@@ -33,7 +33,8 @@ import { randomUUID, createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, writeSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { readStdin, deny, allow, exitAfterWrite, openStore, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
+import { readStdin, deny, allow, exitAfterWrite, openStore, storeBackend, namedError, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
+import { onBrokerFailure } from './lib/broker-client.mjs';
 import { withRegisterLock, classifyRegister, readRegister, formatDispatchRef, formatAge, registerPath as ownerRegisterPath } from '../lib/dispatch-register.mjs';
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { mintSettlementReconcile, withFileLock, parseTouchesContent, gitTouches, gitTrackedSubset, writeGitSettled, loadGeneratedProjections } from './lib/settlement.mjs';
@@ -228,7 +229,35 @@ const residueLines = await (async () => {
     return [];
   }
 })();
-const store = openStore(input.cwd);
+// STORE OPEN. SQLite storage keeps today's open: null (no store) allows, and a
+// throw is the baselined F5 debt below. A Postgres-storage project never reads
+// as "no store" (lib/common.mjs openStore): when its store cannot be opened
+// (an unreachable server, missing credentials or identity, a store that was
+// never moved) this gate FAILS CLOSED, naming the error, and writes nothing
+// (anti_pattern e13f0fb5). On the re-entered Stop (stop_hook_active) it
+// releases loudly instead, the same block-once posture as every other H10
+// duty, so an unreachable database can never trap the conductor.
+let store;
+if (storeBackend(input.cwd) === 'sqlite') {
+  store = openStore(input.cwd);
+} else {
+  try {
+    store = openStore(input.cwd);
+  } catch (e) {
+    const why = `H10: the project store could not be opened (${namedError(e)}), so the session-end duties cannot be checked.`;
+    if (residueLines.length) process.stderr.write(residueLines.join('\n\n') + '\n\n');
+    if (input.stop_hook_active) warnNonBlocking(`${why} Released because this Stop was already blocked once.\n`);
+    deny(`${why} Failing closed: fix the store connection (or move the stores back with \`node scripts/move-store.mjs --to sqlite\`), then stop again.\n`);
+  }
+  // After the open: a broker or store failure in ANY later call ends the hook
+  // the same way (decision hook-store-broker-whole-method-rpc-over-local-socket,
+  // point 6), even inside the duty steps that guard their own store calls.
+  onBrokerFailure((e) => {
+    const why = `H10: the project store failed during the session-end duties (${namedError(e)}).`;
+    if (input.stop_hook_active) warnNonBlocking(`${why} Released because this Stop was already blocked once.\n`);
+    deny(`${why} Failing closed: fix the store connection or the hook store broker, then stop again.\n`);
+  });
+}
 if (!store) {
   if (residueLines.length) process.stderr.write(residueLines.join('\n\n'));
   allow();
@@ -1361,7 +1390,7 @@ try {
       if (git.ok && git.base_lost) {
         const text = `capture owed: settlement history rewritten — persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}; duties for commits between them could not be derived. Reconcile them by hand from git log.`;
         const exists = store.query({ types: ['todo'], cap: 1000 }).some((t) => t.source === 'system' && t.system_reason === 'capture_owed' && t.text === text);
-        if (!exists) store.enqueueSystemTodo({ id: randomUUID(), type: 'todo', created_at: now, updated_at: now, author: 'system', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [], text, source: 'system', system_reason: 'capture_owed', file_keys: [] });
+        if (!exists) store.enqueueSystemTodo({ id: randomUUID(), type: 'todo', created_at: now, updated_at: now, author: 'system', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [], text, source: 'system', system_reason: 'capture_owed', file_keys: [] }, { operation_id: randomUUID() });
       }
       // Advance the git snapshot ONLY after the range's duties minted, and
       // never past a path a live dispatch still owns (its debt must re-derive
@@ -1842,7 +1871,7 @@ try {
         source: 'system',
         system_reason: 'capture_owed',
         file_keys: owedKeys,
-      });
+      }, { operation_id: randomUUID() });
     }
   };
   // Research duty: triggered by research events not covered by a no-capture
@@ -2754,7 +2783,7 @@ try {
     // Undeclared capture debt keeps the broader "any capture_owed open" gate,
     // unchanged.
     if (!hasOpenSystemTodo(store, 'capture_owed')) {
-      store.enqueueSystemTodo(systemTodo(now, { text: captureOwedText(activePaths.length, clipped), system_reason: 'capture_owed', file_keys: owedKeys }));
+      store.enqueueSystemTodo(systemTodo(now, { text: captureOwedText(activePaths.length, clipped), system_reason: 'capture_owed', file_keys: owedKeys }), { operation_id: randomUUID() });
     }
   }
   if (articleDemand) {
@@ -2831,7 +2860,7 @@ try {
     // that is undrainable debt H1 counts forever (the same reasoning the live
     // recompute above gives for REMOVING an item it heals to empty).
     if (demandKeys.length) {
-      store.enqueueSystemTodo(systemTodo(now, { text: articleMissingText(demandKeys, { newlyCreated: newUnowned.length }), system_reason: 'article_missing', file_keys: demandKeys }));
+      store.enqueueSystemTodo(systemTodo(now, { text: articleMissingText(demandKeys, { newlyCreated: newUnowned.length }), system_reason: 'article_missing', file_keys: demandKeys }), { operation_id: randomUUID() });
     }
   }
   if (!conceptSatisfied) {
@@ -2840,7 +2869,7 @@ try {
     // dedupes it — the text is deterministic per family, so the old
     // text.includes() pre-check duplicated exactly what the choke does; removed.
     for (const family of unmetFamilies) {
-      store.enqueueSystemTodo(systemTodo(now, { text: conceptArticleMissingText(family), system_reason: 'concept_article_missing' }));
+      store.enqueueSystemTodo(systemTodo(now, { text: conceptArticleMissingText(family), system_reason: 'concept_article_missing' }), { operation_id: randomUUID() });
     }
   }
   if (hasResearchDuty && !researchSatisfied) {
@@ -2848,7 +2877,7 @@ try {
     // (its text carries session-specific query details) — kept deliberately.
     if (!hasOpenSystemTodo(store, 'research_owed')) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join('; ');
-      store.enqueueSystemTodo(systemTodo(now, { text: researchOwedText(queryTexts), system_reason: 'research_owed' }));
+      store.enqueueSystemTodo(systemTodo(now, { text: researchOwedText(queryTexts), system_reason: 'research_owed' }), { operation_id: randomUUID() });
     }
   }
   // R2 (board c198866d round-3 fixer, BLOCKING): the final terminal release —
@@ -2889,6 +2918,17 @@ try {
     store.recordCheckSkipped('h10-stop-duties', String((e && e.message) || e), undefined, new Date().toISOString());
   } catch {
     // store itself is the casualty — the warn below is the remaining loud signal
+  }
+  // Postgres storage: a broker or store failure after the store opened gets the
+  // same treatment as an open failure (decision
+  // hook-store-broker-whole-method-rpc-over-local-socket, point 6). The duties
+  // could not be evaluated, so the gate FAILS CLOSED naming the error, and on
+  // the re-entered Stop it releases loudly so it can never trap the session.
+  // SQLite storage keeps the baselined warn below unchanged.
+  if (storeBackend(input.cwd) === 'routed') {
+    const why = `H10: session-end duties could not be checked (${namedError(e)}).`;
+    if (input.stop_hook_active) warnNonBlocking(`${why} Released because this Stop was already blocked once.\n`);
+    deny(`${why} Failing closed: fix the store connection or the hook store broker, then stop again.\n`);
   }
   warnNonBlocking(`H10: session-end duties skipped — ${(e && e.message) || e} (check_skipped h10-stop-duties; fix & re-run)`);
   }

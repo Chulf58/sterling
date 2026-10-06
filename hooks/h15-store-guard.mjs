@@ -9,8 +9,8 @@ var __export = (target, all) => {
 import { basename, isAbsolute, resolve as resolve2, sep } from "node:path";
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync, existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { readFileSync as readFileSync2, existsSync as existsSync2 } from "node:fs";
+import { dirname, join as join3, resolve } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5156,13 +5156,22 @@ var configSchema = external_exports.object({
   // S1): any other value is PRESERVED raw, never coerced to hobby and never
   // thrown on — a typo here must not turn every parseConfig reader (the MCP
   // server's boot included) into a startup failure. The strict judge is
-  // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
+  // readProjectMode() in packages/schemas/src/project.ts (re-exported by scripts/lib/handoff-projection.mjs), which every
   // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
   // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
   // Consumers of the PARSED config must narrow this field themselves.
   // The default lives twice (anti_pattern 85d15143): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // Where the project's stores live (decision
+  // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
+  // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
+  // the Served database, valid only with mode 'work'. Only
+  // scripts/move-store.mjs writes it, after the stores have moved; config_set
+  // and the TUI refuse it. Strict, unlike `mode`: a wrong value must never
+  // route a project to the wrong backend. The reader is
+  // packages/store/src/routing.ts (resolveStoreRoute). No default on purpose.
+  storage: external_exports.enum(["sqlite", "postgres"]).optional(),
   // Handoff files (decision
   // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
   // `enabled` says whether Sterling writes the files for colleagues who do not
@@ -5217,6 +5226,166 @@ var runtimeMarkerSchema = external_exports.object({
   booted_at: external_exports.string()
 }).strict();
 
+// packages/schemas/dist/broker.js
+var BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
+var BROKER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+var BROKER_REGISTRY_MAX_BYTES = 16 * 1024;
+var BROKER_MAX_ARGS = 6;
+var brokerIdentitySchema = external_exports.object({
+  instance_id: external_exports.string().regex(/^[0-9a-f]{32}$/),
+  protocol: external_exports.number().int(),
+  build_id: external_exports.string(),
+  project_id: external_exports.string(),
+  root: external_exports.string(),
+  storage: external_exports.object({ backend: external_exports.literal("postgres"), database: external_exports.string(), meta_schema: external_exports.string(), project_schema: external_exports.string() }),
+  pid: external_exports.number().int()
+});
+var brokerRegistrationSchema = brokerIdentitySchema.extend({ socket: external_exports.string() });
+var brokerHelloSchema = external_exports.object({
+  type: external_exports.literal("hello"),
+  protocol: external_exports.number().int(),
+  instance_id: external_exports.string(),
+  project_id: external_exports.string(),
+  root: external_exports.string()
+});
+var brokerErrorSchema = external_exports.object({
+  name: external_exports.string(),
+  message: external_exports.string(),
+  /** Enumerable string or number fields of the original error (domain, location, schema, code). */
+  fields: external_exports.record(external_exports.union([external_exports.string(), external_exports.number()])).default({})
+});
+var brokerWelcomeSchema = external_exports.union([
+  external_exports.object({ type: external_exports.literal("welcome"), identity: brokerIdentitySchema }),
+  external_exports.object({ type: external_exports.literal("refused"), error: brokerErrorSchema })
+]);
+var brokerCallSchema = external_exports.object({
+  type: external_exports.literal("call"),
+  id: external_exports.number().int().nonnegative(),
+  target: external_exports.enum(["project", "mounted"]),
+  op: external_exports.string(),
+  args: external_exports.array(external_exports.unknown()).max(BROKER_MAX_ARGS),
+  /** Client clock (ms since epoch) when the call was sent; client and server share the machine clock. */
+  sent_at: external_exports.number()
+});
+var brokerResultSchema = external_exports.union([
+  external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(true), result: external_exports.unknown().optional() }),
+  /** `executed` false means the server did not start the operation, so the caller may fall back; true or absent means it may have run. */
+  external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(false), executed: external_exports.boolean(), error: brokerErrorSchema })
+]);
+
+// packages/store/dist/pg-bridge.js
+import { homedir } from "node:os";
+import { join } from "node:path";
+var DEFAULT_PG_CREDENTIALS_PATH = join(homedir(), ".sterling", "credentials", "served.json");
+
+// packages/store/dist/search-fold.js
+var LATIN_LETTER = new RegExp("^\\p{Script=Latin}$", "u");
+var LETTER_OR_NUMBER_OR_PRIVATE = /^[\p{L}\p{N}\p{Co}]$/u;
+var COMBINING_MARK = new RegExp("^\\p{M}$", "u");
+function foldSearchText(s) {
+  let kept = "";
+  let afterLatinLetter = false;
+  for (const ch of s.toLowerCase().normalize("NFD")) {
+    if (COMBINING_MARK.test(ch)) {
+      if (!afterLatinLetter)
+        kept += ch;
+      continue;
+    }
+    afterLatinLetter = LATIN_LETTER.test(ch) && new RegExp("^\\p{L}$", "u").test(ch);
+    kept += ch;
+  }
+  let out = "";
+  for (const ch of kept.normalize("NFC"))
+    out += LETTER_OR_NUMBER_OR_PRIVATE.test(ch) ? ch : " ";
+  return out.replace(/ {2,}/g, " ").trim();
+}
+
+// packages/store/dist/pg-driver.js
+var PG_RANKINGS = ["bm25", "idf_tsrank", "tsrank_cd"];
+var DEFAULT_PG_RANKING = "bm25";
+var PG_SCORE_SCALES = { bm25: "pg_bm25_v1", idf_tsrank: "pg_idf_tsrank_v1", tsrank_cd: "pg_tsrank_cd_v1" };
+function pgSearchQuery(terms, matchAll) {
+  const clauses = [];
+  let empty = false;
+  for (const term of terms) {
+    const prefix = term.length > 1 && term.endsWith("*");
+    const folded = foldSearchText(term);
+    if (folded === "") {
+      empty = true;
+      continue;
+    }
+    const w = folded.split(" ");
+    clauses.push({ q: w.map((x) => `'${x}'`).join(" <-> ") + (prefix ? ":*" : ""), w, p: prefix });
+  }
+  const none = clauses.length === 0 || matchAll === true && empty;
+  const prefixes = [...new Set(clauses.filter((c) => c.p).map((c) => c.w[c.w.length - 1]))];
+  const out = JSON.stringify({
+    match: none ? null : clauses.map((c) => `(${c.q})`).join(matchAll ? " & " : " | "),
+    clauses,
+    words: [...new Set(clauses.flatMap((c) => c.w))],
+    prefixes,
+    // The documents any prefix matches, so the statement can list the lexemes each prefix stands for once per query.
+    prefixq: prefixes.length ? prefixes.map((x) => `'${x}':*`).join(" | ") : null
+  });
+  return out;
+}
+var PG_SEARCH_STATS = `CROSS JOIN (SELECT q.j->>'match' AS m,
+    (SELECT count(*) FROM records_fts)::float8 AS n,
+    (SELECT coalesce(avg(dl), 0) FROM records_fts)::float8 AS avgdl,
+    ARRAY(SELECT json_array_elements_text(q.j->'words'))
+      || ARRAY(SELECT DISTINCT u.lexeme FROM records_fts x, unnest(x.tsv) u
+        WHERE x.tsv @@ (q.j->>'prefixq')::tsquery AND EXISTS (SELECT 1 FROM json_array_elements_text(q.j->'prefixes') pf WHERE starts_with(u.lexeme, pf))) AS lexemes,
+    (SELECT coalesce(json_agg(json_build_object('q', c.value->>'q', 'w', c.value->'w', 'p', c.value->'p',
+        'df', (SELECT count(*) FROM records_fts x WHERE x.tsv @@ (c.value->>'q')::tsquery)) ORDER BY c.ordinality), '[]'::json)
+      FROM json_array_elements(q.j->'clauses') WITH ORDINALITY c) AS cl
+  FROM (SELECT ?::json AS j) q) st`;
+var PG_IDF = "greatest(ln((st.n - c.df + 0.5) / (c.df + 0.5)), 1e-6)";
+var PG_BM25_SCORE = `CROSS JOIN LATERAL (SELECT array_agg(u.lexeme) AS lx, array_agg(p) AS ps
+    FROM unnest(ts_filter(setweight(f.tsv, 'A', st.lexemes), '{a}')) u, unnest(u.positions) p) lp
+  CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * (t.tf * 2.2) / (t.tf + 1.2 * (0.25 + 0.75 * f.dl / st.avgdl))), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(w text[], p boolean, df bigint)
+    CROSS JOIN LATERAL (SELECT count(*)::float8 AS tf FROM unnest(lp.lx, lp.ps) AS a(lex, pos)
+      WHERE (a.lex = c.w[1] OR (c.p AND cardinality(c.w) = 1 AND starts_with(a.lex, c.w[1])))
+        AND NOT EXISTS (SELECT 1 FROM generate_series(2, cardinality(c.w)) AS i
+          WHERE NOT EXISTS (SELECT 1 FROM unnest(lp.lx, lp.ps) AS b(lex, pos)
+            WHERE b.pos = a.pos + i - 1 AND (b.lex = c.w[i] OR (c.p AND i = cardinality(c.w) AND starts_with(b.lex, c.w[i])))))) t) sc`;
+var PG_IDF_TSRANK_SCORE = `CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * ts_rank(f.tsv, c.q::tsquery)), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(q text, df bigint) WHERE f.tsv @@ c.q::tsquery) sc`;
+var PG_TSRANK_CD_SCORE = "CROSS JOIN LATERAL (SELECT ts_rank_cd(f.tsv, st.m::tsquery)::float8 AS score) sc";
+var PG_SCORES = { bm25: PG_BM25_SCORE, idf_tsrank: PG_IDF_TSRANK_SCORE, tsrank_cd: PG_TSRANK_CD_SCORE };
+function pgDialectFor(ranking) {
+  if (!PG_RANKINGS.includes(ranking))
+    throw new Error(`Postgres ranking must be one of ${PG_RANKINGS.join(", ")}, got ${String(ranking)}`);
+  return {
+    // One statement per query (a round trip costs about 25 ms): the join binds
+    // the query once for the statistics, the match binds it again so the GIN
+    // index sees a constant tsquery.
+    searchJoin: `JOIN records_fts f ON f.record_id = r.id ${PG_SEARCH_STATS} ${PG_SCORES[ranking]}`,
+    searchJoinBinds: 1,
+    searchMatch: "f.tsv @@ (?::json->>'match')::tsquery",
+    searchScore: "sc.score",
+    searchOrder: "sc.score DESC",
+    scoreScale: PG_SCORE_SCALES[ranking],
+    searchQuery: pgSearchQuery,
+    searchText: foldSearchText,
+    // Postgres refuses \u0000 anywhere in a json value it parses (22P05), so the
+    // real \u0000 escapes are removed first. The pattern consumes an escaped
+    // backslash pair (\\) as a unit and puts it back, so \u0000 only matches
+    // where its backslash starts an escape: the literal text \\u0000 survives.
+    // strpos skips the regex for the bodies that hold no \u0000 at all.
+    jsonText: (column, key) => {
+      if (!/^[a-z_]+$/.test(key))
+        throw new Error(`pgDialect.jsonText: key '${key}' is not a plain identifier`);
+      if (!/^[a-z_]+(\.[a-z_]+)?$/.test(column))
+        throw new Error(`pgDialect.jsonText: column '${column}' is not a plain column reference`);
+      return String.raw`((CASE WHEN strpos(${column}, '\u0000') > 0 THEN regexp_replace(${column}, '(\\\\)|\\u0000', '\1', 'g') ELSE ${column} END)::json ->> '${key}')`;
+    },
+    insertionOrder: (alias) => alias ? `${alias}._seq` : "_seq",
+    insertIgnore: (table, columns) => `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")}) ON CONFLICT DO NOTHING`
+  };
+}
+var pgDialect = pgDialectFor(DEFAULT_PG_RANKING);
+
 // packages/store/dist/axis.js
 var AXIS_MAX_TERM_LEN = 64;
 
@@ -5248,19 +5417,28 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
   return deduped;
 }).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 
+// scripts/hooks/lib/store-backend.mjs
+import { existsSync, readFileSync } from "node:fs";
+import { join as join2 } from "node:path";
+var CONFIG_REL = join2(".sterling", "config.json");
+var STORE_DB_REL = join2(".sterling", "sterling.db");
+function isSterlingRoot(dir) {
+  return typeof dir === "string" && (existsSync(join2(dir, CONFIG_REL)) || existsSync(join2(dir, STORE_DB_REL)));
+}
+
 // scripts/hooks/lib/common.mjs
 function projectRoot(from) {
   if (!from) return null;
   let dir = resolve(String(from));
   for (; ; ) {
-    if (existsSync(join(dir, ".sterling", "sterling.db"))) return dir;
+    if (isSterlingRoot(dir)) return dir;
     const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
 }
 function readStdin() {
-  const input2 = JSON.parse(readFileSync(0, "utf8"));
+  const input2 = JSON.parse(readFileSync2(0, "utf8"));
   const root = projectRoot(input2.cwd);
   if (root) input2.cwd = root;
   return input2;
@@ -5932,6 +6110,26 @@ function namesStoreComponent(absPath) {
   const win32 = sep === "\\";
   return absPath.split(win32 ? /[\\/]+/ : /\/+/).some((c) => (win32 ? c.replace(/[. ]+$/, "") : c).toLowerCase() === ".sterling");
 }
+var PG_CLIENT_RES = [
+  /(?:^|[\s;&|(`'"])(?:[^\s;&|(`'"]*[\\/])?psql(?:\.exe)?(?=[\s;&|)`'"]|$)/i,
+  /(?:^|[\s;&|(`'"])(?:[^\s;&|(`'"]*[\\/])?(?:node|nodejs|bun)(?:\.exe)?\s(?:[^;&|\n]*?\s)?(?:-e|--eval|-p|--print|-pe)(?=[\s='"]|$)/i,
+  /(?:^|[\s;&|(`'"])(?:[^\s;&|(`'"]*[\\/])?(?:node|nodejs|bun)(?:\.exe)?(?:\s+--?[\w-]+(?:=\S+)?)*\s*(?:-\s*)?(?:<<|<\s|$|[;&|\n)])/i
+];
+var SCHEMA = String.raw`(?:"sterling_[^"]*"|\bsterling_[a-z0-9_$]*)`;
+var PG_WRITE_RES = [
+  new RegExp(String.raw`\bINSERT\s+INTO\s+${SCHEMA}`, "i"),
+  new RegExp(String.raw`\bUPDATE\s+(?:ONLY\s+)?${SCHEMA}`, "i"),
+  new RegExp(String.raw`\bDELETE\s+FROM\s+(?:ONLY\s+)?${SCHEMA}`, "i"),
+  new RegExp(String.raw`\b(?:TRUNCATE|DROP|ALTER|CREATE)\b[^;]*?${SCHEMA}`, "i"),
+  new RegExp(String.raw`\bCOPY\s+${SCHEMA}[^;]*?\bFROM\b`, "i")
+];
+var PG_SEARCH_PATH_RE = new RegExp(String.raw`search_path\s*(?:=|\bTO\b)\s*[^;]{0,80}?${SCHEMA}`, "i");
+var PG_UNQUALIFIED_WRITE_RE = /\b(?:INSERT\s+INTO|UPDATE\s+(?:ONLY\s+)?[\w"]+\s+SET|DELETE\s+FROM|TRUNCATE|DROP|ALTER|CREATE|COPY\s+[\w"]+[^;]*?\bFROM)\b/i;
+function postgresSchemaWrite(command) {
+  if (!PG_CLIENT_RES.some((re) => re.test(command))) return false;
+  if (PG_WRITE_RES.some((re) => re.test(command))) return true;
+  return PG_SEARCH_PATH_RE.test(command) && PG_UNQUALIFIED_WRITE_RE.test(command);
+}
 var tool = input.tool_name;
 var PS = tool === "PowerShell";
 if (tool === "Bash" || tool === "PowerShell") {
@@ -5949,6 +6147,11 @@ if (tool === "Bash" || tool === "PowerShell") {
   if (writes) {
     deny(
       "H15: this command would overwrite, delete, move or rewrite the Sterling store database (sterling.db) or the .sterling directory that holds it, which only the Sterling MCP server writes \u2014 write it with knowledge_create / knowledge_update / board_add and the other MCP tools. Reading or merely naming the path is fine, and every other file under .sterling/ (config.json, transient/*) may be read and written freely."
+    );
+  }
+  if (postgresSchemaWrite(command)) {
+    deny(
+      "H15: this command writes to a Sterling Postgres schema (sterling_meta, sterling_p_*, sterling_d_*, sterling_test_*) through an ad-hoc client (psql, or node/bun given a program inline or on stdin), and only the Sterling MCP server and store write those schemas \u2014 write with knowledge_create / knowledge_update / board_add and the other MCP tools. Read-only SELECTs, Sterling scripts, the node --test store suites and schemas outside the sterling_ prefix are fine."
     );
   }
   allow();

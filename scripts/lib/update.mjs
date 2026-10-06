@@ -34,6 +34,7 @@ import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mj
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
 import { readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './handoff-projection.mjs';
 import { ContainmentError } from './contained-fs.mjs';
+import { workIdentityRefusal, withIdentityIgnore } from './project-identity.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
 import { installHostOf, sterlingUpdateRemedy } from './sterling-roots.mjs';
 
@@ -669,8 +670,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     for (const p of list) {
       const entry = { name: p.name, repo_path: p.repo_path, status: null };
       report.projects.push(entry);
+      let projectMode;
       try {
-        readProjectMode(p.repo_path);
+        projectMode = readProjectMode(p.repo_path);
       } catch (err) {
         if (!isProjectReadRefusal(err)) throw err;
         log(`  ✗ ${p.name}: REFUSED — project mode: ${err.message}. Nothing was synced or projected for this project; fix config.mode ('hobby' or 'work', TUI System tab) and rerun /sterling:update.`);
@@ -678,6 +680,29 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         fail(2);
         failures++;
         continue;
+      }
+      // Work-project identity (decision work-project-identity-file-sterling-project-json):
+      // a work project without a valid .sterling/project.json is refused, like an
+      // invalid mode; a hobby project is not checked.
+      const identityRefusal = workIdentityRefusal(p.repo_path, projectMode);
+      if (identityRefusal) {
+        log(`  ✗ ${p.name}: REFUSED — ${identityRefusal}. Nothing was synced or projected for this project.`);
+        entry.handoff = 'refused_project_identity';
+        fail(2);
+        failures++;
+        continue;
+      }
+      // Repair the .gitignore of a project init'd before the identity file existed:
+      // `.sterling/` becomes `.sterling/*` plus `!.sterling/project.json`, so the file
+      // can be committed. Only an existing Sterling ignore line is rewritten.
+      const gitignorePath = join(p.repo_path, '.gitignore');
+      if (existsSync(gitignorePath)) {
+        const repaired = withIdentityIgnore(readFileSync(gitignorePath, 'utf8'), { addIfAbsent: false });
+        if (repaired.changed) {
+          writeFileSync(gitignorePath, repaired.text);
+          log(`      .gitignore: .sterling/ is now .sterling/* plus !.sterling/project.json, so .sterling/project.json can be committed`);
+          entry.gitignore_repaired = true;
+        }
       }
       let handoffEnabled;
       let handoffUnmaintained;

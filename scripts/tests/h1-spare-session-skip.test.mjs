@@ -129,7 +129,7 @@ function deadPid() {
 
 function runH1(dir, { session_id = SPARE, source = 'startup', env }) {
   const input = { session_id, transcript_path: join(dir, 't', `${session_id}.jsonl`), cwd: dir, permission_mode: 'default', hook_event_name: 'SessionStart', source };
-  return spawnSync(process.execPath, [join(root, 'scripts', 'hooks', 'h1-session-start.mjs')], {
+  return spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(root, 'scripts', 'hooks', 'h1-session-start.mjs')], {
     input: JSON.stringify(input), encoding: 'utf8', cwd: dir, timeout: 60_000,
     env: { ...process.env, STERLING_CURRENCY_DISABLE: '1', NO_COLOR: '1', STERLING_NO_BANNER: '1', STERLING_PLUGIN_ROOT: root, ...env },
   });
@@ -305,7 +305,7 @@ test('H1 fallback: a hook input with no session_id is never a spare', () => {
     const dir = project();
     const cfg = claudeDir({ '2824593.json': { pid: 1, spare: true } });
     const input = { cwd: dir, hook_event_name: 'SessionStart', source: 'startup' };
-    const r = spawnSync(process.execPath, [join(root, 'scripts', 'hooks', 'h1-session-start.mjs')], {
+    const r = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(root, 'scripts', 'hooks', 'h1-session-start.mjs')], {
       input: JSON.stringify(input), encoding: 'utf8', cwd: dir, timeout: 60_000,
       env: { ...process.env, STERLING_CURRENCY_DISABLE: '1', NO_COLOR: '1', STERLING_NO_BANNER: '1', STERLING_PLUGIN_ROOT: root, ...fakeEnv(cfg) },
     });

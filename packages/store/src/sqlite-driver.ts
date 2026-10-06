@@ -193,10 +193,14 @@ export interface SqliteDriverOptions {
 /** SQLite's spelling of each dialect hook: the SQL SterlingStore sent before the seam, unchanged. */
 export const sqliteDialect: StoreDialect = {
   searchJoin: 'JOIN records_fts f ON f.record_id = r.id',
+  searchJoinBinds: 0,
   searchMatch: 'records_fts MATCH ?',
   // FTS5's bm25() is LOWER for a better match, so the score is its negation.
   searchScore: '(-bm25(records_fts))',
   searchOrder: 'bm25(records_fts) ASC',
+  scoreScale: 'fts5_bm25',
+  // FTS5's unicode61 tokenizer does its own folding; the text goes in as built.
+  searchText: (text) => text,
   /**
    * The FTS5 MATCH expression rank_terms compiles to. A trailing '*' marks an
    * FTS5 prefix query ("stor*" matches "store") — the star must sit OUTSIDE the
@@ -409,6 +413,16 @@ export class SqliteDriver implements StoreDriver {
     } catch {
       /* column already exists */
     }
+    // Additive, no user_version bump (decision
+    // postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+    // point 3): records gains a nullable operation_id with a unique index, so a
+    // repeated create or enqueue can be found and refused. NULLs never collide.
+    try {
+      this.db.exec('ALTER TABLE records ADD COLUMN operation_id TEXT');
+    } catch {
+      /* column already exists */
+    }
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON records(operation_id)');
   }
 
   journalMode(): string {

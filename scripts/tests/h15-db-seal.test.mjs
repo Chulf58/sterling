@@ -451,3 +451,36 @@ test('Bash: non-string command shapes fail closed without throwing', () => {
     assert.equal(r.code, 0, `${JSON.stringify(tool_input)}\n${r.stderr}`);
   }
 });
+
+// ── the store move script (issue Chulf58/sterling#26 item 7) ─────────────────
+// scripts/move-store.mjs writes the move_fence row into .sterling/sterling.db from
+// inside its own process, which is outside the tool channel. H15 has no sanctioned-script
+// list (it was cut in the scale-down), so the script runs because the command carries no
+// destructive shape aimed at the store, not because its name is listed. A script's name
+// appearing in a fragment never exempts the fragment.
+test('Bash: node scripts/move-store.mjs --to pg|sqlite is allowed, with or without a project path', () => {
+  for (const command of [
+    'node scripts/move-store.mjs --to pg',
+    'node scripts/move-store.mjs --to sqlite',
+    'node scripts/move-store.mjs --to pg --dry-run',
+    `node /opt/sterling/scripts/move-store.mjs --to pg --project ${project}`,
+    'node scripts/move-store.mjs --to pg && git status',
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 0, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash: a fragment that merely names move-store.mjs is not exempt from the seal', () => {
+  for (const command of [
+    'rm .sterling/sterling.db # node scripts/move-store.mjs --to pg',
+    'echo scripts/move-store.mjs; rm .sterling/sterling.db',
+    'node scripts/move-store.mjs --to pg; rm -f .sterling/sterling.db',
+    'rm .sterling/sterling.db scripts/move-store.mjs',
+    'node scripts/move-store.mjs.sh --to pg > .sterling/sterling.db',
+    'cp /tmp/fake/scripts/move-store.mjs .sterling/sterling.db',
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+    assert.match(r.stderr, /store database/);
+  }
+});

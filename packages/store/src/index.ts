@@ -27,7 +27,7 @@ import {
   type Freshness,
 } from '@sterling/schemas';
 
-export { MountedStores, type DomainMount, resolveDomainMounts, createDomain, DomainNotCreatedError, DOMAIN_DESCRIPTION_KEY, missingDomainWarning } from './mounted.js';
+export { MountedStores, MixedScoreScaleError, type DomainMount, resolveDomainMounts, createDomain, DomainNotCreatedError, DOMAIN_DESCRIPTION_KEY, missingDomainWarning } from './mounted.js';
 export { allocateShares, DEFAULT_PROJECT_SHARE } from './shares.js';
 export { fitDomains, DOMAIN_FIT_MIN_TERMS } from './domain-fit.js';
 export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
@@ -42,8 +42,68 @@ export {
   JournalDemotionRefusedError,
   type SqliteDriverOptions,
 } from './sqlite-driver.js';
+export {
+  PgBridge,
+  PgBridgeClosedError,
+  PgBridgeTimeoutError,
+  PgConfigError,
+  PgQueryError,
+  PgWorkerDiedError,
+  DEFAULT_PG_CREDENTIALS_PATH,
+  DEFAULT_PG_WAIT_TIMEOUT_MS,
+  buildPgConnectionConfig,
+  readPgCredentials,
+  type PgBridgeOptions,
+  type PgConnectionConfig,
+  type PgQueryResult,
+} from './pg-bridge.js';
+export {
+  PgDriver,
+  PgLockTimeoutError,
+  PgStatementTimeoutError,
+  PgTransactionOpenError,
+  DEFAULT_PG_LOCK_TIMEOUT_MS,
+  DEFAULT_PG_STATEMENT_TIMEOUT_MS,
+  PgNulCharacterError,
+  PgSchemaNameRefusedError,
+  PgStoreExistsError,
+  PgStoreMissingError,
+  PgUnsupportedError,
+  PG_LAYOUT_VERSION,
+  PG_META_SCHEMA,
+  assertSterlingSchemaName,
+  createPgStore,
+  ensurePgLayout,
+  pgDialect,
+  pgDialectFor,
+  pgSearchQuery,
+  DEFAULT_PG_RANKING,
+  PG_RANKINGS,
+  pgDomainSchemaName,
+  pgProjectSchemaName,
+  type CreatePgStoreInput,
+  type PgDriverOptions,
+  type PgRanking,
+  type PgStoreKind,
+} from './pg-driver.js';
 import type { StoreDriver } from './driver.js';
 import { SqliteDriver } from './sqlite-driver.js';
+
+/** Opens the driver for a store path when SterlingStore is given none. */
+export type StoreDriverFactory = (path: string, options: { busyTimeoutMs?: number }) => StoreDriver;
+
+let storeDriverFactory: StoreDriverFactory | undefined;
+
+/**
+ * Test seam: route every `new SterlingStore(path)` that passes no driver
+ * through `factory` (undefined restores the SQLite default). The store tests
+ * use it to run against Postgres (src/tests/pg-test-setup.ts, STERLING_TEST_PG=1);
+ * no production entry calls it. Choosing the backend in production is issue 26
+ * item 5 (mode routing).
+ */
+export function setStoreDriverFactory(factory: StoreDriverFactory | undefined): void {
+  storeDriverFactory = factory;
+}
 
 /** The verdict on ONE claimed repo-relative path (decision
  *  [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]). */
@@ -137,6 +197,54 @@ export function decodeLiveRecordRow(op: string, row: { body: string; scope: stri
 //     nothing written (the user_version read stays BEFORE journal_mode/DDL).
 // ---------------------------------------------------------------------------
 export const SUPPORTED_SCHEMA_VERSION = 2;
+
+/**
+ * Per-call options for a create, enqueue or supersede (decision
+ * postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump).
+ * operation_id is minted by the caller where it mints the record id; a second
+ * call with the same operation_id is refused with OperationRepeatedError.
+ */
+export interface WriteOptions {
+  operation_id?: string;
+}
+
+/** A create, enqueue or supersede reused an operation_id that already wrote a record. Nothing was written. */
+export class OperationRepeatedError extends Error {
+  constructor(
+    readonly operation_id: string,
+    readonly original_id: string,
+  ) {
+    super(
+      `operation '${operation_id}' already ran: it wrote record '${original_id}'. A repeated operation is refused, never applied twice; nothing was written. Read '${original_id}' to see what landed.`
+    );
+    this.name = 'OperationRepeatedError';
+  }
+}
+
+/**
+ * A write to a store that a store move left (store-move.ts): its store_meta
+ * holds the move fence, so the store's records now live on the other backend.
+ * Checked inside the write lock by SterlingStore.tx(); the mover's own writes
+ * go through raw drivers and are not refused.
+ */
+export class StoreMovedError extends Error {
+  constructor(readonly db_path: string) {
+    super(
+      `store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`
+    );
+    this.name = 'StoreMovedError';
+  }
+}
+
+/** The operation_id from `options`, validated; undefined when the caller passed none. */
+function operationIdOf(options: WriteOptions | undefined, op: string): string | undefined {
+  const id = options?.operation_id;
+  if (id === undefined) return undefined;
+  if (typeof id !== 'string' || id.length === 0 || id.length > 200) {
+    throw new Error(`${op}: operation_id must be a non-empty string of at most 200 characters; nothing was written.`);
+  }
+  return id;
+}
 
 export class UnsupportedSchemaVersionError extends Error {
   readonly found: number;
@@ -486,6 +594,9 @@ export type ToolStore = Pick<
   // knowledge_query's min_score ABSENCE QUERY (board a577a69d) — the
   // uncapped, full-match-set threshold count beside query()'s own window.
   | 'countAboveScore'
+  // The versioned scale countAboveScore's min_score is a floor on, reported
+  // beside above_threshold.
+  | 'scoreScale'
   | 'get'
   // PHYSICAL mount membership — the append-join discharge's project-local owner
   // lookup and its target refusal (packages/mcp-server/src/tools.ts) both need
@@ -1164,6 +1275,9 @@ export class SterlingStore {
         'SterlingStore: busyTimeoutMs configures the SQLite driver this store opens itself; it cannot be combined with an injected driver — set it on that driver.'
       );
     }
+    if (options.driver === undefined && storeDriverFactory !== undefined) {
+      options = { driver: storeDriverFactory(path, { busyTimeoutMs: options.busyTimeoutMs }) };
+    }
     this.db = options.driver ?? new SqliteDriver(path, { busyTimeoutMs: options.busyTimeoutMs });
 
     // Schema-version guard — checked BEFORE the driver prepares the store
@@ -1184,8 +1298,34 @@ export class SterlingStore {
     // probe is hasSchema() BEFORE the driver creates the schema — the only
     // moment at which "this store has no schema yet" is still observable — and
     // it is a read, so the refusal path still writes nothing.
+    //
+    // A driver that several processes open at once (PgDriver) does the probe,
+    // the DDL and the stamp in one transaction under its write lock instead
+    // (StoreDriver.publishFresh, board e05f5127): the read above happened
+    // outside any lock, so another opener may have published the store since,
+    // and only the version re-read under that lock may classify it as older.
     let isFresh = false;
-    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
+    let published = false;
+    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION && this.db.publishFresh !== undefined) {
+      let settled: number;
+      try {
+        settled = this.db.publishFresh(SUPPORTED_SCHEMA_VERSION);
+      } catch (e) {
+        this.db.close();
+        throw e;
+      }
+      if (settled > SUPPORTED_SCHEMA_VERSION) {
+        this.db.close();
+        throw new UnsupportedSchemaVersionError(settled, SUPPORTED_SCHEMA_VERSION);
+      }
+      if (settled < SUPPORTED_SCHEMA_VERSION) {
+        this.db.prepareReadOnly();
+        this.legacySchemaVersion = settled;
+        this.openedSchemaVersion = settled;
+        return; // read-only: publishFresh wrote nothing to an older store that has its schema
+      }
+      published = true;
+    } else if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
       if (this.db.hasSchema()) {
         // The driver refuses here (closing itself) when it cannot serve this
         // store read-only: SQLite does for a WAL store reached over 9p.
@@ -1199,7 +1339,8 @@ export class SterlingStore {
 
     // Connection settings and the schema. On SQLite: the journal-mode policy
     // [store-journal-policy-delete-on-9p], foreign_keys and the DDL.
-    this.db.prepareWritable(isFresh);
+    // publishFresh already created and stamped the store, or found it stamped.
+    if (!published) this.db.prepareWritable(isFresh);
 
     // Stamp the supported version onto a FRESH file (S2 [stable-identity-
     // design-v2]: an existing pre-v2 store returned read-only above and never
@@ -1245,7 +1386,7 @@ export class SterlingStore {
     // write against an unsupported schema (review finding, MEDIUM). The skipped
     // body's `current > SUPPORTED → throw` is therefore restored below, outside
     // the transaction, where it costs no write lock.
-    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION && !published) {
       try {
         this.tx(() => {
           const current = this.db.schemaVersion();
@@ -1623,8 +1764,9 @@ export class SterlingStore {
    *  legacy feature_article field, and the pin fixtures that pass version: 1).
    *  S3 STRIPS it — version becomes server-owned at every surface — so nothing
    *  new should start relying on setting it. */
-  create(input: unknown): DurableRecord {
+  create(input: unknown, options: WriteOptions = {}): DurableRecord {
     this.assertWritable('create');
+    const operationId = operationIdOf(options, 'create');
     const prepared = SterlingStore.resolveIdentity(input as Record<string, unknown>, {
       lifecycle: 'live',
       freshness: 'fresh',
@@ -1681,7 +1823,8 @@ export class SterlingStore {
     // only callers asking create for a raw edge.
     SterlingStore.refuseRawSupersedesLinks('create', record.links, new Set());
     this.tx(() => {
-      this.insertRecord(record);
+      this.refuseRepeatedOperation(operationId);
+      this.insertRecord(record, operationId);
       this.logActivity('created', record, record.created_at);
     });
     // The echo goes through the SAME derivation get() serves (hydrate +
@@ -2093,7 +2236,7 @@ export class SterlingStore {
       }
       // EXACTLY ONE records_fts row per id, current version only (contract 7):
       // the row is replaced, so the prior generation's text stops ranking.
-      this.db.prepare('UPDATE records_fts SET text = ? WHERE record_id = ?').run(entry.fts(stored), id);
+      this.db.prepare('UPDATE records_fts SET text = ? WHERE record_id = ?').run(this.db.dialect.searchText(entry.fts(stored)), id);
       // THE ACTIVITY CLOCK IS SEPARABLE FROM THE BODY CLOCK (see internal.activityAt
       // above): a metadata write preserves the body's updated_at, and stamping the
       // activity row from it would place a write that happened NOW at the previous
@@ -2260,23 +2403,25 @@ export class SterlingStore {
    * write would refuse is not validated here, the write path refuses it.
    */
   enqueueWouldBeNoop(input: { system_reason: string; feature_link?: string; file_keys?: string[]; text: string }): boolean {
-    if (input.system_reason === 'reconcile_needed' && input.feature_link) return false;
-    const wantKey = systemTodoKey(input);
-    const rows = (
-      input.feature_link
-        ? this.db
-            .prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0")
-            .all(input.feature_link)
-        : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all()
-    ) as { body: string; scope: string }[];
-    for (const r of rows) {
-      const t = SterlingStore.decodeLiveRecord('enqueueWouldBeNoop', r) as DurableRecord & SystemTodoShape & { source?: string };
-      if (t.source !== 'system' || systemTodoKey(t) !== wantKey) continue;
-      const priorFiles = [...(t.file_keys ?? [])].sort();
-      const nextFiles = [...(input.file_keys ?? [])].sort();
-      return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? '', input.text);
-    }
-    return false;
+    return this.readTx(() => {
+      if (input.system_reason === 'reconcile_needed' && input.feature_link) return false;
+      const wantKey = systemTodoKey(input);
+      const rows = (
+        input.feature_link
+          ? this.db
+              .prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0")
+              .all(input.feature_link)
+          : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all()
+      ) as { body: string; scope: string }[];
+      for (const r of rows) {
+        const t = SterlingStore.decodeLiveRecord('enqueueWouldBeNoop', r) as DurableRecord & SystemTodoShape & { source?: string };
+        if (t.source !== 'system' || systemTodoKey(t) !== wantKey) continue;
+        const priorFiles = [...(t.file_keys ?? [])].sort();
+        const nextFiles = [...(input.file_keys ?? [])].sort();
+        return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? '', input.text);
+      }
+      return false;
+    });
   }
 
   /**
@@ -2328,8 +2473,9 @@ export class SterlingStore {
    * body UPDATE was invisible to expected_version, so a concurrent in-place
    * write could silently revert it, and the FTS row kept the old text).
    */
-  enqueueSystemTodo(input: unknown): { record: DurableRecord; deduped: boolean; text_updated: boolean } {
+  enqueueSystemTodo(input: unknown, options: WriteOptions = {}): { record: DurableRecord; deduped: boolean; text_updated: boolean } {
     this.assertWritable('enqueueSystemTodo');
+    const operationId = operationIdOf(options, 'enqueueSystemTodo');
     const prepared = SterlingStore.resolveIdentity(input as Record<string, unknown>, {
       lifecycle: 'live',
       freshness: 'fresh',
@@ -2419,6 +2565,9 @@ export class SterlingStore {
     // silently reporting the caller's pre-canonicalization `candidate.text`.
     let insertedText: string | undefined;
     this.tx(() => {
+      // A repeated operation is refused BEFORE the content dedup below, which
+      // would otherwise answer it with deduped:true.
+      this.refuseRepeatedOperation(operationId);
       // The read happens INSIDE the write transaction — that is the whole point.
       // Scanning open todos is cheap: the queue is small by design, and a queue
       // large enough for this scan to matter is itself the finding.
@@ -2462,10 +2611,10 @@ export class SterlingStore {
                 : { type: 'feature_article', slug: candidate.feature_link },
               fileKeys
             );
-            this.insertRecord({ ...candidate, text: canonicalText } as DurableRecord);
+            this.insertRecord({ ...candidate, text: canonicalText } as DurableRecord, operationId);
             insertedText = canonicalText;
           } else {
-            this.insertRecord(candidate);
+            this.insertRecord(candidate, operationId);
           }
           return;
         }
@@ -2541,7 +2690,7 @@ export class SterlingStore {
         break;
       }
       if (!existing) {
-        this.insertRecord(candidate);
+        this.insertRecord(candidate, operationId);
         return;
       }
       // FILE_KEYS REFRESH IS INDEPENDENT OF THE TEXT-EQUALITY BRANCH (board
@@ -2598,14 +2747,16 @@ export class SterlingStore {
   }
 
   get(id: string): DurableRecord | undefined {
-    const row = this.db.prepare('SELECT body, scope FROM records WHERE id = ?').get(id) as
-      | { body: string; scope: string }
-      | undefined;
-    if (!row) return undefined;
-    // hydrateAll re-attaches the DERIVED status/superseded_by and materializes
-    // links[] from record_relations ([stable-identity-design-v2]); the decoder
-    // makes the row's scope COLUMN authoritative over the parsed body.
-    return this.withDerivedReliedBy(this.hydrateAll([SterlingStore.decodeLiveRecord('get', row)])[0]);
+    return this.readTx(() => {
+      const row = this.db.prepare('SELECT body, scope FROM records WHERE id = ?').get(id) as
+        | { body: string; scope: string }
+        | undefined;
+      if (!row) return undefined;
+      // hydrateAll re-attaches the DERIVED status/superseded_by and materializes
+      // links[] from record_relations ([stable-identity-design-v2]); the decoder
+      // makes the row's scope COLUMN authoritative over the parsed body.
+      return this.withDerivedReliedBy(this.hydrateAll([SterlingStore.decodeLiveRecord('get', row)])[0]);
+    });
   }
 
   /**
@@ -2785,17 +2936,19 @@ export class SterlingStore {
    * '(lookup failed)' would trade one false payload for another.
    */
   articlesBySlug(slug: string): DurableRecord[] {
-    const rows = this.db
-      .prepare(
-        `SELECT body, scope FROM records
-          WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
-          ORDER BY updated_at DESC`
-      )
-      .all(slug) as { body: string; scope: string }[];
-    const records = this.hydrateAll(SterlingStore.decodeLiveRecords('articlesBySlug', rows));
-    if (!records.length) return records;
-    const relations = this.activeArticleRelations();
-    return records.map((r) => this.withDerivedReliedBy(r, relations));
+    return this.readTx(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT body, scope FROM records
+            WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
+            ORDER BY updated_at DESC`
+        )
+        .all(slug) as { body: string; scope: string }[];
+      const records = this.hydrateAll(SterlingStore.decodeLiveRecords('articlesBySlug', rows));
+      if (!records.length) return records;
+      const relations = this.activeArticleRelations();
+      return records.map((r) => this.withDerivedReliedBy(r, relations));
+    });
   }
 
   /**
@@ -2809,14 +2962,16 @@ export class SterlingStore {
    * live head while a version-pinned citation keeps using the id.
    */
   recordsBySlug(slug: string): DurableRecord[] {
-    const rows = this.db
-      .prepare(
-        `SELECT body, scope FROM records
-          WHERE status != 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
-          ORDER BY updated_at DESC`
-      )
-      .all(slug) as { body: string; scope: string }[];
-    return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('recordsBySlug', rows));
+    return this.readTx(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT body, scope FROM records
+            WHERE status != 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
+            ORDER BY updated_at DESC`
+        )
+        .all(slug) as { body: string; scope: string }[];
+      return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('recordsBySlug', rows));
+    });
   }
 
   /**
@@ -2833,66 +2988,68 @@ export class SterlingStore {
    * only; the stored blocked_by is never rewritten. No cycle detection.
    */
   boardReadiness(items?: readonly DurableRecord[]): BoardItemReadiness[] {
-    type Todo = {
-      id: string;
-      type: string;
-      text?: string;
-      slug?: string;
-      source?: string;
-      priority?: 'low' | 'normal' | 'high';
-      updated_at: string;
-      file_keys?: string[];
-      needs?: BoardNeeds;
-      blocked_by?: string[];
-    };
-    const total = this.count({ types: ['todo'], source: 'user' });
-    const live = (total > 0 ? this.query({ types: ['todo'], source: 'user', cap: total }) : []) as unknown as Todo[];
-    const bySlug = new Map<string, Todo>();
-    for (const t of live) if (t.slug) bySlug.set(t.slug, t);
-    const dependents = new Map<string, Todo[]>();
-    for (const t of live) {
-      for (const slug of new Set(t.blocked_by ?? [])) {
-        const list = dependents.get(slug);
-        if (list) list.push(t);
-        else dependents.set(slug, [t]);
-      }
-    }
-    // The open-blocker test the board tools always used: a live todo carries the
-    // slug. Live user items answer it without a query; anything else falls back
-    // to recordsBySlug so the definition is unchanged.
-    const openBlocker = (slug: string): Todo | undefined =>
-      bySlug.get(slug) ?? (this.recordsBySlug(slug).find((r) => r.type === 'todo') as unknown as Todo | undefined);
-    const targets = (items ?? live) as unknown as Todo[];
-    return targets
-      .filter((t) => t.type === 'todo' && t.source === 'user')
-      .map((t) => {
-        const blockers: BoardBlockerState[] = [];
-        const blockersOpen: string[] = [];
-        for (const slug of t.blocked_by ?? []) {
-          const holder = openBlocker(slug);
-          blockers.push({ slug, state: holder ? 'open' : 'closed' });
-          if (holder) blockersOpen.push(boardItemHandle(holder));
+    return this.readTx(() => {
+      type Todo = {
+        id: string;
+        type: string;
+        text?: string;
+        slug?: string;
+        source?: string;
+        priority?: 'low' | 'normal' | 'high';
+        updated_at: string;
+        file_keys?: string[];
+        needs?: BoardNeeds;
+        blocked_by?: string[];
+      };
+      const total = this.count({ types: ['todo'], source: 'user' });
+      const live = (total > 0 ? this.query({ types: ['todo'], source: 'user', cap: total }) : []) as unknown as Todo[];
+      const bySlug = new Map<string, Todo>();
+      for (const t of live) if (t.slug) bySlug.set(t.slug, t);
+      const dependents = new Map<string, Todo[]>();
+      for (const t of live) {
+        for (const slug of new Set(t.blocked_by ?? [])) {
+          const list = dependents.get(slug);
+          if (list) list.push(t);
+          else dependents.set(slug, [t]);
         }
-        const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-        // 'user' and 'grill' items wait for the user whatever their blockers (the ruling),
-        // so WAITING is shown every session; an open blocker still wins over
-        // investigation and over no needs.
-        const state: BoardReadinessState =
-          t.needs === 'user' || t.needs === 'grill' ? 'waiting' : blockersOpen.length ? 'blocked' : t.needs === 'investigation' ? 'research' : 'ready';
-        return {
-          id: t.id,
-          ...(t.slug ? { slug: t.slug } : {}),
-          name: boardItemHandle(t),
-          ...(t.priority ? { priority: t.priority } : {}),
-          updated_at: t.updated_at,
-          file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
-          ...(t.needs ? { needs: t.needs } : {}),
-          blockers,
-          blockers_open: blockersOpen,
-          unblocks,
-          state,
-        };
-      });
+      }
+      // The open-blocker test the board tools always used: a live todo carries the
+      // slug. Live user items answer it without a query; anything else falls back
+      // to recordsBySlug so the definition is unchanged.
+      const openBlocker = (slug: string): Todo | undefined =>
+        bySlug.get(slug) ?? (this.recordsBySlug(slug).find((r) => r.type === 'todo') as unknown as Todo | undefined);
+      const targets = (items ?? live) as unknown as Todo[];
+      return targets
+        .filter((t) => t.type === 'todo' && t.source === 'user')
+        .map((t) => {
+          const blockers: BoardBlockerState[] = [];
+          const blockersOpen: string[] = [];
+          for (const slug of t.blocked_by ?? []) {
+            const holder = openBlocker(slug);
+            blockers.push({ slug, state: holder ? 'open' : 'closed' });
+            if (holder) blockersOpen.push(boardItemHandle(holder));
+          }
+          const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+          // 'user' and 'grill' items wait for the user whatever their blockers (the ruling),
+          // so WAITING is shown every session; an open blocker still wins over
+          // investigation and over no needs.
+          const state: BoardReadinessState =
+            t.needs === 'user' || t.needs === 'grill' ? 'waiting' : blockersOpen.length ? 'blocked' : t.needs === 'investigation' ? 'research' : 'ready';
+          return {
+            id: t.id,
+            ...(t.slug ? { slug: t.slug } : {}),
+            name: boardItemHandle(t),
+            ...(t.priority ? { priority: t.priority } : {}),
+            updated_at: t.updated_at,
+            file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+            ...(t.needs ? { needs: t.needs } : {}),
+            blockers,
+            blockers_open: blockersOpen,
+            unblocks,
+            state,
+          };
+        });
+    });
   }
 
   /**
@@ -2906,19 +3063,21 @@ export class SterlingStore {
    * live head via recordsBySlug's own resolution.
    */
   supersededRecordsBySlug(slug: string): DurableRecord[] {
-    // rowid DESC breaks ties within one supersede lineage: a chain built under a
-    // fixed test clock (or any updates landing in the same instant) shares one
-    // updated_at across every carrier, so updated_at alone cannot tell the
-    // newest tombstone from the oldest — insertion order (rowid, monotonic and
-    // never reused) can.
-    const rows = this.db
-      .prepare(
-        `SELECT body, scope FROM records
-          WHERE status = 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
-          ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`
-      )
-      .all(slug) as { body: string; scope: string }[];
-    return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('supersededRecordsBySlug', rows));
+    return this.readTx(() => {
+      // rowid DESC breaks ties within one supersede lineage: a chain built under a
+      // fixed test clock (or any updates landing in the same instant) shares one
+      // updated_at across every carrier, so updated_at alone cannot tell the
+      // newest tombstone from the oldest — insertion order (rowid, monotonic and
+      // never reused) can.
+      const rows = this.db
+        .prepare(
+          `SELECT body, scope FROM records
+            WHERE status = 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
+            ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`
+        )
+        .all(slug) as { body: string; scope: string }[];
+      return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('supersededRecordsBySlug', rows));
+    });
   }
 
   /**
@@ -2932,26 +3091,28 @@ export class SterlingStore {
    * the true, unreached terminus.
    */
   resolveTerminus(id: string): { id: string; status: string; hops: number; truncated?: boolean } | null {
-    const MAX_HOPS = 32;
-    const stmt = this.db.prepare('SELECT id, status, superseded_by FROM records WHERE id = ?');
-    const row = stmt.get(id) as { id: string; status: string; superseded_by: string | null } | undefined;
-    if (!row) return null;
+    return this.readTx(() => {
+      const MAX_HOPS = 32;
+      const stmt = this.db.prepare('SELECT id, status, superseded_by FROM records WHERE id = ?');
+      const row = stmt.get(id) as { id: string; status: string; superseded_by: string | null } | undefined;
+      if (!row) return null;
 
-    const visited = new Set<string>([row.id]);
-    let current = row;
-    let hops = 0;
-    while (current.status === 'superseded' && current.superseded_by) {
-      const next = stmt.get(current.superseded_by) as
-        | { id: string; status: string; superseded_by: string | null }
-        | undefined;
-      if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
-        return { id: current.id, status: current.status, hops, truncated: true };
+      const visited = new Set<string>([row.id]);
+      let current = row;
+      let hops = 0;
+      while (current.status === 'superseded' && current.superseded_by) {
+        const next = stmt.get(current.superseded_by) as
+          | { id: string; status: string; superseded_by: string | null }
+          | undefined;
+        if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+          return { id: current.id, status: current.status, hops, truncated: true };
+        }
+        visited.add(next.id);
+        current = next;
+        hops += 1;
       }
-      visited.add(next.id);
-      current = next;
-      hops += 1;
-    }
-    return { id: current.id, status: current.status, hops };
+      return { id: current.id, status: current.status, hops };
+    });
   }
 
   /**
@@ -2969,13 +3130,39 @@ export class SterlingStore {
    * mount, because an edge lives with its SOURCE record (addLink routes by
    * source), which may sit in a different store than the target.
    */
+  /**
+   * inboundSupersedes() for each id in one read transaction: element i is what
+   * inboundSupersedes(ids[i]) returns. One edge query covers every id, so a
+   * hook attaching supersession state to N delivered records pays one round
+   * trip per store instead of N (board f6c4bc5d).
+   */
+  inboundSupersedesEach(ids: readonly string[]): DurableRecord[][] {
+    if (!ids.length) return [];
+    return this.readTx(() => {
+      const unique = [...new Set(ids)];
+      const rows = this.db
+        .prepare(
+          `SELECT source_id, target_id FROM record_relations WHERE rel = 'supersedes' AND target_id IN (${unique.map(() => '?').join(',')}) ORDER BY ${this.db.dialect.insertionOrder()}`
+        )
+        .all(...unique) as { source_id: string; target_id: string }[];
+      const sources = new Map<string, string[]>();
+      for (const row of rows) sources.set(row.target_id, [...(sources.get(row.target_id) ?? []), row.source_id]);
+      return ids.map((id) => (sources.get(id) ?? []).map((s) => this.get(s)).filter((r): r is DurableRecord => r !== undefined));
+    });
+  }
+
   inboundSupersedes(id: string): DurableRecord[] {
-    const rows = this.db
-      .prepare(
-        `SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`
-      )
-      .all(id) as { source_id: string }[];
-    return rows.map((r) => this.get(r.source_id)).filter((r): r is DurableRecord => r !== undefined);
+    return this.readTx(() => {
+      // No DISTINCT: (source_id, rel, target_id) is the primary key, so with rel
+      // and target_id fixed each source appears once. Postgres also refuses
+      // DISTINCT with an ORDER BY term outside the select list.
+      const rows = this.db
+        .prepare(
+          `SELECT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`
+        )
+        .all(id) as { source_id: string }[];
+      return rows.map((r) => this.get(r.source_id)).filter((r): r is DurableRecord => r !== undefined);
+    });
   }
 
   /**
@@ -3058,7 +3245,9 @@ export class SterlingStore {
    * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
    * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
    * itself — knowledge_query's tool description names this scale so a caller
-   * never has to reverse-engineer bm25's own sign convention.
+   * never has to reverse-engineer bm25's own sign convention. That is the
+   * SQLite scale; on Postgres the score is the driver's ranking, also
+   * higher-is-better, and scoreScale() names which scale a store uses.
    *
    * Requires rank_terms — a threshold on a filter with no ranking has nothing
    * to threshold, so this refuses loudly rather than silently answering 0
@@ -3075,8 +3264,36 @@ export class SterlingStore {
     const d = this.db.dialect;
     const sql = `SELECT COUNT(*) AS n FROM records r ${d.searchJoin}
       WHERE ${where.join(' AND ')} AND ${d.searchMatch} AND ${d.searchScore} >= ?`;
-    const row = this.db.prepare(sql).get(...params, match, minScore) as { n: number };
+    const row = this.db.prepare(sql).get(...this.searchJoinParams(match), ...params, match, minScore) as { n: number };
     return row.n;
+  }
+
+  /**
+   * The scale countAboveScore()'s min_score is a floor on, as a versioned id
+   * (decision postgres-search-ranking-per-query-idf-no-stats-triggers, point
+   * 3): 'fts5_bm25' on SQLite, 'pg_bm25_v1' and the like on Postgres. Every
+   * scale is higher-is-better; a min_score is never carried across scales.
+   */
+  scoreScale(): string {
+    return this.db.dialect.scoreScale;
+  }
+
+  /**
+   * The text this store writes to records_fts for a record of `type` whose
+   * records.body is `body`: the type's fts builder, then the driver's
+   * searchText, as insertRecord() does. A copy that rebuilds the search index
+   * from the records (the knowledge-eval pg loader) calls this, so the rebuilt
+   * text is what this store would have written.
+   */
+  searchTextFor(type: string, body: string): string {
+    const entry = (RECORD_TYPES as Record<string, (typeof RECORD_TYPES)[keyof typeof RECORD_TYPES] | undefined>)[type];
+    if (!entry) throw new Error(`searchTextFor: unknown record type '${type}'`);
+    return this.db.dialect.searchText(entry.fts(JSON.parse(body) as Record<string, unknown>));
+  }
+
+  /** searchJoin's parameters: the match value once per placeholder it has, all before the filter's. */
+  private searchJoinParams(match: string): string[] {
+    return Array.from({ length: this.db.dialect.searchJoinBinds }, () => match);
   }
 
   /**
@@ -3089,8 +3306,30 @@ export class SterlingStore {
     return this.db.dialect.searchQuery(terms, matchAll);
   }
 
+  /**
+   * query() once per entry of `list`, inside one read transaction: element i
+   * is what query(list[i]) returns, all from one snapshot. The hydration reads
+   * (links, successors, derived relied_by) run once over every result instead
+   * of once per entry, so on Postgres the list pays one BEGIN/COMMIT and one
+   * set of hydration statements (board f6c4bc5d: H20 runs six subject queries
+   * per dispatch). Hydration is per record, so the result is the same.
+   */
+  queryEach(list: readonly QueryOptions[]): DurableRecord[][] {
+    return this.readTx(() => {
+      const raw = list.map((opts) => this.queryRows(opts));
+      const hydrated = this.withDerivedReliedByAll(raw.flat());
+      let at = 0;
+      return raw.map((rows) => hydrated.slice(at, (at += rows.length)));
+    });
+  }
+
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts: QueryOptions = {}): DurableRecord[] {
+    return this.readTx(() => this.withDerivedReliedByAll(this.queryRows(opts)));
+  }
+
+  /** query()'s rows, decoded but not hydrated. */
+  private queryRows(opts: QueryOptions): DurableRecord[] {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
     const { where, params, fileKeys } = this.baseFilter(opts);
 
@@ -3102,8 +3341,8 @@ export class SterlingStore {
         const sql = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
           WHERE ${where.join(' AND ')} AND ${d.searchMatch}
           ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
-        const rows = this.db.prepare(sql).all(...params, match, cap) as { body: string; scope: string }[];
-        return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('query', rows));
+        const rows = this.db.prepare(sql).all(...this.searchJoinParams(match), ...params, match, cap) as { body: string; scope: string }[];
+        return SterlingStore.decodeLiveRecords('query', rows);
       }
     }
     // Mechanical fallback rank (§3.4): file-key overlap count, then updated_at
@@ -3126,7 +3365,7 @@ export class SterlingStore {
     const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(' AND ')}
       ORDER BY ${orderBy.join(', ')} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap) as { body: string; scope: string }[];
-    return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('query', rows));
+    return SterlingStore.decodeLiveRecords('query', rows);
   }
 
   /** query()'s two return paths share this: one relations scan for the whole
@@ -3146,8 +3385,9 @@ export class SterlingStore {
    * old; the old is retained with status 'superseded' + superseded_by set.
    * This is the ONLY change path for immutable types (decision, §3.2.1).
    */
-  supersede(oldId: string, newInput: unknown, authoritativeScope?: string): DurableRecord {
+  supersede(oldId: string, newInput: unknown, authoritativeScope?: string, options: WriteOptions = {}): DurableRecord {
     this.assertWritable('supersede');
+    const operationId = operationIdOf(options, 'supersede');
     const oldRecord = this.get(oldId);
     if (!oldRecord) throw new Error(`supersede: no record '${oldId}'`);
     const oldIdentity = this.identityOf(oldId);
@@ -3219,7 +3459,8 @@ export class SterlingStore {
       // insertRecord writes the candidate's links into record_relations, so the
       // authoritative (new -> supersedes -> old) edge lands here (contract 6);
       // the served superseded_by on the old record materializes from it.
-      this.insertRecord(newRecord);
+      this.refuseRepeatedOperation(operationId);
+      this.insertRecord(newRecord, operationId);
       // Guard the UPDATE on the observed lifecycle INSIDE the BEGIN IMMEDIATE tx
       // (audit finding 29/43): the pre-tx read is check-then-act, so a
       // concurrent supersede (server + TUI on the shared WAL file) could
@@ -3736,7 +3977,7 @@ export class SterlingStore {
       catalog: {
         entries: [...ids].map((id) => ({ id, label: id, tier: 'unknown', status: 'active' })),
       },
-    });
+    }, { operation_id: randomUUID() });
   }
 
   /**
@@ -3782,7 +4023,7 @@ export class SterlingStore {
       todo.feature_link = (catalogs[0] as Record<string, unknown>).id;
     }
 
-    this.create(todo);
+    this.create(todo, { operation_id: randomUUID() });
   }
 
   /**
@@ -3793,7 +4034,14 @@ export class SterlingStore {
    * pre-migration store still has): written here from the derived values in the
    * same statement, never read back as the served truth.
    */
-  private insertRecord(record: DurableRecord): void {
+  /** Refuses an operation_id that already wrote a record. Runs inside the write transaction, before the insert: on Postgres a unique violation would abort the transaction. */
+  private refuseRepeatedOperation(operationId: string | undefined): void {
+    if (operationId === undefined) return;
+    const row = this.db.prepare('SELECT id FROM records WHERE operation_id = ?').get(operationId) as { id: string } | undefined;
+    if (row) throw new OperationRepeatedError(operationId, row.id);
+  }
+
+  private insertRecord(record: DurableRecord, operationId?: string): void {
     const entry = RECORD_TYPES[record.type];
     const meta = record as unknown as { lifecycle?: string; freshness?: string; version?: number; superseded_by?: string | null };
     const lifecycle: Lifecycle = meta.lifecycle === 'retired' ? 'retired' : 'live';
@@ -3802,8 +4050,8 @@ export class SterlingStore {
     const stored = SterlingStore.storableBody(record as unknown as Record<string, unknown>);
     this.db
       .prepare(
-        `INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body, operation_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         record.id,
@@ -3817,7 +4065,8 @@ export class SterlingStore {
         record.created_at,
         record.updated_at,
         record.author,
-        JSON.stringify(stored)
+        JSON.stringify(stored),
+        operationId ?? null
       );
     for (const tag of new Set(record.stack_tags)) {
       this.db.prepare('INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)').run(record.id, tag);
@@ -3853,7 +4102,7 @@ export class SterlingStore {
     if (lifecycle === 'retired' && meta.superseded_by && meta.superseded_by !== record.id) {
       this.insertRelation(meta.superseded_by, 'supersedes', record.id, record.updated_at);
     }
-    this.db.prepare('INSERT INTO records_fts (record_id, text) VALUES (?, ?)').run(record.id, entry.fts(stored));
+    this.db.prepare('INSERT INTO records_fts (record_id, text) VALUES (?, ?)').run(record.id, this.db.dialect.searchText(entry.fts(stored)));
   }
 
   /**
@@ -3868,6 +4117,41 @@ export class SterlingStore {
    * whole thing exactly once.
    */
   private txDepth = 0;
+
+  /** Open read transactions on this handle (readTx). A write may not start inside one. */
+  private readDepth = 0;
+
+  /**
+   * A multi-statement read sees one snapshot (decision
+   * postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+   * point 5): it joins an open write or read transaction, or else opens the
+   * driver's read transaction (REPEATABLE READ READ ONLY on Postgres). A driver
+   * with no beginRead (SQLite) keeps its autocommit reads.
+   */
+  private readTx<T>(fn: () => T): T {
+    if (this.txDepth > 0 || this.readDepth > 0 || !this.db.beginRead) return fn();
+    if (this.db.beginReadDeferred) this.db.beginReadDeferred();
+    else this.db.beginRead();
+    this.readDepth++;
+    let ok = false;
+    try {
+      const result = fn();
+      ok = true;
+      return result;
+    } finally {
+      this.readDepth--;
+      if (ok) {
+        this.db.endRead?.();
+      } else {
+        // The read's own error is the one to report; ending the transaction is cleanup.
+        try {
+          this.db.endRead?.();
+        } catch {
+          /* the original error propagates */
+        }
+      }
+    }
+  }
 
   private tx(fn: () => void): void {
     // Backstop for the pre-migration read-only mode: every public write names
@@ -3890,6 +4174,9 @@ export class SterlingStore {
       fn();
       return;
     }
+    if (this.readDepth > 0) {
+      throw new Error('SterlingStore: a write cannot start inside a read transaction (readTx); nothing was written.');
+    }
     // BEGIN FIRST, then count. A failing BEGIN (SQLITE_BUSY on a contended
     // file) previously left txDepth stuck at 1 forever, because the increment
     // happened before the statement that threw and the `finally` was never
@@ -3906,6 +4193,10 @@ export class SterlingStore {
       // silently admitted. Re-reading here, while the write lock is held,
       // guarantees the version cannot move again before fn() writes.
       this.assertLiveSchemaVersion('transaction');
+      // The move fence (store-move.ts, MOVE_FENCE_KEY; spelled out here because
+      // importing it would make a cycle), read under the same lock: a store a
+      // move left refuses every write.
+      if (this.db.prepare("SELECT 1 FROM store_meta WHERE key = 'move_fence'").get()) throw new StoreMovedError(this.dbPath);
       fn();
       this.db.commit();
     } catch (e) {

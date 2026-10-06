@@ -1,7 +1,8 @@
 // Bundle hook scripts for shipping (CLAUDE.md invariant 4, spec §2.2):
 // scripts/hooks/h*.mjs (which import workspace packages at author time) become
-// standalone single-file hooks/<name>.mjs with no workspace imports at runtime.
-// Requires built packages (npm run build) — bundles resolve package dist files.
+// standalone single-file hooks/<name>.mjs with no workspace imports at runtime,
+// and every HOOK_EXTRA_ENTRIES member (a file that must ship beside the hooks)
+// becomes hooks/<out>. Requires built packages (npm run build) — bundles resolve package dist files.
 //   node scripts/build-hooks.mjs [--src-dir <dir>] [--out-dir <dir>]
 // --out-dir builds somewhere OTHER than the live hooks/ surface. A test that
 // needs a built bundle must use it: building in place puts whatever is in

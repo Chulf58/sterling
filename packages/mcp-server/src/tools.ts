@@ -553,8 +553,9 @@ export interface KnowledgeQueryResult {
   by_type?: Record<string, number>;
   /**
    * ABSENCE QUERY (board a577a69d): present only when `min_score` was passed.
-   * The count of records scoring >= min_score on the `-bm25(records_fts)`
-   * scale (higher is more relevant — see countAboveScore), computed over the
+   * The count of records scoring >= min_score on the store's score scale,
+   * named by score_scale (`-bm25(records_fts)` on SQLite; higher is more
+   * relevant on every scale — see countAboveScore), computed over the
    * FULL rank_terms match set, never the capped `records` window — so
    * above_threshold:0 is a usable "nothing scored that high", the thing a
    * capped/ranked window alone can never establish. matched_filter/returned/
@@ -562,6 +563,8 @@ export interface KnowledgeQueryResult {
    * capped-window disclosure, never a replacement for it.
    */
   above_threshold?: number;
+  /** Present with above_threshold: the versioned scale min_score was applied on ('fts5_bm25' is -bm25 on SQLite, 'pg_bm25_v1' on Postgres). A min_score is not portable across scales. */
+  score_scale?: string;
   /** Configured domains not mounted because their store is missing, so this
    *  read did not search them. Present only when non-empty. Each record also
    *  carries `source`: 'project' or 'domain:<name>', the store that holds it. */
@@ -1448,6 +1451,23 @@ function elementOwnsScalar(el: unknown, key: string): el is Record<string, unkno
 const CONFIG_SET_FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
 
 /**
+ * config_set refuses `storage` (and any path under it). It records where the
+ * project's stores live, so only the store move writes it, after every store
+ * has moved (decision storage-backend-is-its-own-config-key-written-only-by-store-move).
+ * `mode` stays writable: it is the PR-flow toggle.
+ */
+export class StorageTransitionRequiredError extends Error {
+  constructor(path: string) {
+    super(
+      `config_set: '${path}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), ` +
+        `so it changes only when the stores move, through the explicit storage transition: \`node scripts/move-store.mjs --to pg|sqlite\`, ` +
+        `which writes it after the move commits. Nothing was written.`
+    );
+    this.name = 'StorageTransitionRequiredError';
+  }
+}
+
+/**
  * The implementation behind SterlingTools.configSet, kept as a standalone
  * function (rather than inline in the class method) so the prototype-
  * pollution guard above stays the only module-level thing it touches — no
@@ -1519,6 +1539,7 @@ function configSetImpl(
       `config_set: '${path}' contains a forbidden path segment — __proto__ / constructor / prototype are refused anywhere in a dotted path (prototype-pollution guard). Nothing was written.`
     );
   }
+  if (path === 'storage' || path.startsWith('storage.')) throw new StorageTransitionRequiredError(path);
 
   const configDir = join(repoRoot, '.sterling');
   const configPath = join(configDir, 'config.json');
@@ -3868,6 +3889,10 @@ export class SterlingTools {
     // 'superseded' would create an already-invisible record). knowledgeUpdate
     // strips the identical set for the same reason.
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, version: smuggledVersion, ...body } = fields;
+    // Minted where the record id is minted (decision
+    // postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump):
+    // a store-level retry of this one write is refused, naming the record it made.
+    const operationId = randomUUID();
     const candidate: Record<string, unknown> = {
       id: this.newId(),
       type,
@@ -4103,7 +4128,7 @@ export class SterlingTools {
 
     const isSystemTodo = type === 'todo' && (candidate as { source?: string }).source === 'system';
     if (isSystemTodo) {
-      const res = this.store.enqueueSystemTodo(candidate);
+      const res = this.store.enqueueSystemTodo(candidate, { operation_id: operationId });
       this.surfacePromotionCandidate(res.record, type);
       return {
         record: res.record,
@@ -4114,7 +4139,7 @@ export class SterlingTools {
         ...claimsCheck,
       };
     }
-    const record = this.store.create(candidate);
+    const record = this.store.create(candidate, { operation_id: operationId });
     const ledgerWarning = this.logDomainWrite(record.scope, record);
     if (ledgerWarning) citationWarnings.push(ledgerWarning);
     const promotionWarning = this.surfacePromotionCandidate(record, type);
@@ -6000,7 +6025,7 @@ export class SterlingTools {
       answerability,
       provenance,
       records: records.map(projectRecord),
-      ...(aboveThreshold !== undefined ? { above_threshold: aboveThreshold } : {}),
+      ...(aboveThreshold !== undefined ? { above_threshold: aboveThreshold, score_scale: this.store.scoreScale() } : {}),
       ...this.unreadDomainsDisclosure(),
       ...(mintFailures.length > 0 ? { maintenance_mint_failed: mintFailures } : {}),
     };
@@ -8620,7 +8645,7 @@ export class SterlingTools {
               `${previousVersion}. Nothing was written; re-read the record and retry against version ${previousVersion}.`
           );
         }
-        updated = this.store.supersede(old.id, next);
+        updated = this.store.supersede(old.id, next, undefined, { operation_id: randomUUID() });
         for (const claim of claims) {
           // Read IMMEDIATELY before remove, never the earlier `claims` value:
           // this narrows the staleness window this lane cannot fully close
@@ -9679,7 +9704,7 @@ export class SterlingTools {
         superseded_by: null,
         scope: `domain:${domain}`,
         links: [{ rel: 'informed_by', target_id: originalId }],
-      });
+      }, { operation_id: randomUUID() });
     } catch (err) {
       if (err instanceof ZodError) throw this.renderValidationFailure(err, original.type, 'knowledge_promote');
       throw err;
@@ -12406,6 +12431,10 @@ export class SterlingTools {
     }
 
     const ts = this.now();
+    // Minted where the record id is minted (decision
+    // postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump):
+    // a store-level retry of this one write is refused, naming the record it made.
+    const operationId = randomUUID();
     const candidate: Record<string, unknown> = {
       id: this.newId(),
       type,
@@ -12556,10 +12585,10 @@ export class SterlingTools {
         // retireInFavorOf writes the supersedes edge itself, so a copy of it in
         // the caller's links is dropped rather than written twice.
         const links = (parsed.links as { rel: string; target_id: string }[]).filter((l) => !(l.rel === 'supersedes' && l.target_id === old.id));
-        head = this.store.create({ ...parsed, links });
+        head = this.store.create({ ...parsed, links }, { operation_id: operationId });
         this.store.retireInFavorOf(old.id, head.id, ts);
       } else {
-        head = this.store.supersede(old.id, parsed);
+        head = this.store.supersede(old.id, parsed, undefined, { operation_id: operationId });
       }
       for (const claim of claims) {
         const atRemoval = this.store.get(claim.id) as (DurableRecord & { system_reason?: string; file_keys?: string[] }) | undefined;

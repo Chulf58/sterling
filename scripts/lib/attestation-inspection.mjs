@@ -29,7 +29,23 @@
 //      exist", never "was it approved". The verdict distribution is disclosed
 //      so the reader draws their own conclusion.
 //
-// STORE ACCESS is raw node:sqlite in READ-ONLY mode, OPENED IN PLACE against the
+// POSTGRES STORAGE (issue Chulf58/sterling#26 item 7; decision
+// storage-backend-is-its-own-config-key-written-only-by-store-move). When the
+// project's config.storage is 'postgres' the live store is its Postgres schema,
+// and any sterling.db file left beside it is a stale pre-move copy, so the
+// SQLite file is never read. The read goes through openRoutedStores with
+// readOnlySnapshot (one REPEATABLE READ READ ONLY transaction, the same
+// snapshot guarantee as the SQLite read below) and SterlingStore.query, which
+// serves the live (not retired) attestations. A missing identity, credentials,
+// an unreachable server or an unmoved store is { available:false, reason } like
+// every other whole-read failure: this module stays disclosure-only, never
+// falls back to SQLite and never fails the caller. The SterlingStore
+// constructor's table creation is a no-op on a moved store, and the router
+// creates no schema. One difference: the store's own decode refuses a row whose body is not a valid attestation, so on
+// Postgres one malformed row makes the whole read unavailable instead of being
+// counted in skipped_malformed_count.
+//
+// STORE ACCESS on SQLite is raw node:sqlite in READ-ONLY mode, OPENED IN PLACE against the
 // live database (precedent: scripts/migration-preflight.mjs's DatabaseSync open)
 // — never SterlingStore, whose constructor performs DDL and would WRITE to a
 // store this module only reads. It issues no journal-mode pragma and manages no
@@ -44,6 +60,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { matchesGlob } from '@sterling/schemas';
+import { openRoutedStores, resolveStoreRoute } from '@sterling/store/routing';
 
 /** Examples cap per declaration. The rollup replaced an uncapped per-path dump
  *  (adjudicated fatal at branch scale — a 300-file branch prints 300 lines
@@ -201,6 +218,18 @@ function readOnlyProbe(dbPath, fn) {
   }
 }
 
+/** The live attestations of a Postgres-storage project, as `{ id, record }` rows, from one read-only snapshot. */
+function readPostgresAttestations(projectRoot) {
+  const { store } = openRoutedStores(projectRoot, { readOnlySnapshot: true });
+  try {
+    const cap = store.count({ types: ['attestation'] });
+    if (cap === 0) return [];
+    return store.query({ types: ['attestation'], cap }).map((record) => ({ id: record.id, record }));
+  } finally {
+    store.close();
+  }
+}
+
 /**
  * Inspect the project store's LIVE attestations against a touched path set.
  *
@@ -240,26 +269,43 @@ export function inspectAttestations({ projectRoot, touchedPaths, declaredGlobs }
     : [];
   const globs = Array.isArray(declaredGlobs) ? declaredGlobs.filter((g) => typeof g === 'string' && g) : [];
 
-  const dbPath = join(projectRoot, '.sterling', 'sterling.db');
-  if (!existsSync(dbPath)) {
-    return { available: false, reason: `no Sterling store at ${dbPath} — nothing to compare against` };
+  let route;
+  try {
+    route = resolveStoreRoute(projectRoot);
+  } catch (e) {
+    // A Postgres-storage project with no identity or credentials, or a config
+    // the router refuses: the SQLite file must not be read in its place.
+    return { available: false, reason: `could not resolve the store of ${projectRoot}: ${e?.message ?? e}` };
   }
 
   let rows;
-  try {
-    rows = readOnlyProbe(dbPath, (db) =>
-      // lifecycle IS the liveness authority (status is derived from it), and a
-      // retired attestation provides no coverage: it was superseded precisely
-      // because someone judged it no longer the ruling. The type predicate is
-      // equally load-bearing — a decision or article carrying the same
-      // file_keys is not a human inspection record.
-      db.prepare("SELECT id, body FROM records WHERE type = 'attestation' AND lifecycle = 'live'").all()
-    );
-  } catch (e) {
-    // Covers every whole-read failure in one honest sentence: an unopenable
-    // file, a store predating the lifecycle column, a hot -wal a reader cannot
-    // recover. The caller prints ONE loud line and proceeds.
-    return { available: false, reason: `could not read attestations from ${dbPath}: ${e?.message ?? e}` };
+  if (route?.storage === 'postgres') {
+    const label = `the Postgres store ${route.projectSchema}`;
+    try {
+      rows = readPostgresAttestations(projectRoot);
+    } catch (e) {
+      return { available: false, reason: `could not read attestations from ${label}: ${e?.message ?? e}` };
+    }
+  } else {
+    const dbPath = join(projectRoot, '.sterling', 'sterling.db');
+    if (!existsSync(dbPath)) {
+      return { available: false, reason: `no Sterling store at ${dbPath} — nothing to compare against` };
+    }
+    try {
+      rows = readOnlyProbe(dbPath, (db) =>
+        // lifecycle IS the liveness authority (status is derived from it), and a
+        // retired attestation provides no coverage: it was superseded precisely
+        // because someone judged it no longer the ruling. The type predicate is
+        // equally load-bearing — a decision or article carrying the same
+        // file_keys is not a human inspection record.
+        db.prepare("SELECT id, body FROM records WHERE type = 'attestation' AND lifecycle = 'live'").all()
+      );
+    } catch (e) {
+      // Covers every whole-read failure in one honest sentence: an unopenable
+      // file, a store predating the lifecycle column, a hot -wal a reader cannot
+      // recover. The caller prints ONE loud line and proceeds.
+      return { available: false, reason: `could not read attestations from ${dbPath}: ${e?.message ?? e}` };
+    }
   }
 
   // ── coverage index: touched path -> the WINNING covering attestation ───────
@@ -273,7 +319,7 @@ export function inspectAttestations({ projectRoot, touchedPaths, declaredGlobs }
   for (const row of rows) {
     let body;
     try {
-      body = JSON.parse(row.body);
+      body = row.record ?? JSON.parse(row.body);
     } catch {
       // ONE bad row is skipped and DISCLOSED, never escalated into total
       // unavailability — the other rows are real evidence and withholding them

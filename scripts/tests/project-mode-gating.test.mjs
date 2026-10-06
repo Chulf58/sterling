@@ -44,6 +44,8 @@ function project(cfg = {}, { store = true } = {}) {
 function writeConfig(dir, { mode, handoff } = {}) {
   const cfg = { project_name: 'fixture', ...(mode === undefined ? {} : { mode }), ...(handoff === undefined ? {} : { handoff: { enabled: handoff } }) };
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(cfg, null, 2) + '\n');
+  // A work project carries its identity (decision work-project-identity-file-sterling-project-json).
+  if (mode === 'work') writeFileSync(join(dir, '.sterling', 'project.json'), JSON.stringify({ project_id: '3f2b8c1e-5a4d-4e6f-9a7b-0c1d2e3f4a5b' }) + '\n');
 }
 const opencodeFiles = (dir) => (existsSync(join(dir, '.opencode', 'agents')) ? readdirSync(join(dir, '.opencode', 'agents')).sort() : []);
 const handoffFiles = (dir) => HANDOFF_FILES.filter((f) => existsSync(join(dir, f)));

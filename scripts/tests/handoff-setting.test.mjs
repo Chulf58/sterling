@@ -60,6 +60,8 @@ function project({ mode, handoff, store = true, repo = false } = {}) {
 function writeConfig(dir, { mode, handoff }) {
   const cfg = { project_name: 'fixture', ...(mode === undefined ? {} : { mode }), ...(handoff === undefined ? {} : { handoff }) };
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(cfg, null, 2) + '\n');
+  // A work project carries its identity (decision work-project-identity-file-sterling-project-json).
+  if (mode === 'work') writeFileSync(join(dir, '.sterling', 'project.json'), JSON.stringify({ project_id: '3f2b8c1e-5a4d-4e6f-9a7b-0c1d2e3f4a5b' }) + '\n');
 }
 const combo = (mode, on, extra = {}) => project({ mode, handoff: { enabled: on }, ...extra });
 const opencodeFiles = (dir) => (existsSync(join(dir, '.opencode', 'agents')) ? readdirSync(join(dir, '.opencode', 'agents')).sort() : []);

@@ -18,16 +18,27 @@
 //   file_keys name files in other repos, so they must never drive path delivery
 //   here (the hazard the decision's sparring round recorded).
 // - Every record returned carries source_store: 'project' or the domain name.
-//   The key is not a record field (todo records already own `source`).
+//   The key is not a record field (todo records already own `source`). The one
+//   exception is inboundSupersedes on Postgres storage (see openRoutedSubjectFan).
 // What it does NOT do: write, read board or queue state, or fan articlesBySlug
 // (feature articles are project-scoped and never promote).
+//
+// POSTGRES STORAGE (lib/store-backend.mjs says 'routed'): the stores open through
+// @sterling/store/routing as one MountedStores, and nothing is skipped or dropped.
+// A missing or unreadable domain, an unreachable server or missing credentials
+// throws a named error (DomainUnavailableError, StoreUnreachableError, ...)
+// instead of landing on missingDomains/unreadableDomains, and the caller's
+// degraded path reports it. The opener argument is not used there.
 //
 // Hooks bundle this module: builtins, sibling libs and @sterling/* only.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseConfig } from '@sterling/schemas';
 import { SterlingStore, resolveDomainMounts, allocateShares, DEFAULT_QUERY_CAP, DOMAIN_DESCRIPTION_KEY } from '@sterling/store';
+import { openRoutedForHook } from './broker-client.mjs';
+import { assertBatchShape } from './delivery.mjs';
 import { loadConfig } from './common.mjs';
+import { storeBackend } from './store-backend.mjs';
 
 const defaultOpener = (dbPath) => new SterlingStore(dbPath);
 
@@ -60,6 +71,7 @@ const errorText = (e) => String((e && e.message) || e);
  * failure to open the PROJECT store throws.
  */
 export function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
+  if (storeBackend(cwd) === 'routed') return openRoutedSubjectFan(cwd);
   const projectPath = join(cwd, '.sterling', 'sterling.db');
   if (!existsSync(projectPath)) return null;
   let mounts = [];
@@ -121,6 +133,10 @@ export function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
       const shares = allocateShares(perStore.map(([, r]) => r.length), cap);
       return perStore.flatMap(([name, records], i) => tag(records.slice(0, shares[i]), name));
     },
+    /** query() for each entry of `list`; element i is what query(list[i]) returns. */
+    queryEach(list) {
+      return list.map((opts) => this.query(opts));
+    },
     /** Supersedes edges live with their SOURCE record, so every mount is read; first seen wins. */
     inboundSupersedes(id) {
       const seen = new Set();
@@ -148,6 +164,82 @@ export function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
         }
       }
       if (first) throw first;
+    },
+  };
+}
+
+/**
+ * The subject fan of a Postgres-storage project: the same surface as
+ * openSubjectFan, over routed MountedStores. Never null (a routed project is a
+ * Sterling project) and never degraded: missingDomains, unreadableDomains and
+ * configError stay empty, because every such case throws by name instead. A
+ * config that names storage 'postgres' but fails the router's checks throws
+ * StoreSettingsError the same way.
+ */
+function openRoutedSubjectFan(cwd) {
+  return routedSubjectFan(openRoutedForHook(cwd, { mount: true }).stores);
+}
+
+/** A bySourceEach reply whose stores are not the mounted roster: project, then each domain in order. */
+export class BatchRosterError extends Error {
+  constructor(expected, got) {
+    super(`bySourceEach: expected sources ${JSON.stringify(expected)}, got ${JSON.stringify(got)}; the batch is treated as failed, never as a store with no rows`);
+    this.name = 'BatchRosterError';
+  }
+}
+
+/** openRoutedSubjectFan's surface over a MountedStores-shaped `stores` (exported for tests). */
+export function routedSubjectFan(stores) {
+  const project = stores.project;
+  return {
+    project,
+    get domainNames() {
+      return stores.domainNames();
+    },
+    missingDomains: [],
+    unreadableDomains: [],
+    configError: null,
+    query(opts = {}) {
+      if (opts.file_keys !== undefined || !stores.domainNames().length) return tag(project.query(opts), 'project');
+      const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+      const perStore = stores.bySource({ ...opts, cap });
+      const shares = allocateShares(perStore.map((s) => s.records.length), cap);
+      return perStore.flatMap((s, i) => tag(s.records.slice(0, shares[i]), s.source));
+    },
+    /** query() for each entry of `list` (element i is what query(list[i]) returns) in one
+     *  store call, so a broker hook pays one round trip and one read transaction per store. */
+    queryEach(list) {
+      if (list.some((opts) => opts.file_keys !== undefined)) return list.map((opts) => this.query(opts));
+      const names = stores.domainNames();
+      if (!names.length) return assertBatchShape(project.queryEach(list), list.length, 'queryEach').map((records) => tag(records, 'project'));
+      const capped = list.map((opts) => ({ ...opts, cap: opts.cap ?? DEFAULT_QUERY_CAP }));
+      const perStore = stores.bySourceEach(capped);
+      // The reply must name every mounted store, project first, in manifest order:
+      // a missing source would silently drop that store's results.
+      const expected = ['project', ...names];
+      const got = Array.isArray(perStore) ? perStore.map((s) => s?.source) : perStore;
+      if (!Array.isArray(got) || got.length !== expected.length || got.some((source, i) => source !== expected[i])) throw new BatchRosterError(expected, got);
+      for (const s of perStore) assertBatchShape(s.results, list.length, `bySourceEach (source '${s.source}')`);
+      return capped.map((opts, j) => {
+        const shares = allocateShares(perStore.map((s) => s.results[j].length), opts.cap);
+        return perStore.flatMap((s, i) => tag(s.results[j].slice(0, shares[i]), s.source));
+      });
+    },
+    /** MountedStores' own merge (project first, first seen wins). These records carry no
+     *  source_store: MountedStores does not say which mount held each edge, and the one
+     *  reader (delivery.mjs withInboundSupersedes) keeps only id, slug, title and status. */
+    inboundSupersedes(id) {
+      return stores.inboundSupersedes(id);
+    },
+    /** inboundSupersedes for each id in one store call (element i answers ids[i]). */
+    inboundSupersedesEach(ids) {
+      return stores.inboundSupersedesEach(ids);
+    },
+    articlesBySlug(slug) {
+      return project.articlesBySlug(slug);
+    },
+    close() {
+      stores.close();
     },
   };
 }
@@ -183,8 +275,14 @@ export function warnFanDegraded(fan, who) {
  * 'undescribed' (the store exists but has no description), 'missing' (no store;
  * never created here) or 'unreadable' (the store or its description could not be
  * read; `error` says why). Throws only when the config's domain fields are malformed.
+ *
+ * With config.storage 'postgres' the domains are read through the router at
+ * `root` (required there): a domain is 'described' or 'undescribed', and when
+ * the stores cannot be opened every configured domain is 'unreadable' with the
+ * named error. A Postgres domain is never 'missing' and never skipped.
  */
-export function describeMountedDomains(config, { opener = defaultOpener } = {}) {
+export function describeMountedDomains(config, { opener = defaultOpener, root } = {}) {
+  if (config?.storage === 'postgres') return describeRoutedDomains(config, root);
   return domainMountsFromConfig(config).map((m) => {
     if (!existsSync(m.dbPath)) return { name: m.name, dbPath: m.dbPath, state: 'missing' };
     let store;
@@ -199,3 +297,31 @@ export function describeMountedDomains(config, { opener = defaultOpener } = {}) 
     }
   });
 }
+
+function describeRoutedDomains(config, root) {
+  const names = domainMountsFromConfig(config).map((m) => m.name);
+  if (!names.length) return [];
+  if (typeof root !== 'string') throw new Error("describeMountedDomains: config.storage is 'postgres', so the project root is required to read its domains");
+  let stores;
+  try {
+    ({ stores } = openRoutedForHook(root, { mount: true }));
+  } catch (e) {
+    const error = namedText(e);
+    return names.map((name) => ({ name, dbPath: `postgres (domain '${name}')`, state: 'unreadable', error }));
+  }
+  try {
+    return names.map((name) => {
+      const dbPath = `postgres (domain '${name}')`;
+      try {
+        const description = stores.domainDescription(name);
+        return description ? { name, dbPath, state: 'described', description } : { name, dbPath, state: 'undescribed' };
+      } catch (e) {
+        return { name, dbPath, state: 'unreadable', error: namedText(e) };
+      }
+    });
+  } finally {
+    stores.close();
+  }
+}
+
+const namedText = (e) => `${e?.constructor?.name ?? e?.name ?? 'Error'}: ${errorText(e)}`;

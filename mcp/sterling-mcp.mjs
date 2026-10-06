@@ -2981,7 +2981,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve3.call(this, root, ref);
+      let _sch = resolve5.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -3008,7 +3008,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve3(root, ref) {
+    function resolve5(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3639,7 +3639,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve3(baseURI, relativeURI, options) {
+    function resolve5(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
@@ -3897,7 +3897,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve3,
+      resolve: resolve5,
       resolveComponent,
       equal,
       serialize,
@@ -6887,7 +6887,7 @@ var require_dist = __commonJS({
 });
 
 // packages/mcp-server/dist/main.js
-import { dirname as dirname8, resolve as resolve2 } from "node:path";
+import { dirname as dirname8, join as join12, resolve as resolve4 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
@@ -13000,16 +13000,21 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve3) => {
+    return new Promise((resolve5) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve3();
+        resolve5();
       } else {
-        this._stdout.once("drain", resolve3);
+        this._stdout.once("drain", resolve5);
       }
     });
   }
 };
+
+// packages/store/dist/routing.js
+import { lstatSync as lstatSync3, readFileSync as readFileSync3 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join8, resolve as resolve2 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -17052,6 +17057,7576 @@ var coerce = {
 };
 var NEVER2 = INVALID;
 
+// packages/schemas/dist/paths.js
+function normalizeRepoPath(input) {
+  const fwd2 = input.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(fwd2)) {
+    throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input}'`);
+  }
+  if (fwd2.startsWith("/")) {
+    throw new Error(`path invariant violation: absolute path is not repo-relative: '${input}'`);
+  }
+  const parts = [];
+  for (const seg of fwd2.split("/")) {
+    if (seg === "" || seg === ".")
+      continue;
+    if (seg === "..") {
+      throw new Error(`path invariant violation: parent-escaping path: '${input}'`);
+    }
+    parts.push(seg);
+  }
+  if (parts.length === 0) {
+    throw new Error(`path invariant violation: empty path: '${input}'`);
+  }
+  return parts.join("/");
+}
+var repoPath = external_exports.string().transform((value, ctx) => {
+  try {
+    return normalizeRepoPath(value);
+  } catch (e) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: e.message });
+    return external_exports.NEVER;
+  }
+});
+function isAbsolutePathAnyHost(p) {
+  const s2 = String(p ?? "");
+  return /^[A-Za-z]:[\\/]/.test(s2) || s2.startsWith("/") || s2.startsWith("\\");
+}
+function sameLocationAnyHost(a, b) {
+  const x = drvfsForm(a);
+  const y = drvfsForm(b);
+  if (x === void 0 || y === void 0)
+    return false;
+  const [fx, fy] = foldDrvfs(x, y);
+  return fx === fy;
+}
+function drvfsForm(p) {
+  const s2 = String(p ?? "").replace(/\\/g, "/");
+  if (!isAbsolutePathAnyHost(s2))
+    return void 0;
+  const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
+  return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
+}
+function foldDrvfs(x, y) {
+  const onDrvfs = (p) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
+  return onDrvfs(x) && onDrvfs(y) ? [x.toLowerCase(), y.toLowerCase()] : [x, y];
+}
+var SCHEME_LOCATION = /^[a-z][a-z0-9+.-]+:(\S|$)/i;
+var COLLAPSED_URL_LOCATION = /^(https?|ftp):\/[^/]/i;
+var HAS_SEPARATOR = /[\\/]/;
+var ENDS_IN_EXTENSION = /\.[A-Za-z0-9]{1,8}$/;
+function isCollapsedUrlLocation(location) {
+  return COLLAPSED_URL_LOCATION.test(location.trim());
+}
+function classifyLocation(location) {
+  const text = location.trim();
+  if (SCHEME_LOCATION.test(text))
+    return "url";
+  if (!/\s/.test(text))
+    return "path";
+  return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
+}
+function repoPathOfLocation(location) {
+  if (classifyLocation(location) !== "path")
+    return void 0;
+  try {
+    return normalizeRepoPath(location.trim());
+  } catch {
+    return void 0;
+  }
+}
+function normalizeLocation(location) {
+  return repoPathOfLocation(location) ?? location;
+}
+
+// packages/schemas/dist/envelope.js
+var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
+var WRITE_REFUSED_LINK_RELS = ["supersedes"];
+var linkSchema = external_exports.object({
+  rel: external_exports.enum(LINK_RELS),
+  target_id: external_exports.string().uuid()
+});
+var AUTHOR_RE = /^(user|conductor|system|agent:[a-z0-9_-]+)$/;
+var SCOPE_RE = /^(project|domain:[a-z0-9_-]+)$/;
+var LIFECYCLE_VALUES = ["live", "retired"];
+var FRESHNESS_VALUES = ["fresh", "flagged_stale"];
+var envelopeFields = {
+  id: external_exports.string().uuid(),
+  type: external_exports.string(),
+  created_at: external_exports.string().datetime(),
+  updated_at: external_exports.string().datetime(),
+  author: external_exports.string().regex(AUTHOR_RE, "author must be user | conductor | system | agent:<role>"),
+  status: external_exports.enum(["active", "superseded"]),
+  // Separate from status on purpose: an enum conflated with a foreign key queries badly (§3.2).
+  superseded_by: external_exports.string().uuid().nullable(),
+  // v2 identity trio — server-owned, optional on input (the store assigns them
+  // and refuses an out-of-enum value loudly). `version` starts at 1 and is
+  // bumped by every in-place write; feature_article narrows it to REQUIRED in
+  // its own extend, because its pre-v2 chains author the number explicitly.
+  lifecycle: external_exports.enum(LIFECYCLE_VALUES).optional(),
+  // freshness KEEPS ITS NAME (decision board-provenance-measured-at-head:
+  // renaming is SQL column + envelope + v2-migration churn for zero behavior
+  // change) but redocumented here — it tracks whether THIS RECORD was edited
+  // (record-edit currency), never whether the world it describes is still
+  // true. On a todo it is always 'fresh' (zero information — see digestRecord,
+  // which omits it from the todo digest for that reason) and must not be
+  // mistaken for the file_keys-changed provenance annotation board_query now
+  // carries, which is the one that speaks to world truth.
+  freshness: external_exports.enum(FRESHNESS_VALUES).optional(),
+  version: external_exports.number().int().positive().optional(),
+  links: external_exports.array(linkSchema),
+  scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
+  stack_tags: external_exports.array(external_exports.string())
+};
+function refineSupersession(rec, ctx) {
+  if (rec.status === "superseded" && rec.superseded_by === null) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'superseded' requires superseded_by" });
+  }
+  if (rec.status === "active" && rec.superseded_by !== null) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'active' forbids superseded_by" });
+  }
+}
+
+// packages/schemas/dist/records.js
+var verifiableAt = external_exports.union([external_exports.literal("final"), external_exports.string().regex(/^phase:\d+$/)]);
+var base = external_exports.object(envelopeFields);
+var decisionSchema = base.extend({
+  type: external_exports.literal("decision"),
+  // Stable handle (board 1e639f32): survives supersession the way an id does
+  // not — auto-minted from the title at create when absent; optional so
+  // legacy records round-trip unchanged. Uniqueness is enforced at the write
+  // (knowledgeCreate), spanning every slug-bearing type.
+  slug: external_exports.string().min(1).optional(),
+  title: external_exports.string().min(1),
+  statement: external_exports.string().min(1),
+  alternatives_rejected: external_exports.array(external_exports.object({ option: external_exports.string(), reason: external_exports.string() })),
+  rationale: external_exports.string().min(1),
+  file_keys: external_exports.array(repoPath).optional(),
+  // MEASURED-VS-INFERRED marker + number→command binding (board 1d02b6b4,
+  // lightweight half, user-approved 2026-08-21): evidence_basis says whether
+  // the record's load-bearing claims were measured or inferred (a false
+  // anti-pattern once lived 8 minutes because nothing marked it inferred);
+  // measured_by names the command/instrument that produced a measured claim,
+  // so a quoted number can be re-derived instead of trusted. Named
+  // evidence_basis because anti_pattern already carries an unrelated `basis`
+  // enum (codebase|platform|external). Instrument-staleness re-test machinery
+  // is DEFERRED — see the decision's rejected alternatives.
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional(),
+  // Board 055cfb6a: whether this ruling is standing policy, scoped to one
+  // session, or a one-off instruction — a capture agent that must choose
+  // asks, one that need not can leave it unstated. Optional, no default: a
+  // one-off instruction was once captured as standing policy and rewrote
+  // the governing file three times; absent means unstated, and existing
+  // records round-trip unchanged.
+  authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
+}).superRefine(refineSupersession);
+var notApplicableExemptionSchema = external_exports.object({
+  not_applicable: external_exports.object({
+    reason: external_exports.string().min(1),
+    ruling_record_id: external_exports.string().optional()
+  }).strict()
+}).strict();
+var ARTICLE_KINDS = ["feature", "probe", "tool", "concept"];
+var NOT_APPLICABLE_EXEMPT_KINDS = ["probe", "tool"];
+var ARTICLE_STATE_REQUIRES = {
+  dormant: ["state_reason", "wiring_todo_id"]
+};
+var currentAcItemSchema = external_exports.object({
+  ac_id: external_exports.string().min(1),
+  text: external_exports.string().min(1),
+  verifiable_at: verifiableAt,
+  // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no test
+  // CAN cover this, because <ruling>" — strict (extra members refused) so a
+  // stray field cannot smuggle unreviewed prose past the one place a reader
+  // checks for a real blocking ruling. Optional: absent means the AC is
+  // ordinarily testable; when present both members are required, since a
+  // reason with no ruling to point at is just an excuse.
+  untestable_because: external_exports.object({
+    reason: external_exports.string().min(1),
+    blocking_record_id: external_exports.string().uuid()
+  }).strict().optional()
+});
+var liveTestRefItemSchema = external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) });
+var baselineAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
+  attested_at: external_exports.string().min(1),
+  item_id: external_exports.string().min(1),
+  head_commit: external_exports.string().min(1),
+  sha256: external_exports.string().min(1)
+})).optional();
+var absenceAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
+  attested_at: external_exports.string().min(1),
+  item_id: external_exports.string().min(1),
+  head_commit: external_exports.string().min(1)
+}).strict()).optional();
+var featureArticleSchema = base.extend({
+  type: external_exports.literal("feature_article"),
+  slug: external_exports.string().min(1),
+  title: external_exports.string().min(1),
+  what_it_does: external_exports.string().min(1),
+  intended_behavior: external_exports.string().min(1),
+  // `unverified` marks a files[] entry whose ROLE has not yet been written from
+  // the actual source — an honest "I do not know this yet" (board db7cd16c).
+  // A consuming project had been expressing exactly this in prose ("⚠⚠ ROLE NOT
+  // YET WRITTEN FROM THE FILE"), which is the right instinct and the wrong
+  // mechanism: a marker buried in a role string only helps if somebody reads it,
+  // while a flag is QUERYABLE and the read-time state check can surface it. Set
+  // it when creating an article ahead of the code; clear it by rewriting the
+  // role from the file.
+  // `entry` marks the file a registry reaches: the hooks.json command, the
+  // command or skill file, the registerTool site, the bin or the agent
+  // template (decision feature-article-states-follow-the-spec-meaning). The
+  // read-time state check looks it up to tell built from wired_in.
+  files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional(), entry: external_exports.boolean().optional() })),
+  // §3.2.3 drift baseline (path → sha256 of the owned file's bytes), computed
+  // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
+  // drift check confirms a content change against this before flagging, so a
+  // git merge/checkout that only resets mtimes no longer raises false
+  // reconcile_needed items (decision foreign_65222971 → its baseline successor).
+  file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
+  // above, which reference_material shares so the shape is defined once.
+  baseline_attestations: baselineAttestationsSchema,
+  absence_attestations: absenceAttestationsSchema,
+  // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
+  // axis, subsuming concept_family's role there — concept_family itself is
+  // untouched, kept for compatibility (see below).
+  article_kind: external_exports.enum(ARTICLE_KINDS).default("feature"),
+  // Union with the structured not_applicable exemption (see
+  // notApplicableExemptionSchema above) — acceptance of the exemption
+  // branch, and rejection of an empty array, are both gated BY KIND in the
+  // superRefine below, since "which kind" is a whole-record fact a single
+  // field's shape cannot express alone.
+  current_ac: external_exports.union([external_exports.array(currentAcItemSchema), notApplicableExemptionSchema]),
+  // Concept-article marker (domain decision foreign_7208729b, concept-article-layer
+  // standard): set ONLY on concept articles — one per recurring domain concept
+  // FAMILY (items, weapons, …). Enables class/family enumeration without
+  // overloading stack_tags (the domain-mount manifest) and lets prep reserve
+  // the concept slice. Optional — owning articles and legacy records omit it.
+  concept_family: external_exports.string().min(1).optional(),
+  // Detached-working-tree resolution (comsoft-juiced incident 2026-07-17):
+  // the SYMBOLIC name of the working tree this record's file paths resolve
+  // against — a key into config.working_trees (name → tree path). Unset =
+  // the project root. Machine-specific paths live in config, never in the
+  // record (invariant 2); consumers (read-time drift, baselines, H7/H10
+  // ownership) resolve per record or abstain LOUD on an unmapped name.
+  working_tree: external_exports.string().min(1).optional(),
+  // relies_on/relied_by name other articles by SLUG — slugs survive version
+  // supersession, record ids do not (decision foreign_474b1c71).
+  dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
+  steps_runbook: external_exports.string().optional(),
+  // Meanings (decision feature-article-states-follow-the-spec-meaning):
+  // planned = not started; built = code exists but nothing reaches it;
+  // wired_in = reachable from a registry, not yet proven in use; active = in
+  // use; dormant = reachable but switched off; deprecated = retired.
+  // wiring_todo_id points a built article at the board item that wires it in.
+  state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
+  state_reason: external_exports.string().optional(),
+  wiring_todo_id: external_exports.string().uuid().optional(),
+  known_gaps: external_exports.array(external_exports.object({
+    site: external_exports.string().min(1),
+    kind: external_exports.enum(["mutation_survivor", "other"]),
+    evidence: external_exports.string().min(1),
+    recorded_run: external_exports.string().min(1)
+  })).optional(),
+  version: external_exports.number().int().positive(),
+  history: external_exports.array(external_exports.object({ date: external_exports.string().datetime(), event: external_exports.string().min(1), target_id: external_exports.string().uuid().optional() })),
+  live_test_refs: external_exports.union([external_exports.array(liveTestRefItemSchema), notApplicableExemptionSchema]),
+  // Board 6a8507f8: when an instrument-describing article's probe script was
+  // last actually RUN — distinct from updated_at (when the record was
+  // edited). Optional: most articles describe no probe at all.
+  last_executed: external_exports.string().datetime().optional()
+}).superRefine((rec, ctx) => {
+  refineSupersession(rec, ctx);
+  const stateNeeds = ARTICLE_STATE_REQUIRES[rec.state];
+  if (stateNeeds?.some((field) => !rec[field])) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `state '${rec.state}' requires ${stateNeeds.join(" and ")} (\xA73.2.3)` });
+  }
+  const exemptKind = NOT_APPLICABLE_EXEMPT_KINDS.includes(rec.article_kind);
+  const isExempt = (v) => typeof v === "object" && v !== null && !Array.isArray(v) && "not_applicable" in v;
+  const gated = [
+    ["live_test_refs", rec.live_test_refs, "real content (ac_id/test_paths)"],
+    ["current_ac", rec.current_ac, "real content (ac_id/text)"]
+  ];
+  for (const [field, value, contentHint] of gated) {
+    const exempt = isExempt(value);
+    if (exempt && !exemptKind) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: [field],
+        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind ${NOT_APPLICABLE_EXEMPT_KINDS.join("/")} may; other kinds must supply real content`
+      });
+    }
+    if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: [field],
+        message: `${field} must not be empty on article_kind '${rec.article_kind}' \u2014 write ${contentHint}, or the structured not_applicable exemption`
+      });
+    }
+  }
+});
+var isoDate = external_exports.string().regex(/^\d{4}-\d{2}-\d{2}/, "ISO date required");
+var antiPatternSchema = base.extend({
+  type: external_exports.literal("anti_pattern"),
+  // Stable handle (board 1e639f32) — see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
+  title: external_exports.string().min(1),
+  trigger: external_exports.string().min(1),
+  guidance: external_exports.string().min(1),
+  wrong_way: external_exports.string().min(1),
+  right_way: external_exports.string().min(1),
+  source_evidence: external_exports.string().min(1),
+  file_keys: external_exports.array(repoPath).optional(),
+  severity: external_exports.enum(["info", "warn", "block"]).optional(),
+  basis: external_exports.enum(["codebase", "platform", "external"]).default("codebase"),
+  // See decisionSchema.evidence_basis (board 1d02b6b4) — evidence_basis is
+  // measured|inferred, distinct from this type's pre-existing `basis`
+  // (where the knowledge CAME FROM, not how it was established).
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
+}).superRefine(refineSupersession);
+var researchFindingSchema = base.extend({
+  type: external_exports.literal("research_finding"),
+  status: external_exports.enum(["active", "superseded", "flagged_stale"]),
+  // Stable handle (board 1e639f32) — derived from the question; see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
+  question: external_exports.string().min(1),
+  answer: external_exports.string().min(1),
+  source_urls: external_exports.array(external_exports.string()).default([]),
+  source_date: isoDate,
+  capture_date: isoDate,
+  volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
+  // Optional (decision foreign_8dbbc85d): findings about specific files (a probe of a
+  // seam, a library's behavior in one adapter) join the file-key economy the
+  // same way decision/anti_pattern/todo do; many findings are fileless
+  // (platform behavior, pricing) so this stays optional, never required.
+  file_keys: external_exports.array(repoPath).optional(),
+  // See decisionSchema.evidence_basis (board 1d02b6b4): a live-probed finding
+  // is measured (measured_by = the probe), a docs-read finding is inferred.
+  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
+  measured_by: external_exports.string().min(1).optional()
+}).superRefine(refineSupersession);
+var modelsCatalogSchema = external_exports.object({
+  entries: external_exports.array(external_exports.object({
+    id: external_exports.string(),
+    label: external_exports.string(),
+    tier: external_exports.string(),
+    status: external_exports.string(),
+    // Which vendor's model this is ('anthropic', 'openai'). Optional: a catalog
+    // written before vendors existed still parses, and none is invented.
+    vendor: external_exports.string().optional()
+  }))
+});
+var referenceMaterialSchema = base.extend({
+  type: external_exports.literal("reference_material"),
+  title: external_exports.string().min(1),
+  kind: external_exports.enum(["pdf", "url", "doc"]),
+  location: external_exports.string().min(1),
+  summary: external_exports.string().min(1),
+  source_date: isoDate,
+  capture_date: isoDate,
+  basis: external_exports.enum(["codebase", "platform", "external"]).default("codebase"),
+  // §3.2.5 drift baseline for a repo-located kind:doc (normalized location →
+  // sha256 of its bytes), computed server-side at create/refresh. Same role as
+  // feature_article.file_baselines: the read-time check confirms a real content
+  // change before raising refresh_reference, so an mtime-only bump (a merge) is
+  // not mistaken for an out-of-band edit. url/pdf locations carry none.
+  file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // R9 ATTESTATION PROVENANCE, on the SAME footing as the article's (board
+  // 8c8b6d78; owner-type parity, review finding 2026-09-06). A repo-located
+  // kind:doc joins the reconcile economy through its `location`, so settlement
+  // mints reconcile_needed items against it and an attested close stamps it —
+  // without this field that stamp was silently dropped by the parse, leaving a
+  // naked baseline whose provenance lied about which write produced it. Shape
+  // shared with featureArticleSchema, never re-declared.
+  baseline_attestations: baselineAttestationsSchema,
+  absence_attestations: absenceAttestationsSchema,
+  // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
+  // unchanged (field_baselines optional-field precedent); a catalog-bearing record
+  // carries a validated modelsCatalogSchema payload.
+  catalog: modelsCatalogSchema.optional(),
+  // Detached-working-tree resolution for a repo-located kind:doc — same
+  // semantics as featureArticleSchema.working_tree (comsoft-juiced 2026-07-17).
+  working_tree: external_exports.string().min(1).optional()
+}).superRefine(refineSupersession).transform((rec) => rec.kind === "doc" ? { ...rec, location: normalizeLocation(rec.location) } : rec);
+var disconfirmedHypothesisSchema = base.extend({
+  type: external_exports.literal("disconfirmed_hypothesis"),
+  question: external_exports.string().min(1),
+  rejected_answer: external_exports.string().min(1),
+  evidence: external_exports.string().min(1),
+  file_keys: external_exports.array(repoPath).optional()
+}).superRefine(refineSupersession);
+var OPEN_QUESTION_CLOSED = "closed";
+var OPEN_QUESTION_TERMINUS_FIELD = "closed_into";
+var openQuestionSchema = base.extend({
+  type: external_exports.literal("open_question"),
+  // Stable handle, minted from the question — see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
+  // The question IS the identity, exactly as on research_finding and
+  // disconfirmed_hypothesis (which is why axisNarrowText treats all three the
+  // same way and why the digest leads with it).
+  question: external_exports.string().min(1),
+  // The LIVE candidates. Plural and ordered by the author; a question with no
+  // hypothesis yet is legitimate, so this defaults to [] rather than being
+  // required — what makes the record worth keeping is the EVIDENCE.
+  hypotheses: external_exports.array(external_exports.string().min(1)).default([]),
+  // What is already known: the measurements, the derived geometry, the probe
+  // output. Required — an unevidenced question is a board todo, not durable
+  // knowledge, and that boundary is the whole point of the type.
+  evidence: external_exports.string().min(1),
+  resolution_status: external_exports.enum(["open", "closed"]).default("open"),
+  // The TERMINAL home: closure means the question was answered, and an
+  // answered question is a research_finding. Its own field, never an id
+  // embedded in a status string (Codex refinement, thread 01a05710), so it is
+  // queryable and cannot rot inside prose.
+  closed_into: external_exports.string().min(1).optional(),
+  file_keys: external_exports.array(repoPath).optional()
+}).superRefine((rec, ctx) => {
+  refineSupersession(rec, ctx);
+  if (rec.resolution_status === OPEN_QUESTION_CLOSED && !rec[OPEN_QUESTION_TERMINUS_FIELD]) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: `resolution_status '${OPEN_QUESTION_CLOSED}' requires ${OPEN_QUESTION_TERMINUS_FIELD} (the research_finding the answer landed in)`
+    });
+  }
+  if (rec.resolution_status !== OPEN_QUESTION_CLOSED && rec[OPEN_QUESTION_TERMINUS_FIELD]) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: `${OPEN_QUESTION_TERMINUS_FIELD} is set but resolution_status is 'open' \u2014 close the question or drop the terminus`
+    });
+  }
+});
+var attestationSchema = base.extend({
+  type: external_exports.literal("attestation"),
+  // Optional explicit handle. NEVER auto-minted (no title/question headline
+  // to mint from); an explicit one passes the cross-type collision refusal
+  // like every slug-bearing type (review finding 3, 2026-08-21).
+  slug: external_exports.string().min(1).optional(),
+  // What was inspected — a free-form artifact identity (a part number, a
+  // render name, a document version). Repo files it corresponds to belong in
+  // file_keys, which joins the retrieval economy; artifact_key does not need
+  // to be a path and often is not.
+  artifact_key: external_exports.string().min(1),
+  verdict: external_exports.enum(["approved", "rejected", "needs_rework"]),
+  // Who ruled — a human identity. An agent's judgment is a review finding or
+  // a decision, never an attestation; the type exists precisely to mark the
+  // human-eyes event.
+  inspector: external_exports.string().min(1),
+  // When the inspection HAPPENED — created_at is merely when the record was
+  // written, and ledger entries are routinely written after the fact.
+  inspected_at: isoDate,
+  // Instrument provenance: what the inspection looked at/through (a render
+  // at a commit, a physical sample batch) — the hook for later instrument-
+  // staleness work (board 1d02b6b4's deferred half).
+  instrument: external_exports.string().min(1).optional(),
+  notes: external_exports.string().optional(),
+  file_keys: external_exports.array(repoPath).optional()
+}).superRefine(refineSupersession);
+var BOARD_NEEDS = ["user", "grill", "investigation"];
+var SYSTEM_REASONS = [
+  "reconcile_needed",
+  "stale_research",
+  "deletion_candidate",
+  "capture_owed",
+  "promotion_review",
+  "refresh_reference",
+  // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
+  "article_missing",
+  // §6 H10: direct-mode work in unowned territory ended without its owning article
+  "research_owed",
+  // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
+  "concept_article_missing",
+  // §6 H10: a concept_designed session event ended the session without its concept article (decision foreign_7208729b)
+  // An owned file is absent from the working tree but ALIVE on another git ref
+  // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
+  // reconcile, because no write can change the fact and the article is already
+  // correct (the path becomes valid again on merge). It exists so the absence
+  // arm stops minting an unclosable reconcile_needed that re-fires on every
+  // read, and so the drain has somewhere honest to put the finding.
+  "file_parked",
+  // An article's METADATA contradicts reality: it claims `planned` while the code
+  // it owns is demonstrably written, or it carries files[] roles still marked
+  // unverified. Nothing watched the state field before — the hooks watch content
+  // hashes — so an article sat at `planned` over a shipped, wired, probe-verified
+  // feature, and anyone querying it would have concluded the feature did not
+  // exist. The PROSE was right; the metadata was the lie, and metadata is what a
+  // reader trusts first. It also carries the wiring check (decision
+  // feature-article-states-follow-the-spec-meaning): a wired_in or active article
+  // whose files[] entry no registry reaches or that marks no entry, and a built
+  // article whose entry is reached.
+  "state_review",
+  // A feature_article's NON-HISTORY serialized size crossed
+  // config.article_oversize_chars on a knowledge_update/append/edit — the
+  // registry-style-article round-trip ceiling (board 8390f8fa), hit twice
+  // before anything checked it mechanically. History is excluded from the
+  // measure (board 0697c6bd): the lane's remedy is a split, a split only
+  // redistributes prose, and history weight is bounded separately by write-time
+  // rotation (article_history_max_entries). Minted at the WRITE, since that is
+  // the only moment anyone is looking; deduped per article via file_keys (a
+  // feature_article's id changes on every version, so id-keyed dedup would not
+  // survive the next reconcile — the article's owned files do).
+  "article_oversize",
+  // H17 (FIX-B, decision h17-stamp-honor-loud-restore) actually restored a
+  // tracked path to HEAD during an in-window Bash sweep, with no fresh stamp
+  // attesting the current bytes — so the restore, previously invisible past
+  // the agent's own stderr, gets a durable trace. Deduped per restored path
+  // (file_keys): a repeat restore of the same path refreshes the open item
+  // rather than minting a second one — the obligation is "this path keeps
+  // getting reverted", not "an event happened".
+  "restore_performed"
+];
+var TODO_SYSTEM_SOURCE = "system";
+var TODO_SYSTEM_REQUIRES = ["system_reason"];
+var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+function todoBlocksItself(rec) {
+  return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
+}
+var todoSchema = base.extend({
+  type: external_exports.literal("todo"),
+  // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
+  // the same stable handle decision/anti_pattern/research_finding gained in
+  // de1a7329, extended to `todo` because a board item otherwise has only a
+  // uuid and a multi-KB text blob, and a user asked to rule on "board
+  // 17204d1e" cannot tell what they are ruling on. Auto-minted at the write
+  // (knowledgeCreate) from the item's opening headline LINE for source:'user'
+  // items; optional so legacy rows round-trip unchanged, exactly as de1a7329
+  // needed no migration. Uniqueness spans EVERY slug-bearing type — one
+  // namespace, because that is what knowledge_get/board_get resolve.
+  //
+  // A SLUG IS A FORGIVING ADDRESS FORM: it is accepted by board_get and
+  // board_update and REFUSED by board_remove/maintenance_remove, which keep
+  // demanding the exact full uuid (anti-pattern
+  // no-bounded-trail-guard-for-destructive-addressing, severity block).
+  slug: external_exports.string().min(1).optional(),
+  text: external_exports.string().min(1),
+  source: external_exports.enum(["user", "system"]),
+  file_keys: external_exports.array(repoPath).optional(),
+  feature_link: external_exports.string().uuid().optional(),
+  priority: external_exports.enum(["low", "normal", "high"]).optional(),
+  system_reason: external_exports.enum(SYSTEM_REASONS).optional(),
+  // Board grouping key (decision foreign_a8d2ce6c): slices of one larger objective
+  // share this label and the TUI groups them under it. A grouping FIELD, not
+  // a parent record — absent means standalone. The 'standalone' sentinel is
+  // normalized to absent at the TOOL layer; the schema stores what it gets.
+  objective: external_exports.string().min(1).optional(),
+  // §3.2.7 provenance (decision board-provenance-measured-at-head): the
+  // commit this item's evidence was read at. Server-stamped on board_add and
+  // re-stamped on a board_update that changes text/file_keys; a caller MAY
+  // supply it, and the tool layer refuses an unresolvable sha by name rather
+  // than silently replacing it with HEAD (P5).
+  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional(),
+  // Semantic order between user asks (decision
+  // every-user-ask-is-boarded-at-intake-with-slim-blocked-by, rule 6): the
+  // SLUGS of the board items this one waits on. Slugs, never ids, because a
+  // slug is the immutable address (decision board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address). Lives in the JSON body
+  // like every other todo field, so it needs no migration. Existence of each
+  // blocker is checked at the tool layer when written; a blocker removed later
+  // reads as closed, it is never rewritten out of this list.
+  blocked_by: external_exports.array(external_exports.string().min(1)).optional(),
+  // What a user item waits on besides its blockers (decision
+  // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
+  // 'investigation' still auto-starts, as a researcher lane; 'user' and
+  // 'grill' wait for the user. Not a progress status: `status` keeps meaning
+  // supersession only. Absent means nothing beyond the blockers.
+  needs: external_exports.enum(BOARD_NEEDS).optional()
+}).superRefine((rec, ctx) => {
+  refineSupersession(rec, ctx);
+  if (rec.source === TODO_SYSTEM_SOURCE) {
+    for (const field of TODO_SYSTEM_REQUIRES) {
+      if (!rec[field]) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `source '${TODO_SYSTEM_SOURCE}' requires ${field} (\xA73.2.7)` });
+      }
+    }
+    for (const [field, verb] of Object.entries(TODO_USER_ONLY_FIELDS)) {
+      if (rec[field] !== void 0) {
+        ctx.addIssue({
+          code: external_exports.ZodIssueCode.custom,
+          path: [field],
+          message: `${field} ${verb} source:'user' board tasks only \u2014 maintenance-queue items never carry it`
+        });
+      }
+    }
+  }
+  if (todoBlocksItself(rec)) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["blocked_by"], message: `blocked_by lists '${rec.slug}', the item itself \u2014 an item cannot block itself` });
+  }
+});
+function undeclaredPhaseInterfaces(rec) {
+  const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
+  return rec.phases.flatMap((phase) => (phase.interfaces ?? []).filter((name) => !declared.has(name)).map((name) => ({ phase_id: phase.phase_id, name })));
+}
+var briefSchema = base.extend({
+  type: external_exports.literal("brief"),
+  slug: external_exports.string().min(1),
+  title: external_exports.string().min(1),
+  problem: external_exports.string().min(1),
+  feature: external_exports.string().min(1),
+  user_stated: external_exports.object({
+    criteria: external_exports.array(external_exports.string()),
+    constraints: external_exports.array(external_exports.string())
+  }),
+  conductor_proposals: external_exports.array(external_exports.object({ text: external_exports.string().min(1), status: external_exports.enum(["confirmed", "unconfirmed"]) })),
+  acceptance_criteria: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), text: external_exports.string().min(1), verifiable_at: verifiableAt })),
+  technical_design: external_exports.object({
+    approach: external_exports.string(),
+    interfaces: external_exports.array(external_exports.object({ name: external_exports.string(), contract: external_exports.string() })),
+    shared_structures: external_exports.array(external_exports.string())
+  }),
+  // §7.1/§7.6: proposed at planning, human-confirmed at the gate, frozen into
+  // data before the run — reviewer-selection's first signal source.
+  risk_flags: external_exports.array(external_exports.enum(["security_relevant", "perf_sensitive"])).optional(),
+  blast_radius: external_exports.object({
+    files: external_exports.array(external_exports.object({ path: repoPath, owning_articles: external_exports.array(external_exports.string().uuid()) })),
+    reconcile_list: external_exports.array(external_exports.string().uuid())
+  }),
+  incidental_scope: external_exports.array(repoPath),
+  out_of_scope: external_exports.array(external_exports.string()),
+  phases: external_exports.array(external_exports.object({
+    phase_id: external_exports.string().min(1),
+    goal: external_exports.string().min(1),
+    subtasks: external_exports.array(external_exports.string()),
+    ac_ids: external_exports.array(external_exports.string()),
+    difficulty: external_exports.object({ level: external_exports.enum(["normal", "hard"]), reasons: external_exports.array(external_exports.string()) }),
+    model_hint: external_exports.string(),
+    // prep's staging inputs are planning outputs (§7.1/§7.6): the phase
+    // declares its file list + rank_terms. Optional pending §4 alignment
+    // (raised as a spec gap); prep falls back to blast_radius files.
+    files: external_exports.array(repoPath).optional(),
+    rank_terms: external_exports.array(external_exports.string().regex(/^\S{1,64}$/)).optional(),
+    // §8.1: the phase's interface slice (names into technical_design.
+    // interfaces) — the test-writer's REQUIRED input; a phase without
+    // declared interfaces gives it nothing to write against (spawn check).
+    interfaces: external_exports.array(external_exports.string().min(1)).optional()
+  })),
+  decisions_made: external_exports.array(external_exports.string().uuid())
+}).superRefine((rec, ctx) => {
+  refineSupersession(rec, ctx);
+  for (const { phase_id, name } of undeclaredPhaseInterfaces(rec)) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: `phase '${phase_id}' references undeclared interface '${name}' (\xA78.1 interface slice must come from technical_design.interfaces)`
+    });
+  }
+});
+var AGENT_MODEL_KEY = {
+  implementor: "implementor",
+  researcher: "researcher",
+  scout: "scout",
+  librarian: "librarian",
+  reviewer: "reviewer"
+};
+var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
+var s = (v) => typeof v === "string" ? v : "";
+var DIGEST_CLIP = 160;
+var clipped = (v, n = DIGEST_CLIP) => {
+  const text = s(v).replace(/\s+/g, " ").trim();
+  if (!text)
+    return void 0;
+  return text.length <= n ? text : `${text.slice(0, n)}\u2026`;
+};
+var RECORD_TYPES = {
+  decision: {
+    schema: decisionSchema,
+    immutable: true,
+    fts: (r) => [s(r.slug), s(r.title), s(r.statement), s(r.rationale)].join("\n"),
+    fileKeys: (r) => r.file_keys ?? [],
+    // slug leads for the same reason it does on feature_article: it is the
+    // handle that survives supersession (board 1e639f32); the title states the ruling.
+    // authority (board 055cfb6a): surfaced on the digest line so a capped scan
+    // shows scope alongside the ruling, not only on knowledge_get.
+    digest: { slug: "plain", title: "plain", authority: "plain" }
+  },
+  anti_pattern: {
+    schema: antiPatternSchema,
+    immutable: false,
+    fts: (r) => [s(r.slug), s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join("\n"),
+    fileKeys: (r) => r.file_keys ?? [],
+    // trigger is the field that tells a reader whether the hazard applies to
+    // what they are about to do — the whole point of scanning hazards — and
+    // severity is the order H19 already renders them in.
+    digest: { slug: "plain", title: "plain", trigger: "clip", severity: "plain" }
+  },
+  research_finding: {
+    schema: researchFindingSchema,
+    immutable: false,
+    fts: (r) => [s(r.slug), s(r.question), s(r.answer)].join("\n"),
+    fileKeys: (r) => r.file_keys ?? [],
+    // No title on this type — the question IS the identity. Both clocks ride
+    // along because a finding's currency decides whether it may be used at all.
+    digest: { slug: "plain", question: "clip", source_date: "plain", capture_date: "plain" }
+  },
+  reference_material: {
+    schema: referenceMaterialSchema,
+    immutable: false,
+    fts: (r) => [s(r.title), s(r.summary)].join("\n"),
+    // §3.2.5: repo-located docs join the reconcile economy — for kind:doc a
+    // repo-relative location doubles as a file_key (H7 pressure applies);
+    // pdf/url locations are external and carry none, and neither does a
+    // kind:doc location that is a URL, prose or an absolute/escaping path.
+    fileKeys: (r) => {
+      if (r.kind !== "doc")
+        return [];
+      const rel = repoPathOfLocation(r.location);
+      return rel === void 0 ? [] : [rel];
+    },
+    // location is this type's path-bearing field (§3.2.5), so it is what a
+    // reader needs to go open the thing.
+    digest: { title: "plain", kind: "plain", location: "plain" }
+  },
+  disconfirmed_hypothesis: {
+    schema: disconfirmedHypothesisSchema,
+    immutable: false,
+    fts: (r) => [s(r.question), s(r.rejected_answer), s(r.evidence)].join("\n"),
+    fileKeys: (r) => r.file_keys ?? [],
+    // The rejected answer is the reusable half — it stops the question being
+    // re-asked and re-answered the same wrong way.
+    digest: { question: "clip", rejected_answer: "clip" }
+  },
+  open_question: {
+    schema: openQuestionSchema,
+    // MUTABLE, unlike decision/attestation: an open question is a LIVE working
+    // record — hypotheses get added and struck, evidence accumulates, and it
+    // eventually flips to closed. Supersession would mint a new record per
+    // measurement, which is exactly the churn the type exists to absorb.
+    immutable: false,
+    fts: (r) => [s(r.slug), s(r.question), r.hypotheses?.join("\n") ?? "", s(r.evidence)].join("\n"),
+    fileKeys: (r) => r.file_keys ?? [],
+    // The question is the identity (research_finding's rule); resolution_status
+    // rides along because whether a question is still OPEN decides whether it is
+    // worth reading at all — the same role research_finding's clocks play.
+    digest: { slug: "plain", question: "clip", resolution_status: "plain" }
+  },
+  attestation: {
+    schema: attestationSchema,
+    // Point-in-time human ruling: supersession is the only change path, exactly
+    // the decision contract (§3.2.1 analog; board 259a455f).
+    immutable: true,
+    fts: (r) => [s(r.slug), s(r.artifact_key), s(r.verdict), s(r.inspector), s(r.notes)].join("\n"),
+    fileKeys: (r) => r.file_keys ?? [],
+    // The progress-surface read: artifact + verdict + who + when answer the
+    // ledger question without opening the record.
+    digest: { artifact_key: "plain", verdict: "plain", inspector: "plain", inspected_at: "plain" }
+  },
+  feature_article: {
+    schema: featureArticleSchema,
+    immutable: false,
+    // concept_family joins the FTS text so a family query ranks its concept
+    // article (class enumeration stays a consumer-side filter on the field).
+    fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join("\n"),
+    fileKeys: (r) => (r.files ?? []).map((f) => f.path),
+    // slug leads: it is the STABLE handle across versions (decision foreign_474b1c71),
+    // and the id in the envelope beside it is not. version + state say whether
+    // this is a moving target and whether it is wired yet.
+    digest: { slug: "plain", title: "plain", state: "plain", version: "plain", concept_family: "plain" }
+  },
+  todo: {
+    schema: todoSchema,
+    immutable: false,
+    fts: (r) => s(r.text),
+    fileKeys: (r) => r.file_keys ?? [],
+    // The measured worst case for full bodies: board items run to ~8 KB each,
+    // so a whole-board read spilled 478 KB. system_reason is what sorts the
+    // maintenance queue into lanes; priority/source sort the board.
+    //
+    // slug LEADS, exactly as it does on decision/feature_article, and is
+    // 'plain' rather than 'clip' (decision human-readable-ids-for-board-items,
+    // 2e8c30e4): it is the ADDRESSABLE handle a reader cites, and a clipped
+    // address does not resolve. Names clip only in the composed `name (id8)`
+    // DISPLAY form (headlineRecord / TUI card titles) — never in the field.
+    // Absent for a legacy slugless item: digestRecord omits empty headline
+    // fields, and an absent name is safer than a fabricated one (df361a0f).
+    digest: { slug: "plain", text: "clip", source: "plain", priority: "plain", system_reason: "plain", objective: "plain" }
+  },
+  brief: {
+    schema: briefSchema,
+    immutable: false,
+    fts: (r) => [s(r.slug), s(r.title), s(r.problem), s(r.feature)].join("\n"),
+    fileKeys: (r) => {
+      const br = r.blast_radius;
+      return (br?.files ?? []).map((f) => f.path);
+    },
+    digest: { slug: "plain", title: "plain", problem: "clip" }
+  }
+};
+function recordSizes(record2) {
+  const { history, ...body } = record2;
+  return {
+    body_chars: JSON.stringify(body).length,
+    history_chars: Array.isArray(history) && history.length ? JSON.stringify(history).length : 0
+  };
+}
+function digestRecord(record2) {
+  const out = {
+    id: record2.id,
+    type: record2.type,
+    status: record2.status,
+    updated_at: record2.updated_at
+  };
+  const entry = RECORD_TYPES[s(record2.type)];
+  if (!entry)
+    return out;
+  for (const [field, mode] of Object.entries(entry.digest)) {
+    const value = mode === "clip" ? clipped(record2[field]) : record2[field];
+    if (value !== void 0 && value !== null && value !== "")
+      out[field] = value;
+  }
+  out.size_chars = recordSizes(record2).body_chars;
+  return out;
+}
+var HEADLINE_CLIP = 80;
+var NAME_CLIP = 48;
+var clipName = (name) => name.length <= NAME_CLIP ? name : `${name.slice(0, NAME_CLIP - 1)}\u2026`;
+var displayHandle = (name, id) => `${clipName(name)} (${id.slice(0, 8)})`;
+function boardDisplayLabel(text, slug) {
+  const line = s(text).split("\n").find((l) => l.trim().length > 0);
+  const normalized = line ? line.trim().replace(/\s+/g, " ") : "";
+  return normalized || s(slug).trim();
+}
+function headlineRecord(record2) {
+  const out = { id: record2.id, priority: record2.priority };
+  const slug = s(record2.slug);
+  const name = record2.type === "todo" ? boardDisplayLabel(record2.text, slug) : slug;
+  if (name)
+    out.name = displayHandle(name, s(record2.id));
+  if (record2.objective !== void 0 && record2.objective !== null && record2.objective !== "")
+    out.objective = record2.objective;
+  if (record2.system_reason !== void 0 && record2.system_reason !== null && record2.system_reason !== "")
+    out.system_reason = record2.system_reason;
+  const text = clipped(record2.text, HEADLINE_CLIP);
+  if (text !== void 0)
+    out.text = text;
+  return out;
+}
+function objectShapeFor(type) {
+  const entry = RECORD_TYPES[type];
+  if (!entry)
+    return void 0;
+  let schema = entry.schema;
+  for (let i = 0; i < 10 && schema && typeof schema === "object"; i++) {
+    const shape = schema.shape;
+    if (shape)
+      return shape;
+    const inner = schema._def;
+    schema = inner?.schema ?? inner?.innerType;
+  }
+  return void 0;
+}
+function knownFieldsFor(type) {
+  const shape = objectShapeFor(type);
+  return shape ? new Set(Object.keys(shape)) : void 0;
+}
+function describeZodDetailed(node, depth = 0) {
+  if (!node || typeof node !== "object" || depth > 6)
+    return { type: "unknown" };
+  if (node === repoPath)
+    return { type: "string", format: REPO_PATH_FORMAT };
+  const def = node._def;
+  const name = def?.typeName;
+  switch (name) {
+    case "ZodString": {
+      const checks = def?.checks ?? [];
+      const regexCheck = checks.find((c) => c.kind === "regex" && c.regex);
+      const datetimeCheck = checks.find((c) => c.kind === "datetime");
+      const uuidCheck = checks.find((c) => c.kind === "uuid");
+      const minCheck = checks.find((c) => c.kind === "min" && typeof c.value === "number" && c.value > 0);
+      const minLength = minCheck ? { min_length: minCheck.value } : {};
+      if (!regexCheck && !datetimeCheck && !uuidCheck)
+        return { type: "string", ...minLength };
+      const annotations = [];
+      if (datetimeCheck)
+        annotations.push(datetimeCheck.offset || datetimeCheck.local ? "ISO datetime" : "ISO datetime, UTC Z form");
+      if (uuidCheck)
+        annotations.push("uuid");
+      const base2 = annotations.length ? `string (${annotations.join(", ")})` : "string";
+      return { type: regexCheck?.regex ? `${base2} matching ${regexCheck.regex}` : base2, ...minLength };
+    }
+    case "ZodNumber":
+      return { type: "number" };
+    case "ZodBoolean":
+      return { type: "boolean" };
+    case "ZodNull":
+      return { type: "null" };
+    case "ZodAny":
+    case "ZodUnknown":
+      return { type: "any" };
+    case "ZodEnum": {
+      const values = def?.values ?? [];
+      return { type: "enum", enum_values: values };
+    }
+    case "ZodNativeEnum":
+      return { type: "enum" };
+    case "ZodLiteral":
+      return { type: `literal ${JSON.stringify(def?.value)}` };
+    case "ZodArray": {
+      const inner = describeZodDetailed(def?.type, depth + 1);
+      return {
+        type: `${inner.type}[]`,
+        ...inner.enum_values ? { enum_values: inner.enum_values } : {},
+        ...inner.member_fields ? { element_fields: inner.member_fields } : {},
+        ...inner.min_length !== void 0 ? { min_length: inner.min_length } : {},
+        ...inner.format ? { format: inner.format } : {}
+      };
+    }
+    case "ZodObject": {
+      const shape = node.shape ?? {};
+      const members = Object.entries(shape).map(([memberName, memberNode]) => fieldShape(memberName, memberNode, depth + 1));
+      return { type: `{${Object.keys(shape).join(", ")}}`, ...members.length ? { member_fields: members } : {} };
+    }
+    case "ZodRecord":
+      return { type: `record<string, ${describeZodDetailed(def?.valueType, depth + 1).type}>` };
+    case "ZodUnion": {
+      const rawOptions = def?.options ?? [];
+      const opts = rawOptions.map((o) => describeZodDetailed(o, depth + 1));
+      const literals = opts.filter((o) => o.type.startsWith("literal "));
+      if (literals.length === opts.length && opts.length) {
+        return { type: opts.map((o) => o.type.replace("literal ", "")).join(" | ") };
+      }
+      const arrayElementFields = opts.find((o) => o.element_fields && o.type.endsWith("[]"))?.element_fields;
+      const objectMemberFields = opts.find((o) => o.member_fields && !o.type.endsWith("[]"))?.member_fields;
+      return {
+        type: opts.map((o) => o.type).join(" | "),
+        ...arrayElementFields ? { element_fields: arrayElementFields } : {},
+        ...objectMemberFields ? { member_fields: objectMemberFields } : {}
+      };
+    }
+    // Wrappers: describe what they wrap. optionality is reported separately, so
+    // it is deliberately NOT folded into the type string.
+    case "ZodOptional":
+    case "ZodNullable":
+    case "ZodDefault":
+      return describeZodDetailed(def?.innerType, depth + 1);
+    case "ZodEffects":
+      return describeZodDetailed(def?.schema, depth + 1);
+    default:
+      return { type: name ? name.replace(/^Zod/, "").toLowerCase() : "unknown" };
+  }
+}
+var EXAMPLE_MAX_DEPTH = 6;
+var EXAMPLE_MAX_CHARS = 256;
+function sampleFromRegex(source) {
+  if (/\(\?[=!<]/.test(source))
+    return void 0;
+  if (/\\[1-9]/.test(source))
+    return void 0;
+  let i = 0;
+  let failed = false;
+  const classChar = () => {
+    i++;
+    if (source[i] === "^")
+      return void 0;
+    let first;
+    while (i < source.length && source[i] !== "]") {
+      const c = source[i];
+      if (c === "\\") {
+        const esc2 = source[i + 1];
+        i += 2;
+        if (first === void 0)
+          first = escapeChar(esc2);
+      } else {
+        i++;
+        if (first === void 0)
+          first = c;
+      }
+    }
+    if (source[i] !== "]")
+      return void 0;
+    i++;
+    return first;
+  };
+  const escapeChar = (c) => {
+    if (c === void 0)
+      return void 0;
+    if (c === "d")
+      return "0";
+    if (c === "w")
+      return "a";
+    if (c === "s")
+      return " ";
+    if ("DWSbB".includes(c))
+      return void 0;
+    if (c === "n")
+      return "\n";
+    if (c === "t")
+      return "	";
+    return c;
+  };
+  const quantifier = () => {
+    const c = source[i];
+    if (c === "*" || c === "?") {
+      i++;
+      if (source[i] === "?")
+        i++;
+      return 0;
+    }
+    if (c === "+") {
+      i++;
+      if (source[i] === "?")
+        i++;
+      return 1;
+    }
+    if (c === "{") {
+      const close = source.indexOf("}", i);
+      if (close === -1)
+        return 1;
+      const body = source.slice(i + 1, close);
+      const m = /^(\d+)(,(\d+)?)?$/.exec(body);
+      if (!m)
+        return 1;
+      i = close + 1;
+      if (source[i] === "?")
+        i++;
+      return Number(m[1]);
+    }
+    return 1;
+  };
+  const sequence = () => {
+    let out = "";
+    while (i < source.length && source[i] !== "|" && source[i] !== ")" && !failed) {
+      const c = source[i];
+      let atom;
+      if (c === "^" || c === "$") {
+        i++;
+        continue;
+      } else if (c === "(") {
+        i++;
+        if (source.startsWith("?:", i))
+          i += 2;
+        atom = alternation();
+        if (source[i] !== ")") {
+          failed = true;
+          return out;
+        }
+        i++;
+      } else if (c === "[") {
+        atom = classChar();
+        if (atom === void 0) {
+          failed = true;
+          return out;
+        }
+      } else if (c === "\\") {
+        atom = escapeChar(source[i + 1]);
+        i += 2;
+        if (atom === void 0) {
+          failed = true;
+          return out;
+        }
+      } else if (c === ".") {
+        i++;
+        atom = "x";
+      } else {
+        i++;
+        atom = c;
+      }
+      const times = quantifier();
+      if (atom.length * times > EXAMPLE_MAX_CHARS) {
+        failed = true;
+        return out;
+      }
+      out += atom.repeat(times);
+      if (out.length > EXAMPLE_MAX_CHARS) {
+        failed = true;
+        return out;
+      }
+    }
+    return out;
+  };
+  const alternation = () => {
+    const first = sequence();
+    while (i < source.length && source[i] === "|" && !failed) {
+      i++;
+      sequence();
+    }
+    return first;
+  };
+  const sampled = alternation();
+  return failed || i < source.length ? void 0 : sampled;
+}
+function satisfies(node, value) {
+  const parse3 = node?.safeParse;
+  if (typeof parse3 !== "function")
+    return false;
+  try {
+    return parse3.call(node, value).success === true;
+  } catch {
+    return false;
+  }
+}
+function exampleCandidates(node, name, depth) {
+  if (!node || typeof node !== "object" || depth > EXAMPLE_MAX_DEPTH)
+    return [];
+  const def = node._def;
+  const placeholder = `<${name ?? "string"}>`;
+  switch (def?.typeName) {
+    case "ZodString": {
+      const checks = def?.checks ?? [];
+      const out = [];
+      if (checks.some((c) => c.kind === "datetime"))
+        out.push("2026-08-24T00:00:00.000Z");
+      if (checks.some((c) => c.kind === "uuid"))
+        out.push("00000000-0000-0000-0000-000000000000");
+      for (const c of checks) {
+        if (c.kind === "regex" && c.regex) {
+          const sampled = sampleFromRegex(c.regex.source);
+          if (sampled !== void 0)
+            out.push(sampled);
+        }
+      }
+      out.push(placeholder);
+      return out;
+    }
+    case "ZodNumber":
+      return [1, 0];
+    case "ZodBoolean":
+      return [true];
+    case "ZodNull":
+      return [null];
+    case "ZodAny":
+    case "ZodUnknown":
+      return [placeholder];
+    case "ZodEnum":
+      return (def?.values ?? []).slice();
+    case "ZodNativeEnum":
+      return Object.values(def?.values ?? {});
+    case "ZodLiteral":
+      return [def?.value];
+    case "ZodArray": {
+      const element = deriveExampleValue(def?.type, name, depth + 1);
+      return element ? [[element.value], []] : [[]];
+    }
+    case "ZodObject": {
+      const shape = node.shape ?? {};
+      const built = {};
+      for (const [key, sub] of Object.entries(shape)) {
+        if (sub.isOptional?.() === true)
+          continue;
+        const subExample = deriveExampleValue(sub, key, depth + 1);
+        if (!subExample)
+          return [];
+        built[key] = subExample.value;
+      }
+      return [built];
+    }
+    case "ZodRecord": {
+      const value = deriveExampleValue(def?.valueType, "value", depth + 1);
+      return value ? [{ "<key>": value.value }, {}] : [{}];
+    }
+    case "ZodUnion":
+      return (def?.options ?? []).flatMap((o) => exampleCandidates(o, name, depth + 1));
+    // Wrappers contribute their inner candidates, but the PROOF still runs
+    // against the outer node, so a refinement the wrapper adds still rules.
+    case "ZodNullable":
+      return [...exampleCandidates(def?.innerType, name, depth + 1), null];
+    case "ZodOptional":
+    case "ZodDefault":
+      return exampleCandidates(def?.innerType, name, depth + 1);
+    case "ZodEffects":
+      return exampleCandidates(def?.schema, name, depth + 1);
+    default:
+      return [];
+  }
+}
+function deriveExampleValue(node, name, depth) {
+  for (const candidate of exampleCandidates(node, name, depth)) {
+    if (satisfies(node, candidate))
+      return { value: candidate };
+  }
+  return void 0;
+}
+function exampleFor(node, name) {
+  const derived = deriveExampleValue(node, name, 0);
+  return derived ? renderValue(derived.value) : void 0;
+}
+function renderValue(value) {
+  const rendered = typeof value === "string" ? value : JSON.stringify(value);
+  return rendered === void 0 || rendered.length === 0 ? void 0 : rendered;
+}
+function defaultOf(node) {
+  let current = node;
+  for (let i = 0; i < 6 && current && typeof current === "object"; i++) {
+    const def = current._def;
+    switch (def?.typeName) {
+      case "ZodDefault":
+        return def?.defaultValue?.();
+      case "ZodOptional":
+      case "ZodNullable":
+        current = def?.innerType;
+        break;
+      case "ZodEffects":
+        current = def?.schema;
+        break;
+      default:
+        return void 0;
+    }
+  }
+  return void 0;
+}
+var REPO_PATH_FORMAT = "repo-relative POSIX path";
+var REPO_PATH_REFUSALS = [
+  { label: "absolute", sample: "/abs/file.ts" },
+  { label: "drive-prefixed", sample: "C:/abs/file.ts" },
+  { label: "escaping through '..'", sample: "../file.ts" },
+  { label: "empty", sample: "" }
+];
+function repoPathCondition() {
+  return `Refused: ${REPO_PATH_REFUSALS.map((r) => r.label).join(", ")}.`;
+}
+function fieldShape(name, node, depth, exampleValue) {
+  const described = describeZodDetailed(node, depth);
+  const required2 = !node.isOptional?.();
+  const example = exampleValue ? renderValue(exampleValue.value) : exampleFor(node, name);
+  const fallback = defaultOf(node);
+  const defaultText = fallback === void 0 ? void 0 : renderValue(fallback);
+  return {
+    name,
+    required: required2,
+    type: described.type,
+    ...described.enum_values ? { enum_values: described.enum_values } : {},
+    ...described.element_fields ? { element_fields: described.element_fields } : {},
+    ...described.member_fields ? { member_fields: described.member_fields } : {},
+    ...described.min_length !== void 0 ? { min_length: described.min_length } : {},
+    ...described.format ? { format: described.format, condition: repoPathCondition() } : {},
+    ...defaultText !== void 0 ? { default: defaultText } : {},
+    ...example ? { example } : {}
+  };
+}
+function fieldShapeAt(fields, path) {
+  let level = fields;
+  let found;
+  for (const segment of path.split(".")) {
+    const intoElements = segment.endsWith("[]");
+    const name = intoElements ? segment.slice(0, -2) : segment;
+    found = level?.find((f) => f.name === name);
+    if (!found)
+      return void 0;
+    level = intoElements ? found.element_fields : found.member_fields;
+  }
+  return found;
+}
+function addFieldCondition(fields, path, text) {
+  const shape = fieldShapeAt(fields, path);
+  if (shape)
+    shape.condition = shape.condition ? `${shape.condition} ${text}` : text;
+}
+function recordFieldConditions(type) {
+  switch (type) {
+    case "feature_article": {
+      const exempt = NOT_APPLICABLE_EXEMPT_KINDS.join(" or ");
+      const others = ARTICLE_KINDS.filter((k) => !NOT_APPLICABLE_EXEMPT_KINDS.includes(k)).join(", ");
+      const members = Object.entries(notApplicableExemptionSchema.shape.not_applicable.shape).map(([key, node]) => node.isOptional() ? `${key}?` : key).join(", ");
+      const kindRule = `The {not_applicable: {${members}}} form is accepted only when article_kind is ${exempt} (on those kinds an empty array is refused). Other kinds (${others}) pass an array, which may be [].`;
+      const out = [
+        ["current_ac", kindRule],
+        ["live_test_refs", kindRule]
+      ];
+      for (const [state, needed] of Object.entries(ARTICLE_STATE_REQUIRES)) {
+        out.push(["state", `state '${state}' requires ${needed.join(" and ")}.`]);
+        for (const field of needed)
+          out.push([field, `Required when state is '${state}'.`]);
+      }
+      return out;
+    }
+    case "todo": {
+      const userOnly = Object.keys(TODO_USER_ONLY_FIELDS);
+      const out = [
+        ["source", `source '${TODO_SYSTEM_SOURCE}' requires ${TODO_SYSTEM_REQUIRES.join(" and ")} and refuses ${userOnly.join(" and ")}.`]
+      ];
+      for (const field of TODO_SYSTEM_REQUIRES)
+        out.push([field, `Required when source is '${TODO_SYSTEM_SOURCE}'.`]);
+      for (const field of userOnly)
+        out.push([field, `Refused when source is '${TODO_SYSTEM_SOURCE}'.`]);
+      out.push(["blocked_by", "An item cannot list its own slug."]);
+      return out;
+    }
+    case "open_question":
+      return [
+        ["resolution_status", `'${OPEN_QUESTION_CLOSED}' requires ${OPEN_QUESTION_TERMINUS_FIELD}; any other value refuses it.`],
+        [OPEN_QUESTION_TERMINUS_FIELD, `Required when resolution_status is '${OPEN_QUESTION_CLOSED}', refused otherwise.`]
+      ];
+    case "brief":
+      return [["phases[].interfaces", "Every name must be the name of a technical_design.interfaces entry."]];
+    default:
+      return [];
+  }
+}
+var OMIT_EXAMPLE = /* @__PURE__ */ Symbol("omit example");
+function exampleValuesFor(type, shape) {
+  const candidates = /* @__PURE__ */ new Map();
+  for (const [name, node] of Object.entries(shape)) {
+    const valid = exampleCandidates(node, name, 0).filter((c) => satisfies(node, c));
+    if (!valid.length)
+      continue;
+    const optional2 = node.isOptional?.() === true;
+    candidates.set(name, optional2 ? [...valid, OMIT_EXAMPLE] : valid);
+  }
+  const withChange = (values, name, value) => {
+    const next = new Map(values);
+    if (value === OMIT_EXAMPLE)
+      next.delete(name);
+    else
+      next.set(name, value);
+    return next;
+  };
+  let chosen = new Map([...candidates].map(([name, valid]) => [name, valid[0]]));
+  const schema = RECORD_TYPES[type]?.schema;
+  const issueCount = (values) => {
+    try {
+      const result = schema?.safeParse(Object.fromEntries(values));
+      return !result || result.success ? 0 : result.error.issues.length;
+    } catch {
+      return Infinity;
+    }
+  };
+  const order = [...candidates].reverse();
+  let remaining = issueCount(chosen);
+  for (let round = 0; remaining > 0 && round < 8; round++) {
+    let best;
+    for (const [name, valid] of order) {
+      for (const value of valid) {
+        if (value === OMIT_EXAMPLE ? !chosen.has(name) : chosen.has(name) && value === chosen.get(name))
+          continue;
+        const issues = issueCount(withChange(chosen, name, value));
+        if (issues < (best?.issues ?? remaining))
+          best = { name, value, issues };
+      }
+    }
+    if (!best)
+      break;
+    chosen = withChange(chosen, best.name, best.value);
+    remaining = best.issues;
+  }
+  return chosen;
+}
+function exampleRecordFor(type) {
+  const shape = objectShapeFor(type);
+  return shape ? Object.fromEntries(exampleValuesFor(type, shape)) : void 0;
+}
+function schemaFor(type) {
+  const shape = objectShapeFor(type);
+  if (!shape)
+    return void 0;
+  const examples = exampleValuesFor(type, shape);
+  const fields = Object.entries(shape).map(([name, node]) => (
+    // A field the whole-record choice left out is still listed, without an example.
+    fieldShape(name, node, 0, examples.has(name) ? { value: examples.get(name) } : { value: void 0 })
+  ));
+  for (const [path, text] of recordFieldConditions(type))
+    addFieldCondition(fields, path, text);
+  return { type, fields };
+}
+function unknownFieldsIn(type, candidate) {
+  const known = knownFieldsFor(type);
+  if (!known)
+    return [];
+  return Object.keys(candidate).filter((k) => !known.has(k));
+}
+function validateRecord(input) {
+  if (typeof input !== "object" || input === null || typeof input.type !== "string") {
+    throw new Error("validateRecord: input has no record type");
+  }
+  const type = input.type;
+  const entry = RECORD_TYPES[type];
+  if (!entry) {
+    throw new Error(`validateRecord: unregistered record type '${type}' \u2014 register it in RECORD_TYPES (spec \xA715) before writing`);
+  }
+  return entry.schema.parse(input);
+}
+
+// packages/schemas/dist/transient.js
+var NO_CAPTURE_LANES = ["research", "capture", "all"];
+var noCaptureLaneSchema = external_exports.enum(NO_CAPTURE_LANES);
+var sessionEventSchema = external_exports.object({
+  kind: external_exports.enum([
+    "research_tool",
+    "agent_dispatch",
+    "debug_scope",
+    "concept_designed",
+    "no_capture",
+    "capture_pending",
+    "test_repair",
+    "test_append"
+  ]),
+  detail: external_exports.string().min(1),
+  at: external_exports.string().min(1),
+  lane: noCaptureLaneSchema.optional(),
+  // capture_pending only (board f003082d): the declared target, trimmed, as its
+  // own field. H10 keys a lapsed declaration's capture_owed debt on it alone,
+  // so one target declared with two reasons is one debt. OPTIONAL because a
+  // legacy event carries only the joined detail; H10 keys such an event on the
+  // whole detail (never a split on ' — ', which may occur inside a target).
+  // Trimmed before the length check, so a whitespace-only target is refused.
+  target: external_exports.string().trim().min(1).optional()
+});
+var KNOWLEDGE_WRITES_DIR_REL = ".sterling/transient";
+var KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/knowledge-writes.jsonl`;
+var KNOWLEDGE_WRITES_PROCESS_FILE = /^knowledge-writes\.([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/;
+var knowledgeWritesProcessFile = (pid, uuid2) => `knowledge-writes.${pid}-${uuid2}.jsonl`;
+function knowledgeWritesOwnerPid(fileName) {
+  const m = KNOWLEDGE_WRITES_PROCESS_FILE.exec(fileName);
+  if (!m)
+    return null;
+  const pid = Number(m[1]);
+  return Number.isSafeInteger(pid) ? pid : null;
+}
+var KNOWLEDGE_WRITES_TEMP_FILE = /^knowledge-writes\.(?:[1-9]\d*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.)?jsonl\.tmp-([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+var knowledgeWritesTempFile = (ledgerFileName, pid, uuid2) => `${ledgerFileName}.tmp-${pid}-${uuid2}`;
+function knowledgeWritesTempOwnerPid(fileName) {
+  const m = KNOWLEDGE_WRITES_TEMP_FILE.exec(fileName);
+  if (!m)
+    return null;
+  const pid = Number(m[1]);
+  return Number.isSafeInteger(pid) ? pid : null;
+}
+var KNOWLEDGE_WRITES_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
+var KNOWLEDGE_WRITES_COMPACT_LINES = 1e3;
+var KNOWLEDGE_WRITES_KEEP_IDS = 500;
+var knowledgeWriteSchema = external_exports.object({
+  id: external_exports.string().min(1),
+  type: external_exports.string().min(1),
+  at: external_exports.string().min(1)
+}).strict();
+
+// packages/schemas/dist/config.js
+var effortLevel = external_exports.enum(["low", "medium", "high", "xhigh"]);
+var modelPin = external_exports.object({
+  model: external_exports.string(),
+  effort: effortLevel.optional()
+}).strict();
+var agentModelEntry = external_exports.object({
+  model: external_exports.string(),
+  effort: effortLevel,
+  hard_task: modelPin.optional()
+}).strict();
+var vendorPins = external_exports.object({
+  openai: modelPin.optional(),
+  anthropic: modelPin.optional()
+}).default({});
+var successPredicateSchema = external_exports.object({
+  output_regex: external_exports.string().optional(),
+  output_regex_absent: external_exports.string().optional(),
+  artifact: external_exports.object({
+    path: external_exports.string(),
+    min_bytes: external_exports.number().optional()
+  }).strict().optional()
+}).strict().refine((v) => v.output_regex !== void 0 || v.output_regex_absent !== void 0 || v.artifact !== void 0, { message: "success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)" });
+var DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS = Object.freeze(["**/*.sh"]);
+var configSchema = external_exports.object({
+  toolchains: external_exports.array(external_exports.object({
+    adapter: external_exports.string(),
+    path_globs: external_exports.array(external_exports.string()),
+    // baked from the adapter at init (§9.1)
+    test_globs: external_exports.array(external_exports.string()).optional(),
+    run_commands: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+    capabilities: external_exports.record(external_exports.string(), external_exports.boolean()).optional(),
+    // §see comment above: keyed by run_command key, optional, never defaulted to {}
+    success_predicates: external_exports.record(external_exports.string(), successPredicateSchema).optional()
+  })).default([]),
+  backup_path: external_exports.string().optional(),
+  // §2.3: init refuses without a backup path OR an explicit recorded opt-out;
+  // with opt-out, disposal skips the snapshot LOUDLY (check_skipped).
+  backup_opt_out: external_exports.boolean().default(false),
+  // §3.3: the project's stack_tags, declared at init, are the domain mount
+  // manifest and nothing else; they do not filter retrieval (a query's own
+  // stack_tags option is a separate, caller-supplied filter). Each tag mounts an
+  // EXISTING store at ~/.sterling/domains/<tag>/sterling.db; a new domain store
+  // is made only by createDomain in @sterling/store, which requires a description.
+  stack_tags: external_exports.array(external_exports.string()).default([]),
+  // §3.3 (spec line 94 — path configurable per domain): per-tag store-path
+  // override; default is the per-user root above. tag → absolute db path (POSIX).
+  domain_paths: external_exports.record(external_exports.string(), external_exports.string()).default({}),
+  // Named detached working trees (comsoft-juiced incident 2026-07-17): map of
+  // SYMBOLIC tree name → tree path (absolute POSIX, or relative to the project
+  // root). Records carrying working_tree: <name> resolve their file paths
+  // against the mapped tree instead of the project root; an unmapped name makes
+  // every consumer abstain LOUD (verify_before_use), never guess. Machine-
+  // specific paths live here, in per-project config — never inside store
+  // records (invariant 2).
+  working_trees: external_exports.record(external_exports.string(), external_exports.string()).default({}),
+  // Generated projection files (regen↔baseline circularity, 2026-07-17):
+  // repo-relative POSIX paths of files REGENERATED from the store
+  // (architecture.md). Content churn on these is a regen, not out-of-band
+  // drift, so the read-time drift check skips its CONTENT-change arm for them
+  // — their currency is guarded by check-projection-fresh at the merge gate,
+  // not by article baselines. DELETION still flags (a vanished committed
+  // deliverable is real drift regardless of how the file is produced).
+  generated_projections: external_exports.array(external_exports.string()).default([]),
+  // Undeclared-source disclosure (decision
+  // undeclared-source-disclosure-per-file-coverage-live-h1-scan, board
+  // 44ef6838): POSIX globs excluded from the live per-file source-extension
+  // coverage scan H1 (SessionStart) and init render — an excluded file never
+  // participates (neither covered nor uncovered), same precedence as
+  // classifyCoverage's excludeGlobs parameter in
+  // scripts/hooks/lib/undeclared-source.mjs (excluded wins over a matching
+  // toolchain path_glob).
+  // DEFAULT ['**/*.sh'] (decision gap-hunt-2026-09-28-rulings item 6): shell
+  // scripts are launcher and console glue, never a toolchain's source, and
+  // flagging them was banner noise answered the same way every session. The
+  // default lives in THREE places that must agree: here, templates/default-
+  // config.json (anti-pattern 85d15143), and the raw-config ladder in
+  // scripts/hooks/lib/undeclared-source-scan.mjs, which imports this constant.
+  // An explicit [] still opts back in.
+  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default(() => [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]),
+  // Attestation disclosure (decision attestation-staleness-disclosure-only-
+  // never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
+  // POSIX globs whose touched paths get a comparable-human-record rollup at
+  // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
+  // field can ever refuse an operation; the refusing form of this feature was
+  // DECLINED, because a gate the conductor must pass turns the conductor into
+  // the de-facto attestation trigger, reversing decision foreign_a7dbac2f (an
+  // attestation records a HUMAN inspection). EMPTY IS THE DEFAULT AND MEANS
+  // FULLY DORMANT: no store is opened, no diff is taken, nothing is printed.
+  // Sterling's own config declares none — the feature exists for consuming
+  // projects with render/asset paths.
+  // `z.unknown()` IS THE POINT, AND IT IS DELIBERATE (Codex review HIGH-1 +
+  // roster MEDIUM-1, 2026-09-01). This field cannot validate ANYTHING here — not
+  // element type, not emptiness, not duplicates — because direct-merge.mjs and
+  // merge-gate.mjs run parseConfig through openProject() long before the
+  // disclosure's fail-open wrapper exists, so ANY refusal on this field kills the
+  // whole merge command. Measured shapes that must not do that: `["", …]`,
+  // duplicated globs, and the bracket-less hand-edit
+  // `"attestation_path_globs": "renders/**"` (a plain string, not an array).
+  // An ADVISORY declaration that can refuse a merge inverts this feature's own
+  // ruling, which is the one thing the design is not allowed to do.
+  // z.unknown().default([]) PRESERVES the declared value verbatim rather than
+  // coercing or dropping it, and it forces any future consumer of the PARSED
+  // config to narrow this field explicitly instead of assuming string[].
+  // WHERE THE REAL READ LIVES: readAttestationGlobs() in
+  // scripts/lib/attestation-inspection.mjs is the ONE place this field is
+  // interpreted — it re-reads .sterling/config.json itself, drops a non-array
+  // container, non-string members, empty strings and exact duplicates, and
+  // DISCLOSES every drop in the rollup. No surface may take these globs from the
+  // parsed config object instead.
+  attestation_path_globs: external_exports.unknown().default([]),
+  // §12 ensure-manifest: declarations are read back from the recorded config on
+  // re-runs (no flags required), so the project name is recorded alongside them.
+  project_name: external_exports.string().optional(),
+  // §11 launcher split ratio
+  tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
+  // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
+  // H6-only (agent-scoped context enforcement) and DELETED with H6 under
+  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
+  // denominator and the direct-mode pressure thresholds). `windows.default`
+  // is a REAL fallback (decision context-window-default-is-a-real-fallback,
+  // user-ruled 2026-09-22, reversing the earlier "never a default"): it is
+  // the window H10 uses for any model with no per-model entry, so it is
+  // seeded at the largest generation's window rather than a conservative
+  // guess — a per-model entry still always wins when one exists.
+  context_watch: external_exports.object({
+    windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 1e6 }),
+    // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
+    // "finish before opening new areas"; hard = once-per-session soft-block naming the
+    // delegation remedy.
+    conductor: external_exports.object({
+      soft_pct: external_exports.number().positive().default(35),
+      hard_pct: external_exports.number().positive().default(50)
+    }).default({})
+  }).default({}),
+  // In-flight dispatch register (decision foreign_ec9eacaa, H22): how long an entry may
+  // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
+  // duties for the files it owns. SubagentStop on a killed/aborted subagent was
+  // never probed (research_finding foreign_20b44518), so this TTL is what converts that
+  // unknown into a bounded, disclosed degradation instead of a duty deferred
+  // forever (P5).
+  dispatch_register: external_exports.object({
+    stale_minutes: external_exports.number().int().positive().default(60),
+    // H10 keeps holding a capture_pending declaration while any row of the
+    // current session ENDED within this many minutes, so a lane that parks
+    // on background work and resumes as a new round does not open a gap
+    // (decision capture-pending-hold-window-spans-resume-rounds). 0 turns
+    // the window off.
+    resume_hold_minutes: external_exports.number().int().nonnegative().default(10)
+  }).default({}),
+  // Concurrent-subagent ceiling (decision foreign_d7a0289f, board 18a22b56): every
+  // surface that states the "N concurrent subagents" ceiling (H1's banner
+  // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
+  // hardcoded literal, so a ruling that changes it takes effect everywhere
+  // without a hook-text edit. The anti-quota semantics are UNCHANGED either
+  // way — this tunes only the number, never a floor/quota (decisions
+  // 677f1639/299d853a stand). Absent → shipped default 5.
+  delegation: external_exports.object({
+    max_concurrent: external_exports.number().int().positive().default(5)
+  }).default({}),
+  // §7.2 model + effort defaults (tunable config, not architecture).
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
+  models: external_exports.object({
+    implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
+    researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
+    scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    classifiers: agentModelEntry.default({ model: "claude-haiku-4-5", effort: "low" }),
+    // librarian is mechanical clerking — cheap model, low effort (P8). The
+    // roster is classless (decision agent-roster-is-classless-four-agents), and
+    // the debugger role it rejected has no key here.
+    librarian: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    // reviewer judges a diff (decision
+    // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
+    // dispatch pins its model explicitly; this is the install-time default.
+    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
+  }).catchall(agentModelEntry).default({}),
+  // Per-project agent tool extension (decision
+  // per-project-agent-extra-tools-config-appended-at-render, 587472e3):
+  // agents.<registered-agent-name>.extra_tools is appended to that agent's
+  // rendered tools: line at install. It must live in the schema — this top-level
+  // object strips unknown keys silently. Each entry is one tool name with an
+  // optional trailing `*`; commas, whitespace and newlines are refused because a
+  // newline in the rendered frontmatter could inject keys such as hooks:.
+  // All of that — entry syntax, unknown keys, registry membership, tools:-line
+  // presence and the Sterling-MCP-prefix ban — is refused loudly at render
+  // (scripts/lib/agent-distribution.mjs), where install and sync fail; parsing
+  // stays lenient so a typo never breaks MCP boot or a hook.
+  agents: external_exports.record(
+    external_exports.string(),
+    // LENIENT on purpose (review fix): the MCP server and every hook parse
+    // this file, so a hand-edit typo must not make every parseConfig throw —
+    // the hazard the delivery block records for .strict(). passthrough keeps
+    // an unknown key (a typo such as extra_tool) so render can refuse it by
+    // name; entry syntax (AGENT_TOOL_NAME_RE) is enforced at render too.
+    external_exports.object({
+      // z.unknown, not z.array: even a non-array value (a string) must
+      // parse; render refuses it by name ("not an array").
+      extra_tools: external_exports.unknown().default([])
+    }).passthrough()
+  ).default({}),
+  // §6 H10 article demand: direct-mode touches in unowned territory at this
+  // threshold (or any new unowned file vs git HEAD) demand the owning article
+  article_demand: external_exports.object({
+    min_unowned_files: external_exports.number().int().positive().default(3),
+    // Per-project policy data (decision
+    // article-demand-ignore-globs-per-project-policy-data): a touched path
+    // matching any glob is dropped from the demand candidate set PER PATH.
+    // Ships empty so every project is unchanged until it opts in (Dome
+    // Farmer: `**/*.uid`, Godot's tracked identity sidecars).
+    ignore_globs: external_exports.array(external_exports.string().min(1)).default([])
+  }).default({}),
+  // §3.2.7 H1 queue-depth signal: at or above this many open maintenance items,
+  // SessionStart tells the CONDUCTOR the queue is deep and wants draining — not
+  // just the human. The counts have always been computed and sent as a
+  // systemMessage the MODEL never sees, on the reasoning that an event-drained
+  // queue is otherwise noise; that holds while it is shallow and fails once it is
+  // not. A consuming project reached 63 items, most of them work already finished
+  // and never closed, with nothing prompting a drain (reported 2026-07-29).
+  // Below the threshold H1 stays silent to the model (P1 — no ceremony).
+  maintenance_queue: external_exports.object({
+    deep_threshold: external_exports.number().int().positive().default(15)
+  }).default({}),
+  // Background maintenance worker kill switch (decision
+  // maintenance-queue-background-haiku-worker-simple-redesign): when true, H10
+  // (at Stop) and H19's Bash surface (after a git commit) start a detached
+  // headless Claude run that judges open reconcile_needed items and closes the
+  // ones already paid (scripts/hooks/lib/maintenance-worker.mjs). false stops
+  // every launch; the queue then drains by hand with /sterling:drain.
+  // There is no daily budget: the worker runs whenever the queue has eligible
+  // work, capped only per run (decision
+  // maintenance-worker-notices-session-start-only-and-no-sliver-launch). A
+  // daily_budget_usd left in an existing config is stripped by this non-strict
+  // object. The default lives here AND in templates/default-config.json,
+  // because install/sync fill an omitted key from this zod default, not the
+  // template.
+  maintenance_worker: external_exports.object({
+    enabled: external_exports.boolean().default(true),
+    // The OpenCode runner's model as provider/model (decision
+    // opencode-maintenance-worker-refuses-without-a-configured-model): the
+    // worker REFUSES to start without it, so config_set must not call it
+    // unread (GitHub issue 23). No default, deliberately. Reader:
+    // scripts/hooks/lib/maintenance-worker.mjs opencodeModelOf(). PERMISSIVE
+    // like `mode`: a non-string is preserved raw and refused loudly by that
+    // reader, never thrown on here (a throw would fail the MCP server's boot).
+    opencode_model: external_exports.unknown().optional()
+  }).default({}),
+  // Board 8390f8fa: a registry-style feature_article can outgrow its own
+  // round-trip — knowledge_append responses on mcp-tool-surface (29 history
+  // entries) and hooks-suite's what_it_does (26k tokens) both blew the MCP
+  // token cap. Measured: mcp-tool-surface serializes ~104KB. Set well below
+  // that observed failure and above every healthy article; a knowledge_update/
+  // append/edit that lands a feature_article over this many chars (as
+  // knowledge_get would return it) warns via the write's result envelope and
+  // enqueues one deduped article_oversize maintenance item. Tunable per
+  // machine, not architecture.
+  article_oversize_chars: external_exports.number().int().positive().default(6e4),
+  // Decision foreign_881baf13 (supersedes foreign_d547d3b0): per-article accepted-oversize
+  // exemption register, article slug -> justifying decision id. Consulted at
+  // the article_oversize minting site (articleOversizeWarnings,
+  // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
+  // maintenance item — the exemption suppresses the mint ONLY while the cited
+  // decision resolves and is live (status active, not superseded/retired) in
+  // the store the minting code already has open. A missing/unresolvable/dead
+  // citation VOIDS the exemption; the mint proceeds with the void reason
+  // appended to the item text — never a silent suppression (P5).
+  article_oversize_exempt: external_exports.record(external_exports.string(), external_exports.string()).default({}),
+  // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
+  // with more entries than this keeps the first article_history_genesis_entries
+  // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on
+  // the write's warnings channel). Nothing is lost: every rotated-away entry
+  // remains readable in the retained superseded versions, which the store keeps
+  // forever — the supersede chain IS the archive, so no new table or archive
+  // record type exists for retrieval to mis-serve. Measured 2026-08-10: the
+  // three oversize articles carried 29/41/46 entries at 0.65–1.5KB each —
+  // 42–57% of their serialized size — and history dominated every write echo
+  // and full read. 20 keeps a reconcile trail deep enough for the brief-lookup
+  // consumers (promotion/completeness match on RECENT entries' target_id)
+  // while bounding the round-trip.
+  article_history_max_entries: external_exports.number().int().positive().default(20),
+  // Board ab87fe24: middle-out rotation sibling to article_history_max_entries
+  // above. On rotation the live record keeps the FIRST genesis_entries entries
+  // (founding/genesis, by array position) plus the newest
+  // (max - genesis_entries) entries, evicting the middle. genesis_entries >=
+  // max clamps to max - 1 so at least one recent entry always survives.
+  article_history_genesis_entries: external_exports.number().int().nonnegative().default(2),
+  // Whether THIS project store is the one the repo's shared, store-DERIVED
+  // artifacts are produced from. Two exist: record-id citations in tracked source,
+  // and the committed architecture.md projection. Both are checked into git while
+  // the store that produces them is NOT (.sterling/ is gitignored), so on any
+  // store but the producing one they read as broken when they are merely foreign.
+  // Record ids make this concrete: an id is minted by the store that first created
+  // the record, and knowledge crosses machines as an export payload whose ids the
+  // receiving server RE-MINTS, so one record ends up with a different id per store.
+  //
+  // 'primary'   — this store mints the ids the tree cites and owns the projection.
+  //               A dangling citation (a typo, or a record never created) and a
+  //               stale projection are real defects here. Both arms fail.
+  // 'secondary' — the tree cites another store's id namespace, and the committed
+  //               projection was generated from that store. Neither is verifiable
+  //               here, and REGENERATING the projection here would actively regress
+  //               a shared file, since a smaller store projects a smaller document.
+  //               Both arms report in full and exit 0 (P1 — a gate that cannot
+  //               change an outcome is ceremony; P5 — it never goes quiet, and each
+  //               pass line names the setting so a weakened arm is never mistaken
+  //               for a clean one).
+  //
+  // KNOWN COST, not a side effect: under 'secondary' a citation written on THAT
+  // machine goes unchecked too — the arm cannot tell it from a foreign one. What
+  // removes the need for this knob entirely is preserving origin ids on import, so
+  // a record carries one id everywhere; see the decision 'Citation and projection
+  // authority is per-store' (cited by title, not id, deliberately — citing its id
+  // here would itself dangle on every store but the one that minted it).
+  store_authority: external_exports.enum(["primary", "secondary"]).default("primary"),
+  // Machine-local role marker (todo cabbc10f, decision foreign_a9b98b7d) — DELIBERATELY
+  // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
+  // a value to infer. 'authoring' is declared once, by hand, on the machine
+  // where Sterling work lands and merges; a successful /sterling:update stamps
+  // 'consumer' into a clone that has it absent, and never overwrites an
+  // existing value (so an authoring machine that occasionally pulls stays
+  // 'authoring'). H1 reads this — never store_authority, whose 'primary'
+  // default would mislabel every consumer that never opted in (the rejected
+  // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
+  machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
+  // §6 H16 session-event register (run r-0501): which agent types are considered
+  // research agents for the research_owed lane (phase 2 filtering). Default list
+  // is over-inclusive (§7.1 precedent) — tune down on run data.
+  session_events: external_exports.object({
+    research_agents: external_exports.array(external_exports.string())
+  }).default({ research_agents: ["researcher", "claude-code-guide"] }),
+  // §3.4 stale-at-read thresholds (days)
+  staleness: external_exports.object({
+    research_days: external_exports.object({
+      fast: external_exports.number().int().positive().default(30),
+      medium: external_exports.number().int().positive().default(90),
+      stable: external_exports.number().int().positive().default(365)
+    }).default({}),
+    platform_external_days: external_exports.number().int().positive().default(180)
+  }).default({}),
+  // run r-ea9e, AC7: TUI System tab — how long a KB-maintained models catalog
+  // reference_material is considered fresh before the tab prompts a refresh.
+  // Distinct from the existing `staleness` block (which governs research
+  // findings and platform docs, not the models catalog).
+  models_catalog: external_exports.object({
+    staleness_days: external_exports.number().int().positive().default(45)
+  }).default({}),
+  // H19 knowledge delivery (decision foreign_6dfbe675). injection_rung is PROBE-SET
+  // per machine/CC version (verify-at-build 0956a464): 'prompt' (default,
+  // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
+  // 'read' (PostToolUse injects directly at the touch), 'edit' (only
+  // PreToolUse injection works; Read touches fall back to the queue).
+  // NOT .strict() (review-reverted, config_set decision config-writes-get-a-
+  // config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays
+  // item 1): a first attempt made this object .strict() so config_set's
+  // whole-document validation would refuse an unrecognized delivery leaf.
+  // That is a FORWARD-COMPATIBILITY BRICK with no in-session remedy — ANY
+  // unknown key already sitting in a project's delivery block (a forward-
+  // shipped field, a hand-edit) turns EVERY parseConfig call into a startup
+  // failure of the MCP server itself (server.ts's boot-time parseConfig)
+  // AND an H15 environment-defect deny for every other Bash/store call on
+  // that project, with no config_set available to fix it because the server
+  // never came up to serve the tool. config_set instead membership-checks
+  // the delivery leaf itself (configSetAllowlistVerdict, tools.ts) exactly
+  // as it already does for models.<key> — this schema stays permissive so a
+  // config.json carrying an unmodeled delivery key never bricks anything
+  // that merely READS the file.
+  delivery: external_exports.object({
+    // `prompt` and `edit` are accepted only to migrate existing project
+    // configs. Parsed configuration exposes only the surviving read rung.
+    injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
+    payload_char_cap: external_exports.number().int().positive().default(2400),
+    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+    // "H19 gets a per-delivery total cap and cross-entry dedup across the
+    // turn"): scripts/hooks/lib/delivery.mjs reads this at
+    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+    // absent/invalid value falls back to the same default there, same
+    // three-state guard used for other config-derived delivery values.
+    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
+  }).default({}),
+  // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
+  // whether the automatic consult moments (design/review/gate second opinions via
+  // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
+  // Codex CLI installed still parses and defaults to true; the TUI System tab
+  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
+  // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
+  // — this field never stands in for that absence, only for a deliberate OFF.
+  sparring_partner: external_exports.object({
+    enabled: external_exports.boolean().default(true),
+    // Which vendor's model the consult runs on (decision
+    // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks).
+    // 'openai' is the behaviour before the setting existed.
+    vendor: external_exports.enum(["openai", "anthropic"]).default("openai"),
+    // The model pinned per vendor. Absent = no pin (the host's default). The
+    // old sparring_partner.model is converted to models.openai by
+    // normalizeRawConfig, before this schema strips unknown keys. The default
+    // ships no pin: the decision names no model per vendor.
+    models: vendorPins
+  }).default({}),
+  // Reviews (same decision): the vendor policy and the model pinned per vendor.
+  // cross_vendor = the other family than the model that wrote the diff; openai
+  // and anthropic force one vendor even when that makes reviewer and author the
+  // same family (user-ruled 2026-10-03). Ships no pin, like sparring_partner.
+  review: external_exports.object({
+    policy: external_exports.enum(["cross_vendor", "openai", "anthropic"]).default("cross_vendor"),
+    models: vendorPins
+  }).default({}),
+  // TDD-by-default posture toggle (decision foreign_752caf98,
+  // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
+  // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
+  // Mirrors sparring_partner's additive-optional shape exactly — an absent
+  // block still parses with {enabled: true}, and an unknown field inside the
+  // block strips silently rather than refusing (forward-compat, non-strict).
+  // OFF silences only the automatic default posture: an explicit user ask
+  // still works, and H5 (frozen tests)/H18 (write wall) are untouched — no
+  // gate or hook arm keys on this toggle.
+  tdd: external_exports.object({
+    enabled: external_exports.boolean().default(true)
+  }).default({}),
+  // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed
+  // by project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+  // the per-project switch that decides how work ships. 'hobby' (the default)
+  // merges directly through /sterling:merge; 'work' opens a pull request and
+  // runs the review loop. It decides nothing else: whether the handoff files
+  // are written is `handoff` below. Toggled in the TUI System tab. A missing
+  // key means hobby.
+  // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
+  // S1): any other value is PRESERVED raw, never coerced to hobby and never
+  // thrown on — a typo here must not turn every parseConfig reader (the MCP
+  // server's boot included) into a startup failure. The strict judge is
+  // readProjectMode() in packages/schemas/src/project.ts (re-exported by scripts/lib/handoff-projection.mjs), which every
+  // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
+  // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
+  // Consumers of the PARSED config must narrow this field themselves.
+  // The default lives twice (anti_pattern 85d15143): here and in
+  // templates/default-config.json; config.test.ts pins that they agree.
+  mode: external_exports.unknown().default("hobby"),
+  // Where the project's stores live (decision
+  // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
+  // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
+  // the Served database, valid only with mode 'work'. Only
+  // scripts/move-store.mjs writes it, after the stores have moved; config_set
+  // and the TUI refuse it. Strict, unlike `mode`: a wrong value must never
+  // route a project to the wrong backend. The reader is
+  // packages/store/src/routing.ts (resolveStoreRoute). No default on purpose.
+  storage: external_exports.enum(["sqlite", "postgres"]).optional(),
+  // Handoff files (decision
+  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
+  // `enabled` says whether Sterling writes the files for colleagues who do not
+  // have Sterling, the portable OpenCode agents (.opencode/agents/) and the
+  // handoff projection (architecture.md, rulings.md, docs/sterling/). Off by
+  // default, independent of `mode`. Toggled in the TUI System tab.
+  // PERMISSIVE for the same reason as `mode`: the value is preserved raw. The
+  // strict judge is readHandoffEnabled() in scripts/lib/handoff-projection.mjs,
+  // which init, sync-agents, /sterling:update, the handoff-projection CLI and
+  // the git exclude block use. It refuses a value that is not a boolean, and it
+  // reads a config with NO key as on when portable agents are already tracked
+  // in git, which this default cannot express: read the setting through it,
+  // never from the parsed config.
+  // The default lives twice (anti_pattern 85d15143): here and in
+  // templates/default-config.json; config.test.ts pins that they agree.
+  handoff: external_exports.unknown().default({ enabled: false }),
+  // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
+  // copilot_logins pins the EXACT Copilot reviewer login(s) observed on the S0
+  // first use; empty means unpinned (any Bot login matching /copilot/i, with
+  // identity_confirmed false). PERMISSIVE like mode: a malformed value is
+  // preserved raw, never thrown on; scripts/pr-review-wait.mjs is the strict
+  // judge. The default lives twice: here and in templates/default-config.json
+  // (config.test.ts pins that they agree).
+  pr_review: external_exports.unknown().default({ copilot_logins: [] })
+});
+var RETIRED_MODEL_KEYS = [
+  "coder",
+  "coder_hard",
+  "explorer",
+  "test_writer",
+  "reviewers",
+  "implementation_architect",
+  "debugger"
+];
+var isPlainObject2 = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+function normalizeRawConfig(raw) {
+  if (!isPlainObject2(raw))
+    return raw;
+  let out = raw;
+  const sp = raw.sparring_partner;
+  if (isPlainObject2(sp) && Object.prototype.hasOwnProperty.call(sp, "model")) {
+    const { model, ...rest } = sp;
+    if (model !== void 0 && model !== "") {
+      const existing = rest.models;
+      if (existing === void 0 || isPlainObject2(existing)) {
+        const models2 = { ...existing ?? {} };
+        if (models2.openai === void 0 || typeof model !== "string")
+          models2.openai = { model };
+        rest.models = models2;
+      }
+    }
+    out = { ...out, sparring_partner: rest };
+  }
+  const models = raw.models;
+  if (isPlainObject2(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
+    out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
+  }
+  return out;
+}
+function parseConfig(raw) {
+  return configSchema.parse(normalizeRawConfig(raw));
+}
+var CONFIG_KEY_RENAMES = {
+  "models.coder": "models.implementor",
+  "models.explorer": "models.scout"
+};
+function unwrapSchema(schema) {
+  let s2 = schema;
+  for (; ; ) {
+    if (s2 instanceof external_exports.ZodDefault)
+      s2 = s2._def.innerType;
+    else if (s2 instanceof external_exports.ZodOptional || s2 instanceof external_exports.ZodNullable)
+      s2 = s2.unwrap();
+    else if (s2 instanceof external_exports.ZodEffects)
+      s2 = s2.innerType();
+    else
+      return s2;
+  }
+}
+function unreadConfigKeys(raw) {
+  const out = [];
+  const walk = (value, schema, prefix) => {
+    const s2 = unwrapSchema(schema);
+    if (!(s2 instanceof external_exports.ZodObject) || s2._def.unknownKeys !== "strip" || !isPlainObject2(value))
+      return;
+    const shape = s2.shape;
+    for (const [key, child] of Object.entries(value)) {
+      const path = prefix ? `${prefix}.${key}` : key;
+      if (!Object.prototype.hasOwnProperty.call(shape, key)) {
+        if (path === "sparring_partner.model")
+          continue;
+        if (!(s2._def.catchall instanceof external_exports.ZodNever) && !(prefix === "models" && RETIRED_MODEL_KEYS.includes(key)))
+          continue;
+        const renamed = CONFIG_KEY_RENAMES[path];
+        out.push(renamed ? { path, renamed_to: renamed } : { path });
+      } else {
+        walk(child, shape[key], path);
+      }
+    }
+  };
+  walk(raw, configSchema, "");
+  return out;
+}
+
+// packages/schemas/dist/registry.js
+var projectRegistrationSchema = external_exports.object({
+  // identity: the project root, absolute POSIX (machine-global, like backup_path —
+  // NOT a repo-relative file_key, so it does not go through the path invariant).
+  repo_path: external_exports.string(),
+  name: external_exports.string(),
+  // the project's stack_tags = the §3.3 domain mount manifest: which shared
+  // domains this project joins (the real cross-project signal).
+  stack_tags: external_exports.array(external_exports.string()).default([]),
+  // toolchain adapter names (e.g. ["node"], ["pester"]) — quick stack context.
+  toolchains: external_exports.array(external_exports.string()).default([]),
+  // plugin version at last init — spot version skew across projects.
+  sterling_version: external_exports.string().nullable().default(null),
+  first_init_at: external_exports.string(),
+  last_init_at: external_exports.string(),
+  // touched by the H1 SessionStart hook for an existing row — activity, not just
+  // init recency. null until the first session start after registration.
+  last_seen_at: external_exports.string().nullable().default(null)
+});
+
+// packages/schemas/dist/staleness.js
+import { dirname, join } from "node:path";
+var BUILD_ID_FILE = ".build-id";
+var runtimeMarkerSchema = external_exports.object({
+  /** the content build-id the running server loaded at boot */
+  build_id: external_exports.string(),
+  pid: external_exports.number().int(),
+  booted_at: external_exports.string()
+}).strict();
+function buildIdPath(serverDir) {
+  return join(serverDir, BUILD_ID_FILE);
+}
+function runtimeMarkerPath(storePath2) {
+  return join(dirname(storePath2), "transient", "mcp-runtime.json");
+}
+
+// packages/schemas/dist/project.js
+import { lstatSync, readFileSync } from "node:fs";
+import { join as join2, resolve } from "node:path";
+var PROJECT_MODES = ["hobby", "work"];
+var ProjectModeError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectModeError";
+  }
+};
+var ProjectIdentityError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectIdentityError";
+  }
+};
+var CONFIG_REL = ".sterling/config.json";
+var PROJECT_IDENTITY_REL = ".sterling/project.json";
+var fwd = (p) => p.replace(/\\/g, "/");
+var UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
+function readContainedText(root, rel, ErrorClass, subject) {
+  const segments = rel.split("/");
+  let cursor = resolve(root);
+  for (const [index, part] of segments.entries()) {
+    cursor = join2(cursor, part);
+    let st;
+    try {
+      st = lstatSync(cursor);
+    } catch (err) {
+      if (err?.code === "ENOENT")
+        return null;
+      throw err;
+    }
+    const shown = segments.slice(0, index + 1).join("/");
+    const isLeaf = index === segments.length - 1;
+    if (st.isSymbolicLink())
+      throw new ErrorClass(`${shown} is a symlink \u2014 refusing to follow it out of the project; ${subject} cannot be read`);
+    if (isLeaf ? !st.isFile() : !st.isDirectory()) {
+      throw new ErrorClass(`${shown} exists but is not a ${isLeaf ? "regular file" : "directory"} \u2014 ${subject} cannot be read`);
+    }
+  }
+  return readFileSync(cursor, "utf8");
+}
+function readJsonObject(root, rel, ErrorClass, subject) {
+  const where = `${fwd(resolve(root))}/${rel}`;
+  const text = readContainedText(root, rel, ErrorClass, subject);
+  if (text === null)
+    return { where, parsed: void 0 };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
+  }
+  return { where, parsed };
+}
+function readProjectMode(root) {
+  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
+  if (parsed === void 0 || parsed.mode === void 0)
+    return "hobby";
+  if (!PROJECT_MODES.includes(parsed.mode)) {
+    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+  }
+  return parsed.mode;
+}
+function readProjectIdentity(root) {
+  const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
+  if (parsed === void 0)
+    return null;
+  if (!isProjectId(parsed.project_id)) {
+    throw new ProjectIdentityError(`project_id is ${JSON.stringify(parsed.project_id)} in ${where} \u2014 it must be a UUID v4 string; fix the file by hand (init never overwrites it) or restore it from git`);
+  }
+  return { project_id: parsed.project_id };
+}
+
+// packages/schemas/dist/broker.js
+var BROKER_PROTOCOL = 2;
+var BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
+var BROKER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+var BROKER_REGISTRY_MAX_BYTES = 16 * 1024;
+var BROKER_BOUNDS = {
+  /** Connecting to the socket. */
+  connectMs: 500,
+  /** Hello to welcome. */
+  handshakeMs: 1e3,
+  /** How long a call may wait in the server before it starts; past this it is refused unexecuted. */
+  queueMs: 2e3,
+  /** How long the client waits for a started call's result; past this the outcome is unknown. */
+  executeMs: 2e4
+};
+var BROKER_OPERATIONS = {
+  project: [
+    "get",
+    "query",
+    "queryEach",
+    "count",
+    "articlesBySlug",
+    "inboundSupersedes",
+    "inboundSupersedesEach",
+    "boardReadiness",
+    "getMeta",
+    "create",
+    "enqueueSystemTodo",
+    "updateTodo",
+    "remove",
+    "recordCheckSkipped"
+  ],
+  mounted: ["domainNames", "bySource", "bySourceEach", "querySource", "inboundSupersedes", "inboundSupersedesEach", "domainDescription"]
+};
+var BROKER_MAX_ARGS = 6;
+var brokerIdentitySchema = external_exports.object({
+  instance_id: external_exports.string().regex(/^[0-9a-f]{32}$/),
+  protocol: external_exports.number().int(),
+  build_id: external_exports.string(),
+  project_id: external_exports.string(),
+  root: external_exports.string(),
+  storage: external_exports.object({ backend: external_exports.literal("postgres"), database: external_exports.string(), meta_schema: external_exports.string(), project_schema: external_exports.string() }),
+  pid: external_exports.number().int()
+});
+var brokerRegistrationSchema = brokerIdentitySchema.extend({ socket: external_exports.string() });
+var brokerHelloSchema = external_exports.object({
+  type: external_exports.literal("hello"),
+  protocol: external_exports.number().int(),
+  instance_id: external_exports.string(),
+  project_id: external_exports.string(),
+  root: external_exports.string()
+});
+var brokerErrorSchema = external_exports.object({
+  name: external_exports.string(),
+  message: external_exports.string(),
+  /** Enumerable string or number fields of the original error (domain, location, schema, code). */
+  fields: external_exports.record(external_exports.union([external_exports.string(), external_exports.number()])).default({})
+});
+var brokerWelcomeSchema = external_exports.union([
+  external_exports.object({ type: external_exports.literal("welcome"), identity: brokerIdentitySchema }),
+  external_exports.object({ type: external_exports.literal("refused"), error: brokerErrorSchema })
+]);
+var brokerCallSchema = external_exports.object({
+  type: external_exports.literal("call"),
+  id: external_exports.number().int().nonnegative(),
+  target: external_exports.enum(["project", "mounted"]),
+  op: external_exports.string(),
+  args: external_exports.array(external_exports.unknown()).max(BROKER_MAX_ARGS),
+  /** Client clock (ms since epoch) when the call was sent; client and server share the machine clock. */
+  sent_at: external_exports.number()
+});
+var brokerResultSchema = external_exports.union([
+  external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(true), result: external_exports.unknown().optional() }),
+  /** `executed` false means the server did not start the operation, so the caller may fall back; true or absent means it may have run. */
+  external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(false), executed: external_exports.boolean(), error: brokerErrorSchema })
+]);
+function isBrokerOperation(target, op) {
+  const ops = BROKER_OPERATIONS[target];
+  return Array.isArray(ops) && ops.includes(op);
+}
+
+// packages/store/dist/index.js
+import { mkdirSync as mkdirSync2, existsSync as existsSync2, statSync as statSync2 } from "node:fs";
+import { dirname as dirname4, join as join6, resolve as resolvePath2 } from "node:path";
+import { randomUUID } from "node:crypto";
+
+// packages/store/dist/mounted.js
+import { mkdirSync, existsSync, rmSync, openSync, closeSync } from "node:fs";
+import { dirname as dirname2, join as join4 } from "node:path";
+import { homedir as homedir2 } from "node:os";
+
+// packages/store/dist/shares.js
+var DEFAULT_PROJECT_SHARE = 0.6;
+function allocateShares(perSourceCounts, cap, projectShare = DEFAULT_PROJECT_SHARE) {
+  if (!Array.isArray(perSourceCounts) || perSourceCounts.length === 0) {
+    throw new Error("allocateShares: perSourceCounts must contain at least the project count (index 0)");
+  }
+  if (!Number.isInteger(cap) || cap < 1)
+    throw new Error(`allocateShares: cap must be a positive integer, got ${cap}`);
+  for (const c of perSourceCounts) {
+    if (!Number.isInteger(c) || c < 0)
+      throw new Error(`allocateShares: every count must be a non-negative integer, got ${c}`);
+  }
+  if (typeof projectShare !== "number" || !(projectShare >= 0 && projectShare <= 1)) {
+    throw new Error(`allocateShares: projectShare must be between 0 and 1, got ${projectShare}`);
+  }
+  const domainCount = perSourceCounts.length - 1;
+  const projectQuota = domainCount === 0 ? cap : Math.min(cap, Math.ceil(projectShare * cap - 1e-9));
+  const quotas = [projectQuota];
+  const rest = cap - projectQuota;
+  for (let i = 0; i < domainCount; i++) {
+    quotas.push(Math.floor(rest / domainCount) + (i < rest % domainCount ? 1 : 0));
+  }
+  const alloc = perSourceCounts.map((count, i) => Math.min(count, quotas[i]));
+  let left = cap - alloc.reduce((a, b) => a + b, 0);
+  while (left > 0) {
+    let gave = false;
+    for (let i = 0; i < alloc.length && left > 0; i++) {
+      if (alloc[i] < perSourceCounts[i]) {
+        alloc[i]++;
+        left--;
+        gave = true;
+      }
+    }
+    if (!gave)
+      break;
+  }
+  return alloc;
+}
+
+// packages/store/dist/pg-bridge.js
+import { MessageChannel, Worker, receiveMessageOnPort } from "node:worker_threads";
+import { readFileSync as readFileSync2, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join as join3 } from "node:path";
+var STATE_WAITING = 0;
+var STATE_REPLY = 1;
+var STATE_DEAD = 2;
+var DEFAULT_PG_CREDENTIALS_PATH = join3(homedir(), ".sterling", "credentials", "served.json");
+var DEFAULT_PG_WAIT_TIMEOUT_MS = 1e4;
+var HANDSHAKE_MARGIN_MS = 5e3;
+var PgConfigError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "PgConfigError";
+  }
+};
+var PgBridgeTimeoutError = class extends Error {
+  phase;
+  timeoutMs;
+  constructor(phase, timeoutMs2, detail) {
+    super(`Postgres bridge: no reply within ${timeoutMs2} ms during the ${phase} (${detail}); the worker was terminated and its connection closed.`);
+    this.phase = phase;
+    this.timeoutMs = timeoutMs2;
+    this.name = "PgBridgeTimeoutError";
+  }
+};
+var PgWorkerDiedError = class extends Error {
+  reason;
+  code;
+  constructor(reason, code) {
+    super(`Postgres bridge: the worker died (${reason}); the bridge is closed.`);
+    this.reason = reason;
+    this.code = code;
+    this.name = "PgWorkerDiedError";
+  }
+};
+var PgBridgeClosedError = class extends Error {
+  constructor(why) {
+    super(`Postgres bridge is closed (${why}); open a new one.`);
+    this.name = "PgBridgeClosedError";
+  }
+};
+var PgTransactionOpenError = class extends Error {
+  constructor(wanted, holder) {
+    super(`Postgres bridge: ${wanted} cannot begin a transaction: this connection already has one open for ${holder}. One connection holds one transaction; nothing was sent.`);
+    this.name = "PgTransactionOpenError";
+  }
+};
+var PgQueryError = class extends Error {
+  code;
+  inPrefix;
+  constructor(message, code, inPrefix = false) {
+    super(message);
+    this.code = code;
+    this.inPrefix = inPrefix;
+    this.name = "PgQueryError";
+  }
+};
+var CREDENTIAL_KEYS = ["host", "port", "database", "user", "password", "ssl", "gssencmode", "connect_timeout_ms"];
+var SSL_KEYS = ["mode", "negotiation", "servername", "rejectUnauthorized"];
+function isPlainObject3(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+function buildPgConnectionConfig(creds) {
+  if (!isPlainObject3(creds))
+    throw new PgConfigError("credentials must be a JSON object");
+  for (const key of Object.keys(creds)) {
+    if (!CREDENTIAL_KEYS.includes(key))
+      throw new PgConfigError(`credentials key '${key}' is not recognised; allowed: ${CREDENTIAL_KEYS.join(", ")}`);
+  }
+  for (const field of ["host", "database", "user"]) {
+    if (typeof creds[field] !== "string" || creds[field].length === 0)
+      throw new PgConfigError(`credentials.${field} must be a non-empty string`);
+  }
+  if (!Number.isInteger(creds.port) || creds.port < 1 || creds.port > 65535) {
+    throw new PgConfigError("credentials.port must be an integer between 1 and 65535");
+  }
+  if (typeof creds.password !== "string")
+    throw new PgConfigError("credentials.password must be a string");
+  if (creds.gssencmode !== void 0 && creds.gssencmode !== "disable") {
+    throw new PgConfigError("credentials.gssencmode must be 'disable' (node-postgres has no GSS encryption)");
+  }
+  const timeout = creds.connect_timeout_ms;
+  if (!Number.isInteger(timeout) || timeout <= 0)
+    throw new PgConfigError("credentials.connect_timeout_ms must be a positive integer");
+  let ssl = false;
+  let sslnegotiation = "postgres";
+  if (creds.ssl !== void 0) {
+    const s2 = creds.ssl;
+    if (!isPlainObject3(s2))
+      throw new PgConfigError("credentials.ssl must be an object");
+    for (const key of Object.keys(s2)) {
+      if (!SSL_KEYS.includes(key))
+        throw new PgConfigError(`credentials.ssl key '${key}' is not recognised; allowed: ${SSL_KEYS.join(", ")}`);
+    }
+    if (s2.mode !== "require" && s2.mode !== "verify-full")
+      throw new PgConfigError("credentials.ssl.mode must be 'require' or 'verify-full'");
+    if (typeof s2.rejectUnauthorized !== "boolean")
+      throw new PgConfigError("credentials.ssl.rejectUnauthorized must be a boolean");
+    if (s2.rejectUnauthorized !== (s2.mode === "verify-full")) {
+      throw new PgConfigError(`credentials.ssl.rejectUnauthorized must be ${s2.mode === "verify-full"} for mode '${s2.mode}' (verify-full verifies the certificate, require does not)`);
+    }
+    if (s2.servername !== void 0 && (typeof s2.servername !== "string" || s2.servername.length === 0)) {
+      throw new PgConfigError("credentials.ssl.servername must be a non-empty string when given");
+    }
+    if (s2.negotiation !== void 0 && s2.negotiation !== "postgres" && s2.negotiation !== "direct") {
+      throw new PgConfigError("credentials.ssl.negotiation must be 'postgres' or 'direct'");
+    }
+    ssl = { rejectUnauthorized: s2.rejectUnauthorized, ...s2.servername !== void 0 ? { servername: s2.servername } : {} };
+    sslnegotiation = s2.negotiation ?? "postgres";
+  }
+  return {
+    host: creds.host,
+    port: creds.port,
+    database: creds.database,
+    user: creds.user,
+    password: creds.password,
+    ssl,
+    sslnegotiation,
+    connectionTimeoutMillis: timeout
+  };
+}
+function readPgCredentials(path = DEFAULT_PG_CREDENTIALS_PATH) {
+  let mode;
+  try {
+    mode = statSync(path).mode;
+  } catch (e) {
+    throw new PgConfigError(`Postgres credentials file '${path}' cannot be read: ${e.code ?? String(e)}`);
+  }
+  if ((mode & 63) !== 0) {
+    throw new PgConfigError(`Postgres credentials file '${path}' is readable by group or other (mode ${(mode & 511).toString(8)}); set it to mode 600`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync2(path, "utf8"));
+  } catch (e) {
+    throw new PgConfigError(`Postgres credentials file '${path}' is not valid JSON: ${e.message}`);
+  }
+  return buildPgConnectionConfig(parsed);
+}
+function redactSecrets(text, secrets) {
+  let out = text;
+  for (const secret of secrets) {
+    if (!secret)
+      continue;
+    out = out.split(secret).join("[redacted]");
+    const encoded = encodeURIComponent(secret);
+    if (encoded !== secret)
+      out = out.split(encoded).join("[redacted]");
+  }
+  return out;
+}
+var PgBridge = class {
+  worker;
+  port;
+  control;
+  secrets;
+  seq = 0;
+  closedReason;
+  txOwner;
+  txOwnerLabel = "";
+  /** How long one statement waits for its reply. Server-side timeouts must be shorter, so the named server error arrives first. */
+  waitTimeoutMs;
+  constructor(config2, options = {}) {
+    this.waitTimeoutMs = options.waitTimeoutMs ?? DEFAULT_PG_WAIT_TIMEOUT_MS;
+    const handshakeTimeoutMs = options.handshakeTimeoutMs ?? config2.connectionTimeoutMillis + HANDSHAKE_MARGIN_MS;
+    for (const [name, v] of [["waitTimeoutMs", this.waitTimeoutMs], ["handshakeTimeoutMs", handshakeTimeoutMs]]) {
+      if (!Number.isInteger(v) || v <= 0)
+        throw new PgConfigError(`PgBridge: ${name} must be a positive integer`);
+    }
+    this.secrets = [config2.password];
+    this.control = new Int32Array(new SharedArrayBuffer(4));
+    const { port1, port2 } = new MessageChannel();
+    this.port = port1;
+    this.port.unref();
+    this.worker = options.workerUrl === void 0 ? new Worker(new URL("./pg-worker.js", import.meta.url)) : new Worker(options.workerUrl);
+    this.worker.unref();
+    this.worker.on("error", () => {
+    });
+    Atomics.store(this.control, 0, STATE_WAITING);
+    this.worker.postMessage({ control: this.control.buffer, port: port2, config: config2 }, [port2]);
+    this.await(0, "handshake", handshakeTimeoutMs, "the worker did not report ready; it may have died at load, or the server did not answer");
+  }
+  get closed() {
+    return this.closedReason !== void 0;
+  }
+  /** The handle whose transaction is open on this connection, if any. */
+  get transactionOwner() {
+    return this.txOwner;
+  }
+  /** Records that `owner` opens a transaction. Refuses when any handle, `owner` included, already holds one. */
+  claimTransaction(owner, label) {
+    if (this.txOwner !== void 0)
+      throw new PgTransactionOpenError(label, this.txOwnerLabel);
+    this.txOwner = owner;
+    this.txOwnerLabel = label;
+  }
+  /** Records that `owner`'s transaction ended. A no-op for any other handle. */
+  releaseTransaction(owner) {
+    if (this.txOwner === owner) {
+      this.txOwner = void 0;
+      this.txOwnerLabel = "";
+    }
+  }
+  /**
+   * Runs one statement. With `values` it is a parameterised query ($1, $2, ...); without, a simple query that may hold several statements.
+   * `prefix`, a simple query, goes out in the same round trip ahead of the statement; when it fails the call throws a PgQueryError with
+   * `inPrefix` set and the statement's result is discarded (the statement may still have run, so the caller passes only a read).
+   */
+  query(text, values, prefix) {
+    const reply = this.send({ op: "query", text, values, ...prefix !== void 0 ? { prefix } : {} }, "query", this.waitTimeoutMs);
+    return { rows: reply.rows ?? [], rowCount: reply.rowCount ?? 0 };
+  }
+  /** Ends the connection and stops the worker. Idempotent. */
+  close() {
+    if (this.closed)
+      return;
+    try {
+      this.send({ op: "close" }, "close", this.waitTimeoutMs);
+    } finally {
+      this.shutDown("close() was called");
+    }
+  }
+  send(req, phase, timeoutMs2) {
+    if (this.closedReason !== void 0)
+      throw new PgBridgeClosedError(this.closedReason);
+    const queued = receiveMessageOnPort(this.port)?.message;
+    const previous = Atomics.compareExchange(this.control, 0, STATE_REPLY, STATE_WAITING);
+    if (queued?.dead || previous === STATE_DEAD) {
+      const reason = queued?.error ? this.redact(queued.error.message) : "it stopped between calls";
+      this.shutDown(`the worker died: ${reason}`);
+      throw new PgWorkerDiedError(reason, queued?.error?.code);
+    }
+    const seq = ++this.seq;
+    this.port.postMessage({ seq, ...req });
+    return this.await(seq, phase, timeoutMs2, phase === "query" ? "the statement did not finish" : "the connection did not end");
+  }
+  await(seq, phase, timeoutMs2, detail) {
+    const outcome = Atomics.wait(this.control, 0, STATE_WAITING, timeoutMs2);
+    if (outcome === "timed-out") {
+      this.shutDown(`a ${phase} wait timed out after ${timeoutMs2} ms`);
+      throw new PgBridgeTimeoutError(phase, timeoutMs2, detail);
+    }
+    const state = Atomics.load(this.control, 0);
+    const reply = receiveMessageOnPort(this.port)?.message;
+    if (state === STATE_DEAD || reply?.dead) {
+      const reason = reply?.error ? this.redact(reply.error.message) : "no reason given";
+      this.shutDown(`the worker died: ${reason}`);
+      throw new PgWorkerDiedError(reason, reply?.error?.code);
+    }
+    if (!reply || reply.seq !== seq) {
+      this.shutDown("protocol error");
+      throw new PgWorkerDiedError(`protocol error: expected the reply to message ${seq}, got ${reply ? `message ${reply.seq}` : "nothing"}`);
+    }
+    if (!reply.ok) {
+      const message = this.redact(reply.error?.message ?? "unknown error");
+      if (phase === "handshake") {
+        this.shutDown(`the connection failed: ${message}`);
+        throw new PgWorkerDiedError(`connecting failed: ${message}`, reply.error?.code);
+      }
+      throw new PgQueryError(message, reply.error?.code, reply.prefixFailed === true);
+    }
+    return reply;
+  }
+  redact(message) {
+    return redactSecrets(message, this.secrets);
+  }
+  shutDown(reason) {
+    if (this.closedReason !== void 0)
+      return;
+    this.closedReason = reason;
+    this.port.close();
+    void this.worker.terminate();
+  }
+};
+
+// packages/store/dist/search-fold.js
+var LATIN_LETTER = new RegExp("^\\p{Script=Latin}$", "u");
+var LETTER_OR_NUMBER_OR_PRIVATE = /^[\p{L}\p{N}\p{Co}]$/u;
+var COMBINING_MARK = new RegExp("^\\p{M}$", "u");
+function foldSearchText(s2) {
+  let kept = "";
+  let afterLatinLetter = false;
+  for (const ch of s2.toLowerCase().normalize("NFD")) {
+    if (COMBINING_MARK.test(ch)) {
+      if (!afterLatinLetter)
+        kept += ch;
+      continue;
+    }
+    afterLatinLetter = LATIN_LETTER.test(ch) && new RegExp("^\\p{L}$", "u").test(ch);
+    kept += ch;
+  }
+  let out = "";
+  for (const ch of kept.normalize("NFC"))
+    out += LETTER_OR_NUMBER_OR_PRIVATE.test(ch) ? ch : " ";
+  return out.replace(/ {2,}/g, " ").trim();
+}
+
+// packages/store/dist/pg-driver.js
+var PG_META_SCHEMA = "sterling_meta";
+var SCHEMA_NAME = /^sterling_[a-z0-9_]*[a-z0-9]$/;
+var MAX_IDENTIFIER_BYTES = 63;
+var PgSchemaNameRefusedError = class extends Error {
+  constructor(name, why) {
+    super(`Postgres schema name '${name}' refused: ${why}. Sterling only touches schemas named sterling_<lowercase letters, digits, _>.`);
+    this.name = "PgSchemaNameRefusedError";
+  }
+};
+var PgStoreMissingError = class extends Error {
+  schema;
+  constructor(schema, missing) {
+    super(`Postgres store '${schema}' does not exist: ${missing}. A store is created only by an explicit createPgStore call, never on open.`);
+    this.schema = schema;
+    this.name = "PgStoreMissingError";
+  }
+};
+var PgNulCharacterError = class extends Error {
+  constructor(detail) {
+    super(`NUL character (U+0000) refused on Postgres: ${detail}. Postgres text cannot hold U+0000, and its JSON functions refuse the \\u0000 escape.`);
+    this.name = "PgNulCharacterError";
+  }
+};
+var PgLockTimeoutError = class extends Error {
+  code = "55P03";
+  constructor(detail) {
+    super(`Postgres lock timeout (55P03): ${detail}. Another writer or a migration holds the lock; nothing was written and the write is not retried.`);
+    this.name = "PgLockTimeoutError";
+  }
+};
+var PgStatementTimeoutError = class extends Error {
+  code = "57014";
+  constructor(detail) {
+    super(`Postgres statement timeout (57014): ${detail}. The transaction was rolled back and is not retried.`);
+    this.name = "PgStatementTimeoutError";
+  }
+};
+var PgUnsupportedError = class extends Error {
+  constructor(what) {
+    super(`${what} is not supported by the Postgres driver.`);
+    this.name = "PgUnsupportedError";
+  }
+};
+function assertSterlingSchemaName(name) {
+  if (typeof name !== "string" || !SCHEMA_NAME.test(name))
+    throw new PgSchemaNameRefusedError(String(name), "not of the form sterling_<a-z0-9_>");
+  if (Buffer.byteLength(name) > MAX_IDENTIFIER_BYTES)
+    throw new PgSchemaNameRefusedError(name, `longer than ${MAX_IDENTIFIER_BYTES} bytes`);
+}
+function pgProjectSchemaName(projectUuid) {
+  if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(projectUuid)) {
+    throw new PgSchemaNameRefusedError(`sterling_p_${projectUuid}`, "the project id is not a UUID");
+  }
+  const name = `sterling_p_${projectUuid.replace(/-/g, "").toLowerCase()}`;
+  assertSterlingSchemaName(name);
+  return name;
+}
+function pgDomainSchemaName(domain) {
+  if (typeof domain !== "string" || domain.length === 0)
+    throw new PgSchemaNameRefusedError("sterling_d_", "the domain name is empty");
+  const name = `sterling_d_${domain.toLowerCase().replace(/[^a-z0-9]/g, "_")}`;
+  assertSterlingSchemaName(name);
+  return name;
+}
+function ident(schema) {
+  assertSterlingSchemaName(schema);
+  return `"${schema}"`;
+}
+var DEFAULT_PG_LOCK_TIMEOUT_MS = 3e3;
+var DEFAULT_PG_STATEMENT_TIMEOUT_MS = 5e3;
+var LOCK_NS_GLOBAL = 1398033735;
+var LOCK_NS_STORE = 1398035284;
+function lockHash(name) {
+  let h = 2166136261;
+  for (const byte of Buffer.from(name, "utf8")) {
+    h ^= byte;
+    h = Math.imul(h, 16777619);
+  }
+  return h | 0;
+}
+function timeoutMs(name, value, fallback, bridge) {
+  const v = value ?? fallback;
+  if (!Number.isInteger(v) || v <= 0)
+    throw new Error(`Postgres ${name} must be a positive integer, got ${String(v)}`);
+  if (v >= bridge.waitTimeoutMs) {
+    throw new Error(`Postgres ${name} (${v} ms) must be below the bridge's wait (${bridge.waitTimeoutMs} ms), so the server's named timeout arrives before the bridge gives up`);
+  }
+  return v;
+}
+function mapPgError(e, where) {
+  if (e instanceof PgQueryError) {
+    if (e.code === "55P03")
+      throw new PgLockTimeoutError(`${e.message} in ${where}`);
+    if (e.code === "57014")
+      throw new PgStatementTimeoutError(`${e.message} in ${where}`);
+    if (e.code === "22P05" || e.code === "22021")
+      throw new PgNulCharacterError(`${e.message} (SQLSTATE ${e.code}) in '${where}'`);
+  }
+  throw e;
+}
+function abandon(bridge, owner) {
+  try {
+    if (!bridge.closed)
+      bridge.query("ROLLBACK");
+  } finally {
+    bridge.releaseTransaction(owner);
+  }
+}
+var STORE_TABLES = /* @__PURE__ */ new Set([
+  "records",
+  "record_versions",
+  "record_aliases",
+  "record_relations",
+  "record_stack_tags",
+  "record_file_keys",
+  "records_fts",
+  "runs",
+  "handoffs",
+  "check_skipped",
+  "selection",
+  "queue_drain_log",
+  "activity_log",
+  "store_meta"
+]);
+function translateStatement(sql, schema) {
+  let out = "";
+  let n = 0;
+  let i = 0;
+  let prevSignificant = "";
+  let firstWords = [];
+  while (i < sql.length) {
+    const c = sql[i];
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === c) {
+          if (sql[j + 1] === c) {
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        j++;
+      }
+      out += sql.slice(i, j + 1);
+      prevSignificant = c;
+      i = j + 1;
+      continue;
+    }
+    if (c === "?") {
+      out += `$${++n}`;
+      prevSignificant = "?";
+      i++;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      let j = i + 1;
+      while (j < sql.length && /[A-Za-z0-9_]/.test(sql[j]))
+        j++;
+      const word = sql.slice(i, j);
+      const lower = word.toLowerCase();
+      if (firstWords.length < 3)
+        firstWords.push(lower);
+      let k = j;
+      while (k < sql.length && /\s/.test(sql[k]))
+        k++;
+      if (STORE_TABLES.has(lower) && prevSignificant !== "." && sql[j] !== ".") {
+        out += `"${schema}".${word}`;
+      } else if (lower === "instr" && sql[k] === "(") {
+        out += "strpos";
+      } else {
+        out += word;
+      }
+      prevSignificant = word;
+      i = j;
+      continue;
+    }
+    if (!/\s/.test(c))
+      prevSignificant = c;
+    out += c;
+    i++;
+  }
+  const derivedText = firstWords[0] === "insert" && firstWords[1] === "into" && firstWords[2] === "records_fts" || firstWords[0] === "update" && firstWords[1] === "records_fts";
+  return { text: out, params: n, derivedText };
+}
+function storeDdl(s2) {
+  return `
+CREATE TABLE IF NOT EXISTS ${s2}.records (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  superseded_by TEXT,
+  lifecycle TEXT NOT NULL DEFAULT 'live',
+  freshness TEXT NOT NULL DEFAULT 'fresh',
+  version INTEGER NOT NULL DEFAULT 1,
+  scope TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  author TEXT NOT NULL,
+  derived_unconfirmed INTEGER NOT NULL DEFAULT 0,
+  body TEXT NOT NULL,
+  _seq BIGINT GENERATED ALWAYS AS IDENTITY,
+  operation_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_records_type_status ON ${s2}.records (type, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON ${s2}.records (operation_id);
+CREATE TABLE IF NOT EXISTS ${s2}.record_versions (
+  record_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  archived_at TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (record_id, version)
+);
+CREATE TABLE IF NOT EXISTS ${s2}.record_aliases (
+  historical_id TEXT PRIMARY KEY,
+  canonical_id TEXT NOT NULL,
+  archived_version INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  _seq BIGINT GENERATED ALWAYS AS IDENTITY
+);
+CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON ${s2}.record_aliases (canonical_id);
+CREATE TABLE IF NOT EXISTS ${s2}.record_relations (
+  source_id TEXT NOT NULL,
+  rel TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  _seq BIGINT GENERATED ALWAYS AS IDENTITY,
+  PRIMARY KEY (source_id, rel, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_relations_target ON ${s2}.record_relations (target_id);
+CREATE INDEX IF NOT EXISTS idx_relations_rel_target ON ${s2}.record_relations (rel, target_id);
+CREATE TABLE IF NOT EXISTS ${s2}.record_stack_tags (
+  record_id TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  PRIMARY KEY (record_id, tag)
+);
+CREATE TABLE IF NOT EXISTS ${s2}.record_file_keys (
+  record_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  PRIMARY KEY (record_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_file_keys_path ON ${s2}.record_file_keys (path);
+-- text is the folded search text (pgDialect.searchText at every write site).
+-- The default parser splits folded text on its spaces only: the fold leaves
+-- letters, digits and private-use characters, and in a C-ctype database every
+-- non-ASCII character is a letter to it. So tsv has one position per word and
+-- dl, the word count, is the document length bm25 normalizes by.
+CREATE TABLE IF NOT EXISTS ${s2}.records_fts (
+  record_id TEXT PRIMARY KEY,
+  text TEXT NOT NULL,
+  tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, text)) STORED,
+  dl INTEGER GENERATED ALWAYS AS (CASE WHEN text = '' THEN 0 ELSE cardinality(string_to_array(text, ' ')) END) STORED
+);
+CREATE INDEX IF NOT EXISTS idx_records_fts_tsv ON ${s2}.records_fts USING gin (tsv);
+CREATE TABLE IF NOT EXISTS ${s2}.runs (
+  id TEXT PRIMARY KEY,
+  machine_state TEXT NOT NULL,
+  pending_exit TEXT,
+  body TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.handoffs (
+  run_id TEXT NOT NULL,
+  phase_id TEXT NOT NULL,
+  agent_role TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoffs_run_phase ON ${s2}.handoffs (run_id, phase_id);
+CREATE TABLE IF NOT EXISTS ${s2}.check_skipped (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  run_id TEXT,
+  check_name TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.selection (
+  slot INTEGER PRIMARY KEY CHECK (slot = 1),
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.queue_drain_log (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  drained_at TEXT NOT NULL,
+  system_reason TEXT NOT NULL,
+  text TEXT NOT NULL,
+  file_keys TEXT NOT NULL,
+  record_id TEXT
+);
+CREATE TABLE IF NOT EXISTS ${s2}.activity_log (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  at TEXT NOT NULL,
+  verb TEXT NOT NULL,
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  title TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.store_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+}
+var PG_RANKINGS = ["bm25", "idf_tsrank", "tsrank_cd"];
+var DEFAULT_PG_RANKING = "bm25";
+var PG_SCORE_SCALES = { bm25: "pg_bm25_v1", idf_tsrank: "pg_idf_tsrank_v1", tsrank_cd: "pg_tsrank_cd_v1" };
+function pgSearchQuery(terms, matchAll) {
+  const clauses = [];
+  let empty = false;
+  for (const term of terms) {
+    const prefix = term.length > 1 && term.endsWith("*");
+    const folded = foldSearchText(term);
+    if (folded === "") {
+      empty = true;
+      continue;
+    }
+    const w = folded.split(" ");
+    clauses.push({ q: w.map((x) => `'${x}'`).join(" <-> ") + (prefix ? ":*" : ""), w, p: prefix });
+  }
+  const none = clauses.length === 0 || matchAll === true && empty;
+  const prefixes = [...new Set(clauses.filter((c) => c.p).map((c) => c.w[c.w.length - 1]))];
+  const out = JSON.stringify({
+    match: none ? null : clauses.map((c) => `(${c.q})`).join(matchAll ? " & " : " | "),
+    clauses,
+    words: [...new Set(clauses.flatMap((c) => c.w))],
+    prefixes,
+    // The documents any prefix matches, so the statement can list the lexemes each prefix stands for once per query.
+    prefixq: prefixes.length ? prefixes.map((x) => `'${x}':*`).join(" | ") : null
+  });
+  return out;
+}
+var PG_SEARCH_STATS = `CROSS JOIN (SELECT q.j->>'match' AS m,
+    (SELECT count(*) FROM records_fts)::float8 AS n,
+    (SELECT coalesce(avg(dl), 0) FROM records_fts)::float8 AS avgdl,
+    ARRAY(SELECT json_array_elements_text(q.j->'words'))
+      || ARRAY(SELECT DISTINCT u.lexeme FROM records_fts x, unnest(x.tsv) u
+        WHERE x.tsv @@ (q.j->>'prefixq')::tsquery AND EXISTS (SELECT 1 FROM json_array_elements_text(q.j->'prefixes') pf WHERE starts_with(u.lexeme, pf))) AS lexemes,
+    (SELECT coalesce(json_agg(json_build_object('q', c.value->>'q', 'w', c.value->'w', 'p', c.value->'p',
+        'df', (SELECT count(*) FROM records_fts x WHERE x.tsv @@ (c.value->>'q')::tsquery)) ORDER BY c.ordinality), '[]'::json)
+      FROM json_array_elements(q.j->'clauses') WITH ORDINALITY c) AS cl
+  FROM (SELECT ?::json AS j) q) st`;
+var PG_IDF = "greatest(ln((st.n - c.df + 0.5) / (c.df + 0.5)), 1e-6)";
+var PG_BM25_SCORE = `CROSS JOIN LATERAL (SELECT array_agg(u.lexeme) AS lx, array_agg(p) AS ps
+    FROM unnest(ts_filter(setweight(f.tsv, 'A', st.lexemes), '{a}')) u, unnest(u.positions) p) lp
+  CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * (t.tf * 2.2) / (t.tf + 1.2 * (0.25 + 0.75 * f.dl / st.avgdl))), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(w text[], p boolean, df bigint)
+    CROSS JOIN LATERAL (SELECT count(*)::float8 AS tf FROM unnest(lp.lx, lp.ps) AS a(lex, pos)
+      WHERE (a.lex = c.w[1] OR (c.p AND cardinality(c.w) = 1 AND starts_with(a.lex, c.w[1])))
+        AND NOT EXISTS (SELECT 1 FROM generate_series(2, cardinality(c.w)) AS i
+          WHERE NOT EXISTS (SELECT 1 FROM unnest(lp.lx, lp.ps) AS b(lex, pos)
+            WHERE b.pos = a.pos + i - 1 AND (b.lex = c.w[i] OR (c.p AND i = cardinality(c.w) AND starts_with(b.lex, c.w[i])))))) t) sc`;
+var PG_IDF_TSRANK_SCORE = `CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * ts_rank(f.tsv, c.q::tsquery)), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(q text, df bigint) WHERE f.tsv @@ c.q::tsquery) sc`;
+var PG_TSRANK_CD_SCORE = "CROSS JOIN LATERAL (SELECT ts_rank_cd(f.tsv, st.m::tsquery)::float8 AS score) sc";
+var PG_SCORES = { bm25: PG_BM25_SCORE, idf_tsrank: PG_IDF_TSRANK_SCORE, tsrank_cd: PG_TSRANK_CD_SCORE };
+function pgDialectFor(ranking) {
+  if (!PG_RANKINGS.includes(ranking))
+    throw new Error(`Postgres ranking must be one of ${PG_RANKINGS.join(", ")}, got ${String(ranking)}`);
+  return {
+    // One statement per query (a round trip costs about 25 ms): the join binds
+    // the query once for the statistics, the match binds it again so the GIN
+    // index sees a constant tsquery.
+    searchJoin: `JOIN records_fts f ON f.record_id = r.id ${PG_SEARCH_STATS} ${PG_SCORES[ranking]}`,
+    searchJoinBinds: 1,
+    searchMatch: "f.tsv @@ (?::json->>'match')::tsquery",
+    searchScore: "sc.score",
+    searchOrder: "sc.score DESC",
+    scoreScale: PG_SCORE_SCALES[ranking],
+    searchQuery: pgSearchQuery,
+    searchText: foldSearchText,
+    // Postgres refuses \u0000 anywhere in a json value it parses (22P05), so the
+    // real \u0000 escapes are removed first. The pattern consumes an escaped
+    // backslash pair (\\) as a unit and puts it back, so \u0000 only matches
+    // where its backslash starts an escape: the literal text \\u0000 survives.
+    // strpos skips the regex for the bodies that hold no \u0000 at all.
+    jsonText: (column, key) => {
+      if (!/^[a-z_]+$/.test(key))
+        throw new Error(`pgDialect.jsonText: key '${key}' is not a plain identifier`);
+      if (!/^[a-z_]+(\.[a-z_]+)?$/.test(column))
+        throw new Error(`pgDialect.jsonText: column '${column}' is not a plain column reference`);
+      return String.raw`((CASE WHEN strpos(${column}, '\u0000') > 0 THEN regexp_replace(${column}, '(\\\\)|\\u0000', '\1', 'g') ELSE ${column} END)::json ->> '${key}')`;
+    },
+    insertionOrder: (alias) => alias ? `${alias}._seq` : "_seq",
+    insertIgnore: (table, columns) => `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")}) ON CONFLICT DO NOTHING`
+  };
+}
+var pgDialect = pgDialectFor(DEFAULT_PG_RANKING);
+function toPgParam(v, i, sql, stripNul) {
+  if (v === void 0)
+    throw new TypeError(`PgDriver: parameter ${i + 1} is undefined in: ${sql}`);
+  if (typeof v === "bigint")
+    return v.toString();
+  if (typeof v === "string" && v.includes("\0")) {
+    if (stripNul)
+      return v.replace(/\u0000/g, "");
+    throw new PgNulCharacterError(`parameter ${i + 1} of '${sql}'`);
+  }
+  return v;
+}
+var PgStatement = class {
+  driver;
+  sql;
+  translated;
+  constructor(driver, sql, schema) {
+    this.driver = driver;
+    this.sql = sql;
+    this.translated = translateStatement(sql, schema);
+  }
+  execute(params) {
+    this.driver.assertOpen();
+    if (params.length !== this.translated.params) {
+      throw new RangeError(`PgDriver: statement takes ${this.translated.params} parameter(s), got ${params.length}: ${this.sql}`);
+    }
+    const values = params.map((p, i) => toPgParam(p, i, this.sql, this.translated.derivedText));
+    return this.driver.run(this.translated.text, values, this.sql);
+  }
+  get(...params) {
+    return this.execute(params).rows[0];
+  }
+  all(...params) {
+    return this.execute(params).rows;
+  }
+  run(...params) {
+    const { rowCount } = this.execute(params);
+    return {
+      changes: rowCount,
+      get lastInsertRowid() {
+        throw new PgUnsupportedError("lastInsertRowid (Postgres has no rowid)");
+      }
+    };
+  }
+};
+var PgDriver = class {
+  bridge;
+  dialect;
+  schema;
+  metaSchema;
+  s;
+  m;
+  ownsBridge;
+  lockTimeoutMs;
+  statementTimeoutMs;
+  closed = false;
+  /**
+   * The transaction this handle claimed. After beginReadDeferred() the BEGIN
+   * waits in `pendingBegin` and goes out in the same round trip as the read's
+   * first statement (run()), so the read costs one round trip less; a read
+   * that runs no statement sends nothing.
+   */
+  txState = "none";
+  pendingBegin;
+  constructor(bridge, options) {
+    this.bridge = bridge;
+    this.schema = options.schema;
+    this.dialect = options.ranking === void 0 ? pgDialect : pgDialectFor(options.ranking);
+    this.metaSchema = options.metaSchema ?? PG_META_SCHEMA;
+    this.s = ident(this.schema);
+    this.m = ident(this.metaSchema);
+    this.ownsBridge = options.ownsBridge ?? false;
+    this.lockTimeoutMs = timeoutMs("lockTimeoutMs", options.lockTimeoutMs, DEFAULT_PG_LOCK_TIMEOUT_MS, bridge);
+    this.statementTimeoutMs = timeoutMs("statementTimeoutMs", options.statementTimeoutMs, DEFAULT_PG_STATEMENT_TIMEOUT_MS, bridge);
+    const found = bridge.query("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1) AS has_schema, EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $2 AND tablename = $3) AS has_registry", [this.schema, this.metaSchema, "stores"]).rows[0];
+    if (!found.has_registry)
+      throw new PgStoreMissingError(this.schema, `the meta schema '${this.metaSchema}' has no stores registry`);
+    const registered = bridge.query(`SELECT 1 FROM ${this.m}.stores WHERE schema_name = $1`, [this.schema]).rows.length === 1;
+    if (!registered && !found.has_schema)
+      throw new PgStoreMissingError(this.schema, "neither its schema nor its registry row exists");
+    if (!registered)
+      throw new PgStoreMissingError(this.schema, `its schema exists but '${this.metaSchema}.stores' has no registry row for it`);
+    if (!found.has_schema)
+      throw new PgStoreMissingError(this.schema, `it has a registry row in '${this.metaSchema}.stores' but no schema`);
+  }
+  /** @internal PgStatement's guard. */
+  assertOpen() {
+    if (this.closed)
+      throw new Error(`PgDriver: store '${this.schema}' is closed`);
+  }
+  prepare(sql) {
+    this.assertOpen();
+    return new PgStatement(this, sql, this.schema);
+  }
+  exec(sql) {
+    this.assertOpen();
+    const t = translateStatement(sql, this.schema);
+    if (t.params)
+      throw new RangeError(`PgDriver.exec takes no parameters: ${sql}`);
+    this.run(t.text, void 0, sql);
+  }
+  /**
+   * @internal Every statement this handle runs. A pending BEGIN goes out ahead
+   * of it in the same round trip when the statement is a SELECT. Anything else
+   * waits for the BEGIN's own reply first: the bridge sends both before either
+   * answers, so a statement after a BEGIN that failed outright would run
+   * outside the transaction, and only a read may.
+   */
+  run(text, values, where) {
+    const pending = this.pendingBegin;
+    if (pending !== void 0) {
+      this.pendingBegin = void 0;
+      this.txState = "open";
+      if (/^\s*SELECT\b/i.test(text)) {
+        try {
+          return this.bridge.query(text, values, pending.text);
+        } catch (e) {
+          if (e instanceof PgQueryError && e.inPrefix)
+            this.failBegin(e, pending.where);
+          return mapPgError(e, where);
+        }
+      }
+      try {
+        this.bridge.query(pending.text);
+      } catch (e) {
+        this.failBegin(e, pending.where);
+      }
+    }
+    try {
+      return this.bridge.query(text, values);
+    } catch (e) {
+      return mapPgError(e, where);
+    }
+  }
+  /** Claims the connection and sends BEGIN now. */
+  beginNow(text, label, where) {
+    this.assertOpen();
+    this.bridge.claimTransaction(this, label);
+    this.txState = "open";
+    try {
+      this.bridge.query(text);
+    } catch (e) {
+      this.failBegin(e, where);
+    }
+  }
+  /** Claims the connection for a read whose BEGIN goes out with its first statement (beginReadDeferred). */
+  deferBegin(text, label, where) {
+    this.assertOpen();
+    this.bridge.claimTransaction(this, label);
+    this.txState = "pending";
+    this.pendingBegin = { text, where };
+  }
+  /** A BEGIN that failed: roll back, release the claim and throw by name, as an eager BEGIN would. */
+  failBegin(e, where) {
+    this.txState = "none";
+    abandon(this.bridge, this);
+    return mapPgError(e, where);
+  }
+  /** Ends this handle's transaction with `statement` when its BEGIN was sent; a transaction that ran nothing (or was abandoned) sends nothing. */
+  endTx(statement, where) {
+    const sent = this.txState === "open";
+    this.txState = "none";
+    this.pendingBegin = void 0;
+    try {
+      if (sent && !this.bridge.closed)
+        this.bridge.query(statement);
+    } catch (e) {
+      if (where === void 0)
+        throw e;
+      mapPgError(e, where);
+    } finally {
+      this.bridge.releaseTransaction(this);
+    }
+  }
+  close() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    if (this.ownsBridge)
+      this.bridge.close();
+  }
+  /**
+   * The write transaction, in one round trip: BEGIN, the two timeouts, the
+   * global migration lock SHARED, then this store's lock, which reproduces
+   * SQLite's BEGIN IMMEDIATE. SterlingStore.tx() re-reads the schema version
+   * after this returns, under the locks. A failure rolls back and throws by
+   * name; it is never retried.
+   */
+  begin() {
+    this.beginNow(`BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SET LOCAL statement_timeout = ${this.statementTimeoutMs}; SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`, `store '${this.schema}'`, `begin on store '${this.schema}'`);
+  }
+  commit() {
+    this.endTx("COMMIT", `commit on store '${this.schema}'`);
+  }
+  rollback() {
+    this.endTx("ROLLBACK", void 0);
+  }
+  /** A multi-statement read: one snapshot (REPEATABLE READ), read-only, under statement_timeout. Takes no lock. */
+  beginRead() {
+    this.beginNow(this.readBeginText(), `a read on store '${this.schema}'`, `a read on store '${this.schema}'`);
+  }
+  /**
+   * beginRead(), except the BEGIN goes out in the same round trip as the
+   * read's first statement, and a read that runs no statement sends nothing.
+   * The snapshot is the same: REPEATABLE READ takes it at the first statement.
+   */
+  beginReadDeferred() {
+    this.deferBegin(this.readBeginText(), `a read on store '${this.schema}'`, `a read on store '${this.schema}'`);
+  }
+  readBeginText() {
+    return `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = ${this.statementTimeoutMs}`;
+  }
+  /** Ends the read transaction. COMMIT also ends one a failed statement aborted. */
+  endRead() {
+    this.endTx("COMMIT", void 0);
+  }
+  /** The store's version lives in its registry row, the counterpart of SQLite's PRAGMA user_version. */
+  schemaVersion() {
+    this.assertOpen();
+    const row = this.run(`SELECT schema_version FROM ${this.m}.stores WHERE schema_name = $1`, [this.schema], `the schema version of store '${this.schema}'`).rows[0];
+    if (!row)
+      throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
+    return Number(row.schema_version);
+  }
+  setSchemaVersion(version2) {
+    if (!Number.isInteger(version2) || version2 < 0)
+      throw new Error(`PgDriver: schema version must be a non-negative integer, got ${String(version2)}`);
+    const { rowCount } = this.run(`UPDATE ${this.m}.stores SET schema_version = $1 WHERE schema_name = $2`, [version2, this.schema], `stamping the schema version of store '${this.schema}'`);
+    if (rowCount !== 1)
+      throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
+  }
+  /** False only before the store's tables were ever created. */
+  hasSchema() {
+    return Boolean(this.run("SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1) AS has", [this.schema], `the tables of store '${this.schema}'`).rows[0].has);
+  }
+  /** Nothing to prepare: SterlingStore refuses every write on an older store itself, and opening writes nothing here. */
+  prepareReadOnly() {
+  }
+  /**
+   * Creates the store's tables when missing. Postgres does not make concurrent
+   * CREATE ... IF NOT EXISTS safe: two processes opening one fresh store at once
+   * failed with 23505 on pg_type_typname_nsp_index (board e05f5127). So the DDL
+   * runs in one transaction under the same locks a write takes (the global lock
+   * shared, then this store's lock): concurrent opens take turns, and the later
+   * ones find every object already there. A lock that cannot be had within
+   * lock_timeout throws PgLockTimeoutError, as a write would.
+   */
+  prepareWritable(_isFresh) {
+    this.assertOpen();
+    const where = `creating the tables of store '${this.schema}'`;
+    this.bridge.claimTransaction(this, `table setup on store '${this.schema}'`);
+    try {
+      this.bridge.query(`${this.setupBeginText()}; ${storeDdl(this.s)};
+COMMIT`);
+    } catch (e) {
+      abandon(this.bridge, this);
+      mapPgError(e, where);
+    }
+    this.bridge.releaseTransaction(this);
+  }
+  /**
+   * StoreDriver.publishFresh. prepareWritable() followed by the store's own
+   * stamp transaction left a window between the two commits: a concurrent
+   * opener that had read version 0 saw the tables and opened the store as a
+   * legacy, read-only one (Codex review of be2b7f7a, board e05f5127). Here the
+   * version and table probe, the DDL and the stamp are one transaction under
+   * the write locks, so the tables and the stamp become visible together, and
+   * an opener that read 0 before someone else published re-reads the stamped
+   * version under the lock. An older store that already has its tables is
+   * left untouched: nothing is written and its version is returned.
+   */
+  publishFresh(supported) {
+    this.assertOpen();
+    if (!Number.isInteger(supported) || supported < 1)
+      throw new Error(`PgDriver: the supported schema version must be a positive integer, got ${String(supported)}`);
+    const where = `publishing store '${this.schema}'`;
+    this.bridge.claimTransaction(this, `table setup on store '${this.schema}'`);
+    let version2;
+    try {
+      const row = this.bridge.query(`SELECT (SELECT schema_version FROM ${this.m}.stores WHERE schema_name = $1) AS version, EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1) AS has_tables`, [this.schema], this.setupBeginText()).rows[0];
+      if (row.version === null)
+        throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
+      version2 = Number(row.version);
+      if (version2 < supported && !row.has_tables) {
+        this.bridge.query(storeDdl(this.s));
+        this.bridge.query(`UPDATE ${this.m}.stores SET schema_version = $1 WHERE schema_name = $2`, [supported, this.schema]);
+        version2 = supported;
+      }
+      this.bridge.query("COMMIT");
+    } catch (e) {
+      abandon(this.bridge, this);
+      mapPgError(e, where);
+    }
+    this.bridge.releaseTransaction(this);
+    return version2;
+  }
+  /** BEGIN for table setup: lock_timeout, then the write locks in begin()'s order (the global lock shared, then this store's). */
+  setupBeginText() {
+    return `BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`;
+  }
+  /**
+   * 'postgres'. SQLite's answer names its rollback-journal mode, which the
+   * 9p policy and the -wal/-shm handling branch on. Postgres has its own WAL
+   * that no Sterling code manages, so 'wal' would send those branches down the
+   * SQLite path. 'postgres' is no SQLite journal mode, so every such branch
+   * falls through.
+   */
+  journalMode() {
+    return "postgres";
+  }
+  snapshot(_targetPath) {
+    throw new PgUnsupportedError("snapshot() (backup in work mode is issue 26 item 7: it refuses and points at the platform point-in-time restore)");
+  }
+};
+
+// packages/store/dist/mounted.js
+function resolveDomainMounts(config2) {
+  return config2.stack_tags.map((name) => ({
+    name,
+    dbPath: config2.domain_paths[name] ?? join4(homedir2(), ".sterling", "domains", name, "sterling.db")
+  }));
+}
+function open(dbPath) {
+  mkdirSync(dirname2(dbPath), { recursive: true });
+  return new SterlingStore(dbPath);
+}
+var PROBE_ID = "00000000-0000-0000-0000-000000000000";
+var DROPPED_AFTER_MOUNT_NOTE = "dropped after mount; reads skip it until the session restarts";
+var DROPPED_AT_MOUNT_NOTE = "dropped at mount; restart the session after the store is repaired";
+function isStoreFailure(e) {
+  return e instanceof SchemaMigrationRequiredError || e instanceof UnsupportedSchemaVersionError || e instanceof StoreRowDecodeError || e?.code === "ERR_SQLITE_ERROR";
+}
+function isPgStoreFailure(e) {
+  return e instanceof PgStoreMissingError || e instanceof PgQueryError || e instanceof PgLockTimeoutError || e instanceof PgStatementTimeoutError || e instanceof PgNulCharacterError || e instanceof PgBridgeClosedError || e instanceof PgBridgeTimeoutError || e instanceof PgWorkerDiedError;
+}
+var errorText = (e) => String(e?.message ?? e);
+var DomainUnavailableError = class extends Error {
+  domain;
+  location;
+  constructor(domain, location, cause) {
+    super(`storage 'postgres': domain '${domain}' (${location}) is missing or cannot be read: ${errorText(cause)}. Postgres storage never skips or drops a mounted domain; the call fails and nothing was written.`, { cause });
+    this.name = "DomainUnavailableError";
+    this.domain = domain;
+    this.location = location;
+  }
+};
+var DOMAIN_DESCRIPTION_KEY = "description";
+var MixedScoreScaleError = class extends Error {
+  scales;
+  constructor(operation, scales) {
+    super(`${operation}: the mounted stores rank on different score scales (${scales.map((x) => `${x.source}: ${x.scale}`).join(", ")}), so a min_score cannot be applied across them. Nothing was counted.`);
+    this.scales = scales;
+    this.name = "MixedScoreScaleError";
+  }
+};
+var DomainNotCreatedError = class extends Error {
+  domain;
+  db_path;
+  constructor(domain, dbPath) {
+    super(`domain '${domain}' has no store at '${dbPath}'. Domain stores are not created on first mount: create it with createDomain('${domain}', <description>, <dbPath>), where the description says which knowledge belongs in this domain. To mount only the domains that already exist, pass { skipMissing: true }.`);
+    this.name = "DomainNotCreatedError";
+    this.domain = domain;
+    this.db_path = dbPath;
+  }
+};
+function missingDomainWarning(m) {
+  return `sterling: domain '${m.name}' is configured but has no store at '${m.dbPath}'; it is NOT mounted, so its knowledge is not read and writes to scope domain:${m.name} are refused. Create it with createDomain (a description is required), or run init to set it up.`;
+}
+var MountedStores = class {
+  /** The project store — also the home of the board/maintenance queue and
+   *  other project-local transient state (the run/handoff protocol this
+   *  comment used to describe was removed per decision
+   *  sterling-claude-code-scale-down-boundary, 2ad87dd1).
+   *
+   *  STATED LIMIT OF THE CROSS-MOUNT WRITE BACKSTOP (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *  This handle is a PUBLIC, FULLY MUTABLE SterlingStore, so
+   *  `stores.project.create(...)` (or any other mutator on it) reaches the
+   *  project connection DIRECTLY and never passes assertMountAffinity below.
+   *  Called inside a transaction open on a DOMAIN mount, such a write commits
+   *  on the project connection and survives the outer rollback — the exact
+   *  atomicity hole the backstop closes for every write that goes through this
+   *  class's own surface. The backstop's guarantee is therefore scoped to
+   *  MountedStores' OWN METHODS, and this field is the one documented way past
+   *  it; treat any claim of universal coverage as wrong.
+   *
+   *  IT IS NOT NARROWED, and the reason is not that narrowing is undesirable.
+   *  MEASURED 2026-09-06 (re-runnable: grep for `.project.` across
+   *  packages/{store,mcp-server,tui}/src and scripts/): NO production caller
+   *  outside this file touches the handle at all — every `.project.<mutator>`
+   *  call in the repo is in a TEST (packages/store/src/tests/
+   *  stable-identity-hardening.test.ts and packages/mcp-server/src/tests/
+   *  resolves-append-join.test.ts seed forged rows through it). Those suites
+   *  are frozen, and a read-only type on
+   *  this field would fail their compile, so the exposure is retained
+   *  deliberately and disclosed here rather than closed by editing pins. The
+   *  real containment today is that production has no such caller — a
+   *  PROPERTY OF THE CALLERS, not a guarantee of this class. If a production
+   *  mutation through this handle is ever wanted, route it through the guarded
+   *  surface instead of widening the exception.
+   */
+  project;
+  domains = /* @__PURE__ */ new Map();
+  /** Configured domains skipped under skipMissing because their store does not
+   *  exist, in manifest order. Kept so a caller (boot, a tool response, H1) can
+   *  disclose the skip instead of the domain silently vanishing. */
+  missingDomains = [];
+  /** Mounted domains whose store failed a read, in the order they were dropped.
+   *  One broken domain must not fail a read over the whole mounted set, so a
+   *  domain read that throws drops that domain from every later read and lists
+   *  it here with the error; a caller (a tool response, boot) discloses it
+   *  instead of the domain silently vanishing. Checked at mount (probeDomain)
+   *  and on every fanned read. The drop lasts for this instance's lifetime:
+   *  a later read does not retry the store. It covers READS only: the domain
+   *  stays in domainNames(), but every write into it is refused
+   *  (assertWritable), and the slug uniqueness checks still ask it
+   *  (slugHolders). The PROJECT store is never listed here: its failure
+   *  throws. */
+  unreadableDomains = [];
+  domainPaths = /* @__PURE__ */ new Map();
+  /** Every configured domain whose store file exists, in manifest order,
+   *  whether or not it could be opened. */
+  mountedNames = [];
+  /** Set for Postgres storage; see MountedStoresOptions.work. */
+  work;
+  /** The project store is opened, and created when absent; a failure to open
+   *  it throws. A domain store is only ever OPENED here, never created, and one
+   *  that exists but cannot be opened is listed on unreadableDomains instead of
+   *  failing the mount: a mount whose db file does not exist
+   *  throws DomainNotCreatedError naming createDomain (board 675daf9d (c)), with
+   *  every handle opened so far closed and no file written for the missing
+   *  domain. When options.skipMissing is true such a mount is skipped instead,
+   *  and the existing siblings are still mounted. An existing domain store opens
+   *  as it is, whether or not it has a description.
+   *
+   *  Postgres storage (options.work, routing.ts) differs in three ways: both stores
+   *  are opened through the given openers, which never create a store;
+   *  skipMissing is ignored; and every case above that lists a domain on
+   *  missingDomains or unreadableDomains throws DomainUnavailableError instead,
+   *  with every handle opened so far closed. */
+  constructor(projectDbPath, mounts = [], options) {
+    this.work = options?.work;
+    if (this.work) {
+      this.project = this.work.openProject();
+      try {
+        for (const m of mounts) {
+          this.mountedNames.push(m.name);
+          this.domainPaths.set(m.name, m.dbPath);
+          let store;
+          try {
+            store = this.work.openDomain(m);
+          } catch (e) {
+            if (!this.isStoreFailure(e))
+              throw e;
+            throw new DomainUnavailableError(m.name, m.dbPath, e);
+          }
+          this.domains.set(m.name, store);
+          this.probeDomain(m.name, store);
+        }
+      } catch (e) {
+        this.close();
+        throw e;
+      }
+      return;
+    }
+    this.project = open(projectDbPath);
+    try {
+      for (const m of mounts) {
+        if (!existsSync(m.dbPath)) {
+          if (options?.skipMissing) {
+            this.missingDomains.push({ name: m.name, dbPath: m.dbPath });
+            continue;
+          }
+          throw new DomainNotCreatedError(m.name, m.dbPath);
+        }
+        this.mountedNames.push(m.name);
+        this.domainPaths.set(m.name, m.dbPath);
+        let store;
+        try {
+          store = new SterlingStore(m.dbPath);
+        } catch (e) {
+          if (!isStoreFailure(e))
+            throw e;
+          this.dropDomain(m.name, e, true);
+          continue;
+        }
+        this.domains.set(m.name, store);
+        this.probeDomain(m.name, store);
+      }
+    } catch (e) {
+      this.close();
+      throw e;
+    }
+  }
+  /** Mount-time read check. A pre-v2 store opens and answers some reads (get,
+   *  query over pre-v2 bodies) but not others (inboundSupersedes: it has no
+   *  record_relations table), so without this a first tool call could serve
+   *  that domain's records and then drop it halfway through. The probe runs the
+   *  two per-record reads the fan makes, against an id no record has, and drops
+   *  the domain when either throws. */
+  probeDomain(name, store) {
+    try {
+      store.get(PROBE_ID);
+      store.inboundSupersedes(PROBE_ID);
+    } catch (e) {
+      if (!this.isStoreFailure(e))
+        throw e;
+      this.dropDomain(name, e, true);
+    }
+  }
+  /** Drop a domain from reads. The drop lasts for this instance's lifetime:
+   *  no later read retries the store, even when the failure was transient. That
+   *  is safe to leave because a dropped domain cannot be written either
+   *  (assertWritable): a session never writes into a store it cannot read back,
+   *  and the slug checks still ask it (fanEveryDomain). */
+  dropDomain(name, e, atMount = false) {
+    if (this.work)
+      throw new DomainUnavailableError(name, this.domainPaths.get(name) ?? "", e);
+    if (this.isUnreadable(name))
+      return;
+    this.unreadableDomains.push({
+      name,
+      dbPath: this.domainPaths.get(name) ?? "",
+      error: errorText(e),
+      note: atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE
+    });
+  }
+  /** The failures that drop a domain in hobby mode and fail the call in work
+   *  mode; any other error is the caller's or this code's fault and is rethrown. */
+  isStoreFailure(e) {
+    return isStoreFailure(e) || this.work !== void 0 && isPgStoreFailure(e);
+  }
+  isUnreadable(name) {
+    return this.unreadableDomains.some((d) => d.name === name);
+  }
+  /** `(<error>; <note>)` for a dropped domain, for refusal text. */
+  droppedReason(name) {
+    const d = this.unreadableDomains.find((x) => x.name === name);
+    return d ? `(${d.error}; ${d.note})` : "";
+  }
+  /** Refuse a write into a domain this session has dropped from reads: the
+   *  write could not be read back, and a promotion would retire the project
+   *  original in favour of a copy nobody can see. */
+  assertWritable(name) {
+    if (!this.isUnreadable(name))
+      return;
+    throw new Error(`domain '${name}' cannot be written: this session cannot read it ${this.droppedReason(name)}. Nothing was written. Repair the store, then restart the session.`);
+  }
+  /** `fn` on the project store and then on EVERY mounted domain, dropped ones
+   *  included, for a check where "not read" must never count as "absent" (slug
+   *  uniqueness). A dropped domain that still answers is believed. A domain
+   *  whose read fails makes the whole check refuse, naming it and the error. */
+  fanEveryDomain(what, fn) {
+    const out = [fn(this.project)];
+    for (const [name, store] of this.domains) {
+      try {
+        out.push(fn(store));
+      } catch (e) {
+        if (!this.isStoreFailure(e))
+          throw e;
+        this.dropDomain(name, e);
+        throw new Error(`${what} cannot be checked: domain '${name}' could not be read (${errorText(e)}), so whether it is taken there is unknown. Nothing was written. Repair the store, then restart the session.`);
+      }
+    }
+    return out;
+  }
+  /** The one read fan: `fn` on the project store, then on each readable domain
+   *  in manifest order, yielding each answer with its source ('project' or the
+   *  domain's manifest name). The project read is NOT guarded, so its failure
+   *  throws. A domain read that fails with a store failure (isStoreFailure)
+   *  drops that domain (dropDomain) and the fan moves on; any other error is
+   *  rethrown. Lazy, so a first-hit caller stops reading at its hit. */
+  *fanRead(fn) {
+    yield { source: "project", store: this.project, value: fn(this.project) };
+    for (const [name, store] of [...this.domains]) {
+      if (this.isUnreadable(name))
+        continue;
+      let value;
+      try {
+        value = fn(store);
+      } catch (e) {
+        if (!this.isStoreFailure(e))
+          throw e;
+        this.dropDomain(name, e);
+        continue;
+      }
+      yield { source: name, store, value };
+    }
+  }
+  /** fanRead's answers alone, project first. */
+  fanValues(fn) {
+    return [...this.fanRead(fn)].map((r) => r.value);
+  }
+  /** A mounted domain's description (store_meta 'description'), or undefined
+   *  when that existing store has none. An unmounted name is refused. */
+  domainDescription(name) {
+    const store = this.domains.get(name);
+    if (!store && this.isUnreadable(name))
+      throw new Error(`domainDescription: domain '${name}' cannot be read ${this.droppedReason(name)}`);
+    if (!store)
+      throw new Error(`domainDescription: domain '${name}' is not mounted`);
+    return store.getMeta(DOMAIN_DESCRIPTION_KEY);
+  }
+  /** Set a mounted domain's description (store_meta 'description'), trimmed,
+   *  on that domain's own store. The write path for an existing domain;
+   *  createDomain sets it for a new one. An unmounted name and a blank
+   *  description are refused with nothing written, and so is a call inside a
+   *  transaction open on another mount (the same affinity rule as every write
+   *  through this class). */
+  setDomainDescription(name, description) {
+    this.assertWritable(name);
+    const store = this.domains.get(name);
+    if (!store)
+      throw new Error(`setDomainDescription: domain '${name}' is not mounted`);
+    if (typeof description !== "string" || description.trim().length === 0) {
+      throw new Error(`setDomainDescription: the description for domain '${name}' is blank; nothing was written`);
+    }
+    this.assertMountAffinity("setDomainDescription", store, `domain '${name}'`);
+    store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
+  }
+  /** Scope-routed write (§3.3): project → the project store; domain:<name> → that
+   *  domain store. Routing is MECHANICAL here; the tool layer owns the policy
+   *  (feature_article always project, reference/research project-then-promote).
+   *
+   *  Validation here needs `scope`, so it must run BEFORE the write reaches a
+   *  store — which means it must also run the store's identity normalization
+   *  first (SterlingStore.normalizeIdentityEnvelope, the ONE definition):
+   *  otherwise a lifecycle/freshness-only envelope that SterlingStore.create
+   *  accepts was rejected through the mounted surface, because the schemas
+   *  registry still declares the derived status/superseded_by fields. */
+  create(input, options = {}) {
+    const normalized = SterlingStore.normalizeIdentityEnvelope(input);
+    const record2 = validateRecord(normalized);
+    assertNoFieldLoss("create", normalized, record2);
+    const target = this.storeFor(record2.scope);
+    this.assertMountAffinity("create", target, `record '${record2.id}' (scope '${record2.scope}')`);
+    return target.create(record2, options);
+  }
+  /** Scope-routed exactly as create() is. A maintenance item is project-LOCAL
+   *  state and never shared, so this resolves to the project store in practice —
+   *  and the dedup key is therefore evaluated within that ONE store rather than
+   *  across the fan, which is right: two projects' queues are independent, and a
+   *  cross-store key would let one project's item suppress another's. */
+  enqueueSystemTodo(input, options = {}) {
+    const record2 = validateRecord(SterlingStore.normalizeIdentityEnvelope(input));
+    const target = this.storeFor(record2.scope);
+    this.assertMountAffinity("enqueueSystemTodo", target, `todo '${record2.id}' (scope '${record2.scope}')`);
+    return target.enqueueSystemTodo(record2, options);
+  }
+  /** Read-only twin of enqueueSystemTodo: queue items are project-local, so the
+   *  precheck asks the project store only (same reasoning as the enqueue above). */
+  enqueueWouldBeNoop(input) {
+    return this.project.enqueueWouldBeNoop(input);
+  }
+  /** Board readiness is project-local like the board itself, so the project
+   *  store answers it (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start). */
+  boardReadiness(items) {
+    return this.project.boardReadiness(items);
+  }
+  storeFor(scope) {
+    if (scope === "project")
+      return this.project;
+    const m = /^domain:(.+)$/.exec(scope);
+    if (m) {
+      this.assertWritable(m[1]);
+      const store = this.domains.get(m[1]);
+      if (!store)
+        throw new Error(`scope '${scope}' targets an unmounted domain \u2014 not in the project's domains manifest`);
+      return store;
+    }
+    throw new Error(`unroutable scope '${scope}'`);
+  }
+  /** Cross-store retrieval (§3.4) with read shares (board 675daf9d (b)): every
+   *  mounted store runs the full filter→join→rank→cap on its own, allocateShares
+   *  decides how many of each store's results make the cap (the project up to
+   *  ceil(0.6 x cap) when a domain has matches, the rest split across domains,
+   *  unused share spilling over), and each store's top-N is concatenated project
+   *  first, then domains in manifest order. Scores are never compared across
+   *  databases. When only the project matches it fills the cap, as before. */
+  query(opts = {}) {
+    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+    const perStore = this.fanValues((s2) => s2.query({ ...opts, cap }));
+    const shares = allocateShares(perStore.map((r) => r.length), cap);
+    return perStore.flatMap((records, i) => records.slice(0, shares[i]));
+  }
+  /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of
+   *  query(), summed project-first across every mounted store (countBySource is
+   *  the same fan, kept per-source for the TUI's badges). No body fetch. The tool
+   *  layer reports it so a capped retrieval can say how many records matched the
+   *  filter it was given, instead of presenting its window as the whole store. */
+  count(opts = {}) {
+    return this.countBySource(opts).reduce((n, s2) => n + s2.count, 0);
+  }
+  /** Cross-mount twin of countAboveScore (board a577a69d) — summed
+   *  project-first across every mounted store, same fan as count(). */
+  countAboveScore(opts, minScore) {
+    this.commonScoreScale("countAboveScore");
+    return this.fanValues((s2) => s2.countAboveScore(opts, minScore)).reduce((n, c) => n + c, 0);
+  }
+  /** The one score scale every mounted store ranks on (SterlingStore.scoreScale). Mixed scales are refused: neither their scores nor their counts above one min_score compare. */
+  scoreScale() {
+    return this.commonScoreScale("scoreScale");
+  }
+  commonScoreScale(operation) {
+    const scales = [...this.fanRead((s2) => s2.scoreScale())].map((r) => ({ source: r.source, scale: r.value }));
+    if (new Set(scales.map((x) => x.scale)).size > 1)
+      throw new MixedScoreScaleError(operation, scales);
+    return scales[0].scale;
+  }
+  /** Per-source projection (AC2): project store FIRST, then each mounted domain
+   *  in manifest order. Each store runs the full query independently — type
+   *  filter, file-key join, cap, and match_all are all PER-STORE (never a
+   *  global slice across the merged result). Zero domains → exactly one entry.
+   *  The source name is 'project' for the project store and the domain manifest
+   *  name (DomainMount.name) for each domain store. */
+  bySource(opts) {
+    return [...this.fanRead((s2) => s2.query(opts))].map((r) => ({ source: r.source, records: r.value }));
+  }
+  /** bySource for each entry of `list` in one pass: per store, project first,
+   *  one SterlingStore.queryEach (one read transaction), so `results[i]` is
+   *  that store's bySource(list[i]) records. */
+  bySourceEach(list) {
+    return [...this.fanRead((s2) => s2.queryEach(list))].map((r) => ({ source: r.source, results: r.value }));
+  }
+  /** Count-only per-source projection — the COUNT(*) twin of bySource (same
+   *  project-first, per-store ordering) with NO body fetch. The TUI Knowledge
+   *  tree's collapsed category/source badges use this so the default all-collapsed
+   *  view does not fetch + parse every source's record bodies each frame. */
+  countBySource(opts) {
+    return [...this.fanRead((s2) => s2.count(opts))].map((r) => ({ source: r.source, count: r.value }));
+  }
+  /** Records from ONE named source ('project' or a mounted domain name) — the
+   *  full §3.4 query against that single store. The TUI fetches bodies only for
+   *  the source the user actually expanded; an unknown source yields [], and so
+   *  does a domain that is, or on this read becomes, unreadable. */
+  querySource(source, opts = {}) {
+    if (source === "project")
+      return this.project.query(opts);
+    const store = this.domains.get(source);
+    if (!store || this.isUnreadable(source))
+      return [];
+    try {
+      return store.query(opts);
+    } catch (e) {
+      if (!this.isStoreFailure(e))
+        throw e;
+      this.dropDomain(source, e);
+      return [];
+    }
+  }
+  /** Cross-store fetch by id: project first, then domains. */
+  get(id) {
+    for (const { value } of this.fanRead((s2) => s2.get(id))) {
+      if (value)
+        return value;
+    }
+    return void 0;
+  }
+  /** PHYSICAL mount membership: the PROJECT store ALONE, never the fan (anti_pattern
+   *  [record-body-scope-is-not-physical-store-identity]). This is the same physical
+   *  database H10 opens and the only mount withTransaction can commit on, so a caller
+   *  whose atomicity or whose parity with H10 depends on "is this record project-local"
+   *  asks HERE. It deliberately does NOT consult the record's body `scope`: create()
+   *  routes by scope, but every later write routes by storeHolding (by id), and `scope`
+   *  is caller-writable — so the field and the mount can disagree in both directions. */
+  projectStoreHolds(id) {
+    return this.project.projectStoreHolds(id);
+  }
+  /** Project-first concatenation of every mounted store's id index (any status,
+   *  tombstones included). A citation checker MUST span mounts: legitimately
+   *  cited ids live in the shared domain stores as often as in the project one,
+   *  so a project-only lookup calls them dangling. No dedup needed — a record
+   *  lives in exactly one store. */
+  recordIdIndex() {
+    return this.fanValues((s2) => s2.recordIdIndex()).flat();
+  }
+  /** Project-first concatenation of every mounted store's dead-id alias index
+   *  ([stable-identity-design-v2] contract 3) — same reasoning as
+   *  recordIdIndex: a historical id cited anywhere may have belonged to a
+   *  record that now lives in a domain store, so resolution MUST span mounts.
+   *  A historical id is unique across the fan (it was one record's id), so no
+   *  dedup is needed. */
+  recordAliases() {
+    return this.fanValues((s2) => s2.recordAliases()).flat();
+  }
+  /** Exact-slug article resolution across the fan, PROJECT-FIRST (decision
+   *  3db7095f's deterministic lookup, mounted). Feature articles are always
+   *  project-scoped and never promote (AC7), so in practice this reads the project
+   *  store — but it fans anyway, deliberately: its callers are H19's one-hop
+   *  pointers and knowledge_create's slug-collision refusal, and for BOTH of them
+   *  over-detecting a slug that somehow lives in a domain store is safe while
+   *  under-detecting is not. A project-only lookup would let a clash through and
+   *  serve two records under one slug, which is the failure the refusal exists to
+   *  prevent. No dedup needed — a record lives in exactly one store. */
+  articlesBySlug(slug) {
+    return this.fanValues((s2) => s2.articlesBySlug(slug)).flat();
+  }
+  /** Type-agnostic exact-slug lookup across the fan, PROJECT-FIRST (board
+   *  1e639f32) — same over-detect-is-safe reasoning as articlesBySlug: its
+   *  callers are a uniqueness refusal and an identity resolution, and both
+   *  would rather see a domain-store record than miss one. */
+  recordsBySlug(slug) {
+    return this.fanValues((s2) => s2.recordsBySlug(slug)).flat();
+  }
+  /** recordsBySlug for a UNIQUENESS check: every mounted domain is asked,
+   *  dropped ones included (fanEveryDomain), so a slug held by a record in a
+   *  dropped domain still counts as taken, and a domain that cannot answer
+   *  makes the check refuse instead of passing. Identity resolution keeps using
+   *  recordsBySlug, which skips a dropped domain and says so. */
+  slugHolders(slug) {
+    return this.fanEveryDomain(`slug '${slug}'`, (s2) => s2.recordsBySlug(slug)).flat();
+  }
+  /** articlesBySlug for a uniqueness check; same rule as slugHolders. */
+  articleSlugHolders(slug) {
+    return this.fanEveryDomain(`slug '${slug}'`, (s2) => s2.articlesBySlug(slug)).flat();
+  }
+  /** Superseded-only counterpart of recordsBySlug — knowledge_get's dead-slug
+   *  fallthrough is the sole caller (decision foreign_df361a0f) and takes result[0] as
+   *  THE newest carrier, so the fan-in order is load-bearing. A slug does NOT
+   *  live in exactly one store: retireInFavorOf's promotion shape leaves the
+   *  project tombstone behind while the live copy is promoted into a domain
+   *  store, so one lineage's tombstones can be split across stores. Plain
+   *  project-first concatenation would let an OLDER project tombstone shadow a
+   *  NEWER domain one, so the fanned results are merge-sorted by updated_at
+   *  DESC — each store's own rows already arrive newest-first, so this is a
+   *  stable merge, not a full re-sort. rowid ordering (and the newest-first
+   *  guarantee it gives) is only meaningful WITHIN one store; updated_at is
+   *  the one field comparable across stores, and is therefore the cross-store
+   *  sort key here (review finding, 2026-08-20). */
+  supersededRecordsBySlug(slug) {
+    return this.fanValues((s2) => s2.supersededRecordsBySlug(slug)).flat().sort((a, b) => a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
+  }
+  /** Cross-store terminus resolution (decision foreign_de1a7329): a record lives in
+   *  exactly one store (same reasoning as get()), so this tries each mounted
+   *  store project-first and returns the first hit. */
+  resolveTerminus(id) {
+    for (const { value } of this.fanRead((s2) => s2.resolveTerminus(id))) {
+      if (value)
+        return value;
+    }
+    return null;
+  }
+  /** Cross-store fan of inboundSupersedes (board c6e3561f part (a)): an edge
+   *  lives with its SOURCE record (addLink routes by source), so a record's
+   *  inbound supersedes edges can sit in a DIFFERENT mounted store than the
+   *  target itself — every mount is scanned and the hits merged, same
+   *  reasoning as recordsBySlug's fan. DEDUPED BY ID (roster review F3,
+   *  anti_pattern foreign_1896c79b): a record promoted into a domain store leaves a
+   *  project-store tombstone behind, so the SAME source id can resolve out of
+   *  two different mounts — first-seen (project-first, the read fan's own
+   *  ordering) wins, never a duplicate entry for one concept. */
+  /** inboundSupersedes() for each id: per store one SterlingStore.inboundSupersedesEach,
+   *  merged per id exactly as inboundSupersedes merges (project first, first seen wins). */
+  inboundSupersedesEach(ids) {
+    const perStore = this.fanValues((s2) => s2.inboundSupersedesEach(ids));
+    return ids.map((_, i) => {
+      const seen = /* @__PURE__ */ new Set();
+      const out = [];
+      for (const lists of perStore) {
+        for (const record2 of lists[i] ?? []) {
+          if (seen.has(record2.id))
+            continue;
+          seen.add(record2.id);
+          out.push(record2);
+        }
+      }
+      return out;
+    });
+  }
+  inboundSupersedes(id) {
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    for (const record2 of this.fanValues((s2) => s2.inboundSupersedes(id)).flat()) {
+      if (seen.has(record2.id))
+        continue;
+      seen.add(record2.id);
+      out.push(record2);
+    }
+    return out;
+  }
+  // -- record mutations: route to the store that HOLDS the record --------------
+  // A record's scope decided where it lives at create time; a later change has to
+  // land in that same store, so these route by where the id actually is — never
+  // by the caller. (knowledge_update gets the record first, so supersede always
+  // finds it; remove routes on its id the same way. addLink routes on the SOURCE
+  // id — the edge lives with its source — and validates the TARGET mount-wide.)
+  /** Versioned change in the holding store (a domain record supersedes in its
+   *  domain store) — and the replacement's `scope` is pinned from THAT MOUNT.
+   *
+   *  THE LAYERING (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *  SterlingStore.supersede pins the replacement's scope from the old row's
+   *  `scope` COLUMN, which is correct for a BARE store: with no mounts there is
+   *  nothing the column can contradict. Through THIS surface the column is not
+   *  the strongest fact — the MOUNT is. In the one drift class a
+   *  column-authoritative read cannot see (a row physically held by a domain
+   *  store whose column says 'project'), inheriting the column would mint a
+   *  brand-new row carrying the same lie, inside the very database that
+   *  disproves it. So the mount is passed down as the authoritative scope and
+   *  the column is not consulted.
+   *
+   *  WHY IT IS DERIVED FROM THE STORE THIS WRITE IS ROUTED TO, and not from a
+   *  second lookup: `store` here IS the destination — the same resolution
+   *  scopeOfHolder performs (mountNameOf ∘ storeHolding), reused rather than
+   *  repeated. The label and the physical destination are therefore ONE fact,
+   *  and cannot drift apart at this site by construction. Any third argument a
+   *  caller supplies is deliberately ignored for the same reason: an
+   *  authoritative scope is not something a caller can be trusted to know.
+   *  The fourth argument (WriteOptions: operation_id) passes through. */
+  supersede(...args2) {
+    const store = this.mutatingStoreHolding("supersede", args2[0]);
+    return store.supersede(args2[0], args2[1], this.mountNameOf(store), args2[3]);
+  }
+  /** Promotion tombstone: retire the original in its (project) store, pointing at
+   *  the cross-store replacement. The replacement already lives in another store
+   *  (the promoted domain copy), so only the original's holding store is touched. */
+  retireInFavorOf(...args2) {
+    return this.mutatingStoreHolding("retireInFavorOf", args2[0]).retireInFavorOf(...args2);
+  }
+  /** Hard delete (+ §3.2.7 drain log for system todos) in the holding store. */
+  remove(...args2) {
+    return this.mutatingStoreHolding("remove", args2[0]).remove(...args2);
+  }
+  // -- the generalized IN-PLACE write triad (stable-identity S2, decision
+  // [stable-identity-design-v2]) — same holding-store routing as supersede:
+  // an in-place write must land on the row that actually exists, and the
+  // version counter it bumps is that store's.
+  /** knowledge_update-shaped in-place write in the holding store. */
+  updateRecord(...args2) {
+    return this.mutatingStoreHolding("updateRecord", args2[0]).updateRecord(...args2);
+  }
+  /** NARROW server-owned metadata write (board 8c8b6d78 / R9) in the holding
+   *  store — same routing as updateRecord, since it is the same in-place core
+   *  with the body clock preserved. */
+  updateRecordMetadata(...args2) {
+    return this.mutatingStoreHolding("updateRecordMetadata", args2[0]).updateRecordMetadata(...args2);
+  }
+  /** knowledge_edit-shaped exactly-once passage replace in the holding store. */
+  editRecordField(...args2) {
+    return this.mutatingStoreHolding("editRecordField", args2[0]).editRecordField(...args2);
+  }
+  /** knowledge_append-shaped array growth in the holding store. */
+  appendRecordField(...args2) {
+    return this.mutatingStoreHolding("appendRecordField", args2[0]).appendRecordField(...args2);
+  }
+  /** An archived (record_id, version) snapshot from whichever store holds the
+   *  record. Version history is store-local, exactly like the record itself. */
+  getRecordVersion(...args2) {
+    return this.storeHolding(args2[0]).getRecordVersion(...args2);
+  }
+  /** IN-PLACE todo edit (board_update) in the holding store — todos are always
+   *  project-scoped (§3.3), so this always resolves to the project store, but it
+   *  routes the same way as supersede/remove for consistency rather than assuming. */
+  updateTodo(...args2) {
+    return this.mutatingStoreHolding("updateTodo", args2[0]).updateTodo(...args2);
+  }
+  /** Typed link edge, added on the source record in its holding store. The TARGET
+   *  is resolved across ALL mounted stores (cross-store get, like get()) before
+   *  delegating: cross-store edges are a legitimate shape — promotion itself writes
+   *  them (supersedes / informed_by across project↔domain) — and the holding
+   *  store's local check cannot see a target mounted elsewhere, so it is told the
+   *  target is already validated. */
+  addLink(sourceId, rel, targetId) {
+    if (!this.get(targetId))
+      throw new Error(`addLink: no target record '${targetId}' in the project store or any mounted domain${this.unreadableNote()}`);
+    return this.mutatingStoreHolding("addLink", sourceId).addLink(sourceId, rel, targetId, true);
+  }
+  /** EVERY mounted store physically holding `id`, project-first. Ordinarily
+   *  exactly one — a record lives in one store — which is precisely why the
+   *  cardinality is returned rather than assumed away by a first-hit scan. */
+  holdersOf(id) {
+    const holders = [...this.fanRead((s2) => s2.get(id) !== void 0)].filter((r) => r.value).map((r) => r.store);
+    for (const [name, store] of this.domains) {
+      if (!this.isUnreadable(name))
+        continue;
+      try {
+        if (store.get(id) !== void 0)
+          holders.push(store);
+      } catch (e) {
+        if (!isStoreFailure(e))
+          throw e;
+      }
+    }
+    return holders;
+  }
+  /** ' Not read: domain <name> (<error>)...' for a refusal that says a record
+   *  was not found, so a miss caused by a dropped domain is not read as absence. */
+  unreadableNote() {
+    if (!this.unreadableDomains.length)
+      return "";
+    return `. Not read: ${this.unreadableDomains.map((d) => `domain '${d.name}' (${d.error}; ${d.note})`).join("; ")}`;
+  }
+  storeHolding(id) {
+    const holders = this.holdersOf(id);
+    if (holders.length === 0)
+      throw new Error(`no record '${id}' in the project store or any mounted domain${this.unreadableNote()}`);
+    if (holders.length > 1) {
+      throw new Error(`ambiguous holder: record '${id}' is held by ${holders.length} mounts \u2014 ${holders.map((s2) => `'${this.mountNameOf(s2)}'`).join(", ")}. One id must name one row: every routing decision here (which store a write lands in, which mount a transaction opens on, what scope a derived record inherits) assumes a single holder, so the ambiguity is refused rather than resolved project-first. Resolve the duplicate (scripts/domain-doctor.mjs show --id '${id}' on each store) before retrying.`);
+    }
+    for (const [name, store] of this.domains) {
+      if (store === holders[0] && this.isUnreadable(name)) {
+        throw new Error(`record '${id}' is held by domain '${name}', which this session cannot read ${this.droppedReason(name)}. Nothing was read or written. Repair the store, then restart the session.`);
+      }
+    }
+    return holders[0];
+  }
+  /** MountedStores' override of the storage-layer scope accessor — 'project' or
+   *  'domain:<name>', derived from the MOUNT that physically holds the record
+   *  and from nothing else. See SterlingStore.scopeOfHolder for the contract
+   *  this satisfies; the two differ only in what "physical" can mean at each
+   *  layer, and here it means the strongest available fact. Deliberately NOT
+   *  the row's `scope` column: the column is authoritative over the BODY, but
+   *  the MOUNT is authoritative over the column — a record seeded into the
+   *  wrong store carries a truthful-looking column and a false location, and
+   *  that is the one drift class a column-authoritative read cannot see.
+   *  Inherits storeHolding's two refusals: no holder, and multiple holders. */
+  scopeOfHolder(id) {
+    return this.mountNameOf(this.storeHolding(id));
+  }
+  /** storeHolding for a WRITE: resolve the holder, then hold it against the
+   *  active transaction's mount (the C2 backstop). Reads keep using
+   *  storeHolding/all() directly — a cross-store READ is legitimate. */
+  mutatingStoreHolding(op, id) {
+    const store = this.storeHolding(id);
+    this.assertMountAffinity(op, store, `record '${id}'`);
+    return store;
+  }
+  /** The project store for a PROJECT-LOCAL write (the board/maintenance
+   *  queue, the drain log — the run/handoff protocol this comment used to
+   *  name was removed per decision sterling-claude-code-scale-down-boundary,
+   *  2ad87dd1), held against the active transaction's mount the same way. These
+   *  forward straight to this.project, so inside a DOMAIN transaction they are
+   *  the second cross-mount shape: a write that commits on the project
+   *  connection while the open BEGIN belongs to a domain mount. */
+  mutatingProject(op) {
+    this.assertMountAffinity(op, this.project, "project-local run/board state");
+    return this.project;
+  }
+  /** The mount name for a physical store — 'project', or the domain's manifest
+   *  name. Used only in refusal text: the point of the guard is that a MOUNT is
+   *  a physical thing, so it is named by where it actually is. */
+  mountNameOf(store) {
+    if (store === this.project)
+      return "project";
+    for (const [name, s2] of this.domains)
+      if (s2 === store)
+        return `domain:${name}`;
+    return "unknown mount";
+  }
+  /**
+   * THE CROSS-MOUNT WRITE BACKSTOP (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *
+   * Each mount is a separate SQLite connection, so a write routed to a store
+   * OTHER than the one holding the open transaction commits independently and
+   * survives an outer rollback — the atomicity hole a correct `scope` label
+   * cannot close on its own. Every mutation ROUTED THROUGH THIS CLASS'S OWN
+   * SURFACE therefore compares its RESOLVED target store against the ACTIVE
+   * TRANSACTION'S STORE IDENTITY (not a label string: a label is exactly the
+   * thing that may be lying) and refuses, naming the record, the mount the
+   * transaction holds, and the mount the target actually lives in. Outside a
+   * transaction there is nothing to violate, so this is a no-op. Cross-store
+   * READS are never affected.
+   *
+   * THAT QUALIFIER IS LOAD-BEARING, not throat-clearing: the public `project`
+   * handle (see its own note above) is a mutable SterlingStore a caller can
+   * write through without ever reaching this method. "Every mutation is
+   * guarded" would be false while that escape hatch is public, so the claim is
+   * scoped to what this class actually mediates.
+   */
+  assertMountAffinity(op, target, subject) {
+    const active = this.activeTransactionStore;
+    if (active === void 0 || active === target)
+      return;
+    throw new Error(`${op}: refused \u2014 cross-mount write while a transaction is open on the '${this.mountNameOf(active)}' mount, but ${subject} is held by the '${this.mountNameOf(target)}' mount. Each mount is a separate SQLite connection, so this write would commit independently and survive a rollback of the open transaction \u2014 it is refused rather than silently split across two connections. Route the transaction to the record's own mount (withTransactionForRecord), or perform this write outside the transaction.`);
+  }
+  // -- board/transient state: PROJECT-LOCAL, never a domain -------------------
+  // The board/maintenance queue (§3.2.7) and check_skipped are project-scoped
+  // by definition — they live in the project store, so MountedStores forwards
+  // them straight through. Knowledge fans across mounts; this state does not.
+  // The run/handoff protocol (createRun, getRun, casTransition,
+  // casTransitionMerge, recordPendingExit/getPendingExit, appendRunEscalation,
+  // appendRunReconcileNeeded, writeHandoff/readHandoffs, setRunReviewMandatory)
+  // was removed with the staged pipeline (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1).
+  recordCheckSkipped(...args2) {
+    return this.mutatingProject("recordCheckSkipped").recordCheckSkipped(...args2);
+  }
+  /** The drain log is project-local (§3.2.7) — forwarded like every board surface. */
+  drainLogEntry(...args2) {
+    return this.mutatingProject("drainLogEntry").drainLogEntry(...args2);
+  }
+  /** knowledge_split's multi-record write (decision
+   *  compaction-tooling-windowed-read-plus-split) targets the PROJECT store
+   *  only — feature_article is always project-scoped (§3.3), so the split's
+   *  children-plus-parent transaction never needs to span a domain mount. */
+  withTransaction(fn) {
+    return this.runScopedTransaction(this.project, fn);
+  }
+  /** PER-RECORD transaction boundary — the affinity fix (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *  Routes by `storeHolding(id)`, the SAME physical resolution every record
+   *  mutation uses, so the transaction and the writes inside it can never open
+   *  on different mounts. The retired label-routed sibling
+   *  (`withTransactionForScope`, deleted per decision
+   *  [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired])
+   *  resolved by storeFor(scope), and a record's body `scope` is caller-writable
+   *  and not the routing key for anything after creation (anti_pattern
+   *  [record-body-scope-is-not-physical-store-identity]) — so a drifted label
+   *  put the transaction on the wrong database while the write went to the
+   *  right one. A record that no record exists for throws loudly BEFORE any
+   *  transaction opens, exactly as an unmounted scope does. */
+  withTransactionForRecord(id, fn) {
+    return this.runScopedTransaction(this.storeHolding(id), fn);
+  }
+  /** The PHYSICAL STORE whose transaction is currently open across THIS
+   *  MountedStores instance (not per-physical-store — a physical store's own
+   *  txDepth only knows about ITSELF). Two jobs, both keyed on store IDENTITY
+   *  rather than on a scope label (which is exactly the value that can lie):
+   *  it refuses a NESTED call that targets a DIFFERENT mount, and it is the
+   *  reference every mutation's cross-mount backstop compares against (see
+   *  assertMountAffinity). Opening a second BEGIN IMMEDIATE on a different
+   *  SQLite connection while the outer transaction is still open would let the
+   *  inner one commit independently, so a later failure in the outer
+   *  transaction could no longer roll the inner write back — silently breaking
+   *  atomicity. A nested call to the SAME mount still joins cleanly, because it
+   *  reaches that store's reentrant `tx()` (txDepth). */
+  activeTransactionStore;
+  runScopedTransaction(store, fn) {
+    if (this.activeTransactionStore !== void 0 && this.activeTransactionStore !== store) {
+      throw new Error(`nested transaction: cannot open a transaction on the '${this.mountNameOf(store)}' mount while a transaction on the '${this.mountNameOf(this.activeTransactionStore)}' mount is still open on this MountedStores \u2014 cross-mount transaction nesting is not supported (each mount is a separate SQLite connection; an inner commit could survive an outer rollback).`);
+    }
+    const isOutermost = this.activeTransactionStore === void 0;
+    if (isOutermost)
+      this.activeTransactionStore = store;
+    try {
+      return store.withTransaction(fn);
+    } finally {
+      if (isOutermost)
+        this.activeTransactionStore = void 0;
+    }
+  }
+  /** Per-store snapshot (§2.3): each store snapshots independently; the caller
+   *  supplies a path per store name ('project' or 'domain-<name>'). */
+  snapshotAll(pathFor) {
+    this.project.snapshot(pathFor("project"));
+    for (const [name, store] of this.domains)
+      store.snapshot(pathFor(`domain-${name}`));
+  }
+  /** Mounted domain names, in manifest order. Includes a domain listed on
+   *  unreadableDomains: it is still configured, though neither read nor written. */
+  domainNames() {
+    return [...this.mountedNames];
+  }
+  close() {
+    for (const s2 of this.all())
+      s2.close();
+  }
+  all() {
+    return [this.project, ...this.domains.values()];
+  }
+};
+
+// packages/store/dist/axis.js
+var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
+  // function words
+  "this",
+  "that",
+  "these",
+  "those",
+  "with",
+  "from",
+  "have",
+  "has",
+  "had",
+  "will",
+  "would",
+  "could",
+  "should",
+  "must",
+  "your",
+  "you",
+  "into",
+  "then",
+  "than",
+  "when",
+  "what",
+  "which",
+  "there",
+  "their",
+  "them",
+  "they",
+  "been",
+  "being",
+  "does",
+  "make",
+  "made",
+  "used",
+  "using",
+  "also",
+  "only",
+  "each",
+  "more",
+  "most",
+  "some",
+  "such",
+  "very",
+  "just",
+  "like",
+  "over",
+  "after",
+  "before",
+  "because",
+  "about",
+  "under",
+  "above",
+  "below",
+  "where",
+  "while",
+  "since",
+  "until",
+  "unless",
+  "either",
+  "neither",
+  "both",
+  "every",
+  "not",
+  "but",
+  "and",
+  "the",
+  "for",
+  "are",
+  "was",
+  "were",
+  "its",
+  "here",
+  "how",
+  "why",
+  "who",
+  "whom",
+  "whose",
+  "any",
+  "all",
+  "can",
+  "may",
+  "might",
+  "shall",
+  // Sterling dispatch boilerplate — present in ~every prompt, so pure noise
+  "sterling",
+  "conductor",
+  "agent",
+  "agents",
+  "subagent",
+  "dispatch",
+  "report",
+  "return",
+  "verify",
+  "verified",
+  "evidence",
+  "record",
+  "records",
+  "store",
+  "knowledge",
+  "query",
+  "knowledge_get",
+  "knowledge_query",
+  "read",
+  "reads",
+  "grep",
+  "file",
+  "files",
+  "code",
+  "first",
+  "second",
+  "third",
+  "task",
+  "work",
+  "please",
+  "note",
+  "notes",
+  "deliverable",
+  "claim",
+  "claims",
+  "absence",
+  "cite",
+  "cites",
+  "citing",
+  "exactly",
+  "nothing",
+  "else"
+]);
+var AXIS_MIN_TERM_LEN = 4;
+var AXIS_MAX_TERM_LEN = 64;
+var AXIS_MIN_HITS = 2;
+function extractAxisTerms(text, maxTerms) {
+  return rankedAxisTerms(text).slice(0, Math.max(0, maxTerms));
+}
+function rankedAxisTerms(text) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const raw of String(text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
+    if (raw.length < AXIS_MIN_TERM_LEN || raw.length > AXIS_MAX_TERM_LEN)
+      continue;
+    if (AXIS_STOPWORDS.has(raw))
+      continue;
+    if (/^\d+$/.test(raw))
+      continue;
+    counts.set(raw, (counts.get(raw) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).map(([term]) => term);
+}
+function extractAxisTermsUncapped(text) {
+  return rankedAxisTerms(text);
+}
+function axisNarrowText(record2) {
+  if (!record2 || typeof record2 !== "object")
+    return "";
+  if (record2.type === "anti_pattern")
+    return `${record2.title ?? ""}
+${record2.trigger ?? ""}`;
+  if (record2.type === "decision")
+    return `${record2.title ?? ""}
+${record2.statement ?? ""}`;
+  if (record2.type === "feature_article")
+    return `${record2.slug ?? ""} ${record2.concept_family ?? ""}
+${record2.title ?? ""}`;
+  if (record2.type === "research_finding")
+    return `${record2.question ?? ""}`;
+  if (record2.type === "disconfirmed_hypothesis")
+    return `${record2.question ?? ""}`;
+  if (record2.type === "open_question")
+    return `${record2.question ?? ""}`;
+  return "";
+}
+function axisTitleText(record2) {
+  if (!record2 || typeof record2 !== "object")
+    return "";
+  if (record2.type === "anti_pattern")
+    return `${record2.title ?? ""}`;
+  if (record2.type === "decision")
+    return `${record2.title ?? ""}`;
+  if (record2.type === "feature_article")
+    return `${record2.slug ?? ""} ${record2.concept_family ?? ""}
+${record2.title ?? ""}`;
+  if (record2.type === "research_finding")
+    return `${record2.question ?? ""}`;
+  if (record2.type === "disconfirmed_hypothesis")
+    return `${record2.question ?? ""}`;
+  if (record2.type === "open_question")
+    return `${record2.question ?? ""}`;
+  return "";
+}
+function axisHits(record2, terms) {
+  const hay = axisNarrowText(record2).toLowerCase();
+  if (!hay)
+    return [];
+  return terms.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay));
+}
+var GENERIC_DEV_TERMS = /* @__PURE__ */ new Set([
+  "test",
+  "tests",
+  "testing",
+  "script",
+  "scripts",
+  "commit",
+  "commits",
+  "branch",
+  "merge",
+  "build",
+  "builds",
+  "check",
+  "checks",
+  "node",
+  "file",
+  "files",
+  "path",
+  "paths",
+  "run",
+  "runs",
+  "running",
+  "item",
+  "items",
+  "text",
+  "change",
+  "changed",
+  "changes",
+  "code",
+  "repo",
+  "line",
+  "lines",
+  "error",
+  "errors",
+  "string",
+  "value",
+  "values",
+  "field",
+  "fields",
+  "message",
+  "messages",
+  "output",
+  "input",
+  "name",
+  "names",
+  "list",
+  "exact",
+  "existing",
+  "touched",
+  "untouched",
+  "through",
+  "actually",
+  "behavior",
+  "still",
+  "full"
+]);
+function candidateBases(term) {
+  const bases = /* @__PURE__ */ new Set([term]);
+  for (const suffix of ["ing", "ed", "es", "s"]) {
+    if (!term.endsWith(suffix) || suffix === "s" && term.endsWith("ss"))
+      continue;
+    const rest = term.slice(0, -suffix.length);
+    for (const base2 of [rest, `${rest}e`])
+      if (base2.length >= 3)
+        bases.add(base2);
+  }
+  return bases;
+}
+function hasDiscriminatingHit(hits, minDiscriminating = 1) {
+  const terms = [...new Set(hits.map((t) => String(t).toLowerCase()).filter((t) => !GENERIC_DEV_TERMS.has(t)))];
+  const groups = [];
+  for (const term of terms) {
+    const merged = candidateBases(term);
+    for (let i = groups.length - 1; i >= 0; i--) {
+      if ([...groups[i]].some((b) => merged.has(b))) {
+        for (const b of groups[i])
+          merged.add(b);
+        groups.splice(i, 1);
+      }
+    }
+    groups.push(merged);
+  }
+  return groups.length >= minDiscriminating;
+}
+var AXIS_RECORD_TOP_K = 6;
+var AXIS_MIN_RECORD_TERMS = 2;
+function narrowCentralTerms(record2, topK) {
+  return extractAxisTerms(axisNarrowText(record2), topK);
+}
+function unionCentralTerms(record2, topK) {
+  return [
+    .../* @__PURE__ */ new Set([...narrowCentralTerms(record2, topK), ...extractAxisTerms(axisTitleText(record2), topK)])
+  ];
+}
+function recordCentralTerms(record2, opts = {}) {
+  return unionCentralTerms(record2, opts.topK ?? AXIS_RECORD_TOP_K);
+}
+function coveredCentralTerms(central, outgoingText) {
+  const words = [
+    ...new Set(String(outgoingText ?? "").toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length >= AXIS_MIN_TERM_LEN))
+  ];
+  if (!words.length)
+    return [];
+  return central.filter((c) => words.some((w) => w.startsWith(c) || c.startsWith(w)));
+}
+function recordCentralityHits(record2, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  return coveredCentralTerms(unionCentralTerms(record2, topK), outgoingText);
+}
+function hasRecordCentralityHit(record2, outgoingText, opts = {}) {
+  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
+  const minTerms = opts.minTerms ?? AXIS_MIN_RECORD_TERMS;
+  const central = unionCentralTerms(record2, topK);
+  const covered = coveredCentralTerms(central, outgoingText);
+  return covered.length >= Math.min(minTerms, central.length);
+}
+
+// packages/store/dist/domain-fit.js
+var DOMAIN_FIT_MIN_TERMS = 2;
+function termsMatch(a, b) {
+  return a === b || a.startsWith(b) || b.startsWith(a);
+}
+function subjectTerms(text) {
+  return extractAxisTermsUncapped(text).filter((t) => t.length >= AXIS_MIN_TERM_LEN && !GENERIC_DEV_TERMS.has(t));
+}
+function fitDomains(recordText, domains, opts = {}) {
+  if (typeof recordText !== "string")
+    throw new TypeError("fitDomains: recordText must be a string");
+  if (!Array.isArray(domains))
+    throw new TypeError("fitDomains: domains must be an array");
+  const minTerms = opts.minTerms ?? DOMAIN_FIT_MIN_TERMS;
+  if (!Number.isInteger(minTerms) || minTerms < 1) {
+    throw new RangeError(`fitDomains: minTerms must be a positive integer, got ${String(minTerms)}`);
+  }
+  if (opts.exclude !== void 0 && (!Array.isArray(opts.exclude) || opts.exclude.some((n) => typeof n !== "string"))) {
+    throw new TypeError("fitDomains: exclude must be an array of strings");
+  }
+  const excluded = new Set((opts.exclude ?? []).map((n) => n.toLowerCase()));
+  const seen = /* @__PURE__ */ new Set();
+  for (const d of domains) {
+    if (d === null || typeof d !== "object" || typeof d.name !== "string" || d.name.trim() === "") {
+      throw new TypeError("fitDomains: every domain needs a non-empty string name");
+    }
+    if (d.description != null && typeof d.description !== "string") {
+      throw new TypeError(`fitDomains: description of domain '${d.name}' must be a string`);
+    }
+    const key = d.name.toLowerCase();
+    if (seen.has(key))
+      throw new Error(`fitDomains: duplicate domain name '${d.name}'`);
+    seen.add(key);
+  }
+  const recordTerms = subjectTerms(recordText);
+  const fits = [];
+  for (const d of domains) {
+    if (excluded.has(d.name.toLowerCase()) || !d.description)
+      continue;
+    const descTerms = subjectTerms(d.description);
+    if (!descTerms.length)
+      continue;
+    const matched = descTerms.filter((dt) => recordTerms.some((rt) => termsMatch(dt, rt)));
+    if (matched.length < Math.min(minTerms, descTerms.length))
+      continue;
+    fits.push({ name: d.name, score: matched.length / descTerms.length, matched });
+  }
+  return fits.sort((a, b) => b.score - a.score || b.matched.length - a.matched.length || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+// packages/store/dist/registry.js
+import { DatabaseSync } from "node:sqlite";
+
+// packages/store/dist/sqlite-driver.js
+import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
+import { realpathSync } from "node:fs";
+import { dirname as dirname3, basename, join as join5, resolve as resolvePath } from "node:path";
+var DDL = `
+CREATE TABLE IF NOT EXISTS records (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  superseded_by TEXT,
+  lifecycle TEXT NOT NULL DEFAULT 'live',
+  freshness TEXT NOT NULL DEFAULT 'fresh',
+  version INTEGER NOT NULL DEFAULT 1,
+  scope TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  author TEXT NOT NULL,
+  derived_unconfirmed INTEGER NOT NULL DEFAULT 0,
+  body TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_records_type_status ON records(type, status);
+-- Schema v2 identity tables [stable-identity-design-v2].
+-- record_versions: FULL-RECORD JSON snapshots, one per (record_id, version).
+-- Append-only and permanent \u2014 NEVER indexed into records_fts, so an archived
+-- version's text can never rank in query() (the whole point of contract 1).
+CREATE TABLE IF NOT EXISTS record_versions (
+  record_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  archived_at TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (record_id, version)
+);
+-- record_aliases: dead-id lookup (historical_id -> canonical_id + the version
+-- archived under that historical id). NOTHING writes it in S2 \u2014 the S4
+-- migration runner populates it once; it is an index, not a namespace.
+CREATE TABLE IF NOT EXISTS record_aliases (
+  historical_id TEXT PRIMARY KEY,
+  canonical_id TEXT NOT NULL,
+  archived_version INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+-- remove() deletes aliases by canonical_id.
+CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON record_aliases(canonical_id);
+-- record_relations: the AUTHORITATIVE home of typed edges (supersedes,
+-- cites, ...). Replaces record_links: served links[] materializes from here,
+-- and supersession is a relation rather than a column value a caller sets.
+CREATE TABLE IF NOT EXISTS record_relations (
+  source_id TEXT NOT NULL,
+  rel TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (source_id, rel, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_relations_target ON record_relations(target_id);
+CREATE INDEX IF NOT EXISTS idx_relations_rel_target ON record_relations(rel, target_id);
+CREATE TABLE IF NOT EXISTS record_stack_tags (
+  record_id TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  PRIMARY KEY (record_id, tag)
+);
+CREATE TABLE IF NOT EXISTS record_file_keys (
+  record_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  PRIMARY KEY (record_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_file_keys_path ON record_file_keys(path);
+CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(record_id UNINDEXED, text);
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  machine_state TEXT NOT NULL,
+  pending_exit TEXT,
+  body TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS handoffs (
+  run_id TEXT NOT NULL,
+  phase_id TEXT NOT NULL,
+  agent_role TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoffs_run_phase ON handoffs(run_id, phase_id);
+CREATE TABLE IF NOT EXISTS check_skipped (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT,
+  check_name TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS selection (
+  slot INTEGER PRIMARY KEY CHECK (slot = 1),
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS queue_drain_log (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  drained_at TEXT NOT NULL,
+  system_reason TEXT NOT NULL,
+  text TEXT NOT NULL,
+  file_keys TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS activity_log (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  verb TEXT NOT NULL,
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  title TEXT NOT NULL
+);
+-- Store-level key/value metadata (board 675daf9d, decision
+-- projects-mount-domains-and-sibling-projects): a domain store's description is
+-- its 'description' key. Additive: CREATE IF NOT EXISTS on every v2 open, so no
+-- user_version bump; a pre-v2 store opens read-only before this DDL runs.
+CREATE TABLE IF NOT EXISTS store_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+function journalDemotionRequired(absPath, platform = process.platform) {
+  if (platform !== "linux")
+    return false;
+  return /^\/mnt\/[a-zA-Z]\//.test(absPath.replace(/\\/g, "/"));
+}
+var JournalDemotionRefusedError = class extends Error {
+  dbPath;
+  returnedMode;
+  constructor(dbPath, returnedMode, options) {
+    super(options?.message ?? `journal_mode=DELETE demotion refused for '${dbPath}' (PRAGMA returned '${returnedMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`, options?.cause !== void 0 ? { cause: options.cause } : void 0);
+    this.dbPath = dbPath;
+    this.returnedMode = returnedMode;
+    this.name = "JournalDemotionRefusedError";
+  }
+};
+var DEFAULT_BUSY_TIMEOUT_MS = 5e3;
+var sqliteDialect = {
+  searchJoin: "JOIN records_fts f ON f.record_id = r.id",
+  searchJoinBinds: 0,
+  searchMatch: "records_fts MATCH ?",
+  // FTS5's bm25() is LOWER for a better match, so the score is its negation.
+  searchScore: "(-bm25(records_fts))",
+  searchOrder: "bm25(records_fts) ASC",
+  scoreScale: "fts5_bm25",
+  // FTS5's unicode61 tokenizer does its own folding; the text goes in as built.
+  searchText: (text) => text,
+  /**
+   * The FTS5 MATCH expression rank_terms compiles to. A trailing '*' marks an
+   * FTS5 prefix query ("stor*" matches "store") — the star must sit OUTSIDE the
+   * quoted token to act as the prefix operator.
+   */
+  searchQuery(terms, matchAll) {
+    const joiner = matchAll ? " AND " : " OR ";
+    return terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+  },
+  jsonText: (column, key) => `json_extract(${column}, '$.${key}')`,
+  insertionOrder: (alias) => alias ? `${alias}.rowid` : "rowid",
+  insertIgnore: (table, columns) => `INSERT OR IGNORE INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`
+};
+var SqliteDriver = class {
+  dialect = sqliteDialect;
+  db;
+  /** The absolute path of the database file, for the refusal messages. */
+  dbPath;
+  /** The path the journal-mode policy classifies: dbPath with its directory's symlinks resolved. */
+  classifiedPath;
+  constructor(path, options = {}) {
+    const busyTimeoutMs = options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS;
+    if (typeof busyTimeoutMs !== "number" || !Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0) {
+      throw new Error(`SqliteDriver: busyTimeoutMs must be a non-negative integer, got ${String(busyTimeoutMs)}`);
+    }
+    this.dbPath = resolvePath(path);
+    this.db = new DatabaseSync2(path);
+    let classifiedPath = this.dbPath;
+    try {
+      classifiedPath = join5(realpathSync(dirname3(this.dbPath)), basename(this.dbPath));
+    } catch {
+    }
+    this.classifiedPath = classifiedPath;
+    this.db.exec(`PRAGMA busy_timeout=${busyTimeoutMs}`);
+  }
+  prepare(sql) {
+    return this.db.prepare(sql);
+  }
+  exec(sql) {
+    this.db.exec(sql);
+  }
+  close() {
+    this.db.close();
+  }
+  /** BEGIN IMMEDIATE: takes the write lock now, or throws once busy_timeout runs out. */
+  begin() {
+    this.db.exec("BEGIN IMMEDIATE");
+  }
+  commit() {
+    this.db.exec("COMMIT");
+  }
+  rollback() {
+    this.db.exec("ROLLBACK");
+  }
+  /** PRAGMA user_version — the application-owned integer, NEVER SQLite's own PRAGMA schema_version. */
+  schemaVersion() {
+    return this.db.prepare("PRAGMA user_version").get().user_version;
+  }
+  setSchemaVersion(version2) {
+    if (!Number.isInteger(version2) || version2 < 0) {
+      throw new Error(`SqliteDriver: schema version must be a non-negative integer, got ${String(version2)}`);
+    }
+    this.db.exec(`PRAGMA user_version = ${version2}`);
+  }
+  /** sqlite_master is empty only before the DDL has ever run on this file. A read, so a refusal after it has still written nothing. */
+  hasSchema() {
+    return this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n > 0;
+  }
+  prepareReadOnly() {
+    if (!journalDemotionRequired(this.classifiedPath))
+      return;
+    let legacyMode;
+    try {
+      legacyMode = this.journalMode();
+    } catch (e) {
+      this.db.close();
+      throw e;
+    }
+    if (legacyMode === "wal") {
+      this.db.close();
+      throw new JournalDemotionRefusedError(this.dbPath, legacyMode, {
+        message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, PRAGMA journal_mode='${legacyMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. Migrate the store first (\`node "<Sterling root>/bin/migrate-stores.mjs"\`) or open it from a non-9p context \u2014 closing other connections will not help here.`
+      });
+    }
+  }
+  prepareWritable(isFresh) {
+    if (journalDemotionRequired(this.classifiedPath)) {
+      let returnedMode;
+      try {
+        returnedMode = this.db.prepare("PRAGMA journal_mode=DELETE").get().journal_mode;
+      } catch (e) {
+        this.db.close();
+        const detail = e instanceof Error ? e.message : String(e);
+        throw new JournalDemotionRefusedError(this.dbPath, detail, {
+          cause: e,
+          message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (PRAGMA threw: ${detail}) \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`
+        });
+      }
+      if (returnedMode !== "delete") {
+        this.db.close();
+        throw new JournalDemotionRefusedError(this.dbPath, returnedMode);
+      }
+    } else {
+      const currentMode = this.journalMode();
+      if (currentMode !== "delete") {
+        this.db.exec("PRAGMA journal_mode=WAL");
+      } else if (isFresh) {
+        const stillFresh = !this.hasSchema();
+        if (stillFresh) {
+          this.db.exec("PRAGMA journal_mode=WAL");
+        }
+      }
+    }
+    this.db.exec("PRAGMA foreign_keys=ON");
+    this.db.exec(DDL);
+    try {
+      this.db.exec("ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT");
+    } catch {
+    }
+    try {
+      this.db.exec("ALTER TABLE records ADD COLUMN operation_id TEXT");
+    } catch {
+    }
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON records(operation_id)");
+  }
+  journalMode() {
+    return this.db.prepare("PRAGMA journal_mode").get().journal_mode;
+  }
+  /** VACUUM INTO: a consistent copy taken without stopping other connections. */
+  snapshot(targetPath) {
+    this.db.exec(`VACUUM INTO '${targetPath.replace(/'/g, "''")}'`);
+  }
+};
+
+// packages/store/dist/index.js
+var storeDriverFactory;
+function classifyClaimPath(repoRoot, path) {
+  try {
+    return statSync2(join6(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
+  } catch (err) {
+    const code = err?.code;
+    if (code === "ENOENT")
+      return "absent";
+    return { kind: "unverifiable", errno: code ?? String(err) };
+  }
+}
+var StoreRowDecodeError = class extends Error {
+  op;
+  constructor(op, cause) {
+    super(`${op}: a record row's body is not valid JSON (${cause?.message ?? String(cause)})`);
+    this.name = "StoreRowDecodeError";
+    this.op = op;
+  }
+};
+function decodeLiveRecordRow(op, row) {
+  let record2;
+  try {
+    record2 = JSON.parse(row.body);
+  } catch (e) {
+    throw new StoreRowDecodeError(op, e);
+  }
+  if (typeof row.scope !== "string" || row.scope.length === 0) {
+    throw new Error(`${op}: record '${record2.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
+  }
+  record2.scope = row.scope;
+  return record2;
+}
+var SUPPORTED_SCHEMA_VERSION = 2;
+var OperationRepeatedError = class extends Error {
+  operation_id;
+  original_id;
+  constructor(operation_id, original_id) {
+    super(`operation '${operation_id}' already ran: it wrote record '${original_id}'. A repeated operation is refused, never applied twice; nothing was written. Read '${original_id}' to see what landed.`);
+    this.operation_id = operation_id;
+    this.original_id = original_id;
+    this.name = "OperationRepeatedError";
+  }
+};
+var StoreMovedError = class extends Error {
+  db_path;
+  constructor(db_path) {
+    super(`store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`);
+    this.db_path = db_path;
+    this.name = "StoreMovedError";
+  }
+};
+function operationIdOf(options, op) {
+  const id = options?.operation_id;
+  if (id === void 0)
+    return void 0;
+  if (typeof id !== "string" || id.length === 0 || id.length > 200) {
+    throw new Error(`${op}: operation_id must be a non-empty string of at most 200 characters; nothing was written.`);
+  }
+  return id;
+}
+var UnsupportedSchemaVersionError = class extends Error {
+  found;
+  supported;
+  constructor(found, supported) {
+    super(`Unsupported schema version: this store's user_version (${found}) is newer than the schema version this build supports (${supported}). This store was likely migrated by a newer build of Sterling. Do not open it with an older/downgraded build \u2014 writing with a downgraded build over a newer schema risks corrupting the store. Upgrade this build (or restore from a backup taken before the migration) before continuing.`);
+    this.name = "UnsupportedSchemaVersionError";
+    this.found = found;
+    this.supported = supported;
+  }
+};
+function shellQuoteSingle(value) {
+  return `'${value.split("'").join(`'\\''`)}'`;
+}
+var SchemaMigrationRequiredError = class extends Error {
+  found;
+  supported;
+  /**
+   * The absolute path of the store file that needs migrating (measured
+   * defect, Salesforce consumer 2026-08-26): without this a hook surfacing
+   * the error showed only a bare bundle line number, and the user could not
+   * tell WHICH of several candidate stores on the machine to migrate.
+   */
+  db_path;
+  constructor(found, supported, operation, dbPath) {
+    super(`Schema migration required: the store at '${dbPath}' is at schema version ${found}, but this build requires version ${supported}. The store is open READ-ONLY \u2014 '${operation}' and every other write refuses until the stable-identity migration has run. Run: node "<Sterling root>/bin/migrate-stores.mjs" --db ${shellQuoteSingle(dbPath)} (decision stable-identity-design-v2; the runner takes a VACUUM INTO backup first, and bumps user_version last). Nothing was written.`);
+    this.name = "SchemaMigrationRequiredError";
+    this.found = found;
+    this.supported = supported;
+    this.db_path = dbPath;
+  }
+};
+function refreshReferenceDeltaSuffix(catalogRecord) {
+  const entries = catalogRecord?.catalog?.entries ?? [];
+  if (entries.length === 0)
+    return "";
+  const snapshot = entries.map((e) => `${e.id} (tier: ${e.tier}, status: ${e.status})`).join(", ");
+  const unknownTier = entries.filter((e) => e.tier === "unknown").map((e) => e.id);
+  const lookup = unknownTier.length > 0 ? `tier is still 'unknown' for: ${unknownTier.join(", ")} \u2014 look these up and ` : "re-verify these against current provider info and ";
+  return ` \u2014 current entries: ${snapshot}. ${lookup}update catalog.entries[] on the linked record via knowledge_edit/knowledge_update, then bump its source_date and cite this item's id in resolves.`;
+}
+function activityTitleOf(record2) {
+  const r = record2;
+  const raw = r.title ?? r.text?.split("\n")[0] ?? r.slug ?? r.id;
+  return raw.slice(0, 80);
+}
+function deepReplaceString(value, from, to) {
+  if (typeof value === "string")
+    return value === from ? to : value;
+  if (Array.isArray(value))
+    return value.map((v) => deepReplaceString(v, from, to));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
+  }
+  return value;
+}
+function boardItemHandle(rec) {
+  const label = boardDisplayLabel(rec.text, rec.slug);
+  return label ? displayHandle(label, rec.id) : `(unnamed board item) (${rec.id.slice(0, 8)})`;
+}
+var MAX_RANK_TERMS = 16;
+function rankTermDedupeKey(term) {
+  const isPrefix = term.endsWith("*") && term.length > 1;
+  const base2 = isPrefix ? term.slice(0, -1) : term;
+  const folded = base2.toLowerCase().replace(/[\p{P}\p{Z}]+/gu, " ").trim();
+  const key = folded.length > 0 ? folded : base2;
+  return isPrefix ? `${key}*` : key;
+}
+var rankTerms = external_exports.array(external_exports.string().regex(new RegExp(`^\\S{1,${AXIS_MAX_TERM_LEN}}$`), `rank_terms must be single keywords (no whitespace, \u2264${AXIS_MAX_TERM_LEN} chars)`)).transform((terms) => {
+  const seen = /* @__PURE__ */ new Set();
+  const deduped = [];
+  for (const term of terms) {
+    const key = rankTermDedupeKey(term);
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    deduped.push(term);
+  }
+  return deduped;
+}).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
+var DEFAULT_QUERY_CAP = 20;
+var MAX_BODY_COMPARE_DEPTH = 64;
+var COMPARE_WORK_BUDGET = 1e7;
+var COMPARE_OUTPUT_BUDGET = 5e4;
+var COMPARE_PATH_LENGTH_BUDGET = 1e6;
+var ComparisonBudgetExceededError = class extends Error {
+};
+function newComparisonBudget() {
+  let work = 0;
+  let output = 0;
+  return {
+    chargeWork() {
+      work += 1;
+      if (work > COMPARE_WORK_BUDGET) {
+        throw new ComparisonBudgetExceededError(`droppedKeyPaths exceeded its comparison work budget (${COMPARE_WORK_BUDGET} nodes/edges visited) \u2014 refusing rather than continuing an unaffordable comparison. This usually means the record body shares structure by reference in a way that re-walks the same subtree many times over; there is no partial result to return. Nothing was written \u2014 this throw always precedes the write transaction.`);
+      }
+    },
+    chargeOutput() {
+      output += 1;
+      if (output > COMPARE_OUTPUT_BUDGET) {
+        throw new ComparisonBudgetExceededError(`droppedKeyPaths exceeded its output-path budget (${COMPARE_OUTPUT_BUDGET} lost paths) \u2014 refusing rather than returning a partial loss list. A legitimate loss report never needs this many entries; this means the comparison is enumerating a pathologically large or heavily-shared subtree. Nothing was written \u2014 this throw always precedes the write transaction.`);
+      }
+    },
+    chargePathLength(prospectiveLength) {
+      if (prospectiveLength > COMPARE_PATH_LENGTH_BUDGET) {
+        throw new ComparisonBudgetExceededError(`droppedKeyPaths exceeded its path-length budget (${COMPARE_PATH_LENGTH_BUDGET} characters in one accumulated key path) \u2014 refusing rather than building or returning an oversized path string. This means the record body's own keys are themselves very large strings, nested deep enough that concatenating them into one addressable path has grown past what any legitimate record address needs. Nothing was written \u2014 this throw always precedes the write transaction.`);
+      }
+    }
+  };
+}
+function depthBoundError() {
+  return new Error(`record body nesting exceeds the depth bound of ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
+}
+function appendPathSegment(path, segment, budget) {
+  if (typeof segment === "number") {
+    if (budget)
+      budget.chargePathLength(path.length + 2 + String(segment).length);
+    return `${path}[${segment}]`;
+  }
+  const prospectiveLength = path ? path.length + 1 + segment.length : segment.length;
+  if (budget)
+    budget.chargePathLength(prospectiveLength);
+  return path ? `${path}.${segment}` : segment;
+}
+function emitTotalLoss(value, path, depth, out, budget) {
+  if (depth > MAX_BODY_COMPARE_DEPTH)
+    throw depthBoundError();
+  budget.chargePathLength(path.length);
+  budget.chargeWork();
+  if (path !== "") {
+    budget.chargeOutput();
+    out.push(path);
+  }
+  if (value === null || typeof value !== "object")
+    return;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      emitTotalLoss(value[i], appendPathSegment(path, i, budget), depth + 1, out, budget);
+    }
+    return;
+  }
+  for (const key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key))
+      continue;
+    emitTotalLoss(value[key], appendPathSegment(path, key, budget), depth + 1, out, budget);
+  }
+}
+function walkDropped(before, after, path, depth, out, budget) {
+  if (depth > MAX_BODY_COMPARE_DEPTH)
+    throw depthBoundError();
+  budget.chargePathLength(path.length);
+  budget.chargeWork();
+  if (before === null || typeof before !== "object")
+    return;
+  if (Array.isArray(before)) {
+    if (!Array.isArray(after)) {
+      emitTotalLoss(before, path, depth, out, budget);
+      return;
+    }
+    for (let i = 0; i < before.length; i++) {
+      const here = appendPathSegment(path, i, budget);
+      if (i >= after.length)
+        emitTotalLoss(before[i], here, depth + 1, out, budget);
+      else
+        walkDropped(before[i], after[i], here, depth + 1, out, budget);
+    }
+    return;
+  }
+  if (after === null || typeof after !== "object" || Array.isArray(after)) {
+    emitTotalLoss(before, path, depth, out, budget);
+    return;
+  }
+  const parsed = after;
+  for (const key in before) {
+    if (!Object.prototype.hasOwnProperty.call(before, key))
+      continue;
+    const here = appendPathSegment(path, key, budget);
+    if (!Object.prototype.hasOwnProperty.call(parsed, key))
+      emitTotalLoss(before[key], here, depth + 1, out, budget);
+    else
+      walkDropped(before[key], parsed[key], here, depth + 1, out, budget);
+  }
+}
+function droppedKeyPaths(before, after) {
+  const out = [];
+  const budget = newComparisonBudget();
+  walkDropped(before, after, "", 0, out, budget);
+  return out;
+}
+function renderCappedPathList(dropped, cap = 20) {
+  if (dropped.length <= cap)
+    return dropped.join(", ");
+  const remaining = dropped.length - cap;
+  return `${dropped.slice(0, cap).join(", ")}, \u2026 and ${remaining} more lost ${remaining === 1 ? "path" : "paths"}`;
+}
+function assertNoFieldLoss(op, before, after) {
+  const dropped = droppedKeyPaths(before, after);
+  if (dropped.length === 0)
+    return;
+  const type = typeof before.type === "string" ? before.type : "unknown";
+  const pathList = renderCappedPathList(dropped);
+  throw new Error(`${op}: record type '${type}' would DROP ${dropped.length === 1 ? "this field" : "these fields"} on the way in \u2014 either the field is not defined by the schema, or its value's shape no longer matches the schema's definition (e.g. an object/array in place of the other) \u2014 and the schema parse would DROP ${dropped.length === 1 ? "it" : "them"} silently: ${pathList}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`);
+}
+function unrecognizedKeyPaths(error2) {
+  const issues = error2?.issues;
+  if (!Array.isArray(issues))
+    return [];
+  const out = [];
+  for (const raw of issues) {
+    const issue2 = raw;
+    if (issue2.code !== "unrecognized_keys" || !Array.isArray(issue2.keys))
+      continue;
+    const segments = Array.isArray(issue2.path) ? issue2.path : [];
+    const base2 = segments.reduce((acc, segment) => appendPathSegment(acc, typeof segment === "number" ? segment : String(segment)), "");
+    for (const key of issue2.keys)
+      out.push(appendPathSegment(base2, String(key)));
+  }
+  return out;
+}
+var DECLARED_CAPTURE_OWED_PREFIX = "capture owed: declared pending (";
+var DECLARED_CAPTURE_TARGET_TRAILER = " [target ";
+function declaredCaptureTarget(text) {
+  if (typeof text !== "string" || !text.startsWith(DECLARED_CAPTURE_OWED_PREFIX) || !text.endsWith('"]'))
+    return null;
+  const at = text.lastIndexOf(`${DECLARED_CAPTURE_TARGET_TRAILER}"`);
+  if (at < 0)
+    return null;
+  let target;
+  try {
+    target = JSON.parse(text.slice(at + DECLARED_CAPTURE_TARGET_TRAILER.length, -1));
+  } catch {
+    return null;
+  }
+  return typeof target === "string" && target.length > 0 ? target : null;
+}
+function systemTodoKey(t) {
+  const declaredTarget = t.system_reason === "capture_owed" ? declaredCaptureTarget(t.text) : null;
+  if (declaredTarget !== null)
+    return JSON.stringify(["capture_owed", t.feature_link ?? "", [], `declared-target:${declaredTarget}`]);
+  const files = t.system_reason === "state_review" ? [] : [...t.file_keys ?? []].sort();
+  const identified = !!t.feature_link || files.length > 0;
+  return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
+}
+function systemTodoTextsEquivalent(reason, a, b) {
+  if (reason !== "state_review")
+    return a === b;
+  const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
+  return strip(a) === strip(b);
+}
+function buildReconcileText(owner, fileKeys) {
+  const files = [...fileKeys].sort();
+  return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
+}
+var SterlingStore = class _SterlingStore {
+  /** The one connection, behind the driver seam (driver.ts). Every statement, transaction and open step goes through it. */
+  db;
+  /**
+   * Set ONLY when an existing, non-empty store below SUPPORTED_SCHEMA_VERSION
+   * was opened ([stable-identity-design-v2]): the connection is read-only and
+   * assertWritable() refuses every write naming the required migration.
+   * undefined = a normal, writable store at the supported version.
+   */
+  legacySchemaVersion;
+  /**
+   * PRAGMA user_version as of the moment this handle finished opening (board
+   * d5942fa0 gap (b) — the LIVE write guard, extending the open-time guard
+   * above to a store that stays open across a migration). undefined ONLY
+   * during the brief window inside the constructor itself: assertLiveSchemaVersion
+   * no-ops then, because the open-time guard already owns that window and the
+   * fresh-store stamp-forward transaction below would otherwise be comparing
+   * against a baseline it hasn't captured yet. Every public write re-reads
+   * PRAGMA user_version against this captured baseline immediately before
+   * mutating; a mismatch means a SECOND process (MCP server or TUI) migrated
+   * the file while this handle stayed open, and the write is refused with
+   * nothing written — matching the open-time guard's loud-failure style.
+   */
+  openedSchemaVersion;
+  /**
+   * The absolute path of this store's database file, retained for
+   * SchemaMigrationRequiredError (measured defect, Salesforce consumer
+   * 2026-08-26): the constructor received the path but never kept it, so a
+   * migration refusal named only found/supported versions — a hook surfacing
+   * the error showed a bare bundle line number and the user could not tell
+   * WHICH store to migrate.
+   */
+  dbPath;
+  constructor(path, options = {}) {
+    this.dbPath = resolvePath2(path);
+    if (options.driver !== void 0 && options.busyTimeoutMs !== void 0) {
+      options.driver.close();
+      throw new Error("SterlingStore: busyTimeoutMs configures the SQLite driver this store opens itself; it cannot be combined with an injected driver \u2014 set it on that driver.");
+    }
+    if (options.driver === void 0 && storeDriverFactory !== void 0) {
+      options = { driver: storeDriverFactory(path, { busyTimeoutMs: options.busyTimeoutMs }) };
+    }
+    this.db = options.driver ?? new SqliteDriver(path, { busyTimeoutMs: options.busyTimeoutMs });
+    const foundSchemaVersion = this.db.schemaVersion();
+    if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
+      this.db.close();
+      throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
+    }
+    let isFresh = false;
+    let published = false;
+    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION && this.db.publishFresh !== void 0) {
+      let settled;
+      try {
+        settled = this.db.publishFresh(SUPPORTED_SCHEMA_VERSION);
+      } catch (e) {
+        this.db.close();
+        throw e;
+      }
+      if (settled > SUPPORTED_SCHEMA_VERSION) {
+        this.db.close();
+        throw new UnsupportedSchemaVersionError(settled, SUPPORTED_SCHEMA_VERSION);
+      }
+      if (settled < SUPPORTED_SCHEMA_VERSION) {
+        this.db.prepareReadOnly();
+        this.legacySchemaVersion = settled;
+        this.openedSchemaVersion = settled;
+        return;
+      }
+      published = true;
+    } else if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
+      if (this.db.hasSchema()) {
+        this.db.prepareReadOnly();
+        this.legacySchemaVersion = foundSchemaVersion;
+        this.openedSchemaVersion = foundSchemaVersion;
+        return;
+      }
+      isFresh = true;
+    }
+    if (!published)
+      this.db.prepareWritable(isFresh);
+    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION && !published) {
+      try {
+        this.tx(() => {
+          const current = this.db.schemaVersion();
+          if (current > SUPPORTED_SCHEMA_VERSION) {
+            throw new UnsupportedSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION);
+          }
+          if (current < SUPPORTED_SCHEMA_VERSION) {
+            this.db.setSchemaVersion(SUPPORTED_SCHEMA_VERSION);
+          }
+        });
+      } catch (e) {
+        this.db.close();
+        throw e;
+      }
+    }
+    this.openedSchemaVersion = this.db.schemaVersion();
+    if (this.openedSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
+      this.db.close();
+      throw new UnsupportedSchemaVersionError(this.openedSchemaVersion, SUPPORTED_SCHEMA_VERSION);
+    }
+  }
+  journalMode() {
+    return this.db.journalMode();
+  }
+  // -------------------------------------------------------------------------
+  // Schema v2 identity core [stable-identity-design-v2]
+  // -------------------------------------------------------------------------
+  /**
+   * The ONE refusal for anything a pre-migration store cannot answer — one
+   * definition, two callers below (writes, and the v2-only read surfaces).
+   */
+  assertV2Surface(operation) {
+    if (this.legacySchemaVersion !== void 0) {
+      throw new SchemaMigrationRequiredError(this.legacySchemaVersion, SUPPORTED_SCHEMA_VERSION, operation, this.dbPath);
+    }
+  }
+  /**
+   * The LIVE write guard (board d5942fa0 gap (b), pin group B): re-reads
+   * PRAGMA user_version fresh and compares it against the baseline captured
+   * at open. A process that ALREADY HOLDS the store open when another process
+   * (MCP server or TUI) migrates the file underneath it would otherwise keep
+   * serving writes on a stale in-memory handle with no re-check until a full
+   * restart — this closes that gap. Reads are deliberately NOT re-checked
+   * (spec: read exemption) — only assertWritable's write callers reach this.
+   *
+   * No-ops while `openedSchemaVersion` is still undefined (mid-constructor):
+   * the open-time guard above already owns that narrow window, and the
+   * fresh-store stamp-forward transaction is itself a write that runs before
+   * the baseline can be captured.
+   */
+  assertLiveSchemaVersion(operation) {
+    if (this.openedSchemaVersion === void 0)
+      return;
+    const current = this.db.schemaVersion();
+    if (current !== this.openedSchemaVersion) {
+      throw new Error(`Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ${current} \u2014 another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every other write are refused until this session is closed. EXIT AND RELAUNCH this session to reopen against the current schema. Nothing was written.`);
+    }
+  }
+  /**
+   * The refusal seam for a pre-migration store, extended to the live write
+   * guard above. Called at the top of every public write and, as a backstop,
+   * from tx() — reads stay allowed on purpose (AC3: read-only pre-migration;
+   * live re-check exemption: pin group B).
+   */
+  assertWritable(operation) {
+    this.assertV2Surface(operation);
+    this.assertLiveSchemaVersion(operation);
+  }
+  /**
+   * The DERIVED served status: the whole API-compatibility hinge of the v2
+   * model. Nothing stores this — it is computed from (lifecycle, freshness) on
+   * every read, so a caller that has always read `status` keeps working while
+   * the store stops holding two versions of the same truth.
+   */
+  static derivedStatus(lifecycle, freshness) {
+    if (lifecycle === "retired")
+      return "superseded";
+    return freshness === "flagged_stale" ? "flagged_stale" : "active";
+  }
+  /**
+   * Resolves the v2 identity trio from a caller's input, accepting BOTH
+   * envelope shapes (write-side compatibility, pin S2-5b):
+   *   * lifecycle/freshness given directly → used as given;
+   *   * only the legacy `status` given → 'active' → live+fresh,
+   *     'superseded' → retired+fresh, 'flagged_stale' → live+flagged_stale.
+   * An out-of-enum lifecycle/freshness is refused loudly rather than coerced.
+   *
+   * It then writes the DERIVED status/superseded_by back onto the candidate,
+   * because the schemas registry still declares those two envelope fields (see
+   * envelope.ts) — a new-shape record must satisfy the same validator every
+   * legacy caller does, and the stored body drops them again afterwards.
+   */
+  static resolveIdentity(raw, defaults) {
+    const input = { ...raw };
+    const readEnum = (field, allowed) => {
+      const value = input[field];
+      if (value === void 0 || value === null)
+        return void 0;
+      if (typeof value !== "string" || !allowed.includes(value)) {
+        throw new Error(`invalid ${field} '${String(value)}' \u2014 expected one of ${allowed.join(" | ")} (stable-identity-design-v2)`);
+      }
+      return value;
+    };
+    let lifecycle = readEnum("lifecycle", LIFECYCLE_VALUES);
+    let freshness = readEnum("freshness", FRESHNESS_VALUES);
+    if (lifecycle === void 0 || freshness === void 0) {
+      const status = typeof input.status === "string" ? input.status : void 0;
+      if (status === "superseded") {
+        lifecycle ??= "retired";
+        freshness ??= "fresh";
+      } else if (status === "flagged_stale") {
+        lifecycle ??= "live";
+        freshness ??= "flagged_stale";
+      } else if (status === "active") {
+        lifecycle ??= "live";
+        freshness ??= "fresh";
+      } else {
+        lifecycle ??= defaults.lifecycle;
+        freshness ??= defaults.freshness;
+      }
+    }
+    const rawVersion = input.version;
+    let version2 = defaults.version;
+    if (typeof rawVersion === "number") {
+      if (!Number.isInteger(rawVersion) || rawVersion < 1) {
+        throw new Error(`invalid version ${rawVersion} \u2014 version is a positive integer (stable-identity-design-v2)`);
+      }
+      version2 = rawVersion;
+    }
+    input.lifecycle = lifecycle;
+    input.freshness = freshness;
+    input.version = version2;
+    input.status = _SterlingStore.derivedStatus(lifecycle, freshness);
+    if (input.superseded_by === void 0)
+      input.superseded_by = null;
+    return { input, lifecycle, freshness, version: version2 };
+  }
+  /**
+   * The identity normalization every write-side caller shares, exposed for the
+   * ONE consumer that validates BEFORE it reaches a store: MountedStores, which
+   * routes on the validated record's `scope` and so must run validateRecord
+   * itself (invariant 1 — this is the single definition, never a second copy of
+   * the lifecycle→status derivation). Without it a lifecycle-only envelope that
+   * SterlingStore.create accepts was rejected through the mounted surface,
+   * because the schemas registry still declares status/superseded_by.
+   * Idempotent: normalizing an already-normalized envelope changes nothing, so
+   * the store's own resolveIdentity re-run downstream is a no-op.
+   */
+  static normalizeIdentityEnvelope(raw) {
+    return _SterlingStore.resolveIdentity(raw, {
+      lifecycle: "live",
+      freshness: "fresh",
+      version: 1
+    }).input;
+  }
+  /**
+   * The body actually persisted: lifecycle/freshness/version are the stored
+   * truth, status/superseded_by are dropped because they are derived at read.
+   * A pre-v2 body (no lifecycle) passes through untouched, so a legacy store
+   * read through this code path is never rewritten in shape.
+   */
+  static storableBody(record2) {
+    if (typeof record2.lifecycle !== "string")
+      return record2;
+    const body = { ...record2 };
+    delete body.status;
+    delete body.superseded_by;
+    return body;
+  }
+  /**
+   * Re-attaches everything derived at read: the SERVED status/superseded_by,
+   * and links[] MATERIALIZED from record_relations (the authoritative edge
+   * home). Batched — one relations query for a whole result set, plus one more
+   * for the successor of any retired record in it — so a capped query() costs
+   * two extra reads rather than 2N.
+   *
+   * A pre-v2 body carries no `lifecycle` and is passed through verbatim: that
+   * is what keeps a pre-migration store READABLE (AC3) with no branch at every
+   * call site.
+   */
+  hydrateAll(records) {
+    const v2 = records.filter((r) => typeof r.lifecycle === "string");
+    if (!v2.length)
+      return records;
+    const ids = [...new Set(v2.map((r) => r.id))];
+    const linkRows = this.db.prepare(`SELECT source_id, rel, target_id FROM record_relations WHERE source_id IN (${ids.map(() => "?").join(",")}) ORDER BY ${this.db.dialect.insertionOrder()}`).all(...ids);
+    const bySource = /* @__PURE__ */ new Map();
+    for (const row of linkRows) {
+      const list = bySource.get(row.source_id) ?? [];
+      list.push({ rel: row.rel, target_id: row.target_id });
+      bySource.set(row.source_id, list);
+    }
+    const retiredIds = v2.filter((r) => r.lifecycle === "retired").map((r) => r.id);
+    const successor = /* @__PURE__ */ new Map();
+    if (retiredIds.length) {
+      const rows = this.db.prepare(`SELECT source_id, target_id FROM record_relations
+            WHERE rel = 'supersedes' AND target_id IN (${retiredIds.map(() => "?").join(",")}) ORDER BY ${this.db.dialect.insertionOrder()}`).all(...retiredIds);
+      for (const row of rows) {
+        if (!successor.has(row.target_id))
+          successor.set(row.target_id, row.source_id);
+      }
+    }
+    return records.map((record2) => {
+      const meta = record2;
+      if (typeof meta.lifecycle !== "string")
+        return record2;
+      const lifecycle = meta.lifecycle;
+      const freshness = meta.freshness === "flagged_stale" ? "flagged_stale" : "fresh";
+      return {
+        ...record2,
+        links: bySource.get(record2.id) ?? [],
+        status: _SterlingStore.derivedStatus(lifecycle, freshness),
+        superseded_by: lifecycle === "retired" ? successor.get(record2.id) ?? null : null
+      };
+    });
+  }
+  /** The server-owned identity columns of a live row — the CAS + lifecycle source.
+   *
+   *  `scope` joins them (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 3):
+   *  the records.scope COLUMN is NOT NULL and is written once, at insert, from the
+   *  routing decision that chose this physical store — while the JSON body's own
+   *  `scope` is caller-writable and can drift away from it (anti_pattern
+   *  [record-body-scope-is-not-physical-store-identity]). Every in-place write and
+   *  supersession below pins the candidate's scope FROM HERE, so the field is
+   *  CREATION-ONLY input and immutable afterwards. Column authoritative on disk. */
+  identityOf(id) {
+    const row = this.db.prepare("SELECT version, lifecycle, freshness, scope, body FROM records WHERE id = ?").get(id);
+    if (!row)
+      return void 0;
+    return {
+      version: row.version,
+      lifecycle: row.lifecycle === "retired" ? "retired" : "live",
+      freshness: row.freshness === "flagged_stale" ? "flagged_stale" : "fresh",
+      scope: row.scope,
+      body: row.body
+    };
+  }
+  /**
+   * THE COLUMN-AUTHORITATIVE LIVE-RECORD DECODER — the ONE place a stored
+   * `records` row becomes a DurableRecord (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 4).
+   *
+   * Every live materializing read selects `body, scope` and comes through here,
+   * so the parsed body's `scope` is OVERWRITTEN by the row's NOT NULL column
+   * before any caller sees it. Body/column disagreement is therefore
+   * unrepresentable on read: column authoritative on disk, and now on read too
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]). A sixth
+   * read path added later is hard to write wrongly because there is no other
+   * body→record parse to copy.
+   *
+   * TOTAL by construction — both drifted shapes normalize to the column with no
+   * branch: a legacy body that OMITS `scope` entirely (reachable and real) gets
+   * it, and a body that CONTRADICTS the column loses. Both are silent by design;
+   * `domain-doctor.mjs scope-audit` (part 1) is the surface that makes them
+   * visible, and it read zero of either across all four stores before this
+   * activated.
+   *
+   * FAILS CLOSED on the impossible case. WHAT ACTUALLY MAKES IT IMPOSSIBLE is
+   * the anchored SCOPE_RE (`^(project|domain:[a-z0-9_-]+)$`, envelope.ts) that
+   * every write funnels through via validateRecord, together with insertRecord
+   * writing the column from that validated record.scope: no store write can
+   * produce an empty or whitespace column. `records.scope` being NOT NULL is
+   * NOT the guarantee on its own — NOT NULL does not exclude '' — and this
+   * comment previously said it was (corrected 2026-09-06 on independent
+   * review; a comment that misattributes its own guarantee is how the real one
+   * gets removed later by someone who reads only the comment). If an empty or
+   * non-string column is nonetheless read, refuse loudly naming the row rather
+   * than inventing 'project' — a default here would re-create exactly the
+   * guess this decoder exists to delete.
+   *
+   * READ-SIDE ONLY: it never changes what is WRITTEN. The write side pins scope
+   * from identityOf's column in applyInPlace/supersede (part 3) — except that
+   * supersede takes an optional `authoritativeScope` from the layer that knows
+   * about MOUNTS (MountedStores), because the column is authoritative over the
+   * BODY while the MOUNT is authoritative over the COLUMN, and a replacement row
+   * must be labelled for the mount it is physically inserted into.
+   *
+   * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
+   *
+   * THE IMPLEMENTATION LIVES IN THE MODULE-LEVEL `decodeLiveRecordRow` EXPORT
+   * above, so an out-of-class reader (a script outside the store with a read-only fallback)
+   * decodes through the same function rather than re-parsing `body` alone.
+   */
+  static decodeLiveRecord(op, row) {
+    return decodeLiveRecordRow(op, row);
+  }
+  /** Plural form of decodeLiveRecord — every row-set read funnels through it. */
+  static decodeLiveRecords(op, rows) {
+    return rows.map((r) => _SterlingStore.decodeLiveRecord(op, r));
+  }
+  /**
+   * Decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede:
+   * a links entry with rel 'supersedes' that is not already an edge of the
+   * record is refused, with nothing written. Supersession has one write path,
+   * supersede() (knowledge_supersede), which also retires the old record; a raw
+   * edge left the target active, a second write with the same name and a
+   * different effect. `existingTargets` holds the targets the record already
+   * supersedes, so a write that carries an existing edge forward still passes.
+   * Exported for the tool layer, whose attestation update branch reaches
+   * supersede() rather than the in-place path.
+   */
+  static refuseRawSupersedesLinks(op, links, existingTargets) {
+    const added = (links ?? []).filter((l) => l.rel === "supersedes" && !existingTargets.has(l.target_id));
+    if (added.length === 0)
+      return;
+    throw new Error(`${op}: a links entry with rel 'supersedes' (target ${added.map((l) => `'${l.target_id}'`).join(", ")}) is refused \u2014 supersession is a lifecycle transition, not a link. Use knowledge_supersede to replace the old record (it retires it), or write the new record with a rel 'cites' link to the old one for a deliberate partial override. Nothing was written.`);
+  }
+  /** Typed edge write — record_relations is the authoritative home (contract 6). */
+  insertRelation(sourceId, rel, targetId, at) {
+    if (sourceId === targetId) {
+      throw new Error(`relation '${rel}' from '${sourceId}' to itself is a self-cycle in the relation graph \u2014 refused (stable-identity-design-v2)`);
+    }
+    this.db.prepare(this.db.dialect.insertIgnore("record_relations", ["source_id", "rel", "target_id", "created_at"])).run(sourceId, rel, targetId, at);
+  }
+  /** The one validated write path. Unregistered type or malformed record throws; nothing is written.
+   *
+   *  NOTE (S3 boundary): a caller-supplied `version` is still honored here (the
+   *  legacy feature_article field, and the pin fixtures that pass version: 1).
+   *  S3 STRIPS it — version becomes server-owned at every surface — so nothing
+   *  new should start relying on setting it. */
+  create(input, options = {}) {
+    this.assertWritable("create");
+    const operationId = operationIdOf(options, "create");
+    const prepared = _SterlingStore.resolveIdentity(input, {
+      lifecycle: "live",
+      freshness: "fresh",
+      version: 1
+    });
+    if (prepared.lifecycle === "retired" && !prepared.input.superseded_by) {
+      throw new Error(`create: lifecycle 'retired' cannot be requested at creation without a successor \u2014 such a record is born dead (hidden from queries, refused by in-place writes, and unsupersedable: one successor maximum is already spent). Retirement happens ONLY through supersede/retireInFavorOf. Nothing was written.`);
+    }
+    let record2;
+    try {
+      record2 = validateRecord(prepared.input);
+    } catch (err) {
+      const refused = unrecognizedKeyPaths(err);
+      if (refused.length === 0)
+        throw err;
+      const type = typeof prepared.input.type === "string" ? prepared.input.type : "unknown";
+      throw new Error(`create: record type '${type}' does not define ${refused.length === 1 ? "this field" : "these fields"}, and the schema REFUSED the write rather than storing ${refused.length === 1 ? "it" : "them"}: ${refused.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`, { cause: err });
+    }
+    assertNoFieldLoss("create", prepared.input, record2);
+    _SterlingStore.refuseRawSupersedesLinks("create", record2.links, /* @__PURE__ */ new Set());
+    this.tx(() => {
+      this.refuseRepeatedOperation(operationId);
+      this.insertRecord(record2, operationId);
+      this.logActivity("created", record2, record2.created_at);
+    });
+    return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.storableBody(record2)])[0]);
+  }
+  /**
+   * The full record archived at (id, version) — a permanent, append-only
+   * snapshot from record_versions, returned exactly as it was stored (no
+   * derivation), so repeated reads of one version are byte-identical forever
+   * (pin S2-2c). A version that was never archived resolves to undefined —
+   * never fabricated.
+   *
+   * A V2-ONLY SURFACE: record_versions does not exist on a pre-migration store,
+   * so this refuses loudly naming the migration (P5) instead of letting a raw
+   * SQLite "no such table: record_versions" escape. Reads that a pre-v2 store
+   * CAN answer stay allowed (AC3) — version history simply is not one of them.
+   */
+  getRecordVersion(id, version2) {
+    this.assertV2Surface("getRecordVersion");
+    const row = this.db.prepare("SELECT body FROM record_versions WHERE record_id = ? AND version = ?").get(id, version2);
+    return row ? JSON.parse(row.body) : void 0;
+  }
+  /**
+   * The dead-id INDEX, whole ([stable-identity-design-v2] contract 3): every
+   * record_aliases row as (historical_id, canonical_id, archived_version). The
+   * shape mirrors recordIdIndex — no body fetch, the full set, so the id
+   * resolution ladder above the store can match an exact historical id AND a
+   * citation PREFIX of one in the same pass it already makes over live ids.
+   *
+   * READ-ONLY and empty-tolerant by design: nothing writes to this table after
+   * the migration, and a PRE-MIGRATION store (where the table does not exist)
+   * returns [] rather than refusing — a legacy store is readable (AC3), and it
+   * has no historical ids to resolve because nothing has been collapsed yet.
+   */
+  recordAliases() {
+    if (this.legacySchemaVersion !== void 0)
+      return [];
+    return this.db.prepare(`SELECT historical_id, canonical_id, archived_version FROM record_aliases ORDER BY ${this.db.dialect.insertionOrder()}`).all();
+  }
+  /**
+   * knowledge_update-shaped IN-PLACE write, generalized from updateTodo to
+   * EVERY record type (contract 2). `patch` is the FULL merged candidate (old
+   * record + the caller's changes), mirroring supersede/updateTodo's existing
+   * convention: this method validates and persists, the layer above decides
+   * which fields may change.
+   *
+   * The id, type and created_at are pinned to the stored record — an in-place
+   * write can never re-mint identity, which is the entire point of stable
+   * identity. lifecycle is likewise preserved: retirement happens ONLY through
+   * supersede/retireInFavorOf.
+   */
+  updateRecord(id, patch, opts = {}) {
+    return this.applyInPlace("updateRecord", id, () => ({ ...patch }), opts);
+  }
+  /**
+   * knowledge_edit-shaped write: replace ONE passage inside a long string
+   * field without retransmitting it. `find` must match EXACTLY ONCE — zero and
+   * multiple matches are both refused NAMING THE COUNT, with nothing written,
+   * because a blind replace inside a field too large to read is an
+   * unreviewable write.
+   */
+  editRecordField(id, field, find, replace, opts = {}) {
+    if (find === "")
+      throw new Error(`editRecordField: 'find' is empty \u2014 an empty find matches everywhere and nowhere; nothing was written`);
+    return this.applyInPlace("editRecordField", id, (current) => {
+      const value = current[field];
+      if (typeof value !== "string") {
+        throw new Error(`editRecordField: field '${field}' on ${current.type} '${id}' is ${value === void 0 ? "not set" : `a ${Array.isArray(value) ? "array" : typeof value}`}, not a string \u2014 an in-place passage replace applies to string fields only (use appendRecordField for arrays). Nothing was written.`);
+      }
+      const matches = value.split(find).length - 1;
+      if (matches !== 1) {
+        throw new Error(`editRecordField: 'find' matched ${matches} time(s) in field '${field}' of record '${id}' \u2014 exactly one match is required (${matches === 0 ? "no match: check whitespace and the exact passage" : `${matches} matches: extend 'find' until it is unique`}). Nothing was written.`);
+      }
+      return { ...current, [field]: value.split(find).join(replace) };
+    }, opts);
+  }
+  /**
+   * The SERVER-OWNED metadata fields updateRecordMetadata may write. A short,
+   * closed list is what makes that method NARROW rather than a second content
+   * write path that happens to skip the clock: anything outside it is refused by
+   * name. Both entries are already in the tool layer's WRITE_REFUSED_FIELDS, so
+   * neither is ever caller-supplied.
+   */
+  static METADATA_WRITE_FIELDS = ["file_baselines", "baseline_attestations", "absence_attestations"];
+  /**
+   * NARROW VERSIONED METADATA WRITE (board 8c8b6d78 / R9) — a full in-place
+   * write of server-owned drift metadata that DELIBERATELY PRESERVES the
+   * record's `updated_at`.
+   *
+   * It bumps `version`, archives the prior body and honours `expected_version`
+   * exactly like every other in-place write: the baselines live in the record
+   * BODY and the body is authoritative, so a same-version body mutation would
+   * evade the CAS and version signal entirely. (addLink's precedent does NOT
+   * apply — its body copy of links[] is non-authoritative and re-hydrated from
+   * record_relations.)
+   *
+   * WHY THE CLOCK IS PRESERVED. `updated_at` is not a "last written" stamp here:
+   * the read-time drift check treats it as THE INSTANT THE BASELINES WERE TAKEN
+   * and uses it as a cheap mtime prefilter — a file whose mtime is no newer than
+   * `updated_at` is reported clean WITHOUT hashing. Advancing the clock while
+   * re-stamping only SOME owned paths therefore masks real, already-standing
+   * drift on the OTHERS: article baselined at T0 for `a` and `b`; `b` drifts at
+   * T1; a metadata write for `a` alone advances the clock to T2; a later read
+   * stats `b`, sees mtime(b) = T1 <= T2 and returns clean without ever comparing
+   * `b` to its stale hash. Preserving the clock keeps every un-restamped path
+   * judged against exactly the instant its own baseline was taken.
+   *
+   * `activity_at` is the REAL time, recorded on the activity row (and used for
+   * any `resolves` drain) so the chronology stays true — see applyInPlace's
+   * `internal.activityAt`. It is required in practice for every caller; it
+   * defaults to now rather than to the preserved clock, because silently
+   * back-dating an activity row is the failure this parameter exists to prevent.
+   */
+  updateRecordMetadata(id, fields, opts = {}) {
+    const refused = Object.keys(fields).filter((k) => !_SterlingStore.METADATA_WRITE_FIELDS.includes(k));
+    if (refused.length) {
+      throw new Error(`updateRecordMetadata: ${refused.map((k) => `'${k}'`).join(", ")} ${refused.length === 1 ? "is" : "are"} not a server-owned metadata field \u2014 this write PRESERVES updated_at, so it must never carry content. The writable set is ${_SterlingStore.METADATA_WRITE_FIELDS.join(", ")}; use updateRecord for anything else. Nothing was written.`);
+    }
+    return this.applyInPlace("updateRecordMetadata", id, (current) => ({
+      ...current,
+      ...fields,
+      // From the IN-TRANSACTION read, never a caller's copy: the whole point is
+      // that the stored clock does not move.
+      updated_at: current.updated_at
+    }), opts, { activityAt: opts.activity_at ?? (/* @__PURE__ */ new Date()).toISOString() });
+  }
+  /**
+   * knowledge_append-shaped write: grow an ARRAY field in place (history,
+   * files, current_ac, …) without retransmitting the existing entries. One
+   * transaction, one version bump, prior array archived.
+   */
+  appendRecordField(id, field, entry, opts = {}) {
+    return this.applyInPlace("appendRecordField", id, (current) => {
+      const value = current[field];
+      if (value !== void 0 && value !== null && !Array.isArray(value)) {
+        throw new Error(`appendRecordField: field '${field}' on ${current.type} '${id}' is a ${typeof value}, not an array \u2014 append grows array fields only (use editRecordField for a string passage). Nothing was written.`);
+      }
+      const existing = Array.isArray(value) ? value : [];
+      return { ...current, [field]: [...existing, entry] };
+    }, opts);
+  }
+  /**
+   * THE in-place write core shared by updateRecord / editRecordField /
+   * appendRecordField / updateTodo / renameFileKey / the enqueueSystemTodo
+   * text-update branch (contracts 2-4, 7):
+   *
+   *  1. resolve the live record + its server-owned identity columns;
+   *  2. CAS on expected_version when supplied — a stale token refuses naming
+   *     BOTH versions and writes nothing, not even a snapshot row;
+   *  3. archive the FULL prior body into record_versions (append-only);
+   *  4. UPDATE ... WHERE id = ? AND version = ? — the real CAS, kept as a
+   *     backstop now that step 1 reads under the write lock;
+   *  5. rebuild the join indexes and REPLACE the single records_fts row, so an
+   *     archived version's text can never rank (contract 1/7);
+   *  6. drain any claimed `resolves` items INSIDE the same transaction — a
+   *     refused claim rolls the whole write back (contract 4).
+   *
+   * EVERY step, step 1 included, runs inside ONE transaction. BEGIN IMMEDIATE
+   * takes the write lock before the identity read, so no committed concurrent
+   * write can land between the CAS check and the snapshot INSERT. Reading
+   * outside the transaction cost two things: a CAS loser died on the
+   * record_versions (record_id, version) primary key with a raw constraint
+   * error instead of the pinned refusal naming both versions, and the body it
+   * archived could be a stale generation of the record.
+   *
+   * `internal.allowRetired` is for the ONE path that legitimately rewrites a
+   * tombstone: renameFileKey, whose contract is that a move orphans no owning
+   * record's paths, retired ones included. It is deliberately not reachable
+   * from the public triad — a content write still goes to the live successor.
+   *
+   * `internal.suppressReconcilePrune` is the OTHER renameFileKey-only flag
+   * (board 7e779e1f): a rename's before/after file-key diff LOOKS like a
+   * shrink (the old path leaves, the new one arrives) but is not one — the
+   * debt must FOLLOW the renamed path, never be pruned, and renameFileKey's
+   * own deepReplaceString already rewrites any queue item naming the old path
+   * (it is itself one of the rows `record_file_keys` matches). Set ONLY by
+   * renameFileKey's own call and by pruneReconcileNeeded's own nested rewrite
+   * of the queue item it is shrinking (which can never legitimately own a
+   * reconcile_needed item pinned to ITSELF, so the flag there is pure
+   * belt-and-braces against a wasted scan, not a correctness requirement).
+   *
+   * `internal.activityAt` SEPARATES TWO CLOCKS THAT ARE OTHERWISE ONE (board
+   * 8c8b6d78 / R9). The row's `updated_at` comes from the CANDIDATE BODY, so a
+   * caller that deliberately preserves the stored `updated_at` — see
+   * updateRecordMetadata — writes a new version WITHOUT advancing the record's
+   * content clock. The activity row must NOT inherit that preserved value: the
+   * activity log is a chronology of when things actually happened, and
+   * back-dating an entry to the previous write's timestamp makes it false. So
+   * the metadata write passes the REAL time here while the body keeps the old
+   * one. Absent (every ordinary write), behaviour is exactly as before: the
+   * activity row is stamped from the body's own updated_at.
+   */
+  applyInPlace(op, id, buildPatch, opts, internal = {}) {
+    this.assertWritable(op);
+    let served;
+    this.tx(() => {
+      const current = this.get(id);
+      if (!current)
+        throw new Error(`${op}: no record '${id}'`);
+      const identity = this.identityOf(id);
+      if (!identity)
+        throw new Error(`${op}: no record '${id}'`);
+      if (identity.lifecycle === "retired" && !internal.allowRetired) {
+        throw new Error(`${op}: record '${id}' is retired (served status 'superseded') \u2014 an in-place write goes to the live successor, never to a retired record`);
+      }
+      if (opts.expected_version !== void 0 && opts.expected_version !== identity.version) {
+        throw new Error(`${op}: stale expected_version \u2014 the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ${identity.version}. Nothing was written; re-read the record and retry against version ${identity.version}.`);
+      }
+      const removedRelation = opts.remove_relation === void 0 ? void 0 : linkSchema.parse(opts.remove_relation);
+      if (removedRelation?.rel === "supersedes") {
+        throw new Error(`${op}: rel 'supersedes' cannot be removed as a raw edge \u2014 it is the authoritative carrier of a lifecycle transition. Use knowledge_supersede / knowledge_retire for lifecycle changes; nothing was written.`);
+      }
+      if (removedRelation) {
+        const exists = this.db.prepare("SELECT 1 FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?").get(id, removedRelation.rel, removedRelation.target_id);
+        if (!exists) {
+          throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' no longer exists \u2014 nothing was written; re-read the record and retry.`);
+        }
+      }
+      const candidate = buildPatch(current);
+      candidate.id = id;
+      candidate.type = current.type;
+      candidate.created_at = current.created_at;
+      candidate.scope = identity.scope;
+      const freshness = candidate.freshness === "fresh" || candidate.freshness === "flagged_stale" ? candidate.freshness : candidate.status === "flagged_stale" ? "flagged_stale" : identity.freshness;
+      const supersededBy = identity.lifecycle === "retired" ? current.superseded_by ?? null : null;
+      const nextVersion = identity.version + 1;
+      const prepared = _SterlingStore.resolveIdentity(candidate, {
+        lifecycle: identity.lifecycle,
+        freshness,
+        version: nextVersion
+      });
+      prepared.input.lifecycle = identity.lifecycle;
+      prepared.input.freshness = freshness;
+      prepared.input.version = nextVersion;
+      prepared.input.status = _SterlingStore.derivedStatus(identity.lifecycle, freshness);
+      prepared.input.superseded_by = supersededBy;
+      const validated = validateRecord(prepared.input);
+      if (validated.type !== current.type) {
+        throw new Error(`${op}: type mismatch ('${validated.type}' cannot replace '${current.type}' in place)`);
+      }
+      const existingSupersedes = new Set(this.db.prepare(`SELECT target_id FROM record_relations WHERE source_id = ? AND rel = 'supersedes'`).all(id).map((r) => r.target_id));
+      _SterlingStore.refuseRawSupersedesLinks(op, validated.links, existingSupersedes);
+      const entry = RECORD_TYPES[validated.type];
+      const stored = _SterlingStore.storableBody(validated);
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      this.db.prepare("INSERT INTO record_versions (record_id, version, archived_at, body) VALUES (?, ?, ?, ?)").run(id, identity.version, now, identity.body);
+      const res = this.db.prepare(`UPDATE records SET version = ?, status = ?, lifecycle = ?, freshness = ?, superseded_by = ?,
+             updated_at = ?, body = ? WHERE id = ? AND version = ?`).run(nextVersion, _SterlingStore.derivedStatus(identity.lifecycle, freshness), identity.lifecycle, freshness, supersededBy, stored.updated_at ?? now, JSON.stringify(stored), id, identity.version);
+      if (res.changes === 0) {
+        throw new Error(`${op}: record '${id}' was concurrently written (it is no longer at version ${identity.version}) \u2014 re-read and retry`);
+      }
+      this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
+      for (const tag of new Set(validated.stack_tags)) {
+        this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(id, tag);
+      }
+      const beforeFileKeys = new Set(entry.fileKeys(current));
+      const afterFileKeys = new Set(entry.fileKeys(stored));
+      this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
+      for (const path of afterFileKeys) {
+        this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
+      }
+      for (const link of validated.links)
+        this.insertRelation(id, link.rel, link.target_id, now);
+      if (removedRelation) {
+        const deleted = this.db.prepare("DELETE FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?").run(id, removedRelation.rel, removedRelation.target_id);
+        if (deleted.changes !== 1) {
+          throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' changed during removal \u2014 the transaction was rolled back; re-read and retry.`);
+        }
+      }
+      this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(this.db.dialect.searchText(entry.fts(stored)), id);
+      this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
+      if (opts.resolves?.length)
+        this.drainResolves(op, opts.resolves, now, opts.resolvedReceipt);
+      if (!internal.suppressReconcilePrune) {
+        const droppedPaths = /* @__PURE__ */ new Set();
+        for (const path of beforeFileKeys)
+          if (!afterFileKeys.has(path))
+            droppedPaths.add(path);
+        if (droppedPaths.size > 0)
+          this.pruneReconcileNeeded(id, droppedPaths, now, opts.prunedReceipt);
+      }
+      served = this.withDerivedReliedBy(this.hydrateAll([stored])[0]);
+    });
+    return served;
+  }
+  /**
+   * The `resolves` drain (contract 4): the maintenance items a write CLAIMS to
+   * close, closed inside the write's own transaction. An unresolvable or
+   * already-closed claim throws, which rolls the ENTIRE write back — an
+   * unclaimed write must never appear to succeed against a dead reference, and
+   * a partial drain is worse than none.
+   *
+   * `receipt`, when supplied, is filled with ONE COMMITTED SNAPSHOT per claimed
+   * item — read here, inside this same transaction, in the instant before that
+   * item's own `remove` call (board b0bb9d96 fix-round HIGH). This is
+   * deliberately NOT the caller's earlier pre-transaction validation read: this
+   * lane's own fold can widen an item's file_keys between an outer caller
+   * validating a claim and this drain actually removing it, and a receipt
+   * built from the stale read would describe a narrower close than the one
+   * that actually happened. Reading `item` (below) IS that snapshot — nothing
+   * else touches this id between the read and the remove.
+   */
+  drainResolves(op, ids, at, receipt) {
+    for (const claimed of new Set(ids)) {
+      const item = this.get(claimed);
+      if (!item) {
+        throw new Error(`${op}: resolves claim '${claimed}' names no open item \u2014 it was never created, or it is already closed. The whole write rolled back (no version bump, no snapshot, no other item drained); re-read the queue and claim only open ids.`);
+      }
+      if (item.type !== "todo") {
+        throw new Error(`${op}: resolves claim '${claimed}' is a ${item.type}, not a maintenance item (todo) \u2014 the whole write rolled back`);
+      }
+      if (receipt)
+        receipt.push({ id: item.id, system_reason: item.system_reason, file_keys: item.file_keys ?? [], text: item.text });
+      this.remove(claimed, at);
+    }
+  }
+  /**
+   * PATH PRUNING FOR reconcile_needed (board 7e779e1f). Called from
+   * applyInPlace, strictly AFTER drainResolves, with the set of paths the
+   * record just stopped claiming: for every open reconcile_needed item pinned
+   * to `ownerId` (feature_link match) that names one of those paths, the path
+   * is removed from that item's file_keys IN THIS SAME TRANSACTION — never a
+   * second write, and never through the caller's own resolves claim.
+   *
+   * This undoes exactly what enqueueSystemTodo's fold committed to, one path
+   * at a time: a shrinking item's text is regenerated through the SAME
+   * `buildReconcileText` builder the fold uses, and an item pruned to zero
+   * paths is removed through the SAME `remove()` normal-removal path every
+   * other closed system todo takes — so the drain log and the FTS row stay
+   * honest either way. `decision reconcile-needed-identity-is-reason-plus-
+   * owner-file-keys-unioned` means there is at most one such item per owner in
+   * practice, but this loops over every match rather than assuming it, so a
+   * legacy duplicate is not silently skipped.
+   *
+   * PRUNING IS BOOKKEEPING, NOT EVIDENCE ANYONE RECONCILED ANYTHING — it only
+   * says the debt's OWNER changed, never that the new bytes were checked. The
+   * caller-facing drift disclosure this feeds lives in tools.ts (`prunedReceipt`
+   * carries id/removed/pruned_paths/remaining_file_keys; the filesystem-facing
+   * "was the pruned path actually drifted against the OLD baseline" verdict is
+   * computed there, from that disclosure, because this layer touches no
+   * filesystem and no git tree).
+   *
+   * SAME-DB BY CONSTRUCTION: this scans `this.db` alone — the exact database
+   * the triggering write is landing in. A queue item pinned to `ownerId` but
+   * living in a DIFFERENT physical store (a different SterlingStore instance,
+   * e.g. under MountedStores when scope and physical holder have drifted)
+   * simply never appears in this query, so nothing is pruned and nothing is
+   * falsely disclosed as pruned — there is no cross-db case to detect.
+   *
+   * A RENAME IS NOT A SHRINK — callers gate this whole method out via
+   * `internal.suppressReconcilePrune` rather than this method trying to tell a
+   * rename from a genuine drop (see applyInPlace's doc comment).
+   */
+  pruneReconcileNeeded(ownerId, droppedPaths, at, receipt) {
+    const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+    for (const r of rows) {
+      const t = _SterlingStore.decodeLiveRecord("pruneReconcileNeeded", r);
+      if (t.source !== "system" || t.system_reason !== "reconcile_needed" || t.feature_link !== ownerId)
+        continue;
+      const currentFiles = t.file_keys ?? [];
+      const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
+      if (prunedPaths.length === 0)
+        continue;
+      const keptFiles = currentFiles.filter((f) => !droppedPaths.has(f));
+      if (receipt) {
+        receipt.push({
+          id: t.id,
+          system_reason: t.system_reason,
+          removed: keptFiles.length === 0,
+          pruned_paths: prunedPaths,
+          remaining_file_keys: keptFiles
+        });
+      }
+      if (keptFiles.length === 0) {
+        this.remove(t.id, at);
+        continue;
+      }
+      const owner = this.get(ownerId);
+      const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: ownerId }, keptFiles);
+      this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({ ...cur, file_keys: keptFiles, text }), {}, { suppressReconcilePrune: true });
+    }
+  }
+  /**
+   * READ-ONLY PRECHECK for enqueueSystemTodo: true only when an enqueue of
+   * `input` would change nothing — an open system item with the same identity
+   * key, equivalent text and the same file_keys already exists. A read-time
+   * minter calls this first and takes the write path (a transaction, a git
+   * probe) only on false, so re-reading N overdue records costs N cheap scans
+   * instead of N write transactions. It shares systemTodoKey and
+   * systemTodoTextsEquivalent with the write, so the dedupe rule has one home.
+   *
+   * Conservative by construction: false is "take the write path", never "an
+   * item is absent". The reconcile_needed fold lane always answers false
+   * (its union-and-fold rule lives only in the write), and an input the
+   * write would refuse is not validated here, the write path refuses it.
+   */
+  enqueueWouldBeNoop(input) {
+    return this.readTx(() => {
+      if (input.system_reason === "reconcile_needed" && input.feature_link)
+        return false;
+      const wantKey = systemTodoKey(input);
+      const rows = input.feature_link ? this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0").all(input.feature_link) : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+      for (const r of rows) {
+        const t = _SterlingStore.decodeLiveRecord("enqueueWouldBeNoop", r);
+        if (t.source !== "system" || systemTodoKey(t) !== wantKey)
+          continue;
+        const priorFiles = [...t.file_keys ?? []].sort();
+        const nextFiles = [...input.file_keys ?? []].sort();
+        return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? "", input.text);
+      }
+      return false;
+    });
+  }
+  /**
+   * ATOMIC check-and-insert for a SYSTEM maintenance item — the ONE dedup
+   * definition, replacing four hand-rolled copies (board 2ded3b4b).
+   *
+   * THE BUG THIS CLOSES IS TWO BUGS. Four producers minted maintenance items
+   * (h7-file-touch, the read-time drift check in tools.ts, fs-remove, fs-move),
+   * each with its own copy-pasted "does an open item already exist?" query
+   * followed by a separate insert, and no uniqueness constraint anywhere:
+   *
+   *  (1) DUPLICATES. Two producers both read "no open item" before either insert
+   *      committed, and both inserted — classic TOCTOU. A consuming project
+   *      measured SEVEN byte-identical pairs created 2-3 MILLISECONDS apart, 52%
+   *      of a 27-item queue. The cost was judgement rather than writes: the
+   *      deep-queue threshold trips early, and anyone sizing a drain from the raw
+   *      count sees double the work that exists.
+   *  (2) SILENT LOSS — the worse half, and not in the report. All four checks
+   *      keyed on (feature_link, system_reason) and OMITTED the file, so a second
+   *      drifting file on the same article was suppressed. And because
+   *      knowledge_update re-baselines EVERY owned file, reconciling the first
+   *      file absorbed the second file's drift into a fresh baseline: the finding
+   *      neither queued nor survived.
+   *
+   * The key is therefore (system_reason, feature_link, file_keys SET) for
+   * every lane EXCEPT reconcile_needed with a feature_link (board b0bb9d96 /
+   * I-29, "the mint storm"): THAT one lane's identity is (system_reason,
+   * feature_link) ALONE — the file_keys SET is deliberately excluded from the
+   * match, and instead gets UNIONED into the surviving (oldest) open item
+   * rather than distinguishing a second one. The exact-SET reading above
+   * fixed the silent-loss bug (2) by making the file part of the key; the
+   * reconcile_needed exception keeps that same guarantee (no file is ever
+   * dropped — see the union below) while also closing bug (1)'s SIBLING for
+   * this lane: two DIFFERENT keys (a singleton [a], then [a,b]) used to
+   * coexist as two legitimate-looking open items for one article, which is
+   * exactly what a reader saw as duplicates even though neither was a
+   * byte-identical TOCTOU race. See the isReconcileFold branch below. The
+   * check still runs inside the same BEGIN IMMEDIATE transaction as the
+   * insert/fold, so a concurrent caller blocks on the write lock and then
+   * SEES the committed row instead of racing it.
+   *
+   * A MATCH WHOSE TEXT DIFFERS IS UPDATED, NOT DISCARDED. Same file, escalating
+   * severity — edited today, deleted tomorrow, both reconcile_needed, the first
+   * not yet drained — would otherwise be swallowed as a duplicate, losing the more
+   * urgent fact. Since S2 that update goes through the versioned in-place core
+   * like every other write ([stable-identity-design-v2]): todos DO carry the
+   * universal version counter now, so the escalation bumps the version and
+   * archives the prior text instead of overwriting the body invisibly (a bare
+   * body UPDATE was invisible to expected_version, so a concurrent in-place
+   * write could silently revert it, and the FTS row kept the old text).
+   */
+  enqueueSystemTodo(input, options = {}) {
+    this.assertWritable("enqueueSystemTodo");
+    const operationId = operationIdOf(options, "enqueueSystemTodo");
+    const prepared = _SterlingStore.resolveIdentity(input, {
+      lifecycle: "live",
+      freshness: "fresh",
+      version: 1
+    });
+    const candidate = validateRecord(prepared.input);
+    if (candidate.type !== "todo" || candidate.source !== "system") {
+      throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? "no source"}`);
+    }
+    if (candidate.system_reason === "state_review" && !candidate.feature_link) {
+      throw new Error(`enqueueSystemTodo: a state_review item requires feature_link \u2014 this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`);
+    }
+    const keyOf = systemTodoKey;
+    const wantKey = keyOf(candidate);
+    const textsEquivalent = (a, b) => systemTodoTextsEquivalent(candidate.system_reason, a, b);
+    const isReconcileFold = candidate.system_reason === "reconcile_needed" && !!candidate.feature_link;
+    let existing;
+    let textUpdated = false;
+    let insertedText;
+    this.tx(() => {
+      this.refuseRepeatedOperation(operationId);
+      const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+      if (isReconcileFold) {
+        const matches = [];
+        for (const r of rows) {
+          const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
+          if (t.source !== "system")
+            continue;
+          if (t.system_reason !== "reconcile_needed" || t.feature_link !== candidate.feature_link)
+            continue;
+          matches.push(t);
+        }
+        if (matches.length === 0) {
+          const fileKeys = candidate.file_keys ?? [];
+          if (fileKeys.length > 1) {
+            const owner = this.get(candidate.feature_link);
+            const canonicalText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, fileKeys);
+            this.insertRecord({ ...candidate, text: canonicalText }, operationId);
+            insertedText = canonicalText;
+          } else {
+            this.insertRecord(candidate, operationId);
+          }
+          return;
+        }
+        matches.sort((a, b) => a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+        const [survivor, ...folded] = matches;
+        const unionSet = new Set(survivor.file_keys ?? []);
+        for (const f of folded)
+          for (const k of f.file_keys ?? [])
+            unionSet.add(k);
+        for (const k of candidate.file_keys ?? [])
+          unionSet.add(k);
+        const unionFiles = [...unionSet].sort();
+        const priorFiles2 = [...survivor.file_keys ?? []].sort();
+        const filesChanged2 = JSON.stringify(priorFiles2) !== JSON.stringify(unionFiles);
+        const widening = folded.length > 0 || unionFiles.length > 1;
+        let nextText = candidate.text ?? "";
+        if (widening) {
+          const owner = this.get(candidate.feature_link);
+          nextText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, unionFiles);
+        }
+        const textChanged2 = !textsEquivalent(survivor.text ?? "", nextText);
+        if (textChanged2 || filesChanged2) {
+          existing = this.applyInPlace("enqueueSystemTodo", survivor.id, (cur) => ({
+            ...cur,
+            updated_at: candidate.updated_at,
+            ...textChanged2 ? { text: nextText } : {},
+            ...filesChanged2 ? { file_keys: unionFiles } : {}
+          }), {});
+          textUpdated = textChanged2;
+        } else {
+          existing = survivor;
+        }
+        for (const f of folded)
+          this.remove(f.id, candidate.updated_at);
+        return;
+      }
+      for (const r of rows) {
+        const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
+        if (t.source !== "system")
+          continue;
+        if (keyOf(t) !== wantKey)
+          continue;
+        existing = t;
+        break;
+      }
+      if (!existing) {
+        this.insertRecord(candidate, operationId);
+        return;
+      }
+      const priorFiles = [...existing.file_keys ?? []].sort();
+      const nextFiles = [...candidate.file_keys ?? []].sort();
+      const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(nextFiles);
+      const textChanged = !textsEquivalent(existing.text ?? "", candidate.text ?? "");
+      if (textChanged || filesChanged) {
+        existing = this.applyInPlace("enqueueSystemTodo", existing.id, (cur) => ({
+          ...cur,
+          updated_at: candidate.updated_at,
+          ...textChanged ? { text: candidate.text } : {},
+          ...filesChanged ? { file_keys: candidate.file_keys } : {}
+        }), {});
+        textUpdated = textChanged;
+      }
+    });
+    return existing ? { record: this.hydrateAll([existing])[0], deduped: true, text_updated: textUpdated } : {
+      // The echo must agree with the ROW this call actually inserted, not
+      // with the caller's pre-canonicalization `candidate` — see
+      // `insertedText`'s own doc comment (board b0bb9d96 fix-round MEDIUM).
+      record: this.hydrateAll([
+        _SterlingStore.storableBody({
+          ...candidate,
+          ...insertedText !== void 0 ? { text: insertedText } : {}
+        })
+      ])[0],
+      deduped: false,
+      text_updated: false
+    };
+  }
+  get(id) {
+    return this.readTx(() => {
+      const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
+      if (!row)
+        return void 0;
+      return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
+    });
+  }
+  /**
+   * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]).
+   *
+   * The record's body `scope` does NOT answer this and must never be used to:
+   * `scope` routes a record at CREATE time (MountedStores.storeFor) while every
+   * later write routes by the store PHYSICALLY HOLDING the id
+   * (MountedStores.storeHolding); `scope` is caller-writable through
+   * knowledge_update (it is not a refused server-owned field); and the in-place
+   * update path above pins id/type/created_at but never re-derives or validates
+   * the row's mount. So a domain-held record can carry scope 'project' and a
+   * project-held one can carry 'domain:x'. Only the storage layer can answer the
+   * question, so it answers it here rather than leaving callers to guess.
+   *
+   * On a bare SterlingStore this is plain existence — the tool layer's ONE store
+   * is then the project store (server.ts mounts MountedStores; the tests wrap
+   * either). MountedStores overrides it to ask its project mount ALONE, never
+   * the fan. Existence only: a tombstoned/retired row still counts as held.
+   */
+  projectStoreHolds(id) {
+    return this.db.prepare("SELECT 1 FROM records WHERE id = ?").get(id) !== void 0;
+  }
+  /**
+   * THE SCOPE OF THE STORE THAT PHYSICALLY HOLDS `id` — the naming companion of
+   * projectStoreHolds (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *
+   * projectStoreHolds answers a YES/NO ("is this the project mount?"), which is
+   * all an atomicity or an H10-parity question needs. A caller that has to
+   * SUPPLY a scope — the replacement minted by a supersession, the new record an
+   * extraction creates — needs the mount NAMED, and until this existed there was
+   * no way to get one: both call sites reconstructed it as
+   * `heldByProject ? 'project' : record.scope`, which is physically derived for
+   * the project case and straight back to the body for every DOMAIN case. In a
+   * design whose whole thesis is that the body is not the routing key, that is
+   * the trap itself (anti_pattern
+   * [record-body-scope-is-not-physical-store-identity]).
+   *
+   * CONTRACT (both implementations):
+   *  - returns 'project' or 'domain:<name>' — never undefined, never a default;
+   *  - an id NO store holds THROWS, naming the id. It never falls back to
+   *    'project': "probably project" is exactly the fail-open the anti-pattern
+   *    forbids, and a caller that cannot locate its own record must not go on to
+   *    label a new one;
+   *  - an id MULTIPLE stores hold throws too (MountedStores only — see
+   *    storeHolding there): one id names one row, and every routing guarantee in
+   *    this design assumes a single holder.
+   *
+   * ON A BARE SterlingStore there are no mounts, so the physical answer is this
+   * row's own `scope` COLUMN — NOT NULL, written once at insert from the routing
+   * decision that chose this store, and never touched by an in-place update
+   * (see identityOf). It is the same value column-authoritative reads already
+   * serve, so a bare-store caller sees no behaviour change; what changes is that
+   * the value now arrives from the column BY CONSTRUCTION rather than by a body
+   * parse that happens to have been corrected. MountedStores overrides this with
+   * the MOUNT the record actually lives in, which is strictly stronger: the
+   * column can still contradict the mount (the third drift class
+   * `domain-doctor.mjs scope-audit` reports), and where they disagree the mount
+   * is the physical fact and the column is a label.
+   */
+  scopeOfHolder(id) {
+    const identity = this.identityOf(id);
+    if (!identity) {
+      throw new Error(`scopeOfHolder: no record '${id}' in this store \u2014 the scope of a record's holder cannot be derived from a record that is not held. Refusing rather than defaulting to 'project' (anti_pattern [record-body-scope-is-not-physical-store-identity]: a guard on scope fails closed on undefined).`);
+    }
+    return identity.scope;
+  }
+  /**
+   * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
+   * 9641e01b, the conductor's option (b)) from the union of every OTHER active
+   * feature_article's relies_on naming this article's slug — not the stored
+   * field. relies_on stays author-written; relied_by cannot drift because it is
+   * no longer authored at all past this read. PROJECT-STORE SCOPE ONLY:
+   * domain-mounted articles are out of scope for this derivation (each mounted
+   * store derives its own; MountedStores does not cross-join relies_on across
+   * stores) — the same store-locality choice articlesBySlug/knowledge_create's
+   * slug-collision check already make.
+   *
+   * Never a hidden lie (constraint 2 of the board item): when the stored
+   * relied_by differs from the derived set (as a sorted-deduped set — order and
+   * duplicates in the stored array don't count as drift), the returned record
+   * carries dependencies.relied_by_stored_stale: true alongside the derived
+   * value actually served. The stored field is left untouched in the DB — this
+   * derivation never writes.
+   */
+  withDerivedReliedBy(record2, relations) {
+    if (record2.type !== "feature_article")
+      return record2;
+    const article = record2;
+    const derived = this.deriveReliedBy(article.slug, relations);
+    const storedSorted = [...new Set(article.dependencies?.relied_by ?? [])].sort();
+    const stale = JSON.stringify(storedSorted) !== JSON.stringify(derived);
+    return {
+      ...record2,
+      dependencies: {
+        relies_on: article.dependencies?.relies_on ?? [],
+        relied_by: derived,
+        ...stale ? { relied_by_stored_stale: true } : {}
+      }
+    };
+  }
+  /**
+   * Every active feature_article's slug + relies_on, in ONE scan — shared by
+   * withDerivedReliedBy across a whole query() result so a capped list of N
+   * articles costs one table scan, not N.
+   *
+   * NOT a materializing read, so it does not go through decodeLiveRecord: it
+   * projects two fields out of each body and never yields a DurableRecord to a
+   * caller. Nothing here reads or reports `scope`.
+   */
+  activeArticleRelations() {
+    const rows = this.db.prepare(`SELECT body FROM records WHERE type = 'feature_article' AND status != 'superseded'`).all();
+    return rows.map((r) => {
+      const rec = JSON.parse(r.body);
+      return { slug: rec.slug ?? "", reliesOn: rec.dependencies?.relies_on ?? [] };
+    });
+  }
+  /** Sorted, deduped slugs of every active article whose relies_on names `slug`. */
+  deriveReliedBy(slug, relations) {
+    const rels = relations ?? this.activeArticleRelations();
+    const set = /* @__PURE__ */ new Set();
+    for (const r of rels) {
+      if (r.slug === slug)
+        continue;
+      if (r.reliesOn.includes(slug))
+        set.add(r.slug);
+    }
+    return [...set].sort();
+  }
+  /**
+   * Every record id in this store at ANY status, tombstones included, with its
+   * type — the resolution surface for id CITATIONS in tracked source
+   * (check-record-citations). It exists because neither existing read serves
+   * that need: query() deliberately excludes superseded records (AC4), yet
+   * citing a superseded record is legitimate and common — a comment names the
+   * decision that ORIGINALLY justified a design, and history is exactly what it
+   * should cite — while get() resolves any status but only from a FULL id, and
+   * citations in prose are 8-char prefixes. No body fetch, no JSON.parse: ids
+   * and types only, so scanning the whole tree stays cheap.
+   */
+  recordIdIndex() {
+    return this.db.prepare("SELECT id, type, status FROM records").all();
+  }
+  /**
+   * Every non-superseded feature_article carrying this EXACT slug, newest first.
+   * A deterministic identity lookup, deliberately NOT a search (decision
+   * 3db7095f). H19's one-hop pointerLine used to resolve sibling slugs through
+   * query({rank_terms:[slug], cap:5}) and then look for an exact match among
+   * those five, which reported LIVE articles as '(not in store)': bm25 ranks by
+   * term frequency over the FTS blob, so a popular slug is cited more often in
+   * OTHER articles' prose than in the article that owns it, and the owner falls
+   * outside its own top-5 — measured against 'hooks-suite' at v46. Raising the
+   * cap was rejected because the cause is the RANKING, not the number 5, and the
+   * miss gets likelier as the store grows.
+   *
+   * Returns an ARRAY so the caller keeps applying its own working_tree exclusion.
+   * More than one active record per slug is a store-integrity fault rather than a
+   * normal state; it resolves newest-first here instead of arbitrarily, and is
+   * not raised on this path because delivery must never fail (AC7) — an opaque
+   * '(lookup failed)' would trade one false payload for another.
+   */
+  articlesBySlug(slug) {
+    return this.readTx(() => {
+      const rows = this.db.prepare(`SELECT body, scope FROM records
+            WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC`).all(slug);
+      const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows));
+      if (!records.length)
+        return records;
+      const relations = this.activeArticleRelations();
+      return records.map((r) => this.withDerivedReliedBy(r, relations));
+    });
+  }
+  /**
+   * Every non-superseded record of ANY type carrying this exact slug, newest
+   * first (board 1e639f32 — decision/anti_pattern/research_finding gained the
+   * stable handle feature_article and brief already had). The type-agnostic
+   * sibling of articlesBySlug: it backs knowledge_create's cross-type slug
+   * uniqueness and knowledge_get's slug resolution, both of which must see
+   * EVERY slug-bearing record or a clash slips through. Excluding superseded
+   * rows is the point — a slug names the CONCEPT, so resolving it serves the
+   * live head while a version-pinned citation keeps using the id.
+   */
+  recordsBySlug(slug) {
+    return this.readTx(() => {
+      const rows = this.db.prepare(`SELECT body, scope FROM records
+            WHERE status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC`).all(slug);
+      return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
+    });
+  }
+  /**
+   * THE ONE READINESS FUNCTION (decision
+   * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start,
+   * AMENDED (a)). board_get/board_query's blocked_by_state, H1's three groups,
+   * H20's ready line, the TUI cards and the OpenCode plugin all read this, so
+   * "open blocker" and "ready" have one definition.
+   *
+   * `items` defaults to every live user board item (a system item is never
+   * returned). Passed explicitly, each user todo given is judged against the
+   * LIVE board: a blocker is open while a live todo carries its slug, and
+   * `unblocks` lists live user items whose blocked_by names the item. Read
+   * only; the stored blocked_by is never rewritten. No cycle detection.
+   */
+  boardReadiness(items) {
+    return this.readTx(() => {
+      const total = this.count({ types: ["todo"], source: "user" });
+      const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+      const bySlug = /* @__PURE__ */ new Map();
+      for (const t of live)
+        if (t.slug)
+          bySlug.set(t.slug, t);
+      const dependents = /* @__PURE__ */ new Map();
+      for (const t of live) {
+        for (const slug of new Set(t.blocked_by ?? [])) {
+          const list = dependents.get(slug);
+          if (list)
+            list.push(t);
+          else
+            dependents.set(slug, [t]);
+        }
+      }
+      const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
+      const targets = items ?? live;
+      return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+        const blockers = [];
+        const blockersOpen = [];
+        for (const slug of t.blocked_by ?? []) {
+          const holder = openBlocker(slug);
+          blockers.push({ slug, state: holder ? "open" : "closed" });
+          if (holder)
+            blockersOpen.push(boardItemHandle(holder));
+        }
+        const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+        const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+        return {
+          id: t.id,
+          ...t.slug ? { slug: t.slug } : {},
+          name: boardItemHandle(t),
+          ...t.priority ? { priority: t.priority } : {},
+          updated_at: t.updated_at,
+          file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+          ...t.needs ? { needs: t.needs } : {},
+          blockers,
+          blockers_open: blockersOpen,
+          unblocks,
+          state
+        };
+      });
+    });
+  }
+  /**
+   * Every SUPERSEDED record carrying this exact slug, newest first — the
+   * dead-slug counterpart of recordsBySlug (decision foreign_df361a0f, board 2b9f2f1a
+   * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
+   * uses this ONLY after live-slug and id-prefix resolution both fail, so it
+   * can never shadow a live record: a slug still carried by a non-superseded
+   * row belongs to recordsBySlug, not here. The write surface never calls
+   * this — a dead slug addresses no write handle, fix-forward goes to the
+   * live head via recordsBySlug's own resolution.
+   */
+  supersededRecordsBySlug(slug) {
+    return this.readTx(() => {
+      const rows = this.db.prepare(`SELECT body, scope FROM records
+            WHERE status = 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`).all(slug);
+      return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
+    });
+  }
+  /**
+   * Follows superseded_by from `id` to the chain end (decision foreign_de1a7329: ids
+   * stay version-pinned — this DISCLOSES where the chain currently ends, it
+   * never redirects the pinned record itself). A live (non-superseded)
+   * record resolves to itself at hops:0. Unknown id -> null. Never throws
+   * and never hangs on a malformed chain: a cycle or a chain deeper than the
+   * 32-hop cap stops traversal and reports the LAST record reached (before
+   * the revisit, or at the cap) with truncated:true — it never claims to be
+   * the true, unreached terminus.
+   */
+  resolveTerminus(id) {
+    return this.readTx(() => {
+      const MAX_HOPS = 32;
+      const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
+      const row = stmt.get(id);
+      if (!row)
+        return null;
+      const visited = /* @__PURE__ */ new Set([row.id]);
+      let current = row;
+      let hops = 0;
+      while (current.status === "superseded" && current.superseded_by) {
+        const next = stmt.get(current.superseded_by);
+        if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+          return { id: current.id, status: current.status, hops, truncated: true };
+        }
+        visited.add(next.id);
+        current = next;
+        hops += 1;
+      }
+      return { id: current.id, status: current.status, hops };
+    });
+  }
+  /**
+   * INBOUND rel:'supersedes' edges — every record elsewhere holding a
+   * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
+   * above is the OUTBOUND, whole-record-supersession walk (decision foreign_de1a7329):
+   * it only ever has something to say about a record that was itself retired
+   * via supersede(). A record can also be named the target of a rel:'supersedes'
+   * link WITHOUT ever being retired — a clause-level or partial override
+   * recorded via knowledge_link — and that leaves no trace on the target's own
+   * status/terminus. This is the read-time counterpart that makes such edges
+   * visible from the target side. Purely additive/advisory: never mutates
+   * status, never feeds resolveTerminus, never touches the terminus block.
+   * LOCAL to this store only — MountedStores.inboundSupersedes fans every
+   * mount, because an edge lives with its SOURCE record (addLink routes by
+   * source), which may sit in a different store than the target.
+   */
+  /**
+   * inboundSupersedes() for each id in one read transaction: element i is what
+   * inboundSupersedes(ids[i]) returns. One edge query covers every id, so a
+   * hook attaching supersession state to N delivered records pays one round
+   * trip per store instead of N (board f6c4bc5d).
+   */
+  inboundSupersedesEach(ids) {
+    if (!ids.length)
+      return [];
+    return this.readTx(() => {
+      const unique = [...new Set(ids)];
+      const rows = this.db.prepare(`SELECT source_id, target_id FROM record_relations WHERE rel = 'supersedes' AND target_id IN (${unique.map(() => "?").join(",")}) ORDER BY ${this.db.dialect.insertionOrder()}`).all(...unique);
+      const sources = /* @__PURE__ */ new Map();
+      for (const row of rows)
+        sources.set(row.target_id, [...sources.get(row.target_id) ?? [], row.source_id]);
+      return ids.map((id) => (sources.get(id) ?? []).map((s2) => this.get(s2)).filter((r) => r !== void 0));
+    });
+  }
+  inboundSupersedes(id) {
+    return this.readTx(() => {
+      const rows = this.db.prepare(`SELECT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`).all(id);
+      return rows.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
+    });
+  }
+  /**
+   * The §3.4 base filter (status + type + stack-tag + file-key join) shared
+   * by query() and count() — everything EXCEPT the rank (FTS), ordering, and
+   * cap. One definition so count() can never drift from what query() would
+   * actually return.
+   */
+  baseFilter(opts) {
+    const params = [];
+    const where = ["r.status != 'superseded'"];
+    if (opts.types?.length) {
+      where.push(`r.type IN (${opts.types.map(() => "?").join(",")})`);
+      params.push(...opts.types);
+    }
+    if (opts.stack_tags?.length) {
+      where.push(`EXISTS (SELECT 1 FROM record_stack_tags t WHERE t.record_id = r.id AND t.tag IN (${opts.stack_tags.map(() => "?").join(",")}))`);
+      params.push(...opts.stack_tags);
+    }
+    const fileKeys = (opts.file_keys ?? []).map(normalizeRepoPath);
+    if (fileKeys.length) {
+      where.push(`EXISTS (SELECT 1 FROM record_file_keys k WHERE k.record_id = r.id AND k.path IN (${fileKeys.map(() => "?").join(",")}))`);
+      params.push(...fileKeys);
+    }
+    if (opts.source) {
+      where.push(`${this.db.dialect.jsonText("r.body", "source")} = ?`);
+      params.push(opts.source);
+    }
+    return { where, params, fileKeys };
+  }
+  /**
+   * COUNT(*) over the §3.4 base filter — the number of records query() WOULD
+   * return ignoring rank/cap (rank_terms is a no-op here). No body fetch, no
+   * JSON.parse: the TUI Knowledge tree's collapsed category/source badges call
+   * this every 1 Hz frame instead of fetching + parsing hundreds of bodies.
+   */
+  count(opts = {}) {
+    const { where, params } = this.baseFilter(opts);
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(" AND ")}`).get(...params);
+    return row.n;
+  }
+  /**
+   * READ-ONLY damage count for issue #14: how many live reference_material
+   * records hold a web URL location (http, https, ftp) whose '//' an earlier
+   * write collapsed to '/' ('https:/host/…'). The shape is isCollapsedUrlLocation's, the one
+   * definition in packages/schemas. Nothing is repaired here: each such record
+   * is fixed by a knowledge_edit on `location` restoring the second slash.
+   */
+  countCollapsedUrlLocations() {
+    const { where, params } = this.baseFilter({ types: ["reference_material"] });
+    const rows = this.db.prepare(`SELECT r.body FROM records r WHERE ${where.join(" AND ")}`).all(...params);
+    return rows.filter((row) => {
+      const location = JSON.parse(row.body).location;
+      return typeof location === "string" && isCollapsedUrlLocation(location);
+    }).length;
+  }
+  /**
+   * ABSENCE QUERY (board a577a69d): "is anything ruled about X" needs a
+   * usable "nothing", and a capped/ranked window can never establish one —
+   * this counts over the FULL rank_terms match set (uncapped, never the
+   * window query() returns) how many score at least `minScore`, using the
+   * SAME base filter and match expression query() ranks by, so this can never
+   * disagree with what a caller would see if it raised cap far enough.
+   *
+   * SCALE: SQLite FTS5's bm25() returns a value where LOWER (more negative) is
+   * MORE relevant, and it is otherwise unbounded — the opposite of what a
+   * caller reading "min_score" would expect. The score this thresholds is
+   * `-bm25(records_fts)`: HIGHER is more relevant, a bare keyword match sits
+   * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
+   * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
+   * itself — knowledge_query's tool description names this scale so a caller
+   * never has to reverse-engineer bm25's own sign convention. That is the
+   * SQLite scale; on Postgres the score is the driver's ranking, also
+   * higher-is-better, and scoreScale() names which scale a store uses.
+   *
+   * Requires rank_terms — a threshold on a filter with no ranking has nothing
+   * to threshold, so this refuses loudly rather than silently answering 0
+   * (P5): a caller reading above_threshold:0 must be able to trust it means
+   * "nothing scored that high", not "nothing was rankable in the first place".
+   */
+  countAboveScore(opts, minScore) {
+    const terms = rankTerms.parse(opts.rank_terms ?? []);
+    if (!terms.length) {
+      throw new Error("min_score requires rank_terms \u2014 there is no ranked score to threshold without them.");
+    }
+    const { where, params } = this.baseFilter(opts);
+    const match = this.ftsMatchExpr(terms, opts.match_all);
+    const d = this.db.dialect;
+    const sql = `SELECT COUNT(*) AS n FROM records r ${d.searchJoin}
+      WHERE ${where.join(" AND ")} AND ${d.searchMatch} AND ${d.searchScore} >= ?`;
+    const row = this.db.prepare(sql).get(...this.searchJoinParams(match), ...params, match, minScore);
+    return row.n;
+  }
+  /**
+   * The scale countAboveScore()'s min_score is a floor on, as a versioned id
+   * (decision postgres-search-ranking-per-query-idf-no-stats-triggers, point
+   * 3): 'fts5_bm25' on SQLite, 'pg_bm25_v1' and the like on Postgres. Every
+   * scale is higher-is-better; a min_score is never carried across scales.
+   */
+  scoreScale() {
+    return this.db.dialect.scoreScale;
+  }
+  /**
+   * The text this store writes to records_fts for a record of `type` whose
+   * records.body is `body`: the type's fts builder, then the driver's
+   * searchText, as insertRecord() does. A copy that rebuilds the search index
+   * from the records (the knowledge-eval pg loader) calls this, so the rebuilt
+   * text is what this store would have written.
+   */
+  searchTextFor(type, body) {
+    const entry = RECORD_TYPES[type];
+    if (!entry)
+      throw new Error(`searchTextFor: unknown record type '${type}'`);
+    return this.db.dialect.searchText(entry.fts(JSON.parse(body)));
+  }
+  /** searchJoin's parameters: the match value once per placeholder it has, all before the filter's. */
+  searchJoinParams(match) {
+    return Array.from({ length: this.db.dialect.searchJoinBinds }, () => match);
+  }
+  /**
+   * The search expression rank_terms compiles to — shared by query() and
+   * countAboveScore() so the two can never rank two different match sets. The
+   * syntax is the driver's (dialect.searchQuery): on SQLite an FTS5 MATCH
+   * expression.
+   */
+  ftsMatchExpr(terms, matchAll) {
+    return this.db.dialect.searchQuery(terms, matchAll);
+  }
+  /**
+   * query() once per entry of `list`, inside one read transaction: element i
+   * is what query(list[i]) returns, all from one snapshot. The hydration reads
+   * (links, successors, derived relied_by) run once over every result instead
+   * of once per entry, so on Postgres the list pays one BEGIN/COMMIT and one
+   * set of hydration statements (board f6c4bc5d: H20 runs six subject queries
+   * per dispatch). Hydration is per record, so the result is the same.
+   */
+  queryEach(list) {
+    return this.readTx(() => {
+      const raw = list.map((opts) => this.queryRows(opts));
+      const hydrated = this.withDerivedReliedByAll(raw.flat());
+      let at = 0;
+      return raw.map((rows) => hydrated.slice(at, at += rows.length));
+    });
+  }
+  /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
+  query(opts = {}) {
+    return this.readTx(() => this.withDerivedReliedByAll(this.queryRows(opts)));
+  }
+  /** query()'s rows, decoded but not hydrated. */
+  queryRows(opts) {
+    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+    const { where, params, fileKeys } = this.baseFilter(opts);
+    if (opts.rank_terms !== void 0) {
+      const terms = rankTerms.parse(opts.rank_terms);
+      if (terms.length) {
+        const match = this.ftsMatchExpr(terms, opts.match_all);
+        const d = this.db.dialect;
+        const sql2 = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
+          WHERE ${where.join(" AND ")} AND ${d.searchMatch}
+          ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
+        const rows2 = this.db.prepare(sql2).all(...this.searchJoinParams(match), ...params, match, cap);
+        return _SterlingStore.decodeLiveRecords("query", rows2);
+      }
+    }
+    const orderBy = [];
+    const overlapParams = [];
+    if (fileKeys.length) {
+      orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
+      overlapParams.push(...fileKeys);
+    }
+    orderBy.push("r.updated_at DESC", "r.id DESC");
+    const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
+      ORDER BY ${orderBy.join(", ")} LIMIT ?`;
+    const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
+    return _SterlingStore.decodeLiveRecords("query", rows);
+  }
+  /** query()'s two return paths share this: one relations scan for the whole
+   *  result set (not one per feature_article row) before applying the derived
+   *  relied_by to each. */
+  withDerivedReliedByAll(input) {
+    const records = this.hydrateAll(input);
+    if (!records.some((r) => r.type === "feature_article"))
+      return records;
+    const relations = this.activeArticleRelations();
+    return records.map((r) => this.withDerivedReliedBy(r, relations));
+  }
+  /**
+   * Versioned change (§3.2.3, §3.1 criterion 3): the new record supersedes the
+   * old; the old is retained with status 'superseded' + superseded_by set.
+   * This is the ONLY change path for immutable types (decision, §3.2.1).
+   */
+  supersede(oldId, newInput, authoritativeScope, options = {}) {
+    this.assertWritable("supersede");
+    const operationId = operationIdOf(options, "supersede");
+    const oldRecord = this.get(oldId);
+    if (!oldRecord)
+      throw new Error(`supersede: no record '${oldId}'`);
+    const oldIdentity = this.identityOf(oldId);
+    if (!oldIdentity)
+      throw new Error(`supersede: no record '${oldId}'`);
+    if (oldIdentity.lifecycle === "retired" || oldRecord.status === "superseded") {
+      throw new Error(`supersede: record '${oldId}' is already superseded (retired) \u2014 one successor maximum`);
+    }
+    const candidate = { ...newInput };
+    if (candidate.id === oldId) {
+      throw new Error(`supersede: the replacement carries the SAME id as '${oldId}' \u2014 that is a self-cycle in the relation graph, not a supersession. Use updateRecord for an in-place change, or mint a genuinely new id for a concept replacement.`);
+    }
+    const links = Array.isArray(candidate.links) ? [...candidate.links] : [];
+    if (!links.some((l) => l.rel === "supersedes" && l.target_id === oldId)) {
+      links.push({ rel: "supersedes", target_id: oldId });
+    }
+    candidate.links = links;
+    candidate.scope = authoritativeScope ?? oldIdentity.scope;
+    const prepared = _SterlingStore.resolveIdentity(candidate, { lifecycle: "live", freshness: "fresh", version: 1 });
+    const newRecord = validateRecord(prepared.input);
+    if (newRecord.type !== oldRecord.type) {
+      throw new Error(`supersede: type mismatch ('${newRecord.type}' cannot supersede '${oldRecord.type}')`);
+    }
+    if (newRecord.type === "feature_article" && oldRecord.type === "feature_article" && newRecord.version <= oldRecord.version) {
+      throw new Error(`supersede: feature_article version must increase (old v${oldRecord.version}, new v${newRecord.version})`);
+    }
+    const storedOld = _SterlingStore.storableBody({
+      ...oldRecord,
+      lifecycle: "retired",
+      updated_at: newRecord.updated_at
+    });
+    this.tx(() => {
+      this.refuseRepeatedOperation(operationId);
+      this.insertRecord(newRecord, operationId);
+      const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
+             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(storedOld), oldId);
+      if (res.changes === 0) {
+        throw new Error(`supersede: record '${oldId}' was concurrently superseded \u2014 retry against the current version`);
+      }
+      this.logActivity("updated", newRecord, newRecord.updated_at);
+    });
+    return this.hydrateAll([_SterlingStore.storableBody(newRecord)])[0];
+  }
+  /**
+   * IN-PLACE todo mutation (§3.2.7 board_update, work order 9a06b6aa) — the one
+   * exception to "every change is a supersession". todo is deliberately NOT in
+   * the immutable set (only decision is), and every board item is a DURABLE
+   * record in the same store as knowledge, so the established change primitive
+   * (supersede: mint a new id, retain the old) would rot every reference keyed
+   * on the item's id (feature_link, H7/H10 maintenance items) on every edit. The
+   * id, created_at, status and superseded_by stay exactly as they were; only the
+   * caller's patched fields and updated_at change — same row, same identity.
+   *
+   * `newInput` is the FULL merged candidate (old record + patch), mirroring
+   * supersede's own calling convention: this method validates and persists, the
+   * tool layer decides which fields may be patched and builds the merge. A
+   * terminal (superseded) record is refused, same as supersede/retireInFavorOf,
+   * and the UPDATE is guarded on that status inside the transaction to close the
+   * same concurrent-supersede race.
+   */
+  updateTodo(id, newInput, opts = {}) {
+    const old = this.get(id);
+    if (!old)
+      throw new Error(`updateTodo: no record '${id}'`);
+    if (old.type !== "todo")
+      throw new Error(`updateTodo: '${id}' is a ${old.type}, not a todo \u2014 board_update only mutates todos`);
+    const candidate = { ...newInput };
+    if (typeof candidate.type === "string" && candidate.type !== "todo") {
+      throw new Error(`updateTodo: type mismatch ('${candidate.type}' is not 'todo')`);
+    }
+    return this.applyInPlace("updateTodo", id, () => candidate, opts);
+  }
+  /**
+   * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a
+   * replacement that lives in ANOTHER store (the promoted copy in a domain
+   * store). supersede can't cross stores and always inserts a same-store
+   * replacement; this sets the existing record to superseded + superseded_by =
+   * the cross-store id with NO new row. Provenance and inbound links survive;
+   * default queries already hide superseded records, so it never double-serves.
+   */
+  /**
+   * `verb` names what this retirement IS for the activity feed (board
+   * 39d6462d): 'retired' for the genuine-duplicate path (knowledge_retire) and
+   * 'promoted' for the project→domain copy's tombstone (knowledgePromote) — the
+   * two existing callers, distinguished so a promotion reads as "promoted",
+   * not as an unrelated-looking "retired". Defaults to 'retired' so the
+   * pre-promotion caller (and any future one) keeps that meaning without
+   * having to know the parameter exists.
+   */
+  retireInFavorOf(id, replacementId, at, verb = "retired") {
+    this.assertWritable("retireInFavorOf");
+    const record2 = this.get(id);
+    if (!record2)
+      throw new Error(`retireInFavorOf: no record '${id}'`);
+    const identity = this.identityOf(id);
+    if (identity?.lifecycle === "retired" || record2.status === "superseded") {
+      throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
+    }
+    const replacement = this.identityOf(replacementId);
+    if (replacement?.lifecycle === "retired") {
+      throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
+    }
+    const retired = { ...record2, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
+    const stored = _SterlingStore.storableBody(retired);
+    this.tx(() => {
+      const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
+             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
+      if (res.changes === 0) {
+        throw new Error(`retireInFavorOf: record '${id}' was concurrently superseded \u2014 retry`);
+      }
+      this.insertRelation(replacementId, "supersedes", id, at);
+      this.logActivity(verb, retired, at);
+    });
+    return this.hydrateAll([stored])[0];
+  }
+  /**
+   * Hard removal — the P4 path for todos (done = removed by the artifact-write
+   * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
+   * Removing a SYSTEM-source todo appends to the capped queue drain log
+   * (§3.2.7 audit projection — "was X handled?"); user todos are never logged.
+   */
+  remove(id, drainedAt) {
+    this.assertWritable("remove");
+    this.tx(() => {
+      const record2 = this.get(id);
+      const isSystemDrain = record2 && record2.type === "todo" && record2.source === "system";
+      if (isSystemDrain && record2) {
+        this.db.prepare("INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys, record_id) VALUES (?, ?, ?, ?, ?)").run(drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), record2.system_reason ?? "", record2.text ?? "", JSON.stringify(record2.file_keys ?? []), record2.id);
+        this.db.prepare("DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)").run();
+      }
+      if (record2 && !isSystemDrain) {
+        this.logActivity("removed", record2, drainedAt ?? (/* @__PURE__ */ new Date()).toISOString());
+      }
+      this.db.prepare("DELETE FROM records WHERE id = ?").run(id);
+      this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
+      this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
+      this.db.prepare("DELETE FROM record_relations WHERE source_id = ?").run(id);
+      this.db.prepare("DELETE FROM record_relations WHERE target_id = ?").run(id);
+      this.db.prepare("DELETE FROM record_versions WHERE record_id = ?").run(id);
+      this.db.prepare("DELETE FROM record_aliases WHERE canonical_id = ?").run(id);
+      this.db.prepare("DELETE FROM records_fts WHERE record_id = ?").run(id);
+    });
+  }
+  /** Newest-first drained queue items (§3.2.7 drain log) — the TUI's completed section. */
+  listQueueDrain(limit = 15) {
+    const rows = this.db.prepare("SELECT drained_at, system_reason, text, file_keys FROM queue_drain_log ORDER BY seq DESC LIMIT ?").all(limit);
+    return rows.map((r) => ({ ...r, file_keys: JSON.parse(r.file_keys) }));
+  }
+  /**
+   * The drain-log trace for ONE removed item id, newest first (board 97d773ef):
+   * lets a remove on a gone id say "already removed <when>" instead of a bare
+   * "no record". Returns undefined when no trace remains — which, because the
+   * log keeps only the newest 50 rows, means "no RECENT trace", never proof the
+   * id never existed.
+   */
+  drainLogEntry(id) {
+    try {
+      return this.db.prepare("SELECT drained_at, system_reason FROM queue_drain_log WHERE record_id = ? ORDER BY seq DESC LIMIT 1").get(id);
+    } catch (e) {
+      if (this.legacySchemaVersion !== void 0 && /record_id/.test(String(e.message)))
+        return void 0;
+      throw e;
+    }
+  }
+  /**
+   * Board 39d6462d activity feed — the ONE seam every knowledge write lands
+   * through, so the Queue tab's activity section shows "what has been done"
+   * without a second, separate write path (§3.1 invariant: one write path).
+   * Called directly by create/supersede/addLink/remove/retireInFavorOf with the
+   * verb that primitive actually performed; NOT called from insertRecord
+   * itself, because supersede/enqueueSystemTodo also insert rows and each needs
+   * its own verb (or, for enqueueSystemTodo, no activity-log entry at all — see
+   * remove()'s system-todo branch, which already has a completed-section home
+   * in queue_drain_log and would otherwise double-log). Same capped-at-50,
+   * pruned-in-tx retention policy as queue_drain_log (§3.2.7), so completed
+   * items never build up here either.
+   */
+  logActivity(verb, record2, at) {
+    this.db.prepare("INSERT INTO activity_log (at, verb, type, record_id, title) VALUES (?, ?, ?, ?, ?)").run(at, verb, record2.type, record2.id, activityTitleOf(record2));
+    this.db.prepare("DELETE FROM activity_log WHERE seq NOT IN (SELECT seq FROM activity_log ORDER BY seq DESC LIMIT 50)").run();
+  }
+  /** Newest-first activity rows (board 39d6462d) — the TUI Queue tab's activity section. */
+  listActivityLog(limit = 15) {
+    return this.db.prepare("SELECT at, verb, type, record_id AS id, title FROM activity_log ORDER BY seq DESC LIMIT ?").all(limit);
+  }
+  /** Backup snapshot (§2.3): the driver copies the store to the configured backup path (SQLite: VACUUM INTO). Refuses to overwrite. */
+  snapshot(targetPath) {
+    const target = targetPath.replace(/\\/g, "/");
+    if (existsSync2(target)) {
+      throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
+    }
+    mkdirSync2(dirname4(target), { recursive: true });
+    this.db.snapshot(target);
+  }
+  close() {
+    this.db.close();
+  }
+  // -------------------------------------------------------------------------
+  // The staged-pipeline run/handoff protocol (spec §3.2.9, §5.2 — createRun,
+  // getRun, casTransition, casTransitionMerge, recordPendingExit/
+  // getPendingExit, writeHandoff/readHandoffs, updateRunOptimistic and its
+  // dependents appendRunEscalation/appendRunReconcileNeeded/
+  // appendRunScopeAmendment/setRunReviewMandatory/incrementDispatchCount) was
+  // removed per decision sterling-claude-code-scale-down-boundary (2ad87dd1).
+  // The `runs`/`handoffs` SQLite tables are left in place, unused — no FK
+  // references them and no startup validation scans them, so leaving them is
+  // safe; a DROP TABLE migration is optional cleanup, not a correctness
+  // requirement (see the migration list at the bottom of this file).
+  // -------------------------------------------------------------------------
+  /**
+   * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,
+   * transactionally — read + delete in one transaction, never a signal file (P4).
+   */
+  writeSelection(type, recordId, at) {
+    this.assertWritable("writeSelection");
+    this.tx(() => {
+      this.db.prepare("INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at").run(type, recordId, at);
+    });
+  }
+  /**
+   * Store-level metadata read (store_meta). undefined when the key was never
+   * set. A pre-v2 store has no store_meta table (it opens read-only before the
+   * DDL runs), so this refuses there with the migration error rather than
+   * answering "unset" for a question the store cannot answer.
+   */
+  getMeta(key) {
+    this.assertV2Surface("getMeta");
+    const row = this.db.prepare("SELECT value FROM store_meta WHERE key = ?").get(key);
+    return row?.value;
+  }
+  /** Store-level metadata write (store_meta): upsert, one row per key, stamped updated_at. */
+  setMeta(key, value) {
+    this.assertWritable("setMeta");
+    if (typeof key !== "string" || key.length === 0)
+      throw new Error("setMeta: key must be a non-empty string");
+    if (typeof value !== "string")
+      throw new Error(`setMeta: value for key '${key}' must be a string`);
+    this.tx(() => {
+      this.db.prepare("INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(key, value, (/* @__PURE__ */ new Date()).toISOString());
+    });
+  }
+  takeSelection() {
+    let row;
+    this.tx(() => {
+      row = this.db.prepare("SELECT type, record_id, at FROM selection WHERE slot = 1").get();
+      if (row)
+        this.db.prepare("DELETE FROM selection WHERE slot = 1").run();
+    });
+    return row;
+  }
+  /**
+   * fs-move support (§7.1): renames inside the machinery never orphan
+   * knowledge — every owning record's stored paths are rewritten as part of
+   * the move (exact normalized-path matches only), revalidated, and the
+   * file-key index updated, in one transaction.
+   *
+   * It goes through the VERSIONED in-place core ([stable-identity-design-v2]):
+   * a rename is a real change to the record's content, so it bumps the version,
+   * archives the prior body, rebuilds record_file_keys and refreshes the FTS
+   * row like every other write. As a bare body UPDATE it was invisible to
+   * expected_version — a concurrent updateRecord holding a pre-rename read
+   * silently reverted the rename with no CAS conflict — and left the old path
+   * ranking in records_fts. allowRetired keeps the contract intact for
+   * tombstones: a move must orphan NO owning record's paths.
+   */
+  renameFileKey(oldPath, newPath) {
+    this.assertWritable("renameFileKey");
+    const from = normalizeRepoPath(oldPath);
+    const to = normalizeRepoPath(newPath);
+    let count = 0;
+    this.tx(() => {
+      const rows = this.db.prepare("SELECT record_id FROM record_file_keys WHERE path = ?").all(from);
+      count = rows.length;
+      for (const { record_id } of rows) {
+        if (!this.get(record_id))
+          continue;
+        this.applyInPlace("renameFileKey", record_id, (current) => {
+          const patched = deepReplaceString(current, from, to);
+          const c = current;
+          if (c.type === "todo" && c.source === "system" && c.system_reason === "reconcile_needed") {
+            const fileKeys = [...new Set(patched.file_keys ?? [])].sort();
+            const featureLink = patched.feature_link;
+            const owner = featureLink ? this.get(featureLink) : void 0;
+            const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: featureLink }, fileKeys);
+            return { ...patched, file_keys: fileKeys, text };
+          }
+          return patched;
+        }, {}, { allowRetired: true, suppressReconcilePrune: true });
+      }
+    });
+    return count;
+  }
+  /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4).
+   *  targetValidated is set ONLY by MountedStores.addLink, which has already resolved
+   *  the target across every mounted store — cross-store edges are a legitimate shape
+   *  (promotion itself writes them: supersedes / informed_by across project↔domain)
+   *  that a store-local get cannot see. Standalone usage keeps the local check. */
+  addLink(sourceId, rel, targetId, targetValidated = false) {
+    this.assertWritable("addLink");
+    const source = this.get(sourceId);
+    if (!source)
+      throw new Error(`addLink: no record '${sourceId}'`);
+    if (!targetValidated && !this.get(targetId))
+      throw new Error(`addLink: no target record '${targetId}'`);
+    const parsedRel = linkSchema.shape.rel.parse(rel);
+    if (parsedRel === "supersedes") {
+      throw new Error(`addLink: rel 'supersedes' cannot be written as a raw edge \u2014 supersession is a lifecycle transition, not a link. Use supersede(oldId, newRecord) for concept replacement, or retireInFavorOf(id, survivor) for duplicate consolidation. Nothing was written.`);
+    }
+    if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId))
+      return source;
+    const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] };
+    const at = (/* @__PURE__ */ new Date()).toISOString();
+    const stored = _SterlingStore.storableBody(updated);
+    this.tx(() => {
+      this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(stored), sourceId);
+      this.insertRelation(sourceId, parsedRel, targetId, at);
+      this.logActivity("linked", updated, at);
+    });
+    return this.hydrateAll([stored])[0];
+  }
+  // disposeRunRows / purgeRunRows (the staged-pipeline run-row disposal pair)
+  // were removed alongside the run/handoff protocol above (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — their sole callers
+  // (dispose-run.mjs, merge-gate.mjs) are pipeline apparatus. check_skipped
+  // rows now accumulate under the NULL-run cap below only; a run-scoped row
+  // is unreachable once nothing calls createRun.
+  /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
+  recordCheckSkipped(check2, reason, runId, at) {
+    this.assertWritable("recordCheckSkipped");
+    this.tx(() => {
+      this.db.prepare("INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)").run(runId ?? null, check2, reason, at);
+      if (!runId) {
+        this.db.prepare("DELETE FROM check_skipped WHERE run_id IS NULL AND seq NOT IN (SELECT seq FROM check_skipped WHERE run_id IS NULL ORDER BY seq DESC LIMIT 50)").run();
+      }
+    });
+  }
+  listCheckSkipped(runId) {
+    return runId ? this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped WHERE run_id = ? ORDER BY seq").all(runId) : this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped ORDER BY seq").all();
+  }
+  // -------------------------------------------------------------------------
+  // AC8: catalog bootstrap + maintenance enqueue (run r-ea9e, phase 3)
+  // -------------------------------------------------------------------------
+  /**
+   * Idempotent bootstrap: if no project-scoped reference_material carrying a
+   * `catalog` payload exists, create one seeded from config.models' DISTINCT
+   * pinned model IDs. No network; no fabrication — day-one entries are the IDs
+   * already in use by the installed agents.
+   */
+  bootstrapCatalogIfAbsent(config2, nowISO) {
+    const existing = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
+    if (existing.length > 0)
+      return;
+    const cfg = config2;
+    const models = cfg.models ?? {};
+    const ids = /* @__PURE__ */ new Set();
+    for (const v of Object.values(models)) {
+      if (v?.model)
+        ids.add(v.model);
+    }
+    const dateStr = nowISO.slice(0, 10);
+    this.create({
+      id: randomUUID(),
+      type: "reference_material",
+      created_at: nowISO,
+      updated_at: nowISO,
+      author: "system",
+      status: "active",
+      superseded_by: null,
+      links: [],
+      scope: "project",
+      stack_tags: [],
+      title: "Models catalog",
+      kind: "doc",
+      location: ".sterling/models-catalog",
+      summary: "KB-maintained model catalog for the TUI System tab.",
+      source_date: dateStr,
+      capture_date: dateStr,
+      catalog: {
+        entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
+      }
+    }, { operation_id: randomUUID() });
+  }
+  /**
+   * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
+   * Dedup: if a pending item with system_reason='refresh_reference' already exists,
+   * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
+   * must NOT suppress the enqueue (§3.2.5, decision foreign_98064d77).
+   *
+   * The item's `text` names a real delta (Dome Farmer friction 2026-09-17: a bare
+   * "Refresh the KB models catalog" with no file_keys and a project-local catalog
+   * gave a drain nothing to act on): every current entry's id/tier/status, with
+   * any 'unknown' tier called out as the concrete thing to look up. A drain closes
+   * it by writing the looked-up values into catalog.entries[] on the linked
+   * record (feature_link) and citing this item's id in `resolves`.
+   */
+  enqueueRefreshReferenceOnce(nowISO) {
+    const pending = this.query({ types: ["todo"], cap: 200 }).filter((r) => r.system_reason === "refresh_reference");
+    if (pending.length > 0)
+      return;
+    const catalogs = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
+    const todo = {
+      id: randomUUID(),
+      type: "todo",
+      created_at: nowISO,
+      updated_at: nowISO,
+      author: "system",
+      status: "active",
+      superseded_by: null,
+      links: [],
+      scope: "project",
+      stack_tags: [],
+      text: "Refresh the KB models catalog" + refreshReferenceDeltaSuffix(catalogs[0]),
+      source: "system",
+      system_reason: "refresh_reference"
+    };
+    if (catalogs.length > 0) {
+      todo.feature_link = catalogs[0].id;
+    }
+    this.create(todo, { operation_id: randomUUID() });
+  }
+  /**
+   * The one row-insert. Since S2 ([stable-identity-design-v2]) the stored BODY
+   * carries lifecycle/freshness/version and NOT status/superseded_by — those two
+   * are derived at read. They survive as records COLUMNS because they are the
+   * §3.4 filter surface every read SQL already joins on (and the shape a
+   * pre-migration store still has): written here from the derived values in the
+   * same statement, never read back as the served truth.
+   */
+  /** Refuses an operation_id that already wrote a record. Runs inside the write transaction, before the insert: on Postgres a unique violation would abort the transaction. */
+  refuseRepeatedOperation(operationId) {
+    if (operationId === void 0)
+      return;
+    const row = this.db.prepare("SELECT id FROM records WHERE operation_id = ?").get(operationId);
+    if (row)
+      throw new OperationRepeatedError(operationId, row.id);
+  }
+  insertRecord(record2, operationId) {
+    const entry = RECORD_TYPES[record2.type];
+    const meta = record2;
+    const lifecycle = meta.lifecycle === "retired" ? "retired" : "live";
+    const freshness = meta.freshness === "flagged_stale" ? "flagged_stale" : "fresh";
+    const version2 = typeof meta.version === "number" ? meta.version : 1;
+    const stored = _SterlingStore.storableBody(record2);
+    this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body, operation_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record2.id, record2.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version2, record2.scope, record2.created_at, record2.updated_at, record2.author, JSON.stringify(stored), operationId ?? null);
+    for (const tag of new Set(record2.stack_tags)) {
+      this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(record2.id, tag);
+    }
+    for (const path of new Set(entry.fileKeys(stored))) {
+      this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(record2.id, path);
+    }
+    for (const link of record2.links) {
+      if (link.target_id === record2.id)
+        continue;
+      this.insertRelation(record2.id, link.rel, link.target_id, record2.updated_at);
+    }
+    if (lifecycle === "retired" && meta.superseded_by && meta.superseded_by !== record2.id) {
+      this.insertRelation(meta.superseded_by, "supersedes", record2.id, record2.updated_at);
+    }
+    this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record2.id, this.db.dialect.searchText(entry.fts(stored)));
+  }
+  /**
+   * REENTRANT — every other write primitive (create, supersede, …) already
+   * calls this internally, so a multi-record tool-layer write (knowledge_split:
+   * N child creates + one parent supersession, decision
+   * compaction-tooling-windowed-read-plus-split) that must land atomically
+   * cannot simply wrap several such calls in a second BEGIN — SQLite does not
+   * nest transactions. `txDepth` makes a NESTED call join the already-open
+   * transaction instead of attempting a second one: only the outermost call
+   * issues BEGIN/COMMIT/ROLLBACK, so a failure anywhere inside unwinds the
+   * whole thing exactly once.
+   */
+  txDepth = 0;
+  /** Open read transactions on this handle (readTx). A write may not start inside one. */
+  readDepth = 0;
+  /**
+   * A multi-statement read sees one snapshot (decision
+   * postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+   * point 5): it joins an open write or read transaction, or else opens the
+   * driver's read transaction (REPEATABLE READ READ ONLY on Postgres). A driver
+   * with no beginRead (SQLite) keeps its autocommit reads.
+   */
+  readTx(fn) {
+    if (this.txDepth > 0 || this.readDepth > 0 || !this.db.beginRead)
+      return fn();
+    if (this.db.beginReadDeferred)
+      this.db.beginReadDeferred();
+    else
+      this.db.beginRead();
+    this.readDepth++;
+    let ok = false;
+    try {
+      const result = fn();
+      ok = true;
+      return result;
+    } finally {
+      this.readDepth--;
+      if (ok) {
+        this.db.endRead?.();
+      } else {
+        try {
+          this.db.endRead?.();
+        } catch {
+        }
+      }
+    }
+  }
+  tx(fn) {
+    this.assertV2Surface("transaction");
+    if (this.txDepth > 0) {
+      fn();
+      return;
+    }
+    if (this.readDepth > 0) {
+      throw new Error("SterlingStore: a write cannot start inside a read transaction (readTx); nothing was written.");
+    }
+    this.db.begin();
+    this.txDepth++;
+    try {
+      this.assertLiveSchemaVersion("transaction");
+      if (this.db.prepare("SELECT 1 FROM store_meta WHERE key = 'move_fence'").get())
+        throw new StoreMovedError(this.dbPath);
+      fn();
+      this.db.commit();
+    } catch (e) {
+      try {
+        this.db.rollback();
+      } catch {
+      }
+      throw e;
+    } finally {
+      this.txDepth--;
+    }
+  }
+  /**
+   * PUBLIC transaction boundary for the tool layer (decision
+   * compaction-tooling-windowed-read-plus-split): the store is the one write
+   * path (invariant 3 / CLAUDE.md §"Store writes"), so a tool-layer operation
+   * that must write several records atomically — knowledge_split's N children
+   * plus one parent supersession — gets the transaction FROM the store rather
+   * than reimplementing BEGIN/COMMIT/ROLLACK above it. Reentrant via `tx`:
+   * every store write primitive called from `fn` joins this same transaction.
+   */
+  withTransaction(fn) {
+    let result;
+    this.tx(() => {
+      result = fn();
+    });
+    return result;
+  }
+  /**
+   * PER-RECORD transaction boundary — the ToolStore sibling that routes by
+   * PHYSICAL IDENTITY rather than by a label (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]). A
+   * label-routed transaction opens on the store the label NAMES while every
+   * record mutation independently opens on the store that HOLDS the id, so a
+   * drifted label put the transaction on the wrong database; routing by the
+   * holder makes the two agree by construction. On a plain SterlingStore there
+   * is only ONE physical store, so this is a straight alias for withTransaction
+   * — MountedStores overrides it to resolve the holding mount.
+   *
+   * ITS LABEL-ROUTED SIBLING (`withTransactionForScope`) IS RETIRED (decision
+   * [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]):
+   * it had zero production callers once knowledge_extract moved here, and its
+   * shape was exactly the defect this method closed.
+   */
+  withTransactionForRecord(_id, fn) {
+    return this.withTransaction(fn);
+  }
+};
+
+// packages/store/dist/broker-runtime.js
+import { createHash } from "node:crypto";
+import { closeSync as closeSync2, constants as FS, fstatSync, lstatSync as lstatSync2, mkdirSync as mkdirSync3, openSync as openSync2, readdirSync, readSync, realpathSync as realpathSync2, renameSync, rmSync as rmSync2, writeFileSync } from "node:fs";
+import { join as join7 } from "node:path";
+var BrokerRuntimeDirError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "BrokerRuntimeDirError";
+  }
+};
+var uid = () => typeof process.getuid === "function" ? process.getuid() : void 0;
+function onWindowsDrive(path) {
+  return /^\/mnt\/[a-zA-Z](\/|$)/.test(path);
+}
+function brokerDirPath(env = process.env) {
+  const id = uid();
+  if (id === void 0)
+    return void 0;
+  const xdg = env.XDG_RUNTIME_DIR;
+  if (xdg && xdg.startsWith("/") && !onWindowsDrive(xdg))
+    return join7(xdg, "sterling");
+  return `/tmp/sterling-${id}`;
+}
+function assertPrivate(path, kind) {
+  let st;
+  try {
+    st = lstatSync2(path);
+  } catch (e) {
+    throw new BrokerRuntimeDirError(`broker ${kind} ${path} cannot be read (${e.code ?? e.message})`);
+  }
+  if (st.isSymbolicLink())
+    throw new BrokerRuntimeDirError(`broker ${kind} ${path} is a symlink; refused`);
+  const isKind = kind === "directory" ? st.isDirectory() : kind === "file" ? st.isFile() : st.isSocket();
+  if (!isKind)
+    throw new BrokerRuntimeDirError(`broker ${kind} ${path} is not a ${kind}; refused`);
+  if (st.uid !== uid())
+    throw new BrokerRuntimeDirError(`broker ${kind} ${path} is owned by uid ${st.uid}, not this user (${uid()}); refused`);
+  if ((st.mode & 63) !== 0)
+    throw new BrokerRuntimeDirError(`broker ${kind} ${path} has mode ${(st.mode & 511).toString(8)}; group and other bits must be clear; refused`);
+}
+function brokerDir({ create, env = process.env }) {
+  const dir = brokerDirPath(env);
+  if (dir === void 0)
+    return void 0;
+  try {
+    lstatSync2(dir);
+  } catch (e) {
+    if (e.code !== "ENOENT")
+      throw new BrokerRuntimeDirError(`broker directory ${dir} cannot be read (${e.message})`);
+    if (!create)
+      return void 0;
+    mkdirSync3(dir, { mode: 448 });
+  }
+  assertPrivate(dir, "directory");
+  return dir;
+}
+function brokerProjectKey(root) {
+  return createHash("sha256").update(realpathSync2(root)).digest("hex").slice(0, 16);
+}
+function brokerSocketPath(dir, instanceId) {
+  return join7(dir, `${instanceId}.sock`);
+}
+function brokerRegistrationPath(dir, root, instanceId) {
+  return join7(dir, `${brokerProjectKey(root)}.${instanceId}.json`);
+}
+function publishBrokerRegistration(dir, root, reg) {
+  const path = brokerRegistrationPath(dir, root, reg.instance_id);
+  const tmp = join7(dir, `.${reg.instance_id}.json.tmp`);
+  writeFileSync(tmp, JSON.stringify(brokerRegistrationSchema.parse(reg)), { mode: 384 });
+  renameSync(tmp, path);
+  return path;
+}
+function removeOwnBrokerFiles(dir, root, instanceId) {
+  rmSync2(brokerRegistrationPath(dir, root, instanceId), { force: true });
+  rmSync2(brokerSocketPath(dir, instanceId), { force: true });
+}
+function brokerStorageIdentity(route) {
+  const c = readPgCredentials(route.credentialsPath);
+  return { backend: "postgres", database: `${c.host}:${c.port}/${c.database}`, meta_schema: route.metaSchema, project_schema: route.projectSchema };
+}
+
+// packages/store/dist/routing.js
+var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
+var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
+var STORAGE_BACKENDS = ["sqlite", "postgres"];
+var MOVE_STORE_COMMAND = "node scripts/move-store.mjs --to pg|sqlite";
+var CONFIG_REL2 = ".sterling/config.json";
+var StoreSettingsError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "StoreSettingsError";
+  }
+};
+var StoreUnreachableError = class extends Error {
+  target;
+  constructor(target, detail) {
+    super(`storage 'postgres': the Postgres store database at ${target} is unreachable (${detail}). Postgres storage never falls back to SQLite; nothing was written.`);
+    this.target = target;
+    this.name = "StoreUnreachableError";
+  }
+};
+var PostgresStoreNotMovedError = class extends PgStoreMissingError {
+  constructor(cause) {
+    super(cause.schema, "see the message");
+    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node scripts/move-store.mjs --to pg\`. Nothing was created.`;
+    this.name = "PostgresStoreNotMovedError";
+  }
+};
+function routedCredentialsPath() {
+  return join8(homedir3(), ".sterling", "credentials", "served.json");
+}
+function readConfig(root) {
+  const path = join8(root, CONFIG_REL2);
+  try {
+    lstatSync3(path);
+  } catch (e) {
+    if (e?.code === "ENOENT")
+      return null;
+    throw new StoreSettingsError(`${path} cannot be read: ${e.message}`);
+  }
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync3(path, "utf8"));
+  } catch (e) {
+    throw new StoreSettingsError(`malformed ${path}: ${e.message}. Nothing was opened.`);
+  }
+  const storage = raw?.storage;
+  if (storage !== void 0 && !STORAGE_BACKENDS.includes(storage)) {
+    throw new StoreSettingsError(`config.storage is ${JSON.stringify(storage)} in ${path} \u2014 it must be 'sqlite' or 'postgres' (absent means 'sqlite'). Only ${MOVE_STORE_COMMAND} sets it. Nothing was opened.`);
+  }
+  try {
+    return { raw, config: parseConfig(raw) };
+  } catch (e) {
+    throw new StoreSettingsError(`malformed ${path}: ${e.message}. Nothing was opened.`);
+  }
+}
+function testNamespace() {
+  const ns = process.env[PG_TEST_NAMESPACE_ENV];
+  if (ns === void 0 || ns === "")
+    return void 0;
+  if (!/^sterling_test_[a-z0-9]+$/.test(ns)) {
+    throw new StoreSettingsError(`${PG_TEST_NAMESPACE_ENV}='${ns}' is refused: it must be sterling_test_<lowercase letters and digits>`);
+  }
+  return ns;
+}
+function pgStoreNames(projectId, stackTags) {
+  const ns = testNamespace();
+  const metaSchema = ns ? `${ns}_meta` : PG_META_SCHEMA;
+  const projectSchema = ns ? pgProjectSchemaName(projectId).replace(/^sterling_p_/, `${ns}_p_`) : pgProjectSchemaName(projectId);
+  assertSterlingSchemaName(metaSchema);
+  assertSterlingSchemaName(projectSchema);
+  const bySchema = /* @__PURE__ */ new Map();
+  const domains = stackTags.map((name) => {
+    const schema = ns ? pgDomainSchemaName(name).replace(/^sterling_d_/, `${ns}_d_`) : pgDomainSchemaName(name);
+    assertSterlingSchemaName(schema);
+    const other = bySchema.get(schema);
+    if (other !== void 0) {
+      throw new StoreSettingsError(`domains '${other}' and '${name}' both map to the Postgres schema '${schema}'; rename one in stack_tags. Nothing was opened.`);
+    }
+    bySchema.set(schema, name);
+    return { name, schema };
+  });
+  return { metaSchema, projectSchema, domains };
+}
+function resolveStoreRoute(root) {
+  const absRoot = resolve2(root);
+  const read = readConfig(absRoot);
+  if (read === null)
+    return null;
+  const { config: config2 } = read;
+  if (read.raw.storage !== "postgres") {
+    return { storage: "sqlite", root: absRoot, config: config2, projectDbPath: join8(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config2) };
+  }
+  const shown = absRoot.replace(/\\/g, "/");
+  const mode = readProjectMode(absRoot);
+  if (mode !== "work") {
+    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node scripts/move-store.mjs --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
+  }
+  const identity = readProjectIdentity(absRoot);
+  if (identity === null) {
+    throw new ProjectIdentityError(`storage 'postgres' needs the project identity file ${shown}/.sterling/project.json ({"project_id": "<uuid v4>"}); it is missing. Restore it from git, or let init write it. Nothing was opened.`);
+  }
+  const credentialsPath = routedCredentialsPath();
+  try {
+    readPgCredentials(credentialsPath);
+  } catch (e) {
+    if (e instanceof PgConfigError)
+      throw new StoreSettingsError(`storage 'postgres': ${e.message}. Nothing was opened; Postgres storage never falls back to SQLite.`);
+    throw e;
+  }
+  const names = pgStoreNames(identity.project_id, config2.stack_tags);
+  return {
+    storage: "postgres",
+    root: absRoot,
+    config: config2,
+    projectId: identity.project_id,
+    credentialsPath,
+    metaSchema: names.metaSchema,
+    projectSchema: names.projectSchema,
+    domains: names.domains.map((d) => ({ ...d, dbPath: `postgres:${d.schema}` })),
+    ...testNamespace() ? { testNamespace: testNamespace() } : {}
+  };
+}
+var bridges = /* @__PURE__ */ new Map();
+function connectionLabel(config2) {
+  return `${config2.host}:${config2.port}/${config2.database}`;
+}
+function acquireBridge(credentialsPath) {
+  const existing = bridges.get(credentialsPath);
+  if (existing && !existing.bridge.closed)
+    return existing;
+  bridges.delete(credentialsPath);
+  let config2;
+  try {
+    config2 = readPgCredentials(credentialsPath);
+  } catch (e) {
+    if (e instanceof PgConfigError)
+      throw new StoreSettingsError(`storage 'postgres': ${e.message}. Nothing was opened; Postgres storage never falls back to SQLite.`);
+    throw e;
+  }
+  config2 = { ...config2, connectionTimeoutMillis: Math.min(config2.connectionTimeoutMillis, ROUTED_CONNECT_TIMEOUT_MS) };
+  let bridge;
+  try {
+    bridge = new PgBridge(config2);
+  } catch (e) {
+    if (e instanceof PgWorkerDiedError || e instanceof PgBridgeTimeoutError)
+      throw new StoreUnreachableError(connectionLabel(config2), e.message);
+    throw e;
+  }
+  const entry = { bridge, leases: 0 };
+  bridges.set(credentialsPath, entry);
+  return entry;
+}
+function releaseLease(credentialsPath, entry) {
+  entry.leases -= 1;
+  if (entry.leases > 0)
+    return;
+  if (bridges.get(credentialsPath) === entry)
+    bridges.delete(credentialsPath);
+  entry.bridge.close();
+}
+var RoutedPgDriver = class {
+  inner;
+  release;
+  dialect;
+  joinedReads = 0;
+  released = false;
+  pinned = false;
+  constructor(inner, release) {
+    this.inner = inner;
+    this.release = release;
+    this.dialect = inner.dialect;
+  }
+  prepare(sql) {
+    return this.inner.prepare(sql);
+  }
+  exec(sql) {
+    this.inner.exec(sql);
+  }
+  begin() {
+    this.inner.begin();
+  }
+  commit() {
+    this.inner.commit();
+  }
+  rollback() {
+    this.inner.rollback();
+  }
+  beginRead() {
+    if (this.inner.bridge.transactionOwner !== void 0) {
+      this.joinedReads += 1;
+      return;
+    }
+    this.inner.beginRead();
+  }
+  /** beginRead() with PgDriver's deferred BEGIN. A deferred BEGIN is pending only inside one
+   *  SterlingStore.readTx, whose statements all run on that store's own handle, so no other
+   *  handle runs a statement between the claim and the BEGIN. */
+  beginReadDeferred() {
+    if (this.inner.bridge.transactionOwner !== void 0) {
+      this.joinedReads += 1;
+      return;
+    }
+    this.inner.beginReadDeferred();
+  }
+  endRead() {
+    if (this.joinedReads > 0) {
+      this.joinedReads -= 1;
+      return;
+    }
+    this.inner.endRead();
+  }
+  /** Holds one REPEATABLE READ READ ONLY transaction until close: every read sees one snapshot and every write is refused (the bridge refuses the write's BEGIN). */
+  pinReadOnlySnapshot() {
+    this.inner.beginRead();
+    this.pinned = true;
+  }
+  schemaVersion() {
+    return this.inner.schemaVersion();
+  }
+  setSchemaVersion(version2) {
+    this.inner.setSchemaVersion(version2);
+  }
+  hasSchema() {
+    return this.inner.hasSchema();
+  }
+  prepareReadOnly() {
+    this.inner.prepareReadOnly();
+  }
+  prepareWritable(isFresh) {
+    this.inner.prepareWritable(isFresh);
+  }
+  publishFresh(supported) {
+    return this.inner.publishFresh(supported);
+  }
+  journalMode() {
+    return this.inner.journalMode();
+  }
+  snapshot(targetPath) {
+    this.inner.snapshot(targetPath);
+  }
+  close() {
+    if (this.released)
+      return;
+    this.released = true;
+    try {
+      if (this.pinned) {
+        this.pinned = false;
+        this.inner.endRead();
+      }
+    } finally {
+      try {
+        this.inner.close();
+      } finally {
+        this.release();
+      }
+    }
+  }
+};
+function openWorkStore(route, entry, schema, options = {}) {
+  let inner;
+  try {
+    inner = new PgDriver(entry.bridge, { schema, metaSchema: route.metaSchema });
+  } catch (e) {
+    if (e instanceof PgStoreMissingError)
+      throw new PostgresStoreNotMovedError(e);
+    throw e;
+  }
+  entry.leases += 1;
+  const driver = new RoutedPgDriver(inner, () => releaseLease(route.credentialsPath, entry));
+  try {
+    const store = new SterlingStore(`postgres:${schema}`, { driver });
+    if (options.readOnlySnapshot)
+      driver.pinReadOnlySnapshot();
+    return store;
+  } catch (e) {
+    driver.close();
+    throw e;
+  }
+}
+function routeOrDefault(root) {
+  const route = resolveStoreRoute(root);
+  if (route !== null)
+    return route;
+  const config2 = parseConfig({});
+  const absRoot = resolve2(root);
+  return { storage: "sqlite", root: absRoot, config: config2, projectDbPath: join8(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config2) };
+}
+function openRoutedStores(root, opts = {}) {
+  const route = routeOrDefault(root);
+  if (route.storage === "sqlite") {
+    if (opts.mount) {
+      return { route, config: route.config, stores: new MountedStores(route.projectDbPath, route.domains, { skipMissing: opts.skipMissing }) };
+    }
+    if (opts.readOnlySnapshot)
+      throw new StoreSettingsError("readOnlySnapshot is a Postgres-storage option; a SQLite read-only open copies the file instead");
+    return { route, config: route.config, store: new SterlingStore(route.projectDbPath) };
+  }
+  const entry = acquireBridge(route.credentialsPath);
+  const closeIfUnused = () => {
+    if (entry.leases === 0) {
+      if (bridges.get(route.credentialsPath) === entry)
+        bridges.delete(route.credentialsPath);
+      entry.bridge.close();
+    }
+  };
+  try {
+    if (opts.mount) {
+      const stores = new MountedStores(`postgres:${route.projectSchema}`, route.domains, {
+        work: {
+          openProject: () => openWorkStore(route, entry, route.projectSchema),
+          openDomain: (m) => openWorkStore(route, entry, schemaOf(route, m.name))
+        }
+      });
+      return { route, config: route.config, stores };
+    }
+    return { route, config: route.config, store: openWorkStore(route, entry, route.projectSchema, { readOnlySnapshot: opts.readOnlySnapshot }) };
+  } catch (e) {
+    closeIfUnused();
+    throw e;
+  }
+}
+function schemaOf(route, name) {
+  const d = route.domains.find((x) => x.name === name);
+  if (!d)
+    throw new Error(`routing: domain '${name}' is not in the route's stack_tags`);
+  return d.schema;
+}
+
 // node_modules/zod/v4/mini/schemas.js
 var ZodMiniType = /* @__PURE__ */ $constructor("ZodMiniType", (inst, def) => {
   if (!inst._zod)
@@ -19073,7 +26648,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
+        await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -19090,7 +26665,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve5, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -19168,7 +26743,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve3(parseResult.data);
+            resolve5(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -19429,12 +27004,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve5, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve3, interval);
+      const timeoutId = setTimeout(resolve5, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -19507,7 +27082,7 @@ var Protocol = class {
     };
   }
 };
-function isPlainObject2(value) {
+function isPlainObject4(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function mergeCapabilities(base2, additional) {
@@ -19518,7 +27093,7 @@ function mergeCapabilities(base2, additional) {
     if (addValue === void 0)
       continue;
     const baseValue = result[k];
-    if (isPlainObject2(baseValue) && isPlainObject2(addValue)) {
+    if (isPlainObject4(baseValue) && isPlainObject4(addValue)) {
       result[k] = { ...baseValue, ...addValue };
     } else {
       result[k] = addValue;
@@ -20534,7 +28109,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
+      await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -21103,5717 +28678,21 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // packages/mcp-server/dist/server.js
-import { readFileSync as readFileSync3, existsSync as existsSync5 } from "node:fs";
-import { join as join7, dirname as dirname6 } from "node:path";
-
-// packages/schemas/dist/paths.js
-function normalizeRepoPath(input) {
-  const fwd = input.replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(fwd)) {
-    throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input}'`);
-  }
-  if (fwd.startsWith("/")) {
-    throw new Error(`path invariant violation: absolute path is not repo-relative: '${input}'`);
-  }
-  const parts = [];
-  for (const seg of fwd.split("/")) {
-    if (seg === "" || seg === ".")
-      continue;
-    if (seg === "..") {
-      throw new Error(`path invariant violation: parent-escaping path: '${input}'`);
-    }
-    parts.push(seg);
-  }
-  if (parts.length === 0) {
-    throw new Error(`path invariant violation: empty path: '${input}'`);
-  }
-  return parts.join("/");
-}
-var repoPath = external_exports.string().transform((value, ctx) => {
-  try {
-    return normalizeRepoPath(value);
-  } catch (e) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: e.message });
-    return external_exports.NEVER;
-  }
-});
-function isAbsolutePathAnyHost(p) {
-  const s2 = String(p ?? "");
-  return /^[A-Za-z]:[\\/]/.test(s2) || s2.startsWith("/") || s2.startsWith("\\");
-}
-function sameLocationAnyHost(a, b) {
-  const x = drvfsForm(a);
-  const y = drvfsForm(b);
-  if (x === void 0 || y === void 0)
-    return false;
-  const [fx, fy] = foldDrvfs(x, y);
-  return fx === fy;
-}
-function drvfsForm(p) {
-  const s2 = String(p ?? "").replace(/\\/g, "/");
-  if (!isAbsolutePathAnyHost(s2))
-    return void 0;
-  const drive = /^([A-Za-z]):\/(.*)$/.exec(s2);
-  return (drive ? `/mnt/${drive[1].toLowerCase()}/${drive[2]}` : s2).replace(/\/+$/, "");
-}
-function foldDrvfs(x, y) {
-  const onDrvfs = (p) => /^\/mnt\/[A-Za-z](\/|$)/.test(p);
-  return onDrvfs(x) && onDrvfs(y) ? [x.toLowerCase(), y.toLowerCase()] : [x, y];
-}
-var SCHEME_LOCATION = /^[a-z][a-z0-9+.-]+:(\S|$)/i;
-var COLLAPSED_URL_LOCATION = /^(https?|ftp):\/[^/]/i;
-var HAS_SEPARATOR = /[\\/]/;
-var ENDS_IN_EXTENSION = /\.[A-Za-z0-9]{1,8}$/;
-function isCollapsedUrlLocation(location) {
-  return COLLAPSED_URL_LOCATION.test(location.trim());
-}
-function classifyLocation(location) {
-  const text = location.trim();
-  if (SCHEME_LOCATION.test(text))
-    return "url";
-  if (!/\s/.test(text))
-    return "path";
-  return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
-}
-function repoPathOfLocation(location) {
-  if (classifyLocation(location) !== "path")
-    return void 0;
-  try {
-    return normalizeRepoPath(location.trim());
-  } catch {
-    return void 0;
-  }
-}
-function normalizeLocation(location) {
-  return repoPathOfLocation(location) ?? location;
-}
-
-// packages/schemas/dist/envelope.js
-var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
-var WRITE_REFUSED_LINK_RELS = ["supersedes"];
-var linkSchema = external_exports.object({
-  rel: external_exports.enum(LINK_RELS),
-  target_id: external_exports.string().uuid()
-});
-var AUTHOR_RE = /^(user|conductor|system|agent:[a-z0-9_-]+)$/;
-var SCOPE_RE = /^(project|domain:[a-z0-9_-]+)$/;
-var LIFECYCLE_VALUES = ["live", "retired"];
-var FRESHNESS_VALUES = ["fresh", "flagged_stale"];
-var envelopeFields = {
-  id: external_exports.string().uuid(),
-  type: external_exports.string(),
-  created_at: external_exports.string().datetime(),
-  updated_at: external_exports.string().datetime(),
-  author: external_exports.string().regex(AUTHOR_RE, "author must be user | conductor | system | agent:<role>"),
-  status: external_exports.enum(["active", "superseded"]),
-  // Separate from status on purpose: an enum conflated with a foreign key queries badly (§3.2).
-  superseded_by: external_exports.string().uuid().nullable(),
-  // v2 identity trio — server-owned, optional on input (the store assigns them
-  // and refuses an out-of-enum value loudly). `version` starts at 1 and is
-  // bumped by every in-place write; feature_article narrows it to REQUIRED in
-  // its own extend, because its pre-v2 chains author the number explicitly.
-  lifecycle: external_exports.enum(LIFECYCLE_VALUES).optional(),
-  // freshness KEEPS ITS NAME (decision board-provenance-measured-at-head:
-  // renaming is SQL column + envelope + v2-migration churn for zero behavior
-  // change) but redocumented here — it tracks whether THIS RECORD was edited
-  // (record-edit currency), never whether the world it describes is still
-  // true. On a todo it is always 'fresh' (zero information — see digestRecord,
-  // which omits it from the todo digest for that reason) and must not be
-  // mistaken for the file_keys-changed provenance annotation board_query now
-  // carries, which is the one that speaks to world truth.
-  freshness: external_exports.enum(FRESHNESS_VALUES).optional(),
-  version: external_exports.number().int().positive().optional(),
-  links: external_exports.array(linkSchema),
-  scope: external_exports.string().regex(SCOPE_RE, "scope must be project | domain:<name>"),
-  stack_tags: external_exports.array(external_exports.string())
-};
-function refineSupersession(rec, ctx) {
-  if (rec.status === "superseded" && rec.superseded_by === null) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'superseded' requires superseded_by" });
-  }
-  if (rec.status === "active" && rec.superseded_by !== null) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "status 'active' forbids superseded_by" });
-  }
-}
-
-// packages/schemas/dist/records.js
-var verifiableAt = external_exports.union([external_exports.literal("final"), external_exports.string().regex(/^phase:\d+$/)]);
-var base = external_exports.object(envelopeFields);
-var decisionSchema = base.extend({
-  type: external_exports.literal("decision"),
-  // Stable handle (board 1e639f32): survives supersession the way an id does
-  // not — auto-minted from the title at create when absent; optional so
-  // legacy records round-trip unchanged. Uniqueness is enforced at the write
-  // (knowledgeCreate), spanning every slug-bearing type.
-  slug: external_exports.string().min(1).optional(),
-  title: external_exports.string().min(1),
-  statement: external_exports.string().min(1),
-  alternatives_rejected: external_exports.array(external_exports.object({ option: external_exports.string(), reason: external_exports.string() })),
-  rationale: external_exports.string().min(1),
-  file_keys: external_exports.array(repoPath).optional(),
-  // MEASURED-VS-INFERRED marker + number→command binding (board 1d02b6b4,
-  // lightweight half, user-approved 2026-08-21): evidence_basis says whether
-  // the record's load-bearing claims were measured or inferred (a false
-  // anti-pattern once lived 8 minutes because nothing marked it inferred);
-  // measured_by names the command/instrument that produced a measured claim,
-  // so a quoted number can be re-derived instead of trusted. Named
-  // evidence_basis because anti_pattern already carries an unrelated `basis`
-  // enum (codebase|platform|external). Instrument-staleness re-test machinery
-  // is DEFERRED — see the decision's rejected alternatives.
-  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
-  measured_by: external_exports.string().min(1).optional(),
-  // Board 055cfb6a: whether this ruling is standing policy, scoped to one
-  // session, or a one-off instruction — a capture agent that must choose
-  // asks, one that need not can leave it unstated. Optional, no default: a
-  // one-off instruction was once captured as standing policy and rewrote
-  // the governing file three times; absent means unstated, and existing
-  // records round-trip unchanged.
-  authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
-}).superRefine(refineSupersession);
-var notApplicableExemptionSchema = external_exports.object({
-  not_applicable: external_exports.object({
-    reason: external_exports.string().min(1),
-    ruling_record_id: external_exports.string().optional()
-  }).strict()
-}).strict();
-var ARTICLE_KINDS = ["feature", "probe", "tool", "concept"];
-var NOT_APPLICABLE_EXEMPT_KINDS = ["probe", "tool"];
-var ARTICLE_STATE_REQUIRES = {
-  dormant: ["state_reason", "wiring_todo_id"]
-};
-var currentAcItemSchema = external_exports.object({
-  ac_id: external_exports.string().min(1),
-  text: external_exports.string().min(1),
-  verifiable_at: verifiableAt,
-  // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no test
-  // CAN cover this, because <ruling>" — strict (extra members refused) so a
-  // stray field cannot smuggle unreviewed prose past the one place a reader
-  // checks for a real blocking ruling. Optional: absent means the AC is
-  // ordinarily testable; when present both members are required, since a
-  // reason with no ruling to point at is just an excuse.
-  untestable_because: external_exports.object({
-    reason: external_exports.string().min(1),
-    blocking_record_id: external_exports.string().uuid()
-  }).strict().optional()
-});
-var liveTestRefItemSchema = external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) });
-var baselineAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
-  attested_at: external_exports.string().min(1),
-  item_id: external_exports.string().min(1),
-  head_commit: external_exports.string().min(1),
-  sha256: external_exports.string().min(1)
-})).optional();
-var absenceAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
-  attested_at: external_exports.string().min(1),
-  item_id: external_exports.string().min(1),
-  head_commit: external_exports.string().min(1)
-}).strict()).optional();
-var featureArticleSchema = base.extend({
-  type: external_exports.literal("feature_article"),
-  slug: external_exports.string().min(1),
-  title: external_exports.string().min(1),
-  what_it_does: external_exports.string().min(1),
-  intended_behavior: external_exports.string().min(1),
-  // `unverified` marks a files[] entry whose ROLE has not yet been written from
-  // the actual source — an honest "I do not know this yet" (board db7cd16c).
-  // A consuming project had been expressing exactly this in prose ("⚠⚠ ROLE NOT
-  // YET WRITTEN FROM THE FILE"), which is the right instinct and the wrong
-  // mechanism: a marker buried in a role string only helps if somebody reads it,
-  // while a flag is QUERYABLE and the read-time state check can surface it. Set
-  // it when creating an article ahead of the code; clear it by rewriting the
-  // role from the file.
-  // `entry` marks the file a registry reaches: the hooks.json command, the
-  // command or skill file, the registerTool site, the bin or the agent
-  // template (decision feature-article-states-follow-the-spec-meaning). The
-  // read-time state check looks it up to tell built from wired_in.
-  files: external_exports.array(external_exports.object({ path: repoPath, role: external_exports.string().min(1), unverified: external_exports.boolean().optional(), entry: external_exports.boolean().optional() })),
-  // §3.2.3 drift baseline (path → sha256 of the owned file's bytes), computed
-  // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
-  // drift check confirms a content change against this before flagging, so a
-  // git merge/checkout that only resets mtimes no longer raises false
-  // reconcile_needed items (decision foreign_65222971 → its baseline successor).
-  file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-  // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
-  // above, which reference_material shares so the shape is defined once.
-  baseline_attestations: baselineAttestationsSchema,
-  absence_attestations: absenceAttestationsSchema,
-  // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
-  // axis, subsuming concept_family's role there — concept_family itself is
-  // untouched, kept for compatibility (see below).
-  article_kind: external_exports.enum(ARTICLE_KINDS).default("feature"),
-  // Union with the structured not_applicable exemption (see
-  // notApplicableExemptionSchema above) — acceptance of the exemption
-  // branch, and rejection of an empty array, are both gated BY KIND in the
-  // superRefine below, since "which kind" is a whole-record fact a single
-  // field's shape cannot express alone.
-  current_ac: external_exports.union([external_exports.array(currentAcItemSchema), notApplicableExemptionSchema]),
-  // Concept-article marker (domain decision foreign_7208729b, concept-article-layer
-  // standard): set ONLY on concept articles — one per recurring domain concept
-  // FAMILY (items, weapons, …). Enables class/family enumeration without
-  // overloading stack_tags (the domain-mount manifest) and lets prep reserve
-  // the concept slice. Optional — owning articles and legacy records omit it.
-  concept_family: external_exports.string().min(1).optional(),
-  // Detached-working-tree resolution (comsoft-juiced incident 2026-07-17):
-  // the SYMBOLIC name of the working tree this record's file paths resolve
-  // against — a key into config.working_trees (name → tree path). Unset =
-  // the project root. Machine-specific paths live in config, never in the
-  // record (invariant 2); consumers (read-time drift, baselines, H7/H10
-  // ownership) resolve per record or abstain LOUD on an unmapped name.
-  working_tree: external_exports.string().min(1).optional(),
-  // relies_on/relied_by name other articles by SLUG — slugs survive version
-  // supersession, record ids do not (decision foreign_474b1c71).
-  dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
-  steps_runbook: external_exports.string().optional(),
-  // Meanings (decision feature-article-states-follow-the-spec-meaning):
-  // planned = not started; built = code exists but nothing reaches it;
-  // wired_in = reachable from a registry, not yet proven in use; active = in
-  // use; dormant = reachable but switched off; deprecated = retired.
-  // wiring_todo_id points a built article at the board item that wires it in.
-  state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
-  state_reason: external_exports.string().optional(),
-  wiring_todo_id: external_exports.string().uuid().optional(),
-  known_gaps: external_exports.array(external_exports.object({
-    site: external_exports.string().min(1),
-    kind: external_exports.enum(["mutation_survivor", "other"]),
-    evidence: external_exports.string().min(1),
-    recorded_run: external_exports.string().min(1)
-  })).optional(),
-  version: external_exports.number().int().positive(),
-  history: external_exports.array(external_exports.object({ date: external_exports.string().datetime(), event: external_exports.string().min(1), target_id: external_exports.string().uuid().optional() })),
-  live_test_refs: external_exports.union([external_exports.array(liveTestRefItemSchema), notApplicableExemptionSchema]),
-  // Board 6a8507f8: when an instrument-describing article's probe script was
-  // last actually RUN — distinct from updated_at (when the record was
-  // edited). Optional: most articles describe no probe at all.
-  last_executed: external_exports.string().datetime().optional()
-}).superRefine((rec, ctx) => {
-  refineSupersession(rec, ctx);
-  const stateNeeds = ARTICLE_STATE_REQUIRES[rec.state];
-  if (stateNeeds?.some((field) => !rec[field])) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `state '${rec.state}' requires ${stateNeeds.join(" and ")} (\xA73.2.3)` });
-  }
-  const exemptKind = NOT_APPLICABLE_EXEMPT_KINDS.includes(rec.article_kind);
-  const isExempt = (v) => typeof v === "object" && v !== null && !Array.isArray(v) && "not_applicable" in v;
-  const gated = [
-    ["live_test_refs", rec.live_test_refs, "real content (ac_id/test_paths)"],
-    ["current_ac", rec.current_ac, "real content (ac_id/text)"]
-  ];
-  for (const [field, value, contentHint] of gated) {
-    const exempt = isExempt(value);
-    if (exempt && !exemptKind) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        path: [field],
-        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind ${NOT_APPLICABLE_EXEMPT_KINDS.join("/")} may; other kinds must supply real content`
-      });
-    }
-    if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
-      ctx.addIssue({
-        code: external_exports.ZodIssueCode.custom,
-        path: [field],
-        message: `${field} must not be empty on article_kind '${rec.article_kind}' \u2014 write ${contentHint}, or the structured not_applicable exemption`
-      });
-    }
-  }
-});
-var isoDate = external_exports.string().regex(/^\d{4}-\d{2}-\d{2}/, "ISO date required");
-var antiPatternSchema = base.extend({
-  type: external_exports.literal("anti_pattern"),
-  // Stable handle (board 1e639f32) — see decisionSchema.slug.
-  slug: external_exports.string().min(1).optional(),
-  title: external_exports.string().min(1),
-  trigger: external_exports.string().min(1),
-  guidance: external_exports.string().min(1),
-  wrong_way: external_exports.string().min(1),
-  right_way: external_exports.string().min(1),
-  source_evidence: external_exports.string().min(1),
-  file_keys: external_exports.array(repoPath).optional(),
-  severity: external_exports.enum(["info", "warn", "block"]).optional(),
-  basis: external_exports.enum(["codebase", "platform", "external"]).default("codebase"),
-  // See decisionSchema.evidence_basis (board 1d02b6b4) — evidence_basis is
-  // measured|inferred, distinct from this type's pre-existing `basis`
-  // (where the knowledge CAME FROM, not how it was established).
-  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
-  measured_by: external_exports.string().min(1).optional()
-}).superRefine(refineSupersession);
-var researchFindingSchema = base.extend({
-  type: external_exports.literal("research_finding"),
-  status: external_exports.enum(["active", "superseded", "flagged_stale"]),
-  // Stable handle (board 1e639f32) — derived from the question; see decisionSchema.slug.
-  slug: external_exports.string().min(1).optional(),
-  question: external_exports.string().min(1),
-  answer: external_exports.string().min(1),
-  source_urls: external_exports.array(external_exports.string()).default([]),
-  source_date: isoDate,
-  capture_date: isoDate,
-  volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
-  // Optional (decision foreign_8dbbc85d): findings about specific files (a probe of a
-  // seam, a library's behavior in one adapter) join the file-key economy the
-  // same way decision/anti_pattern/todo do; many findings are fileless
-  // (platform behavior, pricing) so this stays optional, never required.
-  file_keys: external_exports.array(repoPath).optional(),
-  // See decisionSchema.evidence_basis (board 1d02b6b4): a live-probed finding
-  // is measured (measured_by = the probe), a docs-read finding is inferred.
-  evidence_basis: external_exports.enum(["measured", "inferred"]).optional(),
-  measured_by: external_exports.string().min(1).optional()
-}).superRefine(refineSupersession);
-var modelsCatalogSchema = external_exports.object({
-  entries: external_exports.array(external_exports.object({
-    id: external_exports.string(),
-    label: external_exports.string(),
-    tier: external_exports.string(),
-    status: external_exports.string(),
-    // Which vendor's model this is ('anthropic', 'openai'). Optional: a catalog
-    // written before vendors existed still parses, and none is invented.
-    vendor: external_exports.string().optional()
-  }))
-});
-var referenceMaterialSchema = base.extend({
-  type: external_exports.literal("reference_material"),
-  title: external_exports.string().min(1),
-  kind: external_exports.enum(["pdf", "url", "doc"]),
-  location: external_exports.string().min(1),
-  summary: external_exports.string().min(1),
-  source_date: isoDate,
-  capture_date: isoDate,
-  basis: external_exports.enum(["codebase", "platform", "external"]).default("codebase"),
-  // §3.2.5 drift baseline for a repo-located kind:doc (normalized location →
-  // sha256 of its bytes), computed server-side at create/refresh. Same role as
-  // feature_article.file_baselines: the read-time check confirms a real content
-  // change before raising refresh_reference, so an mtime-only bump (a merge) is
-  // not mistaken for an out-of-band edit. url/pdf locations carry none.
-  file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-  // R9 ATTESTATION PROVENANCE, on the SAME footing as the article's (board
-  // 8c8b6d78; owner-type parity, review finding 2026-09-06). A repo-located
-  // kind:doc joins the reconcile economy through its `location`, so settlement
-  // mints reconcile_needed items against it and an attested close stamps it —
-  // without this field that stamp was silently dropped by the parse, leaving a
-  // naked baseline whose provenance lied about which write produced it. Shape
-  // shared with featureArticleSchema, never re-declared.
-  baseline_attestations: baselineAttestationsSchema,
-  absence_attestations: absenceAttestationsSchema,
-  // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
-  // unchanged (field_baselines optional-field precedent); a catalog-bearing record
-  // carries a validated modelsCatalogSchema payload.
-  catalog: modelsCatalogSchema.optional(),
-  // Detached-working-tree resolution for a repo-located kind:doc — same
-  // semantics as featureArticleSchema.working_tree (comsoft-juiced 2026-07-17).
-  working_tree: external_exports.string().min(1).optional()
-}).superRefine(refineSupersession).transform((rec) => rec.kind === "doc" ? { ...rec, location: normalizeLocation(rec.location) } : rec);
-var disconfirmedHypothesisSchema = base.extend({
-  type: external_exports.literal("disconfirmed_hypothesis"),
-  question: external_exports.string().min(1),
-  rejected_answer: external_exports.string().min(1),
-  evidence: external_exports.string().min(1),
-  file_keys: external_exports.array(repoPath).optional()
-}).superRefine(refineSupersession);
-var OPEN_QUESTION_CLOSED = "closed";
-var OPEN_QUESTION_TERMINUS_FIELD = "closed_into";
-var openQuestionSchema = base.extend({
-  type: external_exports.literal("open_question"),
-  // Stable handle, minted from the question — see decisionSchema.slug.
-  slug: external_exports.string().min(1).optional(),
-  // The question IS the identity, exactly as on research_finding and
-  // disconfirmed_hypothesis (which is why axisNarrowText treats all three the
-  // same way and why the digest leads with it).
-  question: external_exports.string().min(1),
-  // The LIVE candidates. Plural and ordered by the author; a question with no
-  // hypothesis yet is legitimate, so this defaults to [] rather than being
-  // required — what makes the record worth keeping is the EVIDENCE.
-  hypotheses: external_exports.array(external_exports.string().min(1)).default([]),
-  // What is already known: the measurements, the derived geometry, the probe
-  // output. Required — an unevidenced question is a board todo, not durable
-  // knowledge, and that boundary is the whole point of the type.
-  evidence: external_exports.string().min(1),
-  resolution_status: external_exports.enum(["open", "closed"]).default("open"),
-  // The TERMINAL home: closure means the question was answered, and an
-  // answered question is a research_finding. Its own field, never an id
-  // embedded in a status string (Codex refinement, thread 01a05710), so it is
-  // queryable and cannot rot inside prose.
-  closed_into: external_exports.string().min(1).optional(),
-  file_keys: external_exports.array(repoPath).optional()
-}).superRefine((rec, ctx) => {
-  refineSupersession(rec, ctx);
-  if (rec.resolution_status === OPEN_QUESTION_CLOSED && !rec[OPEN_QUESTION_TERMINUS_FIELD]) {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      message: `resolution_status '${OPEN_QUESTION_CLOSED}' requires ${OPEN_QUESTION_TERMINUS_FIELD} (the research_finding the answer landed in)`
-    });
-  }
-  if (rec.resolution_status !== OPEN_QUESTION_CLOSED && rec[OPEN_QUESTION_TERMINUS_FIELD]) {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      message: `${OPEN_QUESTION_TERMINUS_FIELD} is set but resolution_status is 'open' \u2014 close the question or drop the terminus`
-    });
-  }
-});
-var attestationSchema = base.extend({
-  type: external_exports.literal("attestation"),
-  // Optional explicit handle. NEVER auto-minted (no title/question headline
-  // to mint from); an explicit one passes the cross-type collision refusal
-  // like every slug-bearing type (review finding 3, 2026-08-21).
-  slug: external_exports.string().min(1).optional(),
-  // What was inspected — a free-form artifact identity (a part number, a
-  // render name, a document version). Repo files it corresponds to belong in
-  // file_keys, which joins the retrieval economy; artifact_key does not need
-  // to be a path and often is not.
-  artifact_key: external_exports.string().min(1),
-  verdict: external_exports.enum(["approved", "rejected", "needs_rework"]),
-  // Who ruled — a human identity. An agent's judgment is a review finding or
-  // a decision, never an attestation; the type exists precisely to mark the
-  // human-eyes event.
-  inspector: external_exports.string().min(1),
-  // When the inspection HAPPENED — created_at is merely when the record was
-  // written, and ledger entries are routinely written after the fact.
-  inspected_at: isoDate,
-  // Instrument provenance: what the inspection looked at/through (a render
-  // at a commit, a physical sample batch) — the hook for later instrument-
-  // staleness work (board 1d02b6b4's deferred half).
-  instrument: external_exports.string().min(1).optional(),
-  notes: external_exports.string().optional(),
-  file_keys: external_exports.array(repoPath).optional()
-}).superRefine(refineSupersession);
-var BOARD_NEEDS = ["user", "grill", "investigation"];
-var SYSTEM_REASONS = [
-  "reconcile_needed",
-  "stale_research",
-  "deletion_candidate",
-  "capture_owed",
-  "promotion_review",
-  "refresh_reference",
-  // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
-  "article_missing",
-  // §6 H10: direct-mode work in unowned territory ended without its owning article
-  "research_owed",
-  // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
-  "concept_article_missing",
-  // §6 H10: a concept_designed session event ended the session without its concept article (decision foreign_7208729b)
-  // An owned file is absent from the working tree but ALIVE on another git ref
-  // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
-  // reconcile, because no write can change the fact and the article is already
-  // correct (the path becomes valid again on merge). It exists so the absence
-  // arm stops minting an unclosable reconcile_needed that re-fires on every
-  // read, and so the drain has somewhere honest to put the finding.
-  "file_parked",
-  // An article's METADATA contradicts reality: it claims `planned` while the code
-  // it owns is demonstrably written, or it carries files[] roles still marked
-  // unverified. Nothing watched the state field before — the hooks watch content
-  // hashes — so an article sat at `planned` over a shipped, wired, probe-verified
-  // feature, and anyone querying it would have concluded the feature did not
-  // exist. The PROSE was right; the metadata was the lie, and metadata is what a
-  // reader trusts first. It also carries the wiring check (decision
-  // feature-article-states-follow-the-spec-meaning): a wired_in or active article
-  // whose files[] entry no registry reaches or that marks no entry, and a built
-  // article whose entry is reached.
-  "state_review",
-  // A feature_article's NON-HISTORY serialized size crossed
-  // config.article_oversize_chars on a knowledge_update/append/edit — the
-  // registry-style-article round-trip ceiling (board 8390f8fa), hit twice
-  // before anything checked it mechanically. History is excluded from the
-  // measure (board 0697c6bd): the lane's remedy is a split, a split only
-  // redistributes prose, and history weight is bounded separately by write-time
-  // rotation (article_history_max_entries). Minted at the WRITE, since that is
-  // the only moment anyone is looking; deduped per article via file_keys (a
-  // feature_article's id changes on every version, so id-keyed dedup would not
-  // survive the next reconcile — the article's owned files do).
-  "article_oversize",
-  // H17 (FIX-B, decision h17-stamp-honor-loud-restore) actually restored a
-  // tracked path to HEAD during an in-window Bash sweep, with no fresh stamp
-  // attesting the current bytes — so the restore, previously invisible past
-  // the agent's own stderr, gets a durable trace. Deduped per restored path
-  // (file_keys): a repeat restore of the same path refreshes the open item
-  // rather than minting a second one — the obligation is "this path keeps
-  // getting reverted", not "an event happened".
-  "restore_performed"
-];
-var TODO_SYSTEM_SOURCE = "system";
-var TODO_SYSTEM_REQUIRES = ["system_reason"];
-var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
-function todoBlocksItself(rec) {
-  return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
-}
-var todoSchema = base.extend({
-  type: external_exports.literal("todo"),
-  // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
-  // the same stable handle decision/anti_pattern/research_finding gained in
-  // de1a7329, extended to `todo` because a board item otherwise has only a
-  // uuid and a multi-KB text blob, and a user asked to rule on "board
-  // 17204d1e" cannot tell what they are ruling on. Auto-minted at the write
-  // (knowledgeCreate) from the item's opening headline LINE for source:'user'
-  // items; optional so legacy rows round-trip unchanged, exactly as de1a7329
-  // needed no migration. Uniqueness spans EVERY slug-bearing type — one
-  // namespace, because that is what knowledge_get/board_get resolve.
-  //
-  // A SLUG IS A FORGIVING ADDRESS FORM: it is accepted by board_get and
-  // board_update and REFUSED by board_remove/maintenance_remove, which keep
-  // demanding the exact full uuid (anti-pattern
-  // no-bounded-trail-guard-for-destructive-addressing, severity block).
-  slug: external_exports.string().min(1).optional(),
-  text: external_exports.string().min(1),
-  source: external_exports.enum(["user", "system"]),
-  file_keys: external_exports.array(repoPath).optional(),
-  feature_link: external_exports.string().uuid().optional(),
-  priority: external_exports.enum(["low", "normal", "high"]).optional(),
-  system_reason: external_exports.enum(SYSTEM_REASONS).optional(),
-  // Board grouping key (decision foreign_a8d2ce6c): slices of one larger objective
-  // share this label and the TUI groups them under it. A grouping FIELD, not
-  // a parent record — absent means standalone. The 'standalone' sentinel is
-  // normalized to absent at the TOOL layer; the schema stores what it gets.
-  objective: external_exports.string().min(1).optional(),
-  // §3.2.7 provenance (decision board-provenance-measured-at-head): the
-  // commit this item's evidence was read at. Server-stamped on board_add and
-  // re-stamped on a board_update that changes text/file_keys; a caller MAY
-  // supply it, and the tool layer refuses an unresolvable sha by name rather
-  // than silently replacing it with HEAD (P5).
-  measured_at_head: external_exports.string().regex(/^[0-9a-f]{40}$/, "40-hex commit sha required").optional(),
-  // Semantic order between user asks (decision
-  // every-user-ask-is-boarded-at-intake-with-slim-blocked-by, rule 6): the
-  // SLUGS of the board items this one waits on. Slugs, never ids, because a
-  // slug is the immutable address (decision board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address). Lives in the JSON body
-  // like every other todo field, so it needs no migration. Existence of each
-  // blocker is checked at the tool layer when written; a blocker removed later
-  // reads as closed, it is never rewritten out of this list.
-  blocked_by: external_exports.array(external_exports.string().min(1)).optional(),
-  // What a user item waits on besides its blockers (decision
-  // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
-  // 'investigation' still auto-starts, as a researcher lane; 'user' and
-  // 'grill' wait for the user. Not a progress status: `status` keeps meaning
-  // supersession only. Absent means nothing beyond the blockers.
-  needs: external_exports.enum(BOARD_NEEDS).optional()
-}).superRefine((rec, ctx) => {
-  refineSupersession(rec, ctx);
-  if (rec.source === TODO_SYSTEM_SOURCE) {
-    for (const field of TODO_SYSTEM_REQUIRES) {
-      if (!rec[field]) {
-        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: `source '${TODO_SYSTEM_SOURCE}' requires ${field} (\xA73.2.7)` });
-      }
-    }
-    for (const [field, verb] of Object.entries(TODO_USER_ONLY_FIELDS)) {
-      if (rec[field] !== void 0) {
-        ctx.addIssue({
-          code: external_exports.ZodIssueCode.custom,
-          path: [field],
-          message: `${field} ${verb} source:'user' board tasks only \u2014 maintenance-queue items never carry it`
-        });
-      }
-    }
-  }
-  if (todoBlocksItself(rec)) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["blocked_by"], message: `blocked_by lists '${rec.slug}', the item itself \u2014 an item cannot block itself` });
-  }
-});
-function undeclaredPhaseInterfaces(rec) {
-  const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
-  return rec.phases.flatMap((phase) => (phase.interfaces ?? []).filter((name) => !declared.has(name)).map((name) => ({ phase_id: phase.phase_id, name })));
-}
-var briefSchema = base.extend({
-  type: external_exports.literal("brief"),
-  slug: external_exports.string().min(1),
-  title: external_exports.string().min(1),
-  problem: external_exports.string().min(1),
-  feature: external_exports.string().min(1),
-  user_stated: external_exports.object({
-    criteria: external_exports.array(external_exports.string()),
-    constraints: external_exports.array(external_exports.string())
-  }),
-  conductor_proposals: external_exports.array(external_exports.object({ text: external_exports.string().min(1), status: external_exports.enum(["confirmed", "unconfirmed"]) })),
-  acceptance_criteria: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), text: external_exports.string().min(1), verifiable_at: verifiableAt })),
-  technical_design: external_exports.object({
-    approach: external_exports.string(),
-    interfaces: external_exports.array(external_exports.object({ name: external_exports.string(), contract: external_exports.string() })),
-    shared_structures: external_exports.array(external_exports.string())
-  }),
-  // §7.1/§7.6: proposed at planning, human-confirmed at the gate, frozen into
-  // data before the run — reviewer-selection's first signal source.
-  risk_flags: external_exports.array(external_exports.enum(["security_relevant", "perf_sensitive"])).optional(),
-  blast_radius: external_exports.object({
-    files: external_exports.array(external_exports.object({ path: repoPath, owning_articles: external_exports.array(external_exports.string().uuid()) })),
-    reconcile_list: external_exports.array(external_exports.string().uuid())
-  }),
-  incidental_scope: external_exports.array(repoPath),
-  out_of_scope: external_exports.array(external_exports.string()),
-  phases: external_exports.array(external_exports.object({
-    phase_id: external_exports.string().min(1),
-    goal: external_exports.string().min(1),
-    subtasks: external_exports.array(external_exports.string()),
-    ac_ids: external_exports.array(external_exports.string()),
-    difficulty: external_exports.object({ level: external_exports.enum(["normal", "hard"]), reasons: external_exports.array(external_exports.string()) }),
-    model_hint: external_exports.string(),
-    // prep's staging inputs are planning outputs (§7.1/§7.6): the phase
-    // declares its file list + rank_terms. Optional pending §4 alignment
-    // (raised as a spec gap); prep falls back to blast_radius files.
-    files: external_exports.array(repoPath).optional(),
-    rank_terms: external_exports.array(external_exports.string().regex(/^\S{1,64}$/)).optional(),
-    // §8.1: the phase's interface slice (names into technical_design.
-    // interfaces) — the test-writer's REQUIRED input; a phase without
-    // declared interfaces gives it nothing to write against (spawn check).
-    interfaces: external_exports.array(external_exports.string().min(1)).optional()
-  })),
-  decisions_made: external_exports.array(external_exports.string().uuid())
-}).superRefine((rec, ctx) => {
-  refineSupersession(rec, ctx);
-  for (const { phase_id, name } of undeclaredPhaseInterfaces(rec)) {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      message: `phase '${phase_id}' references undeclared interface '${name}' (\xA78.1 interface slice must come from technical_design.interfaces)`
-    });
-  }
-});
-var AGENT_MODEL_KEY = {
-  implementor: "implementor",
-  researcher: "researcher",
-  scout: "scout",
-  librarian: "librarian",
-  reviewer: "reviewer"
-};
-var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
-var s = (v) => typeof v === "string" ? v : "";
-var DIGEST_CLIP = 160;
-var clipped = (v, n = DIGEST_CLIP) => {
-  const text = s(v).replace(/\s+/g, " ").trim();
-  if (!text)
-    return void 0;
-  return text.length <= n ? text : `${text.slice(0, n)}\u2026`;
-};
-var RECORD_TYPES = {
-  decision: {
-    schema: decisionSchema,
-    immutable: true,
-    fts: (r) => [s(r.slug), s(r.title), s(r.statement), s(r.rationale)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? [],
-    // slug leads for the same reason it does on feature_article: it is the
-    // handle that survives supersession (board 1e639f32); the title states the ruling.
-    // authority (board 055cfb6a): surfaced on the digest line so a capped scan
-    // shows scope alongside the ruling, not only on knowledge_get.
-    digest: { slug: "plain", title: "plain", authority: "plain" }
-  },
-  anti_pattern: {
-    schema: antiPatternSchema,
-    immutable: false,
-    fts: (r) => [s(r.slug), s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? [],
-    // trigger is the field that tells a reader whether the hazard applies to
-    // what they are about to do — the whole point of scanning hazards — and
-    // severity is the order H19 already renders them in.
-    digest: { slug: "plain", title: "plain", trigger: "clip", severity: "plain" }
-  },
-  research_finding: {
-    schema: researchFindingSchema,
-    immutable: false,
-    fts: (r) => [s(r.slug), s(r.question), s(r.answer)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? [],
-    // No title on this type — the question IS the identity. Both clocks ride
-    // along because a finding's currency decides whether it may be used at all.
-    digest: { slug: "plain", question: "clip", source_date: "plain", capture_date: "plain" }
-  },
-  reference_material: {
-    schema: referenceMaterialSchema,
-    immutable: false,
-    fts: (r) => [s(r.title), s(r.summary)].join("\n"),
-    // §3.2.5: repo-located docs join the reconcile economy — for kind:doc a
-    // repo-relative location doubles as a file_key (H7 pressure applies);
-    // pdf/url locations are external and carry none, and neither does a
-    // kind:doc location that is a URL, prose or an absolute/escaping path.
-    fileKeys: (r) => {
-      if (r.kind !== "doc")
-        return [];
-      const rel = repoPathOfLocation(r.location);
-      return rel === void 0 ? [] : [rel];
-    },
-    // location is this type's path-bearing field (§3.2.5), so it is what a
-    // reader needs to go open the thing.
-    digest: { title: "plain", kind: "plain", location: "plain" }
-  },
-  disconfirmed_hypothesis: {
-    schema: disconfirmedHypothesisSchema,
-    immutable: false,
-    fts: (r) => [s(r.question), s(r.rejected_answer), s(r.evidence)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? [],
-    // The rejected answer is the reusable half — it stops the question being
-    // re-asked and re-answered the same wrong way.
-    digest: { question: "clip", rejected_answer: "clip" }
-  },
-  open_question: {
-    schema: openQuestionSchema,
-    // MUTABLE, unlike decision/attestation: an open question is a LIVE working
-    // record — hypotheses get added and struck, evidence accumulates, and it
-    // eventually flips to closed. Supersession would mint a new record per
-    // measurement, which is exactly the churn the type exists to absorb.
-    immutable: false,
-    fts: (r) => [s(r.slug), s(r.question), r.hypotheses?.join("\n") ?? "", s(r.evidence)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? [],
-    // The question is the identity (research_finding's rule); resolution_status
-    // rides along because whether a question is still OPEN decides whether it is
-    // worth reading at all — the same role research_finding's clocks play.
-    digest: { slug: "plain", question: "clip", resolution_status: "plain" }
-  },
-  attestation: {
-    schema: attestationSchema,
-    // Point-in-time human ruling: supersession is the only change path, exactly
-    // the decision contract (§3.2.1 analog; board 259a455f).
-    immutable: true,
-    fts: (r) => [s(r.slug), s(r.artifact_key), s(r.verdict), s(r.inspector), s(r.notes)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? [],
-    // The progress-surface read: artifact + verdict + who + when answer the
-    // ledger question without opening the record.
-    digest: { artifact_key: "plain", verdict: "plain", inspector: "plain", inspected_at: "plain" }
-  },
-  feature_article: {
-    schema: featureArticleSchema,
-    immutable: false,
-    // concept_family joins the FTS text so a family query ranks its concept
-    // article (class enumeration stays a consumer-side filter on the field).
-    fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join("\n"),
-    fileKeys: (r) => (r.files ?? []).map((f) => f.path),
-    // slug leads: it is the STABLE handle across versions (decision foreign_474b1c71),
-    // and the id in the envelope beside it is not. version + state say whether
-    // this is a moving target and whether it is wired yet.
-    digest: { slug: "plain", title: "plain", state: "plain", version: "plain", concept_family: "plain" }
-  },
-  todo: {
-    schema: todoSchema,
-    immutable: false,
-    fts: (r) => s(r.text),
-    fileKeys: (r) => r.file_keys ?? [],
-    // The measured worst case for full bodies: board items run to ~8 KB each,
-    // so a whole-board read spilled 478 KB. system_reason is what sorts the
-    // maintenance queue into lanes; priority/source sort the board.
-    //
-    // slug LEADS, exactly as it does on decision/feature_article, and is
-    // 'plain' rather than 'clip' (decision human-readable-ids-for-board-items,
-    // 2e8c30e4): it is the ADDRESSABLE handle a reader cites, and a clipped
-    // address does not resolve. Names clip only in the composed `name (id8)`
-    // DISPLAY form (headlineRecord / TUI card titles) — never in the field.
-    // Absent for a legacy slugless item: digestRecord omits empty headline
-    // fields, and an absent name is safer than a fabricated one (df361a0f).
-    digest: { slug: "plain", text: "clip", source: "plain", priority: "plain", system_reason: "plain", objective: "plain" }
-  },
-  brief: {
-    schema: briefSchema,
-    immutable: false,
-    fts: (r) => [s(r.slug), s(r.title), s(r.problem), s(r.feature)].join("\n"),
-    fileKeys: (r) => {
-      const br = r.blast_radius;
-      return (br?.files ?? []).map((f) => f.path);
-    },
-    digest: { slug: "plain", title: "plain", problem: "clip" }
-  }
-};
-function recordSizes(record2) {
-  const { history, ...body } = record2;
-  return {
-    body_chars: JSON.stringify(body).length,
-    history_chars: Array.isArray(history) && history.length ? JSON.stringify(history).length : 0
-  };
-}
-function digestRecord(record2) {
-  const out = {
-    id: record2.id,
-    type: record2.type,
-    status: record2.status,
-    updated_at: record2.updated_at
-  };
-  const entry = RECORD_TYPES[s(record2.type)];
-  if (!entry)
-    return out;
-  for (const [field, mode] of Object.entries(entry.digest)) {
-    const value = mode === "clip" ? clipped(record2[field]) : record2[field];
-    if (value !== void 0 && value !== null && value !== "")
-      out[field] = value;
-  }
-  out.size_chars = recordSizes(record2).body_chars;
-  return out;
-}
-var HEADLINE_CLIP = 80;
-var NAME_CLIP = 48;
-var clipName = (name) => name.length <= NAME_CLIP ? name : `${name.slice(0, NAME_CLIP - 1)}\u2026`;
-var displayHandle = (name, id) => `${clipName(name)} (${id.slice(0, 8)})`;
-function boardDisplayLabel(text, slug) {
-  const line = s(text).split("\n").find((l) => l.trim().length > 0);
-  const normalized = line ? line.trim().replace(/\s+/g, " ") : "";
-  return normalized || s(slug).trim();
-}
-function headlineRecord(record2) {
-  const out = { id: record2.id, priority: record2.priority };
-  const slug = s(record2.slug);
-  const name = record2.type === "todo" ? boardDisplayLabel(record2.text, slug) : slug;
-  if (name)
-    out.name = displayHandle(name, s(record2.id));
-  if (record2.objective !== void 0 && record2.objective !== null && record2.objective !== "")
-    out.objective = record2.objective;
-  if (record2.system_reason !== void 0 && record2.system_reason !== null && record2.system_reason !== "")
-    out.system_reason = record2.system_reason;
-  const text = clipped(record2.text, HEADLINE_CLIP);
-  if (text !== void 0)
-    out.text = text;
-  return out;
-}
-function objectShapeFor(type) {
-  const entry = RECORD_TYPES[type];
-  if (!entry)
-    return void 0;
-  let schema = entry.schema;
-  for (let i = 0; i < 10 && schema && typeof schema === "object"; i++) {
-    const shape = schema.shape;
-    if (shape)
-      return shape;
-    const inner = schema._def;
-    schema = inner?.schema ?? inner?.innerType;
-  }
-  return void 0;
-}
-function knownFieldsFor(type) {
-  const shape = objectShapeFor(type);
-  return shape ? new Set(Object.keys(shape)) : void 0;
-}
-function describeZodDetailed(node, depth = 0) {
-  if (!node || typeof node !== "object" || depth > 6)
-    return { type: "unknown" };
-  if (node === repoPath)
-    return { type: "string", format: REPO_PATH_FORMAT };
-  const def = node._def;
-  const name = def?.typeName;
-  switch (name) {
-    case "ZodString": {
-      const checks = def?.checks ?? [];
-      const regexCheck = checks.find((c) => c.kind === "regex" && c.regex);
-      const datetimeCheck = checks.find((c) => c.kind === "datetime");
-      const uuidCheck = checks.find((c) => c.kind === "uuid");
-      const minCheck = checks.find((c) => c.kind === "min" && typeof c.value === "number" && c.value > 0);
-      const minLength = minCheck ? { min_length: minCheck.value } : {};
-      if (!regexCheck && !datetimeCheck && !uuidCheck)
-        return { type: "string", ...minLength };
-      const annotations = [];
-      if (datetimeCheck)
-        annotations.push(datetimeCheck.offset || datetimeCheck.local ? "ISO datetime" : "ISO datetime, UTC Z form");
-      if (uuidCheck)
-        annotations.push("uuid");
-      const base2 = annotations.length ? `string (${annotations.join(", ")})` : "string";
-      return { type: regexCheck?.regex ? `${base2} matching ${regexCheck.regex}` : base2, ...minLength };
-    }
-    case "ZodNumber":
-      return { type: "number" };
-    case "ZodBoolean":
-      return { type: "boolean" };
-    case "ZodNull":
-      return { type: "null" };
-    case "ZodAny":
-    case "ZodUnknown":
-      return { type: "any" };
-    case "ZodEnum": {
-      const values = def?.values ?? [];
-      return { type: "enum", enum_values: values };
-    }
-    case "ZodNativeEnum":
-      return { type: "enum" };
-    case "ZodLiteral":
-      return { type: `literal ${JSON.stringify(def?.value)}` };
-    case "ZodArray": {
-      const inner = describeZodDetailed(def?.type, depth + 1);
-      return {
-        type: `${inner.type}[]`,
-        ...inner.enum_values ? { enum_values: inner.enum_values } : {},
-        ...inner.member_fields ? { element_fields: inner.member_fields } : {},
-        ...inner.min_length !== void 0 ? { min_length: inner.min_length } : {},
-        ...inner.format ? { format: inner.format } : {}
-      };
-    }
-    case "ZodObject": {
-      const shape = node.shape ?? {};
-      const members = Object.entries(shape).map(([memberName, memberNode]) => fieldShape(memberName, memberNode, depth + 1));
-      return { type: `{${Object.keys(shape).join(", ")}}`, ...members.length ? { member_fields: members } : {} };
-    }
-    case "ZodRecord":
-      return { type: `record<string, ${describeZodDetailed(def?.valueType, depth + 1).type}>` };
-    case "ZodUnion": {
-      const rawOptions = def?.options ?? [];
-      const opts = rawOptions.map((o) => describeZodDetailed(o, depth + 1));
-      const literals = opts.filter((o) => o.type.startsWith("literal "));
-      if (literals.length === opts.length && opts.length) {
-        return { type: opts.map((o) => o.type.replace("literal ", "")).join(" | ") };
-      }
-      const arrayElementFields = opts.find((o) => o.element_fields && o.type.endsWith("[]"))?.element_fields;
-      const objectMemberFields = opts.find((o) => o.member_fields && !o.type.endsWith("[]"))?.member_fields;
-      return {
-        type: opts.map((o) => o.type).join(" | "),
-        ...arrayElementFields ? { element_fields: arrayElementFields } : {},
-        ...objectMemberFields ? { member_fields: objectMemberFields } : {}
-      };
-    }
-    // Wrappers: describe what they wrap. optionality is reported separately, so
-    // it is deliberately NOT folded into the type string.
-    case "ZodOptional":
-    case "ZodNullable":
-    case "ZodDefault":
-      return describeZodDetailed(def?.innerType, depth + 1);
-    case "ZodEffects":
-      return describeZodDetailed(def?.schema, depth + 1);
-    default:
-      return { type: name ? name.replace(/^Zod/, "").toLowerCase() : "unknown" };
-  }
-}
-var EXAMPLE_MAX_DEPTH = 6;
-var EXAMPLE_MAX_CHARS = 256;
-function sampleFromRegex(source) {
-  if (/\(\?[=!<]/.test(source))
-    return void 0;
-  if (/\\[1-9]/.test(source))
-    return void 0;
-  let i = 0;
-  let failed = false;
-  const classChar = () => {
-    i++;
-    if (source[i] === "^")
-      return void 0;
-    let first;
-    while (i < source.length && source[i] !== "]") {
-      const c = source[i];
-      if (c === "\\") {
-        const esc2 = source[i + 1];
-        i += 2;
-        if (first === void 0)
-          first = escapeChar(esc2);
-      } else {
-        i++;
-        if (first === void 0)
-          first = c;
-      }
-    }
-    if (source[i] !== "]")
-      return void 0;
-    i++;
-    return first;
-  };
-  const escapeChar = (c) => {
-    if (c === void 0)
-      return void 0;
-    if (c === "d")
-      return "0";
-    if (c === "w")
-      return "a";
-    if (c === "s")
-      return " ";
-    if ("DWSbB".includes(c))
-      return void 0;
-    if (c === "n")
-      return "\n";
-    if (c === "t")
-      return "	";
-    return c;
-  };
-  const quantifier = () => {
-    const c = source[i];
-    if (c === "*" || c === "?") {
-      i++;
-      if (source[i] === "?")
-        i++;
-      return 0;
-    }
-    if (c === "+") {
-      i++;
-      if (source[i] === "?")
-        i++;
-      return 1;
-    }
-    if (c === "{") {
-      const close = source.indexOf("}", i);
-      if (close === -1)
-        return 1;
-      const body = source.slice(i + 1, close);
-      const m = /^(\d+)(,(\d+)?)?$/.exec(body);
-      if (!m)
-        return 1;
-      i = close + 1;
-      if (source[i] === "?")
-        i++;
-      return Number(m[1]);
-    }
-    return 1;
-  };
-  const sequence = () => {
-    let out = "";
-    while (i < source.length && source[i] !== "|" && source[i] !== ")" && !failed) {
-      const c = source[i];
-      let atom;
-      if (c === "^" || c === "$") {
-        i++;
-        continue;
-      } else if (c === "(") {
-        i++;
-        if (source.startsWith("?:", i))
-          i += 2;
-        atom = alternation();
-        if (source[i] !== ")") {
-          failed = true;
-          return out;
-        }
-        i++;
-      } else if (c === "[") {
-        atom = classChar();
-        if (atom === void 0) {
-          failed = true;
-          return out;
-        }
-      } else if (c === "\\") {
-        atom = escapeChar(source[i + 1]);
-        i += 2;
-        if (atom === void 0) {
-          failed = true;
-          return out;
-        }
-      } else if (c === ".") {
-        i++;
-        atom = "x";
-      } else {
-        i++;
-        atom = c;
-      }
-      const times = quantifier();
-      if (atom.length * times > EXAMPLE_MAX_CHARS) {
-        failed = true;
-        return out;
-      }
-      out += atom.repeat(times);
-      if (out.length > EXAMPLE_MAX_CHARS) {
-        failed = true;
-        return out;
-      }
-    }
-    return out;
-  };
-  const alternation = () => {
-    const first = sequence();
-    while (i < source.length && source[i] === "|" && !failed) {
-      i++;
-      sequence();
-    }
-    return first;
-  };
-  const sampled = alternation();
-  return failed || i < source.length ? void 0 : sampled;
-}
-function satisfies(node, value) {
-  const parse3 = node?.safeParse;
-  if (typeof parse3 !== "function")
-    return false;
-  try {
-    return parse3.call(node, value).success === true;
-  } catch {
-    return false;
-  }
-}
-function exampleCandidates(node, name, depth) {
-  if (!node || typeof node !== "object" || depth > EXAMPLE_MAX_DEPTH)
-    return [];
-  const def = node._def;
-  const placeholder = `<${name ?? "string"}>`;
-  switch (def?.typeName) {
-    case "ZodString": {
-      const checks = def?.checks ?? [];
-      const out = [];
-      if (checks.some((c) => c.kind === "datetime"))
-        out.push("2026-08-24T00:00:00.000Z");
-      if (checks.some((c) => c.kind === "uuid"))
-        out.push("00000000-0000-0000-0000-000000000000");
-      for (const c of checks) {
-        if (c.kind === "regex" && c.regex) {
-          const sampled = sampleFromRegex(c.regex.source);
-          if (sampled !== void 0)
-            out.push(sampled);
-        }
-      }
-      out.push(placeholder);
-      return out;
-    }
-    case "ZodNumber":
-      return [1, 0];
-    case "ZodBoolean":
-      return [true];
-    case "ZodNull":
-      return [null];
-    case "ZodAny":
-    case "ZodUnknown":
-      return [placeholder];
-    case "ZodEnum":
-      return (def?.values ?? []).slice();
-    case "ZodNativeEnum":
-      return Object.values(def?.values ?? {});
-    case "ZodLiteral":
-      return [def?.value];
-    case "ZodArray": {
-      const element = deriveExampleValue(def?.type, name, depth + 1);
-      return element ? [[element.value], []] : [[]];
-    }
-    case "ZodObject": {
-      const shape = node.shape ?? {};
-      const built = {};
-      for (const [key, sub] of Object.entries(shape)) {
-        if (sub.isOptional?.() === true)
-          continue;
-        const subExample = deriveExampleValue(sub, key, depth + 1);
-        if (!subExample)
-          return [];
-        built[key] = subExample.value;
-      }
-      return [built];
-    }
-    case "ZodRecord": {
-      const value = deriveExampleValue(def?.valueType, "value", depth + 1);
-      return value ? [{ "<key>": value.value }, {}] : [{}];
-    }
-    case "ZodUnion":
-      return (def?.options ?? []).flatMap((o) => exampleCandidates(o, name, depth + 1));
-    // Wrappers contribute their inner candidates, but the PROOF still runs
-    // against the outer node, so a refinement the wrapper adds still rules.
-    case "ZodNullable":
-      return [...exampleCandidates(def?.innerType, name, depth + 1), null];
-    case "ZodOptional":
-    case "ZodDefault":
-      return exampleCandidates(def?.innerType, name, depth + 1);
-    case "ZodEffects":
-      return exampleCandidates(def?.schema, name, depth + 1);
-    default:
-      return [];
-  }
-}
-function deriveExampleValue(node, name, depth) {
-  for (const candidate of exampleCandidates(node, name, depth)) {
-    if (satisfies(node, candidate))
-      return { value: candidate };
-  }
-  return void 0;
-}
-function exampleFor(node, name) {
-  const derived = deriveExampleValue(node, name, 0);
-  return derived ? renderValue(derived.value) : void 0;
-}
-function renderValue(value) {
-  const rendered = typeof value === "string" ? value : JSON.stringify(value);
-  return rendered === void 0 || rendered.length === 0 ? void 0 : rendered;
-}
-function defaultOf(node) {
-  let current = node;
-  for (let i = 0; i < 6 && current && typeof current === "object"; i++) {
-    const def = current._def;
-    switch (def?.typeName) {
-      case "ZodDefault":
-        return def?.defaultValue?.();
-      case "ZodOptional":
-      case "ZodNullable":
-        current = def?.innerType;
-        break;
-      case "ZodEffects":
-        current = def?.schema;
-        break;
-      default:
-        return void 0;
-    }
-  }
-  return void 0;
-}
-var REPO_PATH_FORMAT = "repo-relative POSIX path";
-var REPO_PATH_REFUSALS = [
-  { label: "absolute", sample: "/abs/file.ts" },
-  { label: "drive-prefixed", sample: "C:/abs/file.ts" },
-  { label: "escaping through '..'", sample: "../file.ts" },
-  { label: "empty", sample: "" }
-];
-function repoPathCondition() {
-  return `Refused: ${REPO_PATH_REFUSALS.map((r) => r.label).join(", ")}.`;
-}
-function fieldShape(name, node, depth, exampleValue) {
-  const described = describeZodDetailed(node, depth);
-  const required2 = !node.isOptional?.();
-  const example = exampleValue ? renderValue(exampleValue.value) : exampleFor(node, name);
-  const fallback = defaultOf(node);
-  const defaultText = fallback === void 0 ? void 0 : renderValue(fallback);
-  return {
-    name,
-    required: required2,
-    type: described.type,
-    ...described.enum_values ? { enum_values: described.enum_values } : {},
-    ...described.element_fields ? { element_fields: described.element_fields } : {},
-    ...described.member_fields ? { member_fields: described.member_fields } : {},
-    ...described.min_length !== void 0 ? { min_length: described.min_length } : {},
-    ...described.format ? { format: described.format, condition: repoPathCondition() } : {},
-    ...defaultText !== void 0 ? { default: defaultText } : {},
-    ...example ? { example } : {}
-  };
-}
-function fieldShapeAt(fields, path) {
-  let level = fields;
-  let found;
-  for (const segment of path.split(".")) {
-    const intoElements = segment.endsWith("[]");
-    const name = intoElements ? segment.slice(0, -2) : segment;
-    found = level?.find((f) => f.name === name);
-    if (!found)
-      return void 0;
-    level = intoElements ? found.element_fields : found.member_fields;
-  }
-  return found;
-}
-function addFieldCondition(fields, path, text) {
-  const shape = fieldShapeAt(fields, path);
-  if (shape)
-    shape.condition = shape.condition ? `${shape.condition} ${text}` : text;
-}
-function recordFieldConditions(type) {
-  switch (type) {
-    case "feature_article": {
-      const exempt = NOT_APPLICABLE_EXEMPT_KINDS.join(" or ");
-      const others = ARTICLE_KINDS.filter((k) => !NOT_APPLICABLE_EXEMPT_KINDS.includes(k)).join(", ");
-      const members = Object.entries(notApplicableExemptionSchema.shape.not_applicable.shape).map(([key, node]) => node.isOptional() ? `${key}?` : key).join(", ");
-      const kindRule = `The {not_applicable: {${members}}} form is accepted only when article_kind is ${exempt} (on those kinds an empty array is refused). Other kinds (${others}) pass an array, which may be [].`;
-      const out = [
-        ["current_ac", kindRule],
-        ["live_test_refs", kindRule]
-      ];
-      for (const [state, needed] of Object.entries(ARTICLE_STATE_REQUIRES)) {
-        out.push(["state", `state '${state}' requires ${needed.join(" and ")}.`]);
-        for (const field of needed)
-          out.push([field, `Required when state is '${state}'.`]);
-      }
-      return out;
-    }
-    case "todo": {
-      const userOnly = Object.keys(TODO_USER_ONLY_FIELDS);
-      const out = [
-        ["source", `source '${TODO_SYSTEM_SOURCE}' requires ${TODO_SYSTEM_REQUIRES.join(" and ")} and refuses ${userOnly.join(" and ")}.`]
-      ];
-      for (const field of TODO_SYSTEM_REQUIRES)
-        out.push([field, `Required when source is '${TODO_SYSTEM_SOURCE}'.`]);
-      for (const field of userOnly)
-        out.push([field, `Refused when source is '${TODO_SYSTEM_SOURCE}'.`]);
-      out.push(["blocked_by", "An item cannot list its own slug."]);
-      return out;
-    }
-    case "open_question":
-      return [
-        ["resolution_status", `'${OPEN_QUESTION_CLOSED}' requires ${OPEN_QUESTION_TERMINUS_FIELD}; any other value refuses it.`],
-        [OPEN_QUESTION_TERMINUS_FIELD, `Required when resolution_status is '${OPEN_QUESTION_CLOSED}', refused otherwise.`]
-      ];
-    case "brief":
-      return [["phases[].interfaces", "Every name must be the name of a technical_design.interfaces entry."]];
-    default:
-      return [];
-  }
-}
-var OMIT_EXAMPLE = /* @__PURE__ */ Symbol("omit example");
-function exampleValuesFor(type, shape) {
-  const candidates = /* @__PURE__ */ new Map();
-  for (const [name, node] of Object.entries(shape)) {
-    const valid = exampleCandidates(node, name, 0).filter((c) => satisfies(node, c));
-    if (!valid.length)
-      continue;
-    const optional2 = node.isOptional?.() === true;
-    candidates.set(name, optional2 ? [...valid, OMIT_EXAMPLE] : valid);
-  }
-  const withChange = (values, name, value) => {
-    const next = new Map(values);
-    if (value === OMIT_EXAMPLE)
-      next.delete(name);
-    else
-      next.set(name, value);
-    return next;
-  };
-  let chosen = new Map([...candidates].map(([name, valid]) => [name, valid[0]]));
-  const schema = RECORD_TYPES[type]?.schema;
-  const issueCount = (values) => {
-    try {
-      const result = schema?.safeParse(Object.fromEntries(values));
-      return !result || result.success ? 0 : result.error.issues.length;
-    } catch {
-      return Infinity;
-    }
-  };
-  const order = [...candidates].reverse();
-  let remaining = issueCount(chosen);
-  for (let round = 0; remaining > 0 && round < 8; round++) {
-    let best;
-    for (const [name, valid] of order) {
-      for (const value of valid) {
-        if (value === OMIT_EXAMPLE ? !chosen.has(name) : chosen.has(name) && value === chosen.get(name))
-          continue;
-        const issues = issueCount(withChange(chosen, name, value));
-        if (issues < (best?.issues ?? remaining))
-          best = { name, value, issues };
-      }
-    }
-    if (!best)
-      break;
-    chosen = withChange(chosen, best.name, best.value);
-    remaining = best.issues;
-  }
-  return chosen;
-}
-function exampleRecordFor(type) {
-  const shape = objectShapeFor(type);
-  return shape ? Object.fromEntries(exampleValuesFor(type, shape)) : void 0;
-}
-function schemaFor(type) {
-  const shape = objectShapeFor(type);
-  if (!shape)
-    return void 0;
-  const examples = exampleValuesFor(type, shape);
-  const fields = Object.entries(shape).map(([name, node]) => (
-    // A field the whole-record choice left out is still listed, without an example.
-    fieldShape(name, node, 0, examples.has(name) ? { value: examples.get(name) } : { value: void 0 })
-  ));
-  for (const [path, text] of recordFieldConditions(type))
-    addFieldCondition(fields, path, text);
-  return { type, fields };
-}
-function unknownFieldsIn(type, candidate) {
-  const known = knownFieldsFor(type);
-  if (!known)
-    return [];
-  return Object.keys(candidate).filter((k) => !known.has(k));
-}
-function validateRecord(input) {
-  if (typeof input !== "object" || input === null || typeof input.type !== "string") {
-    throw new Error("validateRecord: input has no record type");
-  }
-  const type = input.type;
-  const entry = RECORD_TYPES[type];
-  if (!entry) {
-    throw new Error(`validateRecord: unregistered record type '${type}' \u2014 register it in RECORD_TYPES (spec \xA715) before writing`);
-  }
-  return entry.schema.parse(input);
-}
-
-// packages/schemas/dist/transient.js
-var NO_CAPTURE_LANES = ["research", "capture", "all"];
-var noCaptureLaneSchema = external_exports.enum(NO_CAPTURE_LANES);
-var sessionEventSchema = external_exports.object({
-  kind: external_exports.enum([
-    "research_tool",
-    "agent_dispatch",
-    "debug_scope",
-    "concept_designed",
-    "no_capture",
-    "capture_pending",
-    "test_repair",
-    "test_append"
-  ]),
-  detail: external_exports.string().min(1),
-  at: external_exports.string().min(1),
-  lane: noCaptureLaneSchema.optional(),
-  // capture_pending only (board f003082d): the declared target, trimmed, as its
-  // own field. H10 keys a lapsed declaration's capture_owed debt on it alone,
-  // so one target declared with two reasons is one debt. OPTIONAL because a
-  // legacy event carries only the joined detail; H10 keys such an event on the
-  // whole detail (never a split on ' — ', which may occur inside a target).
-  // Trimmed before the length check, so a whitespace-only target is refused.
-  target: external_exports.string().trim().min(1).optional()
-});
-var KNOWLEDGE_WRITES_DIR_REL = ".sterling/transient";
-var KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/knowledge-writes.jsonl`;
-var KNOWLEDGE_WRITES_PROCESS_FILE = /^knowledge-writes\.([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/;
-var knowledgeWritesProcessFile = (pid, uuid2) => `knowledge-writes.${pid}-${uuid2}.jsonl`;
-function knowledgeWritesOwnerPid(fileName) {
-  const m = KNOWLEDGE_WRITES_PROCESS_FILE.exec(fileName);
-  if (!m)
-    return null;
-  const pid = Number(m[1]);
-  return Number.isSafeInteger(pid) ? pid : null;
-}
-var KNOWLEDGE_WRITES_TEMP_FILE = /^knowledge-writes\.(?:[1-9]\d*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.)?jsonl\.tmp-([1-9]\d*)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-var knowledgeWritesTempFile = (ledgerFileName, pid, uuid2) => `${ledgerFileName}.tmp-${pid}-${uuid2}`;
-function knowledgeWritesTempOwnerPid(fileName) {
-  const m = KNOWLEDGE_WRITES_TEMP_FILE.exec(fileName);
-  if (!m)
-    return null;
-  const pid = Number(m[1]);
-  return Number.isSafeInteger(pid) ? pid : null;
-}
-var KNOWLEDGE_WRITES_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
-var KNOWLEDGE_WRITES_COMPACT_LINES = 1e3;
-var KNOWLEDGE_WRITES_KEEP_IDS = 500;
-var knowledgeWriteSchema = external_exports.object({
-  id: external_exports.string().min(1),
-  type: external_exports.string().min(1),
-  at: external_exports.string().min(1)
-}).strict();
-
-// packages/schemas/dist/config.js
-var effortLevel = external_exports.enum(["low", "medium", "high", "xhigh"]);
-var modelPin = external_exports.object({
-  model: external_exports.string(),
-  effort: effortLevel.optional()
-}).strict();
-var agentModelEntry = external_exports.object({
-  model: external_exports.string(),
-  effort: effortLevel,
-  hard_task: modelPin.optional()
-}).strict();
-var vendorPins = external_exports.object({
-  openai: modelPin.optional(),
-  anthropic: modelPin.optional()
-}).default({});
-var successPredicateSchema = external_exports.object({
-  output_regex: external_exports.string().optional(),
-  output_regex_absent: external_exports.string().optional(),
-  artifact: external_exports.object({
-    path: external_exports.string(),
-    min_bytes: external_exports.number().optional()
-  }).strict().optional()
-}).strict().refine((v) => v.output_regex !== void 0 || v.output_regex_absent !== void 0 || v.artifact !== void 0, { message: "success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)" });
-var DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS = Object.freeze(["**/*.sh"]);
-var configSchema = external_exports.object({
-  toolchains: external_exports.array(external_exports.object({
-    adapter: external_exports.string(),
-    path_globs: external_exports.array(external_exports.string()),
-    // baked from the adapter at init (§9.1)
-    test_globs: external_exports.array(external_exports.string()).optional(),
-    run_commands: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-    capabilities: external_exports.record(external_exports.string(), external_exports.boolean()).optional(),
-    // §see comment above: keyed by run_command key, optional, never defaulted to {}
-    success_predicates: external_exports.record(external_exports.string(), successPredicateSchema).optional()
-  })).default([]),
-  backup_path: external_exports.string().optional(),
-  // §2.3: init refuses without a backup path OR an explicit recorded opt-out;
-  // with opt-out, disposal skips the snapshot LOUDLY (check_skipped).
-  backup_opt_out: external_exports.boolean().default(false),
-  // §3.3: the project's stack_tags, declared at init, are the domain mount
-  // manifest and nothing else; they do not filter retrieval (a query's own
-  // stack_tags option is a separate, caller-supplied filter). Each tag mounts an
-  // EXISTING store at ~/.sterling/domains/<tag>/sterling.db; a new domain store
-  // is made only by createDomain in @sterling/store, which requires a description.
-  stack_tags: external_exports.array(external_exports.string()).default([]),
-  // §3.3 (spec line 94 — path configurable per domain): per-tag store-path
-  // override; default is the per-user root above. tag → absolute db path (POSIX).
-  domain_paths: external_exports.record(external_exports.string(), external_exports.string()).default({}),
-  // Named detached working trees (comsoft-juiced incident 2026-07-17): map of
-  // SYMBOLIC tree name → tree path (absolute POSIX, or relative to the project
-  // root). Records carrying working_tree: <name> resolve their file paths
-  // against the mapped tree instead of the project root; an unmapped name makes
-  // every consumer abstain LOUD (verify_before_use), never guess. Machine-
-  // specific paths live here, in per-project config — never inside store
-  // records (invariant 2).
-  working_trees: external_exports.record(external_exports.string(), external_exports.string()).default({}),
-  // Generated projection files (regen↔baseline circularity, 2026-07-17):
-  // repo-relative POSIX paths of files REGENERATED from the store
-  // (architecture.md). Content churn on these is a regen, not out-of-band
-  // drift, so the read-time drift check skips its CONTENT-change arm for them
-  // — their currency is guarded by check-projection-fresh at the merge gate,
-  // not by article baselines. DELETION still flags (a vanished committed
-  // deliverable is real drift regardless of how the file is produced).
-  generated_projections: external_exports.array(external_exports.string()).default([]),
-  // Undeclared-source disclosure (decision
-  // undeclared-source-disclosure-per-file-coverage-live-h1-scan, board
-  // 44ef6838): POSIX globs excluded from the live per-file source-extension
-  // coverage scan H1 (SessionStart) and init render — an excluded file never
-  // participates (neither covered nor uncovered), same precedence as
-  // classifyCoverage's excludeGlobs parameter in
-  // scripts/hooks/lib/undeclared-source.mjs (excluded wins over a matching
-  // toolchain path_glob).
-  // DEFAULT ['**/*.sh'] (decision gap-hunt-2026-09-28-rulings item 6): shell
-  // scripts are launcher and console glue, never a toolchain's source, and
-  // flagging them was banner noise answered the same way every session. The
-  // default lives in THREE places that must agree: here, templates/default-
-  // config.json (anti-pattern 85d15143), and the raw-config ladder in
-  // scripts/hooks/lib/undeclared-source-scan.mjs, which imports this constant.
-  // An explicit [] still opts back in.
-  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default(() => [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]),
-  // Attestation disclosure (decision attestation-staleness-disclosure-only-
-  // never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
-  // POSIX globs whose touched paths get a comparable-human-record rollup at
-  // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
-  // field can ever refuse an operation; the refusing form of this feature was
-  // DECLINED, because a gate the conductor must pass turns the conductor into
-  // the de-facto attestation trigger, reversing decision foreign_a7dbac2f (an
-  // attestation records a HUMAN inspection). EMPTY IS THE DEFAULT AND MEANS
-  // FULLY DORMANT: no store is opened, no diff is taken, nothing is printed.
-  // Sterling's own config declares none — the feature exists for consuming
-  // projects with render/asset paths.
-  // `z.unknown()` IS THE POINT, AND IT IS DELIBERATE (Codex review HIGH-1 +
-  // roster MEDIUM-1, 2026-09-01). This field cannot validate ANYTHING here — not
-  // element type, not emptiness, not duplicates — because direct-merge.mjs and
-  // merge-gate.mjs run parseConfig through openProject() long before the
-  // disclosure's fail-open wrapper exists, so ANY refusal on this field kills the
-  // whole merge command. Measured shapes that must not do that: `["", …]`,
-  // duplicated globs, and the bracket-less hand-edit
-  // `"attestation_path_globs": "renders/**"` (a plain string, not an array).
-  // An ADVISORY declaration that can refuse a merge inverts this feature's own
-  // ruling, which is the one thing the design is not allowed to do.
-  // z.unknown().default([]) PRESERVES the declared value verbatim rather than
-  // coercing or dropping it, and it forces any future consumer of the PARSED
-  // config to narrow this field explicitly instead of assuming string[].
-  // WHERE THE REAL READ LIVES: readAttestationGlobs() in
-  // scripts/lib/attestation-inspection.mjs is the ONE place this field is
-  // interpreted — it re-reads .sterling/config.json itself, drops a non-array
-  // container, non-string members, empty strings and exact duplicates, and
-  // DISCLOSES every drop in the rollup. No surface may take these globs from the
-  // parsed config object instead.
-  attestation_path_globs: external_exports.unknown().default([]),
-  // §12 ensure-manifest: declarations are read back from the recorded config on
-  // re-runs (no flags required), so the project name is recorded alongside them.
-  project_name: external_exports.string().optional(),
-  // §11 launcher split ratio
-  tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
-  // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
-  // H6-only (agent-scoped context enforcement) and DELETED with H6 under
-  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
-  // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
-  // denominator and the direct-mode pressure thresholds). `windows.default`
-  // is a REAL fallback (decision context-window-default-is-a-real-fallback,
-  // user-ruled 2026-09-22, reversing the earlier "never a default"): it is
-  // the window H10 uses for any model with no per-model entry, so it is
-  // seeded at the largest generation's window rather than a conservative
-  // guess — a per-model entry still always wins when one exists.
-  context_watch: external_exports.object({
-    windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 1e6 }),
-    // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
-    // "finish before opening new areas"; hard = once-per-session soft-block naming the
-    // delegation remedy.
-    conductor: external_exports.object({
-      soft_pct: external_exports.number().positive().default(35),
-      hard_pct: external_exports.number().positive().default(50)
-    }).default({})
-  }).default({}),
-  // In-flight dispatch register (decision foreign_ec9eacaa, H22): how long an entry may
-  // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
-  // duties for the files it owns. SubagentStop on a killed/aborted subagent was
-  // never probed (research_finding foreign_20b44518), so this TTL is what converts that
-  // unknown into a bounded, disclosed degradation instead of a duty deferred
-  // forever (P5).
-  dispatch_register: external_exports.object({
-    stale_minutes: external_exports.number().int().positive().default(60),
-    // H10 keeps holding a capture_pending declaration while any row of the
-    // current session ENDED within this many minutes, so a lane that parks
-    // on background work and resumes as a new round does not open a gap
-    // (decision capture-pending-hold-window-spans-resume-rounds). 0 turns
-    // the window off.
-    resume_hold_minutes: external_exports.number().int().nonnegative().default(10)
-  }).default({}),
-  // Concurrent-subagent ceiling (decision foreign_d7a0289f, board 18a22b56): every
-  // surface that states the "N concurrent subagents" ceiling (H1's banner
-  // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
-  // hardcoded literal, so a ruling that changes it takes effect everywhere
-  // without a hook-text edit. The anti-quota semantics are UNCHANGED either
-  // way — this tunes only the number, never a floor/quota (decisions
-  // 677f1639/299d853a stand). Absent → shipped default 5.
-  delegation: external_exports.object({
-    max_concurrent: external_exports.number().int().positive().default(5)
-  }).default({}),
-  // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents; max never
-  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
-  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
-  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
-  // longer needs an indirection layer between an agent's name and its config
-  // key.
-  models: external_exports.object({
-    implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
-    researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
-    scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    classifiers: agentModelEntry.default({ model: "claude-haiku-4-5", effort: "low" }),
-    // librarian is mechanical clerking — cheap model, low effort (P8). The
-    // roster is classless (decision agent-roster-is-classless-four-agents), and
-    // the debugger role it rejected has no key here.
-    librarian: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    // reviewer judges a diff (decision
-    // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
-    // dispatch pins its model explicitly; this is the install-time default.
-    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
-  }).catchall(agentModelEntry).default({}),
-  // Per-project agent tool extension (decision
-  // per-project-agent-extra-tools-config-appended-at-render, 587472e3):
-  // agents.<registered-agent-name>.extra_tools is appended to that agent's
-  // rendered tools: line at install. It must live in the schema — this top-level
-  // object strips unknown keys silently. Each entry is one tool name with an
-  // optional trailing `*`; commas, whitespace and newlines are refused because a
-  // newline in the rendered frontmatter could inject keys such as hooks:.
-  // All of that — entry syntax, unknown keys, registry membership, tools:-line
-  // presence and the Sterling-MCP-prefix ban — is refused loudly at render
-  // (scripts/lib/agent-distribution.mjs), where install and sync fail; parsing
-  // stays lenient so a typo never breaks MCP boot or a hook.
-  agents: external_exports.record(
-    external_exports.string(),
-    // LENIENT on purpose (review fix): the MCP server and every hook parse
-    // this file, so a hand-edit typo must not make every parseConfig throw —
-    // the hazard the delivery block records for .strict(). passthrough keeps
-    // an unknown key (a typo such as extra_tool) so render can refuse it by
-    // name; entry syntax (AGENT_TOOL_NAME_RE) is enforced at render too.
-    external_exports.object({
-      // z.unknown, not z.array: even a non-array value (a string) must
-      // parse; render refuses it by name ("not an array").
-      extra_tools: external_exports.unknown().default([])
-    }).passthrough()
-  ).default({}),
-  // §6 H10 article demand: direct-mode touches in unowned territory at this
-  // threshold (or any new unowned file vs git HEAD) demand the owning article
-  article_demand: external_exports.object({
-    min_unowned_files: external_exports.number().int().positive().default(3),
-    // Per-project policy data (decision
-    // article-demand-ignore-globs-per-project-policy-data): a touched path
-    // matching any glob is dropped from the demand candidate set PER PATH.
-    // Ships empty so every project is unchanged until it opts in (Dome
-    // Farmer: `**/*.uid`, Godot's tracked identity sidecars).
-    ignore_globs: external_exports.array(external_exports.string().min(1)).default([])
-  }).default({}),
-  // §3.2.7 H1 queue-depth signal: at or above this many open maintenance items,
-  // SessionStart tells the CONDUCTOR the queue is deep and wants draining — not
-  // just the human. The counts have always been computed and sent as a
-  // systemMessage the MODEL never sees, on the reasoning that an event-drained
-  // queue is otherwise noise; that holds while it is shallow and fails once it is
-  // not. A consuming project reached 63 items, most of them work already finished
-  // and never closed, with nothing prompting a drain (reported 2026-07-29).
-  // Below the threshold H1 stays silent to the model (P1 — no ceremony).
-  maintenance_queue: external_exports.object({
-    deep_threshold: external_exports.number().int().positive().default(15)
-  }).default({}),
-  // Background maintenance worker kill switch (decision
-  // maintenance-queue-background-haiku-worker-simple-redesign): when true, H10
-  // (at Stop) and H19's Bash surface (after a git commit) start a detached
-  // headless Claude run that judges open reconcile_needed items and closes the
-  // ones already paid (scripts/hooks/lib/maintenance-worker.mjs). false stops
-  // every launch; the queue then drains by hand with /sterling:drain.
-  // There is no daily budget: the worker runs whenever the queue has eligible
-  // work, capped only per run (decision
-  // maintenance-worker-notices-session-start-only-and-no-sliver-launch). A
-  // daily_budget_usd left in an existing config is stripped by this non-strict
-  // object. The default lives here AND in templates/default-config.json,
-  // because install/sync fill an omitted key from this zod default, not the
-  // template.
-  maintenance_worker: external_exports.object({
-    enabled: external_exports.boolean().default(true),
-    // The OpenCode runner's model as provider/model (decision
-    // opencode-maintenance-worker-refuses-without-a-configured-model): the
-    // worker REFUSES to start without it, so config_set must not call it
-    // unread (GitHub issue 23). No default, deliberately. Reader:
-    // scripts/hooks/lib/maintenance-worker.mjs opencodeModelOf(). PERMISSIVE
-    // like `mode`: a non-string is preserved raw and refused loudly by that
-    // reader, never thrown on here (a throw would fail the MCP server's boot).
-    opencode_model: external_exports.unknown().optional()
-  }).default({}),
-  // Board 8390f8fa: a registry-style feature_article can outgrow its own
-  // round-trip — knowledge_append responses on mcp-tool-surface (29 history
-  // entries) and hooks-suite's what_it_does (26k tokens) both blew the MCP
-  // token cap. Measured: mcp-tool-surface serializes ~104KB. Set well below
-  // that observed failure and above every healthy article; a knowledge_update/
-  // append/edit that lands a feature_article over this many chars (as
-  // knowledge_get would return it) warns via the write's result envelope and
-  // enqueues one deduped article_oversize maintenance item. Tunable per
-  // machine, not architecture.
-  article_oversize_chars: external_exports.number().int().positive().default(6e4),
-  // Decision foreign_881baf13 (supersedes foreign_d547d3b0): per-article accepted-oversize
-  // exemption register, article slug -> justifying decision id. Consulted at
-  // the article_oversize minting site (articleOversizeWarnings,
-  // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
-  // maintenance item — the exemption suppresses the mint ONLY while the cited
-  // decision resolves and is live (status active, not superseded/retired) in
-  // the store the minting code already has open. A missing/unresolvable/dead
-  // citation VOIDS the exemption; the mint proceeds with the void reason
-  // appended to the item text — never a silent suppression (P5).
-  article_oversize_exempt: external_exports.record(external_exports.string(), external_exports.string()).default({}),
-  // Board 0697c6bd: history is bounded AT THE WRITE — a feature_article landing
-  // with more entries than this keeps the first article_history_genesis_entries
-  // plus the newest remainder, evicting the middle (board ab87fe24; disclosed on
-  // the write's warnings channel). Nothing is lost: every rotated-away entry
-  // remains readable in the retained superseded versions, which the store keeps
-  // forever — the supersede chain IS the archive, so no new table or archive
-  // record type exists for retrieval to mis-serve. Measured 2026-08-10: the
-  // three oversize articles carried 29/41/46 entries at 0.65–1.5KB each —
-  // 42–57% of their serialized size — and history dominated every write echo
-  // and full read. 20 keeps a reconcile trail deep enough for the brief-lookup
-  // consumers (promotion/completeness match on RECENT entries' target_id)
-  // while bounding the round-trip.
-  article_history_max_entries: external_exports.number().int().positive().default(20),
-  // Board ab87fe24: middle-out rotation sibling to article_history_max_entries
-  // above. On rotation the live record keeps the FIRST genesis_entries entries
-  // (founding/genesis, by array position) plus the newest
-  // (max - genesis_entries) entries, evicting the middle. genesis_entries >=
-  // max clamps to max - 1 so at least one recent entry always survives.
-  article_history_genesis_entries: external_exports.number().int().nonnegative().default(2),
-  // Whether THIS project store is the one the repo's shared, store-DERIVED
-  // artifacts are produced from. Two exist: record-id citations in tracked source,
-  // and the committed architecture.md projection. Both are checked into git while
-  // the store that produces them is NOT (.sterling/ is gitignored), so on any
-  // store but the producing one they read as broken when they are merely foreign.
-  // Record ids make this concrete: an id is minted by the store that first created
-  // the record, and knowledge crosses machines as an export payload whose ids the
-  // receiving server RE-MINTS, so one record ends up with a different id per store.
-  //
-  // 'primary'   — this store mints the ids the tree cites and owns the projection.
-  //               A dangling citation (a typo, or a record never created) and a
-  //               stale projection are real defects here. Both arms fail.
-  // 'secondary' — the tree cites another store's id namespace, and the committed
-  //               projection was generated from that store. Neither is verifiable
-  //               here, and REGENERATING the projection here would actively regress
-  //               a shared file, since a smaller store projects a smaller document.
-  //               Both arms report in full and exit 0 (P1 — a gate that cannot
-  //               change an outcome is ceremony; P5 — it never goes quiet, and each
-  //               pass line names the setting so a weakened arm is never mistaken
-  //               for a clean one).
-  //
-  // KNOWN COST, not a side effect: under 'secondary' a citation written on THAT
-  // machine goes unchecked too — the arm cannot tell it from a foreign one. What
-  // removes the need for this knob entirely is preserving origin ids on import, so
-  // a record carries one id everywhere; see the decision 'Citation and projection
-  // authority is per-store' (cited by title, not id, deliberately — citing its id
-  // here would itself dangle on every store but the one that minted it).
-  store_authority: external_exports.enum(["primary", "secondary"]).default("primary"),
-  // Machine-local role marker (todo cabbc10f, decision foreign_a9b98b7d) — DELIBERATELY
-  // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
-  // a value to infer. 'authoring' is declared once, by hand, on the machine
-  // where Sterling work lands and merges; a successful /sterling:update stamps
-  // 'consumer' into a clone that has it absent, and never overwrites an
-  // existing value (so an authoring machine that occasionally pulls stays
-  // 'authoring'). H1 reads this — never store_authority, whose 'primary'
-  // default would mislabel every consumer that never opted in (the rejected
-  // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
-  machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
-  // §6 H16 session-event register (run r-0501): which agent types are considered
-  // research agents for the research_owed lane (phase 2 filtering). Default list
-  // is over-inclusive (§7.1 precedent) — tune down on run data.
-  session_events: external_exports.object({
-    research_agents: external_exports.array(external_exports.string())
-  }).default({ research_agents: ["researcher", "claude-code-guide"] }),
-  // §3.4 stale-at-read thresholds (days)
-  staleness: external_exports.object({
-    research_days: external_exports.object({
-      fast: external_exports.number().int().positive().default(30),
-      medium: external_exports.number().int().positive().default(90),
-      stable: external_exports.number().int().positive().default(365)
-    }).default({}),
-    platform_external_days: external_exports.number().int().positive().default(180)
-  }).default({}),
-  // run r-ea9e, AC7: TUI System tab — how long a KB-maintained models catalog
-  // reference_material is considered fresh before the tab prompts a refresh.
-  // Distinct from the existing `staleness` block (which governs research
-  // findings and platform docs, not the models catalog).
-  models_catalog: external_exports.object({
-    staleness_days: external_exports.number().int().positive().default(45)
-  }).default({}),
-  // H19 knowledge delivery (decision foreign_6dfbe675). injection_rung is PROBE-SET
-  // per machine/CC version (verify-at-build 0956a464): 'prompt' (default,
-  // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
-  // 'read' (PostToolUse injects directly at the touch), 'edit' (only
-  // PreToolUse injection works; Read touches fall back to the queue).
-  // NOT .strict() (review-reverted, config_set decision config-writes-get-a-
-  // config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays
-  // item 1): a first attempt made this object .strict() so config_set's
-  // whole-document validation would refuse an unrecognized delivery leaf.
-  // That is a FORWARD-COMPATIBILITY BRICK with no in-session remedy — ANY
-  // unknown key already sitting in a project's delivery block (a forward-
-  // shipped field, a hand-edit) turns EVERY parseConfig call into a startup
-  // failure of the MCP server itself (server.ts's boot-time parseConfig)
-  // AND an H15 environment-defect deny for every other Bash/store call on
-  // that project, with no config_set available to fix it because the server
-  // never came up to serve the tool. config_set instead membership-checks
-  // the delivery leaf itself (configSetAllowlistVerdict, tools.ts) exactly
-  // as it already does for models.<key> — this schema stays permissive so a
-  // config.json carrying an unmodeled delivery key never bricks anything
-  // that merely READS the file.
-  delivery: external_exports.object({
-    // `prompt` and `edit` are accepted only to migrate existing project
-    // configs. Parsed configuration exposes only the surviving read rung.
-    injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
-    payload_char_cap: external_exports.number().int().positive().default(2400),
-    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
-    // "H19 gets a per-delivery total cap and cross-entry dedup across the
-    // turn"): scripts/hooks/lib/delivery.mjs reads this at
-    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
-    // absent/invalid value falls back to the same default there, same
-    // three-state guard used for other config-derived delivery values.
-    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
-  }).default({}),
-  // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
-  // whether the automatic consult moments (design/review/gate second opinions via
-  // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern (every field has a default; an absent
-  // block still parses) — a project without the
-  // Codex CLI installed still parses and defaults to true; the TUI System tab
-  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
-  // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
-  // — this field never stands in for that absence, only for a deliberate OFF.
-  sparring_partner: external_exports.object({
-    enabled: external_exports.boolean().default(true),
-    // Which vendor's model the consult runs on (decision
-    // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks).
-    // 'openai' is the behaviour before the setting existed.
-    vendor: external_exports.enum(["openai", "anthropic"]).default("openai"),
-    // The model pinned per vendor. Absent = no pin (the host's default). The
-    // old sparring_partner.model is converted to models.openai by
-    // normalizeRawConfig, before this schema strips unknown keys. The default
-    // ships no pin: the decision names no model per vendor.
-    models: vendorPins
-  }).default({}),
-  // Reviews (same decision): the vendor policy and the model pinned per vendor.
-  // cross_vendor = the other family than the model that wrote the diff; openai
-  // and anthropic force one vendor even when that makes reviewer and author the
-  // same family (user-ruled 2026-10-03). Ships no pin, like sparring_partner.
-  review: external_exports.object({
-    policy: external_exports.enum(["cross_vendor", "openai", "anthropic"]).default("cross_vendor"),
-    models: vendorPins
-  }).default({}),
-  // TDD-by-default posture toggle (decision foreign_752caf98,
-  // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
-  // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
-  // Mirrors sparring_partner's additive-optional shape exactly — an absent
-  // block still parses with {enabled: true}, and an unknown field inside the
-  // block strips silently rather than refusing (forward-compat, non-strict).
-  // OFF silences only the automatic default posture: an explicit user ask
-  // still works, and H5 (frozen tests)/H18 (write wall) are untouched — no
-  // gate or hook arm keys on this toggle.
-  tdd: external_exports.object({
-    enabled: external_exports.boolean().default(true)
-  }).default({}),
-  // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed
-  // by project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
-  // the per-project switch that decides how work ships. 'hobby' (the default)
-  // merges directly through /sterling:merge; 'work' opens a pull request and
-  // runs the review loop. It decides nothing else: whether the handoff files
-  // are written is `handoff` below. Toggled in the TUI System tab. A missing
-  // key means hobby.
-  // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
-  // S1): any other value is PRESERVED raw, never coerced to hobby and never
-  // thrown on — a typo here must not turn every parseConfig reader (the MCP
-  // server's boot included) into a startup failure. The strict judge is
-  // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
-  // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
-  // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
-  // Consumers of the PARSED config must narrow this field themselves.
-  // The default lives twice (anti_pattern 85d15143): here and in
-  // templates/default-config.json; config.test.ts pins that they agree.
-  mode: external_exports.unknown().default("hobby"),
-  // Handoff files (decision
-  // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
-  // `enabled` says whether Sterling writes the files for colleagues who do not
-  // have Sterling, the portable OpenCode agents (.opencode/agents/) and the
-  // handoff projection (architecture.md, rulings.md, docs/sterling/). Off by
-  // default, independent of `mode`. Toggled in the TUI System tab.
-  // PERMISSIVE for the same reason as `mode`: the value is preserved raw. The
-  // strict judge is readHandoffEnabled() in scripts/lib/handoff-projection.mjs,
-  // which init, sync-agents, /sterling:update, the handoff-projection CLI and
-  // the git exclude block use. It refuses a value that is not a boolean, and it
-  // reads a config with NO key as on when portable agents are already tracked
-  // in git, which this default cannot express: read the setting through it,
-  // never from the parsed config.
-  // The default lives twice (anti_pattern 85d15143): here and in
-  // templates/default-config.json; config.test.ts pins that they agree.
-  handoff: external_exports.unknown().default({ enabled: false }),
-  // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
-  // copilot_logins pins the EXACT Copilot reviewer login(s) observed on the S0
-  // first use; empty means unpinned (any Bot login matching /copilot/i, with
-  // identity_confirmed false). PERMISSIVE like mode: a malformed value is
-  // preserved raw, never thrown on; scripts/pr-review-wait.mjs is the strict
-  // judge. The default lives twice: here and in templates/default-config.json
-  // (config.test.ts pins that they agree).
-  pr_review: external_exports.unknown().default({ copilot_logins: [] })
-});
-var RETIRED_MODEL_KEYS = [
-  "coder",
-  "coder_hard",
-  "explorer",
-  "test_writer",
-  "reviewers",
-  "implementation_architect",
-  "debugger"
-];
-var isPlainObject3 = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-function normalizeRawConfig(raw) {
-  if (!isPlainObject3(raw))
-    return raw;
-  let out = raw;
-  const sp = raw.sparring_partner;
-  if (isPlainObject3(sp) && Object.prototype.hasOwnProperty.call(sp, "model")) {
-    const { model, ...rest } = sp;
-    if (model !== void 0 && model !== "") {
-      const existing = rest.models;
-      if (existing === void 0 || isPlainObject3(existing)) {
-        const models2 = { ...existing ?? {} };
-        if (models2.openai === void 0 || typeof model !== "string")
-          models2.openai = { model };
-        rest.models = models2;
-      }
-    }
-    out = { ...out, sparring_partner: rest };
-  }
-  const models = raw.models;
-  if (isPlainObject3(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
-    out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
-  }
-  return out;
-}
-function parseConfig(raw) {
-  return configSchema.parse(normalizeRawConfig(raw));
-}
-var CONFIG_KEY_RENAMES = {
-  "models.coder": "models.implementor",
-  "models.explorer": "models.scout"
-};
-function unwrapSchema(schema) {
-  let s2 = schema;
-  for (; ; ) {
-    if (s2 instanceof external_exports.ZodDefault)
-      s2 = s2._def.innerType;
-    else if (s2 instanceof external_exports.ZodOptional || s2 instanceof external_exports.ZodNullable)
-      s2 = s2.unwrap();
-    else if (s2 instanceof external_exports.ZodEffects)
-      s2 = s2.innerType();
-    else
-      return s2;
-  }
-}
-function unreadConfigKeys(raw) {
-  const out = [];
-  const walk = (value, schema, prefix) => {
-    const s2 = unwrapSchema(schema);
-    if (!(s2 instanceof external_exports.ZodObject) || s2._def.unknownKeys !== "strip" || !isPlainObject3(value))
-      return;
-    const shape = s2.shape;
-    for (const [key, child] of Object.entries(value)) {
-      const path = prefix ? `${prefix}.${key}` : key;
-      if (!Object.prototype.hasOwnProperty.call(shape, key)) {
-        if (path === "sparring_partner.model")
-          continue;
-        if (!(s2._def.catchall instanceof external_exports.ZodNever) && !(prefix === "models" && RETIRED_MODEL_KEYS.includes(key)))
-          continue;
-        const renamed = CONFIG_KEY_RENAMES[path];
-        out.push(renamed ? { path, renamed_to: renamed } : { path });
-      } else {
-        walk(child, shape[key], path);
-      }
-    }
-  };
-  walk(raw, configSchema, "");
-  return out;
-}
-
-// packages/schemas/dist/registry.js
-var projectRegistrationSchema = external_exports.object({
-  // identity: the project root, absolute POSIX (machine-global, like backup_path —
-  // NOT a repo-relative file_key, so it does not go through the path invariant).
-  repo_path: external_exports.string(),
-  name: external_exports.string(),
-  // the project's stack_tags = the §3.3 domain mount manifest: which shared
-  // domains this project joins (the real cross-project signal).
-  stack_tags: external_exports.array(external_exports.string()).default([]),
-  // toolchain adapter names (e.g. ["node"], ["pester"]) — quick stack context.
-  toolchains: external_exports.array(external_exports.string()).default([]),
-  // plugin version at last init — spot version skew across projects.
-  sterling_version: external_exports.string().nullable().default(null),
-  first_init_at: external_exports.string(),
-  last_init_at: external_exports.string(),
-  // touched by the H1 SessionStart hook for an existing row — activity, not just
-  // init recency. null until the first session start after registration.
-  last_seen_at: external_exports.string().nullable().default(null)
-});
-
-// packages/schemas/dist/staleness.js
-import { dirname, join } from "node:path";
-var BUILD_ID_FILE = ".build-id";
-var runtimeMarkerSchema = external_exports.object({
-  /** the content build-id the running server loaded at boot */
-  build_id: external_exports.string(),
-  pid: external_exports.number().int(),
-  booted_at: external_exports.string()
-}).strict();
-function buildIdPath(serverDir) {
-  return join(serverDir, BUILD_ID_FILE);
-}
-function runtimeMarkerPath(storePath2) {
-  return join(dirname(storePath2), "transient", "mcp-runtime.json");
-}
-
-// packages/store/dist/index.js
-import { mkdirSync as mkdirSync2, existsSync as existsSync2, statSync } from "node:fs";
-import { dirname as dirname4, join as join4, resolve as resolvePath2 } from "node:path";
-import { randomUUID } from "node:crypto";
-
-// packages/store/dist/mounted.js
-import { mkdirSync, existsSync, rmSync, openSync, closeSync } from "node:fs";
-import { dirname as dirname2, join as join2 } from "node:path";
-import { homedir } from "node:os";
-
-// packages/store/dist/shares.js
-var DEFAULT_PROJECT_SHARE = 0.6;
-function allocateShares(perSourceCounts, cap, projectShare = DEFAULT_PROJECT_SHARE) {
-  if (!Array.isArray(perSourceCounts) || perSourceCounts.length === 0) {
-    throw new Error("allocateShares: perSourceCounts must contain at least the project count (index 0)");
-  }
-  if (!Number.isInteger(cap) || cap < 1)
-    throw new Error(`allocateShares: cap must be a positive integer, got ${cap}`);
-  for (const c of perSourceCounts) {
-    if (!Number.isInteger(c) || c < 0)
-      throw new Error(`allocateShares: every count must be a non-negative integer, got ${c}`);
-  }
-  if (typeof projectShare !== "number" || !(projectShare >= 0 && projectShare <= 1)) {
-    throw new Error(`allocateShares: projectShare must be between 0 and 1, got ${projectShare}`);
-  }
-  const domainCount = perSourceCounts.length - 1;
-  const projectQuota = domainCount === 0 ? cap : Math.min(cap, Math.ceil(projectShare * cap - 1e-9));
-  const quotas = [projectQuota];
-  const rest = cap - projectQuota;
-  for (let i = 0; i < domainCount; i++) {
-    quotas.push(Math.floor(rest / domainCount) + (i < rest % domainCount ? 1 : 0));
-  }
-  const alloc = perSourceCounts.map((count, i) => Math.min(count, quotas[i]));
-  let left = cap - alloc.reduce((a, b) => a + b, 0);
-  while (left > 0) {
-    let gave = false;
-    for (let i = 0; i < alloc.length && left > 0; i++) {
-      if (alloc[i] < perSourceCounts[i]) {
-        alloc[i]++;
-        left--;
-        gave = true;
-      }
-    }
-    if (!gave)
-      break;
-  }
-  return alloc;
-}
-
-// packages/store/dist/mounted.js
-function resolveDomainMounts(config2) {
-  return config2.stack_tags.map((name) => ({
-    name,
-    dbPath: config2.domain_paths[name] ?? join2(homedir(), ".sterling", "domains", name, "sterling.db")
-  }));
-}
-function open(dbPath) {
-  mkdirSync(dirname2(dbPath), { recursive: true });
-  return new SterlingStore(dbPath);
-}
-var PROBE_ID = "00000000-0000-0000-0000-000000000000";
-var DROPPED_AFTER_MOUNT_NOTE = "dropped after mount; reads skip it until the session restarts";
-var DROPPED_AT_MOUNT_NOTE = "dropped at mount; restart the session after the store is repaired";
-function isStoreFailure(e) {
-  return e instanceof SchemaMigrationRequiredError || e instanceof UnsupportedSchemaVersionError || e instanceof StoreRowDecodeError || e?.code === "ERR_SQLITE_ERROR";
-}
-var errorText = (e) => String(e?.message ?? e);
-var DOMAIN_DESCRIPTION_KEY = "description";
-var DomainNotCreatedError = class extends Error {
-  domain;
-  db_path;
-  constructor(domain, dbPath) {
-    super(`domain '${domain}' has no store at '${dbPath}'. Domain stores are not created on first mount: create it with createDomain('${domain}', <description>, <dbPath>), where the description says which knowledge belongs in this domain. To mount only the domains that already exist, pass { skipMissing: true }.`);
-    this.name = "DomainNotCreatedError";
-    this.domain = domain;
-    this.db_path = dbPath;
-  }
-};
-function missingDomainWarning(m) {
-  return `sterling: domain '${m.name}' is configured but has no store at '${m.dbPath}'; it is NOT mounted, so its knowledge is not read and writes to scope domain:${m.name} are refused. Create it with createDomain (a description is required), or run init to set it up.`;
-}
-var MountedStores = class {
-  /** The project store — also the home of the board/maintenance queue and
-   *  other project-local transient state (the run/handoff protocol this
-   *  comment used to describe was removed per decision
-   *  sterling-claude-code-scale-down-boundary, 2ad87dd1).
-   *
-   *  STATED LIMIT OF THE CROSS-MOUNT WRITE BACKSTOP (decision
-   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
-   *  This handle is a PUBLIC, FULLY MUTABLE SterlingStore, so
-   *  `stores.project.create(...)` (or any other mutator on it) reaches the
-   *  project connection DIRECTLY and never passes assertMountAffinity below.
-   *  Called inside a transaction open on a DOMAIN mount, such a write commits
-   *  on the project connection and survives the outer rollback — the exact
-   *  atomicity hole the backstop closes for every write that goes through this
-   *  class's own surface. The backstop's guarantee is therefore scoped to
-   *  MountedStores' OWN METHODS, and this field is the one documented way past
-   *  it; treat any claim of universal coverage as wrong.
-   *
-   *  IT IS NOT NARROWED, and the reason is not that narrowing is undesirable.
-   *  MEASURED 2026-09-06 (re-runnable: grep for `.project.` across
-   *  packages/{store,mcp-server,tui}/src and scripts/): NO production caller
-   *  outside this file touches the handle at all — every `.project.<mutator>`
-   *  call in the repo is in a TEST (packages/store/src/tests/
-   *  stable-identity-hardening.test.ts and packages/mcp-server/src/tests/
-   *  resolves-append-join.test.ts seed forged rows through it). Those suites
-   *  are frozen, and a read-only type on
-   *  this field would fail their compile, so the exposure is retained
-   *  deliberately and disclosed here rather than closed by editing pins. The
-   *  real containment today is that production has no such caller — a
-   *  PROPERTY OF THE CALLERS, not a guarantee of this class. If a production
-   *  mutation through this handle is ever wanted, route it through the guarded
-   *  surface instead of widening the exception.
-   */
-  project;
-  domains = /* @__PURE__ */ new Map();
-  /** Configured domains skipped under skipMissing because their store does not
-   *  exist, in manifest order. Kept so a caller (boot, a tool response, H1) can
-   *  disclose the skip instead of the domain silently vanishing. */
-  missingDomains = [];
-  /** Mounted domains whose store failed a read, in the order they were dropped.
-   *  One broken domain must not fail a read over the whole mounted set, so a
-   *  domain read that throws drops that domain from every later read and lists
-   *  it here with the error; a caller (a tool response, boot) discloses it
-   *  instead of the domain silently vanishing. Checked at mount (probeDomain)
-   *  and on every fanned read. The drop lasts for this instance's lifetime:
-   *  a later read does not retry the store. It covers READS only: the domain
-   *  stays in domainNames(), but every write into it is refused
-   *  (assertWritable), and the slug uniqueness checks still ask it
-   *  (slugHolders). The PROJECT store is never listed here: its failure
-   *  throws. */
-  unreadableDomains = [];
-  domainPaths = /* @__PURE__ */ new Map();
-  /** Every configured domain whose store file exists, in manifest order,
-   *  whether or not it could be opened. */
-  mountedNames = [];
-  /** The project store is opened, and created when absent; a failure to open
-   *  it throws. A domain store is only ever OPENED here, never created, and one
-   *  that exists but cannot be opened is listed on unreadableDomains instead of
-   *  failing the mount: a mount whose db file does not exist
-   *  throws DomainNotCreatedError naming createDomain (board 675daf9d (c)), with
-   *  every handle opened so far closed and no file written for the missing
-   *  domain. When options.skipMissing is true such a mount is skipped instead,
-   *  and the existing siblings are still mounted. An existing domain store opens
-   *  as it is, whether or not it has a description. */
-  constructor(projectDbPath, mounts = [], options) {
-    this.project = open(projectDbPath);
-    try {
-      for (const m of mounts) {
-        if (!existsSync(m.dbPath)) {
-          if (options?.skipMissing) {
-            this.missingDomains.push({ name: m.name, dbPath: m.dbPath });
-            continue;
-          }
-          throw new DomainNotCreatedError(m.name, m.dbPath);
-        }
-        this.mountedNames.push(m.name);
-        this.domainPaths.set(m.name, m.dbPath);
-        let store;
-        try {
-          store = new SterlingStore(m.dbPath);
-        } catch (e) {
-          if (!isStoreFailure(e))
-            throw e;
-          this.dropDomain(m.name, e, true);
-          continue;
-        }
-        this.domains.set(m.name, store);
-        this.probeDomain(m.name, store);
-      }
-    } catch (e) {
-      this.close();
-      throw e;
-    }
-  }
-  /** Mount-time read check. A pre-v2 store opens and answers some reads (get,
-   *  query over pre-v2 bodies) but not others (inboundSupersedes: it has no
-   *  record_relations table), so without this a first tool call could serve
-   *  that domain's records and then drop it halfway through. The probe runs the
-   *  two per-record reads the fan makes, against an id no record has, and drops
-   *  the domain when either throws. */
-  probeDomain(name, store) {
-    try {
-      store.get(PROBE_ID);
-      store.inboundSupersedes(PROBE_ID);
-    } catch (e) {
-      if (!isStoreFailure(e))
-        throw e;
-      this.dropDomain(name, e, true);
-    }
-  }
-  /** Drop a domain from reads. The drop lasts for this instance's lifetime:
-   *  no later read retries the store, even when the failure was transient. That
-   *  is safe to leave because a dropped domain cannot be written either
-   *  (assertWritable): a session never writes into a store it cannot read back,
-   *  and the slug checks still ask it (fanEveryDomain). */
-  dropDomain(name, e, atMount = false) {
-    if (this.isUnreadable(name))
-      return;
-    this.unreadableDomains.push({
-      name,
-      dbPath: this.domainPaths.get(name) ?? "",
-      error: errorText(e),
-      note: atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE
-    });
-  }
-  isUnreadable(name) {
-    return this.unreadableDomains.some((d) => d.name === name);
-  }
-  /** `(<error>; <note>)` for a dropped domain, for refusal text. */
-  droppedReason(name) {
-    const d = this.unreadableDomains.find((x) => x.name === name);
-    return d ? `(${d.error}; ${d.note})` : "";
-  }
-  /** Refuse a write into a domain this session has dropped from reads: the
-   *  write could not be read back, and a promotion would retire the project
-   *  original in favour of a copy nobody can see. */
-  assertWritable(name) {
-    if (!this.isUnreadable(name))
-      return;
-    throw new Error(`domain '${name}' cannot be written: this session cannot read it ${this.droppedReason(name)}. Nothing was written. Repair the store, then restart the session.`);
-  }
-  /** `fn` on the project store and then on EVERY mounted domain, dropped ones
-   *  included, for a check where "not read" must never count as "absent" (slug
-   *  uniqueness). A dropped domain that still answers is believed. A domain
-   *  whose read fails makes the whole check refuse, naming it and the error. */
-  fanEveryDomain(what, fn) {
-    const out = [fn(this.project)];
-    for (const [name, store] of this.domains) {
-      try {
-        out.push(fn(store));
-      } catch (e) {
-        if (!isStoreFailure(e))
-          throw e;
-        this.dropDomain(name, e);
-        throw new Error(`${what} cannot be checked: domain '${name}' could not be read (${errorText(e)}), so whether it is taken there is unknown. Nothing was written. Repair the store, then restart the session.`);
-      }
-    }
-    return out;
-  }
-  /** The one read fan: `fn` on the project store, then on each readable domain
-   *  in manifest order, yielding each answer with its source ('project' or the
-   *  domain's manifest name). The project read is NOT guarded, so its failure
-   *  throws. A domain read that fails with a store failure (isStoreFailure)
-   *  drops that domain (dropDomain) and the fan moves on; any other error is
-   *  rethrown. Lazy, so a first-hit caller stops reading at its hit. */
-  *fanRead(fn) {
-    yield { source: "project", store: this.project, value: fn(this.project) };
-    for (const [name, store] of [...this.domains]) {
-      if (this.isUnreadable(name))
-        continue;
-      let value;
-      try {
-        value = fn(store);
-      } catch (e) {
-        if (!isStoreFailure(e))
-          throw e;
-        this.dropDomain(name, e);
-        continue;
-      }
-      yield { source: name, store, value };
-    }
-  }
-  /** fanRead's answers alone, project first. */
-  fanValues(fn) {
-    return [...this.fanRead(fn)].map((r) => r.value);
-  }
-  /** A mounted domain's description (store_meta 'description'), or undefined
-   *  when that existing store has none. An unmounted name is refused. */
-  domainDescription(name) {
-    const store = this.domains.get(name);
-    if (!store && this.isUnreadable(name))
-      throw new Error(`domainDescription: domain '${name}' cannot be read ${this.droppedReason(name)}`);
-    if (!store)
-      throw new Error(`domainDescription: domain '${name}' is not mounted`);
-    return store.getMeta(DOMAIN_DESCRIPTION_KEY);
-  }
-  /** Set a mounted domain's description (store_meta 'description'), trimmed,
-   *  on that domain's own store. The write path for an existing domain;
-   *  createDomain sets it for a new one. An unmounted name and a blank
-   *  description are refused with nothing written, and so is a call inside a
-   *  transaction open on another mount (the same affinity rule as every write
-   *  through this class). */
-  setDomainDescription(name, description) {
-    this.assertWritable(name);
-    const store = this.domains.get(name);
-    if (!store)
-      throw new Error(`setDomainDescription: domain '${name}' is not mounted`);
-    if (typeof description !== "string" || description.trim().length === 0) {
-      throw new Error(`setDomainDescription: the description for domain '${name}' is blank; nothing was written`);
-    }
-    this.assertMountAffinity("setDomainDescription", store, `domain '${name}'`);
-    store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
-  }
-  /** Scope-routed write (§3.3): project → the project store; domain:<name> → that
-   *  domain store. Routing is MECHANICAL here; the tool layer owns the policy
-   *  (feature_article always project, reference/research project-then-promote).
-   *
-   *  Validation here needs `scope`, so it must run BEFORE the write reaches a
-   *  store — which means it must also run the store's identity normalization
-   *  first (SterlingStore.normalizeIdentityEnvelope, the ONE definition):
-   *  otherwise a lifecycle/freshness-only envelope that SterlingStore.create
-   *  accepts was rejected through the mounted surface, because the schemas
-   *  registry still declares the derived status/superseded_by fields. */
-  create(input) {
-    const normalized = SterlingStore.normalizeIdentityEnvelope(input);
-    const record2 = validateRecord(normalized);
-    assertNoFieldLoss("create", normalized, record2);
-    const target = this.storeFor(record2.scope);
-    this.assertMountAffinity("create", target, `record '${record2.id}' (scope '${record2.scope}')`);
-    return target.create(record2);
-  }
-  /** Scope-routed exactly as create() is. A maintenance item is project-LOCAL
-   *  state and never shared, so this resolves to the project store in practice —
-   *  and the dedup key is therefore evaluated within that ONE store rather than
-   *  across the fan, which is right: two projects' queues are independent, and a
-   *  cross-store key would let one project's item suppress another's. */
-  enqueueSystemTodo(input) {
-    const record2 = validateRecord(SterlingStore.normalizeIdentityEnvelope(input));
-    const target = this.storeFor(record2.scope);
-    this.assertMountAffinity("enqueueSystemTodo", target, `todo '${record2.id}' (scope '${record2.scope}')`);
-    return target.enqueueSystemTodo(record2);
-  }
-  /** Read-only twin of enqueueSystemTodo: queue items are project-local, so the
-   *  precheck asks the project store only (same reasoning as the enqueue above). */
-  enqueueWouldBeNoop(input) {
-    return this.project.enqueueWouldBeNoop(input);
-  }
-  /** Board readiness is project-local like the board itself, so the project
-   *  store answers it (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start). */
-  boardReadiness(items) {
-    return this.project.boardReadiness(items);
-  }
-  storeFor(scope) {
-    if (scope === "project")
-      return this.project;
-    const m = /^domain:(.+)$/.exec(scope);
-    if (m) {
-      this.assertWritable(m[1]);
-      const store = this.domains.get(m[1]);
-      if (!store)
-        throw new Error(`scope '${scope}' targets an unmounted domain \u2014 not in the project's domains manifest`);
-      return store;
-    }
-    throw new Error(`unroutable scope '${scope}'`);
-  }
-  /** Cross-store retrieval (§3.4) with read shares (board 675daf9d (b)): every
-   *  mounted store runs the full filter→join→rank→cap on its own, allocateShares
-   *  decides how many of each store's results make the cap (the project up to
-   *  ceil(0.6 x cap) when a domain has matches, the rest split across domains,
-   *  unused share spilling over), and each store's top-N is concatenated project
-   *  first, then domains in manifest order. Scores are never compared across
-   *  databases. When only the project matches it fills the cap, as before. */
-  query(opts = {}) {
-    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-    const perStore = this.fanValues((s2) => s2.query({ ...opts, cap }));
-    const shares = allocateShares(perStore.map((r) => r.length), cap);
-    return perStore.flatMap((records, i) => records.slice(0, shares[i]));
-  }
-  /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of
-   *  query(), summed project-first across every mounted store (countBySource is
-   *  the same fan, kept per-source for the TUI's badges). No body fetch. The tool
-   *  layer reports it so a capped retrieval can say how many records matched the
-   *  filter it was given, instead of presenting its window as the whole store. */
-  count(opts = {}) {
-    return this.countBySource(opts).reduce((n, s2) => n + s2.count, 0);
-  }
-  /** Cross-mount twin of countAboveScore (board a577a69d) — summed
-   *  project-first across every mounted store, same fan as count(). */
-  countAboveScore(opts, minScore) {
-    return this.fanValues((s2) => s2.countAboveScore(opts, minScore)).reduce((n, c) => n + c, 0);
-  }
-  /** Per-source projection (AC2): project store FIRST, then each mounted domain
-   *  in manifest order. Each store runs the full query independently — type
-   *  filter, file-key join, cap, and match_all are all PER-STORE (never a
-   *  global slice across the merged result). Zero domains → exactly one entry.
-   *  The source name is 'project' for the project store and the domain manifest
-   *  name (DomainMount.name) for each domain store. */
-  bySource(opts) {
-    return [...this.fanRead((s2) => s2.query(opts))].map((r) => ({ source: r.source, records: r.value }));
-  }
-  /** Count-only per-source projection — the COUNT(*) twin of bySource (same
-   *  project-first, per-store ordering) with NO body fetch. The TUI Knowledge
-   *  tree's collapsed category/source badges use this so the default all-collapsed
-   *  view does not fetch + parse every source's record bodies each frame. */
-  countBySource(opts) {
-    return [...this.fanRead((s2) => s2.count(opts))].map((r) => ({ source: r.source, count: r.value }));
-  }
-  /** Records from ONE named source ('project' or a mounted domain name) — the
-   *  full §3.4 query against that single store. The TUI fetches bodies only for
-   *  the source the user actually expanded; an unknown source yields [], and so
-   *  does a domain that is, or on this read becomes, unreadable. */
-  querySource(source, opts = {}) {
-    if (source === "project")
-      return this.project.query(opts);
-    const store = this.domains.get(source);
-    if (!store || this.isUnreadable(source))
-      return [];
-    try {
-      return store.query(opts);
-    } catch (e) {
-      if (!isStoreFailure(e))
-        throw e;
-      this.dropDomain(source, e);
-      return [];
-    }
-  }
-  /** Cross-store fetch by id: project first, then domains. */
-  get(id) {
-    for (const { value } of this.fanRead((s2) => s2.get(id))) {
-      if (value)
-        return value;
-    }
-    return void 0;
-  }
-  /** PHYSICAL mount membership: the PROJECT store ALONE, never the fan (anti_pattern
-   *  [record-body-scope-is-not-physical-store-identity]). This is the same physical
-   *  database H10 opens and the only mount withTransaction can commit on, so a caller
-   *  whose atomicity or whose parity with H10 depends on "is this record project-local"
-   *  asks HERE. It deliberately does NOT consult the record's body `scope`: create()
-   *  routes by scope, but every later write routes by storeHolding (by id), and `scope`
-   *  is caller-writable — so the field and the mount can disagree in both directions. */
-  projectStoreHolds(id) {
-    return this.project.projectStoreHolds(id);
-  }
-  /** Project-first concatenation of every mounted store's id index (any status,
-   *  tombstones included). A citation checker MUST span mounts: legitimately
-   *  cited ids live in the shared domain stores as often as in the project one,
-   *  so a project-only lookup calls them dangling. No dedup needed — a record
-   *  lives in exactly one store. */
-  recordIdIndex() {
-    return this.fanValues((s2) => s2.recordIdIndex()).flat();
-  }
-  /** Project-first concatenation of every mounted store's dead-id alias index
-   *  ([stable-identity-design-v2] contract 3) — same reasoning as
-   *  recordIdIndex: a historical id cited anywhere may have belonged to a
-   *  record that now lives in a domain store, so resolution MUST span mounts.
-   *  A historical id is unique across the fan (it was one record's id), so no
-   *  dedup is needed. */
-  recordAliases() {
-    return this.fanValues((s2) => s2.recordAliases()).flat();
-  }
-  /** Exact-slug article resolution across the fan, PROJECT-FIRST (decision
-   *  3db7095f's deterministic lookup, mounted). Feature articles are always
-   *  project-scoped and never promote (AC7), so in practice this reads the project
-   *  store — but it fans anyway, deliberately: its callers are H19's one-hop
-   *  pointers and knowledge_create's slug-collision refusal, and for BOTH of them
-   *  over-detecting a slug that somehow lives in a domain store is safe while
-   *  under-detecting is not. A project-only lookup would let a clash through and
-   *  serve two records under one slug, which is the failure the refusal exists to
-   *  prevent. No dedup needed — a record lives in exactly one store. */
-  articlesBySlug(slug) {
-    return this.fanValues((s2) => s2.articlesBySlug(slug)).flat();
-  }
-  /** Type-agnostic exact-slug lookup across the fan, PROJECT-FIRST (board
-   *  1e639f32) — same over-detect-is-safe reasoning as articlesBySlug: its
-   *  callers are a uniqueness refusal and an identity resolution, and both
-   *  would rather see a domain-store record than miss one. */
-  recordsBySlug(slug) {
-    return this.fanValues((s2) => s2.recordsBySlug(slug)).flat();
-  }
-  /** recordsBySlug for a UNIQUENESS check: every mounted domain is asked,
-   *  dropped ones included (fanEveryDomain), so a slug held by a record in a
-   *  dropped domain still counts as taken, and a domain that cannot answer
-   *  makes the check refuse instead of passing. Identity resolution keeps using
-   *  recordsBySlug, which skips a dropped domain and says so. */
-  slugHolders(slug) {
-    return this.fanEveryDomain(`slug '${slug}'`, (s2) => s2.recordsBySlug(slug)).flat();
-  }
-  /** articlesBySlug for a uniqueness check; same rule as slugHolders. */
-  articleSlugHolders(slug) {
-    return this.fanEveryDomain(`slug '${slug}'`, (s2) => s2.articlesBySlug(slug)).flat();
-  }
-  /** Superseded-only counterpart of recordsBySlug — knowledge_get's dead-slug
-   *  fallthrough is the sole caller (decision foreign_df361a0f) and takes result[0] as
-   *  THE newest carrier, so the fan-in order is load-bearing. A slug does NOT
-   *  live in exactly one store: retireInFavorOf's promotion shape leaves the
-   *  project tombstone behind while the live copy is promoted into a domain
-   *  store, so one lineage's tombstones can be split across stores. Plain
-   *  project-first concatenation would let an OLDER project tombstone shadow a
-   *  NEWER domain one, so the fanned results are merge-sorted by updated_at
-   *  DESC — each store's own rows already arrive newest-first, so this is a
-   *  stable merge, not a full re-sort. rowid ordering (and the newest-first
-   *  guarantee it gives) is only meaningful WITHIN one store; updated_at is
-   *  the one field comparable across stores, and is therefore the cross-store
-   *  sort key here (review finding, 2026-08-20). */
-  supersededRecordsBySlug(slug) {
-    return this.fanValues((s2) => s2.supersededRecordsBySlug(slug)).flat().sort((a, b) => a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
-  }
-  /** Cross-store terminus resolution (decision foreign_de1a7329): a record lives in
-   *  exactly one store (same reasoning as get()), so this tries each mounted
-   *  store project-first and returns the first hit. */
-  resolveTerminus(id) {
-    for (const { value } of this.fanRead((s2) => s2.resolveTerminus(id))) {
-      if (value)
-        return value;
-    }
-    return null;
-  }
-  /** Cross-store fan of inboundSupersedes (board c6e3561f part (a)): an edge
-   *  lives with its SOURCE record (addLink routes by source), so a record's
-   *  inbound supersedes edges can sit in a DIFFERENT mounted store than the
-   *  target itself — every mount is scanned and the hits merged, same
-   *  reasoning as recordsBySlug's fan. DEDUPED BY ID (roster review F3,
-   *  anti_pattern foreign_1896c79b): a record promoted into a domain store leaves a
-   *  project-store tombstone behind, so the SAME source id can resolve out of
-   *  two different mounts — first-seen (project-first, the read fan's own
-   *  ordering) wins, never a duplicate entry for one concept. */
-  inboundSupersedes(id) {
-    const seen = /* @__PURE__ */ new Set();
-    const out = [];
-    for (const record2 of this.fanValues((s2) => s2.inboundSupersedes(id)).flat()) {
-      if (seen.has(record2.id))
-        continue;
-      seen.add(record2.id);
-      out.push(record2);
-    }
-    return out;
-  }
-  // -- record mutations: route to the store that HOLDS the record --------------
-  // A record's scope decided where it lives at create time; a later change has to
-  // land in that same store, so these route by where the id actually is — never
-  // by the caller. (knowledge_update gets the record first, so supersede always
-  // finds it; remove routes on its id the same way. addLink routes on the SOURCE
-  // id — the edge lives with its source — and validates the TARGET mount-wide.)
-  /** Versioned change in the holding store (a domain record supersedes in its
-   *  domain store) — and the replacement's `scope` is pinned from THAT MOUNT.
-   *
-   *  THE LAYERING (decision
-   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
-   *  SterlingStore.supersede pins the replacement's scope from the old row's
-   *  `scope` COLUMN, which is correct for a BARE store: with no mounts there is
-   *  nothing the column can contradict. Through THIS surface the column is not
-   *  the strongest fact — the MOUNT is. In the one drift class a
-   *  column-authoritative read cannot see (a row physically held by a domain
-   *  store whose column says 'project'), inheriting the column would mint a
-   *  brand-new row carrying the same lie, inside the very database that
-   *  disproves it. So the mount is passed down as the authoritative scope and
-   *  the column is not consulted.
-   *
-   *  WHY IT IS DERIVED FROM THE STORE THIS WRITE IS ROUTED TO, and not from a
-   *  second lookup: `store` here IS the destination — the same resolution
-   *  scopeOfHolder performs (mountNameOf ∘ storeHolding), reused rather than
-   *  repeated. The label and the physical destination are therefore ONE fact,
-   *  and cannot drift apart at this site by construction. Any third argument a
-   *  caller supplies is deliberately ignored for the same reason: an
-   *  authoritative scope is not something a caller can be trusted to know. */
-  supersede(...args2) {
-    const store = this.mutatingStoreHolding("supersede", args2[0]);
-    return store.supersede(args2[0], args2[1], this.mountNameOf(store));
-  }
-  /** Promotion tombstone: retire the original in its (project) store, pointing at
-   *  the cross-store replacement. The replacement already lives in another store
-   *  (the promoted domain copy), so only the original's holding store is touched. */
-  retireInFavorOf(...args2) {
-    return this.mutatingStoreHolding("retireInFavorOf", args2[0]).retireInFavorOf(...args2);
-  }
-  /** Hard delete (+ §3.2.7 drain log for system todos) in the holding store. */
-  remove(...args2) {
-    return this.mutatingStoreHolding("remove", args2[0]).remove(...args2);
-  }
-  // -- the generalized IN-PLACE write triad (stable-identity S2, decision
-  // [stable-identity-design-v2]) — same holding-store routing as supersede:
-  // an in-place write must land on the row that actually exists, and the
-  // version counter it bumps is that store's.
-  /** knowledge_update-shaped in-place write in the holding store. */
-  updateRecord(...args2) {
-    return this.mutatingStoreHolding("updateRecord", args2[0]).updateRecord(...args2);
-  }
-  /** NARROW server-owned metadata write (board 8c8b6d78 / R9) in the holding
-   *  store — same routing as updateRecord, since it is the same in-place core
-   *  with the body clock preserved. */
-  updateRecordMetadata(...args2) {
-    return this.mutatingStoreHolding("updateRecordMetadata", args2[0]).updateRecordMetadata(...args2);
-  }
-  /** knowledge_edit-shaped exactly-once passage replace in the holding store. */
-  editRecordField(...args2) {
-    return this.mutatingStoreHolding("editRecordField", args2[0]).editRecordField(...args2);
-  }
-  /** knowledge_append-shaped array growth in the holding store. */
-  appendRecordField(...args2) {
-    return this.mutatingStoreHolding("appendRecordField", args2[0]).appendRecordField(...args2);
-  }
-  /** An archived (record_id, version) snapshot from whichever store holds the
-   *  record. Version history is store-local, exactly like the record itself. */
-  getRecordVersion(...args2) {
-    return this.storeHolding(args2[0]).getRecordVersion(...args2);
-  }
-  /** IN-PLACE todo edit (board_update) in the holding store — todos are always
-   *  project-scoped (§3.3), so this always resolves to the project store, but it
-   *  routes the same way as supersede/remove for consistency rather than assuming. */
-  updateTodo(...args2) {
-    return this.mutatingStoreHolding("updateTodo", args2[0]).updateTodo(...args2);
-  }
-  /** Typed link edge, added on the source record in its holding store. The TARGET
-   *  is resolved across ALL mounted stores (cross-store get, like get()) before
-   *  delegating: cross-store edges are a legitimate shape — promotion itself writes
-   *  them (supersedes / informed_by across project↔domain) — and the holding
-   *  store's local check cannot see a target mounted elsewhere, so it is told the
-   *  target is already validated. */
-  addLink(sourceId, rel, targetId) {
-    if (!this.get(targetId))
-      throw new Error(`addLink: no target record '${targetId}' in the project store or any mounted domain${this.unreadableNote()}`);
-    return this.mutatingStoreHolding("addLink", sourceId).addLink(sourceId, rel, targetId, true);
-  }
-  /** EVERY mounted store physically holding `id`, project-first. Ordinarily
-   *  exactly one — a record lives in one store — which is precisely why the
-   *  cardinality is returned rather than assumed away by a first-hit scan. */
-  holdersOf(id) {
-    const holders = [...this.fanRead((s2) => s2.get(id) !== void 0)].filter((r) => r.value).map((r) => r.store);
-    for (const [name, store] of this.domains) {
-      if (!this.isUnreadable(name))
-        continue;
-      try {
-        if (store.get(id) !== void 0)
-          holders.push(store);
-      } catch (e) {
-        if (!isStoreFailure(e))
-          throw e;
-      }
-    }
-    return holders;
-  }
-  /** ' Not read: domain <name> (<error>)...' for a refusal that says a record
-   *  was not found, so a miss caused by a dropped domain is not read as absence. */
-  unreadableNote() {
-    if (!this.unreadableDomains.length)
-      return "";
-    return `. Not read: ${this.unreadableDomains.map((d) => `domain '${d.name}' (${d.error}; ${d.note})`).join("; ")}`;
-  }
-  storeHolding(id) {
-    const holders = this.holdersOf(id);
-    if (holders.length === 0)
-      throw new Error(`no record '${id}' in the project store or any mounted domain${this.unreadableNote()}`);
-    if (holders.length > 1) {
-      throw new Error(`ambiguous holder: record '${id}' is held by ${holders.length} mounts \u2014 ${holders.map((s2) => `'${this.mountNameOf(s2)}'`).join(", ")}. One id must name one row: every routing decision here (which store a write lands in, which mount a transaction opens on, what scope a derived record inherits) assumes a single holder, so the ambiguity is refused rather than resolved project-first. Resolve the duplicate (scripts/domain-doctor.mjs show --id '${id}' on each store) before retrying.`);
-    }
-    for (const [name, store] of this.domains) {
-      if (store === holders[0] && this.isUnreadable(name)) {
-        throw new Error(`record '${id}' is held by domain '${name}', which this session cannot read ${this.droppedReason(name)}. Nothing was read or written. Repair the store, then restart the session.`);
-      }
-    }
-    return holders[0];
-  }
-  /** MountedStores' override of the storage-layer scope accessor — 'project' or
-   *  'domain:<name>', derived from the MOUNT that physically holds the record
-   *  and from nothing else. See SterlingStore.scopeOfHolder for the contract
-   *  this satisfies; the two differ only in what "physical" can mean at each
-   *  layer, and here it means the strongest available fact. Deliberately NOT
-   *  the row's `scope` column: the column is authoritative over the BODY, but
-   *  the MOUNT is authoritative over the column — a record seeded into the
-   *  wrong store carries a truthful-looking column and a false location, and
-   *  that is the one drift class a column-authoritative read cannot see.
-   *  Inherits storeHolding's two refusals: no holder, and multiple holders. */
-  scopeOfHolder(id) {
-    return this.mountNameOf(this.storeHolding(id));
-  }
-  /** storeHolding for a WRITE: resolve the holder, then hold it against the
-   *  active transaction's mount (the C2 backstop). Reads keep using
-   *  storeHolding/all() directly — a cross-store READ is legitimate. */
-  mutatingStoreHolding(op, id) {
-    const store = this.storeHolding(id);
-    this.assertMountAffinity(op, store, `record '${id}'`);
-    return store;
-  }
-  /** The project store for a PROJECT-LOCAL write (the board/maintenance
-   *  queue, the drain log — the run/handoff protocol this comment used to
-   *  name was removed per decision sterling-claude-code-scale-down-boundary,
-   *  2ad87dd1), held against the active transaction's mount the same way. These
-   *  forward straight to this.project, so inside a DOMAIN transaction they are
-   *  the second cross-mount shape: a write that commits on the project
-   *  connection while the open BEGIN belongs to a domain mount. */
-  mutatingProject(op) {
-    this.assertMountAffinity(op, this.project, "project-local run/board state");
-    return this.project;
-  }
-  /** The mount name for a physical store — 'project', or the domain's manifest
-   *  name. Used only in refusal text: the point of the guard is that a MOUNT is
-   *  a physical thing, so it is named by where it actually is. */
-  mountNameOf(store) {
-    if (store === this.project)
-      return "project";
-    for (const [name, s2] of this.domains)
-      if (s2 === store)
-        return `domain:${name}`;
-    return "unknown mount";
-  }
-  /**
-   * THE CROSS-MOUNT WRITE BACKSTOP (decision
-   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
-   *
-   * Each mount is a separate SQLite connection, so a write routed to a store
-   * OTHER than the one holding the open transaction commits independently and
-   * survives an outer rollback — the atomicity hole a correct `scope` label
-   * cannot close on its own. Every mutation ROUTED THROUGH THIS CLASS'S OWN
-   * SURFACE therefore compares its RESOLVED target store against the ACTIVE
-   * TRANSACTION'S STORE IDENTITY (not a label string: a label is exactly the
-   * thing that may be lying) and refuses, naming the record, the mount the
-   * transaction holds, and the mount the target actually lives in. Outside a
-   * transaction there is nothing to violate, so this is a no-op. Cross-store
-   * READS are never affected.
-   *
-   * THAT QUALIFIER IS LOAD-BEARING, not throat-clearing: the public `project`
-   * handle (see its own note above) is a mutable SterlingStore a caller can
-   * write through without ever reaching this method. "Every mutation is
-   * guarded" would be false while that escape hatch is public, so the claim is
-   * scoped to what this class actually mediates.
-   */
-  assertMountAffinity(op, target, subject) {
-    const active = this.activeTransactionStore;
-    if (active === void 0 || active === target)
-      return;
-    throw new Error(`${op}: refused \u2014 cross-mount write while a transaction is open on the '${this.mountNameOf(active)}' mount, but ${subject} is held by the '${this.mountNameOf(target)}' mount. Each mount is a separate SQLite connection, so this write would commit independently and survive a rollback of the open transaction \u2014 it is refused rather than silently split across two connections. Route the transaction to the record's own mount (withTransactionForRecord), or perform this write outside the transaction.`);
-  }
-  // -- board/transient state: PROJECT-LOCAL, never a domain -------------------
-  // The board/maintenance queue (§3.2.7) and check_skipped are project-scoped
-  // by definition — they live in the project store, so MountedStores forwards
-  // them straight through. Knowledge fans across mounts; this state does not.
-  // The run/handoff protocol (createRun, getRun, casTransition,
-  // casTransitionMerge, recordPendingExit/getPendingExit, appendRunEscalation,
-  // appendRunReconcileNeeded, writeHandoff/readHandoffs, setRunReviewMandatory)
-  // was removed with the staged pipeline (decision
-  // sterling-claude-code-scale-down-boundary, 2ad87dd1).
-  recordCheckSkipped(...args2) {
-    return this.mutatingProject("recordCheckSkipped").recordCheckSkipped(...args2);
-  }
-  /** The drain log is project-local (§3.2.7) — forwarded like every board surface. */
-  drainLogEntry(...args2) {
-    return this.mutatingProject("drainLogEntry").drainLogEntry(...args2);
-  }
-  /** knowledge_split's multi-record write (decision
-   *  compaction-tooling-windowed-read-plus-split) targets the PROJECT store
-   *  only — feature_article is always project-scoped (§3.3), so the split's
-   *  children-plus-parent transaction never needs to span a domain mount. */
-  withTransaction(fn) {
-    return this.runScopedTransaction(this.project, fn);
-  }
-  /** PER-RECORD transaction boundary — the affinity fix (decision
-   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
-   *  Routes by `storeHolding(id)`, the SAME physical resolution every record
-   *  mutation uses, so the transaction and the writes inside it can never open
-   *  on different mounts. The retired label-routed sibling
-   *  (`withTransactionForScope`, deleted per decision
-   *  [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired])
-   *  resolved by storeFor(scope), and a record's body `scope` is caller-writable
-   *  and not the routing key for anything after creation (anti_pattern
-   *  [record-body-scope-is-not-physical-store-identity]) — so a drifted label
-   *  put the transaction on the wrong database while the write went to the
-   *  right one. A record that no record exists for throws loudly BEFORE any
-   *  transaction opens, exactly as an unmounted scope does. */
-  withTransactionForRecord(id, fn) {
-    return this.runScopedTransaction(this.storeHolding(id), fn);
-  }
-  /** The PHYSICAL STORE whose transaction is currently open across THIS
-   *  MountedStores instance (not per-physical-store — a physical store's own
-   *  txDepth only knows about ITSELF). Two jobs, both keyed on store IDENTITY
-   *  rather than on a scope label (which is exactly the value that can lie):
-   *  it refuses a NESTED call that targets a DIFFERENT mount, and it is the
-   *  reference every mutation's cross-mount backstop compares against (see
-   *  assertMountAffinity). Opening a second BEGIN IMMEDIATE on a different
-   *  SQLite connection while the outer transaction is still open would let the
-   *  inner one commit independently, so a later failure in the outer
-   *  transaction could no longer roll the inner write back — silently breaking
-   *  atomicity. A nested call to the SAME mount still joins cleanly, because it
-   *  reaches that store's reentrant `tx()` (txDepth). */
-  activeTransactionStore;
-  runScopedTransaction(store, fn) {
-    if (this.activeTransactionStore !== void 0 && this.activeTransactionStore !== store) {
-      throw new Error(`nested transaction: cannot open a transaction on the '${this.mountNameOf(store)}' mount while a transaction on the '${this.mountNameOf(this.activeTransactionStore)}' mount is still open on this MountedStores \u2014 cross-mount transaction nesting is not supported (each mount is a separate SQLite connection; an inner commit could survive an outer rollback).`);
-    }
-    const isOutermost = this.activeTransactionStore === void 0;
-    if (isOutermost)
-      this.activeTransactionStore = store;
-    try {
-      return store.withTransaction(fn);
-    } finally {
-      if (isOutermost)
-        this.activeTransactionStore = void 0;
-    }
-  }
-  /** Per-store snapshot (§2.3): each store snapshots independently; the caller
-   *  supplies a path per store name ('project' or 'domain-<name>'). */
-  snapshotAll(pathFor) {
-    this.project.snapshot(pathFor("project"));
-    for (const [name, store] of this.domains)
-      store.snapshot(pathFor(`domain-${name}`));
-  }
-  /** Mounted domain names, in manifest order. Includes a domain listed on
-   *  unreadableDomains: it is still configured, though neither read nor written. */
-  domainNames() {
-    return [...this.mountedNames];
-  }
-  close() {
-    for (const s2 of this.all())
-      s2.close();
-  }
-  all() {
-    return [this.project, ...this.domains.values()];
-  }
-};
-
-// packages/store/dist/axis.js
-var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
-  // function words
-  "this",
-  "that",
-  "these",
-  "those",
-  "with",
-  "from",
-  "have",
-  "has",
-  "had",
-  "will",
-  "would",
-  "could",
-  "should",
-  "must",
-  "your",
-  "you",
-  "into",
-  "then",
-  "than",
-  "when",
-  "what",
-  "which",
-  "there",
-  "their",
-  "them",
-  "they",
-  "been",
-  "being",
-  "does",
-  "make",
-  "made",
-  "used",
-  "using",
-  "also",
-  "only",
-  "each",
-  "more",
-  "most",
-  "some",
-  "such",
-  "very",
-  "just",
-  "like",
-  "over",
-  "after",
-  "before",
-  "because",
-  "about",
-  "under",
-  "above",
-  "below",
-  "where",
-  "while",
-  "since",
-  "until",
-  "unless",
-  "either",
-  "neither",
-  "both",
-  "every",
-  "not",
-  "but",
-  "and",
-  "the",
-  "for",
-  "are",
-  "was",
-  "were",
-  "its",
-  "here",
-  "how",
-  "why",
-  "who",
-  "whom",
-  "whose",
-  "any",
-  "all",
-  "can",
-  "may",
-  "might",
-  "shall",
-  // Sterling dispatch boilerplate — present in ~every prompt, so pure noise
-  "sterling",
-  "conductor",
-  "agent",
-  "agents",
-  "subagent",
-  "dispatch",
-  "report",
-  "return",
-  "verify",
-  "verified",
-  "evidence",
-  "record",
-  "records",
-  "store",
-  "knowledge",
-  "query",
-  "knowledge_get",
-  "knowledge_query",
-  "read",
-  "reads",
-  "grep",
-  "file",
-  "files",
-  "code",
-  "first",
-  "second",
-  "third",
-  "task",
-  "work",
-  "please",
-  "note",
-  "notes",
-  "deliverable",
-  "claim",
-  "claims",
-  "absence",
-  "cite",
-  "cites",
-  "citing",
-  "exactly",
-  "nothing",
-  "else"
-]);
-var AXIS_MIN_TERM_LEN = 4;
-var AXIS_MAX_TERM_LEN = 64;
-var AXIS_MIN_HITS = 2;
-function extractAxisTerms(text, maxTerms) {
-  return rankedAxisTerms(text).slice(0, Math.max(0, maxTerms));
-}
-function rankedAxisTerms(text) {
-  const counts = /* @__PURE__ */ new Map();
-  for (const raw of String(text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
-    if (raw.length < AXIS_MIN_TERM_LEN || raw.length > AXIS_MAX_TERM_LEN)
-      continue;
-    if (AXIS_STOPWORDS.has(raw))
-      continue;
-    if (/^\d+$/.test(raw))
-      continue;
-    counts.set(raw, (counts.get(raw) ?? 0) + 1);
-  }
-  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).map(([term]) => term);
-}
-function extractAxisTermsUncapped(text) {
-  return rankedAxisTerms(text);
-}
-function axisNarrowText(record2) {
-  if (!record2 || typeof record2 !== "object")
-    return "";
-  if (record2.type === "anti_pattern")
-    return `${record2.title ?? ""}
-${record2.trigger ?? ""}`;
-  if (record2.type === "decision")
-    return `${record2.title ?? ""}
-${record2.statement ?? ""}`;
-  if (record2.type === "feature_article")
-    return `${record2.slug ?? ""} ${record2.concept_family ?? ""}
-${record2.title ?? ""}`;
-  if (record2.type === "research_finding")
-    return `${record2.question ?? ""}`;
-  if (record2.type === "disconfirmed_hypothesis")
-    return `${record2.question ?? ""}`;
-  if (record2.type === "open_question")
-    return `${record2.question ?? ""}`;
-  return "";
-}
-function axisTitleText(record2) {
-  if (!record2 || typeof record2 !== "object")
-    return "";
-  if (record2.type === "anti_pattern")
-    return `${record2.title ?? ""}`;
-  if (record2.type === "decision")
-    return `${record2.title ?? ""}`;
-  if (record2.type === "feature_article")
-    return `${record2.slug ?? ""} ${record2.concept_family ?? ""}
-${record2.title ?? ""}`;
-  if (record2.type === "research_finding")
-    return `${record2.question ?? ""}`;
-  if (record2.type === "disconfirmed_hypothesis")
-    return `${record2.question ?? ""}`;
-  if (record2.type === "open_question")
-    return `${record2.question ?? ""}`;
-  return "";
-}
-function axisHits(record2, terms) {
-  const hay = axisNarrowText(record2).toLowerCase();
-  if (!hay)
-    return [];
-  return terms.filter((t) => new RegExp(`(^|[^a-z0-9_])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay));
-}
-var GENERIC_DEV_TERMS = /* @__PURE__ */ new Set([
-  "test",
-  "tests",
-  "testing",
-  "script",
-  "scripts",
-  "commit",
-  "commits",
-  "branch",
-  "merge",
-  "build",
-  "builds",
-  "check",
-  "checks",
-  "node",
-  "file",
-  "files",
-  "path",
-  "paths",
-  "run",
-  "runs",
-  "running",
-  "item",
-  "items",
-  "text",
-  "change",
-  "changed",
-  "changes",
-  "code",
-  "repo",
-  "line",
-  "lines",
-  "error",
-  "errors",
-  "string",
-  "value",
-  "values",
-  "field",
-  "fields",
-  "message",
-  "messages",
-  "output",
-  "input",
-  "name",
-  "names",
-  "list",
-  "exact",
-  "existing",
-  "touched",
-  "untouched",
-  "through",
-  "actually",
-  "behavior",
-  "still",
-  "full"
-]);
-function candidateBases(term) {
-  const bases = /* @__PURE__ */ new Set([term]);
-  for (const suffix of ["ing", "ed", "es", "s"]) {
-    if (!term.endsWith(suffix) || suffix === "s" && term.endsWith("ss"))
-      continue;
-    const rest = term.slice(0, -suffix.length);
-    for (const base2 of [rest, `${rest}e`])
-      if (base2.length >= 3)
-        bases.add(base2);
-  }
-  return bases;
-}
-function hasDiscriminatingHit(hits, minDiscriminating = 1) {
-  const terms = [...new Set(hits.map((t) => String(t).toLowerCase()).filter((t) => !GENERIC_DEV_TERMS.has(t)))];
-  const groups = [];
-  for (const term of terms) {
-    const merged = candidateBases(term);
-    for (let i = groups.length - 1; i >= 0; i--) {
-      if ([...groups[i]].some((b) => merged.has(b))) {
-        for (const b of groups[i])
-          merged.add(b);
-        groups.splice(i, 1);
-      }
-    }
-    groups.push(merged);
-  }
-  return groups.length >= minDiscriminating;
-}
-var AXIS_RECORD_TOP_K = 6;
-var AXIS_MIN_RECORD_TERMS = 2;
-function narrowCentralTerms(record2, topK) {
-  return extractAxisTerms(axisNarrowText(record2), topK);
-}
-function unionCentralTerms(record2, topK) {
-  return [
-    .../* @__PURE__ */ new Set([...narrowCentralTerms(record2, topK), ...extractAxisTerms(axisTitleText(record2), topK)])
-  ];
-}
-function recordCentralTerms(record2, opts = {}) {
-  return unionCentralTerms(record2, opts.topK ?? AXIS_RECORD_TOP_K);
-}
-function coveredCentralTerms(central, outgoingText) {
-  const words = [
-    ...new Set(String(outgoingText ?? "").toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length >= AXIS_MIN_TERM_LEN))
-  ];
-  if (!words.length)
-    return [];
-  return central.filter((c) => words.some((w) => w.startsWith(c) || c.startsWith(w)));
-}
-function recordCentralityHits(record2, outgoingText, opts = {}) {
-  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
-  return coveredCentralTerms(unionCentralTerms(record2, topK), outgoingText);
-}
-function hasRecordCentralityHit(record2, outgoingText, opts = {}) {
-  const topK = opts.topK ?? AXIS_RECORD_TOP_K;
-  const minTerms = opts.minTerms ?? AXIS_MIN_RECORD_TERMS;
-  const central = unionCentralTerms(record2, topK);
-  const covered = coveredCentralTerms(central, outgoingText);
-  return covered.length >= Math.min(minTerms, central.length);
-}
-
-// packages/store/dist/domain-fit.js
-var DOMAIN_FIT_MIN_TERMS = 2;
-function termsMatch(a, b) {
-  return a === b || a.startsWith(b) || b.startsWith(a);
-}
-function subjectTerms(text) {
-  return extractAxisTermsUncapped(text).filter((t) => t.length >= AXIS_MIN_TERM_LEN && !GENERIC_DEV_TERMS.has(t));
-}
-function fitDomains(recordText, domains, opts = {}) {
-  if (typeof recordText !== "string")
-    throw new TypeError("fitDomains: recordText must be a string");
-  if (!Array.isArray(domains))
-    throw new TypeError("fitDomains: domains must be an array");
-  const minTerms = opts.minTerms ?? DOMAIN_FIT_MIN_TERMS;
-  if (!Number.isInteger(minTerms) || minTerms < 1) {
-    throw new RangeError(`fitDomains: minTerms must be a positive integer, got ${String(minTerms)}`);
-  }
-  if (opts.exclude !== void 0 && (!Array.isArray(opts.exclude) || opts.exclude.some((n) => typeof n !== "string"))) {
-    throw new TypeError("fitDomains: exclude must be an array of strings");
-  }
-  const excluded = new Set((opts.exclude ?? []).map((n) => n.toLowerCase()));
-  const seen = /* @__PURE__ */ new Set();
-  for (const d of domains) {
-    if (d === null || typeof d !== "object" || typeof d.name !== "string" || d.name.trim() === "") {
-      throw new TypeError("fitDomains: every domain needs a non-empty string name");
-    }
-    if (d.description != null && typeof d.description !== "string") {
-      throw new TypeError(`fitDomains: description of domain '${d.name}' must be a string`);
-    }
-    const key = d.name.toLowerCase();
-    if (seen.has(key))
-      throw new Error(`fitDomains: duplicate domain name '${d.name}'`);
-    seen.add(key);
-  }
-  const recordTerms = subjectTerms(recordText);
-  const fits = [];
-  for (const d of domains) {
-    if (excluded.has(d.name.toLowerCase()) || !d.description)
-      continue;
-    const descTerms = subjectTerms(d.description);
-    if (!descTerms.length)
-      continue;
-    const matched = descTerms.filter((dt) => recordTerms.some((rt) => termsMatch(dt, rt)));
-    if (matched.length < Math.min(minTerms, descTerms.length))
-      continue;
-    fits.push({ name: d.name, score: matched.length / descTerms.length, matched });
-  }
-  return fits.sort((a, b) => b.score - a.score || b.matched.length - a.matched.length || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-}
-
-// packages/store/dist/registry.js
-import { DatabaseSync } from "node:sqlite";
-
-// packages/store/dist/sqlite-driver.js
-import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { realpathSync } from "node:fs";
-import { dirname as dirname3, basename, join as join3, resolve as resolvePath } from "node:path";
-var DDL = `
-CREATE TABLE IF NOT EXISTS records (
-  id TEXT PRIMARY KEY,
-  type TEXT NOT NULL,
-  status TEXT NOT NULL,
-  superseded_by TEXT,
-  lifecycle TEXT NOT NULL DEFAULT 'live',
-  freshness TEXT NOT NULL DEFAULT 'fresh',
-  version INTEGER NOT NULL DEFAULT 1,
-  scope TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  author TEXT NOT NULL,
-  derived_unconfirmed INTEGER NOT NULL DEFAULT 0,
-  body TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_records_type_status ON records(type, status);
--- Schema v2 identity tables [stable-identity-design-v2].
--- record_versions: FULL-RECORD JSON snapshots, one per (record_id, version).
--- Append-only and permanent \u2014 NEVER indexed into records_fts, so an archived
--- version's text can never rank in query() (the whole point of contract 1).
-CREATE TABLE IF NOT EXISTS record_versions (
-  record_id TEXT NOT NULL,
-  version INTEGER NOT NULL,
-  archived_at TEXT NOT NULL,
-  body TEXT NOT NULL,
-  PRIMARY KEY (record_id, version)
-);
--- record_aliases: dead-id lookup (historical_id -> canonical_id + the version
--- archived under that historical id). NOTHING writes it in S2 \u2014 the S4
--- migration runner populates it once; it is an index, not a namespace.
-CREATE TABLE IF NOT EXISTS record_aliases (
-  historical_id TEXT PRIMARY KEY,
-  canonical_id TEXT NOT NULL,
-  archived_version INTEGER NOT NULL,
-  created_at TEXT NOT NULL
-);
--- remove() deletes aliases by canonical_id.
-CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON record_aliases(canonical_id);
--- record_relations: the AUTHORITATIVE home of typed edges (supersedes,
--- cites, ...). Replaces record_links: served links[] materializes from here,
--- and supersession is a relation rather than a column value a caller sets.
-CREATE TABLE IF NOT EXISTS record_relations (
-  source_id TEXT NOT NULL,
-  rel TEXT NOT NULL,
-  target_id TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (source_id, rel, target_id)
-);
-CREATE INDEX IF NOT EXISTS idx_relations_target ON record_relations(target_id);
-CREATE INDEX IF NOT EXISTS idx_relations_rel_target ON record_relations(rel, target_id);
-CREATE TABLE IF NOT EXISTS record_stack_tags (
-  record_id TEXT NOT NULL,
-  tag TEXT NOT NULL,
-  PRIMARY KEY (record_id, tag)
-);
-CREATE TABLE IF NOT EXISTS record_file_keys (
-  record_id TEXT NOT NULL,
-  path TEXT NOT NULL,
-  PRIMARY KEY (record_id, path)
-);
-CREATE INDEX IF NOT EXISTS idx_file_keys_path ON record_file_keys(path);
-CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(record_id UNINDEXED, text);
-CREATE TABLE IF NOT EXISTS runs (
-  id TEXT PRIMARY KEY,
-  machine_state TEXT NOT NULL,
-  pending_exit TEXT,
-  body TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS handoffs (
-  run_id TEXT NOT NULL,
-  phase_id TEXT NOT NULL,
-  agent_role TEXT NOT NULL,
-  body TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_handoffs_run_phase ON handoffs(run_id, phase_id);
-CREATE TABLE IF NOT EXISTS check_skipped (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT,
-  check_name TEXT NOT NULL,
-  reason TEXT NOT NULL,
-  at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS selection (
-  slot INTEGER PRIMARY KEY CHECK (slot = 1),
-  type TEXT NOT NULL,
-  record_id TEXT NOT NULL,
-  at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS queue_drain_log (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  drained_at TEXT NOT NULL,
-  system_reason TEXT NOT NULL,
-  text TEXT NOT NULL,
-  file_keys TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS activity_log (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  at TEXT NOT NULL,
-  verb TEXT NOT NULL,
-  type TEXT NOT NULL,
-  record_id TEXT NOT NULL,
-  title TEXT NOT NULL
-);
--- Store-level key/value metadata (board 675daf9d, decision
--- projects-mount-domains-and-sibling-projects): a domain store's description is
--- its 'description' key. Additive: CREATE IF NOT EXISTS on every v2 open, so no
--- user_version bump; a pre-v2 store opens read-only before this DDL runs.
-CREATE TABLE IF NOT EXISTS store_meta (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-`;
-function journalDemotionRequired(absPath, platform = process.platform) {
-  if (platform !== "linux")
-    return false;
-  return /^\/mnt\/[a-zA-Z]\//.test(absPath.replace(/\\/g, "/"));
-}
-var JournalDemotionRefusedError = class extends Error {
-  dbPath;
-  returnedMode;
-  constructor(dbPath, returnedMode, options) {
-    super(options?.message ?? `journal_mode=DELETE demotion refused for '${dbPath}' (PRAGMA returned '${returnedMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`, options?.cause !== void 0 ? { cause: options.cause } : void 0);
-    this.dbPath = dbPath;
-    this.returnedMode = returnedMode;
-    this.name = "JournalDemotionRefusedError";
-  }
-};
-var DEFAULT_BUSY_TIMEOUT_MS = 5e3;
-var sqliteDialect = {
-  searchJoin: "JOIN records_fts f ON f.record_id = r.id",
-  searchMatch: "records_fts MATCH ?",
-  // FTS5's bm25() is LOWER for a better match, so the score is its negation.
-  searchScore: "(-bm25(records_fts))",
-  searchOrder: "bm25(records_fts) ASC",
-  /**
-   * The FTS5 MATCH expression rank_terms compiles to. A trailing '*' marks an
-   * FTS5 prefix query ("stor*" matches "store") — the star must sit OUTSIDE the
-   * quoted token to act as the prefix operator.
-   */
-  searchQuery(terms, matchAll) {
-    const joiner = matchAll ? " AND " : " OR ";
-    return terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
-  },
-  jsonText: (column, key) => `json_extract(${column}, '$.${key}')`,
-  insertionOrder: (alias) => alias ? `${alias}.rowid` : "rowid",
-  insertIgnore: (table, columns) => `INSERT OR IGNORE INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`
-};
-var SqliteDriver = class {
-  dialect = sqliteDialect;
-  db;
-  /** The absolute path of the database file, for the refusal messages. */
-  dbPath;
-  /** The path the journal-mode policy classifies: dbPath with its directory's symlinks resolved. */
-  classifiedPath;
-  constructor(path, options = {}) {
-    const busyTimeoutMs = options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS;
-    if (typeof busyTimeoutMs !== "number" || !Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0) {
-      throw new Error(`SqliteDriver: busyTimeoutMs must be a non-negative integer, got ${String(busyTimeoutMs)}`);
-    }
-    this.dbPath = resolvePath(path);
-    this.db = new DatabaseSync2(path);
-    let classifiedPath = this.dbPath;
-    try {
-      classifiedPath = join3(realpathSync(dirname3(this.dbPath)), basename(this.dbPath));
-    } catch {
-    }
-    this.classifiedPath = classifiedPath;
-    this.db.exec(`PRAGMA busy_timeout=${busyTimeoutMs}`);
-  }
-  prepare(sql) {
-    return this.db.prepare(sql);
-  }
-  exec(sql) {
-    this.db.exec(sql);
-  }
-  close() {
-    this.db.close();
-  }
-  /** BEGIN IMMEDIATE: takes the write lock now, or throws once busy_timeout runs out. */
-  begin() {
-    this.db.exec("BEGIN IMMEDIATE");
-  }
-  commit() {
-    this.db.exec("COMMIT");
-  }
-  rollback() {
-    this.db.exec("ROLLBACK");
-  }
-  /** PRAGMA user_version — the application-owned integer, NEVER SQLite's own PRAGMA schema_version. */
-  schemaVersion() {
-    return this.db.prepare("PRAGMA user_version").get().user_version;
-  }
-  setSchemaVersion(version2) {
-    if (!Number.isInteger(version2) || version2 < 0) {
-      throw new Error(`SqliteDriver: schema version must be a non-negative integer, got ${String(version2)}`);
-    }
-    this.db.exec(`PRAGMA user_version = ${version2}`);
-  }
-  /** sqlite_master is empty only before the DDL has ever run on this file. A read, so a refusal after it has still written nothing. */
-  hasSchema() {
-    return this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n > 0;
-  }
-  prepareReadOnly() {
-    if (!journalDemotionRequired(this.classifiedPath))
-      return;
-    let legacyMode;
-    try {
-      legacyMode = this.journalMode();
-    } catch (e) {
-      this.db.close();
-      throw e;
-    }
-    if (legacyMode === "wal") {
-      this.db.close();
-      throw new JournalDemotionRefusedError(this.dbPath, legacyMode, {
-        message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, PRAGMA journal_mode='${legacyMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. Migrate the store first (\`node "<Sterling root>/bin/migrate-stores.mjs"\`) or open it from a non-9p context \u2014 closing other connections will not help here.`
-      });
-    }
-  }
-  prepareWritable(isFresh) {
-    if (journalDemotionRequired(this.classifiedPath)) {
-      let returnedMode;
-      try {
-        returnedMode = this.db.prepare("PRAGMA journal_mode=DELETE").get().journal_mode;
-      } catch (e) {
-        this.db.close();
-        const detail = e instanceof Error ? e.message : String(e);
-        throw new JournalDemotionRefusedError(this.dbPath, detail, {
-          cause: e,
-          message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (PRAGMA threw: ${detail}) \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`
-        });
-      }
-      if (returnedMode !== "delete") {
-        this.db.close();
-        throw new JournalDemotionRefusedError(this.dbPath, returnedMode);
-      }
-    } else {
-      const currentMode = this.journalMode();
-      if (currentMode !== "delete") {
-        this.db.exec("PRAGMA journal_mode=WAL");
-      } else if (isFresh) {
-        const stillFresh = !this.hasSchema();
-        if (stillFresh) {
-          this.db.exec("PRAGMA journal_mode=WAL");
-        }
-      }
-    }
-    this.db.exec("PRAGMA foreign_keys=ON");
-    this.db.exec(DDL);
-    try {
-      this.db.exec("ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT");
-    } catch {
-    }
-  }
-  journalMode() {
-    return this.db.prepare("PRAGMA journal_mode").get().journal_mode;
-  }
-  /** VACUUM INTO: a consistent copy taken without stopping other connections. */
-  snapshot(targetPath) {
-    this.db.exec(`VACUUM INTO '${targetPath.replace(/'/g, "''")}'`);
-  }
-};
-
-// packages/store/dist/index.js
-function classifyClaimPath(repoRoot, path) {
-  try {
-    return statSync(join4(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
-  } catch (err) {
-    const code = err?.code;
-    if (code === "ENOENT")
-      return "absent";
-    return { kind: "unverifiable", errno: code ?? String(err) };
-  }
-}
-var StoreRowDecodeError = class extends Error {
-  op;
-  constructor(op, cause) {
-    super(`${op}: a record row's body is not valid JSON (${cause?.message ?? String(cause)})`);
-    this.name = "StoreRowDecodeError";
-    this.op = op;
-  }
-};
-function decodeLiveRecordRow(op, row) {
-  let record2;
-  try {
-    record2 = JSON.parse(row.body);
-  } catch (e) {
-    throw new StoreRowDecodeError(op, e);
-  }
-  if (typeof row.scope !== "string" || row.scope.length === 0) {
-    throw new Error(`${op}: record '${record2.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
-  }
-  record2.scope = row.scope;
-  return record2;
-}
-var SUPPORTED_SCHEMA_VERSION = 2;
-var UnsupportedSchemaVersionError = class extends Error {
-  found;
-  supported;
-  constructor(found, supported) {
-    super(`Unsupported schema version: this store's user_version (${found}) is newer than the schema version this build supports (${supported}). This store was likely migrated by a newer build of Sterling. Do not open it with an older/downgraded build \u2014 writing with a downgraded build over a newer schema risks corrupting the store. Upgrade this build (or restore from a backup taken before the migration) before continuing.`);
-    this.name = "UnsupportedSchemaVersionError";
-    this.found = found;
-    this.supported = supported;
-  }
-};
-function shellQuoteSingle(value) {
-  return `'${value.split("'").join(`'\\''`)}'`;
-}
-var SchemaMigrationRequiredError = class extends Error {
-  found;
-  supported;
-  /**
-   * The absolute path of the store file that needs migrating (measured
-   * defect, Salesforce consumer 2026-08-26): without this a hook surfacing
-   * the error showed only a bare bundle line number, and the user could not
-   * tell WHICH of several candidate stores on the machine to migrate.
-   */
-  db_path;
-  constructor(found, supported, operation, dbPath) {
-    super(`Schema migration required: the store at '${dbPath}' is at schema version ${found}, but this build requires version ${supported}. The store is open READ-ONLY \u2014 '${operation}' and every other write refuses until the stable-identity migration has run. Run: node "<Sterling root>/bin/migrate-stores.mjs" --db ${shellQuoteSingle(dbPath)} (decision stable-identity-design-v2; the runner takes a VACUUM INTO backup first, and bumps user_version last). Nothing was written.`);
-    this.name = "SchemaMigrationRequiredError";
-    this.found = found;
-    this.supported = supported;
-    this.db_path = dbPath;
-  }
-};
-function refreshReferenceDeltaSuffix(catalogRecord) {
-  const entries = catalogRecord?.catalog?.entries ?? [];
-  if (entries.length === 0)
-    return "";
-  const snapshot = entries.map((e) => `${e.id} (tier: ${e.tier}, status: ${e.status})`).join(", ");
-  const unknownTier = entries.filter((e) => e.tier === "unknown").map((e) => e.id);
-  const lookup = unknownTier.length > 0 ? `tier is still 'unknown' for: ${unknownTier.join(", ")} \u2014 look these up and ` : "re-verify these against current provider info and ";
-  return ` \u2014 current entries: ${snapshot}. ${lookup}update catalog.entries[] on the linked record via knowledge_edit/knowledge_update, then bump its source_date and cite this item's id in resolves.`;
-}
-function activityTitleOf(record2) {
-  const r = record2;
-  const raw = r.title ?? r.text?.split("\n")[0] ?? r.slug ?? r.id;
-  return raw.slice(0, 80);
-}
-function deepReplaceString(value, from, to) {
-  if (typeof value === "string")
-    return value === from ? to : value;
-  if (Array.isArray(value))
-    return value.map((v) => deepReplaceString(v, from, to));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
-  }
-  return value;
-}
-function boardItemHandle(rec) {
-  const label = boardDisplayLabel(rec.text, rec.slug);
-  return label ? displayHandle(label, rec.id) : `(unnamed board item) (${rec.id.slice(0, 8)})`;
-}
-var MAX_RANK_TERMS = 16;
-function rankTermDedupeKey(term) {
-  const isPrefix = term.endsWith("*") && term.length > 1;
-  const base2 = isPrefix ? term.slice(0, -1) : term;
-  const folded = base2.toLowerCase().replace(/[\p{P}\p{Z}]+/gu, " ").trim();
-  const key = folded.length > 0 ? folded : base2;
-  return isPrefix ? `${key}*` : key;
-}
-var rankTerms = external_exports.array(external_exports.string().regex(new RegExp(`^\\S{1,${AXIS_MAX_TERM_LEN}}$`), `rank_terms must be single keywords (no whitespace, \u2264${AXIS_MAX_TERM_LEN} chars)`)).transform((terms) => {
-  const seen = /* @__PURE__ */ new Set();
-  const deduped = [];
-  for (const term of terms) {
-    const key = rankTermDedupeKey(term);
-    if (seen.has(key))
-      continue;
-    seen.add(key);
-    deduped.push(term);
-  }
-  return deduped;
-}).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
-var DEFAULT_QUERY_CAP = 20;
-var MAX_BODY_COMPARE_DEPTH = 64;
-var COMPARE_WORK_BUDGET = 1e7;
-var COMPARE_OUTPUT_BUDGET = 5e4;
-var COMPARE_PATH_LENGTH_BUDGET = 1e6;
-var ComparisonBudgetExceededError = class extends Error {
-};
-function newComparisonBudget() {
-  let work = 0;
-  let output = 0;
-  return {
-    chargeWork() {
-      work += 1;
-      if (work > COMPARE_WORK_BUDGET) {
-        throw new ComparisonBudgetExceededError(`droppedKeyPaths exceeded its comparison work budget (${COMPARE_WORK_BUDGET} nodes/edges visited) \u2014 refusing rather than continuing an unaffordable comparison. This usually means the record body shares structure by reference in a way that re-walks the same subtree many times over; there is no partial result to return. Nothing was written \u2014 this throw always precedes the write transaction.`);
-      }
-    },
-    chargeOutput() {
-      output += 1;
-      if (output > COMPARE_OUTPUT_BUDGET) {
-        throw new ComparisonBudgetExceededError(`droppedKeyPaths exceeded its output-path budget (${COMPARE_OUTPUT_BUDGET} lost paths) \u2014 refusing rather than returning a partial loss list. A legitimate loss report never needs this many entries; this means the comparison is enumerating a pathologically large or heavily-shared subtree. Nothing was written \u2014 this throw always precedes the write transaction.`);
-      }
-    },
-    chargePathLength(prospectiveLength) {
-      if (prospectiveLength > COMPARE_PATH_LENGTH_BUDGET) {
-        throw new ComparisonBudgetExceededError(`droppedKeyPaths exceeded its path-length budget (${COMPARE_PATH_LENGTH_BUDGET} characters in one accumulated key path) \u2014 refusing rather than building or returning an oversized path string. This means the record body's own keys are themselves very large strings, nested deep enough that concatenating them into one addressable path has grown past what any legitimate record address needs. Nothing was written \u2014 this throw always precedes the write transaction.`);
-      }
-    }
-  };
-}
-function depthBoundError() {
-  return new Error(`record body nesting exceeds the depth bound of ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
-}
-function appendPathSegment(path, segment, budget) {
-  if (typeof segment === "number") {
-    if (budget)
-      budget.chargePathLength(path.length + 2 + String(segment).length);
-    return `${path}[${segment}]`;
-  }
-  const prospectiveLength = path ? path.length + 1 + segment.length : segment.length;
-  if (budget)
-    budget.chargePathLength(prospectiveLength);
-  return path ? `${path}.${segment}` : segment;
-}
-function emitTotalLoss(value, path, depth, out, budget) {
-  if (depth > MAX_BODY_COMPARE_DEPTH)
-    throw depthBoundError();
-  budget.chargePathLength(path.length);
-  budget.chargeWork();
-  if (path !== "") {
-    budget.chargeOutput();
-    out.push(path);
-  }
-  if (value === null || typeof value !== "object")
-    return;
-  if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) {
-      emitTotalLoss(value[i], appendPathSegment(path, i, budget), depth + 1, out, budget);
-    }
-    return;
-  }
-  for (const key in value) {
-    if (!Object.prototype.hasOwnProperty.call(value, key))
-      continue;
-    emitTotalLoss(value[key], appendPathSegment(path, key, budget), depth + 1, out, budget);
-  }
-}
-function walkDropped(before, after, path, depth, out, budget) {
-  if (depth > MAX_BODY_COMPARE_DEPTH)
-    throw depthBoundError();
-  budget.chargePathLength(path.length);
-  budget.chargeWork();
-  if (before === null || typeof before !== "object")
-    return;
-  if (Array.isArray(before)) {
-    if (!Array.isArray(after)) {
-      emitTotalLoss(before, path, depth, out, budget);
-      return;
-    }
-    for (let i = 0; i < before.length; i++) {
-      const here = appendPathSegment(path, i, budget);
-      if (i >= after.length)
-        emitTotalLoss(before[i], here, depth + 1, out, budget);
-      else
-        walkDropped(before[i], after[i], here, depth + 1, out, budget);
-    }
-    return;
-  }
-  if (after === null || typeof after !== "object" || Array.isArray(after)) {
-    emitTotalLoss(before, path, depth, out, budget);
-    return;
-  }
-  const parsed = after;
-  for (const key in before) {
-    if (!Object.prototype.hasOwnProperty.call(before, key))
-      continue;
-    const here = appendPathSegment(path, key, budget);
-    if (!Object.prototype.hasOwnProperty.call(parsed, key))
-      emitTotalLoss(before[key], here, depth + 1, out, budget);
-    else
-      walkDropped(before[key], parsed[key], here, depth + 1, out, budget);
-  }
-}
-function droppedKeyPaths(before, after) {
-  const out = [];
-  const budget = newComparisonBudget();
-  walkDropped(before, after, "", 0, out, budget);
-  return out;
-}
-function renderCappedPathList(dropped, cap = 20) {
-  if (dropped.length <= cap)
-    return dropped.join(", ");
-  const remaining = dropped.length - cap;
-  return `${dropped.slice(0, cap).join(", ")}, \u2026 and ${remaining} more lost ${remaining === 1 ? "path" : "paths"}`;
-}
-function assertNoFieldLoss(op, before, after) {
-  const dropped = droppedKeyPaths(before, after);
-  if (dropped.length === 0)
-    return;
-  const type = typeof before.type === "string" ? before.type : "unknown";
-  const pathList = renderCappedPathList(dropped);
-  throw new Error(`${op}: record type '${type}' would DROP ${dropped.length === 1 ? "this field" : "these fields"} on the way in \u2014 either the field is not defined by the schema, or its value's shape no longer matches the schema's definition (e.g. an object/array in place of the other) \u2014 and the schema parse would DROP ${dropped.length === 1 ? "it" : "them"} silently: ${pathList}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`);
-}
-function unrecognizedKeyPaths(error2) {
-  const issues = error2?.issues;
-  if (!Array.isArray(issues))
-    return [];
-  const out = [];
-  for (const raw of issues) {
-    const issue2 = raw;
-    if (issue2.code !== "unrecognized_keys" || !Array.isArray(issue2.keys))
-      continue;
-    const segments = Array.isArray(issue2.path) ? issue2.path : [];
-    const base2 = segments.reduce((acc, segment) => appendPathSegment(acc, typeof segment === "number" ? segment : String(segment)), "");
-    for (const key of issue2.keys)
-      out.push(appendPathSegment(base2, String(key)));
-  }
-  return out;
-}
-var DECLARED_CAPTURE_OWED_PREFIX = "capture owed: declared pending (";
-var DECLARED_CAPTURE_TARGET_TRAILER = " [target ";
-function declaredCaptureTarget(text) {
-  if (typeof text !== "string" || !text.startsWith(DECLARED_CAPTURE_OWED_PREFIX) || !text.endsWith('"]'))
-    return null;
-  const at = text.lastIndexOf(`${DECLARED_CAPTURE_TARGET_TRAILER}"`);
-  if (at < 0)
-    return null;
-  let target;
-  try {
-    target = JSON.parse(text.slice(at + DECLARED_CAPTURE_TARGET_TRAILER.length, -1));
-  } catch {
-    return null;
-  }
-  return typeof target === "string" && target.length > 0 ? target : null;
-}
-function systemTodoKey(t) {
-  const declaredTarget = t.system_reason === "capture_owed" ? declaredCaptureTarget(t.text) : null;
-  if (declaredTarget !== null)
-    return JSON.stringify(["capture_owed", t.feature_link ?? "", [], `declared-target:${declaredTarget}`]);
-  const files = t.system_reason === "state_review" ? [] : [...t.file_keys ?? []].sort();
-  const identified = !!t.feature_link || files.length > 0;
-  return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
-}
-function systemTodoTextsEquivalent(reason, a, b) {
-  if (reason !== "state_review")
-    return a === b;
-  const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
-  return strip(a) === strip(b);
-}
-function buildReconcileText(owner, fileKeys) {
-  const files = [...fileKeys].sort();
-  return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
-}
-var SterlingStore = class _SterlingStore {
-  /** The one connection, behind the driver seam (driver.ts). Every statement, transaction and open step goes through it. */
-  db;
-  /**
-   * Set ONLY when an existing, non-empty store below SUPPORTED_SCHEMA_VERSION
-   * was opened ([stable-identity-design-v2]): the connection is read-only and
-   * assertWritable() refuses every write naming the required migration.
-   * undefined = a normal, writable store at the supported version.
-   */
-  legacySchemaVersion;
-  /**
-   * PRAGMA user_version as of the moment this handle finished opening (board
-   * d5942fa0 gap (b) — the LIVE write guard, extending the open-time guard
-   * above to a store that stays open across a migration). undefined ONLY
-   * during the brief window inside the constructor itself: assertLiveSchemaVersion
-   * no-ops then, because the open-time guard already owns that window and the
-   * fresh-store stamp-forward transaction below would otherwise be comparing
-   * against a baseline it hasn't captured yet. Every public write re-reads
-   * PRAGMA user_version against this captured baseline immediately before
-   * mutating; a mismatch means a SECOND process (MCP server or TUI) migrated
-   * the file while this handle stayed open, and the write is refused with
-   * nothing written — matching the open-time guard's loud-failure style.
-   */
-  openedSchemaVersion;
-  /**
-   * The absolute path of this store's database file, retained for
-   * SchemaMigrationRequiredError (measured defect, Salesforce consumer
-   * 2026-08-26): the constructor received the path but never kept it, so a
-   * migration refusal named only found/supported versions — a hook surfacing
-   * the error showed a bare bundle line number and the user could not tell
-   * WHICH store to migrate.
-   */
-  dbPath;
-  constructor(path, options = {}) {
-    this.dbPath = resolvePath2(path);
-    if (options.driver !== void 0 && options.busyTimeoutMs !== void 0) {
-      options.driver.close();
-      throw new Error("SterlingStore: busyTimeoutMs configures the SQLite driver this store opens itself; it cannot be combined with an injected driver \u2014 set it on that driver.");
-    }
-    this.db = options.driver ?? new SqliteDriver(path, { busyTimeoutMs: options.busyTimeoutMs });
-    const foundSchemaVersion = this.db.schemaVersion();
-    if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
-      this.db.close();
-      throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
-    }
-    let isFresh = false;
-    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
-      if (this.db.hasSchema()) {
-        this.db.prepareReadOnly();
-        this.legacySchemaVersion = foundSchemaVersion;
-        this.openedSchemaVersion = foundSchemaVersion;
-        return;
-      }
-      isFresh = true;
-    }
-    this.db.prepareWritable(isFresh);
-    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
-      try {
-        this.tx(() => {
-          const current = this.db.schemaVersion();
-          if (current > SUPPORTED_SCHEMA_VERSION) {
-            throw new UnsupportedSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION);
-          }
-          if (current < SUPPORTED_SCHEMA_VERSION) {
-            this.db.setSchemaVersion(SUPPORTED_SCHEMA_VERSION);
-          }
-        });
-      } catch (e) {
-        this.db.close();
-        throw e;
-      }
-    }
-    this.openedSchemaVersion = this.db.schemaVersion();
-    if (this.openedSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
-      this.db.close();
-      throw new UnsupportedSchemaVersionError(this.openedSchemaVersion, SUPPORTED_SCHEMA_VERSION);
-    }
-  }
-  journalMode() {
-    return this.db.journalMode();
-  }
-  // -------------------------------------------------------------------------
-  // Schema v2 identity core [stable-identity-design-v2]
-  // -------------------------------------------------------------------------
-  /**
-   * The ONE refusal for anything a pre-migration store cannot answer — one
-   * definition, two callers below (writes, and the v2-only read surfaces).
-   */
-  assertV2Surface(operation) {
-    if (this.legacySchemaVersion !== void 0) {
-      throw new SchemaMigrationRequiredError(this.legacySchemaVersion, SUPPORTED_SCHEMA_VERSION, operation, this.dbPath);
-    }
-  }
-  /**
-   * The LIVE write guard (board d5942fa0 gap (b), pin group B): re-reads
-   * PRAGMA user_version fresh and compares it against the baseline captured
-   * at open. A process that ALREADY HOLDS the store open when another process
-   * (MCP server or TUI) migrates the file underneath it would otherwise keep
-   * serving writes on a stale in-memory handle with no re-check until a full
-   * restart — this closes that gap. Reads are deliberately NOT re-checked
-   * (spec: read exemption) — only assertWritable's write callers reach this.
-   *
-   * No-ops while `openedSchemaVersion` is still undefined (mid-constructor):
-   * the open-time guard above already owns that narrow window, and the
-   * fresh-store stamp-forward transaction is itself a write that runs before
-   * the baseline can be captured.
-   */
-  assertLiveSchemaVersion(operation) {
-    if (this.openedSchemaVersion === void 0)
-      return;
-    const current = this.db.schemaVersion();
-    if (current !== this.openedSchemaVersion) {
-      throw new Error(`Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ${current} \u2014 another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every other write are refused until this session is closed. EXIT AND RELAUNCH this session to reopen against the current schema. Nothing was written.`);
-    }
-  }
-  /**
-   * The refusal seam for a pre-migration store, extended to the live write
-   * guard above. Called at the top of every public write and, as a backstop,
-   * from tx() — reads stay allowed on purpose (AC3: read-only pre-migration;
-   * live re-check exemption: pin group B).
-   */
-  assertWritable(operation) {
-    this.assertV2Surface(operation);
-    this.assertLiveSchemaVersion(operation);
-  }
-  /**
-   * The DERIVED served status: the whole API-compatibility hinge of the v2
-   * model. Nothing stores this — it is computed from (lifecycle, freshness) on
-   * every read, so a caller that has always read `status` keeps working while
-   * the store stops holding two versions of the same truth.
-   */
-  static derivedStatus(lifecycle, freshness) {
-    if (lifecycle === "retired")
-      return "superseded";
-    return freshness === "flagged_stale" ? "flagged_stale" : "active";
-  }
-  /**
-   * Resolves the v2 identity trio from a caller's input, accepting BOTH
-   * envelope shapes (write-side compatibility, pin S2-5b):
-   *   * lifecycle/freshness given directly → used as given;
-   *   * only the legacy `status` given → 'active' → live+fresh,
-   *     'superseded' → retired+fresh, 'flagged_stale' → live+flagged_stale.
-   * An out-of-enum lifecycle/freshness is refused loudly rather than coerced.
-   *
-   * It then writes the DERIVED status/superseded_by back onto the candidate,
-   * because the schemas registry still declares those two envelope fields (see
-   * envelope.ts) — a new-shape record must satisfy the same validator every
-   * legacy caller does, and the stored body drops them again afterwards.
-   */
-  static resolveIdentity(raw, defaults) {
-    const input = { ...raw };
-    const readEnum = (field, allowed) => {
-      const value = input[field];
-      if (value === void 0 || value === null)
-        return void 0;
-      if (typeof value !== "string" || !allowed.includes(value)) {
-        throw new Error(`invalid ${field} '${String(value)}' \u2014 expected one of ${allowed.join(" | ")} (stable-identity-design-v2)`);
-      }
-      return value;
-    };
-    let lifecycle = readEnum("lifecycle", LIFECYCLE_VALUES);
-    let freshness = readEnum("freshness", FRESHNESS_VALUES);
-    if (lifecycle === void 0 || freshness === void 0) {
-      const status = typeof input.status === "string" ? input.status : void 0;
-      if (status === "superseded") {
-        lifecycle ??= "retired";
-        freshness ??= "fresh";
-      } else if (status === "flagged_stale") {
-        lifecycle ??= "live";
-        freshness ??= "flagged_stale";
-      } else if (status === "active") {
-        lifecycle ??= "live";
-        freshness ??= "fresh";
-      } else {
-        lifecycle ??= defaults.lifecycle;
-        freshness ??= defaults.freshness;
-      }
-    }
-    const rawVersion = input.version;
-    let version2 = defaults.version;
-    if (typeof rawVersion === "number") {
-      if (!Number.isInteger(rawVersion) || rawVersion < 1) {
-        throw new Error(`invalid version ${rawVersion} \u2014 version is a positive integer (stable-identity-design-v2)`);
-      }
-      version2 = rawVersion;
-    }
-    input.lifecycle = lifecycle;
-    input.freshness = freshness;
-    input.version = version2;
-    input.status = _SterlingStore.derivedStatus(lifecycle, freshness);
-    if (input.superseded_by === void 0)
-      input.superseded_by = null;
-    return { input, lifecycle, freshness, version: version2 };
-  }
-  /**
-   * The identity normalization every write-side caller shares, exposed for the
-   * ONE consumer that validates BEFORE it reaches a store: MountedStores, which
-   * routes on the validated record's `scope` and so must run validateRecord
-   * itself (invariant 1 — this is the single definition, never a second copy of
-   * the lifecycle→status derivation). Without it a lifecycle-only envelope that
-   * SterlingStore.create accepts was rejected through the mounted surface,
-   * because the schemas registry still declares status/superseded_by.
-   * Idempotent: normalizing an already-normalized envelope changes nothing, so
-   * the store's own resolveIdentity re-run downstream is a no-op.
-   */
-  static normalizeIdentityEnvelope(raw) {
-    return _SterlingStore.resolveIdentity(raw, {
-      lifecycle: "live",
-      freshness: "fresh",
-      version: 1
-    }).input;
-  }
-  /**
-   * The body actually persisted: lifecycle/freshness/version are the stored
-   * truth, status/superseded_by are dropped because they are derived at read.
-   * A pre-v2 body (no lifecycle) passes through untouched, so a legacy store
-   * read through this code path is never rewritten in shape.
-   */
-  static storableBody(record2) {
-    if (typeof record2.lifecycle !== "string")
-      return record2;
-    const body = { ...record2 };
-    delete body.status;
-    delete body.superseded_by;
-    return body;
-  }
-  /**
-   * Re-attaches everything derived at read: the SERVED status/superseded_by,
-   * and links[] MATERIALIZED from record_relations (the authoritative edge
-   * home). Batched — one relations query for a whole result set, plus one more
-   * for the successor of any retired record in it — so a capped query() costs
-   * two extra reads rather than 2N.
-   *
-   * A pre-v2 body carries no `lifecycle` and is passed through verbatim: that
-   * is what keeps a pre-migration store READABLE (AC3) with no branch at every
-   * call site.
-   */
-  hydrateAll(records) {
-    const v2 = records.filter((r) => typeof r.lifecycle === "string");
-    if (!v2.length)
-      return records;
-    const ids = [...new Set(v2.map((r) => r.id))];
-    const linkRows = this.db.prepare(`SELECT source_id, rel, target_id FROM record_relations WHERE source_id IN (${ids.map(() => "?").join(",")}) ORDER BY ${this.db.dialect.insertionOrder()}`).all(...ids);
-    const bySource = /* @__PURE__ */ new Map();
-    for (const row of linkRows) {
-      const list = bySource.get(row.source_id) ?? [];
-      list.push({ rel: row.rel, target_id: row.target_id });
-      bySource.set(row.source_id, list);
-    }
-    const retiredIds = v2.filter((r) => r.lifecycle === "retired").map((r) => r.id);
-    const successor = /* @__PURE__ */ new Map();
-    if (retiredIds.length) {
-      const rows = this.db.prepare(`SELECT source_id, target_id FROM record_relations
-            WHERE rel = 'supersedes' AND target_id IN (${retiredIds.map(() => "?").join(",")}) ORDER BY ${this.db.dialect.insertionOrder()}`).all(...retiredIds);
-      for (const row of rows) {
-        if (!successor.has(row.target_id))
-          successor.set(row.target_id, row.source_id);
-      }
-    }
-    return records.map((record2) => {
-      const meta = record2;
-      if (typeof meta.lifecycle !== "string")
-        return record2;
-      const lifecycle = meta.lifecycle;
-      const freshness = meta.freshness === "flagged_stale" ? "flagged_stale" : "fresh";
-      return {
-        ...record2,
-        links: bySource.get(record2.id) ?? [],
-        status: _SterlingStore.derivedStatus(lifecycle, freshness),
-        superseded_by: lifecycle === "retired" ? successor.get(record2.id) ?? null : null
-      };
-    });
-  }
-  /** The server-owned identity columns of a live row — the CAS + lifecycle source.
-   *
-   *  `scope` joins them (decision
-   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 3):
-   *  the records.scope COLUMN is NOT NULL and is written once, at insert, from the
-   *  routing decision that chose this physical store — while the JSON body's own
-   *  `scope` is caller-writable and can drift away from it (anti_pattern
-   *  [record-body-scope-is-not-physical-store-identity]). Every in-place write and
-   *  supersession below pins the candidate's scope FROM HERE, so the field is
-   *  CREATION-ONLY input and immutable afterwards. Column authoritative on disk. */
-  identityOf(id) {
-    const row = this.db.prepare("SELECT version, lifecycle, freshness, scope, body FROM records WHERE id = ?").get(id);
-    if (!row)
-      return void 0;
-    return {
-      version: row.version,
-      lifecycle: row.lifecycle === "retired" ? "retired" : "live",
-      freshness: row.freshness === "flagged_stale" ? "flagged_stale" : "fresh",
-      scope: row.scope,
-      body: row.body
-    };
-  }
-  /**
-   * THE COLUMN-AUTHORITATIVE LIVE-RECORD DECODER — the ONE place a stored
-   * `records` row becomes a DurableRecord (decision
-   * [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 4).
-   *
-   * Every live materializing read selects `body, scope` and comes through here,
-   * so the parsed body's `scope` is OVERWRITTEN by the row's NOT NULL column
-   * before any caller sees it. Body/column disagreement is therefore
-   * unrepresentable on read: column authoritative on disk, and now on read too
-   * (anti_pattern [record-body-scope-is-not-physical-store-identity]). A sixth
-   * read path added later is hard to write wrongly because there is no other
-   * body→record parse to copy.
-   *
-   * TOTAL by construction — both drifted shapes normalize to the column with no
-   * branch: a legacy body that OMITS `scope` entirely (reachable and real) gets
-   * it, and a body that CONTRADICTS the column loses. Both are silent by design;
-   * `domain-doctor.mjs scope-audit` (part 1) is the surface that makes them
-   * visible, and it read zero of either across all four stores before this
-   * activated.
-   *
-   * FAILS CLOSED on the impossible case. WHAT ACTUALLY MAKES IT IMPOSSIBLE is
-   * the anchored SCOPE_RE (`^(project|domain:[a-z0-9_-]+)$`, envelope.ts) that
-   * every write funnels through via validateRecord, together with insertRecord
-   * writing the column from that validated record.scope: no store write can
-   * produce an empty or whitespace column. `records.scope` being NOT NULL is
-   * NOT the guarantee on its own — NOT NULL does not exclude '' — and this
-   * comment previously said it was (corrected 2026-09-06 on independent
-   * review; a comment that misattributes its own guarantee is how the real one
-   * gets removed later by someone who reads only the comment). If an empty or
-   * non-string column is nonetheless read, refuse loudly naming the row rather
-   * than inventing 'project' — a default here would re-create exactly the
-   * guess this decoder exists to delete.
-   *
-   * READ-SIDE ONLY: it never changes what is WRITTEN. The write side pins scope
-   * from identityOf's column in applyInPlace/supersede (part 3) — except that
-   * supersede takes an optional `authoritativeScope` from the layer that knows
-   * about MOUNTS (MountedStores), because the column is authoritative over the
-   * BODY while the MOUNT is authoritative over the COLUMN, and a replacement row
-   * must be labelled for the mount it is physically inserted into.
-   *
-   * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
-   *
-   * THE IMPLEMENTATION LIVES IN THE MODULE-LEVEL `decodeLiveRecordRow` EXPORT
-   * above, so an out-of-class reader (a script outside the store with a read-only fallback)
-   * decodes through the same function rather than re-parsing `body` alone.
-   */
-  static decodeLiveRecord(op, row) {
-    return decodeLiveRecordRow(op, row);
-  }
-  /** Plural form of decodeLiveRecord — every row-set read funnels through it. */
-  static decodeLiveRecords(op, rows) {
-    return rows.map((r) => _SterlingStore.decodeLiveRecord(op, r));
-  }
-  /**
-   * Decision a-supersedes-link-on-create-or-update-is-refused-use-knowledge-supersede:
-   * a links entry with rel 'supersedes' that is not already an edge of the
-   * record is refused, with nothing written. Supersession has one write path,
-   * supersede() (knowledge_supersede), which also retires the old record; a raw
-   * edge left the target active, a second write with the same name and a
-   * different effect. `existingTargets` holds the targets the record already
-   * supersedes, so a write that carries an existing edge forward still passes.
-   * Exported for the tool layer, whose attestation update branch reaches
-   * supersede() rather than the in-place path.
-   */
-  static refuseRawSupersedesLinks(op, links, existingTargets) {
-    const added = (links ?? []).filter((l) => l.rel === "supersedes" && !existingTargets.has(l.target_id));
-    if (added.length === 0)
-      return;
-    throw new Error(`${op}: a links entry with rel 'supersedes' (target ${added.map((l) => `'${l.target_id}'`).join(", ")}) is refused \u2014 supersession is a lifecycle transition, not a link. Use knowledge_supersede to replace the old record (it retires it), or write the new record with a rel 'cites' link to the old one for a deliberate partial override. Nothing was written.`);
-  }
-  /** Typed edge write — record_relations is the authoritative home (contract 6). */
-  insertRelation(sourceId, rel, targetId, at) {
-    if (sourceId === targetId) {
-      throw new Error(`relation '${rel}' from '${sourceId}' to itself is a self-cycle in the relation graph \u2014 refused (stable-identity-design-v2)`);
-    }
-    this.db.prepare(this.db.dialect.insertIgnore("record_relations", ["source_id", "rel", "target_id", "created_at"])).run(sourceId, rel, targetId, at);
-  }
-  /** The one validated write path. Unregistered type or malformed record throws; nothing is written.
-   *
-   *  NOTE (S3 boundary): a caller-supplied `version` is still honored here (the
-   *  legacy feature_article field, and the pin fixtures that pass version: 1).
-   *  S3 STRIPS it — version becomes server-owned at every surface — so nothing
-   *  new should start relying on setting it. */
-  create(input) {
-    this.assertWritable("create");
-    const prepared = _SterlingStore.resolveIdentity(input, {
-      lifecycle: "live",
-      freshness: "fresh",
-      version: 1
-    });
-    if (prepared.lifecycle === "retired" && !prepared.input.superseded_by) {
-      throw new Error(`create: lifecycle 'retired' cannot be requested at creation without a successor \u2014 such a record is born dead (hidden from queries, refused by in-place writes, and unsupersedable: one successor maximum is already spent). Retirement happens ONLY through supersede/retireInFavorOf. Nothing was written.`);
-    }
-    let record2;
-    try {
-      record2 = validateRecord(prepared.input);
-    } catch (err) {
-      const refused = unrecognizedKeyPaths(err);
-      if (refused.length === 0)
-        throw err;
-      const type = typeof prepared.input.type === "string" ? prepared.input.type : "unknown";
-      throw new Error(`create: record type '${type}' does not define ${refused.length === 1 ? "this field" : "these fields"}, and the schema REFUSED the write rather than storing ${refused.length === 1 ? "it" : "them"}: ${refused.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`, { cause: err });
-    }
-    assertNoFieldLoss("create", prepared.input, record2);
-    _SterlingStore.refuseRawSupersedesLinks("create", record2.links, /* @__PURE__ */ new Set());
-    this.tx(() => {
-      this.insertRecord(record2);
-      this.logActivity("created", record2, record2.created_at);
-    });
-    return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.storableBody(record2)])[0]);
-  }
-  /**
-   * The full record archived at (id, version) — a permanent, append-only
-   * snapshot from record_versions, returned exactly as it was stored (no
-   * derivation), so repeated reads of one version are byte-identical forever
-   * (pin S2-2c). A version that was never archived resolves to undefined —
-   * never fabricated.
-   *
-   * A V2-ONLY SURFACE: record_versions does not exist on a pre-migration store,
-   * so this refuses loudly naming the migration (P5) instead of letting a raw
-   * SQLite "no such table: record_versions" escape. Reads that a pre-v2 store
-   * CAN answer stay allowed (AC3) — version history simply is not one of them.
-   */
-  getRecordVersion(id, version2) {
-    this.assertV2Surface("getRecordVersion");
-    const row = this.db.prepare("SELECT body FROM record_versions WHERE record_id = ? AND version = ?").get(id, version2);
-    return row ? JSON.parse(row.body) : void 0;
-  }
-  /**
-   * The dead-id INDEX, whole ([stable-identity-design-v2] contract 3): every
-   * record_aliases row as (historical_id, canonical_id, archived_version). The
-   * shape mirrors recordIdIndex — no body fetch, the full set, so the id
-   * resolution ladder above the store can match an exact historical id AND a
-   * citation PREFIX of one in the same pass it already makes over live ids.
-   *
-   * READ-ONLY and empty-tolerant by design: nothing writes to this table after
-   * the migration, and a PRE-MIGRATION store (where the table does not exist)
-   * returns [] rather than refusing — a legacy store is readable (AC3), and it
-   * has no historical ids to resolve because nothing has been collapsed yet.
-   */
-  recordAliases() {
-    if (this.legacySchemaVersion !== void 0)
-      return [];
-    return this.db.prepare(`SELECT historical_id, canonical_id, archived_version FROM record_aliases ORDER BY ${this.db.dialect.insertionOrder()}`).all();
-  }
-  /**
-   * knowledge_update-shaped IN-PLACE write, generalized from updateTodo to
-   * EVERY record type (contract 2). `patch` is the FULL merged candidate (old
-   * record + the caller's changes), mirroring supersede/updateTodo's existing
-   * convention: this method validates and persists, the layer above decides
-   * which fields may change.
-   *
-   * The id, type and created_at are pinned to the stored record — an in-place
-   * write can never re-mint identity, which is the entire point of stable
-   * identity. lifecycle is likewise preserved: retirement happens ONLY through
-   * supersede/retireInFavorOf.
-   */
-  updateRecord(id, patch, opts = {}) {
-    return this.applyInPlace("updateRecord", id, () => ({ ...patch }), opts);
-  }
-  /**
-   * knowledge_edit-shaped write: replace ONE passage inside a long string
-   * field without retransmitting it. `find` must match EXACTLY ONCE — zero and
-   * multiple matches are both refused NAMING THE COUNT, with nothing written,
-   * because a blind replace inside a field too large to read is an
-   * unreviewable write.
-   */
-  editRecordField(id, field, find, replace, opts = {}) {
-    if (find === "")
-      throw new Error(`editRecordField: 'find' is empty \u2014 an empty find matches everywhere and nowhere; nothing was written`);
-    return this.applyInPlace("editRecordField", id, (current) => {
-      const value = current[field];
-      if (typeof value !== "string") {
-        throw new Error(`editRecordField: field '${field}' on ${current.type} '${id}' is ${value === void 0 ? "not set" : `a ${Array.isArray(value) ? "array" : typeof value}`}, not a string \u2014 an in-place passage replace applies to string fields only (use appendRecordField for arrays). Nothing was written.`);
-      }
-      const matches = value.split(find).length - 1;
-      if (matches !== 1) {
-        throw new Error(`editRecordField: 'find' matched ${matches} time(s) in field '${field}' of record '${id}' \u2014 exactly one match is required (${matches === 0 ? "no match: check whitespace and the exact passage" : `${matches} matches: extend 'find' until it is unique`}). Nothing was written.`);
-      }
-      return { ...current, [field]: value.split(find).join(replace) };
-    }, opts);
-  }
-  /**
-   * The SERVER-OWNED metadata fields updateRecordMetadata may write. A short,
-   * closed list is what makes that method NARROW rather than a second content
-   * write path that happens to skip the clock: anything outside it is refused by
-   * name. Both entries are already in the tool layer's WRITE_REFUSED_FIELDS, so
-   * neither is ever caller-supplied.
-   */
-  static METADATA_WRITE_FIELDS = ["file_baselines", "baseline_attestations", "absence_attestations"];
-  /**
-   * NARROW VERSIONED METADATA WRITE (board 8c8b6d78 / R9) — a full in-place
-   * write of server-owned drift metadata that DELIBERATELY PRESERVES the
-   * record's `updated_at`.
-   *
-   * It bumps `version`, archives the prior body and honours `expected_version`
-   * exactly like every other in-place write: the baselines live in the record
-   * BODY and the body is authoritative, so a same-version body mutation would
-   * evade the CAS and version signal entirely. (addLink's precedent does NOT
-   * apply — its body copy of links[] is non-authoritative and re-hydrated from
-   * record_relations.)
-   *
-   * WHY THE CLOCK IS PRESERVED. `updated_at` is not a "last written" stamp here:
-   * the read-time drift check treats it as THE INSTANT THE BASELINES WERE TAKEN
-   * and uses it as a cheap mtime prefilter — a file whose mtime is no newer than
-   * `updated_at` is reported clean WITHOUT hashing. Advancing the clock while
-   * re-stamping only SOME owned paths therefore masks real, already-standing
-   * drift on the OTHERS: article baselined at T0 for `a` and `b`; `b` drifts at
-   * T1; a metadata write for `a` alone advances the clock to T2; a later read
-   * stats `b`, sees mtime(b) = T1 <= T2 and returns clean without ever comparing
-   * `b` to its stale hash. Preserving the clock keeps every un-restamped path
-   * judged against exactly the instant its own baseline was taken.
-   *
-   * `activity_at` is the REAL time, recorded on the activity row (and used for
-   * any `resolves` drain) so the chronology stays true — see applyInPlace's
-   * `internal.activityAt`. It is required in practice for every caller; it
-   * defaults to now rather than to the preserved clock, because silently
-   * back-dating an activity row is the failure this parameter exists to prevent.
-   */
-  updateRecordMetadata(id, fields, opts = {}) {
-    const refused = Object.keys(fields).filter((k) => !_SterlingStore.METADATA_WRITE_FIELDS.includes(k));
-    if (refused.length) {
-      throw new Error(`updateRecordMetadata: ${refused.map((k) => `'${k}'`).join(", ")} ${refused.length === 1 ? "is" : "are"} not a server-owned metadata field \u2014 this write PRESERVES updated_at, so it must never carry content. The writable set is ${_SterlingStore.METADATA_WRITE_FIELDS.join(", ")}; use updateRecord for anything else. Nothing was written.`);
-    }
-    return this.applyInPlace("updateRecordMetadata", id, (current) => ({
-      ...current,
-      ...fields,
-      // From the IN-TRANSACTION read, never a caller's copy: the whole point is
-      // that the stored clock does not move.
-      updated_at: current.updated_at
-    }), opts, { activityAt: opts.activity_at ?? (/* @__PURE__ */ new Date()).toISOString() });
-  }
-  /**
-   * knowledge_append-shaped write: grow an ARRAY field in place (history,
-   * files, current_ac, …) without retransmitting the existing entries. One
-   * transaction, one version bump, prior array archived.
-   */
-  appendRecordField(id, field, entry, opts = {}) {
-    return this.applyInPlace("appendRecordField", id, (current) => {
-      const value = current[field];
-      if (value !== void 0 && value !== null && !Array.isArray(value)) {
-        throw new Error(`appendRecordField: field '${field}' on ${current.type} '${id}' is a ${typeof value}, not an array \u2014 append grows array fields only (use editRecordField for a string passage). Nothing was written.`);
-      }
-      const existing = Array.isArray(value) ? value : [];
-      return { ...current, [field]: [...existing, entry] };
-    }, opts);
-  }
-  /**
-   * THE in-place write core shared by updateRecord / editRecordField /
-   * appendRecordField / updateTodo / renameFileKey / the enqueueSystemTodo
-   * text-update branch (contracts 2-4, 7):
-   *
-   *  1. resolve the live record + its server-owned identity columns;
-   *  2. CAS on expected_version when supplied — a stale token refuses naming
-   *     BOTH versions and writes nothing, not even a snapshot row;
-   *  3. archive the FULL prior body into record_versions (append-only);
-   *  4. UPDATE ... WHERE id = ? AND version = ? — the real CAS, kept as a
-   *     backstop now that step 1 reads under the write lock;
-   *  5. rebuild the join indexes and REPLACE the single records_fts row, so an
-   *     archived version's text can never rank (contract 1/7);
-   *  6. drain any claimed `resolves` items INSIDE the same transaction — a
-   *     refused claim rolls the whole write back (contract 4).
-   *
-   * EVERY step, step 1 included, runs inside ONE transaction. BEGIN IMMEDIATE
-   * takes the write lock before the identity read, so no committed concurrent
-   * write can land between the CAS check and the snapshot INSERT. Reading
-   * outside the transaction cost two things: a CAS loser died on the
-   * record_versions (record_id, version) primary key with a raw constraint
-   * error instead of the pinned refusal naming both versions, and the body it
-   * archived could be a stale generation of the record.
-   *
-   * `internal.allowRetired` is for the ONE path that legitimately rewrites a
-   * tombstone: renameFileKey, whose contract is that a move orphans no owning
-   * record's paths, retired ones included. It is deliberately not reachable
-   * from the public triad — a content write still goes to the live successor.
-   *
-   * `internal.suppressReconcilePrune` is the OTHER renameFileKey-only flag
-   * (board 7e779e1f): a rename's before/after file-key diff LOOKS like a
-   * shrink (the old path leaves, the new one arrives) but is not one — the
-   * debt must FOLLOW the renamed path, never be pruned, and renameFileKey's
-   * own deepReplaceString already rewrites any queue item naming the old path
-   * (it is itself one of the rows `record_file_keys` matches). Set ONLY by
-   * renameFileKey's own call and by pruneReconcileNeeded's own nested rewrite
-   * of the queue item it is shrinking (which can never legitimately own a
-   * reconcile_needed item pinned to ITSELF, so the flag there is pure
-   * belt-and-braces against a wasted scan, not a correctness requirement).
-   *
-   * `internal.activityAt` SEPARATES TWO CLOCKS THAT ARE OTHERWISE ONE (board
-   * 8c8b6d78 / R9). The row's `updated_at` comes from the CANDIDATE BODY, so a
-   * caller that deliberately preserves the stored `updated_at` — see
-   * updateRecordMetadata — writes a new version WITHOUT advancing the record's
-   * content clock. The activity row must NOT inherit that preserved value: the
-   * activity log is a chronology of when things actually happened, and
-   * back-dating an entry to the previous write's timestamp makes it false. So
-   * the metadata write passes the REAL time here while the body keeps the old
-   * one. Absent (every ordinary write), behaviour is exactly as before: the
-   * activity row is stamped from the body's own updated_at.
-   */
-  applyInPlace(op, id, buildPatch, opts, internal = {}) {
-    this.assertWritable(op);
-    let served;
-    this.tx(() => {
-      const current = this.get(id);
-      if (!current)
-        throw new Error(`${op}: no record '${id}'`);
-      const identity = this.identityOf(id);
-      if (!identity)
-        throw new Error(`${op}: no record '${id}'`);
-      if (identity.lifecycle === "retired" && !internal.allowRetired) {
-        throw new Error(`${op}: record '${id}' is retired (served status 'superseded') \u2014 an in-place write goes to the live successor, never to a retired record`);
-      }
-      if (opts.expected_version !== void 0 && opts.expected_version !== identity.version) {
-        throw new Error(`${op}: stale expected_version \u2014 the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ${identity.version}. Nothing was written; re-read the record and retry against version ${identity.version}.`);
-      }
-      const removedRelation = opts.remove_relation === void 0 ? void 0 : linkSchema.parse(opts.remove_relation);
-      if (removedRelation?.rel === "supersedes") {
-        throw new Error(`${op}: rel 'supersedes' cannot be removed as a raw edge \u2014 it is the authoritative carrier of a lifecycle transition. Use knowledge_supersede / knowledge_retire for lifecycle changes; nothing was written.`);
-      }
-      if (removedRelation) {
-        const exists = this.db.prepare("SELECT 1 FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?").get(id, removedRelation.rel, removedRelation.target_id);
-        if (!exists) {
-          throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' no longer exists \u2014 nothing was written; re-read the record and retry.`);
-        }
-      }
-      const candidate = buildPatch(current);
-      candidate.id = id;
-      candidate.type = current.type;
-      candidate.created_at = current.created_at;
-      candidate.scope = identity.scope;
-      const freshness = candidate.freshness === "fresh" || candidate.freshness === "flagged_stale" ? candidate.freshness : candidate.status === "flagged_stale" ? "flagged_stale" : identity.freshness;
-      const supersededBy = identity.lifecycle === "retired" ? current.superseded_by ?? null : null;
-      const nextVersion = identity.version + 1;
-      const prepared = _SterlingStore.resolveIdentity(candidate, {
-        lifecycle: identity.lifecycle,
-        freshness,
-        version: nextVersion
-      });
-      prepared.input.lifecycle = identity.lifecycle;
-      prepared.input.freshness = freshness;
-      prepared.input.version = nextVersion;
-      prepared.input.status = _SterlingStore.derivedStatus(identity.lifecycle, freshness);
-      prepared.input.superseded_by = supersededBy;
-      const validated = validateRecord(prepared.input);
-      if (validated.type !== current.type) {
-        throw new Error(`${op}: type mismatch ('${validated.type}' cannot replace '${current.type}' in place)`);
-      }
-      const existingSupersedes = new Set(this.db.prepare(`SELECT target_id FROM record_relations WHERE source_id = ? AND rel = 'supersedes'`).all(id).map((r) => r.target_id));
-      _SterlingStore.refuseRawSupersedesLinks(op, validated.links, existingSupersedes);
-      const entry = RECORD_TYPES[validated.type];
-      const stored = _SterlingStore.storableBody(validated);
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      this.db.prepare("INSERT INTO record_versions (record_id, version, archived_at, body) VALUES (?, ?, ?, ?)").run(id, identity.version, now, identity.body);
-      const res = this.db.prepare(`UPDATE records SET version = ?, status = ?, lifecycle = ?, freshness = ?, superseded_by = ?,
-             updated_at = ?, body = ? WHERE id = ? AND version = ?`).run(nextVersion, _SterlingStore.derivedStatus(identity.lifecycle, freshness), identity.lifecycle, freshness, supersededBy, stored.updated_at ?? now, JSON.stringify(stored), id, identity.version);
-      if (res.changes === 0) {
-        throw new Error(`${op}: record '${id}' was concurrently written (it is no longer at version ${identity.version}) \u2014 re-read and retry`);
-      }
-      this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
-      for (const tag of new Set(validated.stack_tags)) {
-        this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(id, tag);
-      }
-      const beforeFileKeys = new Set(entry.fileKeys(current));
-      const afterFileKeys = new Set(entry.fileKeys(stored));
-      this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
-      for (const path of afterFileKeys) {
-        this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
-      }
-      for (const link of validated.links)
-        this.insertRelation(id, link.rel, link.target_id, now);
-      if (removedRelation) {
-        const deleted = this.db.prepare("DELETE FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?").run(id, removedRelation.rel, removedRelation.target_id);
-        if (deleted.changes !== 1) {
-          throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' changed during removal \u2014 the transaction was rolled back; re-read and retry.`);
-        }
-      }
-      this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(stored), id);
-      this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
-      if (opts.resolves?.length)
-        this.drainResolves(op, opts.resolves, now, opts.resolvedReceipt);
-      if (!internal.suppressReconcilePrune) {
-        const droppedPaths = /* @__PURE__ */ new Set();
-        for (const path of beforeFileKeys)
-          if (!afterFileKeys.has(path))
-            droppedPaths.add(path);
-        if (droppedPaths.size > 0)
-          this.pruneReconcileNeeded(id, droppedPaths, now, opts.prunedReceipt);
-      }
-      served = this.withDerivedReliedBy(this.hydrateAll([stored])[0]);
-    });
-    return served;
-  }
-  /**
-   * The `resolves` drain (contract 4): the maintenance items a write CLAIMS to
-   * close, closed inside the write's own transaction. An unresolvable or
-   * already-closed claim throws, which rolls the ENTIRE write back — an
-   * unclaimed write must never appear to succeed against a dead reference, and
-   * a partial drain is worse than none.
-   *
-   * `receipt`, when supplied, is filled with ONE COMMITTED SNAPSHOT per claimed
-   * item — read here, inside this same transaction, in the instant before that
-   * item's own `remove` call (board b0bb9d96 fix-round HIGH). This is
-   * deliberately NOT the caller's earlier pre-transaction validation read: this
-   * lane's own fold can widen an item's file_keys between an outer caller
-   * validating a claim and this drain actually removing it, and a receipt
-   * built from the stale read would describe a narrower close than the one
-   * that actually happened. Reading `item` (below) IS that snapshot — nothing
-   * else touches this id between the read and the remove.
-   */
-  drainResolves(op, ids, at, receipt) {
-    for (const claimed of new Set(ids)) {
-      const item = this.get(claimed);
-      if (!item) {
-        throw new Error(`${op}: resolves claim '${claimed}' names no open item \u2014 it was never created, or it is already closed. The whole write rolled back (no version bump, no snapshot, no other item drained); re-read the queue and claim only open ids.`);
-      }
-      if (item.type !== "todo") {
-        throw new Error(`${op}: resolves claim '${claimed}' is a ${item.type}, not a maintenance item (todo) \u2014 the whole write rolled back`);
-      }
-      if (receipt)
-        receipt.push({ id: item.id, system_reason: item.system_reason, file_keys: item.file_keys ?? [], text: item.text });
-      this.remove(claimed, at);
-    }
-  }
-  /**
-   * PATH PRUNING FOR reconcile_needed (board 7e779e1f). Called from
-   * applyInPlace, strictly AFTER drainResolves, with the set of paths the
-   * record just stopped claiming: for every open reconcile_needed item pinned
-   * to `ownerId` (feature_link match) that names one of those paths, the path
-   * is removed from that item's file_keys IN THIS SAME TRANSACTION — never a
-   * second write, and never through the caller's own resolves claim.
-   *
-   * This undoes exactly what enqueueSystemTodo's fold committed to, one path
-   * at a time: a shrinking item's text is regenerated through the SAME
-   * `buildReconcileText` builder the fold uses, and an item pruned to zero
-   * paths is removed through the SAME `remove()` normal-removal path every
-   * other closed system todo takes — so the drain log and the FTS row stay
-   * honest either way. `decision reconcile-needed-identity-is-reason-plus-
-   * owner-file-keys-unioned` means there is at most one such item per owner in
-   * practice, but this loops over every match rather than assuming it, so a
-   * legacy duplicate is not silently skipped.
-   *
-   * PRUNING IS BOOKKEEPING, NOT EVIDENCE ANYONE RECONCILED ANYTHING — it only
-   * says the debt's OWNER changed, never that the new bytes were checked. The
-   * caller-facing drift disclosure this feeds lives in tools.ts (`prunedReceipt`
-   * carries id/removed/pruned_paths/remaining_file_keys; the filesystem-facing
-   * "was the pruned path actually drifted against the OLD baseline" verdict is
-   * computed there, from that disclosure, because this layer touches no
-   * filesystem and no git tree).
-   *
-   * SAME-DB BY CONSTRUCTION: this scans `this.db` alone — the exact database
-   * the triggering write is landing in. A queue item pinned to `ownerId` but
-   * living in a DIFFERENT physical store (a different SterlingStore instance,
-   * e.g. under MountedStores when scope and physical holder have drifted)
-   * simply never appears in this query, so nothing is pruned and nothing is
-   * falsely disclosed as pruned — there is no cross-db case to detect.
-   *
-   * A RENAME IS NOT A SHRINK — callers gate this whole method out via
-   * `internal.suppressReconcilePrune` rather than this method trying to tell a
-   * rename from a genuine drop (see applyInPlace's doc comment).
-   */
-  pruneReconcileNeeded(ownerId, droppedPaths, at, receipt) {
-    const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
-    for (const r of rows) {
-      const t = _SterlingStore.decodeLiveRecord("pruneReconcileNeeded", r);
-      if (t.source !== "system" || t.system_reason !== "reconcile_needed" || t.feature_link !== ownerId)
-        continue;
-      const currentFiles = t.file_keys ?? [];
-      const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
-      if (prunedPaths.length === 0)
-        continue;
-      const keptFiles = currentFiles.filter((f) => !droppedPaths.has(f));
-      if (receipt) {
-        receipt.push({
-          id: t.id,
-          system_reason: t.system_reason,
-          removed: keptFiles.length === 0,
-          pruned_paths: prunedPaths,
-          remaining_file_keys: keptFiles
-        });
-      }
-      if (keptFiles.length === 0) {
-        this.remove(t.id, at);
-        continue;
-      }
-      const owner = this.get(ownerId);
-      const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: ownerId }, keptFiles);
-      this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({ ...cur, file_keys: keptFiles, text }), {}, { suppressReconcilePrune: true });
-    }
-  }
-  /**
-   * READ-ONLY PRECHECK for enqueueSystemTodo: true only when an enqueue of
-   * `input` would change nothing — an open system item with the same identity
-   * key, equivalent text and the same file_keys already exists. A read-time
-   * minter calls this first and takes the write path (a transaction, a git
-   * probe) only on false, so re-reading N overdue records costs N cheap scans
-   * instead of N write transactions. It shares systemTodoKey and
-   * systemTodoTextsEquivalent with the write, so the dedupe rule has one home.
-   *
-   * Conservative by construction: false is "take the write path", never "an
-   * item is absent". The reconcile_needed fold lane always answers false
-   * (its union-and-fold rule lives only in the write), and an input the
-   * write would refuse is not validated here, the write path refuses it.
-   */
-  enqueueWouldBeNoop(input) {
-    if (input.system_reason === "reconcile_needed" && input.feature_link)
-      return false;
-    const wantKey = systemTodoKey(input);
-    const rows = input.feature_link ? this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0").all(input.feature_link) : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
-    for (const r of rows) {
-      const t = _SterlingStore.decodeLiveRecord("enqueueWouldBeNoop", r);
-      if (t.source !== "system" || systemTodoKey(t) !== wantKey)
-        continue;
-      const priorFiles = [...t.file_keys ?? []].sort();
-      const nextFiles = [...input.file_keys ?? []].sort();
-      return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? "", input.text);
-    }
-    return false;
-  }
-  /**
-   * ATOMIC check-and-insert for a SYSTEM maintenance item — the ONE dedup
-   * definition, replacing four hand-rolled copies (board 2ded3b4b).
-   *
-   * THE BUG THIS CLOSES IS TWO BUGS. Four producers minted maintenance items
-   * (h7-file-touch, the read-time drift check in tools.ts, fs-remove, fs-move),
-   * each with its own copy-pasted "does an open item already exist?" query
-   * followed by a separate insert, and no uniqueness constraint anywhere:
-   *
-   *  (1) DUPLICATES. Two producers both read "no open item" before either insert
-   *      committed, and both inserted — classic TOCTOU. A consuming project
-   *      measured SEVEN byte-identical pairs created 2-3 MILLISECONDS apart, 52%
-   *      of a 27-item queue. The cost was judgement rather than writes: the
-   *      deep-queue threshold trips early, and anyone sizing a drain from the raw
-   *      count sees double the work that exists.
-   *  (2) SILENT LOSS — the worse half, and not in the report. All four checks
-   *      keyed on (feature_link, system_reason) and OMITTED the file, so a second
-   *      drifting file on the same article was suppressed. And because
-   *      knowledge_update re-baselines EVERY owned file, reconciling the first
-   *      file absorbed the second file's drift into a fresh baseline: the finding
-   *      neither queued nor survived.
-   *
-   * The key is therefore (system_reason, feature_link, file_keys SET) for
-   * every lane EXCEPT reconcile_needed with a feature_link (board b0bb9d96 /
-   * I-29, "the mint storm"): THAT one lane's identity is (system_reason,
-   * feature_link) ALONE — the file_keys SET is deliberately excluded from the
-   * match, and instead gets UNIONED into the surviving (oldest) open item
-   * rather than distinguishing a second one. The exact-SET reading above
-   * fixed the silent-loss bug (2) by making the file part of the key; the
-   * reconcile_needed exception keeps that same guarantee (no file is ever
-   * dropped — see the union below) while also closing bug (1)'s SIBLING for
-   * this lane: two DIFFERENT keys (a singleton [a], then [a,b]) used to
-   * coexist as two legitimate-looking open items for one article, which is
-   * exactly what a reader saw as duplicates even though neither was a
-   * byte-identical TOCTOU race. See the isReconcileFold branch below. The
-   * check still runs inside the same BEGIN IMMEDIATE transaction as the
-   * insert/fold, so a concurrent caller blocks on the write lock and then
-   * SEES the committed row instead of racing it.
-   *
-   * A MATCH WHOSE TEXT DIFFERS IS UPDATED, NOT DISCARDED. Same file, escalating
-   * severity — edited today, deleted tomorrow, both reconcile_needed, the first
-   * not yet drained — would otherwise be swallowed as a duplicate, losing the more
-   * urgent fact. Since S2 that update goes through the versioned in-place core
-   * like every other write ([stable-identity-design-v2]): todos DO carry the
-   * universal version counter now, so the escalation bumps the version and
-   * archives the prior text instead of overwriting the body invisibly (a bare
-   * body UPDATE was invisible to expected_version, so a concurrent in-place
-   * write could silently revert it, and the FTS row kept the old text).
-   */
-  enqueueSystemTodo(input) {
-    this.assertWritable("enqueueSystemTodo");
-    const prepared = _SterlingStore.resolveIdentity(input, {
-      lifecycle: "live",
-      freshness: "fresh",
-      version: 1
-    });
-    const candidate = validateRecord(prepared.input);
-    if (candidate.type !== "todo" || candidate.source !== "system") {
-      throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? "no source"}`);
-    }
-    if (candidate.system_reason === "state_review" && !candidate.feature_link) {
-      throw new Error(`enqueueSystemTodo: a state_review item requires feature_link \u2014 this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`);
-    }
-    const keyOf = systemTodoKey;
-    const wantKey = keyOf(candidate);
-    const textsEquivalent = (a, b) => systemTodoTextsEquivalent(candidate.system_reason, a, b);
-    const isReconcileFold = candidate.system_reason === "reconcile_needed" && !!candidate.feature_link;
-    let existing;
-    let textUpdated = false;
-    let insertedText;
-    this.tx(() => {
-      const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
-      if (isReconcileFold) {
-        const matches = [];
-        for (const r of rows) {
-          const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
-          if (t.source !== "system")
-            continue;
-          if (t.system_reason !== "reconcile_needed" || t.feature_link !== candidate.feature_link)
-            continue;
-          matches.push(t);
-        }
-        if (matches.length === 0) {
-          const fileKeys = candidate.file_keys ?? [];
-          if (fileKeys.length > 1) {
-            const owner = this.get(candidate.feature_link);
-            const canonicalText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, fileKeys);
-            this.insertRecord({ ...candidate, text: canonicalText });
-            insertedText = canonicalText;
-          } else {
-            this.insertRecord(candidate);
-          }
-          return;
-        }
-        matches.sort((a, b) => a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-        const [survivor, ...folded] = matches;
-        const unionSet = new Set(survivor.file_keys ?? []);
-        for (const f of folded)
-          for (const k of f.file_keys ?? [])
-            unionSet.add(k);
-        for (const k of candidate.file_keys ?? [])
-          unionSet.add(k);
-        const unionFiles = [...unionSet].sort();
-        const priorFiles2 = [...survivor.file_keys ?? []].sort();
-        const filesChanged2 = JSON.stringify(priorFiles2) !== JSON.stringify(unionFiles);
-        const widening = folded.length > 0 || unionFiles.length > 1;
-        let nextText = candidate.text ?? "";
-        if (widening) {
-          const owner = this.get(candidate.feature_link);
-          nextText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, unionFiles);
-        }
-        const textChanged2 = !textsEquivalent(survivor.text ?? "", nextText);
-        if (textChanged2 || filesChanged2) {
-          existing = this.applyInPlace("enqueueSystemTodo", survivor.id, (cur) => ({
-            ...cur,
-            updated_at: candidate.updated_at,
-            ...textChanged2 ? { text: nextText } : {},
-            ...filesChanged2 ? { file_keys: unionFiles } : {}
-          }), {});
-          textUpdated = textChanged2;
-        } else {
-          existing = survivor;
-        }
-        for (const f of folded)
-          this.remove(f.id, candidate.updated_at);
-        return;
-      }
-      for (const r of rows) {
-        const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
-        if (t.source !== "system")
-          continue;
-        if (keyOf(t) !== wantKey)
-          continue;
-        existing = t;
-        break;
-      }
-      if (!existing) {
-        this.insertRecord(candidate);
-        return;
-      }
-      const priorFiles = [...existing.file_keys ?? []].sort();
-      const nextFiles = [...candidate.file_keys ?? []].sort();
-      const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(nextFiles);
-      const textChanged = !textsEquivalent(existing.text ?? "", candidate.text ?? "");
-      if (textChanged || filesChanged) {
-        existing = this.applyInPlace("enqueueSystemTodo", existing.id, (cur) => ({
-          ...cur,
-          updated_at: candidate.updated_at,
-          ...textChanged ? { text: candidate.text } : {},
-          ...filesChanged ? { file_keys: candidate.file_keys } : {}
-        }), {});
-        textUpdated = textChanged;
-      }
-    });
-    return existing ? { record: this.hydrateAll([existing])[0], deduped: true, text_updated: textUpdated } : {
-      // The echo must agree with the ROW this call actually inserted, not
-      // with the caller's pre-canonicalization `candidate` — see
-      // `insertedText`'s own doc comment (board b0bb9d96 fix-round MEDIUM).
-      record: this.hydrateAll([
-        _SterlingStore.storableBody({
-          ...candidate,
-          ...insertedText !== void 0 ? { text: insertedText } : {}
-        })
-      ])[0],
-      deduped: false,
-      text_updated: false
-    };
-  }
-  get(id) {
-    const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
-    if (!row)
-      return void 0;
-    return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
-  }
-  /**
-   * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
-   * (anti_pattern [record-body-scope-is-not-physical-store-identity]).
-   *
-   * The record's body `scope` does NOT answer this and must never be used to:
-   * `scope` routes a record at CREATE time (MountedStores.storeFor) while every
-   * later write routes by the store PHYSICALLY HOLDING the id
-   * (MountedStores.storeHolding); `scope` is caller-writable through
-   * knowledge_update (it is not a refused server-owned field); and the in-place
-   * update path above pins id/type/created_at but never re-derives or validates
-   * the row's mount. So a domain-held record can carry scope 'project' and a
-   * project-held one can carry 'domain:x'. Only the storage layer can answer the
-   * question, so it answers it here rather than leaving callers to guess.
-   *
-   * On a bare SterlingStore this is plain existence — the tool layer's ONE store
-   * is then the project store (server.ts mounts MountedStores; the tests wrap
-   * either). MountedStores overrides it to ask its project mount ALONE, never
-   * the fan. Existence only: a tombstoned/retired row still counts as held.
-   */
-  projectStoreHolds(id) {
-    return this.db.prepare("SELECT 1 FROM records WHERE id = ?").get(id) !== void 0;
-  }
-  /**
-   * THE SCOPE OF THE STORE THAT PHYSICALLY HOLDS `id` — the naming companion of
-   * projectStoreHolds (decision
-   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
-   *
-   * projectStoreHolds answers a YES/NO ("is this the project mount?"), which is
-   * all an atomicity or an H10-parity question needs. A caller that has to
-   * SUPPLY a scope — the replacement minted by a supersession, the new record an
-   * extraction creates — needs the mount NAMED, and until this existed there was
-   * no way to get one: both call sites reconstructed it as
-   * `heldByProject ? 'project' : record.scope`, which is physically derived for
-   * the project case and straight back to the body for every DOMAIN case. In a
-   * design whose whole thesis is that the body is not the routing key, that is
-   * the trap itself (anti_pattern
-   * [record-body-scope-is-not-physical-store-identity]).
-   *
-   * CONTRACT (both implementations):
-   *  - returns 'project' or 'domain:<name>' — never undefined, never a default;
-   *  - an id NO store holds THROWS, naming the id. It never falls back to
-   *    'project': "probably project" is exactly the fail-open the anti-pattern
-   *    forbids, and a caller that cannot locate its own record must not go on to
-   *    label a new one;
-   *  - an id MULTIPLE stores hold throws too (MountedStores only — see
-   *    storeHolding there): one id names one row, and every routing guarantee in
-   *    this design assumes a single holder.
-   *
-   * ON A BARE SterlingStore there are no mounts, so the physical answer is this
-   * row's own `scope` COLUMN — NOT NULL, written once at insert from the routing
-   * decision that chose this store, and never touched by an in-place update
-   * (see identityOf). It is the same value column-authoritative reads already
-   * serve, so a bare-store caller sees no behaviour change; what changes is that
-   * the value now arrives from the column BY CONSTRUCTION rather than by a body
-   * parse that happens to have been corrected. MountedStores overrides this with
-   * the MOUNT the record actually lives in, which is strictly stronger: the
-   * column can still contradict the mount (the third drift class
-   * `domain-doctor.mjs scope-audit` reports), and where they disagree the mount
-   * is the physical fact and the column is a label.
-   */
-  scopeOfHolder(id) {
-    const identity = this.identityOf(id);
-    if (!identity) {
-      throw new Error(`scopeOfHolder: no record '${id}' in this store \u2014 the scope of a record's holder cannot be derived from a record that is not held. Refusing rather than defaulting to 'project' (anti_pattern [record-body-scope-is-not-physical-store-identity]: a guard on scope fails closed on undefined).`);
-    }
-    return identity.scope;
-  }
-  /**
-   * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
-   * 9641e01b, the conductor's option (b)) from the union of every OTHER active
-   * feature_article's relies_on naming this article's slug — not the stored
-   * field. relies_on stays author-written; relied_by cannot drift because it is
-   * no longer authored at all past this read. PROJECT-STORE SCOPE ONLY:
-   * domain-mounted articles are out of scope for this derivation (each mounted
-   * store derives its own; MountedStores does not cross-join relies_on across
-   * stores) — the same store-locality choice articlesBySlug/knowledge_create's
-   * slug-collision check already make.
-   *
-   * Never a hidden lie (constraint 2 of the board item): when the stored
-   * relied_by differs from the derived set (as a sorted-deduped set — order and
-   * duplicates in the stored array don't count as drift), the returned record
-   * carries dependencies.relied_by_stored_stale: true alongside the derived
-   * value actually served. The stored field is left untouched in the DB — this
-   * derivation never writes.
-   */
-  withDerivedReliedBy(record2, relations) {
-    if (record2.type !== "feature_article")
-      return record2;
-    const article = record2;
-    const derived = this.deriveReliedBy(article.slug, relations);
-    const storedSorted = [...new Set(article.dependencies?.relied_by ?? [])].sort();
-    const stale = JSON.stringify(storedSorted) !== JSON.stringify(derived);
-    return {
-      ...record2,
-      dependencies: {
-        relies_on: article.dependencies?.relies_on ?? [],
-        relied_by: derived,
-        ...stale ? { relied_by_stored_stale: true } : {}
-      }
-    };
-  }
-  /**
-   * Every active feature_article's slug + relies_on, in ONE scan — shared by
-   * withDerivedReliedBy across a whole query() result so a capped list of N
-   * articles costs one table scan, not N.
-   *
-   * NOT a materializing read, so it does not go through decodeLiveRecord: it
-   * projects two fields out of each body and never yields a DurableRecord to a
-   * caller. Nothing here reads or reports `scope`.
-   */
-  activeArticleRelations() {
-    const rows = this.db.prepare(`SELECT body FROM records WHERE type = 'feature_article' AND status != 'superseded'`).all();
-    return rows.map((r) => {
-      const rec = JSON.parse(r.body);
-      return { slug: rec.slug ?? "", reliesOn: rec.dependencies?.relies_on ?? [] };
-    });
-  }
-  /** Sorted, deduped slugs of every active article whose relies_on names `slug`. */
-  deriveReliedBy(slug, relations) {
-    const rels = relations ?? this.activeArticleRelations();
-    const set = /* @__PURE__ */ new Set();
-    for (const r of rels) {
-      if (r.slug === slug)
-        continue;
-      if (r.reliesOn.includes(slug))
-        set.add(r.slug);
-    }
-    return [...set].sort();
-  }
-  /**
-   * Every record id in this store at ANY status, tombstones included, with its
-   * type — the resolution surface for id CITATIONS in tracked source
-   * (check-record-citations). It exists because neither existing read serves
-   * that need: query() deliberately excludes superseded records (AC4), yet
-   * citing a superseded record is legitimate and common — a comment names the
-   * decision that ORIGINALLY justified a design, and history is exactly what it
-   * should cite — while get() resolves any status but only from a FULL id, and
-   * citations in prose are 8-char prefixes. No body fetch, no JSON.parse: ids
-   * and types only, so scanning the whole tree stays cheap.
-   */
-  recordIdIndex() {
-    return this.db.prepare("SELECT id, type, status FROM records").all();
-  }
-  /**
-   * Every non-superseded feature_article carrying this EXACT slug, newest first.
-   * A deterministic identity lookup, deliberately NOT a search (decision
-   * 3db7095f). H19's one-hop pointerLine used to resolve sibling slugs through
-   * query({rank_terms:[slug], cap:5}) and then look for an exact match among
-   * those five, which reported LIVE articles as '(not in store)': bm25 ranks by
-   * term frequency over the FTS blob, so a popular slug is cited more often in
-   * OTHER articles' prose than in the article that owns it, and the owner falls
-   * outside its own top-5 — measured against 'hooks-suite' at v46. Raising the
-   * cap was rejected because the cause is the RANKING, not the number 5, and the
-   * miss gets likelier as the store grows.
-   *
-   * Returns an ARRAY so the caller keeps applying its own working_tree exclusion.
-   * More than one active record per slug is a store-integrity fault rather than a
-   * normal state; it resolves newest-first here instead of arbitrarily, and is
-   * not raised on this path because delivery must never fail (AC7) — an opaque
-   * '(lookup failed)' would trade one false payload for another.
-   */
-  articlesBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC`).all(slug);
-    const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows));
-    if (!records.length)
-      return records;
-    const relations = this.activeArticleRelations();
-    return records.map((r) => this.withDerivedReliedBy(r, relations));
-  }
-  /**
-   * Every non-superseded record of ANY type carrying this exact slug, newest
-   * first (board 1e639f32 — decision/anti_pattern/research_finding gained the
-   * stable handle feature_article and brief already had). The type-agnostic
-   * sibling of articlesBySlug: it backs knowledge_create's cross-type slug
-   * uniqueness and knowledge_get's slug resolution, both of which must see
-   * EVERY slug-bearing record or a clash slips through. Excluding superseded
-   * rows is the point — a slug names the CONCEPT, so resolving it serves the
-   * live head while a version-pinned citation keeps using the id.
-   */
-  recordsBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC`).all(slug);
-    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
-  }
-  /**
-   * THE ONE READINESS FUNCTION (decision
-   * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start,
-   * AMENDED (a)). board_get/board_query's blocked_by_state, H1's three groups,
-   * H20's ready line, the TUI cards and the OpenCode plugin all read this, so
-   * "open blocker" and "ready" have one definition.
-   *
-   * `items` defaults to every live user board item (a system item is never
-   * returned). Passed explicitly, each user todo given is judged against the
-   * LIVE board: a blocker is open while a live todo carries its slug, and
-   * `unblocks` lists live user items whose blocked_by names the item. Read
-   * only; the stored blocked_by is never rewritten. No cycle detection.
-   */
-  boardReadiness(items) {
-    const total = this.count({ types: ["todo"], source: "user" });
-    const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
-    const bySlug = /* @__PURE__ */ new Map();
-    for (const t of live)
-      if (t.slug)
-        bySlug.set(t.slug, t);
-    const dependents = /* @__PURE__ */ new Map();
-    for (const t of live) {
-      for (const slug of new Set(t.blocked_by ?? [])) {
-        const list = dependents.get(slug);
-        if (list)
-          list.push(t);
-        else
-          dependents.set(slug, [t]);
-      }
-    }
-    const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
-    const targets = items ?? live;
-    return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
-      const blockers = [];
-      const blockersOpen = [];
-      for (const slug of t.blocked_by ?? []) {
-        const holder = openBlocker(slug);
-        blockers.push({ slug, state: holder ? "open" : "closed" });
-        if (holder)
-          blockersOpen.push(boardItemHandle(holder));
-      }
-      const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-      const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
-      return {
-        id: t.id,
-        ...t.slug ? { slug: t.slug } : {},
-        name: boardItemHandle(t),
-        ...t.priority ? { priority: t.priority } : {},
-        updated_at: t.updated_at,
-        file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
-        ...t.needs ? { needs: t.needs } : {},
-        blockers,
-        blockers_open: blockersOpen,
-        unblocks,
-        state
-      };
-    });
-  }
-  /**
-   * Every SUPERSEDED record carrying this exact slug, newest first — the
-   * dead-slug counterpart of recordsBySlug (decision foreign_df361a0f, board 2b9f2f1a
-   * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
-   * uses this ONLY after live-slug and id-prefix resolution both fail, so it
-   * can never shadow a live record: a slug still carried by a non-superseded
-   * row belongs to recordsBySlug, not here. The write surface never calls
-   * this — a dead slug addresses no write handle, fix-forward goes to the
-   * live head via recordsBySlug's own resolution.
-   */
-  supersededRecordsBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status = 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`).all(slug);
-    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
-  }
-  /**
-   * Follows superseded_by from `id` to the chain end (decision foreign_de1a7329: ids
-   * stay version-pinned — this DISCLOSES where the chain currently ends, it
-   * never redirects the pinned record itself). A live (non-superseded)
-   * record resolves to itself at hops:0. Unknown id -> null. Never throws
-   * and never hangs on a malformed chain: a cycle or a chain deeper than the
-   * 32-hop cap stops traversal and reports the LAST record reached (before
-   * the revisit, or at the cap) with truncated:true — it never claims to be
-   * the true, unreached terminus.
-   */
-  resolveTerminus(id) {
-    const MAX_HOPS = 32;
-    const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
-    const row = stmt.get(id);
-    if (!row)
-      return null;
-    const visited = /* @__PURE__ */ new Set([row.id]);
-    let current = row;
-    let hops = 0;
-    while (current.status === "superseded" && current.superseded_by) {
-      const next = stmt.get(current.superseded_by);
-      if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
-        return { id: current.id, status: current.status, hops, truncated: true };
-      }
-      visited.add(next.id);
-      current = next;
-      hops += 1;
-    }
-    return { id: current.id, status: current.status, hops };
-  }
-  /**
-   * INBOUND rel:'supersedes' edges — every record elsewhere holding a
-   * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
-   * above is the OUTBOUND, whole-record-supersession walk (decision foreign_de1a7329):
-   * it only ever has something to say about a record that was itself retired
-   * via supersede(). A record can also be named the target of a rel:'supersedes'
-   * link WITHOUT ever being retired — a clause-level or partial override
-   * recorded via knowledge_link — and that leaves no trace on the target's own
-   * status/terminus. This is the read-time counterpart that makes such edges
-   * visible from the target side. Purely additive/advisory: never mutates
-   * status, never feeds resolveTerminus, never touches the terminus block.
-   * LOCAL to this store only — MountedStores.inboundSupersedes fans every
-   * mount, because an edge lives with its SOURCE record (addLink routes by
-   * source), which may sit in a different store than the target.
-   */
-  inboundSupersedes(id) {
-    const rows = this.db.prepare(`SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`).all(id);
-    return rows.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
-  }
-  /**
-   * The §3.4 base filter (status + type + stack-tag + file-key join) shared
-   * by query() and count() — everything EXCEPT the rank (FTS), ordering, and
-   * cap. One definition so count() can never drift from what query() would
-   * actually return.
-   */
-  baseFilter(opts) {
-    const params = [];
-    const where = ["r.status != 'superseded'"];
-    if (opts.types?.length) {
-      where.push(`r.type IN (${opts.types.map(() => "?").join(",")})`);
-      params.push(...opts.types);
-    }
-    if (opts.stack_tags?.length) {
-      where.push(`EXISTS (SELECT 1 FROM record_stack_tags t WHERE t.record_id = r.id AND t.tag IN (${opts.stack_tags.map(() => "?").join(",")}))`);
-      params.push(...opts.stack_tags);
-    }
-    const fileKeys = (opts.file_keys ?? []).map(normalizeRepoPath);
-    if (fileKeys.length) {
-      where.push(`EXISTS (SELECT 1 FROM record_file_keys k WHERE k.record_id = r.id AND k.path IN (${fileKeys.map(() => "?").join(",")}))`);
-      params.push(...fileKeys);
-    }
-    if (opts.source) {
-      where.push(`${this.db.dialect.jsonText("r.body", "source")} = ?`);
-      params.push(opts.source);
-    }
-    return { where, params, fileKeys };
-  }
-  /**
-   * COUNT(*) over the §3.4 base filter — the number of records query() WOULD
-   * return ignoring rank/cap (rank_terms is a no-op here). No body fetch, no
-   * JSON.parse: the TUI Knowledge tree's collapsed category/source badges call
-   * this every 1 Hz frame instead of fetching + parsing hundreds of bodies.
-   */
-  count(opts = {}) {
-    const { where, params } = this.baseFilter(opts);
-    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(" AND ")}`).get(...params);
-    return row.n;
-  }
-  /**
-   * READ-ONLY damage count for issue #14: how many live reference_material
-   * records hold a web URL location (http, https, ftp) whose '//' an earlier
-   * write collapsed to '/' ('https:/host/…'). The shape is isCollapsedUrlLocation's, the one
-   * definition in packages/schemas. Nothing is repaired here: each such record
-   * is fixed by a knowledge_edit on `location` restoring the second slash.
-   */
-  countCollapsedUrlLocations() {
-    const { where, params } = this.baseFilter({ types: ["reference_material"] });
-    const rows = this.db.prepare(`SELECT r.body FROM records r WHERE ${where.join(" AND ")}`).all(...params);
-    return rows.filter((row) => {
-      const location = JSON.parse(row.body).location;
-      return typeof location === "string" && isCollapsedUrlLocation(location);
-    }).length;
-  }
-  /**
-   * ABSENCE QUERY (board a577a69d): "is anything ruled about X" needs a
-   * usable "nothing", and a capped/ranked window can never establish one —
-   * this counts over the FULL rank_terms match set (uncapped, never the
-   * window query() returns) how many score at least `minScore`, using the
-   * SAME base filter and match expression query() ranks by, so this can never
-   * disagree with what a caller would see if it raised cap far enough.
-   *
-   * SCALE: SQLite FTS5's bm25() returns a value where LOWER (more negative) is
-   * MORE relevant, and it is otherwise unbounded — the opposite of what a
-   * caller reading "min_score" would expect. The score this thresholds is
-   * `-bm25(records_fts)`: HIGHER is more relevant, a bare keyword match sits
-   * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
-   * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
-   * itself — knowledge_query's tool description names this scale so a caller
-   * never has to reverse-engineer bm25's own sign convention.
-   *
-   * Requires rank_terms — a threshold on a filter with no ranking has nothing
-   * to threshold, so this refuses loudly rather than silently answering 0
-   * (P5): a caller reading above_threshold:0 must be able to trust it means
-   * "nothing scored that high", not "nothing was rankable in the first place".
-   */
-  countAboveScore(opts, minScore) {
-    const terms = rankTerms.parse(opts.rank_terms ?? []);
-    if (!terms.length) {
-      throw new Error("min_score requires rank_terms \u2014 there is no ranked score to threshold without them.");
-    }
-    const { where, params } = this.baseFilter(opts);
-    const match = this.ftsMatchExpr(terms, opts.match_all);
-    const d = this.db.dialect;
-    const sql = `SELECT COUNT(*) AS n FROM records r ${d.searchJoin}
-      WHERE ${where.join(" AND ")} AND ${d.searchMatch} AND ${d.searchScore} >= ?`;
-    const row = this.db.prepare(sql).get(...params, match, minScore);
-    return row.n;
-  }
-  /**
-   * The search expression rank_terms compiles to — shared by query() and
-   * countAboveScore() so the two can never rank two different match sets. The
-   * syntax is the driver's (dialect.searchQuery): on SQLite an FTS5 MATCH
-   * expression.
-   */
-  ftsMatchExpr(terms, matchAll) {
-    return this.db.dialect.searchQuery(terms, matchAll);
-  }
-  /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
-  query(opts = {}) {
-    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-    const { where, params, fileKeys } = this.baseFilter(opts);
-    if (opts.rank_terms !== void 0) {
-      const terms = rankTerms.parse(opts.rank_terms);
-      if (terms.length) {
-        const match = this.ftsMatchExpr(terms, opts.match_all);
-        const d = this.db.dialect;
-        const sql2 = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
-          WHERE ${where.join(" AND ")} AND ${d.searchMatch}
-          ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
-        const rows2 = this.db.prepare(sql2).all(...params, match, cap);
-        return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
-      }
-    }
-    const orderBy = [];
-    const overlapParams = [];
-    if (fileKeys.length) {
-      orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
-      overlapParams.push(...fileKeys);
-    }
-    orderBy.push("r.updated_at DESC", "r.id DESC");
-    const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
-      ORDER BY ${orderBy.join(", ")} LIMIT ?`;
-    const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
-    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows));
-  }
-  /** query()'s two return paths share this: one relations scan for the whole
-   *  result set (not one per feature_article row) before applying the derived
-   *  relied_by to each. */
-  withDerivedReliedByAll(input) {
-    const records = this.hydrateAll(input);
-    if (!records.some((r) => r.type === "feature_article"))
-      return records;
-    const relations = this.activeArticleRelations();
-    return records.map((r) => this.withDerivedReliedBy(r, relations));
-  }
-  /**
-   * Versioned change (§3.2.3, §3.1 criterion 3): the new record supersedes the
-   * old; the old is retained with status 'superseded' + superseded_by set.
-   * This is the ONLY change path for immutable types (decision, §3.2.1).
-   */
-  supersede(oldId, newInput, authoritativeScope) {
-    this.assertWritable("supersede");
-    const oldRecord = this.get(oldId);
-    if (!oldRecord)
-      throw new Error(`supersede: no record '${oldId}'`);
-    const oldIdentity = this.identityOf(oldId);
-    if (!oldIdentity)
-      throw new Error(`supersede: no record '${oldId}'`);
-    if (oldIdentity.lifecycle === "retired" || oldRecord.status === "superseded") {
-      throw new Error(`supersede: record '${oldId}' is already superseded (retired) \u2014 one successor maximum`);
-    }
-    const candidate = { ...newInput };
-    if (candidate.id === oldId) {
-      throw new Error(`supersede: the replacement carries the SAME id as '${oldId}' \u2014 that is a self-cycle in the relation graph, not a supersession. Use updateRecord for an in-place change, or mint a genuinely new id for a concept replacement.`);
-    }
-    const links = Array.isArray(candidate.links) ? [...candidate.links] : [];
-    if (!links.some((l) => l.rel === "supersedes" && l.target_id === oldId)) {
-      links.push({ rel: "supersedes", target_id: oldId });
-    }
-    candidate.links = links;
-    candidate.scope = authoritativeScope ?? oldIdentity.scope;
-    const prepared = _SterlingStore.resolveIdentity(candidate, { lifecycle: "live", freshness: "fresh", version: 1 });
-    const newRecord = validateRecord(prepared.input);
-    if (newRecord.type !== oldRecord.type) {
-      throw new Error(`supersede: type mismatch ('${newRecord.type}' cannot supersede '${oldRecord.type}')`);
-    }
-    if (newRecord.type === "feature_article" && oldRecord.type === "feature_article" && newRecord.version <= oldRecord.version) {
-      throw new Error(`supersede: feature_article version must increase (old v${oldRecord.version}, new v${newRecord.version})`);
-    }
-    const storedOld = _SterlingStore.storableBody({
-      ...oldRecord,
-      lifecycle: "retired",
-      updated_at: newRecord.updated_at
-    });
-    this.tx(() => {
-      this.insertRecord(newRecord);
-      const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
-             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(storedOld), oldId);
-      if (res.changes === 0) {
-        throw new Error(`supersede: record '${oldId}' was concurrently superseded \u2014 retry against the current version`);
-      }
-      this.logActivity("updated", newRecord, newRecord.updated_at);
-    });
-    return this.hydrateAll([_SterlingStore.storableBody(newRecord)])[0];
-  }
-  /**
-   * IN-PLACE todo mutation (§3.2.7 board_update, work order 9a06b6aa) — the one
-   * exception to "every change is a supersession". todo is deliberately NOT in
-   * the immutable set (only decision is), and every board item is a DURABLE
-   * record in the same store as knowledge, so the established change primitive
-   * (supersede: mint a new id, retain the old) would rot every reference keyed
-   * on the item's id (feature_link, H7/H10 maintenance items) on every edit. The
-   * id, created_at, status and superseded_by stay exactly as they were; only the
-   * caller's patched fields and updated_at change — same row, same identity.
-   *
-   * `newInput` is the FULL merged candidate (old record + patch), mirroring
-   * supersede's own calling convention: this method validates and persists, the
-   * tool layer decides which fields may be patched and builds the merge. A
-   * terminal (superseded) record is refused, same as supersede/retireInFavorOf,
-   * and the UPDATE is guarded on that status inside the transaction to close the
-   * same concurrent-supersede race.
-   */
-  updateTodo(id, newInput, opts = {}) {
-    const old = this.get(id);
-    if (!old)
-      throw new Error(`updateTodo: no record '${id}'`);
-    if (old.type !== "todo")
-      throw new Error(`updateTodo: '${id}' is a ${old.type}, not a todo \u2014 board_update only mutates todos`);
-    const candidate = { ...newInput };
-    if (typeof candidate.type === "string" && candidate.type !== "todo") {
-      throw new Error(`updateTodo: type mismatch ('${candidate.type}' is not 'todo')`);
-    }
-    return this.applyInPlace("updateTodo", id, () => candidate, opts);
-  }
-  /**
-   * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a
-   * replacement that lives in ANOTHER store (the promoted copy in a domain
-   * store). supersede can't cross stores and always inserts a same-store
-   * replacement; this sets the existing record to superseded + superseded_by =
-   * the cross-store id with NO new row. Provenance and inbound links survive;
-   * default queries already hide superseded records, so it never double-serves.
-   */
-  /**
-   * `verb` names what this retirement IS for the activity feed (board
-   * 39d6462d): 'retired' for the genuine-duplicate path (knowledge_retire) and
-   * 'promoted' for the project→domain copy's tombstone (knowledgePromote) — the
-   * two existing callers, distinguished so a promotion reads as "promoted",
-   * not as an unrelated-looking "retired". Defaults to 'retired' so the
-   * pre-promotion caller (and any future one) keeps that meaning without
-   * having to know the parameter exists.
-   */
-  retireInFavorOf(id, replacementId, at, verb = "retired") {
-    this.assertWritable("retireInFavorOf");
-    const record2 = this.get(id);
-    if (!record2)
-      throw new Error(`retireInFavorOf: no record '${id}'`);
-    const identity = this.identityOf(id);
-    if (identity?.lifecycle === "retired" || record2.status === "superseded") {
-      throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-    }
-    const replacement = this.identityOf(replacementId);
-    if (replacement?.lifecycle === "retired") {
-      throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-    }
-    const retired = { ...record2, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-    const stored = _SterlingStore.storableBody(retired);
-    this.tx(() => {
-      const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
-             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
-      if (res.changes === 0) {
-        throw new Error(`retireInFavorOf: record '${id}' was concurrently superseded \u2014 retry`);
-      }
-      this.insertRelation(replacementId, "supersedes", id, at);
-      this.logActivity(verb, retired, at);
-    });
-    return this.hydrateAll([stored])[0];
-  }
-  /**
-   * Hard removal — the P4 path for todos (done = removed by the artifact-write
-   * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
-   * Removing a SYSTEM-source todo appends to the capped queue drain log
-   * (§3.2.7 audit projection — "was X handled?"); user todos are never logged.
-   */
-  remove(id, drainedAt) {
-    this.assertWritable("remove");
-    this.tx(() => {
-      const record2 = this.get(id);
-      const isSystemDrain = record2 && record2.type === "todo" && record2.source === "system";
-      if (isSystemDrain && record2) {
-        this.db.prepare("INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys, record_id) VALUES (?, ?, ?, ?, ?)").run(drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), record2.system_reason ?? "", record2.text ?? "", JSON.stringify(record2.file_keys ?? []), record2.id);
-        this.db.prepare("DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)").run();
-      }
-      if (record2 && !isSystemDrain) {
-        this.logActivity("removed", record2, drainedAt ?? (/* @__PURE__ */ new Date()).toISOString());
-      }
-      this.db.prepare("DELETE FROM records WHERE id = ?").run(id);
-      this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
-      this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
-      this.db.prepare("DELETE FROM record_relations WHERE source_id = ?").run(id);
-      this.db.prepare("DELETE FROM record_relations WHERE target_id = ?").run(id);
-      this.db.prepare("DELETE FROM record_versions WHERE record_id = ?").run(id);
-      this.db.prepare("DELETE FROM record_aliases WHERE canonical_id = ?").run(id);
-      this.db.prepare("DELETE FROM records_fts WHERE record_id = ?").run(id);
-    });
-  }
-  /** Newest-first drained queue items (§3.2.7 drain log) — the TUI's completed section. */
-  listQueueDrain(limit = 15) {
-    const rows = this.db.prepare("SELECT drained_at, system_reason, text, file_keys FROM queue_drain_log ORDER BY seq DESC LIMIT ?").all(limit);
-    return rows.map((r) => ({ ...r, file_keys: JSON.parse(r.file_keys) }));
-  }
-  /**
-   * The drain-log trace for ONE removed item id, newest first (board 97d773ef):
-   * lets a remove on a gone id say "already removed <when>" instead of a bare
-   * "no record". Returns undefined when no trace remains — which, because the
-   * log keeps only the newest 50 rows, means "no RECENT trace", never proof the
-   * id never existed.
-   */
-  drainLogEntry(id) {
-    try {
-      return this.db.prepare("SELECT drained_at, system_reason FROM queue_drain_log WHERE record_id = ? ORDER BY seq DESC LIMIT 1").get(id);
-    } catch (e) {
-      if (this.legacySchemaVersion !== void 0 && /record_id/.test(String(e.message)))
-        return void 0;
-      throw e;
-    }
-  }
-  /**
-   * Board 39d6462d activity feed — the ONE seam every knowledge write lands
-   * through, so the Queue tab's activity section shows "what has been done"
-   * without a second, separate write path (§3.1 invariant: one write path).
-   * Called directly by create/supersede/addLink/remove/retireInFavorOf with the
-   * verb that primitive actually performed; NOT called from insertRecord
-   * itself, because supersede/enqueueSystemTodo also insert rows and each needs
-   * its own verb (or, for enqueueSystemTodo, no activity-log entry at all — see
-   * remove()'s system-todo branch, which already has a completed-section home
-   * in queue_drain_log and would otherwise double-log). Same capped-at-50,
-   * pruned-in-tx retention policy as queue_drain_log (§3.2.7), so completed
-   * items never build up here either.
-   */
-  logActivity(verb, record2, at) {
-    this.db.prepare("INSERT INTO activity_log (at, verb, type, record_id, title) VALUES (?, ?, ?, ?, ?)").run(at, verb, record2.type, record2.id, activityTitleOf(record2));
-    this.db.prepare("DELETE FROM activity_log WHERE seq NOT IN (SELECT seq FROM activity_log ORDER BY seq DESC LIMIT 50)").run();
-  }
-  /** Newest-first activity rows (board 39d6462d) — the TUI Queue tab's activity section. */
-  listActivityLog(limit = 15) {
-    return this.db.prepare("SELECT at, verb, type, record_id AS id, title FROM activity_log ORDER BY seq DESC LIMIT ?").all(limit);
-  }
-  /** Backup snapshot (§2.3): the driver copies the store to the configured backup path (SQLite: VACUUM INTO). Refuses to overwrite. */
-  snapshot(targetPath) {
-    const target = targetPath.replace(/\\/g, "/");
-    if (existsSync2(target)) {
-      throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
-    }
-    mkdirSync2(dirname4(target), { recursive: true });
-    this.db.snapshot(target);
-  }
-  close() {
-    this.db.close();
-  }
-  // -------------------------------------------------------------------------
-  // The staged-pipeline run/handoff protocol (spec §3.2.9, §5.2 — createRun,
-  // getRun, casTransition, casTransitionMerge, recordPendingExit/
-  // getPendingExit, writeHandoff/readHandoffs, updateRunOptimistic and its
-  // dependents appendRunEscalation/appendRunReconcileNeeded/
-  // appendRunScopeAmendment/setRunReviewMandatory/incrementDispatchCount) was
-  // removed per decision sterling-claude-code-scale-down-boundary (2ad87dd1).
-  // The `runs`/`handoffs` SQLite tables are left in place, unused — no FK
-  // references them and no startup validation scans them, so leaving them is
-  // safe; a DROP TABLE migration is optional cleanup, not a correctness
-  // requirement (see the migration list at the bottom of this file).
-  // -------------------------------------------------------------------------
-  /**
-   * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,
-   * transactionally — read + delete in one transaction, never a signal file (P4).
-   */
-  writeSelection(type, recordId, at) {
-    this.assertWritable("writeSelection");
-    this.tx(() => {
-      this.db.prepare("INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at").run(type, recordId, at);
-    });
-  }
-  /**
-   * Store-level metadata read (store_meta). undefined when the key was never
-   * set. A pre-v2 store has no store_meta table (it opens read-only before the
-   * DDL runs), so this refuses there with the migration error rather than
-   * answering "unset" for a question the store cannot answer.
-   */
-  getMeta(key) {
-    this.assertV2Surface("getMeta");
-    const row = this.db.prepare("SELECT value FROM store_meta WHERE key = ?").get(key);
-    return row?.value;
-  }
-  /** Store-level metadata write (store_meta): upsert, one row per key, stamped updated_at. */
-  setMeta(key, value) {
-    this.assertWritable("setMeta");
-    if (typeof key !== "string" || key.length === 0)
-      throw new Error("setMeta: key must be a non-empty string");
-    if (typeof value !== "string")
-      throw new Error(`setMeta: value for key '${key}' must be a string`);
-    this.tx(() => {
-      this.db.prepare("INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(key, value, (/* @__PURE__ */ new Date()).toISOString());
-    });
-  }
-  takeSelection() {
-    let row;
-    this.tx(() => {
-      row = this.db.prepare("SELECT type, record_id, at FROM selection WHERE slot = 1").get();
-      if (row)
-        this.db.prepare("DELETE FROM selection WHERE slot = 1").run();
-    });
-    return row;
-  }
-  /**
-   * fs-move support (§7.1): renames inside the machinery never orphan
-   * knowledge — every owning record's stored paths are rewritten as part of
-   * the move (exact normalized-path matches only), revalidated, and the
-   * file-key index updated, in one transaction.
-   *
-   * It goes through the VERSIONED in-place core ([stable-identity-design-v2]):
-   * a rename is a real change to the record's content, so it bumps the version,
-   * archives the prior body, rebuilds record_file_keys and refreshes the FTS
-   * row like every other write. As a bare body UPDATE it was invisible to
-   * expected_version — a concurrent updateRecord holding a pre-rename read
-   * silently reverted the rename with no CAS conflict — and left the old path
-   * ranking in records_fts. allowRetired keeps the contract intact for
-   * tombstones: a move must orphan NO owning record's paths.
-   */
-  renameFileKey(oldPath, newPath) {
-    this.assertWritable("renameFileKey");
-    const from = normalizeRepoPath(oldPath);
-    const to = normalizeRepoPath(newPath);
-    let count = 0;
-    this.tx(() => {
-      const rows = this.db.prepare("SELECT record_id FROM record_file_keys WHERE path = ?").all(from);
-      count = rows.length;
-      for (const { record_id } of rows) {
-        if (!this.get(record_id))
-          continue;
-        this.applyInPlace("renameFileKey", record_id, (current) => {
-          const patched = deepReplaceString(current, from, to);
-          const c = current;
-          if (c.type === "todo" && c.source === "system" && c.system_reason === "reconcile_needed") {
-            const fileKeys = [...new Set(patched.file_keys ?? [])].sort();
-            const featureLink = patched.feature_link;
-            const owner = featureLink ? this.get(featureLink) : void 0;
-            const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: featureLink }, fileKeys);
-            return { ...patched, file_keys: fileKeys, text };
-          }
-          return patched;
-        }, {}, { allowRetired: true, suppressReconcilePrune: true });
-      }
-    });
-    return count;
-  }
-  /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4).
-   *  targetValidated is set ONLY by MountedStores.addLink, which has already resolved
-   *  the target across every mounted store — cross-store edges are a legitimate shape
-   *  (promotion itself writes them: supersedes / informed_by across project↔domain)
-   *  that a store-local get cannot see. Standalone usage keeps the local check. */
-  addLink(sourceId, rel, targetId, targetValidated = false) {
-    this.assertWritable("addLink");
-    const source = this.get(sourceId);
-    if (!source)
-      throw new Error(`addLink: no record '${sourceId}'`);
-    if (!targetValidated && !this.get(targetId))
-      throw new Error(`addLink: no target record '${targetId}'`);
-    const parsedRel = linkSchema.shape.rel.parse(rel);
-    if (parsedRel === "supersedes") {
-      throw new Error(`addLink: rel 'supersedes' cannot be written as a raw edge \u2014 supersession is a lifecycle transition, not a link. Use supersede(oldId, newRecord) for concept replacement, or retireInFavorOf(id, survivor) for duplicate consolidation. Nothing was written.`);
-    }
-    if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId))
-      return source;
-    const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] };
-    const at = (/* @__PURE__ */ new Date()).toISOString();
-    const stored = _SterlingStore.storableBody(updated);
-    this.tx(() => {
-      this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(stored), sourceId);
-      this.insertRelation(sourceId, parsedRel, targetId, at);
-      this.logActivity("linked", updated, at);
-    });
-    return this.hydrateAll([stored])[0];
-  }
-  // disposeRunRows / purgeRunRows (the staged-pipeline run-row disposal pair)
-  // were removed alongside the run/handoff protocol above (decision
-  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — their sole callers
-  // (dispose-run.mjs, merge-gate.mjs) are pipeline apparatus. check_skipped
-  // rows now accumulate under the NULL-run cap below only; a run-scoped row
-  // is unreachable once nothing calls createRun.
-  /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
-  recordCheckSkipped(check2, reason, runId, at) {
-    this.assertWritable("recordCheckSkipped");
-    this.tx(() => {
-      this.db.prepare("INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)").run(runId ?? null, check2, reason, at);
-      if (!runId) {
-        this.db.prepare("DELETE FROM check_skipped WHERE run_id IS NULL AND seq NOT IN (SELECT seq FROM check_skipped WHERE run_id IS NULL ORDER BY seq DESC LIMIT 50)").run();
-      }
-    });
-  }
-  listCheckSkipped(runId) {
-    return runId ? this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped WHERE run_id = ? ORDER BY seq").all(runId) : this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped ORDER BY seq").all();
-  }
-  // -------------------------------------------------------------------------
-  // AC8: catalog bootstrap + maintenance enqueue (run r-ea9e, phase 3)
-  // -------------------------------------------------------------------------
-  /**
-   * Idempotent bootstrap: if no project-scoped reference_material carrying a
-   * `catalog` payload exists, create one seeded from config.models' DISTINCT
-   * pinned model IDs. No network; no fabrication — day-one entries are the IDs
-   * already in use by the installed agents.
-   */
-  bootstrapCatalogIfAbsent(config2, nowISO) {
-    const existing = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
-    if (existing.length > 0)
-      return;
-    const cfg = config2;
-    const models = cfg.models ?? {};
-    const ids = /* @__PURE__ */ new Set();
-    for (const v of Object.values(models)) {
-      if (v?.model)
-        ids.add(v.model);
-    }
-    const dateStr = nowISO.slice(0, 10);
-    this.create({
-      id: randomUUID(),
-      type: "reference_material",
-      created_at: nowISO,
-      updated_at: nowISO,
-      author: "system",
-      status: "active",
-      superseded_by: null,
-      links: [],
-      scope: "project",
-      stack_tags: [],
-      title: "Models catalog",
-      kind: "doc",
-      location: ".sterling/models-catalog",
-      summary: "KB-maintained model catalog for the TUI System tab.",
-      source_date: dateStr,
-      capture_date: dateStr,
-      catalog: {
-        entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
-      }
-    });
-  }
-  /**
-   * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
-   * Dedup: if a pending item with system_reason='refresh_reference' already exists,
-   * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
-   * must NOT suppress the enqueue (§3.2.5, decision foreign_98064d77).
-   *
-   * The item's `text` names a real delta (Dome Farmer friction 2026-09-17: a bare
-   * "Refresh the KB models catalog" with no file_keys and a project-local catalog
-   * gave a drain nothing to act on): every current entry's id/tier/status, with
-   * any 'unknown' tier called out as the concrete thing to look up. A drain closes
-   * it by writing the looked-up values into catalog.entries[] on the linked
-   * record (feature_link) and citing this item's id in `resolves`.
-   */
-  enqueueRefreshReferenceOnce(nowISO) {
-    const pending = this.query({ types: ["todo"], cap: 200 }).filter((r) => r.system_reason === "refresh_reference");
-    if (pending.length > 0)
-      return;
-    const catalogs = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
-    const todo = {
-      id: randomUUID(),
-      type: "todo",
-      created_at: nowISO,
-      updated_at: nowISO,
-      author: "system",
-      status: "active",
-      superseded_by: null,
-      links: [],
-      scope: "project",
-      stack_tags: [],
-      text: "Refresh the KB models catalog" + refreshReferenceDeltaSuffix(catalogs[0]),
-      source: "system",
-      system_reason: "refresh_reference"
-    };
-    if (catalogs.length > 0) {
-      todo.feature_link = catalogs[0].id;
-    }
-    this.create(todo);
-  }
-  /**
-   * The one row-insert. Since S2 ([stable-identity-design-v2]) the stored BODY
-   * carries lifecycle/freshness/version and NOT status/superseded_by — those two
-   * are derived at read. They survive as records COLUMNS because they are the
-   * §3.4 filter surface every read SQL already joins on (and the shape a
-   * pre-migration store still has): written here from the derived values in the
-   * same statement, never read back as the served truth.
-   */
-  insertRecord(record2) {
-    const entry = RECORD_TYPES[record2.type];
-    const meta = record2;
-    const lifecycle = meta.lifecycle === "retired" ? "retired" : "live";
-    const freshness = meta.freshness === "flagged_stale" ? "flagged_stale" : "fresh";
-    const version2 = typeof meta.version === "number" ? meta.version : 1;
-    const stored = _SterlingStore.storableBody(record2);
-    this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record2.id, record2.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version2, record2.scope, record2.created_at, record2.updated_at, record2.author, JSON.stringify(stored));
-    for (const tag of new Set(record2.stack_tags)) {
-      this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(record2.id, tag);
-    }
-    for (const path of new Set(entry.fileKeys(stored))) {
-      this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(record2.id, path);
-    }
-    for (const link of record2.links) {
-      if (link.target_id === record2.id)
-        continue;
-      this.insertRelation(record2.id, link.rel, link.target_id, record2.updated_at);
-    }
-    if (lifecycle === "retired" && meta.superseded_by && meta.superseded_by !== record2.id) {
-      this.insertRelation(meta.superseded_by, "supersedes", record2.id, record2.updated_at);
-    }
-    this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record2.id, entry.fts(stored));
-  }
-  /**
-   * REENTRANT — every other write primitive (create, supersede, …) already
-   * calls this internally, so a multi-record tool-layer write (knowledge_split:
-   * N child creates + one parent supersession, decision
-   * compaction-tooling-windowed-read-plus-split) that must land atomically
-   * cannot simply wrap several such calls in a second BEGIN — SQLite does not
-   * nest transactions. `txDepth` makes a NESTED call join the already-open
-   * transaction instead of attempting a second one: only the outermost call
-   * issues BEGIN/COMMIT/ROLLBACK, so a failure anywhere inside unwinds the
-   * whole thing exactly once.
-   */
-  txDepth = 0;
-  tx(fn) {
-    this.assertV2Surface("transaction");
-    if (this.txDepth > 0) {
-      fn();
-      return;
-    }
-    this.db.begin();
-    this.txDepth++;
-    try {
-      this.assertLiveSchemaVersion("transaction");
-      fn();
-      this.db.commit();
-    } catch (e) {
-      try {
-        this.db.rollback();
-      } catch {
-      }
-      throw e;
-    } finally {
-      this.txDepth--;
-    }
-  }
-  /**
-   * PUBLIC transaction boundary for the tool layer (decision
-   * compaction-tooling-windowed-read-plus-split): the store is the one write
-   * path (invariant 3 / CLAUDE.md §"Store writes"), so a tool-layer operation
-   * that must write several records atomically — knowledge_split's N children
-   * plus one parent supersession — gets the transaction FROM the store rather
-   * than reimplementing BEGIN/COMMIT/ROLLACK above it. Reentrant via `tx`:
-   * every store write primitive called from `fn` joins this same transaction.
-   */
-  withTransaction(fn) {
-    let result;
-    this.tx(() => {
-      result = fn();
-    });
-    return result;
-  }
-  /**
-   * PER-RECORD transaction boundary — the ToolStore sibling that routes by
-   * PHYSICAL IDENTITY rather than by a label (decision
-   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]). A
-   * label-routed transaction opens on the store the label NAMES while every
-   * record mutation independently opens on the store that HOLDS the id, so a
-   * drifted label put the transaction on the wrong database; routing by the
-   * holder makes the two agree by construction. On a plain SterlingStore there
-   * is only ONE physical store, so this is a straight alias for withTransaction
-   * — MountedStores overrides it to resolve the holding mount.
-   *
-   * ITS LABEL-ROUTED SIBLING (`withTransactionForScope`) IS RETIRED (decision
-   * [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]):
-   * it had zero production callers once knowledge_extract moved here, and its
-   * shape was exactly the defect this method closed.
-   */
-  withTransactionForRecord(_id, fn) {
-    return this.withTransaction(fn);
-  }
-};
+import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
+import { join as join11, dirname as dirname6 } from "node:path";
 
 // packages/mcp-server/dist/tools.js
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync as existsSync4, lstatSync as lstatSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, readdirSync as readdirSync2, realpathSync as realpathSync2, renameSync, statSync as statSync2, unlinkSync, writeFileSync } from "node:fs";
-import { basename as basename2, dirname as dirname5, isAbsolute, join as join6, relative, sep } from "node:path";
+import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
+import { appendFileSync, chmodSync, existsSync as existsSync4, lstatSync as lstatSync5, mkdirSync as mkdirSync4, readFileSync as readFileSync5, readdirSync as readdirSync3, realpathSync as realpathSync3, renameSync as renameSync2, statSync as statSync3, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { basename as basename2, dirname as dirname5, isAbsolute, join as join10, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 // packages/mcp-server/dist/attestation-proof.js
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { closeSync as closeSync2, constants as fsConstants, fstatSync, lstatSync, openSync as openSync2, readSync } from "node:fs";
-import { resolve } from "node:path";
+import { createHash as createHash2 } from "node:crypto";
+import { closeSync as closeSync3, constants as fsConstants, fstatSync as fstatSync2, lstatSync as lstatSync4, openSync as openSync3, readSync as readSync2 } from "node:fs";
+import { resolve as resolve3 } from "node:path";
 var AttestationRefusal = class extends Error {
   path;
   reason;
@@ -26923,8 +28802,8 @@ function fsStep(key, what, fn) {
   }
 }
 function readOwnedFile(root, key, remainingBytes, maxTotalBytes) {
-  const abs = resolve(root, ...key.split("/"));
-  const pre = fsStep(key, "lstat", () => lstatSync(abs, { throwIfNoEntry: false }));
+  const abs = resolve3(root, ...key.split("/"));
+  const pre = fsStep(key, "lstat", () => lstatSync4(abs, { throwIfNoEntry: false }));
   if (!pre)
     throw new AttestationRefusal("the path does not exist in the worktree", key);
   if (pre.isSymbolicLink())
@@ -26932,9 +28811,9 @@ function readOwnedFile(root, key, remainingBytes, maxTotalBytes) {
   if (!pre.isFile())
     throw new AttestationRefusal("the worktree path is not a regular file", key);
   const noFollow = fsConstants.O_NOFOLLOW ?? 0;
-  const fd = fsStep(key, "open", () => openSync2(abs, fsConstants.O_RDONLY | noFollow));
+  const fd = fsStep(key, "open", () => openSync3(abs, fsConstants.O_RDONLY | noFollow));
   try {
-    const st = fsStep(key, "fstat", () => fstatSync(fd));
+    const st = fsStep(key, "fstat", () => fstatSync2(fd));
     if (!st.isFile())
       throw new AttestationRefusal("the opened handle is not a regular file", key);
     if (st.size > remainingBytes) {
@@ -26943,7 +28822,7 @@ function readOwnedFile(root, key, remainingBytes, maxTotalBytes) {
     const bytes = Buffer.allocUnsafe(st.size);
     let filled = 0;
     while (filled < st.size) {
-      const read = fsStep(key, "read", () => readSync(fd, bytes, filled, st.size - filled, filled));
+      const read = fsStep(key, "read", () => readSync2(fd, bytes, filled, st.size - filled, filled));
       if (read === 0) {
         throw new AttestationRefusal(`the file is shorter than the ${st.size} bytes fstat reported (only ${filled} could be read) \u2014 it changed size while it was being read, so no buffer here can be attested`, key);
       }
@@ -26951,7 +28830,7 @@ function readOwnedFile(root, key, remainingBytes, maxTotalBytes) {
     }
     return bytes;
   } finally {
-    closeSync2(fd);
+    closeSync3(fd);
   }
 }
 function hashObjectOf(root, key, bytes) {
@@ -26987,7 +28866,7 @@ function collectAttestationEvidence(opts) {
     if (actual !== blob) {
       throw new AttestationRefusal(`the worktree bytes are not the content committed in ${head} (git hash-object of the bytes read is ${actual}, the tree entry is ${blob}) \u2014 an uncommitted or modified file cannot be attested`, key);
     }
-    perPath[key] = { kind: "present", sha256: createHash("sha256").update(bytes).digest("hex"), blob };
+    perPath[key] = { kind: "present", sha256: createHash2("sha256").update(bytes).digest("hex"), blob };
   }
   return { head_commit: head, perPath };
 }
@@ -27004,8 +28883,8 @@ function readHeadFile(root, key) {
 }
 
 // packages/mcp-server/dist/entry-reachability.js
-import { existsSync as existsSync3, readdirSync, readFileSync } from "node:fs";
-import { join as join5 } from "node:path";
+import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync4 } from "node:fs";
+import { join as join9 } from "node:path";
 var MCP_TOOL_FILES = /* @__PURE__ */ new Set(["packages/mcp-server/src/server.ts", "packages/mcp-server/src/tools.ts"]);
 var TOOL_NAME_TOKEN = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
 var BIN_REFERENCE_DIRS = ["commands", "agent-templates", "templates", "scripts", "scripts/lib", "scripts/hooks", "scripts/hooks/lib"];
@@ -27081,7 +28960,7 @@ var EntryReachability = class {
     return hit ? { path, kind: "hook", reached: true, detail: `hooks/hooks.json runs ${target}` } : { path, kind: "hook", reached: false, detail: `no hooks/hooks.json command runs ${target}` };
   }
   judgePresent(path, kind) {
-    return existsSync3(join5(this.root, path)) ? { path, kind, reached: true, detail: `${kind} file present` } : { path, kind, reached: false, detail: `${path} does not exist, so nothing discovers it` };
+    return existsSync3(join9(this.root, path)) ? { path, kind, reached: true, detail: `${kind} file present` } : { path, kind, reached: false, detail: `${path} does not exist, so nothing discovers it` };
   }
   judgeTool(path, role) {
     const names = this.toolNames ??= this.load("packages/mcp-server/src/server.ts", (text) => {
@@ -27092,15 +28971,15 @@ var EntryReachability = class {
     });
     if (!names.ok)
       return { path, kind: "tool", reached: false, detail: names.why };
-    const named = [...new Set(role.match(TOOL_NAME_TOKEN) ?? [])];
-    const registered = named.filter((n) => names.value.has(n));
+    const named2 = [...new Set(role.match(TOOL_NAME_TOKEN) ?? [])];
+    const registered = named2.filter((n) => names.value.has(n));
     if (registered.length)
       return { path, kind: "tool", reached: true, detail: `server.ts registers ${registered.join(", ")}` };
     return {
       path,
       kind: "tool",
       reached: false,
-      detail: named.length ? `its role names ${named.join(", ")}, and server.ts registers none of them` : `its role names no tool; a tool entry names its registerTool name in the files[] role`
+      detail: named2.length ? `its role names ${named2.join(", ")}, and server.ts registers none of them` : `its role names no tool; a tool entry names its registerTool name in the files[] role`
     };
   }
   judgeAgent(path, file) {
@@ -27159,7 +29038,7 @@ var EntryReachability = class {
     const out = /* @__PURE__ */ new Map();
     const add = (rel) => {
       try {
-        out.set(rel, readFileSync(join5(this.root, rel), "utf8"));
+        out.set(rel, readFileSync4(join9(this.root, rel), "utf8"));
       } catch (err) {
         const code = err.code;
         if (code !== "ENOENT" && code !== "EISDIR")
@@ -27168,7 +29047,7 @@ var EntryReachability = class {
     };
     const list = (dir) => {
       try {
-        return readdirSync(join5(this.root, dir));
+        return readdirSync2(join9(this.root, dir));
       } catch (err) {
         if (err.code === "ENOENT")
           return [];
@@ -27191,13 +29070,13 @@ var EntryReachability = class {
   }
   /** Same predicate as isSterlingClone in scripts/lib/handoff-projection.mjs (see the header). */
   isSterlingClone() {
-    if (!existsSync3(join5(this.root, "scripts/architecture-projection.mjs")))
+    if (!existsSync3(join9(this.root, "scripts/architecture-projection.mjs")))
       return false;
     const manifest = this.load(".claude-plugin/plugin.json", (text) => JSON.parse(text).name);
     return manifest.ok && manifest.value === "sterling";
   }
   readNpmScripts() {
-    if (!existsSync3(join5(this.root, "package.json")))
+    if (!existsSync3(join9(this.root, "package.json")))
       return { ok: true, value: [] };
     return this.load("package.json", (text) => {
       const scripts = JSON.parse(text).scripts ?? {};
@@ -27205,11 +29084,11 @@ var EntryReachability = class {
     });
   }
   load(rel, parse3) {
-    const abs = join5(this.root, rel);
+    const abs = join9(this.root, rel);
     if (!existsSync3(abs))
       return { ok: false, why: `${rel} is missing` };
     try {
-      return { ok: true, value: parse3(readFileSync(abs, "utf8")) };
+      return { ok: true, value: parse3(readFileSync4(abs, "utf8")) };
     } catch (err) {
       return { ok: false, why: `${rel} could not be parsed (${err.message})` };
     }
@@ -27379,6 +29258,12 @@ function elementOwnsScalar(el, key) {
   return Object.prototype.hasOwnProperty.call(el, key) && el[key] !== void 0;
 }
 var CONFIG_SET_FORBIDDEN_SEGMENTS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
+var StorageTransitionRequiredError = class extends Error {
+  constructor(path) {
+    super(`config_set: '${path}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), so it changes only when the stores move, through the explicit storage transition: \`node scripts/move-store.mjs --to pg|sqlite\`, which writes it after the move commits. Nothing was written.`);
+    this.name = "StorageTransitionRequiredError";
+  }
+};
 function unreadKeyWarnings(path, keys) {
   return keys.filter((k) => k.path === path || path.startsWith(`${k.path}.`)).map((k) => k.renamed_to ? `${k.path} is not read by Sterling (renamed to ${k.renamed_to})` : `${k.path} is not read by Sterling`);
 }
@@ -27395,11 +29280,13 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
   if (path.split(".").some((seg) => CONFIG_SET_FORBIDDEN_SEGMENTS.has(seg))) {
     throw new Error(`config_set: '${path}' contains a forbidden path segment \u2014 __proto__ / constructor / prototype are refused anywhere in a dotted path (prototype-pollution guard). Nothing was written.`);
   }
-  const configDir = join6(repoRoot, ".sterling");
-  const configPath = join6(configDir, "config.json");
+  if (path === "storage" || path.startsWith("storage."))
+    throw new StorageTransitionRequiredError(path);
+  const configDir = join10(repoRoot, ".sterling");
+  const configPath = join10(configDir, "config.json");
   let dirLst;
   try {
-    dirLst = lstatSync2(configDir);
+    dirLst = lstatSync5(configDir);
   } catch (e) {
     if (e.code !== "ENOENT") {
       throw new Error(`config_set: could not stat .sterling at the project root (${e.message}). Nothing was written.`);
@@ -27412,15 +29299,15 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
   if (dirLst.isSymbolicLink()) {
     throw new Error(`config_set: .sterling is a symlink at the project root \u2014 refusing a structured write beneath a linked directory. Nothing was written.`);
   }
-  const realDir = realpathSync2(configDir);
-  const realRoot = realpathSync2(repoRoot);
+  const realDir = realpathSync3(configDir);
+  const realRoot = realpathSync3(repoRoot);
   const relDir = relative(realRoot, realDir);
   if (relDir === ".." || relDir.startsWith(`..${sep}`) || isAbsolute(relDir)) {
     throw new Error(`config_set: .sterling resolves outside the project root (${realDir}) \u2014 refusing. Nothing was written.`);
   }
   let fileLst;
   try {
-    fileLst = lstatSync2(configPath);
+    fileLst = lstatSync5(configPath);
   } catch (e) {
     if (e.code !== "ENOENT") {
       throw new Error(`config_set: could not stat .sterling/config.json (${e.message}). Nothing was written.`);
@@ -27435,11 +29322,11 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (!fileLst.isFile()) {
       throw new Error(`config_set: .sterling/config.json is not a regular file \u2014 refusing. Nothing was written.`);
     }
-    currentBytes = readFileSync2(configPath);
+    currentBytes = readFileSync5(configPath);
   } else {
     currentBytes = Buffer.alloc(0);
   }
-  const currentDigest = createHash2("sha256").update(currentBytes).digest("hex");
+  const currentDigest = createHash3("sha256").update(currentBytes).digest("hex");
   if (expectedDigest !== void 0 && expectedDigest !== currentDigest) {
     throw new Error(`config_set: expected_digest ${expectedDigest} does not match the current config.json digest ${currentDigest} \u2014 it changed since you read it. Nothing was written; re-read and retry.`);
   }
@@ -27499,8 +29386,8 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 ${issues}. Nothing was written.`);
   }
   const serialized = JSON.stringify(mutated, null, 2) + "\n";
-  const tmpPath = join6(configDir, `config.json.tmp-${randomUUID2()}`);
-  writeFileSync(tmpPath, serialized);
+  const tmpPath = join10(configDir, `config.json.tmp-${randomUUID2()}`);
+  writeFileSync2(tmpPath, serialized);
   let renamed = false;
   try {
     if (fileLst) {
@@ -27511,15 +29398,15 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     }
     let raceBytes;
     try {
-      raceBytes = readFileSync2(configPath);
+      raceBytes = readFileSync5(configPath);
     } catch {
       raceBytes = Buffer.alloc(0);
     }
-    const raceDigest = createHash2("sha256").update(raceBytes).digest("hex");
+    const raceDigest = createHash3("sha256").update(raceBytes).digest("hex");
     if (raceDigest !== currentDigest) {
       throw new Error(`config_set: config.json changed on disk while this write was in flight (a concurrent writer) \u2014 read digest ${currentDigest}, now ${raceDigest}. Nothing was written; re-read and retry.`);
     }
-    renameSync(tmpPath, configPath);
+    renameSync2(tmpPath, configPath);
     renamed = true;
   } finally {
     if (!renamed) {
@@ -27529,7 +29416,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
       }
     }
   }
-  const digest = createHash2("sha256").update(serialized).digest("hex");
+  const digest = createHash3("sha256").update(serialized).digest("hex");
   const warnings = unreadKeyWarnings(path, unreadConfigKeys(mutated));
   return warnings.length > 0 ? { path, previous_value: previousValue, value, digest, warnings } : { path, previous_value: previousValue, value, digest };
 }
@@ -27699,7 +29586,7 @@ var SterlingTools = class _SterlingTools {
     for (const rel of _SterlingTools.baselineablePaths(record2)) {
       if (only && !only.has(rel))
         continue;
-      const shape = lstatSync2(join6(root, rel), { throwIfNoEntry: false });
+      const shape = lstatSync5(join10(root, rel), { throwIfNoEntry: false });
       if (!shape || !shape.isFile())
         continue;
       const hash = this.hashFile(rel, root);
@@ -27832,7 +29719,7 @@ var SterlingTools = class _SterlingTools {
       return { root: mapped, unresolved: false };
     if (!this.repoRoot)
       return { root: void 0, unresolved: true };
-    return { root: join6(this.repoRoot, mapped), unresolved: false };
+    return { root: join10(this.repoRoot, mapped), unresolved: false };
   }
   /**
    * Does a record's working_tree name a tree OTHER than this project? A
@@ -28441,7 +30328,7 @@ var SterlingTools = class _SterlingTools {
     if (!root)
       return void 0;
     try {
-      return createHash2("sha256").update(readFileSync2(join6(root, rel))).digest("hex");
+      return createHash3("sha256").update(readFileSync5(join10(root, rel))).digest("hex");
     } catch {
       return void 0;
     }
@@ -28505,7 +30392,7 @@ var SterlingTools = class _SterlingTools {
     const baseline = ctx.baselines?.[rel];
     let stat;
     try {
-      stat = statSync2(join6(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
+      stat = statSync3(join10(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
     } catch (err) {
       const code = err?.code;
       return { verdict: { kind: "unavailable", reason: `stat_failed_${String(code ?? "unknown").toLowerCase()}` } };
@@ -29191,6 +31078,7 @@ var SterlingTools = class _SterlingTools {
     this.refuseServerOwnedFields(fields, "knowledge_create");
     const ts = this.now();
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, version: smuggledVersion, ...body } = fields;
+    const operationId = randomUUID2();
     const candidate = {
       id: this.newId(),
       type,
@@ -29282,7 +31170,7 @@ var SterlingTools = class _SterlingTools {
     }
     const isSystemTodo = type === "todo" && candidate.source === "system";
     if (isSystemTodo) {
-      const res = this.store.enqueueSystemTodo(candidate);
+      const res = this.store.enqueueSystemTodo(candidate, { operation_id: operationId });
       this.surfacePromotionCandidate(res.record, type);
       return {
         record: res.record,
@@ -29293,7 +31181,7 @@ var SterlingTools = class _SterlingTools {
         ...claimsCheck
       };
     }
-    const record2 = this.store.create(candidate);
+    const record2 = this.store.create(candidate, { operation_id: operationId });
     const ledgerWarning = this.logDomainWrite(record2.scope, record2);
     if (ledgerWarning)
       citationWarnings.push(ledgerWarning);
@@ -29349,16 +31237,16 @@ var SterlingTools = class _SterlingTools {
     if (!fits.length)
       return void 0;
     const descriptionOf = new Map(described.map((d) => [d.name, d.description]));
-    const named = fits.map((f) => `domain:${f.name} ("${descriptionOf.get(f.name)}"; matched: ${f.matched.join(", ")})`).join("; ");
+    const named2 = fits.map((f) => `domain:${f.name} ("${descriptionOf.get(f.name)}"; matched: ${f.matched.join(", ")})`).join("; ");
     const alsoSterling = allFits.length > fits.length ? " It also fits the sterling domain, which is never a promotion target." : "";
     const verdict = allFits.length === 1 ? "exactly one fit: drainable" : "several fit: ask the user";
     const label = _SterlingTools.mintHeadlineOf(type, body) || type;
     this.maintenanceEnqueue({
       reason: "promotion_review",
-      text: `review '${label}' for promotion: project-scoped ${type} with no file_keys fits ${named}.${alsoSterling} ${verdict}`,
+      text: `review '${label}' for promotion: project-scoped ${type} with no file_keys fits ${named2}.${alsoSterling} ${verdict}`,
       feature_link: record2.id
     });
-    return `promotion candidate: this project-scoped ${type} fits ${named}, so a promotion_review item was queued (${verdict}). A record about that subject belongs in scope domain:${fits[0].name} at creation; one about this repo stays project.`;
+    return `promotion candidate: this project-scoped ${type} fits ${named2}, so a promotion_review item was queued (${verdict}). A record about that subject belongs in scope domain:${fits[0].name} at creation; one about this repo stays project.`;
   }
   findAntiPatternOverlap(candidate) {
     const existing = this.store.query({ types: ["anti_pattern"], cap: 1e3 });
@@ -29457,7 +31345,7 @@ var SterlingTools = class _SterlingTools {
         if (tree?.unresolved)
           return { ...record2, verify_before_use: true };
         if (rel && tree?.root) {
-          const stat = statSync2(join6(tree.root, rel), { throwIfNoEntry: false });
+          const stat = statSync3(join10(tree.root, rel), { throwIfNoEntry: false });
           if (!stat && this.parkedOnRef(rel, tree.root).status !== "parked") {
             const mintFailed = this.mintAtRead({
               reason: "refresh_reference",
@@ -30512,7 +32400,7 @@ var SterlingTools = class _SterlingTools {
       answerability,
       provenance,
       records: records.map(projectRecord),
-      ...aboveThreshold !== void 0 ? { above_threshold: aboveThreshold } : {},
+      ...aboveThreshold !== void 0 ? { above_threshold: aboveThreshold, score_scale: this.store.scoreScale() } : {},
       ...this.unreadDomainsDisclosure(),
       ...mintFailures.length > 0 ? { maintenance_mint_failed: mintFailures } : {}
     };
@@ -32203,7 +34091,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         if (expectedVersion !== void 0 && previousVersion !== void 0 && expectedVersion !== previousVersion) {
           throw new Error(`${toolName}: stale expected_version \u2014 the caller supplied expected_version ${expectedVersion} but record '${old.id}' is at version ${previousVersion}. Nothing was written; re-read the record and retry against version ${previousVersion}.`);
         }
-        updated = this.store.supersede(old.id, next);
+        updated = this.store.supersede(old.id, next, void 0, { operation_id: randomUUID2() });
         for (const claim of claims) {
           const atRemoval = this.store.get(claim.id);
           this.store.remove(claim.id, ts);
@@ -32414,7 +34302,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         const movedFiles = parentRec.files.filter((f) => claimedPaths.get(f.path) === child.slug);
         const movedAc = parentAcArray.filter((a) => claimedAcIds.get(a.ac_id) === child.slug);
         const movedRefs = parentRefsArray.filter((r) => claimedAcIds.get(r.ac_id) === child.slug);
-        const created = this.knowledgeCreate("feature_article", {
+        const created2 = this.knowledgeCreate("feature_article", {
           slug: child.slug,
           title: child.title,
           what_it_does: child.what_it_does,
@@ -32430,7 +34318,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
           // for that exact value — a contract this surface does not make.
           history: [{ date: ts, event: `split from '${parentRec.slug}'${reason ? ` \u2014 ${reason}` : ""}` }]
         });
-        childResults.push({ id: created.record.id, slug: child.slug });
+        childResults.push({ id: created2.record.id, slug: child.slug });
       }
       const remainingFiles = parentRec.files.filter((f) => !claimedPaths.has(f.path));
       const remainingAc = currentAcIsArray ? parentAcArray.filter((a) => !claimedAcIds.has(a.ac_id)) : parentRec.current_ac;
@@ -32596,10 +34484,10 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     let claimsCheck = {};
     const isDomainScope = !sourceProjectHeld;
     const ledgerWarnings = this.logDomainWritesAfter(() => this.store.withTransactionForRecord(original.id, () => {
-      const created = this.knowledgeCreate(newType, { scope: sourceScope, ...new_record.fields }, { deferCheckSkipped: isDomainScope });
-      deferredSkips = isDomainScope ? created.check_skipped ?? [] : [];
-      claimsCheck = created.claims_check ? { claims_check: created.claims_check } : {};
-      newId = created.record.id;
+      const created2 = this.knowledgeCreate(newType, { scope: sourceScope, ...new_record.fields }, { deferCheckSkipped: isDomainScope });
+      deferredSkips = isDomainScope ? created2.check_skipped ?? [] : [];
+      claimsCheck = created2.claims_check ? { claims_check: created2.claims_check } : {};
+      newId = created2.record.id;
       const updateBody = { [field]: splicedValue };
       if (typeHasHistory) {
         const priorHistory = Array.isArray(original.history) ? original.history : [];
@@ -32769,7 +34657,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         superseded_by: null,
         scope: `domain:${domain}`,
         links: [{ rel: "informed_by", target_id: originalId }]
-      });
+      }, { operation_id: randomUUID2() });
     } catch (err) {
       if (err instanceof ZodError2)
         throw this.renderValidationFailure(err, original.type, "knowledge_promote");
@@ -32924,10 +34812,10 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     try {
       if (!this.repoRoot)
         throw new Error("no project root is known to this server");
-      if (!existsSync4(join6(this.repoRoot, ".sterling")))
+      if (!existsSync4(join10(this.repoRoot, ".sterling")))
         throw new Error(`${this.repoRoot} has no .sterling directory`);
-      ledgerPath = join6(this.repoRoot, PROCESS_KNOWLEDGE_WRITES_REL);
-      mkdirSync3(dirname5(ledgerPath), { recursive: true });
+      ledgerPath = join10(this.repoRoot, PROCESS_KNOWLEDGE_WRITES_REL);
+      mkdirSync4(dirname5(ledgerPath), { recursive: true });
       const entry = knowledgeWriteSchema.parse({ id: record2.id, type: record2.type, at: this.now() });
       appendFileSync(ledgerPath, `
 ${JSON.stringify(entry)}
@@ -32961,9 +34849,9 @@ ${JSON.stringify(entry)}
    */
   compactDomainWrites(ledgerPath) {
     const MIN_LINE_BYTES = 30;
-    if (statSync2(ledgerPath).size <= KNOWLEDGE_WRITES_COMPACT_LINES * MIN_LINE_BYTES)
+    if (statSync3(ledgerPath).size <= KNOWLEDGE_WRITES_COMPACT_LINES * MIN_LINE_BYTES)
       return;
-    const lines = readFileSync2(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
+    const lines = readFileSync5(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
     if (lines.length <= KNOWLEDGE_WRITES_COMPACT_LINES)
       return;
     const latest = /* @__PURE__ */ new Map();
@@ -32981,11 +34869,11 @@ ${JSON.stringify(entry)}
       latest.set(ok.data.id, ok.data);
     }
     const kept = [...latest.values()].slice(-KNOWLEDGE_WRITES_KEEP_IDS);
-    const tmp = join6(dirname5(ledgerPath), knowledgeWritesTempFile(basename2(ledgerPath), process.pid, randomUUID2()));
+    const tmp = join10(dirname5(ledgerPath), knowledgeWritesTempFile(basename2(ledgerPath), process.pid, randomUUID2()));
     try {
-      writeFileSync(tmp, kept.map((e) => `${JSON.stringify(e)}
+      writeFileSync2(tmp, kept.map((e) => `${JSON.stringify(e)}
 `).join(""));
-      renameSync(tmp, ledgerPath);
+      renameSync2(tmp, ledgerPath);
     } catch (err) {
       try {
         unlinkSync(tmp);
@@ -33029,12 +34917,12 @@ ${JSON.stringify(entry)}
   removeExpiredDomainWriteLedgers() {
     if (!this.repoRoot)
       return void 0;
-    const dir = join6(this.repoRoot, KNOWLEDGE_WRITES_DIR_REL);
+    const dir = join10(this.repoRoot, KNOWLEDGE_WRITES_DIR_REL);
     const gone = (err) => err?.code === "ENOENT";
     const text = (err) => err instanceof Error ? err.message : String(err);
     let names;
     try {
-      names = readdirSync2(dir);
+      names = readdirSync3(dir);
     } catch (err) {
       if (gone(err))
         return void 0;
@@ -33050,10 +34938,10 @@ ${JSON.stringify(entry)}
       const ownerPid = name === legacy ? null : knowledgeWritesOwnerPid(name) ?? knowledgeWritesTempOwnerPid(name);
       if (name !== legacy && ownerPid === null)
         continue;
-      const path = join6(dir, name);
+      const path = join10(dir, name);
       let mtimeMs;
       try {
-        mtimeMs = statSync2(path).mtimeMs;
+        mtimeMs = statSync3(path).mtimeMs;
       } catch (err) {
         if (!gone(err))
           failed.push(`${name}: ${err?.code ?? "unknown error"}`);
@@ -33090,12 +34978,12 @@ ${JSON.stringify(entry)}
     if (!this.repoRoot) {
       throw new Error("session-event write: no project root is known to this server, so the transient register location cannot be resolved \u2014 use the script fallback (bin/no-capture.mjs / bin/concept-designed.mjs in the Sterling install root)");
     }
-    const eventsPath = join6(this.repoRoot, ".sterling", "transient", "session-events.json");
-    mkdirSync3(dirname5(eventsPath), { recursive: true });
+    const eventsPath = join10(this.repoRoot, ".sterling", "transient", "session-events.json");
+    mkdirSync4(dirname5(eventsPath), { recursive: true });
     let events = [];
     if (existsSync4(eventsPath)) {
       try {
-        const parsed = JSON.parse(readFileSync2(eventsPath, "utf8"));
+        const parsed = JSON.parse(readFileSync5(eventsPath, "utf8"));
         if (Array.isArray(parsed))
           events = parsed;
       } catch {
@@ -33104,7 +34992,7 @@ ${JSON.stringify(entry)}
     const at = this.now();
     for (const e of entries)
       events.push({ ...e, at });
-    writeFileSync(eventsPath, JSON.stringify(events));
+    writeFileSync2(eventsPath, JSON.stringify(events));
     return { at };
   }
   /**
@@ -34758,6 +36646,7 @@ ${JSON.stringify(entry)}
       }
     }
     const ts = this.now();
+    const operationId = randomUUID2();
     const candidate = {
       id: this.newId(),
       type,
@@ -34872,10 +36761,10 @@ Extend fields to carry the surviving ruling(s) forward, or re-call with orphans_
       let head;
       if (closedByNote) {
         const links = parsed.links.filter((l) => !(l.rel === "supersedes" && l.target_id === old.id));
-        head = this.store.create({ ...parsed, links });
+        head = this.store.create({ ...parsed, links }, { operation_id: operationId });
         this.store.retireInFavorOf(old.id, head.id, ts);
       } else {
-        head = this.store.supersede(old.id, parsed);
+        head = this.store.supersede(old.id, parsed, void 0, { operation_id: operationId });
       }
       for (const claim of claims) {
         const atRemoval = this.store.get(claim.id);
@@ -34986,15 +36875,35 @@ var strict = (shape) => external_exports.object(shape).strict();
 function unreadableDomainWarning(d) {
   return `sterling: domain '${d.name}' is mounted but its store at '${d.dbPath}' could not be read (${d.error}); reads skip it until the store is repaired and the session restarts, so its knowledge is not in any result, and writes into it are refused.`;
 }
-function createSterlingServer(storePath2) {
-  const configPath = join7(dirname6(storePath2), "config.json");
-  const config2 = parseConfig(existsSync5(configPath) ? JSON.parse(readFileSync3(configPath, "utf8")) : {});
+var StoreArgInPostgresStorageError = class extends Error {
+  constructor(configPath) {
+    super(`--store opens a SQLite store, but ${configPath.replace(/\\/g, "/")} sets storage 'postgres', so this project's stores live in Postgres. Launch the server with --project <project root>. Postgres storage never falls back to SQLite; nothing was opened.`);
+    this.name = "StoreArgInPostgresStorageError";
+  }
+};
+function openStoreArg(storePath2) {
+  const configPath = join11(dirname6(storePath2), "config.json");
+  const raw = existsSync5(configPath) ? JSON.parse(readFileSync6(configPath, "utf8")) : {};
+  const config2 = parseConfig(raw);
+  if (raw.storage === "postgres")
+    throw new StoreArgInPostgresStorageError(configPath);
   const store = new MountedStores(storePath2, resolveDomainMounts(config2), { skipMissing: true });
+  return { store, config: config2, repoRoot: dirname6(dirname6(storePath2)) };
+}
+function createSterlingServer(target) {
+  let opened;
+  if (typeof target === "string") {
+    opened = openStoreArg(target);
+  } else {
+    const routed = openRoutedStores(target.projectRoot, { mount: true, skipMissing: true });
+    opened = { store: routed.stores, config: routed.config, repoRoot: routed.route.root };
+  }
+  const { store, config: config2, repoRoot } = opened;
   for (const m of store.missingDomains)
     process.stderr.write(missingDomainWarning(m) + "\n");
   for (const d of store.unreadableDomains)
     process.stderr.write(unreadableDomainWarning(d) + "\n");
-  const tools = new SterlingTools({ store, config: config2, repoRoot: dirname6(dirname6(storePath2)), domains: mountedDomainSurface(store) });
+  const tools = new SterlingTools({ store, config: config2, repoRoot, domains: mountedDomainSurface(store) });
   const ledgerRemoval = tools.removeExpiredDomainWriteLedgers();
   if (ledgerRemoval)
     process.stderr.write(ledgerRemoval + "\n");
@@ -35008,9 +36917,9 @@ function createSterlingServer(storePath2) {
     return description ? `${name} ("${description}")` : `${name} (no description)`;
   });
   const createDomainsNote = bootDomains.length ? ` Mounted domains at server start: ${bootDomains.join("; ")} (the receipt's mounted_domains is current). A record about one of these subjects takes scope domain:<name>; a record about this repo stays project.` : "";
-  const server2 = new McpServer({ name: "sterling", version: "0.1.0" });
+  const server = new McpServer({ name: "sterling", version: "0.1.0" });
   const json = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
-  server2.registerTool("knowledge_create", {
+  server.registerTool("knowledge_create", {
     description: "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. A links entry with rel 'supersedes' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel 'cites' for a deliberate partial override. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." + createDomainsNote,
     inputSchema: strict({ type: external_exports.string(), fields: knowledgeCreateFieldsSchema, projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ type, fields, projection }) => {
@@ -35023,8 +36932,8 @@ function createSterlingServer(storePath2) {
     }
     return json(tools.writeProjected(tools.knowledgeCreate(type, restFields), projection));
   });
-  server2.registerTool("knowledge_query", {
-    description: `Retrieve knowledge: filter (types, stack_tags) \u2192 file_keys join \u2192 rank (rank_terms: single keywords, never prose) \u2192 cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW \u2014 raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: "full" (default), "digest" (one headline line per record \u2014 scan wide, then knowledge_get the few you need), or "count". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (score = -bm25, higher is more relevant, unbounded). Each record carries \`source\` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched; unreadable_domains lists mounted domains that could not be read, each with its error, and their records are not in the result.`,
+  server.registerTool("knowledge_query", {
+    description: `Retrieve knowledge: filter (types, stack_tags) \u2192 file_keys join \u2192 rank (rank_terms: single keywords, never prose) \u2192 cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW \u2014 raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: "full" (default), "digest" (one headline line per record \u2014 scan wide, then knowledge_get the few you need), or "count". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (higher is more relevant, unbounded; score_scale names the scale it was applied on: fts5_bm25 is -bm25 on SQLite, pg_bm25_v1 on Postgres; a min_score is not portable across scales). Each record carries \`source\` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched; unreadable_domains lists mounted domains that could not be read, each with its error, and their records are not in the result.`,
     inputSchema: strict({
       types: external_exports.array(external_exports.string()).optional(),
       stack_tags: external_exports.array(external_exports.string()).optional(),
@@ -35035,7 +36944,7 @@ function createSterlingServer(storePath2) {
       min_score: external_exports.number().optional()
     })
   }, (opts) => json(tools.knowledgeQueryResult(opts)));
-  server2.registerTool("knowledge_get", {
+  server.registerTool("knowledge_get", {
     description: "Fetch one record by id (full uuid, exact slug, or unambiguous 8-char prefix) \u2014 the full-fidelity read. version:<n> reads an archived prior version. With `field`: a windowed read of just that field \u2014 strings page by characters, arrays by elements (offset/length); returns {kind, total_chars|total_entries, offset, value|entries}; an offset past the end returns empty with the true total. Scalar/object fields return whole and refuse offset/length. Unknown field is refused naming the valid set; offset/length without field is refused. unreadable_domains (only when a mounted domain could not be read: each with its error) means a record held there cannot be found by this read.",
     inputSchema: strict({
       id: external_exports.string(),
@@ -35045,11 +36954,11 @@ function createSterlingServer(storePath2) {
       version: external_exports.number().int().positive().optional().describe("read the ARCHIVED snapshot at this version instead of the current record; an unknown version is refused, never silently the latest")
     })
   }, ({ id, field, offset, length, version: version2 }) => json(tools.knowledgeGet(id, { field, offset, length, version: version2 })));
-  server2.registerTool("knowledge_render", {
+  server.registerTool("knowledge_render", {
     description: "Read-only: render 1-20 records (same id ladder as knowledge_get) as one paste-ready plain-text block, for embedding store rulings into an external reviewer prompt. Any id that fails to resolve or is ambiguous refuses the whole call, naming it. Records render in request order with a header (type, title, handle, status) and every content field; server-owned plumbing is omitted; superseded records render with their status. Never writes.",
     inputSchema: strict({ ids: external_exports.array(external_exports.string()).min(1).max(20).describe("1-20 record ids (uuid / slug / unambiguous 8-char prefix)") })
   }, ({ ids }) => ({ content: [{ type: "text", text: tools.knowledgeRender({ ids }) }] }));
-  server2.registerTool("knowledge_split", {
+  server.registerTool("knowledge_split", {
     description: "Split a feature_article: move a subset of its files[] / current_ac[] / live_test_refs into one or more NEW child articles. Prose moves verbatim, ac_ids are inherited (never renumbered), live_test_refs follow their ac_id, the parent keeps its slug (new version), and file coverage stays total. Refused: a moved path/ac_id not owned by the parent or claimed by two children, a child slug that duplicates another or an existing article, or moving every parent file. All validation runs first and the whole split is one transaction. resolves:[<full item ids>] explicitly closes open items of any lane except promotion_review that are keyed to the parent's chain, or that are the parent's article_oversize item (validated before the write; unnamed items stay open and are warned on the receipt). Returns {parent:{id,slug,version}, children:[{id,slug}], warnings[]} \u2014 warnings (e.g. still-oversize) never gate.",
     inputSchema: strict({
       id: external_exports.string(),
@@ -35068,7 +36977,7 @@ function createSterlingServer(storePath2) {
       resolves: external_exports.array(external_exports.string()).optional().describe("open maintenance-queue item ids this split discharges \u2014 validated before the write")
     })
   }, ({ id, children, parent_what_it_does, parent_intended_behavior, reason, resolves }) => json(tools.knowledgeSplitResult({ id, children, parent_what_it_does, parent_intended_behavior, reason, resolves })));
-  server2.registerTool("knowledge_extract", {
+  server.registerTool("knowledge_extract", {
     description: "Lift a passage out of one string field of a live record into a NEW record of a caller-chosen type (new_record.type required; todo/attestation refused); the source stays active minus the passage. (field, find) must match exactly once (0 or >1 matches refused with the count); replace (default '') is inserted literally. Edges are written both ways: new informed_by source, source cites new. The new record inherits the source scope (an explicit different scope is refused); attestation sources are refused; on a domain-held source a non-empty resolves is refused. All validation runs first and everything lands in one transaction. resolves:[<full item ids>] explicitly closes open reconcile_needed/refresh_reference items whose file_keys overlap the source record's (validated before the write; unnamed items stay open and are warned on the receipt). Returns {extracted, source:{id,version}, edges, warnings[]}.",
     inputSchema: strict({
       id: external_exports.string(),
@@ -35083,19 +36992,19 @@ function createSterlingServer(storePath2) {
       resolves: external_exports.array(external_exports.string()).optional().describe("open maintenance-queue item ids this extract discharges \u2014 validated (plain lane, file_keys overlap) before the write")
     })
   }, ({ id, field, find, replace, new_record, reason, resolves }) => json(tools.knowledgeExtractResult({ id, field, find, replace, new_record, reason, resolves })));
-  server2.registerTool("knowledge_schema", {
+  server.registerTool("knowledge_schema", {
     description: "Describe what a record type accepts before writing it. Returns {type, rules[], fields:[{name, required, type, enum_values?, element_fields?, member_fields?, min_length?, format?, default?, condition?, example?, server_owned?}], required[], optional[]}, derived from the registered schema. `condition` states a refusal the type string cannot: a rule tying the field to another field of the record, or a limit on the value itself (a repo path, a slug already held, a link rel with its own tool). `rules` holds what applies to the whole create and fits no field (dedup_override). element_fields describes an array's element and member_fields an object's members, each entry in the same form as a field. min_length marks a string that must not be empty and format a repo-relative path; on an array both apply to each element. `default` is the value used when the field is absent. `example` is a schema-validated worked value (absent when none is derivable); the examples of one type validate together as one record. server_owned fields are assigned by the server, refused on write and excluded from required/optional, except `type`, which knowledge_create requires as fields.type (see its condition). An unregistered type lists the registered ones.",
     inputSchema: strict({ type: external_exports.string() })
   }, ({ type }) => json(tools.knowledgeSchema(type)));
-  server2.registerTool("knowledge_stats", {
+  server.registerTool("knowledge_stats", {
     description: "Size and composition without the body. With id: body_chars (what article_oversize judges; history excluded), history_chars, history_entries, supersedes_count, and over_threshold for a feature_article. Without id: per-type counts and sizes over the mounted stores, plus the 10 largest feature_article bodies against the threshold.",
     inputSchema: strict({ id: external_exports.string().optional() })
   }, ({ id }) => json(tools.knowledgeStats(id)));
-  server2.registerTool("knowledge_retire", {
+  server.registerTool("knowledge_retire", {
     description: "Retire a genuine DUPLICATE in favour of a surviving record: status=superseded, superseded_by=in_favor_of, no new row; it stays fetchable by id and its links survive, but queries stop serving it. Not for a merely wrong record \u2014 fix that with knowledge_update. in_favor_of is required and must be live. todos are refused (use board_remove / maintenance_remove).",
     inputSchema: strict({ id: external_exports.string(), in_favor_of: external_exports.string() })
   }, ({ id, in_favor_of }) => json(tools.knowledgeRetire(id, in_favor_of)));
-  server2.registerTool("knowledge_supersede", {
+  server.registerTool("knowledge_supersede", {
     description: "Atomically replace a decision / anti_pattern / research_finding with a NEW record built from `fields` (a complete create-shaped body, not a delta) and mark old_id superseded by it, in one transaction. A slugless `fields` inherits the old slug; an explicit slug is collision-checked. If the old record enumerates 2+ rulings and the replacement leaves any uncovered, the call is refused naming them \u2014 carry them forward, or pass orphans_acknowledged:true. A reference_material whose subject is gone (its location was deleted) is closed here too: pass type 'decision' or 'research_finding' and `fields` for a short record of that type saying what happened; the reference is superseded by it and is no longer read, so it raises no further refresh_reference items. A reference whose subject still exists is repointed with knowledge_update; a duplicate goes to knowledge_retire. An open_question or disconfirmed_hypothesis whose subject is gone is closed the same way, with the same two closing types; one that still applies is updated with knowledge_update, and an answered open_question is closed there with resolution_status 'closed' and closed_into. resolves:[<full item ids>] closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to the old record's chain in the same transaction (validated before the write; unnamed items stay open). Other types are refused naming their exit path (todo \u2192 board_remove/maintenance_remove; feature_article \u2192 knowledge_update/knowledge_retire). Refusals write nothing.",
     inputSchema: strict({
       old_id: external_exports.string(),
@@ -35105,7 +37014,7 @@ function createSterlingServer(storePath2) {
       resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to the old record's chain that this supersession discharges \u2014 full ids, validated before the write")
     })
   }, ({ old_id, fields, orphans_acknowledged, type, resolves }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged, { type, resolves })));
-  server2.registerTool("knowledge_update", {
+  server.registerTool("knowledge_update", {
     description: "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body \u2014 pass only changed mutable fields; omitted fields are kept (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
     inputSchema: strict({
       id: external_exports.string(),
@@ -35115,7 +37024,7 @@ function createSterlingServer(storePath2) {
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, body, resolves, expected_version, projection }) => json(tools.writeProjected(tools.knowledgeUpdateResult(id, body, resolves, expected_version), projection)));
-  server2.registerTool("knowledge_append", {
+  server.registerTool("knowledge_append", {
     description: `Append entries to an array field (history, files, current_ac, live_test_refs, \u2026) without retransmitting it; same versioned write path as knowledge_update. \`field\` may be an array-element selector 'arr[key=value].sub' to append inside ONE element's array (e.g. field "live_test_refs[ac_id=AC4].test_paths", entries ["tests/x.test.mjs"]); the selector must match exactly one element and sub must already be an array on it. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain, plus an article_missing item when an appended files[] entry's path is one of that item's file_keys (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.`,
     inputSchema: strict({
       id: external_exports.string(),
@@ -35125,7 +37034,7 @@ function createSterlingServer(storePath2) {
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, field, entries, resolves, projection }) => json(tools.writeProjected(tools.knowledgeAppend(id, field, entries, resolves), projection)));
-  server2.registerTool("knowledge_edit", {
+  server.registerTool("knowledge_edit", {
     description: `Replace one passage inside a string field without retransmitting it. \`find\` must match EXACTLY ONCE \u2014 zero or multiple matches are refused with the count; extend find to disambiguate. \`field\` may be an array-element selector 'arr[key=value].sub' (e.g. "files[path=scripts/prep.mjs].role"), which must match exactly one element. A BOOLEAN sub-field is set by value: find is its current value ('true'/'false'), replace the new one (e.g. field "files[path=scripts/prep.mjs].unverified", find 'true', replace 'false' clears the flag); an absent optional boolean such as files[].entry reads as 'false', so field "files[path=skills/drain/SKILL.md].entry", find 'false', replace 'true' sets it. Same versioned write path as knowledge_update. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt with chars_before/chars_after; projection:"full" returns the whole stored record.`,
     inputSchema: strict({
       id: external_exports.string(),
@@ -35136,7 +37045,7 @@ function createSterlingServer(storePath2) {
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, field, find, replace, resolves, projection }) => json(tools.writeProjected(tools.knowledgeEdit(id, field, find, replace, resolves), projection)));
-  server2.registerTool("knowledge_line_ref_fix", {
+  server.registerTool("knowledge_line_ref_fix", {
     description: "Move ONE stale path:line reference inside a feature_article string field, verified by the server \u2014 the background maintenance worker's only article write (decision maintenance-queue-background-haiku-worker-simple-redesign, point 3a). `find` and `replace` are bare line references ([path]:N or [path]:N-M, whitespace trimmed, no other text); `replace` keeps find's path part and changes only the line. `field` takes knowledge_edit's grammar (a string field or 'arr[key=value].sub'). Refused with nothing written, naming the failed check, unless: (1) the record is an active feature_article, the field one of what_it_does, intended_behavior, steps_runbook, current_ac[..].text, files[..].role (never history) and a string, and find matches exactly once as a whole reference; (2) both sides are line references with the same path, replace differs from find, and it is a shift only \u2014 a point stays a point, a range keeps its width (a bare ':N' only when the article owns exactly one files[] entry); (3) the path is one of the article's files[] (exact, or a unique suffix on a '/' boundary); (4) every new line exists in the file AS COMMITTED AT HEAD (not the working tree) and its FIRST line contains `anchor` literally; (5) `anchor` is at least 6 characters, not only punctuation, and is quoted from the field's own text within 120 characters of the reference (the reference itself excluded); (6) nothing but the substitution changes (a write landing while the checks ran refuses). Same versioned write path as knowledge_edit, but it takes NO resolves: a queue item closes only through maintenance_remove. The receipt carries `verification` {path, lines, anchor, head_commit, blob}.",
     inputSchema: strict({
       id: external_exports.string().describe("the feature_article to fix (full uuid, slug, or unambiguous 8-char prefix)"),
@@ -35147,7 +37056,7 @@ function createSterlingServer(storePath2) {
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, field, find, replace, anchor, projection }) => json(tools.writeProjected(tools.knowledgeLineRefFix(id, field, find, replace, anchor), projection)));
-  server2.registerTool("knowledge_array_remove", {
+  server.registerTool("knowledge_array_remove", {
     description: `Remove ONE element from an array field by selector 'arr[key=value]' (no trailing .sub), e.g. "files[path=scripts/prep.mjs]". Zero matches are refused with the count, and so are multiple matches that differ in any field; when every matched element is deep-equal (an identical duplicate) exactly one is removed and removed.note says "removed 1 of N identical elements". A selector only matches elements that have the key. Destructive, so: id must be the EXACT FULL UUID (no slug or prefix), and expected_version is REQUIRED \u2014 a stale token is refused naming both versions; a non-positive token is refused as invalid; a record with no stored version is refused. Refused: removing a feature_article's last files[] entry, or the last history entry. current_ac and live_test_refs may be emptied. Surviving elements keep order and bytes. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt carrying the removed element; projection:"full" returns the whole stored record.`,
     inputSchema: strict({
       id: external_exports.string().describe("the EXACT full uuid \u2014 this call destroys, so no slug and no 8-char prefix is accepted"),
@@ -35157,11 +37066,11 @@ function createSterlingServer(storePath2) {
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, selector, expected_version, resolves, projection }) => json(tools.writeProjected(tools.knowledgeArrayRemove(id, selector, expected_version, resolves), projection)));
-  server2.registerTool("knowledge_promote", {
+  server.registerTool("knowledge_promote", {
     description: 'Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article, todo and attestation never promote; only a project-scoped record the project store holds does; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The receipt carries domain_description, the target domain\'s description. The echo (`promoted`) defaults to a digest; projection:"full" returns the whole record.',
     inputSchema: strict({ id: external_exports.string(), domain: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection)));
-  server2.registerTool("board_add", {
+  server.registerTool("board_add", {
     description: 'Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare `objective`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane); absent means nothing. measured_at_head is stamped to HEAD unless you pass a resolvable 40-hex sha (an unresolvable one is refused). The echo defaults to a digest; projection:"full" returns the stored record.',
     inputSchema: strict({
       text: external_exports.string(),
@@ -35178,7 +37087,7 @@ function createSterlingServer(storePath2) {
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ projection, ...args2 }) => json(tools.writeProjected(tools.boardAdd(args2), projection)));
-  server2.registerTool("board_query", {
+  server.registerTool("board_query", {
     description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, unblocks (live items waiting on this one, as \`name (id8)\`), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane.`,
     inputSchema: strict({
       source: external_exports.enum(["user", "system"]).optional(),
@@ -35191,15 +37100,15 @@ function createSterlingServer(storePath2) {
       projection: external_exports.enum(["text", "full", "digest", "headline"]).optional()
     })
   }, (args2) => json(tools.boardQueryResult(args2)));
-  server2.registerTool("board_remove", {
+  server.registerTool("board_remove", {
     description: "Remove a board or queue item \u2014 the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed.",
     inputSchema: strict({ id: external_exports.string() })
   }, ({ id }) => json(tools.boardRemove(id)));
-  server2.registerTool("maintenance_remove", {
+  server.registerTool("maintenance_remove", {
     description: 'Remove a maintenance-queue (source:"system") item once its fulfilling artifact exists; user board items are refused. Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). Logged to the drain log; the result discloses artifact_evidence (capped compact records plus artifact_evidence_count, the de-duplicated match count within the same 200-record scan window) like board_remove \u2014 an empty list means verify against HEAD before closing.',
     inputSchema: strict({ id: external_exports.string() })
   }, ({ id }) => json(tools.maintenanceRemove(id)));
-  server2.registerTool("board_update", {
+  server.registerTool("board_update", {
     description: 'Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation (user items only; "" clears it). A text or file_keys change re-stamps measured_at_head to HEAD; pass a resolvable 40-hex sha to set it explicitly (unresolvable is refused). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:"full" returns the stored record.',
     inputSchema: strict({
       id: external_exports.string(),
@@ -35213,43 +37122,43 @@ function createSterlingServer(storePath2) {
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, projection, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch), projection)));
-  server2.registerTool("board_get", {
+  server.registerTool("board_get", {
     description: "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` \u2014 the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed). An item other live items wait on returns unblocks: those items as `name (id8)`.",
     inputSchema: strict({ id: external_exports.string() })
   }, ({ id }) => json(tools.boardGet(id)));
-  server2.registerTool("board_edit", {
+  server.registerTool("board_edit", {
     description: 'Replace one passage inside a board/queue item\'s text in place (id stable, no new version). `find` must match EXACTLY ONCE \u2014 zero or multiple matches are refused with the count, nothing written. Works on user and system items. The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.',
     inputSchema: strict({ id: external_exports.string(), find: external_exports.string(), replace: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ id, find, replace, projection }) => json(tools.writeProjected(tools.boardEdit(id, find, replace), projection)));
-  server2.registerTool("no_capture", {
+  server.registerTool("no_capture", {
     description: `Declare that this session's work produced nothing durable, discharging H10's duty for events earlier than the declaration on the declared lane (later work re-arms it): omitted lane = capture only; lane:"research" for the research duty; lane:"all" for both. An unknown lane is refused. The reason is recorded. If a capture exists but lands later, use capture_pending.`,
     inputSchema: strict({ reason: external_exports.string(), lane: external_exports.enum(NO_CAPTURE_LANES).optional() })
   }, ({ reason, lane }) => json(tools.noCapture(reason, lane)));
-  server2.registerTool("concept_designed", {
+  server.registerTool("concept_designed", {
     description: "Register that a concept family's design settled this session (pass the family slug(s)); H10 then requires that family's concept article (feature_article with concept_family) before the session ends, or queues concept_article_missing.",
     inputSchema: strict({ families: external_exports.array(external_exports.string()).min(1) })
   }, ({ families }) => json(tools.conceptDesigned(families)));
-  server2.registerTool("capture_pending", {
+  server.registerTool("capture_pending", {
     description: "Declare that a capture exists and its write is in flight on a named target (a pending commit, a dispatched agent). H10 defers the capture duty: the declaration holds while any dispatched subagent is live, then gets one Stop of grace counted from the declaration (an earlier nag does not spend it); if still pending after that it becomes a capture_owed queue item citing this target, deduped per target. A real capture spends the declaration.",
     inputSchema: strict({ target: external_exports.string(), reason: external_exports.string() })
-  }, ({ target, reason }) => json(tools.capturePending(target, reason)));
-  server2.registerTool("config_set", {
-    description: "Conductor-only (not granted to roster agents): set one key in the active project's .sterling/config.json, validating the whole document against the config schema before writing. `path` is a dotted key (e.g. 'tdd.enabled'; intermediate objects are created); `value` is required; __proto__/constructor/prototype in the path are refused. `expected_digest` (sha256 of the current file bytes) makes the write conditional \u2014 a stale token is refused naming both digests. Pass it against concurrent writers such as the TUI: the call also re-checks the digest just before its atomic rename, but a small window between that re-check and the rename remains, so last write wins inside it. A symlinked or non-regular config.json or .sterling directory is refused. The file is re-serialized as 2-space LF JSON (BOM stripped; other keys preserved). Returns {path, previous_value, value, digest}; digest is the next expected_digest. If the written path is a key Sterling no longer reads (a rename, or a retired mechanism), the receipt also carries `warnings`: [string] naming it \u2014 the write still lands, this is disclosure, never a refusal.",
+  }, ({ target: target2, reason }) => json(tools.capturePending(target2, reason)));
+  server.registerTool("config_set", {
+    description: "Conductor-only (not granted to roster agents): set one key in the active project's .sterling/config.json, validating the whole document against the config schema before writing. `path` is a dotted key (e.g. 'tdd.enabled'; intermediate objects are created); `value` is required; __proto__/constructor/prototype in the path are refused, and so is `storage` (where the stores live; only `node scripts/move-store.mjs --to pg|sqlite` changes it, after moving them). `expected_digest` (sha256 of the current file bytes) makes the write conditional \u2014 a stale token is refused naming both digests. Pass it against concurrent writers such as the TUI: the call also re-checks the digest just before its atomic rename, but a small window between that re-check and the rename remains, so last write wins inside it. A symlinked or non-regular config.json or .sterling directory is refused. The file is re-serialized as 2-space LF JSON (BOM stripped; other keys preserved). Returns {path, previous_value, value, digest}; digest is the next expected_digest. If the written path is a key Sterling no longer reads (a rename, or a retired mechanism), the receipt also carries `warnings`: [string] naming it \u2014 the write still lands, this is disclosure, never a refusal.",
     inputSchema: strict({
       path: external_exports.string(),
       value: external_exports.unknown().refine((v) => v !== void 0, { message: "'value' is required" }),
       expected_digest: external_exports.string().optional()
     })
   }, ({ path, value, expected_digest }) => json(tools.configSet({ path, value, expected_digest })));
-  server2.registerTool("domain_describe", {
+  server.registerTool("domain_describe", {
     description: "Read or set a mounted domain's description: the one line that says which knowledge belongs in that shared domain store. knowledge_create lists it, and the promotion_review mint matches project records against it. Promotion proposals go only to project records with no file_keys (an article's files count; a reference_material's location does not). Omit `description` to read it ({domain, description}, null when unset); pass it to set it ({domain, description, previous_description, updated:true}). An unmounted domain and a blank description are refused with nothing written.",
     inputSchema: strict({ domain: external_exports.string(), description: external_exports.string().optional() })
   }, ({ domain, description }) => json(tools.domainDescribe({ domain, description })));
-  server2.registerTool("knowledge_link", {
+  server.registerTool("knowledge_link", {
     description: "Add a typed link: cites | informed_by | fulfills | falsified_by (supersedes is refused \u2014 use knowledge_supersede / knowledge_retire). falsified_by points FROM the record whose claim was disproven TO the record carrying the evidence; the falsified record stays live. When a successor claim exists, supersede instead.",
     inputSchema: strict({ from: external_exports.string(), rel: external_exports.string(), to: external_exports.string() })
   }, ({ from, rel, to }) => json(tools.knowledgeLink(from, rel, to)));
-  server2.registerTool("knowledge_preflight", {
+  server.registerTool("knowledge_preflight", {
     description: 'Pre-write conflict check: does the store already govern this subject? Run it before dispatching, designing, asking the user, or drafting a new record. Pass `text` (one subject) or `texts` (an agenda, one verdict per entry, in order). Matches anti_pattern, decision, feature_article, research_finding, disconfirmed_hypothesis and open_question records. Verdicts: "verify_targets" \u2014 the store governs this; open the named matches before proceeding (a match is a pointer, not the source); "ungoverned" \u2014 nothing governs it; "insufficient" \u2014 too little vocabulary to judge; the verdict and matched_total are decided from the centrality-passing candidate set only, not the capped `matches` window. Returns {terms, matched_total, capped (present/true only when `matches` was truncated), matches:[{id,type,title,matched_on,central,source}], answerability, missing_domains (only when a configured domain has no store), unreadable_domains (only when a mounted domain could not be read: each with its error; its records are not in the result)} or {verdicts:[\u2026]}. `matches` is capped at 20, sorted centrality-first (a central match always outranks a merely-hitting one), then by raw hit count. `matches` may include records with `central:[]` (non-central) \u2014 record-centrality is no longer required to LIST a candidate, only to decide the verdict and matched_total. matched_total counts centrality-passing, qualifying records among the candidates evaluated (each record type\'s own query is itself capped at 40), not a true/exact/full count.',
     inputSchema: strict({ text: external_exports.string().optional(), texts: external_exports.array(external_exports.string()).optional() })
   }, ({ text, texts }) => {
@@ -35258,7 +37167,7 @@ function createSterlingServer(storePath2) {
     }
     return json(texts !== void 0 ? tools.knowledgePreflightBatch(texts) : tools.knowledgePreflight(text));
   });
-  server2.registerTool("maintenance_query", {
+  server.registerTool("maintenance_query", {
     description: 'List open maintenance-queue items. Filters (AND): system_reason, file_keys, contains (case-insensitive literal substring), feature_slug (items owned by one article, including earlier superseded versions; unresolvable = empty). Same envelope, paging and projections as board_query: capped=true means the queue is deeper than shown \u2014 page (offset, or cursor = next_cursor, which never skips an item behind it; mutually exclusive; bound to its filters) until capped is false. projection: "text" (default; text clipped to 240 chars, artifact_evidence_count), "headline", "digest", or "full" (per-item artifact_evidence detail and annotation prose). artifact_evidence is a lookup, never a verdict \u2014 verify against HEAD before draining on it.',
     inputSchema: strict({
       system_reason: external_exports.string().optional(),
@@ -35271,47 +37180,248 @@ function createSterlingServer(storePath2) {
       projection: external_exports.enum(["text", "full", "digest", "headline"]).optional()
     })
   }, (args2) => json(tools.maintenanceQueryResult(args2)));
-  return { server: server2, store, tools };
+  return { server, store, tools };
 }
 
 // packages/mcp-server/dist/runtime.js
-import { readFileSync as readFileSync4, mkdirSync as mkdirSync4, writeFileSync as writeFileSync2 } from "node:fs";
+import { readFileSync as readFileSync7, mkdirSync as mkdirSync5, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname7 } from "node:path";
 function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */ new Date()).toISOString()) {
   try {
     let buildId = "unknown";
     try {
-      const raw = readFileSync4(buildIdPath(serverDir), "utf8").trim();
+      const raw = readFileSync7(buildIdPath(serverDir), "utf8").trim();
       if (raw)
         buildId = raw;
     } catch {
     }
     const marker = runtimeMarkerSchema.parse({ build_id: buildId, pid: process.pid, booted_at: now() });
     const markerPath = runtimeMarkerPath(storePath2);
-    mkdirSync4(dirname7(markerPath), { recursive: true });
-    writeFileSync2(markerPath, JSON.stringify(marker));
+    mkdirSync5(dirname7(markerPath), { recursive: true });
+    writeFileSync3(markerPath, JSON.stringify(marker));
     return marker;
   } catch {
     return null;
   }
 }
 
+// packages/mcp-server/dist/broker.js
+import { createServer } from "node:net";
+import { randomBytes } from "node:crypto";
+import { chmodSync as chmodSync2, readFileSync as readFileSync8, realpathSync as realpathSync4 } from "node:fs";
+function buildIdOf(serverDir) {
+  try {
+    return readFileSync8(buildIdPath(serverDir), "utf8").trim() || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+function wireError(e) {
+  const err = e;
+  const name = err?.constructor?.name && err.constructor.name !== "Object" && err.constructor.name !== "Error" ? err.constructor.name : err?.name ?? "Error";
+  const fields = {};
+  if (err && typeof err === "object") {
+    for (const [k, v] of Object.entries(err))
+      if (typeof v === "string" || typeof v === "number")
+        fields[k] = v;
+  }
+  return { name, message: String(err?.message ?? e), fields };
+}
+var named = (name, message) => ({ name, message, fields: {} });
+function frame(value) {
+  const body = Buffer.from(JSON.stringify(value), "utf8");
+  const head = Buffer.alloc(4);
+  head.writeUInt32BE(body.length, 0);
+  return Buffer.concat([head, body]);
+}
+function holdMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+async function startHookBroker({ stores, route, serverDir, env = process.env }) {
+  const dir = brokerDir({ create: true, env });
+  if (dir === void 0)
+    return null;
+  const instanceId = randomBytes(16).toString("hex");
+  const root = realpathSync4(route.root);
+  const identity = {
+    instance_id: instanceId,
+    protocol: BROKER_PROTOCOL,
+    build_id: buildIdOf(serverDir),
+    project_id: route.projectId,
+    root,
+    storage: brokerStorageIdentity(route),
+    pid: process.pid
+  };
+  const socketPath = brokerSocketPath(dir, instanceId);
+  const testHold = Number(env.STERLING_BROKER_TEST_HOLD_MS ?? 0);
+  const execute = (target, op, args2) => {
+    const obj = target === "project" ? stores.project : stores;
+    return obj[op].apply(obj, args2);
+  };
+  const serve = (conn) => {
+    conn.unref();
+    let buf = Buffer.alloc(0);
+    let greeted = false;
+    const send = (value) => {
+      conn.write(frame(value));
+    };
+    const handle = (msg) => {
+      if (!greeted) {
+        const hello = brokerHelloSchema.safeParse(msg);
+        let refusal;
+        if (!hello.success)
+          refusal = named("BrokerHandshakeError", `the first frame is not a hello: ${hello.error.message}`);
+        else if (hello.data.protocol !== BROKER_PROTOCOL)
+          refusal = named("BrokerProtocolMismatchError", `protocol ${hello.data.protocol} asked, this server speaks ${BROKER_PROTOCOL}`);
+        else if (hello.data.instance_id !== instanceId)
+          refusal = named("BrokerIdentityMismatchError", `the hello names instance ${hello.data.instance_id}; this server is ${instanceId}`);
+        else if (hello.data.project_id !== identity.project_id || hello.data.root !== identity.root)
+          refusal = named("BrokerIdentityMismatchError", `the hello names project ${hello.data.project_id} at ${hello.data.root}; this server serves ${identity.project_id} at ${identity.root}`);
+        if (refusal) {
+          send({ type: "refused", error: refusal });
+          conn.end();
+          return;
+        }
+        greeted = true;
+        send({ type: "welcome", identity });
+        return;
+      }
+      const call = brokerCallSchema.safeParse(msg);
+      if (!call.success) {
+        const id2 = typeof msg?.id === "number" ? msg.id : 0;
+        send({ type: "result", id: id2, ok: false, executed: false, error: named("BrokerRequestInvalidError", call.error.message) });
+        return;
+      }
+      const { id, target, op, args: args2, sent_at } = call.data;
+      if (!isBrokerOperation(target, op)) {
+        send({ type: "result", id, ok: false, executed: false, error: named("BrokerOperationRefusedError", `'${target}.${op}' is not in the broker's operation registry; nothing ran`) });
+        return;
+      }
+      if (Date.now() - sent_at > BROKER_BOUNDS.queueMs) {
+        send({ type: "result", id, ok: false, executed: false, error: named("BrokerQueueTimeoutError", `the call waited ${Date.now() - sent_at} ms before it could start (bound ${BROKER_BOUNDS.queueMs} ms); nothing ran`) });
+        return;
+      }
+      if (testHold > 0)
+        holdMs(testHold);
+      let response;
+      try {
+        response = { type: "result", id, ok: true, result: execute(target, op, args2) };
+      } catch (e) {
+        response = { type: "result", id, ok: false, executed: true, error: wireError(e) };
+      }
+      let out = frame(response);
+      if (out.length - 4 > BROKER_MAX_RESPONSE_BYTES) {
+        out = frame({ type: "result", id, ok: false, executed: true, error: named("BrokerResponseTooLargeError", `the result of '${target}.${op}' is ${out.length - 4} bytes, over the ${BROKER_MAX_RESPONSE_BYTES}-byte bound; the operation ran`) });
+      }
+      conn.write(out);
+    };
+    conn.on("data", (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      while (buf.length >= 4) {
+        const len = buf.readUInt32BE(0);
+        if (len > BROKER_MAX_REQUEST_BYTES) {
+          send({ type: "result", id: 0, ok: false, executed: false, error: named("BrokerFrameTooLargeError", `a ${len}-byte request frame is over the ${BROKER_MAX_REQUEST_BYTES}-byte bound; the connection is closed and nothing ran`) });
+          conn.end();
+          buf = Buffer.alloc(0);
+          return;
+        }
+        if (buf.length < 4 + len)
+          return;
+        const body = buf.subarray(4, 4 + len).toString("utf8");
+        buf = buf.subarray(4 + len);
+        let msg;
+        try {
+          msg = JSON.parse(body);
+        } catch (e) {
+          send({ type: "result", id: 0, ok: false, executed: false, error: named("BrokerRequestInvalidError", `a frame is not JSON (${e.message})`) });
+          continue;
+        }
+        handle(msg);
+      }
+    });
+    conn.on("error", () => {
+    });
+  };
+  const server = createServer(serve);
+  await new Promise((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(socketPath, () => {
+      server.off("error", rejectListen);
+      resolveListen();
+    });
+  });
+  chmodSync2(socketPath, 384);
+  assertPrivate(socketPath, "socket");
+  const registrationPath = publishBrokerRegistration(dir, root, { ...identity, socket: socketPath });
+  server.unref();
+  let closed = false;
+  return {
+    identity,
+    socketPath,
+    registrationPath,
+    close() {
+      if (closed)
+        return;
+      closed = true;
+      removeOwnBrokerFiles(dir, root, instanceId);
+      server.close();
+    }
+  };
+}
+
 // packages/mcp-server/dist/main.js
 var args = process.argv.slice(2);
-var storeIdx = args.indexOf("--store");
-if (storeIdx === -1 || !args[storeIdx + 1]) {
-  console.error("usage: sterling-mcp --store <path-to-sterling.db>");
+var valueOf = (flag) => {
+  const i = args.indexOf(flag);
+  return i === -1 ? void 0 : args[i + 1] ?? "";
+};
+var projectArg = valueOf("--project");
+var storeArg = valueOf("--store");
+if (projectArg === void 0 === (storeArg === void 0) || !(projectArg ?? storeArg)) {
+  console.error("usage: sterling-mcp --project <project root>   (or, for a hobby project, --store <path-to-sterling.db>)");
   process.exit(2);
 }
-var storePathArg = args[storeIdx + 1];
-if (storePathArg.includes("${")) {
-  console.error(`sterling-mcp: --store path contains an unexpanded placeholder: '${storePathArg}' \u2014 refusing to create a phantom store (P5). In --mcp-config or project-scope configs use \${CLAUDE_PROJECT_DIR:-.}/.sterling/sterling.db (plugin-scope configs expand the bare form).`);
+var flagName = projectArg !== void 0 ? "--project" : "--store";
+var pathArg = projectArg ?? storeArg;
+if (pathArg.includes("${")) {
+  console.error(`sterling-mcp: ${flagName} path contains an unexpanded placeholder: '${pathArg}' \u2014 refusing to create a phantom store (P5). In --mcp-config or project-scope configs use \${CLAUDE_PROJECT_DIR:-.} (plugin-scope configs expand the bare form).`);
   process.exit(2);
 }
-var storePath = resolve2(storePathArg);
+var projectRoot = projectArg !== void 0 ? resolve4(projectArg) : void 0;
+var storePath = projectRoot !== void 0 ? join12(projectRoot, ".sterling", "sterling.db") : resolve4(pathArg);
+var created;
+try {
+  created = createSterlingServer(projectRoot !== void 0 ? { projectRoot } : storePath);
+} catch (e) {
+  const err = e;
+  console.error(`sterling-mcp: ${err?.constructor?.name ?? err?.name ?? "Error"}: ${err?.message ?? String(e)}`);
+  process.exit(1);
+}
 recordRuntimeMarker(storePath, dirname8(fileURLToPath(import.meta.url)));
-var { server } = createSterlingServer(storePath);
-await server.connect(new StdioServerTransport());
+await created.server.connect(new StdioServerTransport());
+if (projectRoot !== void 0) {
+  const route = resolveStoreRoute(projectRoot);
+  if (route?.storage === "postgres") {
+    try {
+      const broker = await startHookBroker({ stores: created.store, route, serverDir: dirname8(fileURLToPath(import.meta.url)) });
+      if (broker === null) {
+        console.error("sterling-mcp: the hook store broker is not available on this platform (no Unix sockets with uids); hooks connect to Postgres directly.");
+      } else {
+        process.on("exit", () => broker.close());
+        for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+          process.once(signal, () => {
+            broker.close();
+            process.exit(128 + { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 }[signal]);
+          });
+        }
+      }
+    } catch (e) {
+      const err = e;
+      console.error(`sterling-mcp: the hook store broker did not start (${err?.constructor?.name ?? err?.name ?? "Error"}: ${err?.message ?? String(e)}); hooks connect to Postgres directly.`);
+    }
+  }
+}
 export {
+  projectRoot,
   storePath
 };

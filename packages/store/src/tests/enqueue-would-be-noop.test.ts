@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { SterlingStore } from '../index.js';
+import { sqliteOnly } from './pg-test-support.js';
 
 const NOW = '2026-10-03T12:00:00.000Z';
 const FINDING = '11111111-1111-4111-8111-111111111111'; // not-a-citation: fixture id
@@ -93,7 +94,7 @@ test('the reconcile_needed fold lane is never reported as a no-op (its union/fol
   }
 });
 
-test('the check takes no write path: it answers while a second connection has moved user_version (a write would be refused)', () => {
+test('the check takes no write path: it answers while a second connection has moved user_version (a write would be refused)', { skip: sqliteOnly('moves user_version through a second SQLite connection; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const { store, path, cleanup } = harness();
   try {
     store.enqueueSystemTodo(sys());

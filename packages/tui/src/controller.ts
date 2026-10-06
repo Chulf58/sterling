@@ -8,6 +8,7 @@ import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { MountedStores, resolveDomainMounts, catalogStatus, type DomainMount, type SterlingStore } from '@sterling/store';
+import { openRoutedStores } from '@sterling/store/routing';
 import { parseConfig, AGENT_MODEL_KEY } from '@sterling/schemas';
 import { buildDashboardState, initialUi, reduce, runEffects, SYSTEM_TAB, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect } from './state.js';
 import { applyHandoffToggle, applyModeToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
@@ -18,6 +19,8 @@ import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/
 import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
 import { sterlingRootFrom, swapFullAgentModel } from '../../../scripts/lib/opencode-install.mjs';
+import { storeBackend } from '../../../scripts/hooks/lib/store-backend.mjs';
+import { writeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mjs';
 
 /** Effect types a host may decline to execute. A string value is the notice
  *  shown when the effect is dropped; null drops it without a notice (for an
@@ -75,20 +78,29 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     }
   }
 
+  // Postgres storage (scripts/hooks/lib/store-backend.mjs says 'routed'): the
+  // project and every mounted domain open through @sterling/store/routing.
+  // Nothing is skipped or created, and any failure (an unreachable server,
+  // missing credentials or identity, a missing domain) throws its named error
+  // out of openDashboard; the host reports it. `storePath` then only names the
+  // project: <root>/.sterling/sterling.db need not exist.
+  const routed = storeBackend(projectRoot) === 'routed';
   // Open the project store PLUS its mounted domain stores so the Knowledge tab
   // can fan across them. skipMissing → a domain whose db does not yet exist is
   // skipped, never created. Any failure to read/parse the config DEGRADES
   // LOUD: project-only + a header indicator, never a crash.
   let mounts: DomainMount[] = [];
   let domainsAvailable = true;
-  try {
-    const config = parseConfig(JSON.parse(readFileSync(configPath, 'utf8')));
-    mounts = resolveDomainMounts(config);
-  } catch {
-    mounts = [];
-    domainsAvailable = false;
+  if (!routed) {
+    try {
+      const config = parseConfig(JSON.parse(readFileSync(configPath, 'utf8')));
+      mounts = resolveDomainMounts(config);
+    } catch {
+      mounts = [];
+      domainsAvailable = false;
+    }
   }
-  const stores = new MountedStores(storePath, mounts, { skipMissing: true });
+  const stores = routed ? openRoutedStores(projectRoot, { mount: true }).stores : new MountedStores(storePath, mounts, { skipMissing: true });
   const store = stores.project;
   const projectName = basename(projectRoot) + (domainsAvailable ? '' : ' — domains unavailable (project-only)');
   let ui: UiState = initialUi;
@@ -300,7 +312,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
         rationale:
           'Model/effort pin changed from the TUI System tab (config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL↔Windows machine boundary, d53dc92c).',
         alternatives_rejected: [],
-      });
+      }, { operation_id: randomUUID() });
     } catch (err) {
       // P5: never silent. The next activation's drift marker still backstops a
       // partial write.
@@ -358,6 +370,20 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       notice('config.json updated — hooks pick this up on their next invocation; restart the session to reload the MCP server.');
     }
     if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length) roster = loadRoster();
+    // Postgres storage keeps the selection slot local to this checkout and host
+    // (decision postgres-store-backend-design-sync-bridge-schema-per-store, point
+    // 9): the shared store's selection row would hand it to another machine's prompt.
+    if (routed) {
+      for (const e of effects) {
+        if (e.type !== 'select') continue;
+        try {
+          writeSelectionFile(projectRoot, e.recordType, e.id, new Date().toISOString());
+        } catch (err) {
+          notice(`selection not handed to the next prompt — ${(err as Error).message}`);
+        }
+      }
+      return runEffects(store, effects.filter((e) => e.type !== 'select'));
+    }
     return runEffects(store, effects);
   }
 

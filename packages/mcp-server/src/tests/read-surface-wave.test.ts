@@ -351,6 +351,7 @@ test('SPEC2(a) CONTROL: omitting min_score leaves the envelope byte-compatible â
     const result = tools.knowledgeQueryResult({ types: ['decision'] }) as unknown as Loose;
 
     assert.ok(!('above_threshold' in result), 'above_threshold must be ABSENT when min_score is never passed');
+    assert.ok(!('score_scale' in result), 'score_scale travels with above_threshold only');
     assert.equal(result.matched_filter, 3);
     assert.equal(typeof result.returned, 'number');
     assert.equal(typeof result.cap, 'number');
@@ -377,8 +378,9 @@ test('SPEC2(b): min_score above every real score yields above_threshold: 0 (the 
     // something once this control has passed for the OPPOSITE reason.
     const low = tools.knowledgeQueryResult(
       widen({ types: ['decision'], rank_terms: ['chassis'], min_score: -1e9 })
-    ) as unknown as { matched_filter: number; above_threshold?: number };
+    ) as unknown as { matched_filter: number; above_threshold?: number; score_scale?: string };
     assert.equal(low.matched_filter, 5);
+    assert.equal(low.score_scale, 'fts5_bm25', 'the scale min_score was applied on is named beside above_threshold');
     assert.equal(
       low.above_threshold,
       5,

@@ -28,8 +28,9 @@
 // flag parsing; this module owns only the build itself.
 import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, sep } from 'node:path';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { contractHistoryJson } from './contract-bullets.mjs';
 import { launcherHistorySnapshot } from './launcher-history.mjs';
 
@@ -54,7 +55,14 @@ const CREATE_REQUIRE_BANNER = 'import { createRequire as __cr } from "node:modul
 // NOT do: make a module that the bundle loads at RUN time from the source tree
 // (a spawn, or a computed dynamic import) standalone — that module still needs
 // its own dependencies.
-function sourceIdentityPlugin({ root, shippedDir }) {
+// BESIDE-BUNDLE EXCEPTION: a name in `besideBundle` is a file the family ships
+// next to its bundles (its EXTRA_ENTRIES outputs, the Postgres worker). The site
+// `new URL('./<name>', import.meta.url)` keeps the bundle's own import.meta.url,
+// so it resolves beside the running bundle, never into the source tree. A module
+// that names './<name>' in any other form is refused at build time: the URL it
+// would ship cannot be shown to land beside the bundle.
+const URL_SITE_RE = /new URL\(\s*(['"])\.\/([^'"]+)\1\s*,\s*import\.meta\.url\s*\)|\bimport\.meta\.url\b/g;
+export function sourceIdentityPlugin({ root, shippedDir, besideBundle = [] }) {
   const up = shippedDir.split('/').map(() => '..').join('/');
   return {
     name: 'sterling-source-identity',
@@ -63,29 +71,120 @@ function sourceIdentityPlugin({ root, shippedDir }) {
         const rel = relative(root, args.path).split(sep).join('/');
         if (rel.startsWith('../') || rel.split('/').includes('node_modules')) return undefined;
         const src = readFileSync(args.path, 'utf8');
-        if (!src.includes('import.meta.url')) return undefined;
         const url = `(new URL(${JSON.stringify(`${up}/${rel}`)}, import.meta.url).href)`;
-        return { contents: src.replace(/\bimport\.meta\.url\b/g, url), loader: 'js', resolveDir: dirname(args.path) };
+        const kept = new Set();
+        const contents = src.replace(URL_SITE_RE, (site, _q, name) => {
+          if (name === undefined) return url;
+          if (besideBundle.includes(name)) {
+            kept.add(name);
+            return site;
+          }
+          return site.replace(/\bimport\.meta\.url\b/, url);
+        });
+        for (const name of besideBundle) {
+          if (!kept.has(name) && (src.includes(`'./${name}'`) || src.includes(`"./${name}"`))) {
+            throw new Error(
+              `sourceIdentityPlugin: ${rel} names './${name}' but not as new URL('./${name}', import.meta.url), so its URL cannot be kept beside the ${shippedDir}/ bundle`
+            );
+          }
+        }
+        if (!src.includes('import.meta.url')) return undefined;
+        return { contents, loader: 'js', resolveDir: dirname(args.path) };
       });
     },
   };
 }
 
+// EXTRA ENTRIES: files that are not a family's own bundles but must ship beside
+// them, each bundled from `source` (repo-relative, or absolute) into the
+// family's output directory as <out>. EXTRA_ENTRIES is the ONE declared table,
+// keyed by BUNDLED_ARTIFACTS name: each family's build emits every member, and
+// check-bundles-fresh compares whatever a build emits, so a member is
+// freshness-gated in every directory it is declared for.
+// The Postgres worker is declared for every family because each one bundles the
+// store (conductor ruling 2026-10-06, board 6be7b53f): pg-bridge spawns
+// new Worker(new URL('./pg-worker.js', import.meta.url)), which resolves beside
+// the running bundle (sourceIdentityPlugin keeps that site; see above). One file
+// per directory serves every bundle in it, so bin/ carries one worker for all
+// its bundles.
+// Each member gets the createRequire banner, because an extra entry exists to
+// carry a CommonJS dependency the hooks themselves must not inline
+// (node-postgres; issue 26 item 3). The h*.mjs hooks do not get it: none of them
+// inlines CommonJS, and a banner-declared `require` would collide with any
+// bundled module that declares its own top-level `require`.
+const PG_WORKER_ENTRY = Object.freeze({ source: 'packages/store/dist/pg-worker.js', out: 'pg-worker.js' });
+export const EXTRA_ENTRIES = {
+  hooks: [PG_WORKER_ENTRY],
+  tui: [PG_WORKER_ENTRY],
+  mcp: [PG_WORKER_ENTRY],
+  bin: [PG_WORKER_ENTRY],
+  opencode: [PG_WORKER_ENTRY],
+  'opencode-tui': [PG_WORKER_ENTRY],
+};
+export const HOOK_EXTRA_ENTRIES = EXTRA_ENTRIES.hooks;
+
+// Refuse a malformed list before anything is emitted. `taken` are the names the
+// family emits itself; for hooks, an h*.mjs-shaped output would be read as a hook.
+function checkExtraEntries(caller, extraEntries, taken, { hookShaped = false } = {}) {
+  if (!Array.isArray(extraEntries)) throw new Error(`${caller}: extra entry list must be an array`);
+  const seen = new Set();
+  for (const e of extraEntries) {
+    const out = e?.out;
+    if (typeof e?.source !== 'string' || e.source === '') throw new Error(`${caller}: extra entry '${out}' has no source`);
+    if (typeof out !== 'string' || out === '' || out !== basename(out) || out === '.' || out === '..') {
+      throw new Error(`${caller}: extra entry output '${out}' must be a plain file name inside the output directory`);
+    }
+    if (hookShaped && out.startsWith('h') && out.endsWith('.mjs')) {
+      throw new Error(`${caller}: extra entry output '${out}' is shaped like a hook entry (h*.mjs) and would be read as one`);
+    }
+    if (taken.includes(out)) throw new Error(`${caller}: extra entry output '${out}' collides with a file the build emits itself`);
+    if (seen.has(out)) throw new Error(`${caller}: extra entry output '${out}' is declared twice`);
+    seen.add(out);
+  }
+}
+
+async function emitExtraEntries({ root, outDir, extraEntries, generator }) {
+  const emitted = [];
+  for (const { source, out } of extraEntries) {
+    const from = resolve(root, source);
+    await build({
+      entryPoints: [from],
+      outfile: join(outDir, out),
+      bundle: true,
+      platform: 'node',
+      format: 'esm',
+      target: 'node24',
+      nodePaths: [join(root, 'node_modules')],
+      absWorkingDir: root,
+      banner: {
+        js: [`// GENERATED by ${generator} from ${relative(root, from).split(sep).join('/')} — do not edit; edit the source and rebuild.`, CREATE_REQUIRE_BANNER].join('\n'),
+      },
+    });
+    emitted.push(join(outDir, out));
+  }
+  return emitted;
+}
+
 // Bundle every scripts/hooks/h*.mjs (from srcDir) into standalone single-file
 // bundles under outDir (invariant 4: dependency-light, esbuild-bundled, no
-// workspace imports at runtime). Returns the emitted absolute paths.
+// workspace imports at runtime), plus every extra entry (HOOK_EXTRA_ENTRIES by
+// default). Returns the emitted absolute paths.
 // `only` (optional, an array of entry basenames) restricts the build to those
-// entries — the test seam harness (scripts/tests/lib/seam-hook.mjs) builds ONE
-// hook into a temp dir per suite. An `only` naming an entry that is not in
+// hook entries and emits no extra entry — the test seam harness
+// (scripts/tests/lib/seam-hook.mjs) builds ONE hook into a temp dir per suite
+// and expects exactly one bundle. An `only` naming an entry that is not in
 // srcDir is refused, never silently built as nothing.
-export async function buildHooks({ root, srcDir, outDir, only }) {
+export async function buildHooks({ root, srcDir, outDir, only, extraEntries = HOOK_EXTRA_ENTRIES }) {
   const all = readdirSync(srcDir).filter((f) => f.startsWith('h') && f.endsWith('.mjs'));
+  checkExtraEntries('buildHooks', extraEntries, all, { hookShaped: true });
   let entries = all;
+  let extras = extraEntries;
   if (only !== undefined) {
     if (!Array.isArray(only) || only.length === 0) throw new Error('buildHooks: `only` must be a non-empty array of hook entry basenames');
     const missing = only.filter((e) => !all.includes(e));
     if (missing.length) throw new Error(`buildHooks: \`only\` names entries not present in ${srcDir}: ${missing.join(', ')}`);
     entries = all.filter((e) => only.includes(e));
+    extras = [];
   }
   const emitted = [];
   for (const entry of entries) {
@@ -116,6 +215,7 @@ export async function buildHooks({ root, srcDir, outDir, only }) {
     });
     emitted.push(join(outDir, entry));
   }
+  emitted.push(...(await emitExtraEntries({ root, outDir, extraEntries: extras, generator: 'scripts/build-hooks.mjs' })));
   return emitted;
 }
 
@@ -125,8 +225,9 @@ export async function buildHooks({ root, srcDir, outDir, only }) {
 // hook to heal the environment, so there must be nothing to repair. Builds
 // from packages/tui/dist (tsc output), so a stale dist produces a faithfully
 // stale bundle — the checker's dist guards exist for exactly that. Returns the
-// emitted absolute path as a one-element manifest.
-export async function buildTui({ root, outFile }) {
+// emitted absolute paths: the bundle, then its extra entries beside it.
+export async function buildTui({ root, outFile, extraEntries = EXTRA_ENTRIES.tui }) {
+  checkExtraEntries('buildTui', extraEntries, [basename(outFile)]);
   await build({
     entryPoints: [join(root, 'packages', 'tui', 'dist', 'main.js')],
     outfile: outFile,
@@ -142,7 +243,7 @@ export async function buildTui({ root, outFile }) {
     alias: { 'terminal-kit': 'terminal-kit/lib/termkit-no-lazy-require.js' },
     absWorkingDir: root,
     plugins: [
-      sourceIdentityPlugin({ root, shippedDir: 'tui' }),
+      sourceIdentityPlugin({ root, shippedDir: 'tui', besideBundle: extraEntries.map((e) => e.out) }),
       {
         name: 'terminal-kit-static',
         setup(b) {
@@ -165,7 +266,7 @@ export async function buildTui({ root, outFile }) {
       ].join('\n'),
     },
   });
-  return [outFile];
+  return [outFile, ...(await emitExtraEntries({ root, outDir: dirname(outFile), extraEntries, generator: 'scripts/build-tui.mjs' }))];
 }
 
 // Bundle the MCP server into outDir/sterling-mcp.mjs (shipped, committed, at
@@ -176,8 +277,10 @@ export async function buildTui({ root, outFile }) {
 // bundle's: recordRuntimeMarker reads the build-id BESIDE the running entry, so
 // outDir/.build-id is written here — a content hash of the bundle bytes, the
 // same 16-hex shape as scripts/build-stamp.mjs's dist stamp, so a no-op rebuild
-// yields the same id. Returns [bundle, .build-id].
-export async function buildMcp({ root, outDir }) {
+// yields the same id. The id hashes the server bundle only, not the extra entries
+// beside it. Returns [bundle, .build-id, ...extra entries].
+export async function buildMcp({ root, outDir, extraEntries = EXTRA_ENTRIES.mcp }) {
+  checkExtraEntries('buildMcp', extraEntries, ['sterling-mcp.mjs', '.build-id']);
   const outFile = join(outDir, 'sterling-mcp.mjs');
   await build({
     entryPoints: [join(root, 'packages', 'mcp-server', 'dist', 'main.js')],
@@ -193,7 +296,7 @@ export async function buildMcp({ root, outDir }) {
   });
   const buildIdFile = join(outDir, '.build-id');
   writeFileSync(buildIdFile, createHash('sha256').update(readFileSync(outFile)).digest('hex').slice(0, 16));
-  return [outFile, buildIdFile];
+  return [outFile, buildIdFile, ...(await emitExtraEntries({ root, outDir, extraEntries, generator: 'scripts/build-mcp.mjs' }))];
 }
 
 // The scripts a command (commands/*.md), a skill, a generated project artifact or H1
@@ -208,7 +311,8 @@ export async function buildMcp({ root, outDir }) {
 // (platform node); the workspace packages and hook libraries are inlined.
 // import.meta.url is left as the bundle's own URL, so the template and the
 // maintenance worker's plugin root resolve by walking up from opencode/.
-export async function buildOpencode({ root, outFile }) {
+export async function buildOpencode({ root, outFile, extraEntries = EXTRA_ENTRIES.opencode }) {
+  checkExtraEntries('buildOpencode', extraEntries, [basename(outFile)]);
   await build({
     entryPoints: [join(root, 'packages', 'opencode-plugin', 'src', 'server.mjs')],
     outfile: outFile,
@@ -221,7 +325,7 @@ export async function buildOpencode({ root, outFile }) {
       js: ['// GENERATED by scripts/build-opencode.mjs — Sterling OpenCode 2 server plugin; do not edit.', CREATE_REQUIRE_BANNER].join('\n'),
     },
   });
-  return [outFile];
+  return [outFile, ...(await emitExtraEntries({ root, outDir: dirname(outFile), extraEntries, generator: 'scripts/build-opencode.mjs' }))];
 }
 
 // The OpenCode 2 dashboard plugin (opencode/sterling-tui/tui.tsx) as one file
@@ -231,7 +335,8 @@ export async function buildOpencode({ root, outFile }) {
 // stay external: OpenCode supplies them to TUI plugins. JSX is preserved and the
 // file keeps the .tsx extension and the @jsxImportSource pragma on line 1, so
 // OpenCode compiles it exactly as it compiles the source.
-export async function buildOpencodeTui({ root, outFile }) {
+export async function buildOpencodeTui({ root, outFile, extraEntries = EXTRA_ENTRIES['opencode-tui'] }) {
+  checkExtraEntries('buildOpencodeTui', extraEntries, [basename(outFile)]);
   await build({
     entryPoints: [join(root, 'opencode', 'sterling-tui', 'tui.tsx')],
     outfile: outFile,
@@ -244,12 +349,12 @@ export async function buildOpencodeTui({ root, outFile }) {
     absWorkingDir: root,
     // preserve mode ignores the source's @jsxImportSource on purpose; the banner restates it
     logOverride: { 'unsupported-jsx-comment': 'silent' },
-    plugins: [sourceIdentityPlugin({ root, shippedDir: 'opencode/sterling-tui' })],
+    plugins: [sourceIdentityPlugin({ root, shippedDir: 'opencode/sterling-tui', besideBundle: extraEntries.map((e) => e.out) })],
     banner: {
       js: ['/** @jsxImportSource @opentui/solid */', '// GENERATED by scripts/build-opencode-tui.mjs — Sterling OpenCode 2 dashboard plugin; do not edit.', CREATE_REQUIRE_BANNER].join('\n'),
     },
   });
-  return [outFile];
+  return [outFile, ...(await emitExtraEntries({ root, outDir: dirname(outFile), extraEntries, generator: 'scripts/build-opencode-tui.mjs' }))];
 }
 
 export const BIN_ENTRIES = {
@@ -294,7 +399,8 @@ export const BIN_ENTRIES = {
 // outDir/launcher-history.json is the same for the launcher templates: the earlier versions
 // init matches an existing launcher against (scripts/lib/launcher-history.mjs).
 // Returns the emitted absolute paths.
-export async function buildBins({ root, outDir }) {
+export async function buildBins({ root, outDir, extraEntries = EXTRA_ENTRIES.bin }) {
+  checkExtraEntries('buildBins', extraEntries, [...Object.keys(BIN_ENTRIES).map((n) => `${n}.mjs`), 'contract-history.json', 'launcher-history.json']);
   const emitted = [];
   for (const [name, entry] of Object.entries(BIN_ENTRIES)) {
     const outFile = join(outDir, `${name}.mjs`);
@@ -306,7 +412,7 @@ export async function buildBins({ root, outDir }) {
       format: 'esm',
       target: 'node24',
       absWorkingDir: root,
-      plugins: [sourceIdentityPlugin({ root, shippedDir: 'bin' })],
+      plugins: [sourceIdentityPlugin({ root, shippedDir: 'bin', besideBundle: extraEntries.map((e) => e.out) })],
       banner: {
         js: [`// GENERATED by scripts/build-bin.mjs from ${entry} — do not edit; edit the source and rebuild.`, CREATE_REQUIRE_BANNER].join('\n'),
       },
@@ -319,6 +425,7 @@ export async function buildBins({ root, outDir }) {
   const launcherHistoryFile = join(outDir, 'launcher-history.json');
   writeFileSync(launcherHistoryFile, launcherHistorySnapshot({ repoRoot: root }));
   emitted.push(launcherHistoryFile);
+  emitted.push(...(await emitExtraEntries({ root, outDir, extraEntries, generator: 'scripts/build-bin.mjs' })));
   return emitted;
 }
 
@@ -397,6 +504,41 @@ export const BUNDLED_ARTIFACTS = [
     build: ({ root, outTarget }) => buildOpencodeTui({ root, outFile: outTarget }),
   },
 ];
+
+// FRESHNESS COMPARE for one descriptor (check-bundles-fresh ARM 3): run the
+// artifact's real build into a temp target (never in place), then byte-compare
+// every EMITTED file against its shipped counterpart under shippedRoot.
+// Returns { count, stale } — stale lists repo-relative shipped paths, a missing
+// one suffixed ' (no shipped file)' — or { unverifiable } when the build throws
+// or emits nothing: a build failure is not staleness, and a vacuous build cannot
+// certify freshness (P5).
+export async function staleAgainstShipped({ artifact, root, shippedRoot }) {
+  const tmp = mkdtempSync(join(tmpdir(), `sterling-bundle-check-${artifact.name}-`));
+  try {
+    const outTarget = artifact.kind === 'dir' ? tmp : join(tmp, basename(artifact.shipped));
+    let emitted;
+    try {
+      emitted = await artifact.build({ root, outTarget });
+    } catch (e) {
+      return { unverifiable: `building artifact '${artifact.name}' failed — ${e?.message ?? e}` };
+    }
+    if (!emitted || emitted.length === 0) {
+      return { unverifiable: `artifact '${artifact.name}' emitted NOTHING — a vacuous build cannot certify freshness (P5)` };
+    }
+    const stale = [];
+    for (const builtFile of emitted) {
+      // A 'file' family's extra entries land beside its shipped file.
+      const shippedDir = artifact.kind === 'dir' ? artifact.shipped : dirname(artifact.shipped);
+      const rel = join(shippedDir, relative(tmp, builtFile)).split(sep).join('/');
+      const shippedFile = join(shippedRoot, rel);
+      if (!existsSync(shippedFile)) stale.push(`${rel} (no shipped file)`);
+      else if (!readFileSync(builtFile).equals(readFileSync(shippedFile))) stale.push(rel);
+    }
+    return { count: emitted.length, stale };
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
 
 // FAIL-CLOSED TOTALITY (the consistency check invariant 3 demands): the
 // checker scans every scripts/build-*.mjs AND every package.json script named
