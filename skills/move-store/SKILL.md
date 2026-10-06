@@ -1,6 +1,6 @@
 ---
 name: move-store
-description: Move a project's knowledge, with its mounted domains, from SQLite to Postgres or back with scripts/move-store.mjs. Use when the user wants a work project on Postgres, wants a project back on SQLite because it became a hobby project or the Served database is closing, or asks what a store move does, why a write was refused with StoreMovedError, or how to recover a move that crashed.
+description: Move a project's knowledge, with its mounted domains, from SQLite to Postgres or back with scripts/move-store.mjs. Use when the user wants a work project on Postgres, wants a project back on SQLite because it became a hobby project or the Served database is closing, wants a second machine to join a project already on Postgres, or asks what a store move does, why a write was refused with StoreMovedError, or how to recover a move that crashed.
 ---
 
 # Moving a project's store SOP
@@ -15,6 +15,7 @@ The move copies ONE project's knowledge store, plus the domain stores that proje
 - `--to sqlite` moves Postgres back to SQLite.
 - `--project <dir>` names the project. Without it the move uses the project containing the current directory.
 - There is no `--all`. Other projects, and domains only hobby projects mount, are never touched.
+- `--attach` copies nothing. It lets a second machine use a project that another machine already moved to Postgres (section 10).
 
 The move writes `config.storage` (`postgres` or `sqlite`) and nothing else in the config. `config.mode` is never changed by it. Do not edit `config.storage` by hand to switch backends: the key is written by the move only, after every store has been copied and checked.
 
@@ -100,3 +101,33 @@ A usage error exits 2 and prints the usage line; any other failure exits 1.
 
 - Re-run the dry run in the other direction only if the user wants to confirm the round trip; it changes nothing.
 - Do not move the project again without a new question to the user.
+
+## 10. A second machine
+
+Decision `second-machine-attaches-to-a-postgres-project-through-move-store-attach`. Use this when one machine already moved a work project to Postgres and the user now has a fresh clone of that project on another machine. The clone has the committed `.sterling/project.json`, but its own `.sterling/config.json` is not in git and has no `config.storage`, so the clone still reads SQLite. Do not run `--to pg` there: the clone's SQLite store is not the one that was moved, so the move refuses it. Do not set `config.storage` by hand either.
+
+The command is `node "${CLAUDE_PLUGIN_ROOT}/scripts/move-store.mjs" --attach [--fence-local] [--dry-run] [--project <dir>]`. It copies no data. It checks the same things the move checks first (work mode, `project.json`, the credentials file, the schema names), then checks each Postgres store the project uses: the project schema and the schema of every mounted domain. Each one must be registered, must have a move receipt from that same store, and must not be fenced. The first store that fails stops the attach, and the refusal names the schema and the check. If every check passes, the attach writes `config.storage = postgres` and nothing else in the config.
+
+Steps:
+
+1. Run `--attach --dry-run` and show the user the report. It lists each store with the receipt that filled it, says what happens to this machine's own SQLite file, and changes nothing.
+2. Put the choice to the user through the question form, as in section 5.
+3. Run `--attach` without `--dry-run`. Check that the report ends with `config.storage switched to postgres` and `config.mode unchanged (work)`, then tell the user to restart the session.
+
+This machine's own project SQLite file (`.sterling/sterling.db`), if there is one:
+
+- If it holds no records, as after a fresh init, the attach fences it. Nothing in it is lost.
+- If it holds records, the attach refuses, because after the switch those records can no longer be reached from this project. Show the user the count from the message and ask what the records are. Only if the user chooses to go ahead, re-run with `--fence-local`. The file is kept and fenced, and a later `--to sqlite` run on this machine replaces it.
+- If it is already fenced toward this project's Postgres schema (an attach that stopped before the switch), the attach goes on. If it is fenced toward anywhere else, the attach refuses.
+
+Domain SQLite files on this machine are never touched; other projects here may still use them.
+
+Refusals. Each starts with the check that failed and ends with `Nothing was changed.`:
+
+- `attach check 'storage' failed`: `config.storage` is already `postgres`. This machine is attached; there is nothing to do.
+- `attach check 'registered' failed`: a schema is not in `sterling_meta.stores`. That store was never moved. Moving it is a `--to pg` run on the machine that holds it.
+- `attach check 'receipt' failed`: a schema has no move receipt, or its receipt is from a different store. No finished move filled it. Report it and stop.
+- `attach check 'fence' failed`: a schema is fenced because it was moved back to SQLite. The project no longer lives on Postgres; ask the user how to go on.
+- `attach check 'local_store' failed`: see the list above.
+- A hobby project, a missing `project.json` or bad credentials: the preconditions in section 3.
+

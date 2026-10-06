@@ -9,6 +9,7 @@
 // a domain, never to move them.
 //
 //   node scripts/move-store.mjs --to pg|sqlite [--dry-run] [--project <dir>]
+//   node scripts/move-store.mjs --attach [--fence-local] [--dry-run] [--project <dir>]
 //
 // Refuses by name: a directory with no Sterling config, --to pg in a hobby
 // project, a missing .sterling/project.json, missing or invalid Postgres
@@ -19,6 +20,13 @@
 // storage-backend-is-its-own-config-key-written-only-by-store-move) is written
 // only after every store's receipt has committed; config.mode is never
 // touched. A re-run after a crash replays the receipts and completes the switch.
+//
+// --attach is for a second machine with a fresh clone of a project already on
+// Postgres (decision second-machine-attaches-to-a-postgres-project-through-move-store-attach).
+// It copies nothing: it checks that the project schema and every mounted domain
+// schema is registered, has a receipt and is not fenced, fences this machine's
+// project SQLite file if there is one (a file holding records only with
+// --fence-local), and then writes config.storage = postgres.
 
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -27,15 +35,20 @@ import { PgBridge, ensurePgLayout, readPgCredentials, registryPath } from '../pa
 import { routedCredentialsPath } from '../packages/store/dist/routing.js';
 import {
   MOVE_BRIDGE_WAIT_MS,
+  attachProject,
   ensureMoveReceipts,
   exportStore,
   importStore,
+  planAttach,
   planMove,
   readRegisteredProjects,
   writeProjectStorage,
 } from '../packages/store/dist/store-move.js';
 
-const USAGE = 'usage: node scripts/move-store.mjs --to pg|sqlite [--dry-run] [--project <dir>]';
+const USAGE = [
+  'usage: node scripts/move-store.mjs --to pg|sqlite [--dry-run] [--project <dir>]',
+  '       node scripts/move-store.mjs --attach [--fence-local] [--dry-run] [--project <dir>]',
+].join('\n');
 
 export class MoveStoreUsageError extends Error {
   constructor(message) {
@@ -44,8 +57,11 @@ export class MoveStoreUsageError extends Error {
   }
 }
 
+/** A move returns { to, dryRun, project }; an attach returns { attach: true, fenceLocal, dryRun, project }. */
 export function parseArgs(argv) {
   const out = { to: undefined, dryRun: false, project: undefined };
+  let attach = false;
+  let fenceLocal = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--to') out.to = argv[++i];
@@ -53,10 +69,17 @@ export function parseArgs(argv) {
     else if (a === '--dry-run') out.dryRun = true;
     else if (a === '--project') out.project = argv[++i];
     else if (a.startsWith('--project=')) out.project = a.slice(10);
+    else if (a === '--attach') attach = true;
+    else if (a === '--fence-local') fenceLocal = true;
     else throw new MoveStoreUsageError(`unknown argument '${a}'`);
   }
-  if (out.to !== 'pg' && out.to !== 'sqlite') throw new MoveStoreUsageError(`--to must be pg or sqlite, got ${out.to === undefined ? 'nothing' : `'${out.to}'`}`);
   if (out.project === '') throw new MoveStoreUsageError('--project needs a directory');
+  if (attach) {
+    if (out.to !== undefined) throw new MoveStoreUsageError('--attach copies nothing and takes no --to');
+    return { attach: true, fenceLocal, dryRun: out.dryRun, project: out.project };
+  }
+  if (fenceLocal) throw new MoveStoreUsageError('--fence-local is only for --attach');
+  if (out.to !== 'pg' && out.to !== 'sqlite') throw new MoveStoreUsageError(`--to must be pg or sqlite, got ${out.to === undefined ? 'nothing' : `'${out.to}'`}`);
   return out;
 }
 
@@ -144,6 +167,40 @@ export function runMoveStore({ root, to, dryRun = false, credentialsPath = route
   return report;
 }
 
+/**
+ * Attaches this machine to a project already on Postgres. Throws the named
+ * refusals (planMove's, MoveAttachError, MoveSourceFencedError); the file
+ * checks run before any connection opens.
+ */
+export function runAttach({ root, dryRun = false, fenceLocal = false, credentialsPath = routedCredentialsPath() }) {
+  const plan = planAttach({ root, credentialsPath, fenceLocal });
+  const bridge = new PgBridge(readPgCredentials(credentialsPath), { waitTimeoutMs: MOVE_BRIDGE_WAIT_MS });
+  try {
+    return attachProject(plan, bridge, { dryRun });
+  } finally {
+    bridge.close();
+  }
+}
+
+const LOCAL_ACTION = {
+  absent: 'none on this machine',
+  fenced: 'fenced',
+  already_fenced: 'already fenced toward the project schema',
+  would_fence: 'would be fenced (dry run fences nothing)',
+};
+
+export function formatAttachReport(report) {
+  const lines = [`move-store --attach ${report.dryRun ? '(dry run) ' : ''}for ${report.root}: no data is copied`];
+  for (const s of report.stores) {
+    lines.push(`${s.identity.kind} ${s.identity.name}: postgres:${s.schema} registered, not fenced; receipt ${s.receipt.move_id} from ${s.receipt.source} at ${s.receipt.committed_at}`);
+  }
+  const records = report.local.action === 'absent' ? '' : ` (${report.local.records} record(s) kept in the file, not read while storage is postgres)`;
+  lines.push(`local project SQLite ${report.local.path}: ${LOCAL_ACTION[report.local.action]}${records}`);
+  lines.push(report.dryRun ? 'config.storage not changed (dry run)' : 'config.storage switched to postgres');
+  lines.push(`config.mode unchanged (${report.mode})`);
+  return lines.join('\n');
+}
+
 export function formatReport(report) {
   const lines = [`move-store ${report.dryRun ? '(dry run) ' : ''}${report.direction === 'to_postgres' ? 'SQLite -> Postgres' : 'Postgres -> SQLite'} for ${report.root}`];
   for (const s of report.stores) {
@@ -182,7 +239,12 @@ function main() {
     process.exit(2);
   }
   try {
-    const report = runMoveStore({ root: findProjectRoot(args.project ?? process.cwd()), to: args.to, dryRun: args.dryRun });
+    const root = findProjectRoot(args.project ?? process.cwd());
+    if (args.attach) {
+      process.stdout.write(formatAttachReport(runAttach({ root, dryRun: args.dryRun, fenceLocal: args.fenceLocal })) + '\n');
+      process.exit(0);
+    }
+    const report = runMoveStore({ root, to: args.to, dryRun: args.dryRun });
     process.stdout.write(formatReport(report) + '\n');
     process.exit(report.failure ? 1 : 0);
   } catch (e) {

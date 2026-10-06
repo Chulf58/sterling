@@ -1332,3 +1332,177 @@ export function writeProjectStorage(root: string, storage: ProjectStorage): bool
   renameSync(tmp, path);
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// Attach: a second machine joins a project already on Postgres
+// ---------------------------------------------------------------------------
+//
+// Decision second-machine-attaches-to-a-postgres-project-through-move-store-attach.
+// A fresh clone has the committed project.json but no config.storage, and its
+// SQLite digest can never match the receipt the first machine wrote, so the move
+// itself refuses there. The attach copies no data: it runs planMove's file
+// checks, then requires that the project schema and every mounted domain schema
+// is registered, carries a move receipt from that same store and is not fenced
+// on the Postgres side. Only then does it write config.storage = 'postgres',
+// so the move module stays the only writer of the key.
+//
+// This machine's own project SQLite file, when there is one, is fenced toward
+// the project schema before the switch, so an older release cannot keep writing
+// into it and a later move back to SQLite from this machine replaces it as the
+// untouched copy a move left. A file that holds records is refused unless the
+// caller passes fenceLocal, because after the switch those records are no
+// longer reachable from this project. Domain SQLite files are never touched:
+// other projects on this machine may still use them.
+//
+// What this does NOT guarantee: a move back to SQLite run elsewhere between the
+// checks and the switch is not seen here (the router then refuses writes on the
+// fenced schema with StoreMovedError); the Postgres checks are reads, not locks.
+
+/** The attach check that refused. */
+export type AttachCheck = 'storage' | 'registered' | 'receipt' | 'fence' | 'local_store';
+
+/** move-store --attach refused. `check` names the failed check; `schema` the Postgres store it failed on, or null for a check on this machine. */
+export class MoveAttachError extends MoveError {
+  readonly check: AttachCheck;
+  readonly schema: string | null;
+  constructor(check: AttachCheck, schema: string | null, message: string) {
+    super(`attach check '${check}' failed: ${message}`);
+    this.check = check;
+    this.schema = schema;
+  }
+}
+
+export interface AttachPlan {
+  root: string;
+  projectId: string;
+  mode: ProjectMode;
+  metaSchema: string;
+  testNamespace?: string;
+  /** The project store first, then every mounted domain, with the schema the router opens. */
+  stores: { identity: StoreIdentity; schema: string }[];
+  /** This machine's project SQLite file (it may not exist). */
+  localSqlitePath: string;
+  /** The caller chose to fence a local SQLite file that holds records. */
+  fenceLocal: boolean;
+}
+
+export interface PlanAttachInput {
+  root: string;
+  credentialsPath: string;
+  fenceLocal?: boolean;
+}
+
+/**
+ * The file checks for an attach. Reuses planMove (config, work mode, identity,
+ * credentials, schema names) with no registered projects: an attach copies and
+ * fences no domain, so who else mounts one does not matter. Opens no database.
+ */
+export function planAttach(input: PlanAttachInput): AttachPlan {
+  const plan = planMove({ root: input.root, direction: 'to_postgres', registeredProjects: [], credentialsPath: input.credentialsPath });
+  if (plan.storage === 'postgres') {
+    throw new MoveAttachError('storage', null, `${plan.root}: config.storage is already postgres, so this machine is already attached. Nothing was changed.`);
+  }
+  return {
+    root: plan.root,
+    projectId: plan.projectId,
+    mode: plan.mode,
+    metaSchema: plan.metaSchema,
+    ...(plan.testNamespace ? { testNamespace: plan.testNamespace } : {}),
+    stores: plan.stores.map((s) => ({ identity: s.identity, schema: s.schema })),
+    localSqlitePath: plan.stores[0].sqlitePath,
+    fenceLocal: input.fenceLocal ?? false,
+  };
+}
+
+export interface AttachedStore {
+  identity: StoreIdentity;
+  schema: string;
+  receipt: { move_id: string; source: string; committed_at: string };
+}
+
+export interface AttachResult {
+  root: string;
+  metaSchema: string;
+  mode: ProjectMode;
+  dryRun: boolean;
+  stores: AttachedStore[];
+  /** This machine's project SQLite file and what the attach did with it. */
+  local: { path: string; records: number; action: 'absent' | 'fenced' | 'already_fenced' | 'would_fence' };
+  storageSwitched: boolean;
+}
+
+function attachLabel(s: { identity: StoreIdentity; schema: string }): string {
+  return `${s.identity.kind} ${s.identity.name} (${pgLabel(s.schema)})`;
+}
+
+/** Registered, a receipt from this same store, no Postgres-side fence; each refusal names the schema and the check. */
+function checkAttachStore(bridge: PgBridge, metaSchema: string, s: { identity: StoreIdentity; schema: string }): AttachedStore {
+  const label = attachLabel(s);
+  if (!pgStoreRegistered(bridge, metaSchema, s.schema)) {
+    throw new MoveAttachError(
+      'registered',
+      s.schema,
+      `${label} is not registered in ${metaSchema}.stores, so it was never moved to Postgres. Run move-store --to pg on the machine that holds this store first. Nothing was changed.`,
+    );
+  }
+  const receipt = latestPgReceipt(bridge, metaSchema, s.schema);
+  if (receipt === null) {
+    throw new MoveAttachError('receipt', s.schema, `${label} is registered but has no move receipt in ${metaSchema}.move_receipts, so no completed move filled it. Nothing was changed.`);
+  }
+  if (receipt.source_kind !== s.identity.kind || receipt.source_name !== s.identity.name) {
+    throw new MoveAttachError(
+      'receipt',
+      s.schema,
+      `${label}: its latest move receipt ${receipt.move_id} is from ${receipt.source_kind} ${receipt.source_name}, not from this store. Nothing was changed.`,
+    );
+  }
+  const fence = readPgFence(bridge, s.schema);
+  if (fence) {
+    throw new MoveAttachError(
+      'fence',
+      s.schema,
+      `${label} is fenced by move ${fence.move_id}: it moved to ${fence.to} on ${fence.fenced_at}, so it no longer takes writes. Nothing was changed.`,
+    );
+  }
+  return { identity: s.identity, schema: s.schema, receipt: { move_id: receipt.move_id, source: receipt.source, committed_at: receipt.committed_at } };
+}
+
+/**
+ * Attaches this machine to the project's Postgres stores: every store is
+ * checked first, then the local project SQLite file is fenced (see above),
+ * then config.storage is written. A dry run runs every check and writes nothing.
+ */
+export function attachProject(plan: AttachPlan, bridge: PgBridge, opts: { dryRun?: boolean } = {}): AttachResult {
+  const dryRun = opts.dryRun ?? false;
+  const stores = plan.stores.map((s) => checkAttachStore(bridge, plan.metaSchema, s));
+  const path = plan.localSqlitePath;
+  let local: AttachResult['local'] = { path, records: 0, action: 'absent' };
+  if (existsSync(path)) {
+    const label = sqliteLabel(path);
+    const target = pgLabel(plan.stores[0].schema);
+    const existing = readSqliteFence(path);
+    sourceFenceCheck(existing, label, target);
+    const records = (snapshotSqlite(path, label).get('records') ?? []).length;
+    if (existing) {
+      local = { path, records, action: 'already_fenced' };
+    } else {
+      if (records > 0 && !plan.fenceLocal) {
+        throw new MoveAttachError(
+          'local_store',
+          null,
+          `${label} holds ${records} record(s). After the attach this project reads only Postgres, so they would no longer be reachable from it. ` +
+            `Check what they are; to fence the file and attach anyway, pass --fence-local (the file is kept, and a later move back to SQLite from this machine replaces it). Nothing was changed.`,
+        );
+      }
+      if (!dryRun) {
+        // As in importStore: fence first, then record the digest of what the fence froze.
+        const fence: MoveFence = { move_id: randomUUID(), to: target, fenced_at: new Date().toISOString(), manifest_digest: null };
+        writeSqliteFence(path, fence);
+        writeSqliteFence(path, { ...fence, manifest_digest: buildManifest(snapshotSqlite(path, label)).manifest.digest });
+      }
+      local = { path, records, action: dryRun ? 'would_fence' : 'fenced' };
+    }
+  }
+  const storageSwitched = dryRun ? false : writeProjectStorage(plan.root, 'postgres');
+  return { root: plan.root, metaSchema: plan.metaSchema, mode: plan.mode, dryRun, stores, local, storageSwitched };
+}

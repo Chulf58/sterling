@@ -17,7 +17,8 @@ import { ProjectRegistry } from '../../packages/store/dist/index.js';
 import { MoveModeError, readSqliteFence, readSqliteReceipt, readPgFence, latestPgReceipt, snapshotSqliteStore, buildManifest } from '../../packages/store/dist/store-move.js';
 import { PG_SKIP, dropTestSchemas, openTestBridge } from '../../packages/store/dist/tests/pg-test-support.js';
 import { seedStore } from '../../packages/store/dist/tests/store-move-fixture.js';
-import { MoveStoreUsageError, findProjectRoot, formatReport, parseArgs, runMoveStore } from '../move-store.mjs';
+import { openRoutedStores } from '../../packages/store/dist/routing.js';
+import { MoveStoreUsageError, findProjectRoot, formatAttachReport, formatReport, parseArgs, runAttach, runMoveStore } from '../move-store.mjs';
 
 const temps = [];
 function tempDir() {
@@ -68,6 +69,22 @@ test('parseArgs: --to is required and must be pg or sqlite; --all does not exist
   assert.throws(() => parseArgs([]), MoveStoreUsageError);
   assert.throws(() => parseArgs(['--to', 'mysql']), MoveStoreUsageError);
   assert.throws(() => parseArgs(['--to', 'pg', '--all']), (e) => e instanceof MoveStoreUsageError && e.message.includes("'--all'"));
+});
+
+test('parseArgs: --attach takes --fence-local, --dry-run and --project but no --to; --fence-local needs --attach', () => {
+  assert.deepEqual(parseArgs(['--attach']), { attach: true, fenceLocal: false, dryRun: false, project: undefined });
+  assert.deepEqual(parseArgs(['--attach', '--fence-local', '--dry-run', '--project=/p']), { attach: true, fenceLocal: true, dryRun: true, project: '/p' });
+  assert.throws(() => parseArgs(['--attach', '--to', 'pg']), (e) => e instanceof MoveStoreUsageError && e.message.includes('--attach copies nothing'));
+  assert.throws(() => parseArgs(['--to', 'pg', '--fence-local']), (e) => e instanceof MoveStoreUsageError && e.message.includes('only for --attach'));
+  assert.match(new MoveStoreUsageError('x').message, /--attach \[--fence-local\]/);
+});
+
+test('--attach: credentials are checked before any connection, and the config is left as found', () => {
+  const base = tempDir();
+  const work = project(join(base, 'work'));
+  const before = readFileSync(join(work, '.sterling', 'config.json'), 'utf8');
+  assert.throws(() => runAttach({ root: work, credentialsPath: join(base, 'missing.json') }), (e) => e.name === 'MoveCredentialsError');
+  assert.equal(readFileSync(join(work, '.sterling', 'config.json'), 'utf8'), before);
 });
 
 test('findProjectRoot: walks up to the directory holding .sterling/config.json', () => {
@@ -232,4 +249,52 @@ test('credentials file mode is checked before any connection', () => {
   writeFileSync(creds, '{}');
   chmodSync(creds, 0o644);
   assert.throws(() => runMoveStore({ root: work, to: 'pg', credentialsPath: creds, registryDb: join(base, 'r.db') }), (e) => e.name === 'MoveCredentialsError' && e.message.includes('mode'));
+});
+
+test('--attach: machine B, a fresh clone of a project machine A moved, joins it and reads A\'s records; a local store with records needs --fence-local', { skip: PG_SKIP }, () => {
+  usedPg = true;
+  const base = tempDir();
+  const domainA = join(base, 'a-domains', 'attachdom.db');
+  const seededDomain = seedStore(domainA, { label: 'attach-domain' });
+  const a = project(join(base, 'machine-a'), { stack: ['attachdom'], domainPaths: { attachdom: domainA } });
+  const seededProject = seedStore(join(a, '.sterling', 'sterling.db'), { label: 'attach-project' });
+  assert.equal(runMoveStore({ root: a, to: 'pg', registryDb: registry(base, [a]) }).failure, null);
+
+  // Machine B: the committed project.json, its own gitignored config with no storage key, and a local store holding a record.
+  const b = join(base, 'machine-b');
+  mkdirSync(join(b, '.sterling'), { recursive: true });
+  writeFileSync(join(b, '.sterling', 'project.json'), readFileSync(join(a, '.sterling', 'project.json')));
+  writeFileSync(join(b, '.sterling', 'config.json'), JSON.stringify({ mode: 'work', stack_tags: ['attachdom'], domain_paths: { attachdom: join(base, 'b-domains', 'attachdom.db') } }, null, 2));
+  const local = join(b, '.sterling', 'sterling.db');
+  seedStore(local, { label: 'machine-b' });
+
+  assert.throws(() => runAttach({ root: b }), (e) => e.name === 'MoveAttachError' && e.check === 'local_store' && e.message.includes('--fence-local'));
+  assert.equal(storageOf(b), undefined);
+  assert.equal(readSqliteFence(local), null);
+
+  const dry = runAttach({ root: b, dryRun: true, fenceLocal: true });
+  assert.match(formatAttachReport(dry), /\(dry run\)[\s\S]*would be fenced[\s\S]*config\.storage not changed \(dry run\)/);
+  assert.equal(storageOf(b), undefined);
+
+  const report = runAttach({ root: b, fenceLocal: true });
+  const text = formatAttachReport(report);
+  assert.deepEqual(report.stores.map((s) => s.identity.kind), ['project', 'domain']);
+  assert.match(text, /no data is copied/);
+  assert.match(text, /config\.storage switched to postgres/);
+  assert.match(text, /config\.mode unchanged \(work\)/);
+  assert.equal(storageOf(b), 'postgres');
+  assert.equal(modeOf(b), 'work');
+  assert.ok(readSqliteFence(local), 'machine B\'s own SQLite store is fenced');
+  assert.equal(existsSync(join(base, 'b-domains', 'attachdom.db')), false, 'no domain file is created or touched');
+
+  // The router on machine B now reaches machine A's records.
+  const routed = openRoutedStores(b, { mount: true });
+  try {
+    assert.equal(routed.route.storage, 'postgres');
+    assert.ok(routed.stores.get(seededProject.ids[0]), 'a project record written on machine A');
+    assert.ok(routed.stores.get(seededDomain.ids[0]), 'a domain record written on machine A');
+  } finally {
+    routed.stores.close();
+  }
+  assert.throws(() => runAttach({ root: b }), (e) => e.name === 'MoveAttachError' && e.check === 'storage');
 });

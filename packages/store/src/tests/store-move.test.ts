@@ -44,8 +44,13 @@ import {
   MoveStorageSettingError,
   MoveConfigInvalidError,
   writeSqliteFence,
+  writePgFence,
+  MoveAttachError,
+  attachProject,
+  planAttach,
   type StoreSnapshot,
 } from '../store-move.js';
+import { PG_TEST_NAMESPACE_ENV, pgStoreNames, routedCredentialsPath } from '../routing.js';
 import { PG_SKIP, dropTestSchemas, newTestPrefix, openTestBridge } from './pg-test-support.js';
 import { decision, openSqliteStore, seedStore } from './store-move-fixture.js';
 
@@ -208,6 +213,26 @@ test('writeProjectStorage: switches config.storage, keeps config.mode and every 
   assert.equal(writeProjectStorage(dir, 'sqlite'), true);
   cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
   assert.deepEqual([cfg.storage, cfg.mode], ['sqlite', 'work']);
+});
+
+test('planAttach: refuses by name in a hobby project, with no identity, with unreadable credentials, and when storage is already postgres', () => {
+  const base = tempDir();
+  const creds = fakeCredentials(base);
+  const hobby = project(join(base, 'hobby'), { mode: 'hobby' });
+  assert.throws(() => planAttach({ root: hobby, credentialsPath: creds }), (e: unknown) => e instanceof MoveModeError && (e as Error).message.includes('hobby project'));
+  const anon = project(join(base, 'anon'), { id: false });
+  assert.throws(() => planAttach({ root: anon, credentialsPath: creds }), MoveIdentityMissingError);
+  const work = project(join(base, 'work'), {});
+  assert.throws(() => planAttach({ root: work, credentialsPath: join(base, 'missing.json') }), MoveCredentialsError);
+  const attached = project(join(base, 'attached'), { storage: 'postgres' });
+  assert.throws(
+    () => planAttach({ root: attached, credentialsPath: creds }),
+    (e: unknown) => e instanceof MoveAttachError && e.check === 'storage' && e.schema === null && e.message.includes('already postgres'),
+  );
+  const plan = planAttach({ root: work, credentialsPath: creds });
+  assert.equal(plan.localSqlitePath, join(work, '.sterling', 'sterling.db'));
+  assert.equal(plan.fenceLocal, false);
+  for (const root of [hobby, anon, work, attached]) assert.equal(existsSync(join(root, '.sterling', 'sterling.db')), false, 'the plan writes nothing');
 });
 
 // ---------------------------------------------------------------------------
@@ -450,4 +475,151 @@ test('the fence key is a plain store_meta row, so SterlingStore can check it aft
   exportStore({ ...pgOpts(), schema, sqlitePath: join(tempDir(), 'out.db'), identity: { kind: 'domain', name: 'fencerow' }, fenceSource: true });
   const row = live().bridge.query(`SELECT value FROM "${schema}".store_meta WHERE key = $1`, [MOVE_FENCE_KEY]).rows[0];
   assert.ok(row && JSON.parse(String(row.value)).move_id);
+});
+
+// ---------------------------------------------------------------------------
+// Attach (STERLING_TEST_PG=1): a second machine joins a project already on Postgres
+// ---------------------------------------------------------------------------
+
+/**
+ * Machine A's stores moved to Postgres under this file's prefix (as the router
+ * names them, through STERLING_TEST_PG_NAMESPACE), and machine B: a fresh
+ * clone with the same project.json and a config with no storage key.
+ * `skip` names stores A never moved ('project', 'alpha', 'beta'). Domain
+ * schemas are named by domain alone, so each fixture gets its own domain names.
+ */
+let attachFixtures = 0;
+function attachFixture(opts: { skip?: string[] } = {}) {
+  process.env[PG_TEST_NAMESPACE_ENV] = live().prefix;
+  const base = tempDir();
+  const projectId = randomUUID();
+  const n = ++attachFixtures;
+  const stack = [`alpha${n}`, `beta${n}`];
+  const names = pgStoreNames(projectId, stack);
+  assert.equal(names.metaSchema, live().meta);
+  const moves: [string, string, { kind: 'project' | 'domain'; name: string }][] = [
+    ['project', names.projectSchema, { kind: 'project', name: projectId }],
+    ...names.domains.map((d, i): [string, string, { kind: 'domain'; name: string }] => [['alpha', 'beta'][i], d.schema, { kind: 'domain', name: d.name }]),
+  ];
+  for (const [key, schema, identity] of moves) {
+    if (opts.skip?.includes(key)) continue;
+    const path = join(base, 'machine-a', `${key}.db`);
+    seedStore(path, { label: `attach-${key}-${projectId.slice(0, 8)}` });
+    importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource: true });
+  }
+  const b = join(base, 'machine-b');
+  mkdirSync(join(b, '.sterling'), { recursive: true });
+  writeFileSync(join(b, '.sterling', 'config.json'), JSON.stringify({ mode: 'work', stack_tags: stack, domain_paths: { [stack[0]]: join(b, 'd', 'alpha.db'), [stack[1]]: join(b, 'd', 'beta.db') }, kept: 'yes' }, null, 2));
+  writeFileSync(join(b, '.sterling', 'project.json'), JSON.stringify({ project_id: projectId }));
+  const cfgPath = join(b, '.sterling', 'config.json');
+  return { b, names, cfgPath, configText: () => readFileSync(cfgPath, 'utf8'), plan: (fenceLocal = false) => planAttach({ root: b, credentialsPath: routedCredentialsPath(), fenceLocal }) };
+}
+
+function assertAttachRefused(fx: ReturnType<typeof attachFixture>, check: string, schema: string | null, fenceLocal = false): void {
+  const before = fx.configText();
+  assert.throws(
+    () => attachProject(fx.plan(fenceLocal), live().bridge),
+    (e: unknown) => e instanceof MoveAttachError && e.check === check && e.schema === schema && e.message.startsWith(`attach check '${check}' failed: `) && (schema === null || e.message.includes(schema)) && e.message.includes('Nothing was changed'),
+  );
+  assert.equal(fx.configText(), before, 'a refused attach leaves the config byte for byte');
+}
+
+test('attach: with every schema registered, receipted and unfenced it writes config.storage = postgres and copies nothing; a dry run writes nothing', { skip: PG_SKIP }, () => {
+  const fx = attachFixture();
+  const before = fx.configText();
+  const dry = attachProject(fx.plan(), live().bridge, { dryRun: true });
+  assert.equal(dry.storageSwitched, false);
+  assert.equal(fx.configText(), before, 'the dry run wrote nothing');
+  const digests = [fx.names.projectSchema, ...fx.names.domains.map((d) => d.schema)].map((s) => digestOf(snapshotPgStore(live().bridge, s)));
+  const done = attachProject(fx.plan(), live().bridge);
+  assert.equal(done.storageSwitched, true);
+  assert.deepEqual(done.stores.map((s) => [s.identity.kind, s.schema]), [['project', fx.names.projectSchema], ...fx.names.domains.map((d) => ['domain', d.schema])]);
+  assert.ok(done.stores.every((s) => s.receipt.move_id.length > 0));
+  assert.deepEqual(done.local, { path: join(fx.b, '.sterling', 'sterling.db'), records: 0, action: 'absent' });
+  const cfg = JSON.parse(fx.configText());
+  assert.deepEqual([cfg.storage, cfg.mode, cfg.kept], ['postgres', 'work', 'yes'], 'storage written; mode and every other key kept');
+  assert.deepEqual([fx.names.projectSchema, ...fx.names.domains.map((d) => d.schema)].map((s) => digestOf(snapshotPgStore(live().bridge, s))), digests, 'the Postgres stores are unchanged');
+  assert.equal(existsSync(join(fx.b, '.sterling', 'sterling.db')), false, 'no SQLite store was created');
+  assert.throws(() => fx.plan(), (e: unknown) => e instanceof MoveAttachError && e.check === 'storage', 'a second attach is refused: already postgres');
+});
+
+test('attach: a project schema never moved is refused by name (registered)', { skip: PG_SKIP }, () => {
+  const fx = attachFixture({ skip: ['project'] });
+  assertAttachRefused(fx, 'registered', fx.names.projectSchema);
+});
+
+test('attach: a mounted domain schema never moved is refused by name (registered)', { skip: PG_SKIP }, () => {
+  const fx = attachFixture({ skip: ['beta'] });
+  assertAttachRefused(fx, 'registered', fx.names.domains[1].schema);
+});
+
+test('attach: a registered schema with no receipt is refused by name (receipt)', { skip: PG_SKIP }, () => {
+  const fx = attachFixture();
+  const schema = fx.names.domains[0].schema;
+  live().bridge.query(`DELETE FROM "${live().meta}".move_receipts WHERE target_schema = $1`, [schema]);
+  assertAttachRefused(fx, 'receipt', schema);
+});
+
+test('attach: a schema whose latest receipt is from another store is refused by name (receipt)', { skip: PG_SKIP }, () => {
+  const fx = attachFixture();
+  const schema = fx.names.projectSchema;
+  const row = live().bridge.query(`SELECT move_id, receipt FROM "${live().meta}".move_receipts WHERE target_schema = $1`, [schema]).rows[0];
+  const receipt = { ...JSON.parse(String(row.receipt)), source_kind: 'domain', source_name: 'someone-else' };
+  live().bridge.query(`UPDATE "${live().meta}".move_receipts SET receipt = $1 WHERE move_id = $2`, [JSON.stringify(receipt), row.move_id]);
+  assertAttachRefused(fx, 'receipt', schema);
+});
+
+test('attach: a schema fenced on the Postgres side (moved back to SQLite) is refused by name (fence)', { skip: PG_SKIP }, () => {
+  const fx = attachFixture();
+  const schema = fx.names.domains[1].schema;
+  writePgFence(live().bridge, live().meta, schema, { move_id: randomUUID(), to: 'sqlite:/elsewhere/beta.db', fenced_at: '2026-10-06T09:00:00.000Z', manifest_digest: null });
+  assertAttachRefused(fx, 'fence', schema);
+});
+
+test('attach: a local project SQLite file is fenced when empty, refused while it holds records, and fenced on --fence-local', { skip: PG_SKIP }, () => {
+  // Holds records, no choice made: refused by name, the file untouched.
+  const held = attachFixture();
+  const local = join(held.b, '.sterling', 'sterling.db');
+  seedStore(local, { label: 'machine-b-local' });
+  const localDigest = digestOf(snapshotSqliteStore(local));
+  assertAttachRefused(held, 'local_store', null);
+  assert.equal(readSqliteFence(local), null, 'the refusal fenced nothing');
+  // A dry run with the choice made reports and writes nothing.
+  const dry = attachProject(held.plan(true), live().bridge, { dryRun: true });
+  assert.equal(dry.local.action, 'would_fence');
+  assert.equal(readSqliteFence(local), null);
+  // The choice made: fenced toward the project schema with the digest of what it froze, then switched.
+  const done = attachProject(held.plan(true), live().bridge);
+  assert.equal(done.local.action, 'fenced');
+  assert.ok(done.local.records > 0);
+  const fence = readSqliteFence(local);
+  assert.equal(fence?.to, `postgres:${held.names.projectSchema}`);
+  assert.equal(fence?.manifest_digest, localDigest, 'a later move back from this machine can replace the file as an untouched copy');
+  assert.equal(JSON.parse(held.configText()).storage, 'postgres');
+
+  // An empty local store (as init leaves it) is fenced without the choice: nothing in it is lost.
+  const empty = attachFixture();
+  const emptyPath = join(empty.b, '.sterling', 'sterling.db');
+  openSqliteStore(emptyPath).close();
+  const emptyDone = attachProject(empty.plan(), live().bridge);
+  assert.deepEqual([emptyDone.local.action, emptyDone.local.records], ['fenced', 0]);
+  assert.ok(readSqliteFence(emptyPath));
+  assert.equal(JSON.parse(empty.configText()).storage, 'postgres');
+
+  // A re-run after a crash between the fence and the switch: the file is already fenced toward this schema, so the choice stands.
+  const resumed = attachFixture();
+  const resumedPath = join(resumed.b, '.sterling', 'sterling.db');
+  seedStore(resumedPath, { label: 'machine-b-resumed' });
+  writeSqliteFence(resumedPath, { move_id: randomUUID(), to: `postgres:${resumed.names.projectSchema}`, fenced_at: '2026-10-06T09:00:00.000Z', manifest_digest: null });
+  assert.equal(attachProject(resumed.plan(), live().bridge).local.action, 'already_fenced');
+  assert.equal(JSON.parse(resumed.configText()).storage, 'postgres');
+
+  // A local file already fenced toward somewhere else is refused by name.
+  const elsewhere = attachFixture();
+  const elsewherePath = join(elsewhere.b, '.sterling', 'sterling.db');
+  openSqliteStore(elsewherePath).close();
+  writeSqliteFence(elsewherePath, { move_id: randomUUID(), to: 'postgres:sterling_p_other', fenced_at: '2026-10-06T09:00:00.000Z', manifest_digest: null });
+  const before = elsewhere.configText();
+  assert.throws(() => attachProject(elsewhere.plan(true), live().bridge), MoveSourceFencedError);
+  assert.equal(elsewhere.configText(), before);
 });
