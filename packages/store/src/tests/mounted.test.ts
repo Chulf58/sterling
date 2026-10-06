@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { MountedStores, SterlingStore, createDomain, missingDomainWarning } from '../index.js';
 import type { QueryOptions } from '../index.js';
+import { sqliteOnly } from './pg-test-support.js';
 
 const NOW = '2026-06-16T12:00:00.000Z';
 
@@ -398,7 +399,7 @@ test('createDomain: refuses a domain whose store already exists, and leaves it u
   }
 });
 
-test('MountedStores: an EXISTING domain store with no description still mounts and is readable', () => {
+test('MountedStores: an EXISTING domain store with no description still mounts and is readable', { skip: sqliteOnly('item 5 routing') }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-domain-nodesc-'));
   const db = join(dir, 'domains', 'legacy', 'sterling.db');
   try {

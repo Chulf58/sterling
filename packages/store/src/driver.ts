@@ -64,6 +64,15 @@ export interface StoreDriver {
   commit(): void;
   rollback(): void;
 
+  // The read transaction (decision
+  // postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+  // point 5): SterlingStore's private readTx() wraps a multi-statement read in
+  // beginRead()/endRead() so it sees one snapshot. A driver whose reads are
+  // already consistent enough, or that keeps today's autocommit reads (SQLite),
+  // omits both. endRead() also ends a read whose statement failed.
+  beginRead?(): void;
+  endRead?(): void;
+
   // Opening. SterlingStore's constructor drives these in a fixed order:
   // schemaVersion() (too new: close and refuse), hasSchema() (an older store
   // that has one opens read-only), prepareReadOnly() or prepareWritable(), then

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { SterlingStore } from '../index.js';
 import type { QueryOptions } from '../index.js';
 import * as storeMod from '../index.js';
+import { sqliteOnly } from './pg-test-support.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
 const LATER = '2026-06-10T13:00:00.000Z';
@@ -100,7 +101,7 @@ test('recordIdIndex serves ids at ANY status — tombstones included, which quer
   }
 });
 
-test('WAL mode is active on a file-backed store (§3.1 criterion 6)', () => {
+test('WAL mode is active on a file-backed store (§3.1 criterion 6)', { skip: sqliteOnly('asserts the SQLite WAL journal mode') }, () => {
   const { dir, store } = tempStore();
   try {
     assert.equal(store.journalMode(), 'wal');
@@ -736,7 +737,7 @@ test('concurrent access: a second connection reads while the first is open (WAL,
   }
 });
 
-test('snapshot: VACUUM INTO produces an openable copy; refuses to overwrite (§2.3)', () => {
+test('snapshot: VACUUM INTO produces an openable copy; refuses to overwrite (§2.3)', { skip: sqliteOnly('VACUUM INTO snapshot; Postgres backup is issue 26 item 7') }, () => {
   const { dir, store } = tempStore();
   try {
     const d = store.create(decision());

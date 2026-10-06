@@ -19,6 +19,7 @@ import {
   type StoreDriver,
   type StoreDialect,
 } from '../index.js';
+import { sqliteOnly } from './pg-test-support.js';
 
 const NOW = '2026-10-05T12:00:00.000Z';
 
@@ -241,7 +242,7 @@ test('SqliteDriver.snapshot writes a readable copy', () => {
   }
 });
 
-test('SterlingStore opens on a SqliteDriver and passes busyTimeoutMs through to it', () => {
+test('SterlingStore opens on a SqliteDriver and passes busyTimeoutMs through to it', { skip: sqliteOnly('asserts the SqliteDriver itself; PgDriver has its own tests in pg-driver.test.ts') }, () => {
   const dir = tempDir();
   try {
     const byDefault = new SterlingStore(join(dir, 'a.db'));
@@ -381,7 +382,7 @@ test('no transaction statement reaches the statement API: BEGIN, COMMIT and ROLL
   }
 });
 
-test('journalMode() and snapshot() go through the driver', () => {
+test('journalMode() and snapshot() go through the driver', { skip: sqliteOnly('asserts the SqliteDriver itself; PgDriver has its own tests in pg-driver.test.ts') }, () => {
   const dir = tempDir();
   try {
     const { driver, events } = recordingDriver(join(dir, 's.db'));

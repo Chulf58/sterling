@@ -409,6 +409,16 @@ export class SqliteDriver implements StoreDriver {
     } catch {
       /* column already exists */
     }
+    // Additive, no user_version bump (decision
+    // postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+    // point 3): records gains a nullable operation_id with a unique index, so a
+    // repeated create or enqueue can be found and refused. NULLs never collide.
+    try {
+      this.db.exec('ALTER TABLE records ADD COLUMN operation_id TEXT');
+    } catch {
+      /* column already exists */
+    }
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON records(operation_id)');
   }
 
   journalMode(): string {

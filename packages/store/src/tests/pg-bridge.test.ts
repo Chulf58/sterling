@@ -155,12 +155,12 @@ for (const mode of ['crash', 'exit'] as const) {
     try {
       assert.throws(() => {
         bridge = new PgBridge(readPgCredentials(), { workerUrl: fixtureWorker, waitTimeoutMs: 20_000 });
-        bridge.query('SELECT pg_sleep(5)');
+        bridge.query('SELECT pg_sleep(8)');
       }, PgWorkerDiedError);
     } finally {
       delete process.env.STERLING_PG_FIXTURE_MODE;
     }
-    assert.ok(Date.now() - t0 < 10_000, `took ${Date.now() - t0} ms`);
+    assert.ok(Date.now() - t0 < 15_000, `took ${Date.now() - t0} ms`);
     assert.ok(bridge, 'the handshake completed before the fixture died');
     assert.throws(() => bridge!.query('SELECT 1'), PgBridgeClosedError);
   });

@@ -12,7 +12,7 @@
 import { mkdirSync, existsSync, rmSync, openSync, closeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { SterlingStore, SchemaMigrationRequiredError, StoreRowDecodeError, UnsupportedSchemaVersionError, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions, type BoardItemReadiness } from './index.js';
+import { SterlingStore, SchemaMigrationRequiredError, StoreRowDecodeError, UnsupportedSchemaVersionError, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions, type BoardItemReadiness, type WriteOptions } from './index.js';
 import { validateRecord, type DurableRecord, type SterlingConfig } from '@sterling/schemas';
 import { allocateShares } from './shares.js';
 
@@ -394,7 +394,7 @@ export class MountedStores {
    *  otherwise a lifecycle/freshness-only envelope that SterlingStore.create
    *  accepts was rejected through the mounted surface, because the schemas
    *  registry still declares the derived status/superseded_by fields. */
-  create(input: unknown): DurableRecord {
+  create(input: unknown, options: WriteOptions = {}): DurableRecord {
     const normalized = SterlingStore.normalizeIdentityEnvelope(input);
     const record = validateRecord(normalized);
     // Board bd3f0acf — this site is NOT redundant with SterlingStore.create's own
@@ -413,7 +413,7 @@ export class MountedStores {
     // still gets its own refusal first.
     const target = this.storeFor(record.scope);
     this.assertMountAffinity('create', target, `record '${record.id}' (scope '${record.scope}')`);
-    return target.create(record);
+    return target.create(record, options);
   }
 
   /** Scope-routed exactly as create() is. A maintenance item is project-LOCAL
@@ -421,12 +421,12 @@ export class MountedStores {
    *  and the dedup key is therefore evaluated within that ONE store rather than
    *  across the fan, which is right: two projects' queues are independent, and a
    *  cross-store key would let one project's item suppress another's. */
-  enqueueSystemTodo(input: unknown): { record: DurableRecord; deduped: boolean; text_updated: boolean } {
+  enqueueSystemTodo(input: unknown, options: WriteOptions = {}): { record: DurableRecord; deduped: boolean; text_updated: boolean } {
     // Same normalize-then-validate order as create(), for the same reason.
     const record = validateRecord(SterlingStore.normalizeIdentityEnvelope(input));
     const target = this.storeFor(record.scope);
     this.assertMountAffinity('enqueueSystemTodo', target, `todo '${record.id}' (scope '${record.scope}')`);
-    return target.enqueueSystemTodo(record);
+    return target.enqueueSystemTodo(record, options);
   }
 
   /** Read-only twin of enqueueSystemTodo: queue items are project-local, so the
@@ -667,10 +667,11 @@ export class MountedStores {
    *  repeated. The label and the physical destination are therefore ONE fact,
    *  and cannot drift apart at this site by construction. Any third argument a
    *  caller supplies is deliberately ignored for the same reason: an
-   *  authoritative scope is not something a caller can be trusted to know. */
+   *  authoritative scope is not something a caller can be trusted to know.
+   *  The fourth argument (WriteOptions: operation_id) passes through. */
   supersede(...args: Parameters<SterlingStore['supersede']>): ReturnType<SterlingStore['supersede']> {
     const store = this.mutatingStoreHolding('supersede', args[0]);
-    return store.supersede(args[0], args[1], this.mountNameOf(store));
+    return store.supersede(args[0], args[1], this.mountNameOf(store), args[3]);
   }
 
   /** Promotion tombstone: retire the original in its (project) store, pointing at

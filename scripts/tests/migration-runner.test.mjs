@@ -1753,3 +1753,38 @@ test('S4-ALL-11b [--all-stores]: a project config with a domain_paths value that
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('S4-W1 [issue 26 slice 3B]: a store inside a work-mode project is refused as hobby-only before anything is read or written', () => {
+  const projectDir = mkdtempSync(join(tmpdir(), 'migration-runner-work-'));
+  try {
+    mkdirSync(join(projectDir, '.sterling'));
+    writeFileSync(join(projectDir, '.sterling', 'config.json'), JSON.stringify({ mode: 'work' }));
+    const dbPath = join(projectDir, '.sterling', 'sterling.db');
+    buildLegacyChainFixture(dbPath);
+    const hash = fileHash(dbPath);
+    const before_ = dirSnapshot(join(projectDir, '.sterling'));
+    const { code, stdout, stderr } = runMigrate(['--db', dbPath]);
+    assert.notEqual(code, 0, 'a work-mode store is a refusal, never a clean exit');
+    assert.match(stdout + stderr, /hobby-only/, 'the refusal names the hobby-only scope');
+    assert.match(stdout + stderr, /work/, 'the refusal names the work mode it found');
+    assert.equal(fileHash(dbPath), hash, 'the store is byte-identical');
+    assert.deepEqual(dirSnapshot(join(projectDir, '.sterling')), before_, 'no backup or manifest was written');
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('S4-W2 [issue 26 slice 3B]: a store inside a hobby-mode project still migrates (control for S4-W1)', () => {
+  const projectDir = mkdtempSync(join(tmpdir(), 'migration-runner-hobby-'));
+  try {
+    mkdirSync(join(projectDir, '.sterling'));
+    writeFileSync(join(projectDir, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby' }));
+    const dbPath = join(projectDir, '.sterling', 'sterling.db');
+    buildLegacyChainFixture(dbPath);
+    const { code } = runMigrate(['--db', dbPath]);
+    assert.equal(code, 0, 'a hobby-mode store migrates');
+    assert.equal(rawUserVersion(dbPath), 2);
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});

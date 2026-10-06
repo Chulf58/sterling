@@ -20,6 +20,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { SterlingStore, journalDemotionRequired, JournalDemotionRefusedError } from '../index.js';
+import { sqliteOnly } from './pg-test-support.js';
 
 function rawMode(path: string): string {
   const db = new DatabaseSync(path, { readOnly: true });
@@ -30,7 +31,7 @@ function rawMode(path: string): string {
   }
 }
 
-test('fresh store on a non-9p path opens in WAL (control arm — anti-hardcode)', () => {
+test('fresh store on a non-9p path opens in WAL (control arm — anti-hardcode)', { skip: sqliteOnly('asserts the SQLite journal mode and the 9p policy') }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'jm-fresh-'));
   try {
     const store = new SterlingStore(join(dir, 'store.db'));
@@ -70,7 +71,7 @@ test('existing store already in DELETE stays DELETE on a non-9p reopen (sticky)'
   }
 });
 
-test('existing store in WAL stays WAL on a non-9p reopen', () => {
+test('existing store in WAL stays WAL on a non-9p reopen', { skip: sqliteOnly('asserts the SQLite journal mode and the 9p policy') }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'jm-wal-'));
   const path = join(dir, 'store.db');
   try {
@@ -104,7 +105,7 @@ function ninePTempDir(): string | null {
   return null;
 }
 
-test('fresh store opened over 9p (/mnt/<drive>) is demoted to DELETE', (t) => {
+test('fresh store opened over 9p (/mnt/<drive>) is demoted to DELETE', { skip: sqliteOnly('asserts the SQLite journal mode and the 9p policy') }, (t) => {
   const base = ninePTempDir();
   if (!base) {
     t.skip('no writable /mnt/<drive> temp dir on this machine — 9p demotion arm not exercised here');
@@ -122,7 +123,7 @@ test('fresh store opened over 9p (/mnt/<drive>) is demoted to DELETE', (t) => {
   }
 });
 
-test('9p open of an existing WAL store demotes it to DELETE once, then stays', (t) => {
+test('9p open of an existing WAL store demotes it to DELETE once, then stays', { skip: sqliteOnly('asserts the SQLite journal mode and the 9p policy') }, (t) => {
   const base = ninePTempDir();
   if (!base) {
     t.skip('no writable /mnt/<drive> temp dir on this machine — 9p demotion arm not exercised here');
@@ -158,7 +159,7 @@ test('9p open of an existing WAL store demotes it to DELETE once, then stays', (
   }
 });
 
-test('refused 9p demotion fails LOUD and closes (never proceeds in WAL)', (t) => {
+test('refused 9p demotion fails LOUD and closes (never proceeds in WAL)', { skip: sqliteOnly('asserts the SQLite journal mode and the 9p policy') }, (t) => {
   const base = ninePTempDir();
   if (!base) {
     t.skip('no writable /mnt/<drive> temp dir on this machine — 9p demotion arm not exercised here');
@@ -206,7 +207,7 @@ test('refused 9p demotion fails LOUD and closes (never proceeds in WAL)', (t) =>
   }
 });
 
-test('legacy-schema store found in WAL over 9p is refused, distinctly', (t) => {
+test('legacy-schema store found in WAL over 9p is refused, distinctly', { skip: sqliteOnly('asserts the SQLite journal mode and the 9p policy') }, (t) => {
   const base = ninePTempDir();
   if (!base) {
     t.skip('no writable /mnt/<drive> temp dir on this machine — 9p demotion arm not exercised here');
@@ -261,7 +262,7 @@ test('control: legacy-schema store already in DELETE over 9p still opens read-on
   }
 });
 
-test('symlinked path resolving onto a 9p dir classifies as 9p', (t) => {
+test('symlinked path resolving onto a 9p dir classifies as 9p', { skip: sqliteOnly('asserts the SQLite journal mode and the 9p policy') }, (t) => {
   const base = ninePTempDir();
   if (!base) {
     t.skip('no writable /mnt/<drive> temp dir on this machine — 9p demotion arm not exercised here');

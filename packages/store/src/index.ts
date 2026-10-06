@@ -59,6 +59,11 @@ export {
 } from './pg-bridge.js';
 export {
   PgDriver,
+  PgLockTimeoutError,
+  PgStatementTimeoutError,
+  PgTransactionOpenError,
+  DEFAULT_PG_LOCK_TIMEOUT_MS,
+  DEFAULT_PG_STATEMENT_TIMEOUT_MS,
   PgNulCharacterError,
   PgSchemaNameRefusedError,
   PgSearchNotImplementedError,
@@ -188,6 +193,39 @@ export function decodeLiveRecordRow(op: string, row: { body: string; scope: stri
 //     nothing written (the user_version read stays BEFORE journal_mode/DDL).
 // ---------------------------------------------------------------------------
 export const SUPPORTED_SCHEMA_VERSION = 2;
+
+/**
+ * Per-call options for a create, enqueue or supersede (decision
+ * postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump).
+ * operation_id is minted by the caller where it mints the record id; a second
+ * call with the same operation_id is refused with OperationRepeatedError.
+ */
+export interface WriteOptions {
+  operation_id?: string;
+}
+
+/** A create, enqueue or supersede reused an operation_id that already wrote a record. Nothing was written. */
+export class OperationRepeatedError extends Error {
+  constructor(
+    readonly operation_id: string,
+    readonly original_id: string,
+  ) {
+    super(
+      `operation '${operation_id}' already ran: it wrote record '${original_id}'. A repeated operation is refused, never applied twice; nothing was written. Read '${original_id}' to see what landed.`
+    );
+    this.name = 'OperationRepeatedError';
+  }
+}
+
+/** The operation_id from `options`, validated; undefined when the caller passed none. */
+function operationIdOf(options: WriteOptions | undefined, op: string): string | undefined {
+  const id = options?.operation_id;
+  if (id === undefined) return undefined;
+  if (typeof id !== 'string' || id.length === 0 || id.length > 200) {
+    throw new Error(`${op}: operation_id must be a non-empty string of at most 200 characters; nothing was written.`);
+  }
+  return id;
+}
 
 export class UnsupportedSchemaVersionError extends Error {
   readonly found: number;
@@ -1677,8 +1715,9 @@ export class SterlingStore {
    *  legacy feature_article field, and the pin fixtures that pass version: 1).
    *  S3 STRIPS it — version becomes server-owned at every surface — so nothing
    *  new should start relying on setting it. */
-  create(input: unknown): DurableRecord {
+  create(input: unknown, options: WriteOptions = {}): DurableRecord {
     this.assertWritable('create');
+    const operationId = operationIdOf(options, 'create');
     const prepared = SterlingStore.resolveIdentity(input as Record<string, unknown>, {
       lifecycle: 'live',
       freshness: 'fresh',
@@ -1735,7 +1774,8 @@ export class SterlingStore {
     // only callers asking create for a raw edge.
     SterlingStore.refuseRawSupersedesLinks('create', record.links, new Set());
     this.tx(() => {
-      this.insertRecord(record);
+      this.refuseRepeatedOperation(operationId);
+      this.insertRecord(record, operationId);
       this.logActivity('created', record, record.created_at);
     });
     // The echo goes through the SAME derivation get() serves (hydrate +
@@ -2314,23 +2354,25 @@ export class SterlingStore {
    * write would refuse is not validated here, the write path refuses it.
    */
   enqueueWouldBeNoop(input: { system_reason: string; feature_link?: string; file_keys?: string[]; text: string }): boolean {
-    if (input.system_reason === 'reconcile_needed' && input.feature_link) return false;
-    const wantKey = systemTodoKey(input);
-    const rows = (
-      input.feature_link
-        ? this.db
-            .prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0")
-            .all(input.feature_link)
-        : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all()
-    ) as { body: string; scope: string }[];
-    for (const r of rows) {
-      const t = SterlingStore.decodeLiveRecord('enqueueWouldBeNoop', r) as DurableRecord & SystemTodoShape & { source?: string };
-      if (t.source !== 'system' || systemTodoKey(t) !== wantKey) continue;
-      const priorFiles = [...(t.file_keys ?? [])].sort();
-      const nextFiles = [...(input.file_keys ?? [])].sort();
-      return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? '', input.text);
-    }
-    return false;
+    return this.readTx(() => {
+      if (input.system_reason === 'reconcile_needed' && input.feature_link) return false;
+      const wantKey = systemTodoKey(input);
+      const rows = (
+        input.feature_link
+          ? this.db
+              .prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0")
+              .all(input.feature_link)
+          : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all()
+      ) as { body: string; scope: string }[];
+      for (const r of rows) {
+        const t = SterlingStore.decodeLiveRecord('enqueueWouldBeNoop', r) as DurableRecord & SystemTodoShape & { source?: string };
+        if (t.source !== 'system' || systemTodoKey(t) !== wantKey) continue;
+        const priorFiles = [...(t.file_keys ?? [])].sort();
+        const nextFiles = [...(input.file_keys ?? [])].sort();
+        return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? '', input.text);
+      }
+      return false;
+    });
   }
 
   /**
@@ -2382,8 +2424,9 @@ export class SterlingStore {
    * body UPDATE was invisible to expected_version, so a concurrent in-place
    * write could silently revert it, and the FTS row kept the old text).
    */
-  enqueueSystemTodo(input: unknown): { record: DurableRecord; deduped: boolean; text_updated: boolean } {
+  enqueueSystemTodo(input: unknown, options: WriteOptions = {}): { record: DurableRecord; deduped: boolean; text_updated: boolean } {
     this.assertWritable('enqueueSystemTodo');
+    const operationId = operationIdOf(options, 'enqueueSystemTodo');
     const prepared = SterlingStore.resolveIdentity(input as Record<string, unknown>, {
       lifecycle: 'live',
       freshness: 'fresh',
@@ -2473,6 +2516,9 @@ export class SterlingStore {
     // silently reporting the caller's pre-canonicalization `candidate.text`.
     let insertedText: string | undefined;
     this.tx(() => {
+      // A repeated operation is refused BEFORE the content dedup below, which
+      // would otherwise answer it with deduped:true.
+      this.refuseRepeatedOperation(operationId);
       // The read happens INSIDE the write transaction — that is the whole point.
       // Scanning open todos is cheap: the queue is small by design, and a queue
       // large enough for this scan to matter is itself the finding.
@@ -2516,10 +2562,10 @@ export class SterlingStore {
                 : { type: 'feature_article', slug: candidate.feature_link },
               fileKeys
             );
-            this.insertRecord({ ...candidate, text: canonicalText } as DurableRecord);
+            this.insertRecord({ ...candidate, text: canonicalText } as DurableRecord, operationId);
             insertedText = canonicalText;
           } else {
-            this.insertRecord(candidate);
+            this.insertRecord(candidate, operationId);
           }
           return;
         }
@@ -2595,7 +2641,7 @@ export class SterlingStore {
         break;
       }
       if (!existing) {
-        this.insertRecord(candidate);
+        this.insertRecord(candidate, operationId);
         return;
       }
       // FILE_KEYS REFRESH IS INDEPENDENT OF THE TEXT-EQUALITY BRANCH (board
@@ -2652,14 +2698,16 @@ export class SterlingStore {
   }
 
   get(id: string): DurableRecord | undefined {
-    const row = this.db.prepare('SELECT body, scope FROM records WHERE id = ?').get(id) as
-      | { body: string; scope: string }
-      | undefined;
-    if (!row) return undefined;
-    // hydrateAll re-attaches the DERIVED status/superseded_by and materializes
-    // links[] from record_relations ([stable-identity-design-v2]); the decoder
-    // makes the row's scope COLUMN authoritative over the parsed body.
-    return this.withDerivedReliedBy(this.hydrateAll([SterlingStore.decodeLiveRecord('get', row)])[0]);
+    return this.readTx(() => {
+      const row = this.db.prepare('SELECT body, scope FROM records WHERE id = ?').get(id) as
+        | { body: string; scope: string }
+        | undefined;
+      if (!row) return undefined;
+      // hydrateAll re-attaches the DERIVED status/superseded_by and materializes
+      // links[] from record_relations ([stable-identity-design-v2]); the decoder
+      // makes the row's scope COLUMN authoritative over the parsed body.
+      return this.withDerivedReliedBy(this.hydrateAll([SterlingStore.decodeLiveRecord('get', row)])[0]);
+    });
   }
 
   /**
@@ -2839,17 +2887,19 @@ export class SterlingStore {
    * '(lookup failed)' would trade one false payload for another.
    */
   articlesBySlug(slug: string): DurableRecord[] {
-    const rows = this.db
-      .prepare(
-        `SELECT body, scope FROM records
-          WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
-          ORDER BY updated_at DESC`
-      )
-      .all(slug) as { body: string; scope: string }[];
-    const records = this.hydrateAll(SterlingStore.decodeLiveRecords('articlesBySlug', rows));
-    if (!records.length) return records;
-    const relations = this.activeArticleRelations();
-    return records.map((r) => this.withDerivedReliedBy(r, relations));
+    return this.readTx(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT body, scope FROM records
+            WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
+            ORDER BY updated_at DESC`
+        )
+        .all(slug) as { body: string; scope: string }[];
+      const records = this.hydrateAll(SterlingStore.decodeLiveRecords('articlesBySlug', rows));
+      if (!records.length) return records;
+      const relations = this.activeArticleRelations();
+      return records.map((r) => this.withDerivedReliedBy(r, relations));
+    });
   }
 
   /**
@@ -2863,14 +2913,16 @@ export class SterlingStore {
    * live head while a version-pinned citation keeps using the id.
    */
   recordsBySlug(slug: string): DurableRecord[] {
-    const rows = this.db
-      .prepare(
-        `SELECT body, scope FROM records
-          WHERE status != 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
-          ORDER BY updated_at DESC`
-      )
-      .all(slug) as { body: string; scope: string }[];
-    return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('recordsBySlug', rows));
+    return this.readTx(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT body, scope FROM records
+            WHERE status != 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
+            ORDER BY updated_at DESC`
+        )
+        .all(slug) as { body: string; scope: string }[];
+      return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('recordsBySlug', rows));
+    });
   }
 
   /**
@@ -2887,66 +2939,68 @@ export class SterlingStore {
    * only; the stored blocked_by is never rewritten. No cycle detection.
    */
   boardReadiness(items?: readonly DurableRecord[]): BoardItemReadiness[] {
-    type Todo = {
-      id: string;
-      type: string;
-      text?: string;
-      slug?: string;
-      source?: string;
-      priority?: 'low' | 'normal' | 'high';
-      updated_at: string;
-      file_keys?: string[];
-      needs?: BoardNeeds;
-      blocked_by?: string[];
-    };
-    const total = this.count({ types: ['todo'], source: 'user' });
-    const live = (total > 0 ? this.query({ types: ['todo'], source: 'user', cap: total }) : []) as unknown as Todo[];
-    const bySlug = new Map<string, Todo>();
-    for (const t of live) if (t.slug) bySlug.set(t.slug, t);
-    const dependents = new Map<string, Todo[]>();
-    for (const t of live) {
-      for (const slug of new Set(t.blocked_by ?? [])) {
-        const list = dependents.get(slug);
-        if (list) list.push(t);
-        else dependents.set(slug, [t]);
-      }
-    }
-    // The open-blocker test the board tools always used: a live todo carries the
-    // slug. Live user items answer it without a query; anything else falls back
-    // to recordsBySlug so the definition is unchanged.
-    const openBlocker = (slug: string): Todo | undefined =>
-      bySlug.get(slug) ?? (this.recordsBySlug(slug).find((r) => r.type === 'todo') as unknown as Todo | undefined);
-    const targets = (items ?? live) as unknown as Todo[];
-    return targets
-      .filter((t) => t.type === 'todo' && t.source === 'user')
-      .map((t) => {
-        const blockers: BoardBlockerState[] = [];
-        const blockersOpen: string[] = [];
-        for (const slug of t.blocked_by ?? []) {
-          const holder = openBlocker(slug);
-          blockers.push({ slug, state: holder ? 'open' : 'closed' });
-          if (holder) blockersOpen.push(boardItemHandle(holder));
+    return this.readTx(() => {
+      type Todo = {
+        id: string;
+        type: string;
+        text?: string;
+        slug?: string;
+        source?: string;
+        priority?: 'low' | 'normal' | 'high';
+        updated_at: string;
+        file_keys?: string[];
+        needs?: BoardNeeds;
+        blocked_by?: string[];
+      };
+      const total = this.count({ types: ['todo'], source: 'user' });
+      const live = (total > 0 ? this.query({ types: ['todo'], source: 'user', cap: total }) : []) as unknown as Todo[];
+      const bySlug = new Map<string, Todo>();
+      for (const t of live) if (t.slug) bySlug.set(t.slug, t);
+      const dependents = new Map<string, Todo[]>();
+      for (const t of live) {
+        for (const slug of new Set(t.blocked_by ?? [])) {
+          const list = dependents.get(slug);
+          if (list) list.push(t);
+          else dependents.set(slug, [t]);
         }
-        const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-        // 'user' and 'grill' items wait for the user whatever their blockers (the ruling),
-        // so WAITING is shown every session; an open blocker still wins over
-        // investigation and over no needs.
-        const state: BoardReadinessState =
-          t.needs === 'user' || t.needs === 'grill' ? 'waiting' : blockersOpen.length ? 'blocked' : t.needs === 'investigation' ? 'research' : 'ready';
-        return {
-          id: t.id,
-          ...(t.slug ? { slug: t.slug } : {}),
-          name: boardItemHandle(t),
-          ...(t.priority ? { priority: t.priority } : {}),
-          updated_at: t.updated_at,
-          file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
-          ...(t.needs ? { needs: t.needs } : {}),
-          blockers,
-          blockers_open: blockersOpen,
-          unblocks,
-          state,
-        };
-      });
+      }
+      // The open-blocker test the board tools always used: a live todo carries the
+      // slug. Live user items answer it without a query; anything else falls back
+      // to recordsBySlug so the definition is unchanged.
+      const openBlocker = (slug: string): Todo | undefined =>
+        bySlug.get(slug) ?? (this.recordsBySlug(slug).find((r) => r.type === 'todo') as unknown as Todo | undefined);
+      const targets = (items ?? live) as unknown as Todo[];
+      return targets
+        .filter((t) => t.type === 'todo' && t.source === 'user')
+        .map((t) => {
+          const blockers: BoardBlockerState[] = [];
+          const blockersOpen: string[] = [];
+          for (const slug of t.blocked_by ?? []) {
+            const holder = openBlocker(slug);
+            blockers.push({ slug, state: holder ? 'open' : 'closed' });
+            if (holder) blockersOpen.push(boardItemHandle(holder));
+          }
+          const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+          // 'user' and 'grill' items wait for the user whatever their blockers (the ruling),
+          // so WAITING is shown every session; an open blocker still wins over
+          // investigation and over no needs.
+          const state: BoardReadinessState =
+            t.needs === 'user' || t.needs === 'grill' ? 'waiting' : blockersOpen.length ? 'blocked' : t.needs === 'investigation' ? 'research' : 'ready';
+          return {
+            id: t.id,
+            ...(t.slug ? { slug: t.slug } : {}),
+            name: boardItemHandle(t),
+            ...(t.priority ? { priority: t.priority } : {}),
+            updated_at: t.updated_at,
+            file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+            ...(t.needs ? { needs: t.needs } : {}),
+            blockers,
+            blockers_open: blockersOpen,
+            unblocks,
+            state,
+          };
+        });
+    });
   }
 
   /**
@@ -2960,19 +3014,21 @@ export class SterlingStore {
    * live head via recordsBySlug's own resolution.
    */
   supersededRecordsBySlug(slug: string): DurableRecord[] {
-    // rowid DESC breaks ties within one supersede lineage: a chain built under a
-    // fixed test clock (or any updates landing in the same instant) shares one
-    // updated_at across every carrier, so updated_at alone cannot tell the
-    // newest tombstone from the oldest — insertion order (rowid, monotonic and
-    // never reused) can.
-    const rows = this.db
-      .prepare(
-        `SELECT body, scope FROM records
-          WHERE status = 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
-          ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`
-      )
-      .all(slug) as { body: string; scope: string }[];
-    return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('supersededRecordsBySlug', rows));
+    return this.readTx(() => {
+      // rowid DESC breaks ties within one supersede lineage: a chain built under a
+      // fixed test clock (or any updates landing in the same instant) shares one
+      // updated_at across every carrier, so updated_at alone cannot tell the
+      // newest tombstone from the oldest — insertion order (rowid, monotonic and
+      // never reused) can.
+      const rows = this.db
+        .prepare(
+          `SELECT body, scope FROM records
+            WHERE status = 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?
+            ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`
+        )
+        .all(slug) as { body: string; scope: string }[];
+      return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('supersededRecordsBySlug', rows));
+    });
   }
 
   /**
@@ -2986,26 +3042,28 @@ export class SterlingStore {
    * the true, unreached terminus.
    */
   resolveTerminus(id: string): { id: string; status: string; hops: number; truncated?: boolean } | null {
-    const MAX_HOPS = 32;
-    const stmt = this.db.prepare('SELECT id, status, superseded_by FROM records WHERE id = ?');
-    const row = stmt.get(id) as { id: string; status: string; superseded_by: string | null } | undefined;
-    if (!row) return null;
+    return this.readTx(() => {
+      const MAX_HOPS = 32;
+      const stmt = this.db.prepare('SELECT id, status, superseded_by FROM records WHERE id = ?');
+      const row = stmt.get(id) as { id: string; status: string; superseded_by: string | null } | undefined;
+      if (!row) return null;
 
-    const visited = new Set<string>([row.id]);
-    let current = row;
-    let hops = 0;
-    while (current.status === 'superseded' && current.superseded_by) {
-      const next = stmt.get(current.superseded_by) as
-        | { id: string; status: string; superseded_by: string | null }
-        | undefined;
-      if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
-        return { id: current.id, status: current.status, hops, truncated: true };
+      const visited = new Set<string>([row.id]);
+      let current = row;
+      let hops = 0;
+      while (current.status === 'superseded' && current.superseded_by) {
+        const next = stmt.get(current.superseded_by) as
+          | { id: string; status: string; superseded_by: string | null }
+          | undefined;
+        if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+          return { id: current.id, status: current.status, hops, truncated: true };
+        }
+        visited.add(next.id);
+        current = next;
+        hops += 1;
       }
-      visited.add(next.id);
-      current = next;
-      hops += 1;
-    }
-    return { id: current.id, status: current.status, hops };
+      return { id: current.id, status: current.status, hops };
+    });
   }
 
   /**
@@ -3024,15 +3082,17 @@ export class SterlingStore {
    * source), which may sit in a different store than the target.
    */
   inboundSupersedes(id: string): DurableRecord[] {
-    // No DISTINCT: (source_id, rel, target_id) is the primary key, so with rel
-    // and target_id fixed each source appears once. Postgres also refuses
-    // DISTINCT with an ORDER BY term outside the select list.
-    const rows = this.db
-      .prepare(
-        `SELECT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`
-      )
-      .all(id) as { source_id: string }[];
-    return rows.map((r) => this.get(r.source_id)).filter((r): r is DurableRecord => r !== undefined);
+    return this.readTx(() => {
+      // No DISTINCT: (source_id, rel, target_id) is the primary key, so with rel
+      // and target_id fixed each source appears once. Postgres also refuses
+      // DISTINCT with an ORDER BY term outside the select list.
+      const rows = this.db
+        .prepare(
+          `SELECT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`
+        )
+        .all(id) as { source_id: string }[];
+      return rows.map((r) => this.get(r.source_id)).filter((r): r is DurableRecord => r !== undefined);
+    });
   }
 
   /**
@@ -3148,42 +3208,44 @@ export class SterlingStore {
 
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts: QueryOptions = {}): DurableRecord[] {
-    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-    const { where, params, fileKeys } = this.baseFilter(opts);
+    return this.readTx(() => {
+      const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+      const { where, params, fileKeys } = this.baseFilter(opts);
 
-    if (opts.rank_terms !== undefined) {
-      const terms = rankTerms.parse(opts.rank_terms);
-      if (terms.length) {
-        const match = this.ftsMatchExpr(terms, opts.match_all);
-        const d = this.db.dialect;
-        const sql = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
-          WHERE ${where.join(' AND ')} AND ${d.searchMatch}
-          ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
-        const rows = this.db.prepare(sql).all(...params, match, cap) as { body: string; scope: string }[];
-        return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('query', rows));
+      if (opts.rank_terms !== undefined) {
+        const terms = rankTerms.parse(opts.rank_terms);
+        if (terms.length) {
+          const match = this.ftsMatchExpr(terms, opts.match_all);
+          const d = this.db.dialect;
+          const sql = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
+            WHERE ${where.join(' AND ')} AND ${d.searchMatch}
+            ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
+          const rows = this.db.prepare(sql).all(...params, match, cap) as { body: string; scope: string }[];
+          return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('query', rows));
+        }
       }
-    }
-    // Mechanical fallback rank (§3.4): file-key overlap count, then updated_at
-    // desc, then id desc as the FINAL tiebreaker (board abafbd48, Codex-
-    // adjudicated) — `updated_at DESC` alone is not a total order (two rows
-    // can share one updated_at), and board_query's keyset cursor paging
-    // (packages/mcp-server/src/tools.ts) needs a total, deterministic order to
-    // name an unambiguous resume point. Applies to BOTH the plain variant and
-    // the file_keys-overlap variant below, since both funnel through this same
-    // `orderBy` array and its shared trailing clauses.
-    const orderBy: string[] = [];
-    const overlapParams: string[] = [];
-    if (fileKeys.length) {
-      orderBy.push(
-        `(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => '?').join(',')})) DESC`
-      );
-      overlapParams.push(...fileKeys);
-    }
-    orderBy.push('r.updated_at DESC', 'r.id DESC');
-    const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(' AND ')}
-      ORDER BY ${orderBy.join(', ')} LIMIT ?`;
-    const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap) as { body: string; scope: string }[];
-    return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('query', rows));
+      // Mechanical fallback rank (§3.4): file-key overlap count, then updated_at
+      // desc, then id desc as the FINAL tiebreaker (board abafbd48, Codex-
+      // adjudicated) — `updated_at DESC` alone is not a total order (two rows
+      // can share one updated_at), and board_query's keyset cursor paging
+      // (packages/mcp-server/src/tools.ts) needs a total, deterministic order to
+      // name an unambiguous resume point. Applies to BOTH the plain variant and
+      // the file_keys-overlap variant below, since both funnel through this same
+      // `orderBy` array and its shared trailing clauses.
+      const orderBy: string[] = [];
+      const overlapParams: string[] = [];
+      if (fileKeys.length) {
+        orderBy.push(
+          `(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => '?').join(',')})) DESC`
+        );
+        overlapParams.push(...fileKeys);
+      }
+      orderBy.push('r.updated_at DESC', 'r.id DESC');
+      const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(' AND ')}
+        ORDER BY ${orderBy.join(', ')} LIMIT ?`;
+      const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap) as { body: string; scope: string }[];
+      return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('query', rows));
+    });
   }
 
   /** query()'s two return paths share this: one relations scan for the whole
@@ -3203,8 +3265,9 @@ export class SterlingStore {
    * old; the old is retained with status 'superseded' + superseded_by set.
    * This is the ONLY change path for immutable types (decision, §3.2.1).
    */
-  supersede(oldId: string, newInput: unknown, authoritativeScope?: string): DurableRecord {
+  supersede(oldId: string, newInput: unknown, authoritativeScope?: string, options: WriteOptions = {}): DurableRecord {
     this.assertWritable('supersede');
+    const operationId = operationIdOf(options, 'supersede');
     const oldRecord = this.get(oldId);
     if (!oldRecord) throw new Error(`supersede: no record '${oldId}'`);
     const oldIdentity = this.identityOf(oldId);
@@ -3276,7 +3339,8 @@ export class SterlingStore {
       // insertRecord writes the candidate's links into record_relations, so the
       // authoritative (new -> supersedes -> old) edge lands here (contract 6);
       // the served superseded_by on the old record materializes from it.
-      this.insertRecord(newRecord);
+      this.refuseRepeatedOperation(operationId);
+      this.insertRecord(newRecord, operationId);
       // Guard the UPDATE on the observed lifecycle INSIDE the BEGIN IMMEDIATE tx
       // (audit finding 29/43): the pre-tx read is check-then-act, so a
       // concurrent supersede (server + TUI on the shared WAL file) could
@@ -3793,7 +3857,7 @@ export class SterlingStore {
       catalog: {
         entries: [...ids].map((id) => ({ id, label: id, tier: 'unknown', status: 'active' })),
       },
-    });
+    }, { operation_id: randomUUID() });
   }
 
   /**
@@ -3839,7 +3903,7 @@ export class SterlingStore {
       todo.feature_link = (catalogs[0] as Record<string, unknown>).id;
     }
 
-    this.create(todo);
+    this.create(todo, { operation_id: randomUUID() });
   }
 
   /**
@@ -3850,7 +3914,14 @@ export class SterlingStore {
    * pre-migration store still has): written here from the derived values in the
    * same statement, never read back as the served truth.
    */
-  private insertRecord(record: DurableRecord): void {
+  /** Refuses an operation_id that already wrote a record. Runs inside the write transaction, before the insert: on Postgres a unique violation would abort the transaction. */
+  private refuseRepeatedOperation(operationId: string | undefined): void {
+    if (operationId === undefined) return;
+    const row = this.db.prepare('SELECT id FROM records WHERE operation_id = ?').get(operationId) as { id: string } | undefined;
+    if (row) throw new OperationRepeatedError(operationId, row.id);
+  }
+
+  private insertRecord(record: DurableRecord, operationId?: string): void {
     const entry = RECORD_TYPES[record.type];
     const meta = record as unknown as { lifecycle?: string; freshness?: string; version?: number; superseded_by?: string | null };
     const lifecycle: Lifecycle = meta.lifecycle === 'retired' ? 'retired' : 'live';
@@ -3859,8 +3930,8 @@ export class SterlingStore {
     const stored = SterlingStore.storableBody(record as unknown as Record<string, unknown>);
     this.db
       .prepare(
-        `INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body, operation_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         record.id,
@@ -3874,7 +3945,8 @@ export class SterlingStore {
         record.created_at,
         record.updated_at,
         record.author,
-        JSON.stringify(stored)
+        JSON.stringify(stored),
+        operationId ?? null
       );
     for (const tag of new Set(record.stack_tags)) {
       this.db.prepare('INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)').run(record.id, tag);
@@ -3926,6 +3998,40 @@ export class SterlingStore {
    */
   private txDepth = 0;
 
+  /** Open read transactions on this handle (readTx). A write may not start inside one. */
+  private readDepth = 0;
+
+  /**
+   * A multi-statement read sees one snapshot (decision
+   * postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+   * point 5): it joins an open write or read transaction, or else opens the
+   * driver's read transaction (REPEATABLE READ READ ONLY on Postgres). A driver
+   * with no beginRead (SQLite) keeps its autocommit reads.
+   */
+  private readTx<T>(fn: () => T): T {
+    if (this.txDepth > 0 || this.readDepth > 0 || !this.db.beginRead) return fn();
+    this.db.beginRead();
+    this.readDepth++;
+    let ok = false;
+    try {
+      const result = fn();
+      ok = true;
+      return result;
+    } finally {
+      this.readDepth--;
+      if (ok) {
+        this.db.endRead?.();
+      } else {
+        // The read's own error is the one to report; ending the transaction is cleanup.
+        try {
+          this.db.endRead?.();
+        } catch {
+          /* the original error propagates */
+        }
+      }
+    }
+  }
+
   private tx(fn: () => void): void {
     // Backstop for the pre-migration read-only mode: every public write names
     // itself through assertWritable, and this catches anything that forgets to
@@ -3946,6 +4052,9 @@ export class SterlingStore {
     if (this.txDepth > 0) {
       fn();
       return;
+    }
+    if (this.readDepth > 0) {
+      throw new Error('SterlingStore: a write cannot start inside a read transaction (readTx); nothing was written.');
     }
     // BEGIN FIRST, then count. A failing BEGIN (SQLITE_BUSY on a contended
     // file) previously left txDepth stuck at 1 forever, because the increment

@@ -268,12 +268,36 @@ test('NUL policy: the body is lossless, search text is stripped, a raw NUL param
   }
 });
 
-test('NUL policy: a JSON extraction that meets \\u0000 fails loud with PgNulCharacterError', { skip: PG_SKIP }, () => {
+test('NUL policy: a slug lookup reads past a NUL in the body and keeps a literal backslash-u0000 text sequence intact', { skip: PG_SKIP }, () => {
+  // Ruled 2026-10-06 (slice 3B): jsonText removes only real \u0000 escapes
+  // before parsing. The literal six characters \u0000 in a field are stored as
+  // the JSON text \\u0000 (an escaped backslash) and must survive.
   const store = openStore(freshStoreSchema());
   try {
-    store.create(article({ what_it_does: 'has a \u0000 in it' }));
-    assert.throws(() => store.articlesBySlug('pg-export'), PgNulCharacterError);
+    const literal = 'see the \\u0000 escape';
+    const created = store.create(article({ what_it_does: 'has a \u0000 in it', intended_behavior: literal }));
+    const found = store.articlesBySlug('pg-export');
+    assert.deepEqual(found.map((r) => r.id), [created.id]);
+    const got = store.get(created.id) as { what_it_does?: string; intended_behavior?: string } | undefined;
+    assert.equal(got?.what_it_does, 'has a \u0000 in it');
+    assert.equal(got?.intended_behavior, literal);
+    assert.equal(literal.length, 'see the '.length + 6 + ' escape'.length, 'the fixture holds the six-character text, not a NUL');
   } finally {
     store.close();
+  }
+});
+
+test('NUL policy: the extraction strips a NUL inside the extracted value itself and keeps the escaped-backslash form', { skip: PG_SKIP }, () => {
+  const schema = freshStoreSchema();
+  openStore(schema).close();
+  const driver = new PgDriver(live(), { schema, metaSchema: meta });
+  try {
+    const body = JSON.stringify({ slug: 'a\u0000b', literal: 'x\\u0000y' });
+    const sql = `SELECT ${driver.dialect.jsonText('t.b', 'slug')} AS slug, ${driver.dialect.jsonText('t.b', 'literal')} AS literal FROM (SELECT CAST(? AS text) AS b) t`;
+    const row = driver.prepare(sql).get(body) as { slug: string; literal: string };
+    assert.equal(row.slug, 'ab');
+    assert.equal(row.literal, 'x\\u0000y');
+  } finally {
+    driver.close();
   }
 });

@@ -3868,6 +3868,10 @@ export class SterlingTools {
     // 'superseded' would create an already-invisible record). knowledgeUpdate
     // strips the identical set for the same reason.
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, version: smuggledVersion, ...body } = fields;
+    // Minted where the record id is minted (decision
+    // postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump):
+    // a store-level retry of this one write is refused, naming the record it made.
+    const operationId = randomUUID();
     const candidate: Record<string, unknown> = {
       id: this.newId(),
       type,
@@ -4103,7 +4107,7 @@ export class SterlingTools {
 
     const isSystemTodo = type === 'todo' && (candidate as { source?: string }).source === 'system';
     if (isSystemTodo) {
-      const res = this.store.enqueueSystemTodo(candidate);
+      const res = this.store.enqueueSystemTodo(candidate, { operation_id: operationId });
       this.surfacePromotionCandidate(res.record, type);
       return {
         record: res.record,
@@ -4114,7 +4118,7 @@ export class SterlingTools {
         ...claimsCheck,
       };
     }
-    const record = this.store.create(candidate);
+    const record = this.store.create(candidate, { operation_id: operationId });
     const ledgerWarning = this.logDomainWrite(record.scope, record);
     if (ledgerWarning) citationWarnings.push(ledgerWarning);
     const promotionWarning = this.surfacePromotionCandidate(record, type);
@@ -8620,7 +8624,7 @@ export class SterlingTools {
               `${previousVersion}. Nothing was written; re-read the record and retry against version ${previousVersion}.`
           );
         }
-        updated = this.store.supersede(old.id, next);
+        updated = this.store.supersede(old.id, next, undefined, { operation_id: randomUUID() });
         for (const claim of claims) {
           // Read IMMEDIATELY before remove, never the earlier `claims` value:
           // this narrows the staleness window this lane cannot fully close
@@ -9679,7 +9683,7 @@ export class SterlingTools {
         superseded_by: null,
         scope: `domain:${domain}`,
         links: [{ rel: 'informed_by', target_id: originalId }],
-      });
+      }, { operation_id: randomUUID() });
     } catch (err) {
       if (err instanceof ZodError) throw this.renderValidationFailure(err, original.type, 'knowledge_promote');
       throw err;
@@ -12406,6 +12410,10 @@ export class SterlingTools {
     }
 
     const ts = this.now();
+    // Minted where the record id is minted (decision
+    // postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump):
+    // a store-level retry of this one write is refused, naming the record it made.
+    const operationId = randomUUID();
     const candidate: Record<string, unknown> = {
       id: this.newId(),
       type,
@@ -12556,10 +12564,10 @@ export class SterlingTools {
         // retireInFavorOf writes the supersedes edge itself, so a copy of it in
         // the caller's links is dropped rather than written twice.
         const links = (parsed.links as { rel: string; target_id: string }[]).filter((l) => !(l.rel === 'supersedes' && l.target_id === old.id));
-        head = this.store.create({ ...parsed, links });
+        head = this.store.create({ ...parsed, links }, { operation_id: operationId });
         this.store.retireInFavorOf(old.id, head.id, ts);
       } else {
-        head = this.store.supersede(old.id, parsed);
+        head = this.store.supersede(old.id, parsed, undefined, { operation_id: operationId });
       }
       for (const claim of claims) {
         const atRemoval = this.store.get(claim.id) as (DurableRecord & { system_reason?: string; file_keys?: string[] }) | undefined;

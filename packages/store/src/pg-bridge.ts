@@ -37,8 +37,8 @@ const STATE_DEAD = 2;
 export const DEFAULT_PG_CREDENTIALS_PATH = join(homedir(), '.sterling', 'credentials', 'served.json');
 /** How long a query waits for its reply when the opener sets nothing. */
 export const DEFAULT_PG_WAIT_TIMEOUT_MS = 10_000;
-/** Added to the connect timeout for the handshake: worker start-up plus loading pg. */
-const HANDSHAKE_MARGIN_MS = 1500;
+/** Added to the connect timeout for the handshake: worker start-up plus loading pg, which took over 1.5 s with a dozen test processes starting at once from /mnt/c (measured 2026-10-06). */
+const HANDSHAKE_MARGIN_MS = 5000;
 
 export class PgConfigError extends Error {
   constructor(message: string) {
@@ -74,6 +74,20 @@ export class PgBridgeClosedError extends Error {
   constructor(why: string) {
     super(`Postgres bridge is closed (${why}); open a new one.`);
     this.name = 'PgBridgeClosedError';
+  }
+}
+
+/**
+ * One connection holds one transaction (decision
+ * postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+ * point 6): a second store handle on the same bridge may not BEGIN while
+ * another holds a transaction open, because its statements would silently run
+ * inside that other transaction.
+ */
+export class PgTransactionOpenError extends Error {
+  constructor(wanted: string, holder: string) {
+    super(`Postgres bridge: ${wanted} cannot begin a transaction: this connection already has one open for ${holder}. One connection holds one transaction; nothing was sent.`);
+    this.name = 'PgTransactionOpenError';
   }
 }
 
@@ -210,7 +224,7 @@ export function redactSecrets(text: string, secrets: string[]): string {
 export interface PgBridgeOptions {
   /** How long one statement waits for its reply. Default 10 000 ms. */
   waitTimeoutMs?: number;
-  /** How long the start-up handshake (worker load, TLS, authentication) waits. Default: the connect timeout plus 1.5 s. */
+  /** How long the start-up handshake (worker load, TLS, authentication) waits. Default: the connect timeout plus 5 s. */
   handshakeTimeoutMs?: number;
   /** Tests only: a stand-in worker module. Production always loads ./pg-worker.js. */
   workerUrl?: URL;
@@ -234,10 +248,13 @@ export class PgBridge {
   private readonly worker: Worker;
   private readonly port: MessagePort;
   private readonly control: Int32Array;
-  private readonly waitTimeoutMs: number;
   private readonly secrets: string[];
   private seq = 0;
   private closedReason: string | undefined;
+  private txOwner: object | undefined;
+  private txOwnerLabel = '';
+  /** How long one statement waits for its reply. Server-side timeouts must be shorter, so the named server error arrives first. */
+  readonly waitTimeoutMs: number;
 
   constructor(config: PgConnectionConfig, options: PgBridgeOptions = {}) {
     this.waitTimeoutMs = options.waitTimeoutMs ?? DEFAULT_PG_WAIT_TIMEOUT_MS;
@@ -267,6 +284,26 @@ export class PgBridge {
 
   get closed(): boolean {
     return this.closedReason !== undefined;
+  }
+
+  /** The handle whose transaction is open on this connection, if any. */
+  get transactionOwner(): object | undefined {
+    return this.txOwner;
+  }
+
+  /** Records that `owner` opens a transaction. Refuses when any handle, `owner` included, already holds one. */
+  claimTransaction(owner: object, label: string): void {
+    if (this.txOwner !== undefined) throw new PgTransactionOpenError(label, this.txOwnerLabel);
+    this.txOwner = owner;
+    this.txOwnerLabel = label;
+  }
+
+  /** Records that `owner`'s transaction ended. A no-op for any other handle. */
+  releaseTransaction(owner: object): void {
+    if (this.txOwner === owner) {
+      this.txOwner = undefined;
+      this.txOwnerLabel = '';
+    }
   }
 
   /** Runs one statement. With `values` it is a parameterised query ($1, $2, ...); without, a simple query that may hold several statements. */

@@ -18,21 +18,32 @@
 // The two ON CONFLICT upserts are valid Postgres as written. The constructs
 // that are not lexical already sit behind StoreDialect.
 //
-// Not here yet: locking, timeouts and REPEATABLE READ (slice 3B), tsvector
-// search (item 4). records_fts is a plain two-column table until item 4
-// replaces it; ranked search throws PgSearchNotImplementedError.
+// Locking (decision postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+// points 4 to 7): begin() takes the global migration lock SHARED, then the
+// store lock, under SET LOCAL lock_timeout and statement_timeout; beginRead()
+// opens REPEATABLE READ READ ONLY. Migrations (ensurePgLayout, createPgStore)
+// take the global lock EXCLUSIVELY. Lock order is fixed: global, then store.
+// 55P03 and 57014 are thrown as PgLockTimeoutError and PgStatementTimeoutError
+// and never retried. One bridge (connection) holds one transaction at a time.
+//
+// Not here yet: tsvector search (item 4). records_fts is a plain two-column
+// table until item 4 replaces it; ranked search throws PgSearchNotImplementedError.
 //
 // NUL policy. Record bodies are JSON.stringify output, which writes U+0000 as
 // the six characters \u0000, so they are stored losslessly in TEXT. The text
 // written to records_fts is derived and has U+0000 removed. Any other string
 // parameter holding U+0000 is refused before it is sent (Postgres TEXT cannot
-// hold it), and a JSON extraction that meets \u0000 (SQLSTATE 22P05) is
-// rethrown as PgNulCharacterError. Measured on Served 2026-10-06: Postgres 18
-// fails the extraction of ANY key from a json value that holds \u0000
-// anywhere, so one such record fails every jsonText() scan that reads it.
+// hold it). Measured on Served 2026-10-06: Postgres 18 fails the extraction of
+// ANY key from a json value that holds \u0000 anywhere (22P05), so one such
+// record would fail every jsonText() scan that reads it. Ruled 2026-10-06
+// (slice 3B): jsonText removes the real \u0000 escapes before parsing and
+// keeps an escaped backslash followed by u0000 intact, so an extracted value
+// loses only its NUL characters. A 22P05 or 22021 that still occurs is
+// rethrown as PgNulCharacterError.
 
 import type { SqlParam, StoreDialect, StoreDriver, StoreRunResult, StoreStatement } from './driver.js';
 import { PgQueryError, type PgBridge } from './pg-bridge.js';
+export { PgTransactionOpenError } from './pg-bridge.js';
 
 /** The meta schema production uses. Tests pass their own sterling_test_<random>_meta. */
 export const PG_META_SCHEMA = 'sterling_meta';
@@ -73,6 +84,24 @@ export class PgNulCharacterError extends Error {
   constructor(detail: string) {
     super(`NUL character (U+0000) refused on Postgres: ${detail}. Postgres text cannot hold U+0000, and its JSON functions refuse the \\u0000 escape.`);
     this.name = 'PgNulCharacterError';
+  }
+}
+
+/** lock_timeout ran out (SQLSTATE 55P03). Never retried: the caller decides. */
+export class PgLockTimeoutError extends Error {
+  readonly code = '55P03';
+  constructor(detail: string) {
+    super(`Postgres lock timeout (55P03): ${detail}. Another writer or a migration holds the lock; nothing was written and the write is not retried.`);
+    this.name = 'PgLockTimeoutError';
+  }
+}
+
+/** statement_timeout ran out (SQLSTATE 57014). Never retried. */
+export class PgStatementTimeoutError extends Error {
+  readonly code = '57014';
+  constructor(detail: string) {
+    super(`Postgres statement timeout (57014): ${detail}. The transaction was rolled back and is not retried.`);
+    this.name = 'PgStatementTimeoutError';
   }
 }
 
@@ -129,11 +158,79 @@ function ident(schema: string): string {
 
 export type PgStoreKind = 'project' | 'domain' | 'test';
 
+/** Default SET LOCAL lock_timeout for a write transaction or a migration. */
+export const DEFAULT_PG_LOCK_TIMEOUT_MS = 3000;
+/** Default SET LOCAL statement_timeout. Both must stay below the bridge's wait, so the named server error arrives first. */
+export const DEFAULT_PG_STATEMENT_TIMEOUT_MS = 5000;
+
+// Advisory-lock keys, two int4 halves: a namespace and a 32-bit FNV-1a hash of
+// the schema name. The global lock is keyed by the META schema, so separate
+// test layouts never block each other. A hash collision only serializes more.
+const LOCK_NS_GLOBAL = 0x53544d47; // 'STMG'
+const LOCK_NS_STORE = 0x53545354; // 'STST'
+
+function lockHash(name: string): number {
+  let h = 0x811c9dc5;
+  for (const byte of Buffer.from(name, 'utf8')) {
+    h ^= byte;
+    h = Math.imul(h, 0x01000193);
+  }
+  return h | 0;
+}
+
+function timeoutMs(name: string, value: number | undefined, fallback: number, bridge: PgBridge): number {
+  const v = value ?? fallback;
+  if (!Number.isInteger(v) || v <= 0) throw new Error(`Postgres ${name} must be a positive integer, got ${String(v)}`);
+  if (v >= bridge.waitTimeoutMs) {
+    throw new Error(`Postgres ${name} (${v} ms) must be below the bridge's wait (${bridge.waitTimeoutMs} ms), so the server's named timeout arrives before the bridge gives up`);
+  }
+  return v;
+}
+
+/** Rethrows a server error by name: 55P03, 57014, and the two NUL codes. */
+function mapPgError(e: unknown, where: string): never {
+  if (e instanceof PgQueryError) {
+    if (e.code === '55P03') throw new PgLockTimeoutError(`${e.message} in ${where}`);
+    if (e.code === '57014') throw new PgStatementTimeoutError(`${e.message} in ${where}`);
+    if (e.code === '22P05' || e.code === '22021') throw new PgNulCharacterError(`${e.message} (SQLSTATE ${e.code}) in '${where}'`);
+  }
+  throw e;
+}
+
+/** Ends a transaction that failed: ROLLBACK unless the connection is gone, then releases the claim. The caller rethrows its own error. */
+function abandon(bridge: PgBridge, owner: object): void {
+  try {
+    if (!bridge.closed) bridge.query('ROLLBACK');
+  } finally {
+    bridge.releaseTransaction(owner);
+  }
+}
+
+/** Runs `fn` in a transaction that holds the global migration lock EXCLUSIVELY (design point 3; decision point 7). */
+function inMigrationTransaction(bridge: PgBridge, metaSchema: string, lockTimeout: number | undefined, fn: () => void): void {
+  assertSterlingSchemaName(metaSchema);
+  const lock = timeoutMs('lockTimeoutMs', lockTimeout, DEFAULT_PG_LOCK_TIMEOUT_MS, bridge);
+  const statement = timeoutMs('statementTimeoutMs', undefined, DEFAULT_PG_STATEMENT_TIMEOUT_MS, bridge);
+  const owner = {};
+  bridge.claimTransaction(owner, `a migration on '${metaSchema}'`);
+  try {
+    bridge.query(
+      `BEGIN; SET LOCAL lock_timeout = ${lock}; SET LOCAL statement_timeout = ${statement}; SELECT pg_advisory_xact_lock(${LOCK_NS_GLOBAL}, ${lockHash(metaSchema)})`,
+    );
+    fn();
+    bridge.query('COMMIT');
+    bridge.releaseTransaction(owner);
+  } catch (e) {
+    abandon(bridge, owner);
+    mapPgError(e, `a migration on '${metaSchema}'`);
+  }
+}
+
 /** Creates the meta schema and its three tables when missing. Explicit: nothing calls it on open. */
-export function ensurePgLayout(bridge: PgBridge, metaSchema: string = PG_META_SCHEMA): void {
+export function ensurePgLayout(bridge: PgBridge, metaSchema: string = PG_META_SCHEMA, options: { lockTimeoutMs?: number } = {}): void {
   const m = ident(metaSchema);
   const now = new Date().toISOString();
-  bridge.query(`
+  inMigrationTransaction(bridge, metaSchema, options.lockTimeoutMs, () => bridge.query(`
 CREATE SCHEMA IF NOT EXISTS ${m};
 CREATE TABLE IF NOT EXISTS ${m}.layout (
   singleton SMALLINT PRIMARY KEY DEFAULT 1 CHECK (singleton = 1),
@@ -155,7 +252,7 @@ CREATE TABLE IF NOT EXISTS ${m}.migration_lock (
 );
 INSERT INTO ${m}.layout (singleton, layout_version, updated_at) VALUES (1, ${PG_LAYOUT_VERSION}, '${now}') ON CONFLICT (singleton) DO NOTHING;
 INSERT INTO ${m}.migration_lock (singleton) VALUES (1) ON CONFLICT (singleton) DO NOTHING;
-`);
+`));
 }
 
 export interface CreatePgStoreInput {
@@ -165,6 +262,8 @@ export interface CreatePgStoreInput {
   /** From pgProjectSchemaName / pgDomainSchemaName, or a sterling_test_ name. */
   schema: string;
   metaSchema?: string;
+  /** lock_timeout for the exclusive global lock. Default 3000 ms. */
+  lockTimeoutMs?: number;
 }
 
 /**
@@ -178,8 +277,9 @@ export function createPgStore(bridge: PgBridge, input: CreatePgStoreInput): void
   const m = ident(input.metaSchema ?? PG_META_SCHEMA);
   if (input.kind === 'test' && !input.schema.startsWith('sterling_test_')) throw new PgSchemaNameRefusedError(input.schema, "a 'test' store must be named sterling_test_*");
   if (input.kind !== 'test' && input.schema.startsWith('sterling_test_')) throw new PgSchemaNameRefusedError(input.schema, `a '${input.kind}' store cannot use the sterling_test_ prefix`);
-  bridge.query('BEGIN');
-  try {
+  // Under the exclusive global lock, so two first creators cannot race on
+  // CREATE SCHEMA: the second finds the first one's registry row.
+  inMigrationTransaction(bridge, input.metaSchema ?? PG_META_SCHEMA, input.lockTimeoutMs, () => {
     const row = bridge.query(`SELECT kind, name FROM ${m}.stores WHERE schema_name = $1`, [input.schema]).rows[0];
     if (row) {
       throw new PgStoreExistsError(
@@ -194,12 +294,7 @@ export function createPgStore(bridge: PgBridge, input: CreatePgStoreInput): void
     }
     bridge.query(`CREATE SCHEMA ${s}`);
     bridge.query(`INSERT INTO ${m}.stores (schema_name, kind, name, created_at) VALUES ($1, $2, $3, $4)`, [input.schema, input.kind, input.name, new Date().toISOString()]);
-    bridge.query('COMMIT');
-  } catch (e) {
-    // A dead bridge has no transaction left to roll back; the original error is the one to report.
-    if (!bridge.closed) bridge.query('ROLLBACK');
-    throw e;
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -321,9 +416,11 @@ CREATE TABLE IF NOT EXISTS ${s}.records (
   author TEXT NOT NULL,
   derived_unconfirmed INTEGER NOT NULL DEFAULT 0,
   body TEXT NOT NULL,
-  _seq BIGINT GENERATED ALWAYS AS IDENTITY
+  _seq BIGINT GENERATED ALWAYS AS IDENTITY,
+  operation_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_records_type_status ON ${s}.records (type, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON ${s}.records (operation_id);
 CREATE TABLE IF NOT EXISTS ${s}.record_versions (
   record_id TEXT NOT NULL,
   version INTEGER NOT NULL,
@@ -433,11 +530,15 @@ export const pgDialect: StoreDialect = {
   searchQuery() {
     throw new PgSearchNotImplementedError();
   },
-  // ->> on json (not jsonb) parses the stored text; a \u0000 anywhere in it
-  // fails with 22P05, which PgStatement rethrows as PgNulCharacterError.
+  // Postgres refuses \u0000 anywhere in a json value it parses (22P05), so the
+  // real \u0000 escapes are removed first. The pattern consumes an escaped
+  // backslash pair (\\) as a unit and puts it back, so \u0000 only matches
+  // where its backslash starts an escape: the literal text \\u0000 survives.
+  // strpos skips the regex for the bodies that hold no \u0000 at all.
   jsonText: (column, key) => {
     if (!/^[a-z_]+$/.test(key)) throw new Error(`pgDialect.jsonText: key '${key}' is not a plain identifier`);
-    return `((${column})::json ->> '${key}')`;
+    if (!/^[a-z_]+(\.[a-z_]+)?$/.test(column)) throw new Error(`pgDialect.jsonText: column '${column}' is not a plain column reference`);
+    return String.raw`((CASE WHEN strpos(${column}, '\u0000') > 0 THEN regexp_replace(${column}, '(\\\\)|\\u0000', '\1', 'g') ELSE ${column} END)::json ->> '${key}')`;
   },
   insertionOrder: (alias) => (alias ? `${alias}._seq` : '_seq'),
   insertIgnore: (table, columns) => `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')}) ON CONFLICT DO NOTHING`,
@@ -457,12 +558,6 @@ function toPgParam(v: SqlParam, i: number, sql: string, stripNul: boolean): unkn
   return v;
 }
 
-function rethrow(e: unknown, sql: string): never {
-  if (e instanceof PgQueryError && (e.code === '22P05' || e.code === '22021')) {
-    throw new PgNulCharacterError(`${e.message} (SQLSTATE ${e.code}) in '${sql}'`);
-  }
-  throw e;
-}
 
 class PgStatement implements StoreStatement {
   private readonly translated: TranslatedStatement;
@@ -484,7 +579,7 @@ class PgStatement implements StoreStatement {
     try {
       return this.driver.bridge.query(this.translated.text, values);
     } catch (e) {
-      return rethrow(e, this.sql);
+      return mapPgError(e, this.sql);
     }
   }
 
@@ -514,6 +609,10 @@ export interface PgDriverOptions {
   metaSchema?: string;
   /** When true, close() also closes the bridge. Default false: one bridge serves every store in a process. */
   ownsBridge?: boolean;
+  /** SET LOCAL lock_timeout in each write transaction. Default 3000 ms; must be below the bridge's wait. */
+  lockTimeoutMs?: number;
+  /** SET LOCAL statement_timeout in each transaction. Default 5000 ms; must be below the bridge's wait. */
+  statementTimeoutMs?: number;
 }
 
 export class PgDriver implements StoreDriver {
@@ -523,6 +622,8 @@ export class PgDriver implements StoreDriver {
   private readonly s: string;
   private readonly m: string;
   private readonly ownsBridge: boolean;
+  private readonly lockTimeoutMs: number;
+  private readonly statementTimeoutMs: number;
   private closed = false;
 
   constructor(
@@ -534,6 +635,8 @@ export class PgDriver implements StoreDriver {
     this.s = ident(this.schema);
     this.m = ident(this.metaSchema);
     this.ownsBridge = options.ownsBridge ?? false;
+    this.lockTimeoutMs = timeoutMs('lockTimeoutMs', options.lockTimeoutMs, DEFAULT_PG_LOCK_TIMEOUT_MS, bridge);
+    this.statementTimeoutMs = timeoutMs('statementTimeoutMs', options.statementTimeoutMs, DEFAULT_PG_STATEMENT_TIMEOUT_MS, bridge);
     const found = bridge.query(
       'SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1) AS has_schema, EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $2 AND tablename = $3) AS has_registry',
       [this.schema, this.metaSchema, 'stores'],
@@ -562,7 +665,7 @@ export class PgDriver implements StoreDriver {
     try {
       this.bridge.query(t.text);
     } catch (e) {
-      rethrow(e, sql);
+      mapPgError(e, sql);
     }
   }
 
@@ -572,19 +675,65 @@ export class PgDriver implements StoreDriver {
     if (this.ownsBridge) this.bridge.close();
   }
 
-  // Plain BEGIN for now: the store advisory lock that reproduces BEGIN
-  // IMMEDIATE, the timeouts and the version re-read are slice 3B.
+  /**
+   * The write transaction, in one round trip: BEGIN, the two timeouts, the
+   * global migration lock SHARED, then this store's lock, which reproduces
+   * SQLite's BEGIN IMMEDIATE. SterlingStore.tx() re-reads the schema version
+   * after this returns, under the locks. A failure rolls back and throws by
+   * name; it is never retried.
+   */
   begin(): void {
     this.assertOpen();
-    this.bridge.query('BEGIN');
+    this.bridge.claimTransaction(this, `store '${this.schema}'`);
+    try {
+      this.bridge.query(
+        `BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SET LOCAL statement_timeout = ${this.statementTimeoutMs}; ` +
+          `SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); ` +
+          `SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`,
+      );
+    } catch (e) {
+      abandon(this.bridge, this);
+      mapPgError(e, `begin on store '${this.schema}'`);
+    }
   }
 
   commit(): void {
-    this.bridge.query('COMMIT');
+    try {
+      this.bridge.query('COMMIT');
+    } catch (e) {
+      mapPgError(e, `commit on store '${this.schema}'`);
+    } finally {
+      this.bridge.releaseTransaction(this);
+    }
   }
 
   rollback(): void {
-    this.bridge.query('ROLLBACK');
+    try {
+      if (!this.bridge.closed) this.bridge.query('ROLLBACK');
+    } finally {
+      this.bridge.releaseTransaction(this);
+    }
+  }
+
+  /** A multi-statement read: one snapshot (REPEATABLE READ), read-only, under statement_timeout. Takes no lock. */
+  beginRead(): void {
+    this.assertOpen();
+    this.bridge.claimTransaction(this, `a read on store '${this.schema}'`);
+    try {
+      this.bridge.query(`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = ${this.statementTimeoutMs}`);
+    } catch (e) {
+      abandon(this.bridge, this);
+      mapPgError(e, `a read on store '${this.schema}'`);
+    }
+  }
+
+  /** Ends the read transaction. COMMIT also ends one a failed statement aborted. */
+  endRead(): void {
+    try {
+      if (!this.bridge.closed) this.bridge.query('COMMIT');
+    } finally {
+      this.bridge.releaseTransaction(this);
+    }
   }
 
   /** The store's version lives in its registry row, the counterpart of SQLite's PRAGMA user_version. */

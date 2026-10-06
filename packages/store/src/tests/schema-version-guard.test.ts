@@ -25,6 +25,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '../index.js';
+import { sqliteOnly } from './pg-test-support.js';
 
 function tempDbPath(prefix = 'sterling-schema-guard-') {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -71,7 +72,7 @@ function rawTableNames(path: string): string[] {
 // migration actually running (S4's journaled runner) — it opens readable and
 // refuses writes loudly instead.
 
-test('A1: a freshly created store stamps PRAGMA user_version = 2 at open', () => {
+test('A1: a freshly created store stamps PRAGMA user_version = 2 at open', { skip: sqliteOnly('reads or writes PRAGMA user_version in the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const { dir, path } = tempDbPath();
   try {
     const store = new SterlingStore(path);
@@ -82,7 +83,7 @@ test('A1: a freshly created store stamps PRAGMA user_version = 2 at open', () =>
   }
 });
 
-test('A2: a pre-v2 store is NOT stamped forward on open — it opens read-only-pre-migration: reads work, writes refuse naming the migration, marker unchanged across repeated opens', () => {
+test('A2: a pre-v2 store is NOT stamped forward on open — it opens read-only-pre-migration: reads work, writes refuse naming the migration, marker unchanged across repeated opens', { skip: sqliteOnly('reads or writes PRAGMA user_version in the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const { dir, path } = tempDbPath();
   try {
     // Create a real, fully-initialized store, then roll its marker back to
@@ -127,7 +128,7 @@ test('A2: a pre-v2 store is NOT stamped forward on open — it opens read-only-p
   }
 });
 
-test('A3: a store whose user_version is GREATER than the code supports refuses to open, and writes nothing', () => {
+test('A3: a store whose user_version is GREATER than the code supports refuses to open, and writes nothing', { skip: sqliteOnly('reads or writes PRAGMA user_version in the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const { dir, path } = tempDbPath();
   try {
     const seed = new SterlingStore(path);
@@ -150,7 +151,7 @@ test('A3: a store whose user_version is GREATER than the code supports refuses t
   }
 });
 
-test('A4: the refusal is a structured, renderable error naming BOTH the found and supported versions and the word "schema"', () => {
+test('A4: the refusal is a structured, renderable error naming BOTH the found and supported versions and the word "schema"', { skip: sqliteOnly('reads or writes PRAGMA user_version in the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const supported = tempDbPath('sterling-schema-guard-probe2-');
   const probe = new SterlingStore(supported.path);
   probe.close();
@@ -192,7 +193,7 @@ test('A4: the refusal is a structured, renderable error naming BOTH the found an
 // that raises busy_timeout instead of removing the lock, so elapsed time is
 // asserted too. The control arm (no lock held) runs FIRST so a green measured
 // arm cannot be explained by a fixture whose lock never materialized.
-test('A5: opening an already-stamped, healthy store takes no write lock — succeeds fast even while another connection holds BEGIN IMMEDIATE', () => {
+test('A5: opening an already-stamped, healthy store takes no write lock — succeeds fast even while another connection holds BEGIN IMMEDIATE', { skip: sqliteOnly('reads or writes PRAGMA user_version in the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   // CONTROL ARM, placed first: same open, no lock held anywhere, must also
   // succeed fast. Without this, a fast "pass" on the measured arm below could
   // just mean the lock-fixture never actually materialized a lock.

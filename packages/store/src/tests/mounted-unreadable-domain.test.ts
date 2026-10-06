@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { MountedStores, SterlingStore, createDomain } from '../index.js';
+import { sqliteOnly } from './pg-test-support.js';
 
 // Board a-mounted-pre-v2-domain-store-breaks-knowledge-query-and-kno (06f72a10):
 // a mounted domain store that cannot answer a read (a pre-v2 store has no
@@ -72,7 +73,7 @@ function harness() {
   };
 }
 
-test('unreadable domain: query returns the project and healthy-domain records and names the dropped domain with its error', () => {
+test('unreadable domain: query returns the project and healthy-domain records and names the dropped domain with its error', { skip: sqliteOnly('item 5 routing') }, () => {
   const h = harness();
   try {
     const ids = h.stores.query({}).map((r) => r.id);
@@ -90,7 +91,7 @@ test('unreadable domain: query returns the project and healthy-domain records an
   }
 });
 
-test('unreadable domain: get serves a project record, and a record held only by the dropped domain is not found', () => {
+test('unreadable domain: get serves a project record, and a record held only by the dropped domain is not found', { skip: sqliteOnly('item 5 routing') }, () => {
   const h = harness();
   try {
     assert.equal(h.stores.get(h.projectRecord.id)?.id, h.projectRecord.id);
@@ -102,7 +103,7 @@ test('unreadable domain: get serves a project record, and a record held only by 
   }
 });
 
-test('unreadable domain: inboundSupersedes over the mounted set answers from the readable stores', () => {
+test('unreadable domain: inboundSupersedes over the mounted set answers from the readable stores', { skip: sqliteOnly('item 5 routing') }, () => {
   const h = harness();
   try {
     const replacement = h.stores.supersede(h.genesysRecord.id, { ...ref('domain:genesys'), title: 'replacement' });
@@ -114,7 +115,7 @@ test('unreadable domain: inboundSupersedes over the mounted set answers from the
   }
 });
 
-test('unreadable domain: every other fanned read skips it instead of throwing', () => {
+test('unreadable domain: every other fanned read skips it instead of throwing', { skip: sqliteOnly('item 5 routing') }, () => {
   const h = harness();
   try {
     assert.equal(h.stores.count({}), 2);
@@ -133,7 +134,7 @@ test('unreadable domain: every other fanned read skips it instead of throwing', 
   }
 });
 
-test('unreadable domain: it stays listed, every write into it refuses naming the domain, its error and the restart, and a missing record names it', () => {
+test('unreadable domain: it stays listed, every write into it refuses naming the domain, its error and the restart, and a missing record names it', { skip: sqliteOnly('item 5 routing') }, () => {
   const h = harness();
   try {
     assert.deepEqual(h.stores.domainNames(), ['old', 'genesys']);
@@ -154,7 +155,7 @@ test('unreadable domain: it stays listed, every write into it refuses naming the
   }
 });
 
-test('unreadable domain: a domain that breaks after mount is dropped on the read that fails, and later reads keep working', () => {
+test('unreadable domain: a domain that breaks after mount is dropped on the read that fails, and later reads keep working', { skip: sqliteOnly('item 5 routing') }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-late-'));
   const genesys = { name: 'genesys', dbPath: join(dir, 'domains', 'genesys', 'sterling.db') };
   createDomain(genesys.name, 'test domain genesys', genesys.dbPath);
@@ -182,7 +183,7 @@ test('unreadable domain: a domain that breaks after mount is dropped on the read
   }
 });
 
-test('unreadable domain: a broken PROJECT store is never isolated, its reads still throw', () => {
+test('unreadable domain: a broken PROJECT store is never isolated, its reads still throw', { skip: sqliteOnly('item 5 routing') }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-project-'));
   const projectPath = join(dir, '.sterling', 'sterling.db');
   const genesys = { name: 'genesys', dbPath: join(dir, 'domains', 'genesys', 'sterling.db') };
@@ -200,7 +201,7 @@ test('unreadable domain: a broken PROJECT store is never isolated, its reads sti
   }
 });
 
-test('slugHolders: a dropped domain that can still answer a slug lookup is asked, so its slug counts as taken', () => {
+test('slugHolders: a dropped domain that can still answer a slug lookup is asked, so its slug counts as taken', { skip: sqliteOnly('item 5 routing') }, () => {
   const h = harness();
   try {
     assert.deepEqual(h.stores.recordsBySlug('taken-slug'), [], 'the guarded read skips the dropped domain');
@@ -212,7 +213,7 @@ test('slugHolders: a dropped domain that can still answer a slug lookup is asked
   }
 });
 
-test('slugHolders: a domain whose slug read throws makes the check refuse, naming the domain and the error', () => {
+test('slugHolders: a domain whose slug read throws makes the check refuse, naming the domain and the error', { skip: sqliteOnly('item 5 routing') }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-slug-'));
   const genesys = { name: 'genesys', dbPath: join(dir, 'domains', 'genesys', 'sterling.db') };
   createDomain(genesys.name, 'test domain genesys', genesys.dbPath);
@@ -231,7 +232,7 @@ test('slugHolders: a domain whose slug read throws makes the check refuse, namin
   }
 });
 
-test('unreadable domain: a record held by a dropped domain that still answers get is refused by holder routing, never reported absent', () => {
+test('unreadable domain: a record held by a dropped domain that still answers get is refused by holder routing, never reported absent', { skip: sqliteOnly('item 5 routing') }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-holder-'));
   const genesys = { name: 'genesys', dbPath: join(dir, 'domains', 'genesys', 'sterling.db') };
   createDomain(genesys.name, 'test domain genesys', genesys.dbPath);
@@ -273,7 +274,7 @@ test('the read guard drops a domain only on a database error: a caller-input err
   }
 });
 
-test('a domain row whose body is not valid JSON drops that domain and names the decode error', () => {
+test('a domain row whose body is not valid JSON drops that domain and names the decode error', { skip: sqliteOnly('item 5 routing') }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-decode-'));
   const genesys = { name: 'genesys', dbPath: join(dir, 'domains', 'genesys', 'sterling.db') };
   createDomain(genesys.name, 'test domain genesys', genesys.dbPath);
@@ -293,7 +294,7 @@ test('a domain row whose body is not valid JSON drops that domain and names the 
   }
 });
 
-test('a PROJECT row whose body is not valid JSON still throws, and drops nothing', () => {
+test('a PROJECT row whose body is not valid JSON still throws, and drops nothing', { skip: sqliteOnly('item 5 routing') }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-decode-project-'));
   const projectPath = join(dir, '.sterling', 'sterling.db');
   const genesys = { name: 'genesys', dbPath: join(dir, 'domains', 'genesys', 'sterling.db') };
@@ -312,7 +313,7 @@ test('a PROJECT row whose body is not valid JSON still throws, and drops nothing
   }
 });
 
-test('a domain store that cannot be OPENED (not a database, or a newer schema) is listed unreadable: mounting succeeds, reads skip it, writes refuse', () => {
+test('a domain store that cannot be OPENED (not a database, or a newer schema) is listed unreadable: mounting succeeds, reads skip it, writes refuse', { skip: sqliteOnly('item 5 routing') }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-open-'));
   const projectPath = join(dir, '.sterling', 'sterling.db');
   const notdb = { name: 'notdb', dbPath: join(dir, 'domains', 'notdb', 'sterling.db') };
@@ -348,7 +349,7 @@ test('a domain store that cannot be OPENED (not a database, or a newer schema) i
   }
 });
 
-test('a PROJECT store that cannot be opened still throws out of the constructor', () => {
+test('a PROJECT store that cannot be opened still throws out of the constructor', { skip: sqliteOnly('item 5 routing') }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-unreadable-open-project-'));
   const projectPath = join(dir, '.sterling', 'sterling.db');
   mkdirSync(dirname(projectPath), { recursive: true });

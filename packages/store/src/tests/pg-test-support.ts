@@ -44,3 +44,13 @@ export function dropTestSchemas(bridge: PgBridge, prefix: string): string[] {
 export function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
+
+/**
+ * The one marker for a test that asserts SQLite file, journal or user_version
+ * mechanics, or that waits on item 5 routing: `test(name, { skip: sqliteOnly(reason) }, fn)`.
+ * On SQLite it is false and the test runs unchanged; under STERLING_TEST_PG=1
+ * the test is skipped and node:test prints the reason.
+ */
+export function sqliteOnly(reason: string): string | false {
+  return PG_TESTS_ENABLED ? `SQLite-only under STERLING_TEST_PG=1: ${reason}` : false;
+}

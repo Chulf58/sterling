@@ -57,6 +57,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '../index.js';
+import { sqliteOnly } from './pg-test-support.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
 
@@ -106,7 +107,7 @@ function decisionRecord(id: string) {
   };
 }
 
-test('E1: a write against a legacy (pre-v2) store throws SchemaMigrationRequiredError whose db_path equals the fixture\'s absolute path, and whose message names both the path and the migrate-stores remediation command', () => {
+test('E1: a write against a legacy (pre-v2) store throws SchemaMigrationRequiredError whose db_path equals the fixture\'s absolute path, and whose message names both the path and the migrate-stores remediation command', { skip: sqliteOnly('builds a legacy SQLite file fixture') }, () => {
   const { dir, path } = tempDbPath();
   try {
     const seed = new SterlingStore(path);
@@ -150,7 +151,7 @@ test('E1: a write against a legacy (pre-v2) store throws SchemaMigrationRequired
 // casTransitionMerge no longer exists and no other retry-loop CAS writer
 // survives in the store to carry this backstop coverage forward.
 
-test('E3 (regression control): found/supported are unchanged by the db_path addition — both properties still present, alongside (not replaced by) db_path', () => {
+test('E3 (regression control): found/supported are unchanged by the db_path addition — both properties still present, alongside (not replaced by) db_path', { skip: sqliteOnly('builds a legacy SQLite file fixture') }, () => {
   const supportedProbe = tempDbPath('sterling-migration-db-path-probe-');
   const probe = new SterlingStore(supportedProbe.path);
   probe.close();
@@ -182,7 +183,7 @@ test('E3 (regression control): found/supported are unchanged by the db_path addi
   }
 });
 
-test('E4 (boundary, quoting): a legacy store whose path contains a space — the remediation command single-quotes the path verbatim (--db \'<path>\') so copy-pasting it into a shell is safe', () => {
+test('E4 (boundary, quoting): a legacy store whose path contains a space — the remediation command single-quotes the path verbatim (--db \'<path>\') so copy-pasting it into a shell is safe', { skip: sqliteOnly('builds a legacy SQLite file fixture') }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling migration db path with space-'));
   const path = join(dir, 'sterling.db');
   assert.ok(path.includes(' '), 'precondition: the fixture path actually contains a space — otherwise this pin cannot distinguish quoted from unquoted');
@@ -217,7 +218,7 @@ test('E4 (boundary, quoting): a legacy store whose path contains a space — the
   }
 });
 
-test('E5 (boundary, embedded quote — skipped if this platform cannot create such a path): a legacy store whose path contains a literal single quote — the remediation command escapes it with the standard POSIX \'\\\'\' form', (t) => {
+test('E5 (boundary, embedded quote — skipped if this platform cannot create such a path): a legacy store whose path contains a literal single quote — the remediation command escapes it with the standard POSIX \'\\\'\' form', { skip: sqliteOnly('builds a legacy SQLite file fixture') }, (t) => {
   const prefix = join(tmpdir(), "sterling-migration-db-path-with'quote-");
   let dir: string;
   try {

@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore, SUPPORTED_SCHEMA_VERSION, SchemaMigrationRequiredError } from '../index.js';
+import { sqliteOnly } from './pg-test-support.js';
 
 function tempDb() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-store-meta-'));
@@ -27,7 +28,7 @@ function rawMetaRows(path: string): { key: string; value: string; updated_at: st
   }
 }
 
-test('store_meta: a fresh store has the table and no keys; getMeta of an unset key is undefined', () => {
+test('store_meta: a fresh store has the table and no keys; getMeta of an unset key is undefined', { skip: sqliteOnly('inspects or builds the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const t = tempDb();
   const store = new SterlingStore(t.path);
   try {
@@ -39,7 +40,7 @@ test('store_meta: a fresh store has the table and no keys; getMeta of an unset k
   }
 });
 
-test('store_meta: setMeta round-trips, overwrites in place, stamps updated_at, and survives a reopen', () => {
+test('store_meta: setMeta round-trips, overwrites in place, stamps updated_at, and survives a reopen', { skip: sqliteOnly('inspects or builds the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const t = tempDb();
   let store = new SterlingStore(t.path);
   try {
@@ -62,7 +63,7 @@ test('store_meta: setMeta round-trips, overwrites in place, stamps updated_at, a
   }
 });
 
-test('store_meta: an empty key is refused and nothing is written', () => {
+test('store_meta: an empty key is refused and nothing is written', { skip: sqliteOnly('inspects or builds the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const t = tempDb();
   const store = new SterlingStore(t.path);
   try {
@@ -74,7 +75,7 @@ test('store_meta: an empty key is refused and nothing is written', () => {
   }
 });
 
-test('store_meta: additive — an existing v2 store without the table gains it on open with no user_version bump', () => {
+test('store_meta: additive — an existing v2 store without the table gains it on open with no user_version bump', { skip: sqliteOnly('inspects or builds the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const t = tempDb();
   try {
     new SterlingStore(t.path).close();
@@ -98,7 +99,7 @@ test('store_meta: additive — an existing v2 store without the table gains it o
   }
 });
 
-test('store_meta: a pre-v2 (read-only) store refuses getMeta and setMeta with the migration error', () => {
+test('store_meta: a pre-v2 (read-only) store refuses getMeta and setMeta with the migration error', { skip: sqliteOnly('inspects or builds the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const t = tempDb();
   try {
     const raw = new DatabaseSync(t.path);

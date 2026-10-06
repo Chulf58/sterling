@@ -48,6 +48,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '../index.js';
+import { sqliteOnly } from './pg-test-support.js';
 
 function tempDbPath(prefix = 'sterling-live-write-guard-') {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -122,7 +123,7 @@ test('B1 (CONTROL for B2): a write proceeds normally when the live version is UN
   }
 });
 
-test('B2: a write throws when the live user_version has moved since open, naming BOTH versions and framed as a relaunch', () => {
+test('B2: a write throws when the live user_version has moved since open, naming BOTH versions and framed as a relaunch', { skip: sqliteOnly('reads or writes PRAGMA user_version in the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const { dir, path } = tempDbPath();
   try {
     const store = new SterlingStore(path);
@@ -152,7 +153,7 @@ test('B2: a write throws when the live user_version has moved since open, naming
   }
 });
 
-test('B3: a refused live-version write leaves NO partial row — the create is fully rolled back, not partially applied', () => {
+test('B3: a refused live-version write leaves NO partial row — the create is fully rolled back, not partially applied', { skip: sqliteOnly('reads or writes PRAGMA user_version in the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const { dir, path } = tempDbPath();
   try {
     const store = new SterlingStore(path);
@@ -173,7 +174,7 @@ test('B3: a refused live-version write leaves NO partial row — the create is f
   }
 });
 
-test('B4 (boundary): a READ after an out-of-band live-version bump does NOT throw — reads stay exempt from the live re-check', () => {
+test('B4 (boundary): a READ after an out-of-band live-version bump does NOT throw — reads stay exempt from the live re-check', { skip: sqliteOnly('reads or writes PRAGMA user_version in the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const { dir, path } = tempDbPath();
   try {
     const store = new SterlingStore(path);
@@ -196,7 +197,7 @@ test('B4 (boundary): a READ after an out-of-band live-version bump does NOT thro
   }
 });
 
-test('B5: a SECOND public write method (remove) is independently guarded — the live re-check is not special-cased to create() alone', () => {
+test('B5: a SECOND public write method (remove) is independently guarded — the live re-check is not special-cased to create() alone', { skip: sqliteOnly('reads or writes PRAGMA user_version in the SQLite file; Postgres counterpart in pg-store-parity.test.ts') }, () => {
   const { dir, path } = tempDbPath();
   try {
     const store = new SterlingStore(path);
