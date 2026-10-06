@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /* Frozen-corpus replay harness.  It deliberately patches only disposable eval worktrees. */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -60,6 +60,46 @@ export function resolveProjects(value) {
   if (value !== undefined) { try { supplied = JSON.parse(value); } catch { throw new Error('--projects must be a JSON object mapping project names to roots'); } }
   if (!supplied || Array.isArray(supplied) || typeof supplied !== 'object' || Object.values(supplied).some((x) => typeof x !== 'string')) throw new Error('--projects must be a JSON object mapping project names to roots');
   return Object.fromEntries(Object.entries({ ...DEFAULT_PROJECTS, ...supplied }).map(([name, projectRoot]) => [name, resolve(projectRoot)]));
+}
+export class ProjectsRequiredError extends Error {
+  constructor(missing) {
+    super(`--projects is required: the default project roots do not exist on this machine (${missing.map(([name, root]) => `${name} -> ${root}`).join(', ')}). Pass --projects '{"<name>":"<project root>"}' for each project the cases use.`);
+    this.name = 'ProjectsRequiredError';
+  }
+}
+/** resolveProjects plus the machine check: without --projects every default root must exist; with it, a default
+ *  the caller did not name and that does not exist here is dropped (and listed) instead of failing the snapshot. */
+export function requireProjects(value, exists = existsSync) {
+  if (value === undefined) {
+    const missing = Object.entries(DEFAULT_PROJECTS).filter(([, projectRoot]) => !exists(projectRoot));
+    if (missing.length) throw new ProjectsRequiredError(missing);
+    return { projects: resolveProjects(), dropped: [] };
+  }
+  const projects = resolveProjects(value); const named = JSON.parse(value);
+  const dropped = Object.keys(projects).filter((name) => !(name in named) && !exists(projects[name]));
+  return { projects: Object.fromEntries(Object.entries(projects).filter(([name]) => !dropped.includes(name))), dropped };
+}
+
+export const BACKENDS = ['sqlite', 'pg'];
+/** `sqlite`, `pg` or a comma list of them (a list replays each commit on each backend, so the two can be paired). */
+export function parseBackends(value) {
+  if (value === undefined) return ['sqlite'];
+  const names = String(value).split(',');
+  const bad = names.filter((name) => !BACKENDS.includes(name));
+  if (bad.length || names.length !== new Set(names).size) throw new Error(`--backend must be ${BACKENDS.join(' or ')}, or a comma list of distinct names; got ${JSON.stringify(value)}`);
+  return names;
+}
+export function parseBackendFlag(argv) {
+  const i = argv.indexOf('--backend');
+  if (i < 0) return parseBackends(undefined);
+  if (argv[i + 1] === undefined || argv[i + 1].startsWith('--')) throw new Error(`--backend needs a value: ${BACKENDS.join(' or ')}`);
+  return parseBackends(argv[i + 1]);
+}
+/** The identity of one run: a commit on a backend. sqlite keeps the bare commit, so its run directories and
+ *  case-project paths are the ones earlier runs wrote; every other backend is suffixed. */
+export function runKey(commit, backend = 'sqlite') {
+  if (!BACKENDS.includes(backend)) throw new Error(`unknown backend ${JSON.stringify(backend)}; expected ${BACKENDS.join(' or ')}`);
+  return backend === 'sqlite' ? commit : `${commit}@${backend}`;
 }
 
 /** Pure scoring functions; intentionally exported for synthetic unit tests. */
@@ -357,7 +397,9 @@ export async function replayCommit({ workDir, repos, cases, setup, runCase, onCa
     return finish(ctx, scored);
   });
 }
-export function pluginTree(repo, commit, workDir, ledger) { return addWorktree(ledger, repo, join(workDir, 'worktrees', commit), commit); }
+// `name` is the directory under worktrees/ (default: the commit). A run key names it, so a second backend run of one commit gets its own
+// tree and its own module URLs rather than the first run's cached, differently patched modules.
+export function pluginTree(repo, commit, workDir, ledger, name = commit) { return addWorktree(ledger, repo, join(workDir, 'worktrees', name), commit); }
 // A wholesale node_modules symlink makes the workspace links (@sterling/*)
 // resolve to the SOURCE tree's packages, so the tree under test compiles against
 // another tree's store types (two private `db` declarations, tsc exit 2). Link
@@ -375,19 +417,141 @@ export function linkNodeModules(source, tree) {
   mkdirSync(join(dest, '@sterling'));
   for (const pkg of readdirSync(join(source, '@sterling'))) symlinkSync(`../../packages/${pkg}`, join(dest, '@sterling', pkg), 'dir');
 }
-function worktree(commit, workDir, ledger) {
-  const tree = pluginTree(root, commit, workDir, ledger);
+function worktree(commit, workDir, ledger, backend = 'sqlite') {
+  const tree = pluginTree(root, commit, workDir, ledger, runKey(commit, backend));
   const lockMatch = existsSync(join(root, 'package-lock.json')) && lockfilesEquivalent(readFileSync(join(root, 'package-lock.json'), 'utf8'), readFileSync(join(tree, 'package-lock.json'), 'utf8'));
   if (lockMatch && !existsSync(join(tree, 'node_modules'))) linkNodeModules(join(root, 'node_modules'), tree);
   if (!existsSync(join(tree, 'packages/schemas/dist/index.js'))) run(['npx', 'tsc', '-p', 'packages/schemas/tsconfig.json'], tree);
   if (!existsSync(join(tree, 'packages/store/dist/index.js'))) run(['npx', 'tsc', '-p', 'packages/store/tsconfig.json'], tree);
-  const diff = patchAdapter(tree);
+  // The adapter makes the SQLite open read-only. On pg the store opens a PgDriver, whose snapshot copy is loaded
+  // once and checksummed per case, so the SQLite patch has nothing to do and must not return the constructor early.
+  const diff = backend === 'pg' ? null : patchAdapter(tree);
   // Old baseline commits do not carry the MCP artifact. Compile only that
   // package against the patched store artifact; no product source is changed.
   if (!existsSync(join(tree, 'packages/mcp-server/dist/tools.js'))) run(['npx', 'tsc', '-p', 'packages/mcp-server/tsconfig.json'], tree);
   const toolsAdapter = patchReadOnlyTools(tree);
   return { tree, build: lockMatch ? 'MCP dist compiled; main node_modules linked, @sterling to this tree (lockfile matched)' : 'MCP dist compiled', adapter_sha256: diff, tools_adapter_sha256: toolsAdapter };
 }
+// ---------------------------------------------------------------------------
+// The Postgres backend. Eval-only: each SQLite snapshot store is copied row by
+// row into a disposable sterling_test_eval<hex>_<n> schema, the per-case stores
+// are routed there through setStoreDriverFactory, and every schema of the run is
+// dropped when the run ends (finally, process exit, SIGINT/SIGTERM).
+// ---------------------------------------------------------------------------
+export const PG_PUSH_SKIP_REASON = 'push needs item 5 routing';
+// Every table SterlingStore keeps, in copy order. A table the snapshot lacks is skipped.
+export const PG_COPY_TABLES = ['records', 'record_versions', 'record_aliases', 'record_relations', 'record_stack_tags', 'record_file_keys', 'records_fts', 'runs', 'handoffs', 'check_skipped', 'selection', 'queue_drain_log', 'activity_log', 'store_meta'];
+const PG_EVAL_EXPORTS = ['PgBridge', 'PgDriver', 'SterlingStore', 'createPgStore', 'ensurePgLayout', 'readPgCredentials', 'setStoreDriverFactory'];
+const EVAL_SCHEMA = /^sterling_test_eval[0-9a-f]{8}(_meta|_[0-9]+)$/;
+const EVAL_PREFIX = /^sterling_test_eval[0-9a-f]{8}$/;
+const pgIdent = (schema, table) => {
+  if (!EVAL_SCHEMA.test(schema)) throw new Error(`refusing a schema outside this run's sterling_test_eval prefix: ${JSON.stringify(schema)}`);
+  if (!PG_COPY_TABLES.includes(table)) throw new Error(`refusing a table outside the store tables: ${JSON.stringify(table)}`);
+  return `"${schema}"."${table}"`;
+};
+/** One statement per table: the row count and an md5 over the sorted row texts. */
+export function pgChecksumSql(schema, table) {
+  return `SELECT count(*)::int AS n, md5(coalesce(string_agg(t::text, E'\n' ORDER BY t::text), '')) AS h FROM ${pgIdent(schema, table)} t`;
+}
+export function pgStoreChecksum(bridge, schemas) {
+  return JSON.stringify(schemas.map((schema) => [schema, PG_COPY_TABLES.map((table) => { const row = bridge.query(pgChecksumSql(schema, table)).rows[0]; return [table, row.n, row.h]; })]));
+}
+/** Copies one SQLite snapshot store, row for row and with the same ids, into a fresh schema through the commit's own SterlingStore, so the DDL and
+ *  version stamp are the commit's. A snapshot of another schema version is refused, never converted. */
+export function copySnapshotStoreToPg(mod, bridge, { schema, meta, sqlitePath, label }) {
+  mod.createPgStore(bridge, { kind: 'test', name: label, schema, metaSchema: meta });
+  const driver = new mod.PgDriver(bridge, { schema, metaSchema: meta });
+  const sidecars = ['-wal', '-shm'].filter((x) => !existsSync(`${sqlitePath}${x}`));
+  const source = new DatabaseSync(sqlitePath, { readOnly: true });
+  let store;
+  try {
+    // A fresh schema opens as a new store: the commit's DDL and version stamp. It stays open until the rows are in; closing it closes the driver.
+    store = new mod.SterlingStore(sqlitePath, { driver });
+    const sourceVersion = source.prepare('PRAGMA user_version').get().user_version;
+    if (driver.schemaVersion() !== sourceVersion) throw new Error(`snapshot store ${label} is schema version ${sourceVersion}; this commit's store writes version ${driver.schemaVersion()}; the pg loader copies rows and never converts`);
+    const present = new Set(source.prepare("SELECT name FROM sqlite_master WHERE type IN ('table')").all().map((x) => x.name));
+    const counts = {};
+    driver.begin();
+    try {
+      for (const table of PG_COPY_TABLES.filter((t) => present.has(t))) {
+        const columns = source.prepare(`PRAGMA table_info(${table})`).all().map((x) => x.name);
+        driver.prepare(`DELETE FROM ${table}`).run();
+        // Rows go in order and unchanged, in multi-row INSERTs: a Served round trip costs about 25 ms, so one row per statement took minutes for a project store.
+        const batchSize = Math.max(1, Math.min(200, Math.floor(30000 / columns.length)));
+        const flush = (rows, first) => {
+          if (!rows.length) return;
+          try { driver.prepare(`INSERT INTO ${table} (${columns.join(', ')}) VALUES ${rows.map(() => `(${columns.map(() => '?').join(', ')})`).join(', ')}`).run(...rows.flat()); }
+          catch (error) { throw new Error(`loading ${label} ${table} rows ${first}-${first + rows.length - 1}: ${error.message}`, { cause: error }); }
+        };
+        let n = 0, batch = [];
+        for (const row of source.prepare(`SELECT ${columns.join(', ')} FROM ${table} ORDER BY rowid`).iterate()) {
+          batch.push(columns.map((c) => row[c])); n++;
+          if (batch.length === batchSize) { flush(batch, n - batch.length + 1); batch = []; }
+        }
+        flush(batch, n - batch.length + 1);
+        counts[table] = n;
+      }
+      driver.commit();
+    } catch (error) { driver.rollback(); throw error; }
+    for (const [table, n] of Object.entries(counts)) {
+      const copied = Number(bridge.query(`SELECT count(*)::int AS n FROM ${pgIdent(schema, table)}`).rows[0].n);
+      if (copied !== n) throw new Error(`snapshot store ${label} ${table}: copied ${copied} rows, read ${n}`);
+    }
+    return counts;
+  } finally {
+    source.close(); if (store) store.close(); driver.close();
+    for (const x of sidecars) rmSync(`${sqlitePath}${x}`, { force: true });
+  }
+}
+/** The pg side of one commit's replay: one bridge, one schema prefix, lazily loaded snapshot stores. */
+export function openPgEvalRun(mod, { wireSignals = true } = {}) {
+  const missing = PG_EVAL_EXPORTS.filter((name) => mod[name] === undefined);
+  if (missing.length) throw new Error(`knowledge-eval --backend pg: this commit's @sterling/store has no ${missing.join(', ')}; pg replay needs a commit that has the Postgres driver seam (f096b79c or later)`);
+  const prefix = `sterling_test_eval${randomBytes(4).toString('hex')}`; const meta = `${prefix}_meta`;
+  if (!EVAL_PREFIX.test(prefix)) throw new Error(`bad eval prefix ${prefix}`);
+  const bridge = new mod.PgBridge(mod.readPgCredentials());
+  let disposed = false, loaded = 0, opened = 0; const schemaByPath = new Map();
+  const dropAll = () => {
+    const names = bridge.query('SELECT nspname FROM pg_namespace WHERE starts_with(nspname, $1) ORDER BY nspname', [`${prefix}_`]).rows.map((r) => String(r.nspname));
+    for (const name of names) { if (!EVAL_SCHEMA.test(name)) throw new Error(`refusing to drop ${JSON.stringify(name)}`); bridge.query(`DROP SCHEMA "${name}" CASCADE`); }
+    return names;
+  };
+  const onExit = () => {
+    if (disposed || bridge.closed) return;
+    try { dropAll(); bridge.close(); } catch (error) { console.error(`knowledge-eval: could not drop the pg eval schemas ${prefix}_*: ${error.message}`); }
+  };
+  const onSignal = (signal) => () => process.exit(signal === 'SIGINT' ? 130 : 143);
+  const signals = wireSignals ? [['SIGINT', onSignal('SIGINT')], ['SIGTERM', onSignal('SIGTERM')]] : [];
+  process.on('exit', onExit); for (const [name, fn] of signals) process.once(name, fn);
+  try { mod.ensurePgLayout(bridge, meta); } catch (error) { onExit(); throw error; }
+  mod.setStoreDriverFactory((path) => {
+    const schema = schemaByPath.get(resolve(path));
+    if (!schema) throw new Error(`knowledge-eval pg: no snapshot schema is loaded for store ${path}`);
+    opened++;
+    return new mod.PgDriver(bridge, { schema, metaSchema: meta });
+  });
+  return {
+    bridge, prefix, meta,
+    /** How many store opens the factory has served. A case that opens stores and moves this by 0 ran on SQLite. */
+    driversOpened: () => opened,
+    /** Loads one SQLite store into the next schema and routes `alias` (and `sqlitePath`) to it. */
+    loadStore(sqlitePath, label, alias = []) {
+      const schema = `${prefix}_${++loaded}`;
+      const counts = copySnapshotStoreToPg(mod, bridge, { schema, meta, sqlitePath, label });
+      for (const p of [sqlitePath, ...alias]) schemaByPath.set(resolve(p), schema);
+      return { schema, counts };
+    },
+    route(path, schema) { schemaByPath.set(resolve(path), schema); },
+    checksum: (schemas) => pgStoreChecksum(bridge, schemas),
+    dispose() {
+      if (disposed) return;
+      try { mod.setStoreDriverFactory(undefined); dropAll(); bridge.close(); }
+      finally { disposed = true; process.off('exit', onExit); for (const [name, fn] of signals) process.off(name, fn); }
+    },
+  };
+}
+export function errorKind(error) { const first = error instanceof AggregateError ? error.errors[0] : error; return first instanceof Error ? first.name : 'unknown'; }
+
 function run(argv, cwd, input) { const r = spawnSync(argv[0], argv.slice(1), { cwd, input, encoding: 'utf8', env: { ...process.env, STERLING_PLUGIN_ROOT: cwd, CLAUDE_PLUGIN_ROOT: cwd }, timeout: 120000 }); if (r.status !== 0) throw new Error(`${argv.join(' ')}: ${r.stderr}`); return r; }
 function transientState(project) {
   const dir = join(project, '.sterling', 'transient');
@@ -473,8 +637,10 @@ function channelTotals(cases) {
   };
   for (const channel of new Set(cases.map((c) => c.channel))) {
     const selected = cases.filter((c) => c.channel === channel);
-    const total = totals[channel] = { completed_cases: [selected.filter((c) => !c.error).length, selected.length] };
-    for (const c of selected) if (!c.error) add(total, c.score);
+    const skipped = selected.filter((c) => c.skipped).length;
+    const total = totals[channel] = { completed_cases: [selected.filter((c) => !c.error && !c.skipped).length, selected.length - skipped] };
+    if (skipped) total.skipped_cases = skipped;
+    for (const c of selected) if (!c.error && !c.skipped) add(total, c.score);
     if (total.rank_histogram) {
       const count = Object.values(total.rank_histogram).reduce((n, x) => n + x, 0);
       total.mrr = { rank_histogram: total.rank_histogram, numerator: Object.entries(total.rank_histogram).reduce((n, [rank, hits]) => n + (Number.isInteger(Number(rank)) ? hits / Number(rank) : 0), 0), denominator: count, value: mrrFromHistogram(total.rank_histogram) };
@@ -482,8 +648,9 @@ function channelTotals(cases) {
   }
   return totals;
 }
-function pairedComparison(summaries) {
-  const invalidReasons = [];
+export function pairedComparison(summaries) {
+  const invalidReasons = [], skippedCases = [];
+  const label = (s) => s.key ?? s.commit;
   const byCommit = summaries.map((s) => new Map(s.cases.map((c) => [c.id, c])));
   const ids = new Set(summaries.flatMap((s) => s.cases.map((c) => c.id)));
   const metricDelta = (a, b) => {
@@ -496,12 +663,14 @@ function pairedComparison(summaries) {
   const cases = {};
   for (const id of ids) {
     const pair = byCommit.map((m) => m.get(id));
-    if (pair.some((x) => !x)) { invalidReasons.push(`case ${id}: result missing; expected one result for each commit [${summaries.map((s) => s.commit).join(', ')}], got [${pair.map((x, i) => x ? summaries[i].commit : 'missing').join(', ')}]`); continue; }
-    if (pair.some((x) => x.error)) { invalidReasons.push(...pair.flatMap((x, i) => x.error ? [`case ${id}: harness error on ${summaries[i].commit}; expected a score, got ${x.error}`] : [])); continue; }
+    if (pair.some((x) => !x)) { invalidReasons.push(`case ${id}: result missing; expected one result for each commit [${summaries.map(label).join(', ')}], got [${pair.map((x, i) => x ? label(summaries[i]) : 'missing').join(', ')}]`); continue; }
+    const skipped = pair.find((x) => x.skipped);
+    if (skipped) { skippedCases.push({ id, reason: skipped.skipped }); continue; }
+    if (pair.some((x) => x.error)) { invalidReasons.push(...pair.flatMap((x, i) => x.error ? [`case ${id}: harness error on ${label(summaries[i])}; expected a score, got ${x.error}`] : [])); continue; }
     const schemas = pair.map((x) => x.case_schema);
-    if (schemas.some((x) => !x) || new Set(schemas).size !== 1) { invalidReasons.push(`case ${id}: case_schema mismatch; expected one non-empty schema across commits, got ${JSON.stringify(Object.fromEntries(summaries.map((s, i) => [s.commit, schemas[i]])))}`); continue; }
+    if (schemas.some((x) => !x) || new Set(schemas).size !== 1) { invalidReasons.push(`case ${id}: case_schema mismatch; expected one non-empty schema across commits, got ${JSON.stringify(Object.fromEntries(summaries.map((s, i) => [label(s), schemas[i]])))}`); continue; }
     const labelHashes = pair.map((x) => x.label_sha256);
-    if (labelHashes.some((x) => !x) || new Set(labelHashes).size !== 1) { invalidReasons.push(`case ${id}: labels hash mismatch; expected one hash across commits, got ${JSON.stringify(Object.fromEntries(summaries.map((s, i) => [s.commit, labelHashes[i]])))}`); continue; }
+    if (labelHashes.some((x) => !x) || new Set(labelHashes).size !== 1) { invalidReasons.push(`case ${id}: labels hash mismatch; expected one hash across commits, got ${JSON.stringify(Object.fromEntries(summaries.map((s, i) => [label(s), labelHashes[i]])))}`); continue; }
     cases[id] = metricDelta(pair[0].score, pair[pair.length - 1].score);
   }
   const totals = {};
@@ -514,14 +683,29 @@ function pairedComparison(summaries) {
       else if (v && typeof v === 'object') for (const [k, child] of Object.entries(v)) visit(child, [...path, k]);
     }; visit(value);
   }
-  return { invalid: invalidReasons.length > 0, invalid_reasons: invalidReasons, cases, paired_totals: totals };
+  return { invalid: invalidReasons.length > 0, invalid_reasons: invalidReasons, cases, paired_totals: totals, ...(skippedCases.length ? { skipped_cases: skippedCases } : {}) };
 }
-async function evaluateCommit(commit, cases, workDir, snap) {
-  const started = Date.now(), runDir = join(workDir, 'runs', commit); const manifest = JSON.parse(readFileSync(join(snap, 'manifest.json')));
-  let MountedStores, resolveDomainMounts, SterlingTools, parseConfig;
-  return replayCommit({ workDir, repos: [root, ...Object.values(manifest.projects ?? {}).map((x) => x.root)], cases,
-  setup: async (commitLedger) => { const w = worktree(commit, workDir, commitLedger);
-  ({ MountedStores, resolveDomainMounts } = await import(pathToFileURL(join(w.tree, 'packages/store/dist/index.js')).href + `?${Date.now()}`)); ({ SterlingTools } = await import(pathToFileURL(join(w.tree, 'packages/mcp-server/dist/tools.js')).href + `?${Date.now()}`)); ({ parseConfig } = await import(pathToFileURL(join(w.tree, 'packages/schemas/dist/index.js')).href + `?${Date.now()}`)); return w; },
+async function evaluateCommit(commit, cases, workDir, snap, backend = 'sqlite') {
+  const key = runKey(commit, backend);
+  const started = Date.now(), runDir = join(workDir, 'runs', key); const manifest = JSON.parse(readFileSync(join(snap, 'manifest.json')));
+  let MountedStores, resolveDomainMounts, SterlingTools, parseConfig, pgRun;
+  const pgProjects = new Map();
+  // One project's snapshot stores, copied into pg the first time a case needs the project.
+  const pgProject = (projectName, projectSnapshot) => {
+    if (!pgProjects.has(projectName)) {
+      const schemas = {}; const counts = {};
+      for (const store of projectSnapshot.stores) { const loaded = pgRun.loadStore(store.path, `${projectName}/${store.name}`); schemas[store.name] = loaded.schema; counts[store.name] = loaded.counts; }
+      pgProjects.set(projectName, { schemas, counts });
+    }
+    return pgProjects.get(projectName);
+  };
+  return runWithCleanup(() => replayCommit({ workDir, repos: [root, ...Object.values(manifest.projects ?? {}).map((x) => x.root)], cases,
+  setup: async (commitLedger) => { const w = worktree(commit, workDir, commitLedger, backend);
+  // pg: the factory must be set on the module instance MountedStores opens its stores from, and mounted.js imports ./index.js with no query string,
+  // so a `?ts` copy of index.js would carry a factory nothing reads. The tree is unique to this run key, so the plain URL is never cached from another run.
+  const storeUrl = pathToFileURL(backend === 'pg' ? realpathSync(join(w.tree, 'packages/store/dist/index.js')) : join(w.tree, 'packages/store/dist/index.js')).href;
+  const storeModule = await import(backend === 'pg' ? storeUrl : `${storeUrl}?${Date.now()}`); ({ MountedStores, resolveDomainMounts } = storeModule);
+  if (backend === 'pg') pgRun = openPgEvalRun(storeModule); ({ SterlingTools } = await import(pathToFileURL(join(w.tree, 'packages/mcp-server/dist/tools.js')).href + `?${Date.now()}`)); ({ parseConfig } = await import(pathToFileURL(join(w.tree, 'packages/schemas/dist/index.js')).href + `?${Date.now()}`)); return w; },
   runCase: async (c, w, { ledger: caseLedger, onClose }) => { const out = join(runDir, c.id); const caseSchema = c.version ?? 'v1'; mkdirSync(out, { recursive: true });
     const projectName = c.project ?? 'sterling-main'; const projectSnapshot = manifest.projects?.[projectName];
     if (!projectSnapshot) throw new Error(`case ${c.id} names unknown project ${JSON.stringify(projectName)}`);
@@ -530,14 +714,21 @@ async function evaluateCommit(commit, cases, workDir, snap) {
     for (const directive of directives.filter((x) => x.kind === 'config')) cfg.delivery = { ...cfg.delivery, injection_rung: directive.value };
     const effectiveRung = cfg.delivery?.injection_rung;
     if (!['prompt', 'read', 'edit'].includes(effectiveRung)) throw new Error(`project ${projectName} has no explicit valid delivery.injection_rung; refusing a silent default (${String(effectiveRung)})`);
-    const project = caseProject(commit, workDir, c.id, snap, projectName, projectSnapshot, cfg, directives.some((x) => x.kind === 'mutate'), caseLedger);
-    const caseDb = join(project, '.sterling', 'sterling.db'); const dbBefore = sha256(readFileSync(caseDb));
+    if (backend === 'pg' && c.channel !== 'pull') return { id: c.id, project: projectName, channel: c.channel, case_schema: caseSchema, label_sha256: labelHash(c), skipped: PG_PUSH_SKIP_REASON };
+    const project = caseProject(key, workDir, c.id, snap, projectName, projectSnapshot, cfg, directives.some((x) => x.kind === 'mutate'), caseLedger);
+    const caseDb = join(project, '.sterling', 'sterling.db');
+    // sqlite: the case database file's hash. pg: a row checksum over every table of every schema the case reads.
+    let fingerprint = () => sha256(readFileSync(caseDb));
+    if (backend === 'pg') { const loaded = pgProject(projectName, projectSnapshot); pgRun.route(caseDb, loaded.schemas.project); fingerprint = () => pgRun.checksum(Object.values(loaded.schemas)); }
+    const dbBefore = fingerprint();
+    const openedBefore = pgRun?.driversOpened();
     const stores = new MountedStores(join(project, '.sterling', 'sterling.db'), resolveDomainMounts(parseConfig(cfg)), { skipMissing: true }); onClose(() => stores.close());
+    if (pgRun && pgRun.driversOpened() === openedBefore) throw new Error('pg backend: the case stores did not open through the pg driver factory, so this case would have run on SQLite');
     const tools = new SterlingTools({ store: stores, config: parseConfig(cfg), repoRoot: project });
     // MountedStores.all() is the mounted STORE fan, not a record list. Enumerate
     // each read-only store so push matching uses the frozen record content.
-    const records = Object.fromEntries(stores.all().flatMap((store) => store.query({ cap: 10000 })).map((record) => [record.id, record]));
-    if (c.channel === 'pull') { const response = c.kind === 'preflight' ? tools.knowledgePreflight(c.input.text) : c.kind === 'get' ? tools.knowledgeGet(c.input.id) : tools.knowledgeQueryResult(c.input); if (dbBefore !== sha256(readFileSync(caseDb))) throw new Error('case-local store mutated during pull replay'); json(join(out, 'response.json'), response); return { id: c.id, project: projectName, channel: 'pull', case_schema: caseSchema, label_sha256: labelHash(c), score: scorePull(response, c.labels, c.negative) }; } else {
+    const records = c.channel === 'push' ? Object.fromEntries(stores.all().flatMap((store) => store.query({ cap: 10000 })).map((record) => [record.id, record])) : {};
+    if (c.channel === 'pull') { const response = c.kind === 'preflight' ? tools.knowledgePreflight(c.input.text) : c.kind === 'get' ? tools.knowledgeGet(c.input.id) : tools.knowledgeQueryResult(c.input); if (dbBefore !== fingerprint()) throw new Error('case-local store mutated during pull replay'); json(join(out, 'response.json'), response); return { id: c.id, project: projectName, channel: 'pull', case_schema: caseSchema, label_sha256: labelHash(c), score: scorePull(response, c.labels, c.negative) }; } else {
       if (!Array.isArray(c.input?.events) || c.input.events.length === 0) throw new Error(`push case ${c.id} requires a non-empty input.events sequence`);
       assertEventPaths(c.id, c.input.events, project);
       const events = [];
@@ -558,10 +749,13 @@ async function evaluateCommit(commit, cases, workDir, snap) {
       const selected = scoreIndexes.map((i) => events[i]);
       return { id: c.id, project: projectName, channel: 'push', case_schema: caseSchema, label_sha256: labelHash(c), score_event: scoreInputIndex, score_hook_events: scoreIndexes, score: scorePush({ envelopes: selected.flatMap((event) => event.captures.map((x) => x.envelope)), lateEnvelopes: late.captures.map((x) => x.envelope).filter((x) => String(x).length > 0), labels: c.labels, recordsById: records, guardBefore: selected[0].guard_before, guardAfter: selected.at(-1).guard_after }) };
     } },
-  onCaseError: (c, error) => ({ id: c.id, project: c.project ?? 'sterling-main', channel: c.channel, case_schema: c.version ?? 'v1', label_sha256: labelHash(c), error: String(error) }),
+  onCaseError: (c, error) => ({ id: c.id, project: c.project ?? 'sterling-main', channel: c.channel, case_schema: c.version ?? 'v1', label_sha256: labelHash(c), error: String(error), error_kind: errorKind(error) }),
   finish: (w, scored) => {
   const perProjectTotals = Object.fromEntries([...new Set(scored.map((x) => x.project ?? 'sterling-main'))].map((project) => [project, channelTotals(scored.filter((x) => (x.project ?? 'sterling-main') === project))]));
-  const summary = { commit, runtime_ms: Date.now() - started, build: w.build, adapter_sha256: w.adapter_sha256, tools_adapter_sha256: w.tools_adapter_sha256, projects: manifest.projects, cases: scored, channel_totals: channelTotals(scored), project_totals: perProjectTotals, invalid: scored.some((x) => x.error) }; json(join(runDir, 'summary.json'), summary); return summary; } });
+  const errorKinds = scored.filter((x) => x.error).reduce((out, x) => ({ ...out, [x.error_kind]: (out[x.error_kind] ?? 0) + 1 }), {});
+  const skipped = scored.filter((x) => x.skipped);
+  const summary = { commit, backend, key, runtime_ms: Date.now() - started, build: w.build, adapter_sha256: w.adapter_sha256, tools_adapter_sha256: w.tools_adapter_sha256, projects: manifest.projects, cases: scored, channel_totals: channelTotals(scored), project_totals: perProjectTotals, ...(Object.keys(errorKinds).length ? { errors_by_kind: errorKinds } : {}), ...(skipped.length ? { skipped: { count: skipped.length, reasons: [...new Set(skipped.map((x) => x.skipped))] } } : {}), ...(pgRun ? { pg_loaded: Object.fromEntries([...pgProjects].map(([name, p]) => [name, p.counts])) } : {}), invalid: scored.some((x) => x.error) }; json(join(runDir, 'summary.json'), summary); return summary; } }),
+  () => [() => pgRun?.dispose()]);
 }
-async function main() { const commits = (arg('--commits', '') ?? '').split(',').filter(Boolean); const casesPath = arg('--cases'); const workDir = resolve(arg('--work-dir', '/tmp/claude-1000/knowledge-eval')); if (!commits.length || !casesPath) throw new Error('usage: --commits sha[,sha] --cases cases.jsonl [--work-dir dir] [--projects JSON] [--clean]'); const projects = resolveProjects(arg('--projects', undefined)); if (process.argv.includes('--clean')) { for (const repo of new Set([root, ...Object.values(projects)])) reapRunWorktrees(repo, workDir); if (existsSync(workDir)) rmSync(workDir, { recursive: true, force: true }); } const snap = arg('--snapshot') ? resolve(arg('--snapshot')) : snapshot(workDir, projects); const cases = readJsonl(resolve(casesPath)); const summaries = []; for (const c of commits) summaries.push(await evaluateCommit(c, cases, workDir, snap)); const paired = pairedComparison(summaries); const projectTotals = Object.fromEntries(Object.keys(JSON.parse(readFileSync(join(snap, 'manifest.json'))).projects ?? {}).map((project) => [project, summaries.map((s) => ({ commit: s.commit, totals: s.project_totals[project] ?? {} }))])); const comparison = { harness_version: HARNESS_VERSION, snapshot: snap, invalid: summaries.some((x) => x.invalid) || paired.invalid, ...paired, project_totals: projectTotals, commits: summaries }; json(join(workDir, 'comparison.json'), comparison); console.log(JSON.stringify(comparison, null, 2)); }
+async function main() { const commits = (arg('--commits', '') ?? '').split(',').filter(Boolean); const casesPath = arg('--cases'); const workDir = resolve(arg('--work-dir', '/tmp/claude-1000/knowledge-eval')); if (!commits.length || !casesPath) throw new Error('usage: --commits sha[,sha] --cases cases.jsonl [--backend sqlite|pg|sqlite,pg] [--work-dir dir] [--projects JSON] [--clean]'); const backends = parseBackendFlag(process.argv); const { projects, dropped } = requireProjects(arg('--projects', undefined)); for (const name of dropped) console.error(`knowledge-eval: default project ${name} (${DEFAULT_PROJECTS[name]}) does not exist on this machine and was not named in --projects; it is not snapshotted`); if (process.argv.includes('--clean')) { for (const repo of new Set([root, ...Object.values(projects)])) reapRunWorktrees(repo, workDir); if (existsSync(workDir)) rmSync(workDir, { recursive: true, force: true }); } const snap = arg('--snapshot') ? resolve(arg('--snapshot')) : snapshot(workDir, projects); const cases = readJsonl(resolve(casesPath)); const summaries = []; for (const c of commits) for (const backend of backends) summaries.push(await evaluateCommit(c, cases, workDir, snap, backend)); const paired = pairedComparison(summaries); const projectTotals = Object.fromEntries(Object.keys(JSON.parse(readFileSync(join(snap, 'manifest.json'))).projects ?? {}).map((project) => [project, summaries.map((s) => ({ commit: s.commit, key: s.key, totals: s.project_totals[project] ?? {} }))])); const comparison = { harness_version: HARNESS_VERSION, snapshot: snap, invalid: summaries.some((x) => x.invalid) || paired.invalid, ...paired, project_totals: projectTotals, commits: summaries }; json(join(workDir, 'comparison.json'), comparison); console.log(JSON.stringify(comparison, null, 2)); }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((e) => { console.error(`knowledge-eval: ${e.stack ?? e}`); process.exitCode = 1; });
