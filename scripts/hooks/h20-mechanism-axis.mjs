@@ -1,13 +1,13 @@
 // H20 — mechanism-axis delivery at DISPATCH (board 62806222; concept family
 // knowledge-delivery, member 7). Registered at PreToolUse on TWO matcher entries:
 // Task|Agent (the dispatch surface) and AskUserQuestion (the question surface,
-// decision foreign_f5638a84). Every delivery member elsewhere NEVER blocks; AC7 still
-// holds for the dispatch/consult surfaces here. The AskUserQuestion surface is
-// the ONE exception (decision foreign_68332e4b, 2026-08-24): a first-attempt question
-// whose subject STRONGLY matches a store RULING (decision/anti_pattern) is
-// DENIED (exit 2) before it ever reaches the user — see the DENY-ONCE block
-// below and its plumbing in lib/delivery.mjs. Everywhere else this file still
-// never exits 2.
+// decision foreign_f5638a84). It NEVER blocks on either surface: it exits 0 with an
+// envelope, or exits 1 through warnNonBlocking when delivery itself fails. The
+// AskUserQuestion deny-once pre-step (decision foreign_68332e4b, 2026-08-24) was removed
+// by the scale-down decision sterling-claude-code-scale-down-boundary: a first-attempt
+// question is no longer denied, it gets the same advisory post-answer audit as any other
+// surface (see the removal note in lib/axis-compose.mjs). DENY_RULING_TYPES still serves
+// candidate selection there.
 //
 // TIMING, probed live 2026-08-11 (research_finding foreign_63a9646d):
 // PreToolUse additionalContext reaches the model WITH the tool result — and

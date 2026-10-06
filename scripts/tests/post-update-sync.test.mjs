@@ -501,6 +501,26 @@ test('cloneAgentSync: master is the base only when the clone has no main branch,
   await onBase(packedOther);
 });
 
+const UNREADABLE_BRANCH = "the Sterling clone's checked-out branch could not be read (HEAD: not a branch or a commit), so no agents were synced";
+
+test('cloneAgentSync: a branch name is accepted only as plain ref-name characters and a bounded length; anything else is an unreadable HEAD, never a cleaned-up name', async () => {
+  // An ordinary name still reaches the clause whole.
+  assert.match(await offBase(makePluginRoot({ clone: true, head: 'ref: refs/heads/integrate/0.18.89\n' })), /is on branch integrate\/0\.18\.89, not its base branch main,/);
+  assert.match(await offBase(makePluginRoot({ clone: true, head: `ref: refs/heads/${'a'.repeat(200)}\n` })), /is on branch a{200}, not/, 'the cap is not tripped by a long but ordinary name');
+  for (const [what, head] of [
+    ['an ESC byte', 'ref: refs/heads/feat\u001b[31mred\n'],
+    ['a BEL byte', 'ref: refs/heads/feat\u0007\n'],
+    ['an over-length name', `ref: refs/heads/${'a'.repeat(3000)}\n`],
+    ['an ESC byte and 3000 characters', `ref: refs/heads/\u001b${'a'.repeat(3000)}\n`],
+    ['a name just over the cap', `ref: refs/heads/${'a'.repeat(201)}\n`],
+    ['a ref-forbidden character', 'ref: refs/heads/feat~1\n'],
+    ['a non-ASCII character', 'ref: refs/heads/f\u00e9e\n'],
+  ]) {
+    const clause = await offBase(makePluginRoot({ clone: true, head }));
+    assert.equal(clause, UNREADABLE_BRANCH, `${what} reads as unreadable`);
+  }
+});
+
 // A linked worktree's .git is a FILE pointing at <main>/.git/worktrees/<name>, which holds
 // that worktree's own HEAD and a commondir file pointing back at the shared refs.
 function makeWorktreeRoot(head, { relative = false } = {}) {
@@ -511,7 +531,7 @@ function makeWorktreeRoot(head, { relative = false } = {}) {
   writeFileSync(join(admin, 'commondir'), '../..\n');
   const wt = makePluginRoot();
   writeFileSync(join(wt, '.git'), `gitdir: ${relative ? relativePath(wt, admin) : admin}\n`);
-  return { wt };
+  return { wt, admin };
 }
 
 test('cloneAgentSync: a linked worktree (.git is a file) is read through its gitdir, absolute or relative', async () => {
@@ -521,6 +541,15 @@ test('cloneAgentSync: a linked worktree (.git is a file) is read through its git
 
   // master in a worktree whose shared refs hold a main: the commondir is where main is found.
   assert.match(await offBase(makeWorktreeRoot('ref: refs/heads/master\n').wt), /is on branch master, not its base branch main,/);
+
+  // A commondir that names a directory which is not there says nothing about main, so it cannot make master the base.
+  const gone = makeWorktreeRoot('ref: refs/heads/master\n');
+  writeFileSync(join(gone.admin, 'commondir'), '../../no-such-common\n');
+  assert.equal(await offBase(gone.wt), "the Sterling clone's checked-out branch could not be read (commondir: ENOENT), so no agents were synced");
+  // On main too: the shared refs cannot be consulted, so nothing is known about the base.
+  const goneMain = makeWorktreeRoot('ref: refs/heads/main\n');
+  writeFileSync(join(goneMain.admin, 'commondir'), '../../no-such-common\n');
+  assert.equal(await offBase(goneMain.wt), "the Sterling clone's checked-out branch could not be read (commondir: ENOENT), so no agents were synced");
 
   const broken = makePluginRoot();
   writeFileSync(join(broken, '.git'), 'not a pointer\nSECOND-LINE-MARKER\n');

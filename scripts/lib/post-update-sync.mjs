@@ -305,9 +305,12 @@ export function cloneBranchState(root) {
       commonDir = gitDir;
       try {
         commonDir = resolve(gitDir, readFileSync(join(gitDir, 'commondir'), 'utf8').trim());
+        // A commondir naming a missing directory says nothing about which branches exist,
+        // so it must not read as "no main" and make master the base.
+        if (!statSync(commonDir).isDirectory()) return unreadable('commondir: not a directory');
       } catch (e) {
         // No commondir file: a gitdir that is not a linked worktree (--separate-git-dir) holds its own refs.
-        if (e?.code !== 'ENOENT') return unreadable(`commondir: ${errCode(e)}`);
+        if (e?.code !== 'ENOENT' || existsSync(join(gitDir, 'commondir'))) return unreadable(`commondir: ${errCode(e)}`);
       }
     }
   } catch (e) {
@@ -319,7 +322,9 @@ export function cloneBranchState(root) {
   } catch (e) {
     return unreadable(`HEAD: ${errCode(e)}`);
   }
-  const ref = /^ref: refs\/heads\/(\S+)\s*$/.exec(head);
+  // The name reaches the banner, so it must pass as plain ref-name characters of a bounded
+  // length or the HEAD reads as unreadable; it is never trimmed or cleaned up.
+  const ref = /^ref: refs\/heads\/([A-Za-z0-9._\/@+-]{1,200})\s*$/.exec(head);
   const detached = /^[0-9a-f]{40,64}\s*$/.test(head);
   if (!ref && !detached) return unreadable('HEAD: not a branch or a commit');
   const branch = ref ? ref[1] : null;
