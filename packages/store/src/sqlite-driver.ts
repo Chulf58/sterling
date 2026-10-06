@@ -372,9 +372,10 @@ export class SqliteDriver implements StoreDriver {
    * user_version and sqlite_master are read in one deferred read transaction,
    * so they come from one snapshot. A store with a schema and a version below
    * `supported` in that snapshot is an older store, returned untouched; a
-   * newer version is returned untouched too, for SterlingStore to refuse. Only
-   * a file without a schema, or one another opener has just stamped, reaches
-   * the write lock.
+   * newer version is returned untouched too, for SterlingStore to refuse. A
+   * store another opener has already published at `supported` gets only this
+   * connection's settings, as an already-current store does. Only a file
+   * without a schema reaches the write lock.
    */
   publishFresh(supported: number): number {
     if (!Number.isInteger(supported) || supported < 1) {
@@ -390,6 +391,12 @@ export class SqliteDriver implements StoreDriver {
       this.db.exec('COMMIT');
     }
     if (version > supported || (version < supported && schemaExists)) return version;
+    if (version === supported && schemaExists) {
+      // Published since SterlingStore's version read: nothing is owed, so no
+      // write lock (decision 81bdfc53), only the connection-local settings.
+      this.prepareConnection(false);
+      return version;
+    }
 
     // PRAGMA journal_mode and foreign_keys have no effect inside a transaction,
     // so the connection settings come before BEGIN IMMEDIATE.
@@ -508,8 +515,11 @@ export class SqliteDriver implements StoreDriver {
    * write lock, and two openers switching together can both fail that way.
    * So this waits as busy_timeout would: after a failed switch it reads the
    * file's mode (hasSchema() takes the read lock that makes this connection
-   * pick it up), stops when another opener's switch has landed, and otherwise
-   * tries again until busy_timeout has run out, then throws the last error.
+   * pick it up), stops when another opener's switch has landed, and stops too
+   * when another opener has built the store in DELETE: that is a 9p opener's
+   * demotion, which is sticky [store-journal-policy-delete-on-9p] and must not
+   * be flipped back. It tries again only while the file is still without a
+   * schema, until busy_timeout has run out, then throws the last error.
    */
   private switchFreshFileToWal(): void {
     const deadline = Date.now() + this.busyTimeoutMs;
@@ -519,8 +529,8 @@ export class SqliteDriver implements StoreDriver {
         return;
       } catch (e) {
         if (!(e instanceof Error) || !/database is locked/.test(e.message)) throw e;
-        this.hasSchema();
-        if (this.journalMode() === 'wal') return;
+        const built = this.hasSchema();
+        if (this.journalMode() === 'wal' || built) return;
         if (Date.now() >= deadline) throw e;
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
       }

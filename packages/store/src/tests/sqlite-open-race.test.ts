@@ -121,3 +121,91 @@ process.disconnect();
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('an opener whose version read went stale opens a store another opener already published without taking the write lock (decision 81bdfc53)', { skip: SKIP }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-sqlite-race-'));
+  const path = join(dir, 'sterling.db');
+  try {
+    const late = new SqliteDriver(path);
+    let versionReads = 0;
+    const interleaved = new Proxy(late, {
+      get(target, key) {
+        const value = Reflect.get(target, key, target);
+        if (key === 'schemaVersion') {
+          return () => {
+            const version = target.schemaVersion();
+            if (++versionReads === 1) {
+              assert.equal(version, 0, 'the late opener read the empty file');
+              const first = new SterlingStore(path, { driver: new SqliteDriver(path) });
+              first.setMeta('first', 'wrote');
+              first.close();
+              // From here the store is published, so this open owes no write.
+              target.begin = () => {
+                throw new Error('begin() was called on a store already published at the supported version');
+              };
+            }
+            return version;
+          };
+        }
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const store = new SterlingStore(path, { driver: interleaved });
+    try {
+      assert.equal(versionReads >= 1, true, 'the stale read happened');
+      delete (late as { begin?: unknown }).begin;
+      store.setMeta('late', 'wrote');
+      assert.equal(store.getMeta('first'), 'wrote');
+      assert.equal(store.getMeta('late'), 'wrote');
+    } finally {
+      store.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a WAL switch that finds the store built in DELETE by another opener leaves it in DELETE (store-journal-policy-delete-on-9p, sticky)', { skip: SKIP }, (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-sqlite-race-'));
+  const path = join(dir, 'sterling.db');
+  try {
+    if (journalDemotionRequired(path)) {
+      t.skip('the temp dir is on a 9p mount, where this opener would demote instead of switching to WAL');
+      return;
+    }
+    // Stands in for a 9p opener: it builds the fresh file in DELETE and holds
+    // the write lock, so the WAL switch below fails with 'database is locked'.
+    const builder = new SqliteDriver(path);
+    builder.begin();
+    builder.exec('CREATE TABLE built_in_delete (x INTEGER)');
+    const opener = new SqliteDriver(path, { busyTimeoutMs: 2000 });
+    const probe = opener.hasSchema.bind(opener);
+    let probes = 0;
+    let committed = false;
+    // The first probe is the fresh check before the switch; the second comes
+    // after the failed switch, and the builder commits just before it.
+    opener.hasSchema = () => {
+      if (++probes === 2) {
+        builder.commit();
+        committed = true;
+      }
+      return probe();
+    };
+    try {
+      opener.prepareWritable(true);
+      assert.equal(committed, true, 'the switch failed while the builder held the lock, and the builder then committed');
+      assert.equal(opener.journalMode(), 'delete', 'the opener left the store in DELETE');
+    } finally {
+      opener.close();
+      builder.close();
+    }
+    const check = new SqliteDriver(path);
+    try {
+      assert.equal(check.journalMode(), 'delete', 'the file is still in DELETE');
+    } finally {
+      check.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

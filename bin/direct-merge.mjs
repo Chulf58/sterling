@@ -7950,9 +7950,10 @@ CREATE TABLE IF NOT EXISTS store_meta (
        * user_version and sqlite_master are read in one deferred read transaction,
        * so they come from one snapshot. A store with a schema and a version below
        * `supported` in that snapshot is an older store, returned untouched; a
-       * newer version is returned untouched too, for SterlingStore to refuse. Only
-       * a file without a schema, or one another opener has just stamped, reaches
-       * the write lock.
+       * newer version is returned untouched too, for SterlingStore to refuse. A
+       * store another opener has already published at `supported` gets only this
+       * connection's settings, as an already-current store does. Only a file
+       * without a schema reaches the write lock.
        */
       publishFresh(supported) {
         if (!Number.isInteger(supported) || supported < 1) {
@@ -7969,6 +7970,10 @@ CREATE TABLE IF NOT EXISTS store_meta (
         }
         if (version > supported || version < supported && schemaExists)
           return version;
+        if (version === supported && schemaExists) {
+          this.prepareConnection(false);
+          return version;
+        }
         this.prepareConnection(!schemaExists);
         this.begin();
         try {
@@ -8039,8 +8044,11 @@ CREATE TABLE IF NOT EXISTS store_meta (
        * write lock, and two openers switching together can both fail that way.
        * So this waits as busy_timeout would: after a failed switch it reads the
        * file's mode (hasSchema() takes the read lock that makes this connection
-       * pick it up), stops when another opener's switch has landed, and otherwise
-       * tries again until busy_timeout has run out, then throws the last error.
+       * pick it up), stops when another opener's switch has landed, and stops too
+       * when another opener has built the store in DELETE: that is a 9p opener's
+       * demotion, which is sticky [store-journal-policy-delete-on-9p] and must not
+       * be flipped back. It tries again only while the file is still without a
+       * schema, until busy_timeout has run out, then throws the last error.
        */
       switchFreshFileToWal() {
         const deadline = Date.now() + this.busyTimeoutMs;
@@ -8051,8 +8059,8 @@ CREATE TABLE IF NOT EXISTS store_meta (
           } catch (e) {
             if (!(e instanceof Error) || !/database is locked/.test(e.message))
               throw e;
-            this.hasSchema();
-            if (this.journalMode() === "wal")
+            const built = this.hasSchema();
+            if (this.journalMode() === "wal" || built)
               return;
             if (Date.now() >= deadline)
               throw e;
