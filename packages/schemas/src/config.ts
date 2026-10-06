@@ -15,7 +15,7 @@ import { z } from 'zod';
 // land on disk unrefused, same rationale as the delivery leaf check below).
 const effortLevel = z.enum(['low', 'medium', 'high', 'xhigh']);
 
-// Every pin is {model, effort?} (decision
+// A hard_task or vendor pin is {model, effort?} (decision
 // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks):
 // effort omitted means the host's own default, so none is invented here.
 const modelPin = z.object({
@@ -24,10 +24,13 @@ const modelPin = z.object({
 }).strict();
 
 // models.<agent>: the default pin plus an optional hard_task pin the conductor
-// passes when it escalates that agent.
+// passes when it escalates that agent. effort is REQUIRED on the default pin:
+// it fills {{EFFORT}} in the agent template, and resolveModelVars
+// (scripts/lib/agent-distribution.mjs) throws at render time without it, so a
+// config missing it is refused here, when it is written.
 const agentModelEntry = z.object({
   model: z.string(),
-  effort: effortLevel.optional(),
+  effort: effortLevel,
   hard_task: modelPin.optional(),
 }).strict();
 
@@ -586,9 +589,10 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> => v !== null &
  *  through for the schema to refuse.
  *   - sparring_partner.model (the old single pin) becomes
  *     sparring_partner.models.openai; when models.openai already exists the new
- *     key wins and the old value is dropped. '' is the TUI's clear-to-unset
+ *     key wins and an old STRING value is dropped. '' is the TUI's clear-to-unset
  *     signal, not a model id, so it creates no pin. A non-string value is moved
- *     as is so the pin schema refuses it loud.
+ *     as is so the pin schema refuses it loud, over an existing models.openai
+ *     too: an invalid value is never dropped unrefused.
  *   - models keys in RETIRED_MODEL_KEYS are dropped. */
 export function normalizeRawConfig(raw: unknown): unknown {
   if (!isPlainObject(raw)) return raw;
@@ -600,7 +604,7 @@ export function normalizeRawConfig(raw: unknown): unknown {
       const existing = rest.models;
       if (existing === undefined || isPlainObject(existing)) {
         const models = { ...(existing ?? {}) };
-        if (models.openai === undefined) models.openai = { model };
+        if (models.openai === undefined || typeof model !== 'string') models.openai = { model };
         rest.models = models;
       }
     }

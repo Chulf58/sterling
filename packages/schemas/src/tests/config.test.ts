@@ -502,16 +502,33 @@ test('models.<agent>.hard_task: absent by default, a {model, effort?} pin round-
   assert.equal(pins({}).models.implementor.hard_task, undefined, 'no hard_task is invented for the shipped defaults');
   const withHard = pins({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5', effort: 'high' } } } });
   assert.deepEqual(withHard.models.implementor.hard_task, { model: 'claude-opus-5-5', effort: 'high' });
-  const noEffort = pins({ models: { implementor: { model: 'claude-sonnet-5-5', hard_task: { model: 'claude-opus-5-5' } } } });
+  const noEffort = pins({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } } } });
   assert.deepEqual(noEffort.models.implementor.hard_task, { model: 'claude-opus-5-5' }, 'hard_task effort is optional and not invented');
-  assert.throws(() => parseConfig({ models: { implementor: { model: 'm', hard_task: { effort: 'high' } } } }), /invalid|required/i, 'hard_task needs a model');
-  assert.throws(() => parseConfig({ models: { implementor: { model: 'm', hard_task: { model: 'm', effort: 'max' } } } }), /invalid/i, 'hard_task effort is the same enum');
-  assert.throws(() => parseConfig({ models: { implementor: { model: 'm', hard_task: { model: 'm', junk: 1 } } } }), /unrecognized/i, 'a pin is strict');
+  assert.throws(() => parseConfig({ models: { implementor: { model: 'm', effort: 'low', hard_task: { effort: 'high' } } } }), /invalid|required/i, 'hard_task needs a model');
+  assert.throws(() => parseConfig({ models: { implementor: { model: 'm', effort: 'low', hard_task: { model: 'm', effort: 'max' } } } }), /invalid/i, 'hard_task effort is the same enum');
+  assert.throws(() => parseConfig({ models: { implementor: { model: 'm', effort: 'low', hard_task: { model: 'm', junk: 1 } } } }), /unrecognized/i, 'a pin is strict');
 });
 
-test('models.<agent>.effort is optional: omitted means the host default and nothing is invented', () => {
-  const p = pins({ models: { implementor: { model: 'claude-sonnet-5-5' } } });
-  assert.deepEqual(p.models.implementor, { model: 'claude-sonnet-5-5' });
+// The agent's DEFAULT entry needs an effort: scripts/lib/agent-distribution.mjs
+// resolveModelVars throws at render time when it is missing, so the refusal has to
+// happen when the config is written. Effort is optional only on hard_task and on the
+// vendor pins, where omitted means the host's own default.
+test('models.<agent>.effort is required on the default entry and optional only on hard_task and the vendor pins', () => {
+  assert.throws(() => parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5' } } }), /required/i, 'a shipped agent key without effort is refused');
+  assert.throws(() => parseConfig({ models: { 'my-custom-agent': { model: 'claude-haiku-4-5' } } }), /required/i, 'any other agent key without effort is refused');
+  assert.throws(
+    () => parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', hard_task: { model: 'claude-opus-5-5', effort: 'high' } } } }),
+    /required/i,
+    'an effort on hard_task does not stand in for the default entry\'s',
+  );
+  const p = pins({
+    models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } } },
+    sparring_partner: { models: { openai: { model: 'gpt-6-astra' } } },
+    review: { models: { anthropic: { model: 'claude-opus-5-5' } } },
+  });
+  assert.deepEqual(p.models.implementor, { model: 'claude-sonnet-5-5', effort: 'high', hard_task: { model: 'claude-opus-5-5' } });
+  assert.deepEqual(p.sparring_partner.models.openai, { model: 'gpt-6-astra' });
+  assert.deepEqual(p.review.models.anthropic, { model: 'claude-opus-5-5' });
 });
 
 test('models accepts any installed agent name as a key, validates its pin, and keeps the shipped defaults', () => {
@@ -606,6 +623,16 @@ test('old sparring_partner.model conversion: the old key joins an existing model
 test("old sparring_partner.model conversion: '' (the clear-to-unset signal) creates no pin, and a non-string is still refused loud", () => {
   assert.deepEqual(pins({ sparring_partner: { enabled: true, model: '' } }).sparring_partner.models, {});
   assert.throws(() => parseConfig({ sparring_partner: { model: 42 } }), /invalid/i);
+});
+
+test('old sparring_partner.model conversion: a non-string old value is refused even when models.openai already exists', () => {
+  const both = (model: unknown) => ({ sparring_partner: { model, models: { openai: { model: 'gpt-6-astra', effort: 'high' } } } });
+  for (const bad of [42, null, { model: 'm' }, ['m']]) {
+    assert.throws(() => parseConfig(both(bad)), /invalid|expected/i, `old model ${JSON.stringify(bad)} is not dropped silently`);
+    assert.equal(configSchema.safeParse(normalizeRawConfig(both(bad))).success, false, 'the validator path (config_set) refuses it too');
+  }
+  assert.deepEqual(pins(both('gpt-5.6-sol')).sparring_partner.models.openai, { model: 'gpt-6-astra', effort: 'high' }, 'a string old value still loses to the new key');
+  assert.deepEqual(pins(both('')).sparring_partner.models.openai, { model: 'gpt-6-astra', effort: 'high' }, "'' still creates and changes nothing");
 });
 
 test('unreadConfigKeys: the old sparring_partner.model is read (converted), not reported as unread', () => {

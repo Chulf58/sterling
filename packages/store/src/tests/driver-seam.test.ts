@@ -259,15 +259,18 @@ test('SterlingStore opens on a SqliteDriver and passes busyTimeoutMs through to 
   }
 });
 
-test('SterlingStore refuses busyTimeoutMs together with an injected driver', () => {
+test('SterlingStore refuses busyTimeoutMs together with an injected driver, and closes that driver', () => {
   const dir = tempDir();
   try {
-    const { driver } = recordingDriver(join(dir, 's.db'));
+    const { driver, events } = recordingDriver(join(dir, 's.db'));
     assert.throws(
       () => new SterlingStore(join(dir, 's.db'), { driver, busyTimeoutMs: 1000 }),
       /busyTimeoutMs.*driver/,
     );
-    driver.close();
+    // The store takes an injected driver over, so the refusal closes it: the caller is
+    // left with no open handle to clean up.
+    assert.deepEqual(events, ['close']);
+    assert.throws(() => driver.prepare('SELECT 1'), 'the injected driver is closed');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

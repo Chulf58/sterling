@@ -129,6 +129,7 @@ const DUE = 'worker launches at your next Stop or git commit to judge 1 item \\(
 const ROUTINE = [
   ['a no-progress run', { ok: true, no_progress: true, error: null }, 'worker paused \\d+m after a run that closed nothing \\(it retries by itself\\)'],
   ['a run that closed items', { ok: true, no_progress: false, error: null, closes_ok: 2, verdicts: 3, closed: 2 }, `${DUE}\\. Last run: 1m ago, 3 verdicts, 2 closed`],
+  ['a run whose claimed closes did not land', { ok: true, no_progress: false, error: null, closes_ok: 0, verdicts: 3, closed: 3 }, `${DUE}\\. Last run: 1m ago, 3 verdicts, 0 closed`],
   ['no run recorded yet', null, `${DUE}\\. No run recorded yet`],
 ];
 

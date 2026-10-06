@@ -178,7 +178,7 @@ const writeLastRun = (dir, lastRun) =>
 test('BACKLOG worker state: a recorded last run adds its age, verdicts and closes to a due worker', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
-    writeLastRun(dir, { ok: true, at: iso(now - 2 * 60 * MIN), verdicts: 3, closed: 1 });
+    writeLastRun(dir, { ok: true, at: iso(now - 2 * 60 * MIN), verdicts: 3, closed: 1, closes_ok: 1 });
     const b = backlog(dir, reconcile(now, { count: 5, ageMin: 3 }), now);
     assert.match(b.banner, /worker launches at your next Stop or git commit to judge 5 items \(oldest unjudged 3m\)\. Last run: 2h ago, 3 verdicts, 1 closed$/);
     assert.match(b.line, /Last run: 2h ago, 3 verdicts, 1 closed\.$/);
@@ -189,11 +189,34 @@ test('BACKLOG worker state: a recorded last run adds its age, verdicts and close
 test('BACKLOG worker state: the last-run clause reaches the batching and idle states and uses singular nouns', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
-    writeLastRun(dir, { ok: true, at: iso(now - 50 * MIN), verdicts: 1, closed: 0 });
+    writeLastRun(dir, { ok: true, at: iso(now - 50 * MIN), verdicts: 1, closed: 0, closes_ok: 0 });
     const batching = backlog(dir, reconcile(now, { count: 1, ageMin: 8 }), now);
     assert.match(batching.banner, /worker batching: starts at 5 unjudged or after 30m \(1 now, oldest 8m\)\. Last run: 50m ago, 1 verdict, 0 closed$/);
     const idle = backlog(dir, reconcile(now, { count: 1, unjudged: 0, ageMin: 90 }), now);
     assert.match(idle.banner, /worker has nothing left to judge: the 1 item waits on you\. Last run: 50m ago, 1 verdict, 0 closed$/);
+  });
+});
+
+// `closed` is what the worker child CLAIMED in its verdicts; `closes_ok` is how many
+// closes the runner saw succeed (maintenance-worker.mjs runWorker). Only the second is printed.
+test('BACKLOG worker state: the close count is the verified closes_ok, never the claimed closed', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    writeLastRun(dir, { ok: true, at: iso(now - 2 * 60 * MIN), verdicts: 3, closed: 3, closes_ok: 0 });
+    const b = backlog(dir, reconcile(now, { count: 5, ageMin: 3 }), now);
+    assert.match(b.banner, /Last run: 2h ago, 3 verdicts, 0 closed$/);
+    assert.match(b.line, /Last run: 2h ago, 3 verdicts, 0 closed\.$/);
+    assert.doesNotMatch(b.banner + b.line, /3 closed/);
+  });
+});
+
+test('BACKLOG worker state: a state file with a claimed closed but no closes_ok (an older one) prints no close count', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    writeLastRun(dir, { ok: true, at: iso(now - 2 * 60 * MIN), verdicts: 3, closed: 3 });
+    const b = backlog(dir, reconcile(now, { count: 5, ageMin: 3 }), now);
+    assert.match(b.banner, /Last run: 2h ago, 3 verdicts$/);
+    assert.doesNotMatch(b.banner + b.line, /closed/);
   });
 });
 

@@ -438,6 +438,38 @@ test('CS-6b: a non-string value written to the old sparring_partner.model is ref
     h.cleanup();
   }
 });
+// CS-6c — once sparring_partner.models.openai exists the old path is not read at all
+// (normalizeRawConfig: the new key wins), so a write to it would validate, land on disk
+// and change nothing. Refused, naming the path that is read.
+test('CS-6c: a write to the old sparring_partner.model is refused when sparring_partner.models.openai exists, naming the new path — nothing written', () => {
+  const h = harness(JSON.stringify({ sparring_partner: { enabled: true, models: { openai: { model: 'gpt-6-astra' } } } }, null, 2));
+  try {
+    const call = handler(h.tools);
+    const before = h.read();
+    for (const value of ['gpt-5.6-sol', '', 42]) {
+      const msg = refusalMessage(call, { path: 'sparring_partner.model', value });
+      assert.match(msg, /sparring_partner\.model\b/, 'the refusal names the old path');
+      assert.match(msg, /'sparring_partner\.models\.openai\.model'/, 'and the path to write instead');
+      assert.match(msg, /Nothing was written/);
+      assert.equal(h.read(), before, 'nothing written');
+    }
+    assert.equal(call({ path: 'sparring_partner.models.openai.model', value: 'gpt-5.6-sol' }).value, 'gpt-5.6-sol', 'the new path still takes the write');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// CS-6d — only the openai pin makes the old path dead: with another vendor pinned the
+// old key is still converted to models.openai, so the write keeps working.
+test('CS-6d: with only an anthropic pin the old sparring_partner.model still takes a write', () => {
+  const h = harness(JSON.stringify({ sparring_partner: { enabled: true, models: { anthropic: { model: 'claude-opus-5-5' } } } }, null, 2));
+  try {
+    const call = handler(h.tools);
+    assert.equal(call({ path: 'sparring_partner.model', value: 'gpt-5.6-sol' }).value, 'gpt-5.6-sol');
+  } finally {
+    h.cleanup();
+  }
+});
 // NAMED SABOTAGE (CS-6): drop the whole-document parse (write the mutated
 // object straight out) → no throw, RED on the missing exception AND on the
 // byte-identity assertion. SECOND, INDEPENDENT: validate but write anyway

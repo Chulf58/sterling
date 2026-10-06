@@ -235,8 +235,11 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 /**
  * How the last worker run went, as a clause that follows a routine state: its
  * age, its verdict count and its close count (all three written by runWorker
- * into last_run). A failed run gets the separate FAILED note instead, never
- * both. A state file from before the counts existed prints the age alone.
+ * into last_run). The close count is closes_ok, the closes the runner saw
+ * succeed; last_run.closed is only what the worker child claimed in its
+ * verdicts and is never printed. A failed run gets the separate FAILED note
+ * instead, never both. A state file from before a count existed leaves that
+ * count out.
  */
 function lastRunClause(last, nowMs) {
   if (!last) return '. No run recorded yet';
@@ -244,7 +247,7 @@ function lastRunClause(last, nowMs) {
   const age = ageText(last.at, nowMs);
   const parts = [age === 'unknown' ? 'time unknown' : `${age} ago`];
   if (Number.isFinite(last.verdicts)) parts.push(plural(last.verdicts, 'verdict'));
-  if (Number.isFinite(last.closed)) parts.push(`${last.closed} closed`);
+  if (Number.isFinite(last.closes_ok)) parts.push(`${last.closes_ok} closed`);
   return `. Last run: ${parts.join(', ')}`;
 }
 

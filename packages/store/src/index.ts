@@ -1158,6 +1158,8 @@ export class SterlingStore {
   constructor(path: string, options: SterlingStoreOptions = {}) {
     this.dbPath = resolvePath(path);
     if (options.driver !== undefined && options.busyTimeoutMs !== undefined) {
+      // The store takes an injected driver over, so refusing it closes it too.
+      options.driver.close();
       throw new Error(
         'SterlingStore: busyTimeoutMs configures the SQLite driver this store opens itself; it cannot be combined with an injected driver — set it on that driver.'
       );

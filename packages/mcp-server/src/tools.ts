@@ -1604,6 +1604,19 @@ function configSetImpl(
     raw = parsed as Record<string, unknown>;
   }
 
+  // The old sparring_partner.model is read only while sparring_partner.models.openai
+  // is absent (normalizeRawConfig converts it; the new key wins). Once the new key
+  // exists a write to the old path would validate, land on disk and change nothing.
+  if (path === 'sparring_partner.model') {
+    const sp = raw.sparring_partner;
+    const spModels = sp !== null && typeof sp === 'object' && !Array.isArray(sp) ? (sp as Record<string, unknown>).models : undefined;
+    if (spModels !== null && typeof spModels === 'object' && !Array.isArray(spModels) && (spModels as Record<string, unknown>).openai !== undefined) {
+      throw new Error(
+        `config_set: 'sparring_partner.model' is the old path and is not read once sparring_partner.models.openai exists, so this write would have no effect — set 'sparring_partner.models.openai.model' instead. Nothing was written.`
+      );
+    }
+  }
+
   // The path can be ANY depth now the allowlist is gone — a bare root key
   // (`machine_role`, 0 dots) or a path several segments deep
   // (`context_watch.windows.claude-fable-5-1`, 2 dots) alike. Walk the

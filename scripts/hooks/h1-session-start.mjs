@@ -39,6 +39,7 @@ import { isInstalledCopy } from '../lib/installed-copy.mjs';
 import { cloneAgentSync, pluginScript, postUpdateSync, samePath } from '../lib/post-update-sync.mjs';
 import { DOMAIN_MAP_PENDING_REL, machineStores, probeSchemaVersion } from '../lib/update.mjs';
 import { domainMapDue, domainNotice, pendingFileNote, runDomainMap } from './lib/domain-notice.mjs';
+import { WORKER_ENV_FLAG } from './lib/maintenance-worker.mjs';
 import { refreshRegistryRow } from './lib/registry-refresh.mjs';
 import { queueDepthLine, readMaintenanceState, reconcileBacklog } from './lib/maintenance-state.mjs';
 import { laneCeiling, liveLanes, renderBoardReadiness } from './lib/board-ready.mjs';
@@ -1282,6 +1283,12 @@ try {
 // as a trigger nor written (decision dual-host-post-update-sync-newest-copy-wins: a
 // clone older than the marker refuses). An INSTALLED COPY stays warn-only here; it
 // syncs by version marker in the post-update block above.
+// BASE BRANCH ONLY (user-ruled 2026-10-06 through the question form, "Sync only on the
+// base branch (Recommended)"): a clone on any other branch, or on a detached or
+// unreadable HEAD, syncs nothing, because its templates are not merged; the stale
+// warning stays and says which branch the clone is on. The maintenance-worker child
+// never syncs either. After a refused-older outcome the warning tells the user to pull
+// the clone and not to run /sterling:sync-agents from it.
 //
 // DEGRADE LOUD, NEVER SILENT: a clone template that cannot be read is reported
 // as UNKNOWN currency, never omitted. anti_pattern foreign_02a1ed39 is precisely this
@@ -1422,10 +1429,19 @@ let cloneSyncContext = '';
 try {
   let state = agentCurrencyState();
   const behind = state ? [...state.stale.map(currencyName), ...state.refusedModified] : [];
-  if (behind.length) {
+  // What the clone sync did, for the remedy below: 'off-base' adds its clause, and
+  // 'refused-older' must not be followed by advice to run the same sync by hand.
+  let cloneSyncOutcome = null;
+  let cloneSyncClause = '';
+  // The background maintenance worker's headless session never syncs: it would
+  // rewrite agent files and spend the restart line where no person reads it. The
+  // stale warning below still prints there, as it did before the clone sync existed.
+  if (behind.length && process.env[WORKER_ENV_FLAG] !== '1') {
     try {
       const synced = await cloneAgentSync({ root: pluginRoot(), project: input.cwd, behind, host: 'claude' });
       if (synced) {
+        cloneSyncOutcome = synced.outcome;
+        cloneSyncClause = synced.clause ?? '';
         cloneSyncWarning = synced.warning;
         cloneSyncContext = synced.context;
         // The steps ran, so the files on disk may have changed: report what is behind NOW.
@@ -1451,13 +1467,22 @@ try {
       refusedModified.length ? `refused_local_modification (behind template): ${refusedModified.join(', ')}` : null,
       unknown.length ? `unknown: ${unknown.map(currencyName).join(', ')}` : null,
     ].filter(Boolean);
+    // A clone older than the project's sync marker refused to sync so that nothing is
+    // downgraded; running sync-agents by hand from that clone would do the downgrade.
+    const refusedOlder = cloneSyncOutcome === 'refused-older';
     agentCurrencyWarning =
       `⚠ AGENT CURRENCY: ${parts.join(', ')} of ${inspected} installed Sterling agent file(s) — ` +
-      `run /sterling:sync-agents in this project, then restart. `;
+      (refusedOlder
+        ? `do NOT run /sterling:sync-agents from this clone (it would downgrade them); pull the clone, then restart. `
+        : `run /sterling:sync-agents in this project, then restart. `) +
+      (cloneSyncClause ? `Not synced at session start: ${cloneSyncClause}. ` : '');
     agentCurrencyContext =
       `\n\nAGENT CURRENCY (H1): ${parts.join(', ')} of ${inspected} generated agent file(s): ` +
       stateLines.join('; ') +
-      `. Run /sterling:sync-agents, restart (agents load at session start), and check /sterling:projects; an unregistered project is not refreshed.`;
+      (refusedOlder
+        ? `. Do NOT run /sterling:sync-agents from this clone: it is older than the Sterling that synced this project and would downgrade these agents. Pull the clone, then restart.`
+        : `. Run /sterling:sync-agents, restart (agents load at session start), and check /sterling:projects; an unregistered project is not refreshed.`) +
+      (cloneSyncClause ? ` The clone agent sync did not run: ${cloneSyncClause}.` : '');
   }
 } catch {
   // fail-open — never break SessionStart (P1). This is now a LAST RESORT only:

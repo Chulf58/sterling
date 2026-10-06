@@ -926,8 +926,13 @@ const DIST_LIB = pathToFileURL(join(root, 'scripts', 'lib', 'agent-distribution.
 const CLONE_VERSION = '1.2.3';
 
 /** Turns a makeClone() fixture into a git clone (or, with git:false, an installed copy) that can run the two sync steps. */
-function makeSyncable(clone, { git = true, version = CLONE_VERSION } = {}) {
-  if (git) mkdirSync(join(clone.dir, '.git'));
+function makeSyncable(clone, { git = true, head = 'ref: refs/heads/main\n', version = CLONE_VERSION } = {}) {
+  if (git) {
+    // The clone sync runs on the base branch only and reads the branch from .git/HEAD.
+    mkdirSync(join(clone.dir, '.git', 'refs', 'heads'), { recursive: true });
+    writeFileSync(join(clone.dir, '.git', 'refs', 'heads', 'main'), `${'0'.repeat(40)}\n`);
+    writeFileSync(join(clone.dir, '.git', 'HEAD'), head);
+  }
   mkdirSync(join(clone.dir, '.claude-plugin'), { recursive: true });
   writeFileSync(join(clone.dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version }));
   const scripts = join(clone.dir, 'scripts');
@@ -955,11 +960,11 @@ function makeSyncable(clone, { git = true, version = CLONE_VERSION } = {}) {
 }
 
 /** Runs H1 with a call log; returns the result plus the steps the hook spawned. */
-function h1Logged(dir, clone) {
+function h1Logged(dir, clone, env = {}) {
   const logDir = mkdtempSync(join(tmpdir(), 'sterling-agentcur-log-'));
   const log = join(logDir, 'calls.log');
   try {
-    const r = h1(dir, clone.dir, { FIXTURE_LOG: log });
+    const r = h1(dir, clone.dir, { FIXTURE_LOG: log, ...env });
     return { ...r, calls: existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [] };
   } finally {
     rmSync(logDir, { recursive: true, force: true });
@@ -1094,10 +1099,68 @@ test('CLONE: a clone OLDER than the project sync marker refuses loudly, spawns n
     assert.ok(messageOf(r).includes(`✗ Sterling clone ${CLONE_VERSION} is OLDER than this project's sync marker 10.0.0: agent sync REFUSED, nothing downgraded — pull this clone. `), messageOf(r));
     assert.match(contextOf(r), /CLONE AGENT SYNC REFUSED \(H1\)/);
     assert.match(lineFor(currencySection(contextOf(r)), 'coder'), /stale/i, 'the stale warning stays');
+    // The usual remedy would run this older clone's sync-agents by hand and downgrade
+    // the agents the refusal just protected.
+    assert.doesNotMatch(messageOf(r), /run \/sterling:sync-agents in this project/, messageOf(r));
+    assert.doesNotMatch(currencySection(contextOf(r)), /Run \/sterling:sync-agents, restart/, contextOf(r));
+    assert.ok(messageOf(r).includes('⚠ AGENT CURRENCY: 1 stale of 1 installed Sterling agent file(s) — do NOT run /sterling:sync-agents from this clone (it would downgrade them); pull the clone, then restart. '), messageOf(r));
+    assert.match(currencySection(contextOf(r)), /Do NOT run \/sterling:sync-agents from this clone: it is older than the Sterling that synced this project and would downgrade these agents\. Pull the clone, then restart\.$/);
   } finally {
     cleanup();
     clone.cleanup();
   }
+});
+
+// BASE BRANCH ONLY (user-ruled 2026-10-06 through the question form, "Sync only on the
+// base branch (Recommended)") and the maintenance-worker child. Each arm is the stale
+// fixture the sync arm above refreshes, so only the branch or the env differs.
+function staleCloneRun({ head, env } = {}) {
+  const clone = makeSyncable(makeClone({ 'coder.md': TPL('coder', 'Fixture body v1 for coder.') }), head === undefined ? {} : { head });
+  const { dir, cleanup, agentsDir } = makeProject();
+  try {
+    installInto(clone, agentsDir);
+    const before = installedBytes(agentsDir, 'coder.md');
+    bumpTemplate(clone, 'coder.md', 'coder');
+    const r = h1Logged(dir, clone, env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(r.out, `H1 must emit parseable JSON: ${r.stdout}${r.stderr}`);
+    return { r, unchanged: installedBytes(agentsDir, 'coder.md') === before };
+  } finally {
+    cleanup();
+    clone.cleanup();
+  }
+}
+
+const STALE_HEAD = '⚠ AGENT CURRENCY: 1 stale of 1 installed Sterling agent file(s) — run /sterling:sync-agents in this project, then restart. ';
+
+test('CLONE: on a branch that is not the base nothing is synced, and the stale warning says which branch the clone is on', () => {
+  const { r, unchanged } = staleCloneRun({ head: 'ref: refs/heads/integrate/0.18.88\n' });
+  assert.deepEqual(r.calls, [], 'nothing is spawned');
+  assert.ok(unchanged, 'the installed agent is not rewritten from an unmerged branch');
+  const clause = 'the Sterling clone is on branch integrate/0.18.88, not its base branch main, so agents sync at session start after the merge';
+  assert.ok(messageOf(r).includes(`${STALE_HEAD}Not synced at session start: ${clause}. `), messageOf(r));
+  assert.match(lineFor(currencySection(contextOf(r)), 'coder'), /stale/i);
+  assert.ok(currencySection(contextOf(r)).endsWith(` The clone agent sync did not run: ${clause}.`), contextOf(r));
+  assert.doesNotMatch(messageOf(r) + contextOf(r), /CLONE AGENT SYNC|Sterling clone:/);
+});
+
+test('CLONE: on a detached HEAD nothing is synced and the stale warning says so', () => {
+  const { r, unchanged } = staleCloneRun({ head: `${'a1b2c3d4'.repeat(5)}\n` });
+  assert.deepEqual(r.calls, []);
+  assert.ok(unchanged);
+  assert.ok(messageOf(r).includes(`${STALE_HEAD}Not synced at session start: the Sterling clone is on a detached HEAD, not its base branch main, so agents sync at session start once main is checked out. `), messageOf(r));
+});
+
+test('CLONE: inside the maintenance worker child (STERLING_MAINTENANCE_WORKER=1) nothing is synced; the stale warning still prints, unchanged', () => {
+  const { r, unchanged } = staleCloneRun({ env: { STERLING_MAINTENANCE_WORKER: '1' } });
+  assert.deepEqual(r.calls, [], 'the worker child spawns no sync');
+  assert.ok(unchanged);
+  assert.ok(messageOf(r).includes(STALE_HEAD), messageOf(r));
+  assert.doesNotMatch(messageOf(r), /Not synced at session start/);
+  assert.doesNotMatch(messageOf(r) + contextOf(r), /CLONE AGENT SYNC|Sterling clone:/);
+
+  const control = staleCloneRun();
+  assert.equal(control.r.calls.length, 2, 'CONTROL: the same fixture without the worker flag does sync');
 });
 
 test('INSTALLED-COPY CONTROL: the same stale fixture without .git and with an equal marker still only warns; nothing is spawned or rewritten', () => {

@@ -17,13 +17,14 @@
 // the bytes H1 printed before this extraction (scripts/tests/post-update-sync.test.mjs
 // pins them). A git clone has no version trigger: H1 runs cloneAgentSync (below) when
 // its agent-currency check finds installed agents behind the clone's templates, and
-// that path never writes the marker. The OpenCode plugin does not call it.
+// that path never writes the marker. It runs only while the clone has its base branch
+// checked out (cloneBranchState). The OpenCode plugin does not call it.
 //
 // Builtins only: hooks and the OpenCode server bundle vendor this module.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { isInstalledCopy } from './installed-copy.mjs';
 import { compareSterlingVersions, installHostOf, parseSterlingVersion, sterlingUpdateRemedy } from './sterling-roots.mjs';
 
@@ -272,6 +273,77 @@ export function cloneAgentSyncApplies(root, project) {
   return Boolean(root) && !isInstalledCopy(root) && existsSync(join(project, '.sterling', 'config.json'));
 }
 
+const errCode = (e) => (typeof e?.code === 'string' ? e.code : 'read error');
+
+/**
+ * Which branch a git clone has checked out and whether that is its base branch, read
+ * from the HEAD file with no git process (git is slow on /mnt/c under WSL2, and H1's
+ * own 3000ms git probe already times out there). A linked worktree's `.git` is a file
+ * holding `gitdir: <path>`; its HEAD is in that directory and the shared refs are in
+ * the directory its `commondir` file names. The base is `main`, or `master` only when
+ * the clone has no refs/heads/main, loose or packed. origin/HEAD is not consulted, so
+ * a clone whose default branch has another name is never on its base here.
+ * Returns { onBase, branch, base, clause }: branch is null on a detached or unreadable
+ * HEAD; clause is one line saying why nothing syncs, null when onBase. An unreadable
+ * HEAD is not-base. Only error codes are quoted, never file content.
+ */
+export function cloneBranchState(root) {
+  const unreadable = (what) => ({
+    onBase: false,
+    branch: null,
+    base: null,
+    clause: `the Sterling clone's checked-out branch could not be read (${what}), so no agents were synced`,
+  });
+  const dotGit = join(root, '.git');
+  let gitDir = dotGit;
+  let commonDir = dotGit;
+  try {
+    if (statSync(dotGit).isFile()) {
+      const pointer = /^gitdir: (.+)$/.exec(readFileSync(dotGit, 'utf8').split(/\r?\n/)[0]);
+      if (!pointer) return unreadable('.git: no gitdir line');
+      gitDir = resolve(root, pointer[1].trim());
+      commonDir = gitDir;
+      try {
+        commonDir = resolve(gitDir, readFileSync(join(gitDir, 'commondir'), 'utf8').trim());
+      } catch (e) {
+        // No commondir file: a gitdir that is not a linked worktree (--separate-git-dir) holds its own refs.
+        if (e?.code !== 'ENOENT') return unreadable(`commondir: ${errCode(e)}`);
+      }
+    }
+  } catch (e) {
+    return unreadable(`.git: ${errCode(e)}`);
+  }
+  let head;
+  try {
+    head = readFileSync(join(gitDir, 'HEAD'), 'utf8');
+  } catch (e) {
+    return unreadable(`HEAD: ${errCode(e)}`);
+  }
+  const ref = /^ref: refs\/heads\/(\S+)\s*$/.exec(head);
+  const detached = /^[0-9a-f]{40,64}\s*$/.test(head);
+  if (!ref && !detached) return unreadable('HEAD: not a branch or a commit');
+  const branch = ref ? ref[1] : null;
+  let base = 'main';
+  if (branch !== 'main' && !existsSync(join(commonDir, 'refs', 'heads', 'main'))) {
+    let packed = '';
+    try {
+      packed = readFileSync(join(commonDir, 'packed-refs'), 'utf8');
+    } catch (e) {
+      if (e?.code !== 'ENOENT') return unreadable(`packed-refs: ${errCode(e)}`);
+    }
+    if (!/^[0-9a-f]+ refs\/heads\/main$/m.test(packed)) base = 'master';
+  }
+  if (branch === base) return { onBase: true, branch, base, clause: null };
+  return {
+    onBase: false,
+    branch,
+    base,
+    clause: branch
+      ? `the Sterling clone is on branch ${branch}, not its base branch ${base}, so agents sync at session start after the merge`
+      : `the Sterling clone is on a detached HEAD, not its base branch ${base}, so agents sync at session start once ${base} is checked out`,
+  };
+}
+
 // sync-agents status lines that changed a Claude agent file (agentChangesRequireRestart's
 // set). The portable `.opencode/agents/` copies print the same statuses and need no restart.
 const AGENT_CHANGED_LINE = /^(installed|refreshed|header_repaired|machine_rebaked|retired): (?!\.opencode\/)\S/;
@@ -286,12 +358,19 @@ const AGENT_CHANGED_LINE = /^(installed|refreshed|header_repaired|machine_rebake
  * still runs its own sync and nothing here can make one skip it. The newest-copy-wins
  * order still holds: a clone OLDER than the marker refuses, because a newer installed
  * copy synced this project and a hash mismatch would otherwise downgrade its agents.
+ * BASE BRANCH ONLY (user-ruled 2026-10-06 through the question form, "Sync only on the
+ * base branch (Recommended)"): a clone on any other branch, or on a detached or
+ * unreadable HEAD, holds templates that are not merged, so nothing runs and the outcome
+ * is 'off-base' with an empty warning and context and a `clause` the caller adds to its
+ * own stale warning.
  * Returns null when it does not apply, else { outcome, warning, context } with outcome
- * 'skipped', 'refused-older', 'failed' or 'synced'.
+ * 'off-base', 'skipped', 'refused-older', 'failed' or 'synced'.
  */
 export async function cloneAgentSync({ root, project, behind = [], host = 'claude', runStep = runStepSync }) {
   const t = hostText(host);
   if (!cloneAgentSyncApplies(root, project)) return null;
+  const checkedOut = cloneBranchState(root);
+  if (!checkedOut.onBase) return { outcome: 'off-base', warning: '', context: '', clause: checkedOut.clause };
   const markerPath = join(project, SYNC_MARKER_REL);
   let previous = null;
   try {
