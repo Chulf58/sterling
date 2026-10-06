@@ -10145,20 +10145,21 @@ var SterlingStore = class _SterlingStore {
    */
   retireInFavorOf(id, replacementId, at, verb = "retired") {
     this.assertWritable("retireInFavorOf");
-    const record = this.get(id);
-    if (!record)
-      throw new Error(`retireInFavorOf: no record '${id}'`);
-    const identity = this.identityOf(id);
-    if (identity?.lifecycle === "retired" || record.status === "superseded") {
-      throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-    }
-    const replacement = this.identityOf(replacementId);
-    if (replacement?.lifecycle === "retired") {
-      throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-    }
-    const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-    const stored = _SterlingStore.storableBody(retired);
+    let stored;
     this.tx(() => {
+      const record = this.get(id);
+      if (!record)
+        throw new Error(`retireInFavorOf: no record '${id}'`);
+      const identity = this.identityOf(id);
+      if (identity?.lifecycle === "retired" || record.status === "superseded") {
+        throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
+      }
+      const replacement = this.identityOf(replacementId);
+      if (replacement?.lifecycle === "retired") {
+        throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
+      }
+      const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
+      stored = _SterlingStore.storableBody(retired);
       const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
       if (res.changes === 0) {

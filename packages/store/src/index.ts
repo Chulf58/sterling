@@ -3541,34 +3541,40 @@ export class SterlingStore {
    */
   retireInFavorOf(id: string, replacementId: string, at: string, verb: string = 'retired'): DurableRecord {
     this.assertWritable('retireInFavorOf');
-    const record = this.get(id);
-    if (!record) throw new Error(`retireInFavorOf: no record '${id}'`);
-    const identity = this.identityOf(id);
-    // Same relaxation + in-tx guard as supersede (audit findings 13/43 + 29/43):
-    // only a terminal (already-retired) record is refused; the lifecycle guard
-    // on the UPDATE closes the check-then-act race. ONE SUCCESSOR MAX holds
-    // ACROSS BOTH PATHS — a record already superseded cannot also be retired in
-    // favour of a second survivor ([stable-identity-design-v2]).
-    if (identity?.lifecycle === 'retired' || record.status === 'superseded') {
-      throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) — one successor maximum`);
-    }
-    // THE REPLACEMENT MUST BE ALIVE. Retiring A in favour of B and then B in
-    // favour of A left both records retired, each forwarding to a dead one — a
-    // supersession cycle where the reader is sent nowhere, which is exactly
-    // what `in_favor_of` is required for in the first place (decision foreign_9948475b).
-    // A replacement this store cannot see is the PROMOTION shape (the survivor
-    // is the copy in a domain store) and stays allowed: relations carry no
-    // foreign key by design, and MountedStores has already resolved it.
-    const replacement = this.identityOf(replacementId);
-    if (replacement?.lifecycle === 'retired') {
-      throw new Error(
-        `retireInFavorOf: replacement '${replacementId}' is itself retired — retiring '${id}' in favour of it would leave both records ` +
-          `dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`
-      );
-    }
-    const retired = { ...record, status: 'superseded' as const, superseded_by: replacementId, lifecycle: 'retired', updated_at: at };
-    const stored = SterlingStore.storableBody(retired as unknown as Record<string, unknown>);
+    let stored!: Record<string, unknown>;
+    // BOTH records are validated INSIDE the transaction (board 895d3c6c), after
+    // BEGIN has taken the write lock. Read before it, the survivor check let a
+    // concurrent X->Y and Y->X (two sessions or two machines on one store) each
+    // see a live survivor and both commit, leaving two retired records
+    // forwarding to each other. The lifecycle guard on the UPDATE stays as a
+    // backstop for the retiree.
     this.tx(() => {
+      const record = this.get(id);
+      if (!record) throw new Error(`retireInFavorOf: no record '${id}'`);
+      const identity = this.identityOf(id);
+      // Same relaxation as supersede (audit findings 13/43 + 29/43): only a
+      // terminal (already-retired) record is refused. ONE SUCCESSOR MAX holds
+      // ACROSS BOTH PATHS — a record already superseded cannot also be retired
+      // in favour of a second survivor ([stable-identity-design-v2]).
+      if (identity?.lifecycle === 'retired' || record.status === 'superseded') {
+        throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) — one successor maximum`);
+      }
+      // THE REPLACEMENT MUST BE ALIVE. Retiring A in favour of B and then B in
+      // favour of A left both records retired, each forwarding to a dead one — a
+      // supersession cycle where the reader is sent nowhere, which is exactly
+      // what `in_favor_of` is required for in the first place (decision foreign_9948475b).
+      // A replacement this store cannot see is the PROMOTION shape (the survivor
+      // is the copy in a domain store) and stays allowed: relations carry no
+      // foreign key by design, and MountedStores has already resolved it.
+      const replacement = this.identityOf(replacementId);
+      if (replacement?.lifecycle === 'retired') {
+        throw new Error(
+          `retireInFavorOf: replacement '${replacementId}' is itself retired — retiring '${id}' in favour of it would leave both records ` +
+            `dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`
+        );
+      }
+      const retired = { ...record, status: 'superseded' as const, superseded_by: replacementId, lifecycle: 'retired', updated_at: at };
+      stored = SterlingStore.storableBody(retired as unknown as Record<string, unknown>);
       const res = this.db
         .prepare(
           `UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?

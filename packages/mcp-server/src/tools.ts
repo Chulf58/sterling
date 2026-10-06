@@ -11080,8 +11080,15 @@ export class SterlingTools {
     // that does not funnel through knowledgeCreate/knowledgeUpdate — so the
     // merged candidate is checked here.
     const claimsCheck = this.assertClaimedPaths('board_update', next);
+    // CAS on the version `old` was read at (board 895d3c6c): `next` is the
+    // WHOLE item merged from that read, so without the token a write that
+    // landed in between (another session or machine on the same store) is
+    // silently reverted field by field. A conflict refuses with the store's
+    // stale-expected_version error naming both versions, nothing written; no
+    // retry, for the reason knowledgeUpdate gives: a silent re-merge would
+    // write onto a body the caller never saw.
     try {
-      const updated = this.store.updateTodo(old.id, next as typeof old);
+      const updated = this.store.updateTodo(old.id, next as typeof old, old.version !== undefined ? { expected_version: old.version } : {});
       // The disclosure rides the record itself because board_update's receipt IS
       // the bare record (its frozen callers read fields straight off the return),
       // and digestWriteEcho carries claims_check through the DEFAULT digest
