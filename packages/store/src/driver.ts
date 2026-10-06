@@ -33,14 +33,28 @@ export interface StoreStatement {
 export interface StoreDialect {
   /** Joins the search index to `records r`. Sites: query(), countAboveScore(). */
   readonly searchJoin: string;
+  /**
+   * How many placeholders searchJoin has. Each binds searchQuery()'s value and
+   * comes before the statement's filter parameters, so a backend whose score
+   * needs the query (Postgres: per-query IDF) can read it there. 0 on SQLite.
+   */
+  readonly searchJoinBinds: number;
   /** WHERE predicate with ONE placeholder, bound to searchQuery()'s value. Sites: query(), countAboveScore(). */
   readonly searchMatch: string;
   /** Relevance expression where HIGHER is more relevant; min_score is a floor on it. Site: countAboveScore(). */
   readonly searchScore: string;
   /** ORDER BY term that puts the most relevant row first. Site: query(). */
   readonly searchOrder: string;
+  /**
+   * Names the scale searchScore is on, versioned: a min_score is only
+   * meaningful against the scale it was chosen on, and scores are never
+   * compared across scales. Site: SterlingStore.scoreScale().
+   */
+  readonly scoreScale: string;
   /** The value bound to searchMatch's placeholder; a trailing '*' on a term asks for a prefix match. Sites: query(), countAboveScore(). */
   searchQuery(terms: string[], matchAll: boolean | undefined): string;
+  /** The text written to the search index for a record's search text. Sites: the records_fts insert and update. */
+  searchText(text: string): string;
   /** A top-level key of a JSON text column, as text. Sites: articlesBySlug(), the live and retired slug lookups, the board `source` filter. */
   jsonText(column: string, key: string): string;
   /** ORDER BY term for insertion order; `alias` qualifies it when the statement names its table. Sites: the relation reads, the alias list, the retired-slug tiebreak, the supersedes-source read. */

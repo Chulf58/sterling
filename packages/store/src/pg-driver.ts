@@ -26,12 +26,15 @@
 // 55P03 and 57014 are thrown as PgLockTimeoutError and PgStatementTimeoutError
 // and never retried. One bridge (connection) holds one transaction at a time.
 //
-// Not here yet: tsvector search (item 4). records_fts is a plain two-column
-// table until item 4 replaces it; ranked search throws PgSearchNotImplementedError.
+// Search (decision postgres-search-ranking-per-query-idf-no-stats-triggers):
+// records_fts holds the folded text (search-fold.ts) plus a stored
+// to_tsvector('simple', text) under a GIN index and a stored token count dl.
+// Ranking is one statement per query; see pgDialectFor().
 //
 // NUL policy. Record bodies are JSON.stringify output, which writes U+0000 as
 // the six characters \u0000, so they are stored losslessly in TEXT. The text
-// written to records_fts is derived and has U+0000 removed. Any other string
+// written to records_fts is derived: the fold makes U+0000 a word separator,
+// and a records_fts write has any U+0000 left removed. Any other string
 // parameter holding U+0000 is refused before it is sent (Postgres TEXT cannot
 // hold it). Measured on Served 2026-10-06: Postgres 18 fails the extraction of
 // ANY key from a json value that holds \u0000 anywhere (22P05), so one such
@@ -43,6 +46,7 @@
 
 import type { SqlParam, StoreDialect, StoreDriver, StoreRunResult, StoreStatement } from './driver.js';
 import { PgQueryError, type PgBridge } from './pg-bridge.js';
+import { foldSearchText } from './search-fold.js';
 export { PgTransactionOpenError } from './pg-bridge.js';
 
 /** The meta schema production uses. Tests pass their own sterling_test_<random>_meta. */
@@ -102,13 +106,6 @@ export class PgStatementTimeoutError extends Error {
   constructor(detail: string) {
     super(`Postgres statement timeout (57014): ${detail}. The transaction was rolled back and is not retried.`);
     this.name = 'PgStatementTimeoutError';
-  }
-}
-
-export class PgSearchNotImplementedError extends Error {
-  constructor() {
-    super('Ranked search (rank_terms, min_score) is not built on Postgres yet; it arrives with tsvector search (issue 26 item 4).');
-    this.name = 'PgSearchNotImplementedError';
   }
 }
 
@@ -457,12 +454,18 @@ CREATE TABLE IF NOT EXISTS ${s}.record_file_keys (
   PRIMARY KEY (record_id, path)
 );
 CREATE INDEX IF NOT EXISTS idx_file_keys_path ON ${s}.record_file_keys (path);
--- Placeholder until item 4 replaces it with a tsvector column and a GIN index.
+-- text is the folded search text (pgDialect.searchText at every write site).
+-- The default parser splits folded text on its spaces only: the fold leaves
+-- letters, digits and private-use characters, and in a C-ctype database every
+-- non-ASCII character is a letter to it. So tsv has one position per word and
+-- dl, the word count, is the document length bm25 normalizes by.
 CREATE TABLE IF NOT EXISTS ${s}.records_fts (
-  record_id TEXT NOT NULL,
-  text TEXT NOT NULL
+  record_id TEXT PRIMARY KEY,
+  text TEXT NOT NULL,
+  tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, text)) STORED,
+  dl INTEGER GENERATED ALWAYS AS (CASE WHEN text = '' THEN 0 ELSE cardinality(string_to_array(text, ' ')) END) STORED
 );
-CREATE INDEX IF NOT EXISTS idx_records_fts_record ON ${s}.records_fts (record_id);
+CREATE INDEX IF NOT EXISTS idx_records_fts_tsv ON ${s}.records_fts USING gin (tsv);
 CREATE TABLE IF NOT EXISTS ${s}.runs (
   id TEXT PRIMARY KEY,
   machine_state TEXT NOT NULL,
@@ -519,30 +522,140 @@ CREATE TABLE IF NOT EXISTS ${s}.store_meta (
 // Dialect
 // ---------------------------------------------------------------------------
 
-export const pgDialect: StoreDialect = {
-  // Search is item 4. searchQuery() runs before any search statement is built
-  // (query(), countAboveScore()), so it is the one place that refuses; the
-  // strings below are never sent.
-  searchJoin: 'JOIN records_fts f ON f.record_id = r.id',
-  searchMatch: 'FALSE AND ? IS NULL',
-  searchScore: '0',
-  searchOrder: 'r.id',
-  searchQuery() {
-    throw new PgSearchNotImplementedError();
-  },
-  // Postgres refuses \u0000 anywhere in a json value it parses (22P05), so the
-  // real \u0000 escapes are removed first. The pattern consumes an escaped
-  // backslash pair (\\) as a unit and puts it back, so \u0000 only matches
-  // where its backslash starts an escape: the literal text \\u0000 survives.
-  // strpos skips the regex for the bodies that hold no \u0000 at all.
-  jsonText: (column, key) => {
-    if (!/^[a-z_]+$/.test(key)) throw new Error(`pgDialect.jsonText: key '${key}' is not a plain identifier`);
-    if (!/^[a-z_]+(\.[a-z_]+)?$/.test(column)) throw new Error(`pgDialect.jsonText: column '${column}' is not a plain column reference`);
-    return String.raw`((CASE WHEN strpos(${column}, '\u0000') > 0 THEN regexp_replace(${column}, '(\\\\)|\\u0000', '\1', 'g') ELSE ${column} END)::json ->> '${key}')`;
-  },
-  insertionOrder: (alias) => (alias ? `${alias}._seq` : '_seq'),
-  insertIgnore: (table, columns) => `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')}) ON CONFLICT DO NOTHING`,
-};
+/**
+ * The ranking candidates of decision
+ * postgres-search-ranking-per-query-idf-no-stats-triggers, point 2. Each is a
+ * score where HIGHER is more relevant, on its own versioned scale:
+ *   bm25        FTS5's bm25 (k1 1.2, b 0.75, IDF clamped to 1e-6), with N,
+ *               avgdl and each clause's document frequency read per query and
+ *               tf counted from the candidate row's tsvector positions;
+ *   idf_tsrank  sum over clauses of IDF(clause) x ts_rank(tsv, clause);
+ *   tsrank_cd   plain ts_rank_cd over the whole query: the control, no IDF.
+ */
+export type PgRanking = 'bm25' | 'idf_tsrank' | 'tsrank_cd';
+export const PG_RANKINGS: readonly PgRanking[] = ['bm25', 'idf_tsrank', 'tsrank_cd'];
+/** The ranking a PgDriver uses when its opener names none: the one the findability replay chose. */
+export const DEFAULT_PG_RANKING: PgRanking = 'bm25';
+const PG_SCORE_SCALES: Record<PgRanking, string> = { bm25: 'pg_bm25_v1', idf_tsrank: 'pg_idf_tsrank_v1', tsrank_cd: 'pg_tsrank_cd_v1' };
+
+/** One rank term after the fold: its words in order, and whether the last one is a prefix. */
+interface PgSearchClause {
+  /** The clause as tsquery text: quoted words joined with <->, :* on the last for a prefix. */
+  q: string;
+  w: string[];
+  p: boolean;
+}
+
+/**
+ * The value searchJoin and searchMatch bind: JSON with `match` (the whole
+ * query as tsquery text, or null when it can match nothing), the clauses, and
+ * the words and prefixes the tf count looks for. Each term is folded the way
+ * record text is; a trailing star is read BEFORE the fold, which drops it.
+ * A term that folds to nothing is a phrase with no words. As in FTS5, it
+ * matches nothing: an OR leaves it out, an AND then matches nothing.
+ */
+export function pgSearchQuery(terms: string[], matchAll: boolean | undefined): string {
+  const clauses: PgSearchClause[] = [];
+  let empty = false;
+  for (const term of terms) {
+    const prefix = term.length > 1 && term.endsWith('*');
+    const folded = foldSearchText(term);
+    if (folded === '') {
+      empty = true;
+      continue;
+    }
+    // The fold leaves no quote, backslash or operator character, so a quoted word is a literal lexeme.
+    const w = folded.split(' ');
+    clauses.push({ q: w.map((x) => `'${x}'`).join(' <-> ') + (prefix ? ':*' : ''), w, p: prefix });
+  }
+  const none = clauses.length === 0 || (matchAll === true && empty);
+  const prefixes = [...new Set(clauses.filter((c) => c.p).map((c) => c.w[c.w.length - 1]))];
+  const out = JSON.stringify({
+    match: none ? null : clauses.map((c) => `(${c.q})`).join(matchAll ? ' & ' : ' | '),
+    clauses,
+    words: [...new Set(clauses.flatMap((c) => c.w))],
+    prefixes,
+    // The documents any prefix matches, so the statement can list the lexemes each prefix stands for once per query.
+    prefixq: prefixes.length ? prefixes.map((x) => `'${x}':*`).join(' | ') : null,
+  });
+  return out;
+}
+
+// The per-query statistics, computed once per statement from the bound JSON:
+// N and avgdl over the store's whole records_fts (as FTS5 takes them), and for
+// each clause df = the number of documents matching the WHOLE clause, so a
+// prefix counts documents, never a sum of lexeme dfs.
+const PG_SEARCH_STATS = `CROSS JOIN (SELECT q.j->>'match' AS m,
+    (SELECT count(*) FROM records_fts)::float8 AS n,
+    (SELECT coalesce(avg(dl), 0) FROM records_fts)::float8 AS avgdl,
+    ARRAY(SELECT json_array_elements_text(q.j->'words'))
+      || ARRAY(SELECT DISTINCT u.lexeme FROM records_fts x, unnest(x.tsv) u
+        WHERE x.tsv @@ (q.j->>'prefixq')::tsquery AND EXISTS (SELECT 1 FROM json_array_elements_text(q.j->'prefixes') pf WHERE starts_with(u.lexeme, pf))) AS lexemes,
+    (SELECT coalesce(json_agg(json_build_object('q', c.value->>'q', 'w', c.value->'w', 'p', c.value->'p',
+        'df', (SELECT count(*) FROM records_fts x WHERE x.tsv @@ (c.value->>'q')::tsquery)) ORDER BY c.ordinality), '[]'::json)
+      FROM json_array_elements(q.j->'clauses') WITH ORDINALITY c) AS cl
+  FROM (SELECT ?::json AS j) q) st`;
+
+// FTS5's IDF: ln((N - df + 0.5) / (df + 0.5)), and 1e-6 where that is not positive.
+const PG_IDF = 'greatest(ln((st.n - c.df + 0.5) / (c.df + 0.5)), 1e-6)';
+
+// bm25's tf for one clause in one row: how many start positions carry the
+// clause's words at consecutive positions (the last word may be a prefix). It
+// reads only the row's positions of the query's own words. Limits, from the
+// tsvector type: to_tsvector keeps at most 255 positions of a word (measured
+// on PostgreSQL 18; the documented cap is 256), so tf counts at most 255;
+// every position past 16,383 is stored as 16,383, so a phrase whose words all
+// sit past it is not found there, while a single word still is. The row's
+// tsvector is cut to the query's lexemes (its words, and every lexeme a prefix
+// stands for) in C, by setweight and ts_filter, before any position is unnested.
+const PG_BM25_SCORE = `CROSS JOIN LATERAL (SELECT array_agg(u.lexeme) AS lx, array_agg(p) AS ps
+    FROM unnest(ts_filter(setweight(f.tsv, 'A', st.lexemes), '{a}')) u, unnest(u.positions) p) lp
+  CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * (t.tf * 2.2) / (t.tf + 1.2 * (0.25 + 0.75 * f.dl / st.avgdl))), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(w text[], p boolean, df bigint)
+    CROSS JOIN LATERAL (SELECT count(*)::float8 AS tf FROM unnest(lp.lx, lp.ps) AS a(lex, pos)
+      WHERE (a.lex = c.w[1] OR (c.p AND cardinality(c.w) = 1 AND starts_with(a.lex, c.w[1])))
+        AND NOT EXISTS (SELECT 1 FROM generate_series(2, cardinality(c.w)) AS i
+          WHERE NOT EXISTS (SELECT 1 FROM unnest(lp.lx, lp.ps) AS b(lex, pos)
+            WHERE b.pos = a.pos + i - 1 AND (b.lex = c.w[i] OR (c.p AND i = cardinality(c.w) AND starts_with(b.lex, c.w[i])))))) t) sc`;
+
+const PG_IDF_TSRANK_SCORE = `CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * ts_rank(f.tsv, c.q::tsquery)), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(q text, df bigint) WHERE f.tsv @@ c.q::tsquery) sc`;
+
+const PG_TSRANK_CD_SCORE = 'CROSS JOIN LATERAL (SELECT ts_rank_cd(f.tsv, st.m::tsquery)::float8 AS score) sc';
+
+const PG_SCORES: Record<PgRanking, string> = { bm25: PG_BM25_SCORE, idf_tsrank: PG_IDF_TSRANK_SCORE, tsrank_cd: PG_TSRANK_CD_SCORE };
+
+/** The Postgres dialect with one of the ranking candidates. */
+export function pgDialectFor(ranking: PgRanking): StoreDialect {
+  if (!PG_RANKINGS.includes(ranking)) throw new Error(`Postgres ranking must be one of ${PG_RANKINGS.join(', ')}, got ${String(ranking)}`);
+  return {
+    // One statement per query (a round trip costs about 25 ms): the join binds
+    // the query once for the statistics, the match binds it again so the GIN
+    // index sees a constant tsquery.
+    searchJoin: `JOIN records_fts f ON f.record_id = r.id ${PG_SEARCH_STATS} ${PG_SCORES[ranking]}`,
+    searchJoinBinds: 1,
+    searchMatch: "f.tsv @@ (?::json->>'match')::tsquery",
+    searchScore: 'sc.score',
+    searchOrder: 'sc.score DESC',
+    scoreScale: PG_SCORE_SCALES[ranking],
+    searchQuery: pgSearchQuery,
+    searchText: foldSearchText,
+    // Postgres refuses \u0000 anywhere in a json value it parses (22P05), so the
+    // real \u0000 escapes are removed first. The pattern consumes an escaped
+    // backslash pair (\\) as a unit and puts it back, so \u0000 only matches
+    // where its backslash starts an escape: the literal text \\u0000 survives.
+    // strpos skips the regex for the bodies that hold no \u0000 at all.
+    jsonText: (column, key) => {
+      if (!/^[a-z_]+$/.test(key)) throw new Error(`pgDialect.jsonText: key '${key}' is not a plain identifier`);
+      if (!/^[a-z_]+(\.[a-z_]+)?$/.test(column)) throw new Error(`pgDialect.jsonText: column '${column}' is not a plain column reference`);
+      return String.raw`((CASE WHEN strpos(${column}, '\u0000') > 0 THEN regexp_replace(${column}, '(\\\\)|\\u0000', '\1', 'g') ELSE ${column} END)::json ->> '${key}')`;
+    },
+    insertionOrder: (alias) => (alias ? `${alias}._seq` : '_seq'),
+    insertIgnore: (table, columns) => `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')}) ON CONFLICT DO NOTHING`,
+  };
+}
+
+export const pgDialect: StoreDialect = pgDialectFor(DEFAULT_PG_RANKING);
 
 // ---------------------------------------------------------------------------
 // The driver
@@ -613,10 +726,12 @@ export interface PgDriverOptions {
   lockTimeoutMs?: number;
   /** SET LOCAL statement_timeout in each transaction. Default 5000 ms; must be below the bridge's wait. */
   statementTimeoutMs?: number;
+  /** The search ranking (pgDialectFor). Default DEFAULT_PG_RANKING; the others exist for the findability replay. */
+  ranking?: PgRanking;
 }
 
 export class PgDriver implements StoreDriver {
-  readonly dialect = pgDialect;
+  readonly dialect: StoreDialect;
   readonly schema: string;
   private readonly metaSchema: string;
   private readonly s: string;
@@ -631,6 +746,7 @@ export class PgDriver implements StoreDriver {
     options: PgDriverOptions,
   ) {
     this.schema = options.schema;
+    this.dialect = options.ranking === undefined ? pgDialect : pgDialectFor(options.ranking);
     this.metaSchema = options.metaSchema ?? PG_META_SCHEMA;
     this.s = ident(this.schema);
     this.m = ident(this.metaSchema);

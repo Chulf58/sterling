@@ -297,18 +297,22 @@ test('rank: a duplicated rank term must not change a competing record\'s score, 
     // ftsMatchExpr (same established internal-access pattern as the
     // inbound-links test above) so this pin can never pass by
     // re-implementing a separate, possibly-also-buggy scoring path.
+    // The SQL is the driver's own search fragments, so the pin reads the
+    // score the store ranks by on either backend (on SQLite, -bm25).
     const internal = store as unknown as {
-      db: { prepare: (sql: string) => { all: (...a: unknown[]) => { body: string; score: number }[] } };
+      db: {
+        dialect: { searchJoin: string; searchJoinBinds: number; searchMatch: string; searchScore: string; searchOrder: string };
+        prepare: (sql: string) => { all: (...a: unknown[]) => { body: string; score: number }[] };
+      };
       ftsMatchExpr: (terms: string[], matchAll: boolean | undefined) => string;
     };
     function scoresFor(rankTermsInput: string[]): Record<string, number> {
       const terms = storeMod.rankTerms.parse(rankTermsInput);
       const match = internal.ftsMatchExpr(terms, undefined);
+      const d = internal.db.dialect;
       const rows = internal.db
-        .prepare(
-          `SELECT r.body AS body, -bm25(records_fts) AS score FROM records r JOIN records_fts f ON f.record_id = r.id WHERE records_fts MATCH ? ORDER BY bm25(records_fts) ASC`
-        )
-        .all(match);
+        .prepare(`SELECT r.body AS body, ${d.searchScore} AS score FROM records r ${d.searchJoin} WHERE ${d.searchMatch} ORDER BY ${d.searchOrder}`)
+        .all(...Array(d.searchJoinBinds).fill(match), match);
       return Object.fromEntries(rows.map((r) => [(JSON.parse(r.body) as { slug: string }).slug, r.score]));
     }
 

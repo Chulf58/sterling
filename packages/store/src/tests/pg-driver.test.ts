@@ -12,7 +12,6 @@ import {
   PgDriver,
   PgNulCharacterError,
   PgSchemaNameRefusedError,
-  PgSearchNotImplementedError,
   PgStoreExistsError,
   PgStoreMissingError,
   PgUnsupportedError,
@@ -226,10 +225,14 @@ test('SterlingStore opens a fresh Postgres store, stamps its version and round-t
   }
 });
 
-test('ranked search on Postgres is a named error until item 4 builds it', { skip: PG_SKIP }, () => {
+test('ranked search on Postgres matches through the tsvector index and names its score scale', { skip: PG_SKIP }, () => {
   const store = openStore(freshStoreSchema());
   try {
-    assert.throws(() => store.query({ rank_terms: ['postgres'] }), PgSearchNotImplementedError);
+    const hit = store.create(decision({ title: 'Postgres search', statement: 'Ranked search runs on Postgres.' }));
+    store.create(decision({ title: 'Unrelated', statement: 'Nothing to see.' }));
+    assert.deepEqual(store.query({ rank_terms: ['postgres'] }).map((r) => r.id), [hit.id]);
+    assert.equal(store.countAboveScore({ rank_terms: ['postgres'] }, 0), 1);
+    assert.equal(store.scoreScale(), 'pg_bm25_v1');
   } finally {
     store.close();
   }
@@ -249,14 +252,15 @@ test('the driver refuses snapshot and lastInsertRowid by name', { skip: PG_SKIP 
   }
 });
 
-test('NUL policy: the body is lossless, search text is stripped, a raw NUL parameter fails loud', { skip: PG_SKIP }, () => {
+test('NUL policy: the body is lossless, search text holds no NUL, a raw NUL parameter fails loud', { skip: PG_SKIP }, () => {
   const schema = freshStoreSchema();
   const store = openStore(schema);
   try {
     const created = store.create(decision({ statement: 'before\u0000after' }));
     assert.equal((store.get(created.id) as { statement?: string } | undefined)?.statement, 'before\u0000after');
     const fts = live().query(`SELECT text FROM "${schema}".records_fts WHERE record_id = $1`, [created.id]).rows[0].text as string;
-    assert.ok(fts.includes('beforeafter') && !fts.includes('\u0000'), 'records_fts text has the NUL stripped');
+    // The fold (search-fold.ts) runs at the write site and makes NUL a word separator, before the driver's own strip is reached.
+    assert.ok(fts.includes('before after') && !fts.includes('\u0000'), 'records_fts text holds no NUL: the fold made it a separator');
     const driver = new PgDriver(live(), { schema, metaSchema: meta });
     try {
       assert.throws(() => driver.prepare('SELECT value FROM store_meta WHERE key = ?').get('a\u0000b'), PgNulCharacterError);

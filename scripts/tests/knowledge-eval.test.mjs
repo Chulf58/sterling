@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { addWorktree, aggregateMetricValues, DEFAULT_PROJECTS, emittedLevel, linkNodeModules, lockfilesEquivalent, mrrFromHistogram, parseCaseDirectives, patchAdapter, resolveProjects, scoreEventIndexes, caseProject, pluginTree, removeWorktrees, replayCommit, runWithCleanup, scorePull, scorePush, withWorktreeLedger } from '../knowledge-eval.mjs';
-import { PG_PUSH_SKIP_REASON, ProjectsRequiredError, errorKind, openPgEvalRun, pairedComparison, parseBackendFlag, parseBackends, pgChecksumSql, requireProjects, runKey } from '../knowledge-eval.mjs';
+import { PG_COPY_BATCH_CHARS, PG_PUSH_SKIP_REASON, ProjectsRequiredError, errorKind, isPgBackend, openPgEvalRun, pgRanking, pairedComparison, parseBackendFlag, parseBackends, pgChecksumSql, requireProjects, runKey } from '../knowledge-eval.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 const id = '11111111-1111-4111-8111-111111111111';
@@ -365,6 +365,8 @@ test('parseBackends defaults to sqlite, accepts sqlite, pg and a comma list, and
   assert.deepEqual(parseBackends('sqlite'), ['sqlite']);
   assert.deepEqual(parseBackends('pg'), ['pg']);
   assert.deepEqual(parseBackends('sqlite,pg'), ['sqlite', 'pg']);
+  assert.deepEqual(parseBackends('sqlite,pg:bm25,pg:tsrank_cd'), ['sqlite', 'pg:bm25', 'pg:tsrank_cd'], 'pg:<ranking> names a ranking candidate');
+  for (const bad of ['pg:', 'pg:BM25', 'sqlite:bm25', 'pg:bm25,pg:bm25']) assert.throws(() => parseBackends(bad), /--backend must be/, JSON.stringify(bad));
   for (const bad of ['postgres', '', 'pg,', 'pg,pg', 'sqlite;pg']) assert.throws(() => parseBackends(bad), /--backend must be sqlite or pg/, JSON.stringify(bad));
 });
 test('parseBackendFlag reads --backend from argv: absent is sqlite, present needs a value', () => {
@@ -380,7 +382,11 @@ test('runKey keeps the bare commit for sqlite and separates every other backend,
   assert.equal(runKey('abc123', 'sqlite'), 'abc123');
   assert.equal(runKey('abc123', 'pg'), 'abc123@pg');
   assert.notEqual(runKey('abc123', 'sqlite'), runKey('abc123', 'pg'));
+  assert.equal(runKey('abc123', 'pg:bm25'), 'abc123@pg-bm25');
+  assert.notEqual(runKey('abc123', 'pg:bm25'), runKey('abc123', 'pg:tsrank_cd'));
   assert.throws(() => runKey('abc123', 'mysql'), /unknown backend/);
+  assert.equal(isPgBackend('pg'), true); assert.equal(isPgBackend('pg:idf_tsrank'), true); assert.equal(isPgBackend('sqlite'), false);
+  assert.equal(pgRanking('pg:idf_tsrank'), 'idf_tsrank'); assert.equal(pgRanking('pg'), undefined);
 });
 test('requireProjects demands --projects when a default project root is missing, naming the flag and the missing roots', () => {
   const none = () => false;
@@ -429,6 +435,32 @@ test('pgChecksumSql refuses any schema outside the eval run\'s sterling_test_ pr
   assert.throws(() => pgChecksumSql('sterling_test_eval0a1b2c3d_1', 'pg_user'), /refusing/);
 });
 
+test('openPgEvalRun passes a pg:<ranking> to every PgDriver it opens, and refuses a ranking the commit\'s store lacks', () => {
+  const made = [];
+  let factory;
+  const fake = {
+    PG_RANKINGS: ['bm25', 'tsrank_cd'],
+    PgBridge: class { constructor() { this.closed = false; } query() { return { rows: [] }; } close() { this.closed = true; } },
+    PgDriver: class { constructor(bridge, options) { made.push(options); } },
+    SterlingStore: class {}, createPgStore() {}, ensurePgLayout() {}, readPgCredentials: () => ({}),
+    setStoreDriverFactory: (f) => { factory = f; },
+  };
+  assert.throws(() => openPgEvalRun(fake, { wireSignals: false, ranking: 'idf_tsrank' }), /has no ranking 'idf_tsrank'/);
+  assert.throws(() => openPgEvalRun({ ...fake, PG_RANKINGS: undefined }, { wireSignals: false, ranking: 'bm25' }), /has no ranking 'bm25'.*none/);
+  const run = openPgEvalRun(fake, { wireSignals: false, ranking: 'tsrank_cd' });
+  try {
+    run.route('/tmp/x.db', `${run.prefix}_1`);
+    factory('/tmp/x.db');
+    assert.equal(made.at(-1).ranking, 'tsrank_cd');
+  } finally { run.dispose(); }
+  const plain = openPgEvalRun(fake, { wireSignals: false });
+  try {
+    plain.route('/tmp/x.db', `${plain.prefix}_1`);
+    factory('/tmp/x.db');
+    assert.equal('ranking' in made.at(-1), false, 'plain pg leaves the ranking to the store default');
+  } finally { plain.dispose(); }
+});
+
 // The pg loader against Served. Needs STERLING_TEST_PG=1 and the credentials file, like the store's own pg tests.
 test('the pg loader copies a SQLite snapshot row by row into a disposable schema, routes stores to it, and leaves no schema behind', { skip: process.env.STERLING_TEST_PG === '1' ? false : 'set STERLING_TEST_PG=1 to run against Served' }, async () => {
   const mod = await import(new URL('../../packages/store/dist/index.js', import.meta.url).href);
@@ -451,10 +483,21 @@ test('the pg loader copies a SQLite snapshot row by row into a disposable schema
     const src = new DatabaseSync(dbPath, { readOnly: true });
     try { assert.deepEqual(run.bridge.query(`SELECT id FROM "${schema}".records ORDER BY _seq`).rows.map((r) => r.id), src.prepare('SELECT id FROM records ORDER BY rowid').all().map((r) => r.id)); } finally { src.close(); }
     assert.equal(run.checksum([schema]), run.checksum([schema]), 'a read leaves the row checksum alone');
+    // records_fts is rebuilt through the store's fold, so Postgres builds tsv and dl from the folded text and ranked search answers.
+    const src2 = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const sqliteText = Object.fromEntries(src2.prepare('SELECT record_id, text FROM records_fts').all().map((r) => [r.record_id, r.text]));
+      for (const row of run.bridge.query(`SELECT record_id, text, dl FROM "${schema}".records_fts`).rows) {
+        assert.equal(row.text, mod.pgDialect.searchText(sqliteText[row.record_id]), 'the rebuilt text is the fold of the SQLite text');
+        assert.equal(row.dl, row.text.split(' ').length);
+      }
+    } finally { src2.close(); }
     const routed = new mod.SterlingStore(dbPath);
     try {
       assert.deepEqual(routed.query({}).map((r) => r.id).sort(), [first.id, second.id].sort());
-      assert.throws(() => routed.query({ rank_terms: ['snapshot'] }), (e) => e.name === 'PgSearchNotImplementedError');
+      assert.deepEqual(routed.query({ rank_terms: ['snapshot'] }).map((r) => r.id).sort(), [first.id, second.id].sort(), 'ranked search runs on the loaded copy');
+      assert.deepEqual(routed.query({ rank_terms: ['Snapshot-two'] }).map((r) => r.id), [second.id], 'a phrase term');
+      assert.equal(routed.scoreScale(), 'pg_bm25_v1');
     } finally { routed.close(); }
     const checksumBefore = run.checksum([schema]);
     run.bridge.query(`UPDATE "${schema}".records SET version = version + 1 WHERE id = '${first.id}'`);
@@ -464,4 +507,39 @@ test('the pg loader copies a SQLite snapshot row by row into a disposable schema
     assert.deepEqual(catalog(), [], 'dispose drops the meta schema and every store schema');
     assert.equal(fileHash(), before, 'the snapshot file is never written');
   } finally { rmSync(base, { recursive: true, force: true }); }
+});
+test('the pg loader splits a table whose rows exceed PG_COPY_BATCH_CHARS into several INSERTs and copies every row', { skip: process.env.STERLING_TEST_PG === '1' ? false : 'set STERLING_TEST_PG=1 to run against Served' }, async () => {
+  const mod = await import(new URL('../../packages/store/dist/index.js', import.meta.url).href);
+  const base = mkdtempSync(join(tmpdir(), 'kev-pg-big-'));
+  const dbPath = join(base, 'sterling.db');
+  const at = '2026-06-10T12:00:00.000Z';
+  const sqliteStore = new mod.SterlingStore(dbPath);
+  const ids = [];
+  for (let i = 0; i < 3; i++) ids.push(sqliteStore.create({ id: randomUUID(), type: 'decision', created_at: at, updated_at: at, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: ['node'], title: `Big ${i}`, statement: `bigword${i} `.repeat(Math.ceil(PG_COPY_BATCH_CHARS / 2 / 9)), alternatives_rejected: [{ option: 'none', reason: 'none' }], rationale: 'because', file_keys: [] }).id);
+  sqliteStore.close();
+  const run = openPgEvalRun(mod, { wireSignals: false });
+  try {
+    const { counts } = run.loadStore(dbPath, 'test/big');
+    assert.equal(counts.records, 3); assert.equal(counts.records_fts, 3);
+    const routed = new mod.SterlingStore(dbPath);
+    try { assert.deepEqual(routed.query({ rank_terms: ['bigword1'] }).map((r) => r.id), [ids[1]]); } finally { routed.close(); }
+  } finally { run.dispose(); rmSync(base, { recursive: true, force: true }); }
+});
+test('the pg loader rebuilds search text from the record, so words after a raw NUL stay searchable (node:sqlite reads TEXT only up to a NUL)', { skip: process.env.STERLING_TEST_PG === '1' ? false : 'set STERLING_TEST_PG=1 to run against Served' }, async () => {
+  const mod = await import(new URL('../../packages/store/dist/index.js', import.meta.url).href);
+  const base = mkdtempSync(join(tmpdir(), 'kev-pg-nul-'));
+  const dbPath = join(base, 'sterling.db');
+  const at = '2026-06-10T12:00:00.000Z';
+  const sqliteStore = new mod.SterlingStore(dbPath);
+  const made = sqliteStore.create({ id: randomUUID(), type: 'decision', created_at: at, updated_at: at, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: ['node'], title: 'Nul title', statement: 'before\u0000afterword tail', alternatives_rejected: [{ option: 'none', reason: 'none' }], rationale: 'because', file_keys: [] });
+  assert.equal(sqliteStore.query({ rank_terms: ['afterword'] }).length, 1, 'precondition: FTS5 indexed the words after the NUL');
+  sqliteStore.close();
+  const src = new DatabaseSync(dbPath, { readOnly: true });
+  try { assert.ok(!src.prepare('SELECT text FROM records_fts').get().text.includes('afterword'), 'precondition: node:sqlite returns the text cut at the NUL'); } finally { src.close(); }
+  const run = openPgEvalRun(mod, { wireSignals: false });
+  try {
+    run.loadStore(dbPath, 'test/nul');
+    const routed = new mod.SterlingStore(dbPath);
+    try { assert.deepEqual(routed.query({ rank_terms: ['afterword'] }).map((r) => r.id), [made.id]); } finally { routed.close(); }
+  } finally { run.dispose(); rmSync(base, { recursive: true, force: true }); }
 });

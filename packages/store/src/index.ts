@@ -66,7 +66,6 @@ export {
   DEFAULT_PG_STATEMENT_TIMEOUT_MS,
   PgNulCharacterError,
   PgSchemaNameRefusedError,
-  PgSearchNotImplementedError,
   PgStoreExistsError,
   PgStoreMissingError,
   PgUnsupportedError,
@@ -76,10 +75,15 @@ export {
   createPgStore,
   ensurePgLayout,
   pgDialect,
+  pgDialectFor,
+  pgSearchQuery,
+  DEFAULT_PG_RANKING,
+  PG_RANKINGS,
   pgDomainSchemaName,
   pgProjectSchemaName,
   type CreatePgStoreInput,
   type PgDriverOptions,
+  type PgRanking,
   type PgStoreKind,
 } from './pg-driver.js';
 import type { StoreDriver } from './driver.js';
@@ -2187,7 +2191,7 @@ export class SterlingStore {
       }
       // EXACTLY ONE records_fts row per id, current version only (contract 7):
       // the row is replaced, so the prior generation's text stops ranking.
-      this.db.prepare('UPDATE records_fts SET text = ? WHERE record_id = ?').run(entry.fts(stored), id);
+      this.db.prepare('UPDATE records_fts SET text = ? WHERE record_id = ?').run(this.db.dialect.searchText(entry.fts(stored)), id);
       // THE ACTIVITY CLOCK IS SEPARABLE FROM THE BODY CLOCK (see internal.activityAt
       // above): a metadata write preserves the body's updated_at, and stamping the
       // activity row from it would place a write that happened NOW at the previous
@@ -3175,7 +3179,9 @@ export class SterlingStore {
    * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
    * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
    * itself — knowledge_query's tool description names this scale so a caller
-   * never has to reverse-engineer bm25's own sign convention.
+   * never has to reverse-engineer bm25's own sign convention. That is the
+   * SQLite scale; on Postgres the score is the driver's ranking, also
+   * higher-is-better, and scoreScale() names which scale a store uses.
    *
    * Requires rank_terms — a threshold on a filter with no ranking has nothing
    * to threshold, so this refuses loudly rather than silently answering 0
@@ -3192,8 +3198,36 @@ export class SterlingStore {
     const d = this.db.dialect;
     const sql = `SELECT COUNT(*) AS n FROM records r ${d.searchJoin}
       WHERE ${where.join(' AND ')} AND ${d.searchMatch} AND ${d.searchScore} >= ?`;
-    const row = this.db.prepare(sql).get(...params, match, minScore) as { n: number };
+    const row = this.db.prepare(sql).get(...this.searchJoinParams(match), ...params, match, minScore) as { n: number };
     return row.n;
+  }
+
+  /**
+   * The scale countAboveScore()'s min_score is a floor on, as a versioned id
+   * (decision postgres-search-ranking-per-query-idf-no-stats-triggers, point
+   * 3): 'fts5_bm25' on SQLite, 'pg_bm25_v1' and the like on Postgres. Every
+   * scale is higher-is-better; a min_score is never carried across scales.
+   */
+  scoreScale(): string {
+    return this.db.dialect.scoreScale;
+  }
+
+  /**
+   * The text this store writes to records_fts for a record of `type` whose
+   * records.body is `body`: the type's fts builder, then the driver's
+   * searchText, as insertRecord() does. A copy that rebuilds the search index
+   * from the records (the knowledge-eval pg loader) calls this, so the rebuilt
+   * text is what this store would have written.
+   */
+  searchTextFor(type: string, body: string): string {
+    const entry = (RECORD_TYPES as Record<string, (typeof RECORD_TYPES)[keyof typeof RECORD_TYPES] | undefined>)[type];
+    if (!entry) throw new Error(`searchTextFor: unknown record type '${type}'`);
+    return this.db.dialect.searchText(entry.fts(JSON.parse(body) as Record<string, unknown>));
+  }
+
+  /** searchJoin's parameters: the match value once per placeholder it has, all before the filter's. */
+  private searchJoinParams(match: string): string[] {
+    return Array.from({ length: this.db.dialect.searchJoinBinds }, () => match);
   }
 
   /**
@@ -3220,7 +3254,7 @@ export class SterlingStore {
           const sql = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
             WHERE ${where.join(' AND ')} AND ${d.searchMatch}
             ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
-          const rows = this.db.prepare(sql).all(...params, match, cap) as { body: string; scope: string }[];
+          const rows = this.db.prepare(sql).all(...this.searchJoinParams(match), ...params, match, cap) as { body: string; scope: string }[];
           return this.withDerivedReliedByAll(SterlingStore.decodeLiveRecords('query', rows));
         }
       }
@@ -3982,7 +4016,7 @@ export class SterlingStore {
     if (lifecycle === 'retired' && meta.superseded_by && meta.superseded_by !== record.id) {
       this.insertRelation(meta.superseded_by, 'supersedes', record.id, record.updated_at);
     }
-    this.db.prepare('INSERT INTO records_fts (record_id, text) VALUES (?, ?)').run(record.id, entry.fts(stored));
+    this.db.prepare('INSERT INTO records_fts (record_id, text) VALUES (?, ?)').run(record.id, this.db.dialect.searchText(entry.fts(stored)));
   }
 
   /**

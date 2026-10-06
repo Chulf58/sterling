@@ -81,12 +81,19 @@ export function requireProjects(value, exists = existsSync) {
 }
 
 export const BACKENDS = ['sqlite', 'pg'];
-/** `sqlite`, `pg` or a comma list of them (a list replays each commit on each backend, so the two can be paired). */
+// `pg:<ranking>` replays on Postgres with one of the store's ranking candidates (PG_RANKINGS); plain `pg` uses the store's default.
+const PG_RANKED_BACKEND = /^pg:([a-z0-9_]+)$/;
+const isBackend = (name) => BACKENDS.includes(name) || PG_RANKED_BACKEND.test(name);
+/** True for `pg` and every `pg:<ranking>`. */
+export const isPgBackend = (backend) => backend === 'pg' || PG_RANKED_BACKEND.test(backend);
+/** The ranking a `pg:<ranking>` backend names; undefined for `pg` and `sqlite`. */
+export const pgRanking = (backend) => PG_RANKED_BACKEND.exec(backend)?.[1];
+/** `sqlite`, `pg`, `pg:<ranking>` or a comma list of them (a list replays each commit on each backend, so they can be paired). */
 export function parseBackends(value) {
   if (value === undefined) return ['sqlite'];
   const names = String(value).split(',');
-  const bad = names.filter((name) => !BACKENDS.includes(name));
-  if (bad.length || names.length !== new Set(names).size) throw new Error(`--backend must be ${BACKENDS.join(' or ')}, or a comma list of distinct names; got ${JSON.stringify(value)}`);
+  const bad = names.filter((name) => !isBackend(name));
+  if (bad.length || names.length !== new Set(names).size) throw new Error(`--backend must be ${BACKENDS.join(' or ')} (or pg:<ranking>), or a comma list of distinct names; got ${JSON.stringify(value)}`);
   return names;
 }
 export function parseBackendFlag(argv) {
@@ -98,8 +105,8 @@ export function parseBackendFlag(argv) {
 /** The identity of one run: a commit on a backend. sqlite keeps the bare commit, so its run directories and
  *  case-project paths are the ones earlier runs wrote; every other backend is suffixed. */
 export function runKey(commit, backend = 'sqlite') {
-  if (!BACKENDS.includes(backend)) throw new Error(`unknown backend ${JSON.stringify(backend)}; expected ${BACKENDS.join(' or ')}`);
-  return backend === 'sqlite' ? commit : `${commit}@${backend}`;
+  if (!isBackend(backend)) throw new Error(`unknown backend ${JSON.stringify(backend)}; expected ${BACKENDS.join(' or ')} or pg:<ranking>`);
+  return backend === 'sqlite' ? commit : `${commit}@${backend.replace(':', '-')}`;
 }
 
 /** Pure scoring functions; intentionally exported for synthetic unit tests. */
@@ -425,7 +432,7 @@ function worktree(commit, workDir, ledger, backend = 'sqlite') {
   if (!existsSync(join(tree, 'packages/store/dist/index.js'))) run(['npx', 'tsc', '-p', 'packages/store/tsconfig.json'], tree);
   // The adapter makes the SQLite open read-only. On pg the store opens a PgDriver, whose snapshot copy is loaded
   // once and checksummed per case, so the SQLite patch has nothing to do and must not return the constructor early.
-  const diff = backend === 'pg' ? null : patchAdapter(tree);
+  const diff = isPgBackend(backend) ? null : patchAdapter(tree);
   // Old baseline commits do not carry the MCP artifact. Compile only that
   // package against the patched store artifact; no product source is changed.
   if (!existsSync(join(tree, 'packages/mcp-server/dist/tools.js'))) run(['npx', 'tsc', '-p', 'packages/mcp-server/tsconfig.json'], tree);
@@ -440,6 +447,8 @@ function worktree(commit, workDir, ledger, backend = 'sqlite') {
 // ---------------------------------------------------------------------------
 export const PG_PUSH_SKIP_REASON = 'push needs item 5 routing';
 // Every table SterlingStore keeps, in copy order. A table the snapshot lacks is skipped.
+/** The most text one multi-row INSERT of the pg loader carries, in characters. */
+export const PG_COPY_BATCH_CHARS = 1_000_000;
 export const PG_COPY_TABLES = ['records', 'record_versions', 'record_aliases', 'record_relations', 'record_stack_tags', 'record_file_keys', 'records_fts', 'runs', 'handoffs', 'check_skipped', 'selection', 'queue_drain_log', 'activity_log', 'store_meta'];
 const PG_EVAL_EXPORTS = ['PgBridge', 'PgDriver', 'SterlingStore', 'createPgStore', 'ensurePgLayout', 'readPgCredentials', 'setStoreDriverFactory'];
 const EVAL_SCHEMA = /^sterling_test_eval[0-9a-f]{8}(_meta|_[0-9]+)$/;
@@ -475,18 +484,32 @@ export function copySnapshotStoreToPg(mod, bridge, { schema, meta, sqlitePath, l
     try {
       for (const table of PG_COPY_TABLES.filter((t) => present.has(t))) {
         const columns = source.prepare(`PRAGMA table_info(${table})`).all().map((x) => x.name);
+        // records_fts is derived, so its text is rebuilt from the record the way the store writes it (searchTextFor: the type's fts
+        // builder, then the fold on Postgres), and Postgres builds tsv and dl from it. Copying the SQLite text instead loses every word
+        // after a raw NUL in it: node:sqlite reads TEXT up to the first NUL. A commit whose store has no searchTextFor copies the text.
+        const derive = table === 'records_fts' && typeof store.searchTextFor === 'function' ? columns.indexOf('text') : -1;
+        const recordOf = derive < 0 ? null : new Map(source.prepare('SELECT id, type, body FROM records').all().map((r) => [r.id, r]));
+        const rebuilt = (recordId) => {
+          const record = recordOf.get(recordId);
+          if (!record) throw new Error(`snapshot store ${label}: records_fts row ${recordId} has no record to rebuild its search text from`);
+          return store.searchTextFor(record.type, record.body);
+        };
         driver.prepare(`DELETE FROM ${table}`).run();
         // Rows go in order and unchanged, in multi-row INSERTs: a Served round trip costs about 25 ms, so one row per statement took minutes for a project store.
+        // A batch is also bounded by its text size: 200 large record_versions bodies in one INSERT ran past the 5 s statement_timeout.
         const batchSize = Math.max(1, Math.min(200, Math.floor(30000 / columns.length)));
+        const batchChars = PG_COPY_BATCH_CHARS;
         const flush = (rows, first) => {
           if (!rows.length) return;
           try { driver.prepare(`INSERT INTO ${table} (${columns.join(', ')}) VALUES ${rows.map(() => `(${columns.map(() => '?').join(', ')})`).join(', ')}`).run(...rows.flat()); }
           catch (error) { throw new Error(`loading ${label} ${table} rows ${first}-${first + rows.length - 1}: ${error.message}`, { cause: error }); }
         };
-        let n = 0, batch = [];
+        let n = 0, batch = [], chars = 0;
         for (const row of source.prepare(`SELECT ${columns.join(', ')} FROM ${table} ORDER BY rowid`).iterate()) {
-          batch.push(columns.map((c) => row[c])); n++;
-          if (batch.length === batchSize) { flush(batch, n - batch.length + 1); batch = []; }
+          const values = columns.map((c, i) => (i === derive ? rebuilt(row.record_id) : row[c]));
+          batch.push(values); n++;
+          chars += values.reduce((sum, v) => sum + (typeof v === 'string' ? v.length : 8), 0);
+          if (batch.length === batchSize || chars >= batchChars) { flush(batch, n - batch.length + 1); batch = []; chars = 0; }
         }
         flush(batch, n - batch.length + 1);
         counts[table] = n;
@@ -504,9 +527,11 @@ export function copySnapshotStoreToPg(mod, bridge, { schema, meta, sqlitePath, l
   }
 }
 /** The pg side of one commit's replay: one bridge, one schema prefix, lazily loaded snapshot stores. */
-export function openPgEvalRun(mod, { wireSignals = true } = {}) {
+export function openPgEvalRun(mod, { wireSignals = true, ranking } = {}) {
   const missing = PG_EVAL_EXPORTS.filter((name) => mod[name] === undefined);
   if (missing.length) throw new Error(`knowledge-eval --backend pg: this commit's @sterling/store has no ${missing.join(', ')}; pg replay needs a commit that has the Postgres driver seam (f096b79c or later)`);
+  // An older store would ignore an unknown driver option and rank with its own default, so a named ranking it lacks is refused.
+  if (ranking !== undefined && !(mod.PG_RANKINGS ?? []).includes(ranking)) throw new Error(`knowledge-eval --backend pg:${ranking}: this commit's @sterling/store has no ranking '${ranking}' (it has: ${(mod.PG_RANKINGS ?? []).join(', ') || 'none'})`);
   const prefix = `sterling_test_eval${randomBytes(4).toString('hex')}`; const meta = `${prefix}_meta`;
   if (!EVAL_PREFIX.test(prefix)) throw new Error(`bad eval prefix ${prefix}`);
   const bridge = new mod.PgBridge(mod.readPgCredentials());
@@ -528,7 +553,7 @@ export function openPgEvalRun(mod, { wireSignals = true } = {}) {
     const schema = schemaByPath.get(resolve(path));
     if (!schema) throw new Error(`knowledge-eval pg: no snapshot schema is loaded for store ${path}`);
     opened++;
-    return new mod.PgDriver(bridge, { schema, metaSchema: meta });
+    return new mod.PgDriver(bridge, { schema, metaSchema: meta, ...(ranking !== undefined ? { ranking } : {}) });
   });
   return {
     bridge, prefix, meta,
@@ -691,21 +716,26 @@ async function evaluateCommit(commit, cases, workDir, snap, backend = 'sqlite') 
   let MountedStores, resolveDomainMounts, SterlingTools, parseConfig, pgRun;
   const pgProjects = new Map();
   // One project's snapshot stores, copied into pg the first time a case needs the project.
+  // A load that failed is remembered and rethrown for the project's later cases: retrying would collide with the registry row the failed attempt left.
   const pgProject = (projectName, projectSnapshot) => {
     if (!pgProjects.has(projectName)) {
       const schemas = {}; const counts = {};
-      for (const store of projectSnapshot.stores) { const loaded = pgRun.loadStore(store.path, `${projectName}/${store.name}`); schemas[store.name] = loaded.schema; counts[store.name] = loaded.counts; }
-      pgProjects.set(projectName, { schemas, counts });
+      try {
+        for (const store of projectSnapshot.stores) { const loaded = pgRun.loadStore(store.path, `${projectName}/${store.name}`); schemas[store.name] = loaded.schema; counts[store.name] = loaded.counts; }
+        pgProjects.set(projectName, { schemas, counts });
+      } catch (error) { pgProjects.set(projectName, { error }); }
     }
-    return pgProjects.get(projectName);
+    const loaded = pgProjects.get(projectName);
+    if (loaded.error) throw loaded.error;
+    return loaded;
   };
   return runWithCleanup(() => replayCommit({ workDir, repos: [root, ...Object.values(manifest.projects ?? {}).map((x) => x.root)], cases,
   setup: async (commitLedger) => { const w = worktree(commit, workDir, commitLedger, backend);
   // pg: the factory must be set on the module instance MountedStores opens its stores from, and mounted.js imports ./index.js with no query string,
   // so a `?ts` copy of index.js would carry a factory nothing reads. The tree is unique to this run key, so the plain URL is never cached from another run.
-  const storeUrl = pathToFileURL(backend === 'pg' ? realpathSync(join(w.tree, 'packages/store/dist/index.js')) : join(w.tree, 'packages/store/dist/index.js')).href;
-  const storeModule = await import(backend === 'pg' ? storeUrl : `${storeUrl}?${Date.now()}`); ({ MountedStores, resolveDomainMounts } = storeModule);
-  if (backend === 'pg') pgRun = openPgEvalRun(storeModule); ({ SterlingTools } = await import(pathToFileURL(join(w.tree, 'packages/mcp-server/dist/tools.js')).href + `?${Date.now()}`)); ({ parseConfig } = await import(pathToFileURL(join(w.tree, 'packages/schemas/dist/index.js')).href + `?${Date.now()}`)); return w; },
+  const storeUrl = pathToFileURL(isPgBackend(backend) ? realpathSync(join(w.tree, 'packages/store/dist/index.js')) : join(w.tree, 'packages/store/dist/index.js')).href;
+  const storeModule = await import(isPgBackend(backend) ? storeUrl : `${storeUrl}?${Date.now()}`); ({ MountedStores, resolveDomainMounts } = storeModule);
+  if (isPgBackend(backend)) pgRun = openPgEvalRun(storeModule, { ranking: pgRanking(backend) }); ({ SterlingTools } = await import(pathToFileURL(join(w.tree, 'packages/mcp-server/dist/tools.js')).href + `?${Date.now()}`)); ({ parseConfig } = await import(pathToFileURL(join(w.tree, 'packages/schemas/dist/index.js')).href + `?${Date.now()}`)); return w; },
   runCase: async (c, w, { ledger: caseLedger, onClose }) => { const out = join(runDir, c.id); const caseSchema = c.version ?? 'v1'; mkdirSync(out, { recursive: true });
     const projectName = c.project ?? 'sterling-main'; const projectSnapshot = manifest.projects?.[projectName];
     if (!projectSnapshot) throw new Error(`case ${c.id} names unknown project ${JSON.stringify(projectName)}`);
@@ -714,12 +744,12 @@ async function evaluateCommit(commit, cases, workDir, snap, backend = 'sqlite') 
     for (const directive of directives.filter((x) => x.kind === 'config')) cfg.delivery = { ...cfg.delivery, injection_rung: directive.value };
     const effectiveRung = cfg.delivery?.injection_rung;
     if (!['prompt', 'read', 'edit'].includes(effectiveRung)) throw new Error(`project ${projectName} has no explicit valid delivery.injection_rung; refusing a silent default (${String(effectiveRung)})`);
-    if (backend === 'pg' && c.channel !== 'pull') return { id: c.id, project: projectName, channel: c.channel, case_schema: caseSchema, label_sha256: labelHash(c), skipped: PG_PUSH_SKIP_REASON };
+    if (isPgBackend(backend) && c.channel !== 'pull') return { id: c.id, project: projectName, channel: c.channel, case_schema: caseSchema, label_sha256: labelHash(c), skipped: PG_PUSH_SKIP_REASON };
     const project = caseProject(key, workDir, c.id, snap, projectName, projectSnapshot, cfg, directives.some((x) => x.kind === 'mutate'), caseLedger);
     const caseDb = join(project, '.sterling', 'sterling.db');
     // sqlite: the case database file's hash. pg: a row checksum over every table of every schema the case reads.
     let fingerprint = () => sha256(readFileSync(caseDb));
-    if (backend === 'pg') { const loaded = pgProject(projectName, projectSnapshot); pgRun.route(caseDb, loaded.schemas.project); fingerprint = () => pgRun.checksum(Object.values(loaded.schemas)); }
+    if (isPgBackend(backend)) { const loaded = pgProject(projectName, projectSnapshot); pgRun.route(caseDb, loaded.schemas.project); fingerprint = () => pgRun.checksum(Object.values(loaded.schemas)); }
     const dbBefore = fingerprint();
     const openedBefore = pgRun?.driversOpened();
     const stores = new MountedStores(join(project, '.sterling', 'sterling.db'), resolveDomainMounts(parseConfig(cfg)), { skipMissing: true }); onClose(() => stores.close());
@@ -757,5 +787,5 @@ async function evaluateCommit(commit, cases, workDir, snap, backend = 'sqlite') 
   const summary = { commit, backend, key, runtime_ms: Date.now() - started, build: w.build, adapter_sha256: w.adapter_sha256, tools_adapter_sha256: w.tools_adapter_sha256, projects: manifest.projects, cases: scored, channel_totals: channelTotals(scored), project_totals: perProjectTotals, ...(Object.keys(errorKinds).length ? { errors_by_kind: errorKinds } : {}), ...(skipped.length ? { skipped: { count: skipped.length, reasons: [...new Set(skipped.map((x) => x.skipped))] } } : {}), ...(pgRun ? { pg_loaded: Object.fromEntries([...pgProjects].map(([name, p]) => [name, p.counts])) } : {}), invalid: scored.some((x) => x.error) }; json(join(runDir, 'summary.json'), summary); return summary; } }),
   () => [() => pgRun?.dispose()]);
 }
-async function main() { const commits = (arg('--commits', '') ?? '').split(',').filter(Boolean); const casesPath = arg('--cases'); const workDir = resolve(arg('--work-dir', '/tmp/claude-1000/knowledge-eval')); if (!commits.length || !casesPath) throw new Error('usage: --commits sha[,sha] --cases cases.jsonl [--backend sqlite|pg|sqlite,pg] [--work-dir dir] [--projects JSON] [--clean]'); const backends = parseBackendFlag(process.argv); const { projects, dropped } = requireProjects(arg('--projects', undefined)); for (const name of dropped) console.error(`knowledge-eval: default project ${name} (${DEFAULT_PROJECTS[name]}) does not exist on this machine and was not named in --projects; it is not snapshotted`); if (process.argv.includes('--clean')) { for (const repo of new Set([root, ...Object.values(projects)])) reapRunWorktrees(repo, workDir); if (existsSync(workDir)) rmSync(workDir, { recursive: true, force: true }); } const snap = arg('--snapshot') ? resolve(arg('--snapshot')) : snapshot(workDir, projects); const cases = readJsonl(resolve(casesPath)); const summaries = []; for (const c of commits) for (const backend of backends) summaries.push(await evaluateCommit(c, cases, workDir, snap, backend)); const paired = pairedComparison(summaries); const projectTotals = Object.fromEntries(Object.keys(JSON.parse(readFileSync(join(snap, 'manifest.json'))).projects ?? {}).map((project) => [project, summaries.map((s) => ({ commit: s.commit, key: s.key, totals: s.project_totals[project] ?? {} }))])); const comparison = { harness_version: HARNESS_VERSION, snapshot: snap, invalid: summaries.some((x) => x.invalid) || paired.invalid, ...paired, project_totals: projectTotals, commits: summaries }; json(join(workDir, 'comparison.json'), comparison); console.log(JSON.stringify(comparison, null, 2)); }
+async function main() { const commits = (arg('--commits', '') ?? '').split(',').filter(Boolean); const casesPath = arg('--cases'); const workDir = resolve(arg('--work-dir', '/tmp/claude-1000/knowledge-eval')); if (!commits.length || !casesPath) throw new Error('usage: --commits sha[,sha] --cases cases.jsonl [--backend sqlite|pg|pg:<ranking>|sqlite,pg,...] [--work-dir dir] [--projects JSON] [--clean]'); const backends = parseBackendFlag(process.argv); const { projects, dropped } = requireProjects(arg('--projects', undefined)); for (const name of dropped) console.error(`knowledge-eval: default project ${name} (${DEFAULT_PROJECTS[name]}) does not exist on this machine and was not named in --projects; it is not snapshotted`); if (process.argv.includes('--clean')) { for (const repo of new Set([root, ...Object.values(projects)])) reapRunWorktrees(repo, workDir); if (existsSync(workDir)) rmSync(workDir, { recursive: true, force: true }); } const snap = arg('--snapshot') ? resolve(arg('--snapshot')) : snapshot(workDir, projects); const cases = readJsonl(resolve(casesPath)); const summaries = []; for (const c of commits) for (const backend of backends) summaries.push(await evaluateCommit(c, cases, workDir, snap, backend)); const paired = pairedComparison(summaries); const projectTotals = Object.fromEntries(Object.keys(JSON.parse(readFileSync(join(snap, 'manifest.json'))).projects ?? {}).map((project) => [project, summaries.map((s) => ({ commit: s.commit, key: s.key, totals: s.project_totals[project] ?? {} }))])); const comparison = { harness_version: HARNESS_VERSION, snapshot: snap, invalid: summaries.some((x) => x.invalid) || paired.invalid, ...paired, project_totals: projectTotals, commits: summaries }; json(join(workDir, 'comparison.json'), comparison); console.log(JSON.stringify(comparison, null, 2)); }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((e) => { console.error(`knowledge-eval: ${e.stack ?? e}`); process.exitCode = 1; });
