@@ -80,3 +80,15 @@ export function withIdentityIgnore(text, { addIfAbsent }) {
   if (!changed) return { text, changed: false };
   return { text: out.length ? `${out.join(eol)}${eol}` : '', changed: true };
 }
+
+// Pure: the .gitignore text with IGNORE_NESTED present once whenever a
+// `.sterling/*` line exists (the form that anchors to the repo root). Without
+// that line the file is left alone, as update never adds an ignore a project did
+// not have; init appends the line itself with the rest of its entries.
+// Idempotent. Returns { text, changed }; line ending and final newline are kept.
+export function withNestedIgnore(text) {
+  const present = text.split(/\r?\n/);
+  if (!present.includes(IGNORE_ALL) || present.includes(IGNORE_NESTED)) return { text, changed: false };
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  return { text: `${text}${text.endsWith('\n') ? '' : eol}${IGNORE_NESTED}${eol}`, changed: true };
+}

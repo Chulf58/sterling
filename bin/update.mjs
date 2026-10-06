@@ -12952,6 +12952,7 @@ function workIdentityRefusal(root, mode) {
 var IGNORE_DIR = ".sterling/";
 var IGNORE_ALL = ".sterling/*";
 var IGNORE_KEEP_IDENTITY = `!${PROJECT_IDENTITY_REL}`;
+var IGNORE_NESTED = "*/**/.sterling/";
 function withIdentityIgnore(text, { addIfAbsent }) {
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text === "" ? [] : text.split(/\r?\n/);
@@ -12971,6 +12972,12 @@ function withIdentityIgnore(text, { addIfAbsent }) {
   const changed = out.length !== lines.length || out.some((line, i) => line !== lines[i]);
   if (!changed) return { text, changed: false };
   return { text: out.length ? `${out.join(eol)}${eol}` : "", changed: true };
+}
+function withNestedIgnore(text) {
+  const present = text.split(/\r?\n/);
+  if (!present.includes(IGNORE_ALL) || present.includes(IGNORE_NESTED)) return { text, changed: false };
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  return { text: `${text}${text.endsWith("\n") ? "" : eol}${IGNORE_NESTED}${eol}`, changed: true };
 }
 
 // scripts/lib/update.mjs
@@ -13332,6 +13339,12 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
         if (repaired.changed) {
           writeFileSync3(gitignorePath, repaired.text);
           log(`      .gitignore: .sterling/ is now .sterling/* plus !.sterling/project.json, so .sterling/project.json can be committed`);
+          entry.gitignore_repaired = true;
+        }
+        const nested = withNestedIgnore(repaired.text);
+        if (nested.changed) {
+          writeFileSync3(gitignorePath, nested.text);
+          log(`      .gitignore: added ${IGNORE_NESTED} so a nested .sterling/ directory stays ignored`);
           entry.gitignore_repaired = true;
         }
       }
