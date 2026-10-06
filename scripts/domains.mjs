@@ -15,6 +15,20 @@
 // never changes a store's database file (SQLite may create -shm and -wal files
 // beside a WAL-mode store while it is read).
 //
+// POSTGRES STORAGE (issue Chulf58/sterling#26 item 7; decision
+// storage-backend-is-its-own-config-key-written-only-by-store-move). When the
+// current project's config.storage is 'postgres', its domain stores are the
+// sterling_d_<name> rows of the Postgres store registry (<meta>.stores), not the
+// folders under ~/.sterling/domains, so the map lists those rows (path
+// postgres:<schema>) and reads each store's description with plain SELECTs on
+// one short-lived connection. Nothing falls back to the SQLite folders. The
+// project registry (~/.sterling/registry.db) and the project's config.json stay
+// local either way. --apply on a Postgres-storage project mounts domains whose
+// Postgres store exists; it refuses, by name and before writing anything, a
+// domain with no Postgres store, because creating one needs createPgStore under
+// the global migration lock plus a first open to write the description, and the
+// SQLite createDomain below has no Postgres twin here.
+//
 // WHAT A RUN WRITES. A report run writes one thing: when the current project has
 // a config and a project store but no registry row (init is the only other
 // writer of a row), it registers it, and says so. --apply writes three: a new
@@ -27,7 +41,8 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { parseConfig, sameLocationAnyHost } from '@sterling/schemas';
-import { ProjectRegistry, registryPath, createDomain, resolveDomainMounts, DOMAIN_DESCRIPTION_KEY, SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
+import { ProjectRegistry, registryPath, createDomain, resolveDomainMounts, DOMAIN_DESCRIPTION_KEY, SUPPORTED_SCHEMA_VERSION, PgBridge, readPgCredentials, assertSterlingSchemaName } from '@sterling/store';
+import { resolveStoreRoute, pgStoreNames } from '@sterling/store/routing';
 import { resolveLinkedWorktree } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
 import { DEFAULT_DOMAIN_DESCRIPTIONS } from './lib/domain-defaults.mjs';
@@ -111,6 +126,19 @@ try {
   refuse(`${fwd(projectDir)}/.sterling/config.json could not be read as a Sterling config (${e.message}). Repair it first; nothing was written.`);
 }
 
+// The backend the project's stores live on. A route the router refuses (a bad
+// storage value, Postgres outside work mode, no identity or credentials) refuses
+// here too: the SQLite folders are never read in its place.
+let route = null;
+if (project) {
+  try {
+    route = resolveStoreRoute(projectDir);
+  } catch (e) {
+    refuse(`the store settings of ${fwd(projectDir)} cannot be used (${e?.constructor?.name ?? 'Error'}: ${e?.message ?? e}). Nothing was written.`);
+  }
+}
+const onPostgres = route?.storage === 'postgres';
+
 // ---- domain stores, read-only ----
 const domainsRoot = join(homedir(), '.sterling', 'domains');
 
@@ -135,7 +163,50 @@ function inspectStore(name, dbPath) {
   return entry;
 }
 
+// The domain stores of a Postgres-storage project: the registry's sterling_d_*
+// rows, each with its description read by SELECT on one short-lived connection.
+// The connect timeout is capped as the router caps it.
+function quotedSchema(schema) {
+  assertSterlingSchemaName(schema);
+  return `"${schema}"`;
+}
+
+function listPostgresStores() {
+  let bridge;
+  try {
+    const config = readPgCredentials(route.credentialsPath);
+    bridge = new PgBridge({ ...config, connectionTimeoutMillis: Math.min(config.connectionTimeoutMillis, 2000) });
+  } catch (e) {
+    refuse(`storage 'postgres': the Postgres store database could not be reached (${e?.constructor?.name ?? 'Error'}: ${e?.message ?? e}). Nothing was written, and the domain folders under ~/.sterling/domains were not read in its place.`);
+  }
+  try {
+    // A domain store's schema is <prefix>_d_<name>; the prefix is sterling, or the
+    // sterling_test_ namespace a test run points the router at (those rows carry kind 'test').
+    const domainPrefix = `${route.testNamespace ?? 'sterling'}_d_`;
+    const registered = bridge.query(`SELECT schema_name, name FROM ${quotedSchema(route.metaSchema)}.stores WHERE starts_with(schema_name, $1) ORDER BY name`, [domainPrefix]).rows;
+    return registered.map((r) => {
+      const schema = String(r.schema_name);
+      const entry = { name: String(r.name), schema, path: `postgres:${schema}`, description: null, format: 'current', unreadable: null };
+      try {
+        const q = `${quotedSchema(schema)}.store_meta`;
+        // A store created but never opened has no store_meta table yet: no description.
+        if (bridge.query('SELECT to_regclass($1) AS t', [q]).rows[0]?.t) {
+          entry.description = String(bridge.query(`SELECT value FROM ${q} WHERE key = $1`, [DOMAIN_DESCRIPTION_KEY]).rows[0]?.value ?? '').trim() || null;
+        }
+      } catch (e) {
+        entry.unreadable = String(e?.message ?? e);
+      }
+      return entry;
+    });
+  } catch (e) {
+    refuse(`storage 'postgres': the domain stores could not be listed from the Postgres store registry (${e?.constructor?.name ?? 'Error'}: ${e?.message ?? e}). Nothing was written.`);
+  } finally {
+    bridge.close();
+  }
+}
+
 function listStores() {
+  if (onPostgres) return listPostgresStores();
   const found = new Map();
   if (existsSync(domainsRoot)) {
     for (const d of readdirSync(domainsRoot, { withFileTypes: true })) {
@@ -165,7 +236,9 @@ let rows = [];
 let registeredByThisRun = false;
 // The registry file is read when it exists. It is created only to register an
 // initialized project: a report run from any other folder writes nothing.
-const hasStore = project ? existsSync(join(projectDir, '.sterling', 'sterling.db')) : false;
+// With Postgres storage the project store is its schema, and the router has
+// already required its identity file, so the project counts as initialized.
+const hasStore = project ? onPostgres || existsSync(join(projectDir, '.sterling', 'sterling.db')) : false;
 if (existsSync(registryPath()) || hasStore) {
   const registry = new ProjectRegistry(registryPath());
   try {
@@ -221,6 +294,8 @@ const projects = rows.map((p) => {
 });
 const current = project ? { name: projectName, path: currentPath, stack_tags: project.config.stack_tags } : null;
 
+if (onPostgres) notes.push(`${projectName} keeps its stores in Postgres (config.storage), so this map lists the Postgres domain stores, not the domain folders under ~/.sterling/domains.`);
+
 if (!opts.apply) {
   const map = buildDomainMap({ stores: listStores(), projects, current, notes });
   // registered_by_this_run lets a caller that reads the JSON (the update pass, session
@@ -273,9 +348,28 @@ const wanted = [...new Set(opts.add)];
 const toAdd = wanted.filter((name) => !mounted.includes(name));
 // Every named domain is planned, a tag the project already lists included: such a
 // tag may still name a store that was never created, and this is where it is made.
-const plan = resolveDomainMounts({ stack_tags: wanted, domain_paths: project.config.domain_paths }).map((m) => ({
+let planned;
+if (onPostgres) {
+  let schemaOf;
+  try {
+    schemaOf = new Map(pgStoreNames(route.projectId, wanted).domains.map((d) => [d.name, d.schema]));
+  } catch (e) {
+    refuse(`${e?.message ?? e} Nothing was written.`);
+  }
+  const have = new Set(listStores().map((st) => st.schema));
+  planned = wanted.map((name) => ({ name, dbPath: `postgres:${schemaOf.get(name)}`, exists: have.has(schemaOf.get(name)) }));
+  const absent = planned.filter((m) => !m.exists);
+  if (absent.length) {
+    refuse(
+      `${absent.map((m) => `'${m.name}'`).join(', ')} ${absent.length === 1 ? 'has' : 'have'} no Postgres domain store, and this command creates domain stores only on SQLite storage: ${projectName} keeps its stores in Postgres (config.storage). ` +
+        `Only domains whose Postgres store exists can be added here. Nothing was written.`
+    );
+  }
+} else {
+  planned = resolveDomainMounts({ stack_tags: wanted, domain_paths: project.config.domain_paths }).map((m) => ({ ...m, exists: existsSync(m.dbPath) }));
+}
+const plan = planned.map((m) => ({
   ...m,
-  exists: existsSync(m.dbPath),
   listed: mounted.includes(m.name),
   description: opts.descriptions.get(m.name) ?? DEFAULT_DOMAIN_DESCRIPTIONS[m.name],
 }));
