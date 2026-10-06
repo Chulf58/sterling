@@ -1156,6 +1156,21 @@ test('CLONE: on a detached HEAD nothing is synced and the stale warning says so'
   assert.ok(messageOf(r).includes(`${OFF_BASE_HEAD}Not synced at session start: the Sterling clone is on a detached HEAD, not its base branch main, so agents sync at session start once main is checked out. `), messageOf(r));
 });
 
+test('CLONE: an unreadable HEAD syncs nothing and still forbids the hand-run, but says the branch could not be read, never that the clone is on an unmerged branch', () => {
+  const { r, unchanged } = staleCloneRun({ head: 'garbage\n' });
+  assert.deepEqual(r.calls, [], 'nothing is spawned');
+  assert.ok(unchanged);
+  const clause = "the Sterling clone's checked-out branch could not be read (HEAD: not a branch or a commit), so no agents were synced";
+  const head = '⚠ AGENT CURRENCY: 1 stale of 1 installed Sterling agent file(s) — do NOT run /sterling:sync-agents from this clone (its checked-out branch could not be read); check the clone\'s checkout, then restart. ';
+  assert.ok(messageOf(r).includes(`${head}Not synced at session start: ${clause}. `), messageOf(r));
+  const section = currencySection(contextOf(r));
+  assert.match(section, /Do NOT run \/sterling:sync-agents from this clone: its checked-out branch could not be read, so whether its templates are merged is unknown\. Check the clone's checkout, then restart\./);
+  assert.ok(section.endsWith(` The clone agent sync did not run: ${clause}.`), contextOf(r));
+  assert.doesNotMatch(messageOf(r) + section, /not merged\)|not on its base branch|[Cc]heck out (its|the) base branch/, 'no claim about a branch that was never read');
+  assert.doesNotMatch(messageOf(r), /run \/sterling:sync-agents in this project/);
+  assert.doesNotMatch(section, /Run \/sterling:sync-agents, restart/);
+});
+
 test('CLONE: inside the maintenance worker child (STERLING_MAINTENANCE_WORKER=1) nothing is synced; the stale warning still prints, unchanged', () => {
   const { r, unchanged } = staleCloneRun({ env: { STERLING_MAINTENANCE_WORKER: '1' } });
   assert.deepEqual(r.calls, [], 'the worker child spawns no sync');

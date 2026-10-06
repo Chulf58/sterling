@@ -13,7 +13,7 @@
 // The sterling-update.bat recogniser lives beside its renderer in update-launcher.mjs.
 //
 // Builtins plus the shared path comparison (@sterling/schemas), which init and update bundle.
-import { existsSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -64,8 +64,9 @@ const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 
 // One JSON object read from disk. Failures carry only a fixed phrase or the error code,
 // never err.message: a JSON.parse message can span lines and quote the file (anti-pattern
-// putting-a-json-parse-or-file-read-error-message-into-one-lin). BOM, line endings and the
-// trailing newline are returned so a rewrite can keep them.
+// putting-a-json-parse-or-file-read-error-message-into-one-lin). Line endings and the
+// trailing newline are returned so a rewrite can keep them; a leading BOM is dropped and
+// a rewrite does not put it back.
 function readJsonObject(path, readFile) {
   let raw;
   try {
@@ -101,12 +102,15 @@ const MANUAL = 'To switch it on by hand: /plugin, Marketplaces, sterling, Enable
  *     Claude Code's own state file and is never written; no source is ever invented.
  *   - an explicit autoUpdate: false (settings entry, or the known entry when settings is silent)
  *     is a deliberate choice: not flipped, a line says how to turn it on.
- *   - settings.json missing, unreadable or malformed, or known_marketplaces.json unreadable or
- *     malformed: nothing is written and the line names the file and the manual step.
+ *   - settings.json or known_marketplaces.json missing, unreadable or malformed: nothing is
+ *     written and the line names the file and the manual step.
+ * A write goes to the file the path really names, through a temp file beside it that carries
+ * the original's mode, so a symlinked settings.json stays a link and a 0600 file stays 0600.
+ * A path whose real file cannot be resolved is not written.
  * The call site runs this on an installed copy only; an authoring clone never reaches it.
  * @returns {{status: string, path: string, line: string|null}} status is one of already-on,
  *   written, explicit-off, no-entry, no-source, settings-missing, settings-unreadable,
- *   settings-unwritable, settings-invalid, known-unreadable, known-invalid
+ *   settings-unwritable, settings-invalid, known-missing, known-unreadable, known-invalid
  */
 export function enableMarketplaceAutoUpdate({ env = process.env, home = homedir(), readFile = readFileSync, writeFile = writeFileSync, rename = renameSync } = {}) {
   const path = userSettingsPath({ env, home });
@@ -131,9 +135,10 @@ export function enableMarketplaceAutoUpdate({ env = process.env, home = homedir(
   }
 
   const known = readJsonObject(knownPath, readFile);
+  if (known.missing) return stop('known-missing', knownPath, 'does not exist, so init cannot tell whether the /plugin toggle is on');
   if (known.unreadable) return stop('known-unreadable', knownPath, `could not be read (${known.unreadable}), so init cannot tell whether the /plugin toggle is on`);
   if (known.invalid) return stop('known-invalid', knownPath, `is ${known.invalid}, so init cannot tell whether the /plugin toggle is on`);
-  const knownEntry = known.value?.sterling;
+  const knownEntry = known.value.sterling;
   if (isObject(knownEntry) && knownEntry.autoUpdate === true) return out('already-on', null);
   if (isObject(knownEntry) && knownEntry.autoUpdate === false) {
     return out('explicit-off', `plugin auto-update: off by an explicit setting, "autoUpdate": false on the sterling entry in ${knownWhere} (the /plugin toggle). Init does not override it; use /plugin, Marketplaces, sterling, Enable auto-update.`);
@@ -154,10 +159,19 @@ export function enableMarketplaceAutoUpdate({ env = process.env, home = homedir(
   let body = JSON.stringify({ ...settings.value, extraKnownMarketplaces: next }, null, 2);
   if (eol === '\r\n') body = body.replace(/\n/g, '\r\n');
   if (trailingNewline) body += eol;
-  const tmp = `${path}.tmp-${randomUUID()}`;
+  let target;
+  let mode;
   try {
-    writeFile(tmp, body);
-    rename(tmp, path);
+    target = realpathSync(path);
+    mode = statSync(target).mode & 0o7777;
+  } catch (err) {
+    return stop('settings-unwritable', path, `could not be resolved to the file it names (${err?.code ?? 'unknown error'}), so init left it alone`);
+  }
+  const tmp = `${target}.tmp-${randomUUID()}`;
+  try {
+    writeFile(tmp, body, { mode });
+    chmodSync(tmp, mode); // the mode given at creation is cut by the umask
+    rename(tmp, target);
   } catch (err) {
     try { unlinkSync(tmp); } catch { /* the temp file may never have been created */ }
     return stop('settings-unwritable', path, `could not be written (${err?.code ?? 'unknown error'}), so init left it alone`);

@@ -521,6 +521,17 @@ test('cloneAgentSync: a branch name is accepted only as plain ref-name character
   }
 });
 
+test('cloneAgentSync: an off-base result says whether the branch was read, so the caller can word an unreadable HEAD differently from another branch', async () => {
+  const project = makeProject({ store: false });
+  const { runStep } = recordingSteps();
+  const read = (head) => cloneAgentSync({ root: makePluginRoot({ clone: true, head }), project, behind: ['implementor.md'], runStep });
+  assert.equal((await read('ref: refs/heads/feat\n')).unreadable, false);
+  assert.equal((await read(`${'a1b2c3d4'.repeat(5)}\n`)).unreadable, false, 'a detached HEAD was read');
+  const garbled = await read('garbage\n');
+  assert.equal(garbled.outcome, 'off-base');
+  assert.equal(garbled.unreadable, true);
+});
+
 // A linked worktree's .git is a FILE pointing at <main>/.git/worktrees/<name>, which holds
 // that worktree's own HEAD and a commondir file pointing back at the shared refs.
 function makeWorktreeRoot(head, { relative = false } = {}) {
@@ -550,6 +561,13 @@ test('cloneAgentSync: a linked worktree (.git is a file) is read through its git
   const goneMain = makeWorktreeRoot('ref: refs/heads/main\n');
   writeFileSync(join(goneMain.admin, 'commondir'), '../../no-such-common\n');
   assert.equal(await offBase(goneMain.wt), "the Sterling clone's checked-out branch could not be read (commondir: ENOENT), so no agents were synced");
+
+  // An empty commondir would resolve to the gitdir itself, which holds no refs: master must not become the base through it.
+  for (const content of ['', '\n', '  \n']) {
+    const empty = makeWorktreeRoot('ref: refs/heads/master\n');
+    writeFileSync(join(empty.admin, 'commondir'), content);
+    assert.equal(await offBase(empty.wt), "the Sterling clone's checked-out branch could not be read (commondir: empty), so no agents were synced");
+  }
 
   const broken = makePluginRoot();
   writeFileSync(join(broken, '.git'), 'not a pointer\nSECOND-LINE-MARKER\n');

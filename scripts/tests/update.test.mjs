@@ -1916,7 +1916,7 @@ test('CLI: an unloadable @sterling/store is a visible exit 2 on the already-curr
     const resolver = `export async function resolve(s, c, n) { if (s === '@sterling/store') { const e = new Error("Cannot find package '@sterling/store' (test: made unloadable)"); e.code = 'ERR_MODULE_NOT_FOUND'; throw e; } return n(s, c); }`;
     writeFileSync(hook, `import { register } from 'node:module';\nregister('data:text/javascript,' + encodeURIComponent(${JSON.stringify(resolver)}));\n`);
 
-    const r = spawnSync(process.execPath, ['--import', hook, join(dirname(fileURLToPath(import.meta.url)), '..', 'update.mjs'), '--target', clone, '--no-fetch', '--no-test'], { encoding: 'utf8', timeout: 120_000 });
+    const r = spawnSync(process.execPath, ['--import', hook, join(dirname(fileURLToPath(import.meta.url)), '..', 'update.mjs'), '--target', clone, '--no-fetch', '--no-test'], { encoding: 'utf8', timeout: 120_000, env: { ...process.env, CLAUDE_CONFIG_DIR: join(work, 'claude-config') } });
     const out = `${r.stdout}${r.stderr}`;
     assert.equal(r.status, 2, out);
     assert.doesNotMatch(out, /Already current/, 'no registered project was refreshed, so the run must not read as current');
@@ -2074,7 +2074,7 @@ test('re-exec through the real CLI: the fast-forwarded scripts/update.mjs runs o
     // A RELATIVE --target (review LOW-1): the child runs with cwd = the target, so
     // a relative path would resolve against the wrong directory there. The CLI is
     // started from the pair's parent dir, where 'consumer' is relative.
-    const r = spawnSync(process.execPath, [join(REPO_ROOT, 'scripts', 'update.mjs'), '--target', 'consumer', '--no-projects'], { cwd: dir, encoding: 'utf8', timeout: 120_000, env: { ...process.env, STERLING_UPDATE_REEXEC: '', STERLING_UPDATE_REEXEC_FROM: '' } });
+    const r = spawnSync(process.execPath, [join(REPO_ROOT, 'scripts', 'update.mjs'), '--target', 'consumer', '--no-projects'], { cwd: dir, encoding: 'utf8', timeout: 120_000, env: { ...process.env, STERLING_UPDATE_REEXEC: '', STERLING_UPDATE_REEXEC_FROM: '', CLAUDE_CONFIG_DIR: join(dir, 'claude-config') } });
     assert.equal(r.status, 7, `the child's exit is the CLI exit:\n${r.stdout}\n${r.stderr}`);
     assert.match(r.stdout, /re-running the UPDATED updater/);
     assert.ok(

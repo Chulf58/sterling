@@ -285,13 +285,15 @@ const errCode = (e) => (typeof e?.code === 'string' ? e.code : 'read error');
  * a clone whose default branch has another name is never on its base here.
  * Returns { onBase, branch, base, clause }: branch is null on a detached or unreadable
  * HEAD; clause is one line saying why nothing syncs, null when onBase. An unreadable
- * HEAD is not-base. Only error codes are quoted, never file content.
+ * HEAD is not-base and carries unreadable: true, with base null because the base was
+ * never worked out. Only error codes are quoted, never file content.
  */
 export function cloneBranchState(root) {
   const unreadable = (what) => ({
     onBase: false,
     branch: null,
     base: null,
+    unreadable: true,
     clause: `the Sterling clone's checked-out branch could not be read (${what}), so no agents were synced`,
   });
   const dotGit = join(root, '.git');
@@ -304,7 +306,11 @@ export function cloneBranchState(root) {
       gitDir = resolve(root, pointer[1].trim());
       commonDir = gitDir;
       try {
-        commonDir = resolve(gitDir, readFileSync(join(gitDir, 'commondir'), 'utf8').trim());
+        const common = readFileSync(join(gitDir, 'commondir'), 'utf8').trim();
+        // An empty commondir would resolve to the gitdir itself, a directory with no shared
+        // refs, and so read as "no main".
+        if (!common) return unreadable('commondir: empty');
+        commonDir = resolve(gitDir, common);
         // A commondir naming a missing directory says nothing about which branches exist,
         // so it must not read as "no main" and make master the base.
         if (!statSync(commonDir).isDirectory()) return unreadable('commondir: not a directory');
@@ -367,7 +373,8 @@ const AGENT_CHANGED_LINE = /^(installed|refreshed|header_repaired|machine_rebake
  * base branch (Recommended)"): a clone on any other branch, or on a detached or
  * unreadable HEAD, holds templates that are not merged, so nothing runs and the outcome
  * is 'off-base' with an empty warning and context and a `clause` the caller adds to its
- * own stale warning.
+ * own stale warning; `unreadable` is true when the branch could not be read at all, so
+ * the caller does not claim the clone is on an unmerged branch.
  * Returns null when it does not apply, else { outcome, warning, context } with outcome
  * 'off-base', 'skipped', 'refused-older', 'failed' or 'synced'.
  */
@@ -375,7 +382,7 @@ export async function cloneAgentSync({ root, project, behind = [], host = 'claud
   const t = hostText(host);
   if (!cloneAgentSyncApplies(root, project)) return null;
   const checkedOut = cloneBranchState(root);
-  if (!checkedOut.onBase) return { outcome: 'off-base', warning: '', context: '', clause: checkedOut.clause };
+  if (!checkedOut.onBase) return { outcome: 'off-base', warning: '', context: '', clause: checkedOut.clause, unreadable: checkedOut.unreadable === true };
   const markerPath = join(project, SYNC_MARKER_REL);
   let previous = null;
   try {

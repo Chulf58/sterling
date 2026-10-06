@@ -9,7 +9,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, symlinkSync, realpathSync, readdirSync, lstatSync, statSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -190,6 +190,8 @@ test('enableMarketplaceAutoUpdate reads <CLAUDE_CONFIG_DIR>/settings.json, else 
   const home = tmp('sterling-cut-home-');
   mkdirSync(join(home, '.claude'));
   writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ extraKnownMarketplaces: { sterling: { source: SRC } } }));
+  mkdirSync(join(home, '.claude', 'plugins'));
+  writeFileSync(join(home, '.claude', 'plugins', 'known_marketplaces.json'), '{}');
   const r = enableMarketplaceAutoUpdate({ env: {}, home });
   assert.equal(r.status, 'written');
   assert.equal(r.path, join(home, '.claude', 'settings.json'));
@@ -203,7 +205,7 @@ test('2a: a settings entry without autoUpdate gets autoUpdate: true, its source 
     enabledPlugins: { 'sterling@sterling': true },
     extraKnownMarketplaces: { other: { source: { source: 'github', repo: 'a/b' }, autoUpdate: false }, sterling: { source: SRC } },
   };
-  const cfg = configDir(settings);
+  const cfg = configDir(settings, {});
   const r = run(cfg);
   assert.equal(r.status, 'written');
   assert.equal(r.path, settingsOf(cfg));
@@ -213,12 +215,12 @@ test('2a: a settings entry without autoUpdate gets autoUpdate: true, its source 
   assert.ok(r.line.includes(fwd(settingsOf(cfg))), r.line);
   assert.match(r.line, /extraKnownMarketplaces\.sterling\.autoUpdate/);
   assert.match(r.line, /next session/);
-  assert.deepEqual(readdirSync(cfg), ['settings.json'], 'no temp file left behind');
+  assert.deepEqual(readdirSync(cfg).sort(), ['plugins', 'settings.json'], 'no temp file left behind');
 });
 
 test('2a: a write keeps CRLF line endings and a missing trailing newline, and drops a leading BOM', () => {
   const body = JSON.stringify({ extraKnownMarketplaces: { sterling: { source: SRC } } }, null, 2).replace(/\n/g, '\r\n');
-  const cfg = configDir('﻿' + body);
+  const cfg = configDir('﻿' + body, {});
   assert.equal(run(cfg).status, 'written');
   const raw = readFileSync(settingsOf(cfg), 'utf8');
   assert.ok(!raw.startsWith('﻿'), 'the BOM is not written back');
@@ -257,7 +259,7 @@ test('2b: a known_marketplaces.json sterling entry with no source object writes 
 });
 
 test('2c: neither file knows sterling: nothing is written and the line gives the /plugin steps', () => {
-  for (const cfg of [configDir({ model: 'opus' }), configDir({ model: 'opus' }, {}), configDir({ model: 'opus' }, { other: { source: SRC } })]) {
+  for (const cfg of [configDir({ model: 'opus' }, {}), configDir({ model: 'opus' }, { other: { source: SRC } })]) {
     const before = readFileSync(settingsOf(cfg), 'utf8');
     const r = run(cfg);
     assert.equal(r.status, 'no-entry');
@@ -309,6 +311,95 @@ test('already on through known_marketplaces.json only (the toggle was used, sett
 test('the settings value outranks the known one: a settings autoUpdate: true is on even when known says false', () => {
   const cfg = configDir({ extraKnownMarketplaces: { sterling: { source: SRC, autoUpdate: true } } }, { sterling: { source: SRC, autoUpdate: false } });
   assert.equal(run(cfg).status, 'already-on');
+});
+
+test('a missing known_marketplaces.json writes nothing, with or without a settings entry: the line names that file and the manual step', () => {
+  for (const settings of [{ extraKnownMarketplaces: { sterling: { source: SRC } } }, { model: 'opus' }]) {
+    const cfg = configDir(settings);
+    const before = readFileSync(settingsOf(cfg), 'utf8');
+    const r = run(cfg);
+    assert.equal(r.status, 'known-missing');
+    assert.equal(readFileSync(settingsOf(cfg), 'utf8'), before, 'settings untouched');
+    assert.deepEqual(readdirSync(cfg), ['settings.json'], 'nothing created');
+    assert.ok(!r.line.includes('\n'), 'one line');
+    assert.ok(r.line.includes(fwd(join(cfg, 'plugins', 'known_marketplaces.json'))), r.line);
+    assert.match(r.line, /does not exist/);
+    assert.match(r.line, /Enable auto-update/);
+  }
+});
+
+// The write goes to the file the path really names, so a settings.json kept as a symlink
+// (a dotfiles checkout) stays a link and its target gets the new content.
+function linkedConfigDir(settings) {
+  const cfg = configDir(undefined, {});
+  const store = tmp('sterling-cut-dotfiles-');
+  const target = join(store, 'claude-settings.json');
+  if (settings !== undefined) writeFileSync(target, JSON.stringify(settings));
+  symlinkSync(target, settingsOf(cfg));
+  return { cfg, store, target };
+}
+
+test('a symlinked settings.json stays a symlink and its target gets the new content; no temp file is left in either directory', () => {
+  const { cfg, store, target } = linkedConfigDir({ model: 'opus', extraKnownMarketplaces: { sterling: { source: SRC } } });
+  const r = run(cfg);
+  assert.equal(r.status, 'written');
+  assert.ok(lstatSync(settingsOf(cfg)).isSymbolicLink(), 'the link is still a link');
+  assert.ok(lstatSync(target).isFile(), 'the target is still a regular file');
+  assert.deepEqual(JSON.parse(readFileSync(target, 'utf8')), { model: 'opus', extraKnownMarketplaces: { sterling: { source: SRC, autoUpdate: true } } });
+  assert.deepEqual(readdirSync(store), ['claude-settings.json'], 'no temp file beside the target');
+  assert.deepEqual(readdirSync(cfg).sort(), ['plugins', 'settings.json'], 'no temp file beside the link');
+  assert.ok(r.line.includes(fwd(settingsOf(cfg))), r.line);
+});
+
+test('a write keeps the settings file\'s mode: a 0600 file stays 0600, directly and through a symlink', () => {
+  const direct = configDir({ extraKnownMarketplaces: { sterling: { source: SRC } } }, {});
+  chmodSync(settingsOf(direct), 0o600);
+  assert.equal(run(direct).status, 'written');
+  assert.equal(statSync(settingsOf(direct)).mode & 0o777, 0o600);
+
+  const { cfg, target } = linkedConfigDir({ extraKnownMarketplaces: { sterling: { source: SRC } } });
+  chmodSync(target, 0o640);
+  assert.equal(run(cfg).status, 'written');
+  assert.equal(statSync(target).mode & 0o777, 0o640);
+});
+
+test('a dangling settings.json symlink: nothing is written, the link is left as it is and its target is not created', () => {
+  const { cfg, store, target } = linkedConfigDir(undefined);
+  const r = run(cfg);
+  assert.equal(r.status, 'settings-missing');
+  assert.ok(lstatSync(settingsOf(cfg)).isSymbolicLink());
+  assert.ok(!existsSync(target), 'the target is not created');
+  assert.deepEqual(readdirSync(store), []);
+  assert.match(r.line, /Enable auto-update/);
+
+  // The same link, with the read answered from elsewhere: the real path still cannot be
+  // resolved, so the write step itself refuses.
+  const readFile = (p, enc) => (p === settingsOf(cfg) ? JSON.stringify({ extraKnownMarketplaces: { sterling: { source: SRC } } }) : readFileSync(p, enc));
+  const second = run(cfg, { readFile });
+  assert.equal(second.status, 'settings-unwritable');
+  assert.ok(lstatSync(settingsOf(cfg)).isSymbolicLink(), 'the link is not replaced by a regular file');
+  assert.ok(!existsSync(target), 'the target is not created');
+  assert.deepEqual(readdirSync(store), []);
+  assert.deepEqual(readdirSync(cfg).sort(), ['plugins', 'settings.json'], 'no temp file left behind');
+  assert.ok(!second.line.includes('\n'), 'one line');
+  assert.match(second.line, /ENOENT/);
+  assert.match(second.line, /Enable auto-update/);
+});
+
+test('a failed write or rename is settings-unwritable: the file is byte-identical, no temp file is left, and the line carries only the error code', () => {
+  const fail = (code) => () => { const e = new Error(`${code}: operation failed, open /secret/path\nline two`); e.code = code; throw e; };
+  for (const [what, extra, code] of [['writeFile', { writeFile: fail('EACCES') }, 'EACCES'], ['rename', { rename: fail('EXDEV') }, 'EXDEV']]) {
+    const cfg = configDir({ extraKnownMarketplaces: { sterling: { source: SRC } } }, {});
+    const before = readFileSync(settingsOf(cfg), 'utf8');
+    const r = run(cfg, extra);
+    assert.equal(r.status, 'settings-unwritable', what);
+    assert.equal(readFileSync(settingsOf(cfg), 'utf8'), before, `${what}: untouched`);
+    assert.deepEqual(readdirSync(cfg).sort(), ['plugins', 'settings.json'], `${what}: no temp file left behind`);
+    assert.ok(r.line.includes(code), r.line);
+    assert.ok(!r.line.includes('operation failed') && !r.line.includes('/secret/path') && !r.line.includes('\n'), r.line);
+    assert.ok(r.line.includes(fwd(settingsOf(cfg))), r.line);
+    assert.match(r.line, /Enable auto-update/);
+  }
 });
 
 test('a missing settings.json is not created: nothing is written and the line names the file and the manual step', () => {
@@ -517,9 +608,8 @@ test('cloneCleanupLines: a clone directory holding its own .sterling/sterling.db
 // under <CLAUDE_CONFIG_DIR>/plugins/cache (isInstalledCopy's second signal), so a
 // config dir whose plugins/cache symlinks to this checkout's parent makes the real
 // init run the installed branch with no copy of the tree.
-function installedConfigDir(settings) {
-  const cfg = configDir(settings);
-  mkdirSync(join(cfg, 'plugins'));
+function installedConfigDir(settings, known = {}) {
+  const cfg = configDir(settings, known);
   symlinkSync(dirname(realpathSync(REPO)), join(cfg, 'plugins', 'cache'));
   return cfg;
 }
