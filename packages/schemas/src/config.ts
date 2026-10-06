@@ -533,7 +533,7 @@ export const configSchema = z.object({
   // S1): any other value is PRESERVED raw, never coerced to hobby and never
   // thrown on — a typo here must not turn every parseConfig reader (the MCP
   // server's boot included) into a startup failure. The strict judge is
-  // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
+  // readProjectMode() in packages/schemas/src/project.ts (re-exported by scripts/lib/handoff-projection.mjs), which every
   // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
   // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
   // Consumers of the PARSED config must narrow this field themselves.

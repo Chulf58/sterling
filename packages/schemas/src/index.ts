@@ -75,3 +75,5 @@ export { projectRegistrationSchema } from './registry.js';
 export type { ProjectRegistration } from './registry.js';
 export { BUILD_ID_FILE, runtimeMarkerSchema, buildIdPath, runtimeMarkerPath, stalenessVerdict } from './staleness.js';
 export type { RuntimeMarker, StalenessVerdict } from './staleness.js';
+export { PROJECT_MODES, ProjectModeError, ProjectIdentityError, PROJECT_IDENTITY_REL, readProjectMode, readProjectIdentity, isProjectId } from './project.js';
+export type { ProjectMode } from './project.js';
