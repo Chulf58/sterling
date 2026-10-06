@@ -20303,13 +20303,60 @@ function onEvaluate(request) {
 init_dist2();
 import { basename as basename4, dirname as dirname18 } from "node:path";
 var BUSY_TIMEOUT_MS = 1e3;
-function openProjectStore(dbPath) {
+function projectRootOf(dbPath) {
   const sterlingDir = dirname18(dbPath);
-  if (basename4(dbPath) === "sterling.db" && basename4(sterlingDir) === ".sterling") {
-    const root = dirname18(sterlingDir);
-    if (storeBackend(root) === "routed") return openRoutedStores(root).store;
-  }
+  if (basename4(dbPath) === "sterling.db" && basename4(sterlingDir) === ".sterling") return dirname18(sterlingDir);
+  return null;
+}
+function openProjectStore(dbPath) {
+  const root = projectRootOf(dbPath);
+  if (root !== null && storeBackend(root) === "routed") return openRoutedStores(root).store;
   return new SterlingStore(dbPath, { busyTimeoutMs: BUSY_TIMEOUT_MS });
+}
+function bridgeGone(e) {
+  return e instanceof PgWorkerDiedError || e instanceof PgBridgeTimeoutError || e instanceof PgBridgeClosedError;
+}
+function createProjectStores({ openRouted = (root) => openRoutedStores(root).store, backend = storeBackend } = {}) {
+  const held = /* @__PURE__ */ new Map();
+  function drop(root, store) {
+    if (held.get(root)?.store !== store) return;
+    held.delete(root);
+    store.close();
+  }
+  function view(root, store) {
+    return new Proxy(store, {
+      get(target, prop) {
+        if (prop === "close") return () => {
+        };
+        const value = Reflect.get(target, prop, target);
+        if (typeof value !== "function") return value;
+        return (...args) => {
+          try {
+            return value.apply(target, args);
+          } catch (e) {
+            if (bridgeGone(e)) drop(root, target);
+            throw e;
+          }
+        };
+      }
+    });
+  }
+  function open2(dbPath) {
+    const root = projectRootOf(dbPath);
+    if (root === null || backend(root) !== "routed") return new SterlingStore(dbPath, { busyTimeoutMs: BUSY_TIMEOUT_MS });
+    let entry = held.get(root);
+    if (!entry) {
+      const store = openRouted(root);
+      entry = { store, view: view(root, store) };
+      held.set(root, entry);
+    }
+    return entry.view;
+  }
+  function release(root) {
+    const entry = held.get(root);
+    if (entry) drop(root, entry.store);
+  }
+  return { open: open2, release };
 }
 
 // packages/opencode-plugin/src/sync.mjs
@@ -20529,7 +20576,8 @@ function sameDirectory(a, b) {
   return { equal, unresolved };
 }
 function createSterlingServer(deps = {}) {
-  const openStore = deps.openStore ?? openProjectStore;
+  const projectStores = deps.openStore ? null : deps.projectStores ?? createProjectStores();
+  const openStore = deps.openStore ?? projectStores.open;
   const now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
   const env = deps.env ?? process.env;
   const swept = /* @__PURE__ */ new Set();
@@ -20705,7 +20753,11 @@ function createSterlingServer(deps = {}) {
           }
         }
       })();
-      return () => abort.abort();
+      return () => {
+        abort.abort();
+        const cleanupRoot = rootOf();
+        if (cleanupRoot) projectStores?.release(cleanupRoot);
+      };
     }
     return { handlers, bind, idle: () => chain };
   }
@@ -20749,6 +20801,7 @@ export {
   NOTICES_REL,
   PLUGIN_ID,
   addNotice,
+  createProjectStores,
   createSterlingServer,
   server_default as default,
   defaultTemplatePath,
