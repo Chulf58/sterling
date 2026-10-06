@@ -10,6 +10,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_REL, knowledgeWriteSchema, matchesGlob } from '@sterling/schemas';
 import { SterlingStore, resolveDomainMounts } from '@sterling/store';
+import { openRoutedStores } from '@sterling/store/routing';
 import { isForeignTree } from './working-tree.mjs';
 
 // Register timestamps are compared LEXICALLY, so only a canonical ISO stamp is
@@ -127,6 +128,10 @@ export function openDutyRecords(store, config, { opener = (dbPath) => new Sterli
   const mounted = () => {
     if (domains === null) {
       domains = [];
+      if (config.storage === 'postgres') {
+        domains = routedDutyDomains(config, root, unreadable);
+        return domains;
+      }
       for (const m of resolveDomainMounts(config)) {
         if (!existsSync(m.dbPath)) continue;
         try {
@@ -178,6 +183,44 @@ export function openDutyRecords(store, config, { opener = (dbPath) => new Sterli
       return errors;
     },
   };
+}
+
+/**
+ * openDutyRecords' domains for a Postgres-storage project: every configured
+ * domain, read through one routed MountedStores at `root`. Nothing is skipped
+ * as missing (the router names a missing domain), and a failure is never
+ * silent: when the stores cannot be opened every configured domain is reported
+ * through `unreadable` with the named error and counts as holding nothing, so
+ * the duty stays armed exactly as for an unreadable SQLite domain. A domain
+ * whose read fails later is reported by openDutyRecords' query the same way.
+ */
+function routedDutyDomains(config, root, unreadable) {
+  // Postgres domains are named by stack_tags alone; domain_paths names SQLite files.
+  const names = [...(config.stack_tags ?? [])];
+  if (!names.length) return [];
+  let stores;
+  try {
+    if (typeof root !== 'string') throw new Error("config.storage is 'postgres', so the project root is required to read its domain stores");
+    ({ stores } = openRoutedStores(root, { mount: true }));
+  } catch (e) {
+    const named = new Error(`${e?.constructor?.name ?? e?.name ?? 'Error'}: ${(e && e.message) || e}`);
+    for (const name of names) unreadable(name, named);
+    return [];
+  }
+  // One handle serves every domain. Each domain's close releases its share, and
+  // the handle closes with the last one, so dropping one failed domain leaves
+  // the others readable.
+  let shares = names.length;
+  return names.map((name) => {
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      shares -= 1;
+      if (shares === 0) stores.close();
+    };
+    return { name, store: { query: (opts) => stores.querySource(name, opts), close } };
+  });
 }
 
 /** A record created or updated at or after `since` (lexical compare of canonical stamps). */

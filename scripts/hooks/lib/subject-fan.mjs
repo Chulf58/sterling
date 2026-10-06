@@ -18,16 +18,26 @@
 //   file_keys name files in other repos, so they must never drive path delivery
 //   here (the hazard the decision's sparring round recorded).
 // - Every record returned carries source_store: 'project' or the domain name.
-//   The key is not a record field (todo records already own `source`).
+//   The key is not a record field (todo records already own `source`). The one
+//   exception is inboundSupersedes on Postgres storage (see openRoutedSubjectFan).
 // What it does NOT do: write, read board or queue state, or fan articlesBySlug
 // (feature articles are project-scoped and never promote).
+//
+// POSTGRES STORAGE (lib/store-backend.mjs says 'routed'): the stores open through
+// @sterling/store/routing as one MountedStores, and nothing is skipped or dropped.
+// A missing or unreadable domain, an unreachable server or missing credentials
+// throws a named error (DomainUnavailableError, StoreUnreachableError, ...)
+// instead of landing on missingDomains/unreadableDomains, and the caller's
+// degraded path reports it. The opener argument is not used there.
 //
 // Hooks bundle this module: builtins, sibling libs and @sterling/* only.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseConfig } from '@sterling/schemas';
 import { SterlingStore, resolveDomainMounts, allocateShares, DEFAULT_QUERY_CAP, DOMAIN_DESCRIPTION_KEY } from '@sterling/store';
+import { openRoutedStores } from '@sterling/store/routing';
 import { loadConfig } from './common.mjs';
+import { storeBackend } from './store-backend.mjs';
 
 const defaultOpener = (dbPath) => new SterlingStore(dbPath);
 
@@ -60,6 +70,7 @@ const errorText = (e) => String((e && e.message) || e);
  * failure to open the PROJECT store throws.
  */
 export function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
+  if (storeBackend(cwd) === 'routed') return openRoutedSubjectFan(cwd);
   const projectPath = join(cwd, '.sterling', 'sterling.db');
   if (!existsSync(projectPath)) return null;
   let mounts = [];
@@ -153,6 +164,47 @@ export function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
 }
 
 /**
+ * The subject fan of a Postgres-storage project: the same surface as
+ * openSubjectFan, over routed MountedStores. Never null (a routed project is a
+ * Sterling project) and never degraded: missingDomains, unreadableDomains and
+ * configError stay empty, because every such case throws by name instead. A
+ * config that names storage 'postgres' but fails the router's checks throws
+ * StoreSettingsError the same way.
+ */
+function openRoutedSubjectFan(cwd) {
+  const { stores } = openRoutedStores(cwd, { mount: true });
+  const project = stores.project;
+  return {
+    project,
+    get domainNames() {
+      return stores.domainNames();
+    },
+    missingDomains: [],
+    unreadableDomains: [],
+    configError: null,
+    query(opts = {}) {
+      if (opts.file_keys !== undefined || !stores.domainNames().length) return tag(project.query(opts), 'project');
+      const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+      const perStore = stores.bySource({ ...opts, cap });
+      const shares = allocateShares(perStore.map((s) => s.records.length), cap);
+      return perStore.flatMap((s, i) => tag(s.records.slice(0, shares[i]), s.source));
+    },
+    /** MountedStores' own merge (project first, first seen wins). These records carry no
+     *  source_store: MountedStores does not say which mount held each edge, and the one
+     *  reader (delivery.mjs withInboundSupersedes) keeps only id, slug, title and status. */
+    inboundSupersedes(id) {
+      return stores.inboundSupersedes(id);
+    },
+    articlesBySlug(slug) {
+      return project.articlesBySlug(slug);
+    },
+    close() {
+      stores.close();
+    },
+  };
+}
+
+/**
  * The one loud line for a degraded fan, or null when nothing degraded: the
  * config error, then every unreadable domain with its path and error. `who`
  * names the hook. Delivery from the project store is unaffected.
@@ -183,8 +235,14 @@ export function warnFanDegraded(fan, who) {
  * 'undescribed' (the store exists but has no description), 'missing' (no store;
  * never created here) or 'unreadable' (the store or its description could not be
  * read; `error` says why). Throws only when the config's domain fields are malformed.
+ *
+ * With config.storage 'postgres' the domains are read through the router at
+ * `root` (required there): a domain is 'described' or 'undescribed', and when
+ * the stores cannot be opened every configured domain is 'unreadable' with the
+ * named error. A Postgres domain is never 'missing' and never skipped.
  */
-export function describeMountedDomains(config, { opener = defaultOpener } = {}) {
+export function describeMountedDomains(config, { opener = defaultOpener, root } = {}) {
+  if (config?.storage === 'postgres') return describeRoutedDomains(config, root);
   return domainMountsFromConfig(config).map((m) => {
     if (!existsSync(m.dbPath)) return { name: m.name, dbPath: m.dbPath, state: 'missing' };
     let store;
@@ -199,3 +257,31 @@ export function describeMountedDomains(config, { opener = defaultOpener } = {}) 
     }
   });
 }
+
+function describeRoutedDomains(config, root) {
+  const names = domainMountsFromConfig(config).map((m) => m.name);
+  if (!names.length) return [];
+  if (typeof root !== 'string') throw new Error("describeMountedDomains: config.storage is 'postgres', so the project root is required to read its domains");
+  let stores;
+  try {
+    ({ stores } = openRoutedStores(root, { mount: true }));
+  } catch (e) {
+    const error = namedText(e);
+    return names.map((name) => ({ name, dbPath: `postgres (domain '${name}')`, state: 'unreadable', error }));
+  }
+  try {
+    return names.map((name) => {
+      const dbPath = `postgres (domain '${name}')`;
+      try {
+        const description = stores.domainDescription(name);
+        return description ? { name, dbPath, state: 'described', description } : { name, dbPath, state: 'undescribed' };
+      } catch (e) {
+        return { name, dbPath, state: 'unreadable', error: namedText(e) };
+      }
+    });
+  } finally {
+    stores.close();
+  }
+}
+
+const namedText = (e) => `${e?.constructor?.name ?? e?.name ?? 'Error'}: ${errorText(e)}`;

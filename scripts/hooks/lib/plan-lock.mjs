@@ -26,8 +26,9 @@
 // what the harness hands it, so this only bites a hand-symlinked setup, and the
 // remedy is to lock the resolved path (plan-lock.mjs --plan <real path>).
 import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, constants as FS, existsSync, fstatSync, mkdirSync, openSync, readSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants as FS, fstatSync, mkdirSync, openSync, readSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isSterlingRoot } from './store-backend.mjs';
 
 // A plan path is attacker-influenceable input and is never read blind: a FIFO
 // would hang the reader (SessionStart, in H1's case), a directory or device
@@ -54,18 +55,19 @@ export function isAbsolutePlanPath(p) {
 }
 
 /**
- * A Sterling project is one holding .sterling/sterling.db — the SAME predicate
- * scripts/lib/project.mjs's resolveProject() and the hooks' own
- * lib/common.mjs projectRoot() use. A bare .sterling DIRECTORY is NOT a
- * project: ~/.sterling exists on every machine and holds the domain stores.
- * The predicate is reimplemented here rather than imported so this module stays
- * bundleable into every hook with no workspace dependency (invariant 4) —
- * project.mjs would drag @sterling/schemas and @sterling/store into the bundle,
- * and openProject() opens a write-locking store connection just to answer an
- * existence question.
+ * A Sterling project is one holding .sterling/config.json or
+ * .sterling/sterling.db — the SAME predicate the hooks' own lib/common.mjs
+ * projectRoot() anchors on (lib/store-backend.mjs isSterlingRoot): a project
+ * whose stores live in Postgres has a config and no SQLite file. A bare
+ * .sterling DIRECTORY is NOT a project: ~/.sterling exists on every machine
+ * and holds the domain stores. The predicate comes from a dependency-free
+ * sibling rather than scripts/lib/project.mjs so this module stays bundleable
+ * into every hook with no workspace dependency (invariant 4) — project.mjs
+ * would drag @sterling/schemas and @sterling/store into the bundle, and
+ * openProject() opens a store connection just to answer an existence question.
  */
 export function isSterlingProject(cwd) {
-  return typeof cwd === 'string' && existsSync(join(cwd, '.sterling', 'sterling.db'));
+  return isSterlingRoot(cwd);
 }
 
 export function sterlingDirOf(cwd) {

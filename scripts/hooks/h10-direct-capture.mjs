@@ -33,7 +33,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, writeSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { readStdin, deny, allow, exitAfterWrite, openStore, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
+import { readStdin, deny, allow, exitAfterWrite, openStore, storeBackend, namedError, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
 import { withRegisterLock, classifyRegister, readRegister, formatDispatchRef, formatAge, registerPath as ownerRegisterPath } from '../lib/dispatch-register.mjs';
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { mintSettlementReconcile, withFileLock, parseTouchesContent, gitTouches, gitTrackedSubset, writeGitSettled, loadGeneratedProjections } from './lib/settlement.mjs';
@@ -228,7 +228,27 @@ const residueLines = await (async () => {
     return [];
   }
 })();
-const store = openStore(input.cwd);
+// STORE OPEN. SQLite storage keeps today's open: null (no store) allows, and a
+// throw is the baselined F5 debt below. A Postgres-storage project never reads
+// as "no store" (lib/common.mjs openStore): when its store cannot be opened
+// (an unreachable server, missing credentials or identity, a store that was
+// never moved) this gate FAILS CLOSED, naming the error, and writes nothing
+// (anti_pattern e13f0fb5). On the re-entered Stop (stop_hook_active) it
+// releases loudly instead, the same block-once posture as every other H10
+// duty, so an unreachable database can never trap the conductor.
+let store;
+if (storeBackend(input.cwd) === 'sqlite') {
+  store = openStore(input.cwd);
+} else {
+  try {
+    store = openStore(input.cwd);
+  } catch (e) {
+    const why = `H10: the project store could not be opened (${namedError(e)}), so the session-end duties cannot be checked.`;
+    if (residueLines.length) process.stderr.write(residueLines.join('\n\n') + '\n\n');
+    if (input.stop_hook_active) warnNonBlocking(`${why} Released because this Stop was already blocked once.\n`);
+    deny(`${why} Failing closed: fix the store connection (or move the stores back with \`node scripts/move-store.mjs --to sqlite\`), then stop again.\n`);
+  }
+}
 if (!store) {
   if (residueLines.length) process.stderr.write(residueLines.join('\n\n'));
   allow();

@@ -3,11 +3,11 @@
 // to .sterling/transient/session-events.json in direct mode.
 // Missing store: allow, no recording (fail-open, mirrors H7).
 // Never deduplicates: the register is a pure append log.
-import { readStdin, allow, warnNonBlocking, openStore } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, openStoreOrDegrade } from './lib/common.mjs';
 import { appendSessionEvent, researchToolEvent } from './lib/session-events.mjs';
 
 const input = readStdin();
-const store = openStore(input.cwd);
+const store = openStoreOrDegrade(input.cwd, 'H16');
 if (!store) allow();
 
 try {

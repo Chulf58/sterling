@@ -226,15 +226,16 @@ export function pendingIssueReportsLine({ cwd, pluginRoot }) {
  * are each a ⚠ line. No domain configured means no line. An unreadable config, or
  * malformed domain fields, is one UNKNOWN line, never silence. `opener(dbPath)`
  * opens a domain store (the OpenCode plugin passes its own); a store is opened
- * only when it already exists, never created. Never throws.
+ * only when it already exists, never created. `root` is the project root, which
+ * Postgres storage needs to reach its domains. Never throws.
  */
-export function mountedDomainLines({ config, configUnreadable, opener }) {
+export function mountedDomainLines({ config, configUnreadable, opener, root }) {
   if (configUnreadable) {
     return ['⚠ Mounted domains: UNKNOWN — the project config could not be read, so config.stack_tags (the domain list) could not be determined.'];
   }
   let domains;
   try {
-    domains = describeMountedDomains(config, opener ? { opener } : {});
+    domains = describeMountedDomains(config, opener ? { opener, root } : { root });
   } catch (e) {
     return [`⚠ Mounted domains: UNKNOWN — config.stack_tags or config.domain_paths is malformed (${(e && e.message) || e}).`];
   }
