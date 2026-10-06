@@ -12,10 +12,12 @@
 // re-upgrade the project on alternate sessions; the version order makes it
 // monotonic.
 //
-// INSTALLED COPIES ONLY (isInstalledCopy): on a git clone /sterling:update owns
-// these steps. The marker is written only after both steps succeed, so a failure
-// retries. Host 'claude' prints the bytes H1 printed before this extraction
-// (scripts/tests/post-update-sync.test.mjs pins them).
+// postUpdateSync is for INSTALLED COPIES ONLY (isInstalledCopy). The marker is
+// written only after both steps succeed, so a failure retries. Host 'claude' prints
+// the bytes H1 printed before this extraction (scripts/tests/post-update-sync.test.mjs
+// pins them). A git clone has no version trigger: H1 runs cloneAgentSync (below) when
+// its agent-currency check finds installed agents behind the clone's templates, and
+// that path never writes the marker. The OpenCode plugin does not call it.
 //
 // Builtins only: hooks and the OpenCode server bundle vendor this module.
 import { spawn, spawnSync } from 'node:child_process';
@@ -259,6 +261,93 @@ export async function postUpdateSync({ root, project, host = 'claude', runStep =
     warning,
     context:
       `\n\nPOST-UPDATE SYNC (${t.label}): ${hop} — ${restartLine}.` +
+      (result.restart ? ` ${t.restartLong}` : '') +
+      (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md/CLAUDE.md (text that was entirely absent; no existing wording was replaced): ${inserted.join('; ')}.` : '') +
+      (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : ''),
+  };
+}
+
+/** True when the clone agent sync applies: a git clone as plugin root and a project with .sterling/config.json. The clone itself is a project like any other. */
+export function cloneAgentSyncApplies(root, project) {
+  return Boolean(root) && !isInstalledCopy(root) && existsSync(join(project, '.sterling', 'config.json'));
+}
+
+// sync-agents status lines that changed a Claude agent file (agentChangesRequireRestart's
+// set). The portable `.opencode/agents/` copies print the same statuses and need no restart.
+const AGENT_CHANGED_LINE = /^(installed|refreshed|header_repaired|machine_rebaked|retired): (?!\.opencode\/)\S/;
+
+/**
+ * CLONE AGENT SYNC (user-ruled 2026-10-06 through the question form, "Sync at session
+ * start (Recommended)", current project only): the same two steps on a git clone, where
+ * plugin.json's version does not move between template edits and so cannot be the
+ * trigger. The CALLER decides that agents are behind (H1's agent-currency hash compare)
+ * and passes their file names as `behind`; this function only runs the steps and words
+ * the result. It never writes the sync marker, so an installed copy newer than the marker
+ * still runs its own sync and nothing here can make one skip it. The newest-copy-wins
+ * order still holds: a clone OLDER than the marker refuses, because a newer installed
+ * copy synced this project and a hash mismatch would otherwise downgrade its agents.
+ * Returns null when it does not apply, else { outcome, warning, context } with outcome
+ * 'skipped', 'refused-older', 'failed' or 'synced'.
+ */
+export async function cloneAgentSync({ root, project, behind = [], host = 'claude', runStep = runStepSync }) {
+  const t = hostText(host);
+  if (!cloneAgentSyncApplies(root, project)) return null;
+  const markerPath = join(project, SYNC_MARKER_REL);
+  let previous = null;
+  try {
+    previous = readFileSync(markerPath, 'utf8').trim() || null;
+  } catch {
+    // absent or unreadable: no installed copy has synced this project, so nothing can be downgraded
+  }
+  if (previous !== null && parseVersion(previous)) {
+    const current = readPluginVersion(root);
+    const order = current === null ? null : compareVersions(current, previous);
+    if (order === null) {
+      const manifest = join(root, '.claude-plugin', 'plugin.json');
+      return {
+        outcome: 'skipped',
+        warning: `⚠ Sterling clone agent sync SKIPPED — the clone's version (${manifest}) is unreadable or not semver, so it cannot be ordered against this project's sync marker ${previous}. `,
+        context: `\n\nCLONE AGENT SYNC (${t.label}): SKIPPED — ${manifest} carries no semver version, so this clone cannot be ordered against this project's sync marker ${previous} (${markerPath}) and syncing could downgrade its agents. Nothing was synced.`,
+      };
+    }
+    if (order < 0) {
+      return {
+        outcome: 'refused-older',
+        warning: `✗ Sterling clone ${current} is OLDER than this project's sync marker ${previous}: agent sync REFUSED, nothing downgraded — pull this clone. `,
+        context: `\n\nCLONE AGENT SYNC REFUSED (${t.label}): this Sterling clone is ${current}, older than this project's sync marker ${previous} (${markerPath}), which a newer installed Sterling wrote. Nothing was synced, so agents and templates are not downgraded. Tell the user to pull this clone (${root}).`,
+      };
+    }
+  }
+  let syncOut = '';
+  const result = await runPostUpdateSteps(root, project, async (r, name, args) => {
+    const step = await runStep(r, name, args);
+    if (name === 'sync-agents.mjs') syncOut = step.out ?? '';
+    return step;
+  });
+  const changed = syncOut.split('\n').map((l) => l.trim()).filter((l) => AGENT_CHANGED_LINE.test(l));
+  const were = behind.length ? ` (${behind.join(', ')})` : '';
+  if (!result.ok) {
+    // sync-agents refreshes the agents it can before it exits 2 for the one it refuses,
+    // so the restart is owed whenever it changed any.
+    const restart = Boolean(result.restart) || changed.length > 0;
+    return {
+      outcome: 'failed',
+      warning: `✗ Sterling clone: agent sync FAILED — ${result.detail}.${restart ? ` ${t.restartShort}.` : ''} `,
+      context:
+        `\n\nCLONE AGENT SYNC FAILED (${t.label}): this project's installed agents are behind the clone's templates${were} — ${result.detail}. Nothing records a clone sync, so it ${t.retry} while an installed agent is behind; tell the user and fix the cause.` +
+        (restart ? ` sync-agents DID change agents before the failure${changed.length ? ` (${changed.join('; ')})` : ''}: ${t.restartLong}` : ''),
+    };
+  }
+  const restartLine = result.restart ? t.restartShort : 'agents synced, none changed';
+  const inserted = result.inserted ?? [];
+  return {
+    outcome: 'synced',
+    warning:
+      `⚠ Sterling clone: installed agents were behind its templates${were} — ${restartLine}. ` +
+      (inserted.length ? `AGENTS.md/CLAUDE.md gained new Sterling text (${inserted.length} insert${inserted.length === 1 ? '' : 's'}). ` : ''),
+    context:
+      `\n\nCLONE AGENT SYNC (${t.label}): this project's installed agents were behind the clone's templates${were} — ${restartLine}.` +
+      (changed.length ? ` sync-agents reported: ${changed.join('; ')}.` : '') +
       (result.restart ? ` ${t.restartLong}` : '') +
       (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md/CLAUDE.md (text that was entirely absent; no existing wording was replaced): ${inserted.join('; ')}.` : '') +
       (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : ''),
