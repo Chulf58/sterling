@@ -42,8 +42,59 @@ export {
   JournalDemotionRefusedError,
   type SqliteDriverOptions,
 } from './sqlite-driver.js';
+export {
+  PgBridge,
+  PgBridgeClosedError,
+  PgBridgeTimeoutError,
+  PgConfigError,
+  PgQueryError,
+  PgWorkerDiedError,
+  DEFAULT_PG_CREDENTIALS_PATH,
+  DEFAULT_PG_WAIT_TIMEOUT_MS,
+  buildPgConnectionConfig,
+  readPgCredentials,
+  type PgBridgeOptions,
+  type PgConnectionConfig,
+  type PgQueryResult,
+} from './pg-bridge.js';
+export {
+  PgDriver,
+  PgNulCharacterError,
+  PgSchemaNameRefusedError,
+  PgSearchNotImplementedError,
+  PgStoreExistsError,
+  PgStoreMissingError,
+  PgUnsupportedError,
+  PG_LAYOUT_VERSION,
+  PG_META_SCHEMA,
+  assertSterlingSchemaName,
+  createPgStore,
+  ensurePgLayout,
+  pgDialect,
+  pgDomainSchemaName,
+  pgProjectSchemaName,
+  type CreatePgStoreInput,
+  type PgDriverOptions,
+  type PgStoreKind,
+} from './pg-driver.js';
 import type { StoreDriver } from './driver.js';
 import { SqliteDriver } from './sqlite-driver.js';
+
+/** Opens the driver for a store path when SterlingStore is given none. */
+export type StoreDriverFactory = (path: string, options: { busyTimeoutMs?: number }) => StoreDriver;
+
+let storeDriverFactory: StoreDriverFactory | undefined;
+
+/**
+ * Test seam: route every `new SterlingStore(path)` that passes no driver
+ * through `factory` (undefined restores the SQLite default). The store tests
+ * use it to run against Postgres (src/tests/pg-test-setup.ts, STERLING_TEST_PG=1);
+ * no production entry calls it. Choosing the backend in production is issue 26
+ * item 5 (mode routing).
+ */
+export function setStoreDriverFactory(factory: StoreDriverFactory | undefined): void {
+  storeDriverFactory = factory;
+}
 
 /** The verdict on ONE claimed repo-relative path (decision
  *  [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]). */
@@ -1163,6 +1214,9 @@ export class SterlingStore {
       throw new Error(
         'SterlingStore: busyTimeoutMs configures the SQLite driver this store opens itself; it cannot be combined with an injected driver — set it on that driver.'
       );
+    }
+    if (options.driver === undefined && storeDriverFactory !== undefined) {
+      options = { driver: storeDriverFactory(path, { busyTimeoutMs: options.busyTimeoutMs }) };
     }
     this.db = options.driver ?? new SqliteDriver(path, { busyTimeoutMs: options.busyTimeoutMs });
 
@@ -2970,9 +3024,12 @@ export class SterlingStore {
    * source), which may sit in a different store than the target.
    */
   inboundSupersedes(id: string): DurableRecord[] {
+    // No DISTINCT: (source_id, rel, target_id) is the primary key, so with rel
+    // and target_id fixed each source appears once. Postgres also refuses
+    // DISTINCT with an ORDER BY term outside the select list.
     const rows = this.db
       .prepare(
-        `SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`
+        `SELECT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`
       )
       .all(id) as { source_id: string }[];
     return rows.map((r) => this.get(r.source_id)).filter((r): r is DurableRecord => r !== undefined);
