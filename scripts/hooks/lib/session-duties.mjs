@@ -10,7 +10,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_REL, knowledgeWriteSchema, matchesGlob } from '@sterling/schemas';
 import { SterlingStore, resolveDomainMounts } from '@sterling/store';
-import { openRoutedStores } from '@sterling/store/routing';
+import { openRoutedForHook } from './broker-client.mjs';
 import { isForeignTree } from './working-tree.mjs';
 
 // Register timestamps are compared LEXICALLY, so only a canonical ISO stamp is
@@ -201,7 +201,7 @@ function routedDutyDomains(config, root, unreadable) {
   let stores;
   try {
     if (typeof root !== 'string') throw new Error("config.storage is 'postgres', so the project root is required to read its domain stores");
-    ({ stores } = openRoutedStores(root, { mount: true }));
+    ({ stores } = openRoutedForHook(root, { mount: true }));
   } catch (e) {
     const named = new Error(`${e?.constructor?.name ?? e?.name ?? 'Error'}: ${(e && e.message) || e}`);
     for (const name of names) unreadable(name, named);

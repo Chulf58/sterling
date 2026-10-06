@@ -5,7 +5,8 @@ import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { normalizeRepoPath, toRepoRelative } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
-import { openRoutedStores, resolveStoreRoute } from '@sterling/store/routing';
+import { resolveStoreRoute } from '@sterling/store/routing';
+import { openRoutedForHook } from './broker-client.mjs';
 import { isSterlingRoot, storeBackend } from './store-backend.mjs';
 
 export { storeBackend } from './store-backend.mjs';
@@ -379,7 +380,9 @@ export function withRetry(fn) {
  * SQLite storage (lib/store-backend.mjs storeBackend): today's open exactly —
  * the file at .sterling/sterling.db, or null when it is absent.
  *
- * Postgres storage goes through @sterling/store/routing and NEVER returns null:
+ * Postgres storage goes through the session's hook store broker when one
+ * answers, else its own connection after a DEGRADED line (lib/broker-client.mjs
+ * openRoutedForHook), and NEVER returns null:
  * a project whose config says 'postgres' is a Sterling project, so "no store"
  * there would be a silent allow. Every failure throws a named error
  * (StoreUnreachableError, StoreSettingsError, ProjectIdentityError,
@@ -392,7 +395,7 @@ export function withRetry(fn) {
 export function openStore(cwd) {
   if (storeBackend(cwd) === 'routed') {
     const route = resolveStoreRoute(cwd);
-    if (route?.storage === 'postgres') return openRoutedStores(cwd).store;
+    if (route?.storage === 'postgres') return openRoutedForHook(cwd).store;
   }
   const p = join(cwd, '.sterling', 'sterling.db');
   return existsSync(p) ? new SterlingStore(p) : null;

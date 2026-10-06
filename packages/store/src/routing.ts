@@ -54,6 +54,8 @@ import { PG_META_SCHEMA, PgDriver, PgStoreMissingError, assertSterlingSchemaName
 export { ProjectModeError, ProjectIdentityError } from '@sterling/schemas';
 export { DomainUnavailableError, type MountedStoresOptions, type WorkStoreOpeners } from './mounted.js';
 export { PgStoreMissingError } from './pg-driver.js';
+// The hook store broker's runtime files (decision hook-store-broker-whole-method-rpc-over-local-socket).
+export * from './broker-runtime.js';
 
 /** The connect timeout every routed Postgres open uses at most (design point 6). A lower value in the credentials file is kept. */
 export const ROUTED_CONNECT_TIMEOUT_MS = 2000;

@@ -297,7 +297,11 @@ test("the COMMITTED plugin wiring resolves with no placeholder left: ${CLAUDE_PL
     const entry = JSON.parse(resolved).mcpServers.sterling;
     assert.equal(entry.command, 'node');
     assert.ok(entry.args.includes(`${fx.plugin}/mcp/sterling-mcp.mjs`), `the bundle resolves under the plugin root: ${entry.args}`);
-    assert.ok(entry.args.includes(`${fx.project}/.sterling/sterling.db`), `the store resolves under the project: ${entry.args}`);
+    // The committed wiring launches with --project <root> (89fa1568: routing picks
+    // SQLite or Postgres from the project's config), so the project the store
+    // resolves under is the value that follows --project, and no --store path is passed.
+    assert.equal(entry.args[entry.args.indexOf('--project') + 1], fx.project, `the store resolves under the project: ${entry.args}`);
+    assert.ok(!entry.args.includes('--store'), `no SQLite --store path is passed: ${entry.args}`);
   } finally {
     fx.cleanup();
   }

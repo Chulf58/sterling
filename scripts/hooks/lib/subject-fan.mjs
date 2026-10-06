@@ -35,7 +35,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseConfig } from '@sterling/schemas';
 import { SterlingStore, resolveDomainMounts, allocateShares, DEFAULT_QUERY_CAP, DOMAIN_DESCRIPTION_KEY } from '@sterling/store';
-import { openRoutedStores } from '@sterling/store/routing';
+import { openRoutedForHook } from './broker-client.mjs';
 import { loadConfig } from './common.mjs';
 import { storeBackend } from './store-backend.mjs';
 
@@ -172,7 +172,7 @@ export function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
  * StoreSettingsError the same way.
  */
 function openRoutedSubjectFan(cwd) {
-  const { stores } = openRoutedStores(cwd, { mount: true });
+  const { stores } = openRoutedForHook(cwd, { mount: true });
   const project = stores.project;
   return {
     project,
@@ -264,7 +264,7 @@ function describeRoutedDomains(config, root) {
   if (typeof root !== 'string') throw new Error("describeMountedDomains: config.storage is 'postgres', so the project root is required to read its domains");
   let stores;
   try {
-    ({ stores } = openRoutedStores(root, { mount: true }));
+    ({ stores } = openRoutedForHook(root, { mount: true }));
   } catch (e) {
     const error = namedText(e);
     return names.map((name) => ({ name, dbPath: `postgres (domain '${name}')`, state: 'unreadable', error }));

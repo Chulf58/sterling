@@ -34,6 +34,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, writeSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { readStdin, deny, allow, exitAfterWrite, openStore, storeBackend, namedError, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
+import { onBrokerFailure } from './lib/broker-client.mjs';
 import { withRegisterLock, classifyRegister, readRegister, formatDispatchRef, formatAge, registerPath as ownerRegisterPath } from '../lib/dispatch-register.mjs';
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { mintSettlementReconcile, withFileLock, parseTouchesContent, gitTouches, gitTrackedSubset, writeGitSettled, loadGeneratedProjections } from './lib/settlement.mjs';
@@ -248,6 +249,14 @@ if (storeBackend(input.cwd) === 'sqlite') {
     if (input.stop_hook_active) warnNonBlocking(`${why} Released because this Stop was already blocked once.\n`);
     deny(`${why} Failing closed: fix the store connection (or move the stores back with \`node scripts/move-store.mjs --to sqlite\`), then stop again.\n`);
   }
+  // After the open: a broker or store failure in ANY later call ends the hook
+  // the same way (decision hook-store-broker-whole-method-rpc-over-local-socket,
+  // point 6), even inside the duty steps that guard their own store calls.
+  onBrokerFailure((e) => {
+    const why = `H10: the project store failed during the session-end duties (${namedError(e)}).`;
+    if (input.stop_hook_active) warnNonBlocking(`${why} Released because this Stop was already blocked once.\n`);
+    deny(`${why} Failing closed: fix the store connection or the hook store broker, then stop again.\n`);
+  });
 }
 if (!store) {
   if (residueLines.length) process.stderr.write(residueLines.join('\n\n'));
@@ -2909,6 +2918,17 @@ try {
     store.recordCheckSkipped('h10-stop-duties', String((e && e.message) || e), undefined, new Date().toISOString());
   } catch {
     // store itself is the casualty — the warn below is the remaining loud signal
+  }
+  // Postgres storage: a broker or store failure after the store opened gets the
+  // same treatment as an open failure (decision
+  // hook-store-broker-whole-method-rpc-over-local-socket, point 6). The duties
+  // could not be evaluated, so the gate FAILS CLOSED naming the error, and on
+  // the re-entered Stop it releases loudly so it can never trap the session.
+  // SQLite storage keeps the baselined warn below unchanged.
+  if (storeBackend(input.cwd) === 'routed') {
+    const why = `H10: session-end duties could not be checked (${namedError(e)}).`;
+    if (input.stop_hook_active) warnNonBlocking(`${why} Released because this Stop was already blocked once.\n`);
+    deny(`${why} Failing closed: fix the store connection or the hook store broker, then stop again.\n`);
   }
   warnNonBlocking(`H10: session-end duties skipped — ${(e && e.message) || e} (check_skipped h10-stop-duties; fix & re-run)`);
   }

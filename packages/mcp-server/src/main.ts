@@ -3,8 +3,10 @@
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { resolveStoreRoute } from '@sterling/store/routing';
 import { createSterlingServer } from './server.js';
 import { recordRuntimeMarker } from './runtime.js';
+import { startHookBroker } from './broker.js';
 
 const args = process.argv.slice(2);
 const valueOf = (flag: string): string | undefined => {
@@ -78,3 +80,32 @@ try {
 recordRuntimeMarker(storePath, dirname(fileURLToPath(import.meta.url)));
 
 await created.server.connect(new StdioServerTransport());
+
+// The hook store broker (decision hook-store-broker-whole-method-rpc-over-local-socket):
+// on Postgres storage, hooks reach this server's open stores over a local socket
+// instead of each paying its own TLS login. SQLite storage never starts it. A
+// broker that cannot start is announced and the server keeps serving tools;
+// hooks then open their own connection and say so (DEGRADED).
+if (projectRoot !== undefined) {
+  const route = resolveStoreRoute(projectRoot);
+  if (route?.storage === 'postgres') {
+    try {
+      const broker = await startHookBroker({ stores: created.store, route, serverDir: dirname(fileURLToPath(import.meta.url)) });
+      if (broker === null) {
+        console.error('sterling-mcp: the hook store broker is not available on this platform (no Unix sockets with uids); hooks connect to Postgres directly.');
+      } else {
+        // Remove only this server's own files, on every way out.
+        process.on('exit', () => broker.close());
+        for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+          process.once(signal, () => {
+            broker.close();
+            process.exit(128 + ({ SIGHUP: 1, SIGINT: 2, SIGTERM: 15 } as const)[signal]);
+          });
+        }
+      }
+    } catch (e) {
+      const err = e as Error;
+      console.error(`sterling-mcp: the hook store broker did not start (${err?.constructor?.name ?? err?.name ?? 'Error'}: ${err?.message ?? String(e)}); hooks connect to Postgres directly.`);
+    }
+  }
+}
