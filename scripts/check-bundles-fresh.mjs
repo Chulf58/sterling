@@ -29,14 +29,14 @@
 // and the dist guards always run against THIS repo. Parsed STRICTLY: an
 // unrecognized or malformed argument refuses (P5), because falling through to
 // the default would silently re-aim the compare at the live tree.
-import { readdirSync, readFileSync, mkdtempSync, rmSync, existsSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve, relative, basename, sep } from 'node:path';
+import { dirname, join, resolve, basename } from 'node:path';
 import {
   BUNDLED_ARTIFACTS,
   NON_SHIPPING_BUILD_SCRIPTS,
   NON_SHIPPING_PACKAGE_BUILD_SCRIPTS,
+  staleAgainstShipped,
 } from './lib/bundled-artifacts.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -137,38 +137,13 @@ for (const pkgDir of guardPkgs) {
 const stale = [];
 const counts = [];
 for (const artifact of BUNDLED_ARTIFACTS) {
-  const tmp = mkdtempSync(join(tmpdir(), `sterling-bundle-check-${artifact.name}-`));
-  try {
-    const outTarget = artifact.kind === 'dir' ? tmp : join(tmp, basename(artifact.shipped));
-    let emitted;
-    try {
-      emitted = await artifact.build({ root, outTarget });
-    } catch (e) {
-      // A build failure is NOT staleness — report it as its own outcome so the
-      // operator fixes the build, not the bundle (83bb625c's bundles_unverified shape).
-      console.error(`bundle freshness UNVERIFIABLE: building artifact '${artifact.name}' failed — ${e?.message ?? e}`);
-      process.exit(1);
-    }
-    if (!emitted || emitted.length === 0) {
-      console.error(`bundle freshness UNVERIFIABLE: artifact '${artifact.name}' emitted NOTHING — a vacuous build cannot certify freshness (P5)`);
-      process.exit(1);
-    }
-    counts.push(`${artifact.name}: ${emitted.length} file(s)`);
-    for (const builtFile of emitted) {
-      const rel =
-        artifact.kind === 'dir'
-          ? join(artifact.shipped, relative(tmp, builtFile)).split(sep).join('/')
-          : artifact.shipped;
-      const shippedFile = join(shippedRoot, rel);
-      if (!existsSync(shippedFile)) {
-        stale.push({ artifact, rel: `${rel} (no shipped file)` });
-        continue;
-      }
-      if (!readFileSync(builtFile).equals(readFileSync(shippedFile))) stale.push({ artifact, rel });
-    }
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
+  const result = await staleAgainstShipped({ artifact, root, shippedRoot });
+  if (result.unverifiable) {
+    console.error(`bundle freshness UNVERIFIABLE: ${result.unverifiable}`);
+    process.exit(1);
   }
+  counts.push(`${artifact.name}: ${result.count} file(s)`);
+  for (const rel of result.stale) stale.push({ artifact, rel });
 }
 
 if (stale.length) {

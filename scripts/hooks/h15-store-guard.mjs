@@ -1,7 +1,7 @@
 // H15 — store DATABASE seal. PreToolUse on Bash|PowerShell and on Edit|Write|MultiEdit|NotebookEdit; BLOCKING (exit 2 = deny).
 //
 // ONE RULE (decision sterling-claude-code-scale-down-boundary, user-ruled 2026-09-19): nothing but the Sterling MCP server
-// touches the store DATABASE — `.sterling/sterling.db` and its siblings (`sterling.db-wal`, `-shm`, `-journal`,
+// touches the store DATABASE (in work mode also its Postgres schemas; see the Postgres arm below) — `.sterling/sterling.db` and its siblings (`sterling.db-wal`, `-shm`, `-journal`,
 // `sterling.db.*` backups). Every other file under `.sterling/` (config.json, transient/*, ...) is
 // ordinary project state any tool may read or write.
 //
@@ -74,6 +74,44 @@ function namesStoreComponent(absPath) {
 // purpose): `git rm`/`mv`/`checkout`/`restore` on the database path, and `find` selecting it by `-name`.
 // The parser lives in lib/store-shell-verdict.mjs (storeShellWriteShape), shared with the OpenCode store guard.
 
+// ── shell channel, Postgres arm (decision postgres-store-backend-design-sync-bridge-schema-per-store, point 11) ──────────
+// In work mode the store lives in Postgres schemas named sterling_* (sterling_meta, sterling_p_<uuid>, sterling_d_<name>,
+// sterling_test_<random>; decision postgres-schema-names-sterling-p-uuid-sterling-d-domain), which only the MCP server and
+// the store write. DENY when BOTH hold: (1) the command runs an ad-hoc client: `psql`, or `node`/`nodejs`/`bun` with
+// `-e`/`--eval`/`-p`/`--print`, or one of them reading its program from stdin (a heredoc, `-`, or a pipe into a bare
+// `node`); and (2) the command text, heredoc bodies included, holds a write statement aimed at a sterling_ schema:
+// INSERT INTO, UPDATE [ONLY], DELETE FROM [ONLY], or COPY <table> ... FROM whose target is schema-qualified with a
+// sterling_ name (unquoted, any case, or "quoted"); TRUNCATE/DROP/ALTER/CREATE with a sterling_ name later in the same
+// statement (up to the next `;`); or any of those verbs after a `search_path` set to a sterling_ schema. Allowed:
+// SELECTs, COPY ... TO and COPY (query) TO, schemas outside the prefix (opensterling, opensterling_live, public), and
+// every command without an ad-hoc client — Sterling's scripts and bundles and the `node --test` store suites run as
+// script files, and the MCP server and the store are processes, not tool calls. NOT CAUGHT: SQL in a file the client
+// reads (`psql -f`, `psql < file`, `node script.mjs`), a schema name built at run time (`${schema}.records`), SQL
+// comments between keywords (`INSERT/**/INTO`), other clients (python -c, pgcli, a GUI), MERGE/GRANT/REVOKE/COMMENT ON
+// and functions with side effects, and an unqualified write after a search_path that is not set in the command itself.
+// Over-catches, accepted: a command that runs an ad-hoc client AND carries such text anywhere else (a commit message).
+const PG_CLIENT_RES = [
+  /(?:^|[\s;&|(`'"])(?:[^\s;&|(`'"]*[\\/])?psql(?:\.exe)?(?=[\s;&|)`'"]|$)/i,
+  /(?:^|[\s;&|(`'"])(?:[^\s;&|(`'"]*[\\/])?(?:node|nodejs|bun)(?:\.exe)?\s(?:[^;&|\n]*?\s)?(?:-e|--eval|-p|--print|-pe)(?=[\s='"]|$)/i,
+  /(?:^|[\s;&|(`'"])(?:[^\s;&|(`'"]*[\\/])?(?:node|nodejs|bun)(?:\.exe)?(?:\s+--?[\w-]+(?:=\S+)?)*\s*(?:-\s*)?(?:<<|<\s|$|[;&|\n)])/i,
+];
+const SCHEMA = String.raw`(?:"sterling_[^"]*"|\bsterling_[a-z0-9_$]*)`;
+const PG_WRITE_RES = [
+  new RegExp(String.raw`\bINSERT\s+INTO\s+${SCHEMA}`, 'i'),
+  new RegExp(String.raw`\bUPDATE\s+(?:ONLY\s+)?${SCHEMA}`, 'i'),
+  new RegExp(String.raw`\bDELETE\s+FROM\s+(?:ONLY\s+)?${SCHEMA}`, 'i'),
+  new RegExp(String.raw`\b(?:TRUNCATE|DROP|ALTER|CREATE)\b[^;]*?${SCHEMA}`, 'i'),
+  new RegExp(String.raw`\bCOPY\s+${SCHEMA}[^;]*?\bFROM\b`, 'i'),
+];
+const PG_SEARCH_PATH_RE = new RegExp(String.raw`search_path\s*(?:=|\bTO\b)\s*[^;]{0,80}?${SCHEMA}`, 'i');
+const PG_UNQUALIFIED_WRITE_RE = /\b(?:INSERT\s+INTO|UPDATE\s+(?:ONLY\s+)?[\w"]+\s+SET|DELETE\s+FROM|TRUNCATE|DROP|ALTER|CREATE|COPY\s+[\w"]+[^;]*?\bFROM)\b/i;
+
+function postgresSchemaWrite(command) {
+  if (!PG_CLIENT_RES.some((re) => re.test(command))) return false;
+  if (PG_WRITE_RES.some((re) => re.test(command))) return true;
+  return PG_SEARCH_PATH_RE.test(command) && PG_UNQUALIFIED_WRITE_RE.test(command);
+}
+
 const tool = input.tool_name;
 const PS = tool === 'PowerShell'; // backslash is a path separator, not an escape char, in PowerShell
 
@@ -94,6 +132,13 @@ if (tool === 'Bash' || tool === 'PowerShell') {
       'H15: this command would overwrite, delete, move or rewrite the Sterling store database (sterling.db) or the .sterling directory that holds it, which only the Sterling MCP server writes — ' +
         'write it with knowledge_create / knowledge_update / board_add and the other MCP tools. ' +
         'Reading or merely naming the path is fine, and every other file under .sterling/ (config.json, transient/*) may be read and written freely.'
+    );
+  }
+  if (postgresSchemaWrite(command)) {
+    deny(
+      'H15: this command writes to a Sterling Postgres schema (sterling_meta, sterling_p_*, sterling_d_*, sterling_test_*) through an ad-hoc client (psql, or node/bun given a program inline or on stdin), and only the Sterling MCP server and store write those schemas — ' +
+        'write with knowledge_create / knowledge_update / board_add and the other MCP tools. ' +
+        'Read-only SELECTs, Sterling scripts, the node --test store suites and schemas outside the sterling_ prefix are fine.'
     );
   }
   allow();
