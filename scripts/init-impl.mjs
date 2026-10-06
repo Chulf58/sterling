@@ -48,7 +48,7 @@ import { probeCodex, userScopeCodexServer, codexUserScopeLine } from './lib/code
 import { renderTmuxLauncher } from './lib/launcher-tmux.mjs';
 import { historicalLauncherTemplates, olderGeneratedLauncher, replayFailureLine } from './lib/launcher-history.mjs';
 import { isInstalledCopy } from './lib/installed-copy.mjs';
-import { cloneLauncherTarget, marketplaceAutoUpdate, autoUpdateWarning, cloneCleanupLines } from './lib/consumer-cutover.mjs';
+import { cloneLauncherTarget, enableMarketplaceAutoUpdate, cloneCleanupLines } from './lib/consumer-cutover.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
 import { setupOpenCode } from './lib/opencode-install.mjs';
 import { probeClaude } from './lib/claude-probe.mjs';
@@ -1184,14 +1184,16 @@ if (claudeHost) {
 }
 
 // PLUGIN AUTO-UPDATE (S6, decision s6-consumer-cutover-init-on-installed-copy-fixes-
-// launchers, ruling point 3): a third-party marketplace does not auto-update by default
+// launchers, ruling point 3, overturned 2026-10-06 by the user through the question form:
+// "Init switches it on"): a third-party marketplace does not auto-update by default
 // (finding plugin-github-source-install-copies-tracked-head-tree-october-2026), so an
-// installed copy warns with the exact settings JSON. Same pattern as the codex check
-// above: init only READS the user-level file, and a missing or unparseable one is a
-// warning, never a crash.
+// installed copy sets autoUpdate: true on the sterling entry in the user-level settings.json.
+// A missing, unreadable or malformed file, or an explicit autoUpdate: false, is never
+// written: a loud warning, never a crash. An authoring clone never reaches this.
 if (claudeHost && installedCopy) {
-  const autoUpdateLine = autoUpdateWarning(marketplaceAutoUpdate());
-  if (autoUpdateLine) warns.push(autoUpdateLine);
+  const autoUpdate = enableMarketplaceAutoUpdate();
+  if (autoUpdate.status === 'written') items.push({ item: 'plugin auto-update', status: 'refreshed', detail: autoUpdate.line });
+  else if (autoUpdate.line) warns.push(autoUpdate.line);
 }
 
 if (initIsPluginRepo) {
