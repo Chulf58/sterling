@@ -8,7 +8,7 @@ var __export = (target, all) => {
 
 // scripts/check-record-citations.mjs
 import { fileURLToPath } from "node:url";
-import { dirname as dirname3, join as join4 } from "node:path";
+import { dirname as dirname4, join as join5 } from "node:path";
 import { existsSync as existsSync4, readFileSync as readFileSync2 } from "node:fs";
 import { spawnSync } from "node:child_process";
 
@@ -4388,7 +4388,10 @@ var modelsCatalogSchema = external_exports.object({
     id: external_exports.string(),
     label: external_exports.string(),
     tier: external_exports.string(),
-    status: external_exports.string()
+    status: external_exports.string(),
+    // Which vendor's model this is ('anthropic', 'openai'). Optional: a catalog
+    // written before vendors existed still parses, and none is invented.
+    vendor: external_exports.string().optional()
   }))
 });
 var referenceMaterialSchema = base.extend({
@@ -4870,10 +4873,20 @@ var knowledgeWriteSchema = external_exports.object({
 }).strict();
 
 // packages/schemas/dist/config.js
-var modelEffort = external_exports.object({
+var effortLevel = external_exports.enum(["low", "medium", "high", "xhigh"]);
+var modelPin = external_exports.object({
   model: external_exports.string(),
-  effort: external_exports.enum(["low", "medium", "high", "xhigh"])
+  effort: effortLevel.optional()
 }).strict();
+var agentModelEntry = external_exports.object({
+  model: external_exports.string(),
+  effort: effortLevel,
+  hard_task: modelPin.optional()
+}).strict();
+var vendorPins = external_exports.object({
+  openai: modelPin.optional(),
+  anthropic: modelPin.optional()
+}).default({});
 var successPredicateSchema = external_exports.object({
   output_regex: external_exports.string().optional(),
   output_regex_absent: external_exports.string().optional(),
@@ -5028,19 +5041,19 @@ var configSchema = external_exports.object({
   // longer needs an indirection layer between an agent's name and its config
   // key.
   models: external_exports.object({
-    implementor: modelEffort.default({ model: "claude-sonnet-5-5", effort: "high" }),
-    researcher: modelEffort.default({ model: "claude-sonnet-5-5", effort: "medium" }),
-    scout: modelEffort.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
+    implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
+    researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
+    scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    classifiers: agentModelEntry.default({ model: "claude-haiku-4-5", effort: "low" }),
     // librarian is mechanical clerking — cheap model, low effort (P8). The
     // roster is classless (decision agent-roster-is-classless-four-agents), and
     // the debugger role it rejected has no key here.
-    librarian: modelEffort.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    librarian: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
-    reviewer: modelEffort.default({ model: "claude-opus-5-5", effort: "high" })
-  }).default({}),
+    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
+  }).catchall(agentModelEntry).default({}),
   // Per-project agent tool extension (decision
   // per-project-agent-extra-tools-config-appended-at-render, 587472e3):
   // agents.<registered-agent-name>.extra_tools is appended to that agent's
@@ -5254,12 +5267,23 @@ var configSchema = external_exports.object({
   // — this field never stands in for that absence, only for a deliberate OFF.
   sparring_partner: external_exports.object({
     enabled: external_exports.boolean().default(true),
-    // TUI System-tab model selector (article sparring-partner interaction i,
-    // board a0714d0b): the model argument sent on every consult. Absent/empty
-    // = the Codex CLI's own default. Deliberately a FREE string, no enum —
-    // codex validates model names server-side with a loud 400, so a client-
-    // side allowlist would only drift from what the CLI actually accepts.
-    model: external_exports.string().optional()
+    // Which vendor's model the consult runs on (decision
+    // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks).
+    // 'openai' is the behaviour before the setting existed.
+    vendor: external_exports.enum(["openai", "anthropic"]).default("openai"),
+    // The model pinned per vendor. Absent = no pin (the host's default). The
+    // old sparring_partner.model is converted to models.openai by
+    // normalizeRawConfig, before this schema strips unknown keys. The default
+    // ships no pin: the decision names no model per vendor.
+    models: vendorPins
+  }).default({}),
+  // Reviews (same decision): the vendor policy and the model pinned per vendor.
+  // cross_vendor = the other family than the model that wrote the diff; openai
+  // and anthropic force one vendor even when that makes reviewer and author the
+  // same family (user-ruled 2026-10-03). Ships no pin, like sparring_partner.
+  review: external_exports.object({
+    policy: external_exports.enum(["cross_vendor", "openai", "anthropic"]).default("cross_vendor"),
+    models: vendorPins
   }).default({}),
   // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
@@ -5316,8 +5340,42 @@ var configSchema = external_exports.object({
   // (config.test.ts pins that they agree).
   pr_review: external_exports.unknown().default({ copilot_logins: [] })
 });
+var RETIRED_MODEL_KEYS = [
+  "coder",
+  "coder_hard",
+  "explorer",
+  "test_writer",
+  "reviewers",
+  "implementation_architect",
+  "debugger"
+];
+var isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+function normalizeRawConfig(raw) {
+  if (!isPlainObject(raw))
+    return raw;
+  let out = raw;
+  const sp = raw.sparring_partner;
+  if (isPlainObject(sp) && Object.prototype.hasOwnProperty.call(sp, "model")) {
+    const { model, ...rest } = sp;
+    if (model !== void 0 && model !== "") {
+      const existing = rest.models;
+      if (existing === void 0 || isPlainObject(existing)) {
+        const models2 = { ...existing ?? {} };
+        if (models2.openai === void 0 || typeof model !== "string")
+          models2.openai = { model };
+        rest.models = models2;
+      }
+    }
+    out = { ...out, sparring_partner: rest };
+  }
+  const models = raw.models;
+  if (isPlainObject(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
+    out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
+  }
+  return out;
+}
 function parseConfig(raw) {
-  return configSchema.parse(raw);
+  return configSchema.parse(normalizeRawConfig(raw));
 }
 
 // packages/schemas/dist/registry.js
@@ -5349,9 +5407,8 @@ var runtimeMarkerSchema = external_exports.object({
 }).strict();
 
 // packages/store/dist/index.js
-import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync as mkdirSync2, existsSync as existsSync2, realpathSync, statSync } from "node:fs";
-import { dirname as dirname2, basename, join as join2, resolve as resolvePath } from "node:path";
+import { mkdirSync as mkdirSync2, existsSync as existsSync2, statSync } from "node:fs";
+import { dirname as dirname3, join as join3, resolve as resolvePath2 } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // packages/store/dist/mounted.js
@@ -6156,28 +6213,10 @@ var AXIS_MAX_TERM_LEN = 64;
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 
-// packages/store/dist/index.js
-var StoreRowDecodeError = class extends Error {
-  op;
-  constructor(op, cause) {
-    super(`${op}: a record row's body is not valid JSON (${cause?.message ?? String(cause)})`);
-    this.name = "StoreRowDecodeError";
-    this.op = op;
-  }
-};
-function decodeLiveRecordRow(op, row) {
-  let record;
-  try {
-    record = JSON.parse(row.body);
-  } catch (e) {
-    throw new StoreRowDecodeError(op, e);
-  }
-  if (typeof row.scope !== "string" || row.scope.length === 0) {
-    throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
-  }
-  record.scope = row.scope;
-  return record;
-}
+// packages/store/dist/sqlite-driver.js
+import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
+import { realpathSync } from "node:fs";
+import { dirname as dirname2, basename, join as join2, resolve as resolvePath } from "node:path";
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -6294,6 +6333,179 @@ CREATE TABLE IF NOT EXISTS store_meta (
   updated_at TEXT NOT NULL
 );
 `;
+function journalDemotionRequired(absPath, platform = process.platform) {
+  if (platform !== "linux")
+    return false;
+  return /^\/mnt\/[a-zA-Z]\//.test(absPath.replace(/\\/g, "/"));
+}
+var JournalDemotionRefusedError = class extends Error {
+  dbPath;
+  returnedMode;
+  constructor(dbPath, returnedMode, options) {
+    super(options?.message ?? `journal_mode=DELETE demotion refused for '${dbPath}' (PRAGMA returned '${returnedMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`, options?.cause !== void 0 ? { cause: options.cause } : void 0);
+    this.dbPath = dbPath;
+    this.returnedMode = returnedMode;
+    this.name = "JournalDemotionRefusedError";
+  }
+};
+var DEFAULT_BUSY_TIMEOUT_MS = 5e3;
+var sqliteDialect = {
+  searchJoin: "JOIN records_fts f ON f.record_id = r.id",
+  searchMatch: "records_fts MATCH ?",
+  // FTS5's bm25() is LOWER for a better match, so the score is its negation.
+  searchScore: "(-bm25(records_fts))",
+  searchOrder: "bm25(records_fts) ASC",
+  /**
+   * The FTS5 MATCH expression rank_terms compiles to. A trailing '*' marks an
+   * FTS5 prefix query ("stor*" matches "store") — the star must sit OUTSIDE the
+   * quoted token to act as the prefix operator.
+   */
+  searchQuery(terms, matchAll) {
+    const joiner = matchAll ? " AND " : " OR ";
+    return terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+  },
+  jsonText: (column, key) => `json_extract(${column}, '$.${key}')`,
+  insertionOrder: (alias) => alias ? `${alias}.rowid` : "rowid",
+  insertIgnore: (table, columns) => `INSERT OR IGNORE INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`
+};
+var SqliteDriver = class {
+  dialect = sqliteDialect;
+  db;
+  /** The absolute path of the database file, for the refusal messages. */
+  dbPath;
+  /** The path the journal-mode policy classifies: dbPath with its directory's symlinks resolved. */
+  classifiedPath;
+  constructor(path, options = {}) {
+    const busyTimeoutMs = options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS;
+    if (typeof busyTimeoutMs !== "number" || !Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0) {
+      throw new Error(`SqliteDriver: busyTimeoutMs must be a non-negative integer, got ${String(busyTimeoutMs)}`);
+    }
+    this.dbPath = resolvePath(path);
+    this.db = new DatabaseSync2(path);
+    let classifiedPath = this.dbPath;
+    try {
+      classifiedPath = join2(realpathSync(dirname2(this.dbPath)), basename(this.dbPath));
+    } catch {
+    }
+    this.classifiedPath = classifiedPath;
+    this.db.exec(`PRAGMA busy_timeout=${busyTimeoutMs}`);
+  }
+  prepare(sql) {
+    return this.db.prepare(sql);
+  }
+  exec(sql) {
+    this.db.exec(sql);
+  }
+  close() {
+    this.db.close();
+  }
+  /** BEGIN IMMEDIATE: takes the write lock now, or throws once busy_timeout runs out. */
+  begin() {
+    this.db.exec("BEGIN IMMEDIATE");
+  }
+  commit() {
+    this.db.exec("COMMIT");
+  }
+  rollback() {
+    this.db.exec("ROLLBACK");
+  }
+  /** PRAGMA user_version — the application-owned integer, NEVER SQLite's own PRAGMA schema_version. */
+  schemaVersion() {
+    return this.db.prepare("PRAGMA user_version").get().user_version;
+  }
+  setSchemaVersion(version) {
+    if (!Number.isInteger(version) || version < 0) {
+      throw new Error(`SqliteDriver: schema version must be a non-negative integer, got ${String(version)}`);
+    }
+    this.db.exec(`PRAGMA user_version = ${version}`);
+  }
+  /** sqlite_master is empty only before the DDL has ever run on this file. A read, so a refusal after it has still written nothing. */
+  hasSchema() {
+    return this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n > 0;
+  }
+  prepareReadOnly() {
+    if (!journalDemotionRequired(this.classifiedPath))
+      return;
+    let legacyMode;
+    try {
+      legacyMode = this.journalMode();
+    } catch (e) {
+      this.db.close();
+      throw e;
+    }
+    if (legacyMode === "wal") {
+      this.db.close();
+      throw new JournalDemotionRefusedError(this.dbPath, legacyMode, {
+        message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, PRAGMA journal_mode='${legacyMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. Migrate the store first (\`node "<Sterling root>/bin/migrate-stores.mjs"\`) or open it from a non-9p context \u2014 closing other connections will not help here.`
+      });
+    }
+  }
+  prepareWritable(isFresh) {
+    if (journalDemotionRequired(this.classifiedPath)) {
+      let returnedMode;
+      try {
+        returnedMode = this.db.prepare("PRAGMA journal_mode=DELETE").get().journal_mode;
+      } catch (e) {
+        this.db.close();
+        const detail = e instanceof Error ? e.message : String(e);
+        throw new JournalDemotionRefusedError(this.dbPath, detail, {
+          cause: e,
+          message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (PRAGMA threw: ${detail}) \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`
+        });
+      }
+      if (returnedMode !== "delete") {
+        this.db.close();
+        throw new JournalDemotionRefusedError(this.dbPath, returnedMode);
+      }
+    } else {
+      const currentMode = this.journalMode();
+      if (currentMode !== "delete") {
+        this.db.exec("PRAGMA journal_mode=WAL");
+      } else if (isFresh) {
+        const stillFresh = !this.hasSchema();
+        if (stillFresh) {
+          this.db.exec("PRAGMA journal_mode=WAL");
+        }
+      }
+    }
+    this.db.exec("PRAGMA foreign_keys=ON");
+    this.db.exec(DDL);
+    try {
+      this.db.exec("ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT");
+    } catch {
+    }
+  }
+  journalMode() {
+    return this.db.prepare("PRAGMA journal_mode").get().journal_mode;
+  }
+  /** VACUUM INTO: a consistent copy taken without stopping other connections. */
+  snapshot(targetPath) {
+    this.db.exec(`VACUUM INTO '${targetPath.replace(/'/g, "''")}'`);
+  }
+};
+
+// packages/store/dist/index.js
+var StoreRowDecodeError = class extends Error {
+  op;
+  constructor(op, cause) {
+    super(`${op}: a record row's body is not valid JSON (${cause?.message ?? String(cause)})`);
+    this.name = "StoreRowDecodeError";
+    this.op = op;
+  }
+};
+function decodeLiveRecordRow(op, row) {
+  let record;
+  try {
+    record = JSON.parse(row.body);
+  } catch (e) {
+    throw new StoreRowDecodeError(op, e);
+  }
+  if (typeof row.scope !== "string" || row.scope.length === 0) {
+    throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
+  }
+  record.scope = row.scope;
+  return record;
+}
 var SUPPORTED_SCHEMA_VERSION = 2;
 var UnsupportedSchemaVersionError = class extends Error {
   found;
@@ -6513,21 +6725,6 @@ function unrecognizedKeyPaths(error) {
   }
   return out;
 }
-function journalDemotionRequired(absPath, platform = process.platform) {
-  if (platform !== "linux")
-    return false;
-  return /^\/mnt\/[a-zA-Z]\//.test(absPath.replace(/\\/g, "/"));
-}
-var JournalDemotionRefusedError = class extends Error {
-  dbPath;
-  returnedMode;
-  constructor(dbPath, returnedMode, options) {
-    super(options?.message ?? `journal_mode=DELETE demotion refused for '${dbPath}' (PRAGMA returned '${returnedMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`, options?.cause !== void 0 ? { cause: options.cause } : void 0);
-    this.dbPath = dbPath;
-    this.returnedMode = returnedMode;
-    this.name = "JournalDemotionRefusedError";
-  }
-};
 var DECLARED_CAPTURE_OWED_PREFIX = "capture owed: declared pending (";
 var DECLARED_CAPTURE_TARGET_TRAILER = " [target ";
 function declaredCaptureTarget(text) {
@@ -6563,6 +6760,7 @@ function buildReconcileText(owner, fileKeys) {
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files2.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files2.join(", ")}`;
 }
 var SterlingStore = class _SterlingStore {
+  /** The one connection, behind the driver seam (driver.ts). Every statement, transaction and open step goes through it. */
   db;
   /**
    * Set ONLY when an existing, non-empty store below SUPPORTED_SCHEMA_VERSION
@@ -6594,87 +6792,38 @@ var SterlingStore = class _SterlingStore {
    * WHICH store to migrate.
    */
   dbPath;
-  constructor(path) {
-    this.dbPath = resolvePath(path);
-    this.db = new DatabaseSync2(path);
-    let classifiedPath = this.dbPath;
-    try {
-      classifiedPath = join2(realpathSync(dirname2(this.dbPath)), basename(this.dbPath));
-    } catch {
+  constructor(path, options = {}) {
+    this.dbPath = resolvePath2(path);
+    if (options.driver !== void 0 && options.busyTimeoutMs !== void 0) {
+      options.driver.close();
+      throw new Error("SterlingStore: busyTimeoutMs configures the SQLite driver this store opens itself; it cannot be combined with an injected driver \u2014 set it on that driver.");
     }
-    this.db.exec("PRAGMA busy_timeout=5000");
-    const foundSchemaVersion = this.db.prepare("PRAGMA user_version").get().user_version;
+    this.db = options.driver ?? new SqliteDriver(path, { busyTimeoutMs: options.busyTimeoutMs });
+    const foundSchemaVersion = this.db.schemaVersion();
     if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
       this.db.close();
       throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
     }
     let isFresh = false;
     if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
-      const objects = this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n;
-      if (objects > 0) {
-        if (journalDemotionRequired(classifiedPath)) {
-          let legacyMode;
-          try {
-            legacyMode = this.db.prepare("PRAGMA journal_mode").get().journal_mode;
-          } catch (e) {
-            this.db.close();
-            throw e;
-          }
-          if (legacyMode === "wal") {
-            this.db.close();
-            throw new JournalDemotionRefusedError(this.dbPath, legacyMode, {
-              message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, PRAGMA journal_mode='${legacyMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. Migrate the store first (\`node "<Sterling root>/bin/migrate-stores.mjs"\`) or open it from a non-9p context \u2014 closing other connections will not help here.`
-            });
-          }
-        }
+      if (this.db.hasSchema()) {
+        this.db.prepareReadOnly();
         this.legacySchemaVersion = foundSchemaVersion;
         this.openedSchemaVersion = foundSchemaVersion;
         return;
       }
       isFresh = true;
     }
-    if (journalDemotionRequired(classifiedPath)) {
-      let returnedMode;
-      try {
-        returnedMode = this.db.prepare("PRAGMA journal_mode=DELETE").get().journal_mode;
-      } catch (e) {
-        this.db.close();
-        const detail = e instanceof Error ? e.message : String(e);
-        throw new JournalDemotionRefusedError(this.dbPath, detail, {
-          cause: e,
-          message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (PRAGMA threw: ${detail}) \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`
-        });
-      }
-      if (returnedMode !== "delete") {
-        this.db.close();
-        throw new JournalDemotionRefusedError(this.dbPath, returnedMode);
-      }
-    } else {
-      const currentMode = this.db.prepare("PRAGMA journal_mode").get().journal_mode;
-      if (currentMode !== "delete") {
-        this.db.exec("PRAGMA journal_mode=WAL");
-      } else if (isFresh) {
-        const stillFresh = this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n === 0;
-        if (stillFresh) {
-          this.db.exec("PRAGMA journal_mode=WAL");
-        }
-      }
-    }
-    this.db.exec("PRAGMA foreign_keys=ON");
-    this.db.exec(DDL);
-    try {
-      this.db.exec("ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT");
-    } catch {
-    }
+    this.db.prepareWritable(isFresh);
     if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
       try {
         this.tx(() => {
-          const current = this.db.prepare("PRAGMA user_version").get().user_version;
+          const current = this.db.schemaVersion();
           if (current > SUPPORTED_SCHEMA_VERSION) {
             throw new UnsupportedSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION);
           }
           if (current < SUPPORTED_SCHEMA_VERSION) {
-            this.db.exec(`PRAGMA user_version = ${SUPPORTED_SCHEMA_VERSION}`);
+            this.db.setSchemaVersion(SUPPORTED_SCHEMA_VERSION);
           }
         });
       } catch (e) {
@@ -6682,14 +6831,14 @@ var SterlingStore = class _SterlingStore {
         throw e;
       }
     }
-    this.openedSchemaVersion = this.db.prepare("PRAGMA user_version").get().user_version;
+    this.openedSchemaVersion = this.db.schemaVersion();
     if (this.openedSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
       this.db.close();
       throw new UnsupportedSchemaVersionError(this.openedSchemaVersion, SUPPORTED_SCHEMA_VERSION);
     }
   }
   journalMode() {
-    return this.db.prepare("PRAGMA journal_mode").get().journal_mode;
+    return this.db.journalMode();
   }
   // -------------------------------------------------------------------------
   // Schema v2 identity core [stable-identity-design-v2]
@@ -6720,7 +6869,7 @@ var SterlingStore = class _SterlingStore {
   assertLiveSchemaVersion(operation) {
     if (this.openedSchemaVersion === void 0)
       return;
-    const current = this.db.prepare("PRAGMA user_version").get().user_version;
+    const current = this.db.schemaVersion();
     if (current !== this.openedSchemaVersion) {
       throw new Error(`Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ${current} \u2014 another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every other write are refused until this session is closed. EXIT AND RELAUNCH this session to reopen against the current schema. Nothing was written.`);
     }
@@ -6852,7 +7001,7 @@ var SterlingStore = class _SterlingStore {
     if (!v2.length)
       return records;
     const ids = [...new Set(v2.map((r) => r.id))];
-    const linkRows = this.db.prepare(`SELECT source_id, rel, target_id FROM record_relations WHERE source_id IN (${ids.map(() => "?").join(",")}) ORDER BY rowid`).all(...ids);
+    const linkRows = this.db.prepare(`SELECT source_id, rel, target_id FROM record_relations WHERE source_id IN (${ids.map(() => "?").join(",")}) ORDER BY ${this.db.dialect.insertionOrder()}`).all(...ids);
     const bySource = /* @__PURE__ */ new Map();
     for (const row of linkRows) {
       const list = bySource.get(row.source_id) ?? [];
@@ -6863,7 +7012,7 @@ var SterlingStore = class _SterlingStore {
     const successor = /* @__PURE__ */ new Map();
     if (retiredIds.length) {
       const rows = this.db.prepare(`SELECT source_id, target_id FROM record_relations
-            WHERE rel = 'supersedes' AND target_id IN (${retiredIds.map(() => "?").join(",")}) ORDER BY rowid`).all(...retiredIds);
+            WHERE rel = 'supersedes' AND target_id IN (${retiredIds.map(() => "?").join(",")}) ORDER BY ${this.db.dialect.insertionOrder()}`).all(...retiredIds);
       for (const row of rows) {
         if (!successor.has(row.target_id))
           successor.set(row.target_id, row.source_id);
@@ -6980,7 +7129,7 @@ var SterlingStore = class _SterlingStore {
     if (sourceId === targetId) {
       throw new Error(`relation '${rel}' from '${sourceId}' to itself is a self-cycle in the relation graph \u2014 refused (stable-identity-design-v2)`);
     }
-    this.db.prepare("INSERT OR IGNORE INTO record_relations (source_id, rel, target_id, created_at) VALUES (?, ?, ?, ?)").run(sourceId, rel, targetId, at);
+    this.db.prepare(this.db.dialect.insertIgnore("record_relations", ["source_id", "rel", "target_id", "created_at"])).run(sourceId, rel, targetId, at);
   }
   /** The one validated write path. Unregistered type or malformed record throws; nothing is written.
    *
@@ -7048,7 +7197,7 @@ var SterlingStore = class _SterlingStore {
   recordAliases() {
     if (this.legacySchemaVersion !== void 0)
       return [];
-    return this.db.prepare("SELECT historical_id, canonical_id, archived_version FROM record_aliases ORDER BY rowid").all();
+    return this.db.prepare(`SELECT historical_id, canonical_id, archived_version FROM record_aliases ORDER BY ${this.db.dialect.insertionOrder()}`).all();
   }
   /**
    * knowledge_update-shaped IN-PLACE write, generalized from updateTodo to
@@ -7759,7 +7908,7 @@ var SterlingStore = class _SterlingStore {
    */
   articlesBySlug(slug) {
     const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE type = 'feature_article' AND status != 'superseded' AND json_extract(body, '$.slug') = ?
+          WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
           ORDER BY updated_at DESC`).all(slug);
     const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows));
     if (!records.length)
@@ -7779,7 +7928,7 @@ var SterlingStore = class _SterlingStore {
    */
   recordsBySlug(slug) {
     const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
+          WHERE status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
           ORDER BY updated_at DESC`).all(slug);
     return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
   }
@@ -7853,8 +8002,8 @@ var SterlingStore = class _SterlingStore {
    */
   supersededRecordsBySlug(slug) {
     const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status = 'superseded' AND json_extract(body, '$.slug') = ?
-          ORDER BY updated_at DESC, rowid DESC`).all(slug);
+          WHERE status = 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+          ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`).all(slug);
     return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
   }
   /**
@@ -7903,7 +8052,7 @@ var SterlingStore = class _SterlingStore {
    * source), which may sit in a different store than the target.
    */
   inboundSupersedes(id) {
-    const rows = this.db.prepare(`SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY rowid`).all(id);
+    const rows = this.db.prepare(`SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`).all(id);
     return rows.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
   }
   /**
@@ -7929,7 +8078,7 @@ var SterlingStore = class _SterlingStore {
       params.push(...fileKeys);
     }
     if (opts.source) {
-      where.push("json_extract(r.body, '$.source') = ?");
+      where.push(`${this.db.dialect.jsonText("r.body", "source")} = ?`);
       params.push(opts.source);
     }
     return { where, params, fileKeys };
@@ -7989,20 +8138,20 @@ var SterlingStore = class _SterlingStore {
     }
     const { where, params } = this.baseFilter(opts);
     const match = this.ftsMatchExpr(terms, opts.match_all);
-    const sql = `SELECT COUNT(*) AS n FROM records r JOIN records_fts f ON f.record_id = r.id
-      WHERE ${where.join(" AND ")} AND records_fts MATCH ? AND (-bm25(records_fts)) >= ?`;
+    const d = this.db.dialect;
+    const sql = `SELECT COUNT(*) AS n FROM records r ${d.searchJoin}
+      WHERE ${where.join(" AND ")} AND ${d.searchMatch} AND ${d.searchScore} >= ?`;
     const row = this.db.prepare(sql).get(...params, match, minScore);
     return row.n;
   }
   /**
-   * The FTS5 MATCH expression rank_terms compiles to — shared by query() and
-   * countAboveScore() so the two can never rank two different match sets. A
-   * trailing '*' marks an FTS5 prefix query ("stor*" matches "store") — the
-   * star must sit OUTSIDE the quoted token to act as the prefix operator.
+   * The search expression rank_terms compiles to — shared by query() and
+   * countAboveScore() so the two can never rank two different match sets. The
+   * syntax is the driver's (dialect.searchQuery): on SQLite an FTS5 MATCH
+   * expression.
    */
   ftsMatchExpr(terms, matchAll) {
-    const joiner = matchAll ? " AND " : " OR ";
-    return terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+    return this.db.dialect.searchQuery(terms, matchAll);
   }
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts = {}) {
@@ -8012,9 +8161,10 @@ var SterlingStore = class _SterlingStore {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
         const match = this.ftsMatchExpr(terms, opts.match_all);
-        const sql2 = `SELECT r.body, r.scope FROM records r JOIN records_fts f ON f.record_id = r.id
-          WHERE ${where.join(" AND ")} AND records_fts MATCH ?
-          ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
+        const d = this.db.dialect;
+        const sql2 = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
+          WHERE ${where.join(" AND ")} AND ${d.searchMatch}
+          ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
         const rows2 = this.db.prepare(sql2).all(...params, match, cap);
         return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
       }
@@ -8233,14 +8383,14 @@ var SterlingStore = class _SterlingStore {
   listActivityLog(limit = 15) {
     return this.db.prepare("SELECT at, verb, type, record_id AS id, title FROM activity_log ORDER BY seq DESC LIMIT ?").all(limit);
   }
-  /** Backup snapshot (§2.3): VACUUM INTO the configured backup path. Refuses to overwrite. */
+  /** Backup snapshot (§2.3): the driver copies the store to the configured backup path (SQLite: VACUUM INTO). Refuses to overwrite. */
   snapshot(targetPath) {
     const target = targetPath.replace(/\\/g, "/");
     if (existsSync2(target)) {
       throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
     }
-    mkdirSync2(dirname2(target), { recursive: true });
-    this.db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+    mkdirSync2(dirname3(target), { recursive: true });
+    this.db.snapshot(target);
   }
   close() {
     this.db.close();
@@ -8519,15 +8669,15 @@ var SterlingStore = class _SterlingStore {
       fn();
       return;
     }
-    this.db.exec("BEGIN IMMEDIATE");
+    this.db.begin();
     this.txDepth++;
     try {
       this.assertLiveSchemaVersion("transaction");
       fn();
-      this.db.exec("COMMIT");
+      this.db.commit();
     } catch (e) {
       try {
-        this.db.exec("ROLLBACK");
+        this.db.rollback();
       } catch {
       }
       throw e;
@@ -8574,7 +8724,7 @@ var SterlingStore = class _SterlingStore {
 
 // scripts/lib/store-path.mjs
 import { lstatSync, realpathSync as realpathSync2 } from "node:fs";
-import { join as join3, resolve, sep } from "node:path";
+import { join as join4, resolve, sep } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root: root2, target } = {}) {
     super(message);
@@ -8617,7 +8767,7 @@ function resolveStoreWritePath(root2, ...segments) {
   }
   if (target !== rootResolved && !target.startsWith(rootResolved + sep)) {
     throw new StorePathContainmentError(
-      `resolveStoreWritePath: '${join3(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
+      `resolveStoreWritePath: '${join4(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
       { root: rootResolved, target }
     );
   }
@@ -8625,7 +8775,7 @@ function resolveStoreWritePath(root2, ...segments) {
   let cursor = rootResolved;
   let deepestExisting = rootResolved;
   for (const part of relParts) {
-    const next = join3(cursor, part);
+    const next = join4(cursor, part);
     let st;
     try {
       st = lstatSync(next);
@@ -8690,7 +8840,7 @@ function resolveStoreWritePath(root2, ...segments) {
     );
   }
   const suffix = target.slice(deepestExisting.length);
-  const reconstructed = suffix ? join3(realDeepest, suffix) : realDeepest;
+  const reconstructed = suffix ? join4(realDeepest, suffix) : realDeepest;
   if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target}') resolves outside the project \u2014 refusing, nothing was written`,
@@ -8875,8 +9025,8 @@ function lintCitationCurrency(content, label, resolve3, getById2) {
 }
 
 // scripts/check-record-citations.mjs
-var root = process.argv[2] ?? join4(dirname3(fileURLToPath(new URL("../scripts/check-record-citations.mjs", import.meta.url).href)), "..");
-var storePath = join4(root, ".sterling", "sterling.db");
+var root = process.argv[2] ?? join5(dirname4(fileURLToPath(new URL("../scripts/check-record-citations.mjs", import.meta.url).href)), "..");
+var storePath = join5(root, ".sterling", "sterling.db");
 if (!existsSync4(storePath)) {
   console.log("record citations: skipped (no store)");
   process.exit(0);
@@ -8916,7 +9066,7 @@ var currencyWarnings = [];
 var citations = 0;
 var optOuts = 0;
 for (const file of files) {
-  const abs = join4(root, file);
+  const abs = join5(root, file);
   if (!existsSync4(abs)) continue;
   const content = readFileSync2(abs, "utf8");
   optOuts += countCitationOptOuts(content);

@@ -4380,7 +4380,10 @@ var modelsCatalogSchema = external_exports.object({
     id: external_exports.string(),
     label: external_exports.string(),
     tier: external_exports.string(),
-    status: external_exports.string()
+    status: external_exports.string(),
+    // Which vendor's model this is ('anthropic', 'openai'). Optional: a catalog
+    // written before vendors existed still parses, and none is invented.
+    vendor: external_exports.string().optional()
   }))
 });
 var referenceMaterialSchema = base.extend({
@@ -4718,10 +4721,20 @@ var knowledgeWriteSchema = external_exports.object({
 }).strict();
 
 // packages/schemas/dist/config.js
-var modelEffort = external_exports.object({
+var effortLevel = external_exports.enum(["low", "medium", "high", "xhigh"]);
+var modelPin = external_exports.object({
   model: external_exports.string(),
-  effort: external_exports.enum(["low", "medium", "high", "xhigh"])
+  effort: effortLevel.optional()
 }).strict();
+var agentModelEntry = external_exports.object({
+  model: external_exports.string(),
+  effort: effortLevel,
+  hard_task: modelPin.optional()
+}).strict();
+var vendorPins = external_exports.object({
+  openai: modelPin.optional(),
+  anthropic: modelPin.optional()
+}).default({});
 var successPredicateSchema = external_exports.object({
   output_regex: external_exports.string().optional(),
   output_regex_absent: external_exports.string().optional(),
@@ -4876,19 +4889,19 @@ var configSchema = external_exports.object({
   // longer needs an indirection layer between an agent's name and its config
   // key.
   models: external_exports.object({
-    implementor: modelEffort.default({ model: "claude-sonnet-5-5", effort: "high" }),
-    researcher: modelEffort.default({ model: "claude-sonnet-5-5", effort: "medium" }),
-    scout: modelEffort.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
+    implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
+    researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
+    scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    classifiers: agentModelEntry.default({ model: "claude-haiku-4-5", effort: "low" }),
     // librarian is mechanical clerking — cheap model, low effort (P8). The
     // roster is classless (decision agent-roster-is-classless-four-agents), and
     // the debugger role it rejected has no key here.
-    librarian: modelEffort.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    librarian: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
-    reviewer: modelEffort.default({ model: "claude-opus-5-5", effort: "high" })
-  }).default({}),
+    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
+  }).catchall(agentModelEntry).default({}),
   // Per-project agent tool extension (decision
   // per-project-agent-extra-tools-config-appended-at-render, 587472e3):
   // agents.<registered-agent-name>.extra_tools is appended to that agent's
@@ -5102,12 +5115,23 @@ var configSchema = external_exports.object({
   // — this field never stands in for that absence, only for a deliberate OFF.
   sparring_partner: external_exports.object({
     enabled: external_exports.boolean().default(true),
-    // TUI System-tab model selector (article sparring-partner interaction i,
-    // board a0714d0b): the model argument sent on every consult. Absent/empty
-    // = the Codex CLI's own default. Deliberately a FREE string, no enum —
-    // codex validates model names server-side with a loud 400, so a client-
-    // side allowlist would only drift from what the CLI actually accepts.
-    model: external_exports.string().optional()
+    // Which vendor's model the consult runs on (decision
+    // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks).
+    // 'openai' is the behaviour before the setting existed.
+    vendor: external_exports.enum(["openai", "anthropic"]).default("openai"),
+    // The model pinned per vendor. Absent = no pin (the host's default). The
+    // old sparring_partner.model is converted to models.openai by
+    // normalizeRawConfig, before this schema strips unknown keys. The default
+    // ships no pin: the decision names no model per vendor.
+    models: vendorPins
+  }).default({}),
+  // Reviews (same decision): the vendor policy and the model pinned per vendor.
+  // cross_vendor = the other family than the model that wrote the diff; openai
+  // and anthropic force one vendor even when that makes reviewer and author the
+  // same family (user-ruled 2026-10-03). Ships no pin, like sparring_partner.
+  review: external_exports.object({
+    policy: external_exports.enum(["cross_vendor", "openai", "anthropic"]).default("cross_vendor"),
+    models: vendorPins
   }).default({}),
   // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
@@ -5193,14 +5217,14 @@ var runtimeMarkerSchema = external_exports.object({
   booted_at: external_exports.string()
 }).strict();
 
-// packages/store/dist/index.js
-import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-
 // packages/store/dist/axis.js
 var AXIS_MAX_TERM_LEN = 64;
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
+
+// packages/store/dist/sqlite-driver.js
+import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 
 // packages/store/dist/index.js
 var MAX_RANK_TERMS = 16;
