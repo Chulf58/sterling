@@ -20,10 +20,10 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative as relativePath } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildSeamHook } from './lib/seam-hook.mjs';
-import { compareVersions, parseVersion, postUpdateSync, runStepAsync } from '../lib/post-update-sync.mjs';
+import { cloneAgentSync, compareVersions, parseVersion, postUpdateSync, runStepAsync } from '../lib/post-update-sync.mjs';
 import { sterlingRootLine } from '../hooks/lib/operating-state.mjs';
 import { renderClaudeText } from '../lib/agent-fences.mjs';
 
@@ -61,11 +61,23 @@ const LOGGING_SCRIPT = (name, stdout, exitEnv) =>
 
 const RESTART_OUT = 'refreshed: implementor\n\nRESTART REQUIRED — project subagents load at session start.\n';
 
-function makePluginRoot({ clone = false, bin = false, noVersion = false, version = VERSION, syncOut = RESTART_OUT, contractOut = 'stamp-contract: 1 already in sync — 1 project(s) processed\n' } = {}) {
+// A clone fixture has a main branch and is checked out on it unless `head` says
+// otherwise: the clone agent sync reads .git/HEAD and runs on the base branch only.
+// head: null leaves the HEAD file out; mainBranch: false is a clone with no main.
+const HEAD_MAIN = 'ref: refs/heads/main\n';
+
+function makePluginRoot({ clone = false, head = HEAD_MAIN, mainBranch = true, bin = false, noVersion = false, version = VERSION, syncOut = RESTART_OUT, contractOut = 'stamp-contract: 1 already in sync — 1 project(s) processed\n' } = {}) {
   const dir = tmp('sterling-pus-plugin-');
   mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
   writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify(noVersion ? { name: 'sterling' } : { name: 'sterling', version }));
-  if (clone) mkdirSync(join(dir, '.git'));
+  if (clone) {
+    mkdirSync(join(dir, '.git'));
+    if (head !== null) writeFileSync(join(dir, '.git', 'HEAD'), head);
+    if (mainBranch) {
+      mkdirSync(join(dir, '.git', 'refs', 'heads'), { recursive: true });
+      writeFileSync(join(dir, '.git', 'refs', 'heads', 'main'), `${'0'.repeat(40)}\n`);
+    }
+  }
   const scriptDir = join(dir, bin ? 'bin' : 'scripts');
   mkdirSync(scriptDir, { recursive: true });
   writeFileSync(join(scriptDir, 'sync-agents.mjs'), LOGGING_SCRIPT('sync-agents', syncOut, 'FIXTURE_SYNC_EXIT'));
@@ -336,6 +348,183 @@ test('postUpdateSync: stamp-contract exit 2 with some projects processed is stil
   const r = await postUpdateSync({ root: plugin, project, host: 'opencode', runStep });
   assert.equal(r.outcome, 'synced');
   assert.equal(markerOf(project), `${VERSION}\n`);
+});
+
+// CLONE AGENT SYNC (user-ruled 2026-10-06, "Sync at session start (Recommended)"): the
+// same two steps on a git clone, triggered by H1's agent-currency hash compare and
+// never recorded in the version marker. The H1 end of it, with the real syncAgents, is
+// pinned in scripts/tests/agent-currency-h1.test.mjs.
+function recordingSteps(results = {}) {
+  const calls = [];
+  const runStep = async (root, name, args) => {
+    calls.push(`${name} ${args.join(' ')}`);
+    return results[name] ?? (name === 'sync-agents.mjs'
+      ? { status: 0, error: null, out: 'refreshed: implementor\n\nRESTART REQUIRED — project subagents load at session start.', tail: 'refreshed: implementor' }
+      : { status: 0, error: null, out: 'stamp-contract: 1 already in sync — 1 project(s) processed', tail: '' });
+  };
+  return { calls, runStep };
+}
+
+test('cloneAgentSync: an installed copy is not a clone, so nothing runs and nothing is said', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const { calls, runStep } = recordingSteps();
+  assert.equal(await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep }), null);
+  assert.deepEqual(calls, []);
+});
+
+test('cloneAgentSync: a clone runs both steps for the project and never writes or moves the version marker', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  for (const marker of [null, VERSION, '0.0.1']) {
+    const project = makeProject({ marker, store: false });
+    const before = markerOf(project);
+    const { calls, runStep } = recordingSteps();
+    const r = await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep });
+    assert.equal(r.outcome, 'synced');
+    assert.deepEqual(calls, [`sync-agents.mjs --target ${project}`, `stamp-contract.mjs --apply-inserts --project ${project}`]);
+    assert.equal(markerOf(project), before, `marker ${marker} is left as it was: an installed copy newer than it still runs its own sync`);
+    assert.equal(r.warning, '⚠ Sterling clone: installed agents were behind its templates (implementor.md) — agents synced — RESTART to load them (EXIT AND RELAUNCH; a /clear is NOT enough). ');
+    assert.ok(r.context.startsWith("\n\nCLONE AGENT SYNC (H1): this project's installed agents were behind the clone's templates (implementor.md) — agents synced — RESTART to load them"), r.context);
+    assert.ok(r.context.includes('sync-agents reported: refreshed: implementor.'), r.context);
+  }
+});
+
+test('cloneAgentSync: the clone as its own project is synced (the project is the plugin root)', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  mkdirSync(join(plugin, '.sterling'), { recursive: true });
+  writeFileSync(join(plugin, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby' }));
+  const { calls, runStep } = recordingSteps();
+  const r = await cloneAgentSync({ root: plugin, project: plugin, behind: [], runStep });
+  assert.equal(r.outcome, 'synced');
+  assert.deepEqual(calls, [`sync-agents.mjs --target ${plugin}`, `stamp-contract.mjs --apply-inserts --project ${plugin}`]);
+  assert.equal(markerOf(plugin), 'ENOENT');
+});
+
+test('cloneAgentSync: a clone older than the marker refuses and runs nothing; a clone version that cannot be ordered against a marker is a loud SKIP', async () => {
+  const older = makePluginRoot({ clone: true });
+  const project = makeProject({ marker: '10.0.0', store: false });
+  const a = recordingSteps();
+  const refused = await cloneAgentSync({ root: older, project, behind: ['implementor.md'], runStep: a.runStep });
+  assert.equal(refused.outcome, 'refused-older');
+  assert.deepEqual(a.calls, []);
+  assert.equal(refused.warning, `✗ Sterling clone ${VERSION} is OLDER than this project's sync marker 10.0.0: agent sync REFUSED, nothing downgraded — pull this clone. `);
+  assert.equal(markerOf(project), '10.0.0\n');
+
+  const b = recordingSteps();
+  const skipped = await cloneAgentSync({ root: makePluginRoot({ clone: true, version: 'dev' }), project, behind: [], runStep: b.runStep });
+  assert.equal(skipped.outcome, 'skipped');
+  assert.deepEqual(b.calls, []);
+  assert.match(skipped.warning, /^⚠ Sterling clone agent sync SKIPPED — /);
+
+  const c = recordingSteps();
+  const unmarked = await cloneAgentSync({ root: makePluginRoot({ clone: true, version: 'dev' }), project: makeProject({ store: false }), behind: [], runStep: c.runStep });
+  assert.equal(unmarked.outcome, 'synced', 'with no marker there is nothing to order against, so nothing can be downgraded');
+});
+
+test('cloneAgentSync: a refusal is a failed sync that says what was refused, and owes the restart when sync-agents changed another agent first', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  const project = makeProject({ store: false });
+  const out = 'refreshed: implementor\nrefused_local_modification: reviewer\nrefreshed: .opencode/agents/scout.md';
+  const a = recordingSteps({ 'sync-agents.mjs': { status: 2, error: null, out, tail: out.split('\n').join(' | ') } });
+  const r = await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep: a.runStep });
+  assert.equal(r.outcome, 'failed');
+  assert.deepEqual(a.calls, [`sync-agents.mjs --target ${project}`]);
+  assert.match(r.warning, /^✗ Sterling clone: agent sync FAILED — sync-agents REFUSED \(exit 2 .*refused_local_modification: reviewer .*\. agents synced — RESTART to load them/);
+  assert.ok(r.context.includes('sync-agents DID change agents before the failure (refreshed: implementor): RESTART REQUIRED'), r.context);
+
+  const portableOnly = 'refused_local_modification: reviewer\nrefreshed: .opencode/agents/scout.md';
+  const b = recordingSteps({ 'sync-agents.mjs': { status: 2, error: null, out: portableOnly, tail: portableOnly } });
+  const quiet = await cloneAgentSync({ root: plugin, project, behind: [], runStep: b.runStep });
+  assert.doesNotMatch(quiet.warning + quiet.context, /RESTART/, 'a portable OpenCode copy needs no restart, and nothing else changed');
+});
+
+// BASE BRANCH ONLY (user-ruled 2026-10-06 through the question form, "Sync only on the
+// base branch (Recommended)"): a clone on a feature branch holds templates that are not
+// merged yet, so nothing is synced from it. The branch comes from the HEAD file, never
+// from a git process.
+async function offBase(plugin) {
+  const project = makeProject({ store: false });
+  const { calls, runStep } = recordingSteps();
+  const r = await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep });
+  assert.deepEqual(calls, [], 'nothing is spawned');
+  assert.equal(r.outcome, 'off-base');
+  assert.equal(r.warning, '');
+  assert.equal(r.context, '');
+  assert.equal(markerOf(project), 'ENOENT');
+  assert.doesNotMatch(r.clause, /\n/, 'the clause is one line');
+  return r.clause;
+}
+
+async function onBase(plugin) {
+  const project = makeProject({ store: false });
+  const { calls, runStep } = recordingSteps();
+  const r = await cloneAgentSync({ root: plugin, project, behind: ['implementor.md'], runStep });
+  assert.equal(r.outcome, 'synced');
+  assert.deepEqual(calls, [`sync-agents.mjs --target ${project}`, `stamp-contract.mjs --apply-inserts --project ${project}`]);
+}
+
+test('cloneAgentSync: a clone on another branch syncs nothing and names the branch', async () => {
+  const clause = await offBase(makePluginRoot({ clone: true, head: 'ref: refs/heads/integrate/0.18.88\n' }));
+  assert.equal(clause, 'the Sterling clone is on branch integrate/0.18.88, not its base branch main, so agents sync at session start after the merge');
+});
+
+test('cloneAgentSync: a detached HEAD syncs nothing and says so', async () => {
+  const clause = await offBase(makePluginRoot({ clone: true, head: `${'a1b2c3d4'.repeat(5)}\n` }));
+  assert.equal(clause, 'the Sterling clone is on a detached HEAD, not its base branch main, so agents sync at session start once main is checked out');
+});
+
+test('cloneAgentSync: a HEAD that is missing or is not a branch or a commit syncs nothing and says it could not be read, with no file content', async () => {
+  assert.equal(
+    await offBase(makePluginRoot({ clone: true, head: null })),
+    "the Sterling clone's checked-out branch could not be read (HEAD: ENOENT), so no agents were synced",
+  );
+  const junk = await offBase(makePluginRoot({ clone: true, head: 'ref: refs/heads/has space\nSECOND-LINE-MARKER\n' }));
+  assert.equal(junk, "the Sterling clone's checked-out branch could not be read (HEAD: not a branch or a commit), so no agents were synced");
+});
+
+test('cloneAgentSync: master is the base only when the clone has no main branch, loose or packed', async () => {
+  const head = 'ref: refs/heads/master\n';
+  await onBase(makePluginRoot({ clone: true, head, mainBranch: false }));
+  assert.match(await offBase(makePluginRoot({ clone: true, head })), /is on branch master, not its base branch main,/, 'a loose refs/heads/main');
+  assert.match(
+    await offBase(makePluginRoot({ clone: true, head: 'ref: refs/heads/feature\n', mainBranch: false })),
+    /is on branch feature, not its base branch master,/,
+    'with no main the base is master, and a feature branch is still not it',
+  );
+
+  const packed = makePluginRoot({ clone: true, head, mainBranch: false });
+  writeFileSync(join(packed, '.git', 'packed-refs'), `# pack-refs with: peeled fully-peeled sorted\n${'0'.repeat(40)} refs/heads/main\n${'1'.repeat(40)} refs/heads/master\n`);
+  assert.match(await offBase(packed), /is on branch master, not its base branch main,/);
+
+  const packedOther = makePluginRoot({ clone: true, head, mainBranch: false });
+  writeFileSync(join(packedOther, '.git', 'packed-refs'), `${'0'.repeat(40)} refs/heads/maintenance\n${'1'.repeat(40)} refs/remotes/origin/main\n`);
+  await onBase(packedOther);
+});
+
+// A linked worktree's .git is a FILE pointing at <main>/.git/worktrees/<name>, which holds
+// that worktree's own HEAD and a commondir file pointing back at the shared refs.
+function makeWorktreeRoot(head, { relative = false } = {}) {
+  const main = makePluginRoot({ clone: true });
+  const admin = join(main, '.git', 'worktrees', 'wt');
+  mkdirSync(admin, { recursive: true });
+  writeFileSync(join(admin, 'HEAD'), head);
+  writeFileSync(join(admin, 'commondir'), '../..\n');
+  const wt = makePluginRoot();
+  writeFileSync(join(wt, '.git'), `gitdir: ${relative ? relativePath(wt, admin) : admin}\n`);
+  return { wt };
+}
+
+test('cloneAgentSync: a linked worktree (.git is a file) is read through its gitdir, absolute or relative', async () => {
+  await onBase(makeWorktreeRoot('ref: refs/heads/main\n').wt);
+  await onBase(makeWorktreeRoot('ref: refs/heads/main\n', { relative: true }).wt);
+  assert.match(await offBase(makeWorktreeRoot('ref: refs/heads/worktree-agent-1\n').wt), /is on branch worktree-agent-1, not its base branch main,/);
+
+  // master in a worktree whose shared refs hold a main: the commondir is where main is found.
+  assert.match(await offBase(makeWorktreeRoot('ref: refs/heads/master\n').wt), /is on branch master, not its base branch main,/);
+
+  const broken = makePluginRoot();
+  writeFileSync(join(broken, '.git'), 'not a pointer\nSECOND-LINE-MARKER\n');
+  assert.equal(await offBase(broken), "the Sterling clone's checked-out branch could not be read (.git: no gitdir line), so no agents were synced");
 });
 
 test('compareVersions: semver precedence, prerelease below release, build metadata ignored, null for non-versions', () => {

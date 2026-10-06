@@ -47,7 +47,13 @@
   },
   "article_history_genesis_entries": 2,
   "sparring_partner": {
-    "enabled": true
+    "enabled": true,
+    "vendor": "openai",
+    "models": {}
+  },
+  "review": {
+    "policy": "cross_vendor",
+    "models": {}
   },
   "tdd": {
     "enabled": true
