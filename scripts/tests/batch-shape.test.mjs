@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { withInboundSupersedesAll, assertBatchShape, BatchShapeError } from '../hooks/lib/delivery.mjs';
 import { composeMechanismAxis } from '../hooks/lib/axis-compose.mjs';
+import { routedSubjectFan, BatchRosterError } from '../hooks/lib/subject-fan.mjs';
 
 const decision = (id) => ({ id, type: 'decision', title: `decision ${id}`, status: 'active', authority: 'standing' });
 
@@ -58,4 +59,19 @@ test('assertBatchShape: exactly n arrays passes through; anything else throws by
   const ok = [[], [1]];
   assert.equal(assertBatchShape(ok, 2, 'x'), ok);
   for (const bad of [[[]], [[], 1], undefined, 'no', [[], [], []]]) assert.throws(() => assertBatchShape(bad, 2, 'x'), BatchShapeError);
+});
+
+test('routed fan queryEach: a bySourceEach reply whose sources are not [project, ...domains] in order throws BatchRosterError', () => {
+  const list = [{ types: ['decision'], rank_terms: ['broker'] }];
+  const entry = (source) => ({ source, results: [[]] });
+  const fanFor = (reply) => routedSubjectFan({ project: {}, domainNames: () => ['alpha'], bySourceEach: () => reply });
+  const bad = {
+    missing: [entry('project')],
+    extra: [entry('project'), entry('alpha'), entry('beta')],
+    duplicated: [entry('project'), entry('project')],
+    reordered: [entry('alpha'), entry('project')],
+  };
+  for (const [name, reply] of Object.entries(bad)) assert.throws(() => fanFor(reply).queryEach(list), BatchRosterError, name);
+  const ok = fanFor([{ source: 'project', results: [[{ id: 'p' }]] }, { source: 'alpha', results: [[{ id: 'a' }]] }]).queryEach(list);
+  assert.deepEqual(ok[0].map((r) => [r.id, r.source_store]), [['p', 'project'], ['a', 'alpha']]);
 });

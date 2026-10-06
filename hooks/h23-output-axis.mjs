@@ -11537,7 +11537,15 @@ function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
   };
 }
 function openRoutedSubjectFan(cwd) {
-  const { stores } = openRoutedForHook(cwd, { mount: true });
+  return routedSubjectFan(openRoutedForHook(cwd, { mount: true }).stores);
+}
+var BatchRosterError = class extends Error {
+  constructor(expected, got) {
+    super(`bySourceEach: expected sources ${JSON.stringify(expected)}, got ${JSON.stringify(got)}; the batch is treated as failed, never as a store with no rows`);
+    this.name = "BatchRosterError";
+  }
+};
+function routedSubjectFan(stores) {
   const project = stores.project;
   return {
     project,
@@ -11558,11 +11566,14 @@ function openRoutedSubjectFan(cwd) {
      *  store call, so a broker hook pays one round trip and one read transaction per store. */
     queryEach(list) {
       if (list.some((opts) => opts.file_keys !== void 0)) return list.map((opts) => this.query(opts));
-      if (!stores.domainNames().length) return assertBatchShape(project.queryEach(list), list.length, "queryEach").map((records) => tag(records, "project"));
+      const names = stores.domainNames();
+      if (!names.length) return assertBatchShape(project.queryEach(list), list.length, "queryEach").map((records) => tag(records, "project"));
       const capped = list.map((opts) => ({ ...opts, cap: opts.cap ?? DEFAULT_QUERY_CAP }));
       const perStore = stores.bySourceEach(capped);
-      if (!Array.isArray(perStore) || !perStore.length) throw new TypeError(`bySourceEach: expected one entry per store, project first, got ${Array.isArray(perStore) ? "none" : typeof perStore}`);
-      for (const s2 of perStore) assertBatchShape(s2?.results, list.length, `bySourceEach (source '${s2?.source}')`);
+      const expected = ["project", ...names];
+      const got = Array.isArray(perStore) ? perStore.map((s2) => s2?.source) : perStore;
+      if (!Array.isArray(got) || got.length !== expected.length || got.some((source, i) => source !== expected[i])) throw new BatchRosterError(expected, got);
+      for (const s2 of perStore) assertBatchShape(s2.results, list.length, `bySourceEach (source '${s2.source}')`);
       return capped.map((opts, j) => {
         const shares = allocateShares(perStore.map((s2) => s2.results[j].length), opts.cap);
         return perStore.flatMap((s2, i) => tag(s2.results[j].slice(0, shares[i]), s2.source));

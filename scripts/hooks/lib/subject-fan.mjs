@@ -177,7 +177,19 @@ export function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
  * StoreSettingsError the same way.
  */
 function openRoutedSubjectFan(cwd) {
-  const { stores } = openRoutedForHook(cwd, { mount: true });
+  return routedSubjectFan(openRoutedForHook(cwd, { mount: true }).stores);
+}
+
+/** A bySourceEach reply whose stores are not the mounted roster: project, then each domain in order. */
+export class BatchRosterError extends Error {
+  constructor(expected, got) {
+    super(`bySourceEach: expected sources ${JSON.stringify(expected)}, got ${JSON.stringify(got)}; the batch is treated as failed, never as a store with no rows`);
+    this.name = 'BatchRosterError';
+  }
+}
+
+/** openRoutedSubjectFan's surface over a MountedStores-shaped `stores` (exported for tests). */
+export function routedSubjectFan(stores) {
   const project = stores.project;
   return {
     project,
@@ -198,11 +210,16 @@ function openRoutedSubjectFan(cwd) {
      *  store call, so a broker hook pays one round trip and one read transaction per store. */
     queryEach(list) {
       if (list.some((opts) => opts.file_keys !== undefined)) return list.map((opts) => this.query(opts));
-      if (!stores.domainNames().length) return assertBatchShape(project.queryEach(list), list.length, 'queryEach').map((records) => tag(records, 'project'));
+      const names = stores.domainNames();
+      if (!names.length) return assertBatchShape(project.queryEach(list), list.length, 'queryEach').map((records) => tag(records, 'project'));
       const capped = list.map((opts) => ({ ...opts, cap: opts.cap ?? DEFAULT_QUERY_CAP }));
       const perStore = stores.bySourceEach(capped);
-      if (!Array.isArray(perStore) || !perStore.length) throw new TypeError(`bySourceEach: expected one entry per store, project first, got ${Array.isArray(perStore) ? 'none' : typeof perStore}`);
-      for (const s of perStore) assertBatchShape(s?.results, list.length, `bySourceEach (source '${s?.source}')`);
+      // The reply must name every mounted store, project first, in manifest order:
+      // a missing source would silently drop that store's results.
+      const expected = ['project', ...names];
+      const got = Array.isArray(perStore) ? perStore.map((s) => s?.source) : perStore;
+      if (!Array.isArray(got) || got.length !== expected.length || got.some((source, i) => source !== expected[i])) throw new BatchRosterError(expected, got);
+      for (const s of perStore) assertBatchShape(s.results, list.length, `bySourceEach (source '${s.source}')`);
       return capped.map((opts, j) => {
         const shares = allocateShares(perStore.map((s) => s.results[j].length), opts.cap);
         return perStore.flatMap((s, i) => tag(s.results[j].slice(0, shares[i]), s.source));
