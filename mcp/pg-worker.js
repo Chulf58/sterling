@@ -5406,7 +5406,7 @@ parentPort.once("message", (init) => {
     process.exit(1);
   });
   process.on("exit", (code) => die(new Error(`pg-worker exited with code ${code}`)));
-  const client = new esm_default.Client(init.config);
+  const client = new esm_default.Client({ ...init.config, pipeline: true });
   client.on("error", (e) => {
     die(e ?? new Error("pg-worker: client error"));
     process.exit(1);
@@ -5427,10 +5427,22 @@ parentPort.once("message", (init) => {
         });
         return;
       }
-      client.query(req.text ?? "", req.values).then((res) => {
+      const done = (res) => {
         const last = Array.isArray(res) ? res[res.length - 1] : res;
         reply({ ok: true, rows: last?.rows ?? [], rowCount: last?.rowCount ?? 0 });
-      }, (e) => reply({ ok: false, error: toWorkerError(e) }));
+      };
+      if (req.prefix !== void 0) {
+        Promise.allSettled([client.query(req.prefix), client.query(req.text ?? "", req.values)]).then(([first, second]) => {
+          if (first.status === "rejected")
+            reply({ ok: false, prefixFailed: true, error: toWorkerError(first.reason) });
+          else if (second.status === "rejected")
+            reply({ ok: false, error: toWorkerError(second.reason) });
+          else
+            done(second.value);
+        });
+        return;
+      }
+      client.query(req.text ?? "", req.values).then(done, (e) => reply({ ok: false, error: toWorkerError(e) }));
     });
   }, (e) => {
     reply({ ok: false, error: toWorkerError(e) });

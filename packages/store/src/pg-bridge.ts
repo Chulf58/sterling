@@ -96,6 +96,8 @@ export class PgQueryError extends Error {
   constructor(
     message: string,
     readonly code: string | undefined,
+    /** True when the failure was in the query's prefix (PgBridge.query's `prefix`), not the statement. */
+    readonly inPrefix = false,
   ) {
     super(message);
     this.name = 'PgQueryError';
@@ -241,6 +243,7 @@ interface Reply {
   dead?: boolean;
   rows?: Record<string, unknown>[];
   rowCount?: number;
+  prefixFailed?: boolean;
   error?: { name: string; message: string; code?: string };
 }
 
@@ -306,9 +309,13 @@ export class PgBridge {
     }
   }
 
-  /** Runs one statement. With `values` it is a parameterised query ($1, $2, ...); without, a simple query that may hold several statements. */
-  query(text: string, values?: unknown[]): PgQueryResult {
-    const reply = this.send({ op: 'query', text, values }, 'query', this.waitTimeoutMs);
+  /**
+   * Runs one statement. With `values` it is a parameterised query ($1, $2, ...); without, a simple query that may hold several statements.
+   * `prefix`, a simple query, goes out in the same round trip ahead of the statement; when it fails the call throws a PgQueryError with
+   * `inPrefix` set and the statement's result is discarded (the statement may still have run, so the caller passes only a read).
+   */
+  query(text: string, values?: unknown[], prefix?: string): PgQueryResult {
+    const reply = this.send({ op: 'query', text, values, ...(prefix !== undefined ? { prefix } : {}) }, 'query', this.waitTimeoutMs);
     return { rows: reply.rows ?? [], rowCount: reply.rowCount ?? 0 };
   }
 
@@ -322,7 +329,7 @@ export class PgBridge {
     }
   }
 
-  private send(req: { op: 'query' | 'close'; text?: string; values?: unknown[] }, phase: 'query' | 'close', timeoutMs: number): Reply {
+  private send(req: { op: 'query' | 'close'; text?: string; values?: unknown[]; prefix?: string }, phase: 'query' | 'close', timeoutMs: number): Reply {
     if (this.closedReason !== undefined) throw new PgBridgeClosedError(this.closedReason);
     // The worker may have died between calls (a connection lost while idle):
     // its death message is already queued and the state already says DEAD.
@@ -361,7 +368,7 @@ export class PgBridge {
         this.shutDown(`the connection failed: ${message}`);
         throw new PgWorkerDiedError(`connecting failed: ${message}`, reply.error?.code);
       }
-      throw new PgQueryError(message, reply.error?.code);
+      throw new PgQueryError(message, reply.error?.code, reply.prefixFailed === true);
     }
     return reply;
   }

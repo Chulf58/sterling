@@ -17,7 +17,7 @@
 // channel that works.
 
 import { parentPort, type MessagePort } from 'node:worker_threads';
-import pg from 'pg';
+import pg, { type QueryResult } from 'pg';
 
 const STATE_REPLY = 1;
 const STATE_DEAD = 2;
@@ -33,6 +33,8 @@ interface Request {
   op: 'query' | 'close';
   text?: string;
   values?: unknown[];
+  /** A simple query sent in the same round trip, ahead of `text` (PgDriver's deferred BEGIN). */
+  prefix?: string;
 }
 
 // int8 (count(*), bigint columns): a number when it is a safe integer, as
@@ -83,7 +85,10 @@ parentPort.once('message', (init: { control: SharedArrayBuffer; port: MessagePor
   });
   process.on('exit', (code) => die(new Error(`pg-worker exited with code ${code}`)));
 
-  const client = new pg.Client(init.config);
+  // Pipeline mode puts a request's prefix and its statement on the wire
+  // together. The bridge sends one request at a time, so a request without a
+  // prefix behaves exactly as it does without pipelining.
+  const client = new pg.Client({ ...init.config, pipeline: true });
   // A connection lost between statements: the client is unusable from here on.
   client.on('error', (e) => {
     die(e ?? new Error('pg-worker: client error'));
@@ -110,14 +115,22 @@ parentPort.once('message', (init: { control: SharedArrayBuffer; port: MessagePor
           );
           return;
         }
-        client.query(req.text ?? '', req.values).then(
-          (res) => {
-            // A multi-statement simple query (exec) returns one result per statement.
-            const last = Array.isArray(res) ? res[res.length - 1] : res;
-            reply({ ok: true, rows: last?.rows ?? [], rowCount: last?.rowCount ?? 0 });
-          },
-          (e: unknown) => reply({ ok: false, error: toWorkerError(e) }),
-        );
+        // A multi-statement simple query (exec) returns one result per statement.
+        const done = (res: QueryResult | QueryResult[]) => {
+          const last = Array.isArray(res) ? res[res.length - 1] : res;
+          reply({ ok: true, rows: last?.rows ?? [], rowCount: last?.rowCount ?? 0 });
+        };
+        if (req.prefix !== undefined) {
+          // Both go out before either reply. A failed prefix fails the request,
+          // and the statement's own result is discarded.
+          Promise.allSettled([client.query(req.prefix), client.query(req.text ?? '', req.values)]).then(([first, second]) => {
+            if (first.status === 'rejected') reply({ ok: false, prefixFailed: true, error: toWorkerError(first.reason) });
+            else if (second.status === 'rejected') reply({ ok: false, error: toWorkerError(second.reason) });
+            else done(second.value);
+          });
+          return;
+        }
+        client.query(req.text ?? '', req.values).then(done, (e: unknown) => reply({ ok: false, error: toWorkerError(e) }));
       });
     },
     (e: unknown) => {

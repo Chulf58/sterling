@@ -5546,7 +5546,7 @@ function readProjectIdentity(root) {
 }
 
 // packages/schemas/dist/broker.js
-var BROKER_PROTOCOL = 1;
+var BROKER_PROTOCOL = 2;
 var BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
 var BROKER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 var BROKER_DISCOVERY_MAX_ENTRIES = 32;
@@ -5565,9 +5565,11 @@ var BROKER_OPERATIONS = {
   project: [
     "get",
     "query",
+    "queryEach",
     "count",
     "articlesBySlug",
     "inboundSupersedes",
+    "inboundSupersedesEach",
     "boardReadiness",
     "getMeta",
     "create",
@@ -5576,7 +5578,7 @@ var BROKER_OPERATIONS = {
     "remove",
     "recordCheckSkipped"
   ],
-  mounted: ["domainNames", "bySource", "querySource", "inboundSupersedes", "domainDescription"]
+  mounted: ["domainNames", "bySource", "bySourceEach", "querySource", "inboundSupersedes", "inboundSupersedesEach", "domainDescription"]
 };
 var BROKER_MAX_ARGS = 6;
 var brokerIdentitySchema = external_exports.object({
@@ -5725,9 +5727,11 @@ var PgTransactionOpenError = class extends Error {
 };
 var PgQueryError = class extends Error {
   code;
-  constructor(message, code) {
+  inPrefix;
+  constructor(message, code, inPrefix = false) {
     super(message);
     this.code = code;
+    this.inPrefix = inPrefix;
     this.name = "PgQueryError";
   }
 };
@@ -5877,9 +5881,13 @@ var PgBridge = class {
       this.txOwnerLabel = "";
     }
   }
-  /** Runs one statement. With `values` it is a parameterised query ($1, $2, ...); without, a simple query that may hold several statements. */
-  query(text, values) {
-    const reply = this.send({ op: "query", text, values }, "query", this.waitTimeoutMs);
+  /**
+   * Runs one statement. With `values` it is a parameterised query ($1, $2, ...); without, a simple query that may hold several statements.
+   * `prefix`, a simple query, goes out in the same round trip ahead of the statement; when it fails the call throws a PgQueryError with
+   * `inPrefix` set and the statement's result is discarded (the statement may still have run, so the caller passes only a read).
+   */
+  query(text, values, prefix) {
+    const reply = this.send({ op: "query", text, values, ...prefix !== void 0 ? { prefix } : {} }, "query", this.waitTimeoutMs);
     return { rows: reply.rows ?? [], rowCount: reply.rowCount ?? 0 };
   }
   /** Ends the connection and stops the worker. Idempotent. */
@@ -5929,7 +5937,7 @@ var PgBridge = class {
         this.shutDown(`the connection failed: ${message}`);
         throw new PgWorkerDiedError(`connecting failed: ${message}`, reply.error?.code);
       }
-      throw new PgQueryError(message, reply.error?.code);
+      throw new PgQueryError(message, reply.error?.code, reply.prefixFailed === true);
     }
     return reply;
   }
@@ -6384,11 +6392,7 @@ var PgStatement = class {
       throw new RangeError(`PgDriver: statement takes ${this.translated.params} parameter(s), got ${params.length}: ${this.sql}`);
     }
     const values = params.map((p, i) => toPgParam(p, i, this.sql, this.translated.derivedText));
-    try {
-      return this.driver.bridge.query(this.translated.text, values);
-    } catch (e) {
-      return mapPgError(e, this.sql);
-    }
+    return this.driver.run(this.translated.text, values, this.sql);
   }
   get(...params) {
     return this.execute(params).rows[0];
@@ -6417,6 +6421,14 @@ var PgDriver = class {
   lockTimeoutMs;
   statementTimeoutMs;
   closed = false;
+  /**
+   * The transaction this handle claimed. After beginReadDeferred() the BEGIN
+   * waits in `pendingBegin` and goes out in the same round trip as the read's
+   * first statement (run()), so the read costs one round trip less; a read
+   * that runs no statement sends nothing.
+   */
+  txState = "none";
+  pendingBegin;
   constructor(bridge, options) {
     this.bridge = bridge;
     this.schema = options.schema;
@@ -6452,10 +6464,79 @@ var PgDriver = class {
     const t = translateStatement(sql, this.schema);
     if (t.params)
       throw new RangeError(`PgDriver.exec takes no parameters: ${sql}`);
+    this.run(t.text, void 0, sql);
+  }
+  /**
+   * @internal Every statement this handle runs. A pending BEGIN goes out ahead
+   * of it in the same round trip when the statement is a SELECT. Anything else
+   * waits for the BEGIN's own reply first: the bridge sends both before either
+   * answers, so a statement after a BEGIN that failed outright would run
+   * outside the transaction, and only a read may.
+   */
+  run(text, values, where) {
+    const pending = this.pendingBegin;
+    if (pending !== void 0) {
+      this.pendingBegin = void 0;
+      this.txState = "open";
+      if (/^\s*SELECT\b/i.test(text)) {
+        try {
+          return this.bridge.query(text, values, pending.text);
+        } catch (e) {
+          if (e instanceof PgQueryError && e.inPrefix)
+            this.failBegin(e, pending.where);
+          return mapPgError(e, where);
+        }
+      }
+      try {
+        this.bridge.query(pending.text);
+      } catch (e) {
+        this.failBegin(e, pending.where);
+      }
+    }
     try {
-      this.bridge.query(t.text);
+      return this.bridge.query(text, values);
     } catch (e) {
-      mapPgError(e, sql);
+      return mapPgError(e, where);
+    }
+  }
+  /** Claims the connection and sends BEGIN now. */
+  beginNow(text, label, where) {
+    this.assertOpen();
+    this.bridge.claimTransaction(this, label);
+    this.txState = "open";
+    try {
+      this.bridge.query(text);
+    } catch (e) {
+      this.failBegin(e, where);
+    }
+  }
+  /** Claims the connection for a read whose BEGIN goes out with its first statement (beginReadDeferred). */
+  deferBegin(text, label, where) {
+    this.assertOpen();
+    this.bridge.claimTransaction(this, label);
+    this.txState = "pending";
+    this.pendingBegin = { text, where };
+  }
+  /** A BEGIN that failed: roll back, release the claim and throw by name, as an eager BEGIN would. */
+  failBegin(e, where) {
+    this.txState = "none";
+    abandon(this.bridge, this);
+    return mapPgError(e, where);
+  }
+  /** Ends this handle's transaction with `statement` when its BEGIN was sent; a transaction that ran nothing (or was abandoned) sends nothing. */
+  endTx(statement, where) {
+    const sent = this.txState === "open";
+    this.txState = "none";
+    this.pendingBegin = void 0;
+    try {
+      if (sent && !this.bridge.closed)
+        this.bridge.query(statement);
+    } catch (e) {
+      if (where === void 0)
+        throw e;
+      mapPgError(e, where);
+    } finally {
+      this.bridge.releaseTransaction(this);
     }
   }
   close() {
@@ -6473,56 +6554,37 @@ var PgDriver = class {
    * name; it is never retried.
    */
   begin() {
-    this.assertOpen();
-    this.bridge.claimTransaction(this, `store '${this.schema}'`);
-    try {
-      this.bridge.query(`BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SET LOCAL statement_timeout = ${this.statementTimeoutMs}; SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`);
-    } catch (e) {
-      abandon(this.bridge, this);
-      mapPgError(e, `begin on store '${this.schema}'`);
-    }
+    this.beginNow(`BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SET LOCAL statement_timeout = ${this.statementTimeoutMs}; SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`, `store '${this.schema}'`, `begin on store '${this.schema}'`);
   }
   commit() {
-    try {
-      this.bridge.query("COMMIT");
-    } catch (e) {
-      mapPgError(e, `commit on store '${this.schema}'`);
-    } finally {
-      this.bridge.releaseTransaction(this);
-    }
+    this.endTx("COMMIT", `commit on store '${this.schema}'`);
   }
   rollback() {
-    try {
-      if (!this.bridge.closed)
-        this.bridge.query("ROLLBACK");
-    } finally {
-      this.bridge.releaseTransaction(this);
-    }
+    this.endTx("ROLLBACK", void 0);
   }
   /** A multi-statement read: one snapshot (REPEATABLE READ), read-only, under statement_timeout. Takes no lock. */
   beginRead() {
-    this.assertOpen();
-    this.bridge.claimTransaction(this, `a read on store '${this.schema}'`);
-    try {
-      this.bridge.query(`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = ${this.statementTimeoutMs}`);
-    } catch (e) {
-      abandon(this.bridge, this);
-      mapPgError(e, `a read on store '${this.schema}'`);
-    }
+    this.beginNow(this.readBeginText(), `a read on store '${this.schema}'`, `a read on store '${this.schema}'`);
+  }
+  /**
+   * beginRead(), except the BEGIN goes out in the same round trip as the
+   * read's first statement, and a read that runs no statement sends nothing.
+   * The snapshot is the same: REPEATABLE READ takes it at the first statement.
+   */
+  beginReadDeferred() {
+    this.deferBegin(this.readBeginText(), `a read on store '${this.schema}'`, `a read on store '${this.schema}'`);
+  }
+  readBeginText() {
+    return `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = ${this.statementTimeoutMs}`;
   }
   /** Ends the read transaction. COMMIT also ends one a failed statement aborted. */
   endRead() {
-    try {
-      if (!this.bridge.closed)
-        this.bridge.query("COMMIT");
-    } finally {
-      this.bridge.releaseTransaction(this);
-    }
+    this.endTx("COMMIT", void 0);
   }
   /** The store's version lives in its registry row, the counterpart of SQLite's PRAGMA user_version. */
   schemaVersion() {
     this.assertOpen();
-    const row = this.bridge.query(`SELECT schema_version FROM ${this.m}.stores WHERE schema_name = $1`, [this.schema]).rows[0];
+    const row = this.run(`SELECT schema_version FROM ${this.m}.stores WHERE schema_name = $1`, [this.schema], `the schema version of store '${this.schema}'`).rows[0];
     if (!row)
       throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
     return Number(row.schema_version);
@@ -6530,20 +6592,20 @@ var PgDriver = class {
   setSchemaVersion(version) {
     if (!Number.isInteger(version) || version < 0)
       throw new Error(`PgDriver: schema version must be a non-negative integer, got ${String(version)}`);
-    const { rowCount } = this.bridge.query(`UPDATE ${this.m}.stores SET schema_version = $1 WHERE schema_name = $2`, [version, this.schema]);
+    const { rowCount } = this.run(`UPDATE ${this.m}.stores SET schema_version = $1 WHERE schema_name = $2`, [version, this.schema], `stamping the schema version of store '${this.schema}'`);
     if (rowCount !== 1)
       throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
   }
   /** False only before the store's tables were ever created. */
   hasSchema() {
-    return Boolean(this.bridge.query("SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1) AS has", [this.schema]).rows[0].has);
+    return Boolean(this.run("SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1) AS has", [this.schema], `the tables of store '${this.schema}'`).rows[0].has);
   }
   /** Nothing to prepare: SterlingStore refuses every write on an older store itself, and opening writes nothing here. */
   prepareReadOnly() {
   }
   prepareWritable(_isFresh) {
     this.assertOpen();
-    this.bridge.query(storeDdl(this.s));
+    this.run(storeDdl(this.s), void 0, `creating the tables of store '${this.schema}'`);
   }
   /**
    * 'postgres'. SQLite's answer names its rollback-journal mode, which the
@@ -6960,6 +7022,12 @@ var MountedStores = class {
   bySource(opts) {
     return [...this.fanRead((s2) => s2.query(opts))].map((r) => ({ source: r.source, records: r.value }));
   }
+  /** bySource for each entry of `list` in one pass: per store, project first,
+   *  one SterlingStore.queryEach (one read transaction), so `results[i]` is
+   *  that store's bySource(list[i]) records. */
+  bySourceEach(list) {
+    return [...this.fanRead((s2) => s2.queryEach(list))].map((r) => ({ source: r.source, results: r.value }));
+  }
   /** Count-only per-source projection — the COUNT(*) twin of bySource (same
    *  project-first, per-store ordering) with NO body fetch. The TUI Knowledge
    *  tree's collapsed category/source badges use this so the default all-collapsed
@@ -7087,6 +7155,24 @@ var MountedStores = class {
    *  project-store tombstone behind, so the SAME source id can resolve out of
    *  two different mounts — first-seen (project-first, the read fan's own
    *  ordering) wins, never a duplicate entry for one concept. */
+  /** inboundSupersedes() for each id: per store one SterlingStore.inboundSupersedesEach,
+   *  merged per id exactly as inboundSupersedes merges (project first, first seen wins). */
+  inboundSupersedesEach(ids) {
+    const perStore = this.fanValues((s2) => s2.inboundSupersedesEach(ids));
+    return ids.map((_, i) => {
+      const seen = /* @__PURE__ */ new Set();
+      const out = [];
+      for (const lists of perStore) {
+        for (const record of lists[i] ?? []) {
+          if (seen.has(record.id))
+            continue;
+          seen.add(record.id);
+          out.push(record);
+        }
+      }
+      return out;
+    });
+  }
   inboundSupersedes(id) {
     const seen = /* @__PURE__ */ new Set();
     const out = [];
@@ -9283,6 +9369,24 @@ var SterlingStore = class _SterlingStore {
    * mount, because an edge lives with its SOURCE record (addLink routes by
    * source), which may sit in a different store than the target.
    */
+  /**
+   * inboundSupersedes() for each id in one read transaction: element i is what
+   * inboundSupersedes(ids[i]) returns. One edge query covers every id, so a
+   * hook attaching supersession state to N delivered records pays one round
+   * trip per store instead of N (board f6c4bc5d).
+   */
+  inboundSupersedesEach(ids) {
+    if (!ids.length)
+      return [];
+    return this.readTx(() => {
+      const unique = [...new Set(ids)];
+      const rows = this.db.prepare(`SELECT source_id, target_id FROM record_relations WHERE rel = 'supersedes' AND target_id IN (${unique.map(() => "?").join(",")}) ORDER BY ${this.db.dialect.insertionOrder()}`).all(...unique);
+      const sources = /* @__PURE__ */ new Map();
+      for (const row of rows)
+        sources.set(row.target_id, [...sources.get(row.target_id) ?? [], row.source_id]);
+      return ids.map((id) => (sources.get(id) ?? []).map((s2) => this.get(s2)).filter((r) => r !== void 0));
+    });
+  }
   inboundSupersedes(id) {
     return this.readTx(() => {
       const rows = this.db.prepare(`SELECT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`).all(id);
@@ -9415,35 +9519,53 @@ var SterlingStore = class _SterlingStore {
   ftsMatchExpr(terms, matchAll) {
     return this.db.dialect.searchQuery(terms, matchAll);
   }
+  /**
+   * query() once per entry of `list`, inside one read transaction: element i
+   * is what query(list[i]) returns, all from one snapshot. The hydration reads
+   * (links, successors, derived relied_by) run once over every result instead
+   * of once per entry, so on Postgres the list pays one BEGIN/COMMIT and one
+   * set of hydration statements (board f6c4bc5d: H20 runs six subject queries
+   * per dispatch). Hydration is per record, so the result is the same.
+   */
+  queryEach(list) {
+    return this.readTx(() => {
+      const raw = list.map((opts) => this.queryRows(opts));
+      const hydrated = this.withDerivedReliedByAll(raw.flat());
+      let at = 0;
+      return raw.map((rows) => hydrated.slice(at, at += rows.length));
+    });
+  }
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts = {}) {
-    return this.readTx(() => {
-      const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-      const { where, params, fileKeys } = this.baseFilter(opts);
-      if (opts.rank_terms !== void 0) {
-        const terms = rankTerms.parse(opts.rank_terms);
-        if (terms.length) {
-          const match = this.ftsMatchExpr(terms, opts.match_all);
-          const d = this.db.dialect;
-          const sql2 = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
-            WHERE ${where.join(" AND ")} AND ${d.searchMatch}
-            ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
-          const rows2 = this.db.prepare(sql2).all(...this.searchJoinParams(match), ...params, match, cap);
-          return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
-        }
+    return this.readTx(() => this.withDerivedReliedByAll(this.queryRows(opts)));
+  }
+  /** query()'s rows, decoded but not hydrated. */
+  queryRows(opts) {
+    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+    const { where, params, fileKeys } = this.baseFilter(opts);
+    if (opts.rank_terms !== void 0) {
+      const terms = rankTerms.parse(opts.rank_terms);
+      if (terms.length) {
+        const match = this.ftsMatchExpr(terms, opts.match_all);
+        const d = this.db.dialect;
+        const sql2 = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
+          WHERE ${where.join(" AND ")} AND ${d.searchMatch}
+          ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
+        const rows2 = this.db.prepare(sql2).all(...this.searchJoinParams(match), ...params, match, cap);
+        return _SterlingStore.decodeLiveRecords("query", rows2);
       }
-      const orderBy = [];
-      const overlapParams = [];
-      if (fileKeys.length) {
-        orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
-        overlapParams.push(...fileKeys);
-      }
-      orderBy.push("r.updated_at DESC", "r.id DESC");
-      const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
-        ORDER BY ${orderBy.join(", ")} LIMIT ?`;
-      const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
-      return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows));
-    });
+    }
+    const orderBy = [];
+    const overlapParams = [];
+    if (fileKeys.length) {
+      orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
+      overlapParams.push(...fileKeys);
+    }
+    orderBy.push("r.updated_at DESC", "r.id DESC");
+    const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
+      ORDER BY ${orderBy.join(", ")} LIMIT ?`;
+    const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
+    return _SterlingStore.decodeLiveRecords("query", rows);
   }
   /** query()'s two return paths share this: one relations scan for the whole
    *  result set (not one per feature_article row) before applying the derived
@@ -9949,7 +10071,10 @@ var SterlingStore = class _SterlingStore {
   readTx(fn) {
     if (this.txDepth > 0 || this.readDepth > 0 || !this.db.beginRead)
       return fn();
-    this.db.beginRead();
+    if (this.db.beginReadDeferred)
+      this.db.beginReadDeferred();
+    else
+      this.db.beginRead();
     this.readDepth++;
     let ok = false;
     try {
@@ -10336,6 +10461,16 @@ var RoutedPgDriver = class {
       return;
     }
     this.inner.beginRead();
+  }
+  /** beginRead() with PgDriver's deferred BEGIN. A deferred BEGIN is pending only inside one
+   *  SterlingStore.readTx, whose statements all run on that store's own handle, so no other
+   *  handle runs a statement between the claim and the BEGIN. */
+  beginReadDeferred() {
+    if (this.inner.bridge.transactionOwner !== void 0) {
+      this.joinedReads += 1;
+      return;
+    }
+    this.inner.beginReadDeferred();
   }
   endRead() {
     if (this.joinedReads > 0) {

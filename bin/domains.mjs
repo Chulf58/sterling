@@ -5621,9 +5621,11 @@ var PgTransactionOpenError = class extends Error {
 };
 var PgQueryError = class extends Error {
   code;
-  constructor(message, code) {
+  inPrefix;
+  constructor(message, code, inPrefix = false) {
     super(message);
     this.code = code;
+    this.inPrefix = inPrefix;
     this.name = "PgQueryError";
   }
 };
@@ -5773,9 +5775,13 @@ var PgBridge = class {
       this.txOwnerLabel = "";
     }
   }
-  /** Runs one statement. With `values` it is a parameterised query ($1, $2, ...); without, a simple query that may hold several statements. */
-  query(text, values) {
-    const reply = this.send({ op: "query", text, values }, "query", this.waitTimeoutMs);
+  /**
+   * Runs one statement. With `values` it is a parameterised query ($1, $2, ...); without, a simple query that may hold several statements.
+   * `prefix`, a simple query, goes out in the same round trip ahead of the statement; when it fails the call throws a PgQueryError with
+   * `inPrefix` set and the statement's result is discarded (the statement may still have run, so the caller passes only a read).
+   */
+  query(text, values, prefix) {
+    const reply = this.send({ op: "query", text, values, ...prefix !== void 0 ? { prefix } : {} }, "query", this.waitTimeoutMs);
     return { rows: reply.rows ?? [], rowCount: reply.rowCount ?? 0 };
   }
   /** Ends the connection and stops the worker. Idempotent. */
@@ -5825,7 +5831,7 @@ var PgBridge = class {
         this.shutDown(`the connection failed: ${message}`);
         throw new PgWorkerDiedError(`connecting failed: ${message}`, reply.error?.code);
       }
-      throw new PgQueryError(message, reply.error?.code);
+      throw new PgQueryError(message, reply.error?.code, reply.prefixFailed === true);
     }
     return reply;
   }
@@ -7987,6 +7993,24 @@ var SterlingStore = class _SterlingStore {
    * mount, because an edge lives with its SOURCE record (addLink routes by
    * source), which may sit in a different store than the target.
    */
+  /**
+   * inboundSupersedes() for each id in one read transaction: element i is what
+   * inboundSupersedes(ids[i]) returns. One edge query covers every id, so a
+   * hook attaching supersession state to N delivered records pays one round
+   * trip per store instead of N (board f6c4bc5d).
+   */
+  inboundSupersedesEach(ids) {
+    if (!ids.length)
+      return [];
+    return this.readTx(() => {
+      const unique2 = [...new Set(ids)];
+      const rows2 = this.db.prepare(`SELECT source_id, target_id FROM record_relations WHERE rel = 'supersedes' AND target_id IN (${unique2.map(() => "?").join(",")}) ORDER BY ${this.db.dialect.insertionOrder()}`).all(...unique2);
+      const sources = /* @__PURE__ */ new Map();
+      for (const row of rows2)
+        sources.set(row.target_id, [...sources.get(row.target_id) ?? [], row.source_id]);
+      return ids.map((id) => (sources.get(id) ?? []).map((s2) => this.get(s2)).filter((r) => r !== void 0));
+    });
+  }
   inboundSupersedes(id) {
     return this.readTx(() => {
       const rows2 = this.db.prepare(`SELECT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`).all(id);
@@ -8119,35 +8143,53 @@ var SterlingStore = class _SterlingStore {
   ftsMatchExpr(terms, matchAll) {
     return this.db.dialect.searchQuery(terms, matchAll);
   }
+  /**
+   * query() once per entry of `list`, inside one read transaction: element i
+   * is what query(list[i]) returns, all from one snapshot. The hydration reads
+   * (links, successors, derived relied_by) run once over every result instead
+   * of once per entry, so on Postgres the list pays one BEGIN/COMMIT and one
+   * set of hydration statements (board f6c4bc5d: H20 runs six subject queries
+   * per dispatch). Hydration is per record, so the result is the same.
+   */
+  queryEach(list2) {
+    return this.readTx(() => {
+      const raw = list2.map((opts2) => this.queryRows(opts2));
+      const hydrated = this.withDerivedReliedByAll(raw.flat());
+      let at = 0;
+      return raw.map((rows2) => hydrated.slice(at, at += rows2.length));
+    });
+  }
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts2 = {}) {
-    return this.readTx(() => {
-      const cap = opts2.cap ?? DEFAULT_QUERY_CAP;
-      const { where, params, fileKeys } = this.baseFilter(opts2);
-      if (opts2.rank_terms !== void 0) {
-        const terms = rankTerms.parse(opts2.rank_terms);
-        if (terms.length) {
-          const match = this.ftsMatchExpr(terms, opts2.match_all);
-          const d = this.db.dialect;
-          const sql2 = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
-            WHERE ${where.join(" AND ")} AND ${d.searchMatch}
-            ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
-          const rows3 = this.db.prepare(sql2).all(...this.searchJoinParams(match), ...params, match, cap);
-          return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows3));
-        }
+    return this.readTx(() => this.withDerivedReliedByAll(this.queryRows(opts2)));
+  }
+  /** query()'s rows, decoded but not hydrated. */
+  queryRows(opts2) {
+    const cap = opts2.cap ?? DEFAULT_QUERY_CAP;
+    const { where, params, fileKeys } = this.baseFilter(opts2);
+    if (opts2.rank_terms !== void 0) {
+      const terms = rankTerms.parse(opts2.rank_terms);
+      if (terms.length) {
+        const match = this.ftsMatchExpr(terms, opts2.match_all);
+        const d = this.db.dialect;
+        const sql2 = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
+          WHERE ${where.join(" AND ")} AND ${d.searchMatch}
+          ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
+        const rows3 = this.db.prepare(sql2).all(...this.searchJoinParams(match), ...params, match, cap);
+        return _SterlingStore.decodeLiveRecords("query", rows3);
       }
-      const orderBy = [];
-      const overlapParams = [];
-      if (fileKeys.length) {
-        orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
-        overlapParams.push(...fileKeys);
-      }
-      orderBy.push("r.updated_at DESC", "r.id DESC");
-      const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
-        ORDER BY ${orderBy.join(", ")} LIMIT ?`;
-      const rows2 = this.db.prepare(sql).all(...params, ...overlapParams, cap);
-      return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
-    });
+    }
+    const orderBy = [];
+    const overlapParams = [];
+    if (fileKeys.length) {
+      orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
+      overlapParams.push(...fileKeys);
+    }
+    orderBy.push("r.updated_at DESC", "r.id DESC");
+    const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
+      ORDER BY ${orderBy.join(", ")} LIMIT ?`;
+    const rows2 = this.db.prepare(sql).all(...params, ...overlapParams, cap);
+    return _SterlingStore.decodeLiveRecords("query", rows2);
   }
   /** query()'s two return paths share this: one relations scan for the whole
    *  result set (not one per feature_article row) before applying the derived
@@ -8653,7 +8695,10 @@ var SterlingStore = class _SterlingStore {
   readTx(fn) {
     if (this.txDepth > 0 || this.readDepth > 0 || !this.db.beginRead)
       return fn();
-    this.db.beginRead();
+    if (this.db.beginReadDeferred)
+      this.db.beginReadDeferred();
+    else
+      this.db.beginRead();
     this.readDepth++;
     let ok = false;
     try {

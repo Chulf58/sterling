@@ -10,7 +10,7 @@
 import { z } from 'zod';
 
 /** Bumped on any change to the shapes or the operation registry below. */
-export const BROKER_PROTOCOL = 1;
+export const BROKER_PROTOCOL = 2;
 
 /** Largest request frame the server reads (hooks send method arguments, never bulk data). */
 export const BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
@@ -43,9 +43,11 @@ export const BROKER_OPERATIONS = {
   project: [
     'get',
     'query',
+    'queryEach',
     'count',
     'articlesBySlug',
     'inboundSupersedes',
+    'inboundSupersedesEach',
     'boardReadiness',
     'getMeta',
     'create',
@@ -54,7 +56,7 @@ export const BROKER_OPERATIONS = {
     'remove',
     'recordCheckSkipped',
   ],
-  mounted: ['domainNames', 'bySource', 'querySource', 'inboundSupersedes', 'domainDescription'],
+  mounted: ['domainNames', 'bySource', 'bySourceEach', 'querySource', 'inboundSupersedes', 'inboundSupersedesEach', 'domainDescription'],
 } as const;
 export type BrokerTarget = keyof typeof BROKER_OPERATIONS;
 

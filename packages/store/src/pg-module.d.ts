@@ -2,7 +2,7 @@
 // types and @types/pg is not a dependency, so this file declares only what
 // the worker calls.
 declare module 'pg' {
-  interface QueryResult {
+  export interface QueryResult {
     rows: Record<string, unknown>[];
     rowCount: number | null;
   }

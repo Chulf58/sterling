@@ -45,7 +45,7 @@
 // rethrown as PgNulCharacterError.
 
 import type { SqlParam, StoreDialect, StoreDriver, StoreRunResult, StoreStatement } from './driver.js';
-import { PgQueryError, type PgBridge } from './pg-bridge.js';
+import { PgQueryError, type PgBridge, type PgQueryResult } from './pg-bridge.js';
 import { foldSearchText } from './search-fold.js';
 export { PgTransactionOpenError } from './pg-bridge.js';
 
@@ -690,11 +690,7 @@ class PgStatement implements StoreStatement {
       throw new RangeError(`PgDriver: statement takes ${this.translated.params} parameter(s), got ${params.length}: ${this.sql}`);
     }
     const values = params.map((p, i) => toPgParam(p, i, this.sql, this.translated.derivedText));
-    try {
-      return this.driver.bridge.query(this.translated.text, values);
-    } catch (e) {
-      return mapPgError(e, this.sql);
-    }
+    return this.driver.run(this.translated.text, values, this.sql);
   }
 
   get(...params: SqlParam[]): Record<string, unknown> | undefined {
@@ -741,6 +737,14 @@ export class PgDriver implements StoreDriver {
   private readonly lockTimeoutMs: number;
   private readonly statementTimeoutMs: number;
   private closed = false;
+  /**
+   * The transaction this handle claimed. After beginReadDeferred() the BEGIN
+   * waits in `pendingBegin` and goes out in the same round trip as the read's
+   * first statement (run()), so the read costs one round trip less; a read
+   * that runs no statement sends nothing.
+   */
+  private txState: 'none' | 'pending' | 'open' = 'none';
+  private pendingBegin: { text: string; where: string } | undefined;
 
   constructor(
     readonly bridge: PgBridge,
@@ -779,10 +783,81 @@ export class PgDriver implements StoreDriver {
     this.assertOpen();
     const t = translateStatement(sql, this.schema);
     if (t.params) throw new RangeError(`PgDriver.exec takes no parameters: ${sql}`);
+    this.run(t.text, undefined, sql);
+  }
+
+  /**
+   * @internal Every statement this handle runs. A pending BEGIN goes out ahead
+   * of it in the same round trip when the statement is a SELECT. Anything else
+   * waits for the BEGIN's own reply first: the bridge sends both before either
+   * answers, so a statement after a BEGIN that failed outright would run
+   * outside the transaction, and only a read may.
+   */
+  run(text: string, values: unknown[] | undefined, where: string): PgQueryResult {
+    const pending = this.pendingBegin;
+    if (pending !== undefined) {
+      this.pendingBegin = undefined;
+      this.txState = 'open';
+      if (/^\s*SELECT\b/i.test(text)) {
+        try {
+          return this.bridge.query(text, values, pending.text);
+        } catch (e) {
+          if (e instanceof PgQueryError && e.inPrefix) this.failBegin(e, pending.where);
+          return mapPgError(e, where);
+        }
+      }
+      try {
+        this.bridge.query(pending.text);
+      } catch (e) {
+        this.failBegin(e, pending.where);
+      }
+    }
     try {
-      this.bridge.query(t.text);
+      return this.bridge.query(text, values);
     } catch (e) {
-      mapPgError(e, sql);
+      return mapPgError(e, where);
+    }
+  }
+
+  /** Claims the connection and sends BEGIN now. */
+  private beginNow(text: string, label: string, where: string): void {
+    this.assertOpen();
+    this.bridge.claimTransaction(this, label);
+    this.txState = 'open';
+    try {
+      this.bridge.query(text);
+    } catch (e) {
+      this.failBegin(e, where);
+    }
+  }
+
+  /** Claims the connection for a read whose BEGIN goes out with its first statement (beginReadDeferred). */
+  private deferBegin(text: string, label: string, where: string): void {
+    this.assertOpen();
+    this.bridge.claimTransaction(this, label);
+    this.txState = 'pending';
+    this.pendingBegin = { text, where };
+  }
+
+  /** A BEGIN that failed: roll back, release the claim and throw by name, as an eager BEGIN would. */
+  private failBegin(e: unknown, where: string): never {
+    this.txState = 'none';
+    abandon(this.bridge, this);
+    return mapPgError(e, where);
+  }
+
+  /** Ends this handle's transaction with `statement` when its BEGIN was sent; a transaction that ran nothing (or was abandoned) sends nothing. */
+  private endTx(statement: 'COMMIT' | 'ROLLBACK', where: string | undefined): void {
+    const sent = this.txState === 'open';
+    this.txState = 'none';
+    this.pendingBegin = undefined;
+    try {
+      if (sent && !this.bridge.closed) this.bridge.query(statement);
+    } catch (e) {
+      if (where === undefined) throw e;
+      mapPgError(e, where);
+    } finally {
+      this.bridge.releaseTransaction(this);
     }
   }
 
@@ -800,76 +875,63 @@ export class PgDriver implements StoreDriver {
    * name; it is never retried.
    */
   begin(): void {
-    this.assertOpen();
-    this.bridge.claimTransaction(this, `store '${this.schema}'`);
-    try {
-      this.bridge.query(
-        `BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SET LOCAL statement_timeout = ${this.statementTimeoutMs}; ` +
-          `SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); ` +
-          `SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`,
-      );
-    } catch (e) {
-      abandon(this.bridge, this);
-      mapPgError(e, `begin on store '${this.schema}'`);
-    }
+    this.beginNow(
+      `BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SET LOCAL statement_timeout = ${this.statementTimeoutMs}; ` +
+        `SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); ` +
+        `SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`,
+      `store '${this.schema}'`,
+      `begin on store '${this.schema}'`,
+    );
   }
 
   commit(): void {
-    try {
-      this.bridge.query('COMMIT');
-    } catch (e) {
-      mapPgError(e, `commit on store '${this.schema}'`);
-    } finally {
-      this.bridge.releaseTransaction(this);
-    }
+    this.endTx('COMMIT', `commit on store '${this.schema}'`);
   }
 
   rollback(): void {
-    try {
-      if (!this.bridge.closed) this.bridge.query('ROLLBACK');
-    } finally {
-      this.bridge.releaseTransaction(this);
-    }
+    this.endTx('ROLLBACK', undefined);
   }
 
   /** A multi-statement read: one snapshot (REPEATABLE READ), read-only, under statement_timeout. Takes no lock. */
   beginRead(): void {
-    this.assertOpen();
-    this.bridge.claimTransaction(this, `a read on store '${this.schema}'`);
-    try {
-      this.bridge.query(`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = ${this.statementTimeoutMs}`);
-    } catch (e) {
-      abandon(this.bridge, this);
-      mapPgError(e, `a read on store '${this.schema}'`);
-    }
+    this.beginNow(this.readBeginText(), `a read on store '${this.schema}'`, `a read on store '${this.schema}'`);
+  }
+
+  /**
+   * beginRead(), except the BEGIN goes out in the same round trip as the
+   * read's first statement, and a read that runs no statement sends nothing.
+   * The snapshot is the same: REPEATABLE READ takes it at the first statement.
+   */
+  beginReadDeferred(): void {
+    this.deferBegin(this.readBeginText(), `a read on store '${this.schema}'`, `a read on store '${this.schema}'`);
+  }
+
+  private readBeginText(): string {
+    return `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = ${this.statementTimeoutMs}`;
   }
 
   /** Ends the read transaction. COMMIT also ends one a failed statement aborted. */
   endRead(): void {
-    try {
-      if (!this.bridge.closed) this.bridge.query('COMMIT');
-    } finally {
-      this.bridge.releaseTransaction(this);
-    }
+    this.endTx('COMMIT', undefined);
   }
 
   /** The store's version lives in its registry row, the counterpart of SQLite's PRAGMA user_version. */
   schemaVersion(): number {
     this.assertOpen();
-    const row = this.bridge.query(`SELECT schema_version FROM ${this.m}.stores WHERE schema_name = $1`, [this.schema]).rows[0];
+    const row = this.run(`SELECT schema_version FROM ${this.m}.stores WHERE schema_name = $1`, [this.schema], `the schema version of store '${this.schema}'`).rows[0];
     if (!row) throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
     return Number(row.schema_version);
   }
 
   setSchemaVersion(version: number): void {
     if (!Number.isInteger(version) || version < 0) throw new Error(`PgDriver: schema version must be a non-negative integer, got ${String(version)}`);
-    const { rowCount } = this.bridge.query(`UPDATE ${this.m}.stores SET schema_version = $1 WHERE schema_name = $2`, [version, this.schema]);
+    const { rowCount } = this.run(`UPDATE ${this.m}.stores SET schema_version = $1 WHERE schema_name = $2`, [version, this.schema], `stamping the schema version of store '${this.schema}'`);
     if (rowCount !== 1) throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
   }
 
   /** False only before the store's tables were ever created. */
   hasSchema(): boolean {
-    return Boolean(this.bridge.query('SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1) AS has', [this.schema]).rows[0].has);
+    return Boolean(this.run('SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1) AS has', [this.schema], `the tables of store '${this.schema}'`).rows[0].has);
   }
 
   /** Nothing to prepare: SterlingStore refuses every write on an older store itself, and opening writes nothing here. */
@@ -877,7 +939,7 @@ export class PgDriver implements StoreDriver {
 
   prepareWritable(_isFresh: boolean): void {
     this.assertOpen();
-    this.bridge.query(storeDdl(this.s));
+    this.run(storeDdl(this.s), undefined, `creating the tables of store '${this.schema}'`);
   }
 
   /**

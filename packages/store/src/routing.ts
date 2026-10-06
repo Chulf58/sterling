@@ -348,6 +348,16 @@ class RoutedPgDriver implements StoreDriver {
     }
     this.inner.beginRead();
   }
+  /** beginRead() with PgDriver's deferred BEGIN. A deferred BEGIN is pending only inside one
+   *  SterlingStore.readTx, whose statements all run on that store's own handle, so no other
+   *  handle runs a statement between the claim and the BEGIN. */
+  beginReadDeferred(): void {
+    if (this.inner.bridge.transactionOwner !== undefined) {
+      this.joinedReads += 1;
+      return;
+    }
+    this.inner.beginReadDeferred();
+  }
   endRead(): void {
     if (this.joinedReads > 0) {
       this.joinedReads -= 1;

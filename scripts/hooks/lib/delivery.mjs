@@ -486,6 +486,34 @@ export function withInboundSupersedes(store, record) {
   };
 }
 
+/** withInboundSupersedes for each record. A store with inboundSupersedesEach
+ *  (the routed subject fan) answers every record in one call; a failure there
+ *  marks every record `supersession_unknown`, since none of them was answered.
+ *  Any other store is asked per record, exactly as withInboundSupersedes does. */
+export function withInboundSupersedesAll(store, records) {
+  if (typeof store?.inboundSupersedesEach !== 'function') return records.map((r) => withInboundSupersedes(store, r));
+  if (!records.length) return [];
+  let lists;
+  try {
+    lists = store.inboundSupersedesEach(records.map((r) => r.id));
+  } catch (e) {
+    return records.map((r) => ({ ...r, supersession_unknown: String(e?.message ?? e) }));
+  }
+  return records.map((record, i) => {
+    const inbound = lists[i] ?? [];
+    if (!inbound.length) return record;
+    return {
+      ...record,
+      inbound_supersedes: inbound.map((s) => ({
+        id: s.id,
+        ...(s.slug ? { slug: s.slug } : {}),
+        ...(s.title ? { title: s.title } : {}),
+        status: s.status,
+      })),
+    };
+  });
+}
+
 function clip(text, cap) {
   const s = String(text ?? '');
   // Code-point safe AND early-stopping (fix 5b, deny-once compaction round 2,

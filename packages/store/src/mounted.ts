@@ -609,6 +609,13 @@ export class MountedStores {
     return [...this.fanRead((s) => s.query(opts))].map((r) => ({ source: r.source, records: r.value }));
   }
 
+  /** bySource for each entry of `list` in one pass: per store, project first,
+   *  one SterlingStore.queryEach (one read transaction), so `results[i]` is
+   *  that store's bySource(list[i]) records. */
+  bySourceEach(list: readonly QueryOptions[]): { source: string; results: DurableRecord[][] }[] {
+    return [...this.fanRead((s) => s.queryEach(list))].map((r) => ({ source: r.source, results: r.value }));
+  }
+
   /** Count-only per-source projection — the COUNT(*) twin of bySource (same
    *  project-first, per-store ordering) with NO body fetch. The TUI Knowledge
    *  tree's collapsed category/source badges use this so the default all-collapsed
@@ -745,6 +752,24 @@ export class MountedStores {
    *  project-store tombstone behind, so the SAME source id can resolve out of
    *  two different mounts — first-seen (project-first, the read fan's own
    *  ordering) wins, never a duplicate entry for one concept. */
+  /** inboundSupersedes() for each id: per store one SterlingStore.inboundSupersedesEach,
+   *  merged per id exactly as inboundSupersedes merges (project first, first seen wins). */
+  inboundSupersedesEach(ids: readonly string[]): DurableRecord[][] {
+    const perStore = this.fanValues((s) => s.inboundSupersedesEach(ids));
+    return ids.map((_, i) => {
+      const seen = new Set<string>();
+      const out: DurableRecord[] = [];
+      for (const lists of perStore) {
+        for (const record of lists[i] ?? []) {
+          if (seen.has(record.id)) continue;
+          seen.add(record.id);
+          out.push(record);
+        }
+      }
+      return out;
+    });
+  }
+
   inboundSupersedes(id: string): ReturnType<SterlingStore['inboundSupersedes']> {
     const seen = new Set<string>();
     const out: ReturnType<SterlingStore['inboundSupersedes']> = [];

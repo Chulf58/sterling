@@ -132,6 +132,10 @@ export function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
       const shares = allocateShares(perStore.map(([, r]) => r.length), cap);
       return perStore.flatMap(([name, records], i) => tag(records.slice(0, shares[i]), name));
     },
+    /** query() for each entry of `list`; element i is what query(list[i]) returns. */
+    queryEach(list) {
+      return list.map((opts) => this.query(opts));
+    },
     /** Supersedes edges live with their SOURCE record, so every mount is read; first seen wins. */
     inboundSupersedes(id) {
       const seen = new Set();
@@ -189,11 +193,27 @@ function openRoutedSubjectFan(cwd) {
       const shares = allocateShares(perStore.map((s) => s.records.length), cap);
       return perStore.flatMap((s, i) => tag(s.records.slice(0, shares[i]), s.source));
     },
+    /** query() for each entry of `list` (element i is what query(list[i]) returns) in one
+     *  store call, so a broker hook pays one round trip and one read transaction per store. */
+    queryEach(list) {
+      if (list.some((opts) => opts.file_keys !== undefined)) return list.map((opts) => this.query(opts));
+      if (!stores.domainNames().length) return project.queryEach(list).map((records) => tag(records, 'project'));
+      const capped = list.map((opts) => ({ ...opts, cap: opts.cap ?? DEFAULT_QUERY_CAP }));
+      const perStore = stores.bySourceEach(capped);
+      return capped.map((opts, j) => {
+        const shares = allocateShares(perStore.map((s) => s.results[j].length), opts.cap);
+        return perStore.flatMap((s, i) => tag(s.results[j].slice(0, shares[i]), s.source));
+      });
+    },
     /** MountedStores' own merge (project first, first seen wins). These records carry no
      *  source_store: MountedStores does not say which mount held each edge, and the one
      *  reader (delivery.mjs withInboundSupersedes) keeps only id, slug, title and status. */
     inboundSupersedes(id) {
       return stores.inboundSupersedes(id);
+    },
+    /** inboundSupersedes for each id in one store call (element i answers ids[i]). */
+    inboundSupersedesEach(ids) {
+      return stores.inboundSupersedesEach(ids);
     },
     articlesBySlug(slug) {
       return project.articlesBySlug(slug);

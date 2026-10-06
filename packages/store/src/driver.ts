@@ -86,6 +86,10 @@ export interface StoreDriver {
   // omits both. endRead() also ends a read whose statement failed.
   beginRead?(): void;
   endRead?(): void;
+  /** readTx() prefers this to beginRead() when the driver has it: the same
+   *  read transaction, except the driver may send its BEGIN together with the
+   *  read's first statement (PgDriver; board f6c4bc5d). endRead() ends it. */
+  beginReadDeferred?(): void;
 
   // Opening. SterlingStore's constructor drives these in a fixed order:
   // schemaVersion() (too new: close and refuse), hasSchema() (an older store

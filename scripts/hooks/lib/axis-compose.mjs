@@ -40,7 +40,7 @@ import {
   decisionPointerPart,
   statusAnnotation,
   authorityMarker,
-  withInboundSupersedes,
+  withInboundSupersedesAll,
   DECISION_STATEMENT_CLIP,
   DECISION_REJECTED_CLIP,
   boundedTermClause,
@@ -266,18 +266,21 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
   // feature_article (slug + concept_family + title, board 39c3d762), so no
   // change to the shared axis matcher is needed — only widening what this
   // hook queries and does with the result.
-  const candidates = [
-    ...store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 }),
-    ...store.query({ types: ['decision'], rank_terms: terms, cap: 40 }),
-    ...store.query({ types: ['feature_article'], rank_terms: terms, cap: 40 }),
+  // One queryEach call when the fan has it (one broker round trip and one read
+  // transaction per store on Postgres, board f6c4bc5d); element i is exactly
+  // what store.query(stageOne[i]) returns.
+  const stageOne = [
+    { types: ['anti_pattern'], rank_terms: terms, cap: 40 },
+    { types: ['decision'], rank_terms: terms, cap: 40 },
+    { types: ['feature_article'], rank_terms: terms, cap: 40 },
     // PRIOR ANSWERS (board e7157d0b): a research_finding is an already-answered
     // question and a disconfirmed_hypothesis an already-refuted trail — the two
     // types a dispatch about to fan out on that question is about to RE-DERIVE
     // (measured: a 158k-token debugger re-deriving a recorded diagnosis; a
     // 6,142-file sweep on a question the store answered). Same floors as every
     // other candidate; axisNarrowText matches their question fields.
-    ...store.query({ types: ['research_finding'], rank_terms: terms, cap: 40 }),
-    ...store.query({ types: ['disconfirmed_hypothesis'], rank_terms: terms, cap: 40 }),
+    { types: ['research_finding'], rank_terms: terms, cap: 40 },
+    { types: ['disconfirmed_hypothesis'], rank_terms: terms, cap: 40 },
     // OPEN QUESTIONS (board a9be48f2) ride the SAME surface for the adjacent
     // question: not "was this answered?" but "is this ALREADY BEING
     // INVESTIGATED?". A fan-out onto a live open_question duplicates an
@@ -285,8 +288,9 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
     // one step earlier. NOTE the deny rung is deliberately untouched: an
     // open_question is not a RULING, so it stays out of DENY_RULING_TYPES and
     // can never deny a user's question.
-    ...store.query({ types: ['open_question'], rank_terms: terms, cap: 40 }),
+    { types: ['open_question'], rank_terms: terms, cap: 40 },
   ];
+  const candidates = (typeof store.queryEach === 'function' ? store.queryEach(stageOne) : stageOne.map((opts) => store.query(opts))).flat();
 
   // MULTI-QUESTION CANDIDATE AUGMENTATION (post-commit follow-up, deny-once
   // recall floor): `terms` above is extractAxisTerms(outgoing, MAX_RANK_TERMS)
@@ -399,8 +403,9 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
   // so a record another one supersedes is never rendered as [standing].
   // Reordered by read share, not cut: the first MAX_DECISIONS are the stores'
   // shares, project first, and the rest follow for the disclosure.
-  const decisions = ((w) => [...w.shown, ...w.rest])(shareWindow(fresh.filter((x) => x.record.type === 'decision'), MAX_DECISIONS, (x) => x.record))
-    .map((x) => ({ ...x, record: withInboundSupersedes(store, x.record) }));
+  const decisionHits = ((w) => [...w.shown, ...w.rest])(shareWindow(fresh.filter((x) => x.record.type === 'decision'), MAX_DECISIONS, (x) => x.record));
+  const decisionRecords = withInboundSupersedesAll(store, decisionHits.map((x) => x.record));
+  const decisions = decisionHits.map((x, i) => ({ ...x, record: decisionRecords[i] }));
   // NOT sliced here — renderArticlePointers itself caps at ARTICLE_POINTER_CAP
   // and discloses the overflow, the same shape as renderHazards/
   // renderDecisionPointers; slicing early would lose the true matched count
