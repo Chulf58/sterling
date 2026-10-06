@@ -835,7 +835,7 @@ test('MCP store args: plugin config stays bare ${CLAUDE_PROJECT_DIR} (phantom-st
   const args = JSON.parse(readFileSync(join(root, '.claude-plugin', 'sterling-mcp.json'), 'utf8')).mcpServers.sterling.args;
   assert.deepEqual(
     args.slice(-2),
-    ['--store', '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db'],
+    ['--project', '${CLAUDE_PROJECT_DIR}'],
     'plugin-scope entry keeps the bare form — plugin configs substitute it unconditionally'
   );
 });
@@ -1094,8 +1094,8 @@ test('committed plugin MCP config: one machine-independent `sterling` entry thro
         args: [
           '--disable-warning=ExperimentalWarning',
           '${CLAUDE_PLUGIN_ROOT}/mcp/sterling-mcp.mjs',
-          '--store',
-          '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db',
+          '--project',
+          '${CLAUDE_PROJECT_DIR}',
         ],
       },
     },

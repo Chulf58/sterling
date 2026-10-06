@@ -1448,6 +1448,23 @@ function elementOwnsScalar(el: unknown, key: string): el is Record<string, unkno
 const CONFIG_SET_FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
 
 /**
+ * config_set refuses `storage` (and any path under it). It records where the
+ * project's stores live, so only the store move writes it, after every store
+ * has moved (decision storage-backend-is-its-own-config-key-written-only-by-store-move).
+ * `mode` stays writable: it is the PR-flow toggle.
+ */
+export class StorageTransitionRequiredError extends Error {
+  constructor(path: string) {
+    super(
+      `config_set: '${path}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), ` +
+        `so it changes only when the stores move, through the explicit storage transition: \`node scripts/move-store.mjs --to pg|sqlite\`, ` +
+        `which writes it after the move commits. Nothing was written.`
+    );
+    this.name = 'StorageTransitionRequiredError';
+  }
+}
+
+/**
  * The implementation behind SterlingTools.configSet, kept as a standalone
  * function (rather than inline in the class method) so the prototype-
  * pollution guard above stays the only module-level thing it touches — no
@@ -1519,6 +1536,7 @@ function configSetImpl(
       `config_set: '${path}' contains a forbidden path segment — __proto__ / constructor / prototype are refused anywhere in a dotted path (prototype-pollution guard). Nothing was written.`
     );
   }
+  if (path === 'storage' || path.startsWith('storage.')) throw new StorageTransitionRequiredError(path);
 
   const configDir = join(repoRoot, '.sterling');
   const configPath = join(configDir, 'config.json');

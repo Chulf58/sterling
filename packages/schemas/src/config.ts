@@ -540,6 +540,15 @@ export const configSchema = z.object({
   // The default lives twice (anti_pattern 85d15143): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: z.unknown().default('hobby'),
+  // Where the project's stores live (decision
+  // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
+  // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
+  // the Served database, valid only with mode 'work'. Only
+  // scripts/move-store.mjs writes it, after the stores have moved; config_set
+  // and the TUI refuse it. Strict, unlike `mode`: a wrong value must never
+  // route a project to the wrong backend. The reader is
+  // packages/store/src/routing.ts (resolveStoreRoute). No default on purpose.
+  storage: z.enum(['sqlite', 'postgres']).optional(),
   // Handoff files (decision
   // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
   // `enabled` says whether Sterling writes the files for colleagues who do not

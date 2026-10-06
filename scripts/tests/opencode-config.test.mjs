@@ -197,7 +197,7 @@ test('a body left with a Claude-only phrase fails loudly for that one item; the 
 
 test('the sterling MCP entry points at this copy and replaces a project entry, logging the replacement', async (t) => {
   const project = tempProject(t);
-  const want = { type: 'local', command: ['node', '--disable-warning=ExperimentalWarning', join(repo, 'mcp', 'sterling-mcp.mjs'), '--store', join(project, '.sterling', 'sterling.db')] };
+  const want = { type: 'local', command: ['node', '--disable-warning=ExperimentalWarning', join(repo, 'mcp', 'sterling-mcp.mjs'), '--project', project] };
   assert.deepEqual(cfg.mcpEntry(repo, project), want);
 
   const fresh = stubCtx(project);

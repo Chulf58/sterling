@@ -24,8 +24,18 @@ import { join, resolve } from 'node:path';
 export const PROJECT_MODES = ['hobby', 'work'] as const;
 export type ProjectMode = (typeof PROJECT_MODES)[number];
 
-export class ProjectModeError extends Error {}
-export class ProjectIdentityError extends Error {}
+export class ProjectModeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProjectModeError';
+  }
+}
+export class ProjectIdentityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProjectIdentityError';
+  }
+}
 
 export const CONFIG_REL = '.sterling/config.json';
 export const PROJECT_IDENTITY_REL = '.sterling/project.json';

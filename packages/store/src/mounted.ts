@@ -15,6 +15,8 @@ import { homedir } from 'node:os';
 import { SterlingStore, SchemaMigrationRequiredError, StoreRowDecodeError, UnsupportedSchemaVersionError, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions, type BoardItemReadiness, type WriteOptions } from './index.js';
 import { validateRecord, type DurableRecord, type SterlingConfig } from '@sterling/schemas';
 import { allocateShares } from './shares.js';
+import { PgBridgeClosedError, PgBridgeTimeoutError, PgQueryError, PgWorkerDiedError } from './pg-bridge.js';
+import { PgLockTimeoutError, PgNulCharacterError, PgStatementTimeoutError, PgStoreMissingError } from './pg-driver.js';
 
 /** A domain store to mount: its manifest name + its already-resolved DB path. */
 export interface DomainMount {
@@ -84,7 +86,57 @@ function isStoreFailure(e: unknown): boolean {
   );
 }
 
+/** True for a failure of a Postgres-backed store under an open or a read: a
+ *  missing store, a server refusal, a timeout, or a lost connection. Only a
+ *  work-mode MountedStores consults it. */
+function isPgStoreFailure(e: unknown): boolean {
+  return (
+    e instanceof PgStoreMissingError ||
+    e instanceof PgQueryError ||
+    e instanceof PgLockTimeoutError ||
+    e instanceof PgStatementTimeoutError ||
+    e instanceof PgNulCharacterError ||
+    e instanceof PgBridgeClosedError ||
+    e instanceof PgBridgeTimeoutError ||
+    e instanceof PgWorkerDiedError
+  );
+}
+
 const errorText = (e: unknown): string => String((e as Error)?.message ?? e);
+
+/** Postgres storage (routing.ts, the `work` option): a mounted domain that is
+ *  missing or cannot be read. It never skips or drops a domain (decision
+ *  postgres-store-backend-design-sync-bridge-schema-per-store, point 6): the
+ *  open or the read fails, naming the domain, and `cause` carries the
+ *  store's own error. */
+export class DomainUnavailableError extends Error {
+  readonly domain: string;
+  readonly location: string;
+  constructor(domain: string, location: string, cause: unknown) {
+    super(
+      `storage 'postgres': domain '${domain}' (${location}) is missing or cannot be read: ${errorText(cause)}. ` +
+        `Postgres storage never skips or drops a mounted domain; the call fails and nothing was written.`,
+      { cause }
+    );
+    this.name = 'DomainUnavailableError';
+    this.domain = domain;
+    this.location = location;
+  }
+}
+
+/** How a work-mode MountedStores opens its stores (routing.ts supplies it).
+ *  Neither opener may create a store. */
+export interface WorkStoreOpeners {
+  openProject(): SterlingStore;
+  openDomain(mount: DomainMount): SterlingStore;
+}
+
+export interface MountedStoresOptions {
+  /** Hobby only: skip a configured domain whose store file is missing, listing it on missingDomains. Ignored with `work`. */
+  skipMissing?: boolean;
+  /** Postgres storage (routing.ts): open through these, never create a store, and throw DomainUnavailableError wherever the SQLite path would skip or drop a domain. */
+  work?: WorkStoreOpeners;
+}
 
 /** The store_meta key that holds a domain's description. */
 export const DOMAIN_DESCRIPTION_KEY = 'description';
@@ -216,6 +268,9 @@ export class MountedStores {
    *  whether or not it could be opened. */
   private readonly mountedNames: string[] = [];
 
+  /** Set for Postgres storage; see MountedStoresOptions.work. */
+  private readonly work: WorkStoreOpeners | undefined;
+
   /** The project store is opened, and created when absent; a failure to open
    *  it throws. A domain store is only ever OPENED here, never created, and one
    *  that exists but cannot be opened is listed on unreadableDomains instead of
@@ -224,8 +279,37 @@ export class MountedStores {
    *  every handle opened so far closed and no file written for the missing
    *  domain. When options.skipMissing is true such a mount is skipped instead,
    *  and the existing siblings are still mounted. An existing domain store opens
-   *  as it is, whether or not it has a description. */
-  constructor(projectDbPath: string, mounts: DomainMount[] = [], options?: { skipMissing?: boolean }) {
+   *  as it is, whether or not it has a description.
+   *
+   *  Postgres storage (options.work, routing.ts) differs in three ways: both stores
+   *  are opened through the given openers, which never create a store;
+   *  skipMissing is ignored; and every case above that lists a domain on
+   *  missingDomains or unreadableDomains throws DomainUnavailableError instead,
+   *  with every handle opened so far closed. */
+  constructor(projectDbPath: string, mounts: DomainMount[] = [], options?: MountedStoresOptions) {
+    this.work = options?.work;
+    if (this.work) {
+      this.project = this.work.openProject();
+      try {
+        for (const m of mounts) {
+          this.mountedNames.push(m.name);
+          this.domainPaths.set(m.name, m.dbPath);
+          let store: SterlingStore;
+          try {
+            store = this.work.openDomain(m);
+          } catch (e) {
+            if (!this.isStoreFailure(e)) throw e;
+            throw new DomainUnavailableError(m.name, m.dbPath, e);
+          }
+          this.domains.set(m.name, store);
+          this.probeDomain(m.name, store);
+        }
+      } catch (e) {
+        this.close();
+        throw e;
+      }
+      return;
+    }
     this.project = open(projectDbPath);
     try {
       for (const m of mounts) {
@@ -269,7 +353,7 @@ export class MountedStores {
       store.get(PROBE_ID);
       store.inboundSupersedes(PROBE_ID);
     } catch (e) {
-      if (!isStoreFailure(e)) throw e;
+      if (!this.isStoreFailure(e)) throw e;
       this.dropDomain(name, e, true);
     }
   }
@@ -280,6 +364,8 @@ export class MountedStores {
    *  (assertWritable): a session never writes into a store it cannot read back,
    *  and the slug checks still ask it (fanEveryDomain). */
   private dropDomain(name: string, e: unknown, atMount = false): void {
+    // Postgres storage drops nothing: the failing open or read throws, naming the domain.
+    if (this.work) throw new DomainUnavailableError(name, this.domainPaths.get(name) ?? '', e);
     if (this.isUnreadable(name)) return;
     this.unreadableDomains.push({
       name,
@@ -287,6 +373,12 @@ export class MountedStores {
       error: errorText(e),
       note: atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE,
     });
+  }
+
+  /** The failures that drop a domain in hobby mode and fail the call in work
+   *  mode; any other error is the caller's or this code's fault and is rethrown. */
+  private isStoreFailure(e: unknown): boolean {
+    return isStoreFailure(e) || (this.work !== undefined && isPgStoreFailure(e));
   }
 
   private isUnreadable(name: string): boolean {
@@ -320,7 +412,7 @@ export class MountedStores {
       try {
         out.push(fn(store));
       } catch (e) {
-        if (!isStoreFailure(e)) throw e;
+        if (!this.isStoreFailure(e)) throw e;
         this.dropDomain(name, e);
         throw new Error(
           `${what} cannot be checked: domain '${name}' could not be read (${errorText(e)}), so whether it is taken there is unknown. ` +
@@ -345,7 +437,7 @@ export class MountedStores {
       try {
         value = fn(store);
       } catch (e) {
-        if (!isStoreFailure(e)) throw e;
+        if (!this.isStoreFailure(e)) throw e;
         this.dropDomain(name, e);
         continue;
       }
@@ -511,7 +603,7 @@ export class MountedStores {
     try {
       return store.query(opts);
     } catch (e) {
-      if (!isStoreFailure(e)) throw e;
+      if (!this.isStoreFailure(e)) throw e;
       this.dropDomain(source, e);
       return [];
     }
