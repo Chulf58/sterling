@@ -79,6 +79,16 @@ test('parseArgs: --attach takes --fence-local, --dry-run and --project but no --
   assert.match(new MoveStoreUsageError('x').message, /--attach \[--fence-local\]/);
 });
 
+test('parseArgs: a bare --to or --project, or one followed by another option, is a usage error', () => {
+  const usage = (argv, text) => assert.throws(() => parseArgs(argv), (e) => e instanceof MoveStoreUsageError && e.message.includes(text), argv.join(' '));
+  usage(['--attach', '--project', '/p', '--to'], '--to needs a value');
+  usage(['--to'], '--to needs a value');
+  usage(['--to', '--dry-run'], '--to needs a value');
+  usage(['--attach', '--to='], '--attach copies nothing and takes no --to');
+  usage(['--attach', '--project'], '--project needs a directory');
+  usage(['--to', 'pg', '--project', '--dry-run'], '--project needs a directory');
+});
+
 test('--attach: credentials are checked before any connection, and the config is left as found', () => {
   const base = tempDir();
   const work = project(join(base, 'work'));

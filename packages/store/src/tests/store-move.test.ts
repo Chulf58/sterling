@@ -512,7 +512,7 @@ function attachFixture(opts: { skip?: string[] } = {}) {
   writeFileSync(join(b, '.sterling', 'config.json'), JSON.stringify({ mode: 'work', stack_tags: stack, domain_paths: { [stack[0]]: join(b, 'd', 'alpha.db'), [stack[1]]: join(b, 'd', 'beta.db') }, kept: 'yes' }, null, 2));
   writeFileSync(join(b, '.sterling', 'project.json'), JSON.stringify({ project_id: projectId }));
   const cfgPath = join(b, '.sterling', 'config.json');
-  return { b, names, cfgPath, configText: () => readFileSync(cfgPath, 'utf8'), plan: (fenceLocal = false) => planAttach({ root: b, credentialsPath: routedCredentialsPath(), fenceLocal }) };
+  return { b, projectId, stack, names, cfgPath, configText: () => readFileSync(cfgPath, 'utf8'), plan: (fenceLocal = false) => planAttach({ root: b, credentialsPath: routedCredentialsPath(), fenceLocal }) };
 }
 
 function assertAttachRefused(fx: ReturnType<typeof attachFixture>, check: string, schema: string | null, fenceLocal = false): void {
@@ -535,7 +535,7 @@ test('attach: with every schema registered, receipted and unfenced it writes con
   assert.equal(done.storageSwitched, true);
   assert.deepEqual(done.stores.map((s) => [s.identity.kind, s.schema]), [['project', fx.names.projectSchema], ...fx.names.domains.map((d) => ['domain', d.schema])]);
   assert.ok(done.stores.every((s) => s.receipt.move_id.length > 0));
-  assert.deepEqual(done.local, { path: join(fx.b, '.sterling', 'sterling.db'), records: 0, action: 'absent' });
+  assert.deepEqual(done.local, { path: join(fx.b, '.sterling', 'sterling.db'), records: 0, occupied: [], action: 'absent' });
   const cfg = JSON.parse(fx.configText());
   assert.deepEqual([cfg.storage, cfg.mode, cfg.kept], ['postgres', 'work', 'yes'], 'storage written; mode and every other key kept');
   assert.deepEqual([fx.names.projectSchema, ...fx.names.domains.map((d) => d.schema)].map((s) => digestOf(snapshotPgStore(live().bridge, s))), digests, 'the Postgres stores are unchanged');
@@ -622,4 +622,83 @@ test('attach: a local project SQLite file is fenced when empty, refused while it
   const before = elsewhere.configText();
   assert.throws(() => attachProject(elsewhere.plan(true), live().bridge), MoveSourceFencedError);
   assert.equal(elsewhere.configText(), before);
+});
+
+test('attach: a receipt that is not a complete to_postgres receipt for this schema is refused by name (receipt)', { skip: PG_SKIP }, () => {
+  const fx = attachFixture();
+  const schema = fx.names.domains[0].schema;
+  const row = live().bridge.query(`SELECT move_id, receipt FROM "${live().meta}".move_receipts WHERE target_schema = $1`, [schema]).rows[0];
+  const full = JSON.parse(String(row.receipt));
+  const setReceipt = (r: unknown) => live().bridge.query(`UPDATE "${live().meta}".move_receipts SET receipt = $1 WHERE move_id = $2`, [JSON.stringify(r), row.move_id]);
+  const variants: Record<string, unknown>[] = [
+    { move_id: full.move_id, source_digest: full.source_digest, source_kind: full.source_kind, source_name: full.source_name },
+    { ...full, direction: 'to_sqlite' },
+    { ...full, target: 'postgres:sterling_d_somewhere_else' },
+    { ...full, source: '' },
+    { ...full, committed_at: 42 },
+    { ...full, tables: { records: full.tables.records } },
+    { ...full, tables: { ...full.tables, records: { rows: 'many', digest: full.tables.records.digest } } },
+  ];
+  for (const v of variants) {
+    setReceipt(v);
+    assertAttachRefused(fx, 'receipt', schema);
+  }
+  setReceipt(full);
+  assert.equal(attachProject(fx.plan(), live().bridge).storageSwitched, true, 'the intact receipt is accepted');
+});
+
+test('attach: a local store with no records but rows in other tables is refused by name, naming the tables', { skip: PG_SKIP }, () => {
+  const fx = attachFixture();
+  const local = join(fx.b, '.sterling', 'sterling.db');
+  openSqliteStore(local).close();
+  const raw = new DatabaseSync(local);
+  try {
+    raw.prepare("INSERT INTO activity_log (at, verb, type, record_id, title) VALUES ('2026-10-06T09:00:00.000Z', 'created', 'decision', 'r1', 'local only')").run();
+    raw.prepare("INSERT INTO store_meta (key, value, updated_at) VALUES ('local_note', 'kept here', '2026-10-06T09:00:00.000Z')").run();
+  } finally {
+    raw.close();
+  }
+  const before = fx.configText();
+  assert.throws(
+    () => attachProject(fx.plan(), live().bridge),
+    (e: unknown) => e instanceof MoveAttachError && e.check === 'local_store' && e.message.includes('activity_log (1)') && e.message.includes('store_meta (1)'),
+  );
+  assert.equal(fx.configText(), before);
+  assert.equal(readSqliteFence(local), null);
+  assert.equal(attachProject(fx.plan(true), live().bridge).local.action, 'fenced', '--fence-local is the choice that lets it through');
+});
+
+test('attach: resuming a same-target fence whose digest was never recorded records it, so a later move back replaces the file', { skip: PG_SKIP }, () => {
+  const fx = attachFixture();
+  const local = join(fx.b, '.sterling', 'sterling.db');
+  seedStore(local, { label: 'machine-b-crashed' });
+  const digest = digestOf(snapshotSqliteStore(local));
+  // A crash between the two fence writes: the fence is there, its digest is not.
+  writeSqliteFence(local, { move_id: randomUUID(), to: `postgres:${fx.names.projectSchema}`, fenced_at: '2026-10-06T09:00:00.000Z', manifest_digest: null });
+  assert.equal(attachProject(fx.plan(), live().bridge, { dryRun: true }).local.action, 'already_fenced');
+  assert.equal(readSqliteFence(local)?.manifest_digest, null, 'a dry run records nothing');
+  const done = attachProject(fx.plan(), live().bridge);
+  assert.equal(done.local.action, 'already_fenced');
+  assert.equal(readSqliteFence(local)?.manifest_digest, digest);
+  const back = exportStore({ ...pgOpts(), schema: fx.names.projectSchema, sqlitePath: local, identity: { kind: 'project', name: fx.projectId }, fenceSource: true });
+  assert.equal(back.outcome, 'replaced', 'the fenced local file is the untouched copy a move back replaces');
+});
+
+test('attach: a mount added to the config after the plan is refused by name before anything is fenced or written (mounts)', { skip: PG_SKIP }, () => {
+  const fx = attachFixture();
+  const plan = fx.plan();
+  const local = join(fx.b, '.sterling', 'sterling.db');
+  openSqliteStore(local).close();
+  const cfg = JSON.parse(fx.configText());
+  const added = `gamma${fx.stack[0].slice('alpha'.length)}`;
+  cfg.stack_tags = [...cfg.stack_tags, added];
+  cfg.domain_paths = { ...cfg.domain_paths, [added]: join(fx.b, 'd', 'gamma.db') };
+  writeFileSync(fx.cfgPath, JSON.stringify(cfg, null, 2));
+  const before = fx.configText();
+  assert.throws(
+    () => attachProject(plan, live().bridge),
+    (e: unknown) => e instanceof MoveAttachError && e.check === 'mounts' && e.message.includes(added) && e.message.includes('Nothing was changed'),
+  );
+  assert.equal(fx.configText(), before, 'storage was not written');
+  assert.equal(readSqliteFence(local), null, 'the local store was not fenced');
 });

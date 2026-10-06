@@ -106,7 +106,7 @@ A usage error exits 2 and prints the usage line; any other failure exits 1.
 
 Decision `second-machine-attaches-to-a-postgres-project-through-move-store-attach`. Use this when one machine already moved a work project to Postgres and the user now has a fresh clone of that project on another machine. The clone has the committed `.sterling/project.json`, but its own `.sterling/config.json` is not in git and has no `config.storage`, so the clone still reads SQLite. Do not run `--to pg` there: the clone's SQLite store is not the one that was moved, so the move refuses it. Do not set `config.storage` by hand either.
 
-The command is `node "${CLAUDE_PLUGIN_ROOT}/scripts/move-store.mjs" --attach [--fence-local] [--dry-run] [--project <dir>]`. It copies no data. It checks the same things the move checks first (work mode, `project.json`, the credentials file, the schema names), then checks each Postgres store the project uses: the project schema and the schema of every mounted domain. Each one must be registered, must have a move receipt from that same store, and must not be fenced. The first store that fails stops the attach, and the refusal names the schema and the check. If every check passes, the attach writes `config.storage = postgres` and nothing else in the config.
+The command is `node "${CLAUDE_PLUGIN_ROOT}/scripts/move-store.mjs" --attach [--fence-local] [--dry-run] [--project <dir>]`. It copies no data. It checks the same things the move checks first (work mode, `project.json`, the credentials file, the schema names), then checks each Postgres store the project uses: the project schema and the schema of every mounted domain. Each one must be registered, must have a complete move receipt from that same store, and must not be fenced. The first store that fails stops the attach, and the refusal names the schema and the check. Before it writes anything, the attach reads the config again and refuses if the project's mounted domains changed while it ran. If every check passes, the attach writes `config.storage = postgres` and nothing else in the config.
 
 Steps:
 
@@ -116,9 +116,9 @@ Steps:
 
 This machine's own project SQLite file (`.sterling/sterling.db`), if there is one:
 
-- If it holds no records, as after a fresh init, the attach fences it. Nothing in it is lost.
-- If it holds records, the attach refuses, because after the switch those records can no longer be reached from this project. Show the user the count from the message and ask what the records are. Only if the user chooses to go ahead, re-run with `--fence-local`. The file is kept and fenced, and a later `--to sqlite` run on this machine replaces it.
-- If it is already fenced toward this project's Postgres schema (an attach that stopped before the switch), the attach goes on. If it is fenced toward anywhere else, the attach refuses.
+- If none of the tables a move copies has a row in it, as after a fresh init, the attach fences the file. Nothing in it is lost.
+- If any of those tables has rows (records, but also the activity log, queue history, runs, handoffs, the selection or store notes), the attach refuses, because after the switch none of it can be reached from this project. The message names each table with its row count; show it to the user and ask what the content is. Only if the user chooses to go ahead, re-run with `--fence-local`. The file is kept and fenced, and a later `--to sqlite` run on this machine replaces it.
+- If it is already fenced toward this project's Postgres schema (an attach that stopped before the switch), the attach goes on, and records the fence's content digest if the earlier run stopped before it could. If it is fenced toward anywhere else, the attach refuses.
 
 Domain SQLite files on this machine are never touched; other projects here may still use them.
 
@@ -126,8 +126,9 @@ Refusals. Each starts with the check that failed and ends with `Nothing was chan
 
 - `attach check 'storage' failed`: `config.storage` is already `postgres`. This machine is attached; there is nothing to do.
 - `attach check 'registered' failed`: a schema is not in `sterling_meta.stores`. That store was never moved. Moving it is a `--to pg` run on the machine that holds it.
-- `attach check 'receipt' failed`: a schema has no move receipt, or its receipt is from a different store. No finished move filled it. Report it and stop.
+- `attach check 'receipt' failed`: a schema has no move receipt, or its latest receipt is not a complete `--to pg` receipt for that schema from that same store. The message says which part is wrong. No finished move filled it. Report it and stop.
 - `attach check 'fence' failed`: a schema is fenced because it was moved back to SQLite. The project no longer lives on Postgres; ask the user how to go on.
 - `attach check 'local_store' failed`: see the list above.
+- `attach check 'mounts' failed`: the project's mounted domains changed while the attach ran. Re-run the attach so every store is checked. If the local SQLite file was already fenced, the message says so, and the re-run goes on from that fence.
 - A hobby project, a missing `project.json` or bad credentials: the preconditions in section 3.
 

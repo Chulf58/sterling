@@ -62,12 +62,23 @@ export function parseArgs(argv) {
   const out = { to: undefined, dryRun: false, project: undefined };
   let attach = false;
   let fenceLocal = false;
+  let toGiven = false;
+  // A flag's separate value: a missing one, or another option in its place, is refused rather than read as no value.
+  const valueAfter = (i, need) => {
+    const v = argv[i];
+    if (v === undefined || v.startsWith('--')) throw new MoveStoreUsageError(need);
+    return v;
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--to') out.to = argv[++i];
-    else if (a.startsWith('--to=')) out.to = a.slice(5);
-    else if (a === '--dry-run') out.dryRun = true;
-    else if (a === '--project') out.project = argv[++i];
+    if (a === '--to') {
+      toGiven = true;
+      out.to = valueAfter(++i, '--to needs a value: pg or sqlite');
+    } else if (a.startsWith('--to=')) {
+      toGiven = true;
+      out.to = a.slice(5);
+    } else if (a === '--dry-run') out.dryRun = true;
+    else if (a === '--project') out.project = valueAfter(++i, '--project needs a directory');
     else if (a.startsWith('--project=')) out.project = a.slice(10);
     else if (a === '--attach') attach = true;
     else if (a === '--fence-local') fenceLocal = true;
@@ -75,7 +86,7 @@ export function parseArgs(argv) {
   }
   if (out.project === '') throw new MoveStoreUsageError('--project needs a directory');
   if (attach) {
-    if (out.to !== undefined) throw new MoveStoreUsageError('--attach copies nothing and takes no --to');
+    if (toGiven) throw new MoveStoreUsageError('--attach copies nothing and takes no --to');
     return { attach: true, fenceLocal, dryRun: out.dryRun, project: out.project };
   }
   if (fenceLocal) throw new MoveStoreUsageError('--fence-local is only for --attach');
@@ -194,7 +205,8 @@ export function formatAttachReport(report) {
   for (const s of report.stores) {
     lines.push(`${s.identity.kind} ${s.identity.name}: postgres:${s.schema} registered, not fenced; receipt ${s.receipt.move_id} from ${s.receipt.source} at ${s.receipt.committed_at}`);
   }
-  const records = report.local.action === 'absent' ? '' : ` (${report.local.records} record(s) kept in the file, not read while storage is postgres)`;
+  const held = report.local.occupied.length ? `holds ${report.local.occupied.join(', ')}` : 'holds nothing';
+  const records = report.local.action === 'absent' ? '' : ` (${held}; kept in the file, not read while storage is postgres)`;
   lines.push(`local project SQLite ${report.local.path}: ${LOCAL_ACTION[report.local.action]}${records}`);
   lines.push(report.dryRun ? 'config.storage not changed (dry run)' : 'config.storage switched to postgres');
   lines.push(`config.mode unchanged (${report.mode})`);
