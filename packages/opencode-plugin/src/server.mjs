@@ -34,7 +34,7 @@
 //      for edit, write and patch; it carries no shell rule.
 // Every handler is fenced: a throw is logged to .sterling/transient and turned
 // into a notice, never raised into OpenCode. Outside a Sterling project (no
-// .sterling/sterling.db above the session directory) every handler is a no-op, and
+// .sterling/config.json or .sterling/sterling.db above the session directory) every handler is a no-op, and
 // setup registers only the bootstrap commands (config.mjs BOOTSTRAP_COMMANDS), so a
 // new user has /sterling:init; nothing is written into such a project.
 // The handlers live in one module each beside this file; this file wires them
