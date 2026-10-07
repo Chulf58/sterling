@@ -179,6 +179,44 @@ test('script: a bin is reached when BIN_ENTRIES lists it AND a command, skill or
   }
 });
 
+test('script: shipped code that joins "scripts" and "<x>.mjs" as adjacent literals reaches the entry; a comment, a test file or a bare mention does not', () => {
+  const { dir, cleanup } = project();
+  try {
+    // The maintenance-worker spawn shape: the runner is not a bin and no npm script runs it.
+    write(dir, 'scripts/maintenance-worker-run.mjs', '// runner\n');
+    write(dir, 'scripts/hooks/lib/maintenance-worker.mjs', [
+      "import { join } from 'node:path';",
+      "const runner = join(pluginRoot, 'scripts', 'maintenance-worker-run.mjs');",
+    ].join('\n'));
+    write(dir, 'scripts/nested-call.mjs', '// runner\n');
+    write(dir, 'scripts/lib/spawner.mjs', 'const p = path.join(dirname(fileURLToPath(import.meta.url)), "scripts", "nested-call.mjs");\n');
+    write(dir, 'scripts/comment-only.mjs', '// runner\n');
+    write(dir, 'scripts/lib/commented.mjs', [
+      "// join(pluginRoot, 'scripts', 'comment-only.mjs')",
+      "/* join(pluginRoot, 'scripts', 'comment-only.mjs') */",
+      "const url = 'http://x'; // join(pluginRoot, 'scripts', 'comment-only.mjs')",
+    ].join('\n'));
+    write(dir, 'scripts/test-only.mjs', '// runner\n');
+    write(dir, 'scripts/tests/spawner.test.mjs', "join(root, 'scripts', 'test-only.mjs');\n");
+    write(dir, 'scripts/lib/spawner.test.mjs', "join(root, 'scripts', 'test-only.mjs');\n");
+    write(dir, 'scripts/domain-doctor.mjs', '// operator CLI nothing references\n');
+    write(dir, 'scripts/lib/bare.mjs', "const note = 'scripts/domain-doctor.mjs'; const other = ['scripts', 'domain-doctor.mjs'];\n");
+    write(dir, 'scripts/self-joined.mjs', "join(root, 'scripts', 'self-joined.mjs');\n");
+
+    const r = new EntryReachability(dir);
+    const hit = r.judge('scripts/maintenance-worker-run.mjs', '');
+    assert.equal(hit?.reached, true);
+    assert.match(hit?.detail ?? '', /scripts\/hooks\/lib\/maintenance-worker\.mjs builds its path from segments/);
+    assert.equal(r.judge('scripts/nested-call.mjs', '')?.reached, true, 'a nested call before the literals still counts');
+    assert.equal(r.judge('scripts/comment-only.mjs', '')?.reached, false, 'the same text in comments does not count');
+    assert.equal(r.judge('scripts/test-only.mjs', '')?.reached, false, 'the same text only in test files does not count');
+    assert.equal(r.judge('scripts/domain-doctor.mjs', '')?.reached, false, 'an operator CLI nothing spawns stays not reached');
+    assert.equal(r.judge('scripts/self-joined.mjs', '')?.reached, false, 'the entry naming itself is not a caller');
+  } finally {
+    cleanup();
+  }
+});
+
 test('an entry of a kind no registry covers (a library file) is not judged', () => {
   const { dir, cleanup } = project();
   try {
