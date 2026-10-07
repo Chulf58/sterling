@@ -1324,7 +1324,7 @@ function forkUnconfirmed(identity: StoreIdentity, sourceLabel: string, targetLab
   return new MoveForkUnconfirmedError(
     `${identity.kind} '${identity.name}': ${targetLabel} was copied from ${sourceLabel} by move ${receipt.move_id} on ${receipt.committed_at}, and the SQLite copy stayed writable for other projects (the fork). ` +
       `This move does not copy it again and never merges the two copies, so no difference between them carries over: ${describeForkLoss(loss)}. ` +
-      `Those records stay in the SQLite file. Re-run with ${FORK_CONFIRM_FLAG} to move without them. Nothing was moved.`,
+      `The two copies stay different: neither is merged into the other, and each copy keeps its own rows. Re-run with ${FORK_CONFIRM_FLAG} to move on that basis. Nothing was moved.`,
     loss,
   );
 }
