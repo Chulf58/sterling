@@ -19474,6 +19474,10 @@ var PgBridge = class {
   get closed() {
     return this.closedReason !== void 0;
   }
+  /** Why the bridge closed (the same text PgBridgeClosedError carries), or undefined while it is open. */
+  get closeReason() {
+    return this.closedReason;
+  }
   /** The handle whose transaction is open on this connection, if any. */
   get transactionOwner() {
     return this.txOwner;
@@ -24697,7 +24701,7 @@ function openRoutedStores(root, opts = {}) {
   const route = routeOrDefault(root);
   if (route.storage === "sqlite") {
     if (opts.mount) {
-      return { route, config: route.config, stores: new MountedStores(route.projectDbPath, route.domains, { skipMissing: opts.skipMissing }) };
+      return { route, config: route.config, stores: new MountedStores(route.projectDbPath, route.domains, { skipMissing: opts.skipMissing }), connectionLost: () => void 0 };
     }
     if (opts.readOnlySnapshot)
       throw new StoreSettingsError("readOnlySnapshot is a Postgres-storage option; a SQLite read-only open copies the file instead");
@@ -24719,7 +24723,7 @@ function openRoutedStores(root, opts = {}) {
           openDomain: (m) => openWorkStore(route, entry, schemaOf(route, m.name))
         }
       });
-      return { route, config: route.config, stores };
+      return { route, config: route.config, stores, connectionLost: () => entry.bridge.closeReason };
     }
     return { route, config: route.config, store: openWorkStore(route, entry, route.projectSchema, { readOnlySnapshot: opts.readOnlySnapshot }) };
   } catch (e) {
@@ -28787,6 +28791,54 @@ var EMPTY_COMPLETION_RESULT = {
 // packages/mcp-server/dist/server.js
 import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
 import { join as join11, dirname as dirname6 } from "node:path";
+
+// packages/mcp-server/dist/held-stores.js
+function holdRoutedStores(opened, reopen, announce) {
+  let current = opened;
+  let last = opened.stores;
+  let depth = 0;
+  let closed = false;
+  function live() {
+    if (closed)
+      return last;
+    if (current !== void 0) {
+      if (depth > 0)
+        return current.stores;
+      const lost = current.connectionLost();
+      if (lost === void 0)
+        return current.stores;
+      announce(`sterling-mcp: the Postgres connection closed (${lost}); the call that found it failed and was not retried. Opening a new connection for this call.`);
+      const dead = current;
+      current = void 0;
+      dead.stores.close();
+    }
+    current = reopen();
+    last = current.stores;
+    return current.stores;
+  }
+  return new Proxy(opened.stores, {
+    get(_target, prop) {
+      if (prop === "close") {
+        return () => {
+          closed = true;
+          last.close();
+        };
+      }
+      const stores = live();
+      const value = Reflect.get(stores, prop, stores);
+      if (typeof value !== "function")
+        return value;
+      return (...args2) => {
+        depth += 1;
+        try {
+          return value.apply(stores, args2);
+        } finally {
+          depth -= 1;
+        }
+      };
+    }
+  });
+}
 
 // packages/mcp-server/dist/tools.js
 import { spawnSync as spawnSync2 } from "node:child_process";
@@ -37002,8 +37054,10 @@ function createSterlingServer(target) {
   if (typeof target === "string") {
     opened = openStoreArg(target);
   } else {
-    const routed = openRoutedStores(target.projectRoot, { mount: true, skipMissing: true });
-    opened = { store: routed.stores, config: routed.config, repoRoot: routed.route.root };
+    const open2 = () => openRoutedStores(target.projectRoot, { mount: true, skipMissing: true });
+    const routed = open2();
+    const store2 = routed.route.storage === "postgres" ? holdRoutedStores(routed, open2, (line) => process.stderr.write(line + "\n")) : routed.stores;
+    opened = { store: store2, config: routed.config, repoRoot: routed.route.root };
   }
   const { store, config: config2, repoRoot } = opened;
   for (const m of store.missingDomains)

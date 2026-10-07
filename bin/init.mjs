@@ -6026,6 +6026,10 @@ var init_pg_bridge = __esm({
       get closed() {
         return this.closedReason !== void 0;
       }
+      /** Why the bridge closed (the same text PgBridgeClosedError carries), or undefined while it is open. */
+      get closeReason() {
+        return this.closedReason;
+      }
       /** The handle whose transaction is open on this connection, if any. */
       get transactionOwner() {
         return this.txOwner;

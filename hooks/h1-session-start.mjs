@@ -6016,6 +6016,10 @@ var init_pg_bridge = __esm({
       get closed() {
         return this.closedReason !== void 0;
       }
+      /** Why the bridge closed (the same text PgBridgeClosedError carries), or undefined while it is open. */
+      get closeReason() {
+        return this.closedReason;
+      }
       /** The handle whose transaction is open on this connection, if any. */
       get transactionOwner() {
         return this.txOwner;
@@ -11210,7 +11214,7 @@ function openRoutedStores(root, opts = {}) {
   const route = routeOrDefault(root);
   if (route.storage === "sqlite") {
     if (opts.mount) {
-      return { route, config: route.config, stores: new MountedStores(route.projectDbPath, route.domains, { skipMissing: opts.skipMissing }) };
+      return { route, config: route.config, stores: new MountedStores(route.projectDbPath, route.domains, { skipMissing: opts.skipMissing }), connectionLost: () => void 0 };
     }
     if (opts.readOnlySnapshot)
       throw new StoreSettingsError("readOnlySnapshot is a Postgres-storage option; a SQLite read-only open copies the file instead");
@@ -11232,7 +11236,7 @@ function openRoutedStores(root, opts = {}) {
           openDomain: (m) => openWorkStore(route, entry, schemaOf(route, m.name))
         }
       });
-      return { route, config: route.config, stores };
+      return { route, config: route.config, stores, connectionLost: () => entry.bridge.closeReason };
     }
     return { route, config: route.config, store: openWorkStore(route, entry, route.projectSchema, { readOnlySnapshot: opts.readOnlySnapshot }) };
   } catch (e) {

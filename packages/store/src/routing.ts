@@ -19,7 +19,9 @@
 // store's driver holds one lease and returns it on close, and the bridge
 // closes when the last lease is returned. A bridge that died is replaced on
 // the next open; handles still holding the dead one fail loud on their next
-// statement (PgBridgeClosedError).
+// statement (PgBridgeClosedError). A long-lived holder asks
+// RoutedMounted.connectionLost() before each call and opens again when it
+// names a reason (the MCP server's held stores, packages/mcp-server/src/held-stores.ts).
 //
 // Fanned reads on one connection. The bridge refuses a second handle's BEGIN
 // while one transaction is open (decision
@@ -460,6 +462,14 @@ export interface RoutedMounted {
   route: StoreRoute;
   config: SterlingConfig;
   stores: MountedStores;
+  /**
+   * Postgres storage: why the connection under `stores` closed (the worker
+   * died, a wait timed out), or undefined while it is open. Once it returns a
+   * reason, every statement on `stores` throws PgBridgeClosedError; a new
+   * openRoutedStores call opens a new connection. SQLite storage: always
+   * undefined.
+   */
+  connectionLost(): string | undefined;
 }
 
 function routeOrDefault(root: string): StoreRoute {
@@ -486,7 +496,7 @@ export function openRoutedStores(root: string, opts: OpenRoutedProjectOptions | 
   const route = routeOrDefault(root);
   if (route.storage === 'sqlite') {
     if (opts.mount) {
-      return { route, config: route.config, stores: new MountedStores(route.projectDbPath, route.domains, { skipMissing: opts.skipMissing }) };
+      return { route, config: route.config, stores: new MountedStores(route.projectDbPath, route.domains, { skipMissing: opts.skipMissing }), connectionLost: () => undefined };
     }
     if (opts.readOnlySnapshot) throw new StoreSettingsError("readOnlySnapshot is a Postgres-storage option; a SQLite read-only open copies the file instead");
     return { route, config: route.config, store: new SterlingStore(route.projectDbPath) };
@@ -508,7 +518,7 @@ export function openRoutedStores(root: string, opts: OpenRoutedProjectOptions | 
           openDomain: (m) => openWorkStore(route, entry, schemaOf(route, m.name)),
         },
       });
-      return { route, config: route.config, stores };
+      return { route, config: route.config, stores, connectionLost: () => entry.bridge.closeReason };
     }
     return { route, config: route.config, store: openWorkStore(route, entry, route.projectSchema, { readOnlySnapshot: opts.readOnlySnapshot }) };
   } catch (e) {

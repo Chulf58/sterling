@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS } from '@sterling/schemas';
 import { MountedStores, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
+import { holdRoutedStores } from './held-stores.js';
 import { SterlingTools, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS, DEDUP_OVERRIDE_FIELD, mountedDomainSurface } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
@@ -224,15 +225,21 @@ function openStoreArg(storePath: string): { store: MountedStores; config: Sterli
  * config.storage picks SQLite or Postgres. On Postgres a missing or unreadable
  * domain fails boot by name instead of being skipped; on SQLite it is skipped
  * and announced as before. The local .sterling/ directory under the project root
- * stays the anchor for markers, ledgers and locks in both modes.
+ * stays the anchor for markers, ledgers and locks in both modes. On Postgres the
+ * returned `store` is held (holdRoutedStores): when its connection closes, the
+ * next call opens a new one.
  */
 export function createSterlingServer(target: string | { projectRoot: string }): { server: McpServer; store: MountedStores; tools: SterlingTools } {
   let opened: { store: MountedStores; config: SterlingConfig; repoRoot: string };
   if (typeof target === 'string') {
     opened = openStoreArg(target);
   } else {
-    const routed = openRoutedStores(target.projectRoot, { mount: true, skipMissing: true });
-    opened = { store: routed.stores, config: routed.config, repoRoot: routed.route.root };
+    const open = () => openRoutedStores(target.projectRoot, { mount: true, skipMissing: true });
+    const routed = open();
+    // Postgres: the stores are held, so a connection that dies is replaced on
+    // the next call instead of failing every call until restart (held-stores.ts).
+    const store = routed.route.storage === 'postgres' ? holdRoutedStores(routed, open, (line) => process.stderr.write(line + '\n')) : routed.stores;
+    opened = { store, config: routed.config, repoRoot: routed.route.root };
   }
   const { store, config, repoRoot } = opened;
   for (const m of store.missingDomains) process.stderr.write(missingDomainWarning(m) + '\n');

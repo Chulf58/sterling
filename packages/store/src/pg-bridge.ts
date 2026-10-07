@@ -289,6 +289,11 @@ export class PgBridge {
     return this.closedReason !== undefined;
   }
 
+  /** Why the bridge closed (the same text PgBridgeClosedError carries), or undefined while it is open. */
+  get closeReason(): string | undefined {
+    return this.closedReason;
+  }
+
   /** The handle whose transaction is open on this connection, if any. */
   get transactionOwner(): object | undefined {
     return this.txOwner;
