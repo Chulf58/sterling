@@ -81,8 +81,6 @@ export class MoveError extends Error {
 export class MoveConfigMissingError extends MoveError {}
 /** The project's .sterling/config.json does not parse or fails the config schema. */
 export class MoveConfigInvalidError extends MoveError {}
-/** The project's mode does not allow this direction (a hobby project never moves to Postgres). */
-export class MoveModeError extends MoveError {}
 /** The project has no .sterling/project.json identity. */
 export class MoveIdentityMissingError extends MoveError {}
 /** The Postgres credentials file is missing or invalid. */
@@ -1225,14 +1223,6 @@ export function planMove(input: PlanMoveInput): MovePlan {
   if (config === null) throw new MoveConfigMissingError(`${root}/${CONFIG_REL} does not exist; run the move inside a Sterling project. Nothing was moved.`);
   const mode = readProjectMode(root);
   const storage = readProjectStorage(root);
-  // Decision storage-backend-is-its-own-config-key-written-only-by-store-move:
-  // storage postgres is valid only in work mode. Moving back to SQLite needs no
-  // mode, since it is also the way out for a postgres store in a hobby project.
-  if (input.direction === 'to_postgres' && mode === 'hobby') {
-    throw new MoveModeError(
-      `${root} is a hobby project (config.mode is hobby); a store move never moves a hobby project to Postgres, which is valid only in work mode. Set the project to work mode first (TUI System tab), then move it. Nothing was moved.`,
-    );
-  }
   const identity = readProjectIdentity(root);
   if (identity === null) throw new MoveIdentityMissingError(`${root}/.sterling/project.json is missing; a work project's Postgres store is named by its project_id. Restore it from git, or let init write it. Nothing was moved.`);
   try {
@@ -1398,7 +1388,7 @@ export interface PlanAttachInput {
 }
 
 /**
- * The file checks for an attach. Reuses planMove (config, work mode, identity,
+ * The file checks for an attach. Reuses planMove (config, identity,
  * credentials, schema names) with no registered projects: an attach copies and
  * fences no domain, so who else mounts one does not matter. Opens no database.
  */
