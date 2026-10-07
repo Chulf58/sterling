@@ -179,39 +179,47 @@ test('script: a bin is reached when BIN_ENTRIES lists it AND a command, skill or
   }
 });
 
-test('script: shipped code that joins "scripts" and "<x>.mjs" as adjacent literals reaches the entry; a comment, a test file or a bare mention does not', () => {
+test('script: SPAWNED_ENTRIES reaches an entry only when its spawner exists and names the entry; a stale member reads as not reached with the reason', () => {
   const { dir, cleanup } = project();
   try {
-    // The maintenance-worker spawn shape: the runner is not a bin and no npm script runs it.
-    write(dir, 'scripts/maintenance-worker-run.mjs', '// runner\n');
+    write(dir, 'scripts/lib/bundled-artifacts.mjs', [
+      BUNDLED_ARTIFACTS,
+      'export const SPAWNED_ENTRIES = {',
+      '  // join(pluginRoot, "scripts", "maintenance-worker-run.mjs") in launchWorker',
+      "  'scripts/maintenance-worker-run.mjs': 'scripts/hooks/lib/maintenance-worker.mjs',",
+      "  'scripts/stale-runner.mjs': 'scripts/hooks/lib/stale-spawner.mjs',",
+      "  'scripts/ghost-runner.mjs': 'scripts/hooks/lib/missing-spawner.mjs',",
+      '};',
+      '',
+    ].join('\n'));
+    for (const name of ['maintenance-worker-run', 'stale-runner', 'ghost-runner', 'unregistered-runner', 'domain-doctor']) {
+      write(dir, `scripts/${name}.mjs`, '// runner\n');
+    }
+    // the maintenance-worker spawn shape
     write(dir, 'scripts/hooks/lib/maintenance-worker.mjs', [
       "import { join } from 'node:path';",
-      "const runner = join(pluginRoot, 'scripts', 'maintenance-worker-run.mjs');",
+      'function launchWorker(pluginRoot, spawn) {',
+      "  const runner = join(pluginRoot, 'scripts', 'maintenance-worker-run.mjs');",
+      '  return spawn(process.execPath, [runner]);',
+      '}',
     ].join('\n'));
-    write(dir, 'scripts/nested-call.mjs', '// runner\n');
-    write(dir, 'scripts/lib/spawner.mjs', 'const p = path.join(dirname(fileURLToPath(import.meta.url)), "scripts", "nested-call.mjs");\n');
-    write(dir, 'scripts/comment-only.mjs', '// runner\n');
-    write(dir, 'scripts/lib/commented.mjs', [
-      "// join(pluginRoot, 'scripts', 'comment-only.mjs')",
-      "/* join(pluginRoot, 'scripts', 'comment-only.mjs') */",
-      "const url = 'http://x'; // join(pluginRoot, 'scripts', 'comment-only.mjs')",
-    ].join('\n'));
-    write(dir, 'scripts/test-only.mjs', '// runner\n');
-    write(dir, 'scripts/tests/spawner.test.mjs', "join(root, 'scripts', 'test-only.mjs');\n");
-    write(dir, 'scripts/lib/spawner.test.mjs', "join(root, 'scripts', 'test-only.mjs');\n");
-    write(dir, 'scripts/domain-doctor.mjs', '// operator CLI nothing references\n');
-    write(dir, 'scripts/lib/bare.mjs', "const note = 'scripts/domain-doctor.mjs'; const other = ['scripts', 'domain-doctor.mjs'];\n");
-    write(dir, 'scripts/self-joined.mjs', "join(root, 'scripts', 'self-joined.mjs');\n");
+    // a spawner that no longer names its entry
+    write(dir, 'scripts/hooks/lib/stale-spawner.mjs', "export const x = join(root, 'scripts', 'renamed-runner.mjs');\n");
+    // joined by segments, but never declared
+    write(dir, 'scripts/lib/other-spawner.mjs', "export const y = join(root, 'scripts', 'unregistered-runner.mjs');\n");
 
     const r = new EntryReachability(dir);
     const hit = r.judge('scripts/maintenance-worker-run.mjs', '');
     assert.equal(hit?.reached, true);
-    assert.match(hit?.detail ?? '', /scripts\/hooks\/lib\/maintenance-worker\.mjs builds its path from segments/);
-    assert.equal(r.judge('scripts/nested-call.mjs', '')?.reached, true, 'a nested call before the literals still counts');
-    assert.equal(r.judge('scripts/comment-only.mjs', '')?.reached, false, 'the same text in comments does not count');
-    assert.equal(r.judge('scripts/test-only.mjs', '')?.reached, false, 'the same text only in test files does not count');
+    assert.match(hit?.detail ?? '', /SPAWNED_ENTRIES maps it to scripts\/hooks\/lib\/maintenance-worker\.mjs/);
+    const stale = r.judge('scripts/stale-runner.mjs', '');
+    assert.equal(stale?.reached, false);
+    assert.match(stale?.detail ?? '', /scripts\/hooks\/lib\/stale-spawner\.mjs holds no quoted 'stale-runner\.mjs'/);
+    const ghost = r.judge('scripts/ghost-runner.mjs', '');
+    assert.equal(ghost?.reached, false);
+    assert.match(ghost?.detail ?? '', /scripts\/hooks\/lib\/missing-spawner\.mjs does not exist/);
+    assert.equal(r.judge('scripts/unregistered-runner.mjs', '')?.reached, false, 'an undeclared path spawn is still not caught');
     assert.equal(r.judge('scripts/domain-doctor.mjs', '')?.reached, false, 'an operator CLI nothing spawns stays not reached');
-    assert.equal(r.judge('scripts/self-joined.mjs', '')?.reached, false, 'the entry naming itself is not a caller');
   } finally {
     cleanup();
   }
