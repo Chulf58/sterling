@@ -23,7 +23,14 @@
  *             scripts/lib/bundled-artifacts.mjs lists it AND a command, skill,
  *             agent template, template, hooks.json or script other than the
  *             entry itself names bin/<name>.mjs or '<name>.mjs'; or the root
- *             package.json "scripts" run it.
+ *             package.json "scripts" run it; or SPAWNED_ENTRIES in the same file
+ *             maps scripts/<x>.mjs to a shipped spawner file that exists and
+ *             holds '<x>.mjs' as a quoted string. A registry member whose
+ *             spawner is missing or no longer names the entry reads as not
+ *             reached, and the detail says which check failed. A SPAWNED_ENTRIES
+ *             block that is missing or holds a line the parser does not
+ *             recognize makes every scripts/<x>.mjs entry not reached, with a
+ *             detail saying the registry could not be read.
  *  - agent    agent-templates/<x>.md: agent-templates/registry.json lists it.
  *
  * Any other path (a library file under packages/ or scripts/lib/) is not
@@ -45,7 +52,10 @@
  *  - dynamic wiring: a script spawned by a computed name, an adapter loaded by
  *    path at runtime, a bin referenced only from packages/ sources (for
  *    example the no-capture fallback named in a tools.ts refusal) reads as not
- *    referenced, and a reference in a comment counts the same as a call.
+ *    referenced, and a reference in a comment counts the same as a call. A
+ *    path spawn built from segments, such as join(root, 'scripts', 'x.mjs'),
+ *    is caught only when the entry is declared in SPAWNED_ENTRIES; an
+ *    unregistered one still reads as not reached.
  *  - runtime failures: a registered hook that crashes, a tool that throws, a
  *    command whose script was renamed after the reference was written all read
  *    as reached. Reached means listed, not working.
@@ -84,6 +94,7 @@ export class EntryReachability {
   private hookCommands?: Loaded<string[]>;
   private toolNames?: Loaded<Set<string>>;
   private binEntries?: Loaded<Map<string, string>>;
+  private spawnedEntries?: Loaded<Map<string, string>>;
   private agentFiles?: Loaded<Set<string>>;
   private npmScripts?: Loaded<string[]>;
   private referenceCorpus?: Map<string, string>;
@@ -186,6 +197,10 @@ export class EntryReachability {
     if (path.startsWith('scripts/') && npm.ok && npm.value.some((s) => s.includes(path))) {
       return { path, kind: 'script', reached: true, detail: 'a package.json script runs it' };
     }
+    if (path.startsWith('scripts/')) {
+      const spawned = this.judgeSpawned(path);
+      if (spawned) return spawned;
+    }
     const bins = (this.binEntries ??= this.load(BIN_REGISTRY_FILE, (text) => {
       const block = /export const BIN_ENTRIES\s*=\s*\{([\s\S]*?)\n\};/.exec(text);
       if (!block) throw new Error('no BIN_ENTRIES object found');
@@ -215,6 +230,46 @@ export class EntryReachability {
       if (tokens.some((t) => text.includes(t))) return { path, kind: 'script', reached: true, detail: `BIN_ENTRIES lists ${name} and ${file} references it` };
     }
     return { path, kind: 'script', reached: false, detail: `BIN_ENTRIES lists ${name} but no command, skill or script references bin/${name}.mjs` };
+  }
+
+  /**
+   * The SPAWNED_ENTRIES route: a verdict when the entry is a registry member
+   * (reached, or not reached with the failed check named), null when it is not
+   * a member, so the BIN_ENTRIES route decides. A registry block that is missing
+   * or has a line the parser does not recognize is a not-reached verdict naming
+   * SPAWNED_ENTRIES, never an empty registry. The block closes with `}` on its
+   * own line, with or without a semicolon.
+   */
+  private judgeSpawned(path: string): EntryVerdict | null {
+    const spawned = (this.spawnedEntries ??= this.load(BIN_REGISTRY_FILE, (text) => {
+      const block = /export const SPAWNED_ENTRIES\s*=\s*\{([\s\S]*?)\n\}/.exec(text);
+      if (!block) throw new Error('no SPAWNED_ENTRIES object found');
+      const out = new Map<string, string>();
+      for (const line of block[1].split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('//')) continue;
+        const hit = /^(?:'([^']+)'|"([^"]+)")\s*:\s*(?:'([^']+)'|"([^"]+)")\s*,?\s*(?:\/\/.*)?$/.exec(trimmed);
+        if (!hit) throw new Error(`unrecognized SPAWNED_ENTRIES line: ${trimmed}`);
+        out.set(hit[1] ?? hit[2], hit[3] ?? hit[4]);
+      }
+      return out;
+    }));
+    if (!spawned.ok) return { path, kind: 'script', reached: false, detail: `SPAWNED_ENTRIES in ${BIN_REGISTRY_FILE} could not be read: ${spawned.why}` };
+    const spawner = spawned.value.get(path);
+    if (!spawner) return null;
+    const name = path.slice(path.lastIndexOf('/') + 1);
+    const notReached = (why: string): EntryVerdict => ({ path, kind: 'script', reached: false, detail: `${BIN_REGISTRY_FILE} SPAWNED_ENTRIES maps it to ${spawner}, but ${why}` });
+    if (!existsSync(join(this.root, spawner))) return notReached(`${spawner} does not exist`);
+    let text: string;
+    try {
+      text = readFileSync(join(this.root, spawner), 'utf8');
+    } catch (err) {
+      return notReached(`${spawner} could not be read (${(err as Error).message})`);
+    }
+    if (!(text.includes(`'${name}'`) || text.includes(`"${name}"`) || text.includes(`\`${name}\``))) {
+      return notReached(`${spawner} holds no quoted '${name}'`);
+    }
+    return { path, kind: 'script', reached: true, detail: `SPAWNED_ENTRIES maps it to ${spawner}, which names '${name}'` };
   }
 
   private corpus(): Map<string, string> {

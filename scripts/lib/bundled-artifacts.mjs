@@ -569,3 +569,16 @@ export const NON_SHIPPING_PACKAGE_BUILD_SCRIPTS = {
 // when its bundle became committed, decision
 // sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone).
 // Freshness of the committed bundles is the checker's job, not prepare's.
+
+/**
+ * Entries shipped code spawns by a path built at run time, which no bin name,
+ * command or package.json script mentions: entry file -> the shipped file that
+ * holds the spawn call. The entry-reachability check (packages/mcp-server/src/
+ * entry-reachability.ts) counts an entry as reached through this map only when
+ * that file exists and holds the entry's basename as a quoted string. Keep both
+ * sides literal, one entry per line.
+ */
+export const SPAWNED_ENTRIES = {
+  // join(pluginRoot, 'scripts', 'maintenance-worker-run.mjs') in launchWorker
+  'scripts/maintenance-worker-run.mjs': 'scripts/hooks/lib/maintenance-worker.mjs',
+};
