@@ -23845,20 +23845,21 @@ var SterlingStore = class _SterlingStore {
    */
   retireInFavorOf(id, replacementId, at, verb = "retired") {
     this.assertWritable("retireInFavorOf");
-    const record2 = this.get(id);
-    if (!record2)
-      throw new Error(`retireInFavorOf: no record '${id}'`);
-    const identity = this.identityOf(id);
-    if (identity?.lifecycle === "retired" || record2.status === "superseded") {
-      throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-    }
-    const replacement = this.identityOf(replacementId);
-    if (replacement?.lifecycle === "retired") {
-      throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-    }
-    const retired = { ...record2, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-    const stored = _SterlingStore.storableBody(retired);
+    let stored;
     this.tx(() => {
+      const record2 = this.get(id);
+      if (!record2)
+        throw new Error(`retireInFavorOf: no record '${id}'`);
+      const identity = this.identityOf(id);
+      if (identity?.lifecycle === "retired" || record2.status === "superseded") {
+        throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
+      }
+      const replacement = this.identityOf(replacementId);
+      if (replacement?.lifecycle === "retired") {
+        throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
+      }
+      const retired = { ...record2, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
+      stored = _SterlingStore.storableBody(retired);
       const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
       if (res.changes === 0) {
@@ -35820,7 +35821,7 @@ ${JSON.stringify(entry)}
       delete next.needs;
     const claimsCheck = this.assertClaimedPaths("board_update", next);
     try {
-      const updated = this.store.updateTodo(old.id, next);
+      const updated = this.store.updateTodo(old.id, next, old.version !== void 0 ? { expected_version: old.version } : {});
       return claimsCheck.claims_check ? { ...updated, ...claimsCheck } : updated;
     } catch (err) {
       if (err instanceof ZodError2)
@@ -36499,6 +36500,14 @@ ${JSON.stringify(entry)}
     }
     if (record2.id === survivor.id) {
       throw new Error(`knowledge_retire: '${id}' and '${inFavorOf}' both resolve to record '${record2.id}' \u2014 a record cannot be retired in favour of itself.`);
+    }
+    const bothInProject = this.store.projectStoreHolds(record2.id) && this.store.projectStoreHolds(survivor.id);
+    if (!bothInProject) {
+      const retireeMount = this.store.scopeOfHolder(record2.id);
+      const survivorMount = this.store.scopeOfHolder(survivor.id);
+      if (retireeMount !== survivorMount) {
+        throw new Error(`knowledge_retire: cross-store retirement refused \u2014 '${record2.id}' is held by the '${retireeMount}' store and its survivor '${survivor.id}' by the '${survivorMount}' store. The survivor's liveness can only be checked under one store's write lock, so a concurrent retirement the other way could leave two retired records forwarding to each other. Nothing was written. Retire a record only in favour of a survivor in the same store.`);
+      }
     }
     if (survivor.status === "superseded") {
       throw new Error(`knowledge_retire: '${inFavorOf}' is itself superseded \u2014 retiring into a dead record forwards the reader to a tombstone. Resolve the survivor's chain to its live head first.`);
