@@ -184,6 +184,66 @@ test('fresh init writes .claude/settings.json with "agent": "conductor" AND "aut
   }
 });
 
+// Board 4cefb9fb: `.sterling/*` is anchored to the repo root, so a nested .sterling/
+// (a stray transient dir under scripts/, say) showed up untracked. init also writes
+// `*/**/.sterling/`, which must not swallow the root's committed project.json.
+test('init .gitignore: nested .sterling/ dirs stay ignored, root .sterling/project.json stays trackable, and a rerun adds the line once', () => {
+  const NESTED = '*/**/.sterling/';
+  const runGit = (dir, args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  const count = (dir, line) => readFileSync(join(dir, '.gitignore'), 'utf8').split(/\r?\n/).filter((l) => l === line).length;
+  const plant = (dir) => {
+    for (const rel of ['x/.sterling', 'a/b/.sterling']) {
+      mkdirSync(join(dir, rel), { recursive: true });
+      writeFileSync(join(dir, rel, 'transient.json'), '{}');
+    }
+  };
+  const assertIgnoreSemantics = (dir, label) => {
+    const porcelain = runGit(dir, ['status', '--porcelain', '--untracked-files=all']).stdout;
+    assert.doesNotMatch(porcelain, /x\/\.sterling|a\/b\/\.sterling/, `${label}: no nested .sterling path is untracked:\n${porcelain}`);
+    assert.match(porcelain, /^\?\? \.sterling\/project\.json$/m, `${label}: the root identity file is still trackable (untracked, not ignored):\n${porcelain}`);
+    for (const ignored of ['x/.sterling/transient.json', 'a/b/.sterling/transient.json']) {
+      assert.equal(runGit(dir, ['check-ignore', '-q', ignored]).status, 0, `${label}: ${ignored} is ignored`);
+    }
+    assert.equal(runGit(dir, ['check-ignore', '-q', '.sterling/project.json']).status, 1, `${label}: .sterling/project.json is not ignored`);
+    assert.equal(runGit(dir, ['check-ignore', '-q', '.sterling/sterling.db']).status, 0, `${label}: the rest of the root .sterling/ is ignored`);
+  };
+
+  // fresh project: init writes the whole entry set.
+  const fresh = mkdtempSync(join(tmpdir(), 'sterling-nested-ignore-'));
+  // a project init'd before the identity file: the legacy `.sterling/` line is rewritten, the nested line added.
+  const legacy = mkdtempSync(join(tmpdir(), 'sterling-nested-ignore-'));
+  // a project that already carries all three lines (this repo's own form): left alone.
+  const carrying = mkdtempSync(join(tmpdir(), 'sterling-nested-ignore-'));
+  const dirs = [[fresh, 'fresh'], [legacy, 'legacy'], [carrying, 'carrying']];
+  try {
+    writeFileSync(join(legacy, '.gitignore'), 'node_modules/\n.sterling/\n');
+    writeFileSync(join(carrying, '.gitignore'), `.sterling/*\n!.sterling/project.json\n${NESTED}\n`);
+    for (const [dir] of dirs) {
+      assert.equal(runGit(dir, ['init', '-q']).status, 0);
+      plant(dir);
+      const r = init(dir, FRESH_FLAGS);
+      assert.equal(r.code, 0, r.stderr);
+    }
+    for (const [dir, label] of dirs) {
+      assert.equal(count(dir, NESTED), 1, `${label}: the nested line is present once`);
+      assert.equal(count(dir, '.sterling/*'), 1, `${label}: the root star line is present once`);
+      assertIgnoreSemantics(dir, label);
+    }
+    assert.equal(count(legacy, '.sterling/'), 0, 'legacy: the directory form was rewritten');
+    assert.ok(readFileSync(join(carrying, '.gitignore'), 'utf8').startsWith(`.sterling/*\n!.sterling/project.json\n${NESTED}\n`), 'carrying: the existing lines were left where they were');
+
+    for (const [dir] of dirs) {
+      const before = readFileSync(join(dir, '.gitignore'), 'utf8');
+      const r = init(dir, FRESH_FLAGS);
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal(readFileSync(join(dir, '.gitignore'), 'utf8'), before, 'a second init leaves .gitignore byte-identical');
+      assert.equal(count(dir, NESTED), 1, 'the nested line is still present once');
+    }
+  } finally {
+    for (const [dir] of dirs) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('ensure outcome 1 — create absent: fresh init creates every manifest item and records declarations', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
