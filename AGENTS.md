@@ -58,7 +58,15 @@ The hook-bundling and store-write invariants are Sterling-bound (they name the M
 
 ## Project facts
 
-Stack: Node.js, TypeScript, Sterling. Stack tags (= domain mount manifest): node, typescript, sterling. Toolchains: node (`**/*.mjs`, `**/*.ts`). npm workspaces monorepo; TypeScript everywhere except `scripts/` (standalone `.mjs`). Local only — SQLite in `.sterling/sterling.db`, no cloud database. Domain stores: `~/.sterling/domains/{node,typescript,sterling}/`, each created by init with a description of what belongs in it; a missing one is skipped with a warning, never created on first use. Backup path: `.sterling/config.json` → `backup_path` (machine-local, not restated here). WSL2 everywhere: Claude Code, this clone, Codex and every project run under WSL2 (Ubuntu-24.04); the Windows `.bat` launchers open the project inside WSL2.
+Stack: Node.js, TypeScript, Sterling. Stack tags (= domain mount manifest): node, typescript, sterling. Toolchains: node (`**/*.mjs`, `**/*.ts`). npm workspaces monorepo; TypeScript everywhere except `scripts/` (standalone `.mjs`). The knowledge store is on the Served Postgres database since 2026-10-06 (`config.storage: postgres`, moved with `scripts/move-store.mjs`): the project schema is `sterling_p_<project_id>` and each mounted domain is `sterling_d_<name>`. The old `.sterling/sterling.db` is fenced and refuses writes. The domain SQLite copies in `~/.sterling/domains/<name>/` stay writable for the hobby projects that mount them, so those copies and the Postgres ones drift apart from the move on. Backup path: `.sterling/config.json` → `backup_path` (machine-local, not restated here). WSL2 everywhere: Claude Code, this clone, Codex and every project run under WSL2 (Ubuntu-24.04); the Windows `.bat` launchers open the project inside WSL2.
+
+## Domains
+
+- **A domain is a shared knowledge store for one subject.** It is kept per user, outside any repo, and every project on the machine that mounts it reads and writes the same store. A project mounts the domains named in its stack tags.
+- **Mount every subject the project works with, its own subject included.** Two projects share knowledge only through a domain both mount.
+- **What not to do:** a Salesforce project that mounts only `genesys` and a Genesys project that mounts only `salesforce` share nothing, because no domain is mounted by both. Both should mount `salesforce` and `genesys`.
+- **A domain needs a description** that says which knowledge belongs in it. The description decides where a new record is written and what gets promoted into the domain.
+- **Run `/sterling:domains` to see and change mounts.** It lists every domain on this machine with the projects that mount it, shows what this project shares with each other project, and adds a missing domain after you agree. It never removes one.
 
 ## Conventions
 
