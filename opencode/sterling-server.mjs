@@ -10479,20 +10479,21 @@ var init_dist2 = __esm({
        */
       retireInFavorOf(id, replacementId, at, verb = "retired") {
         this.assertWritable("retireInFavorOf");
-        const record = this.get(id);
-        if (!record)
-          throw new Error(`retireInFavorOf: no record '${id}'`);
-        const identity = this.identityOf(id);
-        if (identity?.lifecycle === "retired" || record.status === "superseded") {
-          throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-        }
-        const replacement = this.identityOf(replacementId);
-        if (replacement?.lifecycle === "retired") {
-          throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-        }
-        const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-        const stored = _SterlingStore.storableBody(retired);
+        let stored;
         this.tx(() => {
+          const record = this.get(id);
+          if (!record)
+            throw new Error(`retireInFavorOf: no record '${id}'`);
+          const identity = this.identityOf(id);
+          if (identity?.lifecycle === "retired" || record.status === "superseded") {
+            throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
+          }
+          const replacement = this.identityOf(replacementId);
+          if (replacement?.lifecycle === "retired") {
+            throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
+          }
+          const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
+          stored = _SterlingStore.storableBody(retired);
           const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
           if (res.changes === 0) {
@@ -11226,7 +11227,7 @@ function brokerStorageIdentity(route) {
 var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
 var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
 var STORAGE_BACKENDS = ["sqlite", "postgres"];
-var MOVE_STORE_COMMAND = "node scripts/move-store.mjs --to pg|sqlite";
+var MOVE_STORE_COMMAND = 'node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite';
 var CONFIG_REL2 = ".sterling/config.json";
 var StoreSettingsError = class extends Error {
   constructor(message) {
@@ -11245,7 +11246,7 @@ var StoreUnreachableError = class extends Error {
 var PostgresStoreNotMovedError = class extends PgStoreMissingError {
   constructor(cause) {
     super(cause.schema, "see the message");
-    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node scripts/move-store.mjs --to pg\`. Nothing was created.`;
+    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node "<Sterling root>/bin/move-store.mjs" --to pg\`. Nothing was created.`;
     this.name = "PostgresStoreNotMovedError";
   }
 };
@@ -20299,13 +20300,60 @@ function onEvaluate(request) {
 init_dist2();
 import { basename as basename4, dirname as dirname18 } from "node:path";
 var BUSY_TIMEOUT_MS = 1e3;
-function openProjectStore(dbPath) {
+function projectRootOf(dbPath) {
   const sterlingDir = dirname18(dbPath);
-  if (basename4(dbPath) === "sterling.db" && basename4(sterlingDir) === ".sterling") {
-    const root = dirname18(sterlingDir);
-    if (storeBackend(root) === "routed") return openRoutedStores(root).store;
-  }
+  if (basename4(dbPath) === "sterling.db" && basename4(sterlingDir) === ".sterling") return dirname18(sterlingDir);
+  return null;
+}
+function openProjectStore(dbPath) {
+  const root = projectRootOf(dbPath);
+  if (root !== null && storeBackend(root) === "routed") return openRoutedStores(root).store;
   return new SterlingStore(dbPath, { busyTimeoutMs: BUSY_TIMEOUT_MS });
+}
+function bridgeGone(e) {
+  return e instanceof PgWorkerDiedError || e instanceof PgBridgeTimeoutError || e instanceof PgBridgeClosedError;
+}
+function createProjectStores({ openRouted = (root) => openRoutedStores(root).store, backend = storeBackend } = {}) {
+  const held = /* @__PURE__ */ new Map();
+  function drop(root, store) {
+    if (held.get(root)?.store !== store) return;
+    held.delete(root);
+    store.close();
+  }
+  function view(root, store) {
+    return new Proxy(store, {
+      get(target, prop) {
+        if (prop === "close") return () => {
+        };
+        const value = Reflect.get(target, prop, target);
+        if (typeof value !== "function") return value;
+        return (...args) => {
+          try {
+            return value.apply(target, args);
+          } catch (e) {
+            if (bridgeGone(e)) drop(root, target);
+            throw e;
+          }
+        };
+      }
+    });
+  }
+  function open2(dbPath) {
+    const root = projectRootOf(dbPath);
+    if (root === null || backend(root) !== "routed") return new SterlingStore(dbPath, { busyTimeoutMs: BUSY_TIMEOUT_MS });
+    let entry = held.get(root);
+    if (!entry) {
+      const store = openRouted(root);
+      entry = { store, view: view(root, store) };
+      held.set(root, entry);
+    }
+    return entry.view;
+  }
+  function release(root) {
+    const entry = held.get(root);
+    if (entry) drop(root, entry.store);
+  }
+  return { open: open2, release };
 }
 
 // packages/opencode-plugin/src/sync.mjs
@@ -20525,7 +20573,8 @@ function sameDirectory(a, b) {
   return { equal, unresolved };
 }
 function createSterlingServer(deps = {}) {
-  const openStore = deps.openStore ?? openProjectStore;
+  const projectStores = deps.openStore ? null : deps.projectStores ?? createProjectStores();
+  const openStore = deps.openStore ?? projectStores.open;
   const now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
   const env = deps.env ?? process.env;
   const swept = /* @__PURE__ */ new Set();
@@ -20701,7 +20750,10 @@ function createSterlingServer(deps = {}) {
           }
         }
       })();
-      return () => abort.abort();
+      return () => {
+        abort.abort();
+        for (const held of /* @__PURE__ */ new Set([root, rootOf()])) if (held) projectStores?.release(held);
+      };
     }
     return { handlers, bind, idle: () => chain };
   }
@@ -20745,6 +20797,7 @@ export {
   NOTICES_REL,
   PLUGIN_ID,
   addNotice,
+  createProjectStores,
   createSterlingServer,
   server_default as default,
   defaultTemplatePath,

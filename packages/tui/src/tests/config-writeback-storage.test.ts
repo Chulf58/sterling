@@ -38,7 +38,7 @@ test('writeConfigKey refuses storage and every storage.* path with StorageTransi
       (e: unknown) =>
         e instanceof StorageTransitionRequiredError &&
         e.message ===
-          `TUI: '${key}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), so it changes only when the stores move, through the explicit storage transition: \`node scripts/move-store.mjs --to pg|sqlite\`, which writes it after the move commits. Nothing was written.`,
+          `TUI: '${key}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), so it changes only when the stores move, through the explicit storage transition: \`node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite\`, which writes it after the move commits. Nothing was written.`,
     );
   }
   assert.equal(readFileSync(path, 'utf8'), before);

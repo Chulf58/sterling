@@ -34,7 +34,7 @@ import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mj
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
 import { readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './handoff-projection.mjs';
 import { ContainmentError } from './contained-fs.mjs';
-import { workIdentityRefusal, withIdentityIgnore } from './project-identity.mjs';
+import { workIdentityRefusal, withIdentityIgnore, withNestedIgnore, IGNORE_NESTED } from './project-identity.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
 import { installHostOf, sterlingUpdateRemedy } from './sterling-roots.mjs';
 
@@ -701,6 +701,14 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         if (repaired.changed) {
           writeFileSync(gitignorePath, repaired.text);
           log(`      .gitignore: .sterling/ is now .sterling/* plus !.sterling/project.json, so .sterling/project.json can be committed`);
+          entry.gitignore_repaired = true;
+        }
+        // `.sterling/*` is anchored to the repo root; the nested form keeps a stray
+        // .sterling/ deeper in the tree ignored too.
+        const nested = withNestedIgnore(repaired.text);
+        if (nested.changed) {
+          writeFileSync(gitignorePath, nested.text);
+          log(`      .gitignore: added ${IGNORE_NESTED} so a nested .sterling/ directory stays ignored`);
           entry.gitignore_repaired = true;
         }
       }

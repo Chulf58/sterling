@@ -35,7 +35,7 @@ function configPath(explicit?: string): string {
 
 /** The move that is the only writer of config.storage (decision
  *  storage-backend-is-its-own-config-key-written-only-by-store-move). */
-const MOVE_STORE = '`node scripts/move-store.mjs --to pg|sqlite`';
+const MOVE_STORE = '`node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite`';
 
 /** The TUI's refusal to write config.storage: config_set's message
  *  (packages/mcp-server tools.ts StorageTransitionRequiredError), with this

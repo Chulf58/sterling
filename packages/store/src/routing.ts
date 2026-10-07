@@ -69,7 +69,7 @@ export const STORAGE_BACKENDS = ['sqlite', 'postgres'] as const;
 export type StorageBackend = (typeof STORAGE_BACKENDS)[number];
 
 /** The one command that moves a project's stores and writes config.storage. */
-export const MOVE_STORE_COMMAND = 'node scripts/move-store.mjs --to pg|sqlite';
+export const MOVE_STORE_COMMAND = 'node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite';
 
 const CONFIG_REL = '.sterling/config.json';
 
@@ -100,7 +100,7 @@ export class StoreUnreachableError extends Error {
 export class PostgresStoreNotMovedError extends PgStoreMissingError {
   constructor(cause: PgStoreMissingError) {
     super(cause.schema, 'see the message');
-    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node scripts/move-store.mjs --to pg\`. Nothing was created.`;
+    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node "<Sterling root>/bin/move-store.mjs" --to pg\`. Nothing was created.`;
     this.name = 'PostgresStoreNotMovedError';
   }
 }

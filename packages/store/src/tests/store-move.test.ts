@@ -667,6 +667,29 @@ test('attach: a local store with no records but rows in other tables is refused 
   assert.equal(attachProject(fx.plan(true), live().bridge).local.action, 'fenced', '--fence-local is the choice that lets it through');
 });
 
+test('attach: a row written to the empty local store after its pre-check and before the fence is refused by name, not fenced', { skip: PG_SKIP }, () => {
+  const fx = attachFixture();
+  const local = join(fx.b, '.sterling', 'sterling.db');
+  openSqliteStore(local).close();
+  // Another session's write lands between the emptiness check and the fence.
+  const writeBetween = (path: string) => {
+    const raw = new DatabaseSync(path);
+    try {
+      raw.prepare("INSERT INTO activity_log (at, verb, type, record_id, title) VALUES ('2026-10-06T09:00:00.000Z', 'created', 'decision', 'r1', 'written mid-attach')").run();
+    } finally {
+      raw.close();
+    }
+  };
+  const before = fx.configText();
+  assert.throws(
+    () => attachProject(fx.plan(), live().bridge, { hooks: { beforeLocalFence: writeBetween } }),
+    (e: unknown) => e instanceof MoveAttachError && e.check === 'local_store' && e.schema === null && e.message.includes('activity_log (1)') && e.message.includes('Nothing was changed'),
+  );
+  assert.equal(readSqliteFence(local), null, 'the refusal fenced nothing');
+  assert.equal(fx.configText(), before, 'a refused attach leaves the config byte for byte');
+  assert.equal(attachProject(fx.plan(true), live().bridge).local.action, 'fenced', '--fence-local still lets it through');
+});
+
 test('attach: resuming a same-target fence whose digest was never recorded records it, so a later move back replaces the file', { skip: PG_SKIP }, () => {
   const fx = attachFixture();
   const local = join(fx.b, '.sterling', 'sterling.db');

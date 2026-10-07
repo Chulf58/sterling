@@ -377,6 +377,8 @@ export const BIN_ENTRIES = {
   'install-agents': 'scripts/install-agents.mjs',
   'list-projects': 'scripts/list-projects.mjs',
   'migrate-stores': 'scripts/migrate-stores.mjs',
+  // the store move skills/move-store/SKILL.md runs; an installed copy has no packages/*/dist (board 013190cf)
+  'move-store': 'scripts/move-store.mjs',
   // the no_capture no-server fallback the MCP server's session-event refusal names
   'no-capture': 'scripts/no-capture.mjs',
   'plan-lock': 'scripts/plan-lock.mjs',

@@ -331,7 +331,7 @@ test('work: a missing project schema is a PostgresStoreNotMovedError naming move
   inNamespace(() => {
     assert.throws(
       () => openRoutedStores(root),
-      (e: unknown) => e instanceof PostgresStoreNotMovedError && e instanceof PgStoreMissingError && /node scripts\/move-store\.mjs --to pg/.test((e as Error).message),
+      (e: unknown) => e instanceof PostgresStoreNotMovedError && e instanceof PgStoreMissingError && /node "<Sterling root>\/bin\/move-store\.mjs" --to pg/.test((e as Error).message),
     );
   });
   assert.equal(schemasWithPrefix(admin(), ns).includes(projectSchema), false);
