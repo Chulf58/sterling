@@ -232,3 +232,42 @@ test('[DH-5] fail closed: when no readable store holds the chain head, maintenan
     fx.cleanup();
   }
 });
+
+// The domain-held close decides its route on a pre-lock read. A concurrent
+// board_update that rewrites the item's file_keys after that read must not be
+// closed by it: the item is re-read under the project store's lock and the
+// close refuses when anything changed. The race is made deterministic by
+// running the board_update from inside the first scopeOfHolder call, which is
+// the pre-lock holder lookup.
+for (const op of ['maintenance_remove', 'board_remove'] as const) {
+  test(`[DH-6 ${op}] a concurrent board_update replacing the item's file_keys after the routing read is refused under the lock, and the new debt stays open`, () => {
+    const fx = mountedGitFixture();
+    try {
+      commitFile(fx.dir, fx.git, 'docs/guide.md', 'guide-v1');
+      const ref = mkRef(fx.tools, 'docs/guide.md');
+      const itemId = mintReconcile(fx.tools, 'docs/guide.md', ref.id as string);
+      fx.tools.knowledgePromote(ref.id as string, DOMAIN);
+
+      const store = fx.store;
+      const realScopeOfHolder = store.scopeOfHolder.bind(store);
+      let raced = false;
+      store.scopeOfHolder = (id: string) => {
+        if (!raced) {
+          raced = true;
+          fx.tools.boardUpdate(itemId, { file_keys: ['src/new-debt.ts'] });
+        }
+        return realScopeOfHolder(id);
+      };
+
+      const close = () => (op === 'maintenance_remove' ? fx.tools.maintenanceRemove(itemId) : fx.tools.boardRemove(itemId));
+      assert.throws(close, new RegExp(`${itemId}' changed under this call[\\s\\S]*file_keys \\(docs/guide\\.md\\) → \\(src/new-debt\\.ts\\)[\\s\\S]*Nothing was written`));
+      assert.ok(raced, 'precondition: the concurrent board_update ran between the routing read and the lock');
+
+      assert.ok(openIds(fx.tools).includes(itemId), 'the rewritten item is still open');
+      const after = fx.tools.boardGet(itemId) as unknown as { file_keys?: string[] };
+      assert.deepEqual(after.file_keys, ['src/new-debt.ts'], 'the concurrent write is kept');
+    } finally {
+      fx.cleanup();
+    }
+  });
+}
