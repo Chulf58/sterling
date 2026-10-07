@@ -441,7 +441,8 @@ test('toggles 7 (board 8fc765e2): a notice banner does not push the selected row
     assert.strictEqual(typeof stateMod.screenLineToRow, 'function', 'screenLineToRow must be exported');
 
     const numKeys = Object.keys(baseSnapshot().configModels).length;
-    const totalSelectableRows = numKeys + 5; // config rows + 2 sparring + 1 tdd (frozen: toggles 1-6) + 1 project mode (decision project-mode-hobby-work-toggle-decides-flow) + 1 handoff files (decision project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting)
+    // Every non-banner row on the tab, so bannerRowCount below can subtract them: config rows + 2 sparring + 1 tdd (frozen: toggles 1-6) + 1 project mode (decision project-mode-hobby-work-toggle-decides-flow) + 1 handoff files (decision project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) + 1 read-only storage row (board 6ca1a3c5), which is drawn but takes no cursor stop.
+    const totalSelectableRows = numKeys + 6;
     const maxBodyLines = 2; // total SYS_TAB rows exceed this — the roster is taller than the viewport
     const vp = { maxBodyLines, width: 80 };
     const lastRowCursor = numKeys + 4; // the handoff files row — the last selectable row on the tab
