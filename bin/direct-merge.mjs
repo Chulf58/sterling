@@ -10649,10 +10649,6 @@ function resolveStoreRoute(root) {
     return { storage: "sqlite", root: absRoot, config, projectDbPath: join6(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
   }
   const shown = absRoot.replace(/\\/g, "/");
-  const mode2 = readProjectMode(absRoot);
-  if (mode2 !== "work") {
-    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode2}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node "<Sterling root>/bin/move-store.mjs" --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
-  }
   const identity = readProjectIdentity(absRoot);
   if (identity === null) {
     throw new ProjectIdentityError(`storage 'postgres' needs the project identity file ${shown}/.sterling/project.json ({"project_id": "<uuid v4>"}); it is missing. Restore it from git, or let init write it. Nothing was opened.`);

@@ -101,18 +101,7 @@ export function applyTddToggle(e: TddToggleEffect, onError?: (msg: string) => vo
  *  overrides the cwd-derived default (see applySparringToggle). */
 export function applyModeToggle(e: ModeToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
   try {
-    writeConfigKey(configPath(path), 'mode', (_old, raw) => {
-      // storage 'postgres' is valid only in work mode (the router refuses it
-      // anywhere else), so leaving work mode is part of the explicit storage
-      // transition, not a plain toggle: the stores move back first.
-      if (raw.storage === 'postgres' && e.mode !== 'work') {
-        throw new Error(
-          `config.storage is 'postgres', which is valid only in a work-mode project, so setting mode to '${e.mode}' would leave every store unopenable. ` +
-            `Move the stores back first with \`node "<Sterling root>/bin/move-store.mjs" --to sqlite\`, then switch the mode. Nothing was written.`
-        );
-      }
-      return e.mode;
-    });
+    writeConfigKey(configPath(path), 'mode', () => e.mode);
     return true;
   } catch (err) {
     onError?.(`mode toggle failed — ${(err as Error).message}`);

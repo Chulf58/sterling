@@ -21,7 +21,7 @@ The move writes `config.storage` (`postgres` or `sqlite`) and nothing else in th
 
 ## 2. When to use it
 
-- A project is in work mode and should keep its knowledge on the Served Postgres database: `--to pg`.
+- A project should keep its knowledge on the Served Postgres database, in either project mode: `--to pg`.
 - A work project became a hobby project, or the Served database is going to close: `--to sqlite`. The export reads Postgres, so it has to run while the database is still reachable. A database that is already gone cannot be exported; the Served platform's point-in-time restore is the recovery for an unplanned loss, not this move.
 
 If the user asks for a live two-way sync, say that the move does not do one (decision above, user-ruled 2026-10-06) and offer the move in one direction.
@@ -30,7 +30,7 @@ If the user asks for a live two-way sync, say that the move does not do one (dec
 
 Check these before the first run. The move refuses by name when one is missing and moves nothing.
 
-- `--to pg` needs the project in work mode. A hobby project is refused. Switching mode is the user's choice, made on the TUI System tab; this SOP never changes it.
+- `--to pg` works in either project mode. `config.mode` only picks how work ships and never gates the move. Switching mode is the user's choice, made on the TUI System tab; this SOP never changes it.
 - `.sterling/project.json` exists in the project. A work project's Postgres store is named by its `project_id`. If it is missing, restore it from git or let init write it.
 - `~/.sterling/credentials/served.json` exists and is valid. Both directions need it, because both read or write Postgres.
 - Every registered project must have a readable config. One that cannot be read blocks the move, since whether it shares a domain is then unknown; fix or unregister it first.
@@ -88,7 +88,6 @@ What the user may see:
 
 **A refusal.** It names its reason and ends with `Nothing was moved.` when it came from the read-only pass. Report it as printed, in the user's terms, and put the next step to the user through the question form. The common ones:
 
-- hobby project with `--to pg`: the mode precondition in section 3.
 - `.sterling/project.json` missing, or the Postgres credentials missing or invalid: the preconditions in section 3.
 - target not empty or id collision: the target already holds records that do not come from this source. The move fills an empty target, replays its own receipt, or replaces a copy it left itself, and nothing else. Find out what is in the target; never clear it as part of this SOP.
 - source already fenced to a different target: an earlier move took this project elsewhere. Read the message for the move and date.
@@ -106,7 +105,7 @@ A usage error exits 2 and prints the usage line; any other failure exits 1.
 
 Decision `second-machine-attaches-to-a-postgres-project-through-move-store-attach`. Use this when one machine already moved a work project to Postgres and the user now has a fresh clone of that project on another machine. The clone has the committed `.sterling/project.json`, but its own `.sterling/config.json` is not in git and has no `config.storage`, so the clone still reads SQLite. Do not run `--to pg` there: the clone's SQLite store is not the one that was moved, so the move refuses it. Do not set `config.storage` by hand either.
 
-The command is `node "${CLAUDE_PLUGIN_ROOT}/bin/move-store.mjs" --attach [--fence-local] [--dry-run] [--project <dir>]`. It copies no data. It checks the same things the move checks first (work mode, `project.json`, the credentials file, the schema names), then checks each Postgres store the project uses: the project schema and the schema of every mounted domain. Each one must be registered, must have a complete move receipt from that same store, and must not be fenced. The first store that fails stops the attach, and the refusal names the schema and the check. Before it writes anything, the attach reads the config again and refuses if the project's mounted domains changed while it ran. If every check passes, the attach writes `config.storage = postgres` and nothing else in the config.
+The command is `node "${CLAUDE_PLUGIN_ROOT}/bin/move-store.mjs" --attach [--fence-local] [--dry-run] [--project <dir>]`. It copies no data. It checks the same things the move checks first (`project.json`, the credentials file, the schema names), then checks each Postgres store the project uses: the project schema and the schema of every mounted domain. Each one must be registered, must have a complete move receipt from that same store, and must not be fenced. The first store that fails stops the attach, and the refusal names the schema and the check. Before it writes anything, the attach reads the config again and refuses if the project's mounted domains changed while it ran. If every check passes, the attach writes `config.storage = postgres` and nothing else in the config.
 
 Steps:
 
@@ -130,5 +129,5 @@ Refusals. Each starts with the check that failed and ends with `Nothing was chan
 - `attach check 'fence' failed`: a schema is fenced because it was moved back to SQLite. The project no longer lives on Postgres; ask the user how to go on.
 - `attach check 'local_store' failed`: see the list above.
 - `attach check 'mounts' failed`: the project's mounted domains changed while the attach ran. Re-run the attach so every store is checked. If the local SQLite file was already fenced, the message says so, and the re-run goes on from that fence.
-- A hobby project, a missing `project.json` or bad credentials: the preconditions in section 3.
+- A missing `project.json` or bad credentials: the preconditions in section 3.
 

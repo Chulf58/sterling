@@ -9,8 +9,8 @@
 //
 //   node scripts/migration-preflight.mjs --db <path-to-sterling.db>
 //
-// Hobby-only: refuses with exit 4 in a work-mode project (its knowledge is in
-// Postgres), before opening anything — see scripts/lib/hobby-only.mjs. Other
+// SQLite-only: refuses with exit 4 in a project whose config.storage is
+// 'postgres' (its knowledge is in Postgres), before opening anything — see scripts/lib/hobby-only.mjs. Other
 // exits: 2 for an unusable request, 0 otherwise.
 //
 // JSON stdout contract, field definitions ("chain", "depth", "historical id",
@@ -20,7 +20,7 @@
 
 import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { invokingRoot, refuseInWorkMode } from './lib/hobby-only.mjs';
+import { invokingRoot, refuseOnPostgresStorage } from './lib/hobby-only.mjs';
 
 // The version the (later-slice) migration runner will STAMP once it has run —
 // i.e. one past packages/store's current SUPPORTED_SCHEMA_VERSION (1), not a
@@ -39,7 +39,7 @@ function arg(name) {
 }
 
 function main() {
-  refuseInWorkMode(invokingRoot(), 'migration-preflight');
+  refuseOnPostgresStorage(invokingRoot(), 'migration-preflight');
   const dbPath = arg('db');
   if (!dbPath) return fail('--db <path-to-sterling.db> is required');
   if (!existsSync(dbPath)) return fail(`no db file at '${dbPath}'`);

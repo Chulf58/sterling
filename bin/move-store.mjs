@@ -9518,8 +9518,6 @@ var MoveConfigMissingError = class extends MoveError {
 };
 var MoveConfigInvalidError = class extends MoveError {
 };
-var MoveModeError = class extends MoveError {
-};
 var MoveIdentityMissingError = class extends MoveError {
 };
 var MoveCredentialsError = class extends MoveError {
@@ -10272,9 +10270,6 @@ function planMove(input) {
     throw new MoveConfigMissingError(`${root}/${CONFIG_REL2} does not exist; run the move inside a Sterling project. Nothing was moved.`);
   const mode = readProjectMode(root);
   const storage = readProjectStorage(root);
-  if (input.direction === "to_postgres" && mode === "hobby") {
-    throw new MoveModeError(`${root} is a hobby project (config.mode is hobby); a store move never moves a hobby project to Postgres, which is valid only in work mode. Set the project to work mode first (TUI System tab), then move it. Nothing was moved.`);
-  }
   const identity = readProjectIdentity(root);
   if (identity === null)
     throw new MoveIdentityMissingError(`${root}/.sterling/project.json is missing; a work project's Postgres store is named by its project_id. Restore it from git, or let init write it. Nothing was moved.`);

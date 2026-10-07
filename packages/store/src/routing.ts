@@ -2,9 +2,10 @@
 // which backend a project's stores live on. config.storage decides it (decision
 // storage-backend-is-its-own-config-key-written-only-by-store-move): absent or
 // 'sqlite' is today's SQLite files, 'postgres' is the project's schema in the
-// Served database. config.mode stays the PR-flow toggle; the router reads it
-// only to refuse 'postgres' outside a work-mode project. Only
-// scripts/move-store.mjs writes storage, after the stores have moved.
+// Served database. config.mode stays the PR-flow toggle and the router never
+// reads it (decision sterling-repo-is-hobby-mode-on-served-postgres-as-the-test-project:
+// a hobby-mode project may run on Postgres). Only scripts/move-store.mjs
+// writes storage, after the stores have moved.
 //
 // resolveStoreRoute(root) is pure: it reads the project's own files and the
 // credentials file, and opens no database. openRoutedStores(root, opts) opens
@@ -44,7 +45,7 @@
 import { lstatSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { parseConfig, readProjectIdentity, readProjectMode, ProjectIdentityError, type SterlingConfig } from '@sterling/schemas';
+import { parseConfig, readProjectIdentity, ProjectIdentityError, type SterlingConfig } from '@sterling/schemas';
 import { SterlingStore } from './index.js';
 import { MountedStores, resolveDomainMounts, type DomainMount } from './mounted.js';
 import type { StoreDriver } from './driver.js';
@@ -72,7 +73,7 @@ export const MOVE_STORE_COMMAND = 'node "<Sterling root>/bin/move-store.mjs" --t
 
 const CONFIG_REL = '.sterling/config.json';
 
-/** A project's store settings cannot be used: a malformed config, an invalid storage value, storage 'postgres' outside work mode, missing or invalid credentials, a bad test namespace, or two domains that map to one schema. */
+/** A project's store settings cannot be used: a malformed config, an invalid storage value, missing or invalid credentials, a bad test namespace, or two domains that map to one schema. */
 export class StoreSettingsError extends Error {
   constructor(message: string) {
     super(message);
@@ -203,13 +204,12 @@ export function pgStoreNames(projectId: string, stackTags: readonly string[]): {
  * null only when `root` has no .sterling/config.json.
  *
  * storage absent or 'sqlite': the SQLite route; config.mode is not read.
- * storage 'postgres': requires mode 'work' (readProjectMode), a valid
- * .sterling/project.json and a valid credentials file.
+ * storage 'postgres': the Postgres route in any project mode (config.mode is
+ * not read); requires a valid .sterling/project.json and a valid credentials file.
  *
  * Throws StoreSettingsError (a malformed config, an invalid storage value,
- * 'postgres' outside work mode, missing or invalid credentials, a refused test
- * namespace, two domains on one schema), ProjectModeError (an invalid mode
- * beside storage 'postgres') or ProjectIdentityError (no valid identity file).
+ * missing or invalid credentials, a refused test namespace, two domains on
+ * one schema) or ProjectIdentityError (no valid identity file).
  */
 export function resolveStoreRoute(root: string): StoreRoute | null {
   const absRoot = resolve(root);
@@ -221,13 +221,6 @@ export function resolveStoreRoute(root: string): StoreRoute | null {
   }
 
   const shown = absRoot.replace(/\\/g, '/');
-  const mode = readProjectMode(absRoot);
-  if (mode !== 'work') {
-    throw new StoreSettingsError(
-      `config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL}: Postgres storage is valid only in a work-mode project. ` +
-        `Move the stores back with \`node "<Sterling root>/bin/move-store.mjs" --to sqlite\`, or set mode to 'work'. Nothing was opened.`,
-    );
-  }
   const identity = readProjectIdentity(absRoot);
   if (identity === null) {
     throw new ProjectIdentityError(
