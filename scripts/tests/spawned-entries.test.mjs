@@ -8,6 +8,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SPAWNED_ENTRIES } from '../lib/bundled-artifacts.mjs';
+import { EntryReachability } from '../../packages/mcp-server/dist/entry-reachability.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -19,6 +20,10 @@ test('SPAWNED_ENTRIES: every member is an existing top-level script whose spawne
     assert.ok(existsSync(join(root, spawner)), `${spawner} (spawner of ${entry}) exists`);
     const name = basename(entry);
     const text = readFileSync(join(root, spawner), 'utf8');
+    // the reachability check reads the same file by text; it must see what the module exports
+    const verdict = new EntryReachability(root).judge(entry, '');
+    assert.equal(verdict?.reached, true, `${entry}: ${verdict?.detail}`);
+    assert.match(verdict?.detail ?? '', /^SPAWNED_ENTRIES maps it to/);
     assert.ok([`'${name}'`, `"${name}"`, `\`${name}\``].some((q) => text.includes(q)), `${spawner} holds ${name} as a quoted string`);
   }
 });

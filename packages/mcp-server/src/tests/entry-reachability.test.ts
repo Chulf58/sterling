@@ -22,7 +22,7 @@ const HOOKS_JSON = JSON.stringify({
     SessionStart: [{ hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/h1-session-start.mjs"' }] }],
   },
 });
-const BUNDLED_ARTIFACTS = [
+const BIN_ENTRIES_SRC = [
   'export const BIN_ENTRIES = {',
   "  'list-projects': 'scripts/list-projects.mjs',",
   "  init: 'scripts/init-impl.mjs',",
@@ -30,6 +30,8 @@ const BUNDLED_ARTIFACTS = [
   '};',
   '',
 ].join('\n');
+// a missing SPAWNED_ENTRIES block now fails loud, so every fixture registry carries one
+const BUNDLED_ARTIFACTS = BIN_ENTRIES_SRC + ['export const SPAWNED_ENTRIES = {', '};', ''].join('\n');
 const SERVER_TS = [
   'server.registerTool(',
   "  'knowledge_get',",
@@ -183,7 +185,7 @@ test('script: SPAWNED_ENTRIES reaches an entry only when its spawner exists and 
   const { dir, cleanup } = project();
   try {
     write(dir, 'scripts/lib/bundled-artifacts.mjs', [
-      BUNDLED_ARTIFACTS,
+      BIN_ENTRIES_SRC,
       'export const SPAWNED_ENTRIES = {',
       '  // join(pluginRoot, "scripts", "maintenance-worker-run.mjs") in launchWorker',
       "  'scripts/maintenance-worker-run.mjs': 'scripts/hooks/lib/maintenance-worker.mjs',",
@@ -222,6 +224,31 @@ test('script: SPAWNED_ENTRIES reaches an entry only when its spawner exists and 
     assert.equal(r.judge('scripts/domain-doctor.mjs', '')?.reached, false, 'an operator CLI nothing spawns stays not reached');
   } finally {
     cleanup();
+  }
+});
+
+test('script: a SPAWNED_ENTRIES block that is missing or malformed makes a scripts/ entry not reached and says the registry could not be read; a semicolonless block parses', () => {
+  const member = "  'scripts/spawned-runner.mjs': 'scripts/hooks/lib/spawner.mjs',";
+  const block = (...lines: string[]) => BIN_ENTRIES_SRC + ['export const SPAWNED_ENTRIES = {', ...lines].join('\n') + '\n';
+  const cases: { label: string; registry: string; reached: boolean; detail: RegExp }[] = [
+    { label: 'missing block', registry: BIN_ENTRIES_SRC, reached: false, detail: /SPAWNED_ENTRIES in scripts\/lib\/bundled-artifacts\.mjs could not be read: .*no SPAWNED_ENTRIES object found/ },
+    { label: 'unrecognized line', registry: block(member, '  [computedKey]: "scripts/x.mjs",', '};'), reached: false, detail: /could not be read: .*unrecognized SPAWNED_ENTRIES line: \[computedKey\]/ },
+    { label: 'semicolonless block', registry: block(member, '}'), reached: true, detail: /SPAWNED_ENTRIES maps it to scripts\/hooks\/lib\/spawner\.mjs/ },
+    { label: 'double-quoted member with a trailing comment', registry: block('  "scripts/spawned-runner.mjs": "scripts/hooks/lib/spawner.mjs", // runner', '};'), reached: true, detail: /SPAWNED_ENTRIES maps it to/ },
+  ];
+  for (const c of cases) {
+    const { dir, cleanup } = project();
+    try {
+      write(dir, 'scripts/lib/bundled-artifacts.mjs', c.registry);
+      write(dir, 'scripts/spawned-runner.mjs', '// runner\n');
+      write(dir, 'scripts/hooks/lib/spawner.mjs', "const p = join(root, 'scripts', 'spawned-runner.mjs');\n");
+      const v = new EntryReachability(dir).judge('scripts/spawned-runner.mjs', '');
+      assert.equal(v?.reached, c.reached, c.label);
+      assert.match(v?.detail ?? '', c.detail, c.label);
+      if (!c.reached) assert.doesNotMatch(v?.detail ?? '', /BIN_ENTRIES does not list it/, `${c.label}: not hidden behind the BIN_ENTRIES verdict`);
+    } finally {
+      cleanup();
+    }
   }
 });
 

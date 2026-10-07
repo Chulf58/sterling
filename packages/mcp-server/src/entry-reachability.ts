@@ -27,7 +27,10 @@
  *             maps scripts/<x>.mjs to a shipped spawner file that exists and
  *             holds '<x>.mjs' as a quoted string. A registry member whose
  *             spawner is missing or no longer names the entry reads as not
- *             reached, and the detail says which check failed.
+ *             reached, and the detail says which check failed. A SPAWNED_ENTRIES
+ *             block that is missing or holds a line the parser does not
+ *             recognize makes every scripts/<x>.mjs entry not reached, with a
+ *             detail saying the registry could not be read.
  *  - agent    agent-templates/<x>.md: agent-templates/registry.json lists it.
  *
  * Any other path (a library file under packages/ or scripts/lib/) is not
@@ -232,18 +235,27 @@ export class EntryReachability {
   /**
    * The SPAWNED_ENTRIES route: a verdict when the entry is a registry member
    * (reached, or not reached with the failed check named), null when it is not
-   * a member, so the BIN_ENTRIES route decides.
+   * a member, so the BIN_ENTRIES route decides. A registry block that is missing
+   * or has a line the parser does not recognize is a not-reached verdict naming
+   * SPAWNED_ENTRIES, never an empty registry. The block closes with `}` on its
+   * own line, with or without a semicolon.
    */
   private judgeSpawned(path: string): EntryVerdict | null {
     const spawned = (this.spawnedEntries ??= this.load(BIN_REGISTRY_FILE, (text) => {
-      const block = /export const SPAWNED_ENTRIES\s*=\s*\{([\s\S]*?)\n\};/.exec(text);
+      const block = /export const SPAWNED_ENTRIES\s*=\s*\{([\s\S]*?)\n\}/.exec(text);
+      if (!block) throw new Error('no SPAWNED_ENTRIES object found');
       const out = new Map<string, string>();
-      if (!block) return out;
-      for (const hit of block[1].matchAll(/^\s*(?:'([^']+)'|"([^"]+)")\s*:\s*['"]([^'"]+)['"]/gm)) out.set(hit[1] ?? hit[2], hit[3]);
+      for (const line of block[1].split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('//')) continue;
+        const hit = /^(?:'([^']+)'|"([^"]+)")\s*:\s*(?:'([^']+)'|"([^"]+)")\s*,?\s*(?:\/\/.*)?$/.exec(trimmed);
+        if (!hit) throw new Error(`unrecognized SPAWNED_ENTRIES line: ${trimmed}`);
+        out.set(hit[1] ?? hit[2], hit[3] ?? hit[4]);
+      }
       return out;
     }));
-    // an unreadable registry file is reported by the BIN_ENTRIES route that follows
-    const spawner = spawned.ok ? spawned.value.get(path) : undefined;
+    if (!spawned.ok) return { path, kind: 'script', reached: false, detail: `SPAWNED_ENTRIES in ${BIN_REGISTRY_FILE} could not be read: ${spawned.why}` };
+    const spawner = spawned.value.get(path);
     if (!spawner) return null;
     const name = path.slice(path.lastIndexOf('/') + 1);
     const notReached = (why: string): EntryVerdict => ({ path, kind: 'script', reached: false, detail: `${BIN_REGISTRY_FILE} SPAWNED_ENTRIES maps it to ${spawner}, but ${why}` });
