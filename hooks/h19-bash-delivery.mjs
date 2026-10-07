@@ -10955,6 +10955,7 @@ function connectBroker(route, { env = process.env } = {}) {
     return { client: null, reason: `the broker registry cannot be read (${e && e.message || e})` };
   }
   const reasons = listed.refused.map((r) => `${r.file}: ${r.reason}`);
+  let silent = 0;
   for (const reg of listed.registrations) {
     const tag = `instance ${reg.instance_id}`;
     const mismatch = reg.protocol !== BROKER_PROTOCOL ? `protocol ${reg.protocol}, not ${BROKER_PROTOCOL}` : reg.project_id !== route.projectId ? `project ${reg.project_id}, not ${route.projectId}` : reg.root !== root ? `root ${reg.root}, not ${root}` : JSON.stringify(reg.storage) !== JSON.stringify(storage) ? `storage ${JSON.stringify(reg.storage)}, not ${JSON.stringify(storage)}` : reg.socket !== brokerSocketPath(dir, reg.instance_id) ? `socket ${reg.socket} is not this instance's path in ${dir}` : null;
@@ -10982,7 +10983,12 @@ function connectBroker(route, { env = process.env } = {}) {
       welcome = brokerWelcomeSchema.parse(JSON.parse(hello.body));
     } catch (e) {
       sock.close();
-      reasons.push(`${tag}: handshake failed (${e && e.message || e})`);
+      if (hello.timedOut) {
+        silent++;
+        reasons.push(`${tag}: connected, no handshake reply within ${BROKER_BOUNDS.handshakeMs} ms`);
+      } else {
+        reasons.push(`${tag}: handshake failed (${e && e.message || e})`);
+      }
       continue;
     }
     if (welcome.type === "refused") {
@@ -11000,12 +11006,13 @@ function connectBroker(route, { env = process.env } = {}) {
     return { client: new BrokerClient(sock, id, route.root) };
   }
   if (!listed.registrations.length && !reasons.length) reasons.push("no MCP server has published a broker for this project");
-  return { client: null, reason: reasons.join("; ") };
+  return { client: null, reason: reasons.join("; "), busy: silent > 0 && silent === reasons.length };
 }
 var clients = /* @__PURE__ */ new Map();
 var degradedSaid = false;
-function brokerFallbackLine(reason) {
-  return `Sterling hook: DEGRADED \u2014 no hook store broker answered for this project (${reason}); this hook opens its own Postgres connection, which costs a login per hook.
+function brokerFallbackLine(reason, busy = false) {
+  const headline = busy ? `the hook store broker for this project is busy (${reason}; the MCP server is likely running a long tool call)` : `no hook store broker answered for this project (${reason})`;
+  return `Sterling hook: DEGRADED \u2014 ${headline}; this hook opens its own Postgres connection, which costs a login per hook.
 `;
 }
 function openRoutedForHook(root, { mount = false } = {}) {
@@ -11020,7 +11027,7 @@ function openRoutedForHook(root, { mount = false } = {}) {
   if (!degradedSaid) {
     degradedSaid = true;
     try {
-      process.stderr.write(brokerFallbackLine(got.reason));
+      process.stderr.write(brokerFallbackLine(got.reason, got.busy));
     } catch {
     }
   }

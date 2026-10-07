@@ -272,6 +272,10 @@ export function connectBroker(route, { env = process.env } = {}) {
     return { client: null, reason: `the broker registry cannot be read (${(e && e.message) || e})` };
   }
   const reasons = listed.refused.map((r) => `${r.file}: ${r.reason}`);
+  // Instances that accepted the connection but sent no welcome in time: the
+  // server's event loop is busy (the broker shares it with the tool calls),
+  // not absent.
+  let silent = 0;
   for (const reg of listed.registrations) {
     const tag = `instance ${reg.instance_id}`;
     const mismatch =
@@ -304,7 +308,12 @@ export function connectBroker(route, { env = process.env } = {}) {
       welcome = brokerWelcomeSchema.parse(JSON.parse(hello.body));
     } catch (e) {
       sock.close();
-      reasons.push(`${tag}: handshake failed (${(e && e.message) || e})`);
+      if (hello.timedOut) {
+        silent++;
+        reasons.push(`${tag}: connected, no handshake reply within ${BROKER_BOUNDS.handshakeMs} ms`);
+      } else {
+        reasons.push(`${tag}: handshake failed (${(e && e.message) || e})`);
+      }
       continue;
     }
     if (welcome.type === 'refused') {
@@ -327,15 +336,23 @@ export function connectBroker(route, { env = process.env } = {}) {
     return { client: new BrokerClient(sock, id, route.root) };
   }
   if (!listed.registrations.length && !reasons.length) reasons.push('no MCP server has published a broker for this project');
-  return { client: null, reason: reasons.join('; ') };
+  // busy: every reason is a silent instance, so a server is up and only late.
+  return { client: null, reason: reasons.join('; '), busy: silent > 0 && silent === reasons.length };
 }
 
 const clients = new Map();
 let degradedSaid = false;
 
-/** The DEGRADED line a hook prints when it falls back to its own connection. */
-export function brokerFallbackLine(reason) {
-  return `Sterling hook: DEGRADED — no hook store broker answered for this project (${reason}); this hook opens its own Postgres connection, which costs a login per hook.\n`;
+/**
+ * The DEGRADED line a hook prints when it falls back to its own connection.
+ * `busy` is connectBroker's verdict that every candidate connected and then
+ * stayed silent: the headline then says the server is busy, not absent.
+ */
+export function brokerFallbackLine(reason, busy = false) {
+  const headline = busy
+    ? `the hook store broker for this project is busy (${reason}; the MCP server is likely running a long tool call)`
+    : `no hook store broker answered for this project (${reason})`;
+  return `Sterling hook: DEGRADED — ${headline}; this hook opens its own Postgres connection, which costs a login per hook.\n`;
 }
 
 /**
@@ -359,7 +376,7 @@ export function openRoutedForHook(root, { mount = false } = {}) {
   if (!degradedSaid) {
     degradedSaid = true;
     try {
-      process.stderr.write(brokerFallbackLine(got.reason));
+      process.stderr.write(brokerFallbackLine(got.reason, got.busy));
     } catch {
       /* stderr is gone; the direct open below still names its own failures */
     }
