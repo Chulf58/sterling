@@ -48,6 +48,11 @@ export function workIdentityRefusal(root, mode) {
 export const IGNORE_DIR = '.sterling/';
 export const IGNORE_ALL = '.sterling/*';
 export const IGNORE_KEEP_IDENTITY = `!${PROJECT_IDENTITY_REL}`;
+// A pattern with a slash is anchored to the repo root, so `.sterling/*` leaves a
+// nested .sterling/ (a stray transient dir under scripts/, say) untracked.
+// `*/**/.sterling/` ignores one at any depth below the root and not the root's own,
+// so `!.sterling/project.json` keeps working (`**/.sterling/` would hit the root too).
+export const IGNORE_NESTED = '*/**/.sterling/';
 
 // Pure: the .gitignore text with the Sterling directory entry in its identity
 // form. `.sterling/` (or an existing `.sterling/*`) becomes `.sterling/*`
@@ -74,4 +79,16 @@ export function withIdentityIgnore(text, { addIfAbsent }) {
   const changed = out.length !== lines.length || out.some((line, i) => line !== lines[i]);
   if (!changed) return { text, changed: false };
   return { text: out.length ? `${out.join(eol)}${eol}` : '', changed: true };
+}
+
+// Pure: the .gitignore text with IGNORE_NESTED present once whenever a
+// `.sterling/*` line exists (the form that anchors to the repo root). Without
+// that line the file is left alone, as update never adds an ignore a project did
+// not have; init appends the line itself with the rest of its entries.
+// Idempotent. Returns { text, changed }; line ending and final newline are kept.
+export function withNestedIgnore(text) {
+  const present = text.split(/\r?\n/);
+  if (!present.includes(IGNORE_ALL) || present.includes(IGNORE_NESTED)) return { text, changed: false };
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  return { text: `${text}${text.endsWith('\n') ? '' : eol}${IGNORE_NESTED}${eol}`, changed: true };
 }

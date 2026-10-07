@@ -11566,20 +11566,21 @@ var init_dist2 = __esm({
        */
       retireInFavorOf(id, replacementId, at, verb = "retired") {
         this.assertWritable("retireInFavorOf");
-        const record = this.get(id);
-        if (!record)
-          throw new Error(`retireInFavorOf: no record '${id}'`);
-        const identity = this.identityOf(id);
-        if (identity?.lifecycle === "retired" || record.status === "superseded") {
-          throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-        }
-        const replacement = this.identityOf(replacementId);
-        if (replacement?.lifecycle === "retired") {
-          throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-        }
-        const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-        const stored = _SterlingStore.storableBody(retired);
+        let stored;
         this.tx(() => {
+          const record = this.get(id);
+          if (!record)
+            throw new Error(`retireInFavorOf: no record '${id}'`);
+          const identity = this.identityOf(id);
+          if (identity?.lifecycle === "retired" || record.status === "superseded") {
+            throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
+          }
+          const replacement = this.identityOf(replacementId);
+          if (replacement?.lifecycle === "retired") {
+            throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
+          }
+          const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
+          stored = _SterlingStore.storableBody(retired);
           const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
           if (res.changes === 0) {
@@ -12952,6 +12953,7 @@ function workIdentityRefusal(root, mode) {
 var IGNORE_DIR = ".sterling/";
 var IGNORE_ALL = ".sterling/*";
 var IGNORE_KEEP_IDENTITY = `!${PROJECT_IDENTITY_REL}`;
+var IGNORE_NESTED = "*/**/.sterling/";
 function withIdentityIgnore(text, { addIfAbsent }) {
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text === "" ? [] : text.split(/\r?\n/);
@@ -12971,6 +12973,12 @@ function withIdentityIgnore(text, { addIfAbsent }) {
   const changed = out.length !== lines.length || out.some((line, i) => line !== lines[i]);
   if (!changed) return { text, changed: false };
   return { text: out.length ? `${out.join(eol)}${eol}` : "", changed: true };
+}
+function withNestedIgnore(text) {
+  const present = text.split(/\r?\n/);
+  if (!present.includes(IGNORE_ALL) || present.includes(IGNORE_NESTED)) return { text, changed: false };
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  return { text: `${text}${text.endsWith("\n") ? "" : eol}${IGNORE_NESTED}${eol}`, changed: true };
 }
 
 // scripts/lib/update.mjs
@@ -13332,6 +13340,12 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
         if (repaired.changed) {
           writeFileSync3(gitignorePath, repaired.text);
           log(`      .gitignore: .sterling/ is now .sterling/* plus !.sterling/project.json, so .sterling/project.json can be committed`);
+          entry.gitignore_repaired = true;
+        }
+        const nested = withNestedIgnore(repaired.text);
+        if (nested.changed) {
+          writeFileSync3(gitignorePath, nested.text);
+          log(`      .gitignore: added ${IGNORE_NESTED} so a nested .sterling/ directory stays ignored`);
           entry.gitignore_repaired = true;
         }
       }

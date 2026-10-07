@@ -9811,20 +9811,21 @@ var SterlingStore = class _SterlingStore {
    */
   retireInFavorOf(id, replacementId, at, verb = "retired") {
     this.assertWritable("retireInFavorOf");
-    const record = this.get(id);
-    if (!record)
-      throw new Error(`retireInFavorOf: no record '${id}'`);
-    const identity = this.identityOf(id);
-    if (identity?.lifecycle === "retired" || record.status === "superseded") {
-      throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-    }
-    const replacement = this.identityOf(replacementId);
-    if (replacement?.lifecycle === "retired") {
-      throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-    }
-    const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-    const stored = _SterlingStore.storableBody(retired);
+    let stored;
     this.tx(() => {
+      const record = this.get(id);
+      if (!record)
+        throw new Error(`retireInFavorOf: no record '${id}'`);
+      const identity = this.identityOf(id);
+      if (identity?.lifecycle === "retired" || record.status === "superseded") {
+        throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
+      }
+      const replacement = this.identityOf(replacementId);
+      if (replacement?.lifecycle === "retired") {
+        throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
+      }
+      const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
+      stored = _SterlingStore.storableBody(retired);
       const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
       if (res.changes === 0) {
@@ -10298,7 +10299,7 @@ import { join as join6, resolve as resolve2 } from "node:path";
 var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
 var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
 var STORAGE_BACKENDS = ["sqlite", "postgres"];
-var MOVE_STORE_COMMAND = "node scripts/move-store.mjs --to pg|sqlite";
+var MOVE_STORE_COMMAND = 'node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite';
 var CONFIG_REL2 = ".sterling/config.json";
 var StoreSettingsError = class extends Error {
   constructor(message) {
@@ -10317,7 +10318,7 @@ var StoreUnreachableError = class extends Error {
 var PostgresStoreNotMovedError = class extends PgStoreMissingError {
   constructor(cause) {
     super(cause.schema, "see the message");
-    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node scripts/move-store.mjs --to pg\`. Nothing was created.`;
+    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node "<Sterling root>/bin/move-store.mjs" --to pg\`. Nothing was created.`;
     this.name = "PostgresStoreNotMovedError";
   }
 };
@@ -10389,7 +10390,7 @@ function resolveStoreRoute(root) {
   const shown = absRoot.replace(/\\/g, "/");
   const mode = readProjectMode(absRoot);
   if (mode !== "work") {
-    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node scripts/move-store.mjs --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
+    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node "<Sterling root>/bin/move-store.mjs" --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
   }
   const identity = readProjectIdentity(absRoot);
   if (identity === null) {
@@ -11758,7 +11759,7 @@ import { join as join7 } from "node:path";
 function configPath(explicit) {
   return explicit ?? join7(process.cwd(), ".sterling", "config.json");
 }
-var MOVE_STORE = "`node scripts/move-store.mjs --to pg|sqlite`";
+var MOVE_STORE = '`node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite`';
 var StorageTransitionRequiredError = class extends Error {
   constructor(path) {
     super(`TUI: '${path}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), so it changes only when the stores move, through the explicit storage transition: ${MOVE_STORE}, which writes it after the move commits. Nothing was written.`);
@@ -11794,7 +11795,7 @@ function applyModeToggle(e, onError, path) {
   try {
     writeConfigKey(configPath(path), "mode", (_old, raw) => {
       if (raw.storage === "postgres" && e.mode !== "work") {
-        throw new Error(`config.storage is 'postgres', which is valid only in a work-mode project, so setting mode to '${e.mode}' would leave every store unopenable. Move the stores back first with \`node scripts/move-store.mjs --to sqlite\`, then switch the mode. Nothing was written.`);
+        throw new Error(`config.storage is 'postgres', which is valid only in a work-mode project, so setting mode to '${e.mode}' would leave every store unopenable. Move the stores back first with \`node "<Sterling root>/bin/move-store.mjs" --to sqlite\`, then switch the mode. Nothing was written.`);
       }
       return e.mode;
     });
