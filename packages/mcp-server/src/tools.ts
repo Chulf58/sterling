@@ -4604,7 +4604,8 @@ export class SterlingTools {
         // files[].entry and EntryReachability looks it up (see that module for
         // the per-kind registries and what the lookup does not catch):
         //  - wired_in/active with an entry no registry reaches;
-        //  - wired_in/active with no entry marked;
+        //  - wired_in/active with no entry marked, when at least one files[] path
+        //    is one a registry could judge (or files[] is empty);
         //  - built with an entry a registry DOES reach (it looks wired_in).
         // An entry of a kind no registry covers (a library), and every entry outside a
         // Sterling clone, is not judged. All
@@ -4622,7 +4623,18 @@ export class SterlingTools {
             ? entries.map((f) => reachabilityFor(treeRoot).judge(f.path, f.role ?? '')).filter((v): v is EntryVerdict => v !== null)
             : [];
         const unreached = claimsReach ? verdicts.filter((v) => !v.reached) : [];
-        const missingEntry = claimsReach && entries.length === 0;
+        // No entry is demanded of an article none of whose files could be one: a
+        // files[] with no path of a kind the detector judges (a library, a concept
+        // file, a nested script) leaves nothing to mark, so the item could never
+        // be paid. The test is the syntactic path kind, not judge() === null,
+        // which is also null for a consumer tree and for a tree whose clone
+        // identity cannot be read; an unreadable identity still mints (P5), and
+        // only a deliberate consumer tree abstains. No files[] at all is real
+        // metadata debt and still mints. Checked only where it can matter.
+        const missingEntry =
+          claimsReach &&
+          entries.length === 0 &&
+          (files.length === 0 || (files.some((f) => EntryReachability.judgesPathKind(f.path)) && reachabilityFor(treeRoot).cloneStatus() !== 'consumer'));
         const looksWired = state === 'built' ? verdicts.filter((v) => v.reached) : [];
         if (overStated || unverifiedPaths.length || unreached.length || missingEntry || looksWired.length) {
           const reasons: string[] = [];
