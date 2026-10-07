@@ -106,6 +106,39 @@ export class MoveStorageSettingError extends MoveError {}
 /** A shared domain's SQLite copy was left live for hobby projects (the fork) and has diverged; a move back would have to merge. */
 export class MoveForkDivergedError extends MoveError {}
 
+/** The CLI flag that lets a move go ahead past an existing fork without the records only the SQLite copy holds. */
+export const FORK_CONFIRM_FLAG = '--confirm-fork';
+
+/** A record only one copy of a forked domain holds, or holds in a different form. */
+export interface ForkLossEntry {
+  id: string;
+  title: string;
+  /** only_in_source: the target copy lacks the id; differs: both hold it, the source's row is not the target's. */
+  kind: 'only_in_source' | 'differs';
+}
+
+/** What a move past an existing fork leaves behind: every count, and the first FORK_LOSS_LIST_CAP entries. */
+export interface ForkLoss {
+  only_in_source: number;
+  differs: number;
+  listed: ForkLossEntry[];
+}
+
+export const FORK_LOSS_LIST_CAP = 20;
+
+/**
+ * A move met a shared domain that an earlier move already copied while its
+ * source stayed writable (fork_already_copied), and was not confirmed
+ * (decision shared-domains-stay-forked-and-loud-while-projects-move-one-at-a-time).
+ */
+export class MoveForkUnconfirmedError extends MoveError {
+  readonly loss: ForkLoss;
+  constructor(message: string, loss: ForkLoss) {
+    super(message);
+    this.loss = loss;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tables and the canonical row form
 // ---------------------------------------------------------------------------
@@ -384,8 +417,9 @@ type TargetPlan = { kind: 'empty' } | { kind: 'replace'; fence: MoveFence } | { 
  * - fenced, and unchanged since the fence (manifest digest equal): it is the
  *   copy a previous move left behind, and is replaced;
  * - its latest receipt is from this source with this manifest: a replay, no copy;
- * - its latest receipt is from this source and the source is a fork (not
- *   fenced): the fork was already copied, the copies diverge, no copy;
+ * - its latest receipt is from this source and the source is a fork (left
+ *   unfenced now, or not fenced by the move that wrote that receipt): the
+ *   fork was already copied, the copies diverge, no copy;
  * - empty: copied;
  * - anything else is refused by name, colliding ids first.
  */
@@ -399,6 +433,14 @@ function classifyTarget(args: {
   source: StoreSnapshot;
   sourceDigest: string;
   sourceForked: boolean;
+  /**
+   * The move id of the fence the source carried before this run, null for
+   * none. A receipt written by another move than the one that fenced the
+   * source means the source stayed writable after that copy: the last
+   * project to leave a forked domain fences it, and still meets the fork.
+   * Left undefined where this does not apply.
+   */
+  sourceFenceMoveId?: string | null;
 }): TargetPlan {
   const { label, fence, receipt, identity } = args;
   if (fence) {
@@ -410,7 +452,8 @@ function classifyTarget(args: {
   }
   const sameSource = receipt !== null && receipt.source_kind === identity.kind && receipt.source_name === identity.name;
   if (sameSource && receipt.source_digest === args.sourceDigest) return { kind: 'replay', receipt };
-  if (sameSource && args.sourceForked) return { kind: 'fork_already_copied', receipt };
+  const copiedUnfenced = args.sourceFenceMoveId !== undefined && args.sourceFenceMoveId !== receipt?.move_id;
+  if (sameSource && (args.sourceForked || copiedUnfenced)) return { kind: 'fork_already_copied', receipt };
   const occupied = nonEmptyTables(args.target);
   if (occupied.length === 0) return { kind: 'empty' };
   const collisions = crossCollisions(args.source, args.target);
@@ -808,6 +851,8 @@ export interface MoveStoreResult {
   dry_run_plan?: string;
   /** Dry run only: the named refusal the real move would throw for this store. */
   dry_run_refusal?: { name: string; message: string };
+  /** fork_already_copied only: the records the source holds that this move leaves behind. */
+  fork_loss?: ForkLoss;
 }
 
 export interface MoveHooks {
@@ -821,8 +866,15 @@ export interface ImportStoreInput extends PgTimeouts {
   metaSchema: string;
   schema: string;
   identity: StoreIdentity;
-  /** False for a shared domain a hobby project still mounts: the fork (decision c0ba4e93 point 6). */
+  /** False for a shared domain a project still on SQLite mounts: the fork (decision c0ba4e93 point 6). */
   fenceSource: boolean;
+  /**
+   * Go ahead when the target already holds this source's fork
+   * (fork_already_copied), leaving behind what the source gained since.
+   * Without it that case is refused with MoveForkUnconfirmedError
+   * (decision shared-domains-stay-forked-and-loud-while-projects-move-one-at-a-time).
+   */
+  confirmFork?: boolean;
   dryRun?: boolean;
   hooks?: MoveHooks;
 }
@@ -852,25 +904,35 @@ export function importStore(input: ImportStoreInput): MoveStoreResult {
   const preSnap = snapshotSqlite(input.sqlitePath, sourceLabel);
   assertNoInternalCollision(preSnap, sourceLabel);
   const preDetail = buildManifest(preSnap);
+  let preLoss: ForkLoss | undefined;
+  // A fork already copied is refused here, before anything is fenced, unless confirmed.
+  const forkGate = (plan: TargetPlan, source: StoreSnapshot, target: StoreSnapshot): ForkLoss | undefined => {
+    if (plan.kind !== 'fork_already_copied') return undefined;
+    const loss = forkLoss(source, target);
+    if (!input.confirmFork) throw forkUnconfirmed(identity, sourceLabel, targetLabel, plan.receipt, loss);
+    return loss;
+  };
   const preClassify = (): string => {
     if (!pgStoreRegistered(bridge, metaSchema, schema)) return 'copy into a new store';
     const current = snapshotPg(bridge, schema, input);
-    return describePlan(
-      classifyTarget({
-        label: targetLabel,
-        target: current,
-        targetDigest: buildManifest(current).manifest.digest,
-        fence: readPgFence(bridge, schema),
-        receipt: latestPgReceipt(bridge, metaSchema, schema),
-        identity,
-        source: preSnap,
-        sourceDigest: preDetail.manifest.digest,
-        sourceForked: !input.fenceSource,
-      }),
-    );
+    const plan = classifyTarget({
+      label: targetLabel,
+      target: current,
+      targetDigest: buildManifest(current).manifest.digest,
+      fence: readPgFence(bridge, schema),
+      receipt: latestPgReceipt(bridge, metaSchema, schema),
+      identity,
+      source: preSnap,
+      sourceDigest: preDetail.manifest.digest,
+      sourceForked: !input.fenceSource,
+      sourceFenceMoveId: existingFence?.move_id ?? null,
+    });
+    preLoss = forkGate(plan, preSnap, current);
+    return preLoss ? `${describePlan(plan)}; confirmed (${FORK_CONFIRM_FLAG}), leaving behind ${describeForkLoss(preLoss)}` : describePlan(plan);
   };
   if (input.dryRun) {
-    return { ...result('to_postgres', identity, sourceLabel, targetLabel, 'dry_run', moveId, preDetail.manifest, false, existingFence !== null, 0), ...dryRunPlan(preClassify) };
+    const planned = dryRunPlan(preClassify);
+    return { ...result('to_postgres', identity, sourceLabel, targetLabel, 'dry_run', moveId, preDetail.manifest, false, existingFence !== null, 0), ...planned, ...(preLoss ? { fork_loss: preLoss } : {}) };
   }
   preClassify();
 
@@ -888,6 +950,7 @@ export function importStore(input: ImportStoreInput): MoveStoreResult {
   preparePgTarget(bridge, metaSchema, schema, identity, targetLabel);
 
   let statements = 0;
+  let loss: ForkLoss | undefined;
   const outcome = inPgMoveTransaction(bridge, metaSchema, schema, input, (): MoveOutcome => {
     const current = readPgTables(bridge, schema);
     const plan = classifyTarget({
@@ -900,7 +963,9 @@ export function importStore(input: ImportStoreInput): MoveStoreResult {
       source: snap,
       sourceDigest: source.manifest.digest,
       sourceForked: !input.fenceSource,
+      sourceFenceMoveId: existingFence?.move_id ?? null,
     });
+    loss = forkGate(plan, snap, current);
     if (plan.kind === 'replay' || plan.kind === 'fork_already_copied') return plan.kind === 'replay' ? 'replayed' : 'fork_already_copied';
 
     const s = q(schema);
@@ -950,7 +1015,8 @@ export function importStore(input: ImportStoreInput): MoveStoreResult {
     statements += 3;
     return plan.kind === 'replace' ? 'replaced' : 'copied';
   });
-  return result('to_postgres', identity, sourceLabel, targetLabel, outcome, moveId, source.manifest, outcome !== 'fork_already_copied', input.fenceSource, statements);
+  const done = result('to_postgres', identity, sourceLabel, targetLabel, outcome, moveId, source.manifest, outcome !== 'fork_already_copied', input.fenceSource, statements);
+  return loss ? { ...done, fork_loss: loss } : done;
 }
 
 export interface ExportStoreInput extends PgTimeouts {
@@ -1128,6 +1194,48 @@ function describePlan(plan: TargetPlan): string {
   }
 }
 
+function recordTitle(body: Val): string {
+  try {
+    const b = JSON.parse(String(body)) as Record<string, unknown>;
+    const t = [b.title, b.headline, b.text].find((v) => typeof v === 'string' && v.trim() !== '') as string | undefined;
+    if (t === undefined) return '(no title)';
+    return t.length > 80 ? `${t.slice(0, 79)}…` : t;
+  } catch {
+    return '(body is not JSON)';
+  }
+}
+
+/** The records the source copy holds that the target copy lacks or holds in another form: what a move past the fork leaves behind. */
+export function forkLoss(source: StoreSnapshot, target: StoreSnapshot): ForkLoss {
+  const targetRows = new Map((target.get('records') ?? []).map((r) => [r[0] as string, encodeRow(r)]));
+  const only: ForkLossEntry[] = [];
+  const differs: ForkLossEntry[] = [];
+  for (const r of source.get('records') ?? []) {
+    const id = r[0] as string;
+    const there = targetRows.get(id);
+    if (there === undefined) only.push({ id, title: recordTitle(r[12]), kind: 'only_in_source' });
+    else if (there !== encodeRow(r)) differs.push({ id, title: recordTitle(r[12]), kind: 'differs' });
+  }
+  return { only_in_source: only.length, differs: differs.length, listed: [...only, ...differs].slice(0, FORK_LOSS_LIST_CAP) };
+}
+
+function describeForkLoss(loss: ForkLoss): string {
+  const total = loss.only_in_source + loss.differs;
+  if (total === 0) return 'no record differs from the copy';
+  const lines = loss.listed.map((e) => `${e.id} "${e.title}"${e.kind === 'differs' ? ' (changed after the copy)' : ''}`);
+  const more = total > loss.listed.length ? `; and ${total - loss.listed.length} more` : '';
+  return `${loss.only_in_source} record(s) only in the SQLite copy and ${loss.differs} changed there after the copy: ${lines.join('; ')}${more}`;
+}
+
+function forkUnconfirmed(identity: StoreIdentity, sourceLabel: string, targetLabel: string, receipt: MoveReceipt, loss: ForkLoss): MoveForkUnconfirmedError {
+  return new MoveForkUnconfirmedError(
+    `${identity.kind} '${identity.name}': ${targetLabel} was copied from ${sourceLabel} by move ${receipt.move_id} on ${receipt.committed_at}, and the SQLite copy stayed writable for other projects (the fork). ` +
+      `This move does not copy it again and never merges the two copies, so what the SQLite copy gained since will not reach Postgres: ${describeForkLoss(loss)}. ` +
+      `Those records stay in the SQLite file. Re-run with ${FORK_CONFIRM_FLAG} to move without them. Nothing was moved.`,
+    loss,
+  );
+}
+
 /** A dry run reports a refusal instead of throwing it; any error that is not a MoveError still throws. */
 function dryRunPlan(fn: () => string): Pick<MoveStoreResult, 'dry_run_plan' | 'dry_run_refusal'> {
   try {
@@ -1164,9 +1272,20 @@ export interface PlannedStore {
   /** False for a shared domain left live for other projects (sharedWith names them). */
   fenceSource: boolean;
   /** The other projects that keep using the source side of this domain. */
-  sharedWith: { root: string; mode: ProjectMode }[];
+  sharedWith: SharingProject[];
   /** Moving back only: hobby projects that mount this domain's SQLite file, so a live SQLite copy there is a fork. */
-  forkedWith: { root: string; mode: ProjectMode }[];
+  forkedWith: SharingProject[];
+}
+
+/**
+ * Another registered project that keeps using one side of a domain. Its mode
+ * and storage are null when its config cannot be read; moving to Postgres
+ * counts such a project as still on SQLite and mounting every domain.
+ */
+export interface SharingProject {
+  root: string;
+  mode: ProjectMode | null;
+  storage: ProjectStorage | null;
 }
 
 export interface MovePlan {
@@ -1181,6 +1300,12 @@ export interface MovePlan {
   stores: PlannedStore[];
   /** Registered projects skipped in the shared-domain check because their directory or config is gone. */
   skippedProjects: string[];
+  /**
+   * Moving to Postgres only: registered projects whose config exists but
+   * cannot be read, each with the reason. They count as still on SQLite and
+   * as mounting every domain, so no domain this move covers is fenced for them.
+   */
+  unreadableProjects: { root: string; reason: string }[];
 }
 
 export interface PlanMoveInput {
@@ -1248,9 +1373,10 @@ export function planMove(input: PlanMoveInput): MovePlan {
   const ns = process.env[PG_TEST_NAMESPACE_ENV] || undefined;
   const schemaOf = new Map(names.domains.map((d) => [d.name, d.schema]));
 
-  // Who else mounts what: hobby projects mount SQLite files, work projects mount Postgres schemas.
-  const others: { root: string; mode: ProjectMode; paths: Set<string>; schemas: Set<string> }[] = [];
+  // Who else mounts what: a project on SQLite storage writes the domains' SQLite files, a project on Postgres storage the schemas.
+  const others: { root: string; mode: ProjectMode; storage: ProjectStorage; paths: Set<string>; schemas: Set<string> }[] = [];
   const skipped: string[] = [];
+  const unreadable: { root: string; reason: string }[] = [];
   for (const repo of input.registeredProjects) {
     const other = resolve(repo);
     if (canonicalPath(other) === canonicalPath(root)) continue;
@@ -1264,8 +1390,16 @@ export function planMove(input: PlanMoveInput): MovePlan {
       const mounts = resolveDomainMounts(cfg);
       // Only the domain schemas are used here; the project id argument names no store of the other project.
       const otherSchemas = pgStoreNames(identity.project_id, cfg.stack_tags).domains.map((d) => d.schema);
-      others.push({ root: other, mode: otherMode, paths: new Set(mounts.map((m) => canonicalPath(m.dbPath))), schemas: new Set(otherSchemas) });
+      const otherStorage = readProjectStorage(other);
+      others.push({ root: other, mode: otherMode, storage: otherStorage, paths: new Set(mounts.map((m) => canonicalPath(m.dbPath))), schemas: new Set(otherSchemas) });
     } catch (e) {
+      // Fencing a SQLite domain needs proof that every project mounting it is on Postgres; an unreadable config proves
+      // nothing, so moving to Postgres counts it as on SQLite and mounting every domain (decision
+      // shared-domains-stay-forked-and-loud-while-projects-move-one-at-a-time). Moving back still refuses it.
+      if (input.direction === 'to_postgres') {
+        unreadable.push({ root: other, reason: (e as Error).message });
+        continue;
+      }
       throw new MoveRegistryProjectError(
         `registered project ${other} has a config that cannot be read (${(e as Error).message}), so whether it shares a domain with this project is unknown. Fix or unregister it first. Nothing was moved.`,
       );
@@ -1278,15 +1412,22 @@ export function planMove(input: PlanMoveInput): MovePlan {
   for (const mount of resolveDomainMounts(config)) {
     const schema = schemaOf.get(mount.name)!;
     const path = canonicalPath(mount.dbPath);
-    // Importing: a hobby project keeps writing the SQLite domain (the fork). Exporting: another work project keeps reading the Postgres domain.
-    const sharedWith = others
-      .filter((o) => (input.direction === 'to_postgres' ? o.mode === 'hobby' && o.paths.has(path) : o.mode === 'work' && o.schemas.has(schema)))
-      .map((o) => ({ root: o.root, mode: o.mode }));
-    const forkedWith = input.direction === 'to_sqlite' ? others.filter((o) => o.mode === 'hobby' && o.paths.has(path)).map((o) => ({ root: o.root, mode: o.mode })) : [];
+    // Importing: every other project still on SQLite storage keeps writing the SQLite domain (the fork), whatever its
+    // mode; the SQLite copy is fenced only when every project mounting it is on Postgres. Exporting: another work
+    // project keeps reading the Postgres domain.
+    const sharedWith: SharingProject[] =
+      input.direction === 'to_postgres'
+        ? [
+            ...others.filter((o) => o.storage === 'sqlite' && o.paths.has(path)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage })),
+            ...unreadable.map((u) => ({ root: u.root, mode: null, storage: null })),
+          ]
+        : others.filter((o) => o.mode === 'work' && o.schemas.has(schema)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage }));
+    const forkedWith: SharingProject[] =
+      input.direction === 'to_sqlite' ? others.filter((o) => o.mode === 'hobby' && o.paths.has(path)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage })) : [];
     stores.push({ identity: { kind: 'domain', name: mount.name }, sqlitePath: mount.dbPath, schema, fenceSource: sharedWith.length === 0, sharedWith, forkedWith });
   }
   for (const s of stores) assertSterlingSchemaName(s.schema);
-  return { direction: input.direction, root, projectId: identity.project_id, mode, storage, metaSchema, ...(ns ? { testNamespace: ns } : {}), stores, skippedProjects: skipped };
+  return { direction: input.direction, root, projectId: identity.project_id, mode, storage, metaSchema, ...(ns ? { testNamespace: ns } : {}), stores, skippedProjects: skipped, unreadableProjects: unreadable };
 }
 
 /** The repo paths in a registry.db, read through a read-only connection; [] when the file does not exist. */

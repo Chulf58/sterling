@@ -9,6 +9,7 @@
 // a domain, never to move them.
 //
 //   node scripts/move-store.mjs --to pg|sqlite [--dry-run] [--project <dir>]
+//   node scripts/move-store.mjs --to pg --confirm-fork [--dry-run] [--project <dir>]
 //   node scripts/move-store.mjs --attach [--fence-local] [--dry-run] [--project <dir>]
 //
 // Refuses by name: a directory with no Sterling config, --to pg in a hobby
@@ -20,6 +21,16 @@
 // storage-backend-is-its-own-config-key-written-only-by-store-move) is written
 // only after every store's receipt has committed; config.mode is never
 // touched. A re-run after a crash replays the receipts and completes the switch.
+//
+// Shared domains (decision
+// shared-domains-stay-forked-and-loud-while-projects-move-one-at-a-time): --to pg
+// fences a domain's SQLite file only when every other registered project that
+// mounts it has config.storage postgres; a project still on SQLite, whatever its
+// mode, keeps it writable (the fork), and a project whose config cannot be read
+// counts as on SQLite and is named. A domain an earlier move already copied
+// while its SQLite file stayed writable (fork_already_copied) is never copied
+// again or merged: the run lists the records that will not reach Postgres and
+// refuses until it is re-run with --confirm-fork.
 //
 // --attach is for a second machine with a fresh clone of a project already on
 // Postgres (decision second-machine-attaches-to-a-postgres-project-through-move-store-attach).
@@ -34,6 +45,7 @@ import { fileURLToPath } from 'node:url';
 import { PgBridge, ensurePgLayout, readPgCredentials, registryPath } from '../packages/store/dist/index.js';
 import { routedCredentialsPath } from '../packages/store/dist/routing.js';
 import {
+  FORK_CONFIRM_FLAG,
   MOVE_BRIDGE_WAIT_MS,
   attachProject,
   ensureMoveReceipts,
@@ -46,7 +58,7 @@ import {
 } from '../packages/store/dist/store-move.js';
 
 const USAGE = [
-  'usage: node scripts/move-store.mjs --to pg|sqlite [--dry-run] [--project <dir>]',
+  'usage: node scripts/move-store.mjs --to pg|sqlite [--confirm-fork] [--dry-run] [--project <dir>]',
   '       node scripts/move-store.mjs --attach [--fence-local] [--dry-run] [--project <dir>]',
 ].join('\n');
 
@@ -57,9 +69,9 @@ export class MoveStoreUsageError extends Error {
   }
 }
 
-/** A move returns { to, dryRun, project }; an attach returns { attach: true, fenceLocal, dryRun, project }. */
+/** A move returns { to, dryRun, project, confirmFork }; an attach returns { attach: true, fenceLocal, dryRun, project }. */
 export function parseArgs(argv) {
-  const out = { to: undefined, dryRun: false, project: undefined };
+  const out = { to: undefined, dryRun: false, project: undefined, confirmFork: false };
   let attach = false;
   let fenceLocal = false;
   let toGiven = false;
@@ -82,15 +94,18 @@ export function parseArgs(argv) {
     else if (a.startsWith('--project=')) out.project = a.slice(10);
     else if (a === '--attach') attach = true;
     else if (a === '--fence-local') fenceLocal = true;
+    else if (a === FORK_CONFIRM_FLAG) out.confirmFork = true;
     else throw new MoveStoreUsageError(`unknown argument '${a}'`);
   }
   if (out.project === '') throw new MoveStoreUsageError('--project needs a directory');
   if (attach) {
     if (toGiven) throw new MoveStoreUsageError('--attach copies nothing and takes no --to');
+    if (out.confirmFork) throw new MoveStoreUsageError(`${FORK_CONFIRM_FLAG} is only for --to pg`);
     return { attach: true, fenceLocal, dryRun: out.dryRun, project: out.project };
   }
   if (fenceLocal) throw new MoveStoreUsageError('--fence-local is only for --attach');
   if (out.to !== 'pg' && out.to !== 'sqlite') throw new MoveStoreUsageError(`--to must be pg or sqlite, got ${out.to === undefined ? 'nothing' : `'${out.to}'`}`);
+  if (out.confirmFork && out.to !== 'pg') throw new MoveStoreUsageError(`${FORK_CONFIRM_FLAG} is only for --to pg`);
   return out;
 }
 
@@ -111,12 +126,13 @@ export function findProjectRoot(start) {
  * there is returned in `failure` before anything is fenced. A store failure
  * during the move stops the run, is returned in `failure`, and withholds the
  * storage switch. `hooks.beforeStorageSwitch` is the test seam for a crash
- * between the receipts and the switch.
+ * between the receipts and the switch. `confirmFork` lets --to pg go past a
+ * domain an earlier move already copied as a fork (FORK_CONFIRM_FLAG).
  */
-export function runMoveStore({ root, to, dryRun = false, credentialsPath = routedCredentialsPath(), registryDb = registryPath(), hooks = {} }) {
+export function runMoveStore({ root, to, dryRun = false, confirmFork = false, credentialsPath = routedCredentialsPath(), registryDb = registryPath(), hooks = {} }) {
   const direction = to === 'pg' ? 'to_postgres' : 'to_sqlite';
   const plan = planMove({ root, direction, registeredProjects: readRegisteredProjects(registryDb), credentialsPath });
-  const report = { root: plan.root, direction, dryRun, metaSchema: plan.metaSchema, stores: [], failure: null, storageSwitched: false, storage: plan.storage, mode: plan.mode, skippedProjects: plan.skippedProjects };
+  const report = { root: plan.root, direction, dryRun, metaSchema: plan.metaSchema, stores: [], failure: null, storageSwitched: false, storage: plan.storage, mode: plan.mode, skippedProjects: plan.skippedProjects, unreadableProjects: plan.unreadableProjects };
   const bridge = new PgBridge(readPgCredentials(credentialsPath), { waitTimeoutMs: MOVE_BRIDGE_WAIT_MS });
   try {
     if (!dryRun) {
@@ -132,6 +148,7 @@ export function runMoveStore({ root, to, dryRun = false, credentialsPath = route
         identity: store.identity,
         fenceSource: store.fenceSource,
         forkedWith: store.forkedWith.map((h) => h.root),
+        confirmFork,
         dryRun: dry,
       };
       return direction === 'to_postgres' ? importStore(input) : exportStore(input);
@@ -221,7 +238,7 @@ export function formatReport(report) {
     lines.push(`  hash match: ${s.outcome === 'dry_run' ? 'not checked (dry run)' : s.hash_match ? 'yes' : 'no'}; manifest ${s.manifest_digest.slice(0, 16)}`);
     lines.push(`  ids per table: ${Object.entries(s.tables).filter(([, t]) => t.rows > 0).map(([n, t]) => `${n} ${t.rows}`).join(', ') || 'none (empty store)'}`);
     if (s.sharedWith.length) {
-      const holders = s.sharedWith.map((h) => `${h.root} (${h.mode})`).join(', ');
+      const holders = s.sharedWith.map((h) => `${h.root} (${h.mode === null ? 'config unreadable, counted as on SQLite' : report.direction === 'to_postgres' ? `${h.mode}, storage ${h.storage}` : h.mode})`).join(', ');
       lines.push(
         report.direction === 'to_postgres'
           ? `  shared domain, NOT fenced: its SQLite copy stays writable for ${holders}; the two copies diverge from this move on`
@@ -230,6 +247,17 @@ export function formatReport(report) {
     } else {
       lines.push(`  source fenced: ${s.source_fenced ? 'yes' : report.dryRun ? 'no (dry run fences nothing)' : 'no'}`);
     }
+    if (s.fork_loss) {
+      const l = s.fork_loss;
+      lines.push(`  already forked, NOT copied again (${FORK_CONFIRM_FLAG}): left behind in the SQLite copy: ${l.only_in_source} record(s) Postgres lacks, ${l.differs} changed after the copy`);
+      for (const e of l.listed) lines.push(`    ${e.id} "${e.title}"${e.kind === 'differs' ? ' (changed after the copy)' : ''}`);
+      const more = l.only_in_source + l.differs - l.listed.length;
+      if (more > 0) lines.push(`    and ${more} more`);
+    }
+  }
+  if (report.unreadableProjects.length) {
+    lines.push(`registered projects whose config cannot be read, counted as on SQLite and mounting every domain (no shared domain fenced for them):`);
+    for (const u of report.unreadableProjects) lines.push(`  ${u.root}: ${u.reason}`);
   }
   if (report.skippedProjects.length) lines.push(`registered projects skipped in the shared-domain check (directory or config gone): ${report.skippedProjects.join(', ')}`);
   if (report.failure) {
@@ -256,7 +284,7 @@ function main() {
       process.stdout.write(formatAttachReport(runAttach({ root, dryRun: args.dryRun, fenceLocal: args.fenceLocal })) + '\n');
       process.exit(0);
     }
-    const report = runMoveStore({ root, to: args.to, dryRun: args.dryRun });
+    const report = runMoveStore({ root, to: args.to, dryRun: args.dryRun, confirmFork: args.confirmFork });
     process.stdout.write(formatReport(report) + '\n');
     process.exit(report.failure ? 1 : 0);
   } catch (e) {
