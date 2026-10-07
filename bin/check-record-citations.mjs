@@ -10268,7 +10268,7 @@ import { join as join6, resolve as resolve2 } from "node:path";
 var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
 var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
 var STORAGE_BACKENDS = ["sqlite", "postgres"];
-var MOVE_STORE_COMMAND = "node scripts/move-store.mjs --to pg|sqlite";
+var MOVE_STORE_COMMAND = 'node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite';
 var CONFIG_REL2 = ".sterling/config.json";
 var StoreSettingsError = class extends Error {
   constructor(message) {
@@ -10287,7 +10287,7 @@ var StoreUnreachableError = class extends Error {
 var PostgresStoreNotMovedError = class extends PgStoreMissingError {
   constructor(cause) {
     super(cause.schema, "see the message");
-    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node scripts/move-store.mjs --to pg\`. Nothing was created.`;
+    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node "<Sterling root>/bin/move-store.mjs" --to pg\`. Nothing was created.`;
     this.name = "PostgresStoreNotMovedError";
   }
 };
@@ -10359,7 +10359,7 @@ function resolveStoreRoute(root2) {
   const shown = absRoot.replace(/\\/g, "/");
   const mode = readProjectMode(absRoot);
   if (mode !== "work") {
-    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node scripts/move-store.mjs --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
+    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node "<Sterling root>/bin/move-store.mjs" --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
   }
   const identity = readProjectIdentity(absRoot);
   if (identity === null) {

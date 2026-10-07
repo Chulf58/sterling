@@ -38,7 +38,7 @@ test('writeConfigKey refuses storage and every storage.* path with StorageTransi
       (e: unknown) =>
         e instanceof StorageTransitionRequiredError &&
         e.message ===
-          `TUI: '${key}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), so it changes only when the stores move, through the explicit storage transition: \`node scripts/move-store.mjs --to pg|sqlite\`, which writes it after the move commits. Nothing was written.`,
+          `TUI: '${key}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), so it changes only when the stores move, through the explicit storage transition: \`node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite\`, which writes it after the move commits. Nothing was written.`,
     );
   }
   assert.equal(readFileSync(path, 'utf8'), before);
@@ -59,7 +59,7 @@ test('mode toggle, Postgres storage: leaving work mode is refused with the move 
   assert.equal(applyModeToggle({ type: 'mode_toggle', mode: 'hobby' }, (m) => errors.push(m), path), false);
   assert.equal(errors.length, 1);
   assert.match(errors[0], /^mode toggle failed — config\.storage is 'postgres', which is valid only in a work-mode project/);
-  assert.match(errors[0], /node scripts\/move-store\.mjs --to sqlite/);
+  assert.match(errors[0], /node "<Sterling root>\/bin\/move-store\.mjs" --to sqlite/);
   assert.equal(readFileSync(path, 'utf8'), before);
 });
 
