@@ -93,6 +93,16 @@ export interface CreateResult {
  * is the real close time — NOT the article's `updated_at`, which this write
  * deliberately leaves where it was.
  */
+/**
+ * What attestAlreadyPaidClose returns when it closed a reconcile_needed item
+ * WITHOUT an attestation because a domain store physically holds the owner
+ * (board b31dfafb). The item is already removed when this is returned.
+ */
+interface DomainHeldClose {
+  domain_held: true;
+  note: string;
+}
+
 export interface BaselineAttestationReceipt {
   article_id: string;
   article_slug?: string;
@@ -11509,7 +11519,7 @@ export class SterlingTools {
    * attestation candidate and the caller should perform its ordinary removal.
    * Every other outcome THROWS, with nothing written.
    */
-  private attestAlreadyPaidClose(op: string, item: DurableRecord): BaselineAttestationReceipt | undefined {
+  private attestAlreadyPaidClose(op: string, item: DurableRecord): BaselineAttestationReceipt | DomainHeldClose | undefined {
     const it = item as unknown as { id: string; source?: string; system_reason?: string; feature_link?: string; file_keys?: string[] };
     // FALL-THROUGH, NOT REFUSAL — every other lane and every user item removes
     // exactly as it does today.
@@ -11572,6 +11582,28 @@ export class SterlingTools {
           `mints these items only against ${ATTESTABLE_OWNER_TYPES.join(' / ')}) — there is nothing to attest against. Nothing was written.`
       );
     }
+    // A DOMAIN-HELD OWNER CLOSES WITHOUT AN ATTESTATION (board b31dfafb).
+    // The item is project-local and the owner sits in another store, so no
+    // single transaction can stamp the owner's baseline and remove the item.
+    // Decision
+    // [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]
+    // makes maintenance_remove the close for that case: write the owner without
+    // `resolves`, check the lane is paid, then remove the item. Refusing here left
+    // an item keyed to a project record later superseded into a domain record
+    // with no route to close at all.
+    //
+    // Decided by the store that PHYSICALLY holds the live head, never by its body
+    // `scope` (anti_pattern [record-body-scope-is-not-physical-store-identity]):
+    // the project store must not hold it AND scopeOfHolder must name a domain
+    // mount. scopeOfHolder throws when no readable store, or more than one,
+    // holds the id; that refuses the close, as an unresolvable head always has.
+    // This pre-lock answer only ROUTES: the removal happens in
+    // closeDomainHeldInTransaction, which re-reads the item and the holder under
+    // the project store's lock. A project-held head keeps the attestation below
+    // unchanged, including its under-lock mount checks.
+    if (this.domainHolderOf(op, it.id, routing.id) !== undefined) {
+      return this.store.withTransactionForRecord(it.id, () => this.closeDomainHeldInTransaction(op, it, routing.id, keys));
+    }
     // ALL GIT AND FILESYSTEM EVIDENCE IS COLLECTED HERE, OUTSIDE THE LOCK.
     // `git hash-object --path=` runs the repository's configured CLEAN FILTER,
     // which is an arbitrary program; running it while holding the store's single
@@ -11581,6 +11613,87 @@ export class SterlingTools {
     // transaction refuses if either has moved (see attestInTransaction).
     const prepared = this.collectAttestationProof(op, it.id, routing, keys);
     return this.store.withTransactionForRecord(routing.id, () => this.attestInTransaction(op, it.id, routing.id, prepared));
+  }
+
+  /**
+   * The mount that physically holds the live owner `ownerId`, when it is a
+   * DOMAIN mount; undefined when the project store holds it. Refuses when the
+   * project store does not hold it and no single readable store does.
+   */
+  private domainHolderOf(op: string, itemId: string, ownerId: string): string | undefined {
+    if (this.store.projectStoreHolds(ownerId)) return undefined;
+    let holder: string;
+    try {
+      holder = this.store.scopeOfHolder(ownerId);
+    } catch (err) {
+      throw new Error(
+        `${op}: reconcile_needed item '${itemId}' links to the ${ATTESTABLE_OWNER_NOUN} '${ownerId}', which the project store does not ` +
+          `hold, and its holding store cannot be resolved (${err instanceof Error ? err.message : String(err)}). Nothing was written.`
+      );
+    }
+    return holder.startsWith('domain:') ? holder : undefined;
+  }
+
+  /**
+   * The domain-held close, run under the PROJECT store's lock (the item's own
+   * mount). The routing decision was taken on a pre-lock snapshot, and
+   * `file_keys` and the rest of the item are caller-updatable through
+   * board_update, so every input the decision rested on is re-read here: the
+   * item's version, type, source, lane, feature_link and normalized file_keys,
+   * and the owner's physical holder. The item is removed only when all of them
+   * still match; otherwise the close refuses, naming what changed, and the
+   * item stays open (a retry re-decides on the new state).
+   */
+  private closeDomainHeldInTransaction(
+    op: string,
+    snapshot: { id: string; source?: string; system_reason?: string; feature_link?: string },
+    ownerId: string,
+    keys: string[]
+  ): DomainHeldClose {
+    const fresh = this.store.get(snapshot.id) as
+      | (DurableRecord & { version?: number; source?: string; system_reason?: string; feature_link?: string; file_keys?: string[] })
+      | undefined;
+    if (!fresh) {
+      throw new Error(`${op}: item '${snapshot.id}' was removed concurrently — this call did not close it. Nothing was written.`);
+    }
+    const before = snapshot as typeof snapshot & { type?: string; version?: number };
+    const changed: string[] = [];
+    if (fresh.version !== before.version) changed.push(`version ${String(before.version)} → ${String(fresh.version)}`);
+    if (fresh.type !== before.type) changed.push(`type '${String(before.type)}' → '${fresh.type}'`);
+    if (fresh.source !== before.source) changed.push(`source '${String(before.source)}' → '${String(fresh.source)}'`);
+    if (fresh.system_reason !== before.system_reason) changed.push(`lane '${String(before.system_reason)}' → '${String(fresh.system_reason)}'`);
+    if (fresh.feature_link !== before.feature_link) changed.push(`feature_link '${String(before.feature_link)}' → '${String(fresh.feature_link)}'`);
+    const freshKeys = this.attestationKeys(op, fresh.id, fresh.file_keys);
+    if (freshKeys.length !== keys.length || freshKeys.some((k, i) => k !== keys[i])) {
+      changed.push(`file_keys (${keys.join(', ') || 'none'}) → (${freshKeys.join(', ') || 'none'})`);
+    }
+    if (changed.length) {
+      throw new Error(
+        `${op}: item '${fresh.id}' changed under this call — ${changed.join('; ')}. The close was decided on the item as it was ` +
+          `before, so it refuses rather than remove a different debt. Retry. Nothing was written.`
+      );
+    }
+    const relinked = fresh.feature_link ? this.liveArticleFor(fresh.feature_link, ATTESTABLE_OWNER_TYPES) : undefined;
+    if (!relinked || relinked.id !== ownerId) {
+      throw new Error(
+        `${op}: item '${fresh.id}' no longer links to the ${ATTESTABLE_OWNER_NOUN} '${ownerId}' — its feature_link now resolves to ` +
+          `'${relinked?.id ?? 'nothing live'}'. Nothing was written.`
+      );
+    }
+    const holder = this.domainHolderOf(op, fresh.id, ownerId);
+    if (holder === undefined) {
+      throw new Error(
+        `${op}: the ${ATTESTABLE_OWNER_NOUN} '${ownerId}' is no longer held by a domain store, so this item would now close through a ` +
+          `baseline attestation. Retry. Nothing was written.`
+      );
+    }
+    this.store.remove(fresh.id, this.now()); // logged to the §3.2.7 drain log, as every system removal is
+    return {
+      domain_held: true,
+      note:
+        `Closed WITHOUT a baseline attestation: the ${ATTESTABLE_OWNER_NOUN} '${ownerId}' is held by the '${holder}' store, and a ` +
+        `project-local item cannot share a transaction with it. Nothing on the owner was written.`,
+    };
   }
 
   /**
@@ -11992,6 +12105,9 @@ export class SterlingTools {
     // other would re-mint on the next touch and the two tools would disagree
     // about what closing an already-paid item means.
     const attestation = this.attestAlreadyPaidClose('board_remove', record);
+    if (attestation && 'domain_held' in attestation) {
+      return { removed: record.id, ...evidence, note: evidence.note ? `${evidence.note} ${attestation.note}` : attestation.note };
+    }
     if (attestation) {
       return {
         removed: record.id,
@@ -12071,6 +12187,9 @@ export class SterlingTools {
     const evidence = this.removalArtifactEvidence(record);
     // R9: same attestation branch board_remove takes — see its parity note.
     const attestation = this.attestAlreadyPaidClose('maintenance_remove', record);
+    if (attestation && 'domain_held' in attestation) {
+      return { removed: record.id, ...evidence, note: evidence.note ? `${evidence.note} ${attestation.note}` : attestation.note };
+    }
     if (attestation) {
       return {
         removed: record.id,
