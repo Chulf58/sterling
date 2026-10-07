@@ -10,14 +10,19 @@
 //
 // knowledge_retire: A retires X in favour of Y while B retires Y in favour of
 // X. Both used to commit, leaving two retired records forwarding to each other.
+// Same store: the second is refused because its survivor is retired. Across a
+// project store and a mounted domain store each retire locks only its own
+// store, so a cross-store knowledge_retire is refused outright.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SterlingStore } from '@sterling/store';
+import { MountedStores, SterlingStore } from '@sterling/store';
+import { parseConfig } from '@sterling/schemas';
 import { SterlingTools } from '../tools.js';
+import { harnessMounted } from './test-helpers/mounted-harness.js';
 
 const NOW = '2026-10-06T12:00:00.000Z';
 
@@ -88,5 +93,47 @@ test('knowledge_retire from two sessions: crossed retirements X->Y and Y->X cann
     assert.equal(xAfter.status, 'active', 'X stays live, so no retire cycle');
   } finally {
     cleanup();
+  }
+});
+
+test('knowledge_retire across a project store and a domain store from two sessions: crossed retirements cannot both commit', () => {
+  const h = harnessMounted(['genesys'], { now: NOW, prefix: 'sterling-two-sessions-cross-' });
+  const storeB = new MountedStores(join(h.dir, '.sterling', 'sterling.db'), [{ name: 'genesys', dbPath: h.domainDbPath('genesys') }]);
+  try {
+    const b = new SterlingTools({ store: storeB, config: parseConfig({ stack_tags: ['genesys'] }), now: () => NOW });
+    const ref = (scope: string, title: string) =>
+      h.tools.knowledgeCreate('reference_material', {
+        scope,
+        title,
+        kind: 'doc',
+        location: 'docs/genesys.md',
+        summary: 's',
+        source_date: '2026-10-06',
+        capture_date: '2026-10-06',
+        basis: 'platform',
+      }).record as unknown as Loose & { id: string };
+    const x = ref('project', 'Genesys routing rule, project copy');
+    const y = ref('domain:genesys', 'Genesys routing rule, domain copy');
+    // B's call runs inside A's call, just before A takes its write lock. If A
+    // is refused before reaching the lock, B runs right after instead.
+    let bRan = false;
+    let bError: unknown;
+    const runB = () => {
+      bRan = true;
+      try {
+        b.knowledgeRetire(y.id, x.id);
+      } catch (err) {
+        bError = err;
+      }
+    };
+    beforeFirstCall(h.store.project, 'tx', runB);
+    assert.throws(() => h.tools.knowledgeRetire(x.id, y.id), /cross-store retirement refused/, 'A retires project X in favour of domain Y');
+    if (!bRan) runB();
+    assert.match(String(bError), /cross-store retirement refused/, 'B retires domain Y in favour of project X');
+    assert.equal((b.knowledgeGet(x.id) as unknown as Loose).status, 'active', 'X stays live');
+    assert.equal((b.knowledgeGet(y.id) as unknown as Loose).status, 'active', 'Y stays live, so no retire cycle');
+  } finally {
+    storeB.close();
+    h.cleanup();
   }
 });

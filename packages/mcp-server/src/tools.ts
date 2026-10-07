@@ -12150,6 +12150,32 @@ export class SterlingTools {
         `knowledge_retire: '${id}' and '${inFavorOf}' both resolve to record '${record.id}' — a record cannot be retired in favour of itself.`
       );
     }
+    // ONE STORE ONLY (board 895d3c6c, Sol review). retireInFavorOf checks the
+    // survivor under the RETIREE's write lock, which sees the survivor only when
+    // both live in the same store. Across stores, X->Y and Y->X each lock their
+    // own store, see a live survivor and both commit: a cycle of two retired
+    // records. Holding both stores' locks is not available (on Postgres every
+    // store in a process shares one connection, which takes one transaction at
+    // a time), so the cross-store shape is refused. The holder is asked of the
+    // storage layer, never read from `scope`: on a bare store projectStoreHolds
+    // is true for both, and under mounts scopeOfHolder names the physical
+    // mount. A record never changes stores, so checking before the lock holds.
+    // knowledge_promote's tombstone stays cross-store on purpose: its survivor
+    // is a copy it has just created, and with this refusal nothing else can
+    // retire across stores to close a cycle with it.
+    const bothInProject = this.store.projectStoreHolds(record.id) && this.store.projectStoreHolds(survivor.id);
+    if (!bothInProject) {
+      const retireeMount = this.store.scopeOfHolder(record.id);
+      const survivorMount = this.store.scopeOfHolder(survivor.id);
+      if (retireeMount !== survivorMount) {
+        throw new Error(
+          `knowledge_retire: cross-store retirement refused — '${record.id}' is held by the '${retireeMount}' store and its survivor ` +
+            `'${survivor.id}' by the '${survivorMount}' store. The survivor's liveness can only be checked under one store's write lock, ` +
+            `so a concurrent retirement the other way could leave two retired records forwarding to each other. Nothing was written. ` +
+            `Retire a record only in favour of a survivor in the same store.`
+        );
+      }
+    }
     if (survivor.status === 'superseded') {
       throw new Error(
         `knowledge_retire: '${inFavorOf}' is itself superseded — retiring into a dead record forwards the reader to a tombstone. ` +

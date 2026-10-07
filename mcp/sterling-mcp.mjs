@@ -36501,6 +36501,14 @@ ${JSON.stringify(entry)}
     if (record2.id === survivor.id) {
       throw new Error(`knowledge_retire: '${id}' and '${inFavorOf}' both resolve to record '${record2.id}' \u2014 a record cannot be retired in favour of itself.`);
     }
+    const bothInProject = this.store.projectStoreHolds(record2.id) && this.store.projectStoreHolds(survivor.id);
+    if (!bothInProject) {
+      const retireeMount = this.store.scopeOfHolder(record2.id);
+      const survivorMount = this.store.scopeOfHolder(survivor.id);
+      if (retireeMount !== survivorMount) {
+        throw new Error(`knowledge_retire: cross-store retirement refused \u2014 '${record2.id}' is held by the '${retireeMount}' store and its survivor '${survivor.id}' by the '${survivorMount}' store. The survivor's liveness can only be checked under one store's write lock, so a concurrent retirement the other way could leave two retired records forwarding to each other. Nothing was written. Retire a record only in favour of a survivor in the same store.`);
+      }
+    }
     if (survivor.status === "superseded") {
       throw new Error(`knowledge_retire: '${inFavorOf}' is itself superseded \u2014 retiring into a dead record forwards the reader to a tombstone. Resolve the survivor's chain to its live head first.`);
     }
