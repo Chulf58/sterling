@@ -13429,6 +13429,18 @@ function projectModeLine({ config: config2, configUnreadable: configUnreadable2 
   }
   return `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) \u2014 config.mode must be 'hobby' or 'work'; /sterling:merge, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).`;
 }
+var STORAGE_TAIL = "TUI System tab; switch with the move-store skill";
+function storageLine({ config: config2, configUnreadable: configUnreadable2, root }) {
+  const presentButNull = !configUnreadable2 && config2 === null && Boolean(root) && existsSync10(join21(root, ".sterling", "config.json"));
+  if (configUnreadable2 || presentButNull) {
+    return "Storage: UNKNOWN \u2014 the project config could not be read, so config.storage could not be determined. This is NOT the SQLite default: repair the config.";
+  }
+  const storage = config2?.storage;
+  if (storage === void 0) return `Storage: SQLITE (config.storage not set, so SQLite \u2014 ${STORAGE_TAIL})`;
+  if (storage === "sqlite") return `Storage: SQLITE (config.storage \u2014 ${STORAGE_TAIL})`;
+  if (storage === "postgres") return `Storage: SERVED POSTGRES (config.storage \u2014 ${STORAGE_TAIL})`;
+  return `Storage: UNRECOGNIZED (${JSON.stringify(storage)}) \u2014 config.storage must be 'sqlite' or 'postgres'; every store open refuses until it is fixed (TUI System tab shows it; only the move-store skill writes it).`;
+}
 var HANDOFF_SET = "the portable OpenCode agents and the handoff projection for colleagues without Sterling";
 function handoffFilesLine({ config: config2, configUnreadable: configUnreadable2, root }) {
   if (configUnreadable2) {
@@ -15017,13 +15029,17 @@ if (!projectStoreBlocked) {
 if (!store) {
   const earlyWarning = storeOpenWarning + storeVersionWarning + postUpdateWarning;
   const sterlingProject = projectStoreBlocked || storeOpenWarning !== "" || existsSync19(join30(input.cwd, ".sterling", "config.json"));
+  let earlyStorageContext = "";
+  if (sterlingProject) earlyStorageContext = `
+
+${storageLine({ ...readProjectConfig(input.cwd), root: input.cwd })}`;
   if (planLockContext || dispatchResidueLines.length || earlyWarning || sterlingProject) {
     process.stdout.write(
       JSON.stringify({
         ...earlyWarning ? { systemMessage: earlyWarning.trim() } : {},
         hookSpecificOutput: {
           hookEventName: "SessionStart",
-          additionalContext: storeOpenWarning + planLockContext + dispatchResidueLines.join("\n\n") + (sterlingProject ? rootContext : "") + storeVersionContext + postUpdateContext
+          additionalContext: storeOpenWarning + planLockContext + dispatchResidueLines.join("\n\n") + (sterlingProject ? rootContext + earlyStorageContext : "") + storeVersionContext + postUpdateContext
         }
       })
     );
@@ -15062,6 +15078,13 @@ try {
   handoffContext = `
 
 ${handoffFilesLine({ config, configUnreadable, root: input.cwd })}`;
+} catch {
+}
+var storageContext = "";
+try {
+  storageContext = `
+
+${storageLine({ config, configUnreadable, root: input.cwd })}`;
 } catch {
 }
 var domainLines = mountedDomainLines({ config, configUnreadable, root: input.cwd });
@@ -15657,6 +15680,6 @@ var output = {
   systemMessage: `${conductorActivationWarning}${storeVersionWarning}${postUpdateWarning}${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending${reconcileBanner}`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + handoffContext + domainsContext + issueReportsContext + codexContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + storeVersionContext + postUpdateContext + rotationContext + dispatchResidueContext + residueContext + rootContext + roleContext + tddPostureContext + modeContext + handoffContext + storageContext + domainsContext + issueReportsContext + codexContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + reconcileContext + boardReadinessContext + undeclaredSourceContext }
 };
 exitAfterWrite(JSON.stringify(output), 0);
