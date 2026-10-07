@@ -6,7 +6,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -1356,6 +1356,23 @@ test('on Postgres storage N plugin operations open the routed store once, keep i
     assert.equal(calls.opens, 2, 'an operation after the cleanup opens a new routed store');
     projectStores.release(p.dir);
     assert.equal(calls.closes, 2);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('on Postgres storage the location cleanup closes the held store even after the project stopped being a Sterling root', async () => {
+  const p = makeProject();
+  try {
+    const { calls, openRouted } = countingRoutedOpener();
+    const projectStores = server.createProjectStores({ backend: () => 'routed', openRouted });
+    const { ctx, cleanup } = await setupPlugin(p.dir, { projectStores });
+    await ctx.hooks.tool['execute.before'](readCall(p.dir, 'r'));
+    assert.equal(calls.opens, 1);
+    renameSync(join(p.dir, '.sterling'), join(p.dir, '.sterling-moved'));
+    assert.equal(existsSync(join(p.dir, '.sterling', 'config.json')), false, 'the directory is no longer a Sterling root');
+    await cleanup();
+    assert.equal(calls.closes, 1, 'the cleanup released the root found at bind');
   } finally {
     p.cleanup();
   }

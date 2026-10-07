@@ -339,8 +339,10 @@ export function createSterlingServer(deps = {}) {
       })();
       return () => {
         abort.abort();
-        const cleanupRoot = rootOf();
-        if (cleanupRoot) projectStores?.release(cleanupRoot);
+        // The root found at bind, plus the one found now: a project renamed or
+        // removed since bind has no root now but may still hold a store, and one
+        // initialized since bind has a root only now.
+        for (const held of new Set([root, rootOf()])) if (held) projectStores?.release(held);
       };
     }
 

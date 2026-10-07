@@ -20755,8 +20755,7 @@ function createSterlingServer(deps = {}) {
       })();
       return () => {
         abort.abort();
-        const cleanupRoot = rootOf();
-        if (cleanupRoot) projectStores?.release(cleanupRoot);
+        for (const held of /* @__PURE__ */ new Set([root, rootOf()])) if (held) projectStores?.release(held);
       };
     }
     return { handlers, bind, idle: () => chain };
