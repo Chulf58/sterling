@@ -1510,7 +1510,7 @@ function checkAttachStore(bridge: PgBridge, metaSchema: string, s: { identity: S
     throw new MoveAttachError(
       'registered',
       s.schema,
-      `${label} is not registered in ${metaSchema}.stores, so it was never moved to Postgres. Run move-store --to pg on the machine that holds this store first. Nothing was changed.`,
+      `${label} is not registered in ${metaSchema}.stores, so it was never moved to Postgres. Run \`node "<Sterling root>/bin/move-store.mjs" --to pg\` on the machine that holds this store first. Nothing was changed.`,
     );
   }
   const receipt = latestPgReceipt(bridge, metaSchema, s.schema);

@@ -247,7 +247,7 @@ if (storeBackend(input.cwd) === 'sqlite') {
     const why = `H10: the project store could not be opened (${namedError(e)}), so the session-end duties cannot be checked.`;
     if (residueLines.length) process.stderr.write(residueLines.join('\n\n') + '\n\n');
     if (input.stop_hook_active) warnNonBlocking(`${why} Released because this Stop was already blocked once.\n`);
-    deny(`${why} Failing closed: fix the store connection (or move the stores back with \`node scripts/move-store.mjs --to sqlite\`), then stop again.\n`);
+    deny(`${why} Failing closed: fix the store connection (or move the stores back with \`node "<Sterling root>/bin/move-store.mjs" --to sqlite\`), then stop again.\n`);
   }
   // After the open: a broker or store failure in ANY later call ends the hook
   // the same way (decision hook-store-broker-whole-method-rpc-over-local-socket,

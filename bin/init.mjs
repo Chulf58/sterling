@@ -12759,6 +12759,7 @@ function ensureProjectIdentity(root) {
 var IGNORE_DIR = ".sterling/";
 var IGNORE_ALL = ".sterling/*";
 var IGNORE_KEEP_IDENTITY = `!${PROJECT_IDENTITY_REL}`;
+var IGNORE_NESTED = "*/**/.sterling/";
 function withIdentityIgnore(text, { addIfAbsent }) {
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text === "" ? [] : text.split(/\r?\n/);
@@ -15612,7 +15613,7 @@ if (identityIgnore.changed) {
   existingIgnore = identityIgnore.text;
   items.push({ item: ".gitignore (.sterling entry)", status: "refreshed", detail: `${IGNORE_ALL} + ${IGNORE_KEEP_IDENTITY} so .sterling/project.json can be committed` });
 }
-var entries = [IGNORE_ALL, IGNORE_KEEP_IDENTITY, "sterling.bat", "sterling-windows.bat", "tui.bat", "sterling-launch.sh", UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, ".claude/agents/"];
+var entries = [IGNORE_ALL, IGNORE_KEEP_IDENTITY, IGNORE_NESTED, "sterling.bat", "sterling-windows.bat", "tui.bat", "sterling-launch.sh", UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, ".claude/agents/"];
 if (initIsPluginRepo) entries.push(".claude-plugin/sterling-mcp-win.json");
 if (eff.backupPath) {
   const root = fwd7(target);

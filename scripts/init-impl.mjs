@@ -42,7 +42,7 @@ import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRest
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL, trackedHandoffFiles, PROJECT_MODES, readProjectMode, ProjectModeError } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
-import { ensureProjectIdentity, withIdentityIgnore, IGNORE_ALL, IGNORE_KEEP_IDENTITY } from './lib/project-identity.mjs';
+import { ensureProjectIdentity, withIdentityIgnore, IGNORE_ALL, IGNORE_KEEP_IDENTITY, IGNORE_NESTED } from './lib/project-identity.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, userScopeCodexServer, codexUserScopeLine } from './lib/codex-mcp.mjs';
@@ -1278,7 +1278,7 @@ if (identityIgnore.changed) {
   existingIgnore = identityIgnore.text;
   items.push({ item: '.gitignore (.sterling entry)', status: 'refreshed', detail: `${IGNORE_ALL} + ${IGNORE_KEEP_IDENTITY} so .sterling/project.json can be committed` });
 }
-const entries = [IGNORE_ALL, IGNORE_KEEP_IDENTITY, 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, '.claude/agents/'];
+const entries = [IGNORE_ALL, IGNORE_KEEP_IDENTITY, IGNORE_NESTED, 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, '.claude/agents/'];
 // the SOURCE/plugin repo's generated MCP config is machine-specific → gitignore it
 // (consuming projects never get one — the plugin carries its own declaration).
 // (still keyed on --target: this ensures the TARGET's .gitignore, and a consuming
