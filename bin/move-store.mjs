@@ -9765,10 +9765,17 @@ function upsertMetaSql() {
   return "INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at";
 }
 function writeSqliteFence(path, fence) {
+  writeSqliteFenceChecked(path, fence, null);
+}
+function writeSqliteFenceChecked(path, fence, check) {
   const driver = new SqliteDriver(path);
   try {
     driver.begin();
     try {
+      if (check) {
+        const counts = MOVE_TABLES.map((t) => ({ name: t.name, n: Number(driver.prepare(`SELECT COUNT(*) AS n FROM ${t.name}${whereClause(t)}`).get().n) }));
+        check(counts.filter((c) => c.n > 0).map((c) => `${c.name} (${c.n})`), counts.find((c) => c.name === "records").n);
+      }
       driver.prepare(upsertMetaSql()).run(MOVE_FENCE_KEY, JSON.stringify(fence), (/* @__PURE__ */ new Date()).toISOString());
       driver.commit();
     } catch (e) {
@@ -10455,15 +10462,25 @@ function attachProject(plan, bridge, opts = {}) {
         writeSqliteFence(path, { ...existing, manifest_digest: buildManifest(snap).manifest.digest });
       local = { path, records, occupied, action: "already_fenced" };
     } else {
-      if (occupied.length > 0 && !plan.fenceLocal) {
-        throw new MoveAttachError("local_store", null, `${label} holds ${occupied.join(", ")}. After the attach this project reads only Postgres, so none of it would be reachable from it. Check what it is; to fence the file and attach anyway, pass --fence-local (the file is kept, and a later move back to SQLite from this machine replaces it). Nothing was changed.`);
-      }
-      if (!dryRun) {
+      const refuseOccupied = (held) => {
+        if (held.length === 0 || plan.fenceLocal)
+          return;
+        throw new MoveAttachError("local_store", null, `${label} holds ${held.join(", ")}. After the attach this project reads only Postgres, so none of it would be reachable from it. Check what it is; to fence the file and attach anyway, pass --fence-local (the file is kept, and a later move back to SQLite from this machine replaces it). Nothing was changed.`);
+      };
+      refuseOccupied(occupied);
+      if (dryRun) {
+        local = { path, records, occupied, action: "would_fence" };
+      } else {
+        opts.hooks?.beforeLocalFence?.(path);
         const fence = { move_id: randomUUID2(), to: target, fenced_at: (/* @__PURE__ */ new Date()).toISOString(), manifest_digest: null };
-        writeSqliteFence(path, fence);
+        let locked = { occupied, records };
+        writeSqliteFenceChecked(path, fence, (held, heldRecords) => {
+          refuseOccupied(held);
+          locked = { occupied: held, records: heldRecords };
+        });
         writeSqliteFence(path, { ...fence, manifest_digest: buildManifest(snapshotSqlite(path, label)).manifest.digest });
+        local = { path, ...locked, action: "fenced" };
       }
-      local = { path, records, occupied, action: dryRun ? "would_fence" : "fenced" };
     }
   }
   if (!dryRun)
