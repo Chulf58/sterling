@@ -11572,6 +11572,35 @@ export class SterlingTools {
           `mints these items only against ${ATTESTABLE_OWNER_TYPES.join(' / ')}) — there is nothing to attest against. Nothing was written.`
       );
     }
+    // A DOMAIN-HELD OWNER FALLS THROUGH TO ORDINARY REMOVAL (board b31dfafb).
+    // The item is project-local and the owner sits in another store, so no
+    // single transaction can stamp the owner's baseline and remove the item.
+    // Decision
+    // [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]
+    // makes maintenance_remove the close for that case: write the owner without
+    // `resolves`, check the lane is paid, then remove the item. Refusing here left
+    // an item keyed to a project record later superseded into a domain record
+    // with no route to close at all.
+    //
+    // Decided by the store that PHYSICALLY holds the live head, never by its body
+    // `scope` (anti_pattern [record-body-scope-is-not-physical-store-identity]):
+    // the project store must not hold it AND scopeOfHolder must name a domain
+    // mount. scopeOfHolder throws when no readable store, or more than one,
+    // holds the id; that refuses the close, as an unresolvable head always has.
+    // A project-held head keeps the attestation below unchanged, including its
+    // under-lock mount checks.
+    if (!this.store.projectStoreHolds(routing.id)) {
+      let holder: string;
+      try {
+        holder = this.store.scopeOfHolder(routing.id);
+      } catch (err) {
+        throw new Error(
+          `${op}: reconcile_needed item '${it.id}' links to the ${ATTESTABLE_OWNER_NOUN} '${routing.id}', which the project store does not ` +
+            `hold, and its holding store cannot be resolved (${err instanceof Error ? err.message : String(err)}). Nothing was written.`
+        );
+      }
+      if (holder.startsWith('domain:')) return undefined;
+    }
     // ALL GIT AND FILESYSTEM EVIDENCE IS COLLECTED HERE, OUTSIDE THE LOCK.
     // `git hash-object --path=` runs the repository's configured CLEAN FILTER,
     // which is an arbitrary program; running it while holding the store's single
