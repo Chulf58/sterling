@@ -10,7 +10,7 @@ This page is for the person who hands out access. A new user gets two things fro
 
    Send it through a private channel (a direct Teams message or a shared password manager entry, not a public channel or a ticket). Never commit it or put it in this repo, which is public. Everyone who has the file uses the same database login, so if one copy leaks, the password has to be changed and the file sent out again.
 
-2. **The prompt below**, with the values filled in. The user pastes it into OpenCode, running in WSL2, on their machine.
+2. **The prompt below**, with the values filled in. The user pastes it into OpenCode on their machine. It works on native Linux and on WSL2; on WSL2, `CREDENTIALS_FILE` can be a Windows path under `/mnt/c/`.
 
 A project can only be joined after it has moved to Served Postgres (`config.storage: postgres` on the machine that moved it). On 2026-10-07 only the Sterling repo itself has moved.
 
@@ -31,7 +31,7 @@ Stack tags decide which shared domains the project mounts. If they differ from t
 ## The prompt
 
 ```text
-Set up this machine so I can work in a Sterling project whose knowledge store is on the Served Postgres database. We are in WSL2 (Ubuntu). Run the steps below in order. Show me the output of each command. Stop at the first failure and tell me what failed. Never print, cat, copy into a repository, commit or paste the contents of the credentials file.
+Set up this machine so I can work in a Sterling project whose knowledge store is on the Served Postgres database. Run the steps below in order. Show me the output of each command. Stop at the first failure and tell me what failed. Never print, cat, copy into a repository, commit or paste the contents of the credentials file.
 
 Values:
 - Credentials file I was given: CREDENTIALS_FILE
