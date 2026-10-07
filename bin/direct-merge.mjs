@@ -12464,7 +12464,9 @@ function attestationDisclosureLines({ tool, result, declaredGlobs, subject, drop
 // scripts/direct-merge.mjs
 var target = arg("--target") ?? process.cwd();
 var linkedWorktree = resolveLinkedWorktree(target);
-var storeRoot = linkedWorktree ? linkedWorktree.mainRoot : target;
+var CONFIG_REL4 = ".sterling/config.json";
+var worktreeOnlyConfig = linkedWorktree && !existsSync8(join17(linkedWorktree.mainRoot, CONFIG_REL4)) && existsSync8(join17(linkedWorktree.worktree, CONFIG_REL4));
+var storeRoot = linkedWorktree && !worktreeOnlyConfig ? linkedWorktree.mainRoot : linkedWorktree ? linkedWorktree.worktree : target;
 var mode;
 var modeError;
 try {
@@ -12482,15 +12484,14 @@ function fail2(message, code = 1) {
 }
 stage("git-repo");
 if (!isGitRepo(target)) fail2(`direct-merge: not a git repository: '${target}'`);
-var CONFIG_REL4 = ".sterling/config.json";
 if (linkedWorktree && !existsSync8(join17(storeRoot, CONFIG_REL4))) {
   fail2(
-    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its project mode cannot be read \u2014 there is no ${CONFIG_REL4} at '${join17(linkedWorktree.worktree, CONFIG_REL4)}' or at the main checkout '${join17(storeRoot, CONFIG_REL4)}'. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its project mode cannot be read \u2014 there is no ${CONFIG_REL4} at '${join17(linkedWorktree.worktree, CONFIG_REL4)}' or at the main checkout '${join17(linkedWorktree.mainRoot, CONFIG_REL4)}'. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
 Run it from the main checkout, or restore its ${CONFIG_REL4}.`,
     2
   );
 }
-if (!linkedWorktree) {
+if (!linkedWorktree && !existsSync8(join17(target, CONFIG_REL4))) {
   const dirs = spawnSync8("git", ["rev-parse", "--git-dir", "--git-common-dir"], { cwd: target, encoding: "utf8", timeout: 6e4 });
   const [gitDir, commonDir] = dirs.status === 0 ? dirs.stdout.split("\n").map((l) => l.trim()) : [];
   if (gitDir && commonDir && realpathSync5(resolve8(target, gitDir)) !== realpathSync5(resolve8(target, commonDir))) {

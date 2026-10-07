@@ -250,6 +250,26 @@ test('linked worktree whose mode cannot be read anywhere: refuses with exit 2 na
   }
 });
 
+test('work-mode config only in the WORKTREE (none in the main checkout): it is read, not refused; the worktree becomes the store root', () => {
+  const p = makeProject({ mode: 'work', writeConfig: false });
+  try {
+    mkdirSync(join(p.wt, '.sterling'), { recursive: true });
+    writeFileSync(join(p.wt, '.sterling', 'config.json'), JSON.stringify({ mode: 'work' }));
+    new SterlingStore(join(p.wt, '.sterling', 'sterling.db')).close();
+    const r = runFromWorktree(p, ['--no-push']);
+    // The work-only --no-push refusal proves the mode resolved to work from the worktree's own config.
+    assert.equal(r.status, 2, `stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.mode, 'work');
+    assert.match(out.error, /--no-push is refused in WORK mode/);
+    assert.ok(!/cannot be read|never defaulted to hobby/.test(r.stderr), `not the unreadable-mode refusal: ${oneLine(r.stderr)}`);
+    assert.equal(existsSync(join(p.dir, 'battery-ran')), false, 'no hobby merge battery ran');
+    assert.equal(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'main did not move');
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('linked worktree of a BARE main (no main checkout to read the mode from): refuses with exit 2 naming the worktree and the common git dir, never hobby', () => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'sterling-dm-bare-')));
   try {
