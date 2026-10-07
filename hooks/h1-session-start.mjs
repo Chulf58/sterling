@@ -5631,15 +5631,6 @@ function readJsonObject(root, rel, ErrorClass, subject) {
   }
   return { where, parsed };
 }
-function readProjectMode(root) {
-  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
-  if (parsed === void 0 || parsed.mode === void 0)
-    return "hobby";
-  if (!PROJECT_MODES.includes(parsed.mode)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
-  }
-  return parsed.mode;
-}
 function readProjectIdentity(root) {
   const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
   if (parsed === void 0)
@@ -5649,24 +5640,16 @@ function readProjectIdentity(root) {
   }
   return { project_id: parsed.project_id };
 }
-var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd, UUID_V4_RE, isProjectId;
+var ProjectIdentityError, PROJECT_IDENTITY_REL, fwd, UUID_V4_RE, isProjectId;
 var init_project = __esm({
   "packages/schemas/dist/project.js"() {
     "use strict";
-    PROJECT_MODES = ["hobby", "work"];
-    ProjectModeError = class extends Error {
-      constructor(message) {
-        super(message);
-        this.name = "ProjectModeError";
-      }
-    };
     ProjectIdentityError = class extends Error {
       constructor(message) {
         super(message);
         this.name = "ProjectIdentityError";
       }
     };
-    CONFIG_REL = ".sterling/config.json";
     PROJECT_IDENTITY_REL = ".sterling/project.json";
     fwd = (p) => p.replace(/\\/g, "/");
     UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -10924,7 +10907,7 @@ var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
 var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
 var STORAGE_BACKENDS = ["sqlite", "postgres"];
 var MOVE_STORE_COMMAND = "node scripts/move-store.mjs --to pg|sqlite";
-var CONFIG_REL2 = ".sterling/config.json";
+var CONFIG_REL = ".sterling/config.json";
 var StoreSettingsError = class extends Error {
   constructor(message) {
     super(message);
@@ -10950,7 +10933,7 @@ function routedCredentialsPath() {
   return join10(homedir4(), ".sterling", "credentials", "served.json");
 }
 function readConfig(root) {
-  const path = join10(root, CONFIG_REL2);
+  const path = join10(root, CONFIG_REL);
   try {
     lstatSync3(path);
   } catch (e) {
@@ -11012,10 +10995,6 @@ function resolveStoreRoute(root) {
     return { storage: "sqlite", root: absRoot, config: config2, projectDbPath: join10(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config2) };
   }
   const shown = absRoot.replace(/\\/g, "/");
-  const mode = readProjectMode(absRoot);
-  if (mode !== "work") {
-    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node scripts/move-store.mjs --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
-  }
   const identity = readProjectIdentity(absRoot);
   if (identity === null) {
     throw new ProjectIdentityError(`storage 'postgres' needs the project identity file ${shown}/.sterling/project.json ({"project_id": "<uuid v4>"}); it is missing. Restore it from git, or let init write it. Nothing was opened.`);
@@ -11533,16 +11512,16 @@ function openRoutedForHook(root, { mount = false } = {}) {
 // scripts/hooks/lib/store-backend.mjs
 import { existsSync as existsSync4, readFileSync as readFileSync4 } from "node:fs";
 import { join as join11 } from "node:path";
-var CONFIG_REL3 = join11(".sterling", "config.json");
+var CONFIG_REL2 = join11(".sterling", "config.json");
 var STORE_DB_REL = join11(".sterling", "sterling.db");
 function isSterlingRoot(dir) {
-  return typeof dir === "string" && (existsSync4(join11(dir, CONFIG_REL3)) || existsSync4(join11(dir, STORE_DB_REL)));
+  return typeof dir === "string" && (existsSync4(join11(dir, CONFIG_REL2)) || existsSync4(join11(dir, STORE_DB_REL)));
 }
 function storeBackend(root) {
   const dbExists = () => existsSync4(join11(root, STORE_DB_REL));
   let text;
   try {
-    text = readFileSync4(join11(root, CONFIG_REL3), "utf8");
+    text = readFileSync4(join11(root, CONFIG_REL2), "utf8");
   } catch (e) {
     if (e?.code === "ENOENT") return "sqlite";
     return dbExists() ? "sqlite" : "routed";
@@ -13257,7 +13236,7 @@ var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/handoff-projection.mjs
 init_dist();
-var CONFIG_REL4 = ".sterling/config.json";
+var CONFIG_REL3 = ".sterling/config.json";
 var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
 var HandoffSettingError = class extends Error {
 };
@@ -13302,7 +13281,7 @@ function trackedHandoffFiles(root, { spawn: spawn3 = spawnSync3 } = {}) {
   }
   return { files, unknown: null };
 }
-function handoffSettingOf(parsed, root, where = CONFIG_REL4) {
+function handoffSettingOf(parsed, root, where = CONFIG_REL3) {
   const block = parsed?.handoff;
   if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
     throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);

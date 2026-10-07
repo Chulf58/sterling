@@ -5429,20 +5429,12 @@ var runtimeMarkerSchema = external_exports.object({
 // packages/schemas/dist/project.js
 import { lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-var PROJECT_MODES = ["hobby", "work"];
-var ProjectModeError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "ProjectModeError";
-  }
-};
 var ProjectIdentityError = class extends Error {
   constructor(message) {
     super(message);
     this.name = "ProjectIdentityError";
   }
 };
-var CONFIG_REL = ".sterling/config.json";
 var PROJECT_IDENTITY_REL = ".sterling/project.json";
 var fwd = (p) => p.replace(/\\/g, "/");
 var UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -5485,15 +5477,6 @@ function readJsonObject(root, rel2, ErrorClass, subject) {
     throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
   }
   return { where, parsed };
-}
-function readProjectMode(root) {
-  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
-  if (parsed === void 0 || parsed.mode === void 0)
-    return "hobby";
-  if (!PROJECT_MODES.includes(parsed.mode)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
-  }
-  return parsed.mode;
 }
 function readProjectIdentity(root) {
   const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
@@ -10419,7 +10402,7 @@ var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
 var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
 var STORAGE_BACKENDS = ["sqlite", "postgres"];
 var MOVE_STORE_COMMAND = "node scripts/move-store.mjs --to pg|sqlite";
-var CONFIG_REL2 = ".sterling/config.json";
+var CONFIG_REL = ".sterling/config.json";
 var StoreSettingsError = class extends Error {
   constructor(message) {
     super(message);
@@ -10445,7 +10428,7 @@ function routedCredentialsPath() {
   return join7(homedir3(), ".sterling", "credentials", "served.json");
 }
 function readConfig(root) {
-  const path = join7(root, CONFIG_REL2);
+  const path = join7(root, CONFIG_REL);
   try {
     lstatSync3(path);
   } catch (e) {
@@ -10507,10 +10490,6 @@ function resolveStoreRoute(root) {
     return { storage: "sqlite", root: absRoot, config, projectDbPath: join7(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
   }
   const shown = absRoot.replace(/\\/g, "/");
-  const mode = readProjectMode(absRoot);
-  if (mode !== "work") {
-    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node scripts/move-store.mjs --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
-  }
   const identity = readProjectIdentity(absRoot);
   if (identity === null) {
     throw new ProjectIdentityError(`storage 'postgres' needs the project identity file ${shown}/.sterling/project.json ({"project_id": "<uuid v4>"}); it is missing. Restore it from git, or let init write it. Nothing was opened.`);
@@ -11027,16 +11006,16 @@ function openRoutedForHook(root, { mount = false } = {}) {
 // scripts/hooks/lib/store-backend.mjs
 import { existsSync as existsSync3, readFileSync as readFileSync4 } from "node:fs";
 import { join as join8 } from "node:path";
-var CONFIG_REL3 = join8(".sterling", "config.json");
+var CONFIG_REL2 = join8(".sterling", "config.json");
 var STORE_DB_REL = join8(".sterling", "sterling.db");
 function isSterlingRoot(dir) {
-  return typeof dir === "string" && (existsSync3(join8(dir, CONFIG_REL3)) || existsSync3(join8(dir, STORE_DB_REL)));
+  return typeof dir === "string" && (existsSync3(join8(dir, CONFIG_REL2)) || existsSync3(join8(dir, STORE_DB_REL)));
 }
 function storeBackend(root) {
   const dbExists = () => existsSync3(join8(root, STORE_DB_REL));
   let text;
   try {
-    text = readFileSync4(join8(root, CONFIG_REL3), "utf8");
+    text = readFileSync4(join8(root, CONFIG_REL2), "utf8");
   } catch (e) {
     if (e?.code === "ENOENT") return "sqlite";
     return dbExists() ? "sqlite" : "routed";
