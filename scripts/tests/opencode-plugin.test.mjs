@@ -6,7 +6,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -1307,7 +1307,165 @@ test('inside a non-node host the worker runner is spawned with node from PATH; n
   }
 });
 
-test('live: OpenCode 2.0.21 shows the model the injected layer and an edit delivery', { skip: process.env.STERLING_OC_LIVE !== '1' }, async () => {
+// Postgres storage holds one routed store per project (store.mjs createProjectStores, board a0c89548).
+// No Postgres here: the routed opener is a counting test double standing in for
+// openRoutedStores(root).store. Each call to it is where routing acquires the bridge
+// (spawning a worker and connecting when none is alive), so its call count is the
+// number of bridge opens the plugin asks for. It returns a real SQLite-backed store
+// so every handler runs unchanged.
+function countingRoutedOpener({ failFirst } = {}) {
+  const calls = { opens: 0, closes: 0 };
+  const openRouted = (root) => {
+    calls.opens += 1;
+    if (failFirst && calls.opens === 1) throw failFirst;
+    const store = new SterlingStore(join(root, '.sterling', 'sterling.db'));
+    const close = store.close.bind(store);
+    store.close = () => {
+      calls.closes += 1;
+      close();
+    };
+    return store;
+  };
+  return { calls, openRouted };
+}
+
+const readCall = (dir, n) => ({ tool: 'read', sessionID: `ses_r${n}`, id: `c${n}`, input: { path: join(dir, 'src', 'a.mjs') } });
+
+test('on Postgres storage N plugin operations open the routed store once, keep it open between them, and the location cleanup closes it', async () => {
+  const p = makeProject();
+  try {
+    const { calls, openRouted } = countingRoutedOpener();
+    const projectStores = server.createProjectStores({ backend: () => 'routed', openRouted });
+    const { ctx, cleanup } = await setupPlugin(p.dir, { projectStores });
+    const ci = contextInput();
+    await ctx.hooks.session.context(ci);
+    assert.match(systemText(ci), /STERLING STATUS: board 1 open/);
+    const N = 6;
+    for (let i = 0; i < N; i += 1) {
+      const call = readCall(p.dir, i);
+      await ctx.hooks.tool['execute.before'](call);
+      const after = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'ok' }] } };
+      await ctx.hooks.tool['execute.after'](after);
+      assert.match(JSON.stringify(after.result.content), /alpha-feature/, `operation ${i} delivered from the held store`);
+    }
+    assert.equal(calls.opens, 1, `${N + 1} store operations opened the routed store once`);
+    assert.equal(calls.closes, 0, "the callers' close() left the held store open");
+    await cleanup();
+    assert.equal(calls.closes, 1, 'the location cleanup closed the held store');
+    await ctx.hooks.tool['execute.before'](readCall(p.dir, 'after'));
+    assert.equal(calls.opens, 2, 'an operation after the cleanup opens a new routed store');
+    projectStores.release(p.dir);
+    assert.equal(calls.closes, 2);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('on Postgres storage the location cleanup closes the held store even after the project stopped being a Sterling root', async () => {
+  const p = makeProject();
+  try {
+    const { calls, openRouted } = countingRoutedOpener();
+    const projectStores = server.createProjectStores({ backend: () => 'routed', openRouted });
+    const { ctx, cleanup } = await setupPlugin(p.dir, { projectStores });
+    await ctx.hooks.tool['execute.before'](readCall(p.dir, 'r'));
+    assert.equal(calls.opens, 1);
+    renameSync(join(p.dir, '.sterling'), join(p.dir, '.sterling-moved'));
+    assert.equal(existsSync(join(p.dir, '.sterling', 'config.json')), false, 'the directory is no longer a Sterling root');
+    await cleanup();
+    assert.equal(calls.closes, 1, 'the cleanup released the root found at bind');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('on Postgres storage a failed routed open surfaces the named error, holds nothing, and the next operation retries', async () => {
+  const p = makeProject();
+  try {
+    const { StoreUnreachableError } = await import(pathToFileURL(join(repo, 'packages', 'store', 'dist', 'routing.js')).href);
+    const { calls, openRouted } = countingRoutedOpener({ failFirst: new StoreUnreachableError('db.invalid:5432/sterling', 'connect ECONNREFUSED') });
+    const projectStores = server.createProjectStores({ backend: () => 'routed', openRouted });
+    const { ctx, cleanup } = await setupPlugin(p.dir, { projectStores });
+    await ctx.hooks.tool['execute.before'](readCall(p.dir, 'f1'));
+    assert.match(
+      readFileSync(join(p.dir, server.LOG_REL), 'utf8'),
+      /delivery failed: storage 'postgres': the Postgres store database at db\.invalid:5432\/sterling is unreachable \(connect ECONNREFUSED\)\. Postgres storage never falls back to SQLite/,
+    );
+    assert.match(readFileSync(join(p.dir, server.NOTICES_REL), 'utf8'), /is unreachable/, 'the failure is a notice too');
+    const second = readCall(p.dir, 'f2');
+    await ctx.hooks.tool['execute.before'](second);
+    const after = { ...second, status: 'completed', result: { content: [{ type: 'text', text: 'ok' }] } };
+    await ctx.hooks.tool['execute.after'](after);
+    assert.equal(calls.opens, 2, 'the second operation retried the open');
+    assert.match(JSON.stringify(after.result.content), /alpha-feature/, 'and ran on the store it opened');
+    await cleanup();
+    assert.equal(calls.closes, 1);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('a held routed store whose bridge is gone fails that call loud, is closed and dropped, and the next open reconnects', async () => {
+  const { PgWorkerDiedError } = await import(pathToFileURL(join(repo, 'packages', 'store', 'dist', 'index.js')).href);
+  let opens = 0;
+  const fakes = [];
+  const openRouted = () => {
+    opens += 1;
+    const fake = {
+      dead: false,
+      closes: 0,
+      count() {
+        if (this.dead) throw new PgWorkerDiedError('the connection was lost');
+        return 7;
+      },
+      fail() {
+        throw new Error('a statement error that leaves the bridge alive');
+      },
+      close() {
+        this.closes += 1;
+      },
+    };
+    fakes.push(fake);
+    return fake;
+  };
+  const projectStores = server.createProjectStores({ backend: () => 'routed', openRouted });
+  const dbPath = join(tmpdir(), 'held-store-project', '.sterling', 'sterling.db');
+  const a = projectStores.open(dbPath);
+  assert.equal(a.count(), 7);
+  a.close();
+  assert.equal(fakes[0].closes, 0, "a caller's close() does not close the held store");
+  assert.throws(() => projectStores.open(dbPath).fail(), /leaves the bridge alive/);
+  assert.equal(fakes[0].closes, 0, 'an ordinary statement error keeps the held store');
+  assert.equal(opens, 1);
+  fakes[0].dead = true;
+  assert.throws(() => projectStores.open(dbPath).count(), PgWorkerDiedError);
+  assert.equal(fakes[0].closes, 1, 'the dead store was closed once');
+  assert.equal(projectStores.open(dbPath).count(), 7, 'the next operation opened a new connection');
+  assert.equal(opens, 2);
+  assert.equal(fakes[1].closes, 0);
+});
+
+test('on SQLite storage the project stores open a new store per call and close() closes it, as before', () => {
+  const p = makeProject();
+  try {
+    const projectStores = server.createProjectStores();
+    const dbPath = join(p.dir, '.sterling', 'sterling.db');
+    const a = projectStores.open(dbPath);
+    const b = projectStores.open(dbPath);
+    try {
+      assert.ok(a instanceof SterlingStore);
+      assert.notEqual(a, b, 'a new store per call');
+      assert.equal(a['db'].prepare('PRAGMA busy_timeout').get().timeout, 1000);
+    } finally {
+      a.close();
+      b.close();
+    }
+    assert.throws(() => a.count({ types: ['todo'] }), 'close() closed it');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('live: OpenCode 2.0.21 shows the model the injected layer and an edit delivery',{ skip: process.env.STERLING_OC_LIVE !== '1' }, async () => {
   const ocDir = process.env.STERLING_OC_DIR;
   assert.ok(ocDir && existsSync(join(ocDir, 'node_modules', '@opencode', 'cli')), 'STERLING_OC_DIR must point at the OpenCode 2.0.21 scratch install');
   const r = spawnSync('bash', [join(repo, 'scripts', 'tests', 'lib', 'opencode-live-smoke.sh'), ocDir, join(repo, 'opencode', 'sterling-server.mjs')], { encoding: 'utf8', timeout: 400_000 });

@@ -1,11 +1,11 @@
 ---
 name: move-store
-description: Move a project's knowledge, with its mounted domains, from SQLite to Postgres or back with scripts/move-store.mjs. Use when the user wants a work project on Postgres, wants a project back on SQLite because it became a hobby project or the Served database is closing, wants a second machine to join a project already on Postgres, or asks what a store move does, why a write was refused with StoreMovedError, or how to recover a move that crashed.
+description: Move a project's knowledge, with its mounted domains, from SQLite to Postgres or back with bin/move-store.mjs. Use when the user wants a work project on Postgres, wants a project back on SQLite because it became a hobby project or the Served database is closing, wants a second machine to join a project already on Postgres, or asks what a store move does, why a write was refused with StoreMovedError, or how to recover a move that crashed.
 ---
 
 # Moving a project's store SOP
 
-Decisions `store-move-skill-two-way-one-direction-at-a-time-no-live-sync` and `storage-backend-is-its-own-config-key-written-only-by-store-move`. The command is `node "${CLAUDE_PLUGIN_ROOT}/scripts/move-store.mjs" --to pg|sqlite [--dry-run] [--project <dir>]`, called "the move" below. Work the steps in order.
+Decisions `store-move-skill-two-way-one-direction-at-a-time-no-live-sync` and `storage-backend-is-its-own-config-key-written-only-by-store-move`. The command is `node "${CLAUDE_PLUGIN_ROOT}/bin/move-store.mjs" --to pg|sqlite [--dry-run] [--project <dir>]`, called "the move" below. Work the steps in order.
 
 ## 1. What the move does
 
@@ -41,7 +41,7 @@ Never read or print the contents of `served.json`. Check that the file exists an
 
 Run the move with `--dry-run` and the direction the user wants:
 
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/move-store.mjs" --to <pg|sqlite> --dry-run`
+`node "${CLAUDE_PLUGIN_ROOT}/bin/move-store.mjs" --to <pg|sqlite> --dry-run`
 
 A dry run reads every store and fences nothing. It writes no receipt and does not change `config.storage`. Show the user the report, not a summary of it. Point out:
 
@@ -57,7 +57,7 @@ Put the choice to the user through ONE AskUserQuestion form, with the dry-run re
 
 Then run the same command without `--dry-run`:
 
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/move-store.mjs" --to <pg|sqlite>`
+`node "${CLAUDE_PLUGIN_ROOT}/bin/move-store.mjs" --to <pg|sqlite>`
 
 Each store is checked read-only first, so a refusal anywhere stops the run before any store is fenced. Then each store is fenced on the side it leaves, copied, compared against a content-hash manifest of both sides and given a receipt. `config.storage` is written last. Check before moving on: no `FAILED` line, every store shows `hash match: yes`, and the last lines read `config.storage switched to <backend>` and `config.mode unchanged (<mode>)`.
 
@@ -106,7 +106,7 @@ A usage error exits 2 and prints the usage line; any other failure exits 1.
 
 Decision `second-machine-attaches-to-a-postgres-project-through-move-store-attach`. Use this when one machine already moved a work project to Postgres and the user now has a fresh clone of that project on another machine. The clone has the committed `.sterling/project.json`, but its own `.sterling/config.json` is not in git and has no `config.storage`, so the clone still reads SQLite. Do not run `--to pg` there: the clone's SQLite store is not the one that was moved, so the move refuses it. Do not set `config.storage` by hand either.
 
-The command is `node "${CLAUDE_PLUGIN_ROOT}/scripts/move-store.mjs" --attach [--fence-local] [--dry-run] [--project <dir>]`. It copies no data. It checks the same things the move checks first (work mode, `project.json`, the credentials file, the schema names), then checks each Postgres store the project uses: the project schema and the schema of every mounted domain. Each one must be registered, must have a complete move receipt from that same store, and must not be fenced. The first store that fails stops the attach, and the refusal names the schema and the check. Before it writes anything, the attach reads the config again and refuses if the project's mounted domains changed while it ran. If every check passes, the attach writes `config.storage = postgres` and nothing else in the config.
+The command is `node "${CLAUDE_PLUGIN_ROOT}/bin/move-store.mjs" --attach [--fence-local] [--dry-run] [--project <dir>]`. It copies no data. It checks the same things the move checks first (work mode, `project.json`, the credentials file, the schema names), then checks each Postgres store the project uses: the project schema and the schema of every mounted domain. Each one must be registered, must have a complete move receipt from that same store, and must not be fenced. The first store that fails stops the attach, and the refusal names the schema and the check. Before it writes anything, the attach reads the config again and refuses if the project's mounted domains changed while it ran. If every check passes, the attach writes `config.storage = postgres` and nothing else in the config.
 
 Steps:
 

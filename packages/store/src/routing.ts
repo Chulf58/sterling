@@ -68,7 +68,7 @@ export const STORAGE_BACKENDS = ['sqlite', 'postgres'] as const;
 export type StorageBackend = (typeof STORAGE_BACKENDS)[number];
 
 /** The one command that moves a project's stores and writes config.storage. */
-export const MOVE_STORE_COMMAND = 'node scripts/move-store.mjs --to pg|sqlite';
+export const MOVE_STORE_COMMAND = 'node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite';
 
 const CONFIG_REL = '.sterling/config.json';
 
@@ -99,7 +99,7 @@ export class StoreUnreachableError extends Error {
 export class PostgresStoreNotMovedError extends PgStoreMissingError {
   constructor(cause: PgStoreMissingError) {
     super(cause.schema, 'see the message');
-    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node scripts/move-store.mjs --to pg\`. Nothing was created.`;
+    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node "<Sterling root>/bin/move-store.mjs" --to pg\`. Nothing was created.`;
     this.name = 'PostgresStoreNotMovedError';
   }
 }
@@ -225,7 +225,7 @@ export function resolveStoreRoute(root: string): StoreRoute | null {
   if (mode !== 'work') {
     throw new StoreSettingsError(
       `config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL}: Postgres storage is valid only in a work-mode project. ` +
-        `Move the stores back with \`node scripts/move-store.mjs --to sqlite\`, or set mode to 'work'. Nothing was opened.`,
+        `Move the stores back with \`node "<Sterling root>/bin/move-store.mjs" --to sqlite\`, or set mode to 'work'. Nothing was opened.`,
     );
   }
   const identity = readProjectIdentity(absRoot);

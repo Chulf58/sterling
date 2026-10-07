@@ -70,7 +70,7 @@ for (const path of ['storage', 'storage.backend']) {
       const text = (r.content as { text: string }[])[0].text;
       assert.match(text, /cannot be written directly/);
       assert.match(text, /explicit storage transition/);
-      assert.match(text, /node scripts\/move-store\.mjs --to pg\|sqlite/, 'the refusal names the command that moves the stores');
+      assert.match(text, /node "<Sterling root>\/bin\/move-store\.mjs" --to pg\|sqlite/, 'the refusal names the command that moves the stores');
       assert.equal(readFileSync(join(root, '.sterling', 'config.json'), 'utf8'), before, 'nothing was written');
     } finally {
       await close();
