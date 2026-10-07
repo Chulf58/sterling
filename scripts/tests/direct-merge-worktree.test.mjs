@@ -90,7 +90,7 @@ process.exit(r.status ?? 128);
 /** A main checkout on `main` (bare origin, .sterling/ with the given mode and an
  * initialised store, a `check` script that drops a marker file when it runs), and
  * a LINKED worktree of it on a feature branch with one commit. */
-function makeProject({ mode, config = {} }) {
+function makeProject({ mode, config = {}, writeConfig = true }) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'sterling-dm-wt-')));
   const dir = join(base, 'repo');
   const wt = join(base, 'wt');
@@ -116,7 +116,7 @@ function makeProject({ mode, config = {} }) {
   git(dir, ['remote', 'add', 'origin', ORIGIN_URL]);
   git(dir, ['push', 'origin', 'main'], env);
   mkdirSync(join(dir, '.sterling'), { recursive: true });
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode, ...config }));
+  if (writeConfig) writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode, ...config }));
   new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
   git(dir, ['worktree', 'add', '-b', 'feat/sprockets', wt]);
   writeFileSync(join(wt, 'src', 'f0.mjs'), 'export const f0 = 0;\n');
@@ -213,5 +213,82 @@ test('work from a linked worktree: the store and mode come from the main checkou
     assert.ok(!/ATTESTATION DISCLOSURE UNAVAILABLE/.test(r.stderr), `the attestation store is the main checkout's, not the worktree's — stderr=${oneLine(r.stderr)}`);
   } finally {
     p.cleanup();
+  }
+});
+
+test('work-mode config only in the main checkout, none in the worktree: the gate resolves WORK from the main checkout, never hobby', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    assert.equal(existsSync(join(p.wt, '.sterling', 'config.json')), false, 'fixture: the worktree has no config of its own');
+    const r = runFromWorktree(p, ['--no-push']);
+    // --no-push is refused in WORK mode only, so seeing that refusal proves the mode resolved to work.
+    assert.equal(r.status, 2, `stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.mode, 'work');
+    assert.match(out.error, /--no-push is refused in WORK mode/);
+    assert.equal(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'main did not move');
+    assert.equal(existsSync(join(p.dir, 'battery-ran')), false, 'no hobby merge battery ran');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('linked worktree whose mode cannot be read anywhere: refuses with exit 2 naming both config paths, never defaults to hobby; nothing moves', () => {
+  const p = makeProject({ mode: 'work', writeConfig: false });
+  try {
+    const r = runFromWorktree(p);
+    assert.equal(r.status, 2, `exit 2 — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.ok(r.stderr.includes(join(p.wt, '.sterling', 'config.json')), `names the worktree config path: ${oneLine(r.stderr)}`);
+    assert.ok(r.stderr.includes(join(p.dir, '.sterling', 'config.json')), `names the main checkout config path: ${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /never defaulted to hobby/);
+    assert.ok(!/worktree remove/.test(r.stderr), `not the hobby refusal: ${oneLine(r.stderr)}`);
+    assert.equal(existsSync(join(p.dir, 'battery-ran')), false, 'no battery ran');
+    assert.equal(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'main did not move');
+    assert.equal(git(p.origin, ['rev-parse', 'main']), p.originMainSha, 'origin main did not move');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work-mode config only in the WORKTREE (none in the main checkout): it is read, not refused; the worktree becomes the store root', () => {
+  const p = makeProject({ mode: 'work', writeConfig: false });
+  try {
+    mkdirSync(join(p.wt, '.sterling'), { recursive: true });
+    writeFileSync(join(p.wt, '.sterling', 'config.json'), JSON.stringify({ mode: 'work' }));
+    new SterlingStore(join(p.wt, '.sterling', 'sterling.db')).close();
+    const r = runFromWorktree(p, ['--no-push']);
+    // The work-only --no-push refusal proves the mode resolved to work from the worktree's own config.
+    assert.equal(r.status, 2, `stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.mode, 'work');
+    assert.match(out.error, /--no-push is refused in WORK mode/);
+    assert.ok(!/cannot be read|never defaulted to hobby/.test(r.stderr), `not the unreadable-mode refusal: ${oneLine(r.stderr)}`);
+    assert.equal(existsSync(join(p.dir, 'battery-ran')), false, 'no hobby merge battery ran');
+    assert.equal(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'main did not move');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('linked worktree of a BARE main (no main checkout to read the mode from): refuses with exit 2 naming the worktree and the common git dir, never hobby', () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'sterling-dm-bare-')));
+  try {
+    const bare = join(base, 'bare.git');
+    const wt = join(base, 'wt');
+    git(base, ['init', '--bare', '-b', 'main', bare]);
+    git(bare, ['config', 'user.email', 'test@sterling.local']);
+    git(bare, ['config', 'user.name', 'Sterling Test']);
+    git(bare, ['worktree', 'add', '--orphan', '-b', 'feat/x', wt]);
+    writeFileSync(join(wt, 'a.txt'), 'a\n');
+    git(wt, ['add', '-A']);
+    git(wt, ['commit', '-m', 'feat: a']);
+    assert.equal(resolveLinkedWorktree(wt), null, 'fixture: no main checkout can be named');
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'direct-merge.mjs'), '--target', wt], { encoding: 'utf8', cwd: wt, timeout: 60_000 });
+    assert.equal(r.status, 2, `exit 2 — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.ok(r.stderr.includes(wt), `names the worktree: ${oneLine(r.stderr)}`);
+    assert.ok(r.stderr.includes(bare), `names the common git dir: ${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /never defaulted to hobby/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
 });
