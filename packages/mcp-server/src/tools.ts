@@ -4604,7 +4604,8 @@ export class SterlingTools {
         // files[].entry and EntryReachability looks it up (see that module for
         // the per-kind registries and what the lookup does not catch):
         //  - wired_in/active with an entry no registry reaches;
-        //  - wired_in/active with no entry marked;
+        //  - wired_in/active with no entry marked, when at least one files[] path
+        //    is one a registry could judge (or files[] is empty);
         //  - built with an entry a registry DOES reach (it looks wired_in).
         // An entry of a kind no registry covers (a library), and every entry outside a
         // Sterling clone, is not judged. All
@@ -4622,7 +4623,13 @@ export class SterlingTools {
             ? entries.map((f) => reachabilityFor(treeRoot).judge(f.path, f.role ?? '')).filter((v): v is EntryVerdict => v !== null)
             : [];
         const unreached = claimsReach ? verdicts.filter((v) => !v.reached) : [];
-        const missingEntry = claimsReach && entries.length === 0;
+        // No entry is demanded of an article none of whose files could be one:
+        // every files[] path judge() returns null for (a library, a concept file,
+        // a nested script, or any path in a tree that is not a Sterling clone)
+        // leaves nothing to mark, so the item could never be paid. An article
+        // with no files[] at all is real metadata debt and still mints.
+        const hasJudgeablePath = files.some((f) => reachabilityFor(treeRoot).judge(f.path, f.role ?? '') !== null);
+        const missingEntry = claimsReach && entries.length === 0 && (files.length === 0 || hasJudgeablePath);
         const looksWired = state === 'built' ? verdicts.filter((v) => v.reached) : [];
         if (overStated || unverifiedPaths.length || unreached.length || missingEntry || looksWired.length) {
           const reasons: string[] = [];
