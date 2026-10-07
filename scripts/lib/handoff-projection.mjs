@@ -68,6 +68,29 @@ function readRawConfig(root, ErrorClass, subject) {
   return { where, parsed };
 }
 
+// Where the project's stores live (decision
+// storage-backend-is-its-own-config-key-written-only-by-store-move):
+// config.storage is 'sqlite' or 'postgres', and absent means 'sqlite'. A guard
+// that must not run against a Postgres store judges by this, never by
+// config.mode, which only picks the shipping flow. The value is never guessed:
+// any other value, a config that is not a JSON object, or a symlinked config
+// throws ProjectStorageError.
+export class ProjectStorageError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ProjectStorageError';
+  }
+}
+export function readProjectStorage(root) {
+  const { where, parsed } = readRawConfig(root, ProjectStorageError, 'the project storage');
+  const storage = parsed?.storage;
+  if (storage === undefined) return 'sqlite';
+  if (storage !== 'sqlite' && storage !== 'postgres') {
+    throw new ProjectStorageError(`config.storage is ${JSON.stringify(storage)} in ${where} — it must be 'sqlite' or 'postgres'`);
+  }
+  return storage;
+}
+
 // The handoff setting (decision
 // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
 // config.handoff.enabled decides whether Sterling writes the files for

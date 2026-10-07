@@ -7,11 +7,11 @@ var __export = (target, all) => {
 };
 
 // scripts/migrate-stores.mjs
-import { existsSync, openSync as openSync2, readSync, closeSync as closeSync2, writeFileSync, readdirSync as readdirSync2, readFileSync as readFileSync3, statSync } from "node:fs";
+import { existsSync, openSync as openSync2, readSync, closeSync as closeSync2, writeFileSync, readdirSync as readdirSync2, readFileSync as readFileSync2, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
-import { basename, dirname, join as join3, resolve as resolve3 } from "node:path";
+import { basename, dirname, join as join4, resolve as resolve4 } from "node:path";
 
 // scripts/lib/store-path.mjs
 import { lstatSync, realpathSync } from "node:fs";
@@ -141,8 +141,53 @@ function resolveStoreWritePath(root, ...segments) {
   return target;
 }
 
+// scripts/lib/handoff-projection.mjs
+import { join as join3, resolve as resolve3 } from "node:path";
+
 // scripts/lib/contained-fs.mjs
 import { lstatSync as lstatSync2, readFileSync, readdirSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, constants } from "node:fs";
+import { join as join2, resolve as resolve2 } from "node:path";
+var ContainmentError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ContainmentError";
+  }
+};
+var lstatOrNull = (p) => {
+  try {
+    return lstatSync2(p);
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    throw e;
+  }
+};
+function containedPath(root, rel, leaf) {
+  const segments = rel.split("/").filter(Boolean);
+  if (!segments.length || segments.some((s) => s === ".." || s === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
+  let cursor = resolve2(root);
+  for (const [index, part] of segments.entries()) {
+    cursor = join2(cursor, part);
+    const st = lstatOrNull(cursor);
+    if (!st) break;
+    const isLeaf = index === segments.length - 1;
+    const wantDir = !isLeaf || leaf === "dir";
+    if (st.isSymbolicLink()) throw new ContainmentError(`${segments.slice(0, index + 1).join("/")} is a symlink \u2014 refusing to follow it out of the project`);
+    if (wantDir && !st.isDirectory()) throw new ContainmentError(`${segments.slice(0, index + 1).join("/")} exists but is not a directory`);
+    if (!wantDir && !st.isFile()) throw new ContainmentError(`${rel} exists but is not a regular file`);
+  }
+  try {
+    return resolveStoreWritePath(root, ...segments);
+  } catch (e) {
+    if (e instanceof StorePathContainmentError) throw new ContainmentError(`${rel}: ${e.message.replace(/^resolveStoreWritePath: /, "")}`);
+    throw e;
+  }
+}
+function existsContained(root, rel, leaf) {
+  return lstatOrNull(containedPath(root, rel, leaf)) !== null;
+}
+function readContained(root, rel) {
+  return readFileSync(containedPath(root, rel, "file"), "utf8");
+}
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // node_modules/zod/v3/external.js
@@ -5359,67 +5404,6 @@ var runtimeMarkerSchema = external_exports.object({
   booted_at: external_exports.string()
 }).strict();
 
-// packages/schemas/dist/project.js
-import { lstatSync as lstatSync3, readFileSync as readFileSync2 } from "node:fs";
-import { join as join2, resolve as resolve2 } from "node:path";
-var PROJECT_MODES = ["hobby", "work"];
-var ProjectModeError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "ProjectModeError";
-  }
-};
-var CONFIG_REL = ".sterling/config.json";
-var fwd = (p) => p.replace(/\\/g, "/");
-function readContainedText(root, rel, ErrorClass, subject) {
-  const segments = rel.split("/");
-  let cursor = resolve2(root);
-  for (const [index, part] of segments.entries()) {
-    cursor = join2(cursor, part);
-    let st;
-    try {
-      st = lstatSync3(cursor);
-    } catch (err) {
-      if (err?.code === "ENOENT")
-        return null;
-      throw err;
-    }
-    const shown = segments.slice(0, index + 1).join("/");
-    const isLeaf = index === segments.length - 1;
-    if (st.isSymbolicLink())
-      throw new ErrorClass(`${shown} is a symlink \u2014 refusing to follow it out of the project; ${subject} cannot be read`);
-    if (isLeaf ? !st.isFile() : !st.isDirectory()) {
-      throw new ErrorClass(`${shown} exists but is not a ${isLeaf ? "regular file" : "directory"} \u2014 ${subject} cannot be read`);
-    }
-  }
-  return readFileSync2(cursor, "utf8");
-}
-function readJsonObject(root, rel, ErrorClass, subject) {
-  const where = `${fwd(resolve2(root))}/${rel}`;
-  const text = readContainedText(root, rel, ErrorClass, subject);
-  if (text === null)
-    return { where, parsed: void 0 };
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (err) {
-    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
-  }
-  return { where, parsed };
-}
-function readProjectMode(root) {
-  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
-  if (parsed === void 0 || parsed.mode === void 0)
-    return "hobby";
-  if (!PROJECT_MODES.includes(parsed.mode)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
-  }
-  return parsed.mode;
-}
-
 // packages/schemas/dist/broker.js
 var BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
 var BROKER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -5468,6 +5452,37 @@ var brokerResultSchema = external_exports.union([
 ]);
 
 // scripts/lib/handoff-projection.mjs
+var fwd = (p) => p.replace(/\\/g, "/");
+var CONFIG_REL = ".sterling/config.json";
+function readRawConfig(root, ErrorClass, subject) {
+  const where = `${fwd(resolve3(root))}/${CONFIG_REL}`;
+  if (!existsContained(root, CONFIG_REL, "file")) return { where, parsed: void 0 };
+  let parsed;
+  try {
+    parsed = JSON.parse(readContained(root, CONFIG_REL));
+  } catch (err) {
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
+  }
+  return { where, parsed };
+}
+var ProjectStorageError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectStorageError";
+  }
+};
+function readProjectStorage(root) {
+  const { where, parsed } = readRawConfig(root, ProjectStorageError, "the project storage");
+  const storage = parsed?.storage;
+  if (storage === void 0) return "sqlite";
+  if (storage !== "sqlite" && storage !== "postgres") {
+    throw new ProjectStorageError(`config.storage is ${JSON.stringify(storage)} in ${where} \u2014 it must be 'sqlite' or 'postgres'`);
+  }
+  return storage;
+}
 var HANDOFF_DOCS_DIR = "docs/sterling";
 var HANDOFF_MARKER = "<!-- GENERATED by Sterling handoff projection";
 var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NOT EDIT.
@@ -5791,7 +5806,7 @@ function enumerateStores() {
   const seen = /* @__PURE__ */ new Map();
   const unreadable = [];
   const add = (path, origin) => {
-    const resolved = resolve3(path);
+    const resolved = resolve4(path);
     if (!seen.has(resolved)) seen.set(resolved, origin);
   };
   const registryExplicit = process.env.STERLING_REGISTRY_DB !== void 0;
@@ -5826,7 +5841,7 @@ function enumerateStores() {
         add(storeDbPath, `project '${repoPath2}'`);
         if (!existsSync(configPath)) continue;
         try {
-          const config = JSON.parse(readFileSync3(configPath, "utf8"));
+          const config = JSON.parse(readFileSync2(configPath, "utf8"));
           if (config?.stack_tags !== void 0 && !Array.isArray(config.stack_tags)) {
             throw new Error(`'stack_tags' must be an array, got ${typeof config.stack_tags}`);
           }
@@ -5838,7 +5853,7 @@ function enumerateStores() {
             }
             let domainDbPath;
             if (rawMount) {
-              domainDbPath = resolve3(repoPath2, rawMount);
+              domainDbPath = resolve4(repoPath2, rawMount);
             } else {
               domainDbPath = resolveStoreWritePath(homedir(), ".sterling", "domains", tag, "sterling.db");
             }
@@ -5874,16 +5889,16 @@ function enumerateStores() {
       continue;
     }
     for (const name of names) {
-      const entryPath = join3(domainsRoot, name);
+      const entryPath = join4(domainsRoot, name);
       let isDirectory;
       try {
         isDirectory = statSync(entryPath).isDirectory();
       } catch (e) {
-        unreadable.push({ origin: `domain '${name}' (${domainsRoot} root)`, error: e.message, path: join3(entryPath, "sterling.db") });
+        unreadable.push({ origin: `domain '${name}' (${domainsRoot} root)`, error: e.message, path: join4(entryPath, "sterling.db") });
         continue;
       }
       if (!isDirectory) continue;
-      add(join3(entryPath, "sterling.db"), `domain '${name}' (${domainsRoot} root)`);
+      add(join4(entryPath, "sterling.db"), `domain '${name}' (${domainsRoot} root)`);
     }
   }
   return { candidates: [...seen.entries()].map(([path, origin]) => ({ path, origin })), unreadable };
@@ -5945,18 +5960,18 @@ function runAllStores() {
   console.error(JSON.stringify({ total: candidates.length + unreadable.length, migrated, already, failed, missing }));
   process.exit(failed === 0 ? 0 : 1);
 }
-function workModeRefusal(dbPath) {
-  const abs = resolve3(dbPath);
+function postgresStorageRefusal(dbPath) {
+  const abs = resolve4(dbPath);
   if (basename(dirname(abs)) !== ".sterling") return null;
   const projectRoot = dirname(dirname(abs));
-  let mode;
+  let storage;
   try {
-    mode = readProjectMode(projectRoot);
+    storage = readProjectStorage(projectRoot);
   } catch {
     return null;
   }
-  if (mode !== "work") return null;
-  return `refusing '${dbPath}' \u2014 this migration is hobby-only: the project at '${projectRoot}' is in mode 'work', whose stores live in Postgres with their schema version in the sterling_meta registry. Nothing was read or written.`;
+  if (storage !== "postgres") return null;
+  return `refusing '${dbPath}' \u2014 this migration is SQLite-only: the project at '${projectRoot}' has config.storage 'postgres', whose stores live in Postgres with their schema version in the sterling_meta registry. Nothing was read or written.`;
 }
 function main() {
   if (hasFlag("all-stores")) {
@@ -5965,8 +5980,8 @@ function main() {
   const dbPath = arg("db");
   if (!dbPath) return fail("--db <path-to-sterling.db> is required (or --all-stores, for a machine-wide sweep)");
   if (!existsSync(dbPath)) return fail(`no db file at '${dbPath}' \u2014 nothing was read, nothing was created`);
-  const modeRefusal = workModeRefusal(dbPath);
-  if (modeRefusal) return fail(modeRefusal);
+  const storageRefusal = postgresStorageRefusal(dbPath);
+  if (storageRefusal) return fail(storageRefusal);
   const elections = parseElections();
   const invokedBy = arg("invoked-by") ?? "direct";
   const probe = probeSchemaVersion(dbPath);

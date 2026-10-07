@@ -12849,6 +12849,21 @@ function readRawConfig(root, ErrorClass, subject) {
   }
   return { where, parsed };
 }
+var ProjectStorageError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectStorageError";
+  }
+};
+function readProjectStorage(root) {
+  const { where, parsed } = readRawConfig(root, ProjectStorageError, "the project storage");
+  const storage = parsed?.storage;
+  if (storage === void 0) return "sqlite";
+  if (storage !== "sqlite" && storage !== "postgres") {
+    throw new ProjectStorageError(`config.storage is ${JSON.stringify(storage)} in ${where} \u2014 it must be 'sqlite' or 'postgres'`);
+  }
+  return storage;
+}
 var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
 var HANDOFF_OFF_DETAIL = "handoff files are off (config.handoff.enabled is not true: the portable OpenCode agents and the handoff projection are not written; existing files are no longer maintained, and nothing is deleted)";
 var HandoffSettingError = class extends Error {
@@ -12940,14 +12955,21 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 // scripts/lib/project-identity.mjs
 init_dist();
 function workIdentityRefusal(root, mode) {
-  if (mode !== "work") return null;
+  let onPostgres;
+  try {
+    onPostgres = readProjectStorage(root) === "postgres";
+  } catch (err) {
+    return `project storage cannot be read: ${err.message}`;
+  }
+  if (mode !== "work" && !onPostgres) return null;
+  const subject = mode === "work" ? "work-mode project" : "project with storage postgres";
   try {
     if (readProjectIdentity(root)) return null;
   } catch (err) {
     if (!(err instanceof ProjectIdentityError)) throw err;
-    return `work-mode project has an invalid ${PROJECT_IDENTITY_REL}: ${err.message}`;
+    return `${subject} has an invalid ${PROJECT_IDENTITY_REL}: ${err.message}`;
   }
-  return `work-mode project has no ${PROJECT_IDENTITY_REL}: run /sterling:init in the project to create its identity (init never overwrites an existing file), then commit the file`;
+  return `${subject} has no ${PROJECT_IDENTITY_REL}: run /sterling:init in the project to create its identity (init never overwrites an existing file), then commit the file`;
 }
 var IGNORE_DIR = ".sterling/";
 var IGNORE_ALL = ".sterling/*";

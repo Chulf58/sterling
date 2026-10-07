@@ -103,16 +103,39 @@ test('ensureProjectIdentity: creates a UUID v4 file when absent, never overwrite
   assert.equal(readFileSync(identityPath(dir), 'utf8'), '{ broken');
 });
 
-test('workIdentityRefusal: only a work project is checked; missing and invalid are named refusals', () => {
+test('workIdentityRefusal: a work project or a Postgres-storage project is checked; missing and invalid are named refusals', () => {
   const dir = scratch();
   mkdirSync(join(dir, '.sterling'));
-  assert.equal(workIdentityRefusal(dir, 'hobby'), null, 'hobby is never checked');
+  assert.equal(workIdentityRefusal(dir, 'hobby'), null, 'hobby on SQLite is never checked');
   assert.match(workIdentityRefusal(dir, 'work'), /work-mode project has no \.sterling\/project\.json: run \/sterling:init/);
   writeFileSync(identityPath(dir), JSON.stringify({ project_id: 'nope' }));
-  assert.equal(workIdentityRefusal(dir, 'hobby'), null, 'hobby is not checked even when the file is invalid');
+  assert.equal(workIdentityRefusal(dir, 'hobby'), null, 'hobby on SQLite is not checked even when the file is invalid');
   assert.match(workIdentityRefusal(dir, 'work'), /work-mode project has an invalid \.sterling\/project\.json: .*"nope".*UUID v4/);
   writeFileSync(identityPath(dir), JSON.stringify({ project_id: OTHER_ID }));
   assert.equal(workIdentityRefusal(dir, 'work'), null);
+});
+
+test('workIdentityRefusal: storage postgres needs the identity in any mode; the config decides, not the mode alone', () => {
+  const dir = scratch();
+  mkdirSync(join(dir, '.sterling'));
+  const configPath = join(dir, '.sterling', 'config.json');
+  writeFileSync(configPath, JSON.stringify({ mode: 'hobby', storage: 'postgres' }));
+  assert.match(workIdentityRefusal(dir, 'hobby'), /project with storage postgres has no \.sterling\/project\.json: run \/sterling:init/);
+  writeFileSync(identityPath(dir), JSON.stringify({ project_id: 'nope' }));
+  assert.match(workIdentityRefusal(dir, 'hobby'), /project with storage postgres has an invalid \.sterling\/project\.json/);
+  writeFileSync(identityPath(dir), JSON.stringify({ project_id: OTHER_ID }));
+  assert.equal(workIdentityRefusal(dir, 'hobby'), null);
+  rmSync(identityPath(dir));
+  writeFileSync(configPath, JSON.stringify({ mode: 'hobby', storage: 'sqlite' }));
+  assert.equal(workIdentityRefusal(dir, 'hobby'), null, 'hobby on explicit SQLite is not checked');
+  assert.match(workIdentityRefusal(dir, 'work'), /work-mode project has no/, 'work on SQLite is still checked');
+});
+
+test('workIdentityRefusal: an invalid config.storage is a refusal naming it, never a guess', () => {
+  const dir = scratch();
+  mkdirSync(join(dir, '.sterling'));
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby', storage: 'pg' }));
+  assert.match(workIdentityRefusal(dir, 'hobby'), /project storage cannot be read: config\.storage is "pg"/);
 });
 
 // ---------------------------------------------------------------- init

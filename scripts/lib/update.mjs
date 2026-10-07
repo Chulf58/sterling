@@ -683,7 +683,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       }
       // Work-project identity (decision work-project-identity-file-sterling-project-json):
       // a work project without a valid .sterling/project.json is refused, like an
-      // invalid mode; a hobby project is not checked.
+      // invalid mode; a project is checked when it is in work mode or its config.storage is postgres.
       const identityRefusal = workIdentityRefusal(p.repo_path, projectMode);
       if (identityRefusal) {
         log(`  ✗ ${p.name}: REFUSED — ${identityRefusal}. Nothing was synced or projected for this project.`);
