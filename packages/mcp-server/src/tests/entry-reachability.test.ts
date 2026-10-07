@@ -4,7 +4,9 @@
 // use. An article marks its entry file with files[].entry, and the read-time
 // state_review arm looks that file up in the registries:
 //   - wired_in/active whose entry no registry reaches -> a state_review item;
-//   - wired_in/active with no entry declared -> a state_review item asking for one;
+//   - wired_in/active with no entry declared -> a state_review item asking for one,
+//     when at least one files[] path is a kind the detector judges, or files[] is
+//     empty (an article of only libraries has nothing to mark and mints none);
 //   - built whose entry IS reached -> a state_review item saying it looks wired_in.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -671,5 +673,57 @@ test('outside a Sterling clone nothing is judgeable, so an active article with n
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable clone identity is not read as "library": the item still mints', () => {
+  const cases: [string, (dir: string) => void][] = [
+    ['a plugin manifest that does not parse', (dir) => write(dir, '.claude-plugin/plugin.json', '{ not json')],
+    ['the projection script with no manifest beside it', (dir) => rmSync(join(dir, '.claude-plugin/plugin.json'))],
+    ['a manifest naming sterling with no projection script', (dir) => rmSync(join(dir, 'scripts/architecture-projection.mjs'))],
+  ];
+  for (const [label, break_] of cases) {
+    const { dir, tools, cleanup } = project();
+    try {
+      break_(dir);
+      write(dir, 'scripts/run.mjs', '// unmarked script\n');
+      const art = mkArticle(tools, 'active', [{ path: 'scripts/run.mjs', role: 'a script' }], 'unclear-identity');
+      assert.equal(new EntryReachability(dir).cloneStatus(), 'unclear', label);
+      tools.knowledgeQuery({ types: ['feature_article'] });
+      const items = stateReviews(tools);
+      assert.equal(items.length, 1, label);
+      assert.equal(items[0].feature_link, art.id, label);
+      assert.match(items[0].text, NO_ENTRY, label);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+test('an unreadable clone identity says so when a state_review item is closed on an entry', () => {
+  const { dir, cleanup } = project();
+  try {
+    write(dir, '.claude-plugin/plugin.json', '{ not json');
+    assert.match(new EntryReachability(dir).unjudgedReason('scripts/run.mjs', '') ?? '', /clone identity could not be read/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('judgesPathKind agrees with judge() inside a clone, so the path-kind skip cannot drift from the detector', () => {
+  const { dir, cleanup } = project();
+  try {
+    const r = new EntryReachability(dir);
+    const paths = [
+      'scripts/hooks/h1-session-start.mjs', 'hooks/h1-session-start.mjs', 'commands/init.md', 'skills/drain/SKILL.md',
+      'packages/mcp-server/src/server.ts', 'packages/mcp-server/src/tools.ts', 'agent-templates/scout.md',
+      'scripts/list-projects.mjs', 'bin/init.mjs', 'scripts/lib/helper.mjs', 'src/lib.ts', 'docs/concept.md',
+      'packages/schemas/src/index.ts', 'scripts/hooks/lib/x.mjs', 'skills/drain/other.md', 'commands/sub/x.md',
+    ];
+    for (const path of paths) {
+      assert.equal(EntryReachability.judgesPathKind(path), r.judge(path, '') !== null, path);
+    }
+  } finally {
+    cleanup();
   }
 });

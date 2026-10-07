@@ -4623,13 +4623,18 @@ export class SterlingTools {
             ? entries.map((f) => reachabilityFor(treeRoot).judge(f.path, f.role ?? '')).filter((v): v is EntryVerdict => v !== null)
             : [];
         const unreached = claimsReach ? verdicts.filter((v) => !v.reached) : [];
-        // No entry is demanded of an article none of whose files could be one:
-        // every files[] path judge() returns null for (a library, a concept file,
-        // a nested script, or any path in a tree that is not a Sterling clone)
-        // leaves nothing to mark, so the item could never be paid. An article
-        // with no files[] at all is real metadata debt and still mints.
-        const hasJudgeablePath = files.some((f) => reachabilityFor(treeRoot).judge(f.path, f.role ?? '') !== null);
-        const missingEntry = claimsReach && entries.length === 0 && (files.length === 0 || hasJudgeablePath);
+        // No entry is demanded of an article none of whose files could be one: a
+        // files[] with no path of a kind the detector judges (a library, a concept
+        // file, a nested script) leaves nothing to mark, so the item could never
+        // be paid. The test is the syntactic path kind, not judge() === null,
+        // which is also null for a consumer tree and for a tree whose clone
+        // identity cannot be read; an unreadable identity still mints (P5), and
+        // only a deliberate consumer tree abstains. No files[] at all is real
+        // metadata debt and still mints. Checked only where it can matter.
+        const missingEntry =
+          claimsReach &&
+          entries.length === 0 &&
+          (files.length === 0 || (files.some((f) => EntryReachability.judgesPathKind(f.path)) && reachabilityFor(treeRoot).cloneStatus() !== 'consumer'));
         const looksWired = state === 'built' ? verdicts.filter((v) => v.reached) : [];
         if (overStated || unverifiedPaths.length || unreached.length || missingEntry || looksWired.length) {
           const reasons: string[] = [];

@@ -43,8 +43,12 @@
  * isSterlingClone in scripts/lib/handoff-projection.mjs uses:
  * .claude-plugin/plugin.json names "sterling" and
  * scripts/architecture-projection.mjs exists. It is restated here because the
- * MCP server imports nothing from scripts/. A plugin.json that does not parse
- * reads as not a clone, since its name cannot be read.
+ * MCP server imports nothing from scripts/. A deliberate consumer tree (no
+ * marker, or a manifest naming another plugin) is judged as nothing. A manifest
+ * that does not parse, or a manifest and projection script that disagree, is
+ * cloneStatus() 'unclear': judge() still returns null, but callers that would
+ * otherwise read null as "not an entry kind" (the state_review no-entry arm) ask
+ * judgesPathKind() instead and keep minting.
  *
  * WHAT THIS DOES NOT CATCH:
  *  - library entries: a module that is only imported is never judged, so an
@@ -69,6 +73,14 @@
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+/**
+ * Whether the tree is Sterling's own. 'unclear' means the identity files
+ * disagree or cannot be read (a plugin manifest that does not parse, a
+ * projection script with no manifest beside it): that is a fault to surface,
+ * never a consumer tree.
+ */
+export type CloneState = 'clone' | 'consumer' | 'unclear';
 
 export type EntryKind = 'hook' | 'command' | 'skill' | 'tool' | 'script' | 'agent';
 
@@ -98,16 +110,40 @@ export class EntryReachability {
   private agentFiles?: Loaded<Set<string>>;
   private npmScripts?: Loaded<string[]>;
   private referenceCorpus?: Map<string, string>;
-  private sterlingClone?: boolean;
+  private cloneState?: CloneState;
 
   constructor(private readonly root: string) {}
+
+  /**
+   * Is this a KIND of path judge() covers, whatever the tree is? A syntactic
+   * test with no I/O: the same patterns judge() dispatches on. A caller that
+   * asks "could this article have an entry to mark?" uses this, not
+   * `judge() === null`, which is also null in a consumer tree or when the
+   * clone identity cannot be read.
+   */
+  static judgesPathKind(path: string): boolean {
+    return (
+      /^(?:scripts\/)?hooks\/[^/]+\.mjs$/.test(path) ||
+      /^commands\/[^/]+\.md$/.test(path) ||
+      /^skills\/[^/]+\/SKILL\.md$/.test(path) ||
+      MCP_TOOL_FILES.has(path) ||
+      /^agent-templates\/[^/]+\.md$/.test(path) ||
+      /^scripts\/[^/]+\.mjs$/.test(path) ||
+      /^bin\/[^/]+\.mjs$/.test(path)
+    );
+  }
+
+  /** 'clone', a deliberate 'consumer' tree, or 'unclear' (see CloneState). */
+  cloneStatus(): CloneState {
+    return (this.cloneState ??= this.readCloneState());
+  }
 
   /**
    * The verdict for one entry file, or null when no registry covers its kind
    * or the tree is not a Sterling clone.
    */
   judge(path: string, role: string): EntryVerdict | null {
-    if (!(this.sterlingClone ??= this.isSterlingClone())) return null;
+    if (this.cloneStatus() !== 'clone') return null;
     let m: RegExpExecArray | null;
     if ((m = /^(?:scripts\/)?hooks\/([^/]+\.mjs)$/.exec(path))) return this.judgeHook(path, m[1]);
     if (/^commands\/[^/]+\.md$/.test(path)) return this.judgePresent(path, 'command');
@@ -124,7 +160,11 @@ export class EntryReachability {
    * reach-checked (board 12e97ef5).
    */
   unjudgedReason(path: string, role: string): string | null {
-    if (!(this.sterlingClone ??= this.isSterlingClone())) {
+    const clone = this.cloneStatus();
+    if (clone === 'unclear') {
+      return 'this tree\'s Sterling clone identity could not be read (.claude-plugin/plugin.json and scripts/architecture-projection.mjs disagree or do not parse), so reachability was not checked';
+    }
+    if (clone === 'consumer') {
       return 'this tree is not a Sterling clone, whose registries the check reads, so reachability was not checked';
     }
     return this.judge(path, role) === null
@@ -304,11 +344,19 @@ export class EntryReachability {
     return out;
   }
 
-  /** Same predicate as isSterlingClone in scripts/lib/handoff-projection.mjs (see the header). */
-  private isSterlingClone(): boolean {
-    if (!existsSync(join(this.root, 'scripts/architecture-projection.mjs'))) return false;
+  /**
+   * Same predicate as isSterlingClone in scripts/lib/handoff-projection.mjs (see
+   * the header), with a third answer: a manifest that is present but unreadable,
+   * or a projection script and a manifest that disagree, is 'unclear'.
+   */
+  private readCloneState(): CloneState {
+    const marker = existsSync(join(this.root, 'scripts/architecture-projection.mjs'));
+    const manifestPresent = existsSync(join(this.root, '.claude-plugin/plugin.json'));
+    if (!manifestPresent) return marker ? 'unclear' : 'consumer';
     const manifest = this.load('.claude-plugin/plugin.json', (text) => (JSON.parse(text) as { name?: unknown }).name);
-    return manifest.ok && manifest.value === 'sterling';
+    if (!manifest.ok) return 'unclear';
+    if (manifest.value === 'sterling') return marker ? 'clone' : 'unclear';
+    return 'consumer';
   }
 
   private readNpmScripts(): Loaded<string[]> {
