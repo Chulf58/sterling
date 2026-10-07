@@ -1,6 +1,6 @@
 ---
 name: move-store
-description: Move a project's knowledge, with its mounted domains, from SQLite to Postgres or back with bin/move-store.mjs. Use when the user wants a work project on Postgres, wants a project back on SQLite because it became a hobby project or the Served database is closing, wants a second machine to join a project already on Postgres, or asks what a store move does, why a write was refused with StoreMovedError, or how to recover a move that crashed.
+description: Move a project's knowledge, with its mounted domains, from SQLite to Postgres or back with bin/move-store.mjs. Use when the user wants a project on Postgres, wants a project back on SQLite because it became a hobby project or the Served database is closing, wants a second machine to join a project already on Postgres, or asks what a store move does, why a write was refused with StoreMovedError, or how to recover a move that crashed.
 ---
 
 # Moving a project's store SOP
@@ -32,7 +32,7 @@ If the user asks for a live two-way sync, say that the move does not do one (dec
 Check these before the first run. The move refuses by name when one is missing and moves nothing.
 
 - `--to pg` works in either project mode. `config.mode` only picks how work ships and never gates the move. Switching mode is the user's choice, made on the TUI System tab; this SOP never changes it.
-- `.sterling/project.json` exists in the project. A work project's Postgres store is named by its `project_id`. If it is missing, restore it from git or let init write it.
+- `.sterling/project.json` exists in the project. A project's Postgres store, hobby or work, is named by its `project_id`. If it is missing, restore it from git or let init write it.
 - `~/.sterling/credentials/served.json` exists and is valid. Both directions need it, because both read or write Postgres.
 - `--to sqlite`: every registered project must have a readable config. One that cannot be read blocks the move, since whether it shares a domain is then unknown; fix or unregister it first.
 - `--to pg`: a registered project whose config cannot be read does not block the move. It counts as still on SQLite and as mounting every domain, so no shared domain is fenced for it. The report names it with the reason under `registered projects whose config cannot be read`; tell the user, since fixing that config is what lets a later move fence the domain.
@@ -106,7 +106,7 @@ A usage error exits 2 and prints the usage line; any other failure exits 1.
 
 ## 10. A second machine
 
-Decision `second-machine-attaches-to-a-postgres-project-through-move-store-attach`. Use this when one machine already moved a work project to Postgres and the user now has a fresh clone of that project on another machine. The clone has the committed `.sterling/project.json`, but its own `.sterling/config.json` is not in git and has no `config.storage`, so the clone still reads SQLite. Do not run `--to pg` there: the clone's SQLite store is not the one that was moved, so the move refuses it. Do not set `config.storage` by hand either.
+Decision `second-machine-attaches-to-a-postgres-project-through-move-store-attach`. Use this when one machine already moved a project to Postgres, hobby or work, and the user now has a fresh clone of that project on another machine. The clone has the committed `.sterling/project.json`, but its own `.sterling/config.json` is not in git and has no `config.storage`, so the clone still reads SQLite. Do not run `--to pg` there: the clone's SQLite store is not the one that was moved, so the move refuses it. Do not set `config.storage` by hand either.
 
 The command is `node "${CLAUDE_PLUGIN_ROOT}/bin/move-store.mjs" --attach [--fence-local] [--dry-run] [--project <dir>]`. It copies no data. It checks the same things the move checks first (`project.json`, the credentials file, the schema names), then checks each Postgres store the project uses: the project schema and the schema of every mounted domain. Each one must be registered, must have a complete move receipt from that same store, and must not be fenced. The first store that fails stops the attach, and the refusal names the schema and the check. Before it writes anything, the attach reads the config again and refuses if the project's mounted domains changed while it ran. If every check passes, the attach writes `config.storage = postgres` and nothing else in the config.
 
@@ -114,7 +114,7 @@ Steps:
 
 1. Run `--attach --dry-run` and show the user the report. It lists each store with the receipt that filled it, says what happens to this machine's own SQLite file, and changes nothing.
 2. Put the choice to the user through the question form, as in section 5.
-3. Run `--attach` without `--dry-run`. Check that the report ends with `config.storage switched to postgres` and `config.mode unchanged (work)`, then tell the user to restart the session.
+3. Run `--attach` without `--dry-run`. Check that the report ends with `config.storage switched to postgres` and `config.mode unchanged (<mode>)`, where `<mode>` is the project's own mode (`hobby` or `work`), then tell the user to restart the session.
 
 This machine's own project SQLite file (`.sterling/sterling.db`), if there is one:
 
