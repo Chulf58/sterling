@@ -95,6 +95,23 @@ export interface EntryVerdict {
 const MCP_TOOL_FILES = new Set(['packages/mcp-server/src/server.ts', 'packages/mcp-server/src/tools.ts']);
 const TOOL_NAME_TOKEN = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
 
+/**
+ * The one path classifier: which kind of entry a repo-relative path would be,
+ * or null when no registry covers it (a library, a concept file, a nested
+ * script). `file` is the basename the hook and agent registries are keyed on.
+ * judge() dispatches on it and judgesPathKind() asks it, so they cannot drift.
+ */
+function classifyPath(path: string): { kind: EntryKind; file: string } | null {
+  let m: RegExpExecArray | null;
+  if ((m = /^(?:scripts\/)?hooks\/([^/]+\.mjs)$/.exec(path))) return { kind: 'hook', file: m[1] };
+  if (/^commands\/[^/]+\.md$/.test(path)) return { kind: 'command', file: path };
+  if (/^skills\/[^/]+\/SKILL\.md$/.test(path)) return { kind: 'skill', file: path };
+  if (MCP_TOOL_FILES.has(path)) return { kind: 'tool', file: path };
+  if ((m = /^agent-templates\/([^/]+\.md)$/.exec(path))) return { kind: 'agent', file: m[1] };
+  if (/^scripts\/[^/]+\.mjs$/.test(path) || /^bin\/[^/]+\.mjs$/.test(path)) return { kind: 'script', file: path };
+  return null;
+}
+
 /** Directories whose files may reference a bin (non-recursive), plus single files. */
 const BIN_REFERENCE_DIRS = ['commands', 'agent-templates', 'templates', 'scripts', 'scripts/lib', 'scripts/hooks', 'scripts/hooks/lib'];
 const BIN_REFERENCE_FILES = ['hooks/hooks.json'];
@@ -116,21 +133,13 @@ export class EntryReachability {
 
   /**
    * Is this a KIND of path judge() covers, whatever the tree is? A syntactic
-   * test with no I/O: the same patterns judge() dispatches on. A caller that
-   * asks "could this article have an entry to mark?" uses this, not
+   * test with no I/O, from the same classifier judge() dispatches on. A caller
+   * that asks "could this article have an entry to mark?" uses this, not
    * `judge() === null`, which is also null in a consumer tree or when the
    * clone identity cannot be read.
    */
   static judgesPathKind(path: string): boolean {
-    return (
-      /^(?:scripts\/)?hooks\/[^/]+\.mjs$/.test(path) ||
-      /^commands\/[^/]+\.md$/.test(path) ||
-      /^skills\/[^/]+\/SKILL\.md$/.test(path) ||
-      MCP_TOOL_FILES.has(path) ||
-      /^agent-templates\/[^/]+\.md$/.test(path) ||
-      /^scripts\/[^/]+\.mjs$/.test(path) ||
-      /^bin\/[^/]+\.mjs$/.test(path)
-    );
+    return classifyPath(path) !== null;
   }
 
   /** 'clone', a deliberate 'consumer' tree, or 'unclear' (see CloneState). */
@@ -144,14 +153,21 @@ export class EntryReachability {
    */
   judge(path: string, role: string): EntryVerdict | null {
     if (this.cloneStatus() !== 'clone') return null;
-    let m: RegExpExecArray | null;
-    if ((m = /^(?:scripts\/)?hooks\/([^/]+\.mjs)$/.exec(path))) return this.judgeHook(path, m[1]);
-    if (/^commands\/[^/]+\.md$/.test(path)) return this.judgePresent(path, 'command');
-    if (/^skills\/[^/]+\/SKILL\.md$/.test(path)) return this.judgePresent(path, 'skill');
-    if (MCP_TOOL_FILES.has(path)) return this.judgeTool(path, role);
-    if ((m = /^agent-templates\/([^/]+\.md)$/.exec(path))) return this.judgeAgent(path, m[1]);
-    if (/^scripts\/[^/]+\.mjs$/.test(path) || /^bin\/[^/]+\.mjs$/.test(path)) return this.judgeScript(path);
-    return null;
+    const hit = classifyPath(path);
+    if (!hit) return null;
+    switch (hit.kind) {
+      case 'hook':
+        return this.judgeHook(path, hit.file);
+      case 'command':
+      case 'skill':
+        return this.judgePresent(path, hit.kind);
+      case 'tool':
+        return this.judgeTool(path, role);
+      case 'agent':
+        return this.judgeAgent(path, hit.file);
+      case 'script':
+        return this.judgeScript(path);
+    }
   }
 
   /**
@@ -356,7 +372,8 @@ export class EntryReachability {
     const manifest = this.load('.claude-plugin/plugin.json', (text) => (JSON.parse(text) as { name?: unknown }).name);
     if (!manifest.ok) return 'unclear';
     if (manifest.value === 'sterling') return marker ? 'clone' : 'unclear';
-    return 'consumer';
+    // the projection script beside a manifest of another name is a disagreement, not a consumer
+    return marker ? 'unclear' : 'consumer';
   }
 
   private readNpmScripts(): Loaded<string[]> {

@@ -681,6 +681,7 @@ test('an unreadable clone identity is not read as "library": the item still mint
     ['a plugin manifest that does not parse', (dir) => write(dir, '.claude-plugin/plugin.json', '{ not json')],
     ['the projection script with no manifest beside it', (dir) => rmSync(join(dir, '.claude-plugin/plugin.json'))],
     ['a manifest naming sterling with no projection script', (dir) => rmSync(join(dir, 'scripts/architecture-projection.mjs'))],
+    ['a valid manifest naming another plugin beside the projection script', (dir) => write(dir, '.claude-plugin/plugin.json', JSON.stringify({ name: 'other' }))],
   ];
   for (const [label, break_] of cases) {
     const { dir, tools, cleanup } = project();
@@ -700,11 +701,23 @@ test('an unreadable clone identity is not read as "library": the item still mint
   }
 });
 
-test('an unreadable clone identity says so when a state_review item is closed on an entry', () => {
-  const { dir, cleanup } = project();
+test('closing a state_review item on an entry in a tree with an unreadable clone identity warns the identity could not be read', () => {
+  const { dir, tools, cleanup } = project();
   try {
     write(dir, '.claude-plugin/plugin.json', '{ not json');
-    assert.match(new EntryReachability(dir).unjudgedReason('scripts/run.mjs', '') ?? '', /clone identity could not be read/);
+    write(dir, 'scripts/run.mjs', '// unmarked script\n');
+    const { art, item } = openStateReview(tools, [{ path: 'scripts/run.mjs', role: 'a script' }], 'unclear-close');
+    const result = tools.knowledgeUpdateResult(
+      art.id,
+      { files: [{ path: 'scripts/run.mjs', role: 'a script', entry: true }, { path: 'scripts/git-ro.mjs', role: 'a judgeable companion' }] },
+      [item.id]
+    );
+    assert.deepEqual(stateReviews(tools), [], 'the item still closes');
+    const line = result.warnings.filter((w) => UNCHECKED.test(w));
+    assert.equal(line.length, 1);
+    assert.ok(line[0].includes('scripts/run.mjs'));
+    assert.match(line[0], /clone identity could not be read/);
+    assert.doesNotMatch(line[0], /not a Sterling clone,/);
   } finally {
     cleanup();
   }
