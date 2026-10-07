@@ -9,7 +9,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -25,6 +25,12 @@ import {
   MoveSourceFencedError,
   MoveTargetNotEmptyError,
   MoveVerificationError,
+  MoveForkUnconfirmedError,
+  MoveRegistryProjectError,
+  FORK_CONFIRM_FLAG,
+  FORK_LOSS_LIST_CAP,
+  forkLoss,
+  describeForkLoss,
   assertNoInternalCollision,
   buildManifest,
   diffManifests,
@@ -182,22 +188,106 @@ test('planMove: refuses by name with no config, with no identity, and with unrea
   );
 });
 
-test('planMove: a domain a hobby project also mounts is planned unfenced and names that project; a work project sharing it does not fork it', () => {
+test('planMove: a domain a hobby project also mounts is planned unfenced and names that project; a work project already on Postgres sharing it does not fork it', () => {
   const base = tempDir();
   const creds = fakeCredentials(base);
   const shared = join(base, 'domains', 'shared.db');
   const own = join(base, 'domains', 'own.db');
   const work = project(join(base, 'work'), { stack: ['shared', 'own'], domainPaths: { shared, own } });
-  const hobby = project(join(base, 'hobby'), { mode: 'hobby', stack: ['shared'], domainPaths: { shared } });
-  const otherWork = project(join(base, 'work2'), { stack: ['own'], domainPaths: { own } });
+  const hobby = project(join(base, 'hobby'), { mode: 'hobby', stack: ['shared'], domainPaths: { shared }, storage: 'sqlite' });
+  const otherWork = project(join(base, 'work2'), { stack: ['own'], domainPaths: { own }, storage: 'postgres' });
   const plan = planMove({ root: work, direction: 'to_postgres', registeredProjects: [work, hobby, otherWork, join(base, 'gone')], credentialsPath: creds });
   assert.deepEqual(plan.stores.map((s) => [s.identity.kind, s.identity.kind === 'domain' ? s.identity.name : 'p', s.fenceSource]), [['project', 'p', true], ['domain', 'shared', false], ['domain', 'own', true]]);
-  assert.deepEqual(plan.stores[1].sharedWith, [{ root: hobby, mode: 'hobby' }]);
+  assert.deepEqual(plan.stores[1].sharedWith, [{ root: hobby, mode: 'hobby', storage: 'sqlite' }]);
   assert.deepEqual(plan.skippedProjects, [join(base, 'gone')]);
+  assert.deepEqual(plan.unreadableProjects, []);
   const back = planMove({ root: work, direction: 'to_sqlite', registeredProjects: [work, hobby, otherWork], credentialsPath: creds });
   assert.deepEqual(back.stores.map((s) => s.fenceSource), [true, true, false], 'exporting: the Postgres domain another work project mounts stays live');
-  assert.deepEqual(back.stores[2].sharedWith, [{ root: otherWork, mode: 'work' }]);
+  assert.deepEqual(back.stores[2].sharedWith, [{ root: otherWork, mode: 'work', storage: 'postgres' }]);
 });
+
+// Decision shared-domains-stay-forked-and-loud-while-projects-move-one-at-a-time (board 6fcfd161):
+// moving to Postgres fences a domain's SQLite file only when every project mounting it is on Postgres, by config.storage.
+test('planMove --to pg: a work project still on SQLite that mounts the domain keeps it unfenced and is named', () => {
+  const base = tempDir();
+  const creds = fakeCredentials(base);
+  const shared = join(base, 'domains', 'shared.db');
+  const work = project(join(base, 'work'), { stack: ['shared'], domainPaths: { shared } });
+  const stillSqlite = project(join(base, 'work-sqlite'), { stack: ['shared'], domainPaths: { shared } });
+  const explicitSqlite = project(join(base, 'work-sqlite-2'), { stack: ['shared'], domainPaths: { shared }, storage: 'sqlite' });
+  const plan = planMove({ root: work, direction: 'to_postgres', registeredProjects: [work, stillSqlite, explicitSqlite], credentialsPath: creds });
+  assert.equal(plan.stores[1].fenceSource, false, 'its writes would otherwise fail with StoreMovedError');
+  assert.deepEqual(plan.stores[1].sharedWith, [
+    { root: stillSqlite, mode: 'work', storage: 'sqlite' },
+    { root: explicitSqlite, mode: 'work', storage: 'sqlite' },
+  ]);
+});
+
+test('planMove --to pg: a domain every mounting project holds on Postgres is fenced, whatever their mode', () => {
+  const base = tempDir();
+  const creds = fakeCredentials(base);
+  const shared = join(base, 'domains', 'shared.db');
+  const work = project(join(base, 'work'), { stack: ['shared'], domainPaths: { shared } });
+  const moved = project(join(base, 'moved'), { stack: ['shared'], domainPaths: { shared }, storage: 'postgres' });
+  const moved2 = project(join(base, 'moved2'), { stack: ['shared'], domainPaths: { shared }, storage: 'postgres' });
+  const plan = planMove({ root: work, direction: 'to_postgres', registeredProjects: [work, moved, moved2], credentialsPath: creds });
+  assert.equal(plan.stores[1].fenceSource, true);
+  assert.deepEqual(plan.stores[1].sharedWith, []);
+});
+
+test('planMove --to pg: a registered project whose config cannot be read counts as on SQLite for every domain and is named; --to sqlite still refuses it', () => {
+  const base = tempDir();
+  const creds = fakeCredentials(base);
+  const a = join(base, 'domains', 'a.db');
+  const b = join(base, 'domains', 'b.db');
+  const work = project(join(base, 'work'), { stack: ['a', 'b'], domainPaths: { a, b } });
+  const broken = project(join(base, 'broken'), { stack: [] });
+  writeFileSync(join(broken, '.sterling', 'config.json'), '{ not json');
+  const oddStorage = project(join(base, 'odd'), { stack: [], storage: 'mysql' });
+  const plan = planMove({ root: work, direction: 'to_postgres', registeredProjects: [work, broken, oddStorage], credentialsPath: creds });
+  assert.deepEqual(plan.stores.map((s) => s.fenceSource), [true, false, false], 'the project store is fenced; no domain is, not even one the broken config may not mount');
+  for (const s of plan.stores.slice(1)) {
+    assert.deepEqual(s.sharedWith, [
+      { root: broken, mode: null, storage: null },
+      { root: oddStorage, mode: null, storage: null },
+    ]);
+  }
+  assert.deepEqual(plan.unreadableProjects.map((u) => u.root), [broken, oddStorage]);
+  assert.ok(plan.unreadableProjects.every((u) => u.reason.length > 0), 'each is named with its reason');
+  assert.ok(plan.unreadableProjects[1].reason.includes('storage'), plan.unreadableProjects[1].reason);
+  assert.throws(() => planMove({ root: work, direction: 'to_sqlite', registeredProjects: [work, broken], credentialsPath: creds }), MoveRegistryProjectError);
+});
+
+// Peers are judged by config.storage in both directions; mode is report metadata only. The four mode/storage
+// combinations, each a peer mounting the one shared domain, with storage always set explicitly.
+const PEER_COMBINATIONS = [
+  { mode: 'work', storage: 'sqlite' },
+  { mode: 'work', storage: 'postgres' },
+  { mode: 'hobby', storage: 'sqlite' },
+  { mode: 'hobby', storage: 'postgres' },
+] as const;
+
+for (const peer of PEER_COMBINATIONS) {
+  test(`planMove: a ${peer.mode} peer on ${peer.storage} storage that mounts the domain, in both directions`, () => {
+    const base = tempDir();
+    const creds = fakeCredentials(base);
+    const shared = join(base, 'domains', 'shared.db');
+    const work = project(join(base, 'work'), { stack: ['shared'], domainPaths: { shared }, storage: 'sqlite' });
+    const other = project(join(base, 'peer'), { mode: peer.mode, stack: ['shared'], domainPaths: { shared }, storage: peer.storage });
+    const holder = [{ root: other, mode: peer.mode, storage: peer.storage }];
+    const onSqlite = peer.storage === 'sqlite';
+
+    const toPg = planMove({ root: work, direction: 'to_postgres', registeredProjects: [work, other], credentialsPath: creds }).stores[1];
+    assert.equal(toPg.fenceSource, !onSqlite, '--to pg fences the SQLite copy only when the peer is on Postgres');
+    assert.deepEqual(toPg.sharedWith, onSqlite ? holder : []);
+    assert.deepEqual(toPg.forkedWith, []);
+
+    const toSqlite = planMove({ root: work, direction: 'to_sqlite', registeredProjects: [work, other], credentialsPath: creds }).stores[1];
+    assert.equal(toSqlite.fenceSource, onSqlite, '--to sqlite leaves the Postgres copy live for a peer on Postgres');
+    assert.deepEqual(toSqlite.sharedWith, onSqlite ? [] : holder);
+    assert.deepEqual(toSqlite.forkedWith, onSqlite ? holder : [], 'a peer on SQLite writes the SQLite copy, so a live copy there is a fork');
+  });
+}
 
 test('writeProjectStorage: switches config.storage, keeps config.mode and every other key; absent reads as sqlite', () => {
   const dir = project(tempDir(), {});
@@ -232,6 +322,93 @@ test('planAttach: plans a hobby project; refuses by name with no identity, with 
   assert.equal(plan.localSqlitePath, join(work, '.sterling', 'sterling.db'));
   assert.equal(plan.fenceLocal, false);
   for (const root of [hobby, anon, work, attached]) assert.equal(existsSync(join(root, '.sterling', 'sterling.db')), false, 'the plan writes nothing');
+});
+
+/** A seeded store and a byte copy of it taken as the fork's other side, then `change` run on the source. */
+function forkPair(label: string, change: (path: string, ids: string[]) => void): { source: StoreSnapshot; target: StoreSnapshot; ids: string[] } {
+  const dir = tempDir();
+  const path = join(dir, 'source.db');
+  const { ids } = seedStore(path, { label });
+  const copy = join(dir, 'target.db');
+  copyFileSync(path, copy);
+  change(path, ids);
+  return { source: snapshotSqliteStore(path), target: snapshotSqliteStore(copy), ids };
+}
+
+const rawWrite = (path: string, sql: string, ...params: (string | number)[]): void => {
+  const db = new DatabaseSync(path);
+  try {
+    db.prepare(sql).run(...params);
+  } finally {
+    db.close();
+  }
+};
+
+test('forkLoss: an alias-only divergence is counted and names the record it points to', () => {
+  const { source, target, ids } = forkPair('aliasonly', (path, ids) =>
+    rawWrite(path, 'INSERT INTO record_aliases (historical_id, canonical_id, archived_version, created_at) VALUES (?, ?, 1, ?)', randomUUID(), ids[3], '2026-10-07T00:00:00.000Z'),
+  );
+  const loss = forkLoss(source, target);
+  assert.deepEqual(Object.keys(loss.tables), ['record_aliases'], 'the records table matches');
+  assert.deepEqual(loss.tables.record_aliases, { only_in_source: 1, only_in_target: 0, changed: 0 });
+  assert.deepEqual([loss.only_in_source, loss.only_in_target, loss.differs, loss.unattributed_rows], [0, 0, 1, 0]);
+  assert.deepEqual(loss.listed, [{ id: ids[3], title: 'aliasonly article', kind: 'differs' }]);
+});
+
+test('forkLoss: a version-only divergence is counted and names its record', () => {
+  const { source, target, ids } = forkPair('versiononly', (path, ids) =>
+    rawWrite(path, 'INSERT INTO record_versions (record_id, version, archived_at, body) VALUES (?, 99, ?, ?)', ids[1], '2026-10-07T00:00:00.000Z', '{}'),
+  );
+  const loss = forkLoss(source, target);
+  assert.deepEqual(Object.keys(loss.tables), ['record_versions'], 'the records table matches');
+  assert.deepEqual(loss.tables.record_versions, { only_in_source: 1, only_in_target: 0, changed: 0 });
+  assert.deepEqual([loss.only_in_source, loss.only_in_target, loss.differs], [0, 0, 1]);
+  assert.deepEqual(loss.listed, [{ id: ids[1], title: 'versiononly cites the first', kind: 'differs' }]);
+});
+
+test('forkLoss: a retirement in the source is counted: the retired record row changed, the relation to its replacement and the log row are only in the source', () => {
+  const { source, target, ids } = forkPair('retireonly', (path, ids) => {
+    const store = openSqliteStore(path);
+    try {
+      store.retireInFavorOf(ids[1], ids[3], '2026-10-07T00:00:00.000Z');
+    } finally {
+      store.close();
+    }
+  });
+  const loss = forkLoss(source, target);
+  // Measured 2026-10-07: retireInFavorOf rewrites the record row in place and adds one relation and one activity row.
+  assert.deepEqual(loss.tables, {
+    records: { only_in_source: 0, only_in_target: 0, changed: 1 },
+    record_relations: { only_in_source: 1, only_in_target: 0, changed: 0 },
+    activity_log: { only_in_source: 1, only_in_target: 0, changed: 0 },
+  });
+  assert.deepEqual([loss.only_in_source, loss.only_in_target, loss.differs, loss.unattributed_rows], [0, 0, 2, 0]);
+  assert.deepEqual(
+    [...loss.listed].sort((x, y) => x.title.localeCompare(y.title)),
+    [
+      { id: ids[3], title: 'retireonly article', kind: 'differs' },
+      { id: ids[1], title: 'retireonly cites the first', kind: 'differs' },
+    ],
+  );
+  assert.match(describeForkLoss(loss), /0 record\(s\) only in the SQLite copy, 0 only in Postgres, 2 that differ/);
+});
+
+test('forkLoss: the list is capped at FORK_LOSS_LIST_CAP while every count stays complete; identical copies differ in nothing', () => {
+  const { source, target } = forkPair('capped', (path) => {
+    const store = openSqliteStore(path);
+    try {
+      for (let i = 0; i < FORK_LOSS_LIST_CAP + 5; i++) store.create(decision({ title: `capped extra ${i}` }));
+    } finally {
+      store.close();
+    }
+  });
+  const loss = forkLoss(source, target);
+  assert.equal(loss.only_in_source, FORK_LOSS_LIST_CAP + 5);
+  assert.equal(loss.tables.records.only_in_source, FORK_LOSS_LIST_CAP + 5);
+  assert.equal(loss.listed.length, FORK_LOSS_LIST_CAP);
+  assert.match(describeForkLoss(loss), /and 5 more$/);
+  const same = forkPair('same', () => {});
+  assert.deepEqual(forkLoss(same.source, same.target), { only_in_source: 0, only_in_target: 0, differs: 0, tables: {}, unattributed_rows: 0, listed: [] });
 });
 
 // ---------------------------------------------------------------------------
@@ -431,21 +608,107 @@ test('a NUL in a column outside the JSON body is refused by name before anything
   assert.equal(readSqliteFence(path), null);
 });
 
-test('a forked shared domain is copied, left unfenced, and a later run does not copy it again', { skip: PG_SKIP }, () => {
+test('a forked shared domain is copied and left unfenced; a later run lists what the SQLite copy gained, refuses without the confirm flag, and with it copies and merges nothing', { skip: PG_SKIP }, () => {
   const path = join(tempDir(), 'shared.db');
-  seedStore(path, { label: 'fork' });
+  const seeded = seedStore(path, { label: 'fork' });
   const schema = nextSchema();
-  const first = importStore({ ...pgOpts(), schema, sqlitePath: path, identity: { kind: 'domain', name: 'fork' }, fenceSource: false });
+  const identity = { kind: 'domain', name: 'fork' } as const;
+  const first = importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource: false });
   assert.equal(first.outcome, 'copied');
   assert.equal(first.source_fenced, false);
-  assert.equal(readSqliteFence(path), null, 'the SQLite copy stays writable for hobby projects');
-  // The hobby side writes; the copies diverge.
+  assert.equal(readSqliteFence(path), null, 'the SQLite copy stays writable for projects still on SQLite');
+  const pgDigest = () => buildManifest(snapshotPgStore(live().bridge, schema)).manifest.digest;
+  const pgBefore = pgDigest();
+  const receiptBefore = latestPgReceipt(live().bridge, live().meta, schema);
+  // A project still on SQLite writes; the copies diverge: one new record, one changed record.
   const store = openSqliteStore(path);
-  store.create(decision({ title: 'written by a hobby project after the fork' }));
+  const added = store.create(decision({ title: 'written by a hobby project after the fork' }));
+  const art = store.get(seeded.ids[3])!;
+  store.updateRecord(art.id, { ...art, what_it_does: 'Changed in the SQLite copy after the fork.' });
   store.close();
-  const again = importStore({ ...pgOpts(), schema, sqlitePath: path, identity: { kind: 'domain', name: 'fork' }, fenceSource: false });
+
+  const refused = (e: unknown): boolean => {
+    assert.ok(e instanceof MoveForkUnconfirmedError, String(e));
+    const err = e as MoveForkUnconfirmedError;
+    assert.deepEqual([err.loss.only_in_source, err.loss.only_in_target, err.loss.differs], [1, 0, 1]);
+    assert.deepEqual(err.loss.listed, [
+      { id: added.id, title: 'written by a hobby project after the fork', kind: 'only_in_source' },
+      { id: art.id, title: 'fork article', kind: 'differs' },
+    ]);
+    assert.deepEqual(err.loss.tables.records, { only_in_source: 1, only_in_target: 0, changed: 1 });
+    assert.equal(err.loss.tables.record_versions?.only_in_source, 1, 'the archived version of the changed article');
+    assert.ok(err.message.includes(added.id) && err.message.includes('written by a hobby project after the fork'), err.message);
+    assert.ok(err.message.includes(FORK_CONFIRM_FLAG), 'the refusal names the flag');
+    return true;
+  };
+  assert.throws(() => importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource: false }), refused);
+  const dry = importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource: false, dryRun: true });
+  assert.equal(dry.dry_run_refusal?.name, 'MoveForkUnconfirmedError');
+  assert.equal(pgDigest(), pgBefore, 'the refusal changed nothing in Postgres');
+  assert.equal(latestPgReceipt(live().bridge, live().meta, schema)?.move_id, receiptBefore?.move_id, 'and wrote no receipt');
+  assert.equal(readSqliteFence(path), null);
+
+  const again = importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource: false, confirmFork: true });
   assert.equal(again.outcome, 'fork_already_copied');
   assert.equal(again.hash_match, false);
+  assert.equal(again.source_fenced, false);
+  assert.deepEqual([again.fork_loss?.only_in_source, again.fork_loss?.only_in_target, again.fork_loss?.differs, again.fork_loss?.listed.map((l) => l.id)], [1, 0, 1, [added.id, art.id]]);
+  assert.equal(pgDigest(), pgBefore, 'nothing was copied or merged');
+  assert.equal(latestPgReceipt(live().bridge, live().meta, schema)?.move_id, receiptBefore?.move_id);
+  assert.equal(readSqliteFence(path), null, 'still a fork: the SQLite copy stays writable');
+});
+
+test('the last project to leave a forked domain meets the fork too: refused without the flag and nothing fenced; with it the SQLite copy is fenced and nothing copied', { skip: PG_SKIP }, () => {
+  const path = join(tempDir(), 'shared.db');
+  seedStore(path, { label: 'lastfork' });
+  const schema = nextSchema();
+  const identity = { kind: 'domain', name: 'lastfork' } as const;
+  importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource: false });
+  const store = openSqliteStore(path);
+  const added = store.create(decision({ title: 'written before the last project moved' }));
+  store.close();
+  const pgBefore = buildManifest(snapshotPgStore(live().bridge, schema)).manifest.digest;
+  // Every project mounting it is on Postgres now, so this move fences the SQLite copy.
+  assert.throws(
+    () => importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource: true }),
+    (e: unknown) => e instanceof MoveForkUnconfirmedError && e.loss.listed.some((l) => l.id === added.id),
+  );
+  assert.equal(readSqliteFence(path), null, 'a refusal fences nothing');
+  const done = importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource: true, confirmFork: true });
+  assert.equal(done.outcome, 'fork_already_copied');
+  assert.equal(done.source_fenced, true);
+  assert.ok(readSqliteFence(path)?.manifest_digest, 'the SQLite copy is fenced with its content digest');
+  assert.equal(buildManifest(snapshotPgStore(live().bridge, schema)).manifest.digest, pgBefore, 'nothing was copied');
+  // A re-run after a crash at this point meets the same fork and still needs the flag.
+  assert.throws(() => importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource: true }), MoveForkUnconfirmedError);
+  assert.equal(importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource: true, confirmFork: true }).outcome, 'fork_already_copied');
+});
+
+test('a re-run with both copies as the receipt left them is a replay; once only the Postgres copy changed it is the fork, refused without the flag', { skip: PG_SKIP }, () => {
+  const path = join(tempDir(), 'shared.db');
+  seedStore(path, { label: 'pgside' });
+  const schema = nextSchema();
+  const identity = { kind: 'domain', name: 'pgside' } as const;
+  importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource: false });
+  // A crash re-run: neither copy changed since the receipt.
+  assert.equal(importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource: false }).outcome, 'replayed');
+  // A project on Postgres writes to the Postgres copy; the SQLite copy is untouched.
+  live().bridge.query(`INSERT INTO "${schema}".store_meta (key, value, updated_at) VALUES ('written_on_postgres', 'x', '2026-10-07T00:00:00.000Z')`);
+  for (const fenceSource of [false, true]) {
+    assert.throws(
+      () => importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource }),
+      (e: unknown) =>
+        e instanceof MoveForkUnconfirmedError &&
+        e.loss.tables.store_meta?.only_in_target === 1 &&
+        e.loss.unattributed_rows === 1 &&
+        e.message.includes(FORK_CONFIRM_FLAG),
+      `fenceSource ${fenceSource}: not a replay`,
+    );
+  }
+  assert.equal(readSqliteFence(path), null, 'the refusal fenced nothing');
+  const done = importStore({ ...pgOpts(), schema, sqlitePath: path, identity, fenceSource: true, confirmFork: true });
+  assert.equal(done.outcome, 'fork_already_copied');
+  assert.ok(readSqliteFence(path), 'confirmed by the last project on SQLite: the SQLite copy is fenced');
 });
 
 test('lock parity: a move transaction holds the same store lock a PgDriver writer takes', { skip: PG_SKIP }, () => {

@@ -9540,6 +9540,15 @@ var MoveStorageSettingError = class extends MoveError {
 };
 var MoveForkDivergedError = class extends MoveError {
 };
+var FORK_CONFIRM_FLAG = "--confirm-fork";
+var FORK_LOSS_LIST_CAP = 20;
+var MoveForkUnconfirmedError = class extends MoveError {
+  loss;
+  constructor(message, loss) {
+    super(message);
+    this.loss = loss;
+  }
+};
 function spec(name, cols, key, sqliteOrder, pgOrder) {
   const parsed = cols.split(" ").map((c) => ({ name: c.replace(/:int$/, ""), int: c.endsWith(":int") }));
   const order = (key ?? parsed.map((c) => c.name)).join(", ");
@@ -9587,28 +9596,31 @@ function encodeRow(row) {
   return JSON.stringify(row.map((v) => typeof v === "bigint" ? `i:${v.toString()}` : v === null ? null : `s:${v}`));
 }
 var sha256 = (s2) => createHash("sha256").update(s2, "utf8").digest("hex");
+function keyedRows(t, rows) {
+  const map = /* @__PURE__ */ new Map();
+  const seen = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const h = sha256(encodeRow(row));
+    let key;
+    if (t.key === null) {
+      const n = (seen.get(h) ?? 0) + 1;
+      seen.set(h, n);
+      key = `${h}#${n}`;
+    } else {
+      key = encodeRow(t.key.map((k) => row[t.cols.findIndex((c) => c.name === k)]));
+    }
+    if (map.has(key))
+      throw new MoveSchemaError(`${t.name} holds two rows with the key ${key}`);
+    map.set(key, { hash: h, row });
+  }
+  return map;
+}
 function buildManifest(snapshot) {
   const tables = {};
   const entries = /* @__PURE__ */ new Map();
   const top = [];
   for (const t of MOVE_TABLES) {
-    const rows = snapshot.get(t.name) ?? [];
-    const map = /* @__PURE__ */ new Map();
-    const seen = /* @__PURE__ */ new Map();
-    for (const row of rows) {
-      const h = sha256(encodeRow(row));
-      let key;
-      if (t.key === null) {
-        const n = (seen.get(h) ?? 0) + 1;
-        seen.set(h, n);
-        key = `${h}#${n}`;
-      } else {
-        key = encodeRow(t.key.map((k) => row[t.cols.findIndex((c) => c.name === k)]));
-      }
-      if (map.has(key))
-        throw new MoveSchemaError(`${t.name} holds two rows with the key ${key}`);
-      map.set(key, h);
-    }
+    const map = new Map([...keyedRows(t, snapshot.get(t.name) ?? []).entries()].map(([k, v]) => [k, v.hash]));
     const lines = [...map.entries()].map(([k, h]) => `${k}	${h}`).sort();
     const digest = sha256(lines.join("\n"));
     tables[t.name] = { rows: map.size, digest };
@@ -9693,9 +9705,11 @@ function classifyTarget(args) {
     throw new MoveTargetNotEmptyError(`${label} is fenced by move ${fence.move_id} (to ${fence.to}) but its content ${fence.manifest_digest === null ? "was never recorded at fencing" : "changed after the fence"}, so it cannot be proven to be an untouched abandoned copy. Nothing was moved.`);
   }
   const sameSource = receipt !== null && receipt.source_kind === identity.kind && receipt.source_name === identity.name;
-  if (sameSource && receipt.source_digest === args.sourceDigest)
+  const sourceAsCopied = sameSource && receipt.source_digest === args.sourceDigest;
+  if (sourceAsCopied && args.targetDigest === receipt.source_digest)
     return { kind: "replay", receipt };
-  if (sameSource && args.sourceForked)
+  const copiedUnfenced = args.sourceFenceMoveId !== void 0 && args.sourceFenceMoveId !== receipt?.move_id;
+  if (sameSource && (args.sourceForked || copiedUnfenced || sourceAsCopied))
     return { kind: "fork_already_copied", receipt };
   const occupied = nonEmptyTables(args.target);
   if (occupied.length === 0)
@@ -9994,11 +10008,20 @@ function importStore(input) {
   const preSnap = snapshotSqlite(input.sqlitePath, sourceLabel);
   assertNoInternalCollision(preSnap, sourceLabel);
   const preDetail = buildManifest(preSnap);
+  let preLoss;
+  const forkGate = (plan, source2, target) => {
+    if (plan.kind !== "fork_already_copied")
+      return void 0;
+    const loss2 = forkLoss(source2, target);
+    if (!input.confirmFork)
+      throw forkUnconfirmed(identity, sourceLabel, targetLabel, plan.receipt, loss2);
+    return loss2;
+  };
   const preClassify = () => {
     if (!pgStoreRegistered(bridge, metaSchema, schema))
       return "copy into a new store";
     const current = snapshotPg(bridge, schema, input);
-    return describePlan(classifyTarget({
+    const plan = classifyTarget({
       label: targetLabel,
       target: current,
       targetDigest: buildManifest(current).manifest.digest,
@@ -10007,11 +10030,15 @@ function importStore(input) {
       identity,
       source: preSnap,
       sourceDigest: preDetail.manifest.digest,
-      sourceForked: !input.fenceSource
-    }));
+      sourceForked: !input.fenceSource,
+      sourceFenceMoveId: existingFence?.move_id ?? null
+    });
+    preLoss = forkGate(plan, preSnap, current);
+    return preLoss ? `${describePlan(plan)}; confirmed (${FORK_CONFIRM_FLAG}), leaving behind ${describeForkLoss(preLoss)}` : describePlan(plan);
   };
   if (input.dryRun) {
-    return { ...result("to_postgres", identity, sourceLabel, targetLabel, "dry_run", moveId, preDetail.manifest, false, existingFence !== null, 0), ...dryRunPlan(preClassify) };
+    const planned = dryRunPlan(preClassify);
+    return { ...result("to_postgres", identity, sourceLabel, targetLabel, "dry_run", moveId, preDetail.manifest, false, existingFence !== null, 0), ...planned, ...preLoss ? { fork_loss: preLoss } : {} };
   }
   preClassify();
   const fence = existingFence ?? { move_id: moveId, to: targetLabel, fenced_at: (/* @__PURE__ */ new Date()).toISOString(), manifest_digest: null };
@@ -10026,6 +10053,7 @@ function importStore(input) {
   ensureMoveReceipts(bridge, metaSchema, input);
   preparePgTarget(bridge, metaSchema, schema, identity, targetLabel);
   let statements = 0;
+  let loss;
   const outcome = inPgMoveTransaction(bridge, metaSchema, schema, input, () => {
     const current = readPgTables(bridge, schema);
     const plan = classifyTarget({
@@ -10037,8 +10065,10 @@ function importStore(input) {
       identity,
       source: snap,
       sourceDigest: source.manifest.digest,
-      sourceForked: !input.fenceSource
+      sourceForked: !input.fenceSource,
+      sourceFenceMoveId: existingFence?.move_id ?? null
     });
+    loss = forkGate(plan, snap, current);
     if (plan.kind === "replay" || plan.kind === "fork_already_copied")
       return plan.kind === "replay" ? "replayed" : "fork_already_copied";
     const s2 = q(schema);
@@ -10083,7 +10113,8 @@ function importStore(input) {
     statements += 3;
     return plan.kind === "replace" ? "replaced" : "copied";
   });
-  return result("to_postgres", identity, sourceLabel, targetLabel, outcome, moveId, source.manifest, outcome !== "fork_already_copied", input.fenceSource, statements);
+  const done = result("to_postgres", identity, sourceLabel, targetLabel, outcome, moveId, source.manifest, outcome !== "fork_already_copied", input.fenceSource, statements);
+  return loss ? { ...done, fork_loss: loss } : done;
 }
 function exportStore(input) {
   const { bridge, metaSchema, schema, identity } = input;
@@ -10105,7 +10136,7 @@ function exportStore(input) {
     } catch (e) {
       const holders = input.forkedWith ?? [];
       if (holders.length && identity.kind === "domain" && (e instanceof MoveTargetNotEmptyError || e instanceof MoveIdCollisionError) && readSqliteFence(input.sqlitePath) === null) {
-        throw new MoveForkDivergedError(`domain '${identity.name}': its SQLite copy ${targetLabel} stayed writable for hobby project(s) ${holders.join(", ")} when it moved to Postgres (the fork), and the hobby copy has diverged from ${sourceLabel} since. A move back would have to merge the two copies, which a store move never does. Nothing was moved.`);
+        throw new MoveForkDivergedError(`domain '${identity.name}': its SQLite copy ${targetLabel} stayed writable for project(s) on SQLite ${holders.join(", ")} when it moved to Postgres (the fork), and the SQLite copy has diverged from ${sourceLabel} since. A move back would have to merge the two copies, which a store move never does. Nothing was moved.`);
       }
       throw e;
     }
@@ -10232,6 +10263,94 @@ function describePlan(plan) {
       return `none: this shared domain was copied by move ${plan.receipt.move_id}; the copies diverge from then on`;
   }
 }
+function recordTitle(body) {
+  try {
+    const b = JSON.parse(String(body));
+    const t = [b.title, b.headline, b.text].find((v) => typeof v === "string" && v.trim() !== "");
+    if (t === void 0)
+      return "(no title)";
+    return t.length > 80 ? `${t.slice(0, 79)}\u2026` : t;
+  } catch {
+    return "(body is not JSON)";
+  }
+}
+var RECORD_ID_COLUMN = {
+  records: "id",
+  record_versions: "record_id",
+  record_aliases: "canonical_id",
+  record_relations: "source_id",
+  record_stack_tags: "record_id",
+  record_file_keys: "record_id",
+  activity_log: "record_id",
+  queue_drain_log: "record_id",
+  selection: "record_id"
+};
+function forkLoss(source, target) {
+  const diffs = diffManifests(buildManifest(source), buildManifest(target));
+  const tables = {};
+  const kindOf = /* @__PURE__ */ new Map();
+  let unattributed = 0;
+  for (const d of diffs) {
+    tables[d.table] = { only_in_source: d.missing.length, only_in_target: d.extra.length, changed: d.changed.length };
+    const t = MOVE_TABLES.find((x) => x.name === d.table);
+    const col = RECORD_ID_COLUMN[t.name];
+    const idx = col === void 0 ? -1 : t.cols.findIndex((c) => c.name === col);
+    const src = keyedRows(t, source.get(t.name) ?? []);
+    const tgt = keyedRows(t, target.get(t.name) ?? []);
+    const touch = (key, side, recordKind) => {
+      const id = idx < 0 ? null : side.get(key).row[idx];
+      if (typeof id !== "string") {
+        unattributed++;
+        return;
+      }
+      if (t.name === "records")
+        kindOf.set(id, recordKind);
+      else if (!kindOf.has(id))
+        kindOf.set(id, "differs");
+    };
+    for (const k of d.missing)
+      touch(k, src, "only_in_source");
+    for (const k of d.extra)
+      touch(k, tgt, "only_in_target");
+    for (const k of d.changed)
+      touch(k, src, "differs");
+  }
+  const titleOf = /* @__PURE__ */ new Map();
+  for (const r of [...target.get("records") ?? [], ...source.get("records") ?? []])
+    titleOf.set(r[0], recordTitle(r[12]));
+  const order = ["only_in_source", "only_in_target", "differs"];
+  const entries = [...kindOf.entries()].map(([id, kind]) => ({ id, title: titleOf.get(id) ?? "(no record row in either copy)", kind })).sort((x, y) => order.indexOf(x.kind) - order.indexOf(y.kind) || x.id.localeCompare(y.id));
+  const count = (k) => entries.filter((e) => e.kind === k).length;
+  return {
+    only_in_source: count("only_in_source"),
+    only_in_target: count("only_in_target"),
+    differs: count("differs"),
+    tables,
+    unattributed_rows: unattributed,
+    listed: entries.slice(0, FORK_LOSS_LIST_CAP)
+  };
+}
+var FORK_KIND_NOTE = {
+  only_in_source: "only in the SQLite copy",
+  only_in_target: "only in Postgres",
+  differs: "differs between the copies"
+};
+function describeForkLoss(loss) {
+  const tableNames = Object.keys(loss.tables);
+  if (tableNames.length === 0)
+    return "no row differs between the copies";
+  const total = loss.only_in_source + loss.only_in_target + loss.differs;
+  const perTable = tableNames.map((n) => {
+    const t = loss.tables[n];
+    return `${n} ${t.only_in_source} only in SQLite, ${t.only_in_target} only in Postgres, ${t.changed} changed`;
+  }).join("; ");
+  const lines = loss.listed.map((e) => `${e.id} "${e.title}" (${FORK_KIND_NOTE[e.kind]})`);
+  const more = total > loss.listed.length ? `; and ${total - loss.listed.length} more` : "";
+  return `${loss.only_in_source} record(s) only in the SQLite copy, ${loss.only_in_target} only in Postgres, ${loss.differs} that differ (the record or its versions, aliases, relations, tags, file keys or log rows)${loss.unattributed_rows ? `, and ${loss.unattributed_rows} differing row(s) tied to no record` : ""}. Rows per table: ${perTable}. Records: ${lines.join("; ") || "none"}${more}`;
+}
+function forkUnconfirmed(identity, sourceLabel, targetLabel, receipt, loss) {
+  return new MoveForkUnconfirmedError(`${identity.kind} '${identity.name}': ${targetLabel} was copied from ${sourceLabel} by move ${receipt.move_id} on ${receipt.committed_at}, and the SQLite copy stayed writable for other projects (the fork). This move does not copy it again and never merges the two copies, so no difference between them carries over: ${describeForkLoss(loss)}. The two copies stay different: neither is merged into the other, and each copy keeps its own rows. Re-run with ${FORK_CONFIRM_FLAG} to move on that basis. Nothing was moved.`, loss);
+}
 function dryRunPlan(fn) {
   try {
     return { dry_run_plan: fn() };
@@ -10286,6 +10405,7 @@ function planMove(input) {
   const schemaOf = new Map(names.domains.map((d) => [d.name, d.schema]));
   const others = [];
   const skipped = [];
+  const unreadable = [];
   for (const repo of input.registeredProjects) {
     const other = resolve3(repo);
     if (canonicalPath(other) === canonicalPath(root))
@@ -10299,8 +10419,13 @@ function planMove(input) {
       const otherMode = readProjectMode(other);
       const mounts = resolveDomainMounts(cfg);
       const otherSchemas = pgStoreNames(identity.project_id, cfg.stack_tags).domains.map((d) => d.schema);
-      others.push({ root: other, mode: otherMode, paths: new Set(mounts.map((m) => canonicalPath(m.dbPath))), schemas: new Set(otherSchemas) });
+      const otherStorage = readProjectStorage(other);
+      others.push({ root: other, mode: otherMode, storage: otherStorage, paths: new Set(mounts.map((m) => canonicalPath(m.dbPath))), schemas: new Set(otherSchemas) });
     } catch (e) {
+      if (input.direction === "to_postgres") {
+        unreadable.push({ root: other, reason: e.message });
+        continue;
+      }
       throw new MoveRegistryProjectError(`registered project ${other} has a config that cannot be read (${e.message}), so whether it shares a domain with this project is unknown. Fix or unregister it first. Nothing was moved.`);
     }
   }
@@ -10310,13 +10435,16 @@ function planMove(input) {
   for (const mount of resolveDomainMounts(config)) {
     const schema = schemaOf.get(mount.name);
     const path = canonicalPath(mount.dbPath);
-    const sharedWith = others.filter((o) => input.direction === "to_postgres" ? o.mode === "hobby" && o.paths.has(path) : o.mode === "work" && o.schemas.has(schema)).map((o) => ({ root: o.root, mode: o.mode }));
-    const forkedWith = input.direction === "to_sqlite" ? others.filter((o) => o.mode === "hobby" && o.paths.has(path)).map((o) => ({ root: o.root, mode: o.mode })) : [];
+    const sharedWith = input.direction === "to_postgres" ? [
+      ...others.filter((o) => o.storage === "sqlite" && o.paths.has(path)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage })),
+      ...unreadable.map((u) => ({ root: u.root, mode: null, storage: null }))
+    ] : others.filter((o) => o.storage === "postgres" && o.schemas.has(schema)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage }));
+    const forkedWith = input.direction === "to_sqlite" ? others.filter((o) => o.storage === "sqlite" && o.paths.has(path)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage })) : [];
     stores.push({ identity: { kind: "domain", name: mount.name }, sqlitePath: mount.dbPath, schema, fenceSource: sharedWith.length === 0, sharedWith, forkedWith });
   }
   for (const s2 of stores)
     assertSterlingSchemaName(s2.schema);
-  return { direction: input.direction, root, projectId: identity.project_id, mode, storage, metaSchema, ...ns ? { testNamespace: ns } : {}, stores, skippedProjects: skipped };
+  return { direction: input.direction, root, projectId: identity.project_id, mode, storage, metaSchema, ...ns ? { testNamespace: ns } : {}, stores, skippedProjects: skipped, unreadableProjects: unreadable };
 }
 function readRegisteredProjects(registryDbPath) {
   if (!existsSync2(registryDbPath))
@@ -10487,7 +10615,7 @@ function attachProject(plan, bridge, opts = {}) {
 
 // scripts/move-store.mjs
 var USAGE = [
-  "usage: node bin/move-store.mjs --to pg|sqlite [--dry-run] [--project <dir>]",
+  "usage: node bin/move-store.mjs --to pg|sqlite [--confirm-fork] [--dry-run] [--project <dir>]",
   "       node bin/move-store.mjs --attach [--fence-local] [--dry-run] [--project <dir>]"
 ].join("\n");
 var MoveStoreUsageError = class extends Error {
@@ -10498,7 +10626,7 @@ ${USAGE}`);
   }
 };
 function parseArgs(argv) {
-  const out = { to: void 0, dryRun: false, project: void 0 };
+  const out = { to: void 0, dryRun: false, project: void 0, confirmFork: false };
   let attach = false;
   let fenceLocal = false;
   let toGiven = false;
@@ -10520,15 +10648,18 @@ function parseArgs(argv) {
     else if (a.startsWith("--project=")) out.project = a.slice(10);
     else if (a === "--attach") attach = true;
     else if (a === "--fence-local") fenceLocal = true;
+    else if (a === FORK_CONFIRM_FLAG) out.confirmFork = true;
     else throw new MoveStoreUsageError(`unknown argument '${a}'`);
   }
   if (out.project === "") throw new MoveStoreUsageError("--project needs a directory");
   if (attach) {
     if (toGiven) throw new MoveStoreUsageError("--attach copies nothing and takes no --to");
+    if (out.confirmFork) throw new MoveStoreUsageError(`${FORK_CONFIRM_FLAG} is only for --to pg`);
     return { attach: true, fenceLocal, dryRun: out.dryRun, project: out.project };
   }
   if (fenceLocal) throw new MoveStoreUsageError("--fence-local is only for --attach");
   if (out.to !== "pg" && out.to !== "sqlite") throw new MoveStoreUsageError(`--to must be pg or sqlite, got ${out.to === void 0 ? "nothing" : `'${out.to}'`}`);
+  if (out.confirmFork && out.to !== "pg") throw new MoveStoreUsageError(`${FORK_CONFIRM_FLAG} is only for --to pg`);
   return out;
 }
 function findProjectRoot(start) {
@@ -10540,10 +10671,10 @@ function findProjectRoot(start) {
     dir = up;
   }
 }
-function runMoveStore({ root, to, dryRun = false, credentialsPath = routedCredentialsPath(), registryDb = registryPath(), hooks = {} }) {
+function runMoveStore({ root, to, dryRun = false, confirmFork = false, credentialsPath = routedCredentialsPath(), registryDb = registryPath(), hooks = {} }) {
   const direction = to === "pg" ? "to_postgres" : "to_sqlite";
   const plan = planMove({ root, direction, registeredProjects: readRegisteredProjects(registryDb), credentialsPath });
-  const report = { root: plan.root, direction, dryRun, metaSchema: plan.metaSchema, stores: [], failure: null, storageSwitched: false, storage: plan.storage, mode: plan.mode, skippedProjects: plan.skippedProjects };
+  const report = { root: plan.root, direction, dryRun, metaSchema: plan.metaSchema, stores: [], failure: null, storageSwitched: false, storage: plan.storage, mode: plan.mode, skippedProjects: plan.skippedProjects, unreadableProjects: plan.unreadableProjects };
   const bridge = new PgBridge(readPgCredentials(credentialsPath), { waitTimeoutMs: MOVE_BRIDGE_WAIT_MS });
   try {
     if (!dryRun) {
@@ -10559,6 +10690,7 @@ function runMoveStore({ root, to, dryRun = false, credentialsPath = routedCreden
         identity: store.identity,
         fenceSource: store.fenceSource,
         forkedWith: store.forkedWith.map((h) => h.root),
+        confirmFork,
         dryRun: dry
       };
       return direction === "to_postgres" ? importStore(input) : exportStore(input);
@@ -10638,13 +10770,18 @@ function formatReport(report) {
     lines.push(`  hash match: ${s2.outcome === "dry_run" ? "not checked (dry run)" : s2.hash_match ? "yes" : "no"}; manifest ${s2.manifest_digest.slice(0, 16)}`);
     lines.push(`  ids per table: ${Object.entries(s2.tables).filter(([, t]) => t.rows > 0).map(([n, t]) => `${n} ${t.rows}`).join(", ") || "none (empty store)"}`);
     if (s2.sharedWith.length) {
-      const holders = s2.sharedWith.map((h) => `${h.root} (${h.mode})`).join(", ");
+      const holders = s2.sharedWith.map((h) => `${h.root} (${h.mode === null ? "config unreadable, counted as on SQLite" : report.direction === "to_postgres" ? `${h.mode}, storage ${h.storage}` : h.mode})`).join(", ");
       lines.push(
         report.direction === "to_postgres" ? `  shared domain, NOT fenced: its SQLite copy stays writable for ${holders}; the two copies diverge from this move on` : `  shared domain, NOT fenced: its Postgres copy stays live for ${holders}; the two copies diverge from this move on`
       );
     } else {
       lines.push(`  source fenced: ${s2.source_fenced ? "yes" : report.dryRun ? "no (dry run fences nothing)" : "no"}`);
     }
+    if (s2.fork_loss) lines.push(`  already forked, NOT copied again (${FORK_CONFIRM_FLAG}); nothing below carries over: ${describeForkLoss(s2.fork_loss)}`);
+  }
+  if (report.unreadableProjects.length) {
+    lines.push(`registered projects whose config cannot be read, counted as on SQLite and mounting every domain (no shared domain fenced for them):`);
+    for (const u of report.unreadableProjects) lines.push(`  ${u.root}: ${u.reason}`);
   }
   if (report.skippedProjects.length) lines.push(`registered projects skipped in the shared-domain check (directory or config gone): ${report.skippedProjects.join(", ")}`);
   if (report.failure) {
@@ -10671,7 +10808,7 @@ function main() {
       process.stdout.write(formatAttachReport(runAttach({ root, dryRun: args.dryRun, fenceLocal: args.fenceLocal })) + "\n");
       process.exit(0);
     }
-    const report = runMoveStore({ root, to: args.to, dryRun: args.dryRun });
+    const report = runMoveStore({ root, to: args.to, dryRun: args.dryRun, confirmFork: args.confirmFork });
     process.stdout.write(formatReport(report) + "\n");
     process.exit(report.failure ? 1 : 0);
   } catch (e) {
