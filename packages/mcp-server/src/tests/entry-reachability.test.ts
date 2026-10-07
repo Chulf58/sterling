@@ -4,7 +4,9 @@
 // use. An article marks its entry file with files[].entry, and the read-time
 // state_review arm looks that file up in the registries:
 //   - wired_in/active whose entry no registry reaches -> a state_review item;
-//   - wired_in/active with no entry declared -> a state_review item asking for one;
+//   - wired_in/active with no entry declared -> a state_review item asking for one,
+//     when at least one files[] path is a kind the detector judges, or files[] is
+//     empty (an article of only libraries has nothing to mark and mints none);
 //   - built whose entry IS reached -> a state_review item saying it looks wired_in.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -483,9 +485,14 @@ test('when the finding changes between reads, the ONE state_review item updates 
 
 const UNCHECKED = /was not reach-checked/;
 
-/** An active article with no entry mints one state_review item on read; returns it. */
+/**
+ * An active article with no entry mints one state_review item on read; returns
+ * it. The article also owns scripts/git-ro.mjs, a path judge() covers, because
+ * an article whose files are ALL unjudged mints nothing (see the arm's test
+ * below) and these tests need an open item to close.
+ */
 function openStateReview(tools: SterlingTools, files: FileEntry[], slug: string) {
-  const art = mkArticle(tools, 'active', files, slug);
+  const art = mkArticle(tools, 'active', [...files, { path: 'scripts/git-ro.mjs', role: 'a judgeable companion' }], slug);
   tools.knowledgeQuery({ types: ['feature_article'] });
   const [item] = stateReviews(tools);
   assert.ok(item, 'precondition: the read minted one state_review item');
@@ -564,7 +571,14 @@ test('outside a Sterling clone the line says the tree is not a Sterling clone, n
   const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
   const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
   try {
-    const { art, item } = openStateReview(tools, [{ path: 'src/lib.ts', role: 'the library' }], 'consumer-lib');
+    // a consumer tree judges nothing, so the read mints no item: seed the one the arm used to
+    const art = mkArticle(tools, 'active', [{ path: 'src/lib.ts', role: 'the library' }], 'consumer-lib');
+    const { record: item } = tools.maintenanceEnqueue({
+      reason: 'state_review',
+      text: `review article 'consumer-lib' metadata against reality: it declares state 'active' but marks no files[] entry`,
+      file_keys: ['src/lib.ts'],
+      feature_link: art.id,
+    });
     const result = tools.knowledgeUpdateResult(art.id, { files: [{ path: 'src/lib.ts', role: 'the library', entry: true }] }, [item.id]);
     const line = result.warnings.filter((w) => UNCHECKED.test(w));
     assert.equal(line.length, 1);
@@ -574,5 +588,155 @@ test('outside a Sterling clone the line says the tree is not a Sterling clone, n
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// An article none of whose files judge() covers has no entry to mark, so the
+// "marks no files[] entry" item could never be paid (board fe46d1d0).
+// ---------------------------------------------------------------------------
+
+const NO_ENTRY = /marks no files\[\] entry/;
+
+test('an active article whose files are all unjudged paths (library, concept, nested script) mints no "marks no files[] entry" item', () => {
+  const { dir, tools, cleanup } = project();
+  try {
+    write(dir, 'scripts/lib/helper.mjs', '// nested script\n');
+    write(dir, 'docs/concept.md', '# concept\n');
+    write(dir, 'packages/schemas/src/index.ts', '// library\n');
+    for (const state of ['wired_in', 'active']) {
+      mkArticle(
+        tools,
+        state,
+        [
+          { path: 'src/lib.ts', role: 'library' },
+          { path: 'packages/schemas/src/index.ts', role: 'library' },
+          { path: 'scripts/lib/helper.mjs', role: 'nested script' },
+          { path: 'docs/concept.md', role: 'concept file' },
+        ],
+        `library-only-${state}`
+      );
+    }
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.deepEqual(stateReviews(tools), []);
+  } finally {
+    cleanup();
+  }
+});
+
+test('an active article with one judgeable path among libraries and no entry still mints the item', () => {
+  const { tools, cleanup } = project();
+  try {
+    const art = mkArticle(
+      tools,
+      'active',
+      [
+        { path: 'src/lib.ts', role: 'library' },
+        { path: 'scripts/check-fresh.mjs', role: 'the dev tool' },
+      ],
+      'mixed'
+    );
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const items = stateReviews(tools);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].feature_link, art.id);
+    assert.match(items[0].text, NO_ENTRY);
+  } finally {
+    cleanup();
+  }
+});
+
+test('an active article with an empty files[] still mints the item (no files at all is metadata debt)', () => {
+  const { tools, cleanup } = project();
+  try {
+    const art = mkArticle(tools, 'active', [], 'no-files');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const items = stateReviews(tools);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].feature_link, art.id);
+    assert.match(items[0].text, NO_ENTRY);
+  } finally {
+    cleanup();
+  }
+});
+
+test('outside a Sterling clone nothing is judgeable, so an active article with no entry mints no item', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-entry-consumer-arm-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  write(dir, 'scripts/run.mjs', '// consumer script\n');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  try {
+    mkArticle(tools, 'active', [{ path: 'scripts/run.mjs', role: 'the script' }], 'consumer-script');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.deepEqual(stateReviews(tools), []);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable clone identity is not read as "library": the item still mints', () => {
+  const cases: [string, (dir: string) => void][] = [
+    ['a plugin manifest that does not parse', (dir) => write(dir, '.claude-plugin/plugin.json', '{ not json')],
+    ['the projection script with no manifest beside it', (dir) => rmSync(join(dir, '.claude-plugin/plugin.json'))],
+    ['a manifest naming sterling with no projection script', (dir) => rmSync(join(dir, 'scripts/architecture-projection.mjs'))],
+    ['a valid manifest naming another plugin beside the projection script', (dir) => write(dir, '.claude-plugin/plugin.json', JSON.stringify({ name: 'other' }))],
+  ];
+  for (const [label, break_] of cases) {
+    const { dir, tools, cleanup } = project();
+    try {
+      break_(dir);
+      write(dir, 'scripts/run.mjs', '// unmarked script\n');
+      const art = mkArticle(tools, 'active', [{ path: 'scripts/run.mjs', role: 'a script' }], 'unclear-identity');
+      assert.equal(new EntryReachability(dir).cloneStatus(), 'unclear', label);
+      tools.knowledgeQuery({ types: ['feature_article'] });
+      const items = stateReviews(tools);
+      assert.equal(items.length, 1, label);
+      assert.equal(items[0].feature_link, art.id, label);
+      assert.match(items[0].text, NO_ENTRY, label);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+test('closing a state_review item on an entry in a tree with an unreadable clone identity warns the identity could not be read', () => {
+  const { dir, tools, cleanup } = project();
+  try {
+    write(dir, '.claude-plugin/plugin.json', '{ not json');
+    write(dir, 'scripts/run.mjs', '// unmarked script\n');
+    const { art, item } = openStateReview(tools, [{ path: 'scripts/run.mjs', role: 'a script' }], 'unclear-close');
+    const result = tools.knowledgeUpdateResult(
+      art.id,
+      { files: [{ path: 'scripts/run.mjs', role: 'a script', entry: true }, { path: 'scripts/git-ro.mjs', role: 'a judgeable companion' }] },
+      [item.id]
+    );
+    assert.deepEqual(stateReviews(tools), [], 'the item still closes');
+    const line = result.warnings.filter((w) => UNCHECKED.test(w));
+    assert.equal(line.length, 1);
+    assert.ok(line[0].includes('scripts/run.mjs'));
+    assert.match(line[0], /clone identity could not be read/);
+    assert.doesNotMatch(line[0], /not a Sterling clone,/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('judgesPathKind agrees with judge() inside a clone, so the path-kind skip cannot drift from the detector', () => {
+  const { dir, cleanup } = project();
+  try {
+    const r = new EntryReachability(dir);
+    const paths = [
+      'scripts/hooks/h1-session-start.mjs', 'hooks/h1-session-start.mjs', 'commands/init.md', 'skills/drain/SKILL.md',
+      'packages/mcp-server/src/server.ts', 'packages/mcp-server/src/tools.ts', 'agent-templates/scout.md',
+      'scripts/list-projects.mjs', 'bin/init.mjs', 'scripts/lib/helper.mjs', 'src/lib.ts', 'docs/concept.md',
+      'packages/schemas/src/index.ts', 'scripts/hooks/lib/x.mjs', 'skills/drain/other.md', 'commands/sub/x.md',
+    ];
+    for (const path of paths) {
+      assert.equal(EntryReachability.judgesPathKind(path), r.judge(path, '') !== null, path);
+    }
+  } finally {
+    cleanup();
   }
 });
