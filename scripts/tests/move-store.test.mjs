@@ -14,9 +14,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ProjectRegistry } from '../../packages/store/dist/index.js';
-import { MoveModeError, readSqliteFence, readSqliteReceipt, readPgFence, latestPgReceipt, snapshotSqliteStore, buildManifest } from '../../packages/store/dist/store-move.js';
+import { MoveCredentialsError, readSqliteFence, readSqliteReceipt, readPgFence, latestPgReceipt, snapshotSqliteStore, buildManifest } from '../../packages/store/dist/store-move.js';
 import { PG_SKIP, dropTestSchemas, openTestBridge } from '../../packages/store/dist/tests/pg-test-support.js';
-import { seedStore } from '../../packages/store/dist/tests/store-move-fixture.js';
+import { decision, openSqliteStore, seedStore } from '../../packages/store/dist/tests/store-move-fixture.js';
 import { openRoutedStores } from '../../packages/store/dist/routing.js';
 import { MoveStoreUsageError, findProjectRoot, formatAttachReport, formatReport, parseArgs, runAttach, runMoveStore } from '../move-store.mjs';
 
@@ -64,8 +64,8 @@ const modeOf = (root) => configOf(root).mode;
 const storageOf = (root) => configOf(root).storage;
 
 test('parseArgs: --to is required and must be pg or sqlite; --all does not exist', () => {
-  assert.deepEqual(parseArgs(['--to', 'pg']), { to: 'pg', dryRun: false, project: undefined });
-  assert.deepEqual(parseArgs(['--to=sqlite', '--dry-run']), { to: 'sqlite', dryRun: true, project: undefined });
+  assert.deepEqual(parseArgs(['--to', 'pg']), { to: 'pg', dryRun: false, project: undefined, confirmFork: false });
+  assert.deepEqual(parseArgs(['--to=sqlite', '--dry-run']), { to: 'sqlite', dryRun: true, project: undefined, confirmFork: false });
   assert.throws(() => parseArgs([]), MoveStoreUsageError);
   assert.throws(() => parseArgs(['--to', 'mysql']), MoveStoreUsageError);
   assert.throws(() => parseArgs(['--to', 'pg', '--all']), (e) => e instanceof MoveStoreUsageError && e.message.includes("'--all'"));
@@ -77,6 +77,13 @@ test('parseArgs: --attach takes --fence-local, --dry-run and --project but no --
   assert.throws(() => parseArgs(['--attach', '--to', 'pg']), (e) => e instanceof MoveStoreUsageError && e.message.includes('--attach copies nothing'));
   assert.throws(() => parseArgs(['--to', 'pg', '--fence-local']), (e) => e instanceof MoveStoreUsageError && e.message.includes('only for --attach'));
   assert.match(new MoveStoreUsageError('x').message, /--attach \[--fence-local\]/);
+});
+
+test('parseArgs: --confirm-fork goes with --to pg only', () => {
+  assert.deepEqual(parseArgs(['--to', 'pg', '--confirm-fork']), { to: 'pg', dryRun: false, project: undefined, confirmFork: true });
+  assert.throws(() => parseArgs(['--to', 'sqlite', '--confirm-fork']), (e) => e instanceof MoveStoreUsageError && e.message.includes('--confirm-fork is only for --to pg'));
+  assert.throws(() => parseArgs(['--attach', '--confirm-fork']), (e) => e instanceof MoveStoreUsageError && e.message.includes('--confirm-fork is only for --to pg'));
+  assert.match(new MoveStoreUsageError('x').message, /--to pg\|sqlite \[--confirm-fork\]/);
 });
 
 test('parseArgs: a bare --to or --project, or one followed by another option, is a usage error', () => {
@@ -103,7 +110,7 @@ test('findProjectRoot: walks up to the directory holding .sterling/config.json',
   assert.equal(findProjectRoot(join(root, 'src', 'deep')), root);
 });
 
-test('a hobby project is refused by name for --to pg, and nothing is touched', () => {
+test('a hobby project is no longer refused for --to pg on its mode: the move stops at the next precondition (no credentials file) and nothing is touched', () => {
   const base = tempDir();
   const domain = join(base, 'domains', 'node.db');
   seedStore(domain, { label: 'hobby-domain' });
@@ -112,7 +119,7 @@ test('a hobby project is refused by name for --to pg, and nothing is touched', (
   const digest = buildManifest(snapshotSqliteStore(domain)).manifest.digest;
   assert.throws(
     () => runMoveStore({ root: hobby, to: 'pg', credentialsPath: join(base, 'no-credentials.json'), registryDb: join(base, 'registry.db') }),
-    (e) => e instanceof MoveModeError && e.message.includes(hobby) && e.message.includes('hobby project'),
+    (e) => e instanceof MoveCredentialsError && !e.message.includes('hobby project'),
   );
   assert.equal(readFileSync(join(hobby, '.sterling', 'config.json'), 'utf8'), configBefore);
   assert.equal(existsSync(join(hobby, '.sterling', 'sterling.db')), false);
@@ -139,9 +146,9 @@ test('--to pg: a shared domain a hobby project mounts is copied, not fenced, and
     ['domain', 'copied', true, false],
     ['domain', 'copied', true, true],
   ]);
-  assert.deepEqual(report.stores[1].sharedWith, [{ root: hobby, mode: 'hobby' }]);
+  assert.deepEqual(report.stores[1].sharedWith, [{ root: hobby, mode: 'hobby', storage: 'sqlite' }]);
   const text = formatReport(report);
-  assert.match(text, /shared domain, NOT fenced: its SQLite copy stays writable for .*hobby \(hobby\)/);
+  assert.match(text, /shared domain, NOT fenced: its SQLite copy stays writable for .*hobby \(hobby, storage sqlite\)/);
   assert.match(text, /ids per table: records \d+, record_versions \d+/);
   assert.equal(readSqliteFence(shared), null, 'the hobby project keeps writing its SQLite copy');
   assert.ok(readSqliteFence(own), 'the work-only domain is fenced');
@@ -167,6 +174,53 @@ test('--to pg: a shared domain a hobby project mounts is copied, not fenced, and
   assert.equal(readSqliteReceipt(join(work, '.sterling', 'sterling.db')), null, 'the project store was not moved back');
   assert.equal(storageOf(work), 'postgres', 'no storage switch after a refusal');
   assert.equal(modeOf(work), 'work');
+});
+
+test('--to pg: a domain a work project still on SQLite mounts stays unfenced; when that project moves later it is shown what will not carry over and refused until --confirm-fork', { skip: PG_SKIP }, () => {
+  usedPg = true;
+  const base = tempDir();
+  // Its own domain name: the hobby test above already moved a domain 'shared' into this file's namespace.
+  const shared = join(base, 'domains', 'workshared.db');
+  seedStore(shared, { label: 'shared-work' });
+  const first = project(join(base, 'first'), { stack: ['workshared'], domainPaths: { workshared: shared } });
+  const second = project(join(base, 'second'), { stack: ['workshared'], domainPaths: { workshared: shared } });
+  seedStore(join(first, '.sterling', 'sterling.db'), { label: 'first' });
+  seedStore(join(second, '.sterling', 'sterling.db'), { label: 'second' });
+  const registryDb = registry(base, [first, second]);
+
+  const one = runMoveStore({ root: first, to: 'pg', registryDb });
+  assert.equal(one.failure, null);
+  assert.deepEqual(one.stores[1].sharedWith, [{ root: second, mode: 'work', storage: 'sqlite' }]);
+  assert.equal(one.stores[1].source_fenced, false);
+  assert.equal(readSqliteFence(shared), null, 'the work project still on SQLite keeps writing the domain');
+  assert.match(formatReport(one), /its SQLite copy stays writable for .*second \(work, storage sqlite\)/);
+
+  // The project still on SQLite writes to the domain, then moves.
+  const store = openSqliteStore(shared);
+  const added = store.create(decision({ title: 'written by the second project before its move' }));
+  store.close();
+  const configBefore = readFileSync(join(second, '.sterling', 'config.json'), 'utf8');
+  const two = runMoveStore({ root: second, to: 'pg', registryDb });
+  assert.equal(two.failure?.name, 'MoveForkUnconfirmedError');
+  assert.deepEqual(two.failure.identity, { kind: 'domain', name: 'workshared' });
+  assert.ok(two.failure.message.includes(added.id) && two.failure.message.includes('written by the second project before its move') && two.failure.message.includes('--confirm-fork'), two.failure.message);
+  assert.deepEqual(two.stores, [], 'nothing was moved');
+  assert.equal(readSqliteFence(shared), null);
+  assert.equal(readSqliteFence(join(second, '.sterling', 'sterling.db')), null);
+  assert.equal(readFileSync(join(second, '.sterling', 'config.json'), 'utf8'), configBefore, 'config.storage not switched');
+
+  const three = runMoveStore({ root: second, to: 'pg', registryDb, confirmFork: true });
+  assert.equal(three.failure, null);
+  assert.deepEqual(three.stores.map((s) => [s.identity.kind, s.outcome, s.source_fenced]), [
+    ['project', 'copied', true],
+    ['domain', 'fork_already_copied', true],
+  ]);
+  assert.deepEqual(three.stores[1].sharedWith, [], 'every project mounting it is on Postgres now');
+  assert.ok(readSqliteFence(shared), 'so the SQLite copy is fenced');
+  const text = formatReport(three);
+  assert.match(text, /already forked, NOT copied again \(--confirm-fork\); nothing below carries over: 1 record\(s\) only in the SQLite copy, 0 only in Postgres, 0 that differ/);
+  assert.ok(text.includes(added.id), text);
+  assert.equal(storageOf(second), 'postgres');
 });
 
 test('--to sqlite: a crash after the receipts and before the storage switch is completed by a re-run', { skip: PG_SKIP }, () => {

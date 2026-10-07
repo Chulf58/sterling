@@ -2,7 +2,9 @@
 node_modules/
 packages/*/dist/
 packages/tui/bundle/
-.sterling/
+.sterling/*
+!.sterling/project.json
+*/**/.sterling/
 sterling.bat
 .claude/agents/
 tui.bat
@@ -23,3 +25,6 @@ knowledge-export/
 claude-wsl.bat
 # Windows `> NUL` redirect artifact: under WSL, NUL is a real file, not a device
 NUL
+
+# Local secret: Served Sterling-db password (machine-local, never committed)
+Served sterling DB password.txt

@@ -10,8 +10,8 @@
 // (scripts/lib/work-pr.mjs) — never a merge, sweep or push of the base.
 //   node scripts/direct-merge.mjs [--into <branch>] [--branch <branch>] [--target <dir>]
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { arg, fail as baseFail, openProject, resolveLinkedWorktree } from './lib/project.mjs';
 import { isGitRepo, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
@@ -36,7 +36,14 @@ const target = arg('--target') ?? process.cwd();
 // operation and the branch's tree stay on `target`. Outside a worktree the two
 // are the same directory.
 const linkedWorktree = resolveLinkedWorktree(target);
-const storeRoot = linkedWorktree ? linkedWorktree.mainRoot : target;
+const CONFIG_REL = '.sterling/config.json';
+// The main checkout's config wins. Only when the main checkout has none and the
+// worktree carries its own (a copy, per anti-pattern e76fd6b9) does the worktree
+// become the store root: the config, the store and the PR-loop marker then all
+// live in the one root that holds the config, never split across two.
+const worktreeOnlyConfig =
+  linkedWorktree && !existsSync(join(linkedWorktree.mainRoot, CONFIG_REL)) && existsSync(join(linkedWorktree.worktree, CONFIG_REL));
+const storeRoot = linkedWorktree && !worktreeOnlyConfig ? linkedWorktree.mainRoot : linkedWorktree ? linkedWorktree.worktree : target;
 
 // PROJECT MODE decides the flow, read ONLY through readProjectMode (a missing
 // key is hobby), and read FIRST so a work-mode run can put every exit through
@@ -65,6 +72,35 @@ function fail(message, code = 1) {
 
 stage('git-repo');
 if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
+
+// A LINKED WORKTREE IS NEVER DEFAULTED TO HOBBY (board 3adde85e, anti-pattern
+// e76fd6b9). The worktree has no .sterling/ of its own (gitignored), so its mode
+// is the main checkout's, else the worktree's own copy (storeRoot above). When
+// neither config exists, a missing config would read as hobby, so the gate
+// refuses by name instead. A worktree of a bare or separate-git-dir main has no
+// main checkout to read at all (resolveLinkedWorktree is null there, and the
+// target's own config is read), so it is caught by git's own git-dir/common-dir
+// difference when the worktree has no config of its own.
+if (linkedWorktree && !existsSync(join(storeRoot, CONFIG_REL))) {
+  fail(
+    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its project mode cannot be read — there is no ${CONFIG_REL} at '${join(linkedWorktree.worktree, CONFIG_REL)}' ` +
+      `or at the main checkout '${join(linkedWorktree.mainRoot, CONFIG_REL)}'. A linked worktree is never defaulted to hobby — refusing; nothing was run.\n` +
+      `Run it from the main checkout, or restore its ${CONFIG_REL}.`,
+    2
+  );
+}
+if (!linkedWorktree && !existsSync(join(target, CONFIG_REL))) {
+  const dirs = spawnSync('git', ['rev-parse', '--git-dir', '--git-common-dir'], { cwd: target, encoding: 'utf8', timeout: 60_000 });
+  const [gitDir, commonDir] = dirs.status === 0 ? dirs.stdout.split('\n').map((l) => l.trim()) : [];
+  if (gitDir && commonDir && realpathSync(resolve(target, gitDir)) !== realpathSync(resolve(target, commonDir))) {
+    fail(
+      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync(resolve(target, commonDir))}') has no main checkout to read ${CONFIG_REL} from, ` +
+        `and '${join(target, CONFIG_REL)}' does not exist in the worktree. A linked worktree is never defaulted to hobby — refusing; nothing was run.\n` +
+        `Run it from a checkout of the project.`,
+      2
+    );
+  }
+}
 
 // HOBBY from a linked worktree cannot complete: the merge checks the base out,
 // and the base is normally checked out in the main tree (git refuses to check a

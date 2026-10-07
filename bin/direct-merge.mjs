@@ -10046,20 +10046,21 @@ var init_dist2 = __esm({
        */
       retireInFavorOf(id, replacementId, at, verb = "retired") {
         this.assertWritable("retireInFavorOf");
-        const record = this.get(id);
-        if (!record)
-          throw new Error(`retireInFavorOf: no record '${id}'`);
-        const identity = this.identityOf(id);
-        if (identity?.lifecycle === "retired" || record.status === "superseded") {
-          throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-        }
-        const replacement = this.identityOf(replacementId);
-        if (replacement?.lifecycle === "retired") {
-          throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-        }
-        const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-        const stored = _SterlingStore.storableBody(retired);
+        let stored;
         this.tx(() => {
+          const record = this.get(id);
+          if (!record)
+            throw new Error(`retireInFavorOf: no record '${id}'`);
+          const identity = this.identityOf(id);
+          if (identity?.lifecycle === "retired" || record.status === "superseded") {
+            throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
+          }
+          const replacement = this.identityOf(replacementId);
+          if (replacement?.lifecycle === "retired") {
+            throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
+          }
+          const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
+          stored = _SterlingStore.storableBody(retired);
           const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
           if (res.changes === 0) {
@@ -10530,8 +10531,8 @@ var init_dist2 = __esm({
 
 // scripts/direct-merge.mjs
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync8, readFileSync as readFileSync11 } from "node:fs";
-import { join as join17 } from "node:path";
+import { existsSync as existsSync8, readFileSync as readFileSync11, realpathSync as realpathSync5 } from "node:fs";
+import { join as join17, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/project.mjs
@@ -10563,7 +10564,7 @@ init_pg_bridge();
 var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
 var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
 var STORAGE_BACKENDS = ["sqlite", "postgres"];
-var MOVE_STORE_COMMAND = "node scripts/move-store.mjs --to pg|sqlite";
+var MOVE_STORE_COMMAND = 'node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite';
 var CONFIG_REL2 = ".sterling/config.json";
 var StoreSettingsError = class extends Error {
   constructor(message) {
@@ -10582,7 +10583,7 @@ var StoreUnreachableError = class extends Error {
 var PostgresStoreNotMovedError = class extends PgStoreMissingError {
   constructor(cause) {
     super(cause.schema, "see the message");
-    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node scripts/move-store.mjs --to pg\`. Nothing was created.`;
+    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node "<Sterling root>/bin/move-store.mjs" --to pg\`. Nothing was created.`;
     this.name = "PostgresStoreNotMovedError";
   }
 };
@@ -10652,10 +10653,6 @@ function resolveStoreRoute(root) {
     return { storage: "sqlite", root: absRoot, config, projectDbPath: join6(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
   }
   const shown = absRoot.replace(/\\/g, "/");
-  const mode2 = readProjectMode(absRoot);
-  if (mode2 !== "work") {
-    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode2}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node scripts/move-store.mjs --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
-  }
   const identity = readProjectIdentity(absRoot);
   if (identity === null) {
     throw new ProjectIdentityError(`storage 'postgres' needs the project identity file ${shown}/.sterling/project.json ({"project_id": "<uuid v4>"}); it is missing. Restore it from git, or let init write it. Nothing was opened.`);
@@ -12468,7 +12465,9 @@ function attestationDisclosureLines({ tool, result, declaredGlobs, subject, drop
 // scripts/direct-merge.mjs
 var target = arg("--target") ?? process.cwd();
 var linkedWorktree = resolveLinkedWorktree(target);
-var storeRoot = linkedWorktree ? linkedWorktree.mainRoot : target;
+var CONFIG_REL4 = ".sterling/config.json";
+var worktreeOnlyConfig = linkedWorktree && !existsSync8(join17(linkedWorktree.mainRoot, CONFIG_REL4)) && existsSync8(join17(linkedWorktree.worktree, CONFIG_REL4));
+var storeRoot = linkedWorktree && !worktreeOnlyConfig ? linkedWorktree.mainRoot : linkedWorktree ? linkedWorktree.worktree : target;
 var mode;
 var modeError;
 try {
@@ -12486,6 +12485,24 @@ function fail2(message, code = 1) {
 }
 stage("git-repo");
 if (!isGitRepo(target)) fail2(`direct-merge: not a git repository: '${target}'`);
+if (linkedWorktree && !existsSync8(join17(storeRoot, CONFIG_REL4))) {
+  fail2(
+    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its project mode cannot be read \u2014 there is no ${CONFIG_REL4} at '${join17(linkedWorktree.worktree, CONFIG_REL4)}' or at the main checkout '${join17(linkedWorktree.mainRoot, CONFIG_REL4)}'. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+Run it from the main checkout, or restore its ${CONFIG_REL4}.`,
+    2
+  );
+}
+if (!linkedWorktree && !existsSync8(join17(target, CONFIG_REL4))) {
+  const dirs = spawnSync8("git", ["rev-parse", "--git-dir", "--git-common-dir"], { cwd: target, encoding: "utf8", timeout: 6e4 });
+  const [gitDir, commonDir] = dirs.status === 0 ? dirs.stdout.split("\n").map((l) => l.trim()) : [];
+  if (gitDir && commonDir && realpathSync5(resolve8(target, gitDir)) !== realpathSync5(resolve8(target, commonDir))) {
+    fail2(
+      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync5(resolve8(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join17(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+Run it from a checkout of the project.`,
+      2
+    );
+  }
+}
 if (linkedWorktree && !modeError && mode !== "work") {
   const head = spawnSync8("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
   const wtBranch = head.status === 0 && head.stdout.trim() ? head.stdout.trim() : "<branch>";

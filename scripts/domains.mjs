@@ -127,7 +127,7 @@ try {
 }
 
 // The backend the project's stores live on. A route the router refuses (a bad
-// storage value, Postgres outside work mode, no identity or credentials) refuses
+// storage value, no identity or credentials) refuses
 // here too: the SQLite folders are never read in its place.
 let route = null;
 if (project) {

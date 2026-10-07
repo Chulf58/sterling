@@ -9,9 +9,9 @@ import { openDashboard } from '../controller.js';
 
 // config.storage is written only by the store move (decision
 // storage-backend-is-its-own-config-key-written-only-by-store-move): the TUI's
-// write-back refuses it the way config_set does, and the mode toggle cannot
-// leave work mode under Postgres storage (the router refuses 'postgres'
-// anywhere else). A SQLite project's mode toggle is unchanged. The dashboard
+// write-back refuses it the way config_set does. The mode toggle is
+// independent of storage: config.mode only picks the PR flow, and the router
+// opens Postgres storage in any mode. The dashboard
 // opens a Postgres-storage project through the router, so an unreachable
 // database is a named error and no SQLite file is created.
 
@@ -38,7 +38,7 @@ test('writeConfigKey refuses storage and every storage.* path with StorageTransi
       (e: unknown) =>
         e instanceof StorageTransitionRequiredError &&
         e.message ===
-          `TUI: '${key}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), so it changes only when the stores move, through the explicit storage transition: \`node scripts/move-store.mjs --to pg|sqlite\`, which writes it after the move commits. Nothing was written.`,
+          `TUI: '${key}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), so it changes only when the stores move, through the explicit storage transition: \`node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite\`, which writes it after the move commits. Nothing was written.`,
     );
   }
   assert.equal(readFileSync(path, 'utf8'), before);
@@ -52,21 +52,14 @@ test('every toggle keeps config.storage exactly as written', () => {
   assert.deepEqual(after.tdd, { enabled: false });
 });
 
-test('mode toggle, Postgres storage: leaving work mode is refused with the move named, and nothing is written', () => {
-  const path = configFile({ mode: 'work', storage: 'postgres' });
-  const before = readFileSync(path, 'utf8');
+test('mode toggle, Postgres storage: both directions write, storage and every other key kept', () => {
+  const path = configFile({ mode: 'work', storage: 'postgres', stack_tags: ['node'] });
   const errors: string[] = [];
-  assert.equal(applyModeToggle({ type: 'mode_toggle', mode: 'hobby' }, (m) => errors.push(m), path), false);
-  assert.equal(errors.length, 1);
-  assert.match(errors[0], /^mode toggle failed — config\.storage is 'postgres', which is valid only in a work-mode project/);
-  assert.match(errors[0], /node scripts\/move-store\.mjs --to sqlite/);
-  assert.equal(readFileSync(path, 'utf8'), before);
-});
-
-test('mode toggle, Postgres storage: switching to work mode still writes', () => {
-  const path = configFile({ mode: 'hobby', storage: 'postgres' });
-  assert.equal(applyModeToggle({ type: 'mode_toggle', mode: 'work' }, undefined, path), true);
-  assert.equal(JSON.parse(readFileSync(path, 'utf8')).mode, 'work');
+  assert.equal(applyModeToggle({ type: 'mode_toggle', mode: 'hobby' }, (m) => errors.push(m), path), true);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { mode: 'hobby', storage: 'postgres', stack_tags: ['node'] });
+  assert.equal(applyModeToggle({ type: 'mode_toggle', mode: 'work' }, (m) => errors.push(m), path), true);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { mode: 'work', storage: 'postgres', stack_tags: ['node'] });
+  assert.deepEqual(errors, []);
 });
 
 test('mode toggle, SQLite storage: both directions still write, every other key kept', () => {

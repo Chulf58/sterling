@@ -1,11 +1,11 @@
 ---
 name: move-store
-description: Move a project's knowledge, with its mounted domains, from SQLite to Postgres or back with scripts/move-store.mjs. Use when the user wants a work project on Postgres, wants a project back on SQLite because it became a hobby project or the Served database is closing, wants a second machine to join a project already on Postgres, or asks what a store move does, why a write was refused with StoreMovedError, or how to recover a move that crashed.
+description: Move a project's knowledge, with its mounted domains, from SQLite to Postgres or back with bin/move-store.mjs. Use when the user wants a work project on Postgres, wants a project back on SQLite because it became a hobby project or the Served database is closing, wants a second machine to join a project already on Postgres, or asks what a store move does, why a write was refused with StoreMovedError, or how to recover a move that crashed.
 ---
 
 # Moving a project's store SOP
 
-Decisions `store-move-skill-two-way-one-direction-at-a-time-no-live-sync` and `storage-backend-is-its-own-config-key-written-only-by-store-move`. The command is `node "${CLAUDE_PLUGIN_ROOT}/scripts/move-store.mjs" --to pg|sqlite [--dry-run] [--project <dir>]`, called "the move" below. Work the steps in order.
+Decisions `store-move-skill-two-way-one-direction-at-a-time-no-live-sync`, `storage-backend-is-its-own-config-key-written-only-by-store-move` and `shared-domains-stay-forked-and-loud-while-projects-move-one-at-a-time`. The command is `node "${CLAUDE_PLUGIN_ROOT}/bin/move-store.mjs" --to pg|sqlite [--confirm-fork] [--dry-run] [--project <dir>]`, called "the move" below. Work the steps in order.
 
 ## 1. What the move does
 
@@ -14,14 +14,15 @@ The move copies ONE project's knowledge store, plus the domain stores that proje
 - `--to pg` moves SQLite to Postgres.
 - `--to sqlite` moves Postgres back to SQLite.
 - `--project <dir>` names the project. Without it the move uses the project containing the current directory.
-- There is no `--all`. Other projects, and domains only hobby projects mount, are never touched.
+- There is no `--all`. Other projects, and domains only projects still on SQLite mount, are never touched.
+- `--confirm-fork` (with `--to pg` only) lets the move go past a shared domain that an earlier move already copied while its SQLite copy stayed writable (section 6). Pass it only after the user has seen the list of records that will not carry over and agreed.
 - `--attach` copies nothing. It lets a second machine use a project that another machine already moved to Postgres (section 10).
 
 The move writes `config.storage` (`postgres` or `sqlite`) and nothing else in the config. `config.mode` is never changed by it. Do not edit `config.storage` by hand to switch backends: the key is written by the move only, after every store has been copied and checked.
 
 ## 2. When to use it
 
-- A project is in work mode and should keep its knowledge on the Served Postgres database: `--to pg`.
+- A project should keep its knowledge on the Served Postgres database, in either project mode: `--to pg`.
 - A work project became a hobby project, or the Served database is going to close: `--to sqlite`. The export reads Postgres, so it has to run while the database is still reachable. A database that is already gone cannot be exported; the Served platform's point-in-time restore is the recovery for an unplanned loss, not this move.
 
 If the user asks for a live two-way sync, say that the move does not do one (decision above, user-ruled 2026-10-06) and offer the move in one direction.
@@ -30,10 +31,11 @@ If the user asks for a live two-way sync, say that the move does not do one (dec
 
 Check these before the first run. The move refuses by name when one is missing and moves nothing.
 
-- `--to pg` needs the project in work mode. A hobby project is refused. Switching mode is the user's choice, made on the TUI System tab; this SOP never changes it.
+- `--to pg` works in either project mode. `config.mode` only picks how work ships and never gates the move. Switching mode is the user's choice, made on the TUI System tab; this SOP never changes it.
 - `.sterling/project.json` exists in the project. A work project's Postgres store is named by its `project_id`. If it is missing, restore it from git or let init write it.
 - `~/.sterling/credentials/served.json` exists and is valid. Both directions need it, because both read or write Postgres.
-- Every registered project must have a readable config. One that cannot be read blocks the move, since whether it shares a domain is then unknown; fix or unregister it first.
+- `--to sqlite`: every registered project must have a readable config. One that cannot be read blocks the move, since whether it shares a domain is then unknown; fix or unregister it first.
+- `--to pg`: a registered project whose config cannot be read does not block the move. It counts as still on SQLite and as mounting every domain, so no shared domain is fenced for it. The report names it with the reason under `registered projects whose config cannot be read`; tell the user, since fixing that config is what lets a later move fence the domain.
 
 Never read or print the contents of `served.json`. Check that the file exists and report only that.
 
@@ -41,7 +43,7 @@ Never read or print the contents of `served.json`. Check that the file exists an
 
 Run the move with `--dry-run` and the direction the user wants:
 
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/move-store.mjs" --to <pg|sqlite> --dry-run`
+`node "${CLAUDE_PLUGIN_ROOT}/bin/move-store.mjs" --to <pg|sqlite> --dry-run`
 
 A dry run reads every store and fences nothing. It writes no receipt and does not change `config.storage`. Show the user the report, not a summary of it. Point out:
 
@@ -53,11 +55,11 @@ If the report ends in a `FAILED` line, that is a refusal (section 8). Do not go 
 
 ## 5. Ask, then run
 
-Put the choice to the user through ONE AskUserQuestion form, with the dry-run report already shown. Options: run the move as reported, or stop. When the report names a forked domain, say so in the question text. The session proposes; the user decides. Never run the real move before an answer, and never choose the direction for the user.
+Put the choice to the user through ONE AskUserQuestion form, with the dry-run report already shown. Options: run the move as reported, or stop. When the report names a forked domain, say so in the question text. When the dry run fails with `MoveForkUnconfirmedError`, the question is whether to move without the listed records (section 6), and a yes means running with `--confirm-fork`. The session proposes; the user decides. Never run the real move before an answer, and never choose the direction for the user.
 
 Then run the same command without `--dry-run`:
 
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/move-store.mjs" --to <pg|sqlite>`
+`node "${CLAUDE_PLUGIN_ROOT}/bin/move-store.mjs" --to <pg|sqlite>`
 
 Each store is checked read-only first, so a refusal anywhere stops the run before any store is fenced. Then each store is fenced on the side it leaves, copied, compared against a content-hash manifest of both sides and given a receipt. `config.storage` is written last. Check before moving on: no `FAILED` line, every store shows `hash match: yes`, and the last lines read `config.storage switched to <backend>` and `config.mode unchanged (<mode>)`.
 
@@ -67,9 +69,10 @@ Tell the user to restart the session, so the running tools pick up the new `conf
 
 A domain can be mounted by more than one project. The move fences a store only when no other project would be cut off from it.
 
-- `--to pg`: a domain also mounted by a hobby project is copied but NOT fenced. The hobby project keeps writing its SQLite copy, and the two copies diverge from the move on. The report names the hobby projects.
-- `--to sqlite`: a domain also mounted by another work project is copied but NOT fenced. That project keeps using the Postgres copy. The report names those projects.
-- `--to sqlite` is refused for a domain whose SQLite copy a hobby project kept writing after an earlier move to Postgres. Going back would mean merging the two copies, which a move never does (`MoveForkDivergedError`). Report the refusal as printed and ask the user how to proceed; do not delete either copy.
+- `--to pg`: a domain's SQLite copy is fenced only when every other registered project that mounts it has `config.storage` set to `postgres`. A project still on SQLite, hobby or work, keeps writing the SQLite copy, so the domain is copied but NOT fenced, and the two copies diverge from the move on. The report names each such project with its mode and storage. Only this machine's registered projects are checked.
+- `--to pg` when the domain is already forked: an earlier move copied it to Postgres, and since then either copy has changed. The move never copies it again and never merges the two copies. It compares every table a move copies (records, versions, aliases, relations, tags, file keys, logs and the rest), not only the records. It then refuses with `MoveForkUnconfirmedError` and lists the records only in the SQLite copy, the records only in Postgres, and the records that differ in any of their rows, by id and title. The list stops at the first 20; the counts per kind and per table are always complete, and rows tied to no record are counted too. Show the user that list and ask through the question form whether to move with the two copies left different. Only on a yes, re-run with `--confirm-fork`. Neither copy is merged into the other, and each keeps its own rows. When the project moving is the last one on SQLite that mounts the domain, the confirmed move also fences the SQLite copy. The report then shows `already forked, NOT copied again (--confirm-fork)` with the same list.
+- `--to sqlite`: a domain also mounted by another project with `config.storage` set to `postgres`, hobby or work, is copied but NOT fenced. That project keeps using the Postgres copy. The report names those projects.
+- `--to sqlite` is refused for a domain whose SQLite copy a project still on SQLite kept writing after an earlier move to Postgres. Going back would mean merging the two copies, which a move never does (`MoveForkDivergedError`). Report the refusal as printed and ask the user how to proceed; do not delete either copy.
 
 Say plainly what a fork means: after the move there are two copies of that domain's knowledge, and nothing keeps them in step. That is the cost of the user's choice to move the project, so show it in the dry-run report and in the question.
 
@@ -88,7 +91,6 @@ What the user may see:
 
 **A refusal.** It names its reason and ends with `Nothing was moved.` when it came from the read-only pass. Report it as printed, in the user's terms, and put the next step to the user through the question form. The common ones:
 
-- hobby project with `--to pg`: the mode precondition in section 3.
 - `.sterling/project.json` missing, or the Postgres credentials missing or invalid: the preconditions in section 3.
 - target not empty or id collision: the target already holds records that do not come from this source. The move fills an empty target, replays its own receipt, or replaces a copy it left itself, and nothing else. Find out what is in the target; never clear it as part of this SOP.
 - source already fenced to a different target: an earlier move took this project elsewhere. Read the message for the move and date.
@@ -106,7 +108,7 @@ A usage error exits 2 and prints the usage line; any other failure exits 1.
 
 Decision `second-machine-attaches-to-a-postgres-project-through-move-store-attach`. Use this when one machine already moved a work project to Postgres and the user now has a fresh clone of that project on another machine. The clone has the committed `.sterling/project.json`, but its own `.sterling/config.json` is not in git and has no `config.storage`, so the clone still reads SQLite. Do not run `--to pg` there: the clone's SQLite store is not the one that was moved, so the move refuses it. Do not set `config.storage` by hand either.
 
-The command is `node "${CLAUDE_PLUGIN_ROOT}/scripts/move-store.mjs" --attach [--fence-local] [--dry-run] [--project <dir>]`. It copies no data. It checks the same things the move checks first (work mode, `project.json`, the credentials file, the schema names), then checks each Postgres store the project uses: the project schema and the schema of every mounted domain. Each one must be registered, must have a complete move receipt from that same store, and must not be fenced. The first store that fails stops the attach, and the refusal names the schema and the check. Before it writes anything, the attach reads the config again and refuses if the project's mounted domains changed while it ran. If every check passes, the attach writes `config.storage = postgres` and nothing else in the config.
+The command is `node "${CLAUDE_PLUGIN_ROOT}/bin/move-store.mjs" --attach [--fence-local] [--dry-run] [--project <dir>]`. It copies no data. It checks the same things the move checks first (`project.json`, the credentials file, the schema names), then checks each Postgres store the project uses: the project schema and the schema of every mounted domain. Each one must be registered, must have a complete move receipt from that same store, and must not be fenced. The first store that fails stops the attach, and the refusal names the schema and the check. Before it writes anything, the attach reads the config again and refuses if the project's mounted domains changed while it ran. If every check passes, the attach writes `config.storage = postgres` and nothing else in the config.
 
 Steps:
 
@@ -130,5 +132,5 @@ Refusals. Each starts with the check that failed and ends with `Nothing was chan
 - `attach check 'fence' failed`: a schema is fenced because it was moved back to SQLite. The project no longer lives on Postgres; ask the user how to go on.
 - `attach check 'local_store' failed`: see the list above.
 - `attach check 'mounts' failed`: the project's mounted domains changed while the attach ran. Re-run the attach so every store is checked. If the local SQLite file was already fenced, the message says so, and the re-run goes on from that fence.
-- A hobby project, a missing `project.json` or bad credentials: the preconditions in section 3.
+- A missing `project.json` or bad credentials: the preconditions in section 3.
 

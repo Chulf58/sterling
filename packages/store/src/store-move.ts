@@ -81,8 +81,6 @@ export class MoveError extends Error {
 export class MoveConfigMissingError extends MoveError {}
 /** The project's .sterling/config.json does not parse or fails the config schema. */
 export class MoveConfigInvalidError extends MoveError {}
-/** The project's mode does not allow this direction (a hobby project never moves to Postgres). */
-export class MoveModeError extends MoveError {}
 /** The project has no .sterling/project.json identity. */
 export class MoveIdentityMissingError extends MoveError {}
 /** The Postgres credentials file is missing or invalid. */
@@ -105,6 +103,61 @@ export class MoveVerificationError extends MoveError {}
 export class MoveStorageSettingError extends MoveError {}
 /** A shared domain's SQLite copy was left live for hobby projects (the fork) and has diverged; a move back would have to merge. */
 export class MoveForkDivergedError extends MoveError {}
+
+/** The CLI flag that lets a move go ahead past an existing fork without the records only the SQLite copy holds. */
+export const FORK_CONFIRM_FLAG = '--confirm-fork';
+
+/** A record whose rows differ between the two copies of a forked domain. */
+export interface ForkLossEntry {
+  id: string;
+  title: string;
+  /**
+   * only_in_source: the source copy holds the record and the target does not;
+   * only_in_target: the reverse (removed or retired in the source, or added to the target);
+   * differs: both hold it, and its row or any row tied to it (versions, aliases,
+   * relations, tags, file keys, log or selection rows) differs.
+   */
+  kind: 'only_in_source' | 'only_in_target' | 'differs';
+}
+
+/** Row counts of one table that differ between the copies. */
+export interface ForkLossTable {
+  only_in_source: number;
+  only_in_target: number;
+  changed: number;
+}
+
+/**
+ * Every difference between the two copies of a forked domain, over every
+ * table a move copies (anti-pattern 44d4f74f: a check over records alone
+ * misses versions and aliases): complete counts per record kind and per
+ * table, and the first FORK_LOSS_LIST_CAP records.
+ */
+export interface ForkLoss {
+  only_in_source: number;
+  only_in_target: number;
+  differs: number;
+  /** Only the tables with a difference. */
+  tables: Record<string, ForkLossTable>;
+  /** Differing rows tied to no record (store_meta, runs, handoffs, check_skipped, or a log row with no record id). */
+  unattributed_rows: number;
+  listed: ForkLossEntry[];
+}
+
+export const FORK_LOSS_LIST_CAP = 20;
+
+/**
+ * A move met a shared domain that an earlier move already copied while its
+ * source stayed writable (fork_already_copied), and was not confirmed
+ * (decision shared-domains-stay-forked-and-loud-while-projects-move-one-at-a-time).
+ */
+export class MoveForkUnconfirmedError extends MoveError {
+  readonly loss: ForkLoss;
+  constructor(message: string, loss: ForkLoss) {
+    super(message);
+    this.loss = loss;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Tables and the canonical row form
@@ -211,6 +264,26 @@ export interface ManifestDetail {
   entries: Map<string, Map<string, string>>;
 }
 
+/** One table's rows by the manifest key (the full composite key, or row hash and occurrence for a keyless table), each with its row hash. */
+function keyedRows(t: TableSpec, rows: Row[]): Map<string, { hash: string; row: Row }> {
+  const map = new Map<string, { hash: string; row: Row }>();
+  const seen = new Map<string, number>();
+  for (const row of rows) {
+    const h = sha256(encodeRow(row));
+    let key: string;
+    if (t.key === null) {
+      const n = (seen.get(h) ?? 0) + 1;
+      seen.set(h, n);
+      key = `${h}#${n}`;
+    } else {
+      key = encodeRow(t.key.map((k) => row[t.cols.findIndex((c) => c.name === k)]));
+    }
+    if (map.has(key)) throw new MoveSchemaError(`${t.name} holds two rows with the key ${key}`);
+    map.set(key, { hash: h, row });
+  }
+  return map;
+}
+
 /**
  * The manifest of a snapshot. Computed in JS from canonical rows, so SQLite
  * and Postgres reads of the same content give the same digests: integers as
@@ -223,22 +296,7 @@ export function buildManifest(snapshot: StoreSnapshot): ManifestDetail {
   const entries = new Map<string, Map<string, string>>();
   const top: string[] = [];
   for (const t of MOVE_TABLES) {
-    const rows = snapshot.get(t.name) ?? [];
-    const map = new Map<string, string>();
-    const seen = new Map<string, number>();
-    for (const row of rows) {
-      const h = sha256(encodeRow(row));
-      let key: string;
-      if (t.key === null) {
-        const n = (seen.get(h) ?? 0) + 1;
-        seen.set(h, n);
-        key = `${h}#${n}`;
-      } else {
-        key = encodeRow(t.key.map((k) => row[t.cols.findIndex((c) => c.name === k)]));
-      }
-      if (map.has(key)) throw new MoveSchemaError(`${t.name} holds two rows with the key ${key}`);
-      map.set(key, h);
-    }
+    const map = new Map([...keyedRows(t, snapshot.get(t.name) ?? []).entries()].map(([k, v]) => [k, v.hash]));
     const lines = [...map.entries()].map(([k, h]) => `${k}\t${h}`).sort();
     const digest = sha256(lines.join('\n'));
     tables[t.name] = { rows: map.size, digest };
@@ -383,9 +441,12 @@ type TargetPlan = { kind: 'empty' } | { kind: 'replace'; fence: MoveFence } | { 
  * What the move may do with the target, decided under its lock:
  * - fenced, and unchanged since the fence (manifest digest equal): it is the
  *   copy a previous move left behind, and is replaced;
- * - its latest receipt is from this source with this manifest: a replay, no copy;
- * - its latest receipt is from this source and the source is a fork (not
- *   fenced): the fork was already copied, the copies diverge, no copy;
+ * - its latest receipt is from this source, and source and target both still
+ *   hold that receipt's manifest: a replay, no copy;
+ * - its latest receipt is from this source and the source is a fork (left
+ *   unfenced now, or not fenced by the move that wrote that receipt): the
+ *   fork was already copied, the copies diverge, no copy; so is a target
+ *   that changed since the receipt while the source did not;
  * - empty: copied;
  * - anything else is refused by name, colliding ids first.
  */
@@ -399,6 +460,14 @@ function classifyTarget(args: {
   source: StoreSnapshot;
   sourceDigest: string;
   sourceForked: boolean;
+  /**
+   * The move id of the fence the source carried before this run, null for
+   * none. A receipt written by another move than the one that fenced the
+   * source means the source stayed writable after that copy: the last
+   * project to leave a forked domain fences it, and still meets the fork.
+   * Left undefined where this does not apply.
+   */
+  sourceFenceMoveId?: string | null;
 }): TargetPlan {
   const { label, fence, receipt, identity } = args;
   if (fence) {
@@ -409,8 +478,11 @@ function classifyTarget(args: {
     );
   }
   const sameSource = receipt !== null && receipt.source_kind === identity.kind && receipt.source_name === identity.name;
-  if (sameSource && receipt.source_digest === args.sourceDigest) return { kind: 'replay', receipt };
-  if (sameSource && args.sourceForked) return { kind: 'fork_already_copied', receipt };
+  // A replay needs both copies still as the receipt left them; a target that changed since is a fork, even when the source did not.
+  const sourceAsCopied = sameSource && receipt.source_digest === args.sourceDigest;
+  if (sourceAsCopied && args.targetDigest === receipt.source_digest) return { kind: 'replay', receipt };
+  const copiedUnfenced = args.sourceFenceMoveId !== undefined && args.sourceFenceMoveId !== receipt?.move_id;
+  if (sameSource && (args.sourceForked || copiedUnfenced || sourceAsCopied)) return { kind: 'fork_already_copied', receipt };
   const occupied = nonEmptyTables(args.target);
   if (occupied.length === 0) return { kind: 'empty' };
   const collisions = crossCollisions(args.source, args.target);
@@ -519,10 +591,24 @@ function upsertMetaSql(): string {
 
 /** Writes the fence row under BEGIN IMMEDIATE (the store's write lock). */
 export function writeSqliteFence(path: string, fence: MoveFence): void {
+  writeSqliteFenceChecked(path, fence, null);
+}
+
+/**
+ * Writes the fence row under BEGIN IMMEDIATE, after passing `check` (when given) the tables a
+ * move copies that hold rows, counted inside that same transaction, as
+ * nonEmptyTables names them. A check that throws rolls back with no fence
+ * written, and no other write can land between the count and the fence.
+ */
+function writeSqliteFenceChecked(path: string, fence: MoveFence, check: ((occupied: string[], records: number) => void) | null): void {
   const driver = new SqliteDriver(path);
   try {
     driver.begin();
     try {
+      if (check) {
+        const counts = MOVE_TABLES.map((t) => ({ name: t.name, n: Number((driver.prepare(`SELECT COUNT(*) AS n FROM ${t.name}${whereClause(t)}`).get() as { n: number | bigint }).n) }));
+        check(counts.filter((c) => c.n > 0).map((c) => `${c.name} (${c.n})`), counts.find((c) => c.name === 'records')!.n);
+      }
       driver.prepare(upsertMetaSql()).run(MOVE_FENCE_KEY, JSON.stringify(fence), new Date().toISOString());
       driver.commit();
     } catch (e) {
@@ -808,6 +894,8 @@ export interface MoveStoreResult {
   dry_run_plan?: string;
   /** Dry run only: the named refusal the real move would throw for this store. */
   dry_run_refusal?: { name: string; message: string };
+  /** fork_already_copied only: the records the source holds that this move leaves behind. */
+  fork_loss?: ForkLoss;
 }
 
 export interface MoveHooks {
@@ -821,8 +909,15 @@ export interface ImportStoreInput extends PgTimeouts {
   metaSchema: string;
   schema: string;
   identity: StoreIdentity;
-  /** False for a shared domain a hobby project still mounts: the fork (decision c0ba4e93 point 6). */
+  /** False for a shared domain a project still on SQLite mounts: the fork (decision c0ba4e93 point 6). */
   fenceSource: boolean;
+  /**
+   * Go ahead when the target already holds this source's fork
+   * (fork_already_copied), leaving behind what the source gained since.
+   * Without it that case is refused with MoveForkUnconfirmedError
+   * (decision shared-domains-stay-forked-and-loud-while-projects-move-one-at-a-time).
+   */
+  confirmFork?: boolean;
   dryRun?: boolean;
   hooks?: MoveHooks;
 }
@@ -852,25 +947,35 @@ export function importStore(input: ImportStoreInput): MoveStoreResult {
   const preSnap = snapshotSqlite(input.sqlitePath, sourceLabel);
   assertNoInternalCollision(preSnap, sourceLabel);
   const preDetail = buildManifest(preSnap);
+  let preLoss: ForkLoss | undefined;
+  // A fork already copied is refused here, before anything is fenced, unless confirmed.
+  const forkGate = (plan: TargetPlan, source: StoreSnapshot, target: StoreSnapshot): ForkLoss | undefined => {
+    if (plan.kind !== 'fork_already_copied') return undefined;
+    const loss = forkLoss(source, target);
+    if (!input.confirmFork) throw forkUnconfirmed(identity, sourceLabel, targetLabel, plan.receipt, loss);
+    return loss;
+  };
   const preClassify = (): string => {
     if (!pgStoreRegistered(bridge, metaSchema, schema)) return 'copy into a new store';
     const current = snapshotPg(bridge, schema, input);
-    return describePlan(
-      classifyTarget({
-        label: targetLabel,
-        target: current,
-        targetDigest: buildManifest(current).manifest.digest,
-        fence: readPgFence(bridge, schema),
-        receipt: latestPgReceipt(bridge, metaSchema, schema),
-        identity,
-        source: preSnap,
-        sourceDigest: preDetail.manifest.digest,
-        sourceForked: !input.fenceSource,
-      }),
-    );
+    const plan = classifyTarget({
+      label: targetLabel,
+      target: current,
+      targetDigest: buildManifest(current).manifest.digest,
+      fence: readPgFence(bridge, schema),
+      receipt: latestPgReceipt(bridge, metaSchema, schema),
+      identity,
+      source: preSnap,
+      sourceDigest: preDetail.manifest.digest,
+      sourceForked: !input.fenceSource,
+      sourceFenceMoveId: existingFence?.move_id ?? null,
+    });
+    preLoss = forkGate(plan, preSnap, current);
+    return preLoss ? `${describePlan(plan)}; confirmed (${FORK_CONFIRM_FLAG}), leaving behind ${describeForkLoss(preLoss)}` : describePlan(plan);
   };
   if (input.dryRun) {
-    return { ...result('to_postgres', identity, sourceLabel, targetLabel, 'dry_run', moveId, preDetail.manifest, false, existingFence !== null, 0), ...dryRunPlan(preClassify) };
+    const planned = dryRunPlan(preClassify);
+    return { ...result('to_postgres', identity, sourceLabel, targetLabel, 'dry_run', moveId, preDetail.manifest, false, existingFence !== null, 0), ...planned, ...(preLoss ? { fork_loss: preLoss } : {}) };
   }
   preClassify();
 
@@ -888,6 +993,7 @@ export function importStore(input: ImportStoreInput): MoveStoreResult {
   preparePgTarget(bridge, metaSchema, schema, identity, targetLabel);
 
   let statements = 0;
+  let loss: ForkLoss | undefined;
   const outcome = inPgMoveTransaction(bridge, metaSchema, schema, input, (): MoveOutcome => {
     const current = readPgTables(bridge, schema);
     const plan = classifyTarget({
@@ -900,7 +1006,9 @@ export function importStore(input: ImportStoreInput): MoveStoreResult {
       source: snap,
       sourceDigest: source.manifest.digest,
       sourceForked: !input.fenceSource,
+      sourceFenceMoveId: existingFence?.move_id ?? null,
     });
+    loss = forkGate(plan, snap, current);
     if (plan.kind === 'replay' || plan.kind === 'fork_already_copied') return plan.kind === 'replay' ? 'replayed' : 'fork_already_copied';
 
     const s = q(schema);
@@ -950,7 +1058,8 @@ export function importStore(input: ImportStoreInput): MoveStoreResult {
     statements += 3;
     return plan.kind === 'replace' ? 'replaced' : 'copied';
   });
-  return result('to_postgres', identity, sourceLabel, targetLabel, outcome, moveId, source.manifest, outcome !== 'fork_already_copied', input.fenceSource, statements);
+  const done = result('to_postgres', identity, sourceLabel, targetLabel, outcome, moveId, source.manifest, outcome !== 'fork_already_copied', input.fenceSource, statements);
+  return loss ? { ...done, fork_loss: loss } : done;
 }
 
 export interface ExportStoreInput extends PgTimeouts {
@@ -959,7 +1068,7 @@ export interface ExportStoreInput extends PgTimeouts {
   schema: string;
   sqlitePath: string;
   identity: StoreIdentity;
-  /** False for a domain another work project still mounts in Postgres. */
+  /** False for a domain another project on Postgres storage still mounts. */
   fenceSource: boolean;
   /** Hobby projects that mount the SQLite target: a refusal there is the diverged fork, and says so. */
   forkedWith?: string[];
@@ -990,8 +1099,8 @@ export function exportStore(input: ExportStoreInput): MoveStoreResult {
       const holders = input.forkedWith ?? [];
       if (holders.length && identity.kind === 'domain' && (e instanceof MoveTargetNotEmptyError || e instanceof MoveIdCollisionError) && readSqliteFence(input.sqlitePath) === null) {
         throw new MoveForkDivergedError(
-          `domain '${identity.name}': its SQLite copy ${targetLabel} stayed writable for hobby project(s) ${holders.join(', ')} when it moved to Postgres (the fork), ` +
-            `and the hobby copy has diverged from ${sourceLabel} since. A move back would have to merge the two copies, which a store move never does. Nothing was moved.`,
+          `domain '${identity.name}': its SQLite copy ${targetLabel} stayed writable for project(s) on SQLite ${holders.join(', ')} when it moved to Postgres (the fork), ` +
+            `and the SQLite copy has diverged from ${sourceLabel} since. A move back would have to merge the two copies, which a store move never does. Nothing was moved.`,
         );
       }
       throw e;
@@ -1128,6 +1237,110 @@ function describePlan(plan: TargetPlan): string {
   }
 }
 
+function recordTitle(body: Val): string {
+  try {
+    const b = JSON.parse(String(body)) as Record<string, unknown>;
+    const t = [b.title, b.headline, b.text].find((v) => typeof v === 'string' && v.trim() !== '') as string | undefined;
+    if (t === undefined) return '(no title)';
+    return t.length > 80 ? `${t.slice(0, 79)}…` : t;
+  } catch {
+    return '(body is not JSON)';
+  }
+}
+
+/** The column naming the record a row belongs to, for the tables that have one. */
+const RECORD_ID_COLUMN: Record<string, string> = {
+  records: 'id',
+  record_versions: 'record_id',
+  record_aliases: 'canonical_id',
+  record_relations: 'source_id',
+  record_stack_tags: 'record_id',
+  record_file_keys: 'record_id',
+  activity_log: 'record_id',
+  queue_drain_log: 'record_id',
+  selection: 'record_id',
+};
+
+/**
+ * What a move past a fork leaves behind: the full-manifest difference between
+ * the source and target copies (buildManifest and diffManifests), every
+ * differing row mapped to the record it belongs to where it has one.
+ */
+export function forkLoss(source: StoreSnapshot, target: StoreSnapshot): ForkLoss {
+  const diffs = diffManifests(buildManifest(source), buildManifest(target));
+  const tables: Record<string, ForkLossTable> = {};
+  const kindOf = new Map<string, ForkLossEntry['kind']>();
+  let unattributed = 0;
+  for (const d of diffs) {
+    tables[d.table] = { only_in_source: d.missing.length, only_in_target: d.extra.length, changed: d.changed.length };
+    const t = MOVE_TABLES.find((x) => x.name === d.table)!;
+    const col = RECORD_ID_COLUMN[t.name];
+    const idx = col === undefined ? -1 : t.cols.findIndex((c) => c.name === col);
+    const src = keyedRows(t, source.get(t.name) ?? []);
+    const tgt = keyedRows(t, target.get(t.name) ?? []);
+    const touch = (key: string, side: Map<string, { row: Row }>, recordKind: ForkLossEntry['kind']): void => {
+      const id = idx < 0 ? null : side.get(key)!.row[idx];
+      if (typeof id !== 'string') {
+        unattributed++;
+        return;
+      }
+      if (t.name === 'records') kindOf.set(id, recordKind);
+      else if (!kindOf.has(id)) kindOf.set(id, 'differs');
+    };
+    for (const k of d.missing) touch(k, src, 'only_in_source');
+    for (const k of d.extra) touch(k, tgt, 'only_in_target');
+    for (const k of d.changed) touch(k, src, 'differs');
+  }
+  const titleOf = new Map<string, string>();
+  for (const r of [...(target.get('records') ?? []), ...(source.get('records') ?? [])]) titleOf.set(r[0] as string, recordTitle(r[12]));
+  const order: ForkLossEntry['kind'][] = ['only_in_source', 'only_in_target', 'differs'];
+  const entries = [...kindOf.entries()]
+    .map(([id, kind]) => ({ id, title: titleOf.get(id) ?? '(no record row in either copy)', kind }))
+    .sort((x, y) => order.indexOf(x.kind) - order.indexOf(y.kind) || x.id.localeCompare(y.id));
+  const count = (k: ForkLossEntry['kind']) => entries.filter((e) => e.kind === k).length;
+  return {
+    only_in_source: count('only_in_source'),
+    only_in_target: count('only_in_target'),
+    differs: count('differs'),
+    tables,
+    unattributed_rows: unattributed,
+    listed: entries.slice(0, FORK_LOSS_LIST_CAP),
+  };
+}
+
+const FORK_KIND_NOTE: Record<ForkLossEntry['kind'], string> = {
+  only_in_source: 'only in the SQLite copy',
+  only_in_target: 'only in Postgres',
+  differs: 'differs between the copies',
+};
+
+export function describeForkLoss(loss: ForkLoss): string {
+  const tableNames = Object.keys(loss.tables);
+  if (tableNames.length === 0) return 'no row differs between the copies';
+  const total = loss.only_in_source + loss.only_in_target + loss.differs;
+  const perTable = tableNames
+    .map((n) => {
+      const t = loss.tables[n];
+      return `${n} ${t.only_in_source} only in SQLite, ${t.only_in_target} only in Postgres, ${t.changed} changed`;
+    })
+    .join('; ');
+  const lines = loss.listed.map((e) => `${e.id} "${e.title}" (${FORK_KIND_NOTE[e.kind]})`);
+  const more = total > loss.listed.length ? `; and ${total - loss.listed.length} more` : '';
+  return (
+    `${loss.only_in_source} record(s) only in the SQLite copy, ${loss.only_in_target} only in Postgres, ${loss.differs} that differ (the record or its versions, aliases, relations, tags, file keys or log rows)` +
+    `${loss.unattributed_rows ? `, and ${loss.unattributed_rows} differing row(s) tied to no record` : ''}. Rows per table: ${perTable}. Records: ${lines.join('; ') || 'none'}${more}`
+  );
+}
+
+function forkUnconfirmed(identity: StoreIdentity, sourceLabel: string, targetLabel: string, receipt: MoveReceipt, loss: ForkLoss): MoveForkUnconfirmedError {
+  return new MoveForkUnconfirmedError(
+    `${identity.kind} '${identity.name}': ${targetLabel} was copied from ${sourceLabel} by move ${receipt.move_id} on ${receipt.committed_at}, and the SQLite copy stayed writable for other projects (the fork). ` +
+      `This move does not copy it again and never merges the two copies, so no difference between them carries over: ${describeForkLoss(loss)}. ` +
+      `The two copies stay different: neither is merged into the other, and each copy keeps its own rows. Re-run with ${FORK_CONFIRM_FLAG} to move on that basis. Nothing was moved.`,
+    loss,
+  );
+}
+
 /** A dry run reports a refusal instead of throwing it; any error that is not a MoveError still throws. */
 function dryRunPlan(fn: () => string): Pick<MoveStoreResult, 'dry_run_plan' | 'dry_run_refusal'> {
   try {
@@ -1164,9 +1377,20 @@ export interface PlannedStore {
   /** False for a shared domain left live for other projects (sharedWith names them). */
   fenceSource: boolean;
   /** The other projects that keep using the source side of this domain. */
-  sharedWith: { root: string; mode: ProjectMode }[];
-  /** Moving back only: hobby projects that mount this domain's SQLite file, so a live SQLite copy there is a fork. */
-  forkedWith: { root: string; mode: ProjectMode }[];
+  sharedWith: SharingProject[];
+  /** Moving back only: projects on SQLite storage that mount this domain's SQLite file, so a live SQLite copy there is a fork. */
+  forkedWith: SharingProject[];
+}
+
+/**
+ * Another registered project that keeps using one side of a domain. Its mode
+ * and storage are null when its config cannot be read; moving to Postgres
+ * counts such a project as still on SQLite and mounting every domain.
+ */
+export interface SharingProject {
+  root: string;
+  mode: ProjectMode | null;
+  storage: ProjectStorage | null;
 }
 
 export interface MovePlan {
@@ -1181,6 +1405,12 @@ export interface MovePlan {
   stores: PlannedStore[];
   /** Registered projects skipped in the shared-domain check because their directory or config is gone. */
   skippedProjects: string[];
+  /**
+   * Moving to Postgres only: registered projects whose config exists but
+   * cannot be read, each with the reason. They count as still on SQLite and
+   * as mounting every domain, so no domain this move covers is fenced for them.
+   */
+  unreadableProjects: { root: string; reason: string }[];
 }
 
 export interface PlanMoveInput {
@@ -1225,14 +1455,6 @@ export function planMove(input: PlanMoveInput): MovePlan {
   if (config === null) throw new MoveConfigMissingError(`${root}/${CONFIG_REL} does not exist; run the move inside a Sterling project. Nothing was moved.`);
   const mode = readProjectMode(root);
   const storage = readProjectStorage(root);
-  // Decision storage-backend-is-its-own-config-key-written-only-by-store-move:
-  // storage postgres is valid only in work mode. Moving back to SQLite needs no
-  // mode, since it is also the way out for a postgres store in a hobby project.
-  if (input.direction === 'to_postgres' && mode === 'hobby') {
-    throw new MoveModeError(
-      `${root} is a hobby project (config.mode is hobby); a store move never moves a hobby project to Postgres, which is valid only in work mode. Set the project to work mode first (TUI System tab), then move it. Nothing was moved.`,
-    );
-  }
   const identity = readProjectIdentity(root);
   if (identity === null) throw new MoveIdentityMissingError(`${root}/.sterling/project.json is missing; a work project's Postgres store is named by its project_id. Restore it from git, or let init write it. Nothing was moved.`);
   try {
@@ -1248,9 +1470,10 @@ export function planMove(input: PlanMoveInput): MovePlan {
   const ns = process.env[PG_TEST_NAMESPACE_ENV] || undefined;
   const schemaOf = new Map(names.domains.map((d) => [d.name, d.schema]));
 
-  // Who else mounts what: hobby projects mount SQLite files, work projects mount Postgres schemas.
-  const others: { root: string; mode: ProjectMode; paths: Set<string>; schemas: Set<string> }[] = [];
+  // Who else mounts what: a project on SQLite storage writes the domains' SQLite files, a project on Postgres storage the schemas.
+  const others: { root: string; mode: ProjectMode; storage: ProjectStorage; paths: Set<string>; schemas: Set<string> }[] = [];
   const skipped: string[] = [];
+  const unreadable: { root: string; reason: string }[] = [];
   for (const repo of input.registeredProjects) {
     const other = resolve(repo);
     if (canonicalPath(other) === canonicalPath(root)) continue;
@@ -1264,8 +1487,16 @@ export function planMove(input: PlanMoveInput): MovePlan {
       const mounts = resolveDomainMounts(cfg);
       // Only the domain schemas are used here; the project id argument names no store of the other project.
       const otherSchemas = pgStoreNames(identity.project_id, cfg.stack_tags).domains.map((d) => d.schema);
-      others.push({ root: other, mode: otherMode, paths: new Set(mounts.map((m) => canonicalPath(m.dbPath))), schemas: new Set(otherSchemas) });
+      const otherStorage = readProjectStorage(other);
+      others.push({ root: other, mode: otherMode, storage: otherStorage, paths: new Set(mounts.map((m) => canonicalPath(m.dbPath))), schemas: new Set(otherSchemas) });
     } catch (e) {
+      // Fencing a SQLite domain needs proof that every project mounting it is on Postgres; an unreadable config proves
+      // nothing, so moving to Postgres counts it as on SQLite and mounting every domain (decision
+      // shared-domains-stay-forked-and-loud-while-projects-move-one-at-a-time). Moving back still refuses it.
+      if (input.direction === 'to_postgres') {
+        unreadable.push({ root: other, reason: (e as Error).message });
+        continue;
+      }
       throw new MoveRegistryProjectError(
         `registered project ${other} has a config that cannot be read (${(e as Error).message}), so whether it shares a domain with this project is unknown. Fix or unregister it first. Nothing was moved.`,
       );
@@ -1278,15 +1509,22 @@ export function planMove(input: PlanMoveInput): MovePlan {
   for (const mount of resolveDomainMounts(config)) {
     const schema = schemaOf.get(mount.name)!;
     const path = canonicalPath(mount.dbPath);
-    // Importing: a hobby project keeps writing the SQLite domain (the fork). Exporting: another work project keeps reading the Postgres domain.
-    const sharedWith = others
-      .filter((o) => (input.direction === 'to_postgres' ? o.mode === 'hobby' && o.paths.has(path) : o.mode === 'work' && o.schemas.has(schema)))
-      .map((o) => ({ root: o.root, mode: o.mode }));
-    const forkedWith = input.direction === 'to_sqlite' ? others.filter((o) => o.mode === 'hobby' && o.paths.has(path)).map((o) => ({ root: o.root, mode: o.mode })) : [];
+    // Importing: every other project still on SQLite storage keeps writing the SQLite domain (the fork), whatever its
+    // mode; the SQLite copy is fenced only when every project mounting it is on Postgres. Exporting: every other
+    // project on Postgres storage that mounts the domain keeps it live, whatever its mode. Mode is report metadata only.
+    const sharedWith: SharingProject[] =
+      input.direction === 'to_postgres'
+        ? [
+            ...others.filter((o) => o.storage === 'sqlite' && o.paths.has(path)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage })),
+            ...unreadable.map((u) => ({ root: u.root, mode: null, storage: null })),
+          ]
+        : others.filter((o) => o.storage === 'postgres' && o.schemas.has(schema)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage }));
+    const forkedWith: SharingProject[] =
+      input.direction === 'to_sqlite' ? others.filter((o) => o.storage === 'sqlite' && o.paths.has(path)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage })) : [];
     stores.push({ identity: { kind: 'domain', name: mount.name }, sqlitePath: mount.dbPath, schema, fenceSource: sharedWith.length === 0, sharedWith, forkedWith });
   }
   for (const s of stores) assertSterlingSchemaName(s.schema);
-  return { direction: input.direction, root, projectId: identity.project_id, mode, storage, metaSchema, ...(ns ? { testNamespace: ns } : {}), stores, skippedProjects: skipped };
+  return { direction: input.direction, root, projectId: identity.project_id, mode, storage, metaSchema, ...(ns ? { testNamespace: ns } : {}), stores, skippedProjects: skipped, unreadableProjects: unreadable };
 }
 
 /** The repo paths in a registry.db, read through a read-only connection; [] when the file does not exist. */
@@ -1398,7 +1636,7 @@ export interface PlanAttachInput {
 }
 
 /**
- * The file checks for an attach. Reuses planMove (config, work mode, identity,
+ * The file checks for an attach. Reuses planMove (config, identity,
  * credentials, schema names) with no registered projects: an attach copies and
  * fences no domain, so who else mounts one does not matter. Opens no database.
  */
@@ -1496,7 +1734,7 @@ function checkAttachStore(bridge: PgBridge, metaSchema: string, s: { identity: S
     throw new MoveAttachError(
       'registered',
       s.schema,
-      `${label} is not registered in ${metaSchema}.stores, so it was never moved to Postgres. Run move-store --to pg on the machine that holds this store first. Nothing was changed.`,
+      `${label} is not registered in ${metaSchema}.stores, so it was never moved to Postgres. Run \`node "<Sterling root>/bin/move-store.mjs" --to pg\` on the machine that holds this store first. Nothing was changed.`,
     );
   }
   const receipt = latestPgReceipt(bridge, metaSchema, s.schema);
@@ -1522,12 +1760,17 @@ function checkAttachStore(bridge: PgBridge, metaSchema: string, s: { identity: S
   return { identity: s.identity, schema: s.schema, receipt: { move_id: receipt.move_id, source: receipt.source, committed_at: receipt.committed_at } };
 }
 
+export interface AttachHooks {
+  /** Test seam: runs after the local SQLite file's pre-check and before its fence is written (not on a dry run). */
+  beforeLocalFence?: (path: string) => void;
+}
+
 /**
  * Attaches this machine to the project's Postgres stores: every store is
  * checked first, then the local project SQLite file is fenced (see above),
  * then config.storage is written. A dry run runs every check and writes nothing.
  */
-export function attachProject(plan: AttachPlan, bridge: PgBridge, opts: { dryRun?: boolean } = {}): AttachResult {
+export function attachProject(plan: AttachPlan, bridge: PgBridge, opts: { dryRun?: boolean; hooks?: AttachHooks } = {}): AttachResult {
   const dryRun = opts.dryRun ?? false;
   const stores = plan.stores.map((s) => checkAttachStore(bridge, plan.metaSchema, s));
   assertAttachMountsUnchanged(plan, 'Nothing was changed.');
@@ -1547,21 +1790,32 @@ export function attachProject(plan: AttachPlan, bridge: PgBridge, opts: { dryRun
       if (existing.manifest_digest === null && !dryRun) writeSqliteFence(path, { ...existing, manifest_digest: buildManifest(snap).manifest.digest });
       local = { path, records, occupied, action: 'already_fenced' };
     } else {
-      if (occupied.length > 0 && !plan.fenceLocal) {
+      const refuseOccupied = (held: string[]): void => {
+        if (held.length === 0 || plan.fenceLocal) return;
         throw new MoveAttachError(
           'local_store',
           null,
-          `${label} holds ${occupied.join(', ')}. After the attach this project reads only Postgres, so none of it would be reachable from it. ` +
+          `${label} holds ${held.join(', ')}. After the attach this project reads only Postgres, so none of it would be reachable from it. ` +
             `Check what it is; to fence the file and attach anyway, pass --fence-local (the file is kept, and a later move back to SQLite from this machine replaces it). Nothing was changed.`,
         );
-      }
-      if (!dryRun) {
-        // As in importStore: fence first, then record the digest of what the fence froze.
+      };
+      refuseOccupied(occupied);
+      if (dryRun) {
+        local = { path, records, occupied, action: 'would_fence' };
+      } else {
+        opts.hooks?.beforeLocalFence?.(path);
+        // As in importStore: fence first, then record the digest of what the fence froze. The fence
+        // re-counts the copied tables under its own write lock, so a row written after the snapshot
+        // above is refused by name rather than fenced unseen.
         const fence: MoveFence = { move_id: randomUUID(), to: target, fenced_at: new Date().toISOString(), manifest_digest: null };
-        writeSqliteFence(path, fence);
+        let locked = { occupied, records };
+        writeSqliteFenceChecked(path, fence, (held, heldRecords) => {
+          refuseOccupied(held);
+          locked = { occupied: held, records: heldRecords };
+        });
         writeSqliteFence(path, { ...fence, manifest_digest: buildManifest(snapshotSqlite(path, label)).manifest.digest });
+        local = { path, ...locked, action: 'fenced' };
       }
-      local = { path, records, occupied, action: dryRun ? 'would_fence' : 'fenced' };
     }
   }
   if (!dryRun) assertAttachMountsUnchanged(plan, local.action === 'fenced' ? `The local SQLite store ${path} was fenced toward ${pgLabel(plan.stores[0].schema)}; config.storage was not changed.` : 'Nothing was changed.');

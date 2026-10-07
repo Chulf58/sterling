@@ -19081,20 +19081,12 @@ function runtimeMarkerPath(storePath2) {
 // packages/schemas/dist/project.js
 import { lstatSync, readFileSync } from "node:fs";
 import { join as join2, resolve } from "node:path";
-var PROJECT_MODES = ["hobby", "work"];
-var ProjectModeError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "ProjectModeError";
-  }
-};
 var ProjectIdentityError = class extends Error {
   constructor(message) {
     super(message);
     this.name = "ProjectIdentityError";
   }
 };
-var CONFIG_REL = ".sterling/config.json";
 var PROJECT_IDENTITY_REL = ".sterling/project.json";
 var fwd = (p) => p.replace(/\\/g, "/");
 var UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -19137,15 +19129,6 @@ function readJsonObject(root, rel, ErrorClass, subject) {
     throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
   }
   return { where, parsed };
-}
-function readProjectMode(root) {
-  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
-  if (parsed === void 0 || parsed.mode === void 0)
-    return "hobby";
-  if (!PROJECT_MODES.includes(parsed.mode)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
-  }
-  return parsed.mode;
 }
 function readProjectIdentity(root) {
   const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
@@ -23849,20 +23832,21 @@ var SterlingStore = class _SterlingStore {
    */
   retireInFavorOf(id, replacementId, at, verb = "retired") {
     this.assertWritable("retireInFavorOf");
-    const record2 = this.get(id);
-    if (!record2)
-      throw new Error(`retireInFavorOf: no record '${id}'`);
-    const identity = this.identityOf(id);
-    if (identity?.lifecycle === "retired" || record2.status === "superseded") {
-      throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-    }
-    const replacement = this.identityOf(replacementId);
-    if (replacement?.lifecycle === "retired") {
-      throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-    }
-    const retired = { ...record2, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-    const stored = _SterlingStore.storableBody(retired);
+    let stored;
     this.tx(() => {
+      const record2 = this.get(id);
+      if (!record2)
+        throw new Error(`retireInFavorOf: no record '${id}'`);
+      const identity = this.identityOf(id);
+      if (identity?.lifecycle === "retired" || record2.status === "superseded") {
+        throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
+      }
+      const replacement = this.identityOf(replacementId);
+      if (replacement?.lifecycle === "retired") {
+        throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
+      }
+      const retired = { ...record2, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
+      stored = _SterlingStore.storableBody(retired);
       const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
       if (res.changes === 0) {
@@ -24414,8 +24398,8 @@ function brokerStorageIdentity(route) {
 var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
 var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
 var STORAGE_BACKENDS = ["sqlite", "postgres"];
-var MOVE_STORE_COMMAND = "node scripts/move-store.mjs --to pg|sqlite";
-var CONFIG_REL2 = ".sterling/config.json";
+var MOVE_STORE_COMMAND = 'node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite';
+var CONFIG_REL = ".sterling/config.json";
 var StoreSettingsError = class extends Error {
   constructor(message) {
     super(message);
@@ -24433,7 +24417,7 @@ var StoreUnreachableError = class extends Error {
 var PostgresStoreNotMovedError = class extends PgStoreMissingError {
   constructor(cause) {
     super(cause.schema, "see the message");
-    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node scripts/move-store.mjs --to pg\`. Nothing was created.`;
+    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node "<Sterling root>/bin/move-store.mjs" --to pg\`. Nothing was created.`;
     this.name = "PostgresStoreNotMovedError";
   }
 };
@@ -24441,7 +24425,7 @@ function routedCredentialsPath() {
   return join8(homedir3(), ".sterling", "credentials", "served.json");
 }
 function readConfig(root) {
-  const path = join8(root, CONFIG_REL2);
+  const path = join8(root, CONFIG_REL);
   try {
     lstatSync3(path);
   } catch (e) {
@@ -24503,10 +24487,6 @@ function resolveStoreRoute(root) {
     return { storage: "sqlite", root: absRoot, config: config2, projectDbPath: join8(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config2) };
   }
   const shown = absRoot.replace(/\\/g, "/");
-  const mode = readProjectMode(absRoot);
-  if (mode !== "work") {
-    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node scripts/move-store.mjs --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
-  }
   const identity = readProjectIdentity(absRoot);
   if (identity === null) {
     throw new ProjectIdentityError(`storage 'postgres' needs the project identity file ${shown}/.sterling/project.json ({"project_id": "<uuid v4>"}); it is missing. Restore it from git, or let init write it. Nothing was opened.`);
@@ -29419,7 +29399,7 @@ function elementOwnsScalar(el, key) {
 var CONFIG_SET_FORBIDDEN_SEGMENTS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
 var StorageTransitionRequiredError = class extends Error {
   constructor(path) {
-    super(`config_set: '${path}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), so it changes only when the stores move, through the explicit storage transition: \`node scripts/move-store.mjs --to pg|sqlite\`, which writes it after the move commits. Nothing was written.`);
+    super(`config_set: '${path}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), so it changes only when the stores move, through the explicit storage transition: \`node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite\`, which writes it after the move commits. Nothing was written.`);
     this.name = "StorageTransitionRequiredError";
   }
 };
@@ -35872,7 +35852,7 @@ ${JSON.stringify(entry)}
       delete next.needs;
     const claimsCheck = this.assertClaimedPaths("board_update", next);
     try {
-      const updated = this.store.updateTodo(old.id, next);
+      const updated = this.store.updateTodo(old.id, next, old.version !== void 0 ? { expected_version: old.version } : {});
       return claimsCheck.claims_check ? { ...updated, ...claimsCheck } : updated;
     } catch (err) {
       if (err instanceof ZodError2)
@@ -36551,6 +36531,14 @@ ${JSON.stringify(entry)}
     }
     if (record2.id === survivor.id) {
       throw new Error(`knowledge_retire: '${id}' and '${inFavorOf}' both resolve to record '${record2.id}' \u2014 a record cannot be retired in favour of itself.`);
+    }
+    const bothInProject = this.store.projectStoreHolds(record2.id) && this.store.projectStoreHolds(survivor.id);
+    if (!bothInProject) {
+      const retireeMount = this.store.scopeOfHolder(record2.id);
+      const survivorMount = this.store.scopeOfHolder(survivor.id);
+      if (retireeMount !== survivorMount) {
+        throw new Error(`knowledge_retire: cross-store retirement refused \u2014 '${record2.id}' is held by the '${retireeMount}' store and its survivor '${survivor.id}' by the '${survivorMount}' store. The survivor's liveness can only be checked under one store's write lock, so a concurrent retirement the other way could leave two retired records forwarding to each other. Nothing was written. Retire a record only in favour of a survivor in the same store.`);
+      }
     }
     if (survivor.status === "superseded") {
       throw new Error(`knowledge_retire: '${inFavorOf}' is itself superseded \u2014 retiring into a dead record forwards the reader to a tombstone. Resolve the survivor's chain to its live head first.`);
@@ -37304,7 +37292,7 @@ function createSterlingServer(target) {
     inputSchema: strict({ target: external_exports.string(), reason: external_exports.string() })
   }, ({ target: target2, reason }) => json(tools.capturePending(target2, reason)));
   server.registerTool("config_set", {
-    description: "Conductor-only (not granted to roster agents): set one key in the active project's .sterling/config.json, validating the whole document against the config schema before writing. `path` is a dotted key (e.g. 'tdd.enabled'; intermediate objects are created); `value` is required; __proto__/constructor/prototype in the path are refused, and so is `storage` (where the stores live; only `node scripts/move-store.mjs --to pg|sqlite` changes it, after moving them). `expected_digest` (sha256 of the current file bytes) makes the write conditional \u2014 a stale token is refused naming both digests. Pass it against concurrent writers such as the TUI: the call also re-checks the digest just before its atomic rename, but a small window between that re-check and the rename remains, so last write wins inside it. A symlinked or non-regular config.json or .sterling directory is refused. The file is re-serialized as 2-space LF JSON (BOM stripped; other keys preserved). Returns {path, previous_value, value, digest}; digest is the next expected_digest. If the written path is a key Sterling no longer reads (a rename, or a retired mechanism), the receipt also carries `warnings`: [string] naming it \u2014 the write still lands, this is disclosure, never a refusal.",
+    description: "Conductor-only (not granted to roster agents): set one key in the active project's .sterling/config.json, validating the whole document against the config schema before writing. `path` is a dotted key (e.g. 'tdd.enabled'; intermediate objects are created); `value` is required; __proto__/constructor/prototype in the path are refused, and so is `storage` (where the stores live; only `node \"<Sterling root>/bin/move-store.mjs\" --to pg|sqlite` changes it, after moving them). `expected_digest` (sha256 of the current file bytes) makes the write conditional \u2014 a stale token is refused naming both digests. Pass it against concurrent writers such as the TUI: the call also re-checks the digest just before its atomic rename, but a small window between that re-check and the rename remains, so last write wins inside it. A symlinked or non-regular config.json or .sterling directory is refused. The file is re-serialized as 2-space LF JSON (BOM stripped; other keys preserved). Returns {path, previous_value, value, digest}; digest is the next expected_digest. If the written path is a key Sterling no longer reads (a rename, or a retired mechanism), the receipt also carries `warnings`: [string] naming it \u2014 the write still lands, this is disclosure, never a refusal.",
     inputSchema: strict({
       path: external_exports.string(),
       value: external_exports.unknown().refine((v) => v !== void 0, { message: "'value' is required" }),

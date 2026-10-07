@@ -44506,20 +44506,12 @@ var runtimeMarkerSchema = external_exports.object({
 // packages/schemas/dist/project.js
 import { lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-var PROJECT_MODES = ["hobby", "work"];
-var ProjectModeError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "ProjectModeError";
-  }
-};
 var ProjectIdentityError = class extends Error {
   constructor(message) {
     super(message);
     this.name = "ProjectIdentityError";
   }
 };
-var CONFIG_REL = ".sterling/config.json";
 var PROJECT_IDENTITY_REL = ".sterling/project.json";
 var fwd = (p) => p.replace(/\\/g, "/");
 var UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -44562,15 +44554,6 @@ function readJsonObject(root, rel, ErrorClass, subject) {
     throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
   }
   return { where, parsed };
-}
-function readProjectMode(root) {
-  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
-  if (parsed === void 0 || parsed.mode === void 0)
-    return "hobby";
-  if (!PROJECT_MODES.includes(parsed.mode)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
-  }
-  return parsed.mode;
 }
 function readProjectIdentity(root) {
   const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
@@ -48873,20 +48856,21 @@ var SterlingStore = class _SterlingStore {
    */
   retireInFavorOf(id, replacementId, at, verb = "retired") {
     this.assertWritable("retireInFavorOf");
-    const record = this.get(id);
-    if (!record)
-      throw new Error(`retireInFavorOf: no record '${id}'`);
-    const identity = this.identityOf(id);
-    if (identity?.lifecycle === "retired" || record.status === "superseded") {
-      throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-    }
-    const replacement = this.identityOf(replacementId);
-    if (replacement?.lifecycle === "retired") {
-      throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-    }
-    const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-    const stored = _SterlingStore.storableBody(retired);
+    let stored;
     this.tx(() => {
+      const record = this.get(id);
+      if (!record)
+        throw new Error(`retireInFavorOf: no record '${id}'`);
+      const identity = this.identityOf(id);
+      if (identity?.lifecycle === "retired" || record.status === "superseded") {
+        throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
+      }
+      const replacement = this.identityOf(replacementId);
+      if (replacement?.lifecycle === "retired") {
+        throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
+      }
+      const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
+      stored = _SterlingStore.storableBody(retired);
       const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
       if (res.changes === 0) {
@@ -49360,8 +49344,8 @@ import { join as join6, resolve as resolve2 } from "node:path";
 var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
 var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
 var STORAGE_BACKENDS = ["sqlite", "postgres"];
-var MOVE_STORE_COMMAND = "node scripts/move-store.mjs --to pg|sqlite";
-var CONFIG_REL2 = ".sterling/config.json";
+var MOVE_STORE_COMMAND = 'node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite';
+var CONFIG_REL = ".sterling/config.json";
 var StoreSettingsError = class extends Error {
   constructor(message) {
     super(message);
@@ -49379,7 +49363,7 @@ var StoreUnreachableError = class extends Error {
 var PostgresStoreNotMovedError = class extends PgStoreMissingError {
   constructor(cause) {
     super(cause.schema, "see the message");
-    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node scripts/move-store.mjs --to pg\`. Nothing was created.`;
+    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node "<Sterling root>/bin/move-store.mjs" --to pg\`. Nothing was created.`;
     this.name = "PostgresStoreNotMovedError";
   }
 };
@@ -49387,7 +49371,7 @@ function routedCredentialsPath() {
   return join6(homedir3(), ".sterling", "credentials", "served.json");
 }
 function readConfig(root) {
-  const path = join6(root, CONFIG_REL2);
+  const path = join6(root, CONFIG_REL);
   try {
     lstatSync2(path);
   } catch (e) {
@@ -49449,10 +49433,6 @@ function resolveStoreRoute(root) {
     return { storage: "sqlite", root: absRoot, config, projectDbPath: join6(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
   }
   const shown = absRoot.replace(/\\/g, "/");
-  const mode = readProjectMode(absRoot);
-  if (mode !== "work") {
-    throw new StoreSettingsError(`config.storage is 'postgres' but config.mode is '${mode}' in ${shown}/${CONFIG_REL2}: Postgres storage is valid only in a work-mode project. Move the stores back with \`node scripts/move-store.mjs --to sqlite\`, or set mode to 'work'. Nothing was opened.`);
-  }
   const identity = readProjectIdentity(absRoot);
   if (identity === null) {
     throw new ProjectIdentityError(`storage 'postgres' needs the project identity file ${shown}/.sterling/project.json ({"project_id": "<uuid v4>"}); it is missing. Restore it from git, or let init write it. Nothing was opened.`);
@@ -50828,7 +50808,7 @@ import { join as join7 } from "node:path";
 function configPath(explicit) {
   return explicit ?? join7(process.cwd(), ".sterling", "config.json");
 }
-var MOVE_STORE = "`node scripts/move-store.mjs --to pg|sqlite`";
+var MOVE_STORE = '`node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite`';
 var StorageTransitionRequiredError = class extends Error {
   constructor(path) {
     super(`TUI: '${path}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), so it changes only when the stores move, through the explicit storage transition: ${MOVE_STORE}, which writes it after the move commits. Nothing was written.`);
@@ -50862,12 +50842,7 @@ function applyTddToggle(e, onError, path) {
 }
 function applyModeToggle(e, onError, path) {
   try {
-    writeConfigKey(configPath(path), "mode", (_old, raw) => {
-      if (raw.storage === "postgres" && e.mode !== "work") {
-        throw new Error(`config.storage is 'postgres', which is valid only in a work-mode project, so setting mode to '${e.mode}' would leave every store unopenable. Move the stores back first with \`node scripts/move-store.mjs --to sqlite\`, then switch the mode. Nothing was written.`);
-      }
-      return e.mode;
-    });
+    writeConfigKey(configPath(path), "mode", () => e.mode);
     return true;
   } catch (err) {
     onError?.(`mode toggle failed \u2014 ${err.message}`);
@@ -51284,7 +51259,7 @@ function readContained(root, rel) {
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/handoff-projection.mjs
-var CONFIG_REL3 = ".sterling/config.json";
+var CONFIG_REL2 = ".sterling/config.json";
 var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
 var HandoffSettingError = class extends Error {
 };
@@ -51329,7 +51304,7 @@ function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
   }
   return { files, unknown: null };
 }
-function handoffSettingOf(parsed, root, where = CONFIG_REL3) {
+function handoffSettingOf(parsed, root, where = CONFIG_REL2) {
   const block = parsed?.handoff;
   if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
     throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
@@ -51693,13 +51668,13 @@ function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
 // scripts/hooks/lib/store-backend.mjs
 import { existsSync as existsSync7, readFileSync as readFileSync10 } from "node:fs";
 import { join as join14 } from "node:path";
-var CONFIG_REL4 = join14(".sterling", "config.json");
+var CONFIG_REL3 = join14(".sterling", "config.json");
 var STORE_DB_REL = join14(".sterling", "sterling.db");
 function storeBackend(root) {
   const dbExists = () => existsSync7(join14(root, STORE_DB_REL));
   let text;
   try {
-    text = readFileSync10(join14(root, CONFIG_REL4), "utf8");
+    text = readFileSync10(join14(root, CONFIG_REL3), "utf8");
   } catch (e) {
     if (e?.code === "ENOENT") return "sqlite";
     return dbExists() ? "sqlite" : "routed";
