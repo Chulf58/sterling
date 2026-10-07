@@ -1056,7 +1056,7 @@ export interface ExportStoreInput extends PgTimeouts {
   schema: string;
   sqlitePath: string;
   identity: StoreIdentity;
-  /** False for a domain another work project still mounts in Postgres. */
+  /** False for a domain another project on Postgres storage still mounts. */
   fenceSource: boolean;
   /** Hobby projects that mount the SQLite target: a refusal there is the diverged fork, and says so. */
   forkedWith?: string[];
@@ -1087,8 +1087,8 @@ export function exportStore(input: ExportStoreInput): MoveStoreResult {
       const holders = input.forkedWith ?? [];
       if (holders.length && identity.kind === 'domain' && (e instanceof MoveTargetNotEmptyError || e instanceof MoveIdCollisionError) && readSqliteFence(input.sqlitePath) === null) {
         throw new MoveForkDivergedError(
-          `domain '${identity.name}': its SQLite copy ${targetLabel} stayed writable for hobby project(s) ${holders.join(', ')} when it moved to Postgres (the fork), ` +
-            `and the hobby copy has diverged from ${sourceLabel} since. A move back would have to merge the two copies, which a store move never does. Nothing was moved.`,
+          `domain '${identity.name}': its SQLite copy ${targetLabel} stayed writable for project(s) on SQLite ${holders.join(', ')} when it moved to Postgres (the fork), ` +
+            `and the SQLite copy has diverged from ${sourceLabel} since. A move back would have to merge the two copies, which a store move never does. Nothing was moved.`,
         );
       }
       throw e;
@@ -1366,7 +1366,7 @@ export interface PlannedStore {
   fenceSource: boolean;
   /** The other projects that keep using the source side of this domain. */
   sharedWith: SharingProject[];
-  /** Moving back only: hobby projects that mount this domain's SQLite file, so a live SQLite copy there is a fork. */
+  /** Moving back only: projects on SQLite storage that mount this domain's SQLite file, so a live SQLite copy there is a fork. */
   forkedWith: SharingProject[];
 }
 
@@ -1506,17 +1506,17 @@ export function planMove(input: PlanMoveInput): MovePlan {
     const schema = schemaOf.get(mount.name)!;
     const path = canonicalPath(mount.dbPath);
     // Importing: every other project still on SQLite storage keeps writing the SQLite domain (the fork), whatever its
-    // mode; the SQLite copy is fenced only when every project mounting it is on Postgres. Exporting: another work
-    // project keeps reading the Postgres domain.
+    // mode; the SQLite copy is fenced only when every project mounting it is on Postgres. Exporting: every other
+    // project on Postgres storage that mounts the domain keeps it live, whatever its mode. Mode is report metadata only.
     const sharedWith: SharingProject[] =
       input.direction === 'to_postgres'
         ? [
             ...others.filter((o) => o.storage === 'sqlite' && o.paths.has(path)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage })),
             ...unreadable.map((u) => ({ root: u.root, mode: null, storage: null })),
           ]
-        : others.filter((o) => o.mode === 'work' && o.schemas.has(schema)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage }));
+        : others.filter((o) => o.storage === 'postgres' && o.schemas.has(schema)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage }));
     const forkedWith: SharingProject[] =
-      input.direction === 'to_sqlite' ? others.filter((o) => o.mode === 'hobby' && o.paths.has(path)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage })) : [];
+      input.direction === 'to_sqlite' ? others.filter((o) => o.storage === 'sqlite' && o.paths.has(path)).map((o) => ({ root: o.root, mode: o.mode, storage: o.storage })) : [];
     stores.push({ identity: { kind: 'domain', name: mount.name }, sqlitePath: mount.dbPath, schema, fenceSource: sharedWith.length === 0, sharedWith, forkedWith });
   }
   for (const s of stores) assertSterlingSchemaName(s.schema);

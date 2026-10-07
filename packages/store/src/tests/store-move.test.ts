@@ -195,7 +195,7 @@ test('planMove: a domain a hobby project also mounts is planned unfenced and nam
   const shared = join(base, 'domains', 'shared.db');
   const own = join(base, 'domains', 'own.db');
   const work = project(join(base, 'work'), { stack: ['shared', 'own'], domainPaths: { shared, own } });
-  const hobby = project(join(base, 'hobby'), { mode: 'hobby', stack: ['shared'], domainPaths: { shared } });
+  const hobby = project(join(base, 'hobby'), { mode: 'hobby', stack: ['shared'], domainPaths: { shared }, storage: 'sqlite' });
   const otherWork = project(join(base, 'work2'), { stack: ['own'], domainPaths: { own }, storage: 'postgres' });
   const plan = planMove({ root: work, direction: 'to_postgres', registeredProjects: [work, hobby, otherWork, join(base, 'gone')], credentialsPath: creds });
   assert.deepEqual(plan.stores.map((s) => [s.identity.kind, s.identity.kind === 'domain' ? s.identity.name : 'p', s.fenceSource]), [['project', 'p', true], ['domain', 'shared', false], ['domain', 'own', true]]);
@@ -258,6 +258,37 @@ test('planMove --to pg: a registered project whose config cannot be read counts 
   assert.ok(plan.unreadableProjects[1].reason.includes('storage'), plan.unreadableProjects[1].reason);
   assert.throws(() => planMove({ root: work, direction: 'to_sqlite', registeredProjects: [work, broken], credentialsPath: creds }), MoveRegistryProjectError);
 });
+
+// Peers are judged by config.storage in both directions; mode is report metadata only. The four mode/storage
+// combinations, each a peer mounting the one shared domain, with storage always set explicitly.
+const PEER_COMBINATIONS = [
+  { mode: 'work', storage: 'sqlite' },
+  { mode: 'work', storage: 'postgres' },
+  { mode: 'hobby', storage: 'sqlite' },
+  { mode: 'hobby', storage: 'postgres' },
+] as const;
+
+for (const peer of PEER_COMBINATIONS) {
+  test(`planMove: a ${peer.mode} peer on ${peer.storage} storage that mounts the domain, in both directions`, () => {
+    const base = tempDir();
+    const creds = fakeCredentials(base);
+    const shared = join(base, 'domains', 'shared.db');
+    const work = project(join(base, 'work'), { stack: ['shared'], domainPaths: { shared }, storage: 'sqlite' });
+    const other = project(join(base, 'peer'), { mode: peer.mode, stack: ['shared'], domainPaths: { shared }, storage: peer.storage });
+    const holder = [{ root: other, mode: peer.mode, storage: peer.storage }];
+    const onSqlite = peer.storage === 'sqlite';
+
+    const toPg = planMove({ root: work, direction: 'to_postgres', registeredProjects: [work, other], credentialsPath: creds }).stores[1];
+    assert.equal(toPg.fenceSource, !onSqlite, '--to pg fences the SQLite copy only when the peer is on Postgres');
+    assert.deepEqual(toPg.sharedWith, onSqlite ? holder : []);
+    assert.deepEqual(toPg.forkedWith, []);
+
+    const toSqlite = planMove({ root: work, direction: 'to_sqlite', registeredProjects: [work, other], credentialsPath: creds }).stores[1];
+    assert.equal(toSqlite.fenceSource, onSqlite, '--to sqlite leaves the Postgres copy live for a peer on Postgres');
+    assert.deepEqual(toSqlite.sharedWith, onSqlite ? [] : holder);
+    assert.deepEqual(toSqlite.forkedWith, onSqlite ? holder : [], 'a peer on SQLite writes the SQLite copy, so a live copy there is a fork');
+  });
+}
 
 test('writeProjectStorage: switches config.storage, keeps config.mode and every other key; absent reads as sqlite', () => {
   const dir = project(tempDir(), {});
