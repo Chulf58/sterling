@@ -1,9 +1,10 @@
-// Work-mode refusal for the two hobby-only scripts (board 9af3fdd0, issue
+// Postgres-storage refusal for the two SQLite-only scripts (board 9af3fdd0, issue
 // Chulf58/sterling#26 item 7): scripts/domain-doctor.mjs and
 // scripts/migration-preflight.mjs do SQLite file forensics and a v1 -> v2
-// SQLite migration preflight, which have no meaning in a work project (its
-// knowledge lives in Postgres). In a work-mode project both refuse with exit 4
-// before opening anything; a hobby project is unchanged. The invoking project
+// SQLite migration preflight, which have no meaning where config.storage is
+// 'postgres'. The verdict is the storage, in any mode (a hobby project can be on
+// Postgres). Both refuse there with exit 4 before opening anything; a project on
+// SQLite is unchanged, whatever its mode. The invoking project
 // is the Sterling root of the cwd (a linked worktree resolves to its main
 // checkout).
 import { test } from 'node:test';
@@ -57,16 +58,20 @@ for (const [name, script, argsFor] of [
   ['domain-doctor', DOCTOR, (db) => ['show', '--db', db, '--id', 'aaaaaaaa']],
   ['migration-preflight', PREFLIGHT, (db) => ['--db', db]],
 ]) {
-  test(`${name}: refuses in a work-mode project with exit 4, naming the script and Postgres, opening nothing`, () => {
-    const dir = project({ mode: 'work' });
+  test(`${name}: refuses on Postgres storage (hobby and work mode alike) with exit 4, naming the script and the storage, opening nothing`, () => {
+    for (const mode of ['hobby', 'work']) refusesOnPostgres(mode);
+  });
+
+  function refusesOnPostgres(mode) {
+    const dir = project({ mode, storage: 'postgres' });
     try {
       const db = store(dir);
       const before = snapshot(dir);
       const r = run(script, argsFor(db), dir);
       assert.equal(r.code, REFUSED, r.stderr);
       assert.equal(r.stdout, '');
-      assert.match(r.stderr, new RegExp(`^${name}: hobby-only`, 'm'));
-      assert.match(r.stderr, /hobby-only/);
+      assert.match(r.stderr, new RegExp(`^${name}: refused`, 'm'));
+      assert.match(r.stderr, /config\.storage is 'postgres'/);
       assert.match(r.stderr, /Postgres/);
       assert.match(r.stderr, /exit 4/);
       assert.deepEqual(snapshot(dir), before, 'store bytes unchanged and no -wal/-shm created');
@@ -74,10 +79,10 @@ for (const [name, script, argsFor] of [
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }
 
-  test(`${name}: the refusal comes before argument checks, so a bad --db in a work project is still exit 4`, () => {
-    const dir = project({ mode: 'work' });
+  test(`${name}: the refusal comes before argument checks, so a bad --db on Postgres storage is still exit 4`, () => {
+    const dir = project({ mode: 'hobby', storage: 'postgres' });
     try {
       const r = run(script, name === 'domain-doctor' ? ['show', '--db', join(dir, 'missing.db'), '--id', 'x'] : ['--db', join(dir, 'missing.db')], dir);
       assert.equal(r.code, REFUSED, r.stderr);
@@ -86,32 +91,32 @@ for (const [name, script, argsFor] of [
     }
   });
 
-  test(`${name}: an invalid config.mode refuses loudly instead of guessing hobby`, () => {
-    const dir = project({ mode: 'weekend' });
+  test(`${name}: an invalid config.storage refuses loudly instead of guessing sqlite`, () => {
+    const dir = project({ storage: 'pg' });
     try {
       const r = run(script, argsFor(store(dir)), dir);
       assert.equal(r.code, REFUSED, r.stderr);
-      assert.match(r.stderr, /config\.mode/);
+      assert.match(r.stderr, /config\.storage/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test(`${name}: a hobby project (explicit, absent key, or no config) is not refused`, () => {
-    for (const config of [{ mode: 'hobby' }, {}, undefined]) {
+  test(`${name}: a project on SQLite storage is not refused, whatever its mode (explicit, absent key, work mode, or no config)`, () => {
+    for (const config of [{ mode: 'hobby' }, { mode: 'work' }, { mode: 'work', storage: 'sqlite' }, {}, undefined]) {
       const dir = project(config);
       try {
         const r = run(script, argsFor(store(dir)), dir);
         assert.notEqual(r.code, REFUSED, `${JSON.stringify(config)}: ${r.stderr}`);
-        assert.doesNotMatch(r.stderr, /hobby-only/);
+        assert.doesNotMatch(r.stderr, /config\.storage is 'postgres'/);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
     }
   });
 
-  test(`${name}: a linked worktree of a work project is refused through its main checkout`, () => {
-    const dir = project({ mode: 'work' });
+  test(`${name}: a linked worktree of a Postgres-storage project is refused through its main checkout`, () => {
+    const dir = project({ mode: 'hobby', storage: 'postgres' });
     const wt = `${dir}-wt`;
     try {
       const git = (...a) => {
@@ -125,7 +130,7 @@ for (const [name, script, argsFor] of [
       git('worktree', 'add', '-q', wt);
       const r = run(script, ['--db', join(wt, 'none.db')], wt);
       assert.equal(r.code, REFUSED, r.stderr);
-      assert.match(r.stderr, /hobby-only/);
+      assert.match(r.stderr, /config\.storage is 'postgres'/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
       rmSync(wt, { recursive: true, force: true });

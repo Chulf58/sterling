@@ -14,7 +14,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { withIdentityIgnore, workIdentityRefusal, ensureProjectIdentity } from '../lib/project-identity.mjs';
+import { withIdentityIgnore, withNestedIgnore, workIdentityRefusal, ensureProjectIdentity } from '../lib/project-identity.mjs';
 import { runUpdate } from '../lib/update.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -24,6 +24,7 @@ const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 const OTHER_ID = '3f2b8c1e-5a4d-4e6f-9a7b-0c1d2e3f4a5b';
 const STAR = '.sterling/*';
 const KEEP = '!.sterling/project.json';
+const NESTED = '*/**/.sterling/';
 
 const scratchDirs = new Set();
 const scratch = (prefix = 'sterling-identity-') => {
@@ -81,6 +82,16 @@ test('withIdentityIgnore: lookalike lines are not the Sterling entry', () => {
   }
 });
 
+test('withNestedIgnore: a `.sterling/*` line gains the nested form once; no star line, or the nested line present, is left alone', () => {
+  assert.deepEqual(withNestedIgnore(`${STAR}\n${KEEP}\n`), { text: `${STAR}\n${KEEP}\n${NESTED}\n`, changed: true });
+  assert.equal(withNestedIgnore(`${STAR}\r\n${KEEP}`).text, `${STAR}\r\n${KEEP}\r\n${NESTED}\r\n`, 'CRLF kept, missing final newline added');
+  for (const done of [`${STAR}\n${KEEP}\n${NESTED}\n`, `${NESTED}\n${STAR}\n`, 'dist/\n', '.sterling/\n', '']) {
+    assert.deepEqual(withNestedIgnore(done), { text: done, changed: false }, JSON.stringify(done));
+  }
+  const once = withNestedIgnore(`${STAR}\n${KEEP}\n`).text;
+  assert.equal(withNestedIgnore(once).changed, false, 'a second pass is a no-op');
+});
+
 // ---------------------------------------------------------------- the helpers
 
 test('ensureProjectIdentity: creates a UUID v4 file when absent, never overwrites a valid or an invalid one', () => {
@@ -103,16 +114,39 @@ test('ensureProjectIdentity: creates a UUID v4 file when absent, never overwrite
   assert.equal(readFileSync(identityPath(dir), 'utf8'), '{ broken');
 });
 
-test('workIdentityRefusal: only a work project is checked; missing and invalid are named refusals', () => {
+test('workIdentityRefusal: a work project or a Postgres-storage project is checked; missing and invalid are named refusals', () => {
   const dir = scratch();
   mkdirSync(join(dir, '.sterling'));
-  assert.equal(workIdentityRefusal(dir, 'hobby'), null, 'hobby is never checked');
+  assert.equal(workIdentityRefusal(dir, 'hobby'), null, 'hobby on SQLite is never checked');
   assert.match(workIdentityRefusal(dir, 'work'), /work-mode project has no \.sterling\/project\.json: run \/sterling:init/);
   writeFileSync(identityPath(dir), JSON.stringify({ project_id: 'nope' }));
-  assert.equal(workIdentityRefusal(dir, 'hobby'), null, 'hobby is not checked even when the file is invalid');
+  assert.equal(workIdentityRefusal(dir, 'hobby'), null, 'hobby on SQLite is not checked even when the file is invalid');
   assert.match(workIdentityRefusal(dir, 'work'), /work-mode project has an invalid \.sterling\/project\.json: .*"nope".*UUID v4/);
   writeFileSync(identityPath(dir), JSON.stringify({ project_id: OTHER_ID }));
   assert.equal(workIdentityRefusal(dir, 'work'), null);
+});
+
+test('workIdentityRefusal: storage postgres needs the identity in any mode; the config decides, not the mode alone', () => {
+  const dir = scratch();
+  mkdirSync(join(dir, '.sterling'));
+  const configPath = join(dir, '.sterling', 'config.json');
+  writeFileSync(configPath, JSON.stringify({ mode: 'hobby', storage: 'postgres' }));
+  assert.match(workIdentityRefusal(dir, 'hobby'), /project with storage postgres has no \.sterling\/project\.json: run \/sterling:init/);
+  writeFileSync(identityPath(dir), JSON.stringify({ project_id: 'nope' }));
+  assert.match(workIdentityRefusal(dir, 'hobby'), /project with storage postgres has an invalid \.sterling\/project\.json/);
+  writeFileSync(identityPath(dir), JSON.stringify({ project_id: OTHER_ID }));
+  assert.equal(workIdentityRefusal(dir, 'hobby'), null);
+  rmSync(identityPath(dir));
+  writeFileSync(configPath, JSON.stringify({ mode: 'hobby', storage: 'sqlite' }));
+  assert.equal(workIdentityRefusal(dir, 'hobby'), null, 'hobby on explicit SQLite is not checked');
+  assert.match(workIdentityRefusal(dir, 'work'), /work-mode project has no/, 'work on SQLite is still checked');
+});
+
+test('workIdentityRefusal: an invalid config.storage is a refusal naming it, never a guess', () => {
+  const dir = scratch();
+  mkdirSync(join(dir, '.sterling'));
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby', storage: 'pg' }));
+  assert.match(workIdentityRefusal(dir, 'hobby'), /project storage cannot be read: config\.storage is "pg"/);
 });
 
 // ---------------------------------------------------------------- init
@@ -333,4 +367,28 @@ test('update repairs an existing project\'s `.sterling/` ignore line, hobby or w
   assert.deepEqual(again.report.projects.map((p) => p.gitignore_repaired === true), [false, false, false]);
   assert.equal(git(hobby, 'init', '-q').status, 0);
   assert.equal(git(hobby, 'check-ignore', '-q', '.sterling/project.json').status, 1, 'project.json is committable after the repair');
+});
+
+test('update adds the nested `.sterling/` ignore to a project that has the pair, once, and a second run changes nothing', async () => {
+  const pair = projectOf({ mode: 'hobby', ignore: `dist/\n${STAR}\n${KEEP}\n` });
+  const legacy = projectOf({ mode: 'hobby', ignore: '.sterling/\n' });
+  const carrying = projectOf({ mode: 'hobby', ignore: `${STAR}\n${KEEP}\n${NESTED}\n` });
+  const none = projectOf({ mode: 'hobby', ignore: 'dist/\n' });
+  const all = [pair, legacy, carrying, none];
+  const { report, log } = await update(all);
+  assert.equal(report.exit, 0, log);
+  assert.deepEqual(lines(pair), ['dist/', STAR, KEEP, NESTED, '']);
+  assert.deepEqual(lines(legacy), [STAR, KEEP, NESTED, ''], 'a legacy `.sterling/` line gets the pair and the nested line in one run');
+  assert.deepEqual(lines(carrying), [STAR, KEEP, NESTED, ''], 'a project that already has the line is untouched');
+  assert.equal(readFileSync(join(none, '.gitignore'), 'utf8'), 'dist/\n', 'a project with no Sterling ignore line gains none');
+  assert.deepEqual(report.projects.map((p) => p.gitignore_repaired === true), [true, true, false, false]);
+  assert.match(log, /\.gitignore: added \*\/\*\*\/\.sterling\/ so a nested \.sterling\/ directory stays ignored/);
+  const before = all.map((d) => readFileSync(join(d, '.gitignore'), 'utf8'));
+  const again = await update(all);
+  assert.deepEqual(all.map((d) => readFileSync(join(d, '.gitignore'), 'utf8')), before, 'a second run changes nothing');
+  assert.deepEqual(again.report.projects.map((p) => p.gitignore_repaired === true), [false, false, false, false]);
+  assert.equal(git(pair, 'init', '-q').status, 0);
+  mkdirSync(join(pair, 'x', '.sterling'), { recursive: true });
+  assert.equal(git(pair, 'check-ignore', '-q', 'x/.sterling/transient.json').status, 0, 'a nested .sterling/ is ignored');
+  assert.equal(git(pair, 'check-ignore', '-q', '.sterling/project.json').status, 1, 'project.json stays committable');
 });

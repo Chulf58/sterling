@@ -21,7 +21,6 @@ import {
   MoveIdentityMissingError,
   MoveCredentialsError,
   MoveConfigMissingError,
-  MoveModeError,
   MoveNulCharacterError,
   MoveSourceFencedError,
   MoveTargetNotEmptyError,
@@ -168,15 +167,15 @@ function project(dir: string, opts: { mode?: string; id?: boolean; stack?: strin
   return dir;
 }
 
-test('planMove: refuses by name with no config, in a hobby project, with no identity, and with unreadable credentials', () => {
+test('planMove: refuses by name with no config, with no identity, and with unreadable credentials; a hobby project is planned like any other', () => {
   const base = tempDir();
   const creds = fakeCredentials(base);
   const none = join(base, 'none');
   mkdirSync(none);
   assert.throws(() => planMove({ root: none, direction: 'to_postgres', registeredProjects: [], credentialsPath: creds }), MoveConfigMissingError);
   const hobby = project(join(base, 'hobby'), { mode: 'hobby' });
-  assert.throws(() => planMove({ root: hobby, direction: 'to_postgres', registeredProjects: [], credentialsPath: creds }), (e: unknown) => e instanceof MoveModeError && (e as Error).message.includes('hobby project'));
-  assert.equal(planMove({ root: hobby, direction: 'to_sqlite', registeredProjects: [], credentialsPath: creds }).mode, 'hobby', 'moving back needs no mode: it is the way out for a postgres store in a hobby project');
+  assert.equal(planMove({ root: hobby, direction: 'to_postgres', registeredProjects: [], credentialsPath: creds }).mode, 'hobby', 'mode only picks the PR flow: a hobby project moves to Postgres');
+  assert.equal(planMove({ root: hobby, direction: 'to_sqlite', registeredProjects: [], credentialsPath: creds }).mode, 'hobby', 'moving back needs no mode either');
   const anon = project(join(base, 'anon'), { id: false });
   assert.throws(() => planMove({ root: anon, direction: 'to_postgres', registeredProjects: [], credentialsPath: creds }), MoveIdentityMissingError);
   const work = project(join(base, 'work'), {});
@@ -305,11 +304,11 @@ test('writeProjectStorage: switches config.storage, keeps config.mode and every 
   assert.deepEqual([cfg.storage, cfg.mode], ['sqlite', 'work']);
 });
 
-test('planAttach: refuses by name in a hobby project, with no identity, with unreadable credentials, and when storage is already postgres', () => {
+test('planAttach: plans a hobby project; refuses by name with no identity, with unreadable credentials, and when storage is already postgres', () => {
   const base = tempDir();
   const creds = fakeCredentials(base);
   const hobby = project(join(base, 'hobby'), { mode: 'hobby' });
-  assert.throws(() => planAttach({ root: hobby, credentialsPath: creds }), (e: unknown) => e instanceof MoveModeError && (e as Error).message.includes('hobby project'));
+  assert.equal(planAttach({ root: hobby, credentialsPath: creds }).mode, 'hobby', 'mode does not gate an attach');
   const anon = project(join(base, 'anon'), { id: false });
   assert.throws(() => planAttach({ root: anon, credentialsPath: creds }), MoveIdentityMissingError);
   const work = project(join(base, 'work'), {});
@@ -929,6 +928,29 @@ test('attach: a local store with no records but rows in other tables is refused 
   assert.equal(fx.configText(), before);
   assert.equal(readSqliteFence(local), null);
   assert.equal(attachProject(fx.plan(true), live().bridge).local.action, 'fenced', '--fence-local is the choice that lets it through');
+});
+
+test('attach: a row written to the empty local store after its pre-check and before the fence is refused by name, not fenced', { skip: PG_SKIP }, () => {
+  const fx = attachFixture();
+  const local = join(fx.b, '.sterling', 'sterling.db');
+  openSqliteStore(local).close();
+  // Another session's write lands between the emptiness check and the fence.
+  const writeBetween = (path: string) => {
+    const raw = new DatabaseSync(path);
+    try {
+      raw.prepare("INSERT INTO activity_log (at, verb, type, record_id, title) VALUES ('2026-10-06T09:00:00.000Z', 'created', 'decision', 'r1', 'written mid-attach')").run();
+    } finally {
+      raw.close();
+    }
+  };
+  const before = fx.configText();
+  assert.throws(
+    () => attachProject(fx.plan(), live().bridge, { hooks: { beforeLocalFence: writeBetween } }),
+    (e: unknown) => e instanceof MoveAttachError && e.check === 'local_store' && e.schema === null && e.message.includes('activity_log (1)') && e.message.includes('Nothing was changed'),
+  );
+  assert.equal(readSqliteFence(local), null, 'the refusal fenced nothing');
+  assert.equal(fx.configText(), before, 'a refused attach leaves the config byte for byte');
+  assert.equal(attachProject(fx.plan(true), live().bridge).local.action, 'fenced', '--fence-local still lets it through');
 });
 
 test('attach: resuming a same-target fence whose digest was never recorded records it, so a later move back replaces the file', { skip: PG_SKIP }, () => {

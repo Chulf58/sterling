@@ -11566,20 +11566,21 @@ var init_dist2 = __esm({
        */
       retireInFavorOf(id, replacementId, at, verb = "retired") {
         this.assertWritable("retireInFavorOf");
-        const record = this.get(id);
-        if (!record)
-          throw new Error(`retireInFavorOf: no record '${id}'`);
-        const identity = this.identityOf(id);
-        if (identity?.lifecycle === "retired" || record.status === "superseded") {
-          throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-        }
-        const replacement = this.identityOf(replacementId);
-        if (replacement?.lifecycle === "retired") {
-          throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-        }
-        const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-        const stored = _SterlingStore.storableBody(retired);
+        let stored;
         this.tx(() => {
+          const record = this.get(id);
+          if (!record)
+            throw new Error(`retireInFavorOf: no record '${id}'`);
+          const identity = this.identityOf(id);
+          if (identity?.lifecycle === "retired" || record.status === "superseded") {
+            throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
+          }
+          const replacement = this.identityOf(replacementId);
+          if (replacement?.lifecycle === "retired") {
+            throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
+          }
+          const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
+          stored = _SterlingStore.storableBody(retired);
           const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
           if (res.changes === 0) {
@@ -12849,6 +12850,21 @@ function readRawConfig(root, ErrorClass, subject) {
   }
   return { where, parsed };
 }
+var ProjectStorageError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectStorageError";
+  }
+};
+function readProjectStorage(root) {
+  const { where, parsed } = readRawConfig(root, ProjectStorageError, "the project storage");
+  const storage = parsed?.storage;
+  if (storage === void 0) return "sqlite";
+  if (storage !== "sqlite" && storage !== "postgres") {
+    throw new ProjectStorageError(`config.storage is ${JSON.stringify(storage)} in ${where} \u2014 it must be 'sqlite' or 'postgres'`);
+  }
+  return storage;
+}
 var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
 var HANDOFF_OFF_DETAIL = "handoff files are off (config.handoff.enabled is not true: the portable OpenCode agents and the handoff projection are not written; existing files are no longer maintained, and nothing is deleted)";
 var HandoffSettingError = class extends Error {
@@ -12940,18 +12956,26 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 // scripts/lib/project-identity.mjs
 init_dist();
 function workIdentityRefusal(root, mode) {
-  if (mode !== "work") return null;
+  let onPostgres;
+  try {
+    onPostgres = readProjectStorage(root) === "postgres";
+  } catch (err) {
+    return `project storage cannot be read: ${err.message}`;
+  }
+  if (mode !== "work" && !onPostgres) return null;
+  const subject = mode === "work" ? "work-mode project" : "project with storage postgres";
   try {
     if (readProjectIdentity(root)) return null;
   } catch (err) {
     if (!(err instanceof ProjectIdentityError)) throw err;
-    return `work-mode project has an invalid ${PROJECT_IDENTITY_REL}: ${err.message}`;
+    return `${subject} has an invalid ${PROJECT_IDENTITY_REL}: ${err.message}`;
   }
-  return `work-mode project has no ${PROJECT_IDENTITY_REL}: run /sterling:init in the project to create its identity (init never overwrites an existing file), then commit the file`;
+  return `${subject} has no ${PROJECT_IDENTITY_REL}: run /sterling:init in the project to create its identity (init never overwrites an existing file), then commit the file`;
 }
 var IGNORE_DIR = ".sterling/";
 var IGNORE_ALL = ".sterling/*";
 var IGNORE_KEEP_IDENTITY = `!${PROJECT_IDENTITY_REL}`;
+var IGNORE_NESTED = "*/**/.sterling/";
 function withIdentityIgnore(text, { addIfAbsent }) {
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text === "" ? [] : text.split(/\r?\n/);
@@ -12971,6 +12995,12 @@ function withIdentityIgnore(text, { addIfAbsent }) {
   const changed = out.length !== lines.length || out.some((line, i) => line !== lines[i]);
   if (!changed) return { text, changed: false };
   return { text: out.length ? `${out.join(eol)}${eol}` : "", changed: true };
+}
+function withNestedIgnore(text) {
+  const present = text.split(/\r?\n/);
+  if (!present.includes(IGNORE_ALL) || present.includes(IGNORE_NESTED)) return { text, changed: false };
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  return { text: `${text}${text.endsWith("\n") ? "" : eol}${IGNORE_NESTED}${eol}`, changed: true };
 }
 
 // scripts/lib/update.mjs
@@ -13332,6 +13362,12 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
         if (repaired.changed) {
           writeFileSync3(gitignorePath, repaired.text);
           log(`      .gitignore: .sterling/ is now .sterling/* plus !.sterling/project.json, so .sterling/project.json can be committed`);
+          entry.gitignore_repaired = true;
+        }
+        const nested = withNestedIgnore(repaired.text);
+        if (nested.changed) {
+          writeFileSync3(gitignorePath, nested.text);
+          log(`      .gitignore: added ${IGNORE_NESTED} so a nested .sterling/ directory stays ignored`);
           entry.gitignore_repaired = true;
         }
       }

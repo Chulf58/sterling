@@ -1,21 +1,24 @@
-// The refusal shared by the hobby-only scripts (board 9af3fdd0, issue
+// The refusal shared by the SQLite-only scripts (board 9af3fdd0, issue
 // Chulf58/sterling#26 item 7): scripts/domain-doctor.mjs and
 // scripts/migration-preflight.mjs do SQLite file forensics and a v1 -> v2 SQLite
-// migration preflight. A work-mode project keeps its knowledge in Postgres, where
-// neither has a meaning, so both refuse there before they open any store.
+// migration preflight. A project whose config.storage is 'postgres' keeps its
+// knowledge there, where neither has a meaning, so both refuse before they open
+// any store. The verdict is config.storage in any project mode (decision
+// sterling-repo-is-hobby-mode-on-served-postgres-as-the-test-project: mode only
+// picks the shipping flow, so a hobby project can be on Postgres).
 //
 // The invoking project is the Sterling root of the cwd. A linked git worktree has
 // no `.sterling/` of its own (it is gitignored), so it resolves to its main
-// checkout, which holds the config. The mode is read through readProjectMode, the
-// one reader: a missing config or key is hobby, an invalid value throws and is
-// refused too, because the mode is never guessed.
+// checkout, which holds the config. The storage is read through readProjectStorage, the
+// one reader: a missing config or key is sqlite, an invalid value or an unreadable
+// config throws and is refused too, because the storage is never guessed.
 //
 // Exit code HOBBY_ONLY_EXIT (4) is distinct from the 0/2/3 both scripts already
 // use for success, an unusable request and a finding.
 import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { readProjectMode } from './handoff-projection.mjs';
+import { readProjectStorage } from './handoff-projection.mjs';
 
 export const HOBBY_ONLY_EXIT = 4;
 
@@ -30,17 +33,17 @@ export function invokingRoot(cwd = process.cwd()) {
   return dirname(commonReal);
 }
 
-export function refuseInWorkMode(root, scriptName) {
-  let mode;
+export function refuseOnPostgresStorage(root, scriptName) {
+  let storage;
   try {
-    mode = readProjectMode(root);
+    storage = readProjectStorage(root);
   } catch (e) {
-    console.error(`${scriptName}: ${e.message}. ${scriptName} is hobby-only and cannot tell which mode this project is in (exit ${HOBBY_ONLY_EXIT}).`);
+    console.error(`${scriptName}: ${e.message}. ${scriptName} works on SQLite store files and cannot tell which storage this project uses (exit ${HOBBY_ONLY_EXIT}).`);
     process.exit(HOBBY_ONLY_EXIT);
   }
-  if (mode === 'work') {
+  if (storage === 'postgres') {
     console.error(
-      `${scriptName}: hobby-only. This project is in work mode, where knowledge is stored in Postgres, ` +
+      `${scriptName}: refused. This project's config.storage is 'postgres', so its knowledge is stored in Postgres, ` +
         `and ${scriptName} works on SQLite store files. Nothing was opened (exit ${HOBBY_ONLY_EXIT}).`,
     );
     process.exit(HOBBY_ONLY_EXIT);

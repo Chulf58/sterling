@@ -1460,7 +1460,7 @@ export class StorageTransitionRequiredError extends Error {
   constructor(path: string) {
     super(
       `config_set: '${path}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), ` +
-        `so it changes only when the stores move, through the explicit storage transition: \`node scripts/move-store.mjs --to pg|sqlite\`, ` +
+        `so it changes only when the stores move, through the explicit storage transition: \`node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite\`, ` +
         `which writes it after the move commits. Nothing was written.`
     );
     this.name = 'StorageTransitionRequiredError';
@@ -11080,8 +11080,15 @@ export class SterlingTools {
     // that does not funnel through knowledgeCreate/knowledgeUpdate — so the
     // merged candidate is checked here.
     const claimsCheck = this.assertClaimedPaths('board_update', next);
+    // CAS on the version `old` was read at (board 895d3c6c): `next` is the
+    // WHOLE item merged from that read, so without the token a write that
+    // landed in between (another session or machine on the same store) is
+    // silently reverted field by field. A conflict refuses with the store's
+    // stale-expected_version error naming both versions, nothing written; no
+    // retry, for the reason knowledgeUpdate gives: a silent re-merge would
+    // write onto a body the caller never saw.
     try {
-      const updated = this.store.updateTodo(old.id, next as typeof old);
+      const updated = this.store.updateTodo(old.id, next as typeof old, old.version !== undefined ? { expected_version: old.version } : {});
       // The disclosure rides the record itself because board_update's receipt IS
       // the bare record (its frozen callers read fields straight off the return),
       // and digestWriteEcho carries claims_check through the DEFAULT digest
@@ -12142,6 +12149,32 @@ export class SterlingTools {
       throw new Error(
         `knowledge_retire: '${id}' and '${inFavorOf}' both resolve to record '${record.id}' — a record cannot be retired in favour of itself.`
       );
+    }
+    // ONE STORE ONLY (board 895d3c6c, Sol review). retireInFavorOf checks the
+    // survivor under the RETIREE's write lock, which sees the survivor only when
+    // both live in the same store. Across stores, X->Y and Y->X each lock their
+    // own store, see a live survivor and both commit: a cycle of two retired
+    // records. Holding both stores' locks is not available (on Postgres every
+    // store in a process shares one connection, which takes one transaction at
+    // a time), so the cross-store shape is refused. The holder is asked of the
+    // storage layer, never read from `scope`: on a bare store projectStoreHolds
+    // is true for both, and under mounts scopeOfHolder names the physical
+    // mount. A record never changes stores, so checking before the lock holds.
+    // knowledge_promote's tombstone stays cross-store on purpose: its survivor
+    // is a copy it has just created, and with this refusal nothing else can
+    // retire across stores to close a cycle with it.
+    const bothInProject = this.store.projectStoreHolds(record.id) && this.store.projectStoreHolds(survivor.id);
+    if (!bothInProject) {
+      const retireeMount = this.store.scopeOfHolder(record.id);
+      const survivorMount = this.store.scopeOfHolder(survivor.id);
+      if (retireeMount !== survivorMount) {
+        throw new Error(
+          `knowledge_retire: cross-store retirement refused — '${record.id}' is held by the '${retireeMount}' store and its survivor ` +
+            `'${survivor.id}' by the '${survivorMount}' store. The survivor's liveness can only be checked under one store's write lock, ` +
+            `so a concurrent retirement the other way could leave two retired records forwarding to each other. Nothing was written. ` +
+            `Retire a record only in favour of a survivor in the same store.`
+        );
+      }
     }
     if (survivor.status === 'superseded') {
       throw new Error(

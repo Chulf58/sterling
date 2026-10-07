@@ -43,7 +43,7 @@ try {
   process.exit(2);
 }
 // A WORK project must carry its identity (decision
-// work-project-identity-file-sterling-project-json); a hobby project is not checked.
+// work-project-identity-file-sterling-project-json); a project is checked when it is in work mode or its config.storage is postgres.
 const identityRefusal = workIdentityRefusal(targetDir, projectMode);
 if (identityRefusal) {
   console.log(`refused_project_identity: ${identityRefusal}; nothing synced`);

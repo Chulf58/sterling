@@ -8,9 +8,9 @@
 // only"); the machine registry is read only to find other projects that share
 // a domain, never to move them.
 //
-//   node scripts/move-store.mjs --to pg|sqlite [--dry-run] [--project <dir>]
-//   node scripts/move-store.mjs --to pg --confirm-fork [--dry-run] [--project <dir>]
-//   node scripts/move-store.mjs --attach [--fence-local] [--dry-run] [--project <dir>]
+//   node bin/move-store.mjs --to pg|sqlite [--dry-run] [--project <dir>]
+//   node bin/move-store.mjs --to pg --confirm-fork [--dry-run] [--project <dir>]
+//   node bin/move-store.mjs --attach [--fence-local] [--dry-run] [--project <dir>]
 //
 // Refuses by name: a directory with no Sterling config, --to pg in a hobby
 // project, a missing .sterling/project.json, missing or invalid Postgres
@@ -59,8 +59,8 @@ import {
 } from '../packages/store/dist/store-move.js';
 
 const USAGE = [
-  'usage: node scripts/move-store.mjs --to pg|sqlite [--confirm-fork] [--dry-run] [--project <dir>]',
-  '       node scripts/move-store.mjs --attach [--fence-local] [--dry-run] [--project <dir>]',
+  'usage: node bin/move-store.mjs --to pg|sqlite [--confirm-fork] [--dry-run] [--project <dir>]',
+  '       node bin/move-store.mjs --attach [--fence-local] [--dry-run] [--project <dir>]',
 ].join('\n');
 
 export class MoveStoreUsageError extends Error {
@@ -288,4 +288,8 @@ function main() {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
+// Run as the source or as bin/move-store.mjs. Bundled into bin/, this module's
+// import.meta.url is rewritten to name this scripts/ source (source-location
+// identity, scripts/lib/bundled-artifacts.mjs), so the bin path is named too.
+const launchedAs = process.argv[1] && resolve(process.argv[1]);
+if (launchedAs === fileURLToPath(import.meta.url) || launchedAs === fileURLToPath(new URL('../bin/move-store.mjs', import.meta.url))) main();

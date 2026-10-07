@@ -14,7 +14,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ProjectRegistry } from '../../packages/store/dist/index.js';
-import { MoveModeError, readSqliteFence, readSqliteReceipt, readPgFence, latestPgReceipt, snapshotSqliteStore, buildManifest } from '../../packages/store/dist/store-move.js';
+import { MoveCredentialsError, readSqliteFence, readSqliteReceipt, readPgFence, latestPgReceipt, snapshotSqliteStore, buildManifest } from '../../packages/store/dist/store-move.js';
 import { PG_SKIP, dropTestSchemas, openTestBridge } from '../../packages/store/dist/tests/pg-test-support.js';
 import { decision, openSqliteStore, seedStore } from '../../packages/store/dist/tests/store-move-fixture.js';
 import { openRoutedStores } from '../../packages/store/dist/routing.js';
@@ -110,7 +110,7 @@ test('findProjectRoot: walks up to the directory holding .sterling/config.json',
   assert.equal(findProjectRoot(join(root, 'src', 'deep')), root);
 });
 
-test('a hobby project is refused by name for --to pg, and nothing is touched', () => {
+test('a hobby project is no longer refused for --to pg on its mode: the move stops at the next precondition (no credentials file) and nothing is touched', () => {
   const base = tempDir();
   const domain = join(base, 'domains', 'node.db');
   seedStore(domain, { label: 'hobby-domain' });
@@ -119,7 +119,7 @@ test('a hobby project is refused by name for --to pg, and nothing is touched', (
   const digest = buildManifest(snapshotSqliteStore(domain)).manifest.digest;
   assert.throws(
     () => runMoveStore({ root: hobby, to: 'pg', credentialsPath: join(base, 'no-credentials.json'), registryDb: join(base, 'registry.db') }),
-    (e) => e instanceof MoveModeError && e.message.includes(hobby) && e.message.includes('hobby project'),
+    (e) => e instanceof MoveCredentialsError && !e.message.includes('hobby project'),
   );
   assert.equal(readFileSync(join(hobby, '.sterling', 'config.json'), 'utf8'), configBefore);
   assert.equal(existsSync(join(hobby, '.sterling', 'sterling.db')), false);

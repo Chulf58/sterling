@@ -1,5 +1,5 @@
 // Store routing (routing.ts, issue Chulf58/sterling#26 item 5): config.storage
-// picks SQLite (absent or 'sqlite') or Postgres ('postgres', work mode only),
+// picks SQLite (absent or 'sqlite') or Postgres ('postgres', in any project mode),
 // and Postgres storage never falls back (decision
 // storage-backend-is-its-own-config-key-written-only-by-store-move).
 //
@@ -24,7 +24,6 @@ import {
   PgStoreMissingError,
   PostgresStoreNotMovedError,
   ProjectIdentityError,
-  ProjectModeError,
   StoreSettingsError,
   StoreUnreachableError,
   openRoutedBridgeCount,
@@ -114,12 +113,19 @@ test('an invalid storage value is a StoreSettingsError naming it', () => {
   assert.throws(() => resolveStoreRoute(project({ mode: 'work', storage: 'pg' })), (e: unknown) => e instanceof StoreSettingsError && /config\.storage is "pg"/.test((e as Error).message));
 });
 
-test("storage 'postgres' outside a work-mode project is a StoreSettingsError; with an invalid mode a ProjectModeError", () => {
+test("storage 'postgres' routes to Postgres whatever config.mode says: hobby, work, absent, or unreadable as a mode", () => {
   withHome(UNREACHABLE, () => {
-    for (const config of [{ storage: 'postgres' }, { mode: 'hobby', storage: 'postgres' }]) {
-      assert.throws(() => resolveStoreRoute(project(config, randomUUID())), (e: unknown) => e instanceof StoreSettingsError && /valid only in a work-mode project/.test((e as Error).message));
+    for (const mode of ['hobby', 'work', undefined, 'served']) {
+      const config = mode === undefined ? { storage: 'postgres' } : { mode, storage: 'postgres' };
+      const route = resolveStoreRoute(project(config, randomUUID()));
+      assert.equal(route?.storage, 'postgres', `mode ${String(mode)}`);
     }
-    assert.throws(() => resolveStoreRoute(project({ mode: 'served', storage: 'postgres' }, randomUUID())), ProjectModeError);
+  });
+});
+
+test("storage 'postgres' in a hobby-mode project still needs the identity file; mode does not waive it", () => {
+  withHome(UNREACHABLE, () => {
+    assert.throws(() => resolveStoreRoute(project({ mode: 'hobby', storage: 'postgres' })), ProjectIdentityError);
   });
 });
 
@@ -325,7 +331,7 @@ test('work: a missing project schema is a PostgresStoreNotMovedError naming move
   inNamespace(() => {
     assert.throws(
       () => openRoutedStores(root),
-      (e: unknown) => e instanceof PostgresStoreNotMovedError && e instanceof PgStoreMissingError && /node scripts\/move-store\.mjs --to pg/.test((e as Error).message),
+      (e: unknown) => e instanceof PostgresStoreNotMovedError && e instanceof PgStoreMissingError && /node "<Sterling root>\/bin\/move-store\.mjs" --to pg/.test((e as Error).message),
     );
   });
   assert.equal(schemasWithPrefix(admin(), ns).includes(projectSchema), false);

@@ -132,7 +132,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 // the module graph this script does not already load.
 import { resolveStoreWritePath } from './lib/store-path.mjs';
 // Node builtins plus contained-fs.mjs only, like store-path.mjs above.
-import { readProjectMode } from './lib/handoff-projection.mjs';
+import { readProjectStorage } from './lib/handoff-projection.mjs';
 
 // See "MIRRORED, NOT IMPORTED" above before changing either constant.
 const TARGET_SCHEMA_VERSION = 2;
@@ -959,28 +959,35 @@ function runAllStores() {
 }
 
 /**
- * This script migrates SQLite stores, so it is hobby-only (issue 26, design
- * point 11): a work-mode project keeps its store in Postgres, whose schema
- * version lives in the sterling_meta registry. A store at <project>/.sterling/
- * sterling.db is refused when that project's config says mode 'work'. A config
- * that cannot be read is not refused here: the --all-stores sweep already
- * reports it by name, and S4-ALL-9 pins that the project's own store still gets
- * its result line. Any other path (a domain store) has no project config and is
- * not judged here.
+ * This script migrates SQLite stores (issue 26, design point 11): a project
+ * whose config.storage is 'postgres' keeps its store there, whose schema
+ * version lives in the sterling_meta registry. The verdict is the storage, in
+ * any project mode (a hobby project can be on Postgres). A store at
+ * <project>/.sterling/sterling.db is refused when that project's config says
+ * storage 'postgres'. A config that cannot be read (corrupt JSON, not an
+ * object, a symlink) or whose storage value is invalid is refused too, by name,
+ * before the database is probed: the storage is unknown, so the store may be
+ * on Postgres, and it is never guessed to be SQLite (fail closed). In the
+ * --all-stores sweep each store runs as its own --db child, so that store gets
+ * a failed result line and the sweep continues. Any other path (a domain
+ * store) has no project config and is not judged here.
  */
-function workModeRefusal(dbPath) {
+function postgresStorageRefusal(dbPath) {
   const abs = resolve(dbPath);
   if (basename(dirname(abs)) !== '.sterling') return null;
   const projectRoot = dirname(dirname(abs));
-  let mode;
+  let storage;
   try {
-    mode = readProjectMode(projectRoot);
-  } catch {
-    return null;
+    storage = readProjectStorage(projectRoot);
+  } catch (e) {
+    return (
+      `refusing '${dbPath}' — cannot tell which storage the project at '${projectRoot}' uses: ${e.message}. ` +
+      `The store is not opened until config.storage can be read. Nothing was read or written.`
+    );
   }
-  if (mode !== 'work') return null;
+  if (storage !== 'postgres') return null;
   return (
-    `refusing '${dbPath}' — this migration is hobby-only: the project at '${projectRoot}' is in mode 'work', ` +
+    `refusing '${dbPath}' — this migration is SQLite-only: the project at '${projectRoot}' has config.storage 'postgres', ` +
     `whose stores live in Postgres with their schema version in the sterling_meta registry. Nothing was read or written.`
   );
 }
@@ -993,8 +1000,8 @@ function main() {
   const dbPath = arg('db');
   if (!dbPath) return fail('--db <path-to-sterling.db> is required (or --all-stores, for a machine-wide sweep)');
   if (!existsSync(dbPath)) return fail(`no db file at '${dbPath}' — nothing was read, nothing was created`);
-  const modeRefusal = workModeRefusal(dbPath);
-  if (modeRefusal) return fail(modeRefusal);
+  const storageRefusal = postgresStorageRefusal(dbPath);
+  if (storageRefusal) return fail(storageRefusal);
 
   // Syntax-checked before any db work; semantic validation (against the real
   // legacy claims) happens inside classify().
