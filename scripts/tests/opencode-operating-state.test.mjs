@@ -181,6 +181,38 @@ test('an unreadable config reads UNKNOWN on both lines, never the default', asyn
   }
 });
 
+// Storage line (board 6ca1a3c5): the same five states H1 prints, from the same storageLine.
+test('the root session context states Storage in its five separate states, never collapsing absent into unusable', async () => {
+  const TAIL = 'TUI System tab; switch with the move-store skill';
+  const cases = [
+    [{ project_name: 'fixture-proj' }, `Storage: SQLITE (config.storage not set, so SQLite — ${TAIL})`],
+    [{ project_name: 'fixture-proj', storage: 'sqlite' }, `Storage: SQLITE (config.storage — ${TAIL})`],
+    [{ project_name: 'fixture-proj', storage: 'postgres' }, `Storage: SERVED POSTGRES (config.storage — ${TAIL})`],
+    [{ project_name: 'fixture-proj', storage: 'mysql' }, null],
+    ['{ not json', null],
+    ['null', null],
+  ];
+  for (const [config, expected] of cases) {
+    const dir = makeProject(config);
+    try {
+      const h = handler(dir, { sessions: { ses_root: {} } });
+      const i = input('ses_root');
+      await h.onContext(i);
+      const lines = textOf(i).split('\n').filter((l) => l.startsWith('Storage:'));
+      assert.equal(lines.length, 1, JSON.stringify(config));
+      if (expected) assert.equal(lines[0], expected);
+      else if (typeof config === 'string') {
+        assert.match(lines[0], /^Storage: UNKNOWN — .*NOT the SQLite default/);
+      } else {
+        assert.match(lines[0], /^Storage: UNRECOGNIZED \("mysql"\) — config\.storage must be 'sqlite' or 'postgres'/);
+        assert.doesNotMatch(lines[0], /SQLITE|SERVED POSTGRES/);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('MACHINE ROLE appears when the project is the Sterling clone itself, and never in another project', async () => {
   const dir = makeProject({ project_name: 'fixture-proj', machine_role: 'authoring' });
   const other = mkdtempSync(join(tmpdir(), 'sterling-oc-other-root-'));

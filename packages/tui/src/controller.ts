@@ -151,6 +151,23 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     }
   }
 
+  /** config.storage, RAW and read-only (board 6ca1a3c5). Absent → undefined
+   *  (SQLite, the routing default); a config that cannot be read, or parses to
+   *  something that is not an object, → null (the row shows UNKNOWN, never the
+   *  default); any value that is not a string comes back as its JSON text, which
+   *  the row shows as UNRECOGNIZED. readRawMode already states the read error. */
+  function readRawStorage(): string | null | undefined {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    } catch {
+      return null;
+    }
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const storage = (raw as { storage?: unknown }).storage;
+    return storage === undefined ? undefined : typeof storage === 'string' ? storage : JSON.stringify(storage);
+  }
+
   /** The handoff setting (decision
    *  project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting),
    *  resolved from the RAW config by the same function the writers use, so the
@@ -228,7 +245,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // finding 41/43) — surface it as a visible System-tab notice instead.
       ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, ...handoff };
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), ...handoff };
   }
 
   /** Execute a sparring_model effect: config.sparring_partner.models.openai
