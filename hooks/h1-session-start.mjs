@@ -13430,8 +13430,9 @@ function projectModeLine({ config: config2, configUnreadable: configUnreadable2 
   return `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) \u2014 config.mode must be 'hobby' or 'work'; /sterling:merge, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).`;
 }
 var STORAGE_TAIL = "TUI System tab; switch with the move-store skill";
-function storageLine({ config: config2, configUnreadable: configUnreadable2 }) {
-  if (configUnreadable2) {
+function storageLine({ config: config2, configUnreadable: configUnreadable2, root }) {
+  const presentButNull = !configUnreadable2 && config2 === null && Boolean(root) && existsSync10(join21(root, ".sterling", "config.json"));
+  if (configUnreadable2 || presentButNull) {
     return "Storage: UNKNOWN \u2014 the project config could not be read, so config.storage could not be determined. This is NOT the SQLite default: repair the config.";
   }
   const storage = config2?.storage;
@@ -15031,7 +15032,7 @@ if (!store) {
   let earlyStorageContext = "";
   if (sterlingProject) earlyStorageContext = `
 
-${storageLine(readProjectConfig(input.cwd))}`;
+${storageLine({ ...readProjectConfig(input.cwd), root: input.cwd })}`;
   if (planLockContext || dispatchResidueLines.length || earlyWarning || sterlingProject) {
     process.stdout.write(
       JSON.stringify({
@@ -15083,7 +15084,7 @@ var storageContext = "";
 try {
   storageContext = `
 
-${storageLine({ config, configUnreadable })}`;
+${storageLine({ config, configUnreadable, root: input.cwd })}`;
 } catch {
 }
 var domainLines = mountedDomainLines({ config, configUnreadable, root: input.cwd });
