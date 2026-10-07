@@ -5967,8 +5967,8 @@ function postgresStorageRefusal(dbPath) {
   let storage;
   try {
     storage = readProjectStorage(projectRoot);
-  } catch {
-    return null;
+  } catch (e) {
+    return `refusing '${dbPath}' \u2014 cannot tell which storage the project at '${projectRoot}' uses: ${e.message}. The store is not opened until config.storage can be read. Nothing was read or written.`;
   }
   if (storage !== "postgres") return null;
   return `refusing '${dbPath}' \u2014 this migration is SQLite-only: the project at '${projectRoot}' has config.storage 'postgres', whose stores live in Postgres with their schema version in the sterling_meta registry. Nothing was read or written.`;

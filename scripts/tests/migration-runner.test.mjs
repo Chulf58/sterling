@@ -1568,16 +1568,18 @@ test('S4-ALL-8 [--all-stores]: STERLING_REGISTRY_DB pointing at a NONEXISTENT pa
 // THAT config specifically, without suppressing the project's own default
 // store from enumeration. Same S4-ALL idiom/seams.
 
-test("S4-ALL-9 [--all-stores]: a project with a CORRUPT config.json (unparseable) is skipped BY NAME — the project's own sterling.db still gets its own result line, sweep exits nonzero", () => {
+test("S4-ALL-9 [--all-stores]: a project with a CORRUPT config.json (unparseable) is skipped BY NAME — the project's own sterling.db gets its own FAILED result line naming the config and is not opened, sweep exits nonzero", () => {
   const dir = mkdtempSync(join(tmpdir(), 'migrate-all-corruptcfg-'));
   try {
     const projectDir = join(dir, 'proj-corrupt-cfg');
     mkdirSync(join(projectDir, '.sterling'), { recursive: true });
     const projectDb = join(projectDir, '.sterling', 'sterling.db');
     new SterlingStore(projectDb).close(); // the project's OWN store is healthy/v2
+    const projectDbHash = fileHash(projectDb);
 
     const configPath = join(projectDir, '.sterling', 'config.json');
     writeFileSync(configPath, '{ not valid json at all');
+    const sterlingDirBefore = dirSnapshot(join(projectDir, '.sterling'));
 
     const domainsRoot = join(dir, 'domains');
     mkdirSync(domainsRoot, { recursive: true }); // empty — no default-root stores to confuse the picture
@@ -1597,12 +1599,18 @@ test("S4-ALL-9 [--all-stores]: a project with a CORRUPT config.json (unparseable
     const skippedLine = results.find((r) => r.skipped === true && JSON.stringify(r).includes(configPath));
     assert.ok(skippedLine, `a skipped:true line names the corrupt config path; results were: ${JSON.stringify(results)}`);
 
-    const byDb = Object.fromEntries(results.map((r) => [r.db, r]));
+    const byDb = Object.fromEntries(results.map((r) => [r.db ?? r.store, r])); // a refusal line carries store, not db
     assert.ok(
       byDb[projectDb],
       "the project's OWN default store (sterling.db) still gets its own result line — a corrupt DOMAIN-MOUNT config must not suppress the project's default store (skip-the-whole-project sabotage)"
     );
-    assert.equal(byDb[projectDb].ok, true, "the project's own store is healthy and reports cleanly despite the sibling config failure");
+    // Changed from ok:true: the storage of a project with an unreadable config is unknown (it may be Postgres),
+    // so migrating its SQLite file would guess. The store gets a named failure and is left byte-identical.
+    assert.equal(byDb[projectDb].ok, false, "an unreadable config means unknown storage: the project's own store is refused, never migrated on a guess (fail closed)");
+    assert.match(JSON.stringify(byDb[projectDb]), new RegExp(reEscape(configPath)), 'the refusal on the project store names the unreadable config');
+    assert.equal(byDb[projectDb].already_migrated, undefined, 'the database was not probed: no already_migrated verdict');
+    assert.equal(fileHash(projectDb), projectDbHash, 'the store is byte-identical');
+    assert.deepEqual(dirSnapshot(join(projectDir, '.sterling')), sterlingDirBefore, 'nothing was created beside the store (no -wal/-shm, backup or manifest)');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1803,6 +1811,27 @@ test('S4-W3 [issue 26 slice 3B]: a store inside a work-mode project on SQLite st
     const { code } = runMigrate(['--db', dbPath]);
     assert.equal(code, 0, 'a work-mode SQLite store migrates');
     assert.equal(rawUserVersion(dbPath), 2);
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+test('S4-W4: --db on a project store whose config.json is corrupt is refused by name before the database is probed (fail closed, never guessed to be SQLite)', () => {
+  const projectDir = mkdtempSync(join(tmpdir(), 'migration-runner-badcfg-'));
+  try {
+    mkdirSync(join(projectDir, '.sterling'));
+    const configPath = join(projectDir, '.sterling', 'config.json');
+    writeFileSync(configPath, '{ not valid json at all');
+    const dbPath = join(projectDir, '.sterling', 'sterling.db');
+    buildLegacyChainFixture(dbPath);
+    const hash = fileHash(dbPath);
+    const before_ = dirSnapshot(join(projectDir, '.sterling'));
+    const { code, stdout, stderr } = runMigrate(['--db', dbPath]);
+    assert.notEqual(code, 0, 'an unreadable config is a refusal, never a clean exit');
+    assert.match(stdout + stderr, new RegExp(reEscape(configPath)), 'the refusal names the unreadable config');
+    assert.doesNotMatch(stdout + stderr, /already_migrated/, 'no migration verdict: the database was not probed');
+    assert.equal(fileHash(dbPath), hash, 'the store is byte-identical');
+    assert.deepEqual(dirSnapshot(join(projectDir, '.sterling')), before_, 'no backup, manifest or -wal/-shm was written');
   } finally {
     rmSync(projectDir, { recursive: true, force: true });
   }

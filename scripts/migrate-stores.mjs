@@ -964,11 +964,13 @@ function runAllStores() {
  * version lives in the sterling_meta registry. The verdict is the storage, in
  * any project mode (a hobby project can be on Postgres). A store at
  * <project>/.sterling/sterling.db is refused when that project's config says
- * storage 'postgres'. A config that cannot be read, or whose storage value is
- * invalid, is not refused here: the --all-stores sweep already reports it by
- * name, and S4-ALL-9 pins that the project's own store still gets its result
- * line. Any other path (a domain store) has no project config and is not judged
- * here.
+ * storage 'postgres'. A config that cannot be read (corrupt JSON, not an
+ * object, a symlink) or whose storage value is invalid is refused too, by name,
+ * before the database is probed: the storage is unknown, so the store may be
+ * on Postgres, and it is never guessed to be SQLite (fail closed). In the
+ * --all-stores sweep each store runs as its own --db child, so that store gets
+ * a failed result line and the sweep continues. Any other path (a domain
+ * store) has no project config and is not judged here.
  */
 function postgresStorageRefusal(dbPath) {
   const abs = resolve(dbPath);
@@ -977,8 +979,11 @@ function postgresStorageRefusal(dbPath) {
   let storage;
   try {
     storage = readProjectStorage(projectRoot);
-  } catch {
-    return null;
+  } catch (e) {
+    return (
+      `refusing '${dbPath}' — cannot tell which storage the project at '${projectRoot}' uses: ${e.message}. ` +
+      `The store is not opened until config.storage can be read. Nothing was read or written.`
+    );
   }
   if (storage !== 'postgres') return null;
   return (
