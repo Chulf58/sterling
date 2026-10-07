@@ -10975,7 +10975,8 @@ var EMPTY_ROSTER = {
   codexWired: false,
   tdd: { enabled: true },
   mode: "hobby",
-  handoff: false
+  handoff: false,
+  storage: void 0
 };
 function driftOf(installed, config) {
   return installed !== config;
@@ -11147,7 +11148,8 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
   const tddRows = selector ? [] : [tddToggleRow(snap, ui, width, keys.length + 2)];
   const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
   const handoffRows = selector ? [] : [handoffToggleRow(snap, ui, width, keys.length + 4)];
-  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows };
+  const storageRows = selector ? [] : [storageRow(snap, width)];
+  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, storageRows };
 }
 function catalogBanner(catalog, width) {
   const clip3 = (s2) => clipEllipsis(s2, width);
@@ -11204,6 +11206,12 @@ function handoffToggleRow(snap, ui, width, cursorIndex) {
   const shown = handoff === null ? `UNKNOWN (${snap.handoffDetail ?? "config unreadable"})` : handoff === true ? `ON${why}` : handoff === false ? `OFF${why}` : `INVALID (${handoff})`;
   return { id: "sys:handoff_files", lines: [{ text: clip3(`${marker}Handoff files: ${shown}`), kind: "title", selected }] };
 }
+function storageRow(snap, width) {
+  const clip3 = (s2) => clipEllipsis(s2, width);
+  const storage = snap.storage;
+  const shown = storage === null ? "UNKNOWN (config unreadable)" : storage === void 0 ? "SQLITE (not set)" : storage === "sqlite" ? "SQLITE" : storage === "postgres" ? "SERVED POSTGRES" : `UNRECOGNIZED (${storage})`;
+  return { id: "sys:storage", lines: [{ text: clip3(`  Storage: ${shown} (read-only; switch with the move-store skill)`), kind: "title" }] };
+}
 function tabsFor(store, activeTab, agents) {
   let taskCount = null;
   try {
@@ -11244,7 +11252,7 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, max
     rows.push({ id: sr.id, type: "system", selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
     screenRow += lines.length;
   }
-  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows]) {
+  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.storageRows]) {
     const lines = sr.lines.map((l) => ({
       text: l.text,
       kind: l.kind === "title" ? "title" : l.kind === "meta" ? "meta" : "body"
@@ -12699,6 +12707,18 @@ function openDashboard(storePath, options = {}) {
       return null;
     }
   }
+  function readRawStorage() {
+    let raw;
+    try {
+      raw = JSON.parse(readFileSync12(configPath2, "utf8"));
+    } catch {
+      return null;
+    }
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw))
+      return null;
+    const storage = raw.storage;
+    return storage === void 0 ? void 0 : typeof storage === "string" ? storage : JSON.stringify(storage);
+  }
   function readHandoff() {
     let raw;
     try {
@@ -12756,7 +12776,7 @@ function openDashboard(storePath, options = {}) {
     } catch (err) {
       ui = { ...ui, notice: `catalog unavailable \u2014 ${err.message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, ...handoff };
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), ...handoff };
   }
   function applySparringModel(e) {
     try {

@@ -195,6 +195,12 @@ export interface AgentRosterSnapshot {
    *  and the git error for UNKNOWN. Absent for an explicit key; an UNKNOWN
    *  without it is an unreadable config. */
   handoffDetail?: string;
+  /** config.storage (decision storage-backend-is-its-own-config-key-written-only-by-store-move),
+   *  read-only: the RAW config value, so an unrecognized value shows as such instead
+   *  of vanishing. Absent → SQLite (the routing default); null → the config could
+   *  not be read (UNKNOWN, never the default). Only 'sqlite' and 'postgres' are
+   *  recognized; any other value comes back as its JSON text. */
+  storage?: string | null;
 }
 
 /** A projected System-tab line (renderer prints text verbatim; kind styles it). */
@@ -239,6 +245,10 @@ export interface SystemTabView {
    *  a single-entry list, same toggle-only shape as modeRows, appended after it in
    *  cursor order; hidden while a config.models picker is open. */
   handoffRows: SystemRow[];
+  /** storage row (board 6ca1a3c5): a single-entry READ-ONLY list drawn after the
+   *  handoff row. It owns no cursor index (the cursor clamp does not count it) and
+   *  no effect, because only the move-store skill writes config.storage. */
+  storageRows: SystemRow[];
 }
 
 const EMPTY_ROSTER: AgentRosterSnapshot = {
@@ -250,6 +260,7 @@ const EMPTY_ROSTER: AgentRosterSnapshot = {
   tdd: { enabled: true },
   mode: 'hobby',
   handoff: false,
+  storage: undefined,
 };
 
 /** Pure scalar drift check: true iff the installed value differs from config. */
@@ -788,7 +799,9 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
   // the handoff files row follows the project mode row, at keys.length + 4.
   const handoffRows = selector ? [] : [handoffToggleRow(snap, ui, width, keys.length + 4)];
-  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows };
+  // the storage row is read-only: it takes no cursor index.
+  const storageRows = selector ? [] : [storageRow(snap, width)];
+  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, storageRows };
 }
 
 /** The catalog-status banner: absent / current(fresh) / stale-with-date. */
@@ -893,6 +906,26 @@ function handoffToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number,
   return { id: 'sys:handoff_files', lines: [{ text: clip(`${marker}Handoff files: ${shown}`), kind: 'title', selected }] };
 }
 
+/** storage row (board 6ca1a3c5), READ-ONLY and never selected: SERVED POSTGRES for
+ *  'postgres', SQLITE for 'sqlite' or an absent key (told apart by the bracket),
+ *  UNKNOWN for an unreadable config, and UNRECOGNIZED with the raw value for
+ *  anything else, never shown as SQLite. Store routing's rule: absent means SQLite. */
+function storageRow(snap: AgentRosterSnapshot, width: number): SystemRow {
+  const clip = (s: string): string => clipEllipsis(s, width);
+  const storage = snap.storage;
+  const shown =
+    storage === null
+      ? 'UNKNOWN (config unreadable)'
+      : storage === undefined
+        ? 'SQLITE (not set)'
+        : storage === 'sqlite'
+          ? 'SQLITE'
+          : storage === 'postgres'
+            ? 'SERVED POSTGRES'
+            : `UNRECOGNIZED (${storage})`;
+  return { id: 'sys:storage', lines: [{ text: clip(`  Storage: ${shown} (read-only; switch with the move-store skill)`), kind: 'title' }] };
+}
+
 /** Bridge the pure System projection into a DashboardState the renderer draws:
  *  the catalog banner as leading dim rows, then the roster rows. Untested by the
  *  phase oracle (which calls buildSystemTab directly) — this feeds main.ts. */
@@ -992,7 +1025,7 @@ function systemDashboardState(
   // rows, same row shape — a separate list, never merged.
   // project mode row (decision project-mode-hobby-work-toggle-decides-flow): drawn
   // after the tdd row, same row shape. The handoff files row follows it.
-  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows]) {
+  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.storageRows]) {
     const lines: RowLine[] = sr.lines.map((l) => ({
       text: l.text,
       kind: (l.kind === 'title' ? 'title' : l.kind === 'meta' ? 'meta' : 'body') as RowLine['kind'],

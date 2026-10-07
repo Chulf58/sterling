@@ -17660,6 +17660,18 @@ function projectModeLine({ config, configUnreadable }) {
   }
   return `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) \u2014 config.mode must be 'hobby' or 'work'; /sterling:merge, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).`;
 }
+var STORAGE_TAIL = "TUI System tab; switch with the move-store skill";
+function storageLine({ config, configUnreadable, root }) {
+  const presentButNull = !configUnreadable && config === null && Boolean(root) && existsSync18(join29(root, ".sterling", "config.json"));
+  if (configUnreadable || presentButNull) {
+    return "Storage: UNKNOWN \u2014 the project config could not be read, so config.storage could not be determined. This is NOT the SQLite default: repair the config.";
+  }
+  const storage = config?.storage;
+  if (storage === void 0) return `Storage: SQLITE (config.storage not set, so SQLite \u2014 ${STORAGE_TAIL})`;
+  if (storage === "sqlite") return `Storage: SQLITE (config.storage \u2014 ${STORAGE_TAIL})`;
+  if (storage === "postgres") return `Storage: SERVED POSTGRES (config.storage \u2014 ${STORAGE_TAIL})`;
+  return `Storage: UNRECOGNIZED (${JSON.stringify(storage)}) \u2014 config.storage must be 'sqlite' or 'postgres'; every store open refuses until it is fixed (TUI System tab shows it; only the move-store skill writes it).`;
+}
 var HANDOFF_SET = "the portable OpenCode agents and the handoff projection for colleagues without Sterling";
 function handoffFilesLine({ config, configUnreadable, root }) {
   if (configUnreadable) {
@@ -17904,7 +17916,7 @@ POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart 
 function operatingStateLines(root, pluginRoot, { opener } = {}) {
   const { config, configUnreadable } = readProjectConfig2(root);
   const atClone = Boolean(pluginRoot && samePath2(root, pluginRoot));
-  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: "opencode" }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable }), handoffFilesLine({ config, configUnreadable, root }), ...mountedDomainLines({ config, configUnreadable, opener, root }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
+  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: "opencode" }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable }), handoffFilesLine({ config, configUnreadable, root }), storageLine({ config, configUnreadable, root }), ...mountedDomainLines({ config, configUnreadable, opener, root }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
   return { lines, config };
 }
 function undeclaredSourceBlock(root, config) {

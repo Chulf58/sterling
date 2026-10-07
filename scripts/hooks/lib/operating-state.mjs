@@ -137,7 +137,43 @@ export function projectModeLine({ config, configUnreadable }) {
   );
 }
 
-const HANDOFF_SET = 'the portable OpenCode agents and the handoff projection for colleagues without Sterling';
+const STORAGE_TAIL = 'TUI System tab; switch with the move-store skill';
+
+/**
+ * STORAGE (decision storage-backend-is-its-own-config-key-written-only-by-store-move;
+ * board 6ca1a3c5): informational and read-only, it says where this project's
+ * stores live. Four separate states, resolved by the rule store routing uses
+ * (packages/store/src/routing.ts): an absent key IS SQLite, 'sqlite' is SQLite
+ * stated explicitly, 'postgres' is Served Postgres, and any other value is
+ * UNRECOGNIZED, shown with its raw value and never as SQLite (routing refuses it
+ * by name). An unreadable config is UNKNOWN, never the SQLite default. Reads no
+ * database and the project identity file: the schema name is not shown.
+ */
+export function storageLine({ config, configUnreadable, root }) {
+  // readProjectConfig reads a config.json whose content is literally `null` as an ABSENT
+  // file (loadConfig returns null for both). Store routing rejects that file as malformed
+  // (routing.ts readConfig: parseConfig(null) throws), so this line, which states what
+  // routing will do, checks the file itself and keeps the null-content case UNKNOWN.
+  // Storage-specific on purpose: the other lines keep their accepted behaviour for it
+  // (pinned in h1-tdd-posture-line.test.mjs).
+  const presentButNull = !configUnreadable && config === null && Boolean(root) && existsSync(join(root, '.sterling', 'config.json'));
+  if (configUnreadable || presentButNull) {
+    return (
+      'Storage: UNKNOWN — the project config could not be read, so config.storage could not be determined. ' +
+      'This is NOT the SQLite default: repair the config.'
+    );
+  }
+  const storage = config?.storage;
+  if (storage === undefined) return `Storage: SQLITE (config.storage not set, so SQLite — ${STORAGE_TAIL})`;
+  if (storage === 'sqlite') return `Storage: SQLITE (config.storage — ${STORAGE_TAIL})`;
+  if (storage === 'postgres') return `Storage: SERVED POSTGRES (config.storage — ${STORAGE_TAIL})`;
+  return (
+    `Storage: UNRECOGNIZED (${JSON.stringify(storage)}) — config.storage must be 'sqlite' or 'postgres'; ` +
+    'every store open refuses until it is fixed (TUI System tab shows it; only the move-store skill writes it).'
+  );
+}
+
+const HANDOFF_SET ='the portable OpenCode agents and the handoff projection for colleagues without Sterling';
 
 /**
  * HANDOFF FILES (decision

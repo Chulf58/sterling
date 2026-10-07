@@ -36200,8 +36200,75 @@ ${JSON.stringify(entry)}
     if (!routing) {
       throw new Error(`${op}: reconcile_needed item '${it.id}' has feature_link '${it.feature_link}', which does not resolve to a LIVE ${ATTESTABLE_OWNER_NOUN} (missing, retired into a broken chain, or a type that carries no file_baselines \u2014 settlement mints these items only against ${ATTESTABLE_OWNER_TYPES.join(" / ")}) \u2014 there is nothing to attest against. Nothing was written.`);
     }
+    if (this.domainHolderOf(op, it.id, routing.id) !== void 0) {
+      return this.store.withTransactionForRecord(it.id, () => this.closeDomainHeldInTransaction(op, it, routing.id, keys));
+    }
     const prepared = this.collectAttestationProof(op, it.id, routing, keys);
     return this.store.withTransactionForRecord(routing.id, () => this.attestInTransaction(op, it.id, routing.id, prepared));
+  }
+  /**
+   * The mount that physically holds the live owner `ownerId`, when it is a
+   * DOMAIN mount; undefined when the project store holds it. Refuses when the
+   * project store does not hold it and no single readable store does.
+   */
+  domainHolderOf(op, itemId, ownerId) {
+    if (this.store.projectStoreHolds(ownerId))
+      return void 0;
+    let holder;
+    try {
+      holder = this.store.scopeOfHolder(ownerId);
+    } catch (err) {
+      throw new Error(`${op}: reconcile_needed item '${itemId}' links to the ${ATTESTABLE_OWNER_NOUN} '${ownerId}', which the project store does not hold, and its holding store cannot be resolved (${err instanceof Error ? err.message : String(err)}). Nothing was written.`);
+    }
+    return holder.startsWith("domain:") ? holder : void 0;
+  }
+  /**
+   * The domain-held close, run under the PROJECT store's lock (the item's own
+   * mount). The routing decision was taken on a pre-lock snapshot, and
+   * `file_keys` and the rest of the item are caller-updatable through
+   * board_update, so every input the decision rested on is re-read here: the
+   * item's version, type, source, lane, feature_link and normalized file_keys,
+   * and the owner's physical holder. The item is removed only when all of them
+   * still match; otherwise the close refuses, naming what changed, and the
+   * item stays open (a retry re-decides on the new state).
+   */
+  closeDomainHeldInTransaction(op, snapshot, ownerId, keys) {
+    const fresh = this.store.get(snapshot.id);
+    if (!fresh) {
+      throw new Error(`${op}: item '${snapshot.id}' was removed concurrently \u2014 this call did not close it. Nothing was written.`);
+    }
+    const before = snapshot;
+    const changed = [];
+    if (fresh.version !== before.version)
+      changed.push(`version ${String(before.version)} \u2192 ${String(fresh.version)}`);
+    if (fresh.type !== before.type)
+      changed.push(`type '${String(before.type)}' \u2192 '${fresh.type}'`);
+    if (fresh.source !== before.source)
+      changed.push(`source '${String(before.source)}' \u2192 '${String(fresh.source)}'`);
+    if (fresh.system_reason !== before.system_reason)
+      changed.push(`lane '${String(before.system_reason)}' \u2192 '${String(fresh.system_reason)}'`);
+    if (fresh.feature_link !== before.feature_link)
+      changed.push(`feature_link '${String(before.feature_link)}' \u2192 '${String(fresh.feature_link)}'`);
+    const freshKeys = this.attestationKeys(op, fresh.id, fresh.file_keys);
+    if (freshKeys.length !== keys.length || freshKeys.some((k, i) => k !== keys[i])) {
+      changed.push(`file_keys (${keys.join(", ") || "none"}) \u2192 (${freshKeys.join(", ") || "none"})`);
+    }
+    if (changed.length) {
+      throw new Error(`${op}: item '${fresh.id}' changed under this call \u2014 ${changed.join("; ")}. The close was decided on the item as it was before, so it refuses rather than remove a different debt. Retry. Nothing was written.`);
+    }
+    const relinked = fresh.feature_link ? this.liveArticleFor(fresh.feature_link, ATTESTABLE_OWNER_TYPES) : void 0;
+    if (!relinked || relinked.id !== ownerId) {
+      throw new Error(`${op}: item '${fresh.id}' no longer links to the ${ATTESTABLE_OWNER_NOUN} '${ownerId}' \u2014 its feature_link now resolves to '${relinked?.id ?? "nothing live"}'. Nothing was written.`);
+    }
+    const holder = this.domainHolderOf(op, fresh.id, ownerId);
+    if (holder === void 0) {
+      throw new Error(`${op}: the ${ATTESTABLE_OWNER_NOUN} '${ownerId}' is no longer held by a domain store, so this item would now close through a baseline attestation. Retry. Nothing was written.`);
+    }
+    this.store.remove(fresh.id, this.now());
+    return {
+      domain_held: true,
+      note: `Closed WITHOUT a baseline attestation: the ${ATTESTABLE_OWNER_NOUN} '${ownerId}' is held by the '${holder}' store, and a project-local item cannot share a transaction with it. Nothing on the owner was written.`
+    };
   }
   /**
    * The pre-lock evidence pass: resolve the article's tree, decide the key set,
@@ -36429,6 +36496,9 @@ ${JSON.stringify(entry)}
       throw new Error(`board_remove: '${id}' is a ${record2.type}, not a task`);
     const evidence = this.removalArtifactEvidence(record2);
     const attestation = this.attestAlreadyPaidClose("board_remove", record2);
+    if (attestation && "domain_held" in attestation) {
+      return { removed: record2.id, ...evidence, note: evidence.note ? `${evidence.note} ${attestation.note}` : attestation.note };
+    }
     if (attestation) {
       return {
         removed: record2.id,
@@ -36478,6 +36548,9 @@ ${JSON.stringify(entry)}
     }
     const evidence = this.removalArtifactEvidence(record2);
     const attestation = this.attestAlreadyPaidClose("maintenance_remove", record2);
+    if (attestation && "domain_held" in attestation) {
+      return { removed: record2.id, ...evidence, note: evidence.note ? `${evidence.note} ${attestation.note}` : attestation.note };
+    }
     if (attestation) {
       return {
         removed: record2.id,
