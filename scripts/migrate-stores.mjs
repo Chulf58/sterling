@@ -123,7 +123,7 @@ import { existsSync, openSync, readSync, closeSync, writeFileSync, readdirSync, 
 import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 // Dependency-free like this script itself (node builtins only) — see
 // scripts/lib/store-path.mjs's own header. Safe to import here: unlike
 // scripts/lib/project.mjs (which pulls in @sterling/schemas + @sterling/store
@@ -131,6 +131,8 @@ import { join, resolve } from 'node:path';
 // node:sqlite AND NOT SterlingStore" above), store-path.mjs adds nothing to
 // the module graph this script does not already load.
 import { resolveStoreWritePath } from './lib/store-path.mjs';
+// Node builtins plus contained-fs.mjs only, like store-path.mjs above.
+import { readProjectStorage } from './lib/handoff-projection.mjs';
 
 // See "MIRRORED, NOT IMPORTED" above before changing either constant.
 const TARGET_SCHEMA_VERSION = 2;
@@ -956,6 +958,40 @@ function runAllStores() {
   process.exit(failed === 0 ? 0 : 1);
 }
 
+/**
+ * This script migrates SQLite stores (issue 26, design point 11): a project
+ * whose config.storage is 'postgres' keeps its store there, whose schema
+ * version lives in the sterling_meta registry. The verdict is the storage, in
+ * any project mode (a hobby project can be on Postgres). A store at
+ * <project>/.sterling/sterling.db is refused when that project's config says
+ * storage 'postgres'. A config that cannot be read (corrupt JSON, not an
+ * object, a symlink) or whose storage value is invalid is refused too, by name,
+ * before the database is probed: the storage is unknown, so the store may be
+ * on Postgres, and it is never guessed to be SQLite (fail closed). In the
+ * --all-stores sweep each store runs as its own --db child, so that store gets
+ * a failed result line and the sweep continues. Any other path (a domain
+ * store) has no project config and is not judged here.
+ */
+function postgresStorageRefusal(dbPath) {
+  const abs = resolve(dbPath);
+  if (basename(dirname(abs)) !== '.sterling') return null;
+  const projectRoot = dirname(dirname(abs));
+  let storage;
+  try {
+    storage = readProjectStorage(projectRoot);
+  } catch (e) {
+    return (
+      `refusing '${dbPath}' — cannot tell which storage the project at '${projectRoot}' uses: ${e.message}. ` +
+      `The store is not opened until config.storage can be read. Nothing was read or written.`
+    );
+  }
+  if (storage !== 'postgres') return null;
+  return (
+    `refusing '${dbPath}' — this migration is SQLite-only: the project at '${projectRoot}' has config.storage 'postgres', ` +
+    `whose stores live in Postgres with their schema version in the sterling_meta registry. Nothing was read or written.`
+  );
+}
+
 function main() {
   if (hasFlag('all-stores')) {
     return runAllStores();
@@ -964,6 +1000,8 @@ function main() {
   const dbPath = arg('db');
   if (!dbPath) return fail('--db <path-to-sterling.db> is required (or --all-stores, for a machine-wide sweep)');
   if (!existsSync(dbPath)) return fail(`no db file at '${dbPath}' — nothing was read, nothing was created`);
+  const storageRefusal = postgresStorageRefusal(dbPath);
+  if (storageRefusal) return fail(storageRefusal);
 
   // Syntax-checked before any db work; semantic validation (against the real
   // legacy claims) happens inside classify().
@@ -1188,6 +1226,16 @@ function main() {
     db.exec('BEGIN IMMEDIATE');
     let committed = false;
     try {
+      // Re-read under the write lock (decision
+      // postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+      // point 7): `before` came from the header probe, taken before any lock, so
+      // another migrator may have committed since. The throw rolls back.
+      const lockedVersion = db.prepare('PRAGMA user_version').get().user_version;
+      if (lockedVersion !== before) {
+        throw new Error(
+          `the schema version moved from ${before} to ${lockedVersion} between the version probe and the write lock — another migration ran; nothing was changed`
+        );
+      }
       const addedColumns = ensureRecordColumns(db);
       if (addedColumns.length) {
         manifest.disclosures.push(`records table gained the v2 identity columns: ${addedColumns.join(', ')}.`);

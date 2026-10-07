@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync, existsSync as existsSync2 } from "node:fs";
-import { dirname as dirname3, join as join3, resolve } from "node:path";
+import { readFileSync as readFileSync5, existsSync as existsSync4 } from "node:fs";
+import { dirname as dirname4, join as join9, resolve as resolve3 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -4052,15 +4052,15 @@ var NEVER = INVALID;
 
 // packages/schemas/dist/paths.js
 function normalizeRepoPath(input2) {
-  const fwd = input2.replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(fwd)) {
+  const fwd2 = input2.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(fwd2)) {
     throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input2}'`);
   }
-  if (fwd.startsWith("/")) {
+  if (fwd2.startsWith("/")) {
     throw new Error(`path invariant violation: absolute path is not repo-relative: '${input2}'`);
   }
   const parts = [];
-  for (const seg of fwd.split("/")) {
+  for (const seg of fwd2.split("/")) {
     if (seg === "" || seg === ".")
       continue;
     if (seg === "..") {
@@ -5338,13 +5338,22 @@ var configSchema = external_exports.object({
   // S1): any other value is PRESERVED raw, never coerced to hobby and never
   // thrown on — a typo here must not turn every parseConfig reader (the MCP
   // server's boot included) into a startup failure. The strict judge is
-  // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
+  // readProjectMode() in packages/schemas/src/project.ts (re-exported by scripts/lib/handoff-projection.mjs), which every
   // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
   // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
   // Consumers of the PARSED config must narrow this field themselves.
   // The default lives twice (anti_pattern 85d15143): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // Where the project's stores live (decision
+  // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
+  // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
+  // the Served database, valid only with mode 'work'. Only
+  // scripts/move-store.mjs writes it, after the stores have moved; config_set
+  // and the TUI refuse it. Strict, unlike `mode`: a wrong value must never
+  // route a project to the wrong backend. The reader is
+  // packages/store/src/routing.ts (resolveStoreRoute). No default on purpose.
+  storage: external_exports.enum(["sqlite", "postgres"]).optional(),
   // Handoff files (decision
   // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
   // `enabled` says whether Sterling writes the files for colleagues who do not
@@ -5370,6 +5379,43 @@ var configSchema = external_exports.object({
   // (config.test.ts pins that they agree).
   pr_review: external_exports.unknown().default({ copilot_logins: [] })
 });
+var RETIRED_MODEL_KEYS = [
+  "coder",
+  "coder_hard",
+  "explorer",
+  "test_writer",
+  "reviewers",
+  "implementation_architect",
+  "debugger"
+];
+var isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+function normalizeRawConfig(raw) {
+  if (!isPlainObject(raw))
+    return raw;
+  let out = raw;
+  const sp = raw.sparring_partner;
+  if (isPlainObject(sp) && Object.prototype.hasOwnProperty.call(sp, "model")) {
+    const { model, ...rest } = sp;
+    if (model !== void 0 && model !== "") {
+      const existing = rest.models;
+      if (existing === void 0 || isPlainObject(existing)) {
+        const models2 = { ...existing ?? {} };
+        if (models2.openai === void 0 || typeof model !== "string")
+          models2.openai = { model };
+        rest.models = models2;
+      }
+    }
+    out = { ...out, sparring_partner: rest };
+  }
+  const models = raw.models;
+  if (isPlainObject(models) && RETIRED_MODEL_KEYS.some((k) => Object.prototype.hasOwnProperty.call(models, k))) {
+    out = { ...out, models: Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k))) };
+  }
+  return out;
+}
+function parseConfig(raw) {
+  return configSchema.parse(normalizeRawConfig(raw));
+}
 
 // packages/schemas/dist/registry.js
 var projectRegistrationSchema = external_exports.object({
@@ -5399,10 +5445,2051 @@ var runtimeMarkerSchema = external_exports.object({
   booted_at: external_exports.string()
 }).strict();
 
+// packages/schemas/dist/project.js
+import { lstatSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+var ProjectIdentityError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectIdentityError";
+  }
+};
+var PROJECT_IDENTITY_REL = ".sterling/project.json";
+var fwd = (p) => p.replace(/\\/g, "/");
+var UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
+function readContainedText(root, rel, ErrorClass, subject) {
+  const segments = rel.split("/");
+  let cursor = resolve(root);
+  for (const [index, part] of segments.entries()) {
+    cursor = join(cursor, part);
+    let st;
+    try {
+      st = lstatSync(cursor);
+    } catch (err) {
+      if (err?.code === "ENOENT")
+        return null;
+      throw err;
+    }
+    const shown = segments.slice(0, index + 1).join("/");
+    const isLeaf = index === segments.length - 1;
+    if (st.isSymbolicLink())
+      throw new ErrorClass(`${shown} is a symlink \u2014 refusing to follow it out of the project; ${subject} cannot be read`);
+    if (isLeaf ? !st.isFile() : !st.isDirectory()) {
+      throw new ErrorClass(`${shown} exists but is not a ${isLeaf ? "regular file" : "directory"} \u2014 ${subject} cannot be read`);
+    }
+  }
+  return readFileSync(cursor, "utf8");
+}
+function readJsonObject(root, rel, ErrorClass, subject) {
+  const where = `${fwd(resolve(root))}/${rel}`;
+  const text = readContainedText(root, rel, ErrorClass, subject);
+  if (text === null)
+    return { where, parsed: void 0 };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
+  }
+  return { where, parsed };
+}
+function readProjectIdentity(root) {
+  const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
+  if (parsed === void 0)
+    return null;
+  if (!isProjectId(parsed.project_id)) {
+    throw new ProjectIdentityError(`project_id is ${JSON.stringify(parsed.project_id)} in ${where} \u2014 it must be a UUID v4 string; fix the file by hand (init never overwrites it) or restore it from git`);
+  }
+  return { project_id: parsed.project_id };
+}
+
+// packages/schemas/dist/broker.js
+var BROKER_PROTOCOL = 2;
+var BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
+var BROKER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+var BROKER_DISCOVERY_MAX_ENTRIES = 32;
+var BROKER_REGISTRY_MAX_BYTES = 16 * 1024;
+var BROKER_BOUNDS = {
+  /** Connecting to the socket. */
+  connectMs: 500,
+  /** Hello to welcome. */
+  handshakeMs: 1e3,
+  /** How long a call may wait in the server before it starts; past this it is refused unexecuted. */
+  queueMs: 2e3,
+  /** How long the client waits for a started call's result; past this the outcome is unknown. */
+  executeMs: 2e4
+};
+var BROKER_OPERATIONS = {
+  project: [
+    "get",
+    "query",
+    "queryEach",
+    "count",
+    "articlesBySlug",
+    "inboundSupersedes",
+    "inboundSupersedesEach",
+    "boardReadiness",
+    "getMeta",
+    "create",
+    "enqueueSystemTodo",
+    "updateTodo",
+    "remove",
+    "recordCheckSkipped"
+  ],
+  mounted: ["domainNames", "bySource", "bySourceEach", "querySource", "inboundSupersedes", "inboundSupersedesEach", "domainDescription"]
+};
+var BROKER_MAX_ARGS = 6;
+var brokerIdentitySchema = external_exports.object({
+  instance_id: external_exports.string().regex(/^[0-9a-f]{32}$/),
+  protocol: external_exports.number().int(),
+  build_id: external_exports.string(),
+  project_id: external_exports.string(),
+  root: external_exports.string(),
+  storage: external_exports.object({ backend: external_exports.literal("postgres"), database: external_exports.string(), meta_schema: external_exports.string(), project_schema: external_exports.string() }),
+  pid: external_exports.number().int()
+});
+var brokerRegistrationSchema = brokerIdentitySchema.extend({ socket: external_exports.string() });
+var brokerHelloSchema = external_exports.object({
+  type: external_exports.literal("hello"),
+  protocol: external_exports.number().int(),
+  instance_id: external_exports.string(),
+  project_id: external_exports.string(),
+  root: external_exports.string()
+});
+var brokerErrorSchema = external_exports.object({
+  name: external_exports.string(),
+  message: external_exports.string(),
+  /** Enumerable string or number fields of the original error (domain, location, schema, code). */
+  fields: external_exports.record(external_exports.union([external_exports.string(), external_exports.number()])).default({})
+});
+var brokerWelcomeSchema = external_exports.union([
+  external_exports.object({ type: external_exports.literal("welcome"), identity: brokerIdentitySchema }),
+  external_exports.object({ type: external_exports.literal("refused"), error: brokerErrorSchema })
+]);
+var brokerCallSchema = external_exports.object({
+  type: external_exports.literal("call"),
+  id: external_exports.number().int().nonnegative(),
+  target: external_exports.enum(["project", "mounted"]),
+  op: external_exports.string(),
+  args: external_exports.array(external_exports.unknown()).max(BROKER_MAX_ARGS),
+  /** Client clock (ms since epoch) when the call was sent; client and server share the machine clock. */
+  sent_at: external_exports.number()
+});
+var brokerResultSchema = external_exports.union([
+  external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(true), result: external_exports.unknown().optional() }),
+  /** `executed` false means the server did not start the operation, so the caller may fall back; true or absent means it may have run. */
+  external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(false), executed: external_exports.boolean(), error: brokerErrorSchema })
+]);
+function isBrokerOperation(target, op) {
+  const ops = BROKER_OPERATIONS[target];
+  return Array.isArray(ops) && ops.includes(op);
+}
+
 // packages/store/dist/index.js
-import { mkdirSync, existsSync, statSync } from "node:fs";
-import { dirname as dirname2, join as join2, resolve as resolvePath2 } from "node:path";
+import { mkdirSync as mkdirSync2, existsSync as existsSync2, statSync as statSync2 } from "node:fs";
+import { dirname as dirname3, join as join5, resolve as resolvePath2 } from "node:path";
 import { randomUUID } from "node:crypto";
+
+// packages/store/dist/mounted.js
+import { mkdirSync, existsSync, rmSync, openSync, closeSync } from "node:fs";
+import { dirname, join as join3 } from "node:path";
+import { homedir as homedir2 } from "node:os";
+
+// packages/store/dist/shares.js
+var DEFAULT_PROJECT_SHARE = 0.6;
+function allocateShares(perSourceCounts, cap, projectShare = DEFAULT_PROJECT_SHARE) {
+  if (!Array.isArray(perSourceCounts) || perSourceCounts.length === 0) {
+    throw new Error("allocateShares: perSourceCounts must contain at least the project count (index 0)");
+  }
+  if (!Number.isInteger(cap) || cap < 1)
+    throw new Error(`allocateShares: cap must be a positive integer, got ${cap}`);
+  for (const c of perSourceCounts) {
+    if (!Number.isInteger(c) || c < 0)
+      throw new Error(`allocateShares: every count must be a non-negative integer, got ${c}`);
+  }
+  if (typeof projectShare !== "number" || !(projectShare >= 0 && projectShare <= 1)) {
+    throw new Error(`allocateShares: projectShare must be between 0 and 1, got ${projectShare}`);
+  }
+  const domainCount = perSourceCounts.length - 1;
+  const projectQuota = domainCount === 0 ? cap : Math.min(cap, Math.ceil(projectShare * cap - 1e-9));
+  const quotas = [projectQuota];
+  const rest = cap - projectQuota;
+  for (let i = 0; i < domainCount; i++) {
+    quotas.push(Math.floor(rest / domainCount) + (i < rest % domainCount ? 1 : 0));
+  }
+  const alloc = perSourceCounts.map((count, i) => Math.min(count, quotas[i]));
+  let left = cap - alloc.reduce((a, b) => a + b, 0);
+  while (left > 0) {
+    let gave = false;
+    for (let i = 0; i < alloc.length && left > 0; i++) {
+      if (alloc[i] < perSourceCounts[i]) {
+        alloc[i]++;
+        left--;
+        gave = true;
+      }
+    }
+    if (!gave)
+      break;
+  }
+  return alloc;
+}
+
+// packages/store/dist/pg-bridge.js
+import { MessageChannel, Worker, receiveMessageOnPort } from "node:worker_threads";
+import { readFileSync as readFileSync2, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join as join2 } from "node:path";
+var STATE_WAITING = 0;
+var STATE_REPLY = 1;
+var STATE_DEAD = 2;
+var DEFAULT_PG_CREDENTIALS_PATH = join2(homedir(), ".sterling", "credentials", "served.json");
+var DEFAULT_PG_WAIT_TIMEOUT_MS = 1e4;
+var HANDSHAKE_MARGIN_MS = 5e3;
+var PgConfigError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "PgConfigError";
+  }
+};
+var PgBridgeTimeoutError = class extends Error {
+  phase;
+  timeoutMs;
+  constructor(phase, timeoutMs2, detail) {
+    super(`Postgres bridge: no reply within ${timeoutMs2} ms during the ${phase} (${detail}); the worker was terminated and its connection closed.`);
+    this.phase = phase;
+    this.timeoutMs = timeoutMs2;
+    this.name = "PgBridgeTimeoutError";
+  }
+};
+var PgWorkerDiedError = class extends Error {
+  reason;
+  code;
+  constructor(reason, code) {
+    super(`Postgres bridge: the worker died (${reason}); the bridge is closed.`);
+    this.reason = reason;
+    this.code = code;
+    this.name = "PgWorkerDiedError";
+  }
+};
+var PgBridgeClosedError = class extends Error {
+  constructor(why) {
+    super(`Postgres bridge is closed (${why}); open a new one.`);
+    this.name = "PgBridgeClosedError";
+  }
+};
+var PgTransactionOpenError = class extends Error {
+  constructor(wanted, holder) {
+    super(`Postgres bridge: ${wanted} cannot begin a transaction: this connection already has one open for ${holder}. One connection holds one transaction; nothing was sent.`);
+    this.name = "PgTransactionOpenError";
+  }
+};
+var PgQueryError = class extends Error {
+  code;
+  inPrefix;
+  constructor(message, code, inPrefix = false) {
+    super(message);
+    this.code = code;
+    this.inPrefix = inPrefix;
+    this.name = "PgQueryError";
+  }
+};
+var CREDENTIAL_KEYS = ["host", "port", "database", "user", "password", "ssl", "gssencmode", "connect_timeout_ms"];
+var SSL_KEYS = ["mode", "negotiation", "servername", "rejectUnauthorized"];
+function isPlainObject2(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+function buildPgConnectionConfig(creds) {
+  if (!isPlainObject2(creds))
+    throw new PgConfigError("credentials must be a JSON object");
+  for (const key of Object.keys(creds)) {
+    if (!CREDENTIAL_KEYS.includes(key))
+      throw new PgConfigError(`credentials key '${key}' is not recognised; allowed: ${CREDENTIAL_KEYS.join(", ")}`);
+  }
+  for (const field of ["host", "database", "user"]) {
+    if (typeof creds[field] !== "string" || creds[field].length === 0)
+      throw new PgConfigError(`credentials.${field} must be a non-empty string`);
+  }
+  if (!Number.isInteger(creds.port) || creds.port < 1 || creds.port > 65535) {
+    throw new PgConfigError("credentials.port must be an integer between 1 and 65535");
+  }
+  if (typeof creds.password !== "string")
+    throw new PgConfigError("credentials.password must be a string");
+  if (creds.gssencmode !== void 0 && creds.gssencmode !== "disable") {
+    throw new PgConfigError("credentials.gssencmode must be 'disable' (node-postgres has no GSS encryption)");
+  }
+  const timeout = creds.connect_timeout_ms;
+  if (!Number.isInteger(timeout) || timeout <= 0)
+    throw new PgConfigError("credentials.connect_timeout_ms must be a positive integer");
+  let ssl = false;
+  let sslnegotiation = "postgres";
+  if (creds.ssl !== void 0) {
+    const s2 = creds.ssl;
+    if (!isPlainObject2(s2))
+      throw new PgConfigError("credentials.ssl must be an object");
+    for (const key of Object.keys(s2)) {
+      if (!SSL_KEYS.includes(key))
+        throw new PgConfigError(`credentials.ssl key '${key}' is not recognised; allowed: ${SSL_KEYS.join(", ")}`);
+    }
+    if (s2.mode !== "require" && s2.mode !== "verify-full")
+      throw new PgConfigError("credentials.ssl.mode must be 'require' or 'verify-full'");
+    if (typeof s2.rejectUnauthorized !== "boolean")
+      throw new PgConfigError("credentials.ssl.rejectUnauthorized must be a boolean");
+    if (s2.rejectUnauthorized !== (s2.mode === "verify-full")) {
+      throw new PgConfigError(`credentials.ssl.rejectUnauthorized must be ${s2.mode === "verify-full"} for mode '${s2.mode}' (verify-full verifies the certificate, require does not)`);
+    }
+    if (s2.servername !== void 0 && (typeof s2.servername !== "string" || s2.servername.length === 0)) {
+      throw new PgConfigError("credentials.ssl.servername must be a non-empty string when given");
+    }
+    if (s2.negotiation !== void 0 && s2.negotiation !== "postgres" && s2.negotiation !== "direct") {
+      throw new PgConfigError("credentials.ssl.negotiation must be 'postgres' or 'direct'");
+    }
+    ssl = { rejectUnauthorized: s2.rejectUnauthorized, ...s2.servername !== void 0 ? { servername: s2.servername } : {} };
+    sslnegotiation = s2.negotiation ?? "postgres";
+  }
+  return {
+    host: creds.host,
+    port: creds.port,
+    database: creds.database,
+    user: creds.user,
+    password: creds.password,
+    ssl,
+    sslnegotiation,
+    connectionTimeoutMillis: timeout
+  };
+}
+function readPgCredentials(path = DEFAULT_PG_CREDENTIALS_PATH) {
+  let mode;
+  try {
+    mode = statSync(path).mode;
+  } catch (e) {
+    throw new PgConfigError(`Postgres credentials file '${path}' cannot be read: ${e.code ?? String(e)}`);
+  }
+  if ((mode & 63) !== 0) {
+    throw new PgConfigError(`Postgres credentials file '${path}' is readable by group or other (mode ${(mode & 511).toString(8)}); set it to mode 600`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync2(path, "utf8"));
+  } catch (e) {
+    throw new PgConfigError(`Postgres credentials file '${path}' is not valid JSON: ${e.message}`);
+  }
+  return buildPgConnectionConfig(parsed);
+}
+function redactSecrets(text, secrets) {
+  let out = text;
+  for (const secret of secrets) {
+    if (!secret)
+      continue;
+    out = out.split(secret).join("[redacted]");
+    const encoded = encodeURIComponent(secret);
+    if (encoded !== secret)
+      out = out.split(encoded).join("[redacted]");
+  }
+  return out;
+}
+var PgBridge = class {
+  worker;
+  port;
+  control;
+  secrets;
+  seq = 0;
+  closedReason;
+  txOwner;
+  txOwnerLabel = "";
+  /** How long one statement waits for its reply. Server-side timeouts must be shorter, so the named server error arrives first. */
+  waitTimeoutMs;
+  constructor(config, options = {}) {
+    this.waitTimeoutMs = options.waitTimeoutMs ?? DEFAULT_PG_WAIT_TIMEOUT_MS;
+    const handshakeTimeoutMs = options.handshakeTimeoutMs ?? config.connectionTimeoutMillis + HANDSHAKE_MARGIN_MS;
+    for (const [name, v] of [["waitTimeoutMs", this.waitTimeoutMs], ["handshakeTimeoutMs", handshakeTimeoutMs]]) {
+      if (!Number.isInteger(v) || v <= 0)
+        throw new PgConfigError(`PgBridge: ${name} must be a positive integer`);
+    }
+    this.secrets = [config.password];
+    this.control = new Int32Array(new SharedArrayBuffer(4));
+    const { port1, port2 } = new MessageChannel();
+    this.port = port1;
+    this.port.unref();
+    this.worker = options.workerUrl === void 0 ? new Worker(new URL("./pg-worker.js", import.meta.url)) : new Worker(options.workerUrl);
+    this.worker.unref();
+    this.worker.on("error", () => {
+    });
+    Atomics.store(this.control, 0, STATE_WAITING);
+    this.worker.postMessage({ control: this.control.buffer, port: port2, config }, [port2]);
+    this.await(0, "handshake", handshakeTimeoutMs, "the worker did not report ready; it may have died at load, or the server did not answer");
+  }
+  get closed() {
+    return this.closedReason !== void 0;
+  }
+  /** Why the bridge closed (the same text PgBridgeClosedError carries), or undefined while it is open. */
+  get closeReason() {
+    return this.closedReason;
+  }
+  /** The handle whose transaction is open on this connection, if any. */
+  get transactionOwner() {
+    return this.txOwner;
+  }
+  /** Records that `owner` opens a transaction. Refuses when any handle, `owner` included, already holds one. */
+  claimTransaction(owner, label) {
+    if (this.txOwner !== void 0)
+      throw new PgTransactionOpenError(label, this.txOwnerLabel);
+    this.txOwner = owner;
+    this.txOwnerLabel = label;
+  }
+  /** Records that `owner`'s transaction ended. A no-op for any other handle. */
+  releaseTransaction(owner) {
+    if (this.txOwner === owner) {
+      this.txOwner = void 0;
+      this.txOwnerLabel = "";
+    }
+  }
+  /**
+   * Runs one statement. With `values` it is a parameterised query ($1, $2, ...); without, a simple query that may hold several statements.
+   * `prefix`, a simple query, goes out in the same round trip ahead of the statement; when it fails the call throws a PgQueryError with
+   * `inPrefix` set and the statement's result is discarded (the statement may still have run, so the caller passes only a read).
+   */
+  query(text, values, prefix) {
+    const reply = this.send({ op: "query", text, values, ...prefix !== void 0 ? { prefix } : {} }, "query", this.waitTimeoutMs);
+    return { rows: reply.rows ?? [], rowCount: reply.rowCount ?? 0 };
+  }
+  /** Ends the connection and stops the worker. Idempotent. */
+  close() {
+    if (this.closed)
+      return;
+    try {
+      this.send({ op: "close" }, "close", this.waitTimeoutMs);
+    } finally {
+      this.shutDown("close() was called");
+    }
+  }
+  send(req, phase, timeoutMs2) {
+    if (this.closedReason !== void 0)
+      throw new PgBridgeClosedError(this.closedReason);
+    const queued = receiveMessageOnPort(this.port)?.message;
+    const previous = Atomics.compareExchange(this.control, 0, STATE_REPLY, STATE_WAITING);
+    if (queued?.dead || previous === STATE_DEAD) {
+      const reason = queued?.error ? this.redact(queued.error.message) : "it stopped between calls";
+      this.shutDown(`the worker died: ${reason}`);
+      throw new PgWorkerDiedError(reason, queued?.error?.code);
+    }
+    const seq = ++this.seq;
+    this.port.postMessage({ seq, ...req });
+    return this.await(seq, phase, timeoutMs2, phase === "query" ? "the statement did not finish" : "the connection did not end");
+  }
+  await(seq, phase, timeoutMs2, detail) {
+    const outcome = Atomics.wait(this.control, 0, STATE_WAITING, timeoutMs2);
+    if (outcome === "timed-out") {
+      this.shutDown(`a ${phase} wait timed out after ${timeoutMs2} ms`);
+      throw new PgBridgeTimeoutError(phase, timeoutMs2, detail);
+    }
+    const state = Atomics.load(this.control, 0);
+    const reply = receiveMessageOnPort(this.port)?.message;
+    if (state === STATE_DEAD || reply?.dead) {
+      const reason = reply?.error ? this.redact(reply.error.message) : "no reason given";
+      this.shutDown(`the worker died: ${reason}`);
+      throw new PgWorkerDiedError(reason, reply?.error?.code);
+    }
+    if (!reply || reply.seq !== seq) {
+      this.shutDown("protocol error");
+      throw new PgWorkerDiedError(`protocol error: expected the reply to message ${seq}, got ${reply ? `message ${reply.seq}` : "nothing"}`);
+    }
+    if (!reply.ok) {
+      const message = this.redact(reply.error?.message ?? "unknown error");
+      if (phase === "handshake") {
+        this.shutDown(`the connection failed: ${message}`);
+        throw new PgWorkerDiedError(`connecting failed: ${message}`, reply.error?.code);
+      }
+      throw new PgQueryError(message, reply.error?.code, reply.prefixFailed === true);
+    }
+    return reply;
+  }
+  redact(message) {
+    return redactSecrets(message, this.secrets);
+  }
+  shutDown(reason) {
+    if (this.closedReason !== void 0)
+      return;
+    this.closedReason = reason;
+    this.port.close();
+    void this.worker.terminate();
+  }
+};
+
+// packages/store/dist/search-fold.js
+var LATIN_LETTER = new RegExp("^\\p{Script=Latin}$", "u");
+var LETTER_OR_NUMBER_OR_PRIVATE = /^[\p{L}\p{N}\p{Co}]$/u;
+var COMBINING_MARK = new RegExp("^\\p{M}$", "u");
+function foldSearchText(s2) {
+  let kept = "";
+  let afterLatinLetter = false;
+  for (const ch of s2.toLowerCase().normalize("NFD")) {
+    if (COMBINING_MARK.test(ch)) {
+      if (!afterLatinLetter)
+        kept += ch;
+      continue;
+    }
+    afterLatinLetter = LATIN_LETTER.test(ch) && new RegExp("^\\p{L}$", "u").test(ch);
+    kept += ch;
+  }
+  let out = "";
+  for (const ch of kept.normalize("NFC"))
+    out += LETTER_OR_NUMBER_OR_PRIVATE.test(ch) ? ch : " ";
+  return out.replace(/ {2,}/g, " ").trim();
+}
+
+// packages/store/dist/pg-driver.js
+var PG_META_SCHEMA = "sterling_meta";
+var SCHEMA_NAME = /^sterling_[a-z0-9_]*[a-z0-9]$/;
+var MAX_IDENTIFIER_BYTES = 63;
+var PgSchemaNameRefusedError = class extends Error {
+  constructor(name, why) {
+    super(`Postgres schema name '${name}' refused: ${why}. Sterling only touches schemas named sterling_<lowercase letters, digits, _>.`);
+    this.name = "PgSchemaNameRefusedError";
+  }
+};
+var PgStoreMissingError = class extends Error {
+  schema;
+  constructor(schema, missing) {
+    super(`Postgres store '${schema}' does not exist: ${missing}. A store is created only by an explicit createPgStore call, never on open.`);
+    this.schema = schema;
+    this.name = "PgStoreMissingError";
+  }
+};
+var PgNulCharacterError = class extends Error {
+  constructor(detail) {
+    super(`NUL character (U+0000) refused on Postgres: ${detail}. Postgres text cannot hold U+0000, and its JSON functions refuse the \\u0000 escape.`);
+    this.name = "PgNulCharacterError";
+  }
+};
+var PgLockTimeoutError = class extends Error {
+  code = "55P03";
+  constructor(detail) {
+    super(`Postgres lock timeout (55P03): ${detail}. Another writer or a migration holds the lock; nothing was written and the write is not retried.`);
+    this.name = "PgLockTimeoutError";
+  }
+};
+var PgStatementTimeoutError = class extends Error {
+  code = "57014";
+  constructor(detail) {
+    super(`Postgres statement timeout (57014): ${detail}. The transaction was rolled back and is not retried.`);
+    this.name = "PgStatementTimeoutError";
+  }
+};
+var PgUnsupportedError = class extends Error {
+  constructor(what) {
+    super(`${what} is not supported by the Postgres driver.`);
+    this.name = "PgUnsupportedError";
+  }
+};
+function assertSterlingSchemaName(name) {
+  if (typeof name !== "string" || !SCHEMA_NAME.test(name))
+    throw new PgSchemaNameRefusedError(String(name), "not of the form sterling_<a-z0-9_>");
+  if (Buffer.byteLength(name) > MAX_IDENTIFIER_BYTES)
+    throw new PgSchemaNameRefusedError(name, `longer than ${MAX_IDENTIFIER_BYTES} bytes`);
+}
+function pgProjectSchemaName(projectUuid) {
+  if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(projectUuid)) {
+    throw new PgSchemaNameRefusedError(`sterling_p_${projectUuid}`, "the project id is not a UUID");
+  }
+  const name = `sterling_p_${projectUuid.replace(/-/g, "").toLowerCase()}`;
+  assertSterlingSchemaName(name);
+  return name;
+}
+function pgDomainSchemaName(domain) {
+  if (typeof domain !== "string" || domain.length === 0)
+    throw new PgSchemaNameRefusedError("sterling_d_", "the domain name is empty");
+  const name = `sterling_d_${domain.toLowerCase().replace(/[^a-z0-9]/g, "_")}`;
+  assertSterlingSchemaName(name);
+  return name;
+}
+function ident(schema) {
+  assertSterlingSchemaName(schema);
+  return `"${schema}"`;
+}
+var DEFAULT_PG_LOCK_TIMEOUT_MS = 3e3;
+var DEFAULT_PG_STATEMENT_TIMEOUT_MS = 5e3;
+var LOCK_NS_GLOBAL = 1398033735;
+var LOCK_NS_STORE = 1398035284;
+function lockHash(name) {
+  let h = 2166136261;
+  for (const byte of Buffer.from(name, "utf8")) {
+    h ^= byte;
+    h = Math.imul(h, 16777619);
+  }
+  return h | 0;
+}
+function timeoutMs(name, value, fallback, bridge) {
+  const v = value ?? fallback;
+  if (!Number.isInteger(v) || v <= 0)
+    throw new Error(`Postgres ${name} must be a positive integer, got ${String(v)}`);
+  if (v >= bridge.waitTimeoutMs) {
+    throw new Error(`Postgres ${name} (${v} ms) must be below the bridge's wait (${bridge.waitTimeoutMs} ms), so the server's named timeout arrives before the bridge gives up`);
+  }
+  return v;
+}
+function mapPgError(e, where) {
+  if (e instanceof PgQueryError) {
+    if (e.code === "55P03")
+      throw new PgLockTimeoutError(`${e.message} in ${where}`);
+    if (e.code === "57014")
+      throw new PgStatementTimeoutError(`${e.message} in ${where}`);
+    if (e.code === "22P05" || e.code === "22021")
+      throw new PgNulCharacterError(`${e.message} (SQLSTATE ${e.code}) in '${where}'`);
+  }
+  throw e;
+}
+function abandon(bridge, owner) {
+  try {
+    if (!bridge.closed)
+      bridge.query("ROLLBACK");
+  } finally {
+    bridge.releaseTransaction(owner);
+  }
+}
+var STORE_TABLES = /* @__PURE__ */ new Set([
+  "records",
+  "record_versions",
+  "record_aliases",
+  "record_relations",
+  "record_stack_tags",
+  "record_file_keys",
+  "records_fts",
+  "runs",
+  "handoffs",
+  "check_skipped",
+  "selection",
+  "queue_drain_log",
+  "activity_log",
+  "store_meta"
+]);
+function translateStatement(sql, schema) {
+  let out = "";
+  let n = 0;
+  let i = 0;
+  let prevSignificant = "";
+  let firstWords = [];
+  while (i < sql.length) {
+    const c = sql[i];
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === c) {
+          if (sql[j + 1] === c) {
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        j++;
+      }
+      out += sql.slice(i, j + 1);
+      prevSignificant = c;
+      i = j + 1;
+      continue;
+    }
+    if (c === "?") {
+      out += `$${++n}`;
+      prevSignificant = "?";
+      i++;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      let j = i + 1;
+      while (j < sql.length && /[A-Za-z0-9_]/.test(sql[j]))
+        j++;
+      const word = sql.slice(i, j);
+      const lower = word.toLowerCase();
+      if (firstWords.length < 3)
+        firstWords.push(lower);
+      let k = j;
+      while (k < sql.length && /\s/.test(sql[k]))
+        k++;
+      if (STORE_TABLES.has(lower) && prevSignificant !== "." && sql[j] !== ".") {
+        out += `"${schema}".${word}`;
+      } else if (lower === "instr" && sql[k] === "(") {
+        out += "strpos";
+      } else {
+        out += word;
+      }
+      prevSignificant = word;
+      i = j;
+      continue;
+    }
+    if (!/\s/.test(c))
+      prevSignificant = c;
+    out += c;
+    i++;
+  }
+  const derivedText = firstWords[0] === "insert" && firstWords[1] === "into" && firstWords[2] === "records_fts" || firstWords[0] === "update" && firstWords[1] === "records_fts";
+  return { text: out, params: n, derivedText };
+}
+function storeDdl(s2) {
+  return `
+CREATE TABLE IF NOT EXISTS ${s2}.records (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  superseded_by TEXT,
+  lifecycle TEXT NOT NULL DEFAULT 'live',
+  freshness TEXT NOT NULL DEFAULT 'fresh',
+  version INTEGER NOT NULL DEFAULT 1,
+  scope TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  author TEXT NOT NULL,
+  derived_unconfirmed INTEGER NOT NULL DEFAULT 0,
+  body TEXT NOT NULL,
+  _seq BIGINT GENERATED ALWAYS AS IDENTITY,
+  operation_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_records_type_status ON ${s2}.records (type, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON ${s2}.records (operation_id);
+CREATE TABLE IF NOT EXISTS ${s2}.record_versions (
+  record_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  archived_at TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (record_id, version)
+);
+CREATE TABLE IF NOT EXISTS ${s2}.record_aliases (
+  historical_id TEXT PRIMARY KEY,
+  canonical_id TEXT NOT NULL,
+  archived_version INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  _seq BIGINT GENERATED ALWAYS AS IDENTITY
+);
+CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON ${s2}.record_aliases (canonical_id);
+CREATE TABLE IF NOT EXISTS ${s2}.record_relations (
+  source_id TEXT NOT NULL,
+  rel TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  _seq BIGINT GENERATED ALWAYS AS IDENTITY,
+  PRIMARY KEY (source_id, rel, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_relations_target ON ${s2}.record_relations (target_id);
+CREATE INDEX IF NOT EXISTS idx_relations_rel_target ON ${s2}.record_relations (rel, target_id);
+CREATE TABLE IF NOT EXISTS ${s2}.record_stack_tags (
+  record_id TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  PRIMARY KEY (record_id, tag)
+);
+CREATE TABLE IF NOT EXISTS ${s2}.record_file_keys (
+  record_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  PRIMARY KEY (record_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_file_keys_path ON ${s2}.record_file_keys (path);
+-- text is the folded search text (pgDialect.searchText at every write site).
+-- The default parser splits folded text on its spaces only: the fold leaves
+-- letters, digits and private-use characters, and in a C-ctype database every
+-- non-ASCII character is a letter to it. So tsv has one position per word and
+-- dl, the word count, is the document length bm25 normalizes by.
+CREATE TABLE IF NOT EXISTS ${s2}.records_fts (
+  record_id TEXT PRIMARY KEY,
+  text TEXT NOT NULL,
+  tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, text)) STORED,
+  dl INTEGER GENERATED ALWAYS AS (CASE WHEN text = '' THEN 0 ELSE cardinality(string_to_array(text, ' ')) END) STORED
+);
+CREATE INDEX IF NOT EXISTS idx_records_fts_tsv ON ${s2}.records_fts USING gin (tsv);
+CREATE TABLE IF NOT EXISTS ${s2}.runs (
+  id TEXT PRIMARY KEY,
+  machine_state TEXT NOT NULL,
+  pending_exit TEXT,
+  body TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.handoffs (
+  run_id TEXT NOT NULL,
+  phase_id TEXT NOT NULL,
+  agent_role TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoffs_run_phase ON ${s2}.handoffs (run_id, phase_id);
+CREATE TABLE IF NOT EXISTS ${s2}.check_skipped (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  run_id TEXT,
+  check_name TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.selection (
+  slot INTEGER PRIMARY KEY CHECK (slot = 1),
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.queue_drain_log (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  drained_at TEXT NOT NULL,
+  system_reason TEXT NOT NULL,
+  text TEXT NOT NULL,
+  file_keys TEXT NOT NULL,
+  record_id TEXT
+);
+CREATE TABLE IF NOT EXISTS ${s2}.activity_log (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  at TEXT NOT NULL,
+  verb TEXT NOT NULL,
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  title TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.store_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+}
+var PG_RANKINGS = ["bm25", "idf_tsrank", "tsrank_cd"];
+var DEFAULT_PG_RANKING = "bm25";
+var PG_SCORE_SCALES = { bm25: "pg_bm25_v1", idf_tsrank: "pg_idf_tsrank_v1", tsrank_cd: "pg_tsrank_cd_v1" };
+function pgSearchQuery(terms, matchAll) {
+  const clauses = [];
+  let empty = false;
+  for (const term of terms) {
+    const prefix = term.length > 1 && term.endsWith("*");
+    const folded = foldSearchText(term);
+    if (folded === "") {
+      empty = true;
+      continue;
+    }
+    const w = folded.split(" ");
+    clauses.push({ q: w.map((x) => `'${x}'`).join(" <-> ") + (prefix ? ":*" : ""), w, p: prefix });
+  }
+  const none = clauses.length === 0 || matchAll === true && empty;
+  const prefixes = [...new Set(clauses.filter((c) => c.p).map((c) => c.w[c.w.length - 1]))];
+  const out = JSON.stringify({
+    match: none ? null : clauses.map((c) => `(${c.q})`).join(matchAll ? " & " : " | "),
+    clauses,
+    words: [...new Set(clauses.flatMap((c) => c.w))],
+    prefixes,
+    // The documents any prefix matches, so the statement can list the lexemes each prefix stands for once per query.
+    prefixq: prefixes.length ? prefixes.map((x) => `'${x}':*`).join(" | ") : null
+  });
+  return out;
+}
+var PG_SEARCH_STATS = `CROSS JOIN (SELECT q.j->>'match' AS m,
+    (SELECT count(*) FROM records_fts)::float8 AS n,
+    (SELECT coalesce(avg(dl), 0) FROM records_fts)::float8 AS avgdl,
+    ARRAY(SELECT json_array_elements_text(q.j->'words'))
+      || ARRAY(SELECT DISTINCT u.lexeme FROM records_fts x, unnest(x.tsv) u
+        WHERE x.tsv @@ (q.j->>'prefixq')::tsquery AND EXISTS (SELECT 1 FROM json_array_elements_text(q.j->'prefixes') pf WHERE starts_with(u.lexeme, pf))) AS lexemes,
+    (SELECT coalesce(json_agg(json_build_object('q', c.value->>'q', 'w', c.value->'w', 'p', c.value->'p',
+        'df', (SELECT count(*) FROM records_fts x WHERE x.tsv @@ (c.value->>'q')::tsquery)) ORDER BY c.ordinality), '[]'::json)
+      FROM json_array_elements(q.j->'clauses') WITH ORDINALITY c) AS cl
+  FROM (SELECT ?::json AS j) q) st`;
+var PG_IDF = "greatest(ln((st.n - c.df + 0.5) / (c.df + 0.5)), 1e-6)";
+var PG_BM25_SCORE = `CROSS JOIN LATERAL (SELECT array_agg(u.lexeme) AS lx, array_agg(p) AS ps
+    FROM unnest(ts_filter(setweight(f.tsv, 'A', st.lexemes), '{a}')) u, unnest(u.positions) p) lp
+  CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * (t.tf * 2.2) / (t.tf + 1.2 * (0.25 + 0.75 * f.dl / st.avgdl))), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(w text[], p boolean, df bigint)
+    CROSS JOIN LATERAL (SELECT count(*)::float8 AS tf FROM unnest(lp.lx, lp.ps) AS a(lex, pos)
+      WHERE (a.lex = c.w[1] OR (c.p AND cardinality(c.w) = 1 AND starts_with(a.lex, c.w[1])))
+        AND NOT EXISTS (SELECT 1 FROM generate_series(2, cardinality(c.w)) AS i
+          WHERE NOT EXISTS (SELECT 1 FROM unnest(lp.lx, lp.ps) AS b(lex, pos)
+            WHERE b.pos = a.pos + i - 1 AND (b.lex = c.w[i] OR (c.p AND i = cardinality(c.w) AND starts_with(b.lex, c.w[i])))))) t) sc`;
+var PG_IDF_TSRANK_SCORE = `CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * ts_rank(f.tsv, c.q::tsquery)), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(q text, df bigint) WHERE f.tsv @@ c.q::tsquery) sc`;
+var PG_TSRANK_CD_SCORE = "CROSS JOIN LATERAL (SELECT ts_rank_cd(f.tsv, st.m::tsquery)::float8 AS score) sc";
+var PG_SCORES = { bm25: PG_BM25_SCORE, idf_tsrank: PG_IDF_TSRANK_SCORE, tsrank_cd: PG_TSRANK_CD_SCORE };
+function pgDialectFor(ranking) {
+  if (!PG_RANKINGS.includes(ranking))
+    throw new Error(`Postgres ranking must be one of ${PG_RANKINGS.join(", ")}, got ${String(ranking)}`);
+  return {
+    // One statement per query (a round trip costs about 25 ms): the join binds
+    // the query once for the statistics, the match binds it again so the GIN
+    // index sees a constant tsquery.
+    searchJoin: `JOIN records_fts f ON f.record_id = r.id ${PG_SEARCH_STATS} ${PG_SCORES[ranking]}`,
+    searchJoinBinds: 1,
+    searchMatch: "f.tsv @@ (?::json->>'match')::tsquery",
+    searchScore: "sc.score",
+    searchOrder: "sc.score DESC",
+    scoreScale: PG_SCORE_SCALES[ranking],
+    searchQuery: pgSearchQuery,
+    searchText: foldSearchText,
+    // Postgres refuses \u0000 anywhere in a json value it parses (22P05), so the
+    // real \u0000 escapes are removed first. The pattern consumes an escaped
+    // backslash pair (\\) as a unit and puts it back, so \u0000 only matches
+    // where its backslash starts an escape: the literal text \\u0000 survives.
+    // strpos skips the regex for the bodies that hold no \u0000 at all.
+    jsonText: (column, key) => {
+      if (!/^[a-z_]+$/.test(key))
+        throw new Error(`pgDialect.jsonText: key '${key}' is not a plain identifier`);
+      if (!/^[a-z_]+(\.[a-z_]+)?$/.test(column))
+        throw new Error(`pgDialect.jsonText: column '${column}' is not a plain column reference`);
+      return String.raw`((CASE WHEN strpos(${column}, '\u0000') > 0 THEN regexp_replace(${column}, '(\\\\)|\\u0000', '\1', 'g') ELSE ${column} END)::json ->> '${key}')`;
+    },
+    insertionOrder: (alias) => alias ? `${alias}._seq` : "_seq",
+    insertIgnore: (table, columns) => `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")}) ON CONFLICT DO NOTHING`
+  };
+}
+var pgDialect = pgDialectFor(DEFAULT_PG_RANKING);
+function toPgParam(v, i, sql, stripNul) {
+  if (v === void 0)
+    throw new TypeError(`PgDriver: parameter ${i + 1} is undefined in: ${sql}`);
+  if (typeof v === "bigint")
+    return v.toString();
+  if (typeof v === "string" && v.includes("\0")) {
+    if (stripNul)
+      return v.replace(/\u0000/g, "");
+    throw new PgNulCharacterError(`parameter ${i + 1} of '${sql}'`);
+  }
+  return v;
+}
+var PgStatement = class {
+  driver;
+  sql;
+  translated;
+  constructor(driver, sql, schema) {
+    this.driver = driver;
+    this.sql = sql;
+    this.translated = translateStatement(sql, schema);
+  }
+  execute(params) {
+    this.driver.assertOpen();
+    if (params.length !== this.translated.params) {
+      throw new RangeError(`PgDriver: statement takes ${this.translated.params} parameter(s), got ${params.length}: ${this.sql}`);
+    }
+    const values = params.map((p, i) => toPgParam(p, i, this.sql, this.translated.derivedText));
+    return this.driver.run(this.translated.text, values, this.sql);
+  }
+  get(...params) {
+    return this.execute(params).rows[0];
+  }
+  all(...params) {
+    return this.execute(params).rows;
+  }
+  run(...params) {
+    const { rowCount } = this.execute(params);
+    return {
+      changes: rowCount,
+      get lastInsertRowid() {
+        throw new PgUnsupportedError("lastInsertRowid (Postgres has no rowid)");
+      }
+    };
+  }
+};
+var PgDriver = class {
+  bridge;
+  dialect;
+  schema;
+  metaSchema;
+  s;
+  m;
+  ownsBridge;
+  lockTimeoutMs;
+  statementTimeoutMs;
+  closed = false;
+  /**
+   * The transaction this handle claimed. After beginReadDeferred() the BEGIN
+   * waits in `pendingBegin` and goes out in the same round trip as the read's
+   * first statement (run()), so the read costs one round trip less; a read
+   * that runs no statement sends nothing.
+   */
+  txState = "none";
+  pendingBegin;
+  constructor(bridge, options) {
+    this.bridge = bridge;
+    this.schema = options.schema;
+    this.dialect = options.ranking === void 0 ? pgDialect : pgDialectFor(options.ranking);
+    this.metaSchema = options.metaSchema ?? PG_META_SCHEMA;
+    this.s = ident(this.schema);
+    this.m = ident(this.metaSchema);
+    this.ownsBridge = options.ownsBridge ?? false;
+    this.lockTimeoutMs = timeoutMs("lockTimeoutMs", options.lockTimeoutMs, DEFAULT_PG_LOCK_TIMEOUT_MS, bridge);
+    this.statementTimeoutMs = timeoutMs("statementTimeoutMs", options.statementTimeoutMs, DEFAULT_PG_STATEMENT_TIMEOUT_MS, bridge);
+    const found = bridge.query("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1) AS has_schema, EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $2 AND tablename = $3) AS has_registry", [this.schema, this.metaSchema, "stores"]).rows[0];
+    if (!found.has_registry)
+      throw new PgStoreMissingError(this.schema, `the meta schema '${this.metaSchema}' has no stores registry`);
+    const registered = bridge.query(`SELECT 1 FROM ${this.m}.stores WHERE schema_name = $1`, [this.schema]).rows.length === 1;
+    if (!registered && !found.has_schema)
+      throw new PgStoreMissingError(this.schema, "neither its schema nor its registry row exists");
+    if (!registered)
+      throw new PgStoreMissingError(this.schema, `its schema exists but '${this.metaSchema}.stores' has no registry row for it`);
+    if (!found.has_schema)
+      throw new PgStoreMissingError(this.schema, `it has a registry row in '${this.metaSchema}.stores' but no schema`);
+  }
+  /** @internal PgStatement's guard. */
+  assertOpen() {
+    if (this.closed)
+      throw new Error(`PgDriver: store '${this.schema}' is closed`);
+  }
+  prepare(sql) {
+    this.assertOpen();
+    return new PgStatement(this, sql, this.schema);
+  }
+  exec(sql) {
+    this.assertOpen();
+    const t = translateStatement(sql, this.schema);
+    if (t.params)
+      throw new RangeError(`PgDriver.exec takes no parameters: ${sql}`);
+    this.run(t.text, void 0, sql);
+  }
+  /**
+   * @internal Every statement this handle runs. A pending BEGIN goes out ahead
+   * of it in the same round trip when the statement is a SELECT. Anything else
+   * waits for the BEGIN's own reply first: the bridge sends both before either
+   * answers, so a statement after a BEGIN that failed outright would run
+   * outside the transaction, and only a read may.
+   */
+  run(text, values, where) {
+    const pending = this.pendingBegin;
+    if (pending !== void 0) {
+      this.pendingBegin = void 0;
+      this.txState = "open";
+      if (/^\s*SELECT\b/i.test(text)) {
+        try {
+          return this.bridge.query(text, values, pending.text);
+        } catch (e) {
+          if (e instanceof PgQueryError && e.inPrefix)
+            this.failBegin(e, pending.where);
+          return mapPgError(e, where);
+        }
+      }
+      try {
+        this.bridge.query(pending.text);
+      } catch (e) {
+        this.failBegin(e, pending.where);
+      }
+    }
+    try {
+      return this.bridge.query(text, values);
+    } catch (e) {
+      return mapPgError(e, where);
+    }
+  }
+  /** Claims the connection and sends BEGIN now. */
+  beginNow(text, label, where) {
+    this.assertOpen();
+    this.bridge.claimTransaction(this, label);
+    this.txState = "open";
+    try {
+      this.bridge.query(text);
+    } catch (e) {
+      this.failBegin(e, where);
+    }
+  }
+  /** Claims the connection for a read whose BEGIN goes out with its first statement (beginReadDeferred). */
+  deferBegin(text, label, where) {
+    this.assertOpen();
+    this.bridge.claimTransaction(this, label);
+    this.txState = "pending";
+    this.pendingBegin = { text, where };
+  }
+  /** A BEGIN that failed: roll back, release the claim and throw by name, as an eager BEGIN would. */
+  failBegin(e, where) {
+    this.txState = "none";
+    abandon(this.bridge, this);
+    return mapPgError(e, where);
+  }
+  /** Ends this handle's transaction with `statement` when its BEGIN was sent; a transaction that ran nothing (or was abandoned) sends nothing. */
+  endTx(statement, where) {
+    const sent = this.txState === "open";
+    this.txState = "none";
+    this.pendingBegin = void 0;
+    try {
+      if (sent && !this.bridge.closed)
+        this.bridge.query(statement);
+    } catch (e) {
+      if (where === void 0)
+        throw e;
+      mapPgError(e, where);
+    } finally {
+      this.bridge.releaseTransaction(this);
+    }
+  }
+  close() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    if (this.ownsBridge)
+      this.bridge.close();
+  }
+  /**
+   * The write transaction, in one round trip: BEGIN, the two timeouts, the
+   * global migration lock SHARED, then this store's lock, which reproduces
+   * SQLite's BEGIN IMMEDIATE. SterlingStore.tx() re-reads the schema version
+   * after this returns, under the locks. A failure rolls back and throws by
+   * name; it is never retried.
+   */
+  begin() {
+    this.beginNow(`BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SET LOCAL statement_timeout = ${this.statementTimeoutMs}; SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`, `store '${this.schema}'`, `begin on store '${this.schema}'`);
+  }
+  commit() {
+    this.endTx("COMMIT", `commit on store '${this.schema}'`);
+  }
+  rollback() {
+    this.endTx("ROLLBACK", void 0);
+  }
+  /** A multi-statement read: one snapshot (REPEATABLE READ), read-only, under statement_timeout. Takes no lock. */
+  beginRead() {
+    this.beginNow(this.readBeginText(), `a read on store '${this.schema}'`, `a read on store '${this.schema}'`);
+  }
+  /**
+   * beginRead(), except the BEGIN goes out in the same round trip as the
+   * read's first statement, and a read that runs no statement sends nothing.
+   * The snapshot is the same: REPEATABLE READ takes it at the first statement.
+   */
+  beginReadDeferred() {
+    this.deferBegin(this.readBeginText(), `a read on store '${this.schema}'`, `a read on store '${this.schema}'`);
+  }
+  readBeginText() {
+    return `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = ${this.statementTimeoutMs}`;
+  }
+  /** Ends the read transaction. COMMIT also ends one a failed statement aborted. */
+  endRead() {
+    this.endTx("COMMIT", void 0);
+  }
+  /** The store's version lives in its registry row, the counterpart of SQLite's PRAGMA user_version. */
+  schemaVersion() {
+    this.assertOpen();
+    const row = this.run(`SELECT schema_version FROM ${this.m}.stores WHERE schema_name = $1`, [this.schema], `the schema version of store '${this.schema}'`).rows[0];
+    if (!row)
+      throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
+    return Number(row.schema_version);
+  }
+  setSchemaVersion(version) {
+    if (!Number.isInteger(version) || version < 0)
+      throw new Error(`PgDriver: schema version must be a non-negative integer, got ${String(version)}`);
+    const { rowCount } = this.run(`UPDATE ${this.m}.stores SET schema_version = $1 WHERE schema_name = $2`, [version, this.schema], `stamping the schema version of store '${this.schema}'`);
+    if (rowCount !== 1)
+      throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
+  }
+  /** False only before the store's tables were ever created. */
+  hasSchema() {
+    return Boolean(this.run("SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1) AS has", [this.schema], `the tables of store '${this.schema}'`).rows[0].has);
+  }
+  /** Nothing to prepare: SterlingStore refuses every write on an older store itself, and opening writes nothing here. */
+  prepareReadOnly() {
+  }
+  /**
+   * Creates the store's tables when missing. Postgres does not make concurrent
+   * CREATE ... IF NOT EXISTS safe: two processes opening one fresh store at once
+   * failed with 23505 on pg_type_typname_nsp_index (board e05f5127). So the DDL
+   * runs in one transaction under the same locks a write takes (the global lock
+   * shared, then this store's lock): concurrent opens take turns, and the later
+   * ones find every object already there. A lock that cannot be had within
+   * lock_timeout throws PgLockTimeoutError, as a write would.
+   */
+  prepareWritable(_isFresh) {
+    this.assertOpen();
+    const where = `creating the tables of store '${this.schema}'`;
+    this.bridge.claimTransaction(this, `table setup on store '${this.schema}'`);
+    try {
+      this.bridge.query(`${this.setupBeginText()}; ${storeDdl(this.s)};
+COMMIT`);
+    } catch (e) {
+      abandon(this.bridge, this);
+      mapPgError(e, where);
+    }
+    this.bridge.releaseTransaction(this);
+  }
+  /**
+   * StoreDriver.publishFresh. prepareWritable() followed by the store's own
+   * stamp transaction left a window between the two commits: a concurrent
+   * opener that had read version 0 saw the tables and opened the store as a
+   * legacy, read-only one (Codex review of be2b7f7a, board e05f5127). Here the
+   * version and table probe, the DDL and the stamp are one transaction under
+   * the write locks, so the tables and the stamp become visible together, and
+   * an opener that read 0 before someone else published re-reads the stamped
+   * version under the lock. An older store that already has its tables is
+   * left untouched: nothing is written and its version is returned.
+   */
+  publishFresh(supported) {
+    this.assertOpen();
+    if (!Number.isInteger(supported) || supported < 1)
+      throw new Error(`PgDriver: the supported schema version must be a positive integer, got ${String(supported)}`);
+    const where = `publishing store '${this.schema}'`;
+    this.bridge.claimTransaction(this, `table setup on store '${this.schema}'`);
+    let version;
+    try {
+      const row = this.bridge.query(`SELECT (SELECT schema_version FROM ${this.m}.stores WHERE schema_name = $1) AS version, EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1) AS has_tables`, [this.schema], this.setupBeginText()).rows[0];
+      if (row.version === null)
+        throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
+      version = Number(row.version);
+      if (version < supported && !row.has_tables) {
+        this.bridge.query(storeDdl(this.s));
+        this.bridge.query(`UPDATE ${this.m}.stores SET schema_version = $1 WHERE schema_name = $2`, [supported, this.schema]);
+        version = supported;
+      }
+      this.bridge.query("COMMIT");
+    } catch (e) {
+      abandon(this.bridge, this);
+      mapPgError(e, where);
+    }
+    this.bridge.releaseTransaction(this);
+    return version;
+  }
+  /** BEGIN for table setup: lock_timeout, then the write locks in begin()'s order (the global lock shared, then this store's). */
+  setupBeginText() {
+    return `BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`;
+  }
+  /**
+   * 'postgres'. SQLite's answer names its rollback-journal mode, which the
+   * 9p policy and the -wal/-shm handling branch on. Postgres has its own WAL
+   * that no Sterling code manages, so 'wal' would send those branches down the
+   * SQLite path. 'postgres' is no SQLite journal mode, so every such branch
+   * falls through.
+   */
+  journalMode() {
+    return "postgres";
+  }
+  snapshot(_targetPath) {
+    throw new PgUnsupportedError("snapshot() (backup in work mode is issue 26 item 7: it refuses and points at the platform point-in-time restore)");
+  }
+};
+
+// packages/store/dist/mounted.js
+function resolveDomainMounts(config) {
+  return config.stack_tags.map((name) => ({
+    name,
+    dbPath: config.domain_paths[name] ?? join3(homedir2(), ".sterling", "domains", name, "sterling.db")
+  }));
+}
+function open(dbPath) {
+  mkdirSync(dirname(dbPath), { recursive: true });
+  return new SterlingStore(dbPath);
+}
+var PROBE_ID = "00000000-0000-0000-0000-000000000000";
+var DROPPED_AFTER_MOUNT_NOTE = "dropped after mount; reads skip it until the session restarts";
+var DROPPED_AT_MOUNT_NOTE = "dropped at mount; restart the session after the store is repaired";
+function isStoreFailure(e) {
+  return e instanceof SchemaMigrationRequiredError || e instanceof UnsupportedSchemaVersionError || e instanceof StoreRowDecodeError || e?.code === "ERR_SQLITE_ERROR";
+}
+function isPgStoreFailure(e) {
+  return e instanceof PgStoreMissingError || e instanceof PgQueryError || e instanceof PgLockTimeoutError || e instanceof PgStatementTimeoutError || e instanceof PgNulCharacterError || e instanceof PgBridgeClosedError || e instanceof PgBridgeTimeoutError || e instanceof PgWorkerDiedError;
+}
+var errorText = (e) => String(e?.message ?? e);
+var DomainUnavailableError = class extends Error {
+  domain;
+  location;
+  constructor(domain, location, cause) {
+    super(`storage 'postgres': domain '${domain}' (${location}) is missing or cannot be read: ${errorText(cause)}. Postgres storage never skips or drops a mounted domain; the call fails and nothing was written.`, { cause });
+    this.name = "DomainUnavailableError";
+    this.domain = domain;
+    this.location = location;
+  }
+};
+var DOMAIN_DESCRIPTION_KEY = "description";
+var MixedScoreScaleError = class extends Error {
+  scales;
+  constructor(operation, scales) {
+    super(`${operation}: the mounted stores rank on different score scales (${scales.map((x) => `${x.source}: ${x.scale}`).join(", ")}), so a min_score cannot be applied across them. Nothing was counted.`);
+    this.scales = scales;
+    this.name = "MixedScoreScaleError";
+  }
+};
+var DomainNotCreatedError = class extends Error {
+  domain;
+  db_path;
+  constructor(domain, dbPath) {
+    super(`domain '${domain}' has no store at '${dbPath}'. Domain stores are not created on first mount: create it with createDomain('${domain}', <description>, <dbPath>), where the description says which knowledge belongs in this domain. To mount only the domains that already exist, pass { skipMissing: true }.`);
+    this.name = "DomainNotCreatedError";
+    this.domain = domain;
+    this.db_path = dbPath;
+  }
+};
+var MountedStores = class {
+  /** The project store — also the home of the board/maintenance queue and
+   *  other project-local transient state (the run/handoff protocol this
+   *  comment used to describe was removed per decision
+   *  sterling-claude-code-scale-down-boundary, 2ad87dd1).
+   *
+   *  STATED LIMIT OF THE CROSS-MOUNT WRITE BACKSTOP (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *  This handle is a PUBLIC, FULLY MUTABLE SterlingStore, so
+   *  `stores.project.create(...)` (or any other mutator on it) reaches the
+   *  project connection DIRECTLY and never passes assertMountAffinity below.
+   *  Called inside a transaction open on a DOMAIN mount, such a write commits
+   *  on the project connection and survives the outer rollback — the exact
+   *  atomicity hole the backstop closes for every write that goes through this
+   *  class's own surface. The backstop's guarantee is therefore scoped to
+   *  MountedStores' OWN METHODS, and this field is the one documented way past
+   *  it; treat any claim of universal coverage as wrong.
+   *
+   *  IT IS NOT NARROWED, and the reason is not that narrowing is undesirable.
+   *  MEASURED 2026-09-06 (re-runnable: grep for `.project.` across
+   *  packages/{store,mcp-server,tui}/src and scripts/): NO production caller
+   *  outside this file touches the handle at all — every `.project.<mutator>`
+   *  call in the repo is in a TEST (packages/store/src/tests/
+   *  stable-identity-hardening.test.ts and packages/mcp-server/src/tests/
+   *  resolves-append-join.test.ts seed forged rows through it). Those suites
+   *  are frozen, and a read-only type on
+   *  this field would fail their compile, so the exposure is retained
+   *  deliberately and disclosed here rather than closed by editing pins. The
+   *  real containment today is that production has no such caller — a
+   *  PROPERTY OF THE CALLERS, not a guarantee of this class. If a production
+   *  mutation through this handle is ever wanted, route it through the guarded
+   *  surface instead of widening the exception.
+   */
+  project;
+  domains = /* @__PURE__ */ new Map();
+  /** Configured domains skipped under skipMissing because their store does not
+   *  exist, in manifest order. Kept so a caller (boot, a tool response, H1) can
+   *  disclose the skip instead of the domain silently vanishing. */
+  missingDomains = [];
+  /** Mounted domains whose store failed a read, in the order they were dropped.
+   *  One broken domain must not fail a read over the whole mounted set, so a
+   *  domain read that throws drops that domain from every later read and lists
+   *  it here with the error; a caller (a tool response, boot) discloses it
+   *  instead of the domain silently vanishing. Checked at mount (probeDomain)
+   *  and on every fanned read. The drop lasts for this instance's lifetime:
+   *  a later read does not retry the store. It covers READS only: the domain
+   *  stays in domainNames(), but every write into it is refused
+   *  (assertWritable), and the slug uniqueness checks still ask it
+   *  (slugHolders). The PROJECT store is never listed here: its failure
+   *  throws. */
+  unreadableDomains = [];
+  domainPaths = /* @__PURE__ */ new Map();
+  /** Every configured domain whose store file exists, in manifest order,
+   *  whether or not it could be opened. */
+  mountedNames = [];
+  /** Set for Postgres storage; see MountedStoresOptions.work. */
+  work;
+  /** The project store is opened, and created when absent; a failure to open
+   *  it throws. A domain store is only ever OPENED here, never created, and one
+   *  that exists but cannot be opened is listed on unreadableDomains instead of
+   *  failing the mount: a mount whose db file does not exist
+   *  throws DomainNotCreatedError naming createDomain (board 675daf9d (c)), with
+   *  every handle opened so far closed and no file written for the missing
+   *  domain. When options.skipMissing is true such a mount is skipped instead,
+   *  and the existing siblings are still mounted. An existing domain store opens
+   *  as it is, whether or not it has a description.
+   *
+   *  Postgres storage (options.work, routing.ts) differs in three ways: both stores
+   *  are opened through the given openers, which never create a store;
+   *  skipMissing is ignored; and every case above that lists a domain on
+   *  missingDomains or unreadableDomains throws DomainUnavailableError instead,
+   *  with every handle opened so far closed. */
+  constructor(projectDbPath, mounts = [], options) {
+    this.work = options?.work;
+    if (this.work) {
+      this.project = this.work.openProject();
+      try {
+        for (const m of mounts) {
+          this.mountedNames.push(m.name);
+          this.domainPaths.set(m.name, m.dbPath);
+          let store;
+          try {
+            store = this.work.openDomain(m);
+          } catch (e) {
+            if (!this.isStoreFailure(e))
+              throw e;
+            throw new DomainUnavailableError(m.name, m.dbPath, e);
+          }
+          this.domains.set(m.name, store);
+          this.probeDomain(m.name, store);
+        }
+      } catch (e) {
+        this.close();
+        throw e;
+      }
+      return;
+    }
+    this.project = open(projectDbPath);
+    try {
+      for (const m of mounts) {
+        if (!existsSync(m.dbPath)) {
+          if (options?.skipMissing) {
+            this.missingDomains.push({ name: m.name, dbPath: m.dbPath });
+            continue;
+          }
+          throw new DomainNotCreatedError(m.name, m.dbPath);
+        }
+        this.mountedNames.push(m.name);
+        this.domainPaths.set(m.name, m.dbPath);
+        let store;
+        try {
+          store = new SterlingStore(m.dbPath);
+        } catch (e) {
+          if (!isStoreFailure(e))
+            throw e;
+          this.dropDomain(m.name, e, true);
+          continue;
+        }
+        this.domains.set(m.name, store);
+        this.probeDomain(m.name, store);
+      }
+    } catch (e) {
+      this.close();
+      throw e;
+    }
+  }
+  /** Mount-time read check. A pre-v2 store opens and answers some reads (get,
+   *  query over pre-v2 bodies) but not others (inboundSupersedes: it has no
+   *  record_relations table), so without this a first tool call could serve
+   *  that domain's records and then drop it halfway through. The probe runs the
+   *  two per-record reads the fan makes, against an id no record has, and drops
+   *  the domain when either throws. */
+  probeDomain(name, store) {
+    try {
+      store.get(PROBE_ID);
+      store.inboundSupersedes(PROBE_ID);
+    } catch (e) {
+      if (!this.isStoreFailure(e))
+        throw e;
+      this.dropDomain(name, e, true);
+    }
+  }
+  /** Drop a domain from reads. The drop lasts for this instance's lifetime:
+   *  no later read retries the store, even when the failure was transient. That
+   *  is safe to leave because a dropped domain cannot be written either
+   *  (assertWritable): a session never writes into a store it cannot read back,
+   *  and the slug checks still ask it (fanEveryDomain). */
+  dropDomain(name, e, atMount = false) {
+    if (this.work)
+      throw new DomainUnavailableError(name, this.domainPaths.get(name) ?? "", e);
+    if (this.isUnreadable(name))
+      return;
+    this.unreadableDomains.push({
+      name,
+      dbPath: this.domainPaths.get(name) ?? "",
+      error: errorText(e),
+      note: atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE
+    });
+  }
+  /** The failures that drop a domain in hobby mode and fail the call in work
+   *  mode; any other error is the caller's or this code's fault and is rethrown. */
+  isStoreFailure(e) {
+    return isStoreFailure(e) || this.work !== void 0 && isPgStoreFailure(e);
+  }
+  isUnreadable(name) {
+    return this.unreadableDomains.some((d) => d.name === name);
+  }
+  /** `(<error>; <note>)` for a dropped domain, for refusal text. */
+  droppedReason(name) {
+    const d = this.unreadableDomains.find((x) => x.name === name);
+    return d ? `(${d.error}; ${d.note})` : "";
+  }
+  /** Refuse a write into a domain this session has dropped from reads: the
+   *  write could not be read back, and a promotion would retire the project
+   *  original in favour of a copy nobody can see. */
+  assertWritable(name) {
+    if (!this.isUnreadable(name))
+      return;
+    throw new Error(`domain '${name}' cannot be written: this session cannot read it ${this.droppedReason(name)}. Nothing was written. Repair the store, then restart the session.`);
+  }
+  /** `fn` on the project store and then on EVERY mounted domain, dropped ones
+   *  included, for a check where "not read" must never count as "absent" (slug
+   *  uniqueness). A dropped domain that still answers is believed. A domain
+   *  whose read fails makes the whole check refuse, naming it and the error. */
+  fanEveryDomain(what, fn) {
+    const out = [fn(this.project)];
+    for (const [name, store] of this.domains) {
+      try {
+        out.push(fn(store));
+      } catch (e) {
+        if (!this.isStoreFailure(e))
+          throw e;
+        this.dropDomain(name, e);
+        throw new Error(`${what} cannot be checked: domain '${name}' could not be read (${errorText(e)}), so whether it is taken there is unknown. Nothing was written. Repair the store, then restart the session.`);
+      }
+    }
+    return out;
+  }
+  /** The one read fan: `fn` on the project store, then on each readable domain
+   *  in manifest order, yielding each answer with its source ('project' or the
+   *  domain's manifest name). The project read is NOT guarded, so its failure
+   *  throws. A domain read that fails with a store failure (isStoreFailure)
+   *  drops that domain (dropDomain) and the fan moves on; any other error is
+   *  rethrown. Lazy, so a first-hit caller stops reading at its hit. */
+  *fanRead(fn) {
+    yield { source: "project", store: this.project, value: fn(this.project) };
+    for (const [name, store] of [...this.domains]) {
+      if (this.isUnreadable(name))
+        continue;
+      let value;
+      try {
+        value = fn(store);
+      } catch (e) {
+        if (!this.isStoreFailure(e))
+          throw e;
+        this.dropDomain(name, e);
+        continue;
+      }
+      yield { source: name, store, value };
+    }
+  }
+  /** fanRead's answers alone, project first. */
+  fanValues(fn) {
+    return [...this.fanRead(fn)].map((r) => r.value);
+  }
+  /** A mounted domain's description (store_meta 'description'), or undefined
+   *  when that existing store has none. An unmounted name is refused. */
+  domainDescription(name) {
+    const store = this.domains.get(name);
+    if (!store && this.isUnreadable(name))
+      throw new Error(`domainDescription: domain '${name}' cannot be read ${this.droppedReason(name)}`);
+    if (!store)
+      throw new Error(`domainDescription: domain '${name}' is not mounted`);
+    return store.getMeta(DOMAIN_DESCRIPTION_KEY);
+  }
+  /** Set a mounted domain's description (store_meta 'description'), trimmed,
+   *  on that domain's own store. The write path for an existing domain;
+   *  createDomain sets it for a new one. An unmounted name and a blank
+   *  description are refused with nothing written, and so is a call inside a
+   *  transaction open on another mount (the same affinity rule as every write
+   *  through this class). */
+  setDomainDescription(name, description) {
+    this.assertWritable(name);
+    const store = this.domains.get(name);
+    if (!store)
+      throw new Error(`setDomainDescription: domain '${name}' is not mounted`);
+    if (typeof description !== "string" || description.trim().length === 0) {
+      throw new Error(`setDomainDescription: the description for domain '${name}' is blank; nothing was written`);
+    }
+    this.assertMountAffinity("setDomainDescription", store, `domain '${name}'`);
+    store.setMeta(DOMAIN_DESCRIPTION_KEY, description.trim());
+  }
+  /** Scope-routed write (§3.3): project → the project store; domain:<name> → that
+   *  domain store. Routing is MECHANICAL here; the tool layer owns the policy
+   *  (feature_article always project, reference/research project-then-promote).
+   *
+   *  Validation here needs `scope`, so it must run BEFORE the write reaches a
+   *  store — which means it must also run the store's identity normalization
+   *  first (SterlingStore.normalizeIdentityEnvelope, the ONE definition):
+   *  otherwise a lifecycle/freshness-only envelope that SterlingStore.create
+   *  accepts was rejected through the mounted surface, because the schemas
+   *  registry still declares the derived status/superseded_by fields. */
+  create(input2, options = {}) {
+    const normalized = SterlingStore.normalizeIdentityEnvelope(input2);
+    const record = validateRecord(normalized);
+    assertNoFieldLoss("create", normalized, record);
+    const target = this.storeFor(record.scope);
+    this.assertMountAffinity("create", target, `record '${record.id}' (scope '${record.scope}')`);
+    return target.create(record, options);
+  }
+  /** Scope-routed exactly as create() is. A maintenance item is project-LOCAL
+   *  state and never shared, so this resolves to the project store in practice —
+   *  and the dedup key is therefore evaluated within that ONE store rather than
+   *  across the fan, which is right: two projects' queues are independent, and a
+   *  cross-store key would let one project's item suppress another's. */
+  enqueueSystemTodo(input2, options = {}) {
+    const record = validateRecord(SterlingStore.normalizeIdentityEnvelope(input2));
+    const target = this.storeFor(record.scope);
+    this.assertMountAffinity("enqueueSystemTodo", target, `todo '${record.id}' (scope '${record.scope}')`);
+    return target.enqueueSystemTodo(record, options);
+  }
+  /** Read-only twin of enqueueSystemTodo: queue items are project-local, so the
+   *  precheck asks the project store only (same reasoning as the enqueue above). */
+  enqueueWouldBeNoop(input2) {
+    return this.project.enqueueWouldBeNoop(input2);
+  }
+  /** Board readiness is project-local like the board itself, so the project
+   *  store answers it (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start). */
+  boardReadiness(items) {
+    return this.project.boardReadiness(items);
+  }
+  storeFor(scope) {
+    if (scope === "project")
+      return this.project;
+    const m = /^domain:(.+)$/.exec(scope);
+    if (m) {
+      this.assertWritable(m[1]);
+      const store = this.domains.get(m[1]);
+      if (!store)
+        throw new Error(`scope '${scope}' targets an unmounted domain \u2014 not in the project's domains manifest`);
+      return store;
+    }
+    throw new Error(`unroutable scope '${scope}'`);
+  }
+  /** Cross-store retrieval (§3.4) with read shares (board 675daf9d (b)): every
+   *  mounted store runs the full filter→join→rank→cap on its own, allocateShares
+   *  decides how many of each store's results make the cap (the project up to
+   *  ceil(0.6 x cap) when a domain has matches, the rest split across domains,
+   *  unused share spilling over), and each store's top-N is concatenated project
+   *  first, then domains in manifest order. Scores are never compared across
+   *  databases. When only the project matches it fills the cap, as before. */
+  query(opts = {}) {
+    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
+    const perStore = this.fanValues((s2) => s2.query({ ...opts, cap }));
+    const shares = allocateShares(perStore.map((r) => r.length), cap);
+    return perStore.flatMap((records, i) => records.slice(0, shares[i]));
+  }
+  /** Cross-mount COUNT(*) over the §3.4 base filter — the rank/cap-free twin of
+   *  query(), summed project-first across every mounted store (countBySource is
+   *  the same fan, kept per-source for the TUI's badges). No body fetch. The tool
+   *  layer reports it so a capped retrieval can say how many records matched the
+   *  filter it was given, instead of presenting its window as the whole store. */
+  count(opts = {}) {
+    return this.countBySource(opts).reduce((n, s2) => n + s2.count, 0);
+  }
+  /** Cross-mount twin of countAboveScore (board a577a69d) — summed
+   *  project-first across every mounted store, same fan as count(). */
+  countAboveScore(opts, minScore) {
+    this.commonScoreScale("countAboveScore");
+    return this.fanValues((s2) => s2.countAboveScore(opts, minScore)).reduce((n, c) => n + c, 0);
+  }
+  /** The one score scale every mounted store ranks on (SterlingStore.scoreScale). Mixed scales are refused: neither their scores nor their counts above one min_score compare. */
+  scoreScale() {
+    return this.commonScoreScale("scoreScale");
+  }
+  commonScoreScale(operation) {
+    const scales = [...this.fanRead((s2) => s2.scoreScale())].map((r) => ({ source: r.source, scale: r.value }));
+    if (new Set(scales.map((x) => x.scale)).size > 1)
+      throw new MixedScoreScaleError(operation, scales);
+    return scales[0].scale;
+  }
+  /** Per-source projection (AC2): project store FIRST, then each mounted domain
+   *  in manifest order. Each store runs the full query independently — type
+   *  filter, file-key join, cap, and match_all are all PER-STORE (never a
+   *  global slice across the merged result). Zero domains → exactly one entry.
+   *  The source name is 'project' for the project store and the domain manifest
+   *  name (DomainMount.name) for each domain store. */
+  bySource(opts) {
+    return [...this.fanRead((s2) => s2.query(opts))].map((r) => ({ source: r.source, records: r.value }));
+  }
+  /** bySource for each entry of `list` in one pass: per store, project first,
+   *  one SterlingStore.queryEach (one read transaction), so `results[i]` is
+   *  that store's bySource(list[i]) records. */
+  bySourceEach(list) {
+    return [...this.fanRead((s2) => s2.queryEach(list))].map((r) => ({ source: r.source, results: r.value }));
+  }
+  /** Count-only per-source projection — the COUNT(*) twin of bySource (same
+   *  project-first, per-store ordering) with NO body fetch. The TUI Knowledge
+   *  tree's collapsed category/source badges use this so the default all-collapsed
+   *  view does not fetch + parse every source's record bodies each frame. */
+  countBySource(opts) {
+    return [...this.fanRead((s2) => s2.count(opts))].map((r) => ({ source: r.source, count: r.value }));
+  }
+  /** Records from ONE named source ('project' or a mounted domain name) — the
+   *  full §3.4 query against that single store. The TUI fetches bodies only for
+   *  the source the user actually expanded; an unknown source yields [], and so
+   *  does a domain that is, or on this read becomes, unreadable. */
+  querySource(source, opts = {}) {
+    if (source === "project")
+      return this.project.query(opts);
+    const store = this.domains.get(source);
+    if (!store || this.isUnreadable(source))
+      return [];
+    try {
+      return store.query(opts);
+    } catch (e) {
+      if (!this.isStoreFailure(e))
+        throw e;
+      this.dropDomain(source, e);
+      return [];
+    }
+  }
+  /** Cross-store fetch by id: project first, then domains. */
+  get(id) {
+    for (const { value } of this.fanRead((s2) => s2.get(id))) {
+      if (value)
+        return value;
+    }
+    return void 0;
+  }
+  /** PHYSICAL mount membership: the PROJECT store ALONE, never the fan (anti_pattern
+   *  [record-body-scope-is-not-physical-store-identity]). This is the same physical
+   *  database H10 opens and the only mount withTransaction can commit on, so a caller
+   *  whose atomicity or whose parity with H10 depends on "is this record project-local"
+   *  asks HERE. It deliberately does NOT consult the record's body `scope`: create()
+   *  routes by scope, but every later write routes by storeHolding (by id), and `scope`
+   *  is caller-writable — so the field and the mount can disagree in both directions. */
+  projectStoreHolds(id) {
+    return this.project.projectStoreHolds(id);
+  }
+  /** Project-first concatenation of every mounted store's id index (any status,
+   *  tombstones included). A citation checker MUST span mounts: legitimately
+   *  cited ids live in the shared domain stores as often as in the project one,
+   *  so a project-only lookup calls them dangling. No dedup needed — a record
+   *  lives in exactly one store. */
+  recordIdIndex() {
+    return this.fanValues((s2) => s2.recordIdIndex()).flat();
+  }
+  /** Project-first concatenation of every mounted store's dead-id alias index
+   *  ([stable-identity-design-v2] contract 3) — same reasoning as
+   *  recordIdIndex: a historical id cited anywhere may have belonged to a
+   *  record that now lives in a domain store, so resolution MUST span mounts.
+   *  A historical id is unique across the fan (it was one record's id), so no
+   *  dedup is needed. */
+  recordAliases() {
+    return this.fanValues((s2) => s2.recordAliases()).flat();
+  }
+  /** Exact-slug article resolution across the fan, PROJECT-FIRST (decision
+   *  3db7095f's deterministic lookup, mounted). Feature articles are always
+   *  project-scoped and never promote (AC7), so in practice this reads the project
+   *  store — but it fans anyway, deliberately: its callers are H19's one-hop
+   *  pointers and knowledge_create's slug-collision refusal, and for BOTH of them
+   *  over-detecting a slug that somehow lives in a domain store is safe while
+   *  under-detecting is not. A project-only lookup would let a clash through and
+   *  serve two records under one slug, which is the failure the refusal exists to
+   *  prevent. No dedup needed — a record lives in exactly one store. */
+  articlesBySlug(slug) {
+    return this.fanValues((s2) => s2.articlesBySlug(slug)).flat();
+  }
+  /** Type-agnostic exact-slug lookup across the fan, PROJECT-FIRST (board
+   *  1e639f32) — same over-detect-is-safe reasoning as articlesBySlug: its
+   *  callers are a uniqueness refusal and an identity resolution, and both
+   *  would rather see a domain-store record than miss one. */
+  recordsBySlug(slug) {
+    return this.fanValues((s2) => s2.recordsBySlug(slug)).flat();
+  }
+  /** recordsBySlug for a UNIQUENESS check: every mounted domain is asked,
+   *  dropped ones included (fanEveryDomain), so a slug held by a record in a
+   *  dropped domain still counts as taken, and a domain that cannot answer
+   *  makes the check refuse instead of passing. Identity resolution keeps using
+   *  recordsBySlug, which skips a dropped domain and says so. */
+  slugHolders(slug) {
+    return this.fanEveryDomain(`slug '${slug}'`, (s2) => s2.recordsBySlug(slug)).flat();
+  }
+  /** articlesBySlug for a uniqueness check; same rule as slugHolders. */
+  articleSlugHolders(slug) {
+    return this.fanEveryDomain(`slug '${slug}'`, (s2) => s2.articlesBySlug(slug)).flat();
+  }
+  /** Superseded-only counterpart of recordsBySlug — knowledge_get's dead-slug
+   *  fallthrough is the sole caller (decision foreign_df361a0f) and takes result[0] as
+   *  THE newest carrier, so the fan-in order is load-bearing. A slug does NOT
+   *  live in exactly one store: retireInFavorOf's promotion shape leaves the
+   *  project tombstone behind while the live copy is promoted into a domain
+   *  store, so one lineage's tombstones can be split across stores. Plain
+   *  project-first concatenation would let an OLDER project tombstone shadow a
+   *  NEWER domain one, so the fanned results are merge-sorted by updated_at
+   *  DESC — each store's own rows already arrive newest-first, so this is a
+   *  stable merge, not a full re-sort. rowid ordering (and the newest-first
+   *  guarantee it gives) is only meaningful WITHIN one store; updated_at is
+   *  the one field comparable across stores, and is therefore the cross-store
+   *  sort key here (review finding, 2026-08-20). */
+  supersededRecordsBySlug(slug) {
+    return this.fanValues((s2) => s2.supersededRecordsBySlug(slug)).flat().sort((a, b) => a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
+  }
+  /** Cross-store terminus resolution (decision foreign_de1a7329): a record lives in
+   *  exactly one store (same reasoning as get()), so this tries each mounted
+   *  store project-first and returns the first hit. */
+  resolveTerminus(id) {
+    for (const { value } of this.fanRead((s2) => s2.resolveTerminus(id))) {
+      if (value)
+        return value;
+    }
+    return null;
+  }
+  /** Cross-store fan of inboundSupersedes (board c6e3561f part (a)): an edge
+   *  lives with its SOURCE record (addLink routes by source), so a record's
+   *  inbound supersedes edges can sit in a DIFFERENT mounted store than the
+   *  target itself — every mount is scanned and the hits merged, same
+   *  reasoning as recordsBySlug's fan. DEDUPED BY ID (roster review F3,
+   *  anti_pattern foreign_1896c79b): a record promoted into a domain store leaves a
+   *  project-store tombstone behind, so the SAME source id can resolve out of
+   *  two different mounts — first-seen (project-first, the read fan's own
+   *  ordering) wins, never a duplicate entry for one concept. */
+  /** inboundSupersedes() for each id: per store one SterlingStore.inboundSupersedesEach,
+   *  merged per id exactly as inboundSupersedes merges (project first, first seen wins). */
+  inboundSupersedesEach(ids) {
+    const perStore = this.fanValues((s2) => s2.inboundSupersedesEach(ids));
+    return ids.map((_, i) => {
+      const seen = /* @__PURE__ */ new Set();
+      const out = [];
+      for (const lists of perStore) {
+        for (const record of lists[i] ?? []) {
+          if (seen.has(record.id))
+            continue;
+          seen.add(record.id);
+          out.push(record);
+        }
+      }
+      return out;
+    });
+  }
+  inboundSupersedes(id) {
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    for (const record of this.fanValues((s2) => s2.inboundSupersedes(id)).flat()) {
+      if (seen.has(record.id))
+        continue;
+      seen.add(record.id);
+      out.push(record);
+    }
+    return out;
+  }
+  // -- record mutations: route to the store that HOLDS the record --------------
+  // A record's scope decided where it lives at create time; a later change has to
+  // land in that same store, so these route by where the id actually is — never
+  // by the caller. (knowledge_update gets the record first, so supersede always
+  // finds it; remove routes on its id the same way. addLink routes on the SOURCE
+  // id — the edge lives with its source — and validates the TARGET mount-wide.)
+  /** Versioned change in the holding store (a domain record supersedes in its
+   *  domain store) — and the replacement's `scope` is pinned from THAT MOUNT.
+   *
+   *  THE LAYERING (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *  SterlingStore.supersede pins the replacement's scope from the old row's
+   *  `scope` COLUMN, which is correct for a BARE store: with no mounts there is
+   *  nothing the column can contradict. Through THIS surface the column is not
+   *  the strongest fact — the MOUNT is. In the one drift class a
+   *  column-authoritative read cannot see (a row physically held by a domain
+   *  store whose column says 'project'), inheriting the column would mint a
+   *  brand-new row carrying the same lie, inside the very database that
+   *  disproves it. So the mount is passed down as the authoritative scope and
+   *  the column is not consulted.
+   *
+   *  WHY IT IS DERIVED FROM THE STORE THIS WRITE IS ROUTED TO, and not from a
+   *  second lookup: `store` here IS the destination — the same resolution
+   *  scopeOfHolder performs (mountNameOf ∘ storeHolding), reused rather than
+   *  repeated. The label and the physical destination are therefore ONE fact,
+   *  and cannot drift apart at this site by construction. Any third argument a
+   *  caller supplies is deliberately ignored for the same reason: an
+   *  authoritative scope is not something a caller can be trusted to know.
+   *  The fourth argument (WriteOptions: operation_id) passes through. */
+  supersede(...args) {
+    const store = this.mutatingStoreHolding("supersede", args[0]);
+    return store.supersede(args[0], args[1], this.mountNameOf(store), args[3]);
+  }
+  /** Promotion tombstone: retire the original in its (project) store, pointing at
+   *  the cross-store replacement. The replacement already lives in another store
+   *  (the promoted domain copy), so only the original's holding store is touched. */
+  retireInFavorOf(...args) {
+    return this.mutatingStoreHolding("retireInFavorOf", args[0]).retireInFavorOf(...args);
+  }
+  /** Hard delete (+ §3.2.7 drain log for system todos) in the holding store. */
+  remove(...args) {
+    return this.mutatingStoreHolding("remove", args[0]).remove(...args);
+  }
+  // -- the generalized IN-PLACE write triad (stable-identity S2, decision
+  // [stable-identity-design-v2]) — same holding-store routing as supersede:
+  // an in-place write must land on the row that actually exists, and the
+  // version counter it bumps is that store's.
+  /** knowledge_update-shaped in-place write in the holding store. */
+  updateRecord(...args) {
+    return this.mutatingStoreHolding("updateRecord", args[0]).updateRecord(...args);
+  }
+  /** NARROW server-owned metadata write (board 8c8b6d78 / R9) in the holding
+   *  store — same routing as updateRecord, since it is the same in-place core
+   *  with the body clock preserved. */
+  updateRecordMetadata(...args) {
+    return this.mutatingStoreHolding("updateRecordMetadata", args[0]).updateRecordMetadata(...args);
+  }
+  /** knowledge_edit-shaped exactly-once passage replace in the holding store. */
+  editRecordField(...args) {
+    return this.mutatingStoreHolding("editRecordField", args[0]).editRecordField(...args);
+  }
+  /** knowledge_append-shaped array growth in the holding store. */
+  appendRecordField(...args) {
+    return this.mutatingStoreHolding("appendRecordField", args[0]).appendRecordField(...args);
+  }
+  /** An archived (record_id, version) snapshot from whichever store holds the
+   *  record. Version history is store-local, exactly like the record itself. */
+  getRecordVersion(...args) {
+    return this.storeHolding(args[0]).getRecordVersion(...args);
+  }
+  /** IN-PLACE todo edit (board_update) in the holding store — todos are always
+   *  project-scoped (§3.3), so this always resolves to the project store, but it
+   *  routes the same way as supersede/remove for consistency rather than assuming. */
+  updateTodo(...args) {
+    return this.mutatingStoreHolding("updateTodo", args[0]).updateTodo(...args);
+  }
+  /** Typed link edge, added on the source record in its holding store. The TARGET
+   *  is resolved across ALL mounted stores (cross-store get, like get()) before
+   *  delegating: cross-store edges are a legitimate shape — promotion itself writes
+   *  them (supersedes / informed_by across project↔domain) — and the holding
+   *  store's local check cannot see a target mounted elsewhere, so it is told the
+   *  target is already validated. */
+  addLink(sourceId, rel, targetId) {
+    if (!this.get(targetId))
+      throw new Error(`addLink: no target record '${targetId}' in the project store or any mounted domain${this.unreadableNote()}`);
+    return this.mutatingStoreHolding("addLink", sourceId).addLink(sourceId, rel, targetId, true);
+  }
+  /** EVERY mounted store physically holding `id`, project-first. Ordinarily
+   *  exactly one — a record lives in one store — which is precisely why the
+   *  cardinality is returned rather than assumed away by a first-hit scan. */
+  holdersOf(id) {
+    const holders = [...this.fanRead((s2) => s2.get(id) !== void 0)].filter((r) => r.value).map((r) => r.store);
+    for (const [name, store] of this.domains) {
+      if (!this.isUnreadable(name))
+        continue;
+      try {
+        if (store.get(id) !== void 0)
+          holders.push(store);
+      } catch (e) {
+        if (!isStoreFailure(e))
+          throw e;
+      }
+    }
+    return holders;
+  }
+  /** ' Not read: domain <name> (<error>)...' for a refusal that says a record
+   *  was not found, so a miss caused by a dropped domain is not read as absence. */
+  unreadableNote() {
+    if (!this.unreadableDomains.length)
+      return "";
+    return `. Not read: ${this.unreadableDomains.map((d) => `domain '${d.name}' (${d.error}; ${d.note})`).join("; ")}`;
+  }
+  storeHolding(id) {
+    const holders = this.holdersOf(id);
+    if (holders.length === 0)
+      throw new Error(`no record '${id}' in the project store or any mounted domain${this.unreadableNote()}`);
+    if (holders.length > 1) {
+      throw new Error(`ambiguous holder: record '${id}' is held by ${holders.length} mounts \u2014 ${holders.map((s2) => `'${this.mountNameOf(s2)}'`).join(", ")}. One id must name one row: every routing decision here (which store a write lands in, which mount a transaction opens on, what scope a derived record inherits) assumes a single holder, so the ambiguity is refused rather than resolved project-first. Resolve the duplicate (scripts/domain-doctor.mjs show --id '${id}' on each store) before retrying.`);
+    }
+    for (const [name, store] of this.domains) {
+      if (store === holders[0] && this.isUnreadable(name)) {
+        throw new Error(`record '${id}' is held by domain '${name}', which this session cannot read ${this.droppedReason(name)}. Nothing was read or written. Repair the store, then restart the session.`);
+      }
+    }
+    return holders[0];
+  }
+  /** MountedStores' override of the storage-layer scope accessor — 'project' or
+   *  'domain:<name>', derived from the MOUNT that physically holds the record
+   *  and from nothing else. See SterlingStore.scopeOfHolder for the contract
+   *  this satisfies; the two differ only in what "physical" can mean at each
+   *  layer, and here it means the strongest available fact. Deliberately NOT
+   *  the row's `scope` column: the column is authoritative over the BODY, but
+   *  the MOUNT is authoritative over the column — a record seeded into the
+   *  wrong store carries a truthful-looking column and a false location, and
+   *  that is the one drift class a column-authoritative read cannot see.
+   *  Inherits storeHolding's two refusals: no holder, and multiple holders. */
+  scopeOfHolder(id) {
+    return this.mountNameOf(this.storeHolding(id));
+  }
+  /** storeHolding for a WRITE: resolve the holder, then hold it against the
+   *  active transaction's mount (the C2 backstop). Reads keep using
+   *  storeHolding/all() directly — a cross-store READ is legitimate. */
+  mutatingStoreHolding(op, id) {
+    const store = this.storeHolding(id);
+    this.assertMountAffinity(op, store, `record '${id}'`);
+    return store;
+  }
+  /** The project store for a PROJECT-LOCAL write (the board/maintenance
+   *  queue, the drain log — the run/handoff protocol this comment used to
+   *  name was removed per decision sterling-claude-code-scale-down-boundary,
+   *  2ad87dd1), held against the active transaction's mount the same way. These
+   *  forward straight to this.project, so inside a DOMAIN transaction they are
+   *  the second cross-mount shape: a write that commits on the project
+   *  connection while the open BEGIN belongs to a domain mount. */
+  mutatingProject(op) {
+    this.assertMountAffinity(op, this.project, "project-local run/board state");
+    return this.project;
+  }
+  /** The mount name for a physical store — 'project', or the domain's manifest
+   *  name. Used only in refusal text: the point of the guard is that a MOUNT is
+   *  a physical thing, so it is named by where it actually is. */
+  mountNameOf(store) {
+    if (store === this.project)
+      return "project";
+    for (const [name, s2] of this.domains)
+      if (s2 === store)
+        return `domain:${name}`;
+    return "unknown mount";
+  }
+  /**
+   * THE CROSS-MOUNT WRITE BACKSTOP (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *
+   * Each mount is a separate SQLite connection, so a write routed to a store
+   * OTHER than the one holding the open transaction commits independently and
+   * survives an outer rollback — the atomicity hole a correct `scope` label
+   * cannot close on its own. Every mutation ROUTED THROUGH THIS CLASS'S OWN
+   * SURFACE therefore compares its RESOLVED target store against the ACTIVE
+   * TRANSACTION'S STORE IDENTITY (not a label string: a label is exactly the
+   * thing that may be lying) and refuses, naming the record, the mount the
+   * transaction holds, and the mount the target actually lives in. Outside a
+   * transaction there is nothing to violate, so this is a no-op. Cross-store
+   * READS are never affected.
+   *
+   * THAT QUALIFIER IS LOAD-BEARING, not throat-clearing: the public `project`
+   * handle (see its own note above) is a mutable SterlingStore a caller can
+   * write through without ever reaching this method. "Every mutation is
+   * guarded" would be false while that escape hatch is public, so the claim is
+   * scoped to what this class actually mediates.
+   */
+  assertMountAffinity(op, target, subject) {
+    const active = this.activeTransactionStore;
+    if (active === void 0 || active === target)
+      return;
+    throw new Error(`${op}: refused \u2014 cross-mount write while a transaction is open on the '${this.mountNameOf(active)}' mount, but ${subject} is held by the '${this.mountNameOf(target)}' mount. Each mount is a separate SQLite connection, so this write would commit independently and survive a rollback of the open transaction \u2014 it is refused rather than silently split across two connections. Route the transaction to the record's own mount (withTransactionForRecord), or perform this write outside the transaction.`);
+  }
+  // -- board/transient state: PROJECT-LOCAL, never a domain -------------------
+  // The board/maintenance queue (§3.2.7) and check_skipped are project-scoped
+  // by definition — they live in the project store, so MountedStores forwards
+  // them straight through. Knowledge fans across mounts; this state does not.
+  // The run/handoff protocol (createRun, getRun, casTransition,
+  // casTransitionMerge, recordPendingExit/getPendingExit, appendRunEscalation,
+  // appendRunReconcileNeeded, writeHandoff/readHandoffs, setRunReviewMandatory)
+  // was removed with the staged pipeline (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1).
+  recordCheckSkipped(...args) {
+    return this.mutatingProject("recordCheckSkipped").recordCheckSkipped(...args);
+  }
+  /** The drain log is project-local (§3.2.7) — forwarded like every board surface. */
+  drainLogEntry(...args) {
+    return this.mutatingProject("drainLogEntry").drainLogEntry(...args);
+  }
+  /** knowledge_split's multi-record write (decision
+   *  compaction-tooling-windowed-read-plus-split) targets the PROJECT store
+   *  only — feature_article is always project-scoped (§3.3), so the split's
+   *  children-plus-parent transaction never needs to span a domain mount. */
+  withTransaction(fn) {
+    return this.runScopedTransaction(this.project, fn);
+  }
+  /** PER-RECORD transaction boundary — the affinity fix (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *  Routes by `storeHolding(id)`, the SAME physical resolution every record
+   *  mutation uses, so the transaction and the writes inside it can never open
+   *  on different mounts. The retired label-routed sibling
+   *  (`withTransactionForScope`, deleted per decision
+   *  [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired])
+   *  resolved by storeFor(scope), and a record's body `scope` is caller-writable
+   *  and not the routing key for anything after creation (anti_pattern
+   *  [record-body-scope-is-not-physical-store-identity]) — so a drifted label
+   *  put the transaction on the wrong database while the write went to the
+   *  right one. A record that no record exists for throws loudly BEFORE any
+   *  transaction opens, exactly as an unmounted scope does. */
+  withTransactionForRecord(id, fn) {
+    return this.runScopedTransaction(this.storeHolding(id), fn);
+  }
+  /** The PHYSICAL STORE whose transaction is currently open across THIS
+   *  MountedStores instance (not per-physical-store — a physical store's own
+   *  txDepth only knows about ITSELF). Two jobs, both keyed on store IDENTITY
+   *  rather than on a scope label (which is exactly the value that can lie):
+   *  it refuses a NESTED call that targets a DIFFERENT mount, and it is the
+   *  reference every mutation's cross-mount backstop compares against (see
+   *  assertMountAffinity). Opening a second BEGIN IMMEDIATE on a different
+   *  SQLite connection while the outer transaction is still open would let the
+   *  inner one commit independently, so a later failure in the outer
+   *  transaction could no longer roll the inner write back — silently breaking
+   *  atomicity. A nested call to the SAME mount still joins cleanly, because it
+   *  reaches that store's reentrant `tx()` (txDepth). */
+  activeTransactionStore;
+  runScopedTransaction(store, fn) {
+    if (this.activeTransactionStore !== void 0 && this.activeTransactionStore !== store) {
+      throw new Error(`nested transaction: cannot open a transaction on the '${this.mountNameOf(store)}' mount while a transaction on the '${this.mountNameOf(this.activeTransactionStore)}' mount is still open on this MountedStores \u2014 cross-mount transaction nesting is not supported (each mount is a separate SQLite connection; an inner commit could survive an outer rollback).`);
+    }
+    const isOutermost = this.activeTransactionStore === void 0;
+    if (isOutermost)
+      this.activeTransactionStore = store;
+    try {
+      return store.withTransaction(fn);
+    } finally {
+      if (isOutermost)
+        this.activeTransactionStore = void 0;
+    }
+  }
+  /** Per-store snapshot (§2.3): each store snapshots independently; the caller
+   *  supplies a path per store name ('project' or 'domain-<name>'). */
+  snapshotAll(pathFor) {
+    this.project.snapshot(pathFor("project"));
+    for (const [name, store] of this.domains)
+      store.snapshot(pathFor(`domain-${name}`));
+  }
+  /** Mounted domain names, in manifest order. Includes a domain listed on
+   *  unreadableDomains: it is still configured, though neither read nor written. */
+  domainNames() {
+    return [...this.mountedNames];
+  }
+  close() {
+    for (const s2 of this.all())
+      s2.close();
+  }
+  all() {
+    return [this.project, ...this.domains.values()];
+  }
+};
 
 // packages/store/dist/axis.js
 var AXIS_MAX_TERM_LEN = 64;
@@ -5413,7 +7500,7 @@ import { DatabaseSync } from "node:sqlite";
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { realpathSync } from "node:fs";
-import { dirname, basename, join, resolve as resolvePath } from "node:path";
+import { dirname as dirname2, basename, join as join4, resolve as resolvePath } from "node:path";
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -5548,10 +7635,14 @@ var JournalDemotionRefusedError = class extends Error {
 var DEFAULT_BUSY_TIMEOUT_MS = 5e3;
 var sqliteDialect = {
   searchJoin: "JOIN records_fts f ON f.record_id = r.id",
+  searchJoinBinds: 0,
   searchMatch: "records_fts MATCH ?",
   // FTS5's bm25() is LOWER for a better match, so the score is its negation.
   searchScore: "(-bm25(records_fts))",
   searchOrder: "bm25(records_fts) ASC",
+  scoreScale: "fts5_bm25",
+  // FTS5's unicode61 tokenizer does its own folding; the text goes in as built.
+  searchText: (text) => text,
   /**
    * The FTS5 MATCH expression rank_terms compiles to. A trailing '*' marks an
    * FTS5 prefix query ("stor*" matches "store") — the star must sit OUTSIDE the
@@ -5570,6 +7661,8 @@ var SqliteDriver = class {
   db;
   /** The absolute path of the database file, for the refusal messages. */
   dbPath;
+  /** PRAGMA busy_timeout of this connection, which switchFreshFileToWal also waits by. */
+  busyTimeoutMs;
   /** The path the journal-mode policy classifies: dbPath with its directory's symlinks resolved. */
   classifiedPath;
   constructor(path, options = {}) {
@@ -5577,11 +7670,12 @@ var SqliteDriver = class {
     if (typeof busyTimeoutMs !== "number" || !Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0) {
       throw new Error(`SqliteDriver: busyTimeoutMs must be a non-negative integer, got ${String(busyTimeoutMs)}`);
     }
+    this.busyTimeoutMs = busyTimeoutMs;
     this.dbPath = resolvePath(path);
     this.db = new DatabaseSync2(path);
     let classifiedPath = this.dbPath;
     try {
-      classifiedPath = join(realpathSync(dirname(this.dbPath)), basename(this.dbPath));
+      classifiedPath = join4(realpathSync(dirname2(this.dbPath)), basename(this.dbPath));
     } catch {
     }
     this.classifiedPath = classifiedPath;
@@ -5593,7 +7687,15 @@ var SqliteDriver = class {
   exec(sql) {
     this.db.exec(sql);
   }
+  /**
+   * A second close is a no-op, as on PgDriver: a refusal inside publishFresh
+   * closes the connection itself, and SterlingStore then closes the driver
+   * again before rethrowing, which must not replace the refusal with
+   * 'database is not open'.
+   */
   close() {
+    if (!this.db.isOpen)
+      return;
     this.db.close();
   }
   /** BEGIN IMMEDIATE: takes the write lock now, or throws once busy_timeout runs out. */
@@ -5638,6 +7740,68 @@ var SqliteDriver = class {
     }
   }
   prepareWritable(isFresh) {
+    this.prepareConnection(isFresh);
+    this.createSchema();
+  }
+  /**
+   * StoreDriver.publishFresh (board 404228d7). prepareWritable() commits the DDL
+   * statement by statement and SterlingStore stamps user_version in a later
+   * transaction, so a concurrent opener that had read user_version 0 could see
+   * the tables without the stamp and open the store as a legacy, read-only one.
+   * Here an empty file gets its schema and its stamp in one BEGIN IMMEDIATE
+   * transaction, with user_version re-read under that lock, so the tables and
+   * the stamp become visible together.
+   *
+   * The classification read comes first and takes no write lock (decision
+   * store-constructor-stops-write-locking-to-read-user-version-closing-a-concurrency-reachable-fail-open):
+   * user_version and sqlite_master are read in one deferred read transaction,
+   * so they come from one snapshot. A store with a schema and a version below
+   * `supported` in that snapshot is an older store, returned untouched; a
+   * newer version is returned untouched too, for SterlingStore to refuse. A
+   * store another opener has already published at `supported` gets only this
+   * connection's settings, as an already-current store does. Only a file
+   * without a schema reaches the write lock.
+   */
+  publishFresh(supported) {
+    if (!Number.isInteger(supported) || supported < 1) {
+      throw new Error(`SqliteDriver: the supported schema version must be a positive integer, got ${String(supported)}`);
+    }
+    this.db.exec("BEGIN");
+    let version;
+    let schemaExists;
+    try {
+      version = this.schemaVersion();
+      schemaExists = this.hasSchema();
+    } finally {
+      this.db.exec("COMMIT");
+    }
+    if (version > supported || version < supported && schemaExists)
+      return version;
+    if (version === supported && schemaExists) {
+      this.prepareConnection(false);
+      return version;
+    }
+    this.prepareConnection(!schemaExists);
+    this.begin();
+    try {
+      version = this.schemaVersion();
+      if (version > supported || version < supported && this.hasSchema()) {
+        this.rollback();
+        return version;
+      }
+      this.createSchema();
+      if (version < supported)
+        this.setSchemaVersion(supported);
+      this.commit();
+    } catch (e) {
+      if (this.db.isTransaction)
+        this.rollback();
+      throw e;
+    }
+    return supported;
+  }
+  /** The journal-mode policy and foreign_keys: connection settings that must run outside a transaction. */
+  prepareConnection(isFresh) {
     if (journalDemotionRequired(this.classifiedPath)) {
       let returnedMode;
       try {
@@ -5661,15 +7825,54 @@ var SqliteDriver = class {
       } else if (isFresh) {
         const stillFresh = !this.hasSchema();
         if (stillFresh) {
-          this.db.exec("PRAGMA journal_mode=WAL");
+          this.switchFreshFileToWal();
         }
       }
     }
     this.db.exec("PRAGMA foreign_keys=ON");
+  }
+  /** The DDL and its additive migrations. Idempotent, so it also runs on every open of a current store. */
+  createSchema() {
     this.db.exec(DDL);
     try {
       this.db.exec("ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT");
     } catch {
+    }
+    try {
+      this.db.exec("ALTER TABLE records ADD COLUMN operation_id TEXT");
+    } catch {
+    }
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON records(operation_id)");
+  }
+  /**
+   * PRAGMA journal_mode=WAL on a fresh file, which several openers may try at
+   * once (board 404228d7). Measured: the switch fails at once with 'database is
+   * locked', without the busy handler, while another connection holds the
+   * write lock, and two openers switching together can both fail that way.
+   * So this waits as busy_timeout would: after a failed switch it reads the
+   * file's mode (hasSchema() takes the read lock that makes this connection
+   * pick it up), stops when another opener's switch has landed, and stops too
+   * when another opener has built the store in DELETE: that is a 9p opener's
+   * demotion, which is sticky [store-journal-policy-delete-on-9p] and must not
+   * be flipped back. It tries again only while the file is still without a
+   * schema, until busy_timeout has run out, then throws the last error.
+   */
+  switchFreshFileToWal() {
+    const deadline = Date.now() + this.busyTimeoutMs;
+    for (; ; ) {
+      try {
+        this.db.exec("PRAGMA journal_mode=WAL");
+        return;
+      } catch (e) {
+        if (!(e instanceof Error) || !/database is locked/.test(e.message))
+          throw e;
+        const built = this.hasSchema();
+        if (this.journalMode() === "wal" || built)
+          return;
+        if (Date.now() >= deadline)
+          throw e;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
     }
   }
   journalMode() {
@@ -5682,6 +7885,7 @@ var SqliteDriver = class {
 };
 
 // packages/store/dist/index.js
+var storeDriverFactory;
 var StoreRowDecodeError = class extends Error {
   op;
   constructor(op, cause) {
@@ -5704,6 +7908,33 @@ function decodeLiveRecordRow(op, row) {
   return record;
 }
 var SUPPORTED_SCHEMA_VERSION = 2;
+var OperationRepeatedError = class extends Error {
+  operation_id;
+  original_id;
+  constructor(operation_id, original_id) {
+    super(`operation '${operation_id}' already ran: it wrote record '${original_id}'. A repeated operation is refused, never applied twice; nothing was written. Read '${original_id}' to see what landed.`);
+    this.operation_id = operation_id;
+    this.original_id = original_id;
+    this.name = "OperationRepeatedError";
+  }
+};
+var StoreMovedError = class extends Error {
+  db_path;
+  constructor(db_path) {
+    super(`store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`);
+    this.db_path = db_path;
+    this.name = "StoreMovedError";
+  }
+};
+function operationIdOf(options, op) {
+  const id = options?.operation_id;
+  if (id === void 0)
+    return void 0;
+  if (typeof id !== "string" || id.length === 0 || id.length > 200) {
+    throw new Error(`${op}: operation_id must be a non-empty string of at most 200 characters; nothing was written.`);
+  }
+  return id;
+}
 var UnsupportedSchemaVersionError = class extends Error {
   found;
   supported;
@@ -5995,6 +8226,9 @@ var SterlingStore = class _SterlingStore {
       options.driver.close();
       throw new Error("SterlingStore: busyTimeoutMs configures the SQLite driver this store opens itself; it cannot be combined with an injected driver \u2014 set it on that driver.");
     }
+    if (options.driver === void 0 && storeDriverFactory !== void 0) {
+      options = { driver: storeDriverFactory(path, { busyTimeoutMs: options.busyTimeoutMs }) };
+    }
     this.db = options.driver ?? new SqliteDriver(path, { busyTimeoutMs: options.busyTimeoutMs });
     const foundSchemaVersion = this.db.schemaVersion();
     if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
@@ -6002,7 +8236,27 @@ var SterlingStore = class _SterlingStore {
       throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
     }
     let isFresh = false;
-    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
+    let published = false;
+    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION && this.db.publishFresh !== void 0) {
+      let settled;
+      try {
+        settled = this.db.publishFresh(SUPPORTED_SCHEMA_VERSION);
+      } catch (e) {
+        this.db.close();
+        throw e;
+      }
+      if (settled > SUPPORTED_SCHEMA_VERSION) {
+        this.db.close();
+        throw new UnsupportedSchemaVersionError(settled, SUPPORTED_SCHEMA_VERSION);
+      }
+      if (settled < SUPPORTED_SCHEMA_VERSION) {
+        this.db.prepareReadOnly();
+        this.legacySchemaVersion = settled;
+        this.openedSchemaVersion = settled;
+        return;
+      }
+      published = true;
+    } else if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
       if (this.db.hasSchema()) {
         this.db.prepareReadOnly();
         this.legacySchemaVersion = foundSchemaVersion;
@@ -6011,8 +8265,9 @@ var SterlingStore = class _SterlingStore {
       }
       isFresh = true;
     }
-    this.db.prepareWritable(isFresh);
-    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+    if (!published)
+      this.db.prepareWritable(isFresh);
+    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION && !published) {
       try {
         this.tx(() => {
           const current = this.db.schemaVersion();
@@ -6334,8 +8589,9 @@ var SterlingStore = class _SterlingStore {
    *  legacy feature_article field, and the pin fixtures that pass version: 1).
    *  S3 STRIPS it — version becomes server-owned at every surface — so nothing
    *  new should start relying on setting it. */
-  create(input2) {
+  create(input2, options = {}) {
     this.assertWritable("create");
+    const operationId = operationIdOf(options, "create");
     const prepared = _SterlingStore.resolveIdentity(input2, {
       lifecycle: "live",
       freshness: "fresh",
@@ -6357,7 +8613,8 @@ var SterlingStore = class _SterlingStore {
     assertNoFieldLoss("create", prepared.input, record);
     _SterlingStore.refuseRawSupersedesLinks("create", record.links, /* @__PURE__ */ new Set());
     this.tx(() => {
-      this.insertRecord(record);
+      this.refuseRepeatedOperation(operationId);
+      this.insertRecord(record, operationId);
       this.logActivity("created", record, record.created_at);
     });
     return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.storableBody(record)])[0]);
@@ -6626,7 +8883,7 @@ var SterlingStore = class _SterlingStore {
           throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' changed during removal \u2014 the transaction was rolled back; re-read and retry.`);
         }
       }
-      this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(stored), id);
+      this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(this.db.dialect.searchText(entry.fts(stored)), id);
       this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
       if (opts.resolves?.length)
         this.drainResolves(op, opts.resolves, now, opts.resolvedReceipt);
@@ -6754,19 +9011,21 @@ var SterlingStore = class _SterlingStore {
    * write would refuse is not validated here, the write path refuses it.
    */
   enqueueWouldBeNoop(input2) {
-    if (input2.system_reason === "reconcile_needed" && input2.feature_link)
+    return this.readTx(() => {
+      if (input2.system_reason === "reconcile_needed" && input2.feature_link)
+        return false;
+      const wantKey = systemTodoKey(input2);
+      const rows = input2.feature_link ? this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0").all(input2.feature_link) : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+      for (const r of rows) {
+        const t = _SterlingStore.decodeLiveRecord("enqueueWouldBeNoop", r);
+        if (t.source !== "system" || systemTodoKey(t) !== wantKey)
+          continue;
+        const priorFiles = [...t.file_keys ?? []].sort();
+        const nextFiles = [...input2.file_keys ?? []].sort();
+        return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input2.system_reason, t.text ?? "", input2.text);
+      }
       return false;
-    const wantKey = systemTodoKey(input2);
-    const rows = input2.feature_link ? this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0").all(input2.feature_link) : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
-    for (const r of rows) {
-      const t = _SterlingStore.decodeLiveRecord("enqueueWouldBeNoop", r);
-      if (t.source !== "system" || systemTodoKey(t) !== wantKey)
-        continue;
-      const priorFiles = [...t.file_keys ?? []].sort();
-      const nextFiles = [...input2.file_keys ?? []].sort();
-      return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input2.system_reason, t.text ?? "", input2.text);
-    }
-    return false;
+    });
   }
   /**
    * ATOMIC check-and-insert for a SYSTEM maintenance item — the ONE dedup
@@ -6817,8 +9076,9 @@ var SterlingStore = class _SterlingStore {
    * body UPDATE was invisible to expected_version, so a concurrent in-place
    * write could silently revert it, and the FTS row kept the old text).
    */
-  enqueueSystemTodo(input2) {
+  enqueueSystemTodo(input2, options = {}) {
     this.assertWritable("enqueueSystemTodo");
+    const operationId = operationIdOf(options, "enqueueSystemTodo");
     const prepared = _SterlingStore.resolveIdentity(input2, {
       lifecycle: "live",
       freshness: "fresh",
@@ -6839,6 +9099,7 @@ var SterlingStore = class _SterlingStore {
     let textUpdated = false;
     let insertedText;
     this.tx(() => {
+      this.refuseRepeatedOperation(operationId);
       const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
       if (isReconcileFold) {
         const matches = [];
@@ -6855,10 +9116,10 @@ var SterlingStore = class _SterlingStore {
           if (fileKeys.length > 1) {
             const owner = this.get(candidate.feature_link);
             const canonicalText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, fileKeys);
-            this.insertRecord({ ...candidate, text: canonicalText });
+            this.insertRecord({ ...candidate, text: canonicalText }, operationId);
             insertedText = canonicalText;
           } else {
-            this.insertRecord(candidate);
+            this.insertRecord(candidate, operationId);
           }
           return;
         }
@@ -6905,7 +9166,7 @@ var SterlingStore = class _SterlingStore {
         break;
       }
       if (!existing) {
-        this.insertRecord(candidate);
+        this.insertRecord(candidate, operationId);
         return;
       }
       const priorFiles = [...existing.file_keys ?? []].sort();
@@ -6937,10 +9198,12 @@ var SterlingStore = class _SterlingStore {
     };
   }
   get(id) {
-    const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
-    if (!row)
-      return void 0;
-    return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
+    return this.readTx(() => {
+      const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
+      if (!row)
+        return void 0;
+      return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
+    });
   }
   /**
    * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
@@ -7104,14 +9367,16 @@ var SterlingStore = class _SterlingStore {
    * '(lookup failed)' would trade one false payload for another.
    */
   articlesBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC`).all(slug);
-    const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows));
-    if (!records.length)
-      return records;
-    const relations = this.activeArticleRelations();
-    return records.map((r) => this.withDerivedReliedBy(r, relations));
+    return this.readTx(() => {
+      const rows = this.db.prepare(`SELECT body, scope FROM records
+            WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC`).all(slug);
+      const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows));
+      if (!records.length)
+        return records;
+      const relations = this.activeArticleRelations();
+      return records.map((r) => this.withDerivedReliedBy(r, relations));
+    });
   }
   /**
    * Every non-superseded record of ANY type carrying this exact slug, newest
@@ -7124,10 +9389,12 @@ var SterlingStore = class _SterlingStore {
    * live head while a version-pinned citation keeps using the id.
    */
   recordsBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC`).all(slug);
-    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
+    return this.readTx(() => {
+      const rows = this.db.prepare(`SELECT body, scope FROM records
+            WHERE status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC`).all(slug);
+      return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
+    });
   }
   /**
    * THE ONE READINESS FUNCTION (decision
@@ -7143,48 +9410,50 @@ var SterlingStore = class _SterlingStore {
    * only; the stored blocked_by is never rewritten. No cycle detection.
    */
   boardReadiness(items) {
-    const total = this.count({ types: ["todo"], source: "user" });
-    const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
-    const bySlug = /* @__PURE__ */ new Map();
-    for (const t of live)
-      if (t.slug)
-        bySlug.set(t.slug, t);
-    const dependents = /* @__PURE__ */ new Map();
-    for (const t of live) {
-      for (const slug of new Set(t.blocked_by ?? [])) {
-        const list = dependents.get(slug);
-        if (list)
-          list.push(t);
-        else
-          dependents.set(slug, [t]);
+    return this.readTx(() => {
+      const total = this.count({ types: ["todo"], source: "user" });
+      const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+      const bySlug = /* @__PURE__ */ new Map();
+      for (const t of live)
+        if (t.slug)
+          bySlug.set(t.slug, t);
+      const dependents = /* @__PURE__ */ new Map();
+      for (const t of live) {
+        for (const slug of new Set(t.blocked_by ?? [])) {
+          const list = dependents.get(slug);
+          if (list)
+            list.push(t);
+          else
+            dependents.set(slug, [t]);
+        }
       }
-    }
-    const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
-    const targets = items ?? live;
-    return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
-      const blockers = [];
-      const blockersOpen = [];
-      for (const slug of t.blocked_by ?? []) {
-        const holder = openBlocker(slug);
-        blockers.push({ slug, state: holder ? "open" : "closed" });
-        if (holder)
-          blockersOpen.push(boardItemHandle(holder));
-      }
-      const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-      const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
-      return {
-        id: t.id,
-        ...t.slug ? { slug: t.slug } : {},
-        name: boardItemHandle(t),
-        ...t.priority ? { priority: t.priority } : {},
-        updated_at: t.updated_at,
-        file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
-        ...t.needs ? { needs: t.needs } : {},
-        blockers,
-        blockers_open: blockersOpen,
-        unblocks,
-        state
-      };
+      const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
+      const targets = items ?? live;
+      return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+        const blockers = [];
+        const blockersOpen = [];
+        for (const slug of t.blocked_by ?? []) {
+          const holder = openBlocker(slug);
+          blockers.push({ slug, state: holder ? "open" : "closed" });
+          if (holder)
+            blockersOpen.push(boardItemHandle(holder));
+        }
+        const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+        const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+        return {
+          id: t.id,
+          ...t.slug ? { slug: t.slug } : {},
+          name: boardItemHandle(t),
+          ...t.priority ? { priority: t.priority } : {},
+          updated_at: t.updated_at,
+          file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+          ...t.needs ? { needs: t.needs } : {},
+          blockers,
+          blockers_open: blockersOpen,
+          unblocks,
+          state
+        };
+      });
     });
   }
   /**
@@ -7198,10 +9467,12 @@ var SterlingStore = class _SterlingStore {
    * live head via recordsBySlug's own resolution.
    */
   supersededRecordsBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status = 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`).all(slug);
-    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
+    return this.readTx(() => {
+      const rows = this.db.prepare(`SELECT body, scope FROM records
+            WHERE status = 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`).all(slug);
+      return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
+    });
   }
   /**
    * Follows superseded_by from `id` to the chain end (decision foreign_de1a7329: ids
@@ -7214,24 +9485,26 @@ var SterlingStore = class _SterlingStore {
    * the true, unreached terminus.
    */
   resolveTerminus(id) {
-    const MAX_HOPS = 32;
-    const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
-    const row = stmt.get(id);
-    if (!row)
-      return null;
-    const visited = /* @__PURE__ */ new Set([row.id]);
-    let current = row;
-    let hops = 0;
-    while (current.status === "superseded" && current.superseded_by) {
-      const next = stmt.get(current.superseded_by);
-      if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
-        return { id: current.id, status: current.status, hops, truncated: true };
+    return this.readTx(() => {
+      const MAX_HOPS = 32;
+      const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
+      const row = stmt.get(id);
+      if (!row)
+        return null;
+      const visited = /* @__PURE__ */ new Set([row.id]);
+      let current = row;
+      let hops = 0;
+      while (current.status === "superseded" && current.superseded_by) {
+        const next = stmt.get(current.superseded_by);
+        if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+          return { id: current.id, status: current.status, hops, truncated: true };
+        }
+        visited.add(next.id);
+        current = next;
+        hops += 1;
       }
-      visited.add(next.id);
-      current = next;
-      hops += 1;
-    }
-    return { id: current.id, status: current.status, hops };
+      return { id: current.id, status: current.status, hops };
+    });
   }
   /**
    * INBOUND rel:'supersedes' edges — every record elsewhere holding a
@@ -7248,9 +9521,29 @@ var SterlingStore = class _SterlingStore {
    * mount, because an edge lives with its SOURCE record (addLink routes by
    * source), which may sit in a different store than the target.
    */
+  /**
+   * inboundSupersedes() for each id in one read transaction: element i is what
+   * inboundSupersedes(ids[i]) returns. One edge query covers every id, so a
+   * hook attaching supersession state to N delivered records pays one round
+   * trip per store instead of N (board f6c4bc5d).
+   */
+  inboundSupersedesEach(ids) {
+    if (!ids.length)
+      return [];
+    return this.readTx(() => {
+      const unique = [...new Set(ids)];
+      const rows = this.db.prepare(`SELECT source_id, target_id FROM record_relations WHERE rel = 'supersedes' AND target_id IN (${unique.map(() => "?").join(",")}) ORDER BY ${this.db.dialect.insertionOrder()}`).all(...unique);
+      const sources = /* @__PURE__ */ new Map();
+      for (const row of rows)
+        sources.set(row.target_id, [...sources.get(row.target_id) ?? [], row.source_id]);
+      return ids.map((id) => (sources.get(id) ?? []).map((s2) => this.get(s2)).filter((r) => r !== void 0));
+    });
+  }
   inboundSupersedes(id) {
-    const rows = this.db.prepare(`SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`).all(id);
-    return rows.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
+    return this.readTx(() => {
+      const rows = this.db.prepare(`SELECT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`).all(id);
+      return rows.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
+    });
   }
   /**
    * The §3.4 base filter (status + type + stack-tag + file-key join) shared
@@ -7321,7 +9614,9 @@ var SterlingStore = class _SterlingStore {
    * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
    * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
    * itself — knowledge_query's tool description names this scale so a caller
-   * never has to reverse-engineer bm25's own sign convention.
+   * never has to reverse-engineer bm25's own sign convention. That is the
+   * SQLite scale; on Postgres the score is the driver's ranking, also
+   * higher-is-better, and scoreScale() names which scale a store uses.
    *
    * Requires rank_terms — a threshold on a filter with no ranking has nothing
    * to threshold, so this refuses loudly rather than silently answering 0
@@ -7338,8 +9633,34 @@ var SterlingStore = class _SterlingStore {
     const d = this.db.dialect;
     const sql = `SELECT COUNT(*) AS n FROM records r ${d.searchJoin}
       WHERE ${where.join(" AND ")} AND ${d.searchMatch} AND ${d.searchScore} >= ?`;
-    const row = this.db.prepare(sql).get(...params, match, minScore);
+    const row = this.db.prepare(sql).get(...this.searchJoinParams(match), ...params, match, minScore);
     return row.n;
+  }
+  /**
+   * The scale countAboveScore()'s min_score is a floor on, as a versioned id
+   * (decision postgres-search-ranking-per-query-idf-no-stats-triggers, point
+   * 3): 'fts5_bm25' on SQLite, 'pg_bm25_v1' and the like on Postgres. Every
+   * scale is higher-is-better; a min_score is never carried across scales.
+   */
+  scoreScale() {
+    return this.db.dialect.scoreScale;
+  }
+  /**
+   * The text this store writes to records_fts for a record of `type` whose
+   * records.body is `body`: the type's fts builder, then the driver's
+   * searchText, as insertRecord() does. A copy that rebuilds the search index
+   * from the records (the knowledge-eval pg loader) calls this, so the rebuilt
+   * text is what this store would have written.
+   */
+  searchTextFor(type, body) {
+    const entry = RECORD_TYPES[type];
+    if (!entry)
+      throw new Error(`searchTextFor: unknown record type '${type}'`);
+    return this.db.dialect.searchText(entry.fts(JSON.parse(body)));
+  }
+  /** searchJoin's parameters: the match value once per placeholder it has, all before the filter's. */
+  searchJoinParams(match) {
+    return Array.from({ length: this.db.dialect.searchJoinBinds }, () => match);
   }
   /**
    * The search expression rank_terms compiles to — shared by query() and
@@ -7350,8 +9671,28 @@ var SterlingStore = class _SterlingStore {
   ftsMatchExpr(terms, matchAll) {
     return this.db.dialect.searchQuery(terms, matchAll);
   }
+  /**
+   * query() once per entry of `list`, inside one read transaction: element i
+   * is what query(list[i]) returns, all from one snapshot. The hydration reads
+   * (links, successors, derived relied_by) run once over every result instead
+   * of once per entry, so on Postgres the list pays one BEGIN/COMMIT and one
+   * set of hydration statements (board f6c4bc5d: H20 runs six subject queries
+   * per dispatch). Hydration is per record, so the result is the same.
+   */
+  queryEach(list) {
+    return this.readTx(() => {
+      const raw = list.map((opts) => this.queryRows(opts));
+      const hydrated = this.withDerivedReliedByAll(raw.flat());
+      let at = 0;
+      return raw.map((rows) => hydrated.slice(at, at += rows.length));
+    });
+  }
   /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
   query(opts = {}) {
+    return this.readTx(() => this.withDerivedReliedByAll(this.queryRows(opts)));
+  }
+  /** query()'s rows, decoded but not hydrated. */
+  queryRows(opts) {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
     const { where, params, fileKeys } = this.baseFilter(opts);
     if (opts.rank_terms !== void 0) {
@@ -7362,8 +9703,8 @@ var SterlingStore = class _SterlingStore {
         const sql2 = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
           WHERE ${where.join(" AND ")} AND ${d.searchMatch}
           ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
-        const rows2 = this.db.prepare(sql2).all(...params, match, cap);
-        return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
+        const rows2 = this.db.prepare(sql2).all(...this.searchJoinParams(match), ...params, match, cap);
+        return _SterlingStore.decodeLiveRecords("query", rows2);
       }
     }
     const orderBy = [];
@@ -7376,7 +9717,7 @@ var SterlingStore = class _SterlingStore {
     const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy.join(", ")} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
-    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows));
+    return _SterlingStore.decodeLiveRecords("query", rows);
   }
   /** query()'s two return paths share this: one relations scan for the whole
    *  result set (not one per feature_article row) before applying the derived
@@ -7393,8 +9734,9 @@ var SterlingStore = class _SterlingStore {
    * old; the old is retained with status 'superseded' + superseded_by set.
    * This is the ONLY change path for immutable types (decision, §3.2.1).
    */
-  supersede(oldId, newInput, authoritativeScope) {
+  supersede(oldId, newInput, authoritativeScope, options = {}) {
     this.assertWritable("supersede");
+    const operationId = operationIdOf(options, "supersede");
     const oldRecord = this.get(oldId);
     if (!oldRecord)
       throw new Error(`supersede: no record '${oldId}'`);
@@ -7428,7 +9770,8 @@ var SterlingStore = class _SterlingStore {
       updated_at: newRecord.updated_at
     });
     this.tx(() => {
-      this.insertRecord(newRecord);
+      this.refuseRepeatedOperation(operationId);
+      this.insertRecord(newRecord, operationId);
       const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(storedOld), oldId);
       if (res.changes === 0) {
@@ -7486,20 +9829,21 @@ var SterlingStore = class _SterlingStore {
    */
   retireInFavorOf(id, replacementId, at, verb = "retired") {
     this.assertWritable("retireInFavorOf");
-    const record = this.get(id);
-    if (!record)
-      throw new Error(`retireInFavorOf: no record '${id}'`);
-    const identity = this.identityOf(id);
-    if (identity?.lifecycle === "retired" || record.status === "superseded") {
-      throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-    }
-    const replacement = this.identityOf(replacementId);
-    if (replacement?.lifecycle === "retired") {
-      throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-    }
-    const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-    const stored = _SterlingStore.storableBody(retired);
+    let stored;
     this.tx(() => {
+      const record = this.get(id);
+      if (!record)
+        throw new Error(`retireInFavorOf: no record '${id}'`);
+      const identity = this.identityOf(id);
+      if (identity?.lifecycle === "retired" || record.status === "superseded") {
+        throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
+      }
+      const replacement = this.identityOf(replacementId);
+      if (replacement?.lifecycle === "retired") {
+        throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
+      }
+      const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
+      stored = _SterlingStore.storableBody(retired);
       const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
       if (res.changes === 0) {
@@ -7583,10 +9927,10 @@ var SterlingStore = class _SterlingStore {
   /** Backup snapshot (§2.3): the driver copies the store to the configured backup path (SQLite: VACUUM INTO). Refuses to overwrite. */
   snapshot(targetPath) {
     const target = targetPath.replace(/\\/g, "/");
-    if (existsSync(target)) {
+    if (existsSync2(target)) {
       throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
     }
-    mkdirSync(dirname2(target), { recursive: true });
+    mkdirSync2(dirname3(target), { recursive: true });
     this.db.snapshot(target);
   }
   close() {
@@ -7775,7 +10119,7 @@ var SterlingStore = class _SterlingStore {
       catalog: {
         entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
       }
-    });
+    }, { operation_id: randomUUID() });
   }
   /**
    * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
@@ -7813,7 +10157,7 @@ var SterlingStore = class _SterlingStore {
     if (catalogs.length > 0) {
       todo.feature_link = catalogs[0].id;
     }
-    this.create(todo);
+    this.create(todo, { operation_id: randomUUID() });
   }
   /**
    * The one row-insert. Since S2 ([stable-identity-design-v2]) the stored BODY
@@ -7823,15 +10167,23 @@ var SterlingStore = class _SterlingStore {
    * pre-migration store still has): written here from the derived values in the
    * same statement, never read back as the served truth.
    */
-  insertRecord(record) {
+  /** Refuses an operation_id that already wrote a record. Runs inside the write transaction, before the insert: on Postgres a unique violation would abort the transaction. */
+  refuseRepeatedOperation(operationId) {
+    if (operationId === void 0)
+      return;
+    const row = this.db.prepare("SELECT id FROM records WHERE operation_id = ?").get(operationId);
+    if (row)
+      throw new OperationRepeatedError(operationId, row.id);
+  }
+  insertRecord(record, operationId) {
     const entry = RECORD_TYPES[record.type];
     const meta = record;
     const lifecycle = meta.lifecycle === "retired" ? "retired" : "live";
     const freshness = meta.freshness === "flagged_stale" ? "flagged_stale" : "fresh";
     const version = typeof meta.version === "number" ? meta.version : 1;
     const stored = _SterlingStore.storableBody(record);
-    this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version, record.scope, record.created_at, record.updated_at, record.author, JSON.stringify(stored));
+    this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body, operation_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version, record.scope, record.created_at, record.updated_at, record.author, JSON.stringify(stored), operationId ?? null);
     for (const tag of new Set(record.stack_tags)) {
       this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(record.id, tag);
     }
@@ -7846,7 +10198,7 @@ var SterlingStore = class _SterlingStore {
     if (lifecycle === "retired" && meta.superseded_by && meta.superseded_by !== record.id) {
       this.insertRelation(meta.superseded_by, "supersedes", record.id, record.updated_at);
     }
-    this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record.id, entry.fts(stored));
+    this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record.id, this.db.dialect.searchText(entry.fts(stored)));
   }
   /**
    * REENTRANT — every other write primitive (create, supersede, …) already
@@ -7860,16 +10212,55 @@ var SterlingStore = class _SterlingStore {
    * whole thing exactly once.
    */
   txDepth = 0;
+  /** Open read transactions on this handle (readTx). A write may not start inside one. */
+  readDepth = 0;
+  /**
+   * A multi-statement read sees one snapshot (decision
+   * postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+   * point 5): it joins an open write or read transaction, or else opens the
+   * driver's read transaction (REPEATABLE READ READ ONLY on Postgres). A driver
+   * with no beginRead (SQLite) keeps its autocommit reads.
+   */
+  readTx(fn) {
+    if (this.txDepth > 0 || this.readDepth > 0 || !this.db.beginRead)
+      return fn();
+    if (this.db.beginReadDeferred)
+      this.db.beginReadDeferred();
+    else
+      this.db.beginRead();
+    this.readDepth++;
+    let ok = false;
+    try {
+      const result = fn();
+      ok = true;
+      return result;
+    } finally {
+      this.readDepth--;
+      if (ok) {
+        this.db.endRead?.();
+      } else {
+        try {
+          this.db.endRead?.();
+        } catch {
+        }
+      }
+    }
+  }
   tx(fn) {
     this.assertV2Surface("transaction");
     if (this.txDepth > 0) {
       fn();
       return;
     }
+    if (this.readDepth > 0) {
+      throw new Error("SterlingStore: a write cannot start inside a read transaction (readTx); nothing was written.");
+    }
     this.db.begin();
     this.txDepth++;
     try {
       this.assertLiveSchemaVersion("transaction");
+      if (this.db.prepare("SELECT 1 FROM store_meta WHERE key = 'move_fence'").get())
+        throw new StoreMovedError(this.dbPath);
       fn();
       this.db.commit();
     } catch (e) {
@@ -7919,19 +10310,762 @@ var SterlingStore = class _SterlingStore {
   }
 };
 
+// packages/store/dist/routing.js
+import { lstatSync as lstatSync3, readFileSync as readFileSync3 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join7, resolve as resolve2 } from "node:path";
+
+// packages/store/dist/broker-runtime.js
+import { createHash } from "node:crypto";
+import { closeSync as closeSync2, constants as FS, fstatSync, lstatSync as lstatSync2, mkdirSync as mkdirSync3, openSync as openSync2, readdirSync, readSync, realpathSync as realpathSync2, renameSync, rmSync as rmSync2, writeFileSync } from "node:fs";
+import { join as join6 } from "node:path";
+var BrokerRuntimeDirError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "BrokerRuntimeDirError";
+  }
+};
+var uid = () => typeof process.getuid === "function" ? process.getuid() : void 0;
+function onWindowsDrive(path) {
+  return /^\/mnt\/[a-zA-Z](\/|$)/.test(path);
+}
+function brokerDirPath(env = process.env) {
+  const id = uid();
+  if (id === void 0)
+    return void 0;
+  const xdg = env.XDG_RUNTIME_DIR;
+  if (xdg && xdg.startsWith("/") && !onWindowsDrive(xdg))
+    return join6(xdg, "sterling");
+  return `/tmp/sterling-${id}`;
+}
+function assertPrivate(path, kind) {
+  let st;
+  try {
+    st = lstatSync2(path);
+  } catch (e) {
+    throw new BrokerRuntimeDirError(`broker ${kind} ${path} cannot be read (${e.code ?? e.message})`);
+  }
+  if (st.isSymbolicLink())
+    throw new BrokerRuntimeDirError(`broker ${kind} ${path} is a symlink; refused`);
+  const isKind = kind === "directory" ? st.isDirectory() : kind === "file" ? st.isFile() : st.isSocket();
+  if (!isKind)
+    throw new BrokerRuntimeDirError(`broker ${kind} ${path} is not a ${kind}; refused`);
+  if (st.uid !== uid())
+    throw new BrokerRuntimeDirError(`broker ${kind} ${path} is owned by uid ${st.uid}, not this user (${uid()}); refused`);
+  if ((st.mode & 63) !== 0)
+    throw new BrokerRuntimeDirError(`broker ${kind} ${path} has mode ${(st.mode & 511).toString(8)}; group and other bits must be clear; refused`);
+}
+function brokerDir({ create, env = process.env }) {
+  const dir = brokerDirPath(env);
+  if (dir === void 0)
+    return void 0;
+  try {
+    lstatSync2(dir);
+  } catch (e) {
+    if (e.code !== "ENOENT")
+      throw new BrokerRuntimeDirError(`broker directory ${dir} cannot be read (${e.message})`);
+    if (!create)
+      return void 0;
+    mkdirSync3(dir, { mode: 448 });
+  }
+  assertPrivate(dir, "directory");
+  return dir;
+}
+function brokerProjectKey(root) {
+  return createHash("sha256").update(realpathSync2(root)).digest("hex").slice(0, 16);
+}
+function brokerSocketPath(dir, instanceId) {
+  return join6(dir, `${instanceId}.sock`);
+}
+function readBounded(path) {
+  const fd = openSync2(path, FS.O_RDONLY | FS.O_NOFOLLOW);
+  try {
+    const size = fstatSync(fd).size;
+    if (size > BROKER_REGISTRY_MAX_BYTES)
+      throw new BrokerRuntimeDirError(`broker registry file ${path} is ${size} bytes, over the ${BROKER_REGISTRY_MAX_BYTES}-byte bound; refused`);
+    const buf = Buffer.alloc(size);
+    let off = 0;
+    while (off < size) {
+      const n = readSync(fd, buf, off, size - off, off);
+      if (n === 0)
+        break;
+      off += n;
+    }
+    return buf.subarray(0, off).toString("utf8");
+  } finally {
+    closeSync2(fd);
+  }
+}
+function listBrokerRegistrations(dir, root) {
+  const prefix = `${brokerProjectKey(root)}.`;
+  const names = readdirSync(dir).filter((n) => n.startsWith(prefix) && n.endsWith(".json")).slice(0, BROKER_DISCOVERY_MAX_ENTRIES);
+  const found = [];
+  const refused = [];
+  for (const name of names) {
+    const path = join6(dir, name);
+    try {
+      assertPrivate(path, "file");
+      const reg = brokerRegistrationSchema.parse(JSON.parse(readBounded(path)));
+      if (name !== `${prefix}${reg.instance_id}.json`)
+        throw new BrokerRuntimeDirError(`names instance ${reg.instance_id}, not the one in its file name`);
+      found.push({ reg, mtime: lstatSync2(path).mtimeMs });
+    } catch (e) {
+      refused.push({ file: path, reason: e.message });
+    }
+  }
+  found.sort((a, b) => b.mtime - a.mtime);
+  return { registrations: found.map((f) => f.reg), refused };
+}
+function brokerStorageIdentity(route) {
+  const c = readPgCredentials(route.credentialsPath);
+  return { backend: "postgres", database: `${c.host}:${c.port}/${c.database}`, meta_schema: route.metaSchema, project_schema: route.projectSchema };
+}
+
+// packages/store/dist/routing.js
+var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
+var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
+var STORAGE_BACKENDS = ["sqlite", "postgres"];
+var MOVE_STORE_COMMAND = 'node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite';
+var CONFIG_REL = ".sterling/config.json";
+var StoreSettingsError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "StoreSettingsError";
+  }
+};
+var StoreUnreachableError = class extends Error {
+  target;
+  constructor(target, detail) {
+    super(`storage 'postgres': the Postgres store database at ${target} is unreachable (${detail}). Postgres storage never falls back to SQLite; nothing was written.`);
+    this.target = target;
+    this.name = "StoreUnreachableError";
+  }
+};
+var PostgresStoreNotMovedError = class extends PgStoreMissingError {
+  constructor(cause) {
+    super(cause.schema, "see the message");
+    this.message = `${cause.message} config.storage is 'postgres', so this store should exist: move the project's stores with \`node "<Sterling root>/bin/move-store.mjs" --to pg\`. Nothing was created.`;
+    this.name = "PostgresStoreNotMovedError";
+  }
+};
+function routedCredentialsPath() {
+  return join7(homedir3(), ".sterling", "credentials", "served.json");
+}
+function readConfig(root) {
+  const path = join7(root, CONFIG_REL);
+  try {
+    lstatSync3(path);
+  } catch (e) {
+    if (e?.code === "ENOENT")
+      return null;
+    throw new StoreSettingsError(`${path} cannot be read: ${e.message}`);
+  }
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync3(path, "utf8"));
+  } catch (e) {
+    throw new StoreSettingsError(`malformed ${path}: ${e.message}. Nothing was opened.`);
+  }
+  const storage = raw?.storage;
+  if (storage !== void 0 && !STORAGE_BACKENDS.includes(storage)) {
+    throw new StoreSettingsError(`config.storage is ${JSON.stringify(storage)} in ${path} \u2014 it must be 'sqlite' or 'postgres' (absent means 'sqlite'). Only ${MOVE_STORE_COMMAND} sets it. Nothing was opened.`);
+  }
+  try {
+    return { raw, config: parseConfig(raw) };
+  } catch (e) {
+    throw new StoreSettingsError(`malformed ${path}: ${e.message}. Nothing was opened.`);
+  }
+}
+function testNamespace() {
+  const ns = process.env[PG_TEST_NAMESPACE_ENV];
+  if (ns === void 0 || ns === "")
+    return void 0;
+  if (!/^sterling_test_[a-z0-9]+$/.test(ns)) {
+    throw new StoreSettingsError(`${PG_TEST_NAMESPACE_ENV}='${ns}' is refused: it must be sterling_test_<lowercase letters and digits>`);
+  }
+  return ns;
+}
+function pgStoreNames(projectId, stackTags) {
+  const ns = testNamespace();
+  const metaSchema = ns ? `${ns}_meta` : PG_META_SCHEMA;
+  const projectSchema = ns ? pgProjectSchemaName(projectId).replace(/^sterling_p_/, `${ns}_p_`) : pgProjectSchemaName(projectId);
+  assertSterlingSchemaName(metaSchema);
+  assertSterlingSchemaName(projectSchema);
+  const bySchema = /* @__PURE__ */ new Map();
+  const domains = stackTags.map((name) => {
+    const schema = ns ? pgDomainSchemaName(name).replace(/^sterling_d_/, `${ns}_d_`) : pgDomainSchemaName(name);
+    assertSterlingSchemaName(schema);
+    const other = bySchema.get(schema);
+    if (other !== void 0) {
+      throw new StoreSettingsError(`domains '${other}' and '${name}' both map to the Postgres schema '${schema}'; rename one in stack_tags. Nothing was opened.`);
+    }
+    bySchema.set(schema, name);
+    return { name, schema };
+  });
+  return { metaSchema, projectSchema, domains };
+}
+function resolveStoreRoute(root) {
+  const absRoot = resolve2(root);
+  const read = readConfig(absRoot);
+  if (read === null)
+    return null;
+  const { config } = read;
+  if (read.raw.storage !== "postgres") {
+    return { storage: "sqlite", root: absRoot, config, projectDbPath: join7(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
+  }
+  const shown = absRoot.replace(/\\/g, "/");
+  const identity = readProjectIdentity(absRoot);
+  if (identity === null) {
+    throw new ProjectIdentityError(`storage 'postgres' needs the project identity file ${shown}/.sterling/project.json ({"project_id": "<uuid v4>"}); it is missing. Restore it from git, or let init write it. Nothing was opened.`);
+  }
+  const credentialsPath = routedCredentialsPath();
+  try {
+    readPgCredentials(credentialsPath);
+  } catch (e) {
+    if (e instanceof PgConfigError)
+      throw new StoreSettingsError(`storage 'postgres': ${e.message}. Nothing was opened; Postgres storage never falls back to SQLite.`);
+    throw e;
+  }
+  const names = pgStoreNames(identity.project_id, config.stack_tags);
+  return {
+    storage: "postgres",
+    root: absRoot,
+    config,
+    projectId: identity.project_id,
+    credentialsPath,
+    metaSchema: names.metaSchema,
+    projectSchema: names.projectSchema,
+    domains: names.domains.map((d) => ({ ...d, dbPath: `postgres:${d.schema}` })),
+    ...testNamespace() ? { testNamespace: testNamespace() } : {}
+  };
+}
+var bridges = /* @__PURE__ */ new Map();
+function connectionLabel(config) {
+  return `${config.host}:${config.port}/${config.database}`;
+}
+function acquireBridge(credentialsPath) {
+  const existing = bridges.get(credentialsPath);
+  if (existing && !existing.bridge.closed)
+    return existing;
+  bridges.delete(credentialsPath);
+  let config;
+  try {
+    config = readPgCredentials(credentialsPath);
+  } catch (e) {
+    if (e instanceof PgConfigError)
+      throw new StoreSettingsError(`storage 'postgres': ${e.message}. Nothing was opened; Postgres storage never falls back to SQLite.`);
+    throw e;
+  }
+  config = { ...config, connectionTimeoutMillis: Math.min(config.connectionTimeoutMillis, ROUTED_CONNECT_TIMEOUT_MS) };
+  let bridge;
+  try {
+    bridge = new PgBridge(config);
+  } catch (e) {
+    if (e instanceof PgWorkerDiedError || e instanceof PgBridgeTimeoutError)
+      throw new StoreUnreachableError(connectionLabel(config), e.message);
+    throw e;
+  }
+  const entry = { bridge, leases: 0 };
+  bridges.set(credentialsPath, entry);
+  return entry;
+}
+function releaseLease(credentialsPath, entry) {
+  entry.leases -= 1;
+  if (entry.leases > 0)
+    return;
+  if (bridges.get(credentialsPath) === entry)
+    bridges.delete(credentialsPath);
+  entry.bridge.close();
+}
+var RoutedPgDriver = class {
+  inner;
+  release;
+  dialect;
+  joinedReads = 0;
+  released = false;
+  pinned = false;
+  constructor(inner, release) {
+    this.inner = inner;
+    this.release = release;
+    this.dialect = inner.dialect;
+  }
+  prepare(sql) {
+    return this.inner.prepare(sql);
+  }
+  exec(sql) {
+    this.inner.exec(sql);
+  }
+  begin() {
+    this.inner.begin();
+  }
+  commit() {
+    this.inner.commit();
+  }
+  rollback() {
+    this.inner.rollback();
+  }
+  beginRead() {
+    if (this.inner.bridge.transactionOwner !== void 0) {
+      this.joinedReads += 1;
+      return;
+    }
+    this.inner.beginRead();
+  }
+  /** beginRead() with PgDriver's deferred BEGIN. A deferred BEGIN is pending only inside one
+   *  SterlingStore.readTx, whose statements all run on that store's own handle, so no other
+   *  handle runs a statement between the claim and the BEGIN. */
+  beginReadDeferred() {
+    if (this.inner.bridge.transactionOwner !== void 0) {
+      this.joinedReads += 1;
+      return;
+    }
+    this.inner.beginReadDeferred();
+  }
+  endRead() {
+    if (this.joinedReads > 0) {
+      this.joinedReads -= 1;
+      return;
+    }
+    this.inner.endRead();
+  }
+  /** Holds one REPEATABLE READ READ ONLY transaction until close: every read sees one snapshot and every write is refused (the bridge refuses the write's BEGIN). */
+  pinReadOnlySnapshot() {
+    this.inner.beginRead();
+    this.pinned = true;
+  }
+  schemaVersion() {
+    return this.inner.schemaVersion();
+  }
+  setSchemaVersion(version) {
+    this.inner.setSchemaVersion(version);
+  }
+  hasSchema() {
+    return this.inner.hasSchema();
+  }
+  prepareReadOnly() {
+    this.inner.prepareReadOnly();
+  }
+  prepareWritable(isFresh) {
+    this.inner.prepareWritable(isFresh);
+  }
+  publishFresh(supported) {
+    return this.inner.publishFresh(supported);
+  }
+  journalMode() {
+    return this.inner.journalMode();
+  }
+  snapshot(targetPath) {
+    this.inner.snapshot(targetPath);
+  }
+  close() {
+    if (this.released)
+      return;
+    this.released = true;
+    try {
+      if (this.pinned) {
+        this.pinned = false;
+        this.inner.endRead();
+      }
+    } finally {
+      try {
+        this.inner.close();
+      } finally {
+        this.release();
+      }
+    }
+  }
+};
+function openWorkStore(route, entry, schema, options = {}) {
+  let inner;
+  try {
+    inner = new PgDriver(entry.bridge, { schema, metaSchema: route.metaSchema });
+  } catch (e) {
+    if (e instanceof PgStoreMissingError)
+      throw new PostgresStoreNotMovedError(e);
+    throw e;
+  }
+  entry.leases += 1;
+  const driver = new RoutedPgDriver(inner, () => releaseLease(route.credentialsPath, entry));
+  try {
+    const store = new SterlingStore(`postgres:${schema}`, { driver });
+    if (options.readOnlySnapshot)
+      driver.pinReadOnlySnapshot();
+    return store;
+  } catch (e) {
+    driver.close();
+    throw e;
+  }
+}
+function routeOrDefault(root) {
+  const route = resolveStoreRoute(root);
+  if (route !== null)
+    return route;
+  const config = parseConfig({});
+  const absRoot = resolve2(root);
+  return { storage: "sqlite", root: absRoot, config, projectDbPath: join7(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
+}
+function openRoutedStores(root, opts = {}) {
+  const route = routeOrDefault(root);
+  if (route.storage === "sqlite") {
+    if (opts.mount) {
+      return { route, config: route.config, stores: new MountedStores(route.projectDbPath, route.domains, { skipMissing: opts.skipMissing }), connectionLost: () => void 0 };
+    }
+    if (opts.readOnlySnapshot)
+      throw new StoreSettingsError("readOnlySnapshot is a Postgres-storage option; a SQLite read-only open copies the file instead");
+    return { route, config: route.config, store: new SterlingStore(route.projectDbPath) };
+  }
+  const entry = acquireBridge(route.credentialsPath);
+  const closeIfUnused = () => {
+    if (entry.leases === 0) {
+      if (bridges.get(route.credentialsPath) === entry)
+        bridges.delete(route.credentialsPath);
+      entry.bridge.close();
+    }
+  };
+  try {
+    if (opts.mount) {
+      const stores = new MountedStores(`postgres:${route.projectSchema}`, route.domains, {
+        work: {
+          openProject: () => openWorkStore(route, entry, route.projectSchema),
+          openDomain: (m) => openWorkStore(route, entry, schemaOf(route, m.name))
+        }
+      });
+      return { route, config: route.config, stores, connectionLost: () => entry.bridge.closeReason };
+    }
+    return { route, config: route.config, store: openWorkStore(route, entry, route.projectSchema, { readOnlySnapshot: opts.readOnlySnapshot }) };
+  } catch (e) {
+    closeIfUnused();
+    throw e;
+  }
+}
+function schemaOf(route, name) {
+  const d = route.domains.find((x) => x.name === name);
+  if (!d)
+    throw new Error(`routing: domain '${name}' is not in the route's stack_tags`);
+  return d.schema;
+}
+
+// scripts/hooks/lib/broker-client.mjs
+import { realpathSync as realpathSync3 } from "node:fs";
+import { MessageChannel as MessageChannel2, Worker as Worker2, receiveMessageOnPort as receiveMessageOnPort2 } from "node:worker_threads";
+var WORKER_SOURCE = `
+const { workerData } = require('node:worker_threads');
+const net = require('node:net');
+const { port, signal, maxResponse } = workerData;
+let sock = null;
+let buf = Buffer.alloc(0);
+let pending = null;
+let dead = null;
+const done = (msg) => { port.postMessage(msg); Atomics.add(signal, 0, 1); Atomics.notify(signal, 0); };
+const fail = (reason) => {
+  if (dead === null) dead = reason;
+  if (pending) { const p = pending; pending = null; done({ seq: p.seq, ok: false, failure: dead }); }
+};
+const onData = (chunk) => {
+  buf = Buffer.concat([buf, chunk]);
+  while (buf.length >= 4) {
+    const len = buf.readUInt32BE(0);
+    if (len > maxResponse) { fail('a ' + len + '-byte response frame is over the ' + maxResponse + '-byte bound'); sock.destroy(); return; }
+    if (buf.length < 4 + len) return;
+    const body = buf.subarray(4, 4 + len).toString('utf8');
+    buf = buf.subarray(4 + len);
+    if (pending && pending.kind === 'send') { const p = pending; pending = null; done({ seq: p.seq, ok: true, body }); }
+    else fail('an unexpected frame arrived with no call waiting');
+  }
+};
+port.on('message', (m) => {
+  if (m.kind === 'connect') {
+    pending = { seq: m.seq, kind: 'connect' };
+    sock = net.createConnection(m.path);
+    sock.once('connect', () => { if (pending && pending.kind === 'connect') { const p = pending; pending = null; done({ seq: p.seq, ok: true }); } });
+    sock.on('data', onData);
+    sock.on('error', (e) => fail('socket error ' + (e.code || e.message)));
+    sock.on('close', () => fail('the broker closed the connection'));
+  } else if (m.kind === 'send') {
+    if (dead !== null) { done({ seq: m.seq, ok: false, failure: dead }); return; }
+    pending = { seq: m.seq, kind: 'send' };
+    sock.write(Buffer.from(m.frame));
+  } else if (m.kind === 'close') {
+    if (sock) sock.destroy();
+  }
+});
+`;
+var BrokerOutcomeUnknownError = class extends Error {
+  constructor(what, detail) {
+    super(`hook store broker: the outcome of ${what} is unknown (${detail}). It may or may not have run; it was not replayed, and this hook makes no further broker calls.`);
+    this.name = "BrokerOutcomeUnknownError";
+  }
+};
+var BrokerOperationRefusedError = class extends Error {
+  constructor(target, op) {
+    super(`hook store broker: '${target}.${op}' is not in the operation registry (BROKER_OPERATIONS in @sterling/schemas); nothing was sent`);
+    this.name = "BrokerOperationRefusedError";
+  }
+};
+var BrokerClosedError = class extends Error {
+  constructor(reason) {
+    super(`hook store broker: this hook's broker connection is closed (${reason}); nothing was sent`);
+    this.name = "BrokerClosedError";
+  }
+};
+var failureHandler = null;
+var INFRASTRUCTURE_ERROR = /^(Broker\w*Error|StoreUnreachableError|StoreSettingsError|DomainUnavailableError|PostgresStoreNotMovedError|PgStoreMissingError|Pg\w*Error)$/;
+var failed = (e) => {
+  if (failureHandler) failureHandler(e);
+  return e;
+};
+function remoteError(wire) {
+  const name = /^[A-Za-z_$][\w$]*$/.test(wire.name) ? wire.name : "Error";
+  const Named = { [name]: class extends Error {
+  } }[name];
+  const e = new Named(wire.message);
+  for (const [k, v] of Object.entries(wire.fields ?? {})) if (k !== "message" && k !== "stack") e[k] = v;
+  e.name = name;
+  return e;
+}
+function frame(value) {
+  const body = Buffer.from(JSON.stringify(value), "utf8");
+  const head = Buffer.alloc(4);
+  head.writeUInt32BE(body.length, 0);
+  return Buffer.concat([head, body]);
+}
+var SyncSocket = class {
+  constructor() {
+    this.signal = new Int32Array(new SharedArrayBuffer(4));
+    const { port1, port2 } = new MessageChannel2();
+    this.port = port1;
+    this.seq = 0;
+    this.worker = new Worker2(WORKER_SOURCE, { eval: true, workerData: { port: port2, signal: this.signal, maxResponse: BROKER_MAX_RESPONSE_BYTES }, transferList: [port2] });
+    this.worker.unref();
+    this.port.unref();
+    this.worker.on("error", () => {
+    });
+  }
+  /** {ok:true, body?} or {ok:false, failure}; never throws. */
+  request(msg, timeoutMs2) {
+    const seq = ++this.seq;
+    this.port.postMessage({ ...msg, seq });
+    const deadline = Date.now() + timeoutMs2;
+    for (; ; ) {
+      const cur = Atomics.load(this.signal, 0);
+      const got = receiveMessageOnPort2(this.port);
+      if (got) {
+        if (got.message.seq === seq) return got.message;
+        continue;
+      }
+      const left = deadline - Date.now();
+      if (left <= 0) return { ok: false, failure: `no reply within ${timeoutMs2} ms`, timedOut: true };
+      Atomics.wait(this.signal, 0, cur, left);
+    }
+  }
+  close() {
+    try {
+      this.port.postMessage({ kind: "close" });
+    } catch {
+    }
+    this.worker.terminate();
+  }
+};
+var BrokerClient = class {
+  constructor(sock, identity, root) {
+    this.sock = sock;
+    this.identity = identity;
+    this.root = root;
+    this.nextId = 1;
+    this.dead = null;
+    this.txStore = null;
+    this.direct = null;
+    this.project = this.proxy("project", {
+      close: () => {
+      },
+      withTransaction: (fn) => this.withTransaction(fn)
+    });
+    this.mounted = this.proxy("mounted", { project: this.project, close: () => {
+    } });
+  }
+  proxy(target, extras) {
+    return new Proxy(
+      {},
+      {
+        get: (_, prop) => {
+          if (typeof prop !== "string" || prop === "then") return void 0;
+          if (Object.hasOwn(extras, prop)) return extras[prop];
+          if (target === "project" && this.txStore) {
+            const v = this.txStore[prop];
+            return typeof v === "function" ? v.bind(this.txStore) : v;
+          }
+          return (...args) => this.call(target, prop, args);
+        }
+      }
+    );
+  }
+  call(target, op, args) {
+    if (!isBrokerOperation(target, op)) throw new BrokerOperationRefusedError(target, op);
+    if (this.dead) throw failed(new BrokerClosedError(this.dead));
+    const id = this.nextId++;
+    const what = `'${target}.${op}' (call ${id} to instance ${this.identity.instance_id})`;
+    const reply = this.sock.request({ kind: "send", frame: frame({ type: "call", id, target, op, args, sent_at: Date.now() }) }, BROKER_BOUNDS.queueMs + BROKER_BOUNDS.executeMs);
+    if (!reply.ok) return this.lose(what, reply.failure);
+    let res;
+    try {
+      res = brokerResultSchema.parse(JSON.parse(reply.body));
+    } catch (e) {
+      return this.lose(what, `the reply is not a result (${e && e.message || e})`);
+    }
+    if (res.id !== id) return this.lose(what, `the reply answers call ${res.id}`);
+    if (res.ok) return res.result;
+    const err = remoteError(res.error);
+    throw INFRASTRUCTURE_ERROR.test(err.name) ? failed(err) : err;
+  }
+  lose(what, detail) {
+    this.dead = `the outcome of ${what} is unknown`;
+    this.sock.close();
+    throw failed(new BrokerOutcomeUnknownError(what, detail));
+  }
+  withTransaction(fn) {
+    if (!this.direct) this.direct = openRoutedStores(this.root).store;
+    this.txStore = this.direct;
+    try {
+      return this.direct.withTransaction(fn);
+    } finally {
+      this.txStore = null;
+    }
+  }
+};
+function connectBroker(route, { env = process.env } = {}) {
+  let root;
+  let storage;
+  try {
+    root = realpathSync3(route.root);
+    storage = brokerStorageIdentity(route);
+  } catch (e) {
+    return { client: null, reason: `this hook cannot derive its own identity (${e && e.message || e})` };
+  }
+  let dir;
+  try {
+    dir = brokerDir({ create: false, env });
+  } catch (e) {
+    return { client: null, reason: e && e.message || String(e) };
+  }
+  if (dir === void 0) return { client: null, reason: "no broker runtime directory exists, so no MCP server has published a broker" };
+  let listed;
+  try {
+    listed = listBrokerRegistrations(dir, root);
+  } catch (e) {
+    return { client: null, reason: `the broker registry cannot be read (${e && e.message || e})` };
+  }
+  const reasons = listed.refused.map((r) => `${r.file}: ${r.reason}`);
+  for (const reg of listed.registrations) {
+    const tag = `instance ${reg.instance_id}`;
+    const mismatch = reg.protocol !== BROKER_PROTOCOL ? `protocol ${reg.protocol}, not ${BROKER_PROTOCOL}` : reg.project_id !== route.projectId ? `project ${reg.project_id}, not ${route.projectId}` : reg.root !== root ? `root ${reg.root}, not ${root}` : JSON.stringify(reg.storage) !== JSON.stringify(storage) ? `storage ${JSON.stringify(reg.storage)}, not ${JSON.stringify(storage)}` : reg.socket !== brokerSocketPath(dir, reg.instance_id) ? `socket ${reg.socket} is not this instance's path in ${dir}` : null;
+    if (mismatch) {
+      reasons.push(`${tag}: registered ${mismatch}`);
+      continue;
+    }
+    try {
+      assertPrivate(reg.socket, "socket");
+    } catch (e) {
+      reasons.push(`${tag}: ${e.message}`);
+      continue;
+    }
+    const sock = new SyncSocket();
+    const connected = sock.request({ kind: "connect", path: reg.socket }, BROKER_BOUNDS.connectMs);
+    if (!connected.ok) {
+      sock.close();
+      reasons.push(`${tag}: connect failed (${connected.failure})`);
+      continue;
+    }
+    const hello = sock.request({ kind: "send", frame: frame({ type: "hello", protocol: BROKER_PROTOCOL, instance_id: reg.instance_id, project_id: route.projectId, root }) }, BROKER_BOUNDS.handshakeMs);
+    let welcome;
+    try {
+      if (!hello.ok) throw new Error(hello.failure);
+      welcome = brokerWelcomeSchema.parse(JSON.parse(hello.body));
+    } catch (e) {
+      sock.close();
+      reasons.push(`${tag}: handshake failed (${e && e.message || e})`);
+      continue;
+    }
+    if (welcome.type === "refused") {
+      sock.close();
+      reasons.push(`${tag}: refused the hello (${welcome.error.name}: ${welcome.error.message})`);
+      continue;
+    }
+    const id = welcome.identity;
+    const wrong = id.instance_id !== reg.instance_id ? `answered as instance ${id.instance_id}` : id.protocol !== BROKER_PROTOCOL ? `answered with protocol ${id.protocol}` : id.project_id !== route.projectId ? `answered for project ${id.project_id}` : id.root !== root ? `answered for root ${id.root}` : JSON.stringify(id.storage) !== JSON.stringify(storage) ? `answered with storage ${JSON.stringify(id.storage)}` : null;
+    if (wrong) {
+      sock.close();
+      reasons.push(`${tag}: refused, the server ${wrong}`);
+      continue;
+    }
+    return { client: new BrokerClient(sock, id, route.root) };
+  }
+  if (!listed.registrations.length && !reasons.length) reasons.push("no MCP server has published a broker for this project");
+  return { client: null, reason: reasons.join("; ") };
+}
+var clients = /* @__PURE__ */ new Map();
+var degradedSaid = false;
+function brokerFallbackLine(reason) {
+  return `Sterling hook: DEGRADED \u2014 no hook store broker answered for this project (${reason}); this hook opens its own Postgres connection, which costs a login per hook.
+`;
+}
+function openRoutedForHook(root, { mount = false } = {}) {
+  const route = resolveStoreRoute(root);
+  if (route?.storage !== "postgres") return mount ? { stores: openRoutedStores(root, { mount: true }).stores } : { store: openRoutedStores(root).store };
+  let got = clients.get(route.root);
+  if (got === void 0) {
+    got = connectBroker(route);
+    clients.set(route.root, got);
+  }
+  if (got.client) return mount ? { stores: got.client.mounted } : { store: got.client.project };
+  if (!degradedSaid) {
+    degradedSaid = true;
+    try {
+      process.stderr.write(brokerFallbackLine(got.reason));
+    } catch {
+    }
+  }
+  return mount ? { stores: openRoutedStores(root, { mount: true }).stores } : { store: openRoutedStores(root).store };
+}
+
+// scripts/hooks/lib/store-backend.mjs
+import { existsSync as existsSync3, readFileSync as readFileSync4 } from "node:fs";
+import { join as join8 } from "node:path";
+var CONFIG_REL2 = join8(".sterling", "config.json");
+var STORE_DB_REL = join8(".sterling", "sterling.db");
+function isSterlingRoot(dir) {
+  return typeof dir === "string" && (existsSync3(join8(dir, CONFIG_REL2)) || existsSync3(join8(dir, STORE_DB_REL)));
+}
+function storeBackend(root) {
+  const dbExists = () => existsSync3(join8(root, STORE_DB_REL));
+  let text;
+  try {
+    text = readFileSync4(join8(root, CONFIG_REL2), "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return "sqlite";
+    return dbExists() ? "sqlite" : "routed";
+  }
+  let storage;
+  try {
+    storage = JSON.parse(text)?.storage;
+  } catch {
+    return dbExists() ? "sqlite" : "routed";
+  }
+  return storage === void 0 || storage === "sqlite" ? "sqlite" : "routed";
+}
+
 // scripts/hooks/lib/common.mjs
 function projectRoot(from) {
   if (!from) return null;
-  let dir = resolve(String(from));
+  let dir = resolve3(String(from));
   for (; ; ) {
-    if (existsSync2(join3(dir, ".sterling", "sterling.db"))) return dir;
-    const parent = dirname3(dir);
+    if (isSterlingRoot(dir)) return dir;
+    const parent = dirname4(dir);
     if (parent === dir) return null;
     dir = parent;
   }
 }
 function readStdin() {
-  const input2 = JSON.parse(readFileSync(0, "utf8"));
+  const input2 = JSON.parse(readFileSync5(0, "utf8"));
   const root = projectRoot(input2.cwd);
   if (root) input2.cwd = root;
   return input2;
@@ -8043,19 +11177,40 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   exit: (code) => process.exit(code)
 });
 function loadConfig(cwd) {
-  const p = join3(cwd, ".sterling", "config.json");
-  return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
+  const p = join9(cwd, ".sterling", "config.json");
+  return existsSync4(p) ? JSON.parse(readFileSync5(p, "utf8")) : null;
 }
 function openStore(cwd) {
-  const p = join3(cwd, ".sterling", "sterling.db");
-  return existsSync2(p) ? new SterlingStore(p) : null;
+  if (storeBackend(cwd) === "routed") {
+    const route = resolveStoreRoute(cwd);
+    if (route?.storage === "postgres") return openRoutedForHook(cwd).store;
+  }
+  const p = join9(cwd, ".sterling", "sterling.db");
+  return existsSync4(p) ? new SterlingStore(p) : null;
+}
+function namedError(e) {
+  const name = e?.constructor?.name && e.constructor.name !== "Object" ? e.constructor.name : e?.name ?? "Error";
+  return `${name}: ${e?.message ?? String(e)}`;
+}
+function storeUnavailableLine(who, e) {
+  return `${who}: DEGRADED \u2014 the project store could not be opened, so this hook did nothing this time (${namedError(e)}).
+`;
+}
+function openStoreOrDegrade(cwd, who, open2 = openStore) {
+  if (storeBackend(cwd) === "sqlite") return open2(cwd);
+  try {
+    return open2(cwd);
+  } catch (e) {
+    warnNonBlocking(storeUnavailableLine(who, e));
+    return null;
+  }
 }
 function repoRel(toolPath, cwd) {
   if (!toolPath) return null;
-  const fwd = String(toolPath).replace(/\\/g, "/");
+  const fwd2 = String(toolPath).replace(/\\/g, "/");
   try {
-    if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) return toRepoRelative(fwd, cwd);
-    return normalizeRepoPath(fwd);
+    if (/^[A-Za-z]:/.test(fwd2) || fwd2.startsWith("/")) return toRepoRelative(fwd2, cwd);
+    return normalizeRepoPath(fwd2);
   } catch {
     return null;
   }
@@ -8069,15 +11224,15 @@ function isForeignTree(record, root) {
 }
 
 // scripts/hooks/lib/hazard-lane-mode.mjs
-import { readFileSync as readFileSync3 } from "node:fs";
-import { join as join5 } from "node:path";
+import { readFileSync as readFileSync7 } from "node:fs";
+import { join as join11 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync3, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
-import { join as join4, resolve as resolve2, dirname as dirname4, isAbsolute } from "node:path";
+import { mkdirSync as mkdirSync4, readFileSync as readFileSync6, writeFileSync as writeFileSync2, rmSync as rmSync3, rmdirSync, renameSync as renameSync2, existsSync as existsSync5, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync4, chmodSync } from "node:fs";
+import { join as join10, resolve as resolve4, dirname as dirname5, isAbsolute } from "node:path";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 function registerPath(root) {
-  return join4(root, ".sterling", "transient", "dispatch-register.json");
+  return join10(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -8099,10 +11254,10 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync3(p)) return { availability: "absent", arr: [] };
+  if (!existsSync5(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
-    raw = readFileSync2(p, "utf8");
+    raw = readFileSync6(p, "utf8");
   } catch {
     return { availability: "corrupt", arr: [] };
   }
@@ -8171,7 +11326,7 @@ function hazardLaneMode(input2, root) {
     if (!input2 || typeof input2.agent_id !== "string" || !input2.agent_id) return "whole";
     const type = laneAgentType(input2, root);
     if (!type || !PLAIN_AGENT_NAME.test(type)) return "whole";
-    const tools = frontmatterTools(readFileSync3(join5(root, ".claude", "agents", `${type}.md`), "utf8"));
+    const tools = frontmatterTools(readFileSync7(join11(root, ".claude", "agents", `${type}.md`), "utf8"));
     if (!tools) return "whole";
     return tools.every((t) => READ_ONLY_TOOLS.has(t)) ? "pointer" : "whole";
   } catch {
@@ -8180,14 +11335,14 @@ function hazardLaneMode(input2, root) {
 }
 
 // scripts/hooks/h19-bash-delivery.mjs
-import { statSync as statSync3 } from "node:fs";
+import { statSync as statSync4 } from "node:fs";
 import { spawn } from "node:child_process";
 
 // scripts/hooks/lib/maintenance-worker.mjs
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync, existsSync as existsSync4, mkdirSync as mkdirSync3, openSync, readFileSync as readFileSync4, renameSync as renameSync2, rmSync as rmSync2, rmdirSync as rmdirSync2, statSync as statSync2, writeFileSync as writeFileSync2, appendFileSync } from "node:fs";
-import { dirname as dirname5, isAbsolute as isAbsolute2, join as join6, resolve as resolve3, sep } from "node:path";
+import { closeSync as closeSync3, existsSync as existsSync6, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync8, renameSync as renameSync3, rmSync as rmSync4, rmdirSync as rmdirSync2, statSync as statSync3, writeFileSync as writeFileSync3, appendFileSync } from "node:fs";
+import { dirname as dirname6, isAbsolute as isAbsolute2, join as join12, resolve as resolve5, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
@@ -8224,28 +11379,28 @@ var OPENCODE_MODEL_KEY = "opencode_model";
 var opencodeModelOf = (config) => config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
 var OPENCODE_MODEL_UNSET = `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
 function workerPaths(root) {
-  const sterling = join6(root, ".sterling");
+  const sterling = join12(root, ".sterling");
   return {
-    lock: join6(sterling, "transient", "maintenance-worker.lock"),
-    takeover: join6(sterling, "transient", "maintenance-worker.lock.takeover"),
-    lastLaunch: join6(sterling, "transient", "maintenance-worker.last-launch"),
-    eligible: join6(sterling, "transient", "maintenance-worker.eligible.json"),
-    state: join6(sterling, "transient", "maintenance-worker.state.json"),
-    log: join6(sterling, "maintenance-worker.log"),
-    journal: join6(sterling, "maintenance-worker.jsonl")
+    lock: join12(sterling, "transient", "maintenance-worker.lock"),
+    takeover: join12(sterling, "transient", "maintenance-worker.lock.takeover"),
+    lastLaunch: join12(sterling, "transient", "maintenance-worker.last-launch"),
+    eligible: join12(sterling, "transient", "maintenance-worker.eligible.json"),
+    state: join12(sterling, "transient", "maintenance-worker.state.json"),
+    log: join12(sterling, "maintenance-worker.log"),
+    journal: join12(sterling, "maintenance-worker.jsonl")
   };
 }
 function pluginRootFrom(moduleUrl = import.meta.url) {
-  let dir = dirname5(fileURLToPath(moduleUrl));
+  let dir = dirname6(fileURLToPath(moduleUrl));
   for (let i = 0; i < 5; i++) {
-    if (existsSync4(join6(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname5(dir);
+    if (existsSync6(join12(dir, ".claude-plugin", "plugin.json"))) return dir;
+    dir = dirname6(dir);
   }
   return null;
 }
 function readJson(path) {
   try {
-    return JSON.parse(readFileSync4(path, "utf8"));
+    return JSON.parse(readFileSync8(path, "utf8"));
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     return { unreadable: String(e?.message ?? e) };
@@ -8253,7 +11408,7 @@ function readJson(path) {
 }
 function rotateIfLarge(path, limit = ROTATE_BYTES) {
   try {
-    if (statSync2(path).size > limit) renameSync2(path, `${path}.1`);
+    if (statSync3(path).size > limit) renameSync3(path, `${path}.1`);
   } catch (e) {
     if (e?.code !== "ENOENT") throw e;
   }
@@ -8265,7 +11420,7 @@ function judgedVerdicts(root) {
   for (const path of [`${journal}.1`, journal]) {
     let text;
     try {
-      text = readFileSync4(path, "utf8");
+      text = readFileSync8(path, "utf8");
     } catch (e) {
       if (e?.code === "ENOENT") continue;
       throw e;
@@ -8343,7 +11498,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   const body = JSON.stringify({ ...content, token });
   const tryCreate = () => {
     try {
-      writeFileSync2(paths.lock, body, { flag: "wx" });
+      writeFileSync3(paths.lock, body, { flag: "wx" });
       return true;
     } catch (e) {
       if (e?.code === "EEXIST") return false;
@@ -8353,12 +11508,12 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   if (!tryCreate()) {
     if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
     try {
-      mkdirSync3(paths.takeover);
+      mkdirSync5(paths.takeover);
     } catch (e) {
       if (e?.code !== "EEXIST") throw e;
       let age = 0;
       try {
-        age = Date.now() - statSync2(paths.takeover).mtimeMs;
+        age = Date.now() - statSync3(paths.takeover).mtimeMs;
       } catch {
       }
       if (age > TAKEOVER_STALE_MS) rmdirSync2(paths.takeover);
@@ -8366,7 +11521,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
     }
     try {
       if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
-      rmSync2(paths.lock, { force: true });
+      rmSync4(paths.lock, { force: true });
       if (!tryCreate()) return null;
     } finally {
       rmdirSync2(paths.takeover);
@@ -8375,10 +11530,10 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   return readJson(paths.lock)?.token === token ? token : null;
 }
 function resolveMcpConfig(pluginRoot, projectRoot2) {
-  const path = join6(pluginRoot, ".claude-plugin", "sterling-mcp.json");
+  const path = join12(pluginRoot, ".claude-plugin", "sterling-mcp.json");
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync4(path, "utf8"));
+    parsed = JSON.parse(readFileSync8(path, "utf8"));
   } catch (e) {
     throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) \u2014 it ships committed with the plugin, so this plugin tree is incomplete: restore it (git checkout -- .claude-plugin/sterling-mcp.json in a clone) or reinstall the plugin`);
   }
@@ -8390,9 +11545,9 @@ function resolveMcpConfig(pluginRoot, projectRoot2) {
   return JSON.stringify({ mcpServers: { [SERVER2]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
 }
 function readWorkerPrompt(pluginRoot) {
-  const path = join6(pluginRoot, "templates", "maintenance-worker-prompt.md");
+  const path = join12(pluginRoot, "templates", "maintenance-worker-prompt.md");
   try {
-    return readFileSync4(path, "utf8");
+    return readFileSync8(path, "utf8");
   } catch (e) {
     throw new Error(`cannot read the worker prompt ${path} (${e?.code ?? e?.message ?? e})`);
   }
@@ -8403,12 +11558,12 @@ function readState(root) {
 }
 function writeLastRun(root, lastRun) {
   const { state } = workerPaths(root);
-  mkdirSync3(dirname5(state), { recursive: true });
-  writeFileSync2(state, JSON.stringify({ last_run: lastRun }));
+  mkdirSync5(dirname6(state), { recursive: true });
+  writeFileSync3(state, JSON.stringify({ last_run: lastRun }));
 }
 function logLauncherNote(root, reason, detail) {
   const { log } = workerPaths(root);
-  mkdirSync3(dirname5(log), { recursive: true });
+  mkdirSync5(dirname6(log), { recursive: true });
   rotateIfLarge(log);
   appendFileSync(log, `maintenance-worker: ${(/* @__PURE__ */ new Date()).toISOString()} ${reason}: ${detail}
 `);
@@ -8448,8 +11603,8 @@ function launchWorker(opts) {
     if (env[WORKER_DISABLE_ENV] === "1") return { launched: false, reason: "disabled_env" };
     if (opts.config?.maintenance_worker?.enabled === false) return { launched: false, reason: "disabled" };
     const verdicts = judgedVerdicts(opts.root);
-    const open = (opts.items ?? openReconcileItems(opts.store)).filter((t) => !isJudged(t, verdicts, null));
-    if (open.length === 0) return { launched: false, reason: "queue_empty" };
+    const open2 = (opts.items ?? openReconcileItems(opts.store)).filter((t) => !isJudged(t, verdicts, null));
+    if (open2.length === 0) return { launched: false, reason: "queue_empty" };
     const nowMs = opts.now ?? Date.now();
     const paths = workerPaths(opts.root);
     const state = readState(opts.root);
@@ -8465,11 +11620,11 @@ function launchWorker(opts) {
     const lastLaunch = Number(readJson(paths.lastLaunch)?.at_ms);
     if (Number.isFinite(lastLaunch) && nowMs - lastLaunch < DEBOUNCE_MS) return { launched: false, reason: "debounced" };
     const git = gitState(opts.root, opts.spawnSync);
-    const dirty = git && dirtyPaths(opts.root, [...new Set(open.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git.prefix);
+    const dirty = git && dirtyPaths(opts.root, [...new Set(open2.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git.prefix);
     if (!dirty) {
       return { launched: false, reason: "git_failed", detail: `git could not report HEAD or the working-tree state in ${opts.root}, so every reconcile item counts as dirty and no worker starts; drain with /sterling:drain.` };
     }
-    const eligible = open.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
+    const eligible = open2.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
     if (eligible.length === 0) return { launched: false, reason: "none_eligible" };
     const waited = (t) => {
       const created = Date.parse(t.created_at ?? "");
@@ -8495,19 +11650,19 @@ function launchWorker(opts) {
     if (!pluginRoot) return { launched: false, reason: "error", detail: failDetail("plugin root not found above the hook") };
     resolveMcpConfig(pluginRoot, opts.root);
     readWorkerPrompt(pluginRoot);
-    const runner = join6(pluginRoot, "scripts", "maintenance-worker-run.mjs");
-    if (!existsSync4(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
-    mkdirSync3(dirname5(paths.lock), { recursive: true });
+    const runner = join12(pluginRoot, "scripts", "maintenance-worker-run.mjs");
+    if (!existsSync6(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
+    mkdirSync5(dirname6(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: "already_running" };
-    writeFileSync2(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
+    writeFileSync3(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
     const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
-    writeFileSync2(paths.eligible, JSON.stringify({ token, head: git.head, ...runnerHost, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
+    writeFileSync3(paths.eligible, JSON.stringify({ token, head: git.head, ...runnerHost, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
     let logFd;
     try {
       rotateIfLarge(paths.log);
-      logFd = openSync(paths.log, "a");
+      logFd = openSync3(paths.log, "a");
       const child = opts.spawn(
         process.execPath,
         [runner, "--project", opts.root, "--trigger", String(opts.trigger), "--token", token, "--budget-usd", String(WORKER_RUN_BUDGET_USD)],
@@ -8515,20 +11670,20 @@ function launchWorker(opts) {
       );
       child.on?.("error", () => releaseLock(paths, token));
       child.unref?.();
-      writeFileSync2(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
+      writeFileSync3(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
       return { launched: true, reason: "launched", pid: child.pid, items: eligible.length, host };
     } catch (e) {
       releaseLock(paths, token);
       return { launched: false, reason: "error", detail: failDetail(`spawn: ${e?.message ?? e}`) };
     } finally {
-      if (logFd !== void 0) closeSync(logFd);
+      if (logFd !== void 0) closeSync3(logFd);
     }
   } catch (e) {
     return { launched: false, reason: "error", detail: failDetail(e?.message ?? String(e)) };
   }
 }
 function releaseLock(paths, token) {
-  if (readJson(paths.lock)?.token === token) rmSync2(paths.lock, { force: true });
+  if (readJson(paths.lock)?.token === token) rmSync4(paths.lock, { force: true });
 }
 function ageText(iso, nowMs = Date.now()) {
   const ms = nowMs - Date.parse(iso ?? "");
@@ -8541,22 +11696,22 @@ function ageText(iso, nowMs = Date.now()) {
 }
 
 // scripts/hooks/h19-bash-delivery.mjs
-import { join as join8 } from "node:path";
+import { join as join14 } from "node:path";
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync5, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, existsSync as existsSync5, renameSync as renameSync3, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
-import { join as join7, dirname as dirname6 } from "node:path";
+import { readFileSync as readFileSync9, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, existsSync as existsSync7, renameSync as renameSync4, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
+import { join as join13, dirname as dirname7 } from "node:path";
 function deliveryDir(cwd) {
-  return join7(cwd, ".sterling", "transient", "delivery");
+  return join13(cwd, ".sterling", "transient", "delivery");
 }
 function claimLegacyInjectionRungNotice(cwd, rawRung) {
   if (rawRung === "read") return null;
-  const transient = join7(cwd, ".sterling", "transient");
-  const marker = join7(transient, "legacy-injection-rung-noticed");
-  mkdirSync4(transient, { recursive: true });
+  const transient = join13(cwd, ".sterling", "transient");
+  const marker = join13(transient, "legacy-injection-rung-noticed");
+  mkdirSync6(transient, { recursive: true });
   try {
-    const fd = openSync2(marker, "wx");
-    closeSync2(fd);
+    const fd = openSync4(marker, "wx");
+    closeSync4(fd);
   } catch (error) {
     if (error?.code === "EEXIST") return null;
     throw error;
@@ -8585,11 +11740,11 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join7(deliveryDir(cwd), component);
+  return join13(deliveryDir(cwd), component);
 }
 function guardPath(cwd, agentId, sessionId) {
   const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join7(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+  return dir ? join13(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -8640,8 +11795,8 @@ function markGapDelivered(guard, records) {
 function readGuard(path) {
   if (!path) return emptyDeliveryGuard();
   try {
-    if (!existsSync5(path)) return emptyDeliveryGuard();
-    const parsed = JSON.parse(readFileSync5(path, "utf8"));
+    if (!existsSync7(path)) return emptyDeliveryGuard();
+    const parsed = JSON.parse(readFileSync9(path, "utf8"));
     if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
     return { ...emptyDeliveryGuard(), ...parsed };
   } catch {
@@ -8652,10 +11807,10 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   if (!path) return;
-  mkdirSync4(dirname6(path), { recursive: true });
+  mkdirSync6(dirname7(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync3(tmp, JSON.stringify(guard));
-  renameSync3(tmp, path);
+  writeFileSync4(tmp, JSON.stringify(guard));
+  renameSync4(tmp, path);
 }
 function statusBracket(record) {
   const status = record?.status ?? "unknown";
@@ -9263,7 +12418,7 @@ var input = readStdin();
 function main(input2) {
   const command = input2.tool_input?.command;
   if (!command) return allow();
-  const store = openStore(input2.cwd);
+  const store = openStoreOrDegrade(input2.cwd, "H19");
   if (!store) return allow();
   if (GIT_COMMIT_RE.test(command)) {
     maybeLaunchMaintenanceWorker({ root: input2.cwd, config: loadConfig(input2.cwd), store, trigger: "commit", spawn });
@@ -9288,7 +12443,7 @@ function main(input2) {
       if (guard.pointer_files.includes(rel)) continue;
       let isFile;
       try {
-        isFile = statSync3(join8(input2.cwd, rel)).isFile();
+        isFile = statSync4(join14(input2.cwd, rel)).isFile();
       } catch (e) {
         if (e?.code === "ENOENT" || e?.code === "ENOTDIR" || e?.code === "ENAMETOOLONG") continue;
         throw e;

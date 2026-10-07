@@ -28,7 +28,7 @@
 // session, P1) and records check_skipped so the degrade is never silent.
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { readStdin, allow, warnNonBlocking, openStore, repoRel } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, openStoreOrDegrade, repoRel } from './lib/common.mjs';
 import { withFileLock, parseTouchesContent } from './lib/settlement.mjs';
 
 const input = readStdin();
@@ -39,7 +39,7 @@ if (!rel) allow();
 // article demand — the tree is excluded, not pattern-matched per file
 if (rel === '.git' || rel.startsWith('.git/')) allow();
 
-const store = openStore(input.cwd);
+const store = openStoreOrDegrade(input.cwd, 'H7');
 if (!store) allow();
 
 try {

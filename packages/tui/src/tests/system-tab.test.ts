@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { SterlingStore } from '@sterling/store';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
 import { buildDashboardState, initialUi, TABS, type UiState, type DashboardState } from '../state.js';
@@ -210,7 +211,7 @@ const SR = stateMod as unknown as SystemArityStateMod;
 // has no model:/effort: to govern here), so the full registry list is no longer
 // 1:1 with "agents this tab lists a row for".
 const ROSTER_AGENTS: string[] = JSON.parse(
-  readFileSync(join(process.cwd(), 'agent-templates', 'registry.json'), 'utf8'),
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'agent-templates', 'registry.json'), 'utf8'),
 )
   .agents.map((agent: { name: string }) => agent.name)
   .filter((name: string) => name in AGENT_MODEL_KEY);

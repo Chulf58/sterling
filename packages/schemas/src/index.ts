@@ -75,3 +75,24 @@ export { projectRegistrationSchema } from './registry.js';
 export type { ProjectRegistration } from './registry.js';
 export { BUILD_ID_FILE, runtimeMarkerSchema, buildIdPath, runtimeMarkerPath, stalenessVerdict } from './staleness.js';
 export type { RuntimeMarker, StalenessVerdict } from './staleness.js';
+export { PROJECT_MODES, ProjectModeError, ProjectIdentityError, PROJECT_IDENTITY_REL, readProjectMode, readProjectIdentity, isProjectId } from './project.js';
+export type { ProjectMode } from './project.js';
+export {
+  BROKER_PROTOCOL,
+  BROKER_MAX_REQUEST_BYTES,
+  BROKER_MAX_RESPONSE_BYTES,
+  BROKER_DISCOVERY_MAX_ENTRIES,
+  BROKER_REGISTRY_MAX_BYTES,
+  BROKER_BOUNDS,
+  BROKER_OPERATIONS,
+  BROKER_MAX_ARGS,
+  brokerIdentitySchema,
+  brokerRegistrationSchema,
+  brokerHelloSchema,
+  brokerErrorSchema,
+  brokerWelcomeSchema,
+  brokerCallSchema,
+  brokerResultSchema,
+  isBrokerOperation,
+} from './broker.js';
+export type { BrokerTarget, BrokerIdentity, BrokerRegistration, BrokerHello, BrokerError, BrokerWelcome, BrokerCall, BrokerResult } from './broker.js';

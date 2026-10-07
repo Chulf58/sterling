@@ -23,7 +23,7 @@
 //     across every unowned file, which is most of a survey (P1: a signal that
 //     always fires teaches you to ignore it).
 //
-import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig, repoRel } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStoreOrDegrade, loadConfig, repoRel } from './lib/common.mjs';
 import { isForeignTree } from './lib/working-tree.mjs';
 import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
 import { statSync } from 'node:fs';
@@ -62,7 +62,7 @@ function main(input) {
   const command = input.tool_input?.command;
   if (!command) return allow(); // nothing to parse (not a shell call, or a malformed one)
 
-  const store = openStore(input.cwd);
+  const store = openStoreOrDegrade(input.cwd, 'H19');
   if (!store) return allow(); // not a Sterling project — no ceremony (P1)
 
   // BACKGROUND MAINTENANCE WORKER, commit trigger (decision

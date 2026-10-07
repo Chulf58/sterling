@@ -6,17 +6,20 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./routing": "./dist/routing.js",
+    "./store-move": "./dist/store-move.js"
   },
   "engines": {
     "node": ">=24"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node ../../scripts/build-stamp.mjs",
-    "test": "node --test \"dist/tests/*.test.js\""
+    "test": "node --import ./dist/tests/pg-test-setup.js --test \"dist/tests/*.test.js\""
   },
   "dependencies": {
     "@sterling/schemas": "0.1.0",
+    "pg": "8.23.1",
     "zod": "^3.24.0"
   }
 }

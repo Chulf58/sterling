@@ -9,7 +9,7 @@ import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync,
 import { spawnSync } from 'node:child_process';
 import { basename, dirname, join } from 'node:path';
 import { pluginRoot as sharedPluginRoot, walkUpPluginRoot as sharedWalkUpPluginRoot } from './lib/plugin-root-walk.mjs';
-import { readStdin, allow, exitAfterWrite, openStore } from './lib/common.mjs';
+import { readStdin, allow, exitAfterWrite, openStore, storeBackend, namedError } from './lib/common.mjs';
 import { codexRegistrationLine, userScopeCodexServer } from '../lib/codex-mcp.mjs';
 import { SPARE_SKIP_LINE, isSpareSession } from './lib/claude-session-kind.mjs';
 // Plan-lock primitives — ONE implementation, shared with h31-plan-lock.mjs,
@@ -437,12 +437,28 @@ if (domainMapResult) {
   }
 }
 
-const store = projectStoreBlocked ? null : openStore(input.cwd);
+// A Postgres-storage project whose store cannot be opened (lib/common.mjs
+// openStore throws, naming the error) takes the no-store exit below with one
+// DEGRADED line, never the silence of "not a Sterling project". SQLite storage
+// keeps today's unguarded open.
+let storeOpenWarning = '';
+let store = null;
+if (!projectStoreBlocked) {
+  if (storeBackend(input.cwd) === 'sqlite') {
+    store = openStore(input.cwd);
+  } else {
+    try {
+      store = openStore(input.cwd);
+    } catch (e) {
+      storeOpenWarning = `⚠ Sterling store: DEGRADED — the project store could not be opened (${namedError(e)}). Knowledge tools, delivery and the session-end duties cannot reach it until this is fixed.\n`;
+    }
+  }
+}
 if (!store) {
   // The store-version probe and the post-update sync ride this exit too: a project
   // whose store is at another schema version lands here, and its migrate line is
   // the one thing the human must see.
-  const earlyWarning = storeVersionWarning + postUpdateWarning;
+  const earlyWarning = storeOpenWarning + storeVersionWarning + postUpdateWarning;
   // The receipt report rides this early exit too: H22's ledger gate is
   // .sterling/config.json (not sterling.db), so a project with a config but no
   // The PLAN LOCK section rides this early exit too, leading as it does on the
@@ -452,14 +468,14 @@ if (!store) {
   // A project with a Sterling config or a blocked store is a Sterling project: its instructions
   // name <Sterling root>, so this exit prints the STERLING ROOT line too. A directory with no
   // Sterling state prints nothing.
-  const sterlingProject = projectStoreBlocked || existsSync(join(input.cwd, '.sterling', 'config.json'));
+  const sterlingProject = projectStoreBlocked || storeOpenWarning !== '' || existsSync(join(input.cwd, '.sterling', 'config.json'));
   if (planLockContext || dispatchResidueLines.length || earlyWarning || sterlingProject) {
     process.stdout.write(
       JSON.stringify({
         ...(earlyWarning ? { systemMessage: earlyWarning.trim() } : {}),
         hookSpecificOutput: {
           hookEventName: 'SessionStart',
-          additionalContext: planLockContext + dispatchResidueLines.join('\n\n') + (sterlingProject ? rootContext : '') + storeVersionContext + postUpdateContext,
+          additionalContext: storeOpenWarning + planLockContext + dispatchResidueLines.join('\n\n') + (sterlingProject ? rootContext : '') + storeVersionContext + postUpdateContext,
         },
       })
     );
@@ -527,7 +543,7 @@ try {
 // MOUNTED DOMAINS (lib/operating-state.mjs): one line per configured domain with
 // its description, and a loud line for a missing store or a missing description.
 // It never throws: every failure is its own UNKNOWN line.
-const domainLines = mountedDomainLines({ config, configUnreadable });
+const domainLines = mountedDomainLines({ config, configUnreadable, root: input.cwd });
 const domainsContext = domainLines.length ? `\n\n${domainLines.join('\n')}` : '';
 
 // PENDING ISSUE REPORTS: the count of Sterling issue reports report-issue.mjs
@@ -1000,7 +1016,7 @@ try {
               source: 'system',
               system_reason: 'capture_owed',
               file_keys: paths.slice(0, 20),
-            });
+            }, { operation_id: randomUUID() });
             residueContext =
               `\n\nSESSION-BOUNDARY RESIDUE (H1): a previous session left unsettled transient registers` +
               (pending ? ` (including a capture_pending declaration: ${pending})` : '') +

@@ -9,6 +9,11 @@
 // denies ad-hoc shell access to store files; this script is the sanctioned
 // probe, listed in config.store_guard.allow_scripts).
 //
+// POSTGRES-REFUSED: every mode below refuses with exit 4, before opening any store, when
+// the invoking project (the Sterling root of the cwd) has config.storage postgres, where
+// knowledge is stored in Postgres. Exit 4 is in addition to the 0/2/3 documented
+// per mode.
+//
 //   node scripts/domain-doctor.mjs scan [--roots <dir,dir>]
 //     List every domain store file under each root: record count, scope/type
 //     breakdown, clock range, first/last record ids. Default roots: this
@@ -174,6 +179,7 @@ import { parseConfig, validateRecord } from '@sterling/schemas';
 import { buildResolver } from './lib/citations.mjs';
 import { arg as sharedArg, hasFlag as sharedHasFlag } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
+import { invokingRoot, refuseOnPostgresStorage } from './lib/hobby-only.mjs';
 
 function fail(msg, code = 2) {
   console.error(`domain-doctor: ${msg}`);
@@ -3256,6 +3262,12 @@ const mode = process.argv[2];
 // not written. process.exit() does not throw, so every deliberate exit code
 // (0/2/3) still passes through untouched.
 if (invokedAsCli()) {
+  // POSTGRES-REFUSED (exit 4): a project whose config.storage is postgres keeps its knowledge there, where
+  // SQLite store forensics mean nothing. The invoking project (the cwd's Sterling
+  // root) decides, because no mode names a project: scan/migrate/adopt/show take
+  // store paths and the shared domains root belongs to the machine. Refused before
+  // any mode runs, so nothing is opened. scripts/lib/hobby-only.mjs.
+  refuseOnPostgresStorage(invokingRoot(), 'domain-doctor');
   try {
     if (mode === 'scan') scan();
     else if (mode === 'sweep') sweep();

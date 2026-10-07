@@ -9,7 +9,7 @@
 // injection_rung values receive one migration notice and otherwise behave as read.
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig, repoRel, gitIgnored } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStoreOrDegrade, loadConfig, repoRel, gitIgnored } from './lib/common.mjs';
 import { isForeignTree } from './lib/working-tree.mjs';
 import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
 import {
@@ -55,7 +55,7 @@ function main(input) {
   if (rel === '.git' || rel.startsWith('.git/')) return allow(); // machinery internals (H7 precedent)
   if (rel.startsWith('.sterling/')) return allow(); // the store's own tree is never governed territory
 
-  const store = openStore(input.cwd);
+  const store = openStoreOrDegrade(input.cwd, 'H19');
   if (!store) return allow(); // not a Sterling project — no ceremony (P1)
 
   try {

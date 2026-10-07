@@ -42,18 +42,17 @@ export function isSterlingClone(root, pluginRoot) {
 
 // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed by
 // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
-// config.mode decides only how work ships, a direct merge (hobby) or a pull
-// request with the review loop (work). Every surface that acts on it reads the
-// TARGET project's own config through this one function, never the caller's. A
-// missing config or a missing key is hobby, the schema default. An invalid
-// value, or a config that is not a JSON object, throws: the mode is never
-// guessed. Reads go through contained-fs like every other target read.
-export const PROJECT_MODES = ['hobby', 'work'];
-export class ProjectModeError extends Error {}
+// config.mode decides only how work ships. The strict judge, readProjectMode,
+// lives in @sterling/schemas (packages/schemas/src/project.ts) so TypeScript
+// packages can read the mode too; it is re-exported here so every existing
+// caller keeps importing it from this file. A missing config or key is hobby; an
+// invalid value throws ProjectModeError: the mode is never guessed.
+export { PROJECT_MODES, ProjectModeError, readProjectMode } from '@sterling/schemas';
 const CONFIG_REL = '.sterling/config.json';
 // The target's raw config object (undefined when the file is absent) and its
 // path for messages. A file that is not a JSON object throws `ErrorClass`,
-// naming the `subject` that could not be read.
+// naming the `subject` that could not be read. Reads go through contained-fs
+// like every other target read.
 function readRawConfig(root, ErrorClass, subject) {
   const where = `${fwd(resolve(root))}/${CONFIG_REL}`;
   if (!existsContained(root, CONFIG_REL, 'file')) return { where, parsed: undefined };
@@ -68,13 +67,28 @@ function readRawConfig(root, ErrorClass, subject) {
   }
   return { where, parsed };
 }
-export function readProjectMode(root) {
-  const { where, parsed } = readRawConfig(root, ProjectModeError, 'the project mode');
-  if (parsed === undefined || parsed.mode === undefined) return 'hobby';
-  if (!PROJECT_MODES.includes(parsed.mode)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} — it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+
+// Where the project's stores live (decision
+// storage-backend-is-its-own-config-key-written-only-by-store-move):
+// config.storage is 'sqlite' or 'postgres', and absent means 'sqlite'. A guard
+// that must not run against a Postgres store judges by this, never by
+// config.mode, which only picks the shipping flow. The value is never guessed:
+// any other value, a config that is not a JSON object, or a symlinked config
+// throws ProjectStorageError.
+export class ProjectStorageError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ProjectStorageError';
   }
-  return parsed.mode;
+}
+export function readProjectStorage(root) {
+  const { where, parsed } = readRawConfig(root, ProjectStorageError, 'the project storage');
+  const storage = parsed?.storage;
+  if (storage === undefined) return 'sqlite';
+  if (storage !== 'sqlite' && storage !== 'postgres') {
+    throw new ProjectStorageError(`config.storage is ${JSON.stringify(storage)} in ${where} — it must be 'sqlite' or 'postgres'`);
+  }
+  return storage;
 }
 
 // The handoff setting (decision

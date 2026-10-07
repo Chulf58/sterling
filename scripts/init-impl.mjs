@@ -42,6 +42,7 @@ import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRest
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readHandoffEnabled, HandoffSettingError, HANDOFF_OFF_DETAIL, trackedHandoffFiles, PROJECT_MODES, readProjectMode, ProjectModeError } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
+import { ensureProjectIdentity, withIdentityIgnore, IGNORE_ALL, IGNORE_KEEP_IDENTITY, IGNORE_NESTED } from './lib/project-identity.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, userScopeCodexServer, codexUserScopeLine } from './lib/codex-mcp.mjs';
@@ -456,6 +457,22 @@ if (!recorded) {
     items.push({ item: '.sterling/config.json', status: 'matches', detail: 'defaults + recorded declarations' });
   } else {
     items.push({ item: '.sterling/config.json', status: 'differs', detail: 'left untouched (tuned or hand-edited) — declarations were read from it' });
+  }
+}
+
+// project identity (decision work-project-identity-file-sterling-project-json):
+// .sterling/project.json, written only when absent, whatever the mode, and never
+// overwritten. An existing file that is not valid is left exactly as it is and
+// reported loudly: update and sync-agents refuse a work project with it.
+{
+  const identity = ensureProjectIdentity(target);
+  if (identity.status === 'created') {
+    items.push({ item: '.sterling/project.json', status: 'created', detail: `project_id ${identity.project_id} — commit this file; it is the project's durable identity` });
+  } else if (identity.status === 'exists') {
+    items.push({ item: '.sterling/project.json', status: 'exists', detail: 'project identity — left as-is, never overwritten' });
+  } else {
+    items.push({ item: '.sterling/project.json', status: 'differs', detail: 'left untouched — it is not a valid project identity' });
+    warns.push(`warn: ${identity.error}. init never overwrites it; a work-mode project is refused by /sterling:update and sync-agents until it is fixed`);
   }
 }
 
@@ -1252,8 +1269,16 @@ items.push(claudeHost
 
 // gitignore entries (§2.3/§11/§12): per-entry ensure — appending is non-destructive
 const gitignorePath = join(target, '.gitignore');
-const existingIgnore = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
-const entries = ['.sterling/', 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, '.claude/agents/'];
+let existingIgnore = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
+// A directory ignore (`.sterling/`) cannot be re-included from, so an existing one
+// is rewritten in place to `.sterling/*` plus `!.sterling/project.json` first.
+const identityIgnore = withIdentityIgnore(existingIgnore, { addIfAbsent: false });
+if (identityIgnore.changed) {
+  writeFileSync(gitignorePath, identityIgnore.text);
+  existingIgnore = identityIgnore.text;
+  items.push({ item: '.gitignore (.sterling entry)', status: 'refreshed', detail: `${IGNORE_ALL} + ${IGNORE_KEEP_IDENTITY} so .sterling/project.json can be committed` });
+}
+const entries = [IGNORE_ALL, IGNORE_KEEP_IDENTITY, IGNORE_NESTED, 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, '.claude/agents/'];
 // the SOURCE/plugin repo's generated MCP config is machine-specific → gitignore it
 // (consuming projects never get one — the plugin carries its own declaration).
 // (still keyed on --target: this ensures the TARGET's .gitignore, and a consuming

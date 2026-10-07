@@ -4,8 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { MountedStores, SterlingStore, createDomain, missingDomainWarning } from '../index.js';
+import { MixedScoreScaleError, MountedStores, SterlingStore, createDomain, missingDomainWarning } from '../index.js';
 import type { QueryOptions } from '../index.js';
+import { sqliteOnly } from './pg-test-support.js';
 
 const NOW = '2026-06-16T12:00:00.000Z';
 
@@ -398,7 +399,7 @@ test('createDomain: refuses a domain whose store already exists, and leaves it u
   }
 });
 
-test('MountedStores: an EXISTING domain store with no description still mounts and is readable', () => {
+test('MountedStores: an EXISTING domain store with no description still mounts and is readable', { skip: sqliteOnly('item 5 routing') }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-domain-nodesc-'));
   const db = join(dir, 'domains', 'legacy', 'sterling.db');
   try {
@@ -664,5 +665,22 @@ test('createDomain: the create is exclusive, so a store that appears at the path
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('MountedStores.scoreScale: one scale across the mount is reported; mixed scales are refused by name, by scoreScale and by countAboveScore', () => {
+  const { stores, cleanup } = harness(['alpha']);
+  try {
+    stores.create(shareDec('p0'));
+    assert.equal(stores.scoreScale(), stores.project.scoreScale());
+    assert.equal(stores.countAboveScore({ rank_terms: ['shareterm'] }, -1e9), 1);
+    // A domain on another backend ranks on another scale; stand that in on the mounted instance.
+    const alpha = (stores as unknown as { domains: Map<string, SterlingStore> }).domains.get('alpha')!;
+    alpha.scoreScale = () => 'other_scale_v1';
+    const refused = (e: Error) => e instanceof MixedScoreScaleError && e.message.includes('alpha: other_scale_v1') && e.message.includes(`project: ${stores.project.scoreScale()}`);
+    assert.throws(() => stores.scoreScale(), refused);
+    assert.throws(() => stores.countAboveScore({ rank_terms: ['shareterm'] }, -1e9), refused);
+  } finally {
+    cleanup();
   }
 });

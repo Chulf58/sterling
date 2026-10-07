@@ -193,10 +193,14 @@ export interface SqliteDriverOptions {
 /** SQLite's spelling of each dialect hook: the SQL SterlingStore sent before the seam, unchanged. */
 export const sqliteDialect: StoreDialect = {
   searchJoin: 'JOIN records_fts f ON f.record_id = r.id',
+  searchJoinBinds: 0,
   searchMatch: 'records_fts MATCH ?',
   // FTS5's bm25() is LOWER for a better match, so the score is its negation.
   searchScore: '(-bm25(records_fts))',
   searchOrder: 'bm25(records_fts) ASC',
+  scoreScale: 'fts5_bm25',
+  // FTS5's unicode61 tokenizer does its own folding; the text goes in as built.
+  searchText: (text) => text,
   /**
    * The FTS5 MATCH expression rank_terms compiles to. A trailing '*' marks an
    * FTS5 prefix query ("stor*" matches "store") — the star must sit OUTSIDE the
@@ -220,6 +224,9 @@ export class SqliteDriver implements StoreDriver {
   /** The absolute path of the database file, for the refusal messages. */
   private readonly dbPath: string;
 
+  /** PRAGMA busy_timeout of this connection, which switchFreshFileToWal also waits by. */
+  private readonly busyTimeoutMs: number;
+
   /** The path the journal-mode policy classifies: dbPath with its directory's symlinks resolved. */
   private readonly classifiedPath: string;
 
@@ -229,6 +236,7 @@ export class SqliteDriver implements StoreDriver {
     if (typeof busyTimeoutMs !== 'number' || !Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0) {
       throw new Error(`SqliteDriver: busyTimeoutMs must be a non-negative integer, got ${String(busyTimeoutMs)}`);
     }
+    this.busyTimeoutMs = busyTimeoutMs;
     this.dbPath = resolvePath(path);
     this.db = new DatabaseSync(path);
 
@@ -265,7 +273,14 @@ export class SqliteDriver implements StoreDriver {
     this.db.exec(sql);
   }
 
+  /**
+   * A second close is a no-op, as on PgDriver: a refusal inside publishFresh
+   * closes the connection itself, and SterlingStore then closes the driver
+   * again before rethrowing, which must not replace the refusal with
+   * 'database is not open'.
+   */
   close(): void {
+    if (!this.db.isOpen) return;
     this.db.close();
   }
 
@@ -339,6 +354,75 @@ export class SqliteDriver implements StoreDriver {
   }
 
   prepareWritable(isFresh: boolean): void {
+    this.prepareConnection(isFresh);
+    this.createSchema();
+  }
+
+  /**
+   * StoreDriver.publishFresh (board 404228d7). prepareWritable() commits the DDL
+   * statement by statement and SterlingStore stamps user_version in a later
+   * transaction, so a concurrent opener that had read user_version 0 could see
+   * the tables without the stamp and open the store as a legacy, read-only one.
+   * Here an empty file gets its schema and its stamp in one BEGIN IMMEDIATE
+   * transaction, with user_version re-read under that lock, so the tables and
+   * the stamp become visible together.
+   *
+   * The classification read comes first and takes no write lock (decision
+   * store-constructor-stops-write-locking-to-read-user-version-closing-a-concurrency-reachable-fail-open):
+   * user_version and sqlite_master are read in one deferred read transaction,
+   * so they come from one snapshot. A store with a schema and a version below
+   * `supported` in that snapshot is an older store, returned untouched; a
+   * newer version is returned untouched too, for SterlingStore to refuse. A
+   * store another opener has already published at `supported` gets only this
+   * connection's settings, as an already-current store does. Only a file
+   * without a schema reaches the write lock.
+   */
+  publishFresh(supported: number): number {
+    if (!Number.isInteger(supported) || supported < 1) {
+      throw new Error(`SqliteDriver: the supported schema version must be a positive integer, got ${String(supported)}`);
+    }
+    this.db.exec('BEGIN');
+    let version: number;
+    let schemaExists: boolean;
+    try {
+      version = this.schemaVersion();
+      schemaExists = this.hasSchema();
+    } finally {
+      this.db.exec('COMMIT');
+    }
+    if (version > supported || (version < supported && schemaExists)) return version;
+    if (version === supported && schemaExists) {
+      // Published since SterlingStore's version read: nothing is owed, so no
+      // write lock (decision 81bdfc53), only the connection-local settings.
+      this.prepareConnection(false);
+      return version;
+    }
+
+    // PRAGMA journal_mode and foreign_keys have no effect inside a transaction,
+    // so the connection settings come before BEGIN IMMEDIATE.
+    this.prepareConnection(!schemaExists);
+    this.begin();
+    try {
+      version = this.schemaVersion();
+      // Another opener built and stamped the store since the read above:
+      // classify on this locked read. An older version here with a schema
+      // means the store was built by a driver without publishFresh.
+      if (version > supported || (version < supported && this.hasSchema())) {
+        this.rollback();
+        return version;
+      }
+      this.createSchema();
+      if (version < supported) this.setSchemaVersion(supported);
+      this.commit();
+    } catch (e) {
+      if (this.db.isTransaction) this.rollback();
+      throw e;
+    }
+    return supported;
+  }
+
+  /** The journal-mode policy and foreign_keys: connection settings that must run outside a transaction. */
+  private prepareConnection(isFresh: boolean): void {
     // Journal-mode policy [store-journal-policy-delete-on-9p]: over 9p, demote
     // to DELETE and REFUSE the open when the demotion does not land; elsewhere
     // assert WAL — except on an existing store already demoted to DELETE,
@@ -387,17 +471,20 @@ export class SqliteDriver implements StoreDriver {
         // cross-context fresh-open race described above; it does NOT close
         // the (much smaller) window still remaining between THIS COUNT(*)
         // read and the WAL exec immediately below — that residual race is
-        // accepted, not closed. PREDICTED to close the race described above;
-        // the guard expected to carry the verdict is this `stillFresh`
-        // re-probe. Not executed — no multi-process test exists for this
-        // fix (review-verified, not pinned, per the fixer-mode brief).
+        // accepted, not closed. sqlite-open-race.test.ts opens one fresh
+        // file from four processes at once and requires it to end in WAL; it
+        // does not pin the flip-back this re-probe guards against.
         const stillFresh = !this.hasSchema();
         if (stillFresh) {
-          this.db.exec('PRAGMA journal_mode=WAL');
+          this.switchFreshFileToWal();
         }
       }
     }
     this.db.exec('PRAGMA foreign_keys=ON');
+  }
+
+  /** The DDL and its additive migrations. Idempotent, so it also runs on every open of a current store. */
+  private createSchema(): void {
     this.db.exec(DDL);
     // Additive migration (board 97d773ef): queue_drain_log gains record_id so a
     // remove on an already-drained id can answer "already removed <when>"
@@ -408,6 +495,45 @@ export class SqliteDriver implements StoreDriver {
       this.db.exec('ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT');
     } catch {
       /* column already exists */
+    }
+    // Additive, no user_version bump (decision
+    // postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+    // point 3): records gains a nullable operation_id with a unique index, so a
+    // repeated create or enqueue can be found and refused. NULLs never collide.
+    try {
+      this.db.exec('ALTER TABLE records ADD COLUMN operation_id TEXT');
+    } catch {
+      /* column already exists */
+    }
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON records(operation_id)');
+  }
+
+  /**
+   * PRAGMA journal_mode=WAL on a fresh file, which several openers may try at
+   * once (board 404228d7). Measured: the switch fails at once with 'database is
+   * locked', without the busy handler, while another connection holds the
+   * write lock, and two openers switching together can both fail that way.
+   * So this waits as busy_timeout would: after a failed switch it reads the
+   * file's mode (hasSchema() takes the read lock that makes this connection
+   * pick it up), stops when another opener's switch has landed, and stops too
+   * when another opener has built the store in DELETE: that is a 9p opener's
+   * demotion, which is sticky [store-journal-policy-delete-on-9p] and must not
+   * be flipped back. It tries again only while the file is still without a
+   * schema, until busy_timeout has run out, then throws the last error.
+   */
+  private switchFreshFileToWal(): void {
+    const deadline = Date.now() + this.busyTimeoutMs;
+    for (;;) {
+      try {
+        this.db.exec('PRAGMA journal_mode=WAL');
+        return;
+      } catch (e) {
+        if (!(e instanceof Error) || !/database is locked/.test(e.message)) throw e;
+        const built = this.hasSchema();
+        if (this.journalMode() === 'wal' || built) return;
+        if (Date.now() >= deadline) throw e;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
     }
   }
 

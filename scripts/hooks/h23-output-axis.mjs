@@ -58,7 +58,7 @@
 // try/catch as everything else here, unlike h19/h20 where it sits outside
 // theirs — this hook's own contract requires exit 0 even there), a missing
 // tool_response, an unrecognised tool name, and any internal failure.
-import { readStdin, allow, repoRel, exitAfterWrite, warnNonBlocking } from './lib/common.mjs';
+import { readStdin, allow, repoRel, exitAfterWrite, warnNonBlocking, openStoreOrDegrade } from './lib/common.mjs';
 import { openSubjectFan, warnFanDegraded } from './lib/subject-fan.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { isListingCommand } from './lib/listing-command.mjs';
@@ -83,7 +83,7 @@ try {
 
   // The subject fan (lib/subject-fan.mjs): the project store plus the mounted
   // domains. The read gate below passes file_keys, so it reads the project store only.
-  const store = openSubjectFan(input.cwd);
+  const store = openStoreOrDegrade(input.cwd, 'H23', openSubjectFan);
   if (!store) allow(); // not a Sterling project — no ceremony (P1)
 
   // READ SEAM OWNERSHIP GATE — lib/axis-compose.mjs outputAxisReadGated, which

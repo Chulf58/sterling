@@ -37,7 +37,7 @@ try {
       superseded_by: null, links: [], scope: 'project', stack_tags: [],
       text: `reconcile article '${article.slug}' — '${from}' was renamed to '${to}'`,
       source: 'system', system_reason: 'reconcile_needed', file_keys: [to], feature_link: article.id,
-    });
+    }, { operation_id: randomUUID() });
   }
   console.log(JSON.stringify({ moved: { from, to }, records_rewritten: rewritten }));
 } finally {

@@ -19,6 +19,7 @@ import {
   type StoreDriver,
   type StoreDialect,
 } from '../index.js';
+import { sqliteOnly } from './pg-test-support.js';
 
 const NOW = '2026-10-05T12:00:00.000Z';
 
@@ -241,7 +242,7 @@ test('SqliteDriver.snapshot writes a readable copy', () => {
   }
 });
 
-test('SterlingStore opens on a SqliteDriver and passes busyTimeoutMs through to it', () => {
+test('SterlingStore opens on a SqliteDriver and passes busyTimeoutMs through to it', { skip: sqliteOnly('asserts the SqliteDriver itself; PgDriver has its own tests in pg-driver.test.ts') }, () => {
   const dir = tempDir();
   try {
     const byDefault = new SterlingStore(join(dir, 'a.db'));
@@ -381,7 +382,7 @@ test('no transaction statement reaches the statement API: BEGIN, COMMIT and ROLL
   }
 });
 
-test('journalMode() and snapshot() go through the driver', () => {
+test('journalMode() and snapshot() go through the driver', { skip: sqliteOnly('asserts the SqliteDriver itself; PgDriver has its own tests in pg-driver.test.ts') }, () => {
   const dir = tempDir();
   try {
     const { driver, events } = recordingDriver(join(dir, 's.db'));
@@ -408,6 +409,9 @@ test('sqliteDialect is today\'s SQL, byte for byte', () => {
   assert.equal(sqliteDialect.searchMatch, 'records_fts MATCH ?');
   assert.equal(sqliteDialect.searchScore, '(-bm25(records_fts))');
   assert.equal(sqliteDialect.searchOrder, 'bm25(records_fts) ASC');
+  assert.equal(sqliteDialect.searchJoinBinds, 0, 'the SQLite join binds nothing, so the statement parameters are unchanged');
+  assert.equal(sqliteDialect.scoreScale, 'fts5_bm25');
+  assert.equal(sqliteDialect.searchText('Århus, C++ og "citater"'), 'Århus, C++ og "citater"', 'SQLite indexes the built text unchanged; unicode61 folds it');
   assert.equal(sqliteDialect.searchQuery(['store', 'driv*'], undefined), '"store" OR "driv"*');
   assert.equal(sqliteDialect.searchQuery(['store', 'driv*'], true), '"store" AND "driv"*');
   assert.equal(sqliteDialect.searchQuery(['a"b', '*'], false), '"a""b" OR "*"');
@@ -425,8 +429,15 @@ test('each dialect hook is what the store sends at its sites: a marked dialect s
   const dir = tempDir();
   try {
     const searchQueries: string[] = [];
+    const searchTexts: string[] = [];
     const marked: StoreDialect = {
       searchJoin: `/*searchJoin*/ ${sqliteDialect.searchJoin}`,
+      searchJoinBinds: sqliteDialect.searchJoinBinds,
+      scoreScale: sqliteDialect.scoreScale,
+      searchText(text) {
+        searchTexts.push(text);
+        return sqliteDialect.searchText(text);
+      },
       searchMatch: `/*searchMatch*/ ${sqliteDialect.searchMatch}`,
       searchScore: `/*searchScore*/ ${sqliteDialect.searchScore}`,
       searchOrder: `/*searchOrder*/ ${sqliteDialect.searchOrder}`,
@@ -446,6 +457,8 @@ test('each dialect hook is what the store sends at its sites: a marked dialect s
     const cited = store.create(decision());
     const made = store.create(article({ links: [{ rel: 'cites', target_id: cited.id }] }));
     assert.equal(count('/*insertIgnore*/'), 1, 'the relation insert');
+    assert.equal(searchTexts.length, 2, 'the records_fts insert passes each record\'s search text through searchText()');
+    assert.equal(store.scoreScale(), 'fts5_bm25', 'scoreScale() is the dialect\'s');
 
     // The marked SQL still runs and still answers: comments change nothing.
     assert.deepEqual(store.get(made.id)?.links, [{ rel: 'cites', target_id: cited.id }]);

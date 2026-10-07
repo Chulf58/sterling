@@ -8,7 +8,7 @@ var __export = (target, all) => {
 
 // scripts/stamp-contract.mjs
 import { readFileSync as readFileSync4, writeFileSync, existsSync as existsSync3, realpathSync as realpathSync2 } from "node:fs";
-import { join as join6, dirname as dirname2, resolve as resolve2 } from "node:path";
+import { join as join7, dirname as dirname2, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/zod/v3/external.js
@@ -5155,13 +5155,22 @@ var configSchema = external_exports.object({
   // S1): any other value is PRESERVED raw, never coerced to hobby and never
   // thrown on — a typo here must not turn every parseConfig reader (the MCP
   // server's boot included) into a startup failure. The strict judge is
-  // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
+  // readProjectMode() in packages/schemas/src/project.ts (re-exported by scripts/lib/handoff-projection.mjs), which every
   // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
   // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
   // Consumers of the PARSED config must narrow this field themselves.
   // The default lives twice (anti_pattern 85d15143): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
+  // Where the project's stores live (decision
+  // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
+  // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
+  // the Served database, valid only with mode 'work'. Only
+  // scripts/move-store.mjs writes it, after the stores have moved; config_set
+  // and the TUI refuse it. Strict, unlike `mode`: a wrong value must never
+  // route a project to the wrong backend. The reader is
+  // packages/store/src/routing.ts (resolveStoreRoute). No default on purpose.
+  storage: external_exports.enum(["sqlite", "postgres"]).optional(),
   // Handoff files (decision
   // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
   // `enabled` says whether Sterling writes the files for colleagues who do not
@@ -5216,14 +5225,174 @@ var runtimeMarkerSchema = external_exports.object({
   booted_at: external_exports.string()
 }).strict();
 
+// packages/schemas/dist/broker.js
+var BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
+var BROKER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+var BROKER_REGISTRY_MAX_BYTES = 16 * 1024;
+var BROKER_MAX_ARGS = 6;
+var brokerIdentitySchema = external_exports.object({
+  instance_id: external_exports.string().regex(/^[0-9a-f]{32}$/),
+  protocol: external_exports.number().int(),
+  build_id: external_exports.string(),
+  project_id: external_exports.string(),
+  root: external_exports.string(),
+  storage: external_exports.object({ backend: external_exports.literal("postgres"), database: external_exports.string(), meta_schema: external_exports.string(), project_schema: external_exports.string() }),
+  pid: external_exports.number().int()
+});
+var brokerRegistrationSchema = brokerIdentitySchema.extend({ socket: external_exports.string() });
+var brokerHelloSchema = external_exports.object({
+  type: external_exports.literal("hello"),
+  protocol: external_exports.number().int(),
+  instance_id: external_exports.string(),
+  project_id: external_exports.string(),
+  root: external_exports.string()
+});
+var brokerErrorSchema = external_exports.object({
+  name: external_exports.string(),
+  message: external_exports.string(),
+  /** Enumerable string or number fields of the original error (domain, location, schema, code). */
+  fields: external_exports.record(external_exports.union([external_exports.string(), external_exports.number()])).default({})
+});
+var brokerWelcomeSchema = external_exports.union([
+  external_exports.object({ type: external_exports.literal("welcome"), identity: brokerIdentitySchema }),
+  external_exports.object({ type: external_exports.literal("refused"), error: brokerErrorSchema })
+]);
+var brokerCallSchema = external_exports.object({
+  type: external_exports.literal("call"),
+  id: external_exports.number().int().nonnegative(),
+  target: external_exports.enum(["project", "mounted"]),
+  op: external_exports.string(),
+  args: external_exports.array(external_exports.unknown()).max(BROKER_MAX_ARGS),
+  /** Client clock (ms since epoch) when the call was sent; client and server share the machine clock. */
+  sent_at: external_exports.number()
+});
+var brokerResultSchema = external_exports.union([
+  external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(true), result: external_exports.unknown().optional() }),
+  /** `executed` false means the server did not start the operation, so the caller may fall back; true or absent means it may have run. */
+  external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(false), executed: external_exports.boolean(), error: brokerErrorSchema })
+]);
+
+// packages/store/dist/pg-bridge.js
+import { homedir } from "node:os";
+import { join } from "node:path";
+var DEFAULT_PG_CREDENTIALS_PATH = join(homedir(), ".sterling", "credentials", "served.json");
+
+// packages/store/dist/search-fold.js
+var LATIN_LETTER = new RegExp("^\\p{Script=Latin}$", "u");
+var LETTER_OR_NUMBER_OR_PRIVATE = /^[\p{L}\p{N}\p{Co}]$/u;
+var COMBINING_MARK = new RegExp("^\\p{M}$", "u");
+function foldSearchText(s) {
+  let kept = "";
+  let afterLatinLetter = false;
+  for (const ch of s.toLowerCase().normalize("NFD")) {
+    if (COMBINING_MARK.test(ch)) {
+      if (!afterLatinLetter)
+        kept += ch;
+      continue;
+    }
+    afterLatinLetter = LATIN_LETTER.test(ch) && new RegExp("^\\p{L}$", "u").test(ch);
+    kept += ch;
+  }
+  let out = "";
+  for (const ch of kept.normalize("NFC"))
+    out += LETTER_OR_NUMBER_OR_PRIVATE.test(ch) ? ch : " ";
+  return out.replace(/ {2,}/g, " ").trim();
+}
+
+// packages/store/dist/pg-driver.js
+var PG_RANKINGS = ["bm25", "idf_tsrank", "tsrank_cd"];
+var DEFAULT_PG_RANKING = "bm25";
+var PG_SCORE_SCALES = { bm25: "pg_bm25_v1", idf_tsrank: "pg_idf_tsrank_v1", tsrank_cd: "pg_tsrank_cd_v1" };
+function pgSearchQuery(terms, matchAll) {
+  const clauses = [];
+  let empty = false;
+  for (const term of terms) {
+    const prefix = term.length > 1 && term.endsWith("*");
+    const folded = foldSearchText(term);
+    if (folded === "") {
+      empty = true;
+      continue;
+    }
+    const w = folded.split(" ");
+    clauses.push({ q: w.map((x) => `'${x}'`).join(" <-> ") + (prefix ? ":*" : ""), w, p: prefix });
+  }
+  const none = clauses.length === 0 || matchAll === true && empty;
+  const prefixes = [...new Set(clauses.filter((c) => c.p).map((c) => c.w[c.w.length - 1]))];
+  const out = JSON.stringify({
+    match: none ? null : clauses.map((c) => `(${c.q})`).join(matchAll ? " & " : " | "),
+    clauses,
+    words: [...new Set(clauses.flatMap((c) => c.w))],
+    prefixes,
+    // The documents any prefix matches, so the statement can list the lexemes each prefix stands for once per query.
+    prefixq: prefixes.length ? prefixes.map((x) => `'${x}':*`).join(" | ") : null
+  });
+  return out;
+}
+var PG_SEARCH_STATS = `CROSS JOIN (SELECT q.j->>'match' AS m,
+    (SELECT count(*) FROM records_fts)::float8 AS n,
+    (SELECT coalesce(avg(dl), 0) FROM records_fts)::float8 AS avgdl,
+    ARRAY(SELECT json_array_elements_text(q.j->'words'))
+      || ARRAY(SELECT DISTINCT u.lexeme FROM records_fts x, unnest(x.tsv) u
+        WHERE x.tsv @@ (q.j->>'prefixq')::tsquery AND EXISTS (SELECT 1 FROM json_array_elements_text(q.j->'prefixes') pf WHERE starts_with(u.lexeme, pf))) AS lexemes,
+    (SELECT coalesce(json_agg(json_build_object('q', c.value->>'q', 'w', c.value->'w', 'p', c.value->'p',
+        'df', (SELECT count(*) FROM records_fts x WHERE x.tsv @@ (c.value->>'q')::tsquery)) ORDER BY c.ordinality), '[]'::json)
+      FROM json_array_elements(q.j->'clauses') WITH ORDINALITY c) AS cl
+  FROM (SELECT ?::json AS j) q) st`;
+var PG_IDF = "greatest(ln((st.n - c.df + 0.5) / (c.df + 0.5)), 1e-6)";
+var PG_BM25_SCORE = `CROSS JOIN LATERAL (SELECT array_agg(u.lexeme) AS lx, array_agg(p) AS ps
+    FROM unnest(ts_filter(setweight(f.tsv, 'A', st.lexemes), '{a}')) u, unnest(u.positions) p) lp
+  CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * (t.tf * 2.2) / (t.tf + 1.2 * (0.25 + 0.75 * f.dl / st.avgdl))), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(w text[], p boolean, df bigint)
+    CROSS JOIN LATERAL (SELECT count(*)::float8 AS tf FROM unnest(lp.lx, lp.ps) AS a(lex, pos)
+      WHERE (a.lex = c.w[1] OR (c.p AND cardinality(c.w) = 1 AND starts_with(a.lex, c.w[1])))
+        AND NOT EXISTS (SELECT 1 FROM generate_series(2, cardinality(c.w)) AS i
+          WHERE NOT EXISTS (SELECT 1 FROM unnest(lp.lx, lp.ps) AS b(lex, pos)
+            WHERE b.pos = a.pos + i - 1 AND (b.lex = c.w[i] OR (c.p AND i = cardinality(c.w) AND starts_with(b.lex, c.w[i])))))) t) sc`;
+var PG_IDF_TSRANK_SCORE = `CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * ts_rank(f.tsv, c.q::tsquery)), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(q text, df bigint) WHERE f.tsv @@ c.q::tsquery) sc`;
+var PG_TSRANK_CD_SCORE = "CROSS JOIN LATERAL (SELECT ts_rank_cd(f.tsv, st.m::tsquery)::float8 AS score) sc";
+var PG_SCORES = { bm25: PG_BM25_SCORE, idf_tsrank: PG_IDF_TSRANK_SCORE, tsrank_cd: PG_TSRANK_CD_SCORE };
+function pgDialectFor(ranking) {
+  if (!PG_RANKINGS.includes(ranking))
+    throw new Error(`Postgres ranking must be one of ${PG_RANKINGS.join(", ")}, got ${String(ranking)}`);
+  return {
+    // One statement per query (a round trip costs about 25 ms): the join binds
+    // the query once for the statistics, the match binds it again so the GIN
+    // index sees a constant tsquery.
+    searchJoin: `JOIN records_fts f ON f.record_id = r.id ${PG_SEARCH_STATS} ${PG_SCORES[ranking]}`,
+    searchJoinBinds: 1,
+    searchMatch: "f.tsv @@ (?::json->>'match')::tsquery",
+    searchScore: "sc.score",
+    searchOrder: "sc.score DESC",
+    scoreScale: PG_SCORE_SCALES[ranking],
+    searchQuery: pgSearchQuery,
+    searchText: foldSearchText,
+    // Postgres refuses \u0000 anywhere in a json value it parses (22P05), so the
+    // real \u0000 escapes are removed first. The pattern consumes an escaped
+    // backslash pair (\\) as a unit and puts it back, so \u0000 only matches
+    // where its backslash starts an escape: the literal text \\u0000 survives.
+    // strpos skips the regex for the bodies that hold no \u0000 at all.
+    jsonText: (column, key) => {
+      if (!/^[a-z_]+$/.test(key))
+        throw new Error(`pgDialect.jsonText: key '${key}' is not a plain identifier`);
+      if (!/^[a-z_]+(\.[a-z_]+)?$/.test(column))
+        throw new Error(`pgDialect.jsonText: column '${column}' is not a plain column reference`);
+      return String.raw`((CASE WHEN strpos(${column}, '\u0000') > 0 THEN regexp_replace(${column}, '(\\\\)|\\u0000', '\1', 'g') ELSE ${column} END)::json ->> '${key}')`;
+    },
+    insertionOrder: (alias) => alias ? `${alias}._seq` : "_seq",
+    insertIgnore: (table, columns) => `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")}) ON CONFLICT DO NOTHING`
+  };
+}
+var pgDialect = pgDialectFor(DEFAULT_PG_RANKING);
+
 // packages/store/dist/axis.js
 var AXIS_MAX_TERM_LEN = 64;
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir as homedir2 } from "node:os";
+import { dirname, join as join2 } from "node:path";
 var REGISTRY_DDL = `
 CREATE TABLE IF NOT EXISTS projects (
   repo_path TEXT PRIMARY KEY,
@@ -5236,7 +5405,7 @@ CREATE TABLE IF NOT EXISTS projects (
   last_seen_at TEXT
 );`;
 function registryPath() {
-  return process.env.STERLING_REGISTRY_DB ?? join(homedir(), ".sterling", "registry.db");
+  return process.env.STERLING_REGISTRY_DB ?? join2(homedir2(), ".sterling", "registry.db");
 }
 var ProjectRegistry = class {
   db;
@@ -5320,17 +5489,17 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
 // scripts/lib/contract-history.mjs
 import { spawnSync } from "node:child_process";
 import { readFileSync as readFileSync2 } from "node:fs";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 
 // scripts/lib/installed-copy.mjs
 import { existsSync as existsSync2 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join3 } from "node:path";
+import { homedir as homedir4 } from "node:os";
+import { join as join4 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join2, resolve, sep } from "node:path";
+import { homedir as homedir3 } from "node:os";
+import { join as join3, resolve, sep } from "node:path";
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
@@ -5474,7 +5643,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync, readFileSync, readdirSync, join2, homedir2);
+)(existsSync, readFileSync, readdirSync, join3, homedir3);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -5491,7 +5660,7 @@ function canonical(p) {
     throw err;
   }
 }
-function installHostOf(root, { env = process.env, home = homedir2() } = {}) {
+function installHostOf(root, { env = process.env, home = homedir3() } = {}) {
   const real = canonical(root);
   for (const { host, dir } of installRoots(env, home)) {
     if (real.startsWith(canonical(dir) + sep)) return host;
@@ -5500,11 +5669,11 @@ function installHostOf(root, { env = process.env, home = homedir2() } = {}) {
 }
 
 // scripts/lib/installed-copy.mjs
-function isInstalledCopy(root, { env = process.env, home = homedir3() } = {}) {
+function isInstalledCopy(root, { env = process.env, home = homedir4() } = {}) {
   if (typeof root !== "string" || root.length === 0) {
     throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
   }
-  if (!existsSync2(join3(root, ".git"))) return true;
+  if (!existsSync2(join4(root, ".git"))) return true;
   return installHostOf(root, { env, home }) !== null;
 }
 
@@ -5560,7 +5729,7 @@ function historicalVariants({
   const fromGit = gitVariants({ repoRoot: repoRoot2, templateRels, leads, extractBlock: extractBlock2, git });
   if (fromGit) return fromGit;
   const currentOnly = () => new Map(leads.map((l) => [l, new Set(currentBlocks.has(l) ? [currentBlocks.get(l)] : [])]));
-  const snapshot = loadSnapshot(join4(repoRoot2, CONTRACT_HISTORY_REL));
+  const snapshot = loadSnapshot(join5(repoRoot2, CONTRACT_HISTORY_REL));
   if (!snapshot.ok) {
     warn(`stamp-contract: DEGRADED \u2014 no git history at ${repoRoot2} (installed plugin copy) and ${snapshot.reason} \u2014 only the current template text counts as template-descended; older bullets read as drift`);
     return currentOnly();
@@ -5568,7 +5737,7 @@ function historicalVariants({
   const variants2 = currentOnly();
   const absent = leads.filter((l) => !Object.hasOwn(snapshot.blocks, l));
   if (absent.length) {
-    warn(`stamp-contract: DEGRADED \u2014 ${join4(repoRoot2, CONTRACT_HISTORY_REL)} has no entry for ${absent.length} lead(s) (${absent.join(" | ")}) \u2014 only their current template text counts as template-descended`);
+    warn(`stamp-contract: DEGRADED \u2014 ${join5(repoRoot2, CONTRACT_HISTORY_REL)} has no entry for ${absent.length} lead(s) (${absent.join(" | ")}) \u2014 only their current template text counts as template-descended`);
   }
   for (const lead of leads) for (const block of snapshot.blocks[lead] ?? []) variants2.get(lead).add(block);
   return variants2;
@@ -5576,7 +5745,7 @@ function historicalVariants({
 
 // scripts/lib/contract-bullets.mjs
 import { readFileSync as readFileSync3 } from "node:fs";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -5808,7 +5977,7 @@ function extractTemplateBlock(text, lead) {
   return extractBlock(renderClaudeText(text, "template"), lead);
 }
 function readTemplateBullets(repoRoot2) {
-  const templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync3(join5(repoRoot2, rel), "utf8")]));
+  const templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync3(join6(repoRoot2, rel), "utf8")]));
   const leadLayer2 = /* @__PURE__ */ new Map();
   const current2 = /* @__PURE__ */ new Map();
   for (const lead of TARGET_LEADS) {
@@ -5829,7 +5998,7 @@ var onlyProjects = [];
 for (let i = 2; i < process.argv.length; i++) {
   if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve2(process.argv[++i]));
 }
-var repoRoot = join6(dirname2(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
+var repoRoot = join7(dirname2(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
 var INSERT_AFTER = /* @__PURE__ */ new Map([
   ["- **Concept articles \u2014 capture design the moment it settles", ["- **Reconcile _every affected_ article, not just the primary one**"]],
   ["- **Codex runs through the MCP tool, never the shell.**", ["- **Knowledge is born structured.**"]],
@@ -5946,8 +6115,8 @@ for (const p of projects) {
     continue;
   }
   if (realpathSync2(repo) === selfPath) continue;
-  const agentsMd = join6(repo, "AGENTS.md");
-  const claudeMd = join6(repo, "CLAUDE.md");
+  const agentsMd = join7(repo, "AGENTS.md");
+  const claudeMd = join7(repo, "CLAUDE.md");
   if (!existsSync3(agentsMd)) {
     record({ project: p.name, status: "not_migrated", detail: `no AGENTS.md \u2014 run: node "<Sterling root>/bin/init.mjs" --target ${repo}` });
     drift++;

@@ -4118,15 +4118,15 @@ var init_zod = __esm({
 
 // packages/schemas/dist/paths.js
 function normalizeRepoPath(input) {
-  const fwd3 = input.replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(fwd3)) {
+  const fwd4 = input.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(fwd4)) {
     throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input}'`);
   }
-  if (fwd3.startsWith("/")) {
+  if (fwd4.startsWith("/")) {
     throw new Error(`path invariant violation: absolute path is not repo-relative: '${input}'`);
   }
   const parts = [];
-  for (const seg of fwd3.split("/")) {
+  for (const seg of fwd4.split("/")) {
     if (seg === "" || seg === ".")
       continue;
     if (seg === "..") {
@@ -6165,13 +6165,22 @@ var init_config = __esm({
       // S1): any other value is PRESERVED raw, never coerced to hobby and never
       // thrown on — a typo here must not turn every parseConfig reader (the MCP
       // server's boot included) into a startup failure. The strict judge is
-      // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
+      // readProjectMode() in packages/schemas/src/project.ts (re-exported by scripts/lib/handoff-projection.mjs), which every
       // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
       // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
       // Consumers of the PARSED config must narrow this field themselves.
       // The default lives twice (anti_pattern 85d15143): here and in
       // templates/default-config.json; config.test.ts pins that they agree.
       mode: external_exports.unknown().default("hobby"),
+      // Where the project's stores live (decision
+      // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
+      // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
+      // the Served database, valid only with mode 'work'. Only
+      // scripts/move-store.mjs writes it, after the stores have moved; config_set
+      // and the TUI refuse it. Strict, unlike `mode`: a wrong value must never
+      // route a project to the wrong backend. The reader is
+      // packages/store/src/routing.ts (resolveStoreRoute). No default on purpose.
+      storage: external_exports.enum(["sqlite", "postgres"]).optional(),
       // Handoff files (decision
       // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
       // `enabled` says whether Sterling writes the files for colleagues who do not
@@ -6242,12 +6251,12 @@ var init_registry = __esm({
 });
 
 // packages/schemas/dist/staleness.js
-import { dirname, join as join8 } from "node:path";
+import { dirname, join as join7 } from "node:path";
 function buildIdPath(serverDir) {
-  return join8(serverDir, BUILD_ID_FILE);
+  return join7(serverDir, BUILD_ID_FILE);
 }
 function runtimeMarkerPath(storePath) {
-  return join8(dirname(storePath), "transient", "mcp-runtime.json");
+  return join7(dirname(storePath), "transient", "mcp-runtime.json");
 }
 function stalenessVerdict(currentBuildId, marker, markerPidAlive = null) {
   if (!currentBuildId || !marker)
@@ -6271,6 +6280,180 @@ var init_staleness = __esm({
   }
 });
 
+// packages/schemas/dist/project.js
+import { lstatSync as lstatSync3, readFileSync as readFileSync5 } from "node:fs";
+import { join as join8, resolve as resolve4 } from "node:path";
+function readContainedText(root, rel, ErrorClass, subject) {
+  const segments = rel.split("/");
+  let cursor = resolve4(root);
+  for (const [index, part] of segments.entries()) {
+    cursor = join8(cursor, part);
+    let st;
+    try {
+      st = lstatSync3(cursor);
+    } catch (err) {
+      if (err?.code === "ENOENT")
+        return null;
+      throw err;
+    }
+    const shown = segments.slice(0, index + 1).join("/");
+    const isLeaf = index === segments.length - 1;
+    if (st.isSymbolicLink())
+      throw new ErrorClass(`${shown} is a symlink \u2014 refusing to follow it out of the project; ${subject} cannot be read`);
+    if (isLeaf ? !st.isFile() : !st.isDirectory()) {
+      throw new ErrorClass(`${shown} exists but is not a ${isLeaf ? "regular file" : "directory"} \u2014 ${subject} cannot be read`);
+    }
+  }
+  return readFileSync5(cursor, "utf8");
+}
+function readJsonObject(root, rel, ErrorClass, subject) {
+  const where = `${fwd2(resolve4(root))}/${rel}`;
+  const text = readContainedText(root, rel, ErrorClass, subject);
+  if (text === null)
+    return { where, parsed: void 0 };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
+  }
+  return { where, parsed };
+}
+function readProjectMode(root) {
+  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
+  if (parsed === void 0 || parsed.mode === void 0)
+    return "hobby";
+  if (!PROJECT_MODES.includes(parsed.mode)) {
+    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+  }
+  return parsed.mode;
+}
+function readProjectIdentity(root) {
+  const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
+  if (parsed === void 0)
+    return null;
+  if (!isProjectId(parsed.project_id)) {
+    throw new ProjectIdentityError(`project_id is ${JSON.stringify(parsed.project_id)} in ${where} \u2014 it must be a UUID v4 string; fix the file by hand (init never overwrites it) or restore it from git`);
+  }
+  return { project_id: parsed.project_id };
+}
+var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd2, UUID_V4_RE, isProjectId;
+var init_project = __esm({
+  "packages/schemas/dist/project.js"() {
+    "use strict";
+    PROJECT_MODES = ["hobby", "work"];
+    ProjectModeError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ProjectModeError";
+      }
+    };
+    ProjectIdentityError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ProjectIdentityError";
+      }
+    };
+    CONFIG_REL = ".sterling/config.json";
+    PROJECT_IDENTITY_REL = ".sterling/project.json";
+    fwd2 = (p) => p.replace(/\\/g, "/");
+    UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
+  }
+});
+
+// packages/schemas/dist/broker.js
+function isBrokerOperation(target2, op) {
+  const ops = BROKER_OPERATIONS[target2];
+  return Array.isArray(ops) && ops.includes(op);
+}
+var BROKER_PROTOCOL, BROKER_MAX_REQUEST_BYTES, BROKER_MAX_RESPONSE_BYTES, BROKER_DISCOVERY_MAX_ENTRIES, BROKER_REGISTRY_MAX_BYTES, BROKER_BOUNDS, BROKER_OPERATIONS, BROKER_MAX_ARGS, brokerIdentitySchema, brokerRegistrationSchema, brokerHelloSchema, brokerErrorSchema, brokerWelcomeSchema, brokerCallSchema, brokerResultSchema;
+var init_broker = __esm({
+  "packages/schemas/dist/broker.js"() {
+    "use strict";
+    init_zod();
+    BROKER_PROTOCOL = 2;
+    BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
+    BROKER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+    BROKER_DISCOVERY_MAX_ENTRIES = 32;
+    BROKER_REGISTRY_MAX_BYTES = 16 * 1024;
+    BROKER_BOUNDS = {
+      /** Connecting to the socket. */
+      connectMs: 500,
+      /** Hello to welcome. */
+      handshakeMs: 1e3,
+      /** How long a call may wait in the server before it starts; past this it is refused unexecuted. */
+      queueMs: 2e3,
+      /** How long the client waits for a started call's result; past this the outcome is unknown. */
+      executeMs: 2e4
+    };
+    BROKER_OPERATIONS = {
+      project: [
+        "get",
+        "query",
+        "queryEach",
+        "count",
+        "articlesBySlug",
+        "inboundSupersedes",
+        "inboundSupersedesEach",
+        "boardReadiness",
+        "getMeta",
+        "create",
+        "enqueueSystemTodo",
+        "updateTodo",
+        "remove",
+        "recordCheckSkipped"
+      ],
+      mounted: ["domainNames", "bySource", "bySourceEach", "querySource", "inboundSupersedes", "inboundSupersedesEach", "domainDescription"]
+    };
+    BROKER_MAX_ARGS = 6;
+    brokerIdentitySchema = external_exports.object({
+      instance_id: external_exports.string().regex(/^[0-9a-f]{32}$/),
+      protocol: external_exports.number().int(),
+      build_id: external_exports.string(),
+      project_id: external_exports.string(),
+      root: external_exports.string(),
+      storage: external_exports.object({ backend: external_exports.literal("postgres"), database: external_exports.string(), meta_schema: external_exports.string(), project_schema: external_exports.string() }),
+      pid: external_exports.number().int()
+    });
+    brokerRegistrationSchema = brokerIdentitySchema.extend({ socket: external_exports.string() });
+    brokerHelloSchema = external_exports.object({
+      type: external_exports.literal("hello"),
+      protocol: external_exports.number().int(),
+      instance_id: external_exports.string(),
+      project_id: external_exports.string(),
+      root: external_exports.string()
+    });
+    brokerErrorSchema = external_exports.object({
+      name: external_exports.string(),
+      message: external_exports.string(),
+      /** Enumerable string or number fields of the original error (domain, location, schema, code). */
+      fields: external_exports.record(external_exports.union([external_exports.string(), external_exports.number()])).default({})
+    });
+    brokerWelcomeSchema = external_exports.union([
+      external_exports.object({ type: external_exports.literal("welcome"), identity: brokerIdentitySchema }),
+      external_exports.object({ type: external_exports.literal("refused"), error: brokerErrorSchema })
+    ]);
+    brokerCallSchema = external_exports.object({
+      type: external_exports.literal("call"),
+      id: external_exports.number().int().nonnegative(),
+      target: external_exports.enum(["project", "mounted"]),
+      op: external_exports.string(),
+      args: external_exports.array(external_exports.unknown()).max(BROKER_MAX_ARGS),
+      /** Client clock (ms since epoch) when the call was sent; client and server share the machine clock. */
+      sent_at: external_exports.number()
+    });
+    brokerResultSchema = external_exports.union([
+      external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(true), result: external_exports.unknown().optional() }),
+      /** `executed` false means the server did not start the operation, so the caller may fall back; true or absent means it may have run. */
+      external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(false), executed: external_exports.boolean(), error: brokerErrorSchema })
+    ]);
+  }
+});
+
 // packages/schemas/dist/index.js
 var dist_exports = {};
 __export(dist_exports, {
@@ -6280,6 +6463,14 @@ __export(dist_exports, {
   ARTICLE_STATE_REQUIRES: () => ARTICLE_STATE_REQUIRES,
   AUTHOR_RE: () => AUTHOR_RE,
   BOARD_NEEDS: () => BOARD_NEEDS,
+  BROKER_BOUNDS: () => BROKER_BOUNDS,
+  BROKER_DISCOVERY_MAX_ENTRIES: () => BROKER_DISCOVERY_MAX_ENTRIES,
+  BROKER_MAX_ARGS: () => BROKER_MAX_ARGS,
+  BROKER_MAX_REQUEST_BYTES: () => BROKER_MAX_REQUEST_BYTES,
+  BROKER_MAX_RESPONSE_BYTES: () => BROKER_MAX_RESPONSE_BYTES,
+  BROKER_OPERATIONS: () => BROKER_OPERATIONS,
+  BROKER_PROTOCOL: () => BROKER_PROTOCOL,
+  BROKER_REGISTRY_MAX_BYTES: () => BROKER_REGISTRY_MAX_BYTES,
   BUILD_ID_FILE: () => BUILD_ID_FILE,
   DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS: () => DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS,
   DIGEST_CLIP: () => DIGEST_CLIP,
@@ -6300,6 +6491,10 @@ __export(dist_exports, {
   NO_CAPTURE_LANES: () => NO_CAPTURE_LANES,
   OPEN_QUESTION_CLOSED: () => OPEN_QUESTION_CLOSED,
   OPEN_QUESTION_TERMINUS_FIELD: () => OPEN_QUESTION_TERMINUS_FIELD,
+  PROJECT_IDENTITY_REL: () => PROJECT_IDENTITY_REL,
+  PROJECT_MODES: () => PROJECT_MODES,
+  ProjectIdentityError: () => ProjectIdentityError,
+  ProjectModeError: () => ProjectModeError,
   RECORD_TYPES: () => RECORD_TYPES,
   REPO_PATH_FORMAT: () => REPO_PATH_FORMAT,
   REPO_PATH_REFUSALS: () => REPO_PATH_REFUSALS,
@@ -6315,6 +6510,13 @@ __export(dist_exports, {
   attestationSchema: () => attestationSchema,
   boardDisplayLabel: () => boardDisplayLabel,
   briefSchema: () => briefSchema,
+  brokerCallSchema: () => brokerCallSchema,
+  brokerErrorSchema: () => brokerErrorSchema,
+  brokerHelloSchema: () => brokerHelloSchema,
+  brokerIdentitySchema: () => brokerIdentitySchema,
+  brokerRegistrationSchema: () => brokerRegistrationSchema,
+  brokerResultSchema: () => brokerResultSchema,
+  brokerWelcomeSchema: () => brokerWelcomeSchema,
   buildIdPath: () => buildIdPath,
   classifyLocation: () => classifyLocation,
   clipName: () => clipName,
@@ -6332,7 +6534,9 @@ __export(dist_exports, {
   fieldShapeAt: () => fieldShapeAt,
   headlineRecord: () => headlineRecord,
   isAbsolutePathAnyHost: () => isAbsolutePathAnyHost,
+  isBrokerOperation: () => isBrokerOperation,
   isCollapsedUrlLocation: () => isCollapsedUrlLocation,
+  isProjectId: () => isProjectId,
   isUnderLocationAnyHost: () => isUnderLocationAnyHost,
   knowledgeWriteSchema: () => knowledgeWriteSchema,
   knowledgeWritesOwnerPid: () => knowledgeWritesOwnerPid,
@@ -6351,6 +6555,8 @@ __export(dist_exports, {
   openQuestionSchema: () => openQuestionSchema,
   parseConfig: () => parseConfig,
   projectRegistrationSchema: () => projectRegistrationSchema,
+  readProjectIdentity: () => readProjectIdentity,
+  readProjectMode: () => readProjectMode,
   recordSizes: () => recordSizes,
   referenceMaterialSchema: () => referenceMaterialSchema,
   refineSupersession: () => refineSupersession,
@@ -6384,6 +6590,8 @@ var init_dist = __esm({
     init_config();
     init_registry();
     init_staleness();
+    init_project();
+    init_broker();
   }
 });
 
@@ -6432,14 +6640,1114 @@ var init_shares = __esm({
   }
 });
 
+// packages/store/dist/pg-bridge.js
+import { MessageChannel, Worker, receiveMessageOnPort } from "node:worker_threads";
+import { readFileSync as readFileSync6, statSync } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join10 } from "node:path";
+function isPlainObject2(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+function buildPgConnectionConfig(creds) {
+  if (!isPlainObject2(creds))
+    throw new PgConfigError("credentials must be a JSON object");
+  for (const key of Object.keys(creds)) {
+    if (!CREDENTIAL_KEYS.includes(key))
+      throw new PgConfigError(`credentials key '${key}' is not recognised; allowed: ${CREDENTIAL_KEYS.join(", ")}`);
+  }
+  for (const field of ["host", "database", "user"]) {
+    if (typeof creds[field] !== "string" || creds[field].length === 0)
+      throw new PgConfigError(`credentials.${field} must be a non-empty string`);
+  }
+  if (!Number.isInteger(creds.port) || creds.port < 1 || creds.port > 65535) {
+    throw new PgConfigError("credentials.port must be an integer between 1 and 65535");
+  }
+  if (typeof creds.password !== "string")
+    throw new PgConfigError("credentials.password must be a string");
+  if (creds.gssencmode !== void 0 && creds.gssencmode !== "disable") {
+    throw new PgConfigError("credentials.gssencmode must be 'disable' (node-postgres has no GSS encryption)");
+  }
+  const timeout = creds.connect_timeout_ms;
+  if (!Number.isInteger(timeout) || timeout <= 0)
+    throw new PgConfigError("credentials.connect_timeout_ms must be a positive integer");
+  let ssl = false;
+  let sslnegotiation = "postgres";
+  if (creds.ssl !== void 0) {
+    const s2 = creds.ssl;
+    if (!isPlainObject2(s2))
+      throw new PgConfigError("credentials.ssl must be an object");
+    for (const key of Object.keys(s2)) {
+      if (!SSL_KEYS.includes(key))
+        throw new PgConfigError(`credentials.ssl key '${key}' is not recognised; allowed: ${SSL_KEYS.join(", ")}`);
+    }
+    if (s2.mode !== "require" && s2.mode !== "verify-full")
+      throw new PgConfigError("credentials.ssl.mode must be 'require' or 'verify-full'");
+    if (typeof s2.rejectUnauthorized !== "boolean")
+      throw new PgConfigError("credentials.ssl.rejectUnauthorized must be a boolean");
+    if (s2.rejectUnauthorized !== (s2.mode === "verify-full")) {
+      throw new PgConfigError(`credentials.ssl.rejectUnauthorized must be ${s2.mode === "verify-full"} for mode '${s2.mode}' (verify-full verifies the certificate, require does not)`);
+    }
+    if (s2.servername !== void 0 && (typeof s2.servername !== "string" || s2.servername.length === 0)) {
+      throw new PgConfigError("credentials.ssl.servername must be a non-empty string when given");
+    }
+    if (s2.negotiation !== void 0 && s2.negotiation !== "postgres" && s2.negotiation !== "direct") {
+      throw new PgConfigError("credentials.ssl.negotiation must be 'postgres' or 'direct'");
+    }
+    ssl = { rejectUnauthorized: s2.rejectUnauthorized, ...s2.servername !== void 0 ? { servername: s2.servername } : {} };
+    sslnegotiation = s2.negotiation ?? "postgres";
+  }
+  return {
+    host: creds.host,
+    port: creds.port,
+    database: creds.database,
+    user: creds.user,
+    password: creds.password,
+    ssl,
+    sslnegotiation,
+    connectionTimeoutMillis: timeout
+  };
+}
+function readPgCredentials(path = DEFAULT_PG_CREDENTIALS_PATH) {
+  let mode;
+  try {
+    mode = statSync(path).mode;
+  } catch (e) {
+    throw new PgConfigError(`Postgres credentials file '${path}' cannot be read: ${e.code ?? String(e)}`);
+  }
+  if ((mode & 63) !== 0) {
+    throw new PgConfigError(`Postgres credentials file '${path}' is readable by group or other (mode ${(mode & 511).toString(8)}); set it to mode 600`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync6(path, "utf8"));
+  } catch (e) {
+    throw new PgConfigError(`Postgres credentials file '${path}' is not valid JSON: ${e.message}`);
+  }
+  return buildPgConnectionConfig(parsed);
+}
+function redactSecrets(text, secrets) {
+  let out = text;
+  for (const secret of secrets) {
+    if (!secret)
+      continue;
+    out = out.split(secret).join("[redacted]");
+    const encoded = encodeURIComponent(secret);
+    if (encoded !== secret)
+      out = out.split(encoded).join("[redacted]");
+  }
+  return out;
+}
+var STATE_WAITING, STATE_REPLY, STATE_DEAD, DEFAULT_PG_CREDENTIALS_PATH, DEFAULT_PG_WAIT_TIMEOUT_MS, HANDSHAKE_MARGIN_MS, PgConfigError, PgBridgeTimeoutError, PgWorkerDiedError, PgBridgeClosedError, PgTransactionOpenError, PgQueryError, CREDENTIAL_KEYS, SSL_KEYS, PgBridge;
+var init_pg_bridge = __esm({
+  "packages/store/dist/pg-bridge.js"() {
+    "use strict";
+    STATE_WAITING = 0;
+    STATE_REPLY = 1;
+    STATE_DEAD = 2;
+    DEFAULT_PG_CREDENTIALS_PATH = join10(homedir3(), ".sterling", "credentials", "served.json");
+    DEFAULT_PG_WAIT_TIMEOUT_MS = 1e4;
+    HANDSHAKE_MARGIN_MS = 5e3;
+    PgConfigError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "PgConfigError";
+      }
+    };
+    PgBridgeTimeoutError = class extends Error {
+      phase;
+      timeoutMs;
+      constructor(phase, timeoutMs2, detail) {
+        super(`Postgres bridge: no reply within ${timeoutMs2} ms during the ${phase} (${detail}); the worker was terminated and its connection closed.`);
+        this.phase = phase;
+        this.timeoutMs = timeoutMs2;
+        this.name = "PgBridgeTimeoutError";
+      }
+    };
+    PgWorkerDiedError = class extends Error {
+      reason;
+      code;
+      constructor(reason, code) {
+        super(`Postgres bridge: the worker died (${reason}); the bridge is closed.`);
+        this.reason = reason;
+        this.code = code;
+        this.name = "PgWorkerDiedError";
+      }
+    };
+    PgBridgeClosedError = class extends Error {
+      constructor(why) {
+        super(`Postgres bridge is closed (${why}); open a new one.`);
+        this.name = "PgBridgeClosedError";
+      }
+    };
+    PgTransactionOpenError = class extends Error {
+      constructor(wanted, holder) {
+        super(`Postgres bridge: ${wanted} cannot begin a transaction: this connection already has one open for ${holder}. One connection holds one transaction; nothing was sent.`);
+        this.name = "PgTransactionOpenError";
+      }
+    };
+    PgQueryError = class extends Error {
+      code;
+      inPrefix;
+      constructor(message, code, inPrefix = false) {
+        super(message);
+        this.code = code;
+        this.inPrefix = inPrefix;
+        this.name = "PgQueryError";
+      }
+    };
+    CREDENTIAL_KEYS = ["host", "port", "database", "user", "password", "ssl", "gssencmode", "connect_timeout_ms"];
+    SSL_KEYS = ["mode", "negotiation", "servername", "rejectUnauthorized"];
+    PgBridge = class {
+      worker;
+      port;
+      control;
+      secrets;
+      seq = 0;
+      closedReason;
+      txOwner;
+      txOwnerLabel = "";
+      /** How long one statement waits for its reply. Server-side timeouts must be shorter, so the named server error arrives first. */
+      waitTimeoutMs;
+      constructor(config, options = {}) {
+        this.waitTimeoutMs = options.waitTimeoutMs ?? DEFAULT_PG_WAIT_TIMEOUT_MS;
+        const handshakeTimeoutMs = options.handshakeTimeoutMs ?? config.connectionTimeoutMillis + HANDSHAKE_MARGIN_MS;
+        for (const [name, v] of [["waitTimeoutMs", this.waitTimeoutMs], ["handshakeTimeoutMs", handshakeTimeoutMs]]) {
+          if (!Number.isInteger(v) || v <= 0)
+            throw new PgConfigError(`PgBridge: ${name} must be a positive integer`);
+        }
+        this.secrets = [config.password];
+        this.control = new Int32Array(new SharedArrayBuffer(4));
+        const { port1, port2 } = new MessageChannel();
+        this.port = port1;
+        this.port.unref();
+        this.worker = options.workerUrl === void 0 ? new Worker(new URL("./pg-worker.js", import.meta.url)) : new Worker(options.workerUrl);
+        this.worker.unref();
+        this.worker.on("error", () => {
+        });
+        Atomics.store(this.control, 0, STATE_WAITING);
+        this.worker.postMessage({ control: this.control.buffer, port: port2, config }, [port2]);
+        this.await(0, "handshake", handshakeTimeoutMs, "the worker did not report ready; it may have died at load, or the server did not answer");
+      }
+      get closed() {
+        return this.closedReason !== void 0;
+      }
+      /** Why the bridge closed (the same text PgBridgeClosedError carries), or undefined while it is open. */
+      get closeReason() {
+        return this.closedReason;
+      }
+      /** The handle whose transaction is open on this connection, if any. */
+      get transactionOwner() {
+        return this.txOwner;
+      }
+      /** Records that `owner` opens a transaction. Refuses when any handle, `owner` included, already holds one. */
+      claimTransaction(owner, label) {
+        if (this.txOwner !== void 0)
+          throw new PgTransactionOpenError(label, this.txOwnerLabel);
+        this.txOwner = owner;
+        this.txOwnerLabel = label;
+      }
+      /** Records that `owner`'s transaction ended. A no-op for any other handle. */
+      releaseTransaction(owner) {
+        if (this.txOwner === owner) {
+          this.txOwner = void 0;
+          this.txOwnerLabel = "";
+        }
+      }
+      /**
+       * Runs one statement. With `values` it is a parameterised query ($1, $2, ...); without, a simple query that may hold several statements.
+       * `prefix`, a simple query, goes out in the same round trip ahead of the statement; when it fails the call throws a PgQueryError with
+       * `inPrefix` set and the statement's result is discarded (the statement may still have run, so the caller passes only a read).
+       */
+      query(text, values, prefix) {
+        const reply = this.send({ op: "query", text, values, ...prefix !== void 0 ? { prefix } : {} }, "query", this.waitTimeoutMs);
+        return { rows: reply.rows ?? [], rowCount: reply.rowCount ?? 0 };
+      }
+      /** Ends the connection and stops the worker. Idempotent. */
+      close() {
+        if (this.closed)
+          return;
+        try {
+          this.send({ op: "close" }, "close", this.waitTimeoutMs);
+        } finally {
+          this.shutDown("close() was called");
+        }
+      }
+      send(req, phase, timeoutMs2) {
+        if (this.closedReason !== void 0)
+          throw new PgBridgeClosedError(this.closedReason);
+        const queued = receiveMessageOnPort(this.port)?.message;
+        const previous = Atomics.compareExchange(this.control, 0, STATE_REPLY, STATE_WAITING);
+        if (queued?.dead || previous === STATE_DEAD) {
+          const reason = queued?.error ? this.redact(queued.error.message) : "it stopped between calls";
+          this.shutDown(`the worker died: ${reason}`);
+          throw new PgWorkerDiedError(reason, queued?.error?.code);
+        }
+        const seq = ++this.seq;
+        this.port.postMessage({ seq, ...req });
+        return this.await(seq, phase, timeoutMs2, phase === "query" ? "the statement did not finish" : "the connection did not end");
+      }
+      await(seq, phase, timeoutMs2, detail) {
+        const outcome = Atomics.wait(this.control, 0, STATE_WAITING, timeoutMs2);
+        if (outcome === "timed-out") {
+          this.shutDown(`a ${phase} wait timed out after ${timeoutMs2} ms`);
+          throw new PgBridgeTimeoutError(phase, timeoutMs2, detail);
+        }
+        const state = Atomics.load(this.control, 0);
+        const reply = receiveMessageOnPort(this.port)?.message;
+        if (state === STATE_DEAD || reply?.dead) {
+          const reason = reply?.error ? this.redact(reply.error.message) : "no reason given";
+          this.shutDown(`the worker died: ${reason}`);
+          throw new PgWorkerDiedError(reason, reply?.error?.code);
+        }
+        if (!reply || reply.seq !== seq) {
+          this.shutDown("protocol error");
+          throw new PgWorkerDiedError(`protocol error: expected the reply to message ${seq}, got ${reply ? `message ${reply.seq}` : "nothing"}`);
+        }
+        if (!reply.ok) {
+          const message = this.redact(reply.error?.message ?? "unknown error");
+          if (phase === "handshake") {
+            this.shutDown(`the connection failed: ${message}`);
+            throw new PgWorkerDiedError(`connecting failed: ${message}`, reply.error?.code);
+          }
+          throw new PgQueryError(message, reply.error?.code, reply.prefixFailed === true);
+        }
+        return reply;
+      }
+      redact(message) {
+        return redactSecrets(message, this.secrets);
+      }
+      shutDown(reason) {
+        if (this.closedReason !== void 0)
+          return;
+        this.closedReason = reason;
+        this.port.close();
+        void this.worker.terminate();
+      }
+    };
+  }
+});
+
+// packages/store/dist/search-fold.js
+function foldSearchText(s2) {
+  let kept = "";
+  let afterLatinLetter = false;
+  for (const ch of s2.toLowerCase().normalize("NFD")) {
+    if (COMBINING_MARK.test(ch)) {
+      if (!afterLatinLetter)
+        kept += ch;
+      continue;
+    }
+    afterLatinLetter = LATIN_LETTER.test(ch) && new RegExp("^\\p{L}$", "u").test(ch);
+    kept += ch;
+  }
+  let out = "";
+  for (const ch of kept.normalize("NFC"))
+    out += LETTER_OR_NUMBER_OR_PRIVATE.test(ch) ? ch : " ";
+  return out.replace(/ {2,}/g, " ").trim();
+}
+var LATIN_LETTER, LETTER_OR_NUMBER_OR_PRIVATE, COMBINING_MARK;
+var init_search_fold = __esm({
+  "packages/store/dist/search-fold.js"() {
+    "use strict";
+    LATIN_LETTER = new RegExp("^\\p{Script=Latin}$", "u");
+    LETTER_OR_NUMBER_OR_PRIVATE = /^[\p{L}\p{N}\p{Co}]$/u;
+    COMBINING_MARK = new RegExp("^\\p{M}$", "u");
+  }
+});
+
+// packages/store/dist/pg-driver.js
+function assertSterlingSchemaName(name) {
+  if (typeof name !== "string" || !SCHEMA_NAME.test(name))
+    throw new PgSchemaNameRefusedError(String(name), "not of the form sterling_<a-z0-9_>");
+  if (Buffer.byteLength(name) > MAX_IDENTIFIER_BYTES)
+    throw new PgSchemaNameRefusedError(name, `longer than ${MAX_IDENTIFIER_BYTES} bytes`);
+}
+function pgProjectSchemaName(projectUuid) {
+  if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(projectUuid)) {
+    throw new PgSchemaNameRefusedError(`sterling_p_${projectUuid}`, "the project id is not a UUID");
+  }
+  const name = `sterling_p_${projectUuid.replace(/-/g, "").toLowerCase()}`;
+  assertSterlingSchemaName(name);
+  return name;
+}
+function pgDomainSchemaName(domain) {
+  if (typeof domain !== "string" || domain.length === 0)
+    throw new PgSchemaNameRefusedError("sterling_d_", "the domain name is empty");
+  const name = `sterling_d_${domain.toLowerCase().replace(/[^a-z0-9]/g, "_")}`;
+  assertSterlingSchemaName(name);
+  return name;
+}
+function ident(schema) {
+  assertSterlingSchemaName(schema);
+  return `"${schema}"`;
+}
+function lockHash(name) {
+  let h = 2166136261;
+  for (const byte of Buffer.from(name, "utf8")) {
+    h ^= byte;
+    h = Math.imul(h, 16777619);
+  }
+  return h | 0;
+}
+function timeoutMs(name, value, fallback, bridge) {
+  const v = value ?? fallback;
+  if (!Number.isInteger(v) || v <= 0)
+    throw new Error(`Postgres ${name} must be a positive integer, got ${String(v)}`);
+  if (v >= bridge.waitTimeoutMs) {
+    throw new Error(`Postgres ${name} (${v} ms) must be below the bridge's wait (${bridge.waitTimeoutMs} ms), so the server's named timeout arrives before the bridge gives up`);
+  }
+  return v;
+}
+function mapPgError(e, where) {
+  if (e instanceof PgQueryError) {
+    if (e.code === "55P03")
+      throw new PgLockTimeoutError(`${e.message} in ${where}`);
+    if (e.code === "57014")
+      throw new PgStatementTimeoutError(`${e.message} in ${where}`);
+    if (e.code === "22P05" || e.code === "22021")
+      throw new PgNulCharacterError(`${e.message} (SQLSTATE ${e.code}) in '${where}'`);
+  }
+  throw e;
+}
+function abandon(bridge, owner) {
+  try {
+    if (!bridge.closed)
+      bridge.query("ROLLBACK");
+  } finally {
+    bridge.releaseTransaction(owner);
+  }
+}
+function inMigrationTransaction(bridge, metaSchema, lockTimeout, fn) {
+  assertSterlingSchemaName(metaSchema);
+  const lock = timeoutMs("lockTimeoutMs", lockTimeout, DEFAULT_PG_LOCK_TIMEOUT_MS, bridge);
+  const statement = timeoutMs("statementTimeoutMs", void 0, DEFAULT_PG_STATEMENT_TIMEOUT_MS, bridge);
+  const owner = {};
+  bridge.claimTransaction(owner, `a migration on '${metaSchema}'`);
+  try {
+    bridge.query(`BEGIN; SET LOCAL lock_timeout = ${lock}; SET LOCAL statement_timeout = ${statement}; SELECT pg_advisory_xact_lock(${LOCK_NS_GLOBAL}, ${lockHash(metaSchema)})`);
+    fn();
+    bridge.query("COMMIT");
+    bridge.releaseTransaction(owner);
+  } catch (e) {
+    abandon(bridge, owner);
+    mapPgError(e, `a migration on '${metaSchema}'`);
+  }
+}
+function ensurePgLayout(bridge, metaSchema = PG_META_SCHEMA, options = {}) {
+  const m = ident(metaSchema);
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  inMigrationTransaction(bridge, metaSchema, options.lockTimeoutMs, () => bridge.query(`
+CREATE SCHEMA IF NOT EXISTS ${m};
+CREATE TABLE IF NOT EXISTS ${m}.layout (
+  singleton SMALLINT PRIMARY KEY DEFAULT 1 CHECK (singleton = 1),
+  layout_version INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${m}.stores (
+  schema_name TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('project', 'domain', 'test')),
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  schema_version INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS stores_kind_name ON ${m}.stores (kind, name);
+CREATE TABLE IF NOT EXISTS ${m}.migration_lock (
+  singleton SMALLINT PRIMARY KEY DEFAULT 1 CHECK (singleton = 1),
+  held_by TEXT,
+  acquired_at TEXT
+);
+INSERT INTO ${m}.layout (singleton, layout_version, updated_at) VALUES (1, ${PG_LAYOUT_VERSION}, '${now}') ON CONFLICT (singleton) DO NOTHING;
+INSERT INTO ${m}.migration_lock (singleton) VALUES (1) ON CONFLICT (singleton) DO NOTHING;
+`));
+}
+function createPgStore(bridge, input) {
+  const s2 = ident(input.schema);
+  const m = ident(input.metaSchema ?? PG_META_SCHEMA);
+  if (input.kind === "test" && !input.schema.startsWith("sterling_test_"))
+    throw new PgSchemaNameRefusedError(input.schema, "a 'test' store must be named sterling_test_*");
+  if (input.kind !== "test" && input.schema.startsWith("sterling_test_"))
+    throw new PgSchemaNameRefusedError(input.schema, `a '${input.kind}' store cannot use the sterling_test_ prefix`);
+  inMigrationTransaction(bridge, input.metaSchema ?? PG_META_SCHEMA, input.lockTimeoutMs, () => {
+    const row = bridge.query(`SELECT kind, name FROM ${m}.stores WHERE schema_name = $1`, [input.schema]).rows[0];
+    if (row) {
+      throw new PgStoreExistsError(input.schema, row.name === input.name && row.kind === input.kind ? "it is already registered" : `the schema is already registered to ${String(row.kind)} '${String(row.name)}', so '${input.name}' maps to a schema another store owns`);
+    }
+    if (bridge.query("SELECT 1 FROM pg_namespace WHERE nspname = $1", [input.schema]).rows.length) {
+      throw new PgStoreExistsError(input.schema, "the schema exists without a registry row");
+    }
+    bridge.query(`CREATE SCHEMA ${s2}`);
+    bridge.query(`INSERT INTO ${m}.stores (schema_name, kind, name, created_at) VALUES ($1, $2, $3, $4)`, [input.schema, input.kind, input.name, (/* @__PURE__ */ new Date()).toISOString()]);
+  });
+}
+function translateStatement(sql, schema) {
+  let out = "";
+  let n = 0;
+  let i = 0;
+  let prevSignificant = "";
+  let firstWords = [];
+  while (i < sql.length) {
+    const c = sql[i];
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === c) {
+          if (sql[j + 1] === c) {
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        j++;
+      }
+      out += sql.slice(i, j + 1);
+      prevSignificant = c;
+      i = j + 1;
+      continue;
+    }
+    if (c === "?") {
+      out += `$${++n}`;
+      prevSignificant = "?";
+      i++;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      let j = i + 1;
+      while (j < sql.length && /[A-Za-z0-9_]/.test(sql[j]))
+        j++;
+      const word = sql.slice(i, j);
+      const lower = word.toLowerCase();
+      if (firstWords.length < 3)
+        firstWords.push(lower);
+      let k = j;
+      while (k < sql.length && /\s/.test(sql[k]))
+        k++;
+      if (STORE_TABLES.has(lower) && prevSignificant !== "." && sql[j] !== ".") {
+        out += `"${schema}".${word}`;
+      } else if (lower === "instr" && sql[k] === "(") {
+        out += "strpos";
+      } else {
+        out += word;
+      }
+      prevSignificant = word;
+      i = j;
+      continue;
+    }
+    if (!/\s/.test(c))
+      prevSignificant = c;
+    out += c;
+    i++;
+  }
+  const derivedText = firstWords[0] === "insert" && firstWords[1] === "into" && firstWords[2] === "records_fts" || firstWords[0] === "update" && firstWords[1] === "records_fts";
+  return { text: out, params: n, derivedText };
+}
+function storeDdl(s2) {
+  return `
+CREATE TABLE IF NOT EXISTS ${s2}.records (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  superseded_by TEXT,
+  lifecycle TEXT NOT NULL DEFAULT 'live',
+  freshness TEXT NOT NULL DEFAULT 'fresh',
+  version INTEGER NOT NULL DEFAULT 1,
+  scope TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  author TEXT NOT NULL,
+  derived_unconfirmed INTEGER NOT NULL DEFAULT 0,
+  body TEXT NOT NULL,
+  _seq BIGINT GENERATED ALWAYS AS IDENTITY,
+  operation_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_records_type_status ON ${s2}.records (type, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON ${s2}.records (operation_id);
+CREATE TABLE IF NOT EXISTS ${s2}.record_versions (
+  record_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  archived_at TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (record_id, version)
+);
+CREATE TABLE IF NOT EXISTS ${s2}.record_aliases (
+  historical_id TEXT PRIMARY KEY,
+  canonical_id TEXT NOT NULL,
+  archived_version INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  _seq BIGINT GENERATED ALWAYS AS IDENTITY
+);
+CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON ${s2}.record_aliases (canonical_id);
+CREATE TABLE IF NOT EXISTS ${s2}.record_relations (
+  source_id TEXT NOT NULL,
+  rel TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  _seq BIGINT GENERATED ALWAYS AS IDENTITY,
+  PRIMARY KEY (source_id, rel, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_relations_target ON ${s2}.record_relations (target_id);
+CREATE INDEX IF NOT EXISTS idx_relations_rel_target ON ${s2}.record_relations (rel, target_id);
+CREATE TABLE IF NOT EXISTS ${s2}.record_stack_tags (
+  record_id TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  PRIMARY KEY (record_id, tag)
+);
+CREATE TABLE IF NOT EXISTS ${s2}.record_file_keys (
+  record_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  PRIMARY KEY (record_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_file_keys_path ON ${s2}.record_file_keys (path);
+-- text is the folded search text (pgDialect.searchText at every write site).
+-- The default parser splits folded text on its spaces only: the fold leaves
+-- letters, digits and private-use characters, and in a C-ctype database every
+-- non-ASCII character is a letter to it. So tsv has one position per word and
+-- dl, the word count, is the document length bm25 normalizes by.
+CREATE TABLE IF NOT EXISTS ${s2}.records_fts (
+  record_id TEXT PRIMARY KEY,
+  text TEXT NOT NULL,
+  tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, text)) STORED,
+  dl INTEGER GENERATED ALWAYS AS (CASE WHEN text = '' THEN 0 ELSE cardinality(string_to_array(text, ' ')) END) STORED
+);
+CREATE INDEX IF NOT EXISTS idx_records_fts_tsv ON ${s2}.records_fts USING gin (tsv);
+CREATE TABLE IF NOT EXISTS ${s2}.runs (
+  id TEXT PRIMARY KEY,
+  machine_state TEXT NOT NULL,
+  pending_exit TEXT,
+  body TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.handoffs (
+  run_id TEXT NOT NULL,
+  phase_id TEXT NOT NULL,
+  agent_role TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoffs_run_phase ON ${s2}.handoffs (run_id, phase_id);
+CREATE TABLE IF NOT EXISTS ${s2}.check_skipped (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  run_id TEXT,
+  check_name TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.selection (
+  slot INTEGER PRIMARY KEY CHECK (slot = 1),
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.queue_drain_log (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  drained_at TEXT NOT NULL,
+  system_reason TEXT NOT NULL,
+  text TEXT NOT NULL,
+  file_keys TEXT NOT NULL,
+  record_id TEXT
+);
+CREATE TABLE IF NOT EXISTS ${s2}.activity_log (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  at TEXT NOT NULL,
+  verb TEXT NOT NULL,
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  title TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.store_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+}
+function pgSearchQuery(terms, matchAll) {
+  const clauses = [];
+  let empty = false;
+  for (const term of terms) {
+    const prefix = term.length > 1 && term.endsWith("*");
+    const folded = foldSearchText(term);
+    if (folded === "") {
+      empty = true;
+      continue;
+    }
+    const w = folded.split(" ");
+    clauses.push({ q: w.map((x) => `'${x}'`).join(" <-> ") + (prefix ? ":*" : ""), w, p: prefix });
+  }
+  const none = clauses.length === 0 || matchAll === true && empty;
+  const prefixes = [...new Set(clauses.filter((c) => c.p).map((c) => c.w[c.w.length - 1]))];
+  const out = JSON.stringify({
+    match: none ? null : clauses.map((c) => `(${c.q})`).join(matchAll ? " & " : " | "),
+    clauses,
+    words: [...new Set(clauses.flatMap((c) => c.w))],
+    prefixes,
+    // The documents any prefix matches, so the statement can list the lexemes each prefix stands for once per query.
+    prefixq: prefixes.length ? prefixes.map((x) => `'${x}':*`).join(" | ") : null
+  });
+  return out;
+}
+function pgDialectFor(ranking) {
+  if (!PG_RANKINGS.includes(ranking))
+    throw new Error(`Postgres ranking must be one of ${PG_RANKINGS.join(", ")}, got ${String(ranking)}`);
+  return {
+    // One statement per query (a round trip costs about 25 ms): the join binds
+    // the query once for the statistics, the match binds it again so the GIN
+    // index sees a constant tsquery.
+    searchJoin: `JOIN records_fts f ON f.record_id = r.id ${PG_SEARCH_STATS} ${PG_SCORES[ranking]}`,
+    searchJoinBinds: 1,
+    searchMatch: "f.tsv @@ (?::json->>'match')::tsquery",
+    searchScore: "sc.score",
+    searchOrder: "sc.score DESC",
+    scoreScale: PG_SCORE_SCALES[ranking],
+    searchQuery: pgSearchQuery,
+    searchText: foldSearchText,
+    // Postgres refuses \u0000 anywhere in a json value it parses (22P05), so the
+    // real \u0000 escapes are removed first. The pattern consumes an escaped
+    // backslash pair (\\) as a unit and puts it back, so \u0000 only matches
+    // where its backslash starts an escape: the literal text \\u0000 survives.
+    // strpos skips the regex for the bodies that hold no \u0000 at all.
+    jsonText: (column, key) => {
+      if (!/^[a-z_]+$/.test(key))
+        throw new Error(`pgDialect.jsonText: key '${key}' is not a plain identifier`);
+      if (!/^[a-z_]+(\.[a-z_]+)?$/.test(column))
+        throw new Error(`pgDialect.jsonText: column '${column}' is not a plain column reference`);
+      return String.raw`((CASE WHEN strpos(${column}, '\u0000') > 0 THEN regexp_replace(${column}, '(\\\\)|\\u0000', '\1', 'g') ELSE ${column} END)::json ->> '${key}')`;
+    },
+    insertionOrder: (alias) => alias ? `${alias}._seq` : "_seq",
+    insertIgnore: (table, columns) => `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")}) ON CONFLICT DO NOTHING`
+  };
+}
+function toPgParam(v, i, sql, stripNul) {
+  if (v === void 0)
+    throw new TypeError(`PgDriver: parameter ${i + 1} is undefined in: ${sql}`);
+  if (typeof v === "bigint")
+    return v.toString();
+  if (typeof v === "string" && v.includes("\0")) {
+    if (stripNul)
+      return v.replace(/\u0000/g, "");
+    throw new PgNulCharacterError(`parameter ${i + 1} of '${sql}'`);
+  }
+  return v;
+}
+var PG_META_SCHEMA, PG_LAYOUT_VERSION, SCHEMA_NAME, MAX_IDENTIFIER_BYTES, PgSchemaNameRefusedError, PgStoreMissingError, PgStoreExistsError, PgNulCharacterError, PgLockTimeoutError, PgStatementTimeoutError, PgUnsupportedError, DEFAULT_PG_LOCK_TIMEOUT_MS, DEFAULT_PG_STATEMENT_TIMEOUT_MS, LOCK_NS_GLOBAL, LOCK_NS_STORE, STORE_TABLES, PG_RANKINGS, DEFAULT_PG_RANKING, PG_SCORE_SCALES, PG_SEARCH_STATS, PG_IDF, PG_BM25_SCORE, PG_IDF_TSRANK_SCORE, PG_TSRANK_CD_SCORE, PG_SCORES, pgDialect, PgStatement, PgDriver;
+var init_pg_driver = __esm({
+  "packages/store/dist/pg-driver.js"() {
+    "use strict";
+    init_pg_bridge();
+    init_search_fold();
+    init_pg_bridge();
+    PG_META_SCHEMA = "sterling_meta";
+    PG_LAYOUT_VERSION = 1;
+    SCHEMA_NAME = /^sterling_[a-z0-9_]*[a-z0-9]$/;
+    MAX_IDENTIFIER_BYTES = 63;
+    PgSchemaNameRefusedError = class extends Error {
+      constructor(name, why) {
+        super(`Postgres schema name '${name}' refused: ${why}. Sterling only touches schemas named sterling_<lowercase letters, digits, _>.`);
+        this.name = "PgSchemaNameRefusedError";
+      }
+    };
+    PgStoreMissingError = class extends Error {
+      schema;
+      constructor(schema, missing) {
+        super(`Postgres store '${schema}' does not exist: ${missing}. A store is created only by an explicit createPgStore call, never on open.`);
+        this.schema = schema;
+        this.name = "PgStoreMissingError";
+      }
+    };
+    PgStoreExistsError = class extends Error {
+      schema;
+      constructor(schema, detail) {
+        super(`Postgres store '${schema}' cannot be created: ${detail}.`);
+        this.schema = schema;
+        this.name = "PgStoreExistsError";
+      }
+    };
+    PgNulCharacterError = class extends Error {
+      constructor(detail) {
+        super(`NUL character (U+0000) refused on Postgres: ${detail}. Postgres text cannot hold U+0000, and its JSON functions refuse the \\u0000 escape.`);
+        this.name = "PgNulCharacterError";
+      }
+    };
+    PgLockTimeoutError = class extends Error {
+      code = "55P03";
+      constructor(detail) {
+        super(`Postgres lock timeout (55P03): ${detail}. Another writer or a migration holds the lock; nothing was written and the write is not retried.`);
+        this.name = "PgLockTimeoutError";
+      }
+    };
+    PgStatementTimeoutError = class extends Error {
+      code = "57014";
+      constructor(detail) {
+        super(`Postgres statement timeout (57014): ${detail}. The transaction was rolled back and is not retried.`);
+        this.name = "PgStatementTimeoutError";
+      }
+    };
+    PgUnsupportedError = class extends Error {
+      constructor(what) {
+        super(`${what} is not supported by the Postgres driver.`);
+        this.name = "PgUnsupportedError";
+      }
+    };
+    DEFAULT_PG_LOCK_TIMEOUT_MS = 3e3;
+    DEFAULT_PG_STATEMENT_TIMEOUT_MS = 5e3;
+    LOCK_NS_GLOBAL = 1398033735;
+    LOCK_NS_STORE = 1398035284;
+    STORE_TABLES = /* @__PURE__ */ new Set([
+      "records",
+      "record_versions",
+      "record_aliases",
+      "record_relations",
+      "record_stack_tags",
+      "record_file_keys",
+      "records_fts",
+      "runs",
+      "handoffs",
+      "check_skipped",
+      "selection",
+      "queue_drain_log",
+      "activity_log",
+      "store_meta"
+    ]);
+    PG_RANKINGS = ["bm25", "idf_tsrank", "tsrank_cd"];
+    DEFAULT_PG_RANKING = "bm25";
+    PG_SCORE_SCALES = { bm25: "pg_bm25_v1", idf_tsrank: "pg_idf_tsrank_v1", tsrank_cd: "pg_tsrank_cd_v1" };
+    PG_SEARCH_STATS = `CROSS JOIN (SELECT q.j->>'match' AS m,
+    (SELECT count(*) FROM records_fts)::float8 AS n,
+    (SELECT coalesce(avg(dl), 0) FROM records_fts)::float8 AS avgdl,
+    ARRAY(SELECT json_array_elements_text(q.j->'words'))
+      || ARRAY(SELECT DISTINCT u.lexeme FROM records_fts x, unnest(x.tsv) u
+        WHERE x.tsv @@ (q.j->>'prefixq')::tsquery AND EXISTS (SELECT 1 FROM json_array_elements_text(q.j->'prefixes') pf WHERE starts_with(u.lexeme, pf))) AS lexemes,
+    (SELECT coalesce(json_agg(json_build_object('q', c.value->>'q', 'w', c.value->'w', 'p', c.value->'p',
+        'df', (SELECT count(*) FROM records_fts x WHERE x.tsv @@ (c.value->>'q')::tsquery)) ORDER BY c.ordinality), '[]'::json)
+      FROM json_array_elements(q.j->'clauses') WITH ORDINALITY c) AS cl
+  FROM (SELECT ?::json AS j) q) st`;
+    PG_IDF = "greatest(ln((st.n - c.df + 0.5) / (c.df + 0.5)), 1e-6)";
+    PG_BM25_SCORE = `CROSS JOIN LATERAL (SELECT array_agg(u.lexeme) AS lx, array_agg(p) AS ps
+    FROM unnest(ts_filter(setweight(f.tsv, 'A', st.lexemes), '{a}')) u, unnest(u.positions) p) lp
+  CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * (t.tf * 2.2) / (t.tf + 1.2 * (0.25 + 0.75 * f.dl / st.avgdl))), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(w text[], p boolean, df bigint)
+    CROSS JOIN LATERAL (SELECT count(*)::float8 AS tf FROM unnest(lp.lx, lp.ps) AS a(lex, pos)
+      WHERE (a.lex = c.w[1] OR (c.p AND cardinality(c.w) = 1 AND starts_with(a.lex, c.w[1])))
+        AND NOT EXISTS (SELECT 1 FROM generate_series(2, cardinality(c.w)) AS i
+          WHERE NOT EXISTS (SELECT 1 FROM unnest(lp.lx, lp.ps) AS b(lex, pos)
+            WHERE b.pos = a.pos + i - 1 AND (b.lex = c.w[i] OR (c.p AND i = cardinality(c.w) AND starts_with(b.lex, c.w[i])))))) t) sc`;
+    PG_IDF_TSRANK_SCORE = `CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * ts_rank(f.tsv, c.q::tsquery)), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(q text, df bigint) WHERE f.tsv @@ c.q::tsquery) sc`;
+    PG_TSRANK_CD_SCORE = "CROSS JOIN LATERAL (SELECT ts_rank_cd(f.tsv, st.m::tsquery)::float8 AS score) sc";
+    PG_SCORES = { bm25: PG_BM25_SCORE, idf_tsrank: PG_IDF_TSRANK_SCORE, tsrank_cd: PG_TSRANK_CD_SCORE };
+    pgDialect = pgDialectFor(DEFAULT_PG_RANKING);
+    PgStatement = class {
+      driver;
+      sql;
+      translated;
+      constructor(driver, sql, schema) {
+        this.driver = driver;
+        this.sql = sql;
+        this.translated = translateStatement(sql, schema);
+      }
+      execute(params) {
+        this.driver.assertOpen();
+        if (params.length !== this.translated.params) {
+          throw new RangeError(`PgDriver: statement takes ${this.translated.params} parameter(s), got ${params.length}: ${this.sql}`);
+        }
+        const values = params.map((p, i) => toPgParam(p, i, this.sql, this.translated.derivedText));
+        return this.driver.run(this.translated.text, values, this.sql);
+      }
+      get(...params) {
+        return this.execute(params).rows[0];
+      }
+      all(...params) {
+        return this.execute(params).rows;
+      }
+      run(...params) {
+        const { rowCount } = this.execute(params);
+        return {
+          changes: rowCount,
+          get lastInsertRowid() {
+            throw new PgUnsupportedError("lastInsertRowid (Postgres has no rowid)");
+          }
+        };
+      }
+    };
+    PgDriver = class {
+      bridge;
+      dialect;
+      schema;
+      metaSchema;
+      s;
+      m;
+      ownsBridge;
+      lockTimeoutMs;
+      statementTimeoutMs;
+      closed = false;
+      /**
+       * The transaction this handle claimed. After beginReadDeferred() the BEGIN
+       * waits in `pendingBegin` and goes out in the same round trip as the read's
+       * first statement (run()), so the read costs one round trip less; a read
+       * that runs no statement sends nothing.
+       */
+      txState = "none";
+      pendingBegin;
+      constructor(bridge, options) {
+        this.bridge = bridge;
+        this.schema = options.schema;
+        this.dialect = options.ranking === void 0 ? pgDialect : pgDialectFor(options.ranking);
+        this.metaSchema = options.metaSchema ?? PG_META_SCHEMA;
+        this.s = ident(this.schema);
+        this.m = ident(this.metaSchema);
+        this.ownsBridge = options.ownsBridge ?? false;
+        this.lockTimeoutMs = timeoutMs("lockTimeoutMs", options.lockTimeoutMs, DEFAULT_PG_LOCK_TIMEOUT_MS, bridge);
+        this.statementTimeoutMs = timeoutMs("statementTimeoutMs", options.statementTimeoutMs, DEFAULT_PG_STATEMENT_TIMEOUT_MS, bridge);
+        const found = bridge.query("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1) AS has_schema, EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $2 AND tablename = $3) AS has_registry", [this.schema, this.metaSchema, "stores"]).rows[0];
+        if (!found.has_registry)
+          throw new PgStoreMissingError(this.schema, `the meta schema '${this.metaSchema}' has no stores registry`);
+        const registered = bridge.query(`SELECT 1 FROM ${this.m}.stores WHERE schema_name = $1`, [this.schema]).rows.length === 1;
+        if (!registered && !found.has_schema)
+          throw new PgStoreMissingError(this.schema, "neither its schema nor its registry row exists");
+        if (!registered)
+          throw new PgStoreMissingError(this.schema, `its schema exists but '${this.metaSchema}.stores' has no registry row for it`);
+        if (!found.has_schema)
+          throw new PgStoreMissingError(this.schema, `it has a registry row in '${this.metaSchema}.stores' but no schema`);
+      }
+      /** @internal PgStatement's guard. */
+      assertOpen() {
+        if (this.closed)
+          throw new Error(`PgDriver: store '${this.schema}' is closed`);
+      }
+      prepare(sql) {
+        this.assertOpen();
+        return new PgStatement(this, sql, this.schema);
+      }
+      exec(sql) {
+        this.assertOpen();
+        const t = translateStatement(sql, this.schema);
+        if (t.params)
+          throw new RangeError(`PgDriver.exec takes no parameters: ${sql}`);
+        this.run(t.text, void 0, sql);
+      }
+      /**
+       * @internal Every statement this handle runs. A pending BEGIN goes out ahead
+       * of it in the same round trip when the statement is a SELECT. Anything else
+       * waits for the BEGIN's own reply first: the bridge sends both before either
+       * answers, so a statement after a BEGIN that failed outright would run
+       * outside the transaction, and only a read may.
+       */
+      run(text, values, where) {
+        const pending = this.pendingBegin;
+        if (pending !== void 0) {
+          this.pendingBegin = void 0;
+          this.txState = "open";
+          if (/^\s*SELECT\b/i.test(text)) {
+            try {
+              return this.bridge.query(text, values, pending.text);
+            } catch (e) {
+              if (e instanceof PgQueryError && e.inPrefix)
+                this.failBegin(e, pending.where);
+              return mapPgError(e, where);
+            }
+          }
+          try {
+            this.bridge.query(pending.text);
+          } catch (e) {
+            this.failBegin(e, pending.where);
+          }
+        }
+        try {
+          return this.bridge.query(text, values);
+        } catch (e) {
+          return mapPgError(e, where);
+        }
+      }
+      /** Claims the connection and sends BEGIN now. */
+      beginNow(text, label, where) {
+        this.assertOpen();
+        this.bridge.claimTransaction(this, label);
+        this.txState = "open";
+        try {
+          this.bridge.query(text);
+        } catch (e) {
+          this.failBegin(e, where);
+        }
+      }
+      /** Claims the connection for a read whose BEGIN goes out with its first statement (beginReadDeferred). */
+      deferBegin(text, label, where) {
+        this.assertOpen();
+        this.bridge.claimTransaction(this, label);
+        this.txState = "pending";
+        this.pendingBegin = { text, where };
+      }
+      /** A BEGIN that failed: roll back, release the claim and throw by name, as an eager BEGIN would. */
+      failBegin(e, where) {
+        this.txState = "none";
+        abandon(this.bridge, this);
+        return mapPgError(e, where);
+      }
+      /** Ends this handle's transaction with `statement` when its BEGIN was sent; a transaction that ran nothing (or was abandoned) sends nothing. */
+      endTx(statement, where) {
+        const sent = this.txState === "open";
+        this.txState = "none";
+        this.pendingBegin = void 0;
+        try {
+          if (sent && !this.bridge.closed)
+            this.bridge.query(statement);
+        } catch (e) {
+          if (where === void 0)
+            throw e;
+          mapPgError(e, where);
+        } finally {
+          this.bridge.releaseTransaction(this);
+        }
+      }
+      close() {
+        if (this.closed)
+          return;
+        this.closed = true;
+        if (this.ownsBridge)
+          this.bridge.close();
+      }
+      /**
+       * The write transaction, in one round trip: BEGIN, the two timeouts, the
+       * global migration lock SHARED, then this store's lock, which reproduces
+       * SQLite's BEGIN IMMEDIATE. SterlingStore.tx() re-reads the schema version
+       * after this returns, under the locks. A failure rolls back and throws by
+       * name; it is never retried.
+       */
+      begin() {
+        this.beginNow(`BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SET LOCAL statement_timeout = ${this.statementTimeoutMs}; SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`, `store '${this.schema}'`, `begin on store '${this.schema}'`);
+      }
+      commit() {
+        this.endTx("COMMIT", `commit on store '${this.schema}'`);
+      }
+      rollback() {
+        this.endTx("ROLLBACK", void 0);
+      }
+      /** A multi-statement read: one snapshot (REPEATABLE READ), read-only, under statement_timeout. Takes no lock. */
+      beginRead() {
+        this.beginNow(this.readBeginText(), `a read on store '${this.schema}'`, `a read on store '${this.schema}'`);
+      }
+      /**
+       * beginRead(), except the BEGIN goes out in the same round trip as the
+       * read's first statement, and a read that runs no statement sends nothing.
+       * The snapshot is the same: REPEATABLE READ takes it at the first statement.
+       */
+      beginReadDeferred() {
+        this.deferBegin(this.readBeginText(), `a read on store '${this.schema}'`, `a read on store '${this.schema}'`);
+      }
+      readBeginText() {
+        return `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = ${this.statementTimeoutMs}`;
+      }
+      /** Ends the read transaction. COMMIT also ends one a failed statement aborted. */
+      endRead() {
+        this.endTx("COMMIT", void 0);
+      }
+      /** The store's version lives in its registry row, the counterpart of SQLite's PRAGMA user_version. */
+      schemaVersion() {
+        this.assertOpen();
+        const row = this.run(`SELECT schema_version FROM ${this.m}.stores WHERE schema_name = $1`, [this.schema], `the schema version of store '${this.schema}'`).rows[0];
+        if (!row)
+          throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
+        return Number(row.schema_version);
+      }
+      setSchemaVersion(version) {
+        if (!Number.isInteger(version) || version < 0)
+          throw new Error(`PgDriver: schema version must be a non-negative integer, got ${String(version)}`);
+        const { rowCount } = this.run(`UPDATE ${this.m}.stores SET schema_version = $1 WHERE schema_name = $2`, [version, this.schema], `stamping the schema version of store '${this.schema}'`);
+        if (rowCount !== 1)
+          throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
+      }
+      /** False only before the store's tables were ever created. */
+      hasSchema() {
+        return Boolean(this.run("SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1) AS has", [this.schema], `the tables of store '${this.schema}'`).rows[0].has);
+      }
+      /** Nothing to prepare: SterlingStore refuses every write on an older store itself, and opening writes nothing here. */
+      prepareReadOnly() {
+      }
+      /**
+       * Creates the store's tables when missing. Postgres does not make concurrent
+       * CREATE ... IF NOT EXISTS safe: two processes opening one fresh store at once
+       * failed with 23505 on pg_type_typname_nsp_index (board e05f5127). So the DDL
+       * runs in one transaction under the same locks a write takes (the global lock
+       * shared, then this store's lock): concurrent opens take turns, and the later
+       * ones find every object already there. A lock that cannot be had within
+       * lock_timeout throws PgLockTimeoutError, as a write would.
+       */
+      prepareWritable(_isFresh) {
+        this.assertOpen();
+        const where = `creating the tables of store '${this.schema}'`;
+        this.bridge.claimTransaction(this, `table setup on store '${this.schema}'`);
+        try {
+          this.bridge.query(`${this.setupBeginText()}; ${storeDdl(this.s)};
+COMMIT`);
+        } catch (e) {
+          abandon(this.bridge, this);
+          mapPgError(e, where);
+        }
+        this.bridge.releaseTransaction(this);
+      }
+      /**
+       * StoreDriver.publishFresh. prepareWritable() followed by the store's own
+       * stamp transaction left a window between the two commits: a concurrent
+       * opener that had read version 0 saw the tables and opened the store as a
+       * legacy, read-only one (Codex review of be2b7f7a, board e05f5127). Here the
+       * version and table probe, the DDL and the stamp are one transaction under
+       * the write locks, so the tables and the stamp become visible together, and
+       * an opener that read 0 before someone else published re-reads the stamped
+       * version under the lock. An older store that already has its tables is
+       * left untouched: nothing is written and its version is returned.
+       */
+      publishFresh(supported) {
+        this.assertOpen();
+        if (!Number.isInteger(supported) || supported < 1)
+          throw new Error(`PgDriver: the supported schema version must be a positive integer, got ${String(supported)}`);
+        const where = `publishing store '${this.schema}'`;
+        this.bridge.claimTransaction(this, `table setup on store '${this.schema}'`);
+        let version;
+        try {
+          const row = this.bridge.query(`SELECT (SELECT schema_version FROM ${this.m}.stores WHERE schema_name = $1) AS version, EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1) AS has_tables`, [this.schema], this.setupBeginText()).rows[0];
+          if (row.version === null)
+            throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
+          version = Number(row.version);
+          if (version < supported && !row.has_tables) {
+            this.bridge.query(storeDdl(this.s));
+            this.bridge.query(`UPDATE ${this.m}.stores SET schema_version = $1 WHERE schema_name = $2`, [supported, this.schema]);
+            version = supported;
+          }
+          this.bridge.query("COMMIT");
+        } catch (e) {
+          abandon(this.bridge, this);
+          mapPgError(e, where);
+        }
+        this.bridge.releaseTransaction(this);
+        return version;
+      }
+      /** BEGIN for table setup: lock_timeout, then the write locks in begin()'s order (the global lock shared, then this store's). */
+      setupBeginText() {
+        return `BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`;
+      }
+      /**
+       * 'postgres'. SQLite's answer names its rollback-journal mode, which the
+       * 9p policy and the -wal/-shm handling branch on. Postgres has its own WAL
+       * that no Sterling code manages, so 'wal' would send those branches down the
+       * SQLite path. 'postgres' is no SQLite journal mode, so every such branch
+       * falls through.
+       */
+      journalMode() {
+        return "postgres";
+      }
+      snapshot(_targetPath) {
+        throw new PgUnsupportedError("snapshot() (backup in work mode is issue 26 item 7: it refuses and points at the platform point-in-time restore)");
+      }
+    };
+  }
+});
+
 // packages/store/dist/mounted.js
 import { mkdirSync as mkdirSync2, existsSync as existsSync6, rmSync, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
-import { dirname as dirname2, join as join9 } from "node:path";
-import { homedir as homedir3 } from "node:os";
+import { dirname as dirname2, join as join11 } from "node:path";
+import { homedir as homedir4 } from "node:os";
 function resolveDomainMounts(config) {
   return config.stack_tags.map((name) => ({
     name,
-    dbPath: config.domain_paths[name] ?? join9(homedir3(), ".sterling", "domains", name, "sterling.db")
+    dbPath: config.domain_paths[name] ?? join11(homedir4(), ".sterling", "domains", name, "sterling.db")
   }));
 }
 function open(dbPath) {
@@ -6448,6 +7756,9 @@ function open(dbPath) {
 }
 function isStoreFailure(e) {
   return e instanceof SchemaMigrationRequiredError || e instanceof UnsupportedSchemaVersionError || e instanceof StoreRowDecodeError || e?.code === "ERR_SQLITE_ERROR";
+}
+function isPgStoreFailure(e) {
+  return e instanceof PgStoreMissingError || e instanceof PgQueryError || e instanceof PgLockTimeoutError || e instanceof PgStatementTimeoutError || e instanceof PgNulCharacterError || e instanceof PgBridgeClosedError || e instanceof PgBridgeTimeoutError || e instanceof PgWorkerDiedError;
 }
 function missingDomainWarning(m) {
   return `sterling: domain '${m.name}' is configured but has no store at '${m.dbPath}'; it is NOT mounted, so its knowledge is not read and writes to scope domain:${m.name} are refused. Create it with createDomain (a description is required), or run init to set it up.`;
@@ -6479,18 +7790,38 @@ function createDomain(name, description, dbPath) {
   }
   store.close();
 }
-var PROBE_ID, DROPPED_AFTER_MOUNT_NOTE, DROPPED_AT_MOUNT_NOTE, errorText, DOMAIN_DESCRIPTION_KEY, DomainNotCreatedError, MountedStores;
+var PROBE_ID, DROPPED_AFTER_MOUNT_NOTE, DROPPED_AT_MOUNT_NOTE, errorText, DomainUnavailableError, DOMAIN_DESCRIPTION_KEY, MixedScoreScaleError, DomainNotCreatedError, MountedStores;
 var init_mounted = __esm({
   "packages/store/dist/mounted.js"() {
     "use strict";
     init_dist2();
     init_dist();
     init_shares();
+    init_pg_bridge();
+    init_pg_driver();
     PROBE_ID = "00000000-0000-0000-0000-000000000000";
     DROPPED_AFTER_MOUNT_NOTE = "dropped after mount; reads skip it until the session restarts";
     DROPPED_AT_MOUNT_NOTE = "dropped at mount; restart the session after the store is repaired";
     errorText = (e) => String(e?.message ?? e);
+    DomainUnavailableError = class extends Error {
+      domain;
+      location;
+      constructor(domain, location, cause) {
+        super(`storage 'postgres': domain '${domain}' (${location}) is missing or cannot be read: ${errorText(cause)}. Postgres storage never skips or drops a mounted domain; the call fails and nothing was written.`, { cause });
+        this.name = "DomainUnavailableError";
+        this.domain = domain;
+        this.location = location;
+      }
+    };
     DOMAIN_DESCRIPTION_KEY = "description";
+    MixedScoreScaleError = class extends Error {
+      scales;
+      constructor(operation, scales) {
+        super(`${operation}: the mounted stores rank on different score scales (${scales.map((x) => `${x.source}: ${x.scale}`).join(", ")}), so a min_score cannot be applied across them. Nothing was counted.`);
+        this.scales = scales;
+        this.name = "MixedScoreScaleError";
+      }
+    };
     DomainNotCreatedError = class extends Error {
       domain;
       db_path;
@@ -6556,6 +7887,8 @@ var init_mounted = __esm({
       /** Every configured domain whose store file exists, in manifest order,
        *  whether or not it could be opened. */
       mountedNames = [];
+      /** Set for Postgres storage; see MountedStoresOptions.work. */
+      work;
       /** The project store is opened, and created when absent; a failure to open
        *  it throws. A domain store is only ever OPENED here, never created, and one
        *  that exists but cannot be opened is listed on unreadableDomains instead of
@@ -6564,8 +7897,38 @@ var init_mounted = __esm({
        *  every handle opened so far closed and no file written for the missing
        *  domain. When options.skipMissing is true such a mount is skipped instead,
        *  and the existing siblings are still mounted. An existing domain store opens
-       *  as it is, whether or not it has a description. */
+       *  as it is, whether or not it has a description.
+       *
+       *  Postgres storage (options.work, routing.ts) differs in three ways: both stores
+       *  are opened through the given openers, which never create a store;
+       *  skipMissing is ignored; and every case above that lists a domain on
+       *  missingDomains or unreadableDomains throws DomainUnavailableError instead,
+       *  with every handle opened so far closed. */
       constructor(projectDbPath, mounts = [], options) {
+        this.work = options?.work;
+        if (this.work) {
+          this.project = this.work.openProject();
+          try {
+            for (const m of mounts) {
+              this.mountedNames.push(m.name);
+              this.domainPaths.set(m.name, m.dbPath);
+              let store;
+              try {
+                store = this.work.openDomain(m);
+              } catch (e) {
+                if (!this.isStoreFailure(e))
+                  throw e;
+                throw new DomainUnavailableError(m.name, m.dbPath, e);
+              }
+              this.domains.set(m.name, store);
+              this.probeDomain(m.name, store);
+            }
+          } catch (e) {
+            this.close();
+            throw e;
+          }
+          return;
+        }
         this.project = open(projectDbPath);
         try {
           for (const m of mounts) {
@@ -6606,7 +7969,7 @@ var init_mounted = __esm({
           store.get(PROBE_ID);
           store.inboundSupersedes(PROBE_ID);
         } catch (e) {
-          if (!isStoreFailure(e))
+          if (!this.isStoreFailure(e))
             throw e;
           this.dropDomain(name, e, true);
         }
@@ -6617,6 +7980,8 @@ var init_mounted = __esm({
        *  (assertWritable): a session never writes into a store it cannot read back,
        *  and the slug checks still ask it (fanEveryDomain). */
       dropDomain(name, e, atMount = false) {
+        if (this.work)
+          throw new DomainUnavailableError(name, this.domainPaths.get(name) ?? "", e);
         if (this.isUnreadable(name))
           return;
         this.unreadableDomains.push({
@@ -6625,6 +7990,11 @@ var init_mounted = __esm({
           error: errorText(e),
           note: atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE
         });
+      }
+      /** The failures that drop a domain in hobby mode and fail the call in work
+       *  mode; any other error is the caller's or this code's fault and is rethrown. */
+      isStoreFailure(e) {
+        return isStoreFailure(e) || this.work !== void 0 && isPgStoreFailure(e);
       }
       isUnreadable(name) {
         return this.unreadableDomains.some((d) => d.name === name);
@@ -6652,7 +8022,7 @@ var init_mounted = __esm({
           try {
             out.push(fn(store));
           } catch (e) {
-            if (!isStoreFailure(e))
+            if (!this.isStoreFailure(e))
               throw e;
             this.dropDomain(name, e);
             throw new Error(`${what} cannot be checked: domain '${name}' could not be read (${errorText(e)}), so whether it is taken there is unknown. Nothing was written. Repair the store, then restart the session.`);
@@ -6675,7 +8045,7 @@ var init_mounted = __esm({
           try {
             value = fn(store);
           } catch (e) {
-            if (!isStoreFailure(e))
+            if (!this.isStoreFailure(e))
               throw e;
             this.dropDomain(name, e);
             continue;
@@ -6724,24 +8094,24 @@ var init_mounted = __esm({
        *  otherwise a lifecycle/freshness-only envelope that SterlingStore.create
        *  accepts was rejected through the mounted surface, because the schemas
        *  registry still declares the derived status/superseded_by fields. */
-      create(input) {
+      create(input, options = {}) {
         const normalized = SterlingStore.normalizeIdentityEnvelope(input);
         const record = validateRecord(normalized);
         assertNoFieldLoss("create", normalized, record);
         const target2 = this.storeFor(record.scope);
         this.assertMountAffinity("create", target2, `record '${record.id}' (scope '${record.scope}')`);
-        return target2.create(record);
+        return target2.create(record, options);
       }
       /** Scope-routed exactly as create() is. A maintenance item is project-LOCAL
        *  state and never shared, so this resolves to the project store in practice —
        *  and the dedup key is therefore evaluated within that ONE store rather than
        *  across the fan, which is right: two projects' queues are independent, and a
        *  cross-store key would let one project's item suppress another's. */
-      enqueueSystemTodo(input) {
+      enqueueSystemTodo(input, options = {}) {
         const record = validateRecord(SterlingStore.normalizeIdentityEnvelope(input));
         const target2 = this.storeFor(record.scope);
         this.assertMountAffinity("enqueueSystemTodo", target2, `todo '${record.id}' (scope '${record.scope}')`);
-        return target2.enqueueSystemTodo(record);
+        return target2.enqueueSystemTodo(record, options);
       }
       /** Read-only twin of enqueueSystemTodo: queue items are project-local, so the
        *  precheck asks the project store only (same reasoning as the enqueue above). */
@@ -6790,7 +8160,18 @@ var init_mounted = __esm({
       /** Cross-mount twin of countAboveScore (board a577a69d) — summed
        *  project-first across every mounted store, same fan as count(). */
       countAboveScore(opts2, minScore) {
+        this.commonScoreScale("countAboveScore");
         return this.fanValues((s2) => s2.countAboveScore(opts2, minScore)).reduce((n, c) => n + c, 0);
+      }
+      /** The one score scale every mounted store ranks on (SterlingStore.scoreScale). Mixed scales are refused: neither their scores nor their counts above one min_score compare. */
+      scoreScale() {
+        return this.commonScoreScale("scoreScale");
+      }
+      commonScoreScale(operation) {
+        const scales = [...this.fanRead((s2) => s2.scoreScale())].map((r) => ({ source: r.source, scale: r.value }));
+        if (new Set(scales.map((x) => x.scale)).size > 1)
+          throw new MixedScoreScaleError(operation, scales);
+        return scales[0].scale;
       }
       /** Per-source projection (AC2): project store FIRST, then each mounted domain
        *  in manifest order. Each store runs the full query independently — type
@@ -6800,6 +8181,12 @@ var init_mounted = __esm({
        *  name (DomainMount.name) for each domain store. */
       bySource(opts2) {
         return [...this.fanRead((s2) => s2.query(opts2))].map((r) => ({ source: r.source, records: r.value }));
+      }
+      /** bySource for each entry of `list` in one pass: per store, project first,
+       *  one SterlingStore.queryEach (one read transaction), so `results[i]` is
+       *  that store's bySource(list[i]) records. */
+      bySourceEach(list) {
+        return [...this.fanRead((s2) => s2.queryEach(list))].map((r) => ({ source: r.source, results: r.value }));
       }
       /** Count-only per-source projection — the COUNT(*) twin of bySource (same
        *  project-first, per-store ordering) with NO body fetch. The TUI Knowledge
@@ -6821,7 +8208,7 @@ var init_mounted = __esm({
         try {
           return store.query(opts2);
         } catch (e) {
-          if (!isStoreFailure(e))
+          if (!this.isStoreFailure(e))
             throw e;
           this.dropDomain(source, e);
           return [];
@@ -6928,6 +8315,24 @@ var init_mounted = __esm({
        *  project-store tombstone behind, so the SAME source id can resolve out of
        *  two different mounts — first-seen (project-first, the read fan's own
        *  ordering) wins, never a duplicate entry for one concept. */
+      /** inboundSupersedes() for each id: per store one SterlingStore.inboundSupersedesEach,
+       *  merged per id exactly as inboundSupersedes merges (project first, first seen wins). */
+      inboundSupersedesEach(ids) {
+        const perStore = this.fanValues((s2) => s2.inboundSupersedesEach(ids));
+        return ids.map((_, i) => {
+          const seen = /* @__PURE__ */ new Set();
+          const out = [];
+          for (const lists of perStore) {
+            for (const record of lists[i] ?? []) {
+              if (seen.has(record.id))
+                continue;
+              seen.add(record.id);
+              out.push(record);
+            }
+          }
+          return out;
+        });
+      }
       inboundSupersedes(id) {
         const seen = /* @__PURE__ */ new Set();
         const out = [];
@@ -6966,10 +8371,11 @@ var init_mounted = __esm({
        *  repeated. The label and the physical destination are therefore ONE fact,
        *  and cannot drift apart at this site by construction. Any third argument a
        *  caller supplies is deliberately ignored for the same reason: an
-       *  authoritative scope is not something a caller can be trusted to know. */
+       *  authoritative scope is not something a caller can be trusted to know.
+       *  The fourth argument (WriteOptions: operation_id) passes through. */
       supersede(...args) {
         const store = this.mutatingStoreHolding("supersede", args[0]);
-        return store.supersede(args[0], args[1], this.mountNameOf(store));
+        return store.supersede(args[0], args[1], this.mountNameOf(store), args[3]);
       }
       /** Promotion tombstone: retire the original in its (project) store, pointing at
        *  the cross-store replacement. The replacement already lives in another store
@@ -7605,10 +9011,10 @@ var init_domain_fit = __esm({
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync as mkdirSync3 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { dirname as dirname3, join as join10 } from "node:path";
+import { homedir as homedir5 } from "node:os";
+import { dirname as dirname3, join as join12 } from "node:path";
 function registryPath() {
-  return process.env.STERLING_REGISTRY_DB ?? join10(homedir4(), ".sterling", "registry.db");
+  return process.env.STERLING_REGISTRY_DB ?? join12(homedir5(), ".sterling", "registry.db");
 }
 var REGISTRY_DDL, ProjectRegistry;
 var init_registry2 = __esm({
@@ -7685,7 +9091,7 @@ CREATE TABLE IF NOT EXISTS projects (
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { realpathSync as realpathSync3 } from "node:fs";
-import { dirname as dirname4, basename, join as join11, resolve as resolvePath } from "node:path";
+import { dirname as dirname4, basename, join as join13, resolve as resolvePath } from "node:path";
 function journalDemotionRequired(absPath, platform = process.platform) {
   if (platform !== "linux")
     return false;
@@ -7824,10 +9230,14 @@ CREATE TABLE IF NOT EXISTS store_meta (
     DEFAULT_BUSY_TIMEOUT_MS = 5e3;
     sqliteDialect = {
       searchJoin: "JOIN records_fts f ON f.record_id = r.id",
+      searchJoinBinds: 0,
       searchMatch: "records_fts MATCH ?",
       // FTS5's bm25() is LOWER for a better match, so the score is its negation.
       searchScore: "(-bm25(records_fts))",
       searchOrder: "bm25(records_fts) ASC",
+      scoreScale: "fts5_bm25",
+      // FTS5's unicode61 tokenizer does its own folding; the text goes in as built.
+      searchText: (text) => text,
       /**
        * The FTS5 MATCH expression rank_terms compiles to. A trailing '*' marks an
        * FTS5 prefix query ("stor*" matches "store") — the star must sit OUTSIDE the
@@ -7846,6 +9256,8 @@ CREATE TABLE IF NOT EXISTS store_meta (
       db;
       /** The absolute path of the database file, for the refusal messages. */
       dbPath;
+      /** PRAGMA busy_timeout of this connection, which switchFreshFileToWal also waits by. */
+      busyTimeoutMs;
       /** The path the journal-mode policy classifies: dbPath with its directory's symlinks resolved. */
       classifiedPath;
       constructor(path, options = {}) {
@@ -7853,11 +9265,12 @@ CREATE TABLE IF NOT EXISTS store_meta (
         if (typeof busyTimeoutMs !== "number" || !Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0) {
           throw new Error(`SqliteDriver: busyTimeoutMs must be a non-negative integer, got ${String(busyTimeoutMs)}`);
         }
+        this.busyTimeoutMs = busyTimeoutMs;
         this.dbPath = resolvePath(path);
         this.db = new DatabaseSync2(path);
         let classifiedPath = this.dbPath;
         try {
-          classifiedPath = join11(realpathSync3(dirname4(this.dbPath)), basename(this.dbPath));
+          classifiedPath = join13(realpathSync3(dirname4(this.dbPath)), basename(this.dbPath));
         } catch {
         }
         this.classifiedPath = classifiedPath;
@@ -7869,7 +9282,15 @@ CREATE TABLE IF NOT EXISTS store_meta (
       exec(sql) {
         this.db.exec(sql);
       }
+      /**
+       * A second close is a no-op, as on PgDriver: a refusal inside publishFresh
+       * closes the connection itself, and SterlingStore then closes the driver
+       * again before rethrowing, which must not replace the refusal with
+       * 'database is not open'.
+       */
       close() {
+        if (!this.db.isOpen)
+          return;
         this.db.close();
       }
       /** BEGIN IMMEDIATE: takes the write lock now, or throws once busy_timeout runs out. */
@@ -7914,6 +9335,68 @@ CREATE TABLE IF NOT EXISTS store_meta (
         }
       }
       prepareWritable(isFresh) {
+        this.prepareConnection(isFresh);
+        this.createSchema();
+      }
+      /**
+       * StoreDriver.publishFresh (board 404228d7). prepareWritable() commits the DDL
+       * statement by statement and SterlingStore stamps user_version in a later
+       * transaction, so a concurrent opener that had read user_version 0 could see
+       * the tables without the stamp and open the store as a legacy, read-only one.
+       * Here an empty file gets its schema and its stamp in one BEGIN IMMEDIATE
+       * transaction, with user_version re-read under that lock, so the tables and
+       * the stamp become visible together.
+       *
+       * The classification read comes first and takes no write lock (decision
+       * store-constructor-stops-write-locking-to-read-user-version-closing-a-concurrency-reachable-fail-open):
+       * user_version and sqlite_master are read in one deferred read transaction,
+       * so they come from one snapshot. A store with a schema and a version below
+       * `supported` in that snapshot is an older store, returned untouched; a
+       * newer version is returned untouched too, for SterlingStore to refuse. A
+       * store another opener has already published at `supported` gets only this
+       * connection's settings, as an already-current store does. Only a file
+       * without a schema reaches the write lock.
+       */
+      publishFresh(supported) {
+        if (!Number.isInteger(supported) || supported < 1) {
+          throw new Error(`SqliteDriver: the supported schema version must be a positive integer, got ${String(supported)}`);
+        }
+        this.db.exec("BEGIN");
+        let version;
+        let schemaExists;
+        try {
+          version = this.schemaVersion();
+          schemaExists = this.hasSchema();
+        } finally {
+          this.db.exec("COMMIT");
+        }
+        if (version > supported || version < supported && schemaExists)
+          return version;
+        if (version === supported && schemaExists) {
+          this.prepareConnection(false);
+          return version;
+        }
+        this.prepareConnection(!schemaExists);
+        this.begin();
+        try {
+          version = this.schemaVersion();
+          if (version > supported || version < supported && this.hasSchema()) {
+            this.rollback();
+            return version;
+          }
+          this.createSchema();
+          if (version < supported)
+            this.setSchemaVersion(supported);
+          this.commit();
+        } catch (e) {
+          if (this.db.isTransaction)
+            this.rollback();
+          throw e;
+        }
+        return supported;
+      }
+      /** The journal-mode policy and foreign_keys: connection settings that must run outside a transaction. */
+      prepareConnection(isFresh) {
         if (journalDemotionRequired(this.classifiedPath)) {
           let returnedMode;
           try {
@@ -7937,15 +9420,54 @@ CREATE TABLE IF NOT EXISTS store_meta (
           } else if (isFresh) {
             const stillFresh = !this.hasSchema();
             if (stillFresh) {
-              this.db.exec("PRAGMA journal_mode=WAL");
+              this.switchFreshFileToWal();
             }
           }
         }
         this.db.exec("PRAGMA foreign_keys=ON");
+      }
+      /** The DDL and its additive migrations. Idempotent, so it also runs on every open of a current store. */
+      createSchema() {
         this.db.exec(DDL);
         try {
           this.db.exec("ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT");
         } catch {
+        }
+        try {
+          this.db.exec("ALTER TABLE records ADD COLUMN operation_id TEXT");
+        } catch {
+        }
+        this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON records(operation_id)");
+      }
+      /**
+       * PRAGMA journal_mode=WAL on a fresh file, which several openers may try at
+       * once (board 404228d7). Measured: the switch fails at once with 'database is
+       * locked', without the busy handler, while another connection holds the
+       * write lock, and two openers switching together can both fail that way.
+       * So this waits as busy_timeout would: after a failed switch it reads the
+       * file's mode (hasSchema() takes the read lock that makes this connection
+       * pick it up), stops when another opener's switch has landed, and stops too
+       * when another opener has built the store in DELETE: that is a 9p opener's
+       * demotion, which is sticky [store-journal-policy-delete-on-9p] and must not
+       * be flipped back. It tries again only while the file is still without a
+       * schema, until busy_timeout has run out, then throws the last error.
+       */
+      switchFreshFileToWal() {
+        const deadline = Date.now() + this.busyTimeoutMs;
+        for (; ; ) {
+          try {
+            this.db.exec("PRAGMA journal_mode=WAL");
+            return;
+          } catch (e) {
+            if (!(e instanceof Error) || !/database is locked/.test(e.message))
+              throw e;
+            const built = this.hasSchema();
+            if (this.journalMode() === "wal" || built)
+              return;
+            if (Date.now() >= deadline)
+              throw e;
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+          }
         }
       }
       journalMode() {
@@ -7970,6 +9492,11 @@ __export(dist_exports2, {
   AXIS_RECORD_TOP_K: () => AXIS_RECORD_TOP_K,
   DECLARED_CAPTURE_OWED_PREFIX: () => DECLARED_CAPTURE_OWED_PREFIX,
   DEFAULT_BUSY_TIMEOUT_MS: () => DEFAULT_BUSY_TIMEOUT_MS,
+  DEFAULT_PG_CREDENTIALS_PATH: () => DEFAULT_PG_CREDENTIALS_PATH,
+  DEFAULT_PG_LOCK_TIMEOUT_MS: () => DEFAULT_PG_LOCK_TIMEOUT_MS,
+  DEFAULT_PG_RANKING: () => DEFAULT_PG_RANKING,
+  DEFAULT_PG_STATEMENT_TIMEOUT_MS: () => DEFAULT_PG_STATEMENT_TIMEOUT_MS,
+  DEFAULT_PG_WAIT_TIMEOUT_MS: () => DEFAULT_PG_WAIT_TIMEOUT_MS,
   DEFAULT_PROJECT_SHARE: () => DEFAULT_PROJECT_SHARE,
   DEFAULT_QUERY_CAP: () => DEFAULT_QUERY_CAP,
   DOMAIN_DESCRIPTION_KEY: () => DOMAIN_DESCRIPTION_KEY,
@@ -7978,27 +9505,52 @@ __export(dist_exports2, {
   GENERIC_DEV_TERMS: () => GENERIC_DEV_TERMS,
   JournalDemotionRefusedError: () => JournalDemotionRefusedError,
   MAX_RANK_TERMS: () => MAX_RANK_TERMS,
+  MixedScoreScaleError: () => MixedScoreScaleError,
   MountedStores: () => MountedStores,
+  OperationRepeatedError: () => OperationRepeatedError,
+  PG_LAYOUT_VERSION: () => PG_LAYOUT_VERSION,
+  PG_META_SCHEMA: () => PG_META_SCHEMA,
+  PG_RANKINGS: () => PG_RANKINGS,
+  PgBridge: () => PgBridge,
+  PgBridgeClosedError: () => PgBridgeClosedError,
+  PgBridgeTimeoutError: () => PgBridgeTimeoutError,
+  PgConfigError: () => PgConfigError,
+  PgDriver: () => PgDriver,
+  PgLockTimeoutError: () => PgLockTimeoutError,
+  PgNulCharacterError: () => PgNulCharacterError,
+  PgQueryError: () => PgQueryError,
+  PgSchemaNameRefusedError: () => PgSchemaNameRefusedError,
+  PgStatementTimeoutError: () => PgStatementTimeoutError,
+  PgStoreExistsError: () => PgStoreExistsError,
+  PgStoreMissingError: () => PgStoreMissingError,
+  PgTransactionOpenError: () => PgTransactionOpenError,
+  PgUnsupportedError: () => PgUnsupportedError,
+  PgWorkerDiedError: () => PgWorkerDiedError,
   ProjectRegistry: () => ProjectRegistry,
   SUPPORTED_SCHEMA_VERSION: () => SUPPORTED_SCHEMA_VERSION,
   SchemaMigrationRequiredError: () => SchemaMigrationRequiredError,
   SqliteDriver: () => SqliteDriver,
   SterlingStore: () => SterlingStore,
+  StoreMovedError: () => StoreMovedError,
   StoreRowDecodeError: () => StoreRowDecodeError,
   UnsupportedSchemaVersionError: () => UnsupportedSchemaVersionError,
   allocateShares: () => allocateShares,
   assertNoFieldLoss: () => assertNoFieldLoss,
+  assertSterlingSchemaName: () => assertSterlingSchemaName,
   axisHits: () => axisHits,
   axisNarrowText: () => axisNarrowText,
   axisTitleText: () => axisTitleText,
+  buildPgConnectionConfig: () => buildPgConnectionConfig,
   buildReconcileText: () => buildReconcileText,
   catalogStatus: () => catalogStatus,
   classifyClaimPath: () => classifyClaimPath,
   compareBoardReadiness: () => compareBoardReadiness,
   createDomain: () => createDomain,
+  createPgStore: () => createPgStore,
   declaredCaptureTarget: () => declaredCaptureTarget,
   decodeLiveRecordRow: () => decodeLiveRecordRow,
   droppedKeyPaths: () => droppedKeyPaths,
+  ensurePgLayout: () => ensurePgLayout,
   extractAxisTerms: () => extractAxisTerms,
   extractAxisTermsUncapped: () => extractAxisTermsUncapped,
   fitDomains: () => fitDomains,
@@ -8007,22 +9559,32 @@ __export(dist_exports2, {
   hasRecordCentralityHit: () => hasRecordCentralityHit,
   journalDemotionRequired: () => journalDemotionRequired,
   missingDomainWarning: () => missingDomainWarning,
+  pgDialect: () => pgDialect,
+  pgDialectFor: () => pgDialectFor,
+  pgDomainSchemaName: () => pgDomainSchemaName,
+  pgProjectSchemaName: () => pgProjectSchemaName,
+  pgSearchQuery: () => pgSearchQuery,
   rankTermDedupeKey: () => rankTermDedupeKey,
   rankTerms: () => rankTerms,
+  readPgCredentials: () => readPgCredentials,
   recordCentralTerms: () => recordCentralTerms,
   recordCentralityHits: () => recordCentralityHits,
   registryPath: () => registryPath,
   renderCappedPathList: () => renderCappedPathList,
   resolveDomainMounts: () => resolveDomainMounts,
+  setStoreDriverFactory: () => setStoreDriverFactory,
   sqliteDialect: () => sqliteDialect,
   unrecognizedKeyPaths: () => unrecognizedKeyPaths
 });
-import { mkdirSync as mkdirSync4, existsSync as existsSync7, statSync } from "node:fs";
-import { dirname as dirname5, join as join12, resolve as resolvePath2 } from "node:path";
+import { mkdirSync as mkdirSync4, existsSync as existsSync7, statSync as statSync2 } from "node:fs";
+import { dirname as dirname5, join as join14, resolve as resolvePath2 } from "node:path";
 import { randomUUID } from "node:crypto";
+function setStoreDriverFactory(factory) {
+  storeDriverFactory = factory;
+}
 function classifyClaimPath(repoRoot, path) {
   try {
-    return statSync(join12(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
+    return statSync2(join14(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
   } catch (err) {
     const code = err?.code;
     if (code === "ENOENT")
@@ -8042,6 +9604,15 @@ function decodeLiveRecordRow(op, row) {
   }
   record.scope = row.scope;
   return record;
+}
+function operationIdOf(options, op) {
+  const id = options?.operation_id;
+  if (id === void 0)
+    return void 0;
+  if (typeof id !== "string" || id.length === 0 || id.length > 200) {
+    throw new Error(`${op}: operation_id must be a non-empty string of at most 200 characters; nothing was written.`);
+  }
+  return id;
 }
 function shellQuoteSingle(value) {
   return `'${value.split("'").join(`'\\''`)}'`;
@@ -8262,7 +9833,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, OperationRepeatedError, StoreMovedError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -8275,6 +9846,8 @@ var init_dist2 = __esm({
     init_axis();
     init_axis();
     init_sqlite_driver();
+    init_pg_bridge();
+    init_pg_driver();
     init_sqlite_driver();
     StoreRowDecodeError = class extends Error {
       op;
@@ -8285,6 +9858,24 @@ var init_dist2 = __esm({
       }
     };
     SUPPORTED_SCHEMA_VERSION = 2;
+    OperationRepeatedError = class extends Error {
+      operation_id;
+      original_id;
+      constructor(operation_id, original_id) {
+        super(`operation '${operation_id}' already ran: it wrote record '${original_id}'. A repeated operation is refused, never applied twice; nothing was written. Read '${original_id}' to see what landed.`);
+        this.operation_id = operation_id;
+        this.original_id = original_id;
+        this.name = "OperationRepeatedError";
+      }
+    };
+    StoreMovedError = class extends Error {
+      db_path;
+      constructor(db_path) {
+        super(`store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`);
+        this.db_path = db_path;
+        this.name = "StoreMovedError";
+      }
+    };
     UnsupportedSchemaVersionError = class extends Error {
       found;
       supported;
@@ -8376,6 +9967,9 @@ var init_dist2 = __esm({
           options.driver.close();
           throw new Error("SterlingStore: busyTimeoutMs configures the SQLite driver this store opens itself; it cannot be combined with an injected driver \u2014 set it on that driver.");
         }
+        if (options.driver === void 0 && storeDriverFactory !== void 0) {
+          options = { driver: storeDriverFactory(path, { busyTimeoutMs: options.busyTimeoutMs }) };
+        }
         this.db = options.driver ?? new SqliteDriver(path, { busyTimeoutMs: options.busyTimeoutMs });
         const foundSchemaVersion = this.db.schemaVersion();
         if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
@@ -8383,7 +9977,27 @@ var init_dist2 = __esm({
           throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
         }
         let isFresh = false;
-        if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
+        let published = false;
+        if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION && this.db.publishFresh !== void 0) {
+          let settled;
+          try {
+            settled = this.db.publishFresh(SUPPORTED_SCHEMA_VERSION);
+          } catch (e) {
+            this.db.close();
+            throw e;
+          }
+          if (settled > SUPPORTED_SCHEMA_VERSION) {
+            this.db.close();
+            throw new UnsupportedSchemaVersionError(settled, SUPPORTED_SCHEMA_VERSION);
+          }
+          if (settled < SUPPORTED_SCHEMA_VERSION) {
+            this.db.prepareReadOnly();
+            this.legacySchemaVersion = settled;
+            this.openedSchemaVersion = settled;
+            return;
+          }
+          published = true;
+        } else if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
           if (this.db.hasSchema()) {
             this.db.prepareReadOnly();
             this.legacySchemaVersion = foundSchemaVersion;
@@ -8392,8 +10006,9 @@ var init_dist2 = __esm({
           }
           isFresh = true;
         }
-        this.db.prepareWritable(isFresh);
-        if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+        if (!published)
+          this.db.prepareWritable(isFresh);
+        if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION && !published) {
           try {
             this.tx(() => {
               const current = this.db.schemaVersion();
@@ -8715,8 +10330,9 @@ var init_dist2 = __esm({
        *  legacy feature_article field, and the pin fixtures that pass version: 1).
        *  S3 STRIPS it — version becomes server-owned at every surface — so nothing
        *  new should start relying on setting it. */
-      create(input) {
+      create(input, options = {}) {
         this.assertWritable("create");
+        const operationId = operationIdOf(options, "create");
         const prepared = _SterlingStore.resolveIdentity(input, {
           lifecycle: "live",
           freshness: "fresh",
@@ -8738,7 +10354,8 @@ var init_dist2 = __esm({
         assertNoFieldLoss("create", prepared.input, record);
         _SterlingStore.refuseRawSupersedesLinks("create", record.links, /* @__PURE__ */ new Set());
         this.tx(() => {
-          this.insertRecord(record);
+          this.refuseRepeatedOperation(operationId);
+          this.insertRecord(record, operationId);
           this.logActivity("created", record, record.created_at);
         });
         return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.storableBody(record)])[0]);
@@ -9007,7 +10624,7 @@ var init_dist2 = __esm({
               throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' changed during removal \u2014 the transaction was rolled back; re-read and retry.`);
             }
           }
-          this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(stored), id);
+          this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(this.db.dialect.searchText(entry.fts(stored)), id);
           this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
           if (opts2.resolves?.length)
             this.drainResolves(op, opts2.resolves, now, opts2.resolvedReceipt);
@@ -9135,19 +10752,21 @@ var init_dist2 = __esm({
        * write would refuse is not validated here, the write path refuses it.
        */
       enqueueWouldBeNoop(input) {
-        if (input.system_reason === "reconcile_needed" && input.feature_link)
+        return this.readTx(() => {
+          if (input.system_reason === "reconcile_needed" && input.feature_link)
+            return false;
+          const wantKey = systemTodoKey(input);
+          const rows = input.feature_link ? this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0").all(input.feature_link) : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+          for (const r of rows) {
+            const t = _SterlingStore.decodeLiveRecord("enqueueWouldBeNoop", r);
+            if (t.source !== "system" || systemTodoKey(t) !== wantKey)
+              continue;
+            const priorFiles = [...t.file_keys ?? []].sort();
+            const nextFiles = [...input.file_keys ?? []].sort();
+            return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? "", input.text);
+          }
           return false;
-        const wantKey = systemTodoKey(input);
-        const rows = input.feature_link ? this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0").all(input.feature_link) : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
-        for (const r of rows) {
-          const t = _SterlingStore.decodeLiveRecord("enqueueWouldBeNoop", r);
-          if (t.source !== "system" || systemTodoKey(t) !== wantKey)
-            continue;
-          const priorFiles = [...t.file_keys ?? []].sort();
-          const nextFiles = [...input.file_keys ?? []].sort();
-          return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? "", input.text);
-        }
-        return false;
+        });
       }
       /**
        * ATOMIC check-and-insert for a SYSTEM maintenance item — the ONE dedup
@@ -9198,8 +10817,9 @@ var init_dist2 = __esm({
        * body UPDATE was invisible to expected_version, so a concurrent in-place
        * write could silently revert it, and the FTS row kept the old text).
        */
-      enqueueSystemTodo(input) {
+      enqueueSystemTodo(input, options = {}) {
         this.assertWritable("enqueueSystemTodo");
+        const operationId = operationIdOf(options, "enqueueSystemTodo");
         const prepared = _SterlingStore.resolveIdentity(input, {
           lifecycle: "live",
           freshness: "fresh",
@@ -9220,6 +10840,7 @@ var init_dist2 = __esm({
         let textUpdated = false;
         let insertedText;
         this.tx(() => {
+          this.refuseRepeatedOperation(operationId);
           const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
           if (isReconcileFold) {
             const matches = [];
@@ -9236,10 +10857,10 @@ var init_dist2 = __esm({
               if (fileKeys.length > 1) {
                 const owner = this.get(candidate.feature_link);
                 const canonicalText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, fileKeys);
-                this.insertRecord({ ...candidate, text: canonicalText });
+                this.insertRecord({ ...candidate, text: canonicalText }, operationId);
                 insertedText = canonicalText;
               } else {
-                this.insertRecord(candidate);
+                this.insertRecord(candidate, operationId);
               }
               return;
             }
@@ -9286,7 +10907,7 @@ var init_dist2 = __esm({
             break;
           }
           if (!existing) {
-            this.insertRecord(candidate);
+            this.insertRecord(candidate, operationId);
             return;
           }
           const priorFiles = [...existing.file_keys ?? []].sort();
@@ -9318,10 +10939,12 @@ var init_dist2 = __esm({
         };
       }
       get(id) {
-        const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
-        if (!row)
-          return void 0;
-        return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
+        return this.readTx(() => {
+          const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
+          if (!row)
+            return void 0;
+          return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
+        });
       }
       /**
        * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
@@ -9485,14 +11108,16 @@ var init_dist2 = __esm({
        * '(lookup failed)' would trade one false payload for another.
        */
       articlesBySlug(slug) {
-        const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC`).all(slug);
-        const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows));
-        if (!records.length)
-          return records;
-        const relations = this.activeArticleRelations();
-        return records.map((r) => this.withDerivedReliedBy(r, relations));
+        return this.readTx(() => {
+          const rows = this.db.prepare(`SELECT body, scope FROM records
+            WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC`).all(slug);
+          const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows));
+          if (!records.length)
+            return records;
+          const relations = this.activeArticleRelations();
+          return records.map((r) => this.withDerivedReliedBy(r, relations));
+        });
       }
       /**
        * Every non-superseded record of ANY type carrying this exact slug, newest
@@ -9505,10 +11130,12 @@ var init_dist2 = __esm({
        * live head while a version-pinned citation keeps using the id.
        */
       recordsBySlug(slug) {
-        const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC`).all(slug);
-        return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
+        return this.readTx(() => {
+          const rows = this.db.prepare(`SELECT body, scope FROM records
+            WHERE status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC`).all(slug);
+          return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
+        });
       }
       /**
        * THE ONE READINESS FUNCTION (decision
@@ -9524,48 +11151,50 @@ var init_dist2 = __esm({
        * only; the stored blocked_by is never rewritten. No cycle detection.
        */
       boardReadiness(items) {
-        const total = this.count({ types: ["todo"], source: "user" });
-        const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
-        const bySlug = /* @__PURE__ */ new Map();
-        for (const t of live)
-          if (t.slug)
-            bySlug.set(t.slug, t);
-        const dependents = /* @__PURE__ */ new Map();
-        for (const t of live) {
-          for (const slug of new Set(t.blocked_by ?? [])) {
-            const list = dependents.get(slug);
-            if (list)
-              list.push(t);
-            else
-              dependents.set(slug, [t]);
+        return this.readTx(() => {
+          const total = this.count({ types: ["todo"], source: "user" });
+          const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+          const bySlug = /* @__PURE__ */ new Map();
+          for (const t of live)
+            if (t.slug)
+              bySlug.set(t.slug, t);
+          const dependents = /* @__PURE__ */ new Map();
+          for (const t of live) {
+            for (const slug of new Set(t.blocked_by ?? [])) {
+              const list = dependents.get(slug);
+              if (list)
+                list.push(t);
+              else
+                dependents.set(slug, [t]);
+            }
           }
-        }
-        const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
-        const targets = items ?? live;
-        return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
-          const blockers = [];
-          const blockersOpen = [];
-          for (const slug of t.blocked_by ?? []) {
-            const holder = openBlocker(slug);
-            blockers.push({ slug, state: holder ? "open" : "closed" });
-            if (holder)
-              blockersOpen.push(boardItemHandle(holder));
-          }
-          const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-          const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
-          return {
-            id: t.id,
-            ...t.slug ? { slug: t.slug } : {},
-            name: boardItemHandle(t),
-            ...t.priority ? { priority: t.priority } : {},
-            updated_at: t.updated_at,
-            file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
-            ...t.needs ? { needs: t.needs } : {},
-            blockers,
-            blockers_open: blockersOpen,
-            unblocks,
-            state
-          };
+          const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
+          const targets = items ?? live;
+          return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+            const blockers = [];
+            const blockersOpen = [];
+            for (const slug of t.blocked_by ?? []) {
+              const holder = openBlocker(slug);
+              blockers.push({ slug, state: holder ? "open" : "closed" });
+              if (holder)
+                blockersOpen.push(boardItemHandle(holder));
+            }
+            const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+            const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+            return {
+              id: t.id,
+              ...t.slug ? { slug: t.slug } : {},
+              name: boardItemHandle(t),
+              ...t.priority ? { priority: t.priority } : {},
+              updated_at: t.updated_at,
+              file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+              ...t.needs ? { needs: t.needs } : {},
+              blockers,
+              blockers_open: blockersOpen,
+              unblocks,
+              state
+            };
+          });
         });
       }
       /**
@@ -9579,10 +11208,12 @@ var init_dist2 = __esm({
        * live head via recordsBySlug's own resolution.
        */
       supersededRecordsBySlug(slug) {
-        const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status = 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`).all(slug);
-        return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
+        return this.readTx(() => {
+          const rows = this.db.prepare(`SELECT body, scope FROM records
+            WHERE status = 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`).all(slug);
+          return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
+        });
       }
       /**
        * Follows superseded_by from `id` to the chain end (decision foreign_de1a7329: ids
@@ -9595,24 +11226,26 @@ var init_dist2 = __esm({
        * the true, unreached terminus.
        */
       resolveTerminus(id) {
-        const MAX_HOPS = 32;
-        const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
-        const row = stmt.get(id);
-        if (!row)
-          return null;
-        const visited = /* @__PURE__ */ new Set([row.id]);
-        let current = row;
-        let hops = 0;
-        while (current.status === "superseded" && current.superseded_by) {
-          const next = stmt.get(current.superseded_by);
-          if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
-            return { id: current.id, status: current.status, hops, truncated: true };
+        return this.readTx(() => {
+          const MAX_HOPS = 32;
+          const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
+          const row = stmt.get(id);
+          if (!row)
+            return null;
+          const visited = /* @__PURE__ */ new Set([row.id]);
+          let current = row;
+          let hops = 0;
+          while (current.status === "superseded" && current.superseded_by) {
+            const next = stmt.get(current.superseded_by);
+            if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+              return { id: current.id, status: current.status, hops, truncated: true };
+            }
+            visited.add(next.id);
+            current = next;
+            hops += 1;
           }
-          visited.add(next.id);
-          current = next;
-          hops += 1;
-        }
-        return { id: current.id, status: current.status, hops };
+          return { id: current.id, status: current.status, hops };
+        });
       }
       /**
        * INBOUND rel:'supersedes' edges — every record elsewhere holding a
@@ -9629,9 +11262,29 @@ var init_dist2 = __esm({
        * mount, because an edge lives with its SOURCE record (addLink routes by
        * source), which may sit in a different store than the target.
        */
+      /**
+       * inboundSupersedes() for each id in one read transaction: element i is what
+       * inboundSupersedes(ids[i]) returns. One edge query covers every id, so a
+       * hook attaching supersession state to N delivered records pays one round
+       * trip per store instead of N (board f6c4bc5d).
+       */
+      inboundSupersedesEach(ids) {
+        if (!ids.length)
+          return [];
+        return this.readTx(() => {
+          const unique = [...new Set(ids)];
+          const rows = this.db.prepare(`SELECT source_id, target_id FROM record_relations WHERE rel = 'supersedes' AND target_id IN (${unique.map(() => "?").join(",")}) ORDER BY ${this.db.dialect.insertionOrder()}`).all(...unique);
+          const sources = /* @__PURE__ */ new Map();
+          for (const row of rows)
+            sources.set(row.target_id, [...sources.get(row.target_id) ?? [], row.source_id]);
+          return ids.map((id) => (sources.get(id) ?? []).map((s2) => this.get(s2)).filter((r) => r !== void 0));
+        });
+      }
       inboundSupersedes(id) {
-        const rows = this.db.prepare(`SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`).all(id);
-        return rows.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
+        return this.readTx(() => {
+          const rows = this.db.prepare(`SELECT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`).all(id);
+          return rows.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
+        });
       }
       /**
        * The §3.4 base filter (status + type + stack-tag + file-key join) shared
@@ -9702,7 +11355,9 @@ var init_dist2 = __esm({
        * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
        * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
        * itself — knowledge_query's tool description names this scale so a caller
-       * never has to reverse-engineer bm25's own sign convention.
+       * never has to reverse-engineer bm25's own sign convention. That is the
+       * SQLite scale; on Postgres the score is the driver's ranking, also
+       * higher-is-better, and scoreScale() names which scale a store uses.
        *
        * Requires rank_terms — a threshold on a filter with no ranking has nothing
        * to threshold, so this refuses loudly rather than silently answering 0
@@ -9719,8 +11374,34 @@ var init_dist2 = __esm({
         const d = this.db.dialect;
         const sql = `SELECT COUNT(*) AS n FROM records r ${d.searchJoin}
       WHERE ${where.join(" AND ")} AND ${d.searchMatch} AND ${d.searchScore} >= ?`;
-        const row = this.db.prepare(sql).get(...params, match, minScore);
+        const row = this.db.prepare(sql).get(...this.searchJoinParams(match), ...params, match, minScore);
         return row.n;
+      }
+      /**
+       * The scale countAboveScore()'s min_score is a floor on, as a versioned id
+       * (decision postgres-search-ranking-per-query-idf-no-stats-triggers, point
+       * 3): 'fts5_bm25' on SQLite, 'pg_bm25_v1' and the like on Postgres. Every
+       * scale is higher-is-better; a min_score is never carried across scales.
+       */
+      scoreScale() {
+        return this.db.dialect.scoreScale;
+      }
+      /**
+       * The text this store writes to records_fts for a record of `type` whose
+       * records.body is `body`: the type's fts builder, then the driver's
+       * searchText, as insertRecord() does. A copy that rebuilds the search index
+       * from the records (the knowledge-eval pg loader) calls this, so the rebuilt
+       * text is what this store would have written.
+       */
+      searchTextFor(type, body) {
+        const entry = RECORD_TYPES[type];
+        if (!entry)
+          throw new Error(`searchTextFor: unknown record type '${type}'`);
+        return this.db.dialect.searchText(entry.fts(JSON.parse(body)));
+      }
+      /** searchJoin's parameters: the match value once per placeholder it has, all before the filter's. */
+      searchJoinParams(match) {
+        return Array.from({ length: this.db.dialect.searchJoinBinds }, () => match);
       }
       /**
        * The search expression rank_terms compiles to — shared by query() and
@@ -9731,8 +11412,28 @@ var init_dist2 = __esm({
       ftsMatchExpr(terms, matchAll) {
         return this.db.dialect.searchQuery(terms, matchAll);
       }
+      /**
+       * query() once per entry of `list`, inside one read transaction: element i
+       * is what query(list[i]) returns, all from one snapshot. The hydration reads
+       * (links, successors, derived relied_by) run once over every result instead
+       * of once per entry, so on Postgres the list pays one BEGIN/COMMIT and one
+       * set of hydration statements (board f6c4bc5d: H20 runs six subject queries
+       * per dispatch). Hydration is per record, so the result is the same.
+       */
+      queryEach(list) {
+        return this.readTx(() => {
+          const raw = list.map((opts2) => this.queryRows(opts2));
+          const hydrated = this.withDerivedReliedByAll(raw.flat());
+          let at = 0;
+          return raw.map((rows) => hydrated.slice(at, at += rows.length));
+        });
+      }
       /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
       query(opts2 = {}) {
+        return this.readTx(() => this.withDerivedReliedByAll(this.queryRows(opts2)));
+      }
+      /** query()'s rows, decoded but not hydrated. */
+      queryRows(opts2) {
         const cap = opts2.cap ?? DEFAULT_QUERY_CAP;
         const { where, params, fileKeys } = this.baseFilter(opts2);
         if (opts2.rank_terms !== void 0) {
@@ -9743,8 +11444,8 @@ var init_dist2 = __esm({
             const sql2 = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
           WHERE ${where.join(" AND ")} AND ${d.searchMatch}
           ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
-            const rows2 = this.db.prepare(sql2).all(...params, match, cap);
-            return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
+            const rows2 = this.db.prepare(sql2).all(...this.searchJoinParams(match), ...params, match, cap);
+            return _SterlingStore.decodeLiveRecords("query", rows2);
           }
         }
         const orderBy = [];
@@ -9757,7 +11458,7 @@ var init_dist2 = __esm({
         const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy.join(", ")} LIMIT ?`;
         const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
-        return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows));
+        return _SterlingStore.decodeLiveRecords("query", rows);
       }
       /** query()'s two return paths share this: one relations scan for the whole
        *  result set (not one per feature_article row) before applying the derived
@@ -9774,8 +11475,9 @@ var init_dist2 = __esm({
        * old; the old is retained with status 'superseded' + superseded_by set.
        * This is the ONLY change path for immutable types (decision, §3.2.1).
        */
-      supersede(oldId, newInput, authoritativeScope) {
+      supersede(oldId, newInput, authoritativeScope, options = {}) {
         this.assertWritable("supersede");
+        const operationId = operationIdOf(options, "supersede");
         const oldRecord = this.get(oldId);
         if (!oldRecord)
           throw new Error(`supersede: no record '${oldId}'`);
@@ -9809,7 +11511,8 @@ var init_dist2 = __esm({
           updated_at: newRecord.updated_at
         });
         this.tx(() => {
-          this.insertRecord(newRecord);
+          this.refuseRepeatedOperation(operationId);
+          this.insertRecord(newRecord, operationId);
           const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(storedOld), oldId);
           if (res.changes === 0) {
@@ -9867,20 +11570,21 @@ var init_dist2 = __esm({
        */
       retireInFavorOf(id, replacementId, at, verb = "retired") {
         this.assertWritable("retireInFavorOf");
-        const record = this.get(id);
-        if (!record)
-          throw new Error(`retireInFavorOf: no record '${id}'`);
-        const identity = this.identityOf(id);
-        if (identity?.lifecycle === "retired" || record.status === "superseded") {
-          throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-        }
-        const replacement = this.identityOf(replacementId);
-        if (replacement?.lifecycle === "retired") {
-          throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-        }
-        const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-        const stored = _SterlingStore.storableBody(retired);
+        let stored;
         this.tx(() => {
+          const record = this.get(id);
+          if (!record)
+            throw new Error(`retireInFavorOf: no record '${id}'`);
+          const identity = this.identityOf(id);
+          if (identity?.lifecycle === "retired" || record.status === "superseded") {
+            throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
+          }
+          const replacement = this.identityOf(replacementId);
+          if (replacement?.lifecycle === "retired") {
+            throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
+          }
+          const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
+          stored = _SterlingStore.storableBody(retired);
           const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
           if (res.changes === 0) {
@@ -10156,7 +11860,7 @@ var init_dist2 = __esm({
           catalog: {
             entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
           }
-        });
+        }, { operation_id: randomUUID() });
       }
       /**
        * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
@@ -10194,7 +11898,7 @@ var init_dist2 = __esm({
         if (catalogs.length > 0) {
           todo.feature_link = catalogs[0].id;
         }
-        this.create(todo);
+        this.create(todo, { operation_id: randomUUID() });
       }
       /**
        * The one row-insert. Since S2 ([stable-identity-design-v2]) the stored BODY
@@ -10204,15 +11908,23 @@ var init_dist2 = __esm({
        * pre-migration store still has): written here from the derived values in the
        * same statement, never read back as the served truth.
        */
-      insertRecord(record) {
+      /** Refuses an operation_id that already wrote a record. Runs inside the write transaction, before the insert: on Postgres a unique violation would abort the transaction. */
+      refuseRepeatedOperation(operationId) {
+        if (operationId === void 0)
+          return;
+        const row = this.db.prepare("SELECT id FROM records WHERE operation_id = ?").get(operationId);
+        if (row)
+          throw new OperationRepeatedError(operationId, row.id);
+      }
+      insertRecord(record, operationId) {
         const entry = RECORD_TYPES[record.type];
         const meta = record;
         const lifecycle = meta.lifecycle === "retired" ? "retired" : "live";
         const freshness = meta.freshness === "flagged_stale" ? "flagged_stale" : "fresh";
         const version = typeof meta.version === "number" ? meta.version : 1;
         const stored = _SterlingStore.storableBody(record);
-        this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version, record.scope, record.created_at, record.updated_at, record.author, JSON.stringify(stored));
+        this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body, operation_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version, record.scope, record.created_at, record.updated_at, record.author, JSON.stringify(stored), operationId ?? null);
         for (const tag of new Set(record.stack_tags)) {
           this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(record.id, tag);
         }
@@ -10227,7 +11939,7 @@ var init_dist2 = __esm({
         if (lifecycle === "retired" && meta.superseded_by && meta.superseded_by !== record.id) {
           this.insertRelation(meta.superseded_by, "supersedes", record.id, record.updated_at);
         }
-        this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record.id, entry.fts(stored));
+        this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record.id, this.db.dialect.searchText(entry.fts(stored)));
       }
       /**
        * REENTRANT — every other write primitive (create, supersede, …) already
@@ -10241,16 +11953,55 @@ var init_dist2 = __esm({
        * whole thing exactly once.
        */
       txDepth = 0;
+      /** Open read transactions on this handle (readTx). A write may not start inside one. */
+      readDepth = 0;
+      /**
+       * A multi-statement read sees one snapshot (decision
+       * postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+       * point 5): it joins an open write or read transaction, or else opens the
+       * driver's read transaction (REPEATABLE READ READ ONLY on Postgres). A driver
+       * with no beginRead (SQLite) keeps its autocommit reads.
+       */
+      readTx(fn) {
+        if (this.txDepth > 0 || this.readDepth > 0 || !this.db.beginRead)
+          return fn();
+        if (this.db.beginReadDeferred)
+          this.db.beginReadDeferred();
+        else
+          this.db.beginRead();
+        this.readDepth++;
+        let ok = false;
+        try {
+          const result = fn();
+          ok = true;
+          return result;
+        } finally {
+          this.readDepth--;
+          if (ok) {
+            this.db.endRead?.();
+          } else {
+            try {
+              this.db.endRead?.();
+            } catch {
+            }
+          }
+        }
+      }
       tx(fn) {
         this.assertV2Surface("transaction");
         if (this.txDepth > 0) {
           fn();
           return;
         }
+        if (this.readDepth > 0) {
+          throw new Error("SterlingStore: a write cannot start inside a read transaction (readTx); nothing was written.");
+        }
         this.db.begin();
         this.txDepth++;
         try {
           this.assertLiveSchemaVersion("transaction");
+          if (this.db.prepare("SELECT 1 FROM store_meta WHERE key = 'move_fence'").get())
+            throw new StoreMovedError(this.dbPath);
           fn();
           this.db.commit();
         } catch (e) {
@@ -10356,10 +12107,10 @@ __export(agent_coverage_exports, {
   normalizeProjectPath: () => normalizeProjectPath,
   scanAgentCoverage: () => scanAgentCoverage
 });
-import { readdirSync as readdirSync3, readFileSync as readFileSync5, realpathSync as realpathSync4, statSync as statSync2 } from "node:fs";
-import { join as join13, resolve as resolve5 } from "node:path";
+import { readdirSync as readdirSync3, readFileSync as readFileSync7, realpathSync as realpathSync4, statSync as statSync3 } from "node:fs";
+import { join as join15, resolve as resolve6 } from "node:path";
 function normalizeProjectPath(p) {
-  const raw = resolve5(String(p));
+  const raw = resolve6(String(p));
   let real = raw;
   try {
     real = realpathSync4(raw);
@@ -10389,7 +12140,7 @@ function sterlingAgentsIn(agentsDir) {
     if (!f.endsWith(".md")) continue;
     let content;
     try {
-      content = readFileSync5(join13(agentsDir, f), "utf8");
+      content = readFileSync7(join15(agentsDir, f), "utf8");
     } catch (err) {
       damaged.push(`${f} (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -10420,10 +12171,10 @@ function scanAgentCoverage({ roots = [], registeredProjects = [] } = {}) {
       continue;
     }
     for (const name of entries) {
-      const projectDir = join13(root, name);
-      const agentsDir = join13(projectDir, ".claude", "agents");
+      const projectDir = join15(root, name);
+      const agentsDir = join15(projectDir, ".claude", "agents");
       try {
-        if (!statSync2(agentsDir).isDirectory()) continue;
+        if (!statSync3(agentsDir).isDirectory()) continue;
       } catch (err) {
         if (err?.code === "ENOENT" || err?.code === "ENOTDIR") continue;
         unreadable_projects.push({ path: projectDir, error: err?.message ?? String(err) });
@@ -10458,14 +12209,14 @@ var init_agent_coverage = __esm({
 // scripts/update.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { existsSync as existsSync9 } from "node:fs";
-import { dirname as dirname7, join as join15, resolve as resolve6 } from "node:path";
+import { dirname as dirname7, join as join17, resolve as resolve7 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/lib/update.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { closeSync as closeSync3, existsSync as existsSync8, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, readSync, writeFileSync as writeFileSync3 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
-import { dirname as dirname6, join as join14 } from "node:path";
+import { closeSync as closeSync3, existsSync as existsSync8, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync8, readdirSync as readdirSync4, readSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { homedir as homedir6 } from "node:os";
+import { dirname as dirname6, join as join16 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/update-launcher.mjs
@@ -10907,7 +12658,7 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
 // scripts/lib/handoff-projection.mjs
 import { spawnSync } from "node:child_process";
 import { existsSync as existsSync5 } from "node:fs";
-import { join as join7, resolve as resolve4 } from "node:path";
+import { join as join9, resolve as resolve5 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
 import { lstatSync as lstatSync2, readFileSync as readFileSync4, readdirSync as readdirSync2, mkdirSync, openSync, writeSync, closeSync, unlinkSync as unlinkSync2, constants } from "node:fs";
@@ -11086,17 +12837,15 @@ function readContained(root, rel) {
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 // scripts/lib/handoff-projection.mjs
-var fwd2 = (p) => p.replace(/\\/g, "/");
-var PROJECT_MODES = ["hobby", "work"];
-var ProjectModeError = class extends Error {
-};
-var CONFIG_REL = ".sterling/config.json";
+init_dist();
+var fwd3 = (p) => p.replace(/\\/g, "/");
+var CONFIG_REL2 = ".sterling/config.json";
 function readRawConfig(root, ErrorClass, subject) {
-  const where = `${fwd2(resolve4(root))}/${CONFIG_REL}`;
-  if (!existsContained(root, CONFIG_REL, "file")) return { where, parsed: void 0 };
+  const where = `${fwd3(resolve5(root))}/${CONFIG_REL2}`;
+  if (!existsContained(root, CONFIG_REL2, "file")) return { where, parsed: void 0 };
   let parsed;
   try {
-    parsed = JSON.parse(readContained(root, CONFIG_REL));
+    parsed = JSON.parse(readContained(root, CONFIG_REL2));
   } catch (err) {
     throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
   }
@@ -11105,13 +12854,20 @@ function readRawConfig(root, ErrorClass, subject) {
   }
   return { where, parsed };
 }
-function readProjectMode(root) {
-  const { where, parsed } = readRawConfig(root, ProjectModeError, "the project mode");
-  if (parsed === void 0 || parsed.mode === void 0) return "hobby";
-  if (!PROJECT_MODES.includes(parsed.mode)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+var ProjectStorageError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectStorageError";
   }
-  return parsed.mode;
+};
+function readProjectStorage(root) {
+  const { where, parsed } = readRawConfig(root, ProjectStorageError, "the project storage");
+  const storage = parsed?.storage;
+  if (storage === void 0) return "sqlite";
+  if (storage !== "sqlite" && storage !== "postgres") {
+    throw new ProjectStorageError(`config.storage is ${JSON.stringify(storage)} in ${where} \u2014 it must be 'sqlite' or 'postgres'`);
+  }
+  return storage;
 }
 var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
 var HANDOFF_OFF_DETAIL = "handoff files are off (config.handoff.enabled is not true: the portable OpenCode agents and the handoff projection are not written; existing files are no longer maintained, and nothing is deleted)";
@@ -11138,7 +12894,7 @@ function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
   if (!existsSync5(root)) return { files: [], unknown: null };
   const inside = run(["rev-parse", "--is-inside-work-tree"]);
   if (inside.failed) {
-    if (inside.notARepo && !existsSync5(join7(root, ".git"))) return { files: [], unknown: null };
+    if (inside.notARepo && !existsSync5(join9(root, ".git"))) return { files: [], unknown: null };
     return { files: [], unknown: inside.failed };
   }
   if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
@@ -11166,7 +12922,7 @@ function handoffFilesOnDisk(root) {
   }
   return found;
 }
-function handoffSettingOf(parsed, root, where = CONFIG_REL) {
+function handoffSettingOf(parsed, root, where = CONFIG_REL2) {
   const block = parsed?.handoff;
   if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
     throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
@@ -11200,6 +12956,56 @@ var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NO
      your commit message rather than editing it. -->`;
 var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
 var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
+
+// scripts/lib/project-identity.mjs
+init_dist();
+function workIdentityRefusal(root, mode) {
+  let onPostgres;
+  try {
+    onPostgres = readProjectStorage(root) === "postgres";
+  } catch (err) {
+    return `project storage cannot be read: ${err.message}`;
+  }
+  if (mode !== "work" && !onPostgres) return null;
+  const subject = mode === "work" ? "work-mode project" : "project with storage postgres";
+  try {
+    if (readProjectIdentity(root)) return null;
+  } catch (err) {
+    if (!(err instanceof ProjectIdentityError)) throw err;
+    return `${subject} has an invalid ${PROJECT_IDENTITY_REL}: ${err.message}`;
+  }
+  return `${subject} has no ${PROJECT_IDENTITY_REL}: run /sterling:init in the project to create its identity (init never overwrites an existing file), then commit the file`;
+}
+var IGNORE_DIR = ".sterling/";
+var IGNORE_ALL = ".sterling/*";
+var IGNORE_KEEP_IDENTITY = `!${PROJECT_IDENTITY_REL}`;
+var IGNORE_NESTED = "*/**/.sterling/";
+function withIdentityIgnore(text, { addIfAbsent }) {
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const lines = text === "" ? [] : text.split(/\r?\n/);
+  const hadFinalNewline = lines.length > 0 && lines[lines.length - 1] === "";
+  if (hadFinalNewline) lines.pop();
+  const out = [];
+  let placed = false;
+  for (const line of lines) {
+    if (line === IGNORE_DIR || line === IGNORE_ALL) {
+      if (!placed) out.push(IGNORE_ALL, IGNORE_KEEP_IDENTITY);
+      placed = true;
+    } else if (line !== IGNORE_KEEP_IDENTITY) {
+      out.push(line);
+    }
+  }
+  if (!placed && addIfAbsent) out.push(IGNORE_ALL, IGNORE_KEEP_IDENTITY);
+  const changed = out.length !== lines.length || out.some((line, i) => line !== lines[i]);
+  if (!changed) return { text, changed: false };
+  return { text: out.length ? `${out.join(eol)}${eol}` : "", changed: true };
+}
+function withNestedIgnore(text) {
+  const present = text.split(/\r?\n/);
+  if (!present.includes(IGNORE_ALL) || present.includes(IGNORE_NESTED)) return { text, changed: false };
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  return { text: `${text}${text.endsWith("\n") ? "" : eol}${IGNORE_NESTED}${eol}`, changed: true };
+}
 
 // scripts/lib/update.mjs
 var STEP_TIMEOUT_MS = 9e5;
@@ -11338,7 +13144,7 @@ function refusalFor(c) {
   return null;
 }
 function stampConsumerRoleIfAbsent(cwd, log) {
-  const configPath = join14(cwd, ".sterling", "config.json");
+  const configPath = join16(cwd, ".sterling", "config.json");
   if (!existsSync8(configPath)) {
     log(
       "\n\u25B8 machine-role stamp \u2014 SKIPPED: no .sterling/config.json in the clone. Normal for a consumer machine (the clone is not init'd as a project). H1 reports MACHINE ROLE: UNDECLARED, which is treated as CONSUMER \u2014 declare machine_role explicitly only on the authoring machine."
@@ -11346,7 +13152,7 @@ function stampConsumerRoleIfAbsent(cwd, log) {
     return;
   }
   try {
-    const parsed = JSON.parse(readFileSync6(configPath, "utf8"));
+    const parsed = JSON.parse(readFileSync8(configPath, "utf8"));
     if (Object.prototype.hasOwnProperty.call(parsed, "machine_role")) {
       log(`
 \u25B8 machine-role stamp \u2014 already '${parsed.machine_role}', not overwritten`);
@@ -11362,7 +13168,7 @@ function stampConsumerRoleIfAbsent(cwd, log) {
 }
 function readMachineRole(cwd) {
   try {
-    const role = JSON.parse(readFileSync6(join14(cwd, ".sterling", "config.json"), "utf8")).machine_role;
+    const role = JSON.parse(readFileSync8(join16(cwd, ".sterling", "config.json"), "utf8")).machine_role;
     return typeof role === "string" ? role : null;
   } catch {
     return null;
@@ -11375,11 +13181,11 @@ var normPath = (p) => {
 var OLD_TUI_BUNDLE = "packages/tui/bundle/sterling-tui.mjs";
 var SHIPPED_TUI_BUNDLE = "tui/sterling-tui.mjs";
 function warnIfLauncherNamesOldBundle(repoPath2, log) {
-  const launcher = join14(repoPath2, "sterling-launch.sh");
+  const launcher = join16(repoPath2, "sterling-launch.sh");
   if (!existsSync8(launcher)) return;
   let text;
   try {
-    text = readFileSync6(launcher, "utf8");
+    text = readFileSync8(launcher, "utf8");
   } catch (err) {
     log(`\u2717 could not read ${launcher} (${err.code ?? err.message}), so it was not checked for the old TUI bundle path ${OLD_TUI_BUNDLE}. Open it and confirm it runs ${SHIPPED_TUI_BUNDLE}.`);
     return;
@@ -11414,12 +13220,12 @@ var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed
 function preScaleDownMarkers(text) {
   return PRE_SCALE_DOWN_MARKERS.filter((m) => text.includes(m));
 }
-var UPDATE_MARKER_RELATIVE_PATH = join14(".sterling", "update-complete.json");
+var UPDATE_MARKER_RELATIVE_PATH = join16(".sterling", "update-complete.json");
 function readUpdateMarker(cwd, log) {
-  const p = join14(cwd, UPDATE_MARKER_RELATIVE_PATH);
+  const p = join16(cwd, UPDATE_MARKER_RELATIVE_PATH);
   if (!existsSync8(p)) return null;
   try {
-    const parsed = JSON.parse(readFileSync6(p, "utf8"));
+    const parsed = JSON.parse(readFileSync8(p, "utf8"));
     if (typeof parsed?.sha !== "string" || !parsed.sha) throw new Error('missing or invalid "sha" field');
     return { sha: parsed.sha };
   } catch (err) {
@@ -11429,11 +13235,11 @@ function readUpdateMarker(cwd, log) {
   }
 }
 function writeUpdateMarker(cwd, sha) {
-  const p = join14(cwd, UPDATE_MARKER_RELATIVE_PATH);
+  const p = join16(cwd, UPDATE_MARKER_RELATIVE_PATH);
   mkdirSync5(dirname6(p), { recursive: true });
   writeFileSync3(p, JSON.stringify({ sha, completed_at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2) + "\n");
 }
-var DOMAIN_MAP_PENDING_REL = join14(".sterling", "domain-map-pending");
+var DOMAIN_MAP_PENDING_REL = join16(".sterling", "domain-map-pending");
 function parseDomainProposal(stdout) {
   const map = JSON.parse(stdout);
   if (!Array.isArray(map?.proposal?.add)) throw new Error("the output carries no proposal list");
@@ -11447,21 +13253,21 @@ function handoffRefusalRemedy(repoPath2) {
 function ownPluginRoot() {
   let dir = dirname6(fileURLToPath(new URL("../scripts/lib/update.mjs", import.meta.url).href));
   for (let i = 0; i < 4; i++) {
-    if (existsSync8(join14(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync8(join16(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname6(dir);
   }
   return null;
 }
-function installedCopyRefusal(host, { env = process.env, home = homedir5(), root = null } = {}) {
+function installedCopyRefusal(host, { env = process.env, home = homedir6(), root = null } = {}) {
   const by = host === "claude-code" ? "as a Claude Code plugin" : host === "opencode" ? "as an OpenCode plugin" : "as a plugin";
   return `Sterling is installed ${by} \u2014 update it with ${sterlingUpdateRemedy(host, { env, home, root })}. /sterling:update serves only a git clone of Sterling.`;
 }
 function machineStores(cwd) {
-  const stores = [join14(cwd, ".sterling", "sterling.db")];
-  const domains = join14(homedir5(), ".sterling", "domains");
+  const stores = [join16(cwd, ".sterling", "sterling.db")];
+  const domains = join16(homedir6(), ".sterling", "domains");
   if (existsSync8(domains)) {
     for (const name of readdirSync4(domains).sort()) {
-      stores.push(join14(domains, name, "sterling.db"));
+      stores.push(join16(domains, name, "sterling.db"));
     }
   }
   return stores.filter((store) => existsSync8(store));
@@ -11469,7 +13275,7 @@ function machineStores(cwd) {
 function walUserVersion(dbPath) {
   const walPath = `${dbPath}-wal`;
   if (!existsSync8(walPath)) return null;
-  const wal = readFileSync6(walPath);
+  const wal = readFileSync8(walPath);
   if (wal.length < 32) return null;
   const magic = wal.readUInt32BE(0);
   if (magic !== 931071618 && magic !== 931071619) return null;
@@ -11499,7 +13305,7 @@ function probeSchemaVersion(dbPath) {
   }
   return walUserVersion(dbPath) ?? header.readUInt32BE(60);
 }
-async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts: opts2 = {}, reexec: reexec2 = null, invokingProject = null, projectDir = null, pluginRoot: pluginRoot2 = ownPluginRoot(), env = process.env, home = homedir5() }) {
+async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts: opts2 = {}, reexec: reexec2 = null, invokingProject = null, projectDir = null, pluginRoot: pluginRoot2 = ownPluginRoot(), env = process.env, home = homedir6() }) {
   if (pluginRoot2 && isInstalledCopy(pluginRoot2, { env, home })) {
     const refusal2 = installedCopyRefusal(installHostOf(pluginRoot2, { env, home }), { env, home, root: pluginRoot2 });
     log(`
@@ -11535,8 +13341,9 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
     for (const p of list) {
       const entry = { name: p.name, repo_path: p.repo_path, status: null };
       report2.projects.push(entry);
+      let projectMode;
       try {
-        readProjectMode(p.repo_path);
+        projectMode = readProjectMode(p.repo_path);
       } catch (err) {
         if (!isProjectReadRefusal(err)) throw err;
         log(`  \u2717 ${p.name}: REFUSED \u2014 project mode: ${err.message}. Nothing was synced or projected for this project; fix config.mode ('hobby' or 'work', TUI System tab) and rerun /sterling:update.`);
@@ -11544,6 +13351,29 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
         fail(2);
         failures++;
         continue;
+      }
+      const identityRefusal = workIdentityRefusal(p.repo_path, projectMode);
+      if (identityRefusal) {
+        log(`  \u2717 ${p.name}: REFUSED \u2014 ${identityRefusal}. Nothing was synced or projected for this project.`);
+        entry.handoff = "refused_project_identity";
+        fail(2);
+        failures++;
+        continue;
+      }
+      const gitignorePath = join16(p.repo_path, ".gitignore");
+      if (existsSync8(gitignorePath)) {
+        const repaired = withIdentityIgnore(readFileSync8(gitignorePath, "utf8"), { addIfAbsent: false });
+        if (repaired.changed) {
+          writeFileSync3(gitignorePath, repaired.text);
+          log(`      .gitignore: .sterling/ is now .sterling/* plus !.sterling/project.json, so .sterling/project.json can be committed`);
+          entry.gitignore_repaired = true;
+        }
+        const nested = withNestedIgnore(repaired.text);
+        if (nested.changed) {
+          writeFileSync3(gitignorePath, nested.text);
+          log(`      .gitignore: added ${IGNORE_NESTED} so a nested .sterling/ directory stays ignored`);
+          entry.gitignore_repaired = true;
+        }
       }
       let handoffEnabled;
       let handoffUnmaintained;
@@ -11558,7 +13388,7 @@ async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects 
         continue;
       }
       let failed = false;
-      const r = exec(nodeBin, [join14(cwd, "scripts", "sync-agents.mjs"), "--target", p.repo_path], { cwd });
+      const r = exec(nodeBin, [join16(cwd, "scripts", "sync-agents.mjs"), "--target", p.repo_path], { cwd });
       const out = `${r.stdout}${r.stderr}`.trim();
       const statuses = r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^[a-z_]+: /.test(l));
       const driftedAgents = statuses.filter((l) => l.startsWith("config_drift: "));
@@ -11587,7 +13417,7 @@ ${out.split("\n").map((l) => `      ${l}`).join("\n")}`);
         log(`      skipped \u2014 ${HANDOFF_OFF_DETAIL}`);
         entry.handoff = "skipped";
       } else {
-        const handoff = exec(nodeBin, [join14(cwd, "scripts", "handoff-projection.mjs"), p.repo_path], { cwd });
+        const handoff = exec(nodeBin, [join16(cwd, "scripts", "handoff-projection.mjs"), p.repo_path], { cwd });
         const handoffOut = `${handoff.stdout}${handoff.stderr}`.trim();
         const handoffLine = handoffOut.split("\n")[0];
         entry.handoff = handoff.status;
@@ -11608,16 +13438,16 @@ ${handoffOut.split("\n").map((l) => `          ${l}`).join("\n")}`);
         }
       }
       if (failed) failures++;
-      if (existsSync8(join14(p.repo_path, ".sterling", "config.json"))) {
+      if (existsSync8(join16(p.repo_path, ".sterling", "config.json"))) {
         try {
-          const dm = exec(nodeBin, [join14(cwd, "scripts", "domains.mjs"), "--target", p.repo_path, "--json"], { cwd });
+          const dm = exec(nodeBin, [join16(cwd, "scripts", "domains.mjs"), "--target", p.repo_path, "--json"], { cwd });
           if (dm.status !== 0) throw new Error(`exit ${dm.status}: ${`${dm.stdout}${dm.stderr}`.trim().split("\n").slice(-3).join(" | ")}`);
           const { add } = parseDomainProposal(dm.stdout);
           entry.domain_proposal = add.map((a) => a.domain);
           if (add.length) {
             for (const a of add) log(`      domains: proposes adding '${a.domain}' \u2014 ${a.reason}`);
             log(`      Nothing was applied. Run /sterling:domains in ${p.repo_path} to see the map; it adds a domain only after you agree.`);
-            writeFileSync3(join14(p.repo_path, DOMAIN_MAP_PENDING_REL), `${(/* @__PURE__ */ new Date()).toISOString()}
+            writeFileSync3(join16(p.repo_path, DOMAIN_MAP_PENDING_REL), `${(/* @__PURE__ */ new Date()).toISOString()}
 `);
           }
         } catch (err) {
@@ -11700,8 +13530,8 @@ AUTHORING clone \u2014 nothing to pull; syncing ${project.repo_path} only`);
     warnIfLauncherNamesOldBundle(project.repo_path, log);
     if (normPath(project.repo_path) === normPath(cwd)) {
       log("\u25B8 the clone's contract files are hand-maintained \u2014 not checked");
-    } else if (existsSync8(join14(cwd, "scripts", "stamp-contract.mjs"))) {
-      const contract = step("contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join14(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts", "--project", project.repo_path], {
+    } else if (existsSync8(join16(cwd, "scripts", "stamp-contract.mjs"))) {
+      const contract = step("contract text in the invoking project (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join16(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts", "--project", project.repo_path], {
         show: true,
         tolerate: true
       });
@@ -11775,7 +13605,7 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
           `  \u26A0 ${coverage.unregistered.length} project(s) carry Sterling agents but are NOT in the shared project registry, so the agent sync never visits them \u2014 their agents are frozen at install date:
 ` + coverage.unregistered.map((u) => `      ${u.path} (${u.agents.join(", ")})`).join("\n") + `
     Register each by running /sterling:init in that project, or refresh one now:
-      node ${join14(cwd, "scripts", "sync-agents.mjs")} --target <path>   (then restart Claude Code there \u2014 subagents load at session start)`
+      node ${join16(cwd, "scripts", "sync-agents.mjs")} --target <path>   (then restart Claude Code there \u2014 subagents load at session start)`
         );
       } else if (incomplete) {
         log(`  \u26A0 PARTIAL \u2014 nothing unregistered was found in what could be read, but ${incomplete} item(s) above could NOT be inspected, so coverage under these known roots is UNKNOWN, not clean`);
@@ -11803,10 +13633,10 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
     const lines = [];
     for (const p of [{ name: "Sterling clone", repo_path: cwd, clone: true }, ...list]) {
       if (!p.clone) {
-        const claudePath = join14(p.repo_path, "CLAUDE.md");
+        const claudePath = join16(p.repo_path, "CLAUDE.md");
         try {
           if (existsSync8(claudePath)) {
-            const markers = preScaleDownMarkers(readFileSync6(claudePath, "utf8"));
+            const markers = preScaleDownMarkers(readFileSync8(claudePath, "utf8"));
             if (markers.length) lines.push(`  \u26A0 ${p.name}: CLAUDE.md predates the scale-down (mentions ${markers.join(", ")}) \u2014 run /sterling:init there (${p.repo_path}) to migrate it`);
           }
         } catch (err) {
@@ -11814,11 +13644,11 @@ ${before.behind} commit(s) behind \u2014 run /sterling:update to apply:
         }
       }
       if (!describe) continue;
-      const configPath = join14(p.repo_path, ".sterling", "config.json");
+      const configPath = join16(p.repo_path, ".sterling", "config.json");
       if (!existsSync8(configPath)) continue;
       let raw;
       try {
-        raw = JSON.parse(readFileSync6(configPath, "utf8"));
+        raw = JSON.parse(readFileSync8(configPath, "utf8"));
       } catch (err) {
         lines.push(`  \u26A0 ${p.name}: unread-config-key check skipped \u2014 .sterling/config.json could not be parsed: ${err?.message ?? err}`);
         continue;
@@ -11869,7 +13699,7 @@ Already current \u2014 nothing to do for the core update at ${before.head_short}
       return report2;
     }
     if (reexec2) {
-      const script = join14(cwd, "scripts", "update.mjs");
+      const script = join16(cwd, "scripts", "update.mjs");
       const failed = (why) => {
         log(`
 \u2717 RE-EXEC of the updated updater FAILED \u2014 ${why}. The fast-forward stands and nothing after it ran; rerun /sterling:update to finish (it resumes from the build step).`);
@@ -11949,15 +13779,15 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
         return report2;
       }
       if (version < 2) {
-        if (!step(`migrate store schema v${version} \u2192 v2 (${store})`, nodeBin, [join14(cwd, "scripts", "migrate-stores.mjs"), "--db", store, "--invoked-by", "update-sweep"], { show: true }).ok) return report2;
+        if (!step(`migrate store schema v${version} \u2192 v2 (${store})`, nodeBin, [join16(cwd, "scripts", "migrate-stores.mjs"), "--db", store, "--invoked-by", "update-sweep"], { show: true }).ok) return report2;
         log(`  \u25B8 migrated: any Sterling session already open on this store must EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough \u2014 MCP servers survive it) before it can write again`);
       }
     }
   } else {
     log("\n\u25B8 store migration (this clone) \u2014 SKIPPED (red test battery)");
   }
-  if (existsSync8(join14(cwd, ".sterling", "config.json"))) {
-    step("re-bake machine artifacts (init ensure pass)", nodeBin, [join14(cwd, "scripts", "init.mjs"), "--target", cwd, "--update-ensure"], { show: true, tolerate: true });
+  if (existsSync8(join16(cwd, ".sterling", "config.json"))) {
+    step("re-bake machine artifacts (init ensure pass)", nodeBin, [join16(cwd, "scripts", "init.mjs"), "--target", cwd, "--update-ensure"], { show: true, tolerate: true });
   } else {
     log(
       "\n\u25B8 re-bake machine artifacts \u2014 SKIPPED: no .sterling/config.json in the Sterling clone. That is the NORMAL consumer shape and nothing is missing: the clone-as-project artifacts (its own launchers/CLAUDE.md/agents) are what this step bakes, and the plugin MCP config plugin.json points at is committed and arrived with the fast-forward. Run /sterling:init in a project \u2014 not here \u2014 if this machine has never done so."
@@ -11976,7 +13806,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
     }
   } else if (opts2.projects !== false && projectList.length) {
     for (const p of projectList) {
-      const projStore = join14(p.repo_path, ".sterling", "sterling.db");
+      const projStore = join16(p.repo_path, ".sterling", "sterling.db");
       if (!existsSync8(projStore)) continue;
       let projVersion;
       try {
@@ -11989,7 +13819,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
         continue;
       }
       if (projVersion < 2) {
-        const migrated = step(`migrate store schema v${projVersion} \u2192 v2 (${projStore})`, nodeBin, [join14(cwd, "scripts", "migrate-stores.mjs"), "--db", projStore, "--invoked-by", "update-sweep"], { show: true, tolerate: true });
+        const migrated = step(`migrate store schema v${projVersion} \u2192 v2 (${projStore})`, nodeBin, [join16(cwd, "scripts", "migrate-stores.mjs"), "--db", projStore, "--invoked-by", "update-sweep"], { show: true, tolerate: true });
         if (!migrated.ok) {
           log(`  \u2717 ${p.name}: store migration FAILED \u2014 this project's store stays unmigrated; continuing with the remaining projects and the agent-sync fan-out below.`);
           report2.migrations.push({ name: p.name, repo_path: p.repo_path, ok: false });
@@ -12013,8 +13843,8 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   }
   await reportCoverage(projectList, !registryFailed);
   await reportProjectHygiene(projectList);
-  if (opts2.projects !== false && existsSync8(join14(cwd, "scripts", "stamp-contract.mjs"))) {
-    const contract = step("contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join14(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts"], {
+  if (opts2.projects !== false && existsSync8(join16(cwd, "scripts", "stamp-contract.mjs"))) {
+    const contract = step("contract text in sibling projects (stamp-contract: new text inserted, wording changes reported only)", nodeBin, [join16(cwd, "scripts", "stamp-contract.mjs"), "--apply-inserts"], {
       show: true,
       tolerate: true
     });
@@ -12050,8 +13880,8 @@ var argOf = (name) => {
   const i = process.argv.indexOf(name);
   return i !== -1 ? process.argv[i + 1] : void 0;
 };
-var pluginRoot = resolve6(dirname7(fileURLToPath2(new URL("../scripts/update.mjs", import.meta.url).href)), "..");
-var target = resolve6(argOf("--target") ?? pluginRoot);
+var pluginRoot = resolve7(dirname7(fileURLToPath2(new URL("../scripts/update.mjs", import.meta.url).href)), "..");
+var target = resolve7(argOf("--target") ?? pluginRoot);
 var opts = {
   check: process.argv.includes("--check"),
   force: process.argv.includes("--force"),

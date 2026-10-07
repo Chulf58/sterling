@@ -18,6 +18,7 @@ import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.m
 import { setupOpenCode, formatOpenCodeRows } from './lib/opencode-install.mjs';
 import { isSterlingClone, readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintainedNotice, HandoffSettingError, HANDOFF_OFF_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
+import { workIdentityRefusal } from './lib/project-identity.mjs';
 import { probeClaudeWithOverride } from './lib/claude-probe.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -33,11 +34,19 @@ const pluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin',
 // from the TARGET's own config. Nothing below depends on which mode it is (the
 // mode decides only how work ships); an INVALID value is still a refusal
 // (exit 2) naming the value, and nothing is synced until it is fixed.
+let projectMode;
 try {
-  readProjectMode(targetDir);
+  projectMode = readProjectMode(targetDir);
 } catch (err) {
   if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
   console.log(`refused_project_mode: ${err.message}; nothing synced`);
+  process.exit(2);
+}
+// A WORK project must carry its identity (decision
+// work-project-identity-file-sterling-project-json); a project is checked when it is in work mode or its config.storage is postgres.
+const identityRefusal = workIdentityRefusal(targetDir, projectMode);
+if (identityRefusal) {
+  console.log(`refused_project_identity: ${identityRefusal}; nothing synced`);
   process.exit(2);
 }
 // The handoff setting (decision

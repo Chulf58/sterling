@@ -35,7 +35,7 @@ try {
         superseded_by: null, links: [], scope: 'project', stack_tags: [],
         text: `reconcile article '${article.slug}' — '${rel}' was removed`,
         source: 'system', system_reason: 'reconcile_needed', file_keys: [rel], feature_link: article.id,
-      });
+      }, { operation_id: randomUUID() });
     }
   }
 } finally {

@@ -60,7 +60,8 @@ test('mcp bundle: answers initialize standalone and records the .build-id beside
   const tmp = mkdtempSync(join(tmpdir(), 'sterling-mcp-bundle-'));
   try {
     buildInto('build-mcp.mjs', join(tmp, 'mcp'));
-    assert.deepEqual(readdirSync(join(tmp, 'mcp')).sort(), ['.build-id', 'sterling-mcp.mjs']);
+    // pg-worker.js: the Postgres worker ships beside every bundle that contains the store (board 6be7b53f)
+    assert.deepEqual(readdirSync(join(tmp, 'mcp')).sort(), ['.build-id', 'pg-worker.js', 'sterling-mcp.mjs']);
     const src = readFileSync(join(tmp, 'mcp', 'sterling-mcp.mjs'), 'utf8');
     assert.deepEqual(nonBuiltinImports(src), [], 'the server imports only node: builtins (node:sqlite stays external)');
     const buildId = readFileSync(join(tmp, 'mcp', '.build-id'), 'utf8');
@@ -83,8 +84,9 @@ test('bin bundles: one per BIN_ENTRIES member, node: imports only, source identi
     const binDir = join(tmp, 'bin');
     buildInto('build-bin.mjs', binDir);
     // plus the stamp-contract bullet history and the launcher template history an installed
-    // copy reads in place of git (buildBins)
-    assert.deepEqual(readdirSync(binDir).sort(), [...Object.keys(BIN_ENTRIES).map((n) => `${n}.mjs`), 'contract-history.json', 'launcher-history.json'].sort());
+    // copy reads in place of git (buildBins), and the Postgres worker every bin bundle that
+    // contains the store spawns from beside it (board 6be7b53f)
+    assert.deepEqual(readdirSync(binDir).sort(), [...Object.keys(BIN_ENTRIES).map((n) => `${n}.mjs`), 'contract-history.json', 'launcher-history.json', 'pg-worker.js'].sort());
     assert.deepEqual(JSON.parse(readFileSync(join(binDir, 'launcher-history.json'), 'utf8')), JSON.parse(launcherHistorySnapshot({ repoRoot: root })));
     for (const file of readdirSync(binDir)) {
       const src = readFileSync(join(binDir, file), 'utf8');

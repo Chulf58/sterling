@@ -50,6 +50,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '../index.js';
+import { sqliteOnly } from './pg-test-support.js';
 
 const NOW = '2026-08-22T12:00:00.000Z';
 const LATER = '2026-08-22T13:00:00.000Z';
@@ -177,7 +178,7 @@ function rawRelation(store: SterlingStore, sourceId: string, rel: string, target
 // [stable-identity-design-v2]
 // ===========================================================================
 
-test('S2-1a [stable-identity-design-v2]: a freshly created store has record_versions, record_aliases, record_relations tables', () => {
+test('S2-1a [stable-identity-design-v2]: a freshly created store has record_versions, record_aliases, record_relations tables', { skip: sqliteOnly('reads sqlite_master') }, () => {
   const { dir, store } = tempStore();
   try {
     const tables = rawTableNames(store);

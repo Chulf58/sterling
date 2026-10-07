@@ -12,9 +12,11 @@
 import { mkdirSync, existsSync, rmSync, openSync, closeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { SterlingStore, SchemaMigrationRequiredError, StoreRowDecodeError, UnsupportedSchemaVersionError, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions, type BoardItemReadiness } from './index.js';
+import { SterlingStore, SchemaMigrationRequiredError, StoreRowDecodeError, UnsupportedSchemaVersionError, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions, type BoardItemReadiness, type WriteOptions } from './index.js';
 import { validateRecord, type DurableRecord, type SterlingConfig } from '@sterling/schemas';
 import { allocateShares } from './shares.js';
+import { PgBridgeClosedError, PgBridgeTimeoutError, PgQueryError, PgWorkerDiedError } from './pg-bridge.js';
+import { PgLockTimeoutError, PgNulCharacterError, PgStatementTimeoutError, PgStoreMissingError } from './pg-driver.js';
 
 /** A domain store to mount: its manifest name + its already-resolved DB path. */
 export interface DomainMount {
@@ -84,7 +86,57 @@ function isStoreFailure(e: unknown): boolean {
   );
 }
 
+/** True for a failure of a Postgres-backed store under an open or a read: a
+ *  missing store, a server refusal, a timeout, or a lost connection. Only a
+ *  work-mode MountedStores consults it. */
+function isPgStoreFailure(e: unknown): boolean {
+  return (
+    e instanceof PgStoreMissingError ||
+    e instanceof PgQueryError ||
+    e instanceof PgLockTimeoutError ||
+    e instanceof PgStatementTimeoutError ||
+    e instanceof PgNulCharacterError ||
+    e instanceof PgBridgeClosedError ||
+    e instanceof PgBridgeTimeoutError ||
+    e instanceof PgWorkerDiedError
+  );
+}
+
 const errorText = (e: unknown): string => String((e as Error)?.message ?? e);
+
+/** Postgres storage (routing.ts, the `work` option): a mounted domain that is
+ *  missing or cannot be read. It never skips or drops a domain (decision
+ *  postgres-store-backend-design-sync-bridge-schema-per-store, point 6): the
+ *  open or the read fails, naming the domain, and `cause` carries the
+ *  store's own error. */
+export class DomainUnavailableError extends Error {
+  readonly domain: string;
+  readonly location: string;
+  constructor(domain: string, location: string, cause: unknown) {
+    super(
+      `storage 'postgres': domain '${domain}' (${location}) is missing or cannot be read: ${errorText(cause)}. ` +
+        `Postgres storage never skips or drops a mounted domain; the call fails and nothing was written.`,
+      { cause }
+    );
+    this.name = 'DomainUnavailableError';
+    this.domain = domain;
+    this.location = location;
+  }
+}
+
+/** How a work-mode MountedStores opens its stores (routing.ts supplies it).
+ *  Neither opener may create a store. */
+export interface WorkStoreOpeners {
+  openProject(): SterlingStore;
+  openDomain(mount: DomainMount): SterlingStore;
+}
+
+export interface MountedStoresOptions {
+  /** Hobby only: skip a configured domain whose store file is missing, listing it on missingDomains. Ignored with `work`. */
+  skipMissing?: boolean;
+  /** Postgres storage (routing.ts): open through these, never create a store, and throw DomainUnavailableError wherever the SQLite path would skip or drop a domain. */
+  work?: WorkStoreOpeners;
+}
 
 /** The store_meta key that holds a domain's description. */
 export const DOMAIN_DESCRIPTION_KEY = 'description';
@@ -94,6 +146,19 @@ export const DOMAIN_DESCRIPTION_KEY = 'description';
  *  createDomain takes one (board 675daf9d (c), decision
  *  projects-mount-domains-and-sibling-projects: "creating a domain without one
  *  fails loud"). */
+/** The mounted stores rank on different score scales (e.g. one on SQLite, one on Postgres). */
+export class MixedScoreScaleError extends Error {
+  constructor(
+    operation: string,
+    readonly scales: { source: string; scale: string }[],
+  ) {
+    super(
+      `${operation}: the mounted stores rank on different score scales (${scales.map((x) => `${x.source}: ${x.scale}`).join(', ')}), so a min_score cannot be applied across them. Nothing was counted.`
+    );
+    this.name = 'MixedScoreScaleError';
+  }
+}
+
 export class DomainNotCreatedError extends Error {
   readonly domain: string;
   readonly db_path: string;
@@ -216,6 +281,9 @@ export class MountedStores {
    *  whether or not it could be opened. */
   private readonly mountedNames: string[] = [];
 
+  /** Set for Postgres storage; see MountedStoresOptions.work. */
+  private readonly work: WorkStoreOpeners | undefined;
+
   /** The project store is opened, and created when absent; a failure to open
    *  it throws. A domain store is only ever OPENED here, never created, and one
    *  that exists but cannot be opened is listed on unreadableDomains instead of
@@ -224,8 +292,37 @@ export class MountedStores {
    *  every handle opened so far closed and no file written for the missing
    *  domain. When options.skipMissing is true such a mount is skipped instead,
    *  and the existing siblings are still mounted. An existing domain store opens
-   *  as it is, whether or not it has a description. */
-  constructor(projectDbPath: string, mounts: DomainMount[] = [], options?: { skipMissing?: boolean }) {
+   *  as it is, whether or not it has a description.
+   *
+   *  Postgres storage (options.work, routing.ts) differs in three ways: both stores
+   *  are opened through the given openers, which never create a store;
+   *  skipMissing is ignored; and every case above that lists a domain on
+   *  missingDomains or unreadableDomains throws DomainUnavailableError instead,
+   *  with every handle opened so far closed. */
+  constructor(projectDbPath: string, mounts: DomainMount[] = [], options?: MountedStoresOptions) {
+    this.work = options?.work;
+    if (this.work) {
+      this.project = this.work.openProject();
+      try {
+        for (const m of mounts) {
+          this.mountedNames.push(m.name);
+          this.domainPaths.set(m.name, m.dbPath);
+          let store: SterlingStore;
+          try {
+            store = this.work.openDomain(m);
+          } catch (e) {
+            if (!this.isStoreFailure(e)) throw e;
+            throw new DomainUnavailableError(m.name, m.dbPath, e);
+          }
+          this.domains.set(m.name, store);
+          this.probeDomain(m.name, store);
+        }
+      } catch (e) {
+        this.close();
+        throw e;
+      }
+      return;
+    }
     this.project = open(projectDbPath);
     try {
       for (const m of mounts) {
@@ -269,7 +366,7 @@ export class MountedStores {
       store.get(PROBE_ID);
       store.inboundSupersedes(PROBE_ID);
     } catch (e) {
-      if (!isStoreFailure(e)) throw e;
+      if (!this.isStoreFailure(e)) throw e;
       this.dropDomain(name, e, true);
     }
   }
@@ -280,6 +377,8 @@ export class MountedStores {
    *  (assertWritable): a session never writes into a store it cannot read back,
    *  and the slug checks still ask it (fanEveryDomain). */
   private dropDomain(name: string, e: unknown, atMount = false): void {
+    // Postgres storage drops nothing: the failing open or read throws, naming the domain.
+    if (this.work) throw new DomainUnavailableError(name, this.domainPaths.get(name) ?? '', e);
     if (this.isUnreadable(name)) return;
     this.unreadableDomains.push({
       name,
@@ -287,6 +386,12 @@ export class MountedStores {
       error: errorText(e),
       note: atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE,
     });
+  }
+
+  /** The failures that drop a domain in hobby mode and fail the call in work
+   *  mode; any other error is the caller's or this code's fault and is rethrown. */
+  private isStoreFailure(e: unknown): boolean {
+    return isStoreFailure(e) || (this.work !== undefined && isPgStoreFailure(e));
   }
 
   private isUnreadable(name: string): boolean {
@@ -320,7 +425,7 @@ export class MountedStores {
       try {
         out.push(fn(store));
       } catch (e) {
-        if (!isStoreFailure(e)) throw e;
+        if (!this.isStoreFailure(e)) throw e;
         this.dropDomain(name, e);
         throw new Error(
           `${what} cannot be checked: domain '${name}' could not be read (${errorText(e)}), so whether it is taken there is unknown. ` +
@@ -345,7 +450,7 @@ export class MountedStores {
       try {
         value = fn(store);
       } catch (e) {
-        if (!isStoreFailure(e)) throw e;
+        if (!this.isStoreFailure(e)) throw e;
         this.dropDomain(name, e);
         continue;
       }
@@ -394,7 +499,7 @@ export class MountedStores {
    *  otherwise a lifecycle/freshness-only envelope that SterlingStore.create
    *  accepts was rejected through the mounted surface, because the schemas
    *  registry still declares the derived status/superseded_by fields. */
-  create(input: unknown): DurableRecord {
+  create(input: unknown, options: WriteOptions = {}): DurableRecord {
     const normalized = SterlingStore.normalizeIdentityEnvelope(input);
     const record = validateRecord(normalized);
     // Board bd3f0acf — this site is NOT redundant with SterlingStore.create's own
@@ -413,7 +518,7 @@ export class MountedStores {
     // still gets its own refusal first.
     const target = this.storeFor(record.scope);
     this.assertMountAffinity('create', target, `record '${record.id}' (scope '${record.scope}')`);
-    return target.create(record);
+    return target.create(record, options);
   }
 
   /** Scope-routed exactly as create() is. A maintenance item is project-LOCAL
@@ -421,12 +526,12 @@ export class MountedStores {
    *  and the dedup key is therefore evaluated within that ONE store rather than
    *  across the fan, which is right: two projects' queues are independent, and a
    *  cross-store key would let one project's item suppress another's. */
-  enqueueSystemTodo(input: unknown): { record: DurableRecord; deduped: boolean; text_updated: boolean } {
+  enqueueSystemTodo(input: unknown, options: WriteOptions = {}): { record: DurableRecord; deduped: boolean; text_updated: boolean } {
     // Same normalize-then-validate order as create(), for the same reason.
     const record = validateRecord(SterlingStore.normalizeIdentityEnvelope(input));
     const target = this.storeFor(record.scope);
     this.assertMountAffinity('enqueueSystemTodo', target, `todo '${record.id}' (scope '${record.scope}')`);
-    return target.enqueueSystemTodo(record);
+    return target.enqueueSystemTodo(record, options);
   }
 
   /** Read-only twin of enqueueSystemTodo: queue items are project-local, so the
@@ -479,7 +584,19 @@ export class MountedStores {
   /** Cross-mount twin of countAboveScore (board a577a69d) — summed
    *  project-first across every mounted store, same fan as count(). */
   countAboveScore(opts: QueryOptions, minScore: number): number {
+    this.commonScoreScale('countAboveScore');
     return this.fanValues((s) => s.countAboveScore(opts, minScore)).reduce((n, c) => n + c, 0);
+  }
+
+  /** The one score scale every mounted store ranks on (SterlingStore.scoreScale). Mixed scales are refused: neither their scores nor their counts above one min_score compare. */
+  scoreScale(): string {
+    return this.commonScoreScale('scoreScale');
+  }
+
+  private commonScoreScale(operation: string): string {
+    const scales = [...this.fanRead((s) => s.scoreScale())].map((r) => ({ source: r.source, scale: r.value }));
+    if (new Set(scales.map((x) => x.scale)).size > 1) throw new MixedScoreScaleError(operation, scales);
+    return scales[0].scale;
   }
 
   /** Per-source projection (AC2): project store FIRST, then each mounted domain
@@ -490,6 +607,13 @@ export class MountedStores {
    *  name (DomainMount.name) for each domain store. */
   bySource(opts?: QueryOptions): { source: string; records: DurableRecord[] }[] {
     return [...this.fanRead((s) => s.query(opts))].map((r) => ({ source: r.source, records: r.value }));
+  }
+
+  /** bySource for each entry of `list` in one pass: per store, project first,
+   *  one SterlingStore.queryEach (one read transaction), so `results[i]` is
+   *  that store's bySource(list[i]) records. */
+  bySourceEach(list: readonly QueryOptions[]): { source: string; results: DurableRecord[][] }[] {
+    return [...this.fanRead((s) => s.queryEach(list))].map((r) => ({ source: r.source, results: r.value }));
   }
 
   /** Count-only per-source projection — the COUNT(*) twin of bySource (same
@@ -511,7 +635,7 @@ export class MountedStores {
     try {
       return store.query(opts);
     } catch (e) {
-      if (!isStoreFailure(e)) throw e;
+      if (!this.isStoreFailure(e)) throw e;
       this.dropDomain(source, e);
       return [];
     }
@@ -628,6 +752,24 @@ export class MountedStores {
    *  project-store tombstone behind, so the SAME source id can resolve out of
    *  two different mounts — first-seen (project-first, the read fan's own
    *  ordering) wins, never a duplicate entry for one concept. */
+  /** inboundSupersedes() for each id: per store one SterlingStore.inboundSupersedesEach,
+   *  merged per id exactly as inboundSupersedes merges (project first, first seen wins). */
+  inboundSupersedesEach(ids: readonly string[]): DurableRecord[][] {
+    const perStore = this.fanValues((s) => s.inboundSupersedesEach(ids));
+    return ids.map((_, i) => {
+      const seen = new Set<string>();
+      const out: DurableRecord[] = [];
+      for (const lists of perStore) {
+        for (const record of lists[i] ?? []) {
+          if (seen.has(record.id)) continue;
+          seen.add(record.id);
+          out.push(record);
+        }
+      }
+      return out;
+    });
+  }
+
   inboundSupersedes(id: string): ReturnType<SterlingStore['inboundSupersedes']> {
     const seen = new Set<string>();
     const out: ReturnType<SterlingStore['inboundSupersedes']> = [];
@@ -667,10 +809,11 @@ export class MountedStores {
    *  repeated. The label and the physical destination are therefore ONE fact,
    *  and cannot drift apart at this site by construction. Any third argument a
    *  caller supplies is deliberately ignored for the same reason: an
-   *  authoritative scope is not something a caller can be trusted to know. */
+   *  authoritative scope is not something a caller can be trusted to know.
+   *  The fourth argument (WriteOptions: operation_id) passes through. */
   supersede(...args: Parameters<SterlingStore['supersede']>): ReturnType<SterlingStore['supersede']> {
     const store = this.mutatingStoreHolding('supersede', args[0]);
-    return store.supersede(args[0], args[1], this.mountNameOf(store));
+    return store.supersede(args[0], args[1], this.mountNameOf(store), args[3]);
   }
 
   /** Promotion tombstone: retire the original in its (project) store, pointing at

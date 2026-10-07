@@ -33,6 +33,35 @@ function configPath(explicit?: string): string {
   return explicit ?? join(process.cwd(), '.sterling', 'config.json');
 }
 
+/** The move that is the only writer of config.storage (decision
+ *  storage-backend-is-its-own-config-key-written-only-by-store-move). */
+const MOVE_STORE = '`node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite`';
+
+/** The TUI's refusal to write config.storage: config_set's message
+ *  (packages/mcp-server tools.ts StorageTransitionRequiredError), with this
+ *  surface's name in place of config_set's. */
+export class StorageTransitionRequiredError extends Error {
+  constructor(path: string) {
+    super(
+      `TUI: '${path}' cannot be written directly. config.storage records where this project's stores live (SQLite or Postgres), ` +
+        `so it changes only when the stores move, through the explicit storage transition: ${MOVE_STORE}, ` +
+        `which writes it after the move commits. Nothing was written.`
+    );
+    this.name = 'StorageTransitionRequiredError';
+  }
+}
+
+/** The one write path every applier below uses: read config.json, replace the
+ *  top-level `key` with `update(old)`, write it back with every other key kept.
+ *  `storage` (or any `storage.` path) is refused before anything is read or
+ *  written: only the store move writes it. */
+export function writeConfigKey(target: string, key: string, update: (old: unknown, raw: Record<string, unknown>) => unknown): void {
+  if (key === 'storage' || key.startsWith('storage.')) throw new StorageTransitionRequiredError(key);
+  const raw = JSON.parse(readFileSync(target, 'utf8')) as Record<string, unknown>;
+  raw[key] = update(raw[key], raw);
+  writeFileSync(target, JSON.stringify(raw, null, 2) + '\n');
+}
+
 /** Execute a sparring_toggle effect: config.sparring_partner.enabled write
  *  only (advisory-only surface, article interaction a — never gates, so
  *  there is no downstream projection or decision record the way a model swap
@@ -42,10 +71,7 @@ function configPath(explicit?: string): string {
  *  must never split the two). */
 export function applySparringToggle(e: SparringToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
   try {
-    const target = configPath(path);
-    const raw = JSON.parse(readFileSync(target, 'utf8')) as { sparring_partner?: { enabled?: boolean; model?: string } };
-    raw.sparring_partner = { ...raw.sparring_partner, enabled: e.enabled };
-    writeFileSync(target, JSON.stringify(raw, null, 2) + '\n');
+    writeConfigKey(configPath(path), 'sparring_partner', (old) => ({ ...(old as { enabled?: boolean; model?: string } | undefined), enabled: e.enabled }));
     return true;
   } catch (err) {
     onError?.(`sparring partner toggle failed — ${(err as Error).message}`);
@@ -60,10 +86,7 @@ export function applySparringToggle(e: SparringToggleEffect, onError?: (msg: str
  *  applySparringToggle). */
 export function applyTddToggle(e: TddToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
   try {
-    const target = configPath(path);
-    const raw = JSON.parse(readFileSync(target, 'utf8')) as { tdd?: { enabled?: boolean } };
-    raw.tdd = { ...raw.tdd, enabled: e.enabled };
-    writeFileSync(target, JSON.stringify(raw, null, 2) + '\n');
+    writeConfigKey(configPath(path), 'tdd', (old) => ({ ...(old as { enabled?: boolean } | undefined), enabled: e.enabled }));
     return true;
   } catch (err) {
     onError?.(`tdd toggle failed — ${(err as Error).message}`);
@@ -78,10 +101,7 @@ export function applyTddToggle(e: TddToggleEffect, onError?: (msg: string) => vo
  *  overrides the cwd-derived default (see applySparringToggle). */
 export function applyModeToggle(e: ModeToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
   try {
-    const target = configPath(path);
-    const raw = JSON.parse(readFileSync(target, 'utf8')) as { mode?: string };
-    raw.mode = e.mode;
-    writeFileSync(target, JSON.stringify(raw, null, 2) + '\n');
+    writeConfigKey(configPath(path), 'mode', () => e.mode);
     return true;
   } catch (err) {
     onError?.(`mode toggle failed — ${(err as Error).message}`);
@@ -99,11 +119,10 @@ export function applyModeToggle(e: ModeToggleEffect, onError?: (msg: string) => 
  *  (see applySparringToggle). */
 export function applyHandoffToggle(e: HandoffToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
   try {
-    const target = configPath(path);
-    const raw = JSON.parse(readFileSync(target, 'utf8')) as { handoff?: unknown };
-    const block = raw.handoff !== null && typeof raw.handoff === 'object' && !Array.isArray(raw.handoff) ? raw.handoff : {};
-    raw.handoff = { ...block, enabled: e.enabled };
-    writeFileSync(target, JSON.stringify(raw, null, 2) + '\n');
+    writeConfigKey(configPath(path), 'handoff', (old) => {
+      const block = old !== null && typeof old === 'object' && !Array.isArray(old) ? old : {};
+      return { ...block, enabled: e.enabled };
+    });
     return true;
   } catch (err) {
     onError?.(`handoff toggle failed — ${(err as Error).message}`);

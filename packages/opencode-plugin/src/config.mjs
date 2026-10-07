@@ -119,11 +119,11 @@ export function renderRegistrations(root) {
   return { commands, skills, failures };
 }
 
-/** The `sterling` local MCP entry for the Sterling copy at `root`, serving the project's store. */
+/** The `sterling` local MCP entry for the Sterling copy at `root`, serving the project's stores (--project routes by config.storage). */
 export function mcpEntry(root, project) {
   return {
     type: 'local',
-    command: ['node', '--disable-warning=ExperimentalWarning', join(root, 'mcp', 'sterling-mcp.mjs'), '--store', join(project, '.sterling', 'sterling.db')],
+    command: ['node', '--disable-warning=ExperimentalWarning', join(root, 'mcp', 'sterling-mcp.mjs'), '--project', project],
   };
 }
 

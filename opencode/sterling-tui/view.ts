@@ -7,6 +7,7 @@ import { boardDisplayLabel } from '@sterling/schemas';
 import type { SterlingStore } from '@sterling/store';
 import { KNOWLEDGE_TAB, type UiEvent, type UiState } from '@sterling/tui/dist/state.js';
 import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_COLS, DONE_FADE, fadeToTile, type AssignState } from '@sterling/tui/dist/avatars/index.js';
+import { storeBackend } from '../../scripts/hooks/lib/store-backend.mjs';
 
 /** OpenCode 2.0.21's sidebar content width, measured: a session title wraps at 34 columns. */
 export const SIDEBAR_WIDTH = 34;
@@ -300,13 +301,17 @@ export function escapeLeavesView(ui: UiState): boolean {
 }
 
 /** STERLING_STORE when set; otherwise the nearest <dir>/.sterling/sterling.db
- *  walking up from `start`. Undefined when there is none. */
+ *  walking up from `start`, where <dir> holds that file or is a Postgres-storage
+ *  project. Undefined when there is none. */
 export function findStorePath(start: string, env: Record<string, string | undefined>): string | undefined {
   if (env.STERLING_STORE) return env.STERLING_STORE;
   let dir = start;
   for (;;) {
+    // A Postgres-storage project has a config and no SQLite file. The returned
+    // path then only names the project for openDashboard, which opens it
+    // through the router. A SQLite project is found by its file, as before.
     const candidate = join(dir, '.sterling', 'sterling.db');
-    if (existsSync(candidate)) return candidate;
+    if (existsSync(candidate) || (existsSync(join(dir, '.sterling', 'config.json')) && storeBackend(dir) === 'routed')) return candidate;
     const parent = dirname(dir);
     if (parent === dir) return undefined;
     dir = parent;

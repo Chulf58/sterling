@@ -58,7 +58,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -179,8 +179,12 @@ function buildB1Fixture(path) {
   return { idA, idB, idC, idD, idE, idF, missingTargetId };
 }
 
+// The script refuses in a project on Postgres storage (scripts/lib/hobby-only.mjs), so
+// every run starts in an empty SQLite directory, never in the repo's own cwd.
 function run(args) {
-  const r = spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', timeout: 60_000 });
+  const cwd = mkdtempSync(join(tmpdir(), 'migration-preflight-cwd-'));
+  const r = spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', cwd, timeout: 60_000 });
+  rmSync(cwd, { recursive: true, force: true });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 

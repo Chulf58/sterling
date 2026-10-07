@@ -6,8 +6,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { z } from 'zod';
-import { parseConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS } from '@sterling/schemas';
+import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS } from '@sterling/schemas';
 import { MountedStores, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
+import { openRoutedStores } from '@sterling/store/routing';
+import { holdRoutedStores } from './held-stores.js';
 import { SterlingTools, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS, DEDUP_OVERRIDE_FIELD, mountedDomainSurface } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
@@ -183,24 +185,68 @@ export function unreadableDomainWarning(d: MountedStores['unreadableDomains'][nu
   );
 }
 
-export function createSterlingServer(storePath: string): { server: McpServer; store: MountedStores; tools: SterlingTools } {
+/** `--store <path>` names a SQLite file, but the config beside it says the
+ *  stores live in Postgres (storage 'postgres'). Boot refuses rather than open
+ *  the file. */
+export class StoreArgInPostgresStorageError extends Error {
+  constructor(configPath: string) {
+    super(
+      `--store opens a SQLite store, but ${configPath.replace(/\\/g, '/')} sets storage 'postgres', so this project's stores live in Postgres. ` +
+        `Launch the server with --project <project root>. Postgres storage never falls back to SQLite; nothing was opened.`
+    );
+    this.name = 'StoreArgInPostgresStorageError';
+  }
+}
+
+/** Opens the stores the way `--store <path>` always has: SQLite at that path,
+ *  config.json beside it, the project root two directories up. */
+function openStoreArg(storePath: string): { store: MountedStores; config: SterlingConfig; repoRoot: string } {
   // config.json sits beside the store in .sterling/ (§12); malformed fails loud.
   // Read before opening the store: config.stack_tags is the §3.3 mount manifest.
   const configPath = join(dirname(storePath), 'config.json');
-  const config = parseConfig(existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {});
+  const raw: unknown = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {};
+  const config = parseConfig(raw);
+  if ((raw as { storage?: unknown }).storage === 'postgres') throw new StoreArgInPostgresStorageError(configPath);
   // §3.3: mount one shared domain store per stack tag (resolveDomainMounts). The
   // stack tags are only the mount manifest; they do not filter retrieval. Boot
   // never fails on a configured domain whose store is missing (board 675daf9d
   // (c) ruling): it is skipped and announced on stderr, one line per domain, and
   // stays on store.missingDomains. Creating it is an explicit createDomain call.
   const store = new MountedStores(storePath, resolveDomainMounts(config), { skipMissing: true });
+  // store lives at <project>/.sterling/sterling.db (§2.3) — project root is two up;
+  // §3.2.5 repo-located doc mtime checks resolve against it
+  return { store, config, repoRoot: dirname(dirname(storePath)) };
+}
+
+/**
+ * The server over a project's stores. A string is the `--store <path>` form
+ * (hobby back-compat, and the tests' fixtures). `{ projectRoot }` is the
+ * `--project <root>` form: the stores come from openRoutedStores, so
+ * config.storage picks SQLite or Postgres. On Postgres a missing or unreadable
+ * domain fails boot by name instead of being skipped; on SQLite it is skipped
+ * and announced as before. The local .sterling/ directory under the project root
+ * stays the anchor for markers, ledgers and locks in both modes. On Postgres the
+ * returned `store` is held (holdRoutedStores): when its connection closes, the
+ * next call opens a new one.
+ */
+export function createSterlingServer(target: string | { projectRoot: string }): { server: McpServer; store: MountedStores; tools: SterlingTools } {
+  let opened: { store: MountedStores; config: SterlingConfig; repoRoot: string };
+  if (typeof target === 'string') {
+    opened = openStoreArg(target);
+  } else {
+    const open = () => openRoutedStores(target.projectRoot, { mount: true, skipMissing: true });
+    const routed = open();
+    // Postgres: the stores are held, so a connection that dies is replaced on
+    // the next call instead of failing every call until restart (held-stores.ts).
+    const store = routed.route.storage === 'postgres' ? holdRoutedStores(routed, open, (line) => process.stderr.write(line + '\n')) : routed.stores;
+    opened = { store, config: routed.config, repoRoot: routed.route.root };
+  }
+  const { store, config, repoRoot } = opened;
   for (const m of store.missingDomains) process.stderr.write(missingDomainWarning(m) + '\n');
   // A mounted domain that fails the mount-time read check never fails boot
   // either: reads skip it, and it is announced the same way.
   for (const d of store.unreadableDomains) process.stderr.write(unreadableDomainWarning(d) + '\n');
-  // store lives at <project>/.sterling/sterling.db (§2.3) — project root is two up;
-  // §3.2.5 repo-located doc mtime checks resolve against it
-  const tools = new SterlingTools({ store, config, repoRoot: dirname(dirname(storePath)), domains: mountedDomainSurface(store) });
+  const tools = new SterlingTools({ store, config, repoRoot, domains: mountedDomainSurface(store) });
   // Server start is the one moment expired domain-write ledger files of other
   // processes are removed (the rule is at removeExpiredDomainWriteLedgers). A
   // file that could not be removed is announced once here and never fails boot.
@@ -263,7 +309,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_query',
     {
       description:
-        "Retrieve knowledge: filter (types, stack_tags) → file_keys join → rank (rank_terms: single keywords, never prose) → cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW — raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: \"full\" (default), \"digest\" (one headline line per record — scan wide, then knowledge_get the few you need), or \"count\". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (score = -bm25, higher is more relevant, unbounded). Each record carries `source` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched; unreadable_domains lists mounted domains that could not be read, each with its error, and their records are not in the result.",
+        "Retrieve knowledge: filter (types, stack_tags) → file_keys join → rank (rank_terms: single keywords, never prose) → cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW — raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: \"full\" (default), \"digest\" (one headline line per record — scan wide, then knowledge_get the few you need), or \"count\". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (higher is more relevant, unbounded; score_scale names the scale it was applied on: fts5_bm25 is -bm25 on SQLite, pg_bm25_v1 on Postgres; a min_score is not portable across scales). Each record carries `source` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched; unreadable_domains lists mounted domains that could not be read, each with its error, and their records are not in the result.",
       inputSchema: strict({
         types: z.array(z.string()).optional(),
         stack_tags: z.array(z.string()).optional(),
@@ -675,7 +721,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'config_set',
     {
       description:
-        "Conductor-only (not granted to roster agents): set one key in the active project's .sterling/config.json, validating the whole document against the config schema before writing. `path` is a dotted key (e.g. 'tdd.enabled'; intermediate objects are created); `value` is required; __proto__/constructor/prototype in the path are refused. `expected_digest` (sha256 of the current file bytes) makes the write conditional — a stale token is refused naming both digests. Pass it against concurrent writers such as the TUI: the call also re-checks the digest just before its atomic rename, but a small window between that re-check and the rename remains, so last write wins inside it. A symlinked or non-regular config.json or .sterling directory is refused. The file is re-serialized as 2-space LF JSON (BOM stripped; other keys preserved). Returns {path, previous_value, value, digest}; digest is the next expected_digest. If the written path is a key Sterling no longer reads (a rename, or a retired mechanism), the receipt also carries `warnings`: [string] naming it — the write still lands, this is disclosure, never a refusal.",
+        "Conductor-only (not granted to roster agents): set one key in the active project's .sterling/config.json, validating the whole document against the config schema before writing. `path` is a dotted key (e.g. 'tdd.enabled'; intermediate objects are created); `value` is required; __proto__/constructor/prototype in the path are refused, and so is `storage` (where the stores live; only `node \"<Sterling root>/bin/move-store.mjs\" --to pg|sqlite` changes it, after moving them). `expected_digest` (sha256 of the current file bytes) makes the write conditional — a stale token is refused naming both digests. Pass it against concurrent writers such as the TUI: the call also re-checks the digest just before its atomic rename, but a small window between that re-check and the rename remains, so last write wins inside it. A symlinked or non-regular config.json or .sterling directory is refused. The file is re-serialized as 2-space LF JSON (BOM stripped; other keys preserved). Returns {path, previous_value, value, digest}; digest is the next expected_digest. If the written path is a key Sterling no longer reads (a rename, or a retired mechanism), the receipt also carries `warnings`: [string] naming it — the write still lands, this is disclosure, never a refusal.",
       inputSchema: strict({
         path: z.string(),
         value: z.unknown().refine((v) => v !== undefined, { message: "'value' is required" }),

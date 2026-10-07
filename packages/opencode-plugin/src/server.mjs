@@ -34,7 +34,7 @@
 //      for edit, write and patch; it carries no shell rule.
 // Every handler is fenced: a throw is logged to .sterling/transient and turned
 // into a notice, never raised into OpenCode. Outside a Sterling project (no
-// .sterling/sterling.db above the session directory) every handler is a no-op, and
+// .sterling/config.json or .sterling/sterling.db above the session directory) every handler is a no-op, and
 // setup registers only the bootstrap commands (config.mjs BOOTSTRAP_COMMANDS), so a
 // new user has /sterling:init; nothing is written into such a project.
 // The handlers live in one module each beside this file; this file wires them
@@ -62,14 +62,14 @@ import { createPromptHandler } from './selection.mjs';
 import { remember } from './bounded.mjs';
 import { createSettle, liveDispatch } from './settle.mjs';
 import { onEvaluate as storeGuard } from './store-guard.mjs';
-import { BUSY_TIMEOUT_MS, openProjectStore } from './store.mjs';
+import { BUSY_TIMEOUT_MS, createProjectStores, openProjectStore } from './store.mjs';
 import { createSessionSync } from './sync.mjs';
 import { createWorkerLaunch, inWorkerChild } from './worker.mjs';
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
 
-export { BUSY_TIMEOUT_MS, LOG_REL, NOTICES_REL, addNotice, liveDispatch, openProjectStore };
+export { BUSY_TIMEOUT_MS, LOG_REL, NOTICES_REL, addNotice, createProjectStores, liveDispatch, openProjectStore };
 export { defaultTemplatePath, hostBlockPairs, opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
 
 export const PLUGIN_ID = 'sterling.server';
@@ -102,7 +102,8 @@ function sameDirectory(a, b) {
 }
 
 /**
- * The plugin factory. `deps` exists for tests: openStore(dbPath), now(),
+ * The plugin factory. `deps` exists for tests: openStore(dbPath) (replaces the
+ * project stores outright) or projectStores (a createProjectStores() result), now(),
  * claudeOnPath(), launchWorker(opts), sterlingRoot (a path), renderRestore(note, opts),
  * configure(ctx), bootstrap(ctx) and syncSession(root, sessionID) (replace the config.mjs and sync.mjs handlers),
  * and env (process.env for the worker-child check and sync.mjs).
@@ -118,7 +119,10 @@ function sameDirectory(a, b) {
  * the project first.
  */
 export function createSterlingServer(deps = {}) {
-  const openStore = deps.openStore ?? openProjectStore;
+  // On Postgres storage the project stores hold one routed store per project for the
+  // process's life (store.mjs); a location's cleanup closes its project's.
+  const projectStores = deps.openStore ? null : (deps.projectStores ?? createProjectStores());
+  const openStore = deps.openStore ?? projectStores.open;
   const now = deps.now ?? (() => new Date().toISOString());
   const env = deps.env ?? process.env;
   // Process-wide, keyed by project root: the roots whose startup sweep ran, and whose post-update sync started.
@@ -333,7 +337,13 @@ export function createSterlingServer(deps = {}) {
           }
         }
       })();
-      return () => abort.abort();
+      return () => {
+        abort.abort();
+        // The root found at bind, plus the one found now: a project renamed or
+        // removed since bind has no root now but may still hold a store, and one
+        // initialized since bind has a root only now.
+        for (const held of new Set([root, rootOf()])) if (held) projectStores?.release(held);
+      };
     }
 
     return { handlers, bind, idle: () => chain };

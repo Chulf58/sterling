@@ -36,5 +36,6 @@ for (let i = 0; i < args.length; i++) {
   outFile = resolve(value);
 }
 
-await buildTui({ root, outFile });
-console.log(`bundled: ${relative(root, outFile).split('\\').join('/')}`);
+for (const file of await buildTui({ root, outFile })) {
+  console.log(`bundled: ${relative(root, file).split('\\').join('/')}`);
+}

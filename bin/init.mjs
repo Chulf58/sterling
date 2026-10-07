@@ -4123,15 +4123,15 @@ var init_zod = __esm({
 
 // packages/schemas/dist/paths.js
 function normalizeRepoPath(input) {
-  const fwd7 = input.replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(fwd7)) {
+  const fwd8 = input.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(fwd8)) {
     throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input}'`);
   }
-  if (fwd7.startsWith("/")) {
+  if (fwd8.startsWith("/")) {
     throw new Error(`path invariant violation: absolute path is not repo-relative: '${input}'`);
   }
   const parts = [];
-  for (const seg of fwd7.split("/")) {
+  for (const seg of fwd8.split("/")) {
     if (seg === "" || seg === ".")
       continue;
     if (seg === "..") {
@@ -5534,13 +5534,22 @@ var init_config = __esm({
       // S1): any other value is PRESERVED raw, never coerced to hobby and never
       // thrown on — a typo here must not turn every parseConfig reader (the MCP
       // server's boot included) into a startup failure. The strict judge is
-      // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
+      // readProjectMode() in packages/schemas/src/project.ts (re-exported by scripts/lib/handoff-projection.mjs), which every
       // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
       // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
       // Consumers of the PARSED config must narrow this field themselves.
       // The default lives twice (anti_pattern 85d15143): here and in
       // templates/default-config.json; config.test.ts pins that they agree.
       mode: external_exports.unknown().default("hobby"),
+      // Where the project's stores live (decision
+      // storage-backend-is-its-own-config-key-written-only-by-store-move): absent
+      // or 'sqlite' is the local SQLite store, 'postgres' the project's schema in
+      // the Served database, valid only with mode 'work'. Only
+      // scripts/move-store.mjs writes it, after the stores have moved; config_set
+      // and the TUI refuse it. Strict, unlike `mode`: a wrong value must never
+      // route a project to the wrong backend. The reader is
+      // packages/store/src/routing.ts (resolveStoreRoute). No default on purpose.
+      storage: external_exports.enum(["sqlite", "postgres"]).optional(),
       // Handoff files (decision
       // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
       // `enabled` says whether Sterling writes the files for colleagues who do not
@@ -5625,6 +5634,145 @@ var init_staleness = __esm({
   }
 });
 
+// packages/schemas/dist/project.js
+import { lstatSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+function readContainedText(root, rel, ErrorClass, subject) {
+  const segments = rel.split("/");
+  let cursor = resolve(root);
+  for (const [index, part] of segments.entries()) {
+    cursor = join(cursor, part);
+    let st;
+    try {
+      st = lstatSync(cursor);
+    } catch (err) {
+      if (err?.code === "ENOENT")
+        return null;
+      throw err;
+    }
+    const shown = segments.slice(0, index + 1).join("/");
+    const isLeaf = index === segments.length - 1;
+    if (st.isSymbolicLink())
+      throw new ErrorClass(`${shown} is a symlink \u2014 refusing to follow it out of the project; ${subject} cannot be read`);
+    if (isLeaf ? !st.isFile() : !st.isDirectory()) {
+      throw new ErrorClass(`${shown} exists but is not a ${isLeaf ? "regular file" : "directory"} \u2014 ${subject} cannot be read`);
+    }
+  }
+  return readFileSync(cursor, "utf8");
+}
+function readJsonObject(root, rel, ErrorClass, subject) {
+  const where = `${fwd(resolve(root))}/${rel}`;
+  const text = readContainedText(root, rel, ErrorClass, subject);
+  if (text === null)
+    return { where, parsed: void 0 };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
+  }
+  return { where, parsed };
+}
+function readProjectMode(root) {
+  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
+  if (parsed === void 0 || parsed.mode === void 0)
+    return "hobby";
+  if (!PROJECT_MODES.includes(parsed.mode)) {
+    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+  }
+  return parsed.mode;
+}
+function readProjectIdentity(root) {
+  const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
+  if (parsed === void 0)
+    return null;
+  if (!isProjectId(parsed.project_id)) {
+    throw new ProjectIdentityError(`project_id is ${JSON.stringify(parsed.project_id)} in ${where} \u2014 it must be a UUID v4 string; fix the file by hand (init never overwrites it) or restore it from git`);
+  }
+  return { project_id: parsed.project_id };
+}
+var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd, UUID_V4_RE, isProjectId;
+var init_project = __esm({
+  "packages/schemas/dist/project.js"() {
+    "use strict";
+    PROJECT_MODES = ["hobby", "work"];
+    ProjectModeError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ProjectModeError";
+      }
+    };
+    ProjectIdentityError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ProjectIdentityError";
+      }
+    };
+    CONFIG_REL = ".sterling/config.json";
+    PROJECT_IDENTITY_REL = ".sterling/project.json";
+    fwd = (p) => p.replace(/\\/g, "/");
+    UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
+  }
+});
+
+// packages/schemas/dist/broker.js
+var BROKER_MAX_REQUEST_BYTES, BROKER_MAX_RESPONSE_BYTES, BROKER_REGISTRY_MAX_BYTES, BROKER_MAX_ARGS, brokerIdentitySchema, brokerRegistrationSchema, brokerHelloSchema, brokerErrorSchema, brokerWelcomeSchema, brokerCallSchema, brokerResultSchema;
+var init_broker = __esm({
+  "packages/schemas/dist/broker.js"() {
+    "use strict";
+    init_zod();
+    BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
+    BROKER_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+    BROKER_REGISTRY_MAX_BYTES = 16 * 1024;
+    BROKER_MAX_ARGS = 6;
+    brokerIdentitySchema = external_exports.object({
+      instance_id: external_exports.string().regex(/^[0-9a-f]{32}$/),
+      protocol: external_exports.number().int(),
+      build_id: external_exports.string(),
+      project_id: external_exports.string(),
+      root: external_exports.string(),
+      storage: external_exports.object({ backend: external_exports.literal("postgres"), database: external_exports.string(), meta_schema: external_exports.string(), project_schema: external_exports.string() }),
+      pid: external_exports.number().int()
+    });
+    brokerRegistrationSchema = brokerIdentitySchema.extend({ socket: external_exports.string() });
+    brokerHelloSchema = external_exports.object({
+      type: external_exports.literal("hello"),
+      protocol: external_exports.number().int(),
+      instance_id: external_exports.string(),
+      project_id: external_exports.string(),
+      root: external_exports.string()
+    });
+    brokerErrorSchema = external_exports.object({
+      name: external_exports.string(),
+      message: external_exports.string(),
+      /** Enumerable string or number fields of the original error (domain, location, schema, code). */
+      fields: external_exports.record(external_exports.union([external_exports.string(), external_exports.number()])).default({})
+    });
+    brokerWelcomeSchema = external_exports.union([
+      external_exports.object({ type: external_exports.literal("welcome"), identity: brokerIdentitySchema }),
+      external_exports.object({ type: external_exports.literal("refused"), error: brokerErrorSchema })
+    ]);
+    brokerCallSchema = external_exports.object({
+      type: external_exports.literal("call"),
+      id: external_exports.number().int().nonnegative(),
+      target: external_exports.enum(["project", "mounted"]),
+      op: external_exports.string(),
+      args: external_exports.array(external_exports.unknown()).max(BROKER_MAX_ARGS),
+      /** Client clock (ms since epoch) when the call was sent; client and server share the machine clock. */
+      sent_at: external_exports.number()
+    });
+    brokerResultSchema = external_exports.union([
+      external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(true), result: external_exports.unknown().optional() }),
+      /** `executed` false means the server did not start the operation, so the caller may fall back; true or absent means it may have run. */
+      external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(false), executed: external_exports.boolean(), error: brokerErrorSchema })
+    ]);
+  }
+});
+
 // packages/schemas/dist/index.js
 var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
@@ -5637,6 +5785,8 @@ var init_dist = __esm({
     init_config();
     init_registry();
     init_staleness();
+    init_project();
+    init_broker();
   }
 });
 
@@ -5685,14 +5835,1114 @@ var init_shares = __esm({
   }
 });
 
+// packages/store/dist/pg-bridge.js
+import { MessageChannel, Worker, receiveMessageOnPort } from "node:worker_threads";
+import { readFileSync as readFileSync2, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join as join2 } from "node:path";
+function isPlainObject2(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+function buildPgConnectionConfig(creds) {
+  if (!isPlainObject2(creds))
+    throw new PgConfigError("credentials must be a JSON object");
+  for (const key of Object.keys(creds)) {
+    if (!CREDENTIAL_KEYS.includes(key))
+      throw new PgConfigError(`credentials key '${key}' is not recognised; allowed: ${CREDENTIAL_KEYS.join(", ")}`);
+  }
+  for (const field of ["host", "database", "user"]) {
+    if (typeof creds[field] !== "string" || creds[field].length === 0)
+      throw new PgConfigError(`credentials.${field} must be a non-empty string`);
+  }
+  if (!Number.isInteger(creds.port) || creds.port < 1 || creds.port > 65535) {
+    throw new PgConfigError("credentials.port must be an integer between 1 and 65535");
+  }
+  if (typeof creds.password !== "string")
+    throw new PgConfigError("credentials.password must be a string");
+  if (creds.gssencmode !== void 0 && creds.gssencmode !== "disable") {
+    throw new PgConfigError("credentials.gssencmode must be 'disable' (node-postgres has no GSS encryption)");
+  }
+  const timeout = creds.connect_timeout_ms;
+  if (!Number.isInteger(timeout) || timeout <= 0)
+    throw new PgConfigError("credentials.connect_timeout_ms must be a positive integer");
+  let ssl = false;
+  let sslnegotiation = "postgres";
+  if (creds.ssl !== void 0) {
+    const s2 = creds.ssl;
+    if (!isPlainObject2(s2))
+      throw new PgConfigError("credentials.ssl must be an object");
+    for (const key of Object.keys(s2)) {
+      if (!SSL_KEYS.includes(key))
+        throw new PgConfigError(`credentials.ssl key '${key}' is not recognised; allowed: ${SSL_KEYS.join(", ")}`);
+    }
+    if (s2.mode !== "require" && s2.mode !== "verify-full")
+      throw new PgConfigError("credentials.ssl.mode must be 'require' or 'verify-full'");
+    if (typeof s2.rejectUnauthorized !== "boolean")
+      throw new PgConfigError("credentials.ssl.rejectUnauthorized must be a boolean");
+    if (s2.rejectUnauthorized !== (s2.mode === "verify-full")) {
+      throw new PgConfigError(`credentials.ssl.rejectUnauthorized must be ${s2.mode === "verify-full"} for mode '${s2.mode}' (verify-full verifies the certificate, require does not)`);
+    }
+    if (s2.servername !== void 0 && (typeof s2.servername !== "string" || s2.servername.length === 0)) {
+      throw new PgConfigError("credentials.ssl.servername must be a non-empty string when given");
+    }
+    if (s2.negotiation !== void 0 && s2.negotiation !== "postgres" && s2.negotiation !== "direct") {
+      throw new PgConfigError("credentials.ssl.negotiation must be 'postgres' or 'direct'");
+    }
+    ssl = { rejectUnauthorized: s2.rejectUnauthorized, ...s2.servername !== void 0 ? { servername: s2.servername } : {} };
+    sslnegotiation = s2.negotiation ?? "postgres";
+  }
+  return {
+    host: creds.host,
+    port: creds.port,
+    database: creds.database,
+    user: creds.user,
+    password: creds.password,
+    ssl,
+    sslnegotiation,
+    connectionTimeoutMillis: timeout
+  };
+}
+function readPgCredentials(path = DEFAULT_PG_CREDENTIALS_PATH) {
+  let mode;
+  try {
+    mode = statSync(path).mode;
+  } catch (e) {
+    throw new PgConfigError(`Postgres credentials file '${path}' cannot be read: ${e.code ?? String(e)}`);
+  }
+  if ((mode & 63) !== 0) {
+    throw new PgConfigError(`Postgres credentials file '${path}' is readable by group or other (mode ${(mode & 511).toString(8)}); set it to mode 600`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync2(path, "utf8"));
+  } catch (e) {
+    throw new PgConfigError(`Postgres credentials file '${path}' is not valid JSON: ${e.message}`);
+  }
+  return buildPgConnectionConfig(parsed);
+}
+function redactSecrets(text, secrets) {
+  let out = text;
+  for (const secret of secrets) {
+    if (!secret)
+      continue;
+    out = out.split(secret).join("[redacted]");
+    const encoded = encodeURIComponent(secret);
+    if (encoded !== secret)
+      out = out.split(encoded).join("[redacted]");
+  }
+  return out;
+}
+var STATE_WAITING, STATE_REPLY, STATE_DEAD, DEFAULT_PG_CREDENTIALS_PATH, DEFAULT_PG_WAIT_TIMEOUT_MS, HANDSHAKE_MARGIN_MS, PgConfigError, PgBridgeTimeoutError, PgWorkerDiedError, PgBridgeClosedError, PgTransactionOpenError, PgQueryError, CREDENTIAL_KEYS, SSL_KEYS, PgBridge;
+var init_pg_bridge = __esm({
+  "packages/store/dist/pg-bridge.js"() {
+    "use strict";
+    STATE_WAITING = 0;
+    STATE_REPLY = 1;
+    STATE_DEAD = 2;
+    DEFAULT_PG_CREDENTIALS_PATH = join2(homedir(), ".sterling", "credentials", "served.json");
+    DEFAULT_PG_WAIT_TIMEOUT_MS = 1e4;
+    HANDSHAKE_MARGIN_MS = 5e3;
+    PgConfigError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "PgConfigError";
+      }
+    };
+    PgBridgeTimeoutError = class extends Error {
+      phase;
+      timeoutMs;
+      constructor(phase, timeoutMs2, detail) {
+        super(`Postgres bridge: no reply within ${timeoutMs2} ms during the ${phase} (${detail}); the worker was terminated and its connection closed.`);
+        this.phase = phase;
+        this.timeoutMs = timeoutMs2;
+        this.name = "PgBridgeTimeoutError";
+      }
+    };
+    PgWorkerDiedError = class extends Error {
+      reason;
+      code;
+      constructor(reason, code) {
+        super(`Postgres bridge: the worker died (${reason}); the bridge is closed.`);
+        this.reason = reason;
+        this.code = code;
+        this.name = "PgWorkerDiedError";
+      }
+    };
+    PgBridgeClosedError = class extends Error {
+      constructor(why) {
+        super(`Postgres bridge is closed (${why}); open a new one.`);
+        this.name = "PgBridgeClosedError";
+      }
+    };
+    PgTransactionOpenError = class extends Error {
+      constructor(wanted, holder) {
+        super(`Postgres bridge: ${wanted} cannot begin a transaction: this connection already has one open for ${holder}. One connection holds one transaction; nothing was sent.`);
+        this.name = "PgTransactionOpenError";
+      }
+    };
+    PgQueryError = class extends Error {
+      code;
+      inPrefix;
+      constructor(message, code, inPrefix = false) {
+        super(message);
+        this.code = code;
+        this.inPrefix = inPrefix;
+        this.name = "PgQueryError";
+      }
+    };
+    CREDENTIAL_KEYS = ["host", "port", "database", "user", "password", "ssl", "gssencmode", "connect_timeout_ms"];
+    SSL_KEYS = ["mode", "negotiation", "servername", "rejectUnauthorized"];
+    PgBridge = class {
+      worker;
+      port;
+      control;
+      secrets;
+      seq = 0;
+      closedReason;
+      txOwner;
+      txOwnerLabel = "";
+      /** How long one statement waits for its reply. Server-side timeouts must be shorter, so the named server error arrives first. */
+      waitTimeoutMs;
+      constructor(config, options = {}) {
+        this.waitTimeoutMs = options.waitTimeoutMs ?? DEFAULT_PG_WAIT_TIMEOUT_MS;
+        const handshakeTimeoutMs = options.handshakeTimeoutMs ?? config.connectionTimeoutMillis + HANDSHAKE_MARGIN_MS;
+        for (const [name4, v] of [["waitTimeoutMs", this.waitTimeoutMs], ["handshakeTimeoutMs", handshakeTimeoutMs]]) {
+          if (!Number.isInteger(v) || v <= 0)
+            throw new PgConfigError(`PgBridge: ${name4} must be a positive integer`);
+        }
+        this.secrets = [config.password];
+        this.control = new Int32Array(new SharedArrayBuffer(4));
+        const { port1, port2 } = new MessageChannel();
+        this.port = port1;
+        this.port.unref();
+        this.worker = options.workerUrl === void 0 ? new Worker(new URL("./pg-worker.js", import.meta.url)) : new Worker(options.workerUrl);
+        this.worker.unref();
+        this.worker.on("error", () => {
+        });
+        Atomics.store(this.control, 0, STATE_WAITING);
+        this.worker.postMessage({ control: this.control.buffer, port: port2, config }, [port2]);
+        this.await(0, "handshake", handshakeTimeoutMs, "the worker did not report ready; it may have died at load, or the server did not answer");
+      }
+      get closed() {
+        return this.closedReason !== void 0;
+      }
+      /** Why the bridge closed (the same text PgBridgeClosedError carries), or undefined while it is open. */
+      get closeReason() {
+        return this.closedReason;
+      }
+      /** The handle whose transaction is open on this connection, if any. */
+      get transactionOwner() {
+        return this.txOwner;
+      }
+      /** Records that `owner` opens a transaction. Refuses when any handle, `owner` included, already holds one. */
+      claimTransaction(owner, label) {
+        if (this.txOwner !== void 0)
+          throw new PgTransactionOpenError(label, this.txOwnerLabel);
+        this.txOwner = owner;
+        this.txOwnerLabel = label;
+      }
+      /** Records that `owner`'s transaction ended. A no-op for any other handle. */
+      releaseTransaction(owner) {
+        if (this.txOwner === owner) {
+          this.txOwner = void 0;
+          this.txOwnerLabel = "";
+        }
+      }
+      /**
+       * Runs one statement. With `values` it is a parameterised query ($1, $2, ...); without, a simple query that may hold several statements.
+       * `prefix`, a simple query, goes out in the same round trip ahead of the statement; when it fails the call throws a PgQueryError with
+       * `inPrefix` set and the statement's result is discarded (the statement may still have run, so the caller passes only a read).
+       */
+      query(text, values, prefix) {
+        const reply = this.send({ op: "query", text, values, ...prefix !== void 0 ? { prefix } : {} }, "query", this.waitTimeoutMs);
+        return { rows: reply.rows ?? [], rowCount: reply.rowCount ?? 0 };
+      }
+      /** Ends the connection and stops the worker. Idempotent. */
+      close() {
+        if (this.closed)
+          return;
+        try {
+          this.send({ op: "close" }, "close", this.waitTimeoutMs);
+        } finally {
+          this.shutDown("close() was called");
+        }
+      }
+      send(req, phase, timeoutMs2) {
+        if (this.closedReason !== void 0)
+          throw new PgBridgeClosedError(this.closedReason);
+        const queued = receiveMessageOnPort(this.port)?.message;
+        const previous = Atomics.compareExchange(this.control, 0, STATE_REPLY, STATE_WAITING);
+        if (queued?.dead || previous === STATE_DEAD) {
+          const reason = queued?.error ? this.redact(queued.error.message) : "it stopped between calls";
+          this.shutDown(`the worker died: ${reason}`);
+          throw new PgWorkerDiedError(reason, queued?.error?.code);
+        }
+        const seq = ++this.seq;
+        this.port.postMessage({ seq, ...req });
+        return this.await(seq, phase, timeoutMs2, phase === "query" ? "the statement did not finish" : "the connection did not end");
+      }
+      await(seq, phase, timeoutMs2, detail) {
+        const outcome = Atomics.wait(this.control, 0, STATE_WAITING, timeoutMs2);
+        if (outcome === "timed-out") {
+          this.shutDown(`a ${phase} wait timed out after ${timeoutMs2} ms`);
+          throw new PgBridgeTimeoutError(phase, timeoutMs2, detail);
+        }
+        const state = Atomics.load(this.control, 0);
+        const reply = receiveMessageOnPort(this.port)?.message;
+        if (state === STATE_DEAD || reply?.dead) {
+          const reason = reply?.error ? this.redact(reply.error.message) : "no reason given";
+          this.shutDown(`the worker died: ${reason}`);
+          throw new PgWorkerDiedError(reason, reply?.error?.code);
+        }
+        if (!reply || reply.seq !== seq) {
+          this.shutDown("protocol error");
+          throw new PgWorkerDiedError(`protocol error: expected the reply to message ${seq}, got ${reply ? `message ${reply.seq}` : "nothing"}`);
+        }
+        if (!reply.ok) {
+          const message = this.redact(reply.error?.message ?? "unknown error");
+          if (phase === "handshake") {
+            this.shutDown(`the connection failed: ${message}`);
+            throw new PgWorkerDiedError(`connecting failed: ${message}`, reply.error?.code);
+          }
+          throw new PgQueryError(message, reply.error?.code, reply.prefixFailed === true);
+        }
+        return reply;
+      }
+      redact(message) {
+        return redactSecrets(message, this.secrets);
+      }
+      shutDown(reason) {
+        if (this.closedReason !== void 0)
+          return;
+        this.closedReason = reason;
+        this.port.close();
+        void this.worker.terminate();
+      }
+    };
+  }
+});
+
+// packages/store/dist/search-fold.js
+function foldSearchText(s2) {
+  let kept = "";
+  let afterLatinLetter = false;
+  for (const ch of s2.toLowerCase().normalize("NFD")) {
+    if (COMBINING_MARK.test(ch)) {
+      if (!afterLatinLetter)
+        kept += ch;
+      continue;
+    }
+    afterLatinLetter = LATIN_LETTER.test(ch) && new RegExp("^\\p{L}$", "u").test(ch);
+    kept += ch;
+  }
+  let out = "";
+  for (const ch of kept.normalize("NFC"))
+    out += LETTER_OR_NUMBER_OR_PRIVATE.test(ch) ? ch : " ";
+  return out.replace(/ {2,}/g, " ").trim();
+}
+var LATIN_LETTER, LETTER_OR_NUMBER_OR_PRIVATE, COMBINING_MARK;
+var init_search_fold = __esm({
+  "packages/store/dist/search-fold.js"() {
+    "use strict";
+    LATIN_LETTER = new RegExp("^\\p{Script=Latin}$", "u");
+    LETTER_OR_NUMBER_OR_PRIVATE = /^[\p{L}\p{N}\p{Co}]$/u;
+    COMBINING_MARK = new RegExp("^\\p{M}$", "u");
+  }
+});
+
+// packages/store/dist/pg-driver.js
+function assertSterlingSchemaName(name4) {
+  if (typeof name4 !== "string" || !SCHEMA_NAME.test(name4))
+    throw new PgSchemaNameRefusedError(String(name4), "not of the form sterling_<a-z0-9_>");
+  if (Buffer.byteLength(name4) > MAX_IDENTIFIER_BYTES)
+    throw new PgSchemaNameRefusedError(name4, `longer than ${MAX_IDENTIFIER_BYTES} bytes`);
+}
+function pgProjectSchemaName(projectUuid) {
+  if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(projectUuid)) {
+    throw new PgSchemaNameRefusedError(`sterling_p_${projectUuid}`, "the project id is not a UUID");
+  }
+  const name4 = `sterling_p_${projectUuid.replace(/-/g, "").toLowerCase()}`;
+  assertSterlingSchemaName(name4);
+  return name4;
+}
+function pgDomainSchemaName(domain) {
+  if (typeof domain !== "string" || domain.length === 0)
+    throw new PgSchemaNameRefusedError("sterling_d_", "the domain name is empty");
+  const name4 = `sterling_d_${domain.toLowerCase().replace(/[^a-z0-9]/g, "_")}`;
+  assertSterlingSchemaName(name4);
+  return name4;
+}
+function ident(schema) {
+  assertSterlingSchemaName(schema);
+  return `"${schema}"`;
+}
+function lockHash(name4) {
+  let h = 2166136261;
+  for (const byte of Buffer.from(name4, "utf8")) {
+    h ^= byte;
+    h = Math.imul(h, 16777619);
+  }
+  return h | 0;
+}
+function timeoutMs(name4, value, fallback, bridge) {
+  const v = value ?? fallback;
+  if (!Number.isInteger(v) || v <= 0)
+    throw new Error(`Postgres ${name4} must be a positive integer, got ${String(v)}`);
+  if (v >= bridge.waitTimeoutMs) {
+    throw new Error(`Postgres ${name4} (${v} ms) must be below the bridge's wait (${bridge.waitTimeoutMs} ms), so the server's named timeout arrives before the bridge gives up`);
+  }
+  return v;
+}
+function mapPgError(e, where) {
+  if (e instanceof PgQueryError) {
+    if (e.code === "55P03")
+      throw new PgLockTimeoutError(`${e.message} in ${where}`);
+    if (e.code === "57014")
+      throw new PgStatementTimeoutError(`${e.message} in ${where}`);
+    if (e.code === "22P05" || e.code === "22021")
+      throw new PgNulCharacterError(`${e.message} (SQLSTATE ${e.code}) in '${where}'`);
+  }
+  throw e;
+}
+function abandon(bridge, owner) {
+  try {
+    if (!bridge.closed)
+      bridge.query("ROLLBACK");
+  } finally {
+    bridge.releaseTransaction(owner);
+  }
+}
+function inMigrationTransaction(bridge, metaSchema, lockTimeout, fn) {
+  assertSterlingSchemaName(metaSchema);
+  const lock = timeoutMs("lockTimeoutMs", lockTimeout, DEFAULT_PG_LOCK_TIMEOUT_MS, bridge);
+  const statement = timeoutMs("statementTimeoutMs", void 0, DEFAULT_PG_STATEMENT_TIMEOUT_MS, bridge);
+  const owner = {};
+  bridge.claimTransaction(owner, `a migration on '${metaSchema}'`);
+  try {
+    bridge.query(`BEGIN; SET LOCAL lock_timeout = ${lock}; SET LOCAL statement_timeout = ${statement}; SELECT pg_advisory_xact_lock(${LOCK_NS_GLOBAL}, ${lockHash(metaSchema)})`);
+    fn();
+    bridge.query("COMMIT");
+    bridge.releaseTransaction(owner);
+  } catch (e) {
+    abandon(bridge, owner);
+    mapPgError(e, `a migration on '${metaSchema}'`);
+  }
+}
+function ensurePgLayout(bridge, metaSchema = PG_META_SCHEMA, options = {}) {
+  const m = ident(metaSchema);
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  inMigrationTransaction(bridge, metaSchema, options.lockTimeoutMs, () => bridge.query(`
+CREATE SCHEMA IF NOT EXISTS ${m};
+CREATE TABLE IF NOT EXISTS ${m}.layout (
+  singleton SMALLINT PRIMARY KEY DEFAULT 1 CHECK (singleton = 1),
+  layout_version INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${m}.stores (
+  schema_name TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('project', 'domain', 'test')),
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  schema_version INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS stores_kind_name ON ${m}.stores (kind, name);
+CREATE TABLE IF NOT EXISTS ${m}.migration_lock (
+  singleton SMALLINT PRIMARY KEY DEFAULT 1 CHECK (singleton = 1),
+  held_by TEXT,
+  acquired_at TEXT
+);
+INSERT INTO ${m}.layout (singleton, layout_version, updated_at) VALUES (1, ${PG_LAYOUT_VERSION}, '${now}') ON CONFLICT (singleton) DO NOTHING;
+INSERT INTO ${m}.migration_lock (singleton) VALUES (1) ON CONFLICT (singleton) DO NOTHING;
+`));
+}
+function createPgStore(bridge, input) {
+  const s2 = ident(input.schema);
+  const m = ident(input.metaSchema ?? PG_META_SCHEMA);
+  if (input.kind === "test" && !input.schema.startsWith("sterling_test_"))
+    throw new PgSchemaNameRefusedError(input.schema, "a 'test' store must be named sterling_test_*");
+  if (input.kind !== "test" && input.schema.startsWith("sterling_test_"))
+    throw new PgSchemaNameRefusedError(input.schema, `a '${input.kind}' store cannot use the sterling_test_ prefix`);
+  inMigrationTransaction(bridge, input.metaSchema ?? PG_META_SCHEMA, input.lockTimeoutMs, () => {
+    const row = bridge.query(`SELECT kind, name FROM ${m}.stores WHERE schema_name = $1`, [input.schema]).rows[0];
+    if (row) {
+      throw new PgStoreExistsError(input.schema, row.name === input.name && row.kind === input.kind ? "it is already registered" : `the schema is already registered to ${String(row.kind)} '${String(row.name)}', so '${input.name}' maps to a schema another store owns`);
+    }
+    if (bridge.query("SELECT 1 FROM pg_namespace WHERE nspname = $1", [input.schema]).rows.length) {
+      throw new PgStoreExistsError(input.schema, "the schema exists without a registry row");
+    }
+    bridge.query(`CREATE SCHEMA ${s2}`);
+    bridge.query(`INSERT INTO ${m}.stores (schema_name, kind, name, created_at) VALUES ($1, $2, $3, $4)`, [input.schema, input.kind, input.name, (/* @__PURE__ */ new Date()).toISOString()]);
+  });
+}
+function translateStatement(sql, schema) {
+  let out = "";
+  let n = 0;
+  let i = 0;
+  let prevSignificant = "";
+  let firstWords = [];
+  while (i < sql.length) {
+    const c = sql[i];
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === c) {
+          if (sql[j + 1] === c) {
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        j++;
+      }
+      out += sql.slice(i, j + 1);
+      prevSignificant = c;
+      i = j + 1;
+      continue;
+    }
+    if (c === "?") {
+      out += `$${++n}`;
+      prevSignificant = "?";
+      i++;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      let j = i + 1;
+      while (j < sql.length && /[A-Za-z0-9_]/.test(sql[j]))
+        j++;
+      const word = sql.slice(i, j);
+      const lower = word.toLowerCase();
+      if (firstWords.length < 3)
+        firstWords.push(lower);
+      let k = j;
+      while (k < sql.length && /\s/.test(sql[k]))
+        k++;
+      if (STORE_TABLES.has(lower) && prevSignificant !== "." && sql[j] !== ".") {
+        out += `"${schema}".${word}`;
+      } else if (lower === "instr" && sql[k] === "(") {
+        out += "strpos";
+      } else {
+        out += word;
+      }
+      prevSignificant = word;
+      i = j;
+      continue;
+    }
+    if (!/\s/.test(c))
+      prevSignificant = c;
+    out += c;
+    i++;
+  }
+  const derivedText = firstWords[0] === "insert" && firstWords[1] === "into" && firstWords[2] === "records_fts" || firstWords[0] === "update" && firstWords[1] === "records_fts";
+  return { text: out, params: n, derivedText };
+}
+function storeDdl(s2) {
+  return `
+CREATE TABLE IF NOT EXISTS ${s2}.records (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  superseded_by TEXT,
+  lifecycle TEXT NOT NULL DEFAULT 'live',
+  freshness TEXT NOT NULL DEFAULT 'fresh',
+  version INTEGER NOT NULL DEFAULT 1,
+  scope TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  author TEXT NOT NULL,
+  derived_unconfirmed INTEGER NOT NULL DEFAULT 0,
+  body TEXT NOT NULL,
+  _seq BIGINT GENERATED ALWAYS AS IDENTITY,
+  operation_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_records_type_status ON ${s2}.records (type, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON ${s2}.records (operation_id);
+CREATE TABLE IF NOT EXISTS ${s2}.record_versions (
+  record_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  archived_at TEXT NOT NULL,
+  body TEXT NOT NULL,
+  PRIMARY KEY (record_id, version)
+);
+CREATE TABLE IF NOT EXISTS ${s2}.record_aliases (
+  historical_id TEXT PRIMARY KEY,
+  canonical_id TEXT NOT NULL,
+  archived_version INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  _seq BIGINT GENERATED ALWAYS AS IDENTITY
+);
+CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON ${s2}.record_aliases (canonical_id);
+CREATE TABLE IF NOT EXISTS ${s2}.record_relations (
+  source_id TEXT NOT NULL,
+  rel TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  _seq BIGINT GENERATED ALWAYS AS IDENTITY,
+  PRIMARY KEY (source_id, rel, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_relations_target ON ${s2}.record_relations (target_id);
+CREATE INDEX IF NOT EXISTS idx_relations_rel_target ON ${s2}.record_relations (rel, target_id);
+CREATE TABLE IF NOT EXISTS ${s2}.record_stack_tags (
+  record_id TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  PRIMARY KEY (record_id, tag)
+);
+CREATE TABLE IF NOT EXISTS ${s2}.record_file_keys (
+  record_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  PRIMARY KEY (record_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_file_keys_path ON ${s2}.record_file_keys (path);
+-- text is the folded search text (pgDialect.searchText at every write site).
+-- The default parser splits folded text on its spaces only: the fold leaves
+-- letters, digits and private-use characters, and in a C-ctype database every
+-- non-ASCII character is a letter to it. So tsv has one position per word and
+-- dl, the word count, is the document length bm25 normalizes by.
+CREATE TABLE IF NOT EXISTS ${s2}.records_fts (
+  record_id TEXT PRIMARY KEY,
+  text TEXT NOT NULL,
+  tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, text)) STORED,
+  dl INTEGER GENERATED ALWAYS AS (CASE WHEN text = '' THEN 0 ELSE cardinality(string_to_array(text, ' ')) END) STORED
+);
+CREATE INDEX IF NOT EXISTS idx_records_fts_tsv ON ${s2}.records_fts USING gin (tsv);
+CREATE TABLE IF NOT EXISTS ${s2}.runs (
+  id TEXT PRIMARY KEY,
+  machine_state TEXT NOT NULL,
+  pending_exit TEXT,
+  body TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.handoffs (
+  run_id TEXT NOT NULL,
+  phase_id TEXT NOT NULL,
+  agent_role TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoffs_run_phase ON ${s2}.handoffs (run_id, phase_id);
+CREATE TABLE IF NOT EXISTS ${s2}.check_skipped (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  run_id TEXT,
+  check_name TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.selection (
+  slot INTEGER PRIMARY KEY CHECK (slot = 1),
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.queue_drain_log (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  drained_at TEXT NOT NULL,
+  system_reason TEXT NOT NULL,
+  text TEXT NOT NULL,
+  file_keys TEXT NOT NULL,
+  record_id TEXT
+);
+CREATE TABLE IF NOT EXISTS ${s2}.activity_log (
+  seq BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  at TEXT NOT NULL,
+  verb TEXT NOT NULL,
+  type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  title TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ${s2}.store_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+}
+function pgSearchQuery(terms, matchAll) {
+  const clauses = [];
+  let empty = false;
+  for (const term of terms) {
+    const prefix = term.length > 1 && term.endsWith("*");
+    const folded = foldSearchText(term);
+    if (folded === "") {
+      empty = true;
+      continue;
+    }
+    const w = folded.split(" ");
+    clauses.push({ q: w.map((x) => `'${x}'`).join(" <-> ") + (prefix ? ":*" : ""), w, p: prefix });
+  }
+  const none = clauses.length === 0 || matchAll === true && empty;
+  const prefixes = [...new Set(clauses.filter((c) => c.p).map((c) => c.w[c.w.length - 1]))];
+  const out = JSON.stringify({
+    match: none ? null : clauses.map((c) => `(${c.q})`).join(matchAll ? " & " : " | "),
+    clauses,
+    words: [...new Set(clauses.flatMap((c) => c.w))],
+    prefixes,
+    // The documents any prefix matches, so the statement can list the lexemes each prefix stands for once per query.
+    prefixq: prefixes.length ? prefixes.map((x) => `'${x}':*`).join(" | ") : null
+  });
+  return out;
+}
+function pgDialectFor(ranking) {
+  if (!PG_RANKINGS.includes(ranking))
+    throw new Error(`Postgres ranking must be one of ${PG_RANKINGS.join(", ")}, got ${String(ranking)}`);
+  return {
+    // One statement per query (a round trip costs about 25 ms): the join binds
+    // the query once for the statistics, the match binds it again so the GIN
+    // index sees a constant tsquery.
+    searchJoin: `JOIN records_fts f ON f.record_id = r.id ${PG_SEARCH_STATS} ${PG_SCORES[ranking]}`,
+    searchJoinBinds: 1,
+    searchMatch: "f.tsv @@ (?::json->>'match')::tsquery",
+    searchScore: "sc.score",
+    searchOrder: "sc.score DESC",
+    scoreScale: PG_SCORE_SCALES[ranking],
+    searchQuery: pgSearchQuery,
+    searchText: foldSearchText,
+    // Postgres refuses \u0000 anywhere in a json value it parses (22P05), so the
+    // real \u0000 escapes are removed first. The pattern consumes an escaped
+    // backslash pair (\\) as a unit and puts it back, so \u0000 only matches
+    // where its backslash starts an escape: the literal text \\u0000 survives.
+    // strpos skips the regex for the bodies that hold no \u0000 at all.
+    jsonText: (column, key) => {
+      if (!/^[a-z_]+$/.test(key))
+        throw new Error(`pgDialect.jsonText: key '${key}' is not a plain identifier`);
+      if (!/^[a-z_]+(\.[a-z_]+)?$/.test(column))
+        throw new Error(`pgDialect.jsonText: column '${column}' is not a plain column reference`);
+      return String.raw`((CASE WHEN strpos(${column}, '\u0000') > 0 THEN regexp_replace(${column}, '(\\\\)|\\u0000', '\1', 'g') ELSE ${column} END)::json ->> '${key}')`;
+    },
+    insertionOrder: (alias) => alias ? `${alias}._seq` : "_seq",
+    insertIgnore: (table, columns) => `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")}) ON CONFLICT DO NOTHING`
+  };
+}
+function toPgParam(v, i, sql, stripNul) {
+  if (v === void 0)
+    throw new TypeError(`PgDriver: parameter ${i + 1} is undefined in: ${sql}`);
+  if (typeof v === "bigint")
+    return v.toString();
+  if (typeof v === "string" && v.includes("\0")) {
+    if (stripNul)
+      return v.replace(/\u0000/g, "");
+    throw new PgNulCharacterError(`parameter ${i + 1} of '${sql}'`);
+  }
+  return v;
+}
+var PG_META_SCHEMA, PG_LAYOUT_VERSION, SCHEMA_NAME, MAX_IDENTIFIER_BYTES, PgSchemaNameRefusedError, PgStoreMissingError, PgStoreExistsError, PgNulCharacterError, PgLockTimeoutError, PgStatementTimeoutError, PgUnsupportedError, DEFAULT_PG_LOCK_TIMEOUT_MS, DEFAULT_PG_STATEMENT_TIMEOUT_MS, LOCK_NS_GLOBAL, LOCK_NS_STORE, STORE_TABLES, PG_RANKINGS, DEFAULT_PG_RANKING, PG_SCORE_SCALES, PG_SEARCH_STATS, PG_IDF, PG_BM25_SCORE, PG_IDF_TSRANK_SCORE, PG_TSRANK_CD_SCORE, PG_SCORES, pgDialect, PgStatement, PgDriver;
+var init_pg_driver = __esm({
+  "packages/store/dist/pg-driver.js"() {
+    "use strict";
+    init_pg_bridge();
+    init_search_fold();
+    init_pg_bridge();
+    PG_META_SCHEMA = "sterling_meta";
+    PG_LAYOUT_VERSION = 1;
+    SCHEMA_NAME = /^sterling_[a-z0-9_]*[a-z0-9]$/;
+    MAX_IDENTIFIER_BYTES = 63;
+    PgSchemaNameRefusedError = class extends Error {
+      constructor(name4, why) {
+        super(`Postgres schema name '${name4}' refused: ${why}. Sterling only touches schemas named sterling_<lowercase letters, digits, _>.`);
+        this.name = "PgSchemaNameRefusedError";
+      }
+    };
+    PgStoreMissingError = class extends Error {
+      schema;
+      constructor(schema, missing2) {
+        super(`Postgres store '${schema}' does not exist: ${missing2}. A store is created only by an explicit createPgStore call, never on open.`);
+        this.schema = schema;
+        this.name = "PgStoreMissingError";
+      }
+    };
+    PgStoreExistsError = class extends Error {
+      schema;
+      constructor(schema, detail) {
+        super(`Postgres store '${schema}' cannot be created: ${detail}.`);
+        this.schema = schema;
+        this.name = "PgStoreExistsError";
+      }
+    };
+    PgNulCharacterError = class extends Error {
+      constructor(detail) {
+        super(`NUL character (U+0000) refused on Postgres: ${detail}. Postgres text cannot hold U+0000, and its JSON functions refuse the \\u0000 escape.`);
+        this.name = "PgNulCharacterError";
+      }
+    };
+    PgLockTimeoutError = class extends Error {
+      code = "55P03";
+      constructor(detail) {
+        super(`Postgres lock timeout (55P03): ${detail}. Another writer or a migration holds the lock; nothing was written and the write is not retried.`);
+        this.name = "PgLockTimeoutError";
+      }
+    };
+    PgStatementTimeoutError = class extends Error {
+      code = "57014";
+      constructor(detail) {
+        super(`Postgres statement timeout (57014): ${detail}. The transaction was rolled back and is not retried.`);
+        this.name = "PgStatementTimeoutError";
+      }
+    };
+    PgUnsupportedError = class extends Error {
+      constructor(what) {
+        super(`${what} is not supported by the Postgres driver.`);
+        this.name = "PgUnsupportedError";
+      }
+    };
+    DEFAULT_PG_LOCK_TIMEOUT_MS = 3e3;
+    DEFAULT_PG_STATEMENT_TIMEOUT_MS = 5e3;
+    LOCK_NS_GLOBAL = 1398033735;
+    LOCK_NS_STORE = 1398035284;
+    STORE_TABLES = /* @__PURE__ */ new Set([
+      "records",
+      "record_versions",
+      "record_aliases",
+      "record_relations",
+      "record_stack_tags",
+      "record_file_keys",
+      "records_fts",
+      "runs",
+      "handoffs",
+      "check_skipped",
+      "selection",
+      "queue_drain_log",
+      "activity_log",
+      "store_meta"
+    ]);
+    PG_RANKINGS = ["bm25", "idf_tsrank", "tsrank_cd"];
+    DEFAULT_PG_RANKING = "bm25";
+    PG_SCORE_SCALES = { bm25: "pg_bm25_v1", idf_tsrank: "pg_idf_tsrank_v1", tsrank_cd: "pg_tsrank_cd_v1" };
+    PG_SEARCH_STATS = `CROSS JOIN (SELECT q.j->>'match' AS m,
+    (SELECT count(*) FROM records_fts)::float8 AS n,
+    (SELECT coalesce(avg(dl), 0) FROM records_fts)::float8 AS avgdl,
+    ARRAY(SELECT json_array_elements_text(q.j->'words'))
+      || ARRAY(SELECT DISTINCT u.lexeme FROM records_fts x, unnest(x.tsv) u
+        WHERE x.tsv @@ (q.j->>'prefixq')::tsquery AND EXISTS (SELECT 1 FROM json_array_elements_text(q.j->'prefixes') pf WHERE starts_with(u.lexeme, pf))) AS lexemes,
+    (SELECT coalesce(json_agg(json_build_object('q', c.value->>'q', 'w', c.value->'w', 'p', c.value->'p',
+        'df', (SELECT count(*) FROM records_fts x WHERE x.tsv @@ (c.value->>'q')::tsquery)) ORDER BY c.ordinality), '[]'::json)
+      FROM json_array_elements(q.j->'clauses') WITH ORDINALITY c) AS cl
+  FROM (SELECT ?::json AS j) q) st`;
+    PG_IDF = "greatest(ln((st.n - c.df + 0.5) / (c.df + 0.5)), 1e-6)";
+    PG_BM25_SCORE = `CROSS JOIN LATERAL (SELECT array_agg(u.lexeme) AS lx, array_agg(p) AS ps
+    FROM unnest(ts_filter(setweight(f.tsv, 'A', st.lexemes), '{a}')) u, unnest(u.positions) p) lp
+  CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * (t.tf * 2.2) / (t.tf + 1.2 * (0.25 + 0.75 * f.dl / st.avgdl))), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(w text[], p boolean, df bigint)
+    CROSS JOIN LATERAL (SELECT count(*)::float8 AS tf FROM unnest(lp.lx, lp.ps) AS a(lex, pos)
+      WHERE (a.lex = c.w[1] OR (c.p AND cardinality(c.w) = 1 AND starts_with(a.lex, c.w[1])))
+        AND NOT EXISTS (SELECT 1 FROM generate_series(2, cardinality(c.w)) AS i
+          WHERE NOT EXISTS (SELECT 1 FROM unnest(lp.lx, lp.ps) AS b(lex, pos)
+            WHERE b.pos = a.pos + i - 1 AND (b.lex = c.w[i] OR (c.p AND i = cardinality(c.w) AND starts_with(b.lex, c.w[i])))))) t) sc`;
+    PG_IDF_TSRANK_SCORE = `CROSS JOIN LATERAL (SELECT coalesce(sum(${PG_IDF} * ts_rank(f.tsv, c.q::tsquery)), 0)::float8 AS score
+    FROM json_to_recordset(st.cl) AS c(q text, df bigint) WHERE f.tsv @@ c.q::tsquery) sc`;
+    PG_TSRANK_CD_SCORE = "CROSS JOIN LATERAL (SELECT ts_rank_cd(f.tsv, st.m::tsquery)::float8 AS score) sc";
+    PG_SCORES = { bm25: PG_BM25_SCORE, idf_tsrank: PG_IDF_TSRANK_SCORE, tsrank_cd: PG_TSRANK_CD_SCORE };
+    pgDialect = pgDialectFor(DEFAULT_PG_RANKING);
+    PgStatement = class {
+      driver;
+      sql;
+      translated;
+      constructor(driver, sql, schema) {
+        this.driver = driver;
+        this.sql = sql;
+        this.translated = translateStatement(sql, schema);
+      }
+      execute(params) {
+        this.driver.assertOpen();
+        if (params.length !== this.translated.params) {
+          throw new RangeError(`PgDriver: statement takes ${this.translated.params} parameter(s), got ${params.length}: ${this.sql}`);
+        }
+        const values = params.map((p, i) => toPgParam(p, i, this.sql, this.translated.derivedText));
+        return this.driver.run(this.translated.text, values, this.sql);
+      }
+      get(...params) {
+        return this.execute(params).rows[0];
+      }
+      all(...params) {
+        return this.execute(params).rows;
+      }
+      run(...params) {
+        const { rowCount } = this.execute(params);
+        return {
+          changes: rowCount,
+          get lastInsertRowid() {
+            throw new PgUnsupportedError("lastInsertRowid (Postgres has no rowid)");
+          }
+        };
+      }
+    };
+    PgDriver = class {
+      bridge;
+      dialect;
+      schema;
+      metaSchema;
+      s;
+      m;
+      ownsBridge;
+      lockTimeoutMs;
+      statementTimeoutMs;
+      closed = false;
+      /**
+       * The transaction this handle claimed. After beginReadDeferred() the BEGIN
+       * waits in `pendingBegin` and goes out in the same round trip as the read's
+       * first statement (run()), so the read costs one round trip less; a read
+       * that runs no statement sends nothing.
+       */
+      txState = "none";
+      pendingBegin;
+      constructor(bridge, options) {
+        this.bridge = bridge;
+        this.schema = options.schema;
+        this.dialect = options.ranking === void 0 ? pgDialect : pgDialectFor(options.ranking);
+        this.metaSchema = options.metaSchema ?? PG_META_SCHEMA;
+        this.s = ident(this.schema);
+        this.m = ident(this.metaSchema);
+        this.ownsBridge = options.ownsBridge ?? false;
+        this.lockTimeoutMs = timeoutMs("lockTimeoutMs", options.lockTimeoutMs, DEFAULT_PG_LOCK_TIMEOUT_MS, bridge);
+        this.statementTimeoutMs = timeoutMs("statementTimeoutMs", options.statementTimeoutMs, DEFAULT_PG_STATEMENT_TIMEOUT_MS, bridge);
+        const found = bridge.query("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1) AS has_schema, EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $2 AND tablename = $3) AS has_registry", [this.schema, this.metaSchema, "stores"]).rows[0];
+        if (!found.has_registry)
+          throw new PgStoreMissingError(this.schema, `the meta schema '${this.metaSchema}' has no stores registry`);
+        const registered = bridge.query(`SELECT 1 FROM ${this.m}.stores WHERE schema_name = $1`, [this.schema]).rows.length === 1;
+        if (!registered && !found.has_schema)
+          throw new PgStoreMissingError(this.schema, "neither its schema nor its registry row exists");
+        if (!registered)
+          throw new PgStoreMissingError(this.schema, `its schema exists but '${this.metaSchema}.stores' has no registry row for it`);
+        if (!found.has_schema)
+          throw new PgStoreMissingError(this.schema, `it has a registry row in '${this.metaSchema}.stores' but no schema`);
+      }
+      /** @internal PgStatement's guard. */
+      assertOpen() {
+        if (this.closed)
+          throw new Error(`PgDriver: store '${this.schema}' is closed`);
+      }
+      prepare(sql) {
+        this.assertOpen();
+        return new PgStatement(this, sql, this.schema);
+      }
+      exec(sql) {
+        this.assertOpen();
+        const t = translateStatement(sql, this.schema);
+        if (t.params)
+          throw new RangeError(`PgDriver.exec takes no parameters: ${sql}`);
+        this.run(t.text, void 0, sql);
+      }
+      /**
+       * @internal Every statement this handle runs. A pending BEGIN goes out ahead
+       * of it in the same round trip when the statement is a SELECT. Anything else
+       * waits for the BEGIN's own reply first: the bridge sends both before either
+       * answers, so a statement after a BEGIN that failed outright would run
+       * outside the transaction, and only a read may.
+       */
+      run(text, values, where) {
+        const pending = this.pendingBegin;
+        if (pending !== void 0) {
+          this.pendingBegin = void 0;
+          this.txState = "open";
+          if (/^\s*SELECT\b/i.test(text)) {
+            try {
+              return this.bridge.query(text, values, pending.text);
+            } catch (e) {
+              if (e instanceof PgQueryError && e.inPrefix)
+                this.failBegin(e, pending.where);
+              return mapPgError(e, where);
+            }
+          }
+          try {
+            this.bridge.query(pending.text);
+          } catch (e) {
+            this.failBegin(e, pending.where);
+          }
+        }
+        try {
+          return this.bridge.query(text, values);
+        } catch (e) {
+          return mapPgError(e, where);
+        }
+      }
+      /** Claims the connection and sends BEGIN now. */
+      beginNow(text, label, where) {
+        this.assertOpen();
+        this.bridge.claimTransaction(this, label);
+        this.txState = "open";
+        try {
+          this.bridge.query(text);
+        } catch (e) {
+          this.failBegin(e, where);
+        }
+      }
+      /** Claims the connection for a read whose BEGIN goes out with its first statement (beginReadDeferred). */
+      deferBegin(text, label, where) {
+        this.assertOpen();
+        this.bridge.claimTransaction(this, label);
+        this.txState = "pending";
+        this.pendingBegin = { text, where };
+      }
+      /** A BEGIN that failed: roll back, release the claim and throw by name, as an eager BEGIN would. */
+      failBegin(e, where) {
+        this.txState = "none";
+        abandon(this.bridge, this);
+        return mapPgError(e, where);
+      }
+      /** Ends this handle's transaction with `statement` when its BEGIN was sent; a transaction that ran nothing (or was abandoned) sends nothing. */
+      endTx(statement, where) {
+        const sent = this.txState === "open";
+        this.txState = "none";
+        this.pendingBegin = void 0;
+        try {
+          if (sent && !this.bridge.closed)
+            this.bridge.query(statement);
+        } catch (e) {
+          if (where === void 0)
+            throw e;
+          mapPgError(e, where);
+        } finally {
+          this.bridge.releaseTransaction(this);
+        }
+      }
+      close() {
+        if (this.closed)
+          return;
+        this.closed = true;
+        if (this.ownsBridge)
+          this.bridge.close();
+      }
+      /**
+       * The write transaction, in one round trip: BEGIN, the two timeouts, the
+       * global migration lock SHARED, then this store's lock, which reproduces
+       * SQLite's BEGIN IMMEDIATE. SterlingStore.tx() re-reads the schema version
+       * after this returns, under the locks. A failure rolls back and throws by
+       * name; it is never retried.
+       */
+      begin() {
+        this.beginNow(`BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SET LOCAL statement_timeout = ${this.statementTimeoutMs}; SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`, `store '${this.schema}'`, `begin on store '${this.schema}'`);
+      }
+      commit() {
+        this.endTx("COMMIT", `commit on store '${this.schema}'`);
+      }
+      rollback() {
+        this.endTx("ROLLBACK", void 0);
+      }
+      /** A multi-statement read: one snapshot (REPEATABLE READ), read-only, under statement_timeout. Takes no lock. */
+      beginRead() {
+        this.beginNow(this.readBeginText(), `a read on store '${this.schema}'`, `a read on store '${this.schema}'`);
+      }
+      /**
+       * beginRead(), except the BEGIN goes out in the same round trip as the
+       * read's first statement, and a read that runs no statement sends nothing.
+       * The snapshot is the same: REPEATABLE READ takes it at the first statement.
+       */
+      beginReadDeferred() {
+        this.deferBegin(this.readBeginText(), `a read on store '${this.schema}'`, `a read on store '${this.schema}'`);
+      }
+      readBeginText() {
+        return `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout = ${this.statementTimeoutMs}`;
+      }
+      /** Ends the read transaction. COMMIT also ends one a failed statement aborted. */
+      endRead() {
+        this.endTx("COMMIT", void 0);
+      }
+      /** The store's version lives in its registry row, the counterpart of SQLite's PRAGMA user_version. */
+      schemaVersion() {
+        this.assertOpen();
+        const row = this.run(`SELECT schema_version FROM ${this.m}.stores WHERE schema_name = $1`, [this.schema], `the schema version of store '${this.schema}'`).rows[0];
+        if (!row)
+          throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
+        return Number(row.schema_version);
+      }
+      setSchemaVersion(version) {
+        if (!Number.isInteger(version) || version < 0)
+          throw new Error(`PgDriver: schema version must be a non-negative integer, got ${String(version)}`);
+        const { rowCount } = this.run(`UPDATE ${this.m}.stores SET schema_version = $1 WHERE schema_name = $2`, [version, this.schema], `stamping the schema version of store '${this.schema}'`);
+        if (rowCount !== 1)
+          throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
+      }
+      /** False only before the store's tables were ever created. */
+      hasSchema() {
+        return Boolean(this.run("SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1) AS has", [this.schema], `the tables of store '${this.schema}'`).rows[0].has);
+      }
+      /** Nothing to prepare: SterlingStore refuses every write on an older store itself, and opening writes nothing here. */
+      prepareReadOnly() {
+      }
+      /**
+       * Creates the store's tables when missing. Postgres does not make concurrent
+       * CREATE ... IF NOT EXISTS safe: two processes opening one fresh store at once
+       * failed with 23505 on pg_type_typname_nsp_index (board e05f5127). So the DDL
+       * runs in one transaction under the same locks a write takes (the global lock
+       * shared, then this store's lock): concurrent opens take turns, and the later
+       * ones find every object already there. A lock that cannot be had within
+       * lock_timeout throws PgLockTimeoutError, as a write would.
+       */
+      prepareWritable(_isFresh) {
+        this.assertOpen();
+        const where = `creating the tables of store '${this.schema}'`;
+        this.bridge.claimTransaction(this, `table setup on store '${this.schema}'`);
+        try {
+          this.bridge.query(`${this.setupBeginText()}; ${storeDdl(this.s)};
+COMMIT`);
+        } catch (e) {
+          abandon(this.bridge, this);
+          mapPgError(e, where);
+        }
+        this.bridge.releaseTransaction(this);
+      }
+      /**
+       * StoreDriver.publishFresh. prepareWritable() followed by the store's own
+       * stamp transaction left a window between the two commits: a concurrent
+       * opener that had read version 0 saw the tables and opened the store as a
+       * legacy, read-only one (Codex review of be2b7f7a, board e05f5127). Here the
+       * version and table probe, the DDL and the stamp are one transaction under
+       * the write locks, so the tables and the stamp become visible together, and
+       * an opener that read 0 before someone else published re-reads the stamped
+       * version under the lock. An older store that already has its tables is
+       * left untouched: nothing is written and its version is returned.
+       */
+      publishFresh(supported) {
+        this.assertOpen();
+        if (!Number.isInteger(supported) || supported < 1)
+          throw new Error(`PgDriver: the supported schema version must be a positive integer, got ${String(supported)}`);
+        const where = `publishing store '${this.schema}'`;
+        this.bridge.claimTransaction(this, `table setup on store '${this.schema}'`);
+        let version;
+        try {
+          const row = this.bridge.query(`SELECT (SELECT schema_version FROM ${this.m}.stores WHERE schema_name = $1) AS version, EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = $1) AS has_tables`, [this.schema], this.setupBeginText()).rows[0];
+          if (row.version === null)
+            throw new PgStoreMissingError(this.schema, `its registry row in '${this.metaSchema}.stores' is gone`);
+          version = Number(row.version);
+          if (version < supported && !row.has_tables) {
+            this.bridge.query(storeDdl(this.s));
+            this.bridge.query(`UPDATE ${this.m}.stores SET schema_version = $1 WHERE schema_name = $2`, [supported, this.schema]);
+            version = supported;
+          }
+          this.bridge.query("COMMIT");
+        } catch (e) {
+          abandon(this.bridge, this);
+          mapPgError(e, where);
+        }
+        this.bridge.releaseTransaction(this);
+        return version;
+      }
+      /** BEGIN for table setup: lock_timeout, then the write locks in begin()'s order (the global lock shared, then this store's). */
+      setupBeginText() {
+        return `BEGIN; SET LOCAL lock_timeout = ${this.lockTimeoutMs}; SELECT pg_advisory_xact_lock_shared(${LOCK_NS_GLOBAL}, ${lockHash(this.metaSchema)}); SELECT pg_advisory_xact_lock(${LOCK_NS_STORE}, ${lockHash(this.schema)})`;
+      }
+      /**
+       * 'postgres'. SQLite's answer names its rollback-journal mode, which the
+       * 9p policy and the -wal/-shm handling branch on. Postgres has its own WAL
+       * that no Sterling code manages, so 'wal' would send those branches down the
+       * SQLite path. 'postgres' is no SQLite journal mode, so every such branch
+       * falls through.
+       */
+      journalMode() {
+        return "postgres";
+      }
+      snapshot(_targetPath) {
+        throw new PgUnsupportedError("snapshot() (backup in work mode is issue 26 item 7: it refuses and points at the platform point-in-time restore)");
+      }
+    };
+  }
+});
+
 // packages/store/dist/mounted.js
 import { mkdirSync, existsSync, rmSync, openSync, closeSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { dirname, join as join3 } from "node:path";
+import { homedir as homedir2 } from "node:os";
 function resolveDomainMounts(config) {
   return config.stack_tags.map((name4) => ({
     name: name4,
-    dbPath: config.domain_paths[name4] ?? join(homedir(), ".sterling", "domains", name4, "sterling.db")
+    dbPath: config.domain_paths[name4] ?? join3(homedir2(), ".sterling", "domains", name4, "sterling.db")
   }));
 }
 function open(dbPath2) {
@@ -5701,6 +6951,9 @@ function open(dbPath2) {
 }
 function isStoreFailure(e) {
   return e instanceof SchemaMigrationRequiredError || e instanceof UnsupportedSchemaVersionError || e instanceof StoreRowDecodeError || e?.code === "ERR_SQLITE_ERROR";
+}
+function isPgStoreFailure(e) {
+  return e instanceof PgStoreMissingError || e instanceof PgQueryError || e instanceof PgLockTimeoutError || e instanceof PgStatementTimeoutError || e instanceof PgNulCharacterError || e instanceof PgBridgeClosedError || e instanceof PgBridgeTimeoutError || e instanceof PgWorkerDiedError;
 }
 function missingDomainWarning(m) {
   return `sterling: domain '${m.name}' is configured but has no store at '${m.dbPath}'; it is NOT mounted, so its knowledge is not read and writes to scope domain:${m.name} are refused. Create it with createDomain (a description is required), or run init to set it up.`;
@@ -5732,18 +6985,38 @@ function createDomain(name4, description, dbPath2) {
   }
   store.close();
 }
-var PROBE_ID, DROPPED_AFTER_MOUNT_NOTE, DROPPED_AT_MOUNT_NOTE, errorText, DOMAIN_DESCRIPTION_KEY, DomainNotCreatedError, MountedStores;
+var PROBE_ID, DROPPED_AFTER_MOUNT_NOTE, DROPPED_AT_MOUNT_NOTE, errorText, DomainUnavailableError, DOMAIN_DESCRIPTION_KEY, MixedScoreScaleError, DomainNotCreatedError, MountedStores;
 var init_mounted = __esm({
   "packages/store/dist/mounted.js"() {
     "use strict";
     init_dist2();
     init_dist();
     init_shares();
+    init_pg_bridge();
+    init_pg_driver();
     PROBE_ID = "00000000-0000-0000-0000-000000000000";
     DROPPED_AFTER_MOUNT_NOTE = "dropped after mount; reads skip it until the session restarts";
     DROPPED_AT_MOUNT_NOTE = "dropped at mount; restart the session after the store is repaired";
     errorText = (e) => String(e?.message ?? e);
+    DomainUnavailableError = class extends Error {
+      domain;
+      location;
+      constructor(domain, location, cause) {
+        super(`storage 'postgres': domain '${domain}' (${location}) is missing or cannot be read: ${errorText(cause)}. Postgres storage never skips or drops a mounted domain; the call fails and nothing was written.`, { cause });
+        this.name = "DomainUnavailableError";
+        this.domain = domain;
+        this.location = location;
+      }
+    };
     DOMAIN_DESCRIPTION_KEY = "description";
+    MixedScoreScaleError = class extends Error {
+      scales;
+      constructor(operation, scales) {
+        super(`${operation}: the mounted stores rank on different score scales (${scales.map((x) => `${x.source}: ${x.scale}`).join(", ")}), so a min_score cannot be applied across them. Nothing was counted.`);
+        this.scales = scales;
+        this.name = "MixedScoreScaleError";
+      }
+    };
     DomainNotCreatedError = class extends Error {
       domain;
       db_path;
@@ -5809,6 +7082,8 @@ var init_mounted = __esm({
       /** Every configured domain whose store file exists, in manifest order,
        *  whether or not it could be opened. */
       mountedNames = [];
+      /** Set for Postgres storage; see MountedStoresOptions.work. */
+      work;
       /** The project store is opened, and created when absent; a failure to open
        *  it throws. A domain store is only ever OPENED here, never created, and one
        *  that exists but cannot be opened is listed on unreadableDomains instead of
@@ -5817,8 +7092,38 @@ var init_mounted = __esm({
        *  every handle opened so far closed and no file written for the missing
        *  domain. When options.skipMissing is true such a mount is skipped instead,
        *  and the existing siblings are still mounted. An existing domain store opens
-       *  as it is, whether or not it has a description. */
+       *  as it is, whether or not it has a description.
+       *
+       *  Postgres storage (options.work, routing.ts) differs in three ways: both stores
+       *  are opened through the given openers, which never create a store;
+       *  skipMissing is ignored; and every case above that lists a domain on
+       *  missingDomains or unreadableDomains throws DomainUnavailableError instead,
+       *  with every handle opened so far closed. */
       constructor(projectDbPath, mounts = [], options) {
+        this.work = options?.work;
+        if (this.work) {
+          this.project = this.work.openProject();
+          try {
+            for (const m of mounts) {
+              this.mountedNames.push(m.name);
+              this.domainPaths.set(m.name, m.dbPath);
+              let store;
+              try {
+                store = this.work.openDomain(m);
+              } catch (e) {
+                if (!this.isStoreFailure(e))
+                  throw e;
+                throw new DomainUnavailableError(m.name, m.dbPath, e);
+              }
+              this.domains.set(m.name, store);
+              this.probeDomain(m.name, store);
+            }
+          } catch (e) {
+            this.close();
+            throw e;
+          }
+          return;
+        }
         this.project = open(projectDbPath);
         try {
           for (const m of mounts) {
@@ -5859,7 +7164,7 @@ var init_mounted = __esm({
           store.get(PROBE_ID);
           store.inboundSupersedes(PROBE_ID);
         } catch (e) {
-          if (!isStoreFailure(e))
+          if (!this.isStoreFailure(e))
             throw e;
           this.dropDomain(name4, e, true);
         }
@@ -5870,6 +7175,8 @@ var init_mounted = __esm({
        *  (assertWritable): a session never writes into a store it cannot read back,
        *  and the slug checks still ask it (fanEveryDomain). */
       dropDomain(name4, e, atMount = false) {
+        if (this.work)
+          throw new DomainUnavailableError(name4, this.domainPaths.get(name4) ?? "", e);
         if (this.isUnreadable(name4))
           return;
         this.unreadableDomains.push({
@@ -5878,6 +7185,11 @@ var init_mounted = __esm({
           error: errorText(e),
           note: atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE
         });
+      }
+      /** The failures that drop a domain in hobby mode and fail the call in work
+       *  mode; any other error is the caller's or this code's fault and is rethrown. */
+      isStoreFailure(e) {
+        return isStoreFailure(e) || this.work !== void 0 && isPgStoreFailure(e);
       }
       isUnreadable(name4) {
         return this.unreadableDomains.some((d) => d.name === name4);
@@ -5905,7 +7217,7 @@ var init_mounted = __esm({
           try {
             out.push(fn(store));
           } catch (e) {
-            if (!isStoreFailure(e))
+            if (!this.isStoreFailure(e))
               throw e;
             this.dropDomain(name4, e);
             throw new Error(`${what} cannot be checked: domain '${name4}' could not be read (${errorText(e)}), so whether it is taken there is unknown. Nothing was written. Repair the store, then restart the session.`);
@@ -5928,7 +7240,7 @@ var init_mounted = __esm({
           try {
             value = fn(store);
           } catch (e) {
-            if (!isStoreFailure(e))
+            if (!this.isStoreFailure(e))
               throw e;
             this.dropDomain(name4, e);
             continue;
@@ -5977,24 +7289,24 @@ var init_mounted = __esm({
        *  otherwise a lifecycle/freshness-only envelope that SterlingStore.create
        *  accepts was rejected through the mounted surface, because the schemas
        *  registry still declares the derived status/superseded_by fields. */
-      create(input) {
+      create(input, options = {}) {
         const normalized = SterlingStore.normalizeIdentityEnvelope(input);
         const record = validateRecord(normalized);
         assertNoFieldLoss("create", normalized, record);
         const target2 = this.storeFor(record.scope);
         this.assertMountAffinity("create", target2, `record '${record.id}' (scope '${record.scope}')`);
-        return target2.create(record);
+        return target2.create(record, options);
       }
       /** Scope-routed exactly as create() is. A maintenance item is project-LOCAL
        *  state and never shared, so this resolves to the project store in practice —
        *  and the dedup key is therefore evaluated within that ONE store rather than
        *  across the fan, which is right: two projects' queues are independent, and a
        *  cross-store key would let one project's item suppress another's. */
-      enqueueSystemTodo(input) {
+      enqueueSystemTodo(input, options = {}) {
         const record = validateRecord(SterlingStore.normalizeIdentityEnvelope(input));
         const target2 = this.storeFor(record.scope);
         this.assertMountAffinity("enqueueSystemTodo", target2, `todo '${record.id}' (scope '${record.scope}')`);
-        return target2.enqueueSystemTodo(record);
+        return target2.enqueueSystemTodo(record, options);
       }
       /** Read-only twin of enqueueSystemTodo: queue items are project-local, so the
        *  precheck asks the project store only (same reasoning as the enqueue above). */
@@ -6043,7 +7355,18 @@ var init_mounted = __esm({
       /** Cross-mount twin of countAboveScore (board a577a69d) — summed
        *  project-first across every mounted store, same fan as count(). */
       countAboveScore(opts, minScore) {
+        this.commonScoreScale("countAboveScore");
         return this.fanValues((s2) => s2.countAboveScore(opts, minScore)).reduce((n, c) => n + c, 0);
+      }
+      /** The one score scale every mounted store ranks on (SterlingStore.scoreScale). Mixed scales are refused: neither their scores nor their counts above one min_score compare. */
+      scoreScale() {
+        return this.commonScoreScale("scoreScale");
+      }
+      commonScoreScale(operation) {
+        const scales = [...this.fanRead((s2) => s2.scoreScale())].map((r) => ({ source: r.source, scale: r.value }));
+        if (new Set(scales.map((x) => x.scale)).size > 1)
+          throw new MixedScoreScaleError(operation, scales);
+        return scales[0].scale;
       }
       /** Per-source projection (AC2): project store FIRST, then each mounted domain
        *  in manifest order. Each store runs the full query independently — type
@@ -6053,6 +7376,12 @@ var init_mounted = __esm({
        *  name (DomainMount.name) for each domain store. */
       bySource(opts) {
         return [...this.fanRead((s2) => s2.query(opts))].map((r) => ({ source: r.source, records: r.value }));
+      }
+      /** bySource for each entry of `list` in one pass: per store, project first,
+       *  one SterlingStore.queryEach (one read transaction), so `results[i]` is
+       *  that store's bySource(list[i]) records. */
+      bySourceEach(list) {
+        return [...this.fanRead((s2) => s2.queryEach(list))].map((r) => ({ source: r.source, results: r.value }));
       }
       /** Count-only per-source projection — the COUNT(*) twin of bySource (same
        *  project-first, per-store ordering) with NO body fetch. The TUI Knowledge
@@ -6074,7 +7403,7 @@ var init_mounted = __esm({
         try {
           return store.query(opts);
         } catch (e) {
-          if (!isStoreFailure(e))
+          if (!this.isStoreFailure(e))
             throw e;
           this.dropDomain(source, e);
           return [];
@@ -6181,6 +7510,24 @@ var init_mounted = __esm({
        *  project-store tombstone behind, so the SAME source id can resolve out of
        *  two different mounts — first-seen (project-first, the read fan's own
        *  ordering) wins, never a duplicate entry for one concept. */
+      /** inboundSupersedes() for each id: per store one SterlingStore.inboundSupersedesEach,
+       *  merged per id exactly as inboundSupersedes merges (project first, first seen wins). */
+      inboundSupersedesEach(ids) {
+        const perStore = this.fanValues((s2) => s2.inboundSupersedesEach(ids));
+        return ids.map((_, i) => {
+          const seen = /* @__PURE__ */ new Set();
+          const out = [];
+          for (const lists of perStore) {
+            for (const record of lists[i] ?? []) {
+              if (seen.has(record.id))
+                continue;
+              seen.add(record.id);
+              out.push(record);
+            }
+          }
+          return out;
+        });
+      }
       inboundSupersedes(id) {
         const seen = /* @__PURE__ */ new Set();
         const out = [];
@@ -6219,10 +7566,11 @@ var init_mounted = __esm({
        *  repeated. The label and the physical destination are therefore ONE fact,
        *  and cannot drift apart at this site by construction. Any third argument a
        *  caller supplies is deliberately ignored for the same reason: an
-       *  authoritative scope is not something a caller can be trusted to know. */
+       *  authoritative scope is not something a caller can be trusted to know.
+       *  The fourth argument (WriteOptions: operation_id) passes through. */
       supersede(...args) {
         const store = this.mutatingStoreHolding("supersede", args[0]);
-        return store.supersede(args[0], args[1], this.mountNameOf(store));
+        return store.supersede(args[0], args[1], this.mountNameOf(store), args[3]);
       }
       /** Promotion tombstone: retire the original in its (project) store, pointing at
        *  the cross-store replacement. The replacement already lives in another store
@@ -6858,10 +8206,10 @@ var init_domain_fit = __esm({
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync as mkdirSync2 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { dirname as dirname2, join as join2 } from "node:path";
+import { homedir as homedir3 } from "node:os";
+import { dirname as dirname2, join as join4 } from "node:path";
 function registryPath() {
-  return process.env.STERLING_REGISTRY_DB ?? join2(homedir2(), ".sterling", "registry.db");
+  return process.env.STERLING_REGISTRY_DB ?? join4(homedir3(), ".sterling", "registry.db");
 }
 var REGISTRY_DDL, ProjectRegistry;
 var init_registry2 = __esm({
@@ -6938,7 +8286,7 @@ CREATE TABLE IF NOT EXISTS projects (
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { realpathSync } from "node:fs";
-import { dirname as dirname3, basename, join as join3, resolve as resolvePath } from "node:path";
+import { dirname as dirname3, basename, join as join5, resolve as resolvePath } from "node:path";
 function journalDemotionRequired(absPath, platform = process.platform) {
   if (platform !== "linux")
     return false;
@@ -7077,10 +8425,14 @@ CREATE TABLE IF NOT EXISTS store_meta (
     DEFAULT_BUSY_TIMEOUT_MS = 5e3;
     sqliteDialect = {
       searchJoin: "JOIN records_fts f ON f.record_id = r.id",
+      searchJoinBinds: 0,
       searchMatch: "records_fts MATCH ?",
       // FTS5's bm25() is LOWER for a better match, so the score is its negation.
       searchScore: "(-bm25(records_fts))",
       searchOrder: "bm25(records_fts) ASC",
+      scoreScale: "fts5_bm25",
+      // FTS5's unicode61 tokenizer does its own folding; the text goes in as built.
+      searchText: (text) => text,
       /**
        * The FTS5 MATCH expression rank_terms compiles to. A trailing '*' marks an
        * FTS5 prefix query ("stor*" matches "store") — the star must sit OUTSIDE the
@@ -7099,6 +8451,8 @@ CREATE TABLE IF NOT EXISTS store_meta (
       db;
       /** The absolute path of the database file, for the refusal messages. */
       dbPath;
+      /** PRAGMA busy_timeout of this connection, which switchFreshFileToWal also waits by. */
+      busyTimeoutMs;
       /** The path the journal-mode policy classifies: dbPath with its directory's symlinks resolved. */
       classifiedPath;
       constructor(path, options = {}) {
@@ -7106,11 +8460,12 @@ CREATE TABLE IF NOT EXISTS store_meta (
         if (typeof busyTimeoutMs !== "number" || !Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0) {
           throw new Error(`SqliteDriver: busyTimeoutMs must be a non-negative integer, got ${String(busyTimeoutMs)}`);
         }
+        this.busyTimeoutMs = busyTimeoutMs;
         this.dbPath = resolvePath(path);
         this.db = new DatabaseSync2(path);
         let classifiedPath = this.dbPath;
         try {
-          classifiedPath = join3(realpathSync(dirname3(this.dbPath)), basename(this.dbPath));
+          classifiedPath = join5(realpathSync(dirname3(this.dbPath)), basename(this.dbPath));
         } catch {
         }
         this.classifiedPath = classifiedPath;
@@ -7122,7 +8477,15 @@ CREATE TABLE IF NOT EXISTS store_meta (
       exec(sql) {
         this.db.exec(sql);
       }
+      /**
+       * A second close is a no-op, as on PgDriver: a refusal inside publishFresh
+       * closes the connection itself, and SterlingStore then closes the driver
+       * again before rethrowing, which must not replace the refusal with
+       * 'database is not open'.
+       */
       close() {
+        if (!this.db.isOpen)
+          return;
         this.db.close();
       }
       /** BEGIN IMMEDIATE: takes the write lock now, or throws once busy_timeout runs out. */
@@ -7167,6 +8530,68 @@ CREATE TABLE IF NOT EXISTS store_meta (
         }
       }
       prepareWritable(isFresh) {
+        this.prepareConnection(isFresh);
+        this.createSchema();
+      }
+      /**
+       * StoreDriver.publishFresh (board 404228d7). prepareWritable() commits the DDL
+       * statement by statement and SterlingStore stamps user_version in a later
+       * transaction, so a concurrent opener that had read user_version 0 could see
+       * the tables without the stamp and open the store as a legacy, read-only one.
+       * Here an empty file gets its schema and its stamp in one BEGIN IMMEDIATE
+       * transaction, with user_version re-read under that lock, so the tables and
+       * the stamp become visible together.
+       *
+       * The classification read comes first and takes no write lock (decision
+       * store-constructor-stops-write-locking-to-read-user-version-closing-a-concurrency-reachable-fail-open):
+       * user_version and sqlite_master are read in one deferred read transaction,
+       * so they come from one snapshot. A store with a schema and a version below
+       * `supported` in that snapshot is an older store, returned untouched; a
+       * newer version is returned untouched too, for SterlingStore to refuse. A
+       * store another opener has already published at `supported` gets only this
+       * connection's settings, as an already-current store does. Only a file
+       * without a schema reaches the write lock.
+       */
+      publishFresh(supported) {
+        if (!Number.isInteger(supported) || supported < 1) {
+          throw new Error(`SqliteDriver: the supported schema version must be a positive integer, got ${String(supported)}`);
+        }
+        this.db.exec("BEGIN");
+        let version;
+        let schemaExists;
+        try {
+          version = this.schemaVersion();
+          schemaExists = this.hasSchema();
+        } finally {
+          this.db.exec("COMMIT");
+        }
+        if (version > supported || version < supported && schemaExists)
+          return version;
+        if (version === supported && schemaExists) {
+          this.prepareConnection(false);
+          return version;
+        }
+        this.prepareConnection(!schemaExists);
+        this.begin();
+        try {
+          version = this.schemaVersion();
+          if (version > supported || version < supported && this.hasSchema()) {
+            this.rollback();
+            return version;
+          }
+          this.createSchema();
+          if (version < supported)
+            this.setSchemaVersion(supported);
+          this.commit();
+        } catch (e) {
+          if (this.db.isTransaction)
+            this.rollback();
+          throw e;
+        }
+        return supported;
+      }
+      /** The journal-mode policy and foreign_keys: connection settings that must run outside a transaction. */
+      prepareConnection(isFresh) {
         if (journalDemotionRequired(this.classifiedPath)) {
           let returnedMode;
           try {
@@ -7190,15 +8615,54 @@ CREATE TABLE IF NOT EXISTS store_meta (
           } else if (isFresh) {
             const stillFresh = !this.hasSchema();
             if (stillFresh) {
-              this.db.exec("PRAGMA journal_mode=WAL");
+              this.switchFreshFileToWal();
             }
           }
         }
         this.db.exec("PRAGMA foreign_keys=ON");
+      }
+      /** The DDL and its additive migrations. Idempotent, so it also runs on every open of a current store. */
+      createSchema() {
         this.db.exec(DDL);
         try {
           this.db.exec("ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT");
         } catch {
+        }
+        try {
+          this.db.exec("ALTER TABLE records ADD COLUMN operation_id TEXT");
+        } catch {
+        }
+        this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_records_operation_id ON records(operation_id)");
+      }
+      /**
+       * PRAGMA journal_mode=WAL on a fresh file, which several openers may try at
+       * once (board 404228d7). Measured: the switch fails at once with 'database is
+       * locked', without the busy handler, while another connection holds the
+       * write lock, and two openers switching together can both fail that way.
+       * So this waits as busy_timeout would: after a failed switch it reads the
+       * file's mode (hasSchema() takes the read lock that makes this connection
+       * pick it up), stops when another opener's switch has landed, and stops too
+       * when another opener has built the store in DELETE: that is a 9p opener's
+       * demotion, which is sticky [store-journal-policy-delete-on-9p] and must not
+       * be flipped back. It tries again only while the file is still without a
+       * schema, until busy_timeout has run out, then throws the last error.
+       */
+      switchFreshFileToWal() {
+        const deadline = Date.now() + this.busyTimeoutMs;
+        for (; ; ) {
+          try {
+            this.db.exec("PRAGMA journal_mode=WAL");
+            return;
+          } catch (e) {
+            if (!(e instanceof Error) || !/database is locked/.test(e.message))
+              throw e;
+            const built = this.hasSchema();
+            if (this.journalMode() === "wal" || built)
+              return;
+            if (Date.now() >= deadline)
+              throw e;
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+          }
         }
       }
       journalMode() {
@@ -7223,6 +8687,11 @@ __export(dist_exports, {
   AXIS_RECORD_TOP_K: () => AXIS_RECORD_TOP_K,
   DECLARED_CAPTURE_OWED_PREFIX: () => DECLARED_CAPTURE_OWED_PREFIX,
   DEFAULT_BUSY_TIMEOUT_MS: () => DEFAULT_BUSY_TIMEOUT_MS,
+  DEFAULT_PG_CREDENTIALS_PATH: () => DEFAULT_PG_CREDENTIALS_PATH,
+  DEFAULT_PG_LOCK_TIMEOUT_MS: () => DEFAULT_PG_LOCK_TIMEOUT_MS,
+  DEFAULT_PG_RANKING: () => DEFAULT_PG_RANKING,
+  DEFAULT_PG_STATEMENT_TIMEOUT_MS: () => DEFAULT_PG_STATEMENT_TIMEOUT_MS,
+  DEFAULT_PG_WAIT_TIMEOUT_MS: () => DEFAULT_PG_WAIT_TIMEOUT_MS,
   DEFAULT_PROJECT_SHARE: () => DEFAULT_PROJECT_SHARE,
   DEFAULT_QUERY_CAP: () => DEFAULT_QUERY_CAP,
   DOMAIN_DESCRIPTION_KEY: () => DOMAIN_DESCRIPTION_KEY,
@@ -7231,27 +8700,52 @@ __export(dist_exports, {
   GENERIC_DEV_TERMS: () => GENERIC_DEV_TERMS,
   JournalDemotionRefusedError: () => JournalDemotionRefusedError,
   MAX_RANK_TERMS: () => MAX_RANK_TERMS,
+  MixedScoreScaleError: () => MixedScoreScaleError,
   MountedStores: () => MountedStores,
+  OperationRepeatedError: () => OperationRepeatedError,
+  PG_LAYOUT_VERSION: () => PG_LAYOUT_VERSION,
+  PG_META_SCHEMA: () => PG_META_SCHEMA,
+  PG_RANKINGS: () => PG_RANKINGS,
+  PgBridge: () => PgBridge,
+  PgBridgeClosedError: () => PgBridgeClosedError,
+  PgBridgeTimeoutError: () => PgBridgeTimeoutError,
+  PgConfigError: () => PgConfigError,
+  PgDriver: () => PgDriver,
+  PgLockTimeoutError: () => PgLockTimeoutError,
+  PgNulCharacterError: () => PgNulCharacterError,
+  PgQueryError: () => PgQueryError,
+  PgSchemaNameRefusedError: () => PgSchemaNameRefusedError,
+  PgStatementTimeoutError: () => PgStatementTimeoutError,
+  PgStoreExistsError: () => PgStoreExistsError,
+  PgStoreMissingError: () => PgStoreMissingError,
+  PgTransactionOpenError: () => PgTransactionOpenError,
+  PgUnsupportedError: () => PgUnsupportedError,
+  PgWorkerDiedError: () => PgWorkerDiedError,
   ProjectRegistry: () => ProjectRegistry,
   SUPPORTED_SCHEMA_VERSION: () => SUPPORTED_SCHEMA_VERSION,
   SchemaMigrationRequiredError: () => SchemaMigrationRequiredError,
   SqliteDriver: () => SqliteDriver,
   SterlingStore: () => SterlingStore,
+  StoreMovedError: () => StoreMovedError,
   StoreRowDecodeError: () => StoreRowDecodeError,
   UnsupportedSchemaVersionError: () => UnsupportedSchemaVersionError,
   allocateShares: () => allocateShares,
   assertNoFieldLoss: () => assertNoFieldLoss,
+  assertSterlingSchemaName: () => assertSterlingSchemaName,
   axisHits: () => axisHits,
   axisNarrowText: () => axisNarrowText,
   axisTitleText: () => axisTitleText,
+  buildPgConnectionConfig: () => buildPgConnectionConfig,
   buildReconcileText: () => buildReconcileText,
   catalogStatus: () => catalogStatus,
   classifyClaimPath: () => classifyClaimPath,
   compareBoardReadiness: () => compareBoardReadiness,
   createDomain: () => createDomain,
+  createPgStore: () => createPgStore,
   declaredCaptureTarget: () => declaredCaptureTarget,
   decodeLiveRecordRow: () => decodeLiveRecordRow,
   droppedKeyPaths: () => droppedKeyPaths,
+  ensurePgLayout: () => ensurePgLayout,
   extractAxisTerms: () => extractAxisTerms,
   extractAxisTermsUncapped: () => extractAxisTermsUncapped,
   fitDomains: () => fitDomains,
@@ -7260,22 +8754,32 @@ __export(dist_exports, {
   hasRecordCentralityHit: () => hasRecordCentralityHit,
   journalDemotionRequired: () => journalDemotionRequired,
   missingDomainWarning: () => missingDomainWarning,
+  pgDialect: () => pgDialect,
+  pgDialectFor: () => pgDialectFor,
+  pgDomainSchemaName: () => pgDomainSchemaName,
+  pgProjectSchemaName: () => pgProjectSchemaName,
+  pgSearchQuery: () => pgSearchQuery,
   rankTermDedupeKey: () => rankTermDedupeKey,
   rankTerms: () => rankTerms,
+  readPgCredentials: () => readPgCredentials,
   recordCentralTerms: () => recordCentralTerms,
   recordCentralityHits: () => recordCentralityHits,
   registryPath: () => registryPath,
   renderCappedPathList: () => renderCappedPathList,
   resolveDomainMounts: () => resolveDomainMounts,
+  setStoreDriverFactory: () => setStoreDriverFactory,
   sqliteDialect: () => sqliteDialect,
   unrecognizedKeyPaths: () => unrecognizedKeyPaths
 });
-import { mkdirSync as mkdirSync3, existsSync as existsSync2, statSync } from "node:fs";
-import { dirname as dirname4, join as join4, resolve as resolvePath2 } from "node:path";
+import { mkdirSync as mkdirSync3, existsSync as existsSync2, statSync as statSync2 } from "node:fs";
+import { dirname as dirname4, join as join6, resolve as resolvePath2 } from "node:path";
 import { randomUUID } from "node:crypto";
+function setStoreDriverFactory(factory) {
+  storeDriverFactory = factory;
+}
 function classifyClaimPath(repoRoot, path) {
   try {
-    return statSync(join4(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
+    return statSync2(join6(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
   } catch (err) {
     const code = err?.code;
     if (code === "ENOENT")
@@ -7295,6 +8799,15 @@ function decodeLiveRecordRow(op, row) {
   }
   record.scope = row.scope;
   return record;
+}
+function operationIdOf(options, op) {
+  const id = options?.operation_id;
+  if (id === void 0)
+    return void 0;
+  if (typeof id !== "string" || id.length === 0 || id.length > 200) {
+    throw new Error(`${op}: operation_id must be a non-empty string of at most 200 characters; nothing was written.`);
+  }
+  return id;
 }
 function shellQuoteSingle(value) {
   return `'${value.split("'").join(`'\\''`)}'`;
@@ -7515,7 +9028,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, OperationRepeatedError, StoreMovedError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -7528,6 +9041,8 @@ var init_dist2 = __esm({
     init_axis();
     init_axis();
     init_sqlite_driver();
+    init_pg_bridge();
+    init_pg_driver();
     init_sqlite_driver();
     StoreRowDecodeError = class extends Error {
       op;
@@ -7538,6 +9053,24 @@ var init_dist2 = __esm({
       }
     };
     SUPPORTED_SCHEMA_VERSION = 2;
+    OperationRepeatedError = class extends Error {
+      operation_id;
+      original_id;
+      constructor(operation_id, original_id) {
+        super(`operation '${operation_id}' already ran: it wrote record '${original_id}'. A repeated operation is refused, never applied twice; nothing was written. Read '${original_id}' to see what landed.`);
+        this.operation_id = operation_id;
+        this.original_id = original_id;
+        this.name = "OperationRepeatedError";
+      }
+    };
+    StoreMovedError = class extends Error {
+      db_path;
+      constructor(db_path) {
+        super(`store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`);
+        this.db_path = db_path;
+        this.name = "StoreMovedError";
+      }
+    };
     UnsupportedSchemaVersionError = class extends Error {
       found;
       supported;
@@ -7629,6 +9162,9 @@ var init_dist2 = __esm({
           options.driver.close();
           throw new Error("SterlingStore: busyTimeoutMs configures the SQLite driver this store opens itself; it cannot be combined with an injected driver \u2014 set it on that driver.");
         }
+        if (options.driver === void 0 && storeDriverFactory !== void 0) {
+          options = { driver: storeDriverFactory(path, { busyTimeoutMs: options.busyTimeoutMs }) };
+        }
         this.db = options.driver ?? new SqliteDriver(path, { busyTimeoutMs: options.busyTimeoutMs });
         const foundSchemaVersion = this.db.schemaVersion();
         if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
@@ -7636,7 +9172,27 @@ var init_dist2 = __esm({
           throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
         }
         let isFresh = false;
-        if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
+        let published = false;
+        if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION && this.db.publishFresh !== void 0) {
+          let settled;
+          try {
+            settled = this.db.publishFresh(SUPPORTED_SCHEMA_VERSION);
+          } catch (e) {
+            this.db.close();
+            throw e;
+          }
+          if (settled > SUPPORTED_SCHEMA_VERSION) {
+            this.db.close();
+            throw new UnsupportedSchemaVersionError(settled, SUPPORTED_SCHEMA_VERSION);
+          }
+          if (settled < SUPPORTED_SCHEMA_VERSION) {
+            this.db.prepareReadOnly();
+            this.legacySchemaVersion = settled;
+            this.openedSchemaVersion = settled;
+            return;
+          }
+          published = true;
+        } else if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
           if (this.db.hasSchema()) {
             this.db.prepareReadOnly();
             this.legacySchemaVersion = foundSchemaVersion;
@@ -7645,8 +9201,9 @@ var init_dist2 = __esm({
           }
           isFresh = true;
         }
-        this.db.prepareWritable(isFresh);
-        if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+        if (!published)
+          this.db.prepareWritable(isFresh);
+        if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION && !published) {
           try {
             this.tx(() => {
               const current = this.db.schemaVersion();
@@ -7968,8 +9525,9 @@ var init_dist2 = __esm({
        *  legacy feature_article field, and the pin fixtures that pass version: 1).
        *  S3 STRIPS it — version becomes server-owned at every surface — so nothing
        *  new should start relying on setting it. */
-      create(input) {
+      create(input, options = {}) {
         this.assertWritable("create");
+        const operationId = operationIdOf(options, "create");
         const prepared = _SterlingStore.resolveIdentity(input, {
           lifecycle: "live",
           freshness: "fresh",
@@ -7991,7 +9549,8 @@ var init_dist2 = __esm({
         assertNoFieldLoss("create", prepared.input, record);
         _SterlingStore.refuseRawSupersedesLinks("create", record.links, /* @__PURE__ */ new Set());
         this.tx(() => {
-          this.insertRecord(record);
+          this.refuseRepeatedOperation(operationId);
+          this.insertRecord(record, operationId);
           this.logActivity("created", record, record.created_at);
         });
         return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.storableBody(record)])[0]);
@@ -8260,7 +9819,7 @@ var init_dist2 = __esm({
               throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' changed during removal \u2014 the transaction was rolled back; re-read and retry.`);
             }
           }
-          this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(stored), id);
+          this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(this.db.dialect.searchText(entry.fts(stored)), id);
           this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
           if (opts.resolves?.length)
             this.drainResolves(op, opts.resolves, now, opts.resolvedReceipt);
@@ -8388,19 +9947,21 @@ var init_dist2 = __esm({
        * write would refuse is not validated here, the write path refuses it.
        */
       enqueueWouldBeNoop(input) {
-        if (input.system_reason === "reconcile_needed" && input.feature_link)
+        return this.readTx(() => {
+          if (input.system_reason === "reconcile_needed" && input.feature_link)
+            return false;
+          const wantKey = systemTodoKey(input);
+          const rows = input.feature_link ? this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0").all(input.feature_link) : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+          for (const r of rows) {
+            const t = _SterlingStore.decodeLiveRecord("enqueueWouldBeNoop", r);
+            if (t.source !== "system" || systemTodoKey(t) !== wantKey)
+              continue;
+            const priorFiles = [...t.file_keys ?? []].sort();
+            const nextFiles = [...input.file_keys ?? []].sort();
+            return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? "", input.text);
+          }
           return false;
-        const wantKey = systemTodoKey(input);
-        const rows = input.feature_link ? this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded' AND instr(body, ?) > 0").all(input.feature_link) : this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
-        for (const r of rows) {
-          const t = _SterlingStore.decodeLiveRecord("enqueueWouldBeNoop", r);
-          if (t.source !== "system" || systemTodoKey(t) !== wantKey)
-            continue;
-          const priorFiles = [...t.file_keys ?? []].sort();
-          const nextFiles = [...input.file_keys ?? []].sort();
-          return JSON.stringify(priorFiles) === JSON.stringify(nextFiles) && systemTodoTextsEquivalent(input.system_reason, t.text ?? "", input.text);
-        }
-        return false;
+        });
       }
       /**
        * ATOMIC check-and-insert for a SYSTEM maintenance item — the ONE dedup
@@ -8451,8 +10012,9 @@ var init_dist2 = __esm({
        * body UPDATE was invisible to expected_version, so a concurrent in-place
        * write could silently revert it, and the FTS row kept the old text).
        */
-      enqueueSystemTodo(input) {
+      enqueueSystemTodo(input, options = {}) {
         this.assertWritable("enqueueSystemTodo");
+        const operationId = operationIdOf(options, "enqueueSystemTodo");
         const prepared = _SterlingStore.resolveIdentity(input, {
           lifecycle: "live",
           freshness: "fresh",
@@ -8473,6 +10035,7 @@ var init_dist2 = __esm({
         let textUpdated = false;
         let insertedText;
         this.tx(() => {
+          this.refuseRepeatedOperation(operationId);
           const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
           if (isReconcileFold) {
             const matches = [];
@@ -8489,10 +10052,10 @@ var init_dist2 = __esm({
               if (fileKeys.length > 1) {
                 const owner = this.get(candidate.feature_link);
                 const canonicalText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, fileKeys);
-                this.insertRecord({ ...candidate, text: canonicalText });
+                this.insertRecord({ ...candidate, text: canonicalText }, operationId);
                 insertedText = canonicalText;
               } else {
-                this.insertRecord(candidate);
+                this.insertRecord(candidate, operationId);
               }
               return;
             }
@@ -8539,7 +10102,7 @@ var init_dist2 = __esm({
             break;
           }
           if (!existing) {
-            this.insertRecord(candidate);
+            this.insertRecord(candidate, operationId);
             return;
           }
           const priorFiles = [...existing.file_keys ?? []].sort();
@@ -8571,10 +10134,12 @@ var init_dist2 = __esm({
         };
       }
       get(id) {
-        const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
-        if (!row)
-          return void 0;
-        return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
+        return this.readTx(() => {
+          const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
+          if (!row)
+            return void 0;
+          return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
+        });
       }
       /**
        * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
@@ -8738,14 +10303,16 @@ var init_dist2 = __esm({
        * '(lookup failed)' would trade one false payload for another.
        */
       articlesBySlug(slug) {
-        const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC`).all(slug);
-        const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows));
-        if (!records.length)
-          return records;
-        const relations = this.activeArticleRelations();
-        return records.map((r) => this.withDerivedReliedBy(r, relations));
+        return this.readTx(() => {
+          const rows = this.db.prepare(`SELECT body, scope FROM records
+            WHERE type = 'feature_article' AND status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC`).all(slug);
+          const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows));
+          if (!records.length)
+            return records;
+          const relations = this.activeArticleRelations();
+          return records.map((r) => this.withDerivedReliedBy(r, relations));
+        });
       }
       /**
        * Every non-superseded record of ANY type carrying this exact slug, newest
@@ -8758,10 +10325,12 @@ var init_dist2 = __esm({
        * live head while a version-pinned citation keeps using the id.
        */
       recordsBySlug(slug) {
-        const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC`).all(slug);
-        return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
+        return this.readTx(() => {
+          const rows = this.db.prepare(`SELECT body, scope FROM records
+            WHERE status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC`).all(slug);
+          return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
+        });
       }
       /**
        * THE ONE READINESS FUNCTION (decision
@@ -8777,48 +10346,50 @@ var init_dist2 = __esm({
        * only; the stored blocked_by is never rewritten. No cycle detection.
        */
       boardReadiness(items2) {
-        const total = this.count({ types: ["todo"], source: "user" });
-        const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
-        const bySlug = /* @__PURE__ */ new Map();
-        for (const t of live)
-          if (t.slug)
-            bySlug.set(t.slug, t);
-        const dependents = /* @__PURE__ */ new Map();
-        for (const t of live) {
-          for (const slug of new Set(t.blocked_by ?? [])) {
-            const list = dependents.get(slug);
-            if (list)
-              list.push(t);
-            else
-              dependents.set(slug, [t]);
+        return this.readTx(() => {
+          const total = this.count({ types: ["todo"], source: "user" });
+          const live = total > 0 ? this.query({ types: ["todo"], source: "user", cap: total }) : [];
+          const bySlug = /* @__PURE__ */ new Map();
+          for (const t of live)
+            if (t.slug)
+              bySlug.set(t.slug, t);
+          const dependents = /* @__PURE__ */ new Map();
+          for (const t of live) {
+            for (const slug of new Set(t.blocked_by ?? [])) {
+              const list = dependents.get(slug);
+              if (list)
+                list.push(t);
+              else
+                dependents.set(slug, [t]);
+            }
           }
-        }
-        const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
-        const targets = items2 ?? live;
-        return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
-          const blockers = [];
-          const blockersOpen = [];
-          for (const slug of t.blocked_by ?? []) {
-            const holder = openBlocker(slug);
-            blockers.push({ slug, state: holder ? "open" : "closed" });
-            if (holder)
-              blockersOpen.push(boardItemHandle(holder));
-          }
-          const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-          const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
-          return {
-            id: t.id,
-            ...t.slug ? { slug: t.slug } : {},
-            name: boardItemHandle(t),
-            ...t.priority ? { priority: t.priority } : {},
-            updated_at: t.updated_at,
-            file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
-            ...t.needs ? { needs: t.needs } : {},
-            blockers,
-            blockers_open: blockersOpen,
-            unblocks,
-            state
-          };
+          const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
+          const targets = items2 ?? live;
+          return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+            const blockers = [];
+            const blockersOpen = [];
+            for (const slug of t.blocked_by ?? []) {
+              const holder = openBlocker(slug);
+              blockers.push({ slug, state: holder ? "open" : "closed" });
+              if (holder)
+                blockersOpen.push(boardItemHandle(holder));
+            }
+            const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+            const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+            return {
+              id: t.id,
+              ...t.slug ? { slug: t.slug } : {},
+              name: boardItemHandle(t),
+              ...t.priority ? { priority: t.priority } : {},
+              updated_at: t.updated_at,
+              file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+              ...t.needs ? { needs: t.needs } : {},
+              blockers,
+              blockers_open: blockersOpen,
+              unblocks,
+              state
+            };
+          });
         });
       }
       /**
@@ -8832,10 +10403,12 @@ var init_dist2 = __esm({
        * live head via recordsBySlug's own resolution.
        */
       supersededRecordsBySlug(slug) {
-        const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status = 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
-          ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`).all(slug);
-        return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
+        return this.readTx(() => {
+          const rows = this.db.prepare(`SELECT body, scope FROM records
+            WHERE status = 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?
+            ORDER BY updated_at DESC, ${this.db.dialect.insertionOrder()} DESC`).all(slug);
+          return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
+        });
       }
       /**
        * Follows superseded_by from `id` to the chain end (decision foreign_de1a7329: ids
@@ -8848,24 +10421,26 @@ var init_dist2 = __esm({
        * the true, unreached terminus.
        */
       resolveTerminus(id) {
-        const MAX_HOPS = 32;
-        const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
-        const row = stmt.get(id);
-        if (!row)
-          return null;
-        const visited = /* @__PURE__ */ new Set([row.id]);
-        let current = row;
-        let hops = 0;
-        while (current.status === "superseded" && current.superseded_by) {
-          const next = stmt.get(current.superseded_by);
-          if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
-            return { id: current.id, status: current.status, hops, truncated: true };
+        return this.readTx(() => {
+          const MAX_HOPS = 32;
+          const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
+          const row = stmt.get(id);
+          if (!row)
+            return null;
+          const visited = /* @__PURE__ */ new Set([row.id]);
+          let current = row;
+          let hops = 0;
+          while (current.status === "superseded" && current.superseded_by) {
+            const next = stmt.get(current.superseded_by);
+            if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
+              return { id: current.id, status: current.status, hops, truncated: true };
+            }
+            visited.add(next.id);
+            current = next;
+            hops += 1;
           }
-          visited.add(next.id);
-          current = next;
-          hops += 1;
-        }
-        return { id: current.id, status: current.status, hops };
+          return { id: current.id, status: current.status, hops };
+        });
       }
       /**
        * INBOUND rel:'supersedes' edges — every record elsewhere holding a
@@ -8882,9 +10457,29 @@ var init_dist2 = __esm({
        * mount, because an edge lives with its SOURCE record (addLink routes by
        * source), which may sit in a different store than the target.
        */
+      /**
+       * inboundSupersedes() for each id in one read transaction: element i is what
+       * inboundSupersedes(ids[i]) returns. One edge query covers every id, so a
+       * hook attaching supersession state to N delivered records pays one round
+       * trip per store instead of N (board f6c4bc5d).
+       */
+      inboundSupersedesEach(ids) {
+        if (!ids.length)
+          return [];
+        return this.readTx(() => {
+          const unique = [...new Set(ids)];
+          const rows = this.db.prepare(`SELECT source_id, target_id FROM record_relations WHERE rel = 'supersedes' AND target_id IN (${unique.map(() => "?").join(",")}) ORDER BY ${this.db.dialect.insertionOrder()}`).all(...unique);
+          const sources = /* @__PURE__ */ new Map();
+          for (const row of rows)
+            sources.set(row.target_id, [...sources.get(row.target_id) ?? [], row.source_id]);
+          return ids.map((id) => (sources.get(id) ?? []).map((s2) => this.get(s2)).filter((r) => r !== void 0));
+        });
+      }
       inboundSupersedes(id) {
-        const rows = this.db.prepare(`SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`).all(id);
-        return rows.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
+        return this.readTx(() => {
+          const rows = this.db.prepare(`SELECT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY ${this.db.dialect.insertionOrder()}`).all(id);
+          return rows.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
+        });
       }
       /**
        * The §3.4 base filter (status + type + stack-tag + file-key join) shared
@@ -8955,7 +10550,9 @@ var init_dist2 = __esm({
        * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
        * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
        * itself — knowledge_query's tool description names this scale so a caller
-       * never has to reverse-engineer bm25's own sign convention.
+       * never has to reverse-engineer bm25's own sign convention. That is the
+       * SQLite scale; on Postgres the score is the driver's ranking, also
+       * higher-is-better, and scoreScale() names which scale a store uses.
        *
        * Requires rank_terms — a threshold on a filter with no ranking has nothing
        * to threshold, so this refuses loudly rather than silently answering 0
@@ -8972,8 +10569,34 @@ var init_dist2 = __esm({
         const d = this.db.dialect;
         const sql = `SELECT COUNT(*) AS n FROM records r ${d.searchJoin}
       WHERE ${where.join(" AND ")} AND ${d.searchMatch} AND ${d.searchScore} >= ?`;
-        const row = this.db.prepare(sql).get(...params, match, minScore);
+        const row = this.db.prepare(sql).get(...this.searchJoinParams(match), ...params, match, minScore);
         return row.n;
+      }
+      /**
+       * The scale countAboveScore()'s min_score is a floor on, as a versioned id
+       * (decision postgres-search-ranking-per-query-idf-no-stats-triggers, point
+       * 3): 'fts5_bm25' on SQLite, 'pg_bm25_v1' and the like on Postgres. Every
+       * scale is higher-is-better; a min_score is never carried across scales.
+       */
+      scoreScale() {
+        return this.db.dialect.scoreScale;
+      }
+      /**
+       * The text this store writes to records_fts for a record of `type` whose
+       * records.body is `body`: the type's fts builder, then the driver's
+       * searchText, as insertRecord() does. A copy that rebuilds the search index
+       * from the records (the knowledge-eval pg loader) calls this, so the rebuilt
+       * text is what this store would have written.
+       */
+      searchTextFor(type, body) {
+        const entry = RECORD_TYPES[type];
+        if (!entry)
+          throw new Error(`searchTextFor: unknown record type '${type}'`);
+        return this.db.dialect.searchText(entry.fts(JSON.parse(body)));
+      }
+      /** searchJoin's parameters: the match value once per placeholder it has, all before the filter's. */
+      searchJoinParams(match) {
+        return Array.from({ length: this.db.dialect.searchJoinBinds }, () => match);
       }
       /**
        * The search expression rank_terms compiles to — shared by query() and
@@ -8984,8 +10607,28 @@ var init_dist2 = __esm({
       ftsMatchExpr(terms, matchAll) {
         return this.db.dialect.searchQuery(terms, matchAll);
       }
+      /**
+       * query() once per entry of `list`, inside one read transaction: element i
+       * is what query(list[i]) returns, all from one snapshot. The hydration reads
+       * (links, successors, derived relied_by) run once over every result instead
+       * of once per entry, so on Postgres the list pays one BEGIN/COMMIT and one
+       * set of hydration statements (board f6c4bc5d: H20 runs six subject queries
+       * per dispatch). Hydration is per record, so the result is the same.
+       */
+      queryEach(list) {
+        return this.readTx(() => {
+          const raw = list.map((opts) => this.queryRows(opts));
+          const hydrated = this.withDerivedReliedByAll(raw.flat());
+          let at = 0;
+          return raw.map((rows) => hydrated.slice(at, at += rows.length));
+        });
+      }
       /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
       query(opts = {}) {
+        return this.readTx(() => this.withDerivedReliedByAll(this.queryRows(opts)));
+      }
+      /** query()'s rows, decoded but not hydrated. */
+      queryRows(opts) {
         const cap = opts.cap ?? DEFAULT_QUERY_CAP;
         const { where, params, fileKeys } = this.baseFilter(opts);
         if (opts.rank_terms !== void 0) {
@@ -8996,8 +10639,8 @@ var init_dist2 = __esm({
             const sql2 = `SELECT r.body, r.scope FROM records r ${d.searchJoin}
           WHERE ${where.join(" AND ")} AND ${d.searchMatch}
           ORDER BY ${d.searchOrder}, r.updated_at DESC LIMIT ?`;
-            const rows2 = this.db.prepare(sql2).all(...params, match, cap);
-            return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
+            const rows2 = this.db.prepare(sql2).all(...this.searchJoinParams(match), ...params, match, cap);
+            return _SterlingStore.decodeLiveRecords("query", rows2);
           }
         }
         const orderBy = [];
@@ -9010,7 +10653,7 @@ var init_dist2 = __esm({
         const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy.join(", ")} LIMIT ?`;
         const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
-        return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows));
+        return _SterlingStore.decodeLiveRecords("query", rows);
       }
       /** query()'s two return paths share this: one relations scan for the whole
        *  result set (not one per feature_article row) before applying the derived
@@ -9027,8 +10670,9 @@ var init_dist2 = __esm({
        * old; the old is retained with status 'superseded' + superseded_by set.
        * This is the ONLY change path for immutable types (decision, §3.2.1).
        */
-      supersede(oldId, newInput, authoritativeScope) {
+      supersede(oldId, newInput, authoritativeScope, options = {}) {
         this.assertWritable("supersede");
+        const operationId = operationIdOf(options, "supersede");
         const oldRecord = this.get(oldId);
         if (!oldRecord)
           throw new Error(`supersede: no record '${oldId}'`);
@@ -9062,7 +10706,8 @@ var init_dist2 = __esm({
           updated_at: newRecord.updated_at
         });
         this.tx(() => {
-          this.insertRecord(newRecord);
+          this.refuseRepeatedOperation(operationId);
+          this.insertRecord(newRecord, operationId);
           const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(storedOld), oldId);
           if (res.changes === 0) {
@@ -9120,20 +10765,21 @@ var init_dist2 = __esm({
        */
       retireInFavorOf(id, replacementId, at, verb = "retired") {
         this.assertWritable("retireInFavorOf");
-        const record = this.get(id);
-        if (!record)
-          throw new Error(`retireInFavorOf: no record '${id}'`);
-        const identity = this.identityOf(id);
-        if (identity?.lifecycle === "retired" || record.status === "superseded") {
-          throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-        }
-        const replacement = this.identityOf(replacementId);
-        if (replacement?.lifecycle === "retired") {
-          throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-        }
-        const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-        const stored = _SterlingStore.storableBody(retired);
+        let stored;
         this.tx(() => {
+          const record = this.get(id);
+          if (!record)
+            throw new Error(`retireInFavorOf: no record '${id}'`);
+          const identity = this.identityOf(id);
+          if (identity?.lifecycle === "retired" || record.status === "superseded") {
+            throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
+          }
+          const replacement = this.identityOf(replacementId);
+          if (replacement?.lifecycle === "retired") {
+            throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
+          }
+          const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
+          stored = _SterlingStore.storableBody(retired);
           const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
              WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
           if (res.changes === 0) {
@@ -9409,7 +11055,7 @@ var init_dist2 = __esm({
           catalog: {
             entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
           }
-        });
+        }, { operation_id: randomUUID() });
       }
       /**
        * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
@@ -9447,7 +11093,7 @@ var init_dist2 = __esm({
         if (catalogs.length > 0) {
           todo.feature_link = catalogs[0].id;
         }
-        this.create(todo);
+        this.create(todo, { operation_id: randomUUID() });
       }
       /**
        * The one row-insert. Since S2 ([stable-identity-design-v2]) the stored BODY
@@ -9457,15 +11103,23 @@ var init_dist2 = __esm({
        * pre-migration store still has): written here from the derived values in the
        * same statement, never read back as the served truth.
        */
-      insertRecord(record) {
+      /** Refuses an operation_id that already wrote a record. Runs inside the write transaction, before the insert: on Postgres a unique violation would abort the transaction. */
+      refuseRepeatedOperation(operationId) {
+        if (operationId === void 0)
+          return;
+        const row = this.db.prepare("SELECT id FROM records WHERE operation_id = ?").get(operationId);
+        if (row)
+          throw new OperationRepeatedError(operationId, row.id);
+      }
+      insertRecord(record, operationId) {
         const entry = RECORD_TYPES[record.type];
         const meta = record;
         const lifecycle = meta.lifecycle === "retired" ? "retired" : "live";
         const freshness = meta.freshness === "flagged_stale" ? "flagged_stale" : "fresh";
         const version = typeof meta.version === "number" ? meta.version : 1;
         const stored = _SterlingStore.storableBody(record);
-        this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version, record.scope, record.created_at, record.updated_at, record.author, JSON.stringify(stored));
+        this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body, operation_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version, record.scope, record.created_at, record.updated_at, record.author, JSON.stringify(stored), operationId ?? null);
         for (const tag of new Set(record.stack_tags)) {
           this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(record.id, tag);
         }
@@ -9480,7 +11134,7 @@ var init_dist2 = __esm({
         if (lifecycle === "retired" && meta.superseded_by && meta.superseded_by !== record.id) {
           this.insertRelation(meta.superseded_by, "supersedes", record.id, record.updated_at);
         }
-        this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record.id, entry.fts(stored));
+        this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record.id, this.db.dialect.searchText(entry.fts(stored)));
       }
       /**
        * REENTRANT — every other write primitive (create, supersede, …) already
@@ -9494,16 +11148,55 @@ var init_dist2 = __esm({
        * whole thing exactly once.
        */
       txDepth = 0;
+      /** Open read transactions on this handle (readTx). A write may not start inside one. */
+      readDepth = 0;
+      /**
+       * A multi-statement read sees one snapshot (decision
+       * postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump,
+       * point 5): it joins an open write or read transaction, or else opens the
+       * driver's read transaction (REPEATABLE READ READ ONLY on Postgres). A driver
+       * with no beginRead (SQLite) keeps its autocommit reads.
+       */
+      readTx(fn) {
+        if (this.txDepth > 0 || this.readDepth > 0 || !this.db.beginRead)
+          return fn();
+        if (this.db.beginReadDeferred)
+          this.db.beginReadDeferred();
+        else
+          this.db.beginRead();
+        this.readDepth++;
+        let ok = false;
+        try {
+          const result = fn();
+          ok = true;
+          return result;
+        } finally {
+          this.readDepth--;
+          if (ok) {
+            this.db.endRead?.();
+          } else {
+            try {
+              this.db.endRead?.();
+            } catch {
+            }
+          }
+        }
+      }
       tx(fn) {
         this.assertV2Surface("transaction");
         if (this.txDepth > 0) {
           fn();
           return;
         }
+        if (this.readDepth > 0) {
+          throw new Error("SterlingStore: a write cannot start inside a read transaction (readTx); nothing was written.");
+        }
         this.db.begin();
         this.txDepth++;
         try {
           this.assertLiveSchemaVersion("transaction");
+          if (this.db.prepare("SELECT 1 FROM store_meta WHERE key = 'move_fence'").get())
+            throw new StoreMovedError(this.dbPath);
           fn();
           this.db.commit();
         } catch (e) {
@@ -9566,8 +11259,8 @@ __export(node_exports, {
   testPathGlobs: () => testPathGlobs
 });
 import { spawnSync } from "node:child_process";
-import { readFileSync, readdirSync, statSync as statSync2, existsSync as existsSync3 } from "node:fs";
-import { join as join6, relative, dirname as dirname5 } from "node:path";
+import { readFileSync as readFileSync3, readdirSync, statSync as statSync3, existsSync as existsSync3 } from "node:fs";
+import { join as join8, relative, dirname as dirname5 } from "node:path";
 function runTests({ cwd, scope = [] }) {
   const remapped = buildAndRemapTsScope(cwd, scope);
   if (remapped.buildOutput != null) {
@@ -9601,8 +11294,8 @@ function buildAndRemapTsScope(cwd, scope) {
     if (pkgDir) pkgDirs.add(pkgDir);
   }
   for (const pkgDir of pkgDirs) {
-    const tsc = join6(cwd, "node_modules", "typescript", "bin", "tsc");
-    const build = spawnSync(process.execPath, [tsc, "-p", join6(pkgDir, "tsconfig.json")], { cwd, encoding: "utf8", timeout: 12e4 });
+    const tsc = join8(cwd, "node_modules", "typescript", "bin", "tsc");
+    const build = spawnSync(process.execPath, [tsc, "-p", join8(pkgDir, "tsconfig.json")], { cwd, encoding: "utf8", timeout: 12e4 });
     if (build.error) return { scope, buildOutput: String(build.error) };
     if (build.status !== 0) return { scope, buildOutput: `${build.stdout ?? ""}
 ${build.stderr ?? ""}` };
@@ -9618,12 +11311,12 @@ ${build.stderr ?? ""}` };
 function findPackageDir(cwd, file) {
   let dir = dirname5(file);
   while (dir && dir !== "." && dir !== "/") {
-    if (existsSync3(join6(cwd, dir, "tsconfig.json"))) return dir;
+    if (existsSync3(join8(cwd, dir, "tsconfig.json"))) return dir;
     const parent = dirname5(dir);
     if (parent === dir) break;
     dir = parent;
   }
-  return existsSync3(join6(cwd, "tsconfig.json")) ? "." : null;
+  return existsSync3(join8(cwd, "tsconfig.json")) ? "." : null;
 }
 function staticWiring({ cwd, scope = [] }) {
   const scopeSet = new Set(scope.map((p) => p.replace(/\\/g, "/")));
@@ -9631,7 +11324,7 @@ function staticWiring({ cwd, scope = [] }) {
   const exportsByFile = [];
   for (const file of allFiles) {
     if (!scopeSet.has(file)) continue;
-    const content = readFileSync(join6(cwd, file), "utf8");
+    const content = readFileSync3(join8(cwd, file), "utf8");
     const names = /* @__PURE__ */ new Set();
     for (const m of content.matchAll(/export\s+(?:async\s+)?(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)/g)) {
       names.add(m[1]);
@@ -9655,7 +11348,7 @@ function staticWiring({ cwd, scope = [] }) {
       let testRef = false;
       for (const other of allFiles) {
         if (other === file) continue;
-        if (!re.test(readFileSync(join6(cwd, other), "utf8"))) continue;
+        if (!re.test(readFileSync3(join8(cwd, other), "utf8"))) continue;
         if (isTest(other)) testRef = true;
         else {
           nonTestRef = true;
@@ -9669,8 +11362,8 @@ function staticWiring({ cwd, scope = [] }) {
 }
 function walkSources(cwd, dir = cwd, out = []) {
   for (const entry of readdirSync(dir)) {
-    const full = join6(dir, entry);
-    const stat = statSync2(full);
+    const full = join8(dir, entry);
+    const stat = statSync3(full);
     if (stat.isDirectory()) {
       if (!SKIP_DIRS.has(entry)) walkSources(cwd, full, out);
     } else if (/\.(mjs|js|ts|tsx|jsx)$/.test(entry)) {
@@ -9760,7 +11453,7 @@ __export(pester_exports, {
 });
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname as dirname6, join as join7 } from "node:path";
+import { dirname as dirname6, join as join9 } from "node:path";
 function powershellExe() {
   if (psExe) return psExe;
   const probe = spawnSync2("pwsh", ["-NoProfile", "-Command", "exit 0"], { encoding: "utf8" });
@@ -9802,7 +11495,7 @@ var init_pester = __esm({
     capabilities3 = { mutation: false, static_wiring: false };
     testPathGlobs3 = ["**/*.Tests.ps1", "tests/**/*.ps1"];
     runCommands3 = { test: "Invoke-Pester" };
-    RUNNER = join7(dirname6(fileURLToPath(new URL("../scripts/adapters/pester.mjs", import.meta.url).href)), "run-pester.ps1");
+    RUNNER = join9(dirname6(fileURLToPath(new URL("../scripts/adapters/pester.mjs", import.meta.url).href)), "run-pester.ps1");
     START = "@@PESTER_JSON_START@@";
     END = "@@PESTER_JSON_END@@";
   }
@@ -9829,9 +11522,9 @@ __export(resolve_exports, {
   loadAdapterRegistry: () => loadAdapterRegistry,
   resolveToolchains: () => resolveToolchains
 });
-import { readFileSync as readFileSync2 } from "node:fs";
+import { readFileSync as readFileSync4 } from "node:fs";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-import { dirname as dirname7, join as join8 } from "node:path";
+import { dirname as dirname7, join as join10 } from "node:path";
 function importAdapterModule(module) {
   if (typeof module !== "string" || !module.endsWith(".mjs")) {
     throw new Error(`adapter registry: module ${JSON.stringify(module)} must be a .mjs file`);
@@ -9839,7 +11532,7 @@ function importAdapterModule(module) {
   return globImport_mjs(`./${module.slice(0, -".mjs".length)}.mjs`);
 }
 function loadAdapterRegistry(dir = here) {
-  const registry2 = JSON.parse(readFileSync2(join8(dir, "registry.json"), "utf8"));
+  const registry2 = JSON.parse(readFileSync4(join10(dir, "registry.json"), "utf8"));
   if (registry2.version !== 1 || !Array.isArray(registry2.adapters)) {
     throw new Error("adapter registry: unsupported shape (expected {version: 1, adapters: []})");
   }
@@ -9904,9 +11597,9 @@ var init_resolve = __esm({
 // scripts/init-impl.mjs
 init_dist();
 init_dist2();
-import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync14, writeFileSync as writeFileSync7, appendFileSync as appendFileSync3, statSync as statSync6, unlinkSync as unlinkSync6, renameSync as renameSync3, realpathSync as realpathSync6 } from "node:fs";
+import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync16, writeFileSync as writeFileSync7, appendFileSync as appendFileSync3, statSync as statSync7, unlinkSync as unlinkSync6, renameSync as renameSync3, realpathSync as realpathSync6 } from "node:fs";
 import { spawnSync as spawnSync10 } from "node:child_process";
-import { join as join22, resolve as resolve6, dirname as dirname10, basename as basename2 } from "node:path";
+import { join as join24, resolve as resolve7, dirname as dirname10, basename as basename2 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 
 // scripts/lib/project.mjs
@@ -9914,9 +11607,23 @@ init_dist();
 init_dist2();
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
+// packages/store/dist/routing.js
+init_dist();
+init_dist2();
+init_mounted();
+init_pg_bridge();
+init_pg_driver();
+init_dist();
+init_mounted();
+init_pg_driver();
+
+// packages/store/dist/broker-runtime.js
+init_dist();
+init_pg_bridge();
+
 // scripts/lib/store-path.mjs
-import { lstatSync, realpathSync as realpathSync2 } from "node:fs";
-import { join as join5, resolve, sep } from "node:path";
+import { lstatSync as lstatSync2, realpathSync as realpathSync2 } from "node:fs";
+import { join as join7, resolve as resolve2, sep } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target: target2 } = {}) {
     super(message);
@@ -9939,8 +11646,8 @@ function resolveStoreWritePath(root, ...segments) {
       );
     }
   }
-  const rootResolved = resolve(root);
-  const target2 = resolve(rootResolved, ...segments);
+  const rootResolved = resolve2(root);
+  const target2 = resolve2(rootResolved, ...segments);
   for (const raw of segments) {
     if (isAbsoluteSegment(raw)) {
       throw new StorePathContainmentError(
@@ -9959,7 +11666,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   if (target2 !== rootResolved && !target2.startsWith(rootResolved + sep)) {
     throw new StorePathContainmentError(
-      `resolveStoreWritePath: '${join5(...segments)}' resolves outside '${rootResolved}' (got '${target2}') \u2014 refusing`,
+      `resolveStoreWritePath: '${join7(...segments)}' resolves outside '${rootResolved}' (got '${target2}') \u2014 refusing`,
       { root: rootResolved, target: target2 }
     );
   }
@@ -9967,10 +11674,10 @@ function resolveStoreWritePath(root, ...segments) {
   let cursor = rootResolved;
   let deepestExisting = rootResolved;
   for (const part of relParts) {
-    const next = join5(cursor, part);
+    const next = join7(cursor, part);
     let st;
     try {
-      st = lstatSync(next);
+      st = lstatSync2(next);
     } catch (e) {
       if (e && e.code === "ENOENT") break;
       throw new StorePathContainmentError(
@@ -10032,7 +11739,7 @@ function resolveStoreWritePath(root, ...segments) {
     );
   }
   const suffix = target2.slice(deepestExisting.length);
-  const reconstructed = suffix ? join5(realDeepest, suffix) : realDeepest;
+  const reconstructed = suffix ? join7(realDeepest, suffix) : realDeepest;
   if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target2}') resolves outside the project \u2014 refusing, nothing was written`,
@@ -10120,8 +11827,8 @@ init_resolve();
 // scripts/lib/agent-distribution.mjs
 init_dist();
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync3, writeFileSync, readdirSync as readdirSync2, existsSync as existsSync4, mkdirSync as mkdirSync4, statSync as statSync3, lstatSync as lstatSync2, unlinkSync, renameSync, linkSync } from "node:fs";
-import { join as join9 } from "node:path";
+import { readFileSync as readFileSync5, writeFileSync, readdirSync as readdirSync2, existsSync as existsSync4, mkdirSync as mkdirSync4, statSync as statSync4, lstatSync as lstatSync3, unlinkSync, renameSync, linkSync } from "node:fs";
+import { join as join11 } from "node:path";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -10409,7 +12116,7 @@ function validateOpenCodeEntry(entry, where) {
   }
 }
 function loadRegistry(registryPath2) {
-  const registry2 = JSON.parse(readFileSync3(registryPath2, "utf8"));
+  const registry2 = JSON.parse(readFileSync5(registryPath2, "utf8"));
   if (registry2.version !== 1 || !Array.isArray(registry2.agents)) {
     throw new Error(`agent registry ${registryPath2}: unsupported shape (expected {version: 1, agents: []})`);
   }
@@ -10454,7 +12161,7 @@ function prepareRegisteredAgents({ templatesDir, registryPath: registryPath2, pl
     }
   }
   return registry2.agents.map((entry) => {
-    const templateContent = readFileSync3(join9(templatesDir, entry.file), "utf8");
+    const templateContent = readFileSync5(join11(templatesDir, entry.file), "utf8");
     const { name: name4, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars, config });
     if (name4 !== entry.name) {
       throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name4}'`);
@@ -10472,7 +12179,7 @@ function retirementRefuseInstruction(name4) {
   ].join("\n");
 }
 function retireAgents({ targetAgentsDir, registryNames, fs = {} }) {
-  const io = { readdirSync: readdirSync2, lstatSync: lstatSync2, readFileSync: readFileSync3, unlinkSync, renameSync, linkSync, ...fs };
+  const io = { readdirSync: readdirSync2, lstatSync: lstatSync3, readFileSync: readFileSync5, unlinkSync, renameSync, linkSync, ...fs };
   const report = [];
   let entries2;
   try {
@@ -10485,7 +12192,7 @@ Unable to scan the agent directory: ${err?.code ?? err?.message ?? err}` }];
     if (!filename.endsWith(".md")) continue;
     const name4 = filename.slice(0, -3);
     if (registryNames.has(name4)) continue;
-    const path = join9(targetAgentsDir, filename);
+    const path = join11(targetAgentsDir, filename);
     let stat;
     try {
       stat = io.lstatSync(path);
@@ -10523,7 +12230,7 @@ Unable to read the file: ${err?.code ?? err?.message ?? err}` });
       report.push({ name: name4, status: "retired_but_modified", refused: true, instruction: retirementRefuseInstruction(name4) });
       continue;
     }
-    const quarantine = join9(targetAgentsDir, `.sterling-retire-${name4}-${randomUUID2()}`);
+    const quarantine = join11(targetAgentsDir, `.sterling-retire-${name4}-${randomUUID2()}`);
     const verifyQuarantine = () => {
       const qstat = io.lstatSync(quarantine);
       if (!qstat.isFile()) throw new Error("quarantine is not a regular file");
@@ -10587,14 +12294,14 @@ function syncAgents({ templatesDir, registryPath: registryPath2, targetAgentsDir
   mkdirSync4(targetAgentsDir, { recursive: true });
   const report = [];
   for (const entry of prepared) {
-    const installedPath = join9(targetAgentsDir, `${entry.name}.md`);
+    const installedPath = join11(targetAgentsDir, `${entry.name}.md`);
     const renderCandidate = () => entry.installedContent;
     if (!existsSync4(installedPath)) {
       writeFileSync(installedPath, renderCandidate());
       report.push({ name: entry.name, status: "installed" });
       continue;
     }
-    const installed = readFileSync3(installedPath, "utf8");
+    const installed = readFileSync5(installedPath, "utf8");
     const header = parseInstalledHeader(installed);
     if (!header) {
       report.push({ name: entry.name, status: "foreign_file", refused: true, instruction: foreignFileInstruction(entry.name) });
@@ -10644,12 +12351,12 @@ function syncAgents({ templatesDir, registryPath: registryPath2, targetAgentsDir
 }
 var CONDUCTOR_ACTIVATION_SUCCESS_STATUSES = /* @__PURE__ */ new Set(["installed", "up_to_date", "refreshed", "header_repaired"]);
 function ensureConductorActivation(targetDir, agentResults) {
-  const settingsPath = join9(targetDir, ".claude", "settings.json");
+  const settingsPath = join11(targetDir, ".claude", "settings.json");
   let parsed;
   let eol = "\n";
   let trailingNewline = true;
   if (existsSync4(settingsPath)) {
-    let raw = readFileSync3(settingsPath, "utf8");
+    let raw = readFileSync5(settingsPath, "utf8");
     if (raw.charCodeAt(0) === 65279) raw = raw.slice(1);
     eol = raw.includes("\r\n") ? "\r\n" : "\n";
     trailingNewline = /\r?\n$/.test(raw);
@@ -10698,7 +12405,7 @@ function ensureConductorActivation(targetDir, agentResults) {
   if (result.activation !== "written" && result.autoMemory !== "written") return result;
   if (result.activation === "written") parsed.agent = "conductor";
   if (result.autoMemory === "written") parsed.autoMemoryEnabled = false;
-  mkdirSync4(join9(targetDir, ".claude"), { recursive: true });
+  mkdirSync4(join11(targetDir, ".claude"), { recursive: true });
   const tmp = `${settingsPath}.tmp-${randomUUID2()}`;
   let body = JSON.stringify(parsed, null, 2);
   if (eol === "\r\n") body = body.replace(/\n/g, "\r\n");
@@ -10710,11 +12417,11 @@ function ensureConductorActivation(targetDir, agentResults) {
 }
 
 // scripts/lib/opencode-agents.mjs
-import { readFileSync as readFileSync5 } from "node:fs";
+import { readFileSync as readFileSync7 } from "node:fs";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync3, readFileSync as readFileSync4, readdirSync as readdirSync3, mkdirSync as mkdirSync5, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync2, constants } from "node:fs";
-import { join as join10, resolve as resolve2 } from "node:path";
+import { lstatSync as lstatSync4, readFileSync as readFileSync6, readdirSync as readdirSync3, mkdirSync as mkdirSync5, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { join as join12, resolve as resolve3 } from "node:path";
 var ContainmentError = class extends Error {
   constructor(message) {
     super(message);
@@ -10723,7 +12430,7 @@ var ContainmentError = class extends Error {
 };
 var lstatOrNull = (p) => {
   try {
-    return lstatSync3(p);
+    return lstatSync4(p);
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     throw e;
@@ -10732,9 +12439,9 @@ var lstatOrNull = (p) => {
 function containedPath(root, rel, leaf) {
   const segments = rel.split("/").filter(Boolean);
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
-  let cursor = resolve2(root);
+  let cursor = resolve3(root);
   for (const [index, part] of segments.entries()) {
-    cursor = join10(cursor, part);
+    cursor = join12(cursor, part);
     const st = lstatOrNull(cursor);
     if (!st) break;
     const isLeaf = index === segments.length - 1;
@@ -10754,7 +12461,7 @@ function existsContained(root, rel, leaf) {
   return lstatOrNull(containedPath(root, rel, leaf)) !== null;
 }
 function readContained(root, rel) {
-  return readFileSync4(containedPath(root, rel, "file"), "utf8");
+  return readFileSync6(containedPath(root, rel, "file"), "utf8");
 }
 function mkdirContained(root, rel) {
   const segments = rel.split("/").filter(Boolean);
@@ -10802,7 +12509,7 @@ function ignoredRemedy(ignored) {
 }
 
 // scripts/lib/opencode-agents.mjs
-import { join as join11 } from "node:path";
+import { join as join13 } from "node:path";
 var OPENCODE_RENDERER = "opencode/1";
 var OPENCODE_AGENTS_DIR = ".opencode/agents";
 var OPENCODE_HEADER_RE = /^<!-- sterling-portable renderer=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
@@ -10888,7 +12595,7 @@ function syncOne(targetDir, candidate) {
 function syncOpenCodeAgents({ registryPath: registryPath2, templatesDir, targetDir, renderer = OPENCODE_RENDERER }) {
   const entries2 = portableAgentEntries(loadRegistry(registryPath2));
   const rendered = entries2.map((entry) => {
-    const out = renderOpenCodeAgent(readFileSync5(join11(templatesDir, entry.file), "utf8"), entry.file, entry.opencode, renderer);
+    const out = renderOpenCodeAgent(readFileSync7(join13(templatesDir, entry.file), "utf8"), entry.file, entry.opencode, renderer);
     if (out.name !== entry.name) throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${out.name}'`);
     return out;
   });
@@ -10914,24 +12621,22 @@ function syncOpenCodeAgents({ registryPath: registryPath2, templatesDir, targetD
 // scripts/lib/handoff-projection.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { existsSync as existsSync5 } from "node:fs";
-import { join as join12, resolve as resolve3 } from "node:path";
-var fwd = (p) => p.replace(/\\/g, "/");
+import { join as join14, resolve as resolve4 } from "node:path";
+init_dist();
+var fwd2 = (p) => p.replace(/\\/g, "/");
 function isSterlingClone(root, pluginRoot2) {
-  if (fwd(resolve3(root)) === fwd(resolve3(process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot2))) return true;
+  if (fwd2(resolve4(root)) === fwd2(resolve4(process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot2))) return true;
   const manifest = ".claude-plugin/plugin.json";
   if (!existsContained(root, manifest, "file") || !existsContained(root, "scripts/architecture-projection.mjs", "file")) return false;
   return JSON.parse(readContained(root, manifest)).name === "sterling";
 }
-var PROJECT_MODES = ["hobby", "work"];
-var ProjectModeError = class extends Error {
-};
-var CONFIG_REL = ".sterling/config.json";
+var CONFIG_REL2 = ".sterling/config.json";
 function readRawConfig(root, ErrorClass, subject) {
-  const where = `${fwd(resolve3(root))}/${CONFIG_REL}`;
-  if (!existsContained(root, CONFIG_REL, "file")) return { where, parsed: void 0 };
+  const where = `${fwd2(resolve4(root))}/${CONFIG_REL2}`;
+  if (!existsContained(root, CONFIG_REL2, "file")) return { where, parsed: void 0 };
   let parsed;
   try {
-    parsed = JSON.parse(readContained(root, CONFIG_REL));
+    parsed = JSON.parse(readContained(root, CONFIG_REL2));
   } catch (err) {
     throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
   }
@@ -10939,14 +12644,6 @@ function readRawConfig(root, ErrorClass, subject) {
     throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
   }
   return { where, parsed };
-}
-function readProjectMode(root) {
-  const { where, parsed } = readRawConfig(root, ProjectModeError, "the project mode");
-  if (parsed === void 0 || parsed.mode === void 0) return "hobby";
-  if (!PROJECT_MODES.includes(parsed.mode)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
-  }
-  return parsed.mode;
 }
 var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
 var HANDOFF_OFF_DETAIL = "handoff files are off (config.handoff.enabled is not true: the portable OpenCode agents and the handoff projection are not written; existing files are no longer maintained, and nothing is deleted)";
@@ -10973,7 +12670,7 @@ function trackedHandoffFiles(root, { spawn = spawnSync4 } = {}) {
   if (!existsSync5(root)) return { files: [], unknown: null };
   const inside = run(["rev-parse", "--is-inside-work-tree"]);
   if (inside.failed) {
-    if (inside.notARepo && !existsSync5(join12(root, ".git"))) return { files: [], unknown: null };
+    if (inside.notARepo && !existsSync5(join14(root, ".git"))) return { files: [], unknown: null };
     return { files: [], unknown: inside.failed };
   }
   if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
@@ -11001,7 +12698,7 @@ function handoffFilesOnDisk(root) {
   }
   return found;
 }
-function handoffSettingOf(parsed, root, where = CONFIG_REL) {
+function handoffSettingOf(parsed, root, where = CONFIG_REL2) {
   const block = parsed?.handoff;
   if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
     throw new HandoffSettingError(`config.handoff is ${JSON.stringify(block)} in ${where} \u2014 it must be an object like {"enabled": true}; switch it in the TUI System tab or fix the file`);
@@ -11047,9 +12744,51 @@ function isOwnedExport(root, rel) {
   return existsContained(root, rel, "file") && isHandoffOwned(readContained(root, rel), rel);
 }
 
+// scripts/lib/project-identity.mjs
+init_dist();
+import { randomUUID as randomUUID3 } from "node:crypto";
+function ensureProjectIdentity(root) {
+  let identity;
+  try {
+    identity = readProjectIdentity(root);
+  } catch (err) {
+    if (!(err instanceof ProjectIdentityError)) throw err;
+    return { status: "invalid", error: err.message };
+  }
+  if (identity) return { status: "exists", project_id: identity.project_id };
+  const project_id = randomUUID3();
+  writeContained(root, PROJECT_IDENTITY_REL, `${JSON.stringify({ project_id }, null, 2)}
+`);
+  return { status: "created", project_id };
+}
+var IGNORE_DIR = ".sterling/";
+var IGNORE_ALL = ".sterling/*";
+var IGNORE_KEEP_IDENTITY = `!${PROJECT_IDENTITY_REL}`;
+var IGNORE_NESTED = "*/**/.sterling/";
+function withIdentityIgnore(text, { addIfAbsent }) {
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const lines = text === "" ? [] : text.split(/\r?\n/);
+  const hadFinalNewline = lines.length > 0 && lines[lines.length - 1] === "";
+  if (hadFinalNewline) lines.pop();
+  const out = [];
+  let placed = false;
+  for (const line of lines) {
+    if (line === IGNORE_DIR || line === IGNORE_ALL) {
+      if (!placed) out.push(IGNORE_ALL, IGNORE_KEEP_IDENTITY);
+      placed = true;
+    } else if (line !== IGNORE_KEEP_IDENTITY) {
+      out.push(line);
+    }
+  }
+  if (!placed && addIfAbsent) out.push(IGNORE_ALL, IGNORE_KEEP_IDENTITY);
+  const changed = out.length !== lines.length || out.some((line, i) => line !== lines[i]);
+  if (!changed) return { text, changed: false };
+  return { text: out.length ? `${out.join(eol)}${eol}` : "", changed: true };
+}
+
 // scripts/lib/update-launcher.mjs
-import { existsSync as existsSync8, readFileSync as readFileSync7, writeFileSync as writeFileSync2, appendFileSync, unlinkSync as unlinkSync3 } from "node:fs";
-import { join as join15 } from "node:path";
+import { existsSync as existsSync8, readFileSync as readFileSync9, writeFileSync as writeFileSync2, appendFileSync, unlinkSync as unlinkSync3 } from "node:fs";
+import { join as join17 } from "node:path";
 
 // scripts/lib/generated-marker.mjs
 import { createHash as createHash2 } from "node:crypto";
@@ -11074,13 +12813,13 @@ function verifyStamp(content, prefix) {
 
 // scripts/lib/installed-copy.mjs
 import { existsSync as existsSync7 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { join as join14 } from "node:path";
+import { homedir as homedir5 } from "node:os";
+import { join as join16 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync6, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync3 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join13, resolve as resolve4, sep as sep2 } from "node:path";
+import { existsSync as existsSync6, readFileSync as readFileSync8, readdirSync as readdirSync4, realpathSync as realpathSync3 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join15, resolve as resolve5, sep as sep2 } from "node:path";
 
 // scripts/lib/jsonc.mjs
 function parseJsonc(text) {
@@ -11249,7 +12988,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync6, readFileSync6, readdirSync4, join13, homedir3);
+)(existsSync6, readFileSync8, readdirSync4, join15, homedir4);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -11275,11 +13014,11 @@ function canonical(p) {
   try {
     return realpathSync3(p);
   } catch (err) {
-    if (err?.code === "ENOENT") return resolve4(p);
+    if (err?.code === "ENOENT") return resolve5(p);
     throw err;
   }
 }
-function installHostOf(root, { env = process.env, home = homedir3() } = {}) {
+function installHostOf(root, { env = process.env, home = homedir4() } = {}) {
   const real2 = canonical(root);
   for (const { host, dir } of installRoots(env, home)) {
     if (real2.startsWith(canonical(dir) + sep2)) return host;
@@ -11288,11 +13027,11 @@ function installHostOf(root, { env = process.env, home = homedir3() } = {}) {
 }
 
 // scripts/lib/installed-copy.mjs
-function isInstalledCopy(root, { env = process.env, home = homedir4() } = {}) {
+function isInstalledCopy(root, { env = process.env, home = homedir5() } = {}) {
   if (typeof root !== "string" || root.length === 0) {
     throw new TypeError(`isInstalledCopy: root must be a non-empty path string, got ${JSON.stringify(root)}`);
   }
-  if (!existsSync7(join14(root, ".git"))) return true;
+  if (!existsSync7(join16(root, ".git"))) return true;
   return installHostOf(root, { env, home }) !== null;
 }
 
@@ -11306,7 +13045,7 @@ var toWindowsPath = (p) => {
 var crlf = (s2) => s2.replace(/\r?\n/g, "\r\n");
 var normalize3 = (s2) => s2.replace(/\r\n/g, "\n");
 function renderUpdateLauncher(pluginRoot2) {
-  const template = readFileSync7(join15(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL), "utf8");
+  const template = readFileSync9(join17(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL), "utf8");
   const posix = pluginRoot2.replace(/\\/g, "/");
   const cdPath = /^\/mnt\/[a-z](\/|$)/.test(posix) || !posix.startsWith("/") ? toWindowsPath(posix) : posix;
   const body = template.replaceAll("{{WIN_PLUGIN_DIR}}", cdPath);
@@ -11334,28 +13073,28 @@ function ensureUpdateLauncher(target2, pluginRoot2) {
     return { status: "skipped", detail: `target missing: ${target2}` };
   }
   if (isInstalledCopy(pluginRoot2)) {
-    const launcherPath2 = join15(target2, UPDATE_LAUNCHER_NAME);
+    const launcherPath2 = join17(target2, UPDATE_LAUNCHER_NAME);
     if (!existsSync8(launcherPath2)) {
       return { status: "skipped", detail: "installed plugin copy \u2014 updates come from the plugin manager, there is no clone to update" };
     }
-    const clonePath = cloneUpdateLauncherTarget(readFileSync7(launcherPath2, "utf8"));
+    const clonePath = cloneUpdateLauncherTarget(readFileSync9(launcherPath2, "utf8"));
     if (clonePath === null) {
       return { status: "differs", detail: "left untouched \u2014 not the generated clone-updater shape; on an installed plugin copy /sterling:update refuses and updates come from the plugin manager, so delete it yourself if it only updated a Sterling clone" };
     }
     unlinkSync3(launcherPath2);
     return { status: "removed", detail: `deleted \u2014 it ran /sterling:update in the clone ${clonePath}; on an installed plugin copy updates come from the plugin manager`, clonePath };
   }
-  if (!existsSync8(join15(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL))) {
+  if (!existsSync8(join17(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL))) {
     return { status: "skipped", detail: `templates/${UPDATE_TEMPLATE_WSL} missing in the clone` };
   }
   const expected = renderUpdateLauncher(pluginRoot2);
-  const launcherPath = join15(target2, UPDATE_LAUNCHER_NAME);
+  const launcherPath = join17(target2, UPDATE_LAUNCHER_NAME);
   let result;
   if (!existsSync8(launcherPath)) {
     writeFileSync2(launcherPath, expected);
     result = { status: "created", detail: "double-click -> update the Sterling clone (no session in the loop)" };
   } else {
-    const diskNorm = normalize3(readFileSync7(launcherPath, "utf8"));
+    const diskNorm = normalize3(readFileSync9(launcherPath, "utf8"));
     if (diskNorm === normalize3(expected)) {
       result = { status: "matches", detail: "unchanged" };
     } else {
@@ -11368,8 +13107,8 @@ function ensureUpdateLauncher(target2, pluginRoot2) {
       }
     }
   }
-  const gitignorePath2 = join15(target2, ".gitignore");
-  const existing = existsSync8(gitignorePath2) ? readFileSync7(gitignorePath2, "utf8") : "";
+  const gitignorePath2 = join17(target2, ".gitignore");
+  const existing = existsSync8(gitignorePath2) ? readFileSync9(gitignorePath2, "utf8") : "";
   if (!existing.split(/\r?\n/).includes(UPDATE_LAUNCHER_NAME)) {
     appendFileSync(gitignorePath2, `${existing && !existing.endsWith("\n") ? "\n" : ""}${UPDATE_LAUNCHER_NAME}
 `);
@@ -11378,14 +13117,14 @@ function ensureUpdateLauncher(target2, pluginRoot2) {
 }
 
 // scripts/lib/consumer-checks.mjs
-import { existsSync as existsSync9, readFileSync as readFileSync8, writeFileSync as writeFileSync3, appendFileSync as appendFileSync2 } from "node:fs";
-import { join as join16 } from "node:path";
+import { existsSync as existsSync9, readFileSync as readFileSync10, writeFileSync as writeFileSync3, appendFileSync as appendFileSync2 } from "node:fs";
+import { join as join18 } from "node:path";
 var CONSUMER_CHECK_LAUNCHER_NAME = "sterling-check.mjs";
 var normalize4 = (s2) => s2.replace(/\r\n/g, "\n");
-var fwd2 = (p) => p.replace(/\\/g, "/");
+var fwd3 = (p) => p.replace(/\\/g, "/");
 function renderConsumerCheckLauncher(pluginRoot2, { installed = isInstalledCopy(pluginRoot2), host = installHostOf(pluginRoot2) } = {}) {
-  const template = readFileSync8(join16(pluginRoot2, "templates", "check-consumer.mjs"), "utf8");
-  const pluginDirExpr = installed ? "newestInstalledPluginDir()" : JSON.stringify(fwd2(pluginRoot2));
+  const template = readFileSync10(join18(pluginRoot2, "templates", "check-consumer.mjs"), "utf8");
+  const pluginDirExpr = installed ? "newestInstalledPluginDir()" : JSON.stringify(fwd3(pluginRoot2));
   const resolver = `${RESOLVER_SOURCE.trim()}
 
 function newestInstalledPluginDir() {
@@ -11403,17 +13142,17 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
   if (!existsSync9(target2)) {
     return { status: "skipped", detail: `target missing: ${target2}` };
   }
-  if (!existsSync9(join16(pluginRoot2, "templates", "check-consumer.mjs"))) {
+  if (!existsSync9(join18(pluginRoot2, "templates", "check-consumer.mjs"))) {
     return { status: "skipped", detail: "templates/check-consumer.mjs missing in the clone" };
   }
   const expected = renderConsumerCheckLauncher(pluginRoot2);
-  const launcherPath = join16(target2, CONSUMER_CHECK_LAUNCHER_NAME);
+  const launcherPath = join18(target2, CONSUMER_CHECK_LAUNCHER_NAME);
   let result;
   if (!existsSync9(launcherPath)) {
     writeFileSync3(launcherPath, expected);
     result = { status: "created", detail: "node sterling-check.mjs \u2014 runs record-citations + stale-claim checks against this project" };
   } else {
-    const diskNorm = normalize4(readFileSync8(launcherPath, "utf8"));
+    const diskNorm = normalize4(readFileSync10(launcherPath, "utf8"));
     if (diskNorm === normalize4(expected)) {
       result = { status: "matches", detail: "unchanged" };
     } else {
@@ -11426,8 +13165,8 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
       }
     }
   }
-  const gitignorePath2 = join16(target2, ".gitignore");
-  const existing = existsSync9(gitignorePath2) ? readFileSync8(gitignorePath2, "utf8") : "";
+  const gitignorePath2 = join18(target2, ".gitignore");
+  const existing = existsSync9(gitignorePath2) ? readFileSync10(gitignorePath2, "utf8") : "";
   if (!existing.split(/\r?\n/).includes(CONSUMER_CHECK_LAUNCHER_NAME)) {
     appendFileSync2(gitignorePath2, `${existing && !existing.endsWith("\n") ? "\n" : ""}${CONSUMER_CHECK_LAUNCHER_NAME}
 `);
@@ -11437,14 +13176,14 @@ function ensureConsumerCheckLauncher(target2, pluginRoot2) {
 
 // scripts/lib/codex-mcp.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { readFileSync as readFileSync9 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
-import { join as join17 } from "node:path";
+import { readFileSync as readFileSync11 } from "node:fs";
+import { homedir as homedir6 } from "node:os";
+import { join as join19 } from "node:path";
 var PROBE_TIMEOUT_MS = 5e3;
-function probeCodex({ spawnFn = spawnSync5, timeoutMs = PROBE_TIMEOUT_MS, env = process.env } = {}) {
+function probeCodex({ spawnFn = spawnSync5, timeoutMs: timeoutMs2 = PROBE_TIMEOUT_MS, env = process.env } = {}) {
   const run = (args) => {
     try {
-      return spawnFn("codex", args, { encoding: "utf8", timeout: timeoutMs, env });
+      return spawnFn("codex", args, { encoding: "utf8", timeout: timeoutMs2, env });
     } catch {
       return null;
     }
@@ -11488,8 +13227,8 @@ function codexSkipLine(reason, version) {
   const text = reason === "mcp-server-missing" ? `Codex CLI ${version ?? "unknown version"} does not support \`mcp-server\`; the supported route is a user-scope pinned Codex MCP server (such as Codex 0.153.4)` : REASON_TEXT[reason] ?? reason;
   return `codex mcp: skipped \u2014 ${text}`;
 }
-function userScopeCodexServer({ env = process.env, home = homedir5(), readFile = readFileSync9 } = {}) {
-  const path = join17(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+function userScopeCodexServer({ env = process.env, home = homedir6(), readFile = readFileSync11 } = {}) {
+  const path = join19(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
   let raw;
   try {
     raw = readFile(path, "utf8");
@@ -11519,10 +13258,10 @@ function codexUserScopeLine(probe, { nodeBinDir, unreadable } = {}) {
 }
 
 // scripts/lib/launcher-tmux.mjs
-import { readFileSync as readFileSync10 } from "node:fs";
-import { join as join18 } from "node:path";
-var fwd3 = (p) => p.replace(/\\/g, "/");
-var AUTHORING_PATHS = (pluginRoot2) => [`PLUGIN_DIR="${fwd3(pluginRoot2)}"`, `TUI_BUNDLE="${fwd3(pluginRoot2)}/tui/sterling-tui.mjs"`].join("\n");
+import { readFileSync as readFileSync12 } from "node:fs";
+import { join as join20 } from "node:path";
+var fwd4 = (p) => p.replace(/\\/g, "/");
+var AUTHORING_PATHS = (pluginRoot2) => [`PLUGIN_DIR="${fwd4(pluginRoot2)}"`, `TUI_BUNDLE="${fwd4(pluginRoot2)}/tui/sterling-tui.mjs"`].join("\n");
 var INSTALLED_PATHS = [
   "# installed copy: nothing below names a versioned install directory; the newest",
   "# installed Sterling (Claude Code or OpenCode) is resolved when this runs",
@@ -11539,14 +13278,14 @@ var INSTALLED_PATHS = [
   ')"'
 ].join("\n");
 function renderTmuxLauncher(pluginRoot2, { session, splitPercent, installed = isInstalledCopy(pluginRoot2) }) {
-  return readFileSync10(join18(pluginRoot2, "templates", "launcher-tmux.sh"), "utf8").replaceAll("{{SESSION}}", () => session).replaceAll("{{PLUGIN_PATHS}}", () => installed ? INSTALLED_PATHS : AUTHORING_PATHS(pluginRoot2)).replaceAll("{{CLAUDE_PLUGIN_FLAG}}", () => installed ? "" : ' --plugin-dir "$PLUGIN_DIR"').replaceAll("{{SPLIT_RATIO}}", () => String(splitPercent));
+  return readFileSync12(join20(pluginRoot2, "templates", "launcher-tmux.sh"), "utf8").replaceAll("{{SESSION}}", () => session).replaceAll("{{PLUGIN_PATHS}}", () => installed ? INSTALLED_PATHS : AUTHORING_PATHS(pluginRoot2)).replaceAll("{{CLAUDE_PLUGIN_FLAG}}", () => installed ? "" : ' --plugin-dir "$PLUGIN_DIR"').replaceAll("{{SPLIT_RATIO}}", () => String(splitPercent));
 }
 
 // scripts/lib/launcher-history.mjs
 import { spawnSync as spawnSync6 } from "node:child_process";
-import { mkdirSync as mkdirSync6, mkdtempSync, readFileSync as readFileSync11, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync6, mkdtempSync, readFileSync as readFileSync13, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname as dirname8, join as join19 } from "node:path";
+import { dirname as dirname8, join as join21 } from "node:path";
 import { pathToFileURL } from "node:url";
 var LAUNCHER_TEMPLATES = ["launcher-tmux.sh", "launcher-win.bat", "tui-win.bat"];
 var LAUNCHER_HISTORY_REL = "bin/launcher-history.json";
@@ -11601,7 +13340,7 @@ var replayFailureLine = (failures, consequence) => {
   const detail = failures.length > 1 && reasons.every((r) => r === reasons[0]) ? `all: ${reasons[0]}` : failures.join("; ");
   return `launcher history: ${failures.length} earlier renderer version(s) could not be replayed (${detail}); ${consequence}`;
 };
-var currentText = (repoRoot, name4) => lf(readFileSync11(join19(repoRoot, "templates", name4), "utf8"));
+var currentText = (repoRoot, name4) => lf(readFileSync13(join21(repoRoot, "templates", name4), "utf8"));
 var defaultGit = (repoRoot) => (args, { input, encoding = "utf8" } = {}) => spawnSync6("git", args, { cwd: repoRoot, encoding, input, maxBuffer: 256 * 1024 * 1024 });
 function gitLog(git2, repoRoot, rels) {
   const log = git2(["log", "--full-history", "--format=%H", "--", ...rels]);
@@ -11651,7 +13390,7 @@ function rendererClosure(read) {
     if (src === null) return null;
     files[rel] = src;
     for (const m of src.matchAll(RELATIVE_SPECIFIER)) {
-      pending.push(join19(dirname8(rel), m[2]).split("\\").join("/"));
+      pending.push(join21(dirname8(rel), m[2]).split("\\").join("/"));
     }
   }
   return files;
@@ -11671,7 +13410,7 @@ function rendererClosures(blobs, shas) {
           break;
         }
         s2.files[rel] = src;
-        for (const m of src.matchAll(RELATIVE_SPECIFIER)) s2.next.push(join19(dirname8(rel), m[2]).split("\\").join("/"));
+        for (const m of src.matchAll(RELATIVE_SPECIFIER)) s2.next.push(join21(dirname8(rel), m[2]).split("\\").join("/"));
       }
     }
   }
@@ -11679,19 +13418,19 @@ function rendererClosures(blobs, shas) {
 }
 function replayRenderers(versions, spawn) {
   if (!versions.length) return [];
-  const root = mkdtempSync(join19(tmpdir(), "sterling-launcher-history-"));
+  const root = mkdtempSync(join21(tmpdir(), "sterling-launcher-history-"));
   try {
     const dirs = versions.map(({ files }, i) => {
-      const dir = join19(root, String(i));
+      const dir = join21(root, String(i));
       for (const [rel, src] of Object.entries(files)) {
-        mkdirSync6(join19(dir, dirname8(rel)), { recursive: true });
-        writeFileSync4(join19(dir, rel), src);
+        mkdirSync6(join21(dir, dirname8(rel)), { recursive: true });
+        writeFileSync4(join21(dir, rel), src);
       }
-      mkdirSync6(join19(dir, "templates"));
-      writeFileSync4(join19(dir, "templates", "launcher-tmux.sh"), "{{PLUGIN_PATHS}}");
+      mkdirSync6(join21(dir, "templates"));
+      writeFileSync4(join21(dir, "templates", "launcher-tmux.sh"), "{{PLUGIN_PATHS}}");
       return dir;
     });
-    const urls = dirs.map((dir) => pathToFileURL(join19(dir, RENDERER_REL)).href);
+    const urls = dirs.map((dir) => pathToFileURL(join21(dir, RENDERER_REL)).href);
     const program = `const dirs = ${JSON.stringify(dirs)};
 const urls = ${JSON.stringify(urls)};
 const out = [];
@@ -11728,7 +13467,7 @@ process.stdout.write(JSON.stringify(out));`;
 function gitHistory(repoRoot, git2, spawn) {
   if (isInstalledCopy(repoRoot)) return null;
   const blobs = gitBlobs(git2);
-  const closure = Object.keys(rendererClosure((rel) => readFileSync11(join19(repoRoot, rel), "utf8")));
+  const closure = Object.keys(rendererClosure((rel) => readFileSync13(join21(repoRoot, rel), "utf8")));
   const templateRels = LAUNCHER_TEMPLATES.map((name4) => `templates/${name4}`);
   const shas = gitLog(git2, repoRoot, [...templateRels, ...closure]);
   blobs.fetch(shas.flatMap((sha) => [...templateRels, ...closure].map((rel) => `${sha}:${rel}`)));
@@ -11758,7 +13497,7 @@ function gitHistory(repoRoot, git2, spawn) {
 function loadSnapshot(path) {
   let raw;
   try {
-    raw = readFileSync11(path, "utf8");
+    raw = readFileSync13(path, "utf8");
   } catch (err) {
     if (err?.code === "ENOENT") return { ok: false, reason: `${path} is missing` };
     throw err;
@@ -11783,7 +13522,7 @@ function historicalLauncherTemplates({ repoRoot, git: git2 = defaultGit(repoRoot
     }
     return { templates, installedBlocks: /* @__PURE__ */ new Set([INSTALLED_PATHS, ...fromGit.installedBlocks]), degraded: null, replayFailures: fromGit.replayFailures };
   }
-  const path = join19(repoRoot, LAUNCHER_HISTORY_REL);
+  const path = join21(repoRoot, LAUNCHER_HISTORY_REL);
   const snapshot = loadSnapshot(path);
   for (const name4 of LAUNCHER_TEMPLATES) templates.set(name4, snapshot.ok ? (snapshot.data[name4] ?? []).map(lf) : []);
   const installedBlocks = /* @__PURE__ */ new Set([INSTALLED_PATHS, ...snapshot.ok ? snapshot.data[INSTALLED_BLOCKS_KEY] ?? [] : []]);
@@ -11800,11 +13539,11 @@ function olderGeneratedLauncher(text, templateName, history) {
 
 // scripts/lib/consumer-cutover.mjs
 init_dist();
-import { chmodSync, existsSync as existsSync10, readFileSync as readFileSync12, realpathSync as realpathSync4, renameSync as renameSync2, statSync as statSync4, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
-import { randomUUID as randomUUID3 } from "node:crypto";
-import { homedir as homedir6 } from "node:os";
-import { join as join20 } from "node:path";
-var fwd4 = (p) => p.replace(/\\/g, "/");
+import { chmodSync, existsSync as existsSync10, readFileSync as readFileSync14, realpathSync as realpathSync4, renameSync as renameSync2, statSync as statSync5, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { homedir as homedir7 } from "node:os";
+import { join as join22 } from "node:path";
+var fwd5 = (p) => p.replace(/\\/g, "/");
 function cloneLauncherTarget(text) {
   const raw = text.replace(/\r\n/g, "\n").split("\n");
   const code = raw.map((l) => l.replace(/(^|\s)#.*$/, "").trimEnd());
@@ -11812,19 +13551,19 @@ function cloneLauncherTarget(text) {
   if (!flagLine) return null;
   const assigned = code.map((l) => /^\s*PLUGIN_DIR="([^"$]+)"$/.exec(l)).find(Boolean);
   const literal = /--plugin-dir[ =](?:"([^"$]+)"|([^\s"'$][^\s"']*))/.exec(flagLine);
-  const clonePath = assigned ? fwd4(assigned[1]) : literal ? fwd4(literal[1] ?? literal[2]) : null;
+  const clonePath = assigned ? fwd5(assigned[1]) : literal ? fwd5(literal[1] ?? literal[2]) : null;
   if (raw.some((l) => /^\s*#.*GENERATED by \/sterling:init/.test(l))) return { clonePath, signal: "generated-header" };
   if (clonePath && inspectClone(clonePath).kind === "clone") return { clonePath, signal: "sterling-clone" };
   return null;
 }
-function userSettingsPath({ env = process.env, home = homedir6() } = {}) {
-  return join20(env.CLAUDE_CONFIG_DIR || join20(home, ".claude"), "settings.json");
+function userSettingsPath({ env = process.env, home = homedir7() } = {}) {
+  return join22(env.CLAUDE_CONFIG_DIR || join22(home, ".claude"), "settings.json");
 }
 function knownMarketplacesPath({ env, home }) {
-  return join20(env.CLAUDE_CODE_PLUGIN_CACHE_DIR || join20(env.CLAUDE_CONFIG_DIR || join20(home, ".claude"), "plugins"), "known_marketplaces.json");
+  return join22(env.CLAUDE_CODE_PLUGIN_CACHE_DIR || join22(env.CLAUDE_CONFIG_DIR || join22(home, ".claude"), "plugins"), "known_marketplaces.json");
 }
 var isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-function readJsonObject(path, readFile) {
+function readJsonObject2(path, readFile) {
   let raw;
   try {
     raw = readFile(path, "utf8");
@@ -11843,14 +13582,14 @@ function readJsonObject(path, readFile) {
   return { value, eol: text.includes("\r\n") ? "\r\n" : "\n", trailingNewline: /\r?\n$/.test(text) };
 }
 var MANUAL = "To switch it on by hand: /plugin, Marketplaces, sterling, Enable auto-update.";
-function enableMarketplaceAutoUpdate({ env = process.env, home = homedir6(), readFile = readFileSync12, writeFile = writeFileSync5, rename = renameSync2 } = {}) {
+function enableMarketplaceAutoUpdate({ env = process.env, home = homedir7(), readFile = readFileSync14, writeFile = writeFileSync5, rename = renameSync2 } = {}) {
   const path = userSettingsPath({ env, home });
   const knownPath = knownMarketplacesPath({ env, home });
-  const where = fwd4(path);
-  const knownWhere = fwd4(knownPath);
+  const where = fwd5(path);
+  const knownWhere = fwd5(knownPath);
   const out = (status, line) => ({ status, path, line });
-  const stop = (status, file, why) => out(status, `plugin auto-update: not switched on, ${fwd4(file)} ${why}. ${MANUAL}`);
-  const settings = readJsonObject(path, readFile);
+  const stop = (status, file, why) => out(status, `plugin auto-update: not switched on, ${fwd5(file)} ${why}. ${MANUAL}`);
+  const settings = readJsonObject2(path, readFile);
   if (settings.missing) return stop("settings-missing", path, "does not exist, so init left it alone");
   if (settings.unreadable) return stop("settings-unreadable", path, `could not be read (${settings.unreadable}), so init left it alone`);
   if (settings.invalid) return stop("settings-invalid", path, `is ${settings.invalid}, so init left it alone`);
@@ -11862,7 +13601,7 @@ function enableMarketplaceAutoUpdate({ env = process.env, home = homedir6(), rea
   if (entry?.autoUpdate === false) {
     return out("explicit-off", `plugin auto-update: off by an explicit setting, "autoUpdate": false on extraKnownMarketplaces.sterling in ${where}. Init does not override it; set "autoUpdate": true there, or use /plugin, Marketplaces, sterling, Enable auto-update.`);
   }
-  const known = readJsonObject(knownPath, readFile);
+  const known = readJsonObject2(knownPath, readFile);
   if (known.missing) return stop("known-missing", knownPath, "does not exist, so init cannot tell whether the /plugin toggle is on");
   if (known.unreadable) return stop("known-unreadable", knownPath, `could not be read (${known.unreadable}), so init cannot tell whether the /plugin toggle is on`);
   if (known.invalid) return stop("known-invalid", knownPath, `is ${known.invalid}, so init cannot tell whether the /plugin toggle is on`);
@@ -11889,11 +13628,11 @@ function enableMarketplaceAutoUpdate({ env = process.env, home = homedir6(), rea
   let mode;
   try {
     target2 = realpathSync4(path);
-    mode = statSync4(target2).mode & 4095;
+    mode = statSync5(target2).mode & 4095;
   } catch (err) {
     return stop("settings-unwritable", path, `could not be resolved to the file it names (${err?.code ?? "unknown error"}), so init left it alone`);
   }
-  const tmp = `${target2}.tmp-${randomUUID3()}`;
+  const tmp = `${target2}.tmp-${randomUUID4()}`;
   try {
     writeFile(tmp, body, { mode });
     chmodSync(tmp, mode);
@@ -11909,18 +13648,18 @@ function enableMarketplaceAutoUpdate({ env = process.env, home = homedir6(), rea
 }
 function readJsonField(path, field) {
   try {
-    return { value: JSON.parse(readFileSync12(path, "utf8"))?.[field] };
+    return { value: JSON.parse(readFileSync14(path, "utf8"))?.[field] };
   } catch (err) {
     if (err?.code === "ENOENT" || err?.code === "ENOTDIR" || err instanceof SyntaxError) return { absent: true };
     return { error: err?.code ?? err?.message ?? String(err) };
   }
 }
 function inspectClone(dir) {
-  if (!existsSync10(join20(dir, ".git"))) return { kind: "not-clone" };
-  const name4 = readJsonField(join20(dir, ".claude-plugin", "plugin.json"), "name");
+  if (!existsSync10(join22(dir, ".git"))) return { kind: "not-clone" };
+  const name4 = readJsonField(join22(dir, ".claude-plugin", "plugin.json"), "name");
   if (name4.error) return { kind: "error", code: name4.error };
   if (name4.value !== "sterling") return { kind: "not-clone" };
-  const role = readJsonField(join20(dir, ".sterling", "config.json"), "machine_role");
+  const role = readJsonField(join22(dir, ".sterling", "config.json"), "machine_role");
   if (role.error) return { kind: "error", code: role.error };
   return { kind: "clone", authoring: role.value === "authoring" };
 }
@@ -11933,7 +13672,7 @@ var real = (p) => {
   }
 };
 function cloneCleanupLines(paths, liveProjectPaths2) {
-  const unique = [...new Set(paths.filter(Boolean).map((p) => trimSlash(fwd4(p))))];
+  const unique = [...new Set(paths.filter(Boolean).map((p) => trimSlash(fwd5(p))))];
   if (unique.length === 0) return [];
   const lines = ["old Sterling clone \u2014 this project used to run Sterling from a clone. Init never deletes a clone:"];
   for (const p of unique) {
@@ -11958,7 +13697,7 @@ function cloneCleanupLines(paths, liveProjectPaths2) {
       lines.push(`  ${p} \u2014 not a Sterling clone on this machine (already removed or moved); nothing to delete`);
     } else if (found.authoring) {
       lines.push(`  ${p} \u2014 this machine's authoring clone (machine_role authoring in its .sterling/config.json); keep it`);
-    } else if (existsSync10(join20(p, ".sterling", "sterling.db"))) {
+    } else if (existsSync10(join22(p, ".sterling", "sterling.db"))) {
       lines.push(`  ${p} \u2014 holds its own project store (.sterling/sterling.db), so it is a live Sterling project even if no registry lists it; keep it`);
     } else {
       lines.push(`  ${p} \u2014 delete it by hand once no project on this machine launches from it (rm -rf "${p}")`);
@@ -12118,9 +13857,9 @@ function renderUnavailable(reason) {
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync11, mkdirSync as mkdirSync7, readFileSync as readFileSync13, readdirSync as readdirSync5, realpathSync as realpathSync5, rmSync as rmSync3, statSync as statSync5, unlinkSync as unlinkSync5, writeFileSync as writeFileSync6 } from "node:fs";
-import { homedir as homedir7 } from "node:os";
-import { dirname as dirname9, isAbsolute, join as join21, resolve as resolve5 } from "node:path";
+import { existsSync as existsSync11, mkdirSync as mkdirSync7, readFileSync as readFileSync15, readdirSync as readdirSync5, realpathSync as realpathSync5, rmSync as rmSync3, statSync as statSync6, unlinkSync as unlinkSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { homedir as homedir8 } from "node:os";
+import { dirname as dirname9, isAbsolute, join as join23, resolve as resolve6 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
 var PROJECT_CONFIG_REL = ".opencode/opencode.json";
@@ -12132,13 +13871,13 @@ var PACKAGE_MARKER = "sterling-generated";
 var EXCLUDE_BEGIN = "# >>> sterling opencode (managed by Sterling init/update; per-user files, never committed)";
 var EXCLUDE_END = "# <<< sterling opencode";
 var FULL_HEADER_RE = /^<!-- sterling-full renderer=opencode-full\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
-var fwd5 = (p) => p.replace(/\\/g, "/");
+var fwd6 = (p) => p.replace(/\\/g, "/");
 var normalize5 = (s2) => s2.replace(/\r\n/g, "\n");
-function opencodeConfigDir({ env = process.env, home = homedir7() } = {}) {
-  return join21(env.XDG_CONFIG_HOME || join21(home, ".config"), "opencode");
+function opencodeConfigDir({ env = process.env, home = homedir8() } = {}) {
+  return join23(env.XDG_CONFIG_HOME || join23(home, ".config"), "opencode");
 }
-function mcpLauncherPath({ home = homedir7() } = {}) {
-  return join21(home, ".sterling", "opencode", "sterling-mcp.mjs");
+function mcpLauncherPath({ home = homedir8() } = {}) {
+  return join23(home, ".sterling", "opencode", "sterling-mcp.mjs");
 }
 function probeOpenCode({ env = process.env } = {}) {
   const r = spawnSync7("opencode", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
@@ -12161,10 +13900,10 @@ var IMPORTS = [
   "import { pathToFileURL } from 'node:url';"
 ].join("\n");
 function rootExpr(pluginRoot2, installed) {
-  return installed ? "sterlingInstallRoot()" : JSON.stringify(fwd5(resolve5(pluginRoot2)));
+  return installed ? "sterlingInstallRoot()" : JSON.stringify(fwd6(resolve6(pluginRoot2)));
 }
 function notFoundLine(what, shimPath) {
-  return `console.error('Sterling not found; ${what} is off. Remove ' + ${JSON.stringify(fwd5(shimPath))} + ' or reinstall Sterling (' + String((err && err.message) || err) + ')');`;
+  return `console.error('Sterling not found; ${what} is off. Remove ' + ${JSON.stringify(fwd6(shimPath))} + ' or reinstall Sterling (' + String((err && err.message) || err) + ')');`;
 }
 function renderServerShim(pluginRoot2, installed, shimPath) {
   return stampBody(`// Sterling OpenCode server shim \u2014 generated by /sterling:init and /sterling:update; do not edit.
@@ -12205,7 +13944,7 @@ function renderTuiShim(pluginRoot2, installed, shimDir, { materializedRoot } = {
 // gives a TUI bundle its own solid-js only outside node_modules (finding 789147ca).
 // The newest copied version is taken when this loads, so an update needs no new shim.
 function newestMaterializedTui() {
-  const base = ${JSON.stringify(fwd5(materializedRoot))};
+  const base = ${JSON.stringify(fwd6(materializedRoot))};
   const versions = sterlingRootsLs(base).filter((n) => /^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$/.test(n));
   if (!versions.length) throw new Error('Sterling: no dashboard has been copied to ' + base + ' \u2014 rerun /sterling:update (or /sterling:init) so Sterling copies it out of the npm cache.');
   versions.sort(compareSterlingVersions);
@@ -12268,7 +14007,7 @@ export default {
     // A Sterling that was found but whose dashboard does not import is thrown, not logged:
     // a logged line is invisible in the TUI (finding 789147ca saw it swallowed).
     if (loadError) {
-      throw new Error(String((loadError && loadError.message) || loadError) + ' \u2014 the Sterling dashboard is off. Fix the cause above, or remove ' + ${JSON.stringify(fwd5(shimDir))} + '.', { cause: loadError });
+      throw new Error(String((loadError && loadError.message) || loadError) + ' \u2014 the Sterling dashboard is off. Fix the cause above, or remove ' + ${JSON.stringify(fwd6(shimDir))} + '.', { cause: loadError });
     }
     return plugin.setup(api);
   },
@@ -12316,12 +14055,12 @@ function ensureStampedFile(path, content, label) {
     writeFileSync6(path, content);
     return { item: label, status: "created" };
   }
-  if (!statSync5(path).isFile()) return refusal(label, `${fwd5(path)} exists and is not a file`, `move it aside, then rerun /sterling:update`);
-  const disk = normalize5(readFileSync13(path, "utf8"));
+  if (!statSync6(path).isFile()) return refusal(label, `${fwd6(path)} exists and is not a file`, `move it aside, then rerun /sterling:update`);
+  const disk = normalize5(readFileSync15(path, "utf8"));
   if (disk === content) return { item: label, status: "matches" };
   const stamp = verifyStamp(disk, "//");
-  if (stamp === null) return refusal(label, `${fwd5(path)} exists and Sterling did not write it`, `rename or remove it (it would shadow Sterling's), then rerun /sterling:update`);
-  if (!stamp.unmodified) return refusal(label, `${fwd5(path)} was edited after Sterling wrote it`, `delete it so Sterling can regenerate it, then rerun /sterling:update`);
+  if (stamp === null) return refusal(label, `${fwd6(path)} exists and Sterling did not write it`, `rename or remove it (it would shadow Sterling's), then rerun /sterling:update`);
+  if (!stamp.unmodified) return refusal(label, `${fwd6(path)} was edited after Sterling wrote it`, `delete it so Sterling can regenerate it, then rerun /sterling:update`);
   writeFileSync6(path, content);
   return { item: label, status: "refreshed" };
 }
@@ -12330,10 +14069,10 @@ function refusal(item, what, remedy) {
 }
 var TWICE = "the npm package is registered too, so Sterling would load twice; remove it unless you mean it to";
 function retireServerShim(path) {
-  const item = fwd5(path);
+  const item = fwd6(path);
   if (!existsSync11(path)) return { item, status: "skipped", detail: `not installed: opencode plugin add registers the ${STERLING_NPM_PACKAGE} server itself, so a shim would load it twice` };
-  if (!statSync5(path).isFile()) return { item, status: "skipped", detail: `KEPT: ${item} is not a file, so it stays; ${TWICE}` };
-  const stamp = verifyStamp(normalize5(readFileSync13(path, "utf8")), "//");
+  if (!statSync6(path).isFile()) return { item, status: "skipped", detail: `KEPT: ${item} is not a file, so it stays; ${TWICE}` };
+  const stamp = verifyStamp(normalize5(readFileSync15(path, "utf8")), "//");
   if (stamp === null) return { item, status: "skipped", detail: `KEPT: ${item} exists and Sterling did not write it, so it stays; if it loads Sterling, ${TWICE}` };
   if (!stamp.unmodified) return { item, status: "skipped", detail: `KEPT: ${item} was edited after Sterling wrote it, so it stays; ${TWICE}` };
   unlinkSync5(path);
@@ -12344,13 +14083,13 @@ var TUI_MATERIALIZED_KEEP = 2;
 var MATERIALIZED_MARKER = ".sterling-materialized.json";
 var SEMVER_DIR = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 var bytesHash = (b) => createHash3("sha256").update(b).digest("hex");
-function materializedTuiRoot({ home = homedir7() } = {}) {
-  return join21(home, ".sterling", "opencode", "tui");
+function materializedTuiRoot({ home = homedir8() } = {}) {
+  return join23(home, ".sterling", "opencode", "tui");
 }
 function materializedState(dir) {
   let marker;
   try {
-    marker = JSON.parse(readFileSync13(join21(dir, MATERIALIZED_MARKER), "utf8"));
+    marker = JSON.parse(readFileSync15(join23(dir, MATERIALIZED_MARKER), "utf8"));
   } catch (err) {
     if (err.code === "ENOENT" || err instanceof SyntaxError) return "foreign";
     throw err;
@@ -12360,48 +14099,48 @@ function materializedState(dir) {
   const extra = readdirSync5(dir).filter((n) => n !== MATERIALIZED_MARKER && !(n in files));
   if (extra.length) return "edited";
   for (const [name4, hash] of Object.entries(files)) {
-    if (!existsSync11(join21(dir, name4)) || bytesHash(readFileSync13(join21(dir, name4))) !== hash) return "edited";
+    if (!existsSync11(join23(dir, name4)) || bytesHash(readFileSync15(join23(dir, name4))) !== hash) return "edited";
   }
   return "ours";
 }
-function materializeTui({ pluginRoot: pluginRoot2, env = process.env, home = homedir7() }) {
+function materializeTui({ pluginRoot: pluginRoot2, env = process.env, home = homedir8() }) {
   void env;
   const base2 = materializedTuiRoot({ home });
-  const src = join21(pluginRoot2, "opencode", "sterling-tui");
+  const src = join23(pluginRoot2, "opencode", "sterling-tui");
   const v = readCopyVersion(pluginRoot2, "opencode");
-  if (!v.version) return [refusal(`${fwd5(base2)}/`, `the version of ${fwd5(pluginRoot2)} cannot be read: ${v.reason}`, `reinstall Sterling (${sterlingInstallRemedy("opencode")}), then rerun /sterling:update`)];
-  const missing2 = TUI_MATERIALIZED_FILES.filter((f) => !existsSync11(join21(src, f)));
-  if (missing2.length) return [refusal(`${fwd5(base2)}/`, `${fwd5(src)} lacks ${missing2.join(", ")}, so there is no dashboard to copy`, "update Sterling, then rerun /sterling:update")];
+  if (!v.version) return [refusal(`${fwd6(base2)}/`, `the version of ${fwd6(pluginRoot2)} cannot be read: ${v.reason}`, `reinstall Sterling (${sterlingInstallRemedy("opencode")}), then rerun /sterling:update`)];
+  const missing2 = TUI_MATERIALIZED_FILES.filter((f) => !existsSync11(join23(src, f)));
+  if (missing2.length) return [refusal(`${fwd6(base2)}/`, `${fwd6(src)} lacks ${missing2.join(", ")}, so there is no dashboard to copy`, "update Sterling, then rerun /sterling:update")];
   const rows = [];
-  const dest = join21(base2, v.version);
-  const item = `${fwd5(dest)}/`;
-  const content = Object.fromEntries(TUI_MATERIALIZED_FILES.map((f) => [f, readFileSync13(join21(src, f))]));
+  const dest = join23(base2, v.version);
+  const item = `${fwd6(dest)}/`;
+  const content = Object.fromEntries(TUI_MATERIALIZED_FILES.map((f) => [f, readFileSync15(join23(src, f))]));
   const hashes = Object.fromEntries(Object.entries(content).map(([f, b]) => [f, bytesHash(b)]));
   const write = () => {
     mkdirSync7(dest, { recursive: true });
-    for (const [f, b] of Object.entries(content)) writeFileSync6(join21(dest, f), b);
-    writeFileSync6(join21(dest, MATERIALIZED_MARKER), `${JSON.stringify({ version: v.version, files: hashes }, null, 2)}
+    for (const [f, b] of Object.entries(content)) writeFileSync6(join23(dest, f), b);
+    writeFileSync6(join23(dest, MATERIALIZED_MARKER), `${JSON.stringify({ version: v.version, files: hashes }, null, 2)}
 `);
   };
   if (!existsSync11(dest)) {
     write();
     rows.push({ item, status: "created", detail: `the dashboard copied out of the npm cache (OpenCode gives its own solid-js only outside node_modules)` });
   } else {
-    const state = statSync5(dest).isDirectory() ? materializedState(dest) : "foreign";
+    const state = statSync6(dest).isDirectory() ? materializedState(dest) : "foreign";
     if (state === "foreign") rows.push(refusal(item, `${item} exists and Sterling did not write it`, `move it aside, then rerun /sterling:update`));
     else if (state === "edited") rows.push(refusal(item, `${item} was edited after Sterling wrote it`, `delete it so Sterling can copy the dashboard again, then rerun /sterling:update`));
-    else if (TUI_MATERIALIZED_FILES.every((f) => bytesHash(readFileSync13(join21(dest, f))) === hashes[f])) rows.push({ item, status: "matches" });
+    else if (TUI_MATERIALIZED_FILES.every((f) => bytesHash(readFileSync15(join23(dest, f))) === hashes[f])) rows.push({ item, status: "matches" });
     else {
       write();
       rows.push({ item, status: "refreshed" });
     }
   }
-  const versions = readdirSync5(base2).filter((n) => SEMVER_DIR.test(n) && statSync5(join21(base2, n)).isDirectory());
+  const versions = readdirSync5(base2).filter((n) => SEMVER_DIR.test(n) && statSync6(join23(base2, n)).isDirectory());
   versions.sort((a, b) => compareSterlingVersions(b, a));
   const keep = /* @__PURE__ */ new Set([...versions.slice(0, TUI_MATERIALIZED_KEEP), v.version]);
   for (const old of versions.filter((n) => !keep.has(n))) {
-    const dir = join21(base2, old);
-    const oldItem = `${fwd5(dir)}/`;
+    const dir = join23(base2, old);
+    const oldItem = `${fwd6(dir)}/`;
     const state = materializedState(dir);
     if (state === "ours") {
       rmSync3(dir, { recursive: true });
@@ -12413,57 +14152,57 @@ function materializeTui({ pluginRoot: pluginRoot2, env = process.env, home = hom
   return rows;
 }
 function ensureTuiShim(tuiDir, shim) {
-  const pkgPath = join21(tuiDir, "package.json");
-  const pkgLabel = `${fwd5(tuiDir)}/package.json`;
+  const pkgPath = join23(tuiDir, "package.json");
+  const pkgLabel = `${fwd6(tuiDir)}/package.json`;
   const pkg = renderTuiPackageJson();
-  const pkgState = existsSync11(pkgPath) && statSync5(pkgPath).isFile() ? tuiPackageState(normalize5(readFileSync13(pkgPath, "utf8"))) : null;
-  if (existsSync11(tuiDir) && !statSync5(tuiDir).isDirectory()) {
-    return [refusal(`${fwd5(tuiDir)}/`, `${fwd5(tuiDir)} exists and is not a directory`, "move it aside, then rerun /sterling:update")];
+  const pkgState = existsSync11(pkgPath) && statSync6(pkgPath).isFile() ? tuiPackageState(normalize5(readFileSync15(pkgPath, "utf8"))) : null;
+  if (existsSync11(tuiDir) && !statSync6(tuiDir).isDirectory()) {
+    return [refusal(`${fwd6(tuiDir)}/`, `${fwd6(tuiDir)} exists and is not a directory`, "move it aside, then rerun /sterling:update")];
   }
   if (pkgState === "foreign") {
-    return [refusal(pkgLabel, `${fwd5(tuiDir)}/ holds a package.json Sterling did not write`, `rename or remove ${fwd5(tuiDir)}/, then rerun /sterling:update`)];
+    return [refusal(pkgLabel, `${fwd6(tuiDir)}/ holds a package.json Sterling did not write`, `rename or remove ${fwd6(tuiDir)}/, then rerun /sterling:update`)];
   }
   if (pkgState === "edited") {
-    return [refusal(pkgLabel, `${fwd5(pkgPath)} was edited after Sterling wrote it`, `delete it so Sterling can regenerate it, then rerun /sterling:update`)];
+    return [refusal(pkgLabel, `${fwd6(pkgPath)} was edited after Sterling wrote it`, `delete it so Sterling can regenerate it, then rerun /sterling:update`)];
   }
   if (existsSync11(tuiDir) && !existsSync11(pkgPath) && readdirSync5(tuiDir).length > 0) {
-    return [refusal(`${fwd5(tuiDir)}/`, `${fwd5(tuiDir)}/ exists with files Sterling did not write and no package.json`, `rename or remove ${fwd5(tuiDir)}/, then rerun /sterling:update`)];
+    return [refusal(`${fwd6(tuiDir)}/`, `${fwd6(tuiDir)}/ exists with files Sterling did not write and no package.json`, `rename or remove ${fwd6(tuiDir)}/, then rerun /sterling:update`)];
   }
-  const before = existsSync11(pkgPath) ? normalize5(readFileSync13(pkgPath, "utf8")) : null;
+  const before = existsSync11(pkgPath) ? normalize5(readFileSync15(pkgPath, "utf8")) : null;
   mkdirSync7(tuiDir, { recursive: true });
   if (before !== pkg) writeFileSync6(pkgPath, pkg);
   return [
     { item: pkgLabel, status: before === null ? "created" : before === pkg ? "matches" : "refreshed" },
-    ensureStampedFile(join21(tuiDir, "tui.tsx"), shim, `${fwd5(tuiDir)}/tui.tsx`)
+    ensureStampedFile(join23(tuiDir, "tui.tsx"), shim, `${fwd6(tuiDir)}/tui.tsx`)
   ];
 }
-function npmCopyOnMachine({ env = process.env, home = homedir7() } = {}) {
+function npmCopyOnMachine({ env = process.env, home = homedir8() } = {}) {
   const copies = scanInstalledSterling(env, home).copies.filter((c) => c.host === "opencode");
   copies.sort((a, b) => compareSterlingVersions(a.version, b.version) || (a.root > b.root ? 1 : a.root < b.root ? -1 : 0));
   const root = copies.length ? copies[copies.length - 1].root : null;
-  const path = join21(opencodeConfigDir({ env, home }), "opencode.json");
+  const path = join23(opencodeConfigDir({ env, home }), "opencode.json");
   if (!existsSync11(path)) return { root, configured: false };
-  const item = `${fwd5(path)} plugins`;
+  const item = `${fwd6(path)} plugins`;
   let config;
   try {
-    config = parseJsonc(readFileSync13(path, "utf8"));
+    config = parseJsonc(readFileSync15(path, "utf8"));
   } catch (err) {
-    return { root, configured: false, row: { item, status: "skipped", detail: `${fwd5(path)} is not valid JSON (${err.message}), so whether it registers ${STERLING_NPM_PACKAGE} is unknown; the server shim is written unless the npm copy is in OpenCode's cache. Fix the file, then rerun /sterling:update` } };
+    return { root, configured: false, row: { item, status: "skipped", detail: `${fwd6(path)} is not valid JSON (${err.message}), so whether it registers ${STERLING_NPM_PACKAGE} is unknown; the server shim is written unless the npm copy is in OpenCode's cache. Fix the file, then rerun /sterling:update` } };
   }
   const plugins = config && typeof config === "object" && !Array.isArray(config) ? config.plugins : void 0;
   return { root, configured: sterlingPluginSpecs(plugins).length > 0 };
 }
-function installGlobal({ pluginRoot: pluginRoot2, installed, npmCopy = false, env = process.env, home = homedir7() }) {
-  const pluginsDir = join21(opencodeConfigDir({ env, home }), "plugins");
-  const tuiDir = join21(pluginsDir, "sterling-tui");
+function installGlobal({ pluginRoot: pluginRoot2, installed, npmCopy = false, env = process.env, home = homedir8() }) {
+  const pluginsDir = join23(opencodeConfigDir({ env, home }), "plugins");
+  const tuiDir = join23(pluginsDir, "sterling-tui");
   const rows = [];
   const machine = npmCopyOnMachine({ env, home });
   if (machine.row) rows.push(machine.row);
   const npmRoot = npmCopy ? pluginRoot2 : machine.root;
   if (npmCopy || machine.root !== null || machine.configured) {
-    rows.push(retireServerShim(join21(pluginsDir, "sterling.js")));
+    rows.push(retireServerShim(join23(pluginsDir, "sterling.js")));
   } else {
-    rows.push(ensureStampedFile(join21(pluginsDir, "sterling.js"), renderServerShim(pluginRoot2, installed, join21(pluginsDir, "sterling.js")), `${fwd5(pluginsDir)}/sterling.js`));
+    rows.push(ensureStampedFile(join23(pluginsDir, "sterling.js"), renderServerShim(pluginRoot2, installed, join23(pluginsDir, "sterling.js")), `${fwd6(pluginsDir)}/sterling.js`));
   }
   if (npmRoot !== null) {
     rows.push(...materializeTui({ pluginRoot: npmRoot, env, home }));
@@ -12471,31 +14210,31 @@ function installGlobal({ pluginRoot: pluginRoot2, installed, npmCopy = false, en
   } else {
     rows.push(...ensureTuiShim(tuiDir, renderTuiShim(pluginRoot2, installed, tuiDir)));
   }
-  rows.push(ensureStampedFile(mcpLauncherPath({ home }), renderMcpLauncher(pluginRoot2, installed), fwd5(mcpLauncherPath({ home }))));
+  rows.push(ensureStampedFile(mcpLauncherPath({ home }), renderMcpLauncher(pluginRoot2, installed), fwd6(mcpLauncherPath({ home }))));
   return rows;
 }
 var PINNED_CODEX_REL = ".local/codex-mcp-0.153.4/bin/codex";
 var PINNED_CODEX_INSTALL = "npm i -g --prefix ~/.local/codex-mcp-0.153.4 @openai/codex@0.153.4";
 var CODEX_PROBE_TIMEOUT_MS = 1e4;
-var isFile = (p) => existsSync11(p) && statSync5(p).isFile();
+var isFile = (p) => existsSync11(p) && statSync6(p).isFile();
 function codexCandidates({ env, home }) {
   const out = [];
   const notes2 = [];
-  const claudeJson = join21(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+  const claudeJson = join23(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
   if (isFile(claudeJson)) {
     let command;
     try {
-      command = JSON.parse(readFileSync13(claudeJson, "utf8"))?.mcpServers?.codex?.command;
+      command = JSON.parse(readFileSync15(claudeJson, "utf8"))?.mcpServers?.codex?.command;
     } catch (err) {
-      notes2.push(`${fwd5(claudeJson)} not read (${err.message})`);
+      notes2.push(`${fwd6(claudeJson)} not read (${err.message})`);
     }
     if (typeof command === "string" && isAbsolute(command)) out.push(command);
   }
-  out.push(join21(home, PINNED_CODEX_REL));
-  for (const dir of (env.PATH ?? "").split(":").filter(Boolean)) out.push(join21(dir, "codex"));
+  out.push(join23(home, PINNED_CODEX_REL));
+  for (const dir of (env.PATH ?? "").split(":").filter(Boolean)) out.push(join23(dir, "codex"));
   return { candidates: [...new Set(out)].filter(isFile), notes: notes2 };
 }
-function resolveCodexMcp({ env = process.env, home = homedir7(), nodeBinDir, spawnFn = spawnSync7 }) {
+function resolveCodexMcp({ env = process.env, home = homedir8(), nodeBinDir, spawnFn = spawnSync7 }) {
   const { candidates, notes: notes2 } = codexCandidates({ env, home });
   const tried = [...notes2];
   for (const command of candidates) {
@@ -12503,22 +14242,22 @@ function resolveCodexMcp({ env = process.env, home = homedir7(), nodeBinDir, spa
     const help = `${r.stdout ?? ""}
 ${r.stderr ?? ""}`;
     if (!r.error && r.status === 0 && /\bcodex\s+mcp-server\b/i.test(help)) return { command };
-    tried.push(`${fwd5(command)} (${r.error ? r.error.message : r.status !== 0 ? `exit ${r.status}` : "generic help, no mcp-server subcommand"})`);
+    tried.push(`${fwd6(command)} (${r.error ? r.error.message : r.status !== 0 ? `exit ${r.status}` : "generic help, no mcp-server subcommand"})`);
   }
   return { tried };
 }
-var codexPath = (nodeBinDir) => `${fwd5(nodeBinDir)}:/usr/local/bin:/usr/bin:/bin`;
+var codexPath = (nodeBinDir) => `${fwd6(nodeBinDir)}:/usr/local/bin:/usr/bin:/bin`;
 function codexServerEntry(command, nodeBinDir) {
   return {
     type: "local",
-    command: [fwd5(command), "mcp-server"],
+    command: [fwd6(command), "mcp-server"],
     environment: { PATH: codexPath(nodeBinDir) },
     timeout: { startup: 3e4, execution: 9e5 }
   };
 }
-function ensureCodexServer({ env = process.env, home = homedir7(), nodeBinDir = dirname9(process.execPath), spawnFn = spawnSync7 }) {
-  const path = join21(opencodeConfigDir({ env, home }), "opencode.json");
-  const label = `${fwd5(path)} mcp.servers.codex`;
+function ensureCodexServer({ env = process.env, home = homedir8(), nodeBinDir = dirname9(process.execPath), spawnFn = spawnSync7 }) {
+  const path = join23(opencodeConfigDir({ env, home }), "opencode.json");
+  const label = `${fwd6(path)} mcp.servers.codex`;
   const found = resolveCodexMcp({ env, home, nodeBinDir, spawnFn });
   if (!found.command) {
     const tried = found.tried.length ? `tried ${found.tried.join("; ")}` : "no Codex binary found";
@@ -12527,37 +14266,37 @@ function ensureCodexServer({ env = process.env, home = homedir7(), nodeBinDir = 
   let config = {};
   let before = null;
   if (existsSync11(path)) {
-    before = normalize5(readFileSync13(path, "utf8"));
+    before = normalize5(readFileSync15(path, "utf8"));
     try {
       config = JSON.parse(before);
     } catch (err) {
-      return refusal(label, `${fwd5(path)} is not valid JSON (${err.message})`, `fix or remove ${fwd5(path)}, then rerun /sterling:update`);
+      return refusal(label, `${fwd6(path)} is not valid JSON (${err.message})`, `fix or remove ${fwd6(path)}, then rerun /sterling:update`);
     }
-    if (config === null || typeof config !== "object" || Array.isArray(config)) return refusal(label, `${fwd5(path)} is not a JSON object`, `fix or remove ${fwd5(path)}, then rerun /sterling:update`);
+    if (config === null || typeof config !== "object" || Array.isArray(config)) return refusal(label, `${fwd6(path)} is not a JSON object`, `fix or remove ${fwd6(path)}, then rerun /sterling:update`);
   }
   const mcp = config.mcp ?? {};
-  if (typeof mcp !== "object" || Array.isArray(mcp)) return refusal(label, `${fwd5(path)}: "mcp" is not an object`, `fix ${fwd5(path)}, then rerun /sterling:update`);
+  if (typeof mcp !== "object" || Array.isArray(mcp)) return refusal(label, `${fwd6(path)}: "mcp" is not an object`, `fix ${fwd6(path)}, then rerun /sterling:update`);
   const servers = mcp.servers ?? {};
-  if (typeof servers !== "object" || Array.isArray(servers)) return refusal(label, `${fwd5(path)}: "mcp.servers" is not an object`, `fix ${fwd5(path)}, then rerun /sterling:update`);
+  if (typeof servers !== "object" || Array.isArray(servers)) return refusal(label, `${fwd6(path)}: "mcp.servers" is not an object`, `fix ${fwd6(path)}, then rerun /sterling:update`);
   const want = codexServerEntry(found.command, nodeBinDir);
   const legacy = mcp.codex !== void 0 ? "; a legacy mcp.codex entry is also present, which 2.0.21 drops silently when it carries a timeout" : "";
   if (servers.codex !== void 0) {
-    if (JSON.stringify(servers.codex) === JSON.stringify(want)) return { item: label, status: "matches", detail: `${fwd5(found.command)}${legacy}` };
+    if (JSON.stringify(servers.codex) === JSON.stringify(want)) return { item: label, status: "matches", detail: `${fwd6(found.command)}${legacy}` };
     return { item: label, status: "skipped", detail: `kept: mcp.servers.codex is already set and differs from Sterling's (yours); Sterling's would be ${JSON.stringify(want)}${legacy}` };
   }
   config.mcp = { ...mcp, servers: { ...servers, codex: want } };
   mkdirSync7(dirname9(path), { recursive: true });
   writeFileSync6(path, `${JSON.stringify(config, null, 2)}
 `);
-  return { item: label, status: before === null ? "created" : "refreshed", detail: `${fwd5(found.command)}${legacy}` };
+  return { item: label, status: before === null ? "created" : "refreshed", detail: `${fwd6(found.command)}${legacy}` };
 }
 function git(projectDir, args) {
   const r = spawnSync7("git", args, { cwd: projectDir, encoding: "utf8" });
-  if (r.error) throw new Error(`git ${args.join(" ")} could not run in ${fwd5(projectDir)}: ${r.error.message}`);
+  if (r.error) throw new Error(`git ${args.join(" ")} could not run in ${fwd6(projectDir)}: ${r.error.message}`);
   return r;
 }
-function mcpCommand({ home = homedir7() } = {}) {
-  return ["node", "--disable-warning=ExperimentalWarning", fwd5(mcpLauncherPath({ home })), "--store", ".sterling/sterling.db"];
+function mcpCommand({ home = homedir8() } = {}) {
+  return ["node", "--disable-warning=ExperimentalWarning", fwd6(mcpLauncherPath({ home })), "--store", ".sterling/sterling.db"];
 }
 var EDIT_FAMILY = ["edit", "write", "patch"];
 var SHELL_FAMILY = ["shell", "bash"];
@@ -12610,10 +14349,10 @@ function agentFiles(dir, { flat = false, prefix = "", seen = /* @__PURE__ */ new
   seen.add(real2);
   const files = [];
   for (const name4 of readdirSync5(dir)) {
-    const path = join21(dir, name4);
+    const path = join23(dir, name4);
     let st;
     try {
-      st = statSync5(path);
+      st = statSync6(path);
     } catch (err) {
       if (err.code === "ENOENT") continue;
       throw err;
@@ -12652,11 +14391,11 @@ function hasEvaluateHook(version) {
   for (let i = 0; i < 3; i++) if (Number(m[i + 1]) !== want[i]) return Number(m[i + 1]) > want[i];
   return true;
 }
-function visibleAgents({ projectDir, env = process.env, home = homedir7(), checkAgentFiles = true }) {
+function visibleAgents({ projectDir, env = process.env, home = homedir8(), checkAgentFiles = true }) {
   const globalDir = env.OPENCODE_CONFIG_DIR || opencodeConfigDir({ env, home });
-  const dotDir = join21(projectDir, ".opencode");
+  const dotDir = join23(projectDir, ".opencode");
   const ancestors = [];
-  for (let d = dirname9(resolve5(projectDir)); ; d = dirname9(d)) {
+  for (let d = dirname9(resolve6(projectDir)); ; d = dirname9(d)) {
     ancestors.push(d);
     if (dirname9(d) === d) break;
   }
@@ -12668,13 +14407,13 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7(), check
     incomplete = true;
     problems.push({ item: label, status: "skipped", detail: `cannot be read (${err.code ?? err.message}), so the agents it defines are NOT checked and get no new per-agent guard; earlier per-agent guard entries are kept; fix it, then rerun /sterling:update` });
   };
-  for (const dir of [globalDir, dotDir, ...ancestors.map((a) => join21(a, ".opencode"))]) {
+  for (const dir of [globalDir, dotDir, ...ancestors.map((a) => join23(a, ".opencode"))]) {
     for (const [sub, flat] of [["agent", false], ["agents", false], ["mode", true], ["modes", true]]) {
       let files;
       try {
-        files = agentFiles(join21(dir, sub), { flat });
+        files = agentFiles(join23(dir, sub), { flat });
       } catch (err) {
-        unreadable(fwd5(join21(dir, sub)), err);
+        unreadable(fwd6(join23(dir, sub)), err);
         continue;
       }
       for (const { name: name4, path } of files) {
@@ -12682,27 +14421,27 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7(), check
         if (dir !== dotDir || !checkAgentFiles) continue;
         let text;
         try {
-          text = readFileSync13(path, "utf8");
+          text = readFileSync15(path, "utf8");
         } catch (err) {
-          unreadable(fwd5(path), err);
+          unreadable(fwd6(path), err);
           continue;
         }
         if (agentFileLoosensGuard(text)) {
-          problems.push({ item: fwd5(path), status: "skipped", detail: `its permission rules can allow edit, and OpenCode reads them after ${PROJECT_CONFIG_REL}, so the store guard does NOT hold for agent "${name4}" on this OpenCode (the plugin store guard needs ${EVALUATE_HOOK_MIN_VERSION} or later); upgrade OpenCode, or move its edit, write, patch and "*" rules into agent.${JSON.stringify(name4)}.permission in ${PROJECT_CONFIG_REL}, then rerun /sterling:update` });
+          problems.push({ item: fwd6(path), status: "skipped", detail: `its permission rules can allow edit, and OpenCode reads them after ${PROJECT_CONFIG_REL}, so the store guard does NOT hold for agent "${name4}" on this OpenCode (the plugin store guard needs ${EVALUATE_HOOK_MIN_VERSION} or later); upgrade OpenCode, or move its edit, write, patch and "*" rules into agent.${JSON.stringify(name4)}.permission in ${PROJECT_CONFIG_REL}, then rerun /sterling:update` });
         }
       }
     }
   }
   const docs = [
-    ...["opencode.json", "opencode.jsonc"].map((f) => join21(globalDir, f)),
-    ...["opencode.json", "opencode.jsonc"].map((f) => join21(projectDir, f)),
-    join21(dotDir, "opencode.jsonc"),
-    ...ancestors.flatMap((a) => ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"].map((f) => join21(a, f))),
+    ...["opencode.json", "opencode.jsonc"].map((f) => join23(globalDir, f)),
+    ...["opencode.json", "opencode.jsonc"].map((f) => join23(projectDir, f)),
+    join23(dotDir, "opencode.jsonc"),
+    ...ancestors.flatMap((a) => ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"].map((f) => join23(a, f))),
     ...env.OPENCODE_CONFIG ? [env.OPENCODE_CONFIG] : []
-  ].map((path) => ({ label: fwd5(path), read: () => existsSync11(path) ? readFileSync13(path, "utf8") : null }));
+  ].map((path) => ({ label: fwd6(path), read: () => existsSync11(path) ? readFileSync15(path, "utf8") : null }));
   if (env.OPENCODE_CONFIG_CONTENT) docs.push({ label: "OPENCODE_CONFIG_CONTENT", read: () => env.OPENCODE_CONFIG_CONTENT });
-  const fromEnv = /* @__PURE__ */ new Set([...env.OPENCODE_CONFIG_DIR ? ["opencode.json", "opencode.jsonc"].map((f) => fwd5(join21(globalDir, f))) : [], ...env.OPENCODE_CONFIG ? [fwd5(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
-  const late2 = /* @__PURE__ */ new Set([fwd5(join21(dotDir, "opencode.jsonc")), ...env.OPENCODE_CONFIG ? [fwd5(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
+  const fromEnv = /* @__PURE__ */ new Set([...env.OPENCODE_CONFIG_DIR ? ["opencode.json", "opencode.jsonc"].map((f) => fwd6(join23(globalDir, f))) : [], ...env.OPENCODE_CONFIG ? [fwd6(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
+  const late2 = /* @__PURE__ */ new Set([fwd6(join23(dotDir, "opencode.jsonc")), ...env.OPENCODE_CONFIG ? [fwd6(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
   for (const doc of docs) {
     let text;
     try {
@@ -12731,16 +14470,16 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7(), check
   const envOnly = [...envNames].filter((n) => !names.has(n)).sort();
   return { names: [.../* @__PURE__ */ new Set([...names, ...envNames])].sort(), envOnly, problems, incomplete };
 }
-function ensureProjectConfig({ projectDir, env = process.env, home = homedir7(), tracked, conductorOk = true, opencodeVersion }) {
+function ensureProjectConfig({ projectDir, env = process.env, home = homedir8(), tracked, conductorOk = true, opencodeVersion }) {
   const rel = PROJECT_CONFIG_REL;
-  const path = join21(projectDir, rel);
+  const path = join23(projectDir, rel);
   if (tracked.includes(rel)) {
     return [refusal(rel, `${rel} is tracked by git, and Sterling writes .opencode/ config only into untracked files (decision sterling-on-opencode-installs-global-plugins-plus-untracked-project-config)`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`)];
   }
   let config = {};
   let before = null;
   if (existsSync11(path)) {
-    before = normalize5(readFileSync13(path, "utf8"));
+    before = normalize5(readFileSync15(path, "utf8"));
     try {
       config = JSON.parse(before);
     } catch (err) {
@@ -12798,9 +14537,9 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir7(),
   if (Object.keys(nextAgents).length) config.agent = nextAgents;
   else delete config.agent;
   if (removedShellDeny) notes2.push("removed the shell deny on *sterling.db* an earlier init wrote, and an identical rule of your own if you had one, since the two cannot be told apart (the Sterling plugin now guards shell commands, and a command that only reads the store passes)");
-  notes2.push(`per-agent store guard on ${names.size} agents (agent files in the global config dir and ${fwd5(".opencode")}, and the config "agent" entries; not checked: agents a plugin adds); an agent added later is covered on the next /sterling:update`);
+  notes2.push(`per-agent store guard on ${names.size} agents (agent files in the global config dir and ${fwd6(".opencode")}, and the config "agent" entries; not checked: agents a plugin adds); an agent added later is covered on the next /sterling:update`);
   if (envOnly.length) notes2.push(`guard entries for agents seen only through this run's OPENCODE_CONFIG_DIR, OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT: ${envOnly.join(", ")}; OpenCode started without that environment lists each as an agent with no prompt, and a rerun of /sterling:update without it removes them`);
-  if (env.OPENCODE_CONFIG_DIR) notes2.push(`OPENCODE_CONFIG_DIR replaced the global config dir for this run, so agents in ${fwd5(opencodeConfigDir({ env, home }))} were not checked`);
+  if (env.OPENCODE_CONFIG_DIR) notes2.push(`OPENCODE_CONFIG_DIR replaced the global config dir for this run, so agents in ${fwd6(opencodeConfigDir({ env, home }))} were not checked`);
   if (!conductorOk) {
     if (config.default_agent === void 0) notes2.push(`default_agent not set: the ${CONDUCTOR_AGENT} agent file was refused`);
   } else if (config.default_agent === void 0) config.default_agent = CONDUCTOR_AGENT;
@@ -12821,8 +14560,8 @@ function ensureExcluded({ projectDir, handoff, tracked, unmaintained = [] }) {
   const want = [EXCLUDE_BEGIN, ...excludeLines(wholeDir), EXCLUDE_END].join("\n");
   const gp = git(projectDir, ["rev-parse", "--git-path", "info/exclude"]);
   if (gp.status !== 0) return { item: label, status: "skipped", detail: `not a git work tree (${(gp.stderr || "").trim().split("\n")[0]}) \u2014 nothing to keep untracked` };
-  const excludePath = resolve5(projectDir, gp.stdout.trim());
-  const current = existsSync11(excludePath) ? normalize5(readFileSync13(excludePath, "utf8")) : "";
+  const excludePath = resolve6(projectDir, gp.stdout.trim());
+  const current = existsSync11(excludePath) ? normalize5(readFileSync15(excludePath, "utf8")) : "";
   const begin = current.indexOf(EXCLUDE_BEGIN);
   const end = current.indexOf(EXCLUDE_END);
   if (begin !== -1 && end > begin) {
@@ -12848,16 +14587,16 @@ var FULL_PERMISSIONS = {
 };
 var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
 function storeWriteTools(pluginRoot2 = sterlingRootFrom()) {
-  const fm = normalize5(readFileSync13(join21(pluginRoot2, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
+  const fm = normalize5(readFileSync15(join23(pluginRoot2, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
   const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
   const tools = [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))].map((t) => `sterling_${t}`);
-  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd5(join21(pluginRoot2, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
+  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd6(join23(pluginRoot2, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
   return tools;
 }
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname9(fileURLToPath3(moduleUrl));
   for (let dir = start; ; dir = dirname9(dir)) {
-    if (existsSync11(join21(dir, "agent-templates", "registry.json"))) return dir;
+    if (existsSync11(join23(dir, "agent-templates", "registry.json"))) return dir;
     if (dirname9(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
@@ -12888,19 +14627,19 @@ function frontmatterModel(content) {
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
 function ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
-  const registry2 = loadRegistry(join21(pluginRoot2, "agent-templates", "registry.json"));
+  const registry2 = loadRegistry(join23(pluginRoot2, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot2);
   const rows = [];
   for (const name4 of ROSTER) {
     const entry = registry2.agents.find((a) => a.name === name4);
     if (!entry) throw new Error(`opencode roster: '${name4}' is not in agent-templates/registry.json (P5)`);
     const rel = `${STERLING_AGENTS_SUBDIR}/${name4}.md`;
-    const path = join21(projectDir, rel);
+    const path = join23(projectDir, rel);
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const disk = existsSync11(path) ? normalize5(readFileSync13(path, "utf8")) : null;
+    const disk = existsSync11(path) ? normalize5(readFileSync15(path, "utf8")) : null;
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
       if (!m || m[1] !== name4) {
@@ -12914,7 +14653,7 @@ function ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models
       }
     }
     const model = models[name4] ?? (disk === null ? void 0 : frontmatterModel(disk));
-    const agent = renderFullOpenCodeAgent(readFileSync13(join21(pluginRoot2, "agent-templates", entry.file), "utf8"), entry.file, entry, { primary: name4 === "conductor", model, writeTools });
+    const agent = renderFullOpenCodeAgent(readFileSync15(join23(pluginRoot2, "agent-templates", entry.file), "utf8"), entry.file, entry, { primary: name4 === "conductor", model, writeTools });
     if (agent.name !== name4) throw new Error(`opencode roster: '${entry.file}' renders as '${agent.name}', not '${name4}' (P5)`);
     if (disk === agent.content) {
       rows.push({ item: rel, status: "matches" });
@@ -12926,7 +14665,7 @@ function ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models
   }
   return rows;
 }
-function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir7(), installed, probe = probeOpenCode }) {
+function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir8(), installed, probe = probeOpenCode }) {
   if (!isAbsolute(projectDir)) throw new TypeError(`setupOpenCode: projectDir must be absolute, got ${projectDir}`);
   if (env.STERLING_OPENCODE_SETUP_DISABLE === "1") return { skipped: "Sterling on OpenCode SKIPPED (STERLING_OPENCODE_SETUP_DISABLE=1)" };
   const oc = probe({ env });
@@ -12972,7 +14711,7 @@ init_dist();
 import { spawnSync as spawnSync9 } from "node:child_process";
 var UNDECLARED_SOURCE_TIMEOUT_MS = 3e3;
 var UNDECLARED_SOURCE_OUTPUT_CAP = 5e6;
-function isPlainObject2(v) {
+function isPlainObject3(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 function isArrayOfStrings(v) {
@@ -12982,7 +14721,7 @@ function validateUndeclaredSourceConfig(config) {
   if (config === null || config === void 0) {
     return { ok: false, reason: "project config is missing or failed to parse \u2014 coverage cannot be computed against unknown toolchains" };
   }
-  if (!isPlainObject2(config)) {
+  if (!isPlainObject3(config)) {
     return { ok: false, reason: "project config is not an object" };
   }
   if (config.toolchains !== void 0 && !Array.isArray(config.toolchains)) {
@@ -12991,7 +14730,7 @@ function validateUndeclaredSourceConfig(config) {
   const toolchains = config.toolchains ?? [];
   for (let i = 0; i < toolchains.length; i++) {
     const entry = toolchains[i];
-    if (!isPlainObject2(entry)) {
+    if (!isPlainObject3(entry)) {
       return { ok: false, reason: `config.toolchains[${i}] is not an object` };
     }
     if (!isArrayOfStrings(entry.path_globs)) {
@@ -13066,9 +14805,9 @@ function computeUndeclaredSourceDisclosure({ cwd, config }) {
 }
 
 // scripts/init-impl.mjs
-var pluginRoot = resolve6(dirname10(fileURLToPath4(new URL("../scripts/init-impl.mjs", import.meta.url).href)), "..");
+var pluginRoot = resolve7(dirname10(fileURLToPath4(new URL("../scripts/init-impl.mjs", import.meta.url).href)), "..");
 var pluginRootMatch = process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot;
-var target = resolve6(arg("--target") ?? process.cwd());
+var target = resolve7(arg("--target") ?? process.cwd());
 var projectNameFlag = arg("--project-name");
 var stackTagsFlag = (arg("--stack-tags") ?? "").split(",").filter(Boolean);
 var backupPathFlag = arg("--backup-path");
@@ -13110,7 +14849,7 @@ for (const spec of domainDescriptionFlags) {
   if (domainDescriptions.has(name4)) fail(`init REFUSED: ${DOMAIN_DESCRIPTION_FLAG} was given twice for domain '${name4}'`, 2);
   domainDescriptions.set(name4, text);
 }
-var fwd6 = (p) => p.replace(/\\/g, "/");
+var fwd7 = (p) => p.replace(/\\/g, "/");
 var normalize6 = (s2) => s2.replace(/\r\n/g, "\n");
 var withoutHandoffEntries = (c) => ({ ...c, generated_projections: (c.generated_projections ?? []).filter((p) => !isOwnedExport(target, p)) });
 var canonical2 = (v) => JSON.stringify(
@@ -13121,24 +14860,24 @@ if (!existsSync12(target)) fail(`init REFUSED: target '${target}' does not exist
 if (modeFlagGiven && !PROJECT_MODES.includes(modeFlag)) {
   fail(`init REFUSED: --mode must be 'hobby' or 'work' \u2014 got ${JSON.stringify(modeFlag ?? "")}`, 2);
 }
-if (!existsSync12(join22(pluginRoot, "mcp", "sterling-mcp.mjs"))) fail("init REFUSED: MCP server bundle missing (mcp/sterling-mcp.mjs) \u2014 the plugin checkout is incomplete; on the authoring clone run `npm run build:bundles`", 2);
-if (!existsSync12(join22(pluginRoot, "tui", "sterling-tui.mjs"))) fail("init REFUSED: TUI bundle missing (tui/sterling-tui.mjs) \u2014 the plugin checkout is incomplete; on the authoring clone run `npm run build:bundles`", 2);
-var mcpServerEntry = join22(pluginRoot, "packages", "mcp-server", "dist", "main.js");
+if (!existsSync12(join24(pluginRoot, "mcp", "sterling-mcp.mjs"))) fail("init REFUSED: MCP server bundle missing (mcp/sterling-mcp.mjs) \u2014 the plugin checkout is incomplete; on the authoring clone run `npm run build:bundles`", 2);
+if (!existsSync12(join24(pluginRoot, "tui", "sterling-tui.mjs"))) fail("init REFUSED: TUI bundle missing (tui/sterling-tui.mjs) \u2014 the plugin checkout is incomplete; on the authoring clone run `npm run build:bundles`", 2);
+var mcpServerEntry = join24(pluginRoot, "packages", "mcp-server", "dist", "main.js");
 for (const rel of [".sterling", ".sterling/runs", "docs", "docs/briefs", ".claude", ".claude/agents", ".opencode", OPENCODE_AGENTS_DIR, ...HANDOFF_DIRS]) {
-  const p = join22(target, rel);
-  if (existsSync12(p) && !statSync6(p).isDirectory()) {
+  const p = join24(target, rel);
+  if (existsSync12(p) && !statSync7(p).isDirectory()) {
     fail(`init REFUSED (destructive): '${rel}' exists as a file but the manifest requires a directory \u2014 refusing to replace it`, 2);
   }
 }
 var claudeProbeOverride = process.env.STERLING_CLAUDE_PROBE;
 var claudeProbe = !claudeProbeOverride ? probeClaude() : claudeProbeOverride === "ok" ? { installed: true, version: "forced" } : claudeProbeOverride === "absent" ? { installed: false, reason: "STERLING_CLAUDE_PROBE=absent" } : fail(`STERLING_CLAUDE_PROBE must be 'ok' or 'absent' (got '${claudeProbeOverride}')`, 2);
 var claudeHost = claudeProbe.installed;
-var configPath = join22(target, ".sterling", "config.json");
+var configPath = join24(target, ".sterling", "config.json");
 var recorded;
 var rawRecorded;
 if (existsSync12(configPath)) {
   try {
-    rawRecorded = JSON.parse(readFileSync14(configPath, "utf8"));
+    rawRecorded = JSON.parse(readFileSync16(configPath, "utf8"));
     recorded = parseConfig(rawRecorded);
   } catch (e) {
     fail(`init REFUSED (destructive to fix): .sterling/config.json exists but does not validate \u2014 cannot verify, will not overwrite. Repair or delete it first. ${e.message}`, 2);
@@ -13157,18 +14896,18 @@ var sameDir = (a, b) => {
     try {
       return realpathSync6(d);
     } catch {
-      return resolve6(d);
+      return resolve7(d);
     }
   };
-  return fwd6(real2(a)) === fwd6(real2(b));
+  return fwd7(real2(a)) === fwd7(real2(b));
 };
 var inheritedFrom;
 var inheritedMode;
 if (invokingGiven && !recorded && !modeFlagGiven) {
-  const invoking = resolve6(invokingFlag);
+  const invoking = resolve7(invokingFlag);
   if (!sameDir(invoking, target)) {
-    if (!existsSync12(join22(invoking, ".sterling", "config.json"))) {
-      fail(`init REFUSED: --invoking-project names a directory that is not a Sterling project \u2014 '${fwd6(invoking)}' has no .sterling/config.json. Pass the root of the project this session belongs to, or drop the flag and pass --mode hobby|work`, 2);
+    if (!existsSync12(join24(invoking, ".sterling", "config.json"))) {
+      fail(`init REFUSED: --invoking-project names a directory that is not a Sterling project \u2014 '${fwd7(invoking)}' has no .sterling/config.json. Pass the root of the project this session belongs to, or drop the flag and pass --mode hobby|work`, 2);
     }
     try {
       inheritedMode = readProjectMode(invoking);
@@ -13176,7 +14915,7 @@ if (invokingGiven && !recorded && !modeFlagGiven) {
       if (!(e instanceof ProjectModeError) && !(e instanceof ContainmentError)) throw e;
       fail(`init REFUSED: the invoking project's mode cannot be inherited \u2014 ${e.message}. Fix it, or pass --mode hobby|work`, 2);
     }
-    inheritedFrom = fwd6(invoking);
+    inheritedFrom = fwd7(invoking);
   }
 }
 var baked = recorded ? recorded.toolchains : await resolveToolchains(declaredToolchains);
@@ -13197,7 +14936,7 @@ var eff = recorded ? {
   // backupPathForRuntime first rewrites a Windows drive path (C:\.../C:/...)
   // to /mnt form under WSL, so resolve() treats it as absolute instead of as
   // a relative path that lands inside the repo (the r-dd88 junk-dir bug).
-  backupPath: backupPathFlag ? fwd6(resolve6(target, backupPathForRuntime(backupPathFlag))) : void 0,
+  backupPath: backupPathFlag ? fwd7(resolve7(target, backupPathForRuntime(backupPathFlag))) : void 0,
   backupOptOut: backupOptOutFlag,
   projectName: projectNameFlag ?? "project",
   splitRatio: void 0
@@ -13207,7 +14946,7 @@ var UNIVERSAL_DOMAIN = "sterling";
 eff.stackTags = [...eff.stackTags.filter((t) => t !== UNIVERSAL_DOMAIN), UNIVERSAL_DOMAIN];
 var freshTracked = recorded ? null : trackedHandoffFiles(target);
 var expectedConfig = parseConfig({
-  ...JSON.parse(readFileSync14(join22(pluginRoot, "templates", "default-config.json"), "utf8")),
+  ...JSON.parse(readFileSync16(join24(pluginRoot, "templates", "default-config.json"), "utf8")),
   toolchains: baked,
   stack_tags: eff.stackTags,
   domain_paths: eff.domainPaths,
@@ -13268,7 +15007,7 @@ if (recorded) {
   const stripUniversal = (tags) => tags.filter((t) => t !== UNIVERSAL_DOMAIN);
   if (stackTagsFlag.length && canonical2(stripUniversal(stackTagsFlag)) !== canonical2(stripUniversal(recorded.stack_tags))) flagDiffs.push("--stack-tags");
   if (declaredToolchains.length && canonical2(declaredToolchains) !== canonical2(recorded.toolchains.map((t) => ({ adapter: t.adapter, path_globs: t.path_globs })))) flagDiffs.push("--toolchain");
-  if (backupPathFlag && fwd6(resolve6(target, backupPathForRuntime(backupPathFlag))) !== recorded.backup_path) flagDiffs.push("--backup-path");
+  if (backupPathFlag && fwd7(resolve7(target, backupPathForRuntime(backupPathFlag))) !== recorded.backup_path) flagDiffs.push("--backup-path");
   if (backupOptOutFlag && !recorded.backup_opt_out) flagDiffs.push("--backup-opt-out");
   if (projectNameFlag && recorded.project_name && projectNameFlag !== recorded.project_name) flagDiffs.push("--project-name");
   if (flagDiffs.length) {
@@ -13294,8 +15033,8 @@ if (!claudeHost) {
 \u26A0 Claude Code not found (${claudeProbe.reason}) \u2014 skipped the Claude-only files: sterling-launch.sh, sterling.bat, tui.bat, .claude/agents/, .claude/settings.json and the codex user-scope check. Wrote the OpenCode side only; install Claude Code and re-run /sterling:init to add them.`);
 }
 for (const [label, leaf] of [[".sterling/ (+runs/)", ".sterling/runs"], ["docs/briefs/", "docs/briefs"]]) {
-  const existed = existsSync12(join22(target, leaf));
-  mkdirSync8(join22(target, leaf), { recursive: true });
+  const existed = existsSync12(join24(target, leaf));
+  mkdirSync8(join24(target, leaf), { recursive: true });
   items.push({ item: label, status: existed ? "exists" : "created", detail: "" });
 }
 for (const d of domainsToCreate) {
@@ -13341,7 +15080,18 @@ if (!recorded) {
     items.push({ item: ".sterling/config.json", status: "differs", detail: "left untouched (tuned or hand-edited) \u2014 declarations were read from it" });
   }
 }
-var dbPath = join22(target, ".sterling", "sterling.db");
+{
+  const identity = ensureProjectIdentity(target);
+  if (identity.status === "created") {
+    items.push({ item: ".sterling/project.json", status: "created", detail: `project_id ${identity.project_id} \u2014 commit this file; it is the project's durable identity` });
+  } else if (identity.status === "exists") {
+    items.push({ item: ".sterling/project.json", status: "exists", detail: "project identity \u2014 left as-is, never overwritten" });
+  } else {
+    items.push({ item: ".sterling/project.json", status: "differs", detail: "left untouched \u2014 it is not a valid project identity" });
+    warns.push(`warn: ${identity.error}. init never overwrites it; a work-mode project is refused by /sterling:update and sync-agents until it is fixed`);
+  }
+}
+var dbPath = join24(target, ".sterling", "sterling.db");
 if (existsSync12(dbPath)) {
   items.push({ item: ".sterling/sterling.db", status: "exists", detail: "data store \u2014 left as-is, never recreated" });
 } else {
@@ -13354,7 +15104,7 @@ var assertNoDeadTerms = (label, content) => {
   if (hits.length) fail(`init dead-term check FAILED in generated ${label}: ${hits.map((h) => h.match).join(", ")}`, 1);
   return content;
 };
-var agentsMdTemplateRaw = readFileSync14(join22(pluginRoot, "templates", "target-agents-md.md"), "utf8").replaceAll("{{PROJECT_NAME}}", eff.projectName).replaceAll("{{STACK_TAGS}}", eff.stackTags.join(", ")).replaceAll("{{TOOLCHAINS}}", baked.map((t) => `${t.adapter} (${t.path_globs.join(", ")})`).join("; ")).replaceAll("{{LINT_COMMAND}}", baked.flatMap((t) => [t.run_commands?.lint, t.run_commands?.format].filter(Boolean).map((cmd) => {
+var agentsMdTemplateRaw = readFileSync16(join24(pluginRoot, "templates", "target-agents-md.md"), "utf8").replaceAll("{{PROJECT_NAME}}", eff.projectName).replaceAll("{{STACK_TAGS}}", eff.stackTags.join(", ")).replaceAll("{{TOOLCHAINS}}", baked.map((t) => `${t.adapter} (${t.path_globs.join(", ")})`).join("; ")).replaceAll("{{LINT_COMMAND}}", baked.flatMap((t) => [t.run_commands?.lint, t.run_commands?.format].filter(Boolean).map((cmd) => {
   const oneLine = cmd.replace(/\s+/g, " ").trim();
   return `${oneLine.includes("`") ? oneLine : `\`${oneLine}\``} (${t.adapter})`;
 })).join("; ") || "not recorded yet; add it here").replaceAll("{{DOMAINS}}", eff.stackTags.length ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(", ") + " \u2014 each created by init with a description of what belongs in it (\xA72.3)" : "(none \u2014 declare stack tags to mount domain stores)").replaceAll("{{BACKUP_PATH}}", eff.backupPath ? "configured \u2014 see `.sterling/config.json` \u2192 `backup_path` (machine-local, deliberately not restated here)" : "(opted out \u2014 recorded)");
@@ -13368,9 +15118,9 @@ assertNoDeadTerms(
 var renderAgentsMd = (conventionsSection) => agentsMdTemplateRaw.replace(CONVENTIONS_TOKEN, conventionsSection);
 var DEFAULT_CONVENTIONS = "(grows only via architecture-altering decision records \u2014 nothing yet)";
 var expectedAgentsMd = renderAgentsMd(DEFAULT_CONVENTIONS);
-var expectedClaudeMd = assertNoDeadTerms("CLAUDE.md", renderClaudeText(readFileSync14(join22(pluginRoot, "templates", "target-claude-md.md"), "utf8"), "templates/target-claude-md.md").replaceAll("{{PROJECT_NAME}}", eff.projectName));
-var agentsMdPath = join22(target, "AGENTS.md");
-var claudeMdPath = join22(target, "CLAUDE.md");
+var expectedClaudeMd = assertNoDeadTerms("CLAUDE.md", renderClaudeText(readFileSync16(join24(pluginRoot, "templates", "target-claude-md.md"), "utf8"), "templates/target-claude-md.md").replaceAll("{{PROJECT_NAME}}", eff.projectName));
+var agentsMdPath = join24(target, "AGENTS.md");
+var claudeMdPath = join24(target, "CLAUDE.md");
 var writeAtomic = (p, content) => {
   const tmp = `${p}.tmp-${process.pid}`;
   writeFileSync7(tmp, content);
@@ -13468,9 +15218,9 @@ function historicalHeadSegmentSets() {
   return { segmentSets, unavailableReason: null };
 }
 function writeMigrationPreview(rawClaudeText, tailForPreview) {
-  mkdirSync8(join22(target, ".sterling"), { recursive: true });
-  const previewRel = join22(".sterling", "agents-md-migration-preview.diff");
-  const previewPath = join22(target, previewRel);
+  mkdirSync8(join24(target, ".sterling"), { recursive: true });
+  const previewRel = join24(".sterling", "agents-md-migration-preview.diff");
+  const previewPath = join24(target, previewRel);
   const oldTmp = `${previewPath}.old.tmp`;
   const newTmp = `${previewPath}.new.tmp`;
   writeFileSync7(oldTmp, rawClaudeText);
@@ -13524,10 +15274,10 @@ function computeMigration(rawText) {
 }
 var agentsMdExists = existsSync12(agentsMdPath);
 var claudeMdExists = existsSync12(claudeMdPath);
-var claudeMdRaw = claudeMdExists ? readFileSync14(claudeMdPath, "utf8") : "";
+var claudeMdRaw = claudeMdExists ? readFileSync16(claudeMdPath, "utf8") : "";
 var claudeMdIsStub = claudeMdExists && claudeMdRaw.split(/\r?\n/, 1)[0] === "@AGENTS.md";
 if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
-  const agentsMdRaw = readFileSync14(agentsMdPath, "utf8");
+  const agentsMdRaw = readFileSync16(agentsMdPath, "utf8");
   const result = computeMigration(claudeMdRaw);
   if (result.matched && result.agentsMd === agentsMdRaw) {
     writeAtomic(claudeMdPath, result.claudeMd);
@@ -13575,7 +15325,7 @@ if (claudeHost) {
     return m ? `${m[1].toUpperCase()}:${(m[2] ?? "/").replace(/\//g, "\\")}` : p.replace(/\//g, "\\");
   };
   const sanitizeSession = (s2) => s2.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project";
-  const winProjectDir = toWindowsPath2(fwd6(target));
+  const winProjectDir = toWindowsPath2(fwd7(target));
   const sessionName = `sterling-${sanitizeSession(basename2(target))}`;
   const splitPercent = Math.round(eff.splitRatio * 100);
   const lf2 = (s2) => s2.replace(/\r\n/g, "\n");
@@ -13603,7 +15353,7 @@ if (claudeHost) {
     return { item: file, status: "differs", detail: "left untouched (matches no generated version: hand-edited or another path) \u2014 delete it and re-run /sterling:init to regenerate" };
   };
   const ensureBat = (file, path, expected, templateName, createdDetail) => {
-    const existing = existsSync12(path) ? readFileSync14(path, "utf8") : null;
+    const existing = existsSync12(path) ? readFileSync16(path, "utf8") : null;
     if (existing === null) {
       writeFileSync7(path, expected);
       items.push({ item: file, status: "created", detail: createdDetail });
@@ -13624,8 +15374,8 @@ if (claudeHost) {
   const expectedTmuxLauncher = assertNoDeadTerms("sterling-launch.sh", lf2(
     renderTmuxLauncher(pluginRoot, { session: sessionName, splitPercent })
   ));
-  const tmuxLauncherPath = join22(target, "sterling-launch.sh");
-  const existingTmuxLauncher = existsSync12(tmuxLauncherPath) ? readFileSync14(tmuxLauncherPath, "utf8") : null;
+  const tmuxLauncherPath = join24(target, "sterling-launch.sh");
+  const existingTmuxLauncher = existsSync12(tmuxLauncherPath) ? readFileSync16(tmuxLauncherPath, "utf8") : null;
   const cloneLauncher = installedCopy && existingTmuxLauncher !== null ? cloneLauncherTarget(existingTmuxLauncher) : null;
   if (existingTmuxLauncher === null) {
     writeFileSync7(tmuxLauncherPath, expectedTmuxLauncher);
@@ -13642,22 +15392,22 @@ if (claudeHost) {
     if (old) {
       writeFileSync7(tmuxLauncherPath, expectedTmuxLauncher);
       const oldPluginDir = old.PLUGIN_DIR ?? /^PLUGIN_DIR="([^"]+)"/.exec(old.PLUGIN_PATHS ?? "")?.[1];
-      const newPluginDir = installedCopy ? "the installed copy, resolved at run time" : fwd6(pluginRoot);
+      const newPluginDir = installedCopy ? "the installed copy, resolved at run time" : fwd7(pluginRoot);
       items.push({ item: "sterling-launch.sh", status: "refreshed", detail: refreshedDetail(oldPluginDir, newPluginDir) });
     } else {
       items.push(leftUntouched("sterling-launch.sh"));
     }
   }
   const expectedLauncher = assertNoDeadTerms("sterling.bat", crlf2(
-    readFileSync14(join22(pluginRoot, "templates", "launcher-win.bat"), "utf8").replaceAll("{{WIN_PROJECT_DIR}}", winProjectDir)
+    readFileSync16(join24(pluginRoot, "templates", "launcher-win.bat"), "utf8").replaceAll("{{WIN_PROJECT_DIR}}", winProjectDir)
   ));
-  ensureBat("sterling.bat", join22(target, "sterling.bat"), expectedLauncher, "launcher-win.bat", `double-click -> wsl ${winProjectDir}`);
+  ensureBat("sterling.bat", join24(target, "sterling.bat"), expectedLauncher, "launcher-win.bat", `double-click -> wsl ${winProjectDir}`);
   const expectedTuiLauncher = assertNoDeadTerms("tui.bat", crlf2(
-    readFileSync14(join22(pluginRoot, "templates", "tui-win.bat"), "utf8").replaceAll("{{WIN_PROJECT_DIR}}", winProjectDir)
+    readFileSync16(join24(pluginRoot, "templates", "tui-win.bat"), "utf8").replaceAll("{{WIN_PROJECT_DIR}}", winProjectDir)
   ));
-  ensureBat("tui.bat", join22(target, "tui.bat"), expectedTuiLauncher, "tui-win.bat", "double-click -> ./sterling-launch.sh tui");
+  ensureBat("tui.bat", join24(target, "tui.bat"), expectedTuiLauncher, "tui-win.bat", "double-click -> ./sterling-launch.sh tui");
 }
-var nativeLauncherPath = join22(target, "sterling-windows.bat");
+var nativeLauncherPath = join24(target, "sterling-windows.bat");
 if (existsSync12(nativeLauncherPath)) {
   items.push({
     item: "sterling-windows.bat",
@@ -13673,11 +15423,11 @@ var agentInstructions = [];
 var restartNeeded = false;
 var conductorActivation = { activation: "skipped", autoMemory: "skipped" };
 if (claudeHost) {
-  const installedPluginVersion = JSON.parse(readFileSync14(join22(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version;
+  const installedPluginVersion = JSON.parse(readFileSync16(join24(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version;
   const { report: agentReport } = syncAgents({
-    templatesDir: join22(pluginRoot, "agent-templates"),
-    registryPath: join22(pluginRoot, "agent-templates", "registry.json"),
-    targetAgentsDir: join22(target, ".claude", "agents"),
+    templatesDir: join24(pluginRoot, "agent-templates"),
+    registryPath: join24(pluginRoot, "agent-templates", "registry.json"),
+    targetAgentsDir: join24(target, ".claude", "agents"),
     pluginVersion: installedPluginVersion,
     now: (/* @__PURE__ */ new Date()).toISOString(),
     // config.models is authoritative (98064d77): the config init just wrote/read
@@ -13713,7 +15463,7 @@ if (claudeHost) {
   restartNeeded = agentChangesRequireRestart(agentReport);
   const agentRefused = agentReport.some((a) => items.find((i) => i.item === `.claude/agents/${a.name}.md`)?.status === "refused");
   if (!agentRefused) {
-    writeFileSync7(join22(target, ".sterling", "synced-version"), `${installedPluginVersion}
+    writeFileSync7(join24(target, ".sterling", "synced-version"), `${installedPluginVersion}
 `);
   }
   conductorActivation = ensureConductorActivation(target, agentReport);
@@ -13761,8 +15511,8 @@ if (handoffCloneTarget === true) {
   items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: "skipped", detail: HANDOFF_OFF_DETAIL });
 } else if (handoffEnabled === true) {
   const { report: opencodeReport } = syncOpenCodeAgents({
-    templatesDir: join22(pluginRoot, "agent-templates"),
-    registryPath: join22(pluginRoot, "agent-templates", "registry.json"),
+    templatesDir: join24(pluginRoot, "agent-templates"),
+    registryPath: join24(pluginRoot, "agent-templates", "registry.json"),
     targetDir: target
   });
   const opencodeRows = {
@@ -13781,8 +15531,8 @@ if (handoffCloneTarget === true) {
     items.push({ item: `${OPENCODE_AGENTS_DIR}/${r.name}.md`, status, detail });
     if (r.instruction) agentInstructions.push(r.instruction);
   }
-  const handoffBundle = join22(pluginRoot, "bin", "handoff-projection.mjs");
-  const handoffScript = existsSync12(handoffBundle) ? handoffBundle : join22(pluginRoot, "scripts", "handoff-projection.mjs");
+  const handoffBundle = join24(pluginRoot, "bin", "handoff-projection.mjs");
+  const handoffScript = existsSync12(handoffBundle) ? handoffBundle : join24(pluginRoot, "scripts", "handoff-projection.mjs");
   const handoff = spawnSync10(process.execPath, [handoffScript, target], { cwd: target, encoding: "utf8" });
   const handoffOut = `${handoff.stdout ?? ""}${handoff.stderr ?? ""}${handoff.error ? handoff.error.message : ""}`.trim();
   const handoffLine = handoffOut.split("\n")[0].replace(/^handoff projection: /, "");
@@ -13795,13 +15545,13 @@ ${handoffOut}`);
     process.exitCode = 1;
   }
 }
-var mcpPath = join22(target, ".mcp.json");
-var initIsPluginRepo = fwd6(target) === fwd6(pluginRootMatch);
+var mcpPath = join24(target, ".mcp.json");
+var initIsPluginRepo = fwd7(target) === fwd7(pluginRootMatch);
 var pluginArtifactRoot = pluginRootMatch;
-var isOurMcpEntry = (e) => e && typeof e === "object" && e.command === process.execPath && Array.isArray(e.args) && e.args[0] === fwd6(mcpServerEntry);
+var isOurMcpEntry = (e) => e && typeof e === "object" && e.command === process.execPath && Array.isArray(e.args) && e.args[0] === fwd7(mcpServerEntry);
 var readMcp = () => {
   try {
-    const m = JSON.parse(readFileSync14(mcpPath, "utf8"));
+    const m = JSON.parse(readFileSync16(mcpPath, "utf8"));
     if (m === null || typeof m !== "object" || Array.isArray(m)) throw new Error("not an object");
     return m;
   } catch {
@@ -13813,10 +15563,10 @@ var forcedCodexProbe = !codexProbeOverride ? void 0 : codexProbeOverride === "ok
 if (claudeHost) {
   const codexUserScope = userScopeCodexServer();
   if (codexUserScope.found) {
-    items.push({ item: "codex MCP (user scope)", status: "matches", detail: `a codex server is registered in ${fwd6(codexUserScope.path)}` });
+    items.push({ item: "codex MCP (user scope)", status: "matches", detail: `a codex server is registered in ${fwd7(codexUserScope.path)}` });
   } else {
     const codexProbe = forcedCodexProbe ?? probeCodex();
-    warns.push(codexUserScopeLine(codexProbe, { nodeBinDir: fwd6(dirname10(process.execPath)), unreadable: codexUserScope.unreadable }));
+    warns.push(codexUserScopeLine(codexProbe, { nodeBinDir: fwd7(dirname10(process.execPath)), unreadable: codexUserScope.unreadable }));
     items.push({ item: "codex MCP (user scope)", status: "skipped", detail: "no codex server in the user-level Claude config \u2014 see the codex mcp line below for the command" });
   }
 }
@@ -13826,7 +15576,7 @@ if (claudeHost && installedCopy) {
   else if (autoUpdate.line) warns.push(autoUpdate.line);
 }
 if (initIsPluginRepo) {
-  const winMcpConfigPath = join22(pluginArtifactRoot, ".claude-plugin", "sterling-mcp-win.json");
+  const winMcpConfigPath = join24(pluginArtifactRoot, ".claude-plugin", "sterling-mcp-win.json");
   if (existsSync12(winMcpConfigPath)) {
     items.push({
       item: ".claude-plugin/sterling-mcp-win.json",
@@ -13860,12 +15610,18 @@ if (initIsPluginRepo) {
   }
 }
 items.push(claudeHost ? { item: "hooks (\xA76 set)", status: "matches", detail: "active via the plugin (hooks/hooks.json) \u2014 not duplicated into the project" } : { item: "hooks (\xA76 set)", status: "skipped", detail: "not applicable \u2014 Claude Code is not installed on this machine, and the Claude Code plugin is what activates these hooks (OpenCode runs its own plugin hooks)" });
-var gitignorePath = join22(target, ".gitignore");
-var existingIgnore = existsSync12(gitignorePath) ? readFileSync14(gitignorePath, "utf8") : "";
-var entries = [".sterling/", "sterling.bat", "sterling-windows.bat", "tui.bat", "sterling-launch.sh", UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, ".claude/agents/"];
+var gitignorePath = join24(target, ".gitignore");
+var existingIgnore = existsSync12(gitignorePath) ? readFileSync16(gitignorePath, "utf8") : "";
+var identityIgnore = withIdentityIgnore(existingIgnore, { addIfAbsent: false });
+if (identityIgnore.changed) {
+  writeFileSync7(gitignorePath, identityIgnore.text);
+  existingIgnore = identityIgnore.text;
+  items.push({ item: ".gitignore (.sterling entry)", status: "refreshed", detail: `${IGNORE_ALL} + ${IGNORE_KEEP_IDENTITY} so .sterling/project.json can be committed` });
+}
+var entries = [IGNORE_ALL, IGNORE_KEEP_IDENTITY, IGNORE_NESTED, "sterling.bat", "sterling-windows.bat", "tui.bat", "sterling-launch.sh", UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, ".claude/agents/"];
 if (initIsPluginRepo) entries.push(".claude-plugin/sterling-mcp-win.json");
 if (eff.backupPath) {
-  const root = fwd6(target);
+  const root = fwd7(target);
   if (eff.backupPath === root || eff.backupPath.startsWith(root + "/")) {
     entries.push(eff.backupPath === root ? "/" : eff.backupPath.slice(root.length + 1) + "/");
   }
@@ -13879,7 +15635,7 @@ if (missing.length) {
 }
 var pluginPkg = (() => {
   try {
-    return JSON.parse(readFileSync14(join22(pluginRoot, ".claude-plugin", "plugin.json"), "utf8"));
+    return JSON.parse(readFileSync16(join24(pluginRoot, ".claude-plugin", "plugin.json"), "utf8"));
   } catch {
     return {};
   }
@@ -13887,9 +15643,9 @@ var pluginPkg = (() => {
 var registry = new ProjectRegistry(registryPath());
 var liveProjectPaths = null;
 try {
-  const already = registry.list().some((p) => p.repo_path === fwd6(target));
+  const already = registry.list().some((p) => p.repo_path === fwd7(target));
   registry.register({
-    repo_path: fwd6(target),
+    repo_path: fwd7(target),
     name: eff.projectName,
     stack_tags: eff.stackTags,
     toolchains: baked.map((t) => t.adapter),
@@ -13897,7 +15653,7 @@ try {
     at: (/* @__PURE__ */ new Date()).toISOString()
   });
   liveProjectPaths = [target, ...registry.list().map((p) => p.repo_path)];
-  const siblings = registry.list().filter((p) => p.repo_path !== fwd6(target)).length;
+  const siblings = registry.list().filter((p) => p.repo_path !== fwd7(target)).length;
   items.push({
     item: "project registry",
     status: already ? "refreshed" : "created",

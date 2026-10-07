@@ -5,6 +5,11 @@ import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { normalizeRepoPath, toRepoRelative } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
+import { resolveStoreRoute } from '@sterling/store/routing';
+import { openRoutedForHook } from './broker-client.mjs';
+import { isSterlingRoot, storeBackend } from './store-backend.mjs';
+
+export { storeBackend } from './store-backend.mjs';
 
 /**
  * WHICH LINES an Edit/MultiEdit changed, as merged 1-based [start, end] ranges
@@ -60,20 +65,26 @@ export function formatLineRanges(ranges) {
 }
 
 /**
- * Nearest ancestor of `from` holding .sterling/sterling.db, or null when the walk
- * reaches the filesystem root without finding one (= not a Sterling project, so
- * hooks stay silent — P1, no ceremony outside Sterling repos).
+ * Nearest ancestor of `from` that is a Sterling project root, or null when the
+ * walk reaches the filesystem root without finding one (= not a Sterling
+ * project, so hooks stay silent — P1, no ceremony outside Sterling repos).
  *
- * Keyed on the DB FILE, deliberately NOT on a bare .sterling DIRECTORY: ~/.sterling
- * exists on every machine (it holds the domain stores + registry.db) and is
- * emphatically not a project root — a walk that stopped at the directory would
- * resolve the entire enforcement surface against a store that isn't there.
+ * The anchor is .sterling/config.json, and .sterling/sterling.db is still
+ * accepted (lib/store-backend.mjs isSterlingRoot): a project whose stores live
+ * in Postgres has a config and no SQLite file, and a walk keyed on the file
+ * alone would read it as "not a Sterling project" and go silent (issue
+ * Chulf58/sterling#26 item 5c).
+ *
+ * Deliberately NOT keyed on a bare .sterling DIRECTORY: ~/.sterling exists on
+ * every machine (it holds the domain stores + registry.db, never a config.json)
+ * and is emphatically not a project root — a walk that stopped at the directory
+ * would resolve the entire enforcement surface against a store that isn't there.
  */
 export function projectRoot(from) {
   if (!from) return null;
   let dir = resolve(String(from));
   for (;;) {
-    if (existsSync(join(dir, '.sterling', 'sterling.db'))) return dir;
+    if (isSterlingRoot(dir)) return dir;
     const parent = dirname(dir);
     if (parent === dir) return null; // filesystem root — bounded, never walks forever
     dir = parent;
@@ -363,10 +374,58 @@ export function withRetry(fn) {
   throw last;
 }
 
-/** Open the project store if the project is Sterling-initialized; null otherwise. */
+/**
+ * Open the project store, or null when the project has none.
+ *
+ * SQLite storage (lib/store-backend.mjs storeBackend): today's open exactly —
+ * the file at .sterling/sterling.db, or null when it is absent.
+ *
+ * Postgres storage goes through the session's hook store broker when one
+ * answers, else its own connection after a DEGRADED line (lib/broker-client.mjs
+ * openRoutedForHook), and NEVER returns null:
+ * a project whose config says 'postgres' is a Sterling project, so "no store"
+ * there would be a silent allow. Every failure throws a named error
+ * (StoreUnreachableError, StoreSettingsError, ProjectIdentityError,
+ * PostgresStoreNotMovedError, ...) and nothing is written or created. A
+ * blocking hook turns the throw into a deny; an advisory hook uses
+ * openStoreOrDegrade below. The route is resolved (pure: files only) before
+ * anything connects, so a caller that runs its cheap event exclusions first
+ * pays the Postgres connect only on the events it acts on.
+ */
 export function openStore(cwd) {
+  if (storeBackend(cwd) === 'routed') {
+    const route = resolveStoreRoute(cwd);
+    if (route?.storage === 'postgres') return openRoutedForHook(cwd).store;
+  }
   const p = join(cwd, '.sterling', 'sterling.db');
   return existsSync(p) ? new SterlingStore(p) : null;
+}
+
+/** `Name: message` for a store failure; the class name is preferred because ProjectModeError and ProjectIdentityError keep name 'Error'. */
+export function namedError(e) {
+  const name = e?.constructor?.name && e.constructor.name !== 'Object' ? e.constructor.name : (e?.name ?? 'Error');
+  return `${name}: ${e?.message ?? String(e)}`;
+}
+
+/** The one stderr line an advisory hook prints when a routed (Postgres-storage) project store cannot be opened. */
+export function storeUnavailableLine(who, e) {
+  return `${who}: DEGRADED — the project store could not be opened, so this hook did nothing this time (${namedError(e)}).\n`;
+}
+
+/**
+ * For ADVISORY hooks: `open(cwd)` (openStore by default), and on a routed
+ * project a failure prints storeUnavailableLine and exits 1 (non-blocking but
+ * loud, P5) instead of reading as "not a Sterling project". A SQLite project
+ * keeps today's behaviour exactly: the open runs unguarded.
+ */
+export function openStoreOrDegrade(cwd, who, open = openStore) {
+  if (storeBackend(cwd) === 'sqlite') return open(cwd);
+  try {
+    return open(cwd);
+  } catch (e) {
+    warnNonBlocking(storeUnavailableLine(who, e));
+    return null; // reached only when a stdout write is already in flight, whose own exit carries
+  }
 }
 
 /**
