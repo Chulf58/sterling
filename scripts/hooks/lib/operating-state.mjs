@@ -149,8 +149,15 @@ const STORAGE_TAIL = 'TUI System tab; switch with the move-store skill';
  * by name). An unreadable config is UNKNOWN, never the SQLite default. Reads no
  * database and the project identity file: the schema name is not shown.
  */
-export function storageLine({ config, configUnreadable }) {
-  if (configUnreadable) {
+export function storageLine({ config, configUnreadable, root }) {
+  // readProjectConfig reads a config.json whose content is literally `null` as an ABSENT
+  // file (loadConfig returns null for both). Store routing rejects that file as malformed
+  // (routing.ts readConfig: parseConfig(null) throws), so this line, which states what
+  // routing will do, checks the file itself and keeps the null-content case UNKNOWN.
+  // Storage-specific on purpose: the other lines keep their accepted behaviour for it
+  // (pinned in h1-tdd-posture-line.test.mjs).
+  const presentButNull = !configUnreadable && config === null && Boolean(root) && existsSync(join(root, '.sterling', 'config.json'));
+  if (configUnreadable || presentButNull) {
     return (
       'Storage: UNKNOWN — the project config could not be read, so config.storage could not be determined. ' +
       'This is NOT the SQLite default: repair the config.'

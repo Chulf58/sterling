@@ -96,11 +96,24 @@ test('H1 shows an unrecognized config.storage as UNRECOGNIZED with its raw value
 });
 
 test('H1 reports Storage: UNKNOWN, never the SQLite default, for an unreadable or non-object config', () => {
-  for (const raw of ['{ not json', '[]', 'true', 'false', '0', '""', '"x"', '5']) {
+  for (const raw of ['{ not json', 'null', '[]', 'true', 'false', '0', '""', '"x"', '5']) {
     const lines = storageLineFor(raw);
     assert.equal(lines.length, 1, `config ${raw}`);
     assert.ok(lines[0].startsWith('Storage: UNKNOWN — the project config could not be read, so config.storage could not be determined.'), `config ${raw}: ${lines[0]}`);
     assert.match(lines[0], /NOT the SQLite default/);
     assert.doesNotMatch(lines[0], /Storage: SQLITE/);
+  }
+});
+
+// A config.json holding the literal `null` is present but unusable: store routing rejects it as
+// malformed, so the line says UNKNOWN. A config.json that is ABSENT (store file present) is the
+// SQLite default, stated as not set. loadConfig returns null for both, so the line checks the file.
+test('H1 keeps an ABSENT config.json (store file present) as SQLITE not set, apart from a file holding null', () => {
+  const dir = project({ ...BASE_CONFIG });
+  try {
+    rmSync(join(dir, '.sterling', 'config.json'));
+    assert.deepEqual(storageLines(context(dir)), [`Storage: SQLITE (config.storage not set, so SQLite — ${TAIL})`]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

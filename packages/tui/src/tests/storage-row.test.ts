@@ -108,7 +108,34 @@ test('the controller reads config.storage RAW for the row, keeping the four stat
   assert.equal(await rosterStorage('{"storage":"mysql"}'), 'mysql');
   assert.equal(await rosterStorage('{"storage":5}'), '5', 'a non-string value comes back as its JSON text');
   assert.equal(await rosterStorage('{ not json'), null, 'an unreadable config is null (UNKNOWN)');
-  for (const junk of ['[]', 'false', '0', '""', '5']) {
+  for (const junk of ['null', '[]', 'false', '0', '""', '5']) {
     assert.equal(await rosterStorage(junk), null, `a config of ${junk} parses but is not an object: UNKNOWN, never the SQLite default`);
+  }
+});
+
+// Startup is where an unrecognized config.storage is refused: every store open refuses it
+// (fail loud, P5), so openDashboard throws before any row exists. main.ts lets that throw
+// reach the terminal, so the message is what the user reads. It must name the key, the raw
+// value and the valid values. The UNRECOGNIZED and UNKNOWN rows above cover a config that
+// changes while the TUI is already running.
+test('openDashboard refuses an unrecognized config.storage at startup, naming the key, the raw value and the valid values', () => {
+  for (const [raw, shown] of [['"mysql"', '"mysql"'], ['5', '5'], ['"Postgres"', '"Postgres"']] as const) {
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-tui-refuse-'));
+    try {
+      mkdirSync(join(dir, '.sterling'), { recursive: true });
+      writeFileSync(join(dir, '.sterling', 'config.json'), `{"storage":${raw}}`);
+      assert.throws(
+        () => openDashboard(join(dir, '.sterling', 'sterling.db')),
+        (e: unknown) => {
+          const err = e as Error;
+          assert.equal(err.name, 'StoreSettingsError');
+          assert.ok(err.message.includes(`config.storage is ${shown}`), err.message);
+          assert.ok(err.message.includes("must be 'sqlite' or 'postgres'"), err.message);
+          return true;
+        },
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });

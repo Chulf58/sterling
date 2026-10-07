@@ -473,7 +473,7 @@ if (!store) {
   // (the DEGRADED case above) is exactly where the reader needs to see which backend the
   // config names. readProjectConfig never throws.
   let earlyStorageContext = '';
-  if (sterlingProject) earlyStorageContext = `\n\n${storageLine(readProjectConfig(input.cwd))}`;
+  if (sterlingProject) earlyStorageContext = `\n\n${storageLine({ ...readProjectConfig(input.cwd), root: input.cwd })}`;
   if (planLockContext || dispatchResidueLines.length || earlyWarning || sterlingProject) {
     process.stdout.write(
       JSON.stringify({
@@ -549,7 +549,7 @@ try {
 // the Handoff files line so the Project mode and Handoff files lines stay adjacent.
 let storageContext = '';
 try {
-  storageContext = `\n\n${storageLine({ config, configUnreadable })}`;
+  storageContext = `\n\n${storageLine({ config, configUnreadable, root: input.cwd })}`;
 } catch {
   // fail-open — a malformed config costs only this line
 }

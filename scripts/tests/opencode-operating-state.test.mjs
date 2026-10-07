@@ -190,6 +190,7 @@ test('the root session context states Storage in its five separate states, never
     [{ project_name: 'fixture-proj', storage: 'postgres' }, `Storage: SERVED POSTGRES (config.storage — ${TAIL})`],
     [{ project_name: 'fixture-proj', storage: 'mysql' }, null],
     ['{ not json', null],
+    ['null', null],
   ];
   for (const [config, expected] of cases) {
     const dir = makeProject(config);
@@ -200,7 +201,7 @@ test('the root session context states Storage in its five separate states, never
       const lines = textOf(i).split('\n').filter((l) => l.startsWith('Storage:'));
       assert.equal(lines.length, 1, JSON.stringify(config));
       if (expected) assert.equal(lines[0], expected);
-      else if (config === '{ not json') {
+      else if (typeof config === 'string') {
         assert.match(lines[0], /^Storage: UNKNOWN — .*NOT the SQLite default/);
       } else {
         assert.match(lines[0], /^Storage: UNRECOGNIZED \("mysql"\) — config\.storage must be 'sqlite' or 'postgres'/);
