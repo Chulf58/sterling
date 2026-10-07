@@ -48,6 +48,7 @@ import {
   FORK_CONFIRM_FLAG,
   MOVE_BRIDGE_WAIT_MS,
   attachProject,
+  describeForkLoss,
   ensureMoveReceipts,
   exportStore,
   importStore,
@@ -247,13 +248,7 @@ export function formatReport(report) {
     } else {
       lines.push(`  source fenced: ${s.source_fenced ? 'yes' : report.dryRun ? 'no (dry run fences nothing)' : 'no'}`);
     }
-    if (s.fork_loss) {
-      const l = s.fork_loss;
-      lines.push(`  already forked, NOT copied again (${FORK_CONFIRM_FLAG}): left behind in the SQLite copy: ${l.only_in_source} record(s) Postgres lacks, ${l.differs} changed after the copy`);
-      for (const e of l.listed) lines.push(`    ${e.id} "${e.title}"${e.kind === 'differs' ? ' (changed after the copy)' : ''}`);
-      const more = l.only_in_source + l.differs - l.listed.length;
-      if (more > 0) lines.push(`    and ${more} more`);
-    }
+    if (s.fork_loss) lines.push(`  already forked, NOT copied again (${FORK_CONFIRM_FLAG}); nothing below carries over: ${describeForkLoss(s.fork_loss)}`);
   }
   if (report.unreadableProjects.length) {
     lines.push(`registered projects whose config cannot be read, counted as on SQLite and mounting every domain (no shared domain fenced for them):`);

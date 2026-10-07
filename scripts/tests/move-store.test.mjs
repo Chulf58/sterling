@@ -218,7 +218,7 @@ test('--to pg: a domain a work project still on SQLite mounts stays unfenced; wh
   assert.deepEqual(three.stores[1].sharedWith, [], 'every project mounting it is on Postgres now');
   assert.ok(readSqliteFence(shared), 'so the SQLite copy is fenced');
   const text = formatReport(three);
-  assert.match(text, /already forked, NOT copied again \(--confirm-fork\): left behind in the SQLite copy: 1 record\(s\) Postgres lacks, 0 changed after the copy/);
+  assert.match(text, /already forked, NOT copied again \(--confirm-fork\); nothing below carries over: 1 record\(s\) only in the SQLite copy, 0 only in Postgres, 0 that differ/);
   assert.ok(text.includes(added.id), text);
   assert.equal(storageOf(second), 'postgres');
 });

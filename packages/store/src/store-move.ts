@@ -109,18 +109,40 @@ export class MoveForkDivergedError extends MoveError {}
 /** The CLI flag that lets a move go ahead past an existing fork without the records only the SQLite copy holds. */
 export const FORK_CONFIRM_FLAG = '--confirm-fork';
 
-/** A record only one copy of a forked domain holds, or holds in a different form. */
+/** A record whose rows differ between the two copies of a forked domain. */
 export interface ForkLossEntry {
   id: string;
   title: string;
-  /** only_in_source: the target copy lacks the id; differs: both hold it, the source's row is not the target's. */
-  kind: 'only_in_source' | 'differs';
+  /**
+   * only_in_source: the source copy holds the record and the target does not;
+   * only_in_target: the reverse (removed or retired in the source, or added to the target);
+   * differs: both hold it, and its row or any row tied to it (versions, aliases,
+   * relations, tags, file keys, log or selection rows) differs.
+   */
+  kind: 'only_in_source' | 'only_in_target' | 'differs';
 }
 
-/** What a move past an existing fork leaves behind: every count, and the first FORK_LOSS_LIST_CAP entries. */
+/** Row counts of one table that differ between the copies. */
+export interface ForkLossTable {
+  only_in_source: number;
+  only_in_target: number;
+  changed: number;
+}
+
+/**
+ * Every difference between the two copies of a forked domain, over every
+ * table a move copies (anti-pattern 44d4f74f: a check over records alone
+ * misses versions and aliases): complete counts per record kind and per
+ * table, and the first FORK_LOSS_LIST_CAP records.
+ */
 export interface ForkLoss {
   only_in_source: number;
+  only_in_target: number;
   differs: number;
+  /** Only the tables with a difference. */
+  tables: Record<string, ForkLossTable>;
+  /** Differing rows tied to no record (store_meta, runs, handoffs, check_skipped, or a log row with no record id). */
+  unattributed_rows: number;
   listed: ForkLossEntry[];
 }
 
@@ -244,6 +266,26 @@ export interface ManifestDetail {
   entries: Map<string, Map<string, string>>;
 }
 
+/** One table's rows by the manifest key (the full composite key, or row hash and occurrence for a keyless table), each with its row hash. */
+function keyedRows(t: TableSpec, rows: Row[]): Map<string, { hash: string; row: Row }> {
+  const map = new Map<string, { hash: string; row: Row }>();
+  const seen = new Map<string, number>();
+  for (const row of rows) {
+    const h = sha256(encodeRow(row));
+    let key: string;
+    if (t.key === null) {
+      const n = (seen.get(h) ?? 0) + 1;
+      seen.set(h, n);
+      key = `${h}#${n}`;
+    } else {
+      key = encodeRow(t.key.map((k) => row[t.cols.findIndex((c) => c.name === k)]));
+    }
+    if (map.has(key)) throw new MoveSchemaError(`${t.name} holds two rows with the key ${key}`);
+    map.set(key, { hash: h, row });
+  }
+  return map;
+}
+
 /**
  * The manifest of a snapshot. Computed in JS from canonical rows, so SQLite
  * and Postgres reads of the same content give the same digests: integers as
@@ -256,22 +298,7 @@ export function buildManifest(snapshot: StoreSnapshot): ManifestDetail {
   const entries = new Map<string, Map<string, string>>();
   const top: string[] = [];
   for (const t of MOVE_TABLES) {
-    const rows = snapshot.get(t.name) ?? [];
-    const map = new Map<string, string>();
-    const seen = new Map<string, number>();
-    for (const row of rows) {
-      const h = sha256(encodeRow(row));
-      let key: string;
-      if (t.key === null) {
-        const n = (seen.get(h) ?? 0) + 1;
-        seen.set(h, n);
-        key = `${h}#${n}`;
-      } else {
-        key = encodeRow(t.key.map((k) => row[t.cols.findIndex((c) => c.name === k)]));
-      }
-      if (map.has(key)) throw new MoveSchemaError(`${t.name} holds two rows with the key ${key}`);
-      map.set(key, h);
-    }
+    const map = new Map([...keyedRows(t, snapshot.get(t.name) ?? []).entries()].map(([k, v]) => [k, v.hash]));
     const lines = [...map.entries()].map(([k, h]) => `${k}\t${h}`).sort();
     const digest = sha256(lines.join('\n'));
     tables[t.name] = { rows: map.size, digest };
@@ -416,10 +443,12 @@ type TargetPlan = { kind: 'empty' } | { kind: 'replace'; fence: MoveFence } | { 
  * What the move may do with the target, decided under its lock:
  * - fenced, and unchanged since the fence (manifest digest equal): it is the
  *   copy a previous move left behind, and is replaced;
- * - its latest receipt is from this source with this manifest: a replay, no copy;
+ * - its latest receipt is from this source, and source and target both still
+ *   hold that receipt's manifest: a replay, no copy;
  * - its latest receipt is from this source and the source is a fork (left
  *   unfenced now, or not fenced by the move that wrote that receipt): the
- *   fork was already copied, the copies diverge, no copy;
+ *   fork was already copied, the copies diverge, no copy; so is a target
+ *   that changed since the receipt while the source did not;
  * - empty: copied;
  * - anything else is refused by name, colliding ids first.
  */
@@ -451,9 +480,11 @@ function classifyTarget(args: {
     );
   }
   const sameSource = receipt !== null && receipt.source_kind === identity.kind && receipt.source_name === identity.name;
-  if (sameSource && receipt.source_digest === args.sourceDigest) return { kind: 'replay', receipt };
+  // A replay needs both copies still as the receipt left them; a target that changed since is a fork, even when the source did not.
+  const sourceAsCopied = sameSource && receipt.source_digest === args.sourceDigest;
+  if (sourceAsCopied && args.targetDigest === receipt.source_digest) return { kind: 'replay', receipt };
   const copiedUnfenced = args.sourceFenceMoveId !== undefined && args.sourceFenceMoveId !== receipt?.move_id;
-  if (sameSource && (args.sourceForked || copiedUnfenced)) return { kind: 'fork_already_copied', receipt };
+  if (sameSource && (args.sourceForked || copiedUnfenced || sourceAsCopied)) return { kind: 'fork_already_copied', receipt };
   const occupied = nonEmptyTables(args.target);
   if (occupied.length === 0) return { kind: 'empty' };
   const collisions = crossCollisions(args.source, args.target);
@@ -1205,32 +1236,94 @@ function recordTitle(body: Val): string {
   }
 }
 
-/** The records the source copy holds that the target copy lacks or holds in another form: what a move past the fork leaves behind. */
+/** The column naming the record a row belongs to, for the tables that have one. */
+const RECORD_ID_COLUMN: Record<string, string> = {
+  records: 'id',
+  record_versions: 'record_id',
+  record_aliases: 'canonical_id',
+  record_relations: 'source_id',
+  record_stack_tags: 'record_id',
+  record_file_keys: 'record_id',
+  activity_log: 'record_id',
+  queue_drain_log: 'record_id',
+  selection: 'record_id',
+};
+
+/**
+ * What a move past a fork leaves behind: the full-manifest difference between
+ * the source and target copies (buildManifest and diffManifests), every
+ * differing row mapped to the record it belongs to where it has one.
+ */
 export function forkLoss(source: StoreSnapshot, target: StoreSnapshot): ForkLoss {
-  const targetRows = new Map((target.get('records') ?? []).map((r) => [r[0] as string, encodeRow(r)]));
-  const only: ForkLossEntry[] = [];
-  const differs: ForkLossEntry[] = [];
-  for (const r of source.get('records') ?? []) {
-    const id = r[0] as string;
-    const there = targetRows.get(id);
-    if (there === undefined) only.push({ id, title: recordTitle(r[12]), kind: 'only_in_source' });
-    else if (there !== encodeRow(r)) differs.push({ id, title: recordTitle(r[12]), kind: 'differs' });
+  const diffs = diffManifests(buildManifest(source), buildManifest(target));
+  const tables: Record<string, ForkLossTable> = {};
+  const kindOf = new Map<string, ForkLossEntry['kind']>();
+  let unattributed = 0;
+  for (const d of diffs) {
+    tables[d.table] = { only_in_source: d.missing.length, only_in_target: d.extra.length, changed: d.changed.length };
+    const t = MOVE_TABLES.find((x) => x.name === d.table)!;
+    const col = RECORD_ID_COLUMN[t.name];
+    const idx = col === undefined ? -1 : t.cols.findIndex((c) => c.name === col);
+    const src = keyedRows(t, source.get(t.name) ?? []);
+    const tgt = keyedRows(t, target.get(t.name) ?? []);
+    const touch = (key: string, side: Map<string, { row: Row }>, recordKind: ForkLossEntry['kind']): void => {
+      const id = idx < 0 ? null : side.get(key)!.row[idx];
+      if (typeof id !== 'string') {
+        unattributed++;
+        return;
+      }
+      if (t.name === 'records') kindOf.set(id, recordKind);
+      else if (!kindOf.has(id)) kindOf.set(id, 'differs');
+    };
+    for (const k of d.missing) touch(k, src, 'only_in_source');
+    for (const k of d.extra) touch(k, tgt, 'only_in_target');
+    for (const k of d.changed) touch(k, src, 'differs');
   }
-  return { only_in_source: only.length, differs: differs.length, listed: [...only, ...differs].slice(0, FORK_LOSS_LIST_CAP) };
+  const titleOf = new Map<string, string>();
+  for (const r of [...(target.get('records') ?? []), ...(source.get('records') ?? [])]) titleOf.set(r[0] as string, recordTitle(r[12]));
+  const order: ForkLossEntry['kind'][] = ['only_in_source', 'only_in_target', 'differs'];
+  const entries = [...kindOf.entries()]
+    .map(([id, kind]) => ({ id, title: titleOf.get(id) ?? '(no record row in either copy)', kind }))
+    .sort((x, y) => order.indexOf(x.kind) - order.indexOf(y.kind) || x.id.localeCompare(y.id));
+  const count = (k: ForkLossEntry['kind']) => entries.filter((e) => e.kind === k).length;
+  return {
+    only_in_source: count('only_in_source'),
+    only_in_target: count('only_in_target'),
+    differs: count('differs'),
+    tables,
+    unattributed_rows: unattributed,
+    listed: entries.slice(0, FORK_LOSS_LIST_CAP),
+  };
 }
 
-function describeForkLoss(loss: ForkLoss): string {
-  const total = loss.only_in_source + loss.differs;
-  if (total === 0) return 'no record differs from the copy';
-  const lines = loss.listed.map((e) => `${e.id} "${e.title}"${e.kind === 'differs' ? ' (changed after the copy)' : ''}`);
+const FORK_KIND_NOTE: Record<ForkLossEntry['kind'], string> = {
+  only_in_source: 'only in the SQLite copy',
+  only_in_target: 'only in Postgres',
+  differs: 'differs between the copies',
+};
+
+export function describeForkLoss(loss: ForkLoss): string {
+  const tableNames = Object.keys(loss.tables);
+  if (tableNames.length === 0) return 'no row differs between the copies';
+  const total = loss.only_in_source + loss.only_in_target + loss.differs;
+  const perTable = tableNames
+    .map((n) => {
+      const t = loss.tables[n];
+      return `${n} ${t.only_in_source} only in SQLite, ${t.only_in_target} only in Postgres, ${t.changed} changed`;
+    })
+    .join('; ');
+  const lines = loss.listed.map((e) => `${e.id} "${e.title}" (${FORK_KIND_NOTE[e.kind]})`);
   const more = total > loss.listed.length ? `; and ${total - loss.listed.length} more` : '';
-  return `${loss.only_in_source} record(s) only in the SQLite copy and ${loss.differs} changed there after the copy: ${lines.join('; ')}${more}`;
+  return (
+    `${loss.only_in_source} record(s) only in the SQLite copy, ${loss.only_in_target} only in Postgres, ${loss.differs} that differ (the record or its versions, aliases, relations, tags, file keys or log rows)` +
+    `${loss.unattributed_rows ? `, and ${loss.unattributed_rows} differing row(s) tied to no record` : ''}. Rows per table: ${perTable}. Records: ${lines.join('; ') || 'none'}${more}`
+  );
 }
 
 function forkUnconfirmed(identity: StoreIdentity, sourceLabel: string, targetLabel: string, receipt: MoveReceipt, loss: ForkLoss): MoveForkUnconfirmedError {
   return new MoveForkUnconfirmedError(
     `${identity.kind} '${identity.name}': ${targetLabel} was copied from ${sourceLabel} by move ${receipt.move_id} on ${receipt.committed_at}, and the SQLite copy stayed writable for other projects (the fork). ` +
-      `This move does not copy it again and never merges the two copies, so what the SQLite copy gained since will not reach Postgres: ${describeForkLoss(loss)}. ` +
+      `This move does not copy it again and never merges the two copies, so no difference between them carries over: ${describeForkLoss(loss)}. ` +
       `Those records stay in the SQLite file. Re-run with ${FORK_CONFIRM_FLAG} to move without them. Nothing was moved.`,
     loss,
   );
