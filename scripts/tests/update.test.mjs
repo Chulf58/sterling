@@ -2385,6 +2385,35 @@ test('consumer update: the fan-out writes the launchers per installed tool, dele
   }
 });
 
+test('consumer update: with neither tool found no opener is written, the pristine sterling.bat is kept with a warning; with one tool found it is deleted', async () => {
+  const cwd = scratchCwd();
+  const fx = launcherFixture(cwd);
+  const emptyBin = mkdtempSync(join(tmpdir(), 'sterling-update-launchers-nobin-'));
+  try {
+    const run = async (env) => {
+      const { exec } = fakeExec({ behind: 1, changed: ['scripts/prep.mjs'] });
+      const lines = [];
+      const report = await runUpdate({ cwd, exec, log: (l) => lines.push(String(l)), projects: [{ name: 'proj', repo_path: fx.proj }], opts: {}, env, home: fx.home });
+      assert.equal(report.exit, 0, lines.join('\n'));
+      return lines.join('\n');
+    };
+    const none = await run({ ...fx.env, PATH: emptyBin });
+    assert.ok(existsSync(join(fx.proj, 'sterling.bat')), 'kept');
+    assert.ok(!existsSync(join(fx.proj, 'claude-code.bat')) && !existsSync(join(fx.proj, 'sterling-launch.sh')), 'no opener, no engine');
+    assert.match(none, /Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers .* were kept\. They are removed on the next run that finds one of the two\./);
+    assert.doesNotMatch(none, /sterling\.bat: removed/);
+
+    const found = await run(fx.env);
+    assert.ok(!existsSync(join(fx.proj, 'sterling.bat')), 'deleted once a tool is found');
+    assert.match(found, /sterling\.bat: removed — deleted — an unedited generated copy/);
+    assert.doesNotMatch(found, /Neither Claude Code nor OpenCode was found/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(emptyBin, { recursive: true, force: true });
+    fx.cleanup();
+  }
+});
+
 test('consumer update: a project whose launchers cannot be ensured (bad tui_split_ratio) is one nonfatal warning, and the next project still gets its launchers', async () => {
   const cwd = scratchCwd();
   const fx = launcherFixture(cwd);

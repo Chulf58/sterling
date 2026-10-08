@@ -848,9 +848,16 @@ if (launcherToolsFound.claude || launcherToolsFound.opencode) {
 // (4) launchers init no longer generates (sterling.bat, tui.bat, and the native-Windows
 // sterling-windows.bat): a copy that is still a pristine generated render is deleted; an
 // edited one is kept and reported (scripts/lib/launchers.mjs removeRetiredLaunchers).
-const retired = removeRetiredLaunchers(target, pluginRoot, { history: launcherHistory });
-items.push(...retired.items);
-warns.push(...retired.warns);
+// With neither tool found no opener was written, so the old ones are the project's only
+// launchers: they are kept until a run that finds a tool writes the new ones (user-ruled
+// 2026-10-08, "Keep old ones if no tool (Recommended)").
+if (launcherToolsFound.claude || launcherToolsFound.opencode) {
+  const retired = removeRetiredLaunchers(target, pluginRoot, { history: launcherHistory });
+  items.push(...retired.items);
+  warns.push(...retired.warns);
+} else {
+  warns.push('\n⚠ Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of the two.');
+}
 
 // (5) the double-click updater entry: brings the machine's Sterling CLONE to
 // origin's default branch with NO Claude session in the loop (the updater is

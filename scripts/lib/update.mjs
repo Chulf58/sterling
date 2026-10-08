@@ -642,9 +642,15 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         rows.push(...r.items);
         warns.push(...r.warns);
       }
-      const retired = removeRetiredLaunchers(repoPath, cwd, { history: launcherHistory });
-      rows.push(...retired.items);
-      warns.push(...retired.warns);
+      if (tools.claude || tools.opencode) {
+        const retired = removeRetiredLaunchers(repoPath, cwd, { history: launcherHistory });
+        rows.push(...retired.items);
+        warns.push(...retired.warns);
+      } else {
+        // no opener was written, so the old launchers are the project's only ones
+        // (user-ruled 2026-10-08, "Keep old ones if no tool (Recommended)")
+        warns.push('⚠ Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of the two.');
+      }
       const ignored = ensureLauncherIgnores(repoPath);
       const out = rows.filter((r) => r.status !== 'matches').map((r) => `${r.item}: ${r.status} — ${r.detail}`);
       if (ignored.length) out.push(`.gitignore: added ${ignored.join(', ')}`);
