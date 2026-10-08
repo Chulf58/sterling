@@ -157,6 +157,9 @@ const GENERATED_TRACKED = [
   /^tui\/sterling-tui\.mjs$/,
   /^opencode\/sterling-server\.mjs$/,
   /^opencode\/sterling-tui\/sterling-tui\.bundle\.tsx$/,
+  // The Postgres worker: an EXTRA_ENTRIES member the same build emits beside every
+  // family's bundles (hooks, bin, mcp, tui, opencode, opencode/sterling-tui).
+  /^(hooks|bin|mcp|tui|opencode|opencode\/sterling-tui)\/pg-worker\.js$/,
   /^architecture\.md$/,
   /^rulings\.md$/,
 ];
