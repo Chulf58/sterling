@@ -7,12 +7,13 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   LAUNCHER_TEMPLATES,
+  RETIRED_LAUNCHER_TEMPLATES,
   LAUNCHER_HISTORY_REL,
   INSTALLED_BLOCKS_KEY,
   PLACEHOLDER_VALUES,
@@ -80,7 +81,7 @@ test('matchTemplateRender: {{PLUGIN_PATHS}} accepts the authoring pair and known
 });
 
 test('every placeholder in every committed version of the launcher templates has a validator', () => {
-  for (const name of LAUNCHER_TEMPLATES) {
+  for (const name of [...LAUNCHER_TEMPLATES, ...RETIRED_LAUNCHER_TEMPLATES]) {
     for (const sha of gitShas(`templates/${name}`)) {
       for (const [, token] of gitShow(sha, `templates/${name}`).matchAll(/\{\{([A-Z_]+)\}\}/g)) {
         assert.ok(Object.hasOwn(PLACEHOLDER_VALUES, token), `${name}@${sha.slice(0, 8)}: {{${token}}} has no validator`);
@@ -102,10 +103,12 @@ test('the 2026-09-19 Dome Farmer launcher is an older generated version; a hand 
 
 test('historicalLauncherTemplates on a clone: every committed template version except the current one, and the installed blocks of every renderer version', () => {
   const history = historicalLauncherTemplates({ repoRoot: REPO });
-  assert.deepEqual([...history.templates.keys()].sort(), [...LAUNCHER_TEMPLATES].sort());
-  for (const name of LAUNCHER_TEMPLATES) {
-    const current = lf(readFileSync(join(REPO, 'templates', name), 'utf8'));
-    const expected = new Set(gitShasFull(`templates/${name}`).map((s) => lf(gitShow(s, `templates/${name}`))).filter((t) => t !== current));
+  assert.deepEqual([...history.templates.keys()].sort(), [...LAUNCHER_TEMPLATES, ...RETIRED_LAUNCHER_TEMPLATES].sort());
+  for (const name of [...LAUNCHER_TEMPLATES, ...RETIRED_LAUNCHER_TEMPLATES]) {
+    // a retired template has no current text: every committed version is an earlier one
+    const current = RETIRED_LAUNCHER_TEMPLATES.includes(name) ? null : lf(readFileSync(join(REPO, 'templates', name), 'utf8'));
+    // the commit that deleted a retired template has no text for it (git show prints nothing)
+    const expected = new Set(gitShasFull(`templates/${name}`).map((s) => lf(gitShow(s, `templates/${name}`))).filter((t) => t !== current && t !== ''));
     assert.deepEqual(new Set(history.templates.get(name)), expected, name);
   }
   assert.ok(history.installedBlocks.has(INSTALLED_PATHS));
@@ -134,7 +137,8 @@ test('launcherHistorySnapshot: deterministic JSON of every launcher template and
   const a = launcherHistorySnapshot({ repoRoot: REPO });
   assert.equal(a, launcherHistorySnapshot({ repoRoot: REPO }));
   const parsed = JSON.parse(a);
-  assert.deepEqual(Object.keys(parsed), [INSTALLED_BLOCKS_KEY, ...LAUNCHER_TEMPLATES].sort());
+  assert.deepEqual(Object.keys(parsed), [INSTALLED_BLOCKS_KEY, ...LAUNCHER_TEMPLATES, ...RETIRED_LAUNCHER_TEMPLATES].sort());
+  assert.ok(parsed['launcher-win-native.bat'].length >= 5, 'every committed version of the retired native launcher is in the snapshot');
   assert.ok(parsed['launcher-tmux.sh'].length >= 1);
   assert.ok(!parsed['launcher-tmux.sh'].includes(lf(readFileSync(join(REPO, 'templates', 'launcher-tmux.sh'), 'utf8'))));
   assert.ok(!parsed[INSTALLED_BLOCKS_KEY].includes(INSTALLED_PATHS));
@@ -158,6 +162,8 @@ function runInit(target, initScript = join(REPO, 'scripts', 'init.mjs')) {
       STERLING_PLUGIN_ROOT_MATCH: tmp('sterling-lh-prm-'),
       STERLING_CODEX_PROBE: 'absent',
       STERLING_CLAUDE_PROBE: 'ok',
+      STERLING_LAUNCHER_HOST: 'windows', // a WSL2 host: the .bat openers
+      STERLING_LAUNCHER_OPENCODE: 'found', // and OpenCode found: both openers
       CLAUDE_CONFIG_DIR: cfg,
     },
   });
@@ -176,7 +182,8 @@ test('init: the 2026-09-19 launcher is rewritten from the current template and a
   assert.match(row(first.out, 'sterling-launch.sh'), /earlier generated version/);
   assert.ok(row(first.out, 'sterling-launch.sh').includes(`rendered for /home/demo/sterling-clone, now ${REPO.replace(/\\/g, '/')}`), row(first.out, 'sterling-launch.sh'));
   const after1 = readFileSync(join(target, 'sterling-launch.sh'), 'utf8');
-  assert.match(after1, /tmux set-option -t "\$SESSION" mouse on/);
+  // a line only the current template has (the per-mode sessions target "=$S:")
+  assert.match(after1, /tmux set-option -t "=\$S:" mouse on/);
   assert.ok(after1.includes(`TUI_BUNDLE="${REPO.replace(/\\/g, '/')}/tui/sterling-tui.mjs"`), after1);
   assert.doesNotMatch(after1, /packages\/tui\/bundle/);
 
@@ -211,12 +218,17 @@ test('init: a 43232a67 launcher with flags appended to the claude command is not
   assert.ok(loudLine(out, 'sterling-launch.sh'), out);
 });
 
-test('init: a current launcher is left as is; older generated .bat files are refreshed; a hand-edited .bat stays byte-identical', () => {
+// CHANGED (decision launchers-consolidated-to-claude-code-and-opencode-pair): init no
+// longer generates sterling.bat or tui.bat, so it no longer refreshes them. An older
+// render of either is an unedited generated copy, so it is now deleted (init and
+// /sterling:update alike). This test used to pin that both were refreshed.
+test('init: a current launcher is left as is; older generated sterling.bat and tui.bat are deleted', () => {
   const target = tmp('sterling-lh-project-');
   const fresh = runInit(target);
   assert.equal(fresh.code, 0, fresh.out);
   const current = {};
-  for (const f of ['sterling-launch.sh', 'sterling.bat', 'tui.bat']) current[f] = readFileSync(join(target, f), 'utf8');
+  current['sterling-launch.sh'] = readFileSync(join(target, 'sterling-launch.sh'), 'utf8');
+  for (const f of ['sterling.bat', 'tui.bat']) assert.ok(!existsSync(join(target, f)), `${f} is no longer generated`);
 
   // The oldest committed version of each .bat template, rendered with values the init of
   // its day produced (scripts/init.mjs at 495cef15).
@@ -239,17 +251,9 @@ test('init: a current launcher is left as is; older generated .bat files are ref
   assert.match(row(second.out, 'sterling-launch.sh'), /\bmatches\b/);
   assert.equal(readFileSync(join(target, 'sterling-launch.sh'), 'utf8'), current['sterling-launch.sh']);
   for (const f of ['sterling.bat', 'tui.bat']) {
-    assert.match(row(second.out, f), /\brefreshed\b/, second.out);
-    assert.equal(readFileSync(join(target, f), 'utf8'), current[f], `${f} is the current render again`);
+    assert.match(row(second.out, f), /\bremoved\b/, second.out);
+    assert.ok(!existsSync(join(target, f)), `${f} is deleted`);
   }
-
-  const handBat = current['tui.bat'].replace('\r\n', '\r\nREM my own line\r\n');
-  writeFileSync(join(target, 'tui.bat'), handBat);
-  const third = runInit(target);
-  assert.equal(third.code, 0, third.out);
-  assert.equal(readFileSync(join(target, 'tui.bat'), 'utf8'), handBat);
-  assert.match(row(third.out, 'tui.bat'), /\bdiffers\b/);
-  assert.ok(loudLine(third.out, 'tui.bat'), third.out);
 });
 
 // ---- the replay of earlier renderer versions (residuals of the launcher-refresh re-check) ----
@@ -454,15 +458,16 @@ test('init on an installed copy with no bin/launcher-history.json: a differing l
   // A launcher that differs but names no clone, so it is not the clone-launcher replacement.
   const noClone = SEP19.replace(' --plugin-dir "$PLUGIN_DIR"', '');
   assert.notEqual(noClone, SEP19);
-  const handBat = readFileSync(join(target, 'tui.bat'), 'utf8').replace('\r\n', '\r\nREM my own line\r\n');
   writeFileSync(join(target, 'sterling-launch.sh'), noClone);
-  writeFileSync(join(target, 'tui.bat'), handBat);
 
   const { code, out } = runInit(target, installedInit);
   assert.equal(code, 0, out);
   assert.equal(readFileSync(join(target, 'sterling-launch.sh'), 'utf8'), noClone);
-  assert.equal(readFileSync(join(target, 'tui.bat'), 'utf8'), handBat);
-  for (const file of ['sterling-launch.sh', 'tui.bat']) {
+  // CHANGED: tui.bat was the second subject here; init no longer generates it, and the
+  // openers that replace it are refreshed by their generated-marker stamp, which needs no
+  // template history. So the engine is the only launcher this degraded path still covers.
+  for (const file of ['claude-code.bat', 'opencode.bat']) assert.match(row(out, file), /\bmatches\b/, out);
+  for (const file of ['sterling-launch.sh']) {
     assert.match(row(out, file), /\bdiffers\b.*could not be checked \(no template history\)/, out);
     const loud = loudLine(out, file);
     assert.ok(loud, out);

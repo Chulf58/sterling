@@ -14275,6 +14275,49 @@ import { dirname as dirname10, join as join26 } from "node:path";
 init_dist();
 var IGNORE_KEEP_IDENTITY = `!${PROJECT_IDENTITY_REL}`;
 
+// scripts/lib/launcher-tmux.mjs
+var INSTALLED_PATHS = [
+  "# installed copy: nothing below names a versioned install directory; the newest",
+  "# installed Sterling (Claude Code or OpenCode) is resolved when this runs",
+  'RESOLVER_NODE="${NODE_BIN:-$(command -v node || true)}"',
+  '[ -n "$RESOLVER_NODE" ] || RESOLVER_NODE="$(ls -d "$HOME"/.local/node-v*-linux-x64/bin/node 2>/dev/null | head -1)"',
+  'TUI_BUNDLE=""',
+  `[ -z "$RESOLVER_NODE" ] || TUI_BUNDLE="$("$RESOLVER_NODE" --input-type=module <<'STERLING_RESOLVER'`,
+  RESOLVER_IMPORTS,
+  RESOLVER_SOURCE.trim(),
+  "const found = newestInstalledSterling();",
+  "if (found) process.stdout.write(join(found.root, 'tui', 'sterling-tui.mjs'));",
+  "else console.error('sterling-launch: ' + sterlingNotFoundMessage('claude-code'));",
+  "STERLING_RESOLVER",
+  ')"'
+].join("\n");
+
+// scripts/lib/launcher-history.mjs
+var LAUNCHER_TEMPLATES = ["launcher-tmux.sh", "launcher-win.bat", "tui-win.bat"];
+var RETIRED_LAUNCHER_TEMPLATES = ["launcher-win-native.bat"];
+var ALL_TEMPLATES = [...LAUNCHER_TEMPLATES, ...RETIRED_LAUNCHER_TEMPLATES];
+
+// scripts/lib/launchers.mjs
+var ENGINE_NAME = "sterling-launch.sh";
+var OPENERS = {
+  windows: [
+    { file: "claude-code.bat", mode: "claude", tool: "claude", app: "Claude Code" },
+    { file: "opencode.bat", mode: "opencode", tool: "opencode", app: "OpenCode" }
+  ],
+  linux: [
+    { file: "claude-code.sh", mode: "claude", tool: "claude", app: "Claude Code" },
+    { file: "opencode.sh", mode: "opencode", tool: "opencode", app: "OpenCode" }
+  ]
+};
+var LAUNCHER_GITIGNORE_ENTRIES = [
+  "sterling.bat",
+  "sterling-windows.bat",
+  "tui.bat",
+  ENGINE_NAME,
+  ...OPENERS.windows.map((o) => o.file),
+  ...OPENERS.linux.map((o) => o.file)
+];
+
 // scripts/lib/update.mjs
 var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed-By-Agent", "review-ledger", "frozen-test"]);
 var UPDATE_MARKER_RELATIVE_PATH = join26(".sterling", "update-complete.json");

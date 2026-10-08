@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ProjectRegistry } from '@sterling/store';
 import { findDeadTerms } from '../lib/agent-distribution.mjs';
 import { renderClaudeText } from '../lib/agent-fences.mjs';
+import { stampBody } from '../lib/generated-marker.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -134,6 +135,10 @@ function init(dir, args = [], extraEnv = {}, { cwd = dir } = {}) {
       STERLING_CLAUDE_PROBE: 'ok',
       CLAUDE_CONFIG_DIR: claudeConfigDir,
       HOME: scratchHome(dir),
+      // a WSL2 host: claude-code.bat + opencode.bat (scripts/lib/launchers.mjs launcherHost); an explicit value wins
+      STERLING_LAUNCHER_HOST: 'windows',
+      // OpenCode found, so the opencode opener is written too (Claude Code via STERLING_CLAUDE_PROBE)
+      STERLING_LAUNCHER_OPENCODE: 'found',
       ...extraEnv,
     },
   });
@@ -150,7 +155,7 @@ const FRESH_FLAGS = ['--project-name', 'ensure-target', '--stack-tags', 'node', 
 // .mcp.json is NOT a per-project artifact: the plugin declares the sterling
 // server (bound per-project via ${CLAUDE_PROJECT_DIR}), so a consuming project
 // never gets one. Its absence is asserted directly below.
-const ARTIFACTS = ['.sterling/config.json', 'AGENTS.md', 'CLAUDE.md', 'sterling.bat', 'tui.bat', 'sterling-launch.sh', 'sterling-update.bat', '.gitignore'];
+const ARTIFACTS = ['.sterling/config.json', 'AGENTS.md', 'CLAUDE.md', 'claude-code.bat', 'opencode.bat', 'sterling-launch.sh', 'sterling-update.bat', '.gitignore'];
 const snapshot = (dir) => Object.fromEntries(ARTIFACTS.map((a) => [a, readFileSync(join(dir, a), 'utf8')]));
 
 test('init records a Windows-drive --backup-path in WSL /mnt form (r-dd88 backup_path bug)', () => {
@@ -347,14 +352,17 @@ test('retired native launcher: init writes no sterling-windows.bat even with a W
     assert.ok(!existsSync(join(dir, 'sterling-windows.bat')), 'no native launcher is generated');
     assert.ok(!/^sterling-windows\.bat\b/m.test(r.stdout), 'no report row for a launcher that does not exist');
     // CONTROL: the WSL launchers the ruling keeps are still generated.
-    assert.ok(existsSync(join(dir, 'sterling.bat')), 'CONTROL: the WSL launcher is still generated');
-    assert.ok(existsSync(join(dir, 'tui.bat')), 'CONTROL: tui.bat is still generated');
+    assert.ok(existsSync(join(dir, 'claude-code.bat')), 'CONTROL: the WSL Claude Code launcher is generated');
+    assert.ok(existsSync(join(dir, 'opencode.bat')), 'CONTROL: the WSL OpenCode launcher is generated');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
 
-test('retired native launcher: an existing sterling-windows.bat is left byte-identical and reported as retired', () => {
+// CHANGED (decision launchers-consolidated-to-claude-code-and-opencode-pair): a retired
+// launcher that is a pristine generated render is now deleted; this hand-written one
+// matches no render, so it is kept and reported as differs (it was 'stale').
+test('retired native launcher: an existing hand-written sterling-windows.bat is left byte-identical and reported as kept', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
@@ -365,9 +373,146 @@ test('retired native launcher: an existing sterling-windows.bat is left byte-ide
     assert.equal(r.code, 0, r.stderr);
     assert.equal(readFileSync(bat, 'utf8'), body, 'the existing file is neither deleted nor rewritten');
     const line = statusLineFor(r.stdout, 'sterling-windows.bat') ?? '';
-    assert.match(line, /^sterling-windows\.bat\s+stale\b/, `reported, not silent — got: ${line}`);
+    assert.match(line, /^sterling-windows\.bat\s+differs\b.*kept/, `reported, not silent — got: ${line}`);
     assert.match(line, /retired/, 'the report says the launcher is retired');
     assert.match(line, /delete/i, 'the report tells the user they may delete it');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// Decision launchers-consolidated-to-claude-code-and-opencode-pair: one engine
+// (sterling-launch.sh) plus claude-code + opencode openers per host. sterling.bat and
+// tui.bat are no longer generated; an unedited copy an earlier init wrote is deleted, an edited one is kept and reported as differs.
+test('launchers: a Windows (WSL2) host gets claude-code.bat + opencode.bat, a native Linux host claude-code.sh + opencode.sh; neither gets sterling.bat or tui.bat', () => {
+  for (const [host, own, other] of [['windows', ['claude-code.bat', 'opencode.bat'], ['claude-code.sh', 'opencode.sh']], ['linux', ['claude-code.sh', 'opencode.sh'], ['claude-code.bat', 'opencode.bat']]]) {
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+    try {
+      const r = init(dir, FRESH_FLAGS, { STERLING_LAUNCHER_HOST: host });
+      assert.equal(r.code, 0, r.stderr);
+      for (const f of ['sterling-launch.sh', ...own]) {
+        assert.ok(existsSync(join(dir, f)), `${host}: ${f} generated`);
+        assert.match(statusLineFor(r.stdout, f) ?? '', new RegExp(`^${escapeRe(f)}\\s+created\\b`), `${host}: ${f} reported`);
+      }
+      for (const f of [...other, 'sterling.bat', 'tui.bat']) assert.ok(!existsSync(join(dir, f)), `${host}: no ${f}`);
+      const ignored = readFileSync(join(dir, '.gitignore'), 'utf8').split('\n');
+      for (const e of ['sterling-launch.sh', 'claude-code.bat', 'opencode.bat', 'claude-code.sh', 'opencode.sh', 'sterling.bat', 'tui.bat', 'sterling-windows.bat']) {
+        assert.ok(ignored.includes(e), `${host}: .gitignore carries ${e}`);
+      }
+      if (host === 'linux') {
+        for (const f of ['sterling-launch.sh', ...own]) assert.equal(statSync(join(dir, f)).mode & 0o111, 0o111, `${f} is executable`);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
+  }
+});
+
+test('launchers: a hand-written sterling.bat and tui.bat are kept byte-identical and reported, naming what replaces them', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    const old = { 'sterling.bat': '@echo off\r\nrem an old launcher\r\n', 'tui.bat': '@echo off\r\nrem an old TUI re-opener\r\n' };
+    for (const [f, body] of Object.entries(old)) writeFileSync(join(dir, f), body);
+    const r = init(dir, []);
+    assert.equal(r.code, 0, r.stderr);
+    for (const [f, body] of Object.entries(old)) {
+      assert.equal(readFileSync(join(dir, f), 'utf8'), body, `${f} is neither deleted nor rewritten`);
+      assert.match(statusLineFor(r.stdout, f) ?? '', new RegExp(`^${escapeRe(f)}\\s+differs\\b.*kept — no longer generated`), `${f} reported as kept`);
+    }
+    assert.match(statusLineFor(r.stdout, 'sterling.bat'), /claude-code\.bat and opencode\.bat replace it/);
+    assert.match(statusLineFor(r.stdout, 'tui.bat'), /re-adds a closed TUI pane/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// User-ruled 2026-10-08, "Keep old ones if no tool (Recommended)": with neither claude nor
+// opencode found no opener is written, so the old launchers are the project's only ones and
+// stay until a run that finds a tool replaces them.
+test('launchers: with neither Claude Code nor OpenCode found a pristine sterling.bat is kept with a warning; the next run that finds a tool deletes it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    const NONE = { STERLING_CLAUDE_PROBE: 'absent', STERLING_LAUNCHER_OPENCODE: 'absent' };
+    assert.equal(init(dir, FRESH_FLAGS, NONE).code, 0);
+    const pristine = readFileSync(join(root, 'templates', 'launcher-win.bat'), 'utf8').replaceAll('{{WIN_PROJECT_DIR}}', 'C:\\Users\\demo\\proj').replace(/\r?\n/g, '\r\n');
+    writeFileSync(join(dir, 'sterling.bat'), pristine);
+    const none = init(dir, [], NONE);
+    assert.equal(none.code, 0, none.stderr);
+    assert.equal(readFileSync(join(dir, 'sterling.bat'), 'utf8'), pristine, 'kept, not deleted');
+    assert.equal(statusLineFor(none.stdout, 'sterling.bat'), null, 'no removed row');
+    assert.match(none.stdout, /Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers .* were kept\. They are removed on the next run that finds one of the two\./);
+    assert.ok(!existsSync(join(dir, 'claude-code.bat')) && !existsSync(join(dir, 'opencode.bat')), 'no opener written');
+
+    const found = init(dir, [], { STERLING_CLAUDE_PROBE: 'ok', STERLING_LAUNCHER_OPENCODE: 'absent' });
+    assert.equal(found.code, 0, found.stderr);
+    assert.ok(!existsSync(join(dir, 'sterling.bat')), 'deleted once a tool is found');
+    assert.match(statusLineFor(found.stdout, 'sterling.bat') ?? '', /^sterling\.bat\s+removed\b/);
+    assert.doesNotMatch(found.stdout, /Neither Claude Code nor OpenCode was found/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// A retired launcher that is still a pristine generated render is deleted: the current
+// template of sterling.bat / tui.bat, or any committed version of the deleted
+// launcher-win-native.bat (sterling-windows.bat), stamped or not. Edited ones are kept.
+test('launchers: unedited generated sterling.bat, tui.bat and sterling-windows.bat are deleted; an edited stamped sterling-windows.bat is kept', () => {
+  const show = (sha, rel) => spawnSync('git', ['show', `${sha}:${rel}`], { cwd: root, encoding: 'utf8' }).stdout;
+  const crlf = (t) => t.replace(/\r?\n/g, '\r\n');
+  const fill = (t, values) => t.replace(/\{\{([A-Z_]+)\}\}/g, (_, k) => values[k]);
+  const WIN = { WIN_PROJECT_DIR: 'C:\\Users\\demo\\proj' };
+  const NATIVE = {
+    WIN_PLUGIN_DIR: 'C:\\Users\\demo\\sterling', WIN_NODE: 'C:\\Program Files\\nodejs\\node.exe',
+    WIN_TUI_BUNDLE: 'C:\\Users\\demo\\sterling\\tui\\sterling-tui.mjs', SPLIT_RATIO: '0.35', MCP_ARGS: '',
+    MCP_MODE_NOTE: 'rem MODE: host-native — sterling comes from --plugin-dir; no --strict, so other MCP servers (codex) still load.',
+  };
+  const dirs = [];
+  try {
+    // (1) current sterling.bat / tui.bat renders and the newest stamped native launcher: all deleted
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+    dirs.push(dir);
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    writeFileSync(join(dir, 'sterling.bat'), crlf(fill(readFileSync(join(root, 'templates', 'launcher-win.bat'), 'utf8'), WIN)));
+    writeFileSync(join(dir, 'tui.bat'), crlf(fill(readFileSync(join(root, 'templates', 'tui-win.bat'), 'utf8'), WIN)));
+    const newestNative = show('6496fe07', 'templates/launcher-win-native.bat');
+    assert.ok(newestNative.includes('{{MCP_ARGS}}'), 'CONTROL: the retired template is read from git');
+    writeFileSync(join(dir, 'sterling-windows.bat'), crlf(stampBody(fill(newestNative, NATIVE), 'rem')));
+    const r = init(dir, []);
+    assert.equal(r.code, 0, r.stderr);
+    for (const f of ['sterling.bat', 'tui.bat', 'sterling-windows.bat']) {
+      assert.ok(!existsSync(join(dir, f)), `${f} deleted`);
+      assert.match(statusLineFor(r.stdout, f) ?? '', new RegExp(`^${escapeRe(f)}\\s+removed\\b.*unedited generated copy`), `${f} reported removed`);
+    }
+
+    // (2) the first, unstamped native launcher (50c31433) is recognised too; a stamped copy
+    // edited after it was stamped (its body no longer matches its stamp) is kept
+    const old = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+    dirs.push(old);
+    assert.equal(init(old, FRESH_FLAGS).code, 0);
+    writeFileSync(join(old, 'sterling-windows.bat'), crlf(fill(show('50c31433', 'templates/launcher-win-native.bat'), NATIVE)));
+    const oldRun = init(old, []);
+    assert.equal(oldRun.code, 0, oldRun.stderr);
+    assert.ok(!existsSync(join(old, 'sterling-windows.bat')), 'the unstamped 50c31433 render is deleted');
+
+    const edited = crlf(stampBody(fill(newestNative, NATIVE), 'rem')).replace('move-focus left', 'move-focus right');
+    writeFileSync(join(old, 'sterling-windows.bat'), edited);
+    const keep = init(old, []);
+    assert.equal(keep.code, 0, keep.stderr);
+    assert.equal(readFileSync(join(old, 'sterling-windows.bat'), 'utf8'), edited, 'an edited copy is kept byte-identical');
+    assert.match(statusLineFor(keep.stdout, 'sterling-windows.bat') ?? '', /^sterling-windows\.bat\s+differs\b.*kept/);
+  } finally {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('launchers: an unknown STERLING_LAUNCHER_HOST stops init loudly, before anything is written', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    const r = init(dir, FRESH_FLAGS, { STERLING_LAUNCHER_HOST: 'macos' });
+    assert.equal(r.code, 2);
+    assert.match(r.stderr, /STERLING_LAUNCHER_HOST must be 'windows' or 'linux' \(got 'macos'\)/);
+    assert.ok(!existsSync(join(dir, '.sterling')) && !existsSync(join(dir, 'sterling-launch.sh')), 'refused in the verify pass, before any write');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -418,7 +563,7 @@ test('ensure outcome 2 — skip matching: a flagless re-run reports matches and 
     const before = snapshot(dir);
     const rerun = init(dir); // NO flags: declarations read back from the recorded config
     assert.equal(rerun.code, 0, rerun.stderr);
-    for (const item of ['\\.sterling/config\\.json', 'CLAUDE\\.md', 'sterling\\.bat', 'tui\\.bat', 'sterling-launch\\.sh', 'sterling-update\\.bat', '\\.mcp\\.json', '\\.gitignore']) {
+    for (const item of ['\\.sterling/config\\.json', 'CLAUDE\\.md', 'claude-code\\.bat', 'opencode\\.bat', 'sterling-launch\\.sh', 'sterling-update\\.bat', '\\.mcp\\.json', '\\.gitignore']) {
       assert.match(rerun.stdout, new RegExp(`^${item}\\s+matches\\b`, 'm'), `${item} reported as matching`);
     }
     assert.match(rerun.stdout, /^\.claude\/agents\/librarian\.md\s+matches\b/m);
@@ -493,7 +638,7 @@ test('never-clobber: a pre-existing hand-written CLAUDE.md survives the FIRST in
     assert.ok(!existsSync(join(dir, 'AGENTS.md')), 'AGENTS.md never guessed into existence from an unrecognized head');
     assert.match(r.stdout, /^AGENTS\.md\s+manual\s+head is not a pristine historical render of the Sterling template \(checked \d+ revision\(s\)\) — nothing written/m);
     assert.match(r.stdout, /^CLAUDE\.md\s+manual\s+left untouched pending AGENTS\.md migration/m);
-    for (const a of ['.sterling/config.json', '.sterling/sterling.db', 'sterling.bat', '.claude/agents/librarian.md']) {
+    for (const a of ['.sterling/config.json', '.sterling/sterling.db', 'claude-code.bat', '.claude/agents/librarian.md']) {
       assert.ok(existsSync(join(dir, a)), `the rest of the manifest still created: ${a}`);
     }
   } finally {
@@ -803,17 +948,17 @@ test('individually regenerable: deleted artifacts are recreated by a flagless re
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
-    const launcherBefore = readFileSync(join(dir, 'sterling.bat'), 'utf8');
-    unlinkSync(join(dir, 'sterling.bat'));
+    const launcherBefore = readFileSync(join(dir, 'claude-code.bat'), 'utf8');
+    unlinkSync(join(dir, 'claude-code.bat'));
     unlinkSync(join(dir, '.claude', 'agents', 'librarian.md'));
 
     const rerun = init(dir);
     assert.equal(rerun.code, 0, rerun.stderr);
-    assert.match(rerun.stdout, /^sterling\.bat\s+created\b/m);
+    assert.match(rerun.stdout, /^claude-code\.bat\s+created\b/m);
     assert.match(rerun.stdout, /^\.claude\/agents\/librarian\.md\s+created\b/m);
     assert.match(rerun.stdout, /^CLAUDE\.md\s+matches\b/m, 'untouched items still match');
     assert.match(rerun.stdout, /RESTART REQUIRED/, 'reinstalled agent → restart instruction again');
-    assert.equal(readFileSync(join(dir, 'sterling.bat'), 'utf8'), launcherBefore, 'regenerated identically');
+    assert.equal(readFileSync(join(dir, 'claude-code.bat'), 'utf8'), launcherBefore, 'regenerated identically');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -1263,7 +1408,7 @@ test('WSL2-only: init never spawns where.exe and writes no Windows artifact — 
     assert.deepEqual(modeLines(report), [], 'no line reports a run mode');
     assert.ok(!/REFUSED/.test(report), 'nothing was refused');
     assert.match(r.stdout, /^CLAUDE\.md\s+created\b/m, 'init completed the rest of the manifest');
-    assert.ok(existsSync(join(dir, 'sterling.bat')), 'the WSL launcher is still generated');
+    assert.ok(existsSync(join(dir, 'claude-code.bat')), 'the WSL launcher is still generated');
     assert.ok(existsSync(join(dir, '.claude', 'agents', 'librarian.md')), 'agents still installed');
 
     // A flagless re-run in the same environment: still no where.exe, no mode line.
