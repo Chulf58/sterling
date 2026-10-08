@@ -1,5 +1,7 @@
 # Join a Served Postgres project from OpenCode
 
+> Retired 2026-10-08. Postgres storage is switched off (decision `postgres-storage-switched-off-every-project-locked-to-local-sqlite`), so no project can be joined this way and `move-store --attach` refuses. This page is kept for reference.
+
 This page is for the person who hands out access. A new user gets two things from you:
 
 1. **The credentials file.** It is a copy of your own `~/.sterling/credentials/served.json`. Make it with:
