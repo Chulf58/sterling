@@ -1364,6 +1364,8 @@ test('every tracked file under every registered bundle family (hooks, bin, mcp, 
       assert.doesNotMatch(c, /SOURCE CHANGES/, f);
     }
   }
+  // the per-family loop above skips hooks/'s non-.mjs files, so pin the hooks copy of the worker directly
+  assert.ok(isGeneratedTrackedPath('hooks/pg-worker.js'), 'hooks/pg-worker.js is an EXTRA_ENTRIES build output');
   assert.equal(isGeneratedTrackedPath('hooks/hooks.json'), false, 'the hand-maintained hook registry stays source');
   assert.equal(isGeneratedTrackedPath('hooks/README.md'), false, 'authored hooks/ prose stays source');
   assert.equal(isGeneratedTrackedPath('.claude-plugin/sterling-mcp.json'), false, 'the committed MCP config is authored, not generated');
