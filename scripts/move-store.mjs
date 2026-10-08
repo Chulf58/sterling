@@ -12,6 +12,11 @@
 //   node bin/move-store.mjs --to pg --confirm-fork [--dry-run] [--project <dir>]
 //   node bin/move-store.mjs --attach [--fence-local] [--dry-run] [--project <dir>]
 //
+// --to pg and --attach are switched off (decision
+// postgres-storage-switched-off-every-project-locked-to-local-sqlite): they refuse
+// with MovePostgresOffError, before any file or connection is touched, unless
+// STERLING_ALLOW_POSTGRES_MOVE=1 is set. --to sqlite is unaffected.
+//
 // Refuses by name: a directory with no Sterling config, --to pg in a hobby
 // project, a missing .sterling/project.json, missing or invalid Postgres
 // credentials. Every store is checked first, so a refusal anywhere moves and
@@ -68,6 +73,22 @@ export class MoveStoreUsageError extends Error {
     super(`${message}\n${USAGE}`);
     this.name = 'MoveStoreUsageError';
   }
+}
+
+export class MovePostgresOffError extends Error {
+  constructor() {
+    super(
+      'Postgres storage is switched off (decision postgres-storage-switched-off-every-project-locked-to-local-sqlite). ' +
+        'Nothing was read or written. --to sqlite still works. ' +
+        'Set STERLING_ALLOW_POSTGRES_MOVE=1 only to deliberately reverse that decision.',
+    );
+    this.name = 'MovePostgresOffError';
+  }
+}
+
+/** Refuses --to pg and --attach, dry run included, unless the env opts in with exactly '1'. --to sqlite is never refused. */
+export function refusePostgresMove(args, env = process.env) {
+  if ((args.attach || args.to === 'pg') && env.STERLING_ALLOW_POSTGRES_MOVE !== '1') throw new MovePostgresOffError();
 }
 
 /** A move returns { to, dryRun, project, confirmFork }; an attach returns { attach: true, fenceLocal, dryRun, project }. */
@@ -269,8 +290,9 @@ function main() {
   let args;
   try {
     args = parseArgs(process.argv.slice(2));
+    refusePostgresMove(args);
   } catch (e) {
-    process.stderr.write(`move-store: ${e.message}\n`);
+    process.stderr.write(`move-store: ${e instanceof MovePostgresOffError ? `${e.name}: ` : ''}${e.message}\n`);
     process.exit(2);
   }
   try {

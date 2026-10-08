@@ -10629,6 +10629,17 @@ ${USAGE}`);
     this.name = "MoveStoreUsageError";
   }
 };
+var MovePostgresOffError = class extends Error {
+  constructor() {
+    super(
+      "Postgres storage is switched off (decision postgres-storage-switched-off-every-project-locked-to-local-sqlite). Nothing was read or written. --to sqlite still works. Set STERLING_ALLOW_POSTGRES_MOVE=1 only to deliberately reverse that decision."
+    );
+    this.name = "MovePostgresOffError";
+  }
+};
+function refusePostgresMove(args, env = process.env) {
+  if ((args.attach || args.to === "pg") && env.STERLING_ALLOW_POSTGRES_MOVE !== "1") throw new MovePostgresOffError();
+}
 function parseArgs(argv) {
   const out = { to: void 0, dryRun: false, project: void 0, confirmFork: false };
   let attach = false;
@@ -10801,8 +10812,9 @@ function main() {
   let args;
   try {
     args = parseArgs(process.argv.slice(2));
+    refusePostgresMove(args);
   } catch (e) {
-    process.stderr.write(`move-store: ${e.message}
+    process.stderr.write(`move-store: ${e instanceof MovePostgresOffError ? `${e.name}: ` : ""}${e.message}
 `);
     process.exit(2);
   }
@@ -10824,11 +10836,13 @@ function main() {
 var launchedAs = process.argv[1] && resolve4(process.argv[1]);
 if (launchedAs === fileURLToPath(new URL("../scripts/move-store.mjs", import.meta.url).href) || launchedAs === fileURLToPath(new URL("../bin/move-store.mjs", new URL("../scripts/move-store.mjs", import.meta.url).href))) main();
 export {
+  MovePostgresOffError,
   MoveStoreUsageError,
   findProjectRoot,
   formatAttachReport,
   formatReport,
   parseArgs,
+  refusePostgresMove,
   runAttach,
   runMoveStore
 };

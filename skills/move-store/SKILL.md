@@ -5,6 +5,8 @@ description: Move a project's knowledge, with its mounted domains, from SQLite t
 
 # Moving a project's store SOP
 
+> Switched off: decision `postgres-storage-switched-off-every-project-locked-to-local-sqlite`. `--to pg` and `--attach` refuse with `MovePostgresOffError` before touching anything, unless `STERLING_ALLOW_POSTGRES_MOVE=1` is set in the environment. Set it only to deliberately reverse that decision. `--to sqlite` still works.
+
 Decisions `store-move-skill-two-way-one-direction-at-a-time-no-live-sync`, `storage-backend-is-its-own-config-key-written-only-by-store-move` and `shared-domains-stay-forked-and-loud-while-projects-move-one-at-a-time`. The command is `node "${CLAUDE_PLUGIN_ROOT}/bin/move-store.mjs" --to pg|sqlite [--confirm-fork] [--dry-run] [--project <dir>]`, called "the move" below. Work the steps in order.
 
 ## 1. What the move does
@@ -22,7 +24,7 @@ The move writes `config.storage` (`postgres` or `sqlite`) and nothing else in th
 
 ## 2. When to use it
 
-- A project should keep its knowledge on the Served Postgres database, in either project mode: `--to pg`.
+- A project should keep its knowledge on the Served Postgres database, in either project mode: `--to pg`. Switched off (see the note at the top); do not run it unless the user explicitly reverses the decision.
 - A work project became a hobby project, or the Served database is going to close: `--to sqlite`. The export reads Postgres, so it has to run while the database is still reachable. A database that is already gone cannot be exported; the Served platform's point-in-time restore is the recovery for an unplanned loss, not this move.
 
 If the user asks for a live two-way sync, say that the move does not do one (decision above, user-ruled 2026-10-06) and offer the move in one direction.
@@ -105,6 +107,8 @@ A usage error exits 2 and prints the usage line; any other failure exits 1.
 - Do not move the project again without a new question to the user.
 
 ## 10. A second machine
+
+`--attach` is switched off the same way (see the note at the top). It refuses unless `STERLING_ALLOW_POSTGRES_MOVE=1` is set, and nothing is read or written when it refuses.
 
 Decision `second-machine-attaches-to-a-postgres-project-through-move-store-attach`. Use this when one machine already moved a project to Postgres, hobby or work, and the user now has a fresh clone of that project on another machine. The clone has the committed `.sterling/project.json`, but its own `.sterling/config.json` is not in git and has no `config.storage`, so the clone still reads SQLite. Do not run `--to pg` there: the clone's SQLite store is not the one that was moved, so the move refuses it. Do not set `config.storage` by hand either.
 
