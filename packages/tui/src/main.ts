@@ -2,9 +2,11 @@
 // Exits politely on non-TTY stdout (§11). terminal-kit loads only after the
 // guard. STERLING_TUI_SMOKE=1 initializes the terminal stack and exits —
 // the bundle test uses it to prove runtime resolution works.
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { openDashboard } from './controller.js';
-import { visibleBodyLines, AGENTS_TAB } from './state.js';
+import { visibleBodyLines, AGENTS_TAB, type DashboardState } from './state.js';
 import { bannerLines } from './banner.js';
 import { clearPixels, draw, keyToEvent, mouseToEvent, paintPixels } from './render.js';
 import { composeSubagentBlock, createSubagentTracker, type BlockPixel, type SubagentBlock, type SubagentView } from './subagents.js';
@@ -45,7 +47,28 @@ if (owner !== null) {
 // The store, config and effect code paths live in controller.ts, shared with
 // the OpenCode plugin; this file owns the terminal: the lock, the screen, the
 // key and mouse translation, and the redraw loop.
-const ctl = openDashboard(storePath);
+// STERLING_TUI_PROFILE=<file> (or =1 for .sterling/transient/tui-profile.log)
+// appends one JSON line per input event, deferred write and tick: timings,
+// dashboard builds and project-store method calls.
+const profileEnv = process.env.STERLING_TUI_PROFILE;
+const profilePath = !profileEnv ? undefined : profileEnv === '1' ? join(dirname(storePath), 'transient', 'tui-profile.log') : profileEnv;
+// Store writes are deferred: the frame is drawn first, then the write runs.
+const ctl = openDashboard(storePath, { deferWrites: true, profile: profilePath !== undefined });
+if (profilePath) {
+  mkdirSync(dirname(profilePath), { recursive: true });
+  appendFileSync(profilePath, JSON.stringify({ at: new Date().toISOString(), start: true, pid: process.pid, changeDetection: ctl.stats().changeDetection }) + '\n');
+}
+/** Time one unit of work and, when profiling, log it with the builds and store calls it cost. */
+function profiled<T>(kind: string, work: () => T, extra: () => Record<string, unknown> = () => ({})): T {
+  if (!profilePath) return work();
+  const s0 = ctl.stats();
+  const t0 = performance.now();
+  const out = work();
+  const ms = Math.round((performance.now() - t0) * 100) / 100;
+  const s1 = ctl.stats();
+  appendFileSync(profilePath, JSON.stringify({ at: new Date().toISOString(), kind, ms, builds: s1.builds - s0.builds, storeCalls: s1.storeCalls - s0.storeCalls, ...extra() }) + '\n');
+  return out;
+}
 // the §11 banner is on by default; STERLING_NO_BANNER=1 suppresses it (the same
 // env var the H1 SessionStart hook honors). It is a pure flag from here down —
 // the state layer stays env-free.
@@ -109,10 +132,20 @@ function animate(): void {
   painted = paintPixels(term, screenPixels(block), painted, trueColor);
 }
 
-function redraw(): void {
+// what the last redraw drew: the 1 Hz tick skips a redraw that would draw the same
+let drawnState: DashboardState | undefined;
+let drawnView = '';
+
+/** Draw the dashboard. With onlyIfChanged (the tick) nothing is drawn when the
+ *  state is the cached one and the agent view is unchanged; true when it drew. */
+function redraw(onlyIfChanged = false): boolean {
   const now = Date.now();
   shownView = subagents.view(now);
   const state = ctl.state(viewport());
+  const viewKey = ctl.ui().tab === AGENTS_TAB ? JSON.stringify(shownView) : String(shownView.active);
+  if (onlyIfChanged && !forceFull && state === drawnState && viewKey === drawnView) return false;
+  drawnState = state;
+  drawnView = viewKey;
   bodyTop = state.bodyTop;
   const block = subagentBlock(Math.floor(now / ANIMATION_MS));
   const key = layoutKey(block);
@@ -130,15 +163,50 @@ function redraw(): void {
     clearInterval(animation);
     animation = undefined;
   }
+  return true;
+}
+
+// Events run one at a time: each input event, tick, resize and deferred write
+// waits for the one before it, so a key can no longer interleave with an
+// effect still awaiting (applySwap). A rejection still reaches the fatal
+// handler below, as before.
+let queue: Promise<void> = Promise.resolve();
+function serial(job: () => void | Promise<void>): void {
+  queue = queue.then(job);
 }
 
 async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
   if (!event) return;
+  const s0 = profilePath ? ctl.stats() : undefined;
+  const t0 = performance.now();
   if (await ctl.handle(event, viewport())) {
+    ctl.flush(); // the last selection still reaches the store before the exit
     restoreTerminal();
     process.exit(0);
   }
-  redraw();
+  const t1 = performance.now();
+  profiled(`event:${event.kind}`, () => redraw(), () => ({
+    handleMs: Math.round((t1 - t0) * 100) / 100,
+    builds: ctl.stats().builds - s0!.builds,
+    storeCalls: ctl.stats().storeCalls - s0!.storeCalls,
+  }));
+  scheduleFlush();
+}
+
+// The held store writes run after the input already waiting has been handled
+// (setImmediate runs after the poll phase), so the frame for every click is
+// on screen first and a burst of clicks ends in one selection write. A failed
+// write shows as a notice; it never exits.
+let flushScheduled = false;
+function scheduleFlush(): void {
+  if (flushScheduled) return;
+  flushScheduled = true;
+  setImmediate(() =>
+    serial(() => {
+      flushScheduled = false;
+      if (profiled('flush', () => ctl.flush())) redraw();
+    })
+  );
 }
 
 // Idempotent terminal + resource restore (audit finding 23/43): the ONLY prior
@@ -178,13 +246,17 @@ process.on('unhandledRejection', (err) => {
 term.fullscreen(true);
 term.hideCursor();
 term.grabInput({ mouse: 'button' });
-term.on('key', (name: string) => void handle(keyToEvent(name)));
-term.on('mouse', (name: string, data: { x: number; y: number }) => void handle(mouseToEvent(name, data)));
-term.on('resize', () => {
-  // fresh buffer at the new size; its empty delta state forces a full repaint
-  screen = new termkit.default.ScreenBuffer({ dst: term });
-  forceFull = true;
-  redraw();
-});
-setInterval(redraw, 1000); // live view over the durable store
+term.on('key', (name: string) => serial(() => handle(keyToEvent(name))));
+term.on('mouse', (name: string, data: { x: number; y: number }) => serial(() => handle(mouseToEvent(name, data))));
+term.on('resize', () =>
+  serial(() => {
+    // fresh buffer at the new size; its empty delta state forces a full repaint
+    screen = new termkit.default.ScreenBuffer({ dst: term });
+    forceFull = true;
+    redraw();
+  })
+);
+// live view over the durable store: the tick rebuilds only when the store's
+// data_version, the ui or the viewport moved, and draws only when that or the agent view changed
+setInterval(() => serial(() => void profiled('tick', () => redraw(true), () => ({}))), 1000);
 redraw();
