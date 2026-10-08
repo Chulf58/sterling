@@ -627,8 +627,8 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   let launcherSetup = null;
   const launcherHistory = launcherHistoryLoader(cwd);
   const projectLaunchers = (repoPath) => {
-    if (!existsSync(join(repoPath, '.sterling', 'config.json'))) return [];
     try {
+      if (!existsSync(join(repoPath, '.sterling', 'config.json'))) return [];
       launcherSetup ??= { host: launcherHost({ env }), tools: launcherTools({ env, home }) };
       const { host, tools } = launcherSetup;
       const rows = [];

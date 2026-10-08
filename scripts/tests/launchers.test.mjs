@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { renderTmuxLauncher } from '../lib/launcher-tmux.mjs';
 import { stampBody, verifyStamp } from '../lib/generated-marker.mjs';
 import {
-  ensureLauncherIgnores, ensureLaunchers, launcherHost, launcherTools, legacySessionName, removeRetiredLaunchers, renderOpener, sessionName,
+  ensureExecutable, ensureLauncherIgnores, ensureLaunchers, launcherHost, launcherTools, legacySessionName, removeRetiredLaunchers, renderOpener, sessionName,
   LAUNCHER_GITIGNORE_ENTRIES, OPENERS,
 } from '../lib/launchers.mjs';
 
@@ -170,7 +170,7 @@ function engine({ installed = false } = {}) {
   return { root, text: renderTmuxLauncher(root, { session: 'sterling-demo-1a2b', legacySession: 'sterling-demo', splitPercent: 35, installed }) };
 }
 // The fake tmux: has-session answers from $RUNNING ('=name' exact, a bare name also as a prefix, as tmux does),
-// list-panes -a from $PANES_ALL, other list-panes from $PANES, display from $CALLER.
+// list-panes -a from $PANES_ALL, other list-panes from $PANES, display of #{session_path} from $SESSION_PATH, other display from $CALLER.
 const FAKE_TMUX = `#!/bin/sh
 printf '%s\\n' "$*" >> "$TMUX_LOG"
 case "$1" in
@@ -180,11 +180,11 @@ case "$1" in
   esac
   exit 1 ;;
   list-panes) case " $* " in *" -a "*) printf '%s\\n' "$PANES_ALL" ;; *) printf '%s\\n' "$PANES" ;; esac; exit 0 ;;
-  display) printf '%s\\n' "$CALLER"; exit 0 ;;
+  display) case " $* " in *session_path*) printf '%s\\n' "$SESSION_PATH" ;; *) printf '%s\\n' "$CALLER" ;; esac; exit 0 ;;
 esac
 exit 0
 `;
-function runEngine(args, { running = '', panes = '', panesAll = '', caller = '', tmux, home, extraEnv = {}, lock } = {}) {
+function runEngine(args, { running = '', panes = '', panesAll = '', caller = '', sessionPath, tmux, home, extraEnv = {}, lock } = {}) {
   const { root, text } = engine();
   const work = tmp('sterling-ln-work-');
   mkdirSync(join(work, '.sterling', 'transient'), { recursive: true });
@@ -195,7 +195,7 @@ function runEngine(args, { running = '', panes = '', panesAll = '', caller = '',
   script(join(bin, 'tmux'), FAKE_TMUX);
   const log = join(work, 'tmux.log');
   const env = {
-    PATH: bin, HOME: home ?? tmp('sterling-ln-home-'), TMUX_LOG: log, RUNNING: running, PANES: panes, PANES_ALL: panesAll, CALLER: caller,
+    PATH: bin, HOME: home ?? tmp('sterling-ln-home-'), TMUX_LOG: log, RUNNING: running, PANES: panes, PANES_ALL: panesAll, CALLER: caller, SESSION_PATH: sessionPath ?? work,
     NODE_BIN: process.execPath, CLAUDE_BIN: '/bin/true', ...(tmux ? { TMUX: tmux } : {}), ...extraEnv,
   };
   const r = spawnSync(which('bash'), [join(work, 'sterling-launch.sh'), ...args], { cwd: work, env, encoding: 'utf8', timeout: 30_000 });
@@ -255,6 +255,26 @@ test('engine: a running legacy sterling-<proj> session is attached to in claude 
   assert.ok(first(calls, 'split-window').includes('-t =sterling-demo:'), 'the missing TUI pane is re-added to the legacy session');
   assert.equal(calls.at(-1), 'attach-session -t =sterling-demo');
   assert.ok(calls.includes('has-session -t =sterling-demo-1a2b-claude'), 'the suffixed session was looked for first');
+});
+
+test('engine: a running legacy session of ANOTHER checkout with the same directory name (issue #52) is never attached to or split, in claude or tui mode', { skip: LINUX }, () => {
+  const elsewhere = '/somewhere/else/demo';
+  const claude = runEngine(['claude'], { running: 'sterling-demo', sessionPath: elsewhere });
+  assert.equal(claude.r.status, 0, claude.r.stderr);
+  assert.match(first(claude.calls, 'new-session'), /-s sterling-demo-1a2b-claude /, 'a fresh session of this checkout');
+  assert.equal(all(claude.calls, 'attach-session').filter((c) => c === 'attach-session -t =sterling-demo').length, 0, 'the other checkout\'s session is not attached');
+  assert.equal(all(claude.calls, 'split-window').filter((c) => c.includes('-t =sterling-demo:')).length, 0, 'its TUI is not split into the other checkout\'s session');
+
+  const tui = runEngine(['tui'], { running: 'sterling-demo', sessionPath: elsewhere });
+  assert.equal(tui.r.status, 1);
+  assert.match(tui.r.stderr, /no session of this project is running/);
+  assert.equal(all(tui.calls, 'split-window').length, 0);
+});
+
+test('engine tui mode: a running legacy session of THIS checkout still gets the TUI outside tmux', { skip: LINUX }, () => {
+  const { r, calls } = runEngine(['tui'], { running: 'sterling-demo' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(first(calls, 'split-window').includes('-t =sterling-demo:'), first(calls, 'split-window'));
 });
 
 test('engine: the suffixed session wins over a legacy one; opencode mode never attaches to the legacy (Claude Code) session', { skip: LINUX }, () => {
@@ -420,6 +440,30 @@ test('removeRetiredLaunchers: a current-template render of sterling.bat and tui.
   assert.equal(readFileSync(join(target, 'tui.bat'), 'utf8'), '@echo off\r\nrem my own\r\n');
   assert.match(r.items[1].detail, /kept — no longer generated .*re-adds a closed TUI pane/);
   assert.ok(r.warns.some((w) => w.includes('tui.bat') && /kept/.test(w)), r.warns.join('\n'));
+});
+
+test('removeRetiredLaunchers: with no template history (degraded) an older-render sterling.bat is kept and the message says it could not be checked', () => {
+  const target = tmp('sterling-ln-target-');
+  const older = readFileSync(join(REPO, 'templates', 'launcher-win.bat'), 'utf8').replaceAll('{{WIN_PROJECT_DIR}}', 'D:\\proj').replace('@echo off', '@echo off\r\nrem an older render').replace(/\r?\n/g, '\r\n');
+  writeFileSync(join(target, 'sterling.bat'), older);
+  const history = { warns: [], get: () => ({ templates: new Map(), installedBlocks: new Set(), replayFailures: [], degraded: 'bin/launcher-history.json is missing' }) };
+  const r = removeRetiredLaunchers(target, REPO, { history });
+  assert.deepEqual(r.items.map((i) => [i.item, i.status]), [['sterling.bat', 'differs']]);
+  assert.equal(readFileSync(join(target, 'sterling.bat'), 'utf8'), older, 'kept, not deleted');
+  assert.ok(r.warns.some((w) => w.includes('sterling.bat') && /could not be checked against earlier versions \(no template history: bin\/launcher-history\.json is missing\)/.test(w)), r.warns.join('\n'));
+});
+
+test('ensureExecutable: a mode that cannot be read or set (a drvfs mount, a vanished file) is a warning naming the fix, never a throw; a settable mode gets the bits', { skip: LINUX }, () => {
+  const dir = tmp('sterling-ln-exec-');
+  const warns = [];
+  assert.doesNotThrow(() => ensureExecutable(join(dir, 'missing.sh'), warns));
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /missing\.sh could not be made executable \(ENOENT\); run: chmod \+x /);
+  const file = join(dir, 'ok.sh');
+  writeFileSync(file, '', { mode: 0o644 });
+  ensureExecutable(file, warns);
+  assert.equal(warns.length, 1, 'no warning when it works');
+  assert.equal(statSync(file).mode & 0o755, 0o755);
 });
 
 test('launcherTools: claude on PATH; opencode on PATH or in ~/.opencode/bin; the claude argument and STERLING_LAUNCHER_OPENCODE override; a bad override throws', () => {

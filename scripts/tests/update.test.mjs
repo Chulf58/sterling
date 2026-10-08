@@ -389,7 +389,7 @@ test('behind: fast-forward then build → check → test, then the project fan-o
 // Launchers baked before the plugin layout (sterling.bat, tui.bat, sterling-launch.sh)
 // name packages/tui/bundle/sterling-tui.mjs, which no longer ships. The fan-out now
 // refreshes unedited ones; a consumer update still says once what to do about an edited one.
-test('consumer update: one line tells the user to re-run /sterling:init per project so launchers run tui/sterling-tui.mjs; an authoring clone is not told', async () => {
+test('consumer update: one line names the launcher refresh and says an edited launcher is kept (delete it, re-run /sterling:init) so launchers run tui/sterling-tui.mjs; an authoring clone is not told', async () => {
   for (const [role, expected] of [[null, 1], ['consumer', 1], ['authoring', 0]]) {
     const cwd = scratchCwd();
     try {
@@ -2381,6 +2381,28 @@ test('consumer update: the fan-out writes the launchers per installed tool, dele
     assertLaunchersRefreshed(fx.proj, text);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+    fx.cleanup();
+  }
+});
+
+test('consumer update: a project whose launchers cannot be ensured (bad tui_split_ratio) is one nonfatal warning, and the next project still gets its launchers', async () => {
+  const cwd = scratchCwd();
+  const fx = launcherFixture(cwd);
+  const bad = mkdtempSync(join(tmpdir(), 'sterling-update-launchers-bad-'));
+  try {
+    mkdirSync(join(bad, '.sterling'), { recursive: true });
+    writeFileSync(join(bad, '.sterling', 'config.json'), JSON.stringify({ tui_split_ratio: 'x' }));
+    const { exec } = fakeExec({ behind: 1, changed: ['scripts/prep.mjs'] });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(String(l)), projects: [{ name: 'bad', repo_path: bad }, { name: 'proj', repo_path: fx.proj }], opts: {}, env: fx.env, home: fx.home });
+    const text = lines.join('\n');
+    assert.equal(report.exit, 0, text);
+    assert.match(text, /⚠ launchers ensure FAILED \(nonfatal\): tui_split_ratio in \.sterling\/config\.json is "x"/);
+    assert.ok(!existsSync(join(bad, 'sterling-launch.sh')), 'nothing written into the project that failed');
+    assertLaunchersRefreshed(fx.proj, text);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(bad, { recursive: true, force: true });
     fx.cleanup();
   }
 });

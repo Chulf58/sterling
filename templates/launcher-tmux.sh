@@ -41,6 +41,12 @@ command -v tmux >/dev/null || { echo "sterling-launch: 'tmux' not installed" >&2
 # set-option and split-window take a pane target, so they need the trailing ':'.
 running() { tmux has-session -t "=$1" 2>/dev/null; }
 
+# The legacy name is basename-only, so another checkout with the same directory
+# name can own it: it counts as this checkout's only when it started in WORKDIR.
+legacy_running() {
+  running "$LEGACY_SESSION" && [ "$(tmux display -p -t "=$LEGACY_SESSION:" '#{session_path}' 2>/dev/null || true)" = "$WORKDIR" ]
+}
+
 has_tui_pane() {
   local cmds
   cmds="$(tmux list-panes -s -t "=$1" -F '#{pane_start_command}' 2>/dev/null || true)"
@@ -119,7 +125,7 @@ case "$MODE" in
   claude|up)
     [ -n "$CLAUDE_BIN" ] || { echo "sterling-launch: 'claude' not found on PATH (set CLAUDE_BIN)" >&2; exit 1; }
     # A session from the launcher before the per-checkout names is attached to, never duplicated.
-    if ! running "$SESSION-claude" && running "$LEGACY_SESSION"; then
+    if ! running "$SESSION-claude" && legacy_running; then
       open_session "$LEGACY_SESSION"
     fi
     open_session "$SESSION-claude" "$CLAUDE_BIN"{{CLAUDE_PLUGIN_FLAG}}
@@ -135,9 +141,10 @@ case "$MODE" in
     if [ -n "${TMUX:-}" ]; then
       S="$(tmux display -p '#S')"
     else
-      for candidate in "$SESSION-claude" "$SESSION-opencode" "$LEGACY_SESSION"; do
+      for candidate in "$SESSION-claude" "$SESSION-opencode"; do
         if running "$candidate"; then S="$candidate"; break; fi
       done
+      if [ -z "$S" ] && legacy_running; then S="$LEGACY_SESSION"; fi
     fi
     [ -n "$S" ] || { echo "sterling-launch: no session of this project is running ($SESSION-claude, $SESSION-opencode) - start one with: ./sterling-launch.sh claude" >&2; exit 1; }
     tmux set-option -t "=$S:" mouse on

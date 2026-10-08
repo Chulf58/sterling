@@ -383,7 +383,7 @@ test('retired native launcher: an existing hand-written sterling-windows.bat is 
 
 // Decision launchers-consolidated-to-claude-code-and-opencode-pair: one engine
 // (sterling-launch.sh) plus claude-code + opencode openers per host. sterling.bat and
-// tui.bat are no longer generated; a copy an earlier init wrote is reported stale.
+// tui.bat are no longer generated; an unedited copy an earlier init wrote is deleted, an edited one is kept and reported as differs.
 test('launchers: a Windows (WSL2) host gets claude-code.bat + opencode.bat, a native Linux host claude-code.sh + opencode.sh; neither gets sterling.bat or tui.bat', () => {
   for (const [host, own, other] of [['windows', ['claude-code.bat', 'opencode.bat'], ['claude-code.sh', 'opencode.sh']], ['linux', ['claude-code.sh', 'opencode.sh'], ['claude-code.bat', 'opencode.bat']]]) {
     const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
