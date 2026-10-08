@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { SterlingStore } from '@sterling/store';
 import { openDashboard, type DashboardController, type DashboardOptions } from '../controller.js';
@@ -93,7 +94,7 @@ test('click lag (c): a failed store write becomes a notice; handle() and flush()
     try {
       todo(ctl.store, 'item');
       ctl.state(VP);
-      ctl.store.writeSelection = () => {
+      ctl.writeStore.writeSelection = () => {
         throw new Error('disk I/O error');
       };
       await ctl.handle({ kind: 'click', x: 5, y: lineOf(0) }, VP); // rejects on regression
@@ -114,7 +115,7 @@ test('click lag (c): a failed store write becomes a notice; handle() and flush()
     await ctl.handle({ kind: 'char', ch: 'e' }, VP);
     await ctl.handle({ kind: 'char', ch: '!' }, VP);
     await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
-    ctl.store.updateTodo = () => {
+    ctl.writeStore.updateTodo = () => {
       throw new Error('version moved');
     };
     assert.equal(ctl.flush(), true);
@@ -191,8 +192,8 @@ test('quit: a held write that fails or cannot get the lock stops the quit once; 
   try {
     todo(ctl.store, 'item');
     ctl.state(VP);
-    const real = ctl.store.writeSelection.bind(ctl.store);
-    ctl.store.writeSelection = () => {
+    const real = ctl.writeStore.writeSelection.bind(ctl.writeStore);
+    ctl.writeStore.writeSelection = () => {
       throw Object.assign(new Error('database is locked'), { errcode: 5 });
     };
     await ctl.handle({ kind: 'click', x: 5, y: lineOf(0) }, VP);
@@ -204,7 +205,7 @@ test('quit: a held write that fails or cannot get the lock stops the quit once; 
     // any other event disarms the discard; a later retry that succeeds saves the write and clears the notice
     await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
     assert.equal(ctl.requestQuit(), false, 'disarmed by the next event');
-    ctl.store.writeSelection = real;
+    ctl.writeStore.writeSelection = real;
     assert.equal(ctl.flush(), false);
     assert.equal(ctl.pending(), 0);
     assert.ok(ctl.store.takeSelection(), 'the retried selection reached the store');
@@ -212,7 +213,7 @@ test('quit: a held write that fails or cannot get the lock stops the quit once; 
     assert.equal(ctl.requestQuit(), true, 'nothing unsaved: quit at once');
 
     // a write that fails for good is dropped with a notice, and the quit is still held once
-    ctl.store.writeSelection = () => {
+    ctl.writeStore.writeSelection = () => {
       throw new Error('disk I/O error');
     };
     await ctl.handle({ kind: 'click', x: 5, y: lineOf(0) }, VP);
@@ -275,6 +276,82 @@ test('change detection: a failed data_version read marks it degraded, says so on
     ctl.state(VP);
     assert.equal(ctl.ui().notice, undefined, 'the notice is shown once, not on every rebuild');
   } finally {
+    ctl.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Re-check round (Sol): only the deferred writes use the short timeout.
+
+/** Hold the store's write lock from another process for `ms`; resolves once the lock is held. */
+async function holdLock(dbPath: string, ms: number): Promise<{ released: Promise<void> }> {
+  const child = spawn(process.execPath, [
+    '--input-type=module',
+    '-e',
+    `const { DatabaseSync } = await import('node:sqlite');
+     const db = new DatabaseSync(${JSON.stringify(dbPath)});
+     db.exec('BEGIN IMMEDIATE');
+     process.stdout.write('locked\\n');
+     setTimeout(() => { db.exec('ROLLBACK'); db.close(); }, ${ms});`,
+  ]);
+  const released = new Promise<void>((resolve) => child.on('exit', () => resolve()));
+  await new Promise<void>((resolve, reject) => {
+    child.stdout.on('data', (d: Buffer) => d.toString().includes('locked') && resolve());
+    child.on('error', reject);
+  });
+  return { released };
+}
+
+test('busy timeout: a 600 ms lock does not fail opening the dashboard or a decision write; a deferred select still gives up fast and stays queued', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-click-lag-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), '{}\n');
+  const storePath = join(dir, '.sterling', 'sterling.db');
+  const seed = new SterlingStore(storePath);
+  todo(seed, 'item');
+  seed.close();
+  let ctl: DashboardController | undefined;
+  try {
+    let lock = await holdLock(storePath, 600);
+    const t0 = Date.now();
+    ctl = openDashboard(storePath, { deferWrites: true });
+    const now = new Date().toISOString();
+    ctl.store.create({
+      id: randomUUID(), type: 'decision', created_at: now, updated_at: now, author: 'conductor', status: 'active', superseded_by: null,
+      links: [], scope: 'project', stack_tags: [], title: 'swap decision under a held lock', statement: 's', rationale: 'r', alternatives_rejected: [],
+    } as never);
+    assert.ok(Date.now() - t0 >= 300, 'the open and the decision write waited for the lock instead of failing');
+    await lock.released;
+
+    ctl.state(VP);
+    await ctl.handle({ kind: 'click', x: 5, y: lineOf(0) }, VP);
+    lock = await holdLock(storePath, 1500);
+    const t1 = Date.now();
+    assert.equal(ctl.flush(), true);
+    assert.ok(Date.now() - t1 < 1000, `the deferred select gave up after ${Date.now() - t1} ms`);
+    assert.equal(ctl.pending(), 1, 'and stays queued');
+    await lock.released;
+    assert.equal(ctl.flush(), false);
+    assert.ok(ctl.store.takeSelection(), 'the retry saved it');
+  } finally {
+    ctl?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('busy timeout without deferWrites (the OpenCode host, which never flushes again): a busy write is dropped with a notice, not queued', async () => {
+  const { dir, storePath, ctl } = fixture({});
+  const locker = new DatabaseSync(storePath);
+  try {
+    todo(ctl.store, 'item');
+    ctl.state(VP);
+    locker.exec('BEGIN IMMEDIATE');
+    await ctl.handle({ kind: 'click', x: 5, y: lineOf(0) }, VP);
+    assert.equal(ctl.pending(), 0, 'nothing is left queued that no one would retry');
+    assert.match(ctl.ui().notice ?? '', /^selection not handed to the next prompt — database is locked/);
+  } finally {
+    locker.exec('ROLLBACK');
+    locker.close();
     ctl.close();
     rmSync(dir, { recursive: true, force: true });
   }

@@ -53,9 +53,9 @@ export function resolveDomainMounts(config: SterlingConfig): DomainMount[] {
 /** Open a store at dbPath, creating the file and its parent dir when absent.
  *  MountedStores uses this for the PROJECT store and for domain stores that
  *  already exist; a missing domain is never created here (see createDomain). */
-function open(dbPath: string, busyTimeoutMs: number | undefined): SterlingStore {
+function open(dbPath: string): SterlingStore {
   mkdirSync(dirname(dbPath), { recursive: true });
-  return new SterlingStore(dbPath, { busyTimeoutMs });
+  return new SterlingStore(dbPath);
 }
 
 /** An id no record has, for the mount-time read check (probeDomain). */
@@ -136,8 +136,6 @@ export interface MountedStoresOptions {
   skipMissing?: boolean;
   /** Postgres storage (routing.ts): open through these, never create a store, and throw DomainUnavailableError wherever the SQLite path would skip or drop a domain. */
   work?: WorkStoreOpeners;
-  /** SQLite busy timeout in milliseconds for every store opened here (project and domains). Unset keeps the store default (5000). Ignored with `work`. */
-  busyTimeoutMs?: number;
 }
 
 /** The store_meta key that holds a domain's description. */
@@ -325,7 +323,7 @@ export class MountedStores {
       }
       return;
     }
-    this.project = open(projectDbPath, options?.busyTimeoutMs);
+    this.project = open(projectDbPath);
     try {
       for (const m of mounts) {
         if (!existsSync(m.dbPath)) {
@@ -342,7 +340,7 @@ export class MountedStores {
         // It has no handle, so nothing can ask it, slug checks included.
         let store: SterlingStore;
         try {
-          store = new SterlingStore(m.dbPath, { busyTimeoutMs: options?.busyTimeoutMs });
+          store = new SterlingStore(m.dbPath);
         } catch (e) {
           if (!isStoreFailure(e)) throw e;
           this.dropDomain(m.name, e, true);

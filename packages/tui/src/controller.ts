@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { MountedStores, resolveDomainMounts, catalogStatus, type DomainMount, type SterlingStore } from '@sterling/store';
+import { MountedStores, SterlingStore, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { parseConfig, AGENT_MODEL_KEY } from '@sterling/schemas';
 import { buildDashboardFrame, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect } from './state.js';
@@ -41,11 +41,11 @@ export interface DashboardOptions {
   dataVersionProbe?: (paths: string[]) => DataVersionProbe;
 }
 
-/** How long the dashboard's store connections wait for another connection's
- *  write lock before a write gives up (SQLite's busy timeout; the store's
- *  default is 5000 ms). Short, because the dashboard's writes run on the
- *  terminal's event loop: a write that times out stays queued and is retried
- *  on the next flush. */
+/** How long the held selection and board-edit writes wait for another
+ *  connection's write lock before giving up (SQLite's busy timeout; the
+ *  store's default is 5000 ms). Short, because they run on the terminal's
+ *  event loop. Only their own connection (writeStore) uses it. With
+ *  deferWrites a write that times out stays queued for the next flush. */
 export const DASHBOARD_BUSY_TIMEOUT_MS = 250;
 
 /** Counters for the profile log; cumulative since openDashboard. */
@@ -64,6 +64,9 @@ export type ControllerViewport = Required<Omit<Viewport, 'agents'>> & Pick<Viewp
 export interface DashboardController {
   readonly stores: MountedStores;
   readonly store: SterlingStore;
+  /** the connection the held selection and board-edit writes run on, with
+   *  DASHBOARD_BUSY_TIMEOUT_MS (the same handle as `store` on Postgres storage) */
+  readonly writeStore: SterlingStore;
   /** the project's folder name, plus a loud suffix when domains could not load */
   readonly projectName: string;
   readonly configPath: string;
@@ -138,8 +141,19 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       domainsAvailable = false;
     }
   }
-  const stores = routed ? openRoutedStores(projectRoot, { mount: true }).stores : new MountedStores(storePath, mounts, { skipMissing: true, busyTimeoutMs: DASHBOARD_BUSY_TIMEOUT_MS });
+  const stores = routed ? openRoutedStores(projectRoot, { mount: true }).stores : new MountedStores(storePath, mounts, { skipMissing: true });
   const store = stores.project;
+  // The held writes get their own connection with the short busy timeout.
+  // Every other connection keeps the store's default, so opening the store,
+  // the catalog bootstrap and a model swap's decision record still wait out
+  // an ordinary MCP write lock instead of failing after 250 ms.
+  let writeStore: SterlingStore;
+  try {
+    writeStore = routed ? store : new SterlingStore(storePath, { busyTimeoutMs: DASHBOARD_BUSY_TIMEOUT_MS });
+  } catch (err) {
+    stores.close();
+    throw err;
+  }
   const projectName = basename(projectRoot) + (domainsAvailable ? '' : ' — domains unavailable (project-only)');
   let ui: UiState = initialUi;
 
@@ -189,23 +203,27 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     return built;
   }
 
-  // Profile counters: every project-store method call, wrapped on this
-  // instance only when the host asks (STERLING_TUI_PROFILE).
+  // Profile counters: every project-store method call (both connections),
+  // wrapped on these instances only when the host asks (STERLING_TUI_PROFILE).
   let storeCalls = 0;
-  if (options.profile) {
-    const proto = Object.getPrototypeOf(store) as object;
+  const countCalls = (target: SterlingStore): void => {
+    const proto = Object.getPrototypeOf(target) as object;
     for (const name of Object.getOwnPropertyNames(proto)) {
       const fn = Object.getOwnPropertyDescriptor(proto, name)?.value as unknown;
       if (name === 'constructor' || typeof fn !== 'function') continue;
-      Object.defineProperty(store, name, {
+      Object.defineProperty(target, name, {
         configurable: true,
         writable: true,
         value: (...args: unknown[]) => {
           storeCalls++;
-          return (fn as (...a: unknown[]) => unknown).apply(store, args);
+          return (fn as (...a: unknown[]) => unknown).apply(target, args);
         },
       });
     }
+  };
+  if (options.profile) {
+    countCalls(store);
+    if (writeStore !== store) countCalls(writeStore);
   }
 
   // Store writes wait here until flush(). A click's selection write used to
@@ -213,8 +231,10 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   // timeout, and an exhausted timeout reached the TUI's fatal handler. Only
   // the latest selection is kept: a burst of clicks ends in one write.
   // A write that meets another connection's lock gives up after
-  // DASHBOARD_BUSY_TIMEOUT_MS and stays queued; the notice it sets is cleared
-  // once the retry succeeds. Any other failure drops the write and says so.
+  // DASHBOARD_BUSY_TIMEOUT_MS. With deferWrites it stays queued, the host
+  // retries it (main.ts does on each tick) and the notice it sets is cleared
+  // once the retry succeeds. Without deferWrites no host flushes again (the
+  // OpenCode dashboard), so it is dropped with a notice like any other failure.
   let pending: (SelectEffect | BoardEditEffect)[] = [];
   let retryNotice: string | undefined;
   const isBusy = (err: unknown): boolean => {
@@ -232,11 +252,11 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
         // host (decision postgres-store-backend-design-sync-bridge-schema-per-store,
         // point 9): the shared store's selection row would hand it to another machine's prompt.
         if (e.type === 'select' && routed) writeSelectionFile(projectRoot, e.recordType, e.id, new Date().toISOString());
-        else runEffects(store, [e]);
+        else runEffects(writeStore, [e]);
       } catch (err) {
         failed = true;
         const msg = (err as Error).message;
-        if (isBusy(err)) {
+        if (isBusy(err) && options.deferWrites) {
           pending.push(e);
           retryNotice = `${e.type === 'select' ? 'selection' : 'board edit'} not saved yet: the store is busy (${msg}); retrying`;
           ui = { ...ui, notice: retryNotice };
@@ -560,6 +580,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   return {
     stores,
     store,
+    writeStore,
     projectName,
     configPath,
     ui: () => ui,
@@ -588,6 +609,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // close is the last one on each file
       try {
         probe?.close();
+        if (writeStore !== store) writeStore.close();
       } finally {
         stores.close();
       }
