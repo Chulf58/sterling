@@ -18,7 +18,7 @@ import { MoveCredentialsError, readSqliteFence, readSqliteReceipt, readPgFence, 
 import { PG_SKIP, dropTestSchemas, openTestBridge } from '../../packages/store/dist/tests/pg-test-support.js';
 import { decision, openSqliteStore, seedStore } from '../../packages/store/dist/tests/store-move-fixture.js';
 import { openRoutedStores } from '../../packages/store/dist/routing.js';
-import { MoveStoreUsageError, findProjectRoot, formatAttachReport, formatReport, parseArgs, runAttach, runMoveStore } from '../move-store.mjs';
+import { MovePostgresOffError, MoveStoreUsageError, findProjectRoot, formatAttachReport, formatReport, parseArgs, refusePostgresMove, runAttach, runMoveStore } from '../move-store.mjs';
 
 const temps = [];
 function tempDir() {
@@ -69,6 +69,19 @@ test('parseArgs: --to is required and must be pg or sqlite; --all does not exist
   assert.throws(() => parseArgs([]), MoveStoreUsageError);
   assert.throws(() => parseArgs(['--to', 'mysql']), MoveStoreUsageError);
   assert.throws(() => parseArgs(['--to', 'pg', '--all']), (e) => e instanceof MoveStoreUsageError && e.message.includes("'--all'"));
+});
+
+test('refusePostgresMove: --to pg, --attach and their dry runs are refused unless the env is exactly 1; --to sqlite never is', () => {
+  const pg = [['--to', 'pg'], ['--attach'], ['--to', 'pg', '--dry-run'], ['--attach', '--dry-run']].map((a) => parseArgs(a));
+  for (const args of pg) {
+    for (const env of [{}, { STERLING_ALLOW_POSTGRES_MOVE: '0' }, { STERLING_ALLOW_POSTGRES_MOVE: 'true' }, { STERLING_ALLOW_POSTGRES_MOVE: '' }]) {
+      assert.throws(() => refusePostgresMove(args, env), (e) => e instanceof MovePostgresOffError && e.message.includes('postgres-storage-switched-off-every-project-locked-to-local-sqlite') && e.message.includes('--to sqlite still works'), JSON.stringify([args, env]));
+    }
+    assert.doesNotThrow(() => refusePostgresMove(args, { STERLING_ALLOW_POSTGRES_MOVE: '1' }));
+  }
+  for (const a of [['--to', 'sqlite'], ['--to', 'sqlite', '--dry-run']]) {
+    for (const env of [{}, { STERLING_ALLOW_POSTGRES_MOVE: '0' }, { STERLING_ALLOW_POSTGRES_MOVE: '1' }]) assert.doesNotThrow(() => refusePostgresMove(parseArgs(a), env));
+  }
 });
 
 test('parseArgs: --attach takes --fence-local, --dry-run and --project but no --to; --fence-local needs --attach', () => {

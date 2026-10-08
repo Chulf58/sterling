@@ -31,11 +31,11 @@ before(() => {
   mkdirSync(home);
 });
 
-function run(entry, args) {
+function run(entry, args, env = {}) {
   const r = spawnSync(process.execPath, [join(plugin, entry), ...args], {
     cwd: base,
     encoding: 'utf8',
-    env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home, STERLING_REGISTRY_DB: join(base, 'registry.db') },
+    env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home, STERLING_REGISTRY_DB: join(base, 'registry.db'), ...env },
     timeout: 60_000,
   });
   const out = `${r.stdout}${r.stderr}`;
@@ -51,7 +51,23 @@ function workProject(name, { identity = true } = {}) {
   return dir;
 }
 
+// Postgres moves are switched off; the tests that exercise what a move refuses on opt in.
+const ALLOW_PG = { STERLING_ALLOW_POSTGRES_MOVE: '1' };
+
 const configOf = (dir) => readFileSync(join(dir, '.sterling', 'config.json'), 'utf8');
+
+test('bin/move-store.mjs: --to pg and --attach (dry run too) are switched off before anything is read, with no project.json and no credentials', () => {
+  const dir = workProject('switched-off', { identity: false });
+  const before = configOf(dir);
+  for (const args of [['--to', 'pg', '--dry-run'], ['--attach', '--dry-run'], ['--to', 'pg'], ['--attach']]) {
+    const r = run('bin/move-store.mjs', [...args, '--project', dir]);
+    assert.equal(r.status, 2, `${args.join(' ')}: ${r.stderr}`);
+    assert.match(r.stderr, /MovePostgresOffError: Postgres storage is switched off/);
+    assert.match(r.stderr, /STERLING_ALLOW_POSTGRES_MOVE=1/);
+    assert.doesNotMatch(r.stderr, /MoveIdentityMissingError|MoveCredentialsError/);
+    assert.equal(configOf(dir), before);
+  }
+});
 
 test('the copied tree has no compiled store: the scripts/ source cannot load there', () => {
   const r = spawnSync(process.execPath, [join(plugin, 'scripts', 'move-store.mjs'), '--to', 'pg', '--dry-run'], { cwd: base, encoding: 'utf8', env: { PATH: process.env.PATH, HOME: home } });
@@ -69,7 +85,7 @@ test('bin/move-store.mjs: no arguments is a usage error naming the bin command',
 test('bin/move-store.mjs --to pg --dry-run: a work project with no project.json is refused by name', () => {
   const dir = workProject('no-identity', { identity: false });
   const before = configOf(dir);
-  const r = run('bin/move-store.mjs', ['--to', 'pg', '--dry-run', '--project', dir]);
+  const r = run('bin/move-store.mjs', ['--to', 'pg', '--dry-run', '--project', dir], ALLOW_PG);
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /MoveIdentityMissingError: .*project\.json is missing/);
   assert.equal(configOf(dir), before);
@@ -77,7 +93,7 @@ test('bin/move-store.mjs --to pg --dry-run: a work project with no project.json 
 
 test('bin/move-store.mjs --to pg --dry-run: missing credentials are refused by name', () => {
   const dir = workProject('no-creds-move');
-  const r = run('bin/move-store.mjs', ['--to', 'pg', '--dry-run', '--project', dir]);
+  const r = run('bin/move-store.mjs', ['--to', 'pg', '--dry-run', '--project', dir], ALLOW_PG);
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /MoveCredentialsError: Postgres credentials file '.*served\.json' cannot be read: ENOENT/);
 });
@@ -85,7 +101,7 @@ test('bin/move-store.mjs --to pg --dry-run: missing credentials are refused by n
 test('bin/move-store.mjs --attach --dry-run: missing credentials are refused by name', () => {
   const dir = workProject('no-creds-attach');
   const before = configOf(dir);
-  const r = run('bin/move-store.mjs', ['--attach', '--dry-run', '--project', dir]);
+  const r = run('bin/move-store.mjs', ['--attach', '--dry-run', '--project', dir], ALLOW_PG);
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /MoveCredentialsError: Postgres credentials file '.*served\.json' cannot be read: ENOENT/);
   assert.equal(configOf(dir), before);
@@ -105,7 +121,7 @@ test('bin/move-store.mjs --attach --dry-run: the Postgres worker loads beside th
   chmodSync(creds, 0o600);
   try {
     const dir = workProject('refused');
-    const r = run('bin/move-store.mjs', ['--attach', '--dry-run', '--project', dir]);
+    const r = run('bin/move-store.mjs', ['--attach', '--dry-run', '--project', dir], ALLOW_PG);
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /ECONNREFUSED/);
   } finally {
