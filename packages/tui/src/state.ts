@@ -1703,10 +1703,14 @@ function reduceNodes(
           // Fix 2 (Opus review of 71c1f41): read the CURRENT version fresh
           // via store.get — the projected Card carries no version field, and
           // a snapshot taken anywhere earlier than this keypress would widen
-          // the lost-update guard's blind spot.
-          const rec = store.get(node.card.id) as { version?: number } | undefined;
-          const version = rec && typeof rec.version === 'number' ? rec.version : 0;
-          return { ui: { ...ui, boardEdit: { id: node.card.id, text: node.card.body, version }, notice: undefined }, effects };
+          // the lost-update guard's blind spot. The TEXT comes from the same
+          // read: the node can come from the drawn frame, whose body may
+          // predate another connection's change, and saving that body at the
+          // new version would pass the guard and overwrite the change.
+          const rec = store.get(node.card.id) as { version?: number; text?: unknown } | undefined;
+          if (!rec || typeof rec.text !== 'string') return { ui: { ...ui, notice: 'board item no longer exists — nothing to edit' }, effects };
+          const version = typeof rec.version === 'number' ? rec.version : 0;
+          return { ui: { ...ui, boardEdit: { id: node.card.id, text: rec.text, version }, notice: undefined }, effects };
         }
         return { ui, effects };
       }

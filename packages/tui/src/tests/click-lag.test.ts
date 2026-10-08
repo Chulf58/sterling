@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { SterlingStore } from '@sterling/store';
 import { openDashboard, type DashboardController, type DashboardOptions } from '../controller.js';
 import { buildDashboardState, TASKS_TAB } from '../state.js';
@@ -90,14 +91,14 @@ test('click lag (c): a failed store write becomes a notice; handle() and flush()
   for (const deferWrites of [true, false]) {
     const { dir, ctl } = fixture({ deferWrites });
     try {
-      todo(ctl.store, 'locked item');
+      todo(ctl.store, 'item');
       ctl.state(VP);
       ctl.store.writeSelection = () => {
-        throw new Error('database is locked');
+        throw new Error('disk I/O error');
       };
       await ctl.handle({ kind: 'click', x: 5, y: lineOf(0) }, VP); // rejects on regression
       if (deferWrites) assert.equal(ctl.flush(), true, 'flush reports the failure so the host redraws');
-      assert.match(ctl.ui().notice ?? '', /^selection not handed to the next prompt — database is locked$/);
+      assert.match(ctl.ui().notice ?? '', /^selection not handed to the next prompt — disk I\/O error$/);
       assert.match(ctl.state(VP).footer, /^⚠ selection not handed to the next prompt/, 'the notice is drawn');
     } finally {
       ctl.close();
@@ -149,6 +150,131 @@ test('click lag (d): a click on a frame whose data changed since it was drawn se
     assert.equal(ctl.ui().tab, TASKS_TAB);
   } finally {
     other.close();
+    ctl.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Fix round (Sol task-end review of 96abdce8).
+
+function editText(store: SterlingStore, id: string, text: string): void {
+  const rec = store.get(id) as unknown as Record<string, unknown>;
+  store.updateTodo(id, { ...rec, text, updated_at: new Date().toISOString() });
+}
+
+test('board edit: e opens the LIVE text with its version, not the drawn body; a save over a newer change is refused', async () => {
+  const { dir, storePath, ctl } = fixture();
+  const other = new SterlingStore(storePath);
+  try {
+    const id = todo(ctl.store, 'old');
+    ctl.state(VP); // drawn with "old"
+    editText(other, id, 'new');
+    await ctl.handle({ kind: 'char', ch: 'e' }, VP);
+    assert.equal(ctl.ui().boardEdit?.text, 'new', 'the editor holds the text the store has now');
+    assert.equal(ctl.ui().boardEdit?.version, (other.get(id) as unknown as { version: number }).version, 'text and version come from one read');
+
+    editText(other, id, 'newer'); // another change while the editor is open
+    await ctl.handle({ kind: 'char', ch: '!' }, VP);
+    await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
+    ctl.flush();
+    assert.equal((ctl.store.get(id) as unknown as { text: string }).text, 'newer', 'the stale buffer did not overwrite the newer text');
+    assert.ok(ctl.ui().notice, 'the refusal is said');
+  } finally {
+    other.close();
+    ctl.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('quit: a held write that fails or cannot get the lock stops the quit once; q again quits and discards', async () => {
+  const { dir, ctl } = fixture();
+  try {
+    todo(ctl.store, 'item');
+    ctl.state(VP);
+    const real = ctl.store.writeSelection.bind(ctl.store);
+    ctl.store.writeSelection = () => {
+      throw Object.assign(new Error('database is locked'), { errcode: 5 });
+    };
+    await ctl.handle({ kind: 'click', x: 5, y: lineOf(0) }, VP);
+    assert.equal(ctl.requestQuit(), false, 'the first quit is held while a write is unsaved');
+    assert.equal(ctl.pending(), 1, 'a busy write stays queued for a retry');
+    assert.match(ctl.ui().notice ?? '', /press q again to quit and discard/);
+    assert.equal(ctl.requestQuit(), true, 'q again quits, discarding explicitly');
+
+    // any other event disarms the discard; a later retry that succeeds saves the write and clears the notice
+    await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
+    assert.equal(ctl.requestQuit(), false, 'disarmed by the next event');
+    ctl.store.writeSelection = real;
+    assert.equal(ctl.flush(), false);
+    assert.equal(ctl.pending(), 0);
+    assert.ok(ctl.store.takeSelection(), 'the retried selection reached the store');
+    assert.equal(ctl.ui().notice, undefined, 'the busy notice is cleared once the write is saved');
+    assert.equal(ctl.requestQuit(), true, 'nothing unsaved: quit at once');
+
+    // a write that fails for good is dropped with a notice, and the quit is still held once
+    ctl.store.writeSelection = () => {
+      throw new Error('disk I/O error');
+    };
+    await ctl.handle({ kind: 'click', x: 5, y: lineOf(0) }, VP);
+    assert.equal(ctl.requestQuit(), false);
+    assert.equal(ctl.pending(), 0, 'a failure that is not a busy lock is not retried');
+    assert.match(ctl.ui().notice ?? '', /disk I\/O error.*press q again to quit and discard/);
+    assert.equal(ctl.requestQuit(), true);
+  } finally {
+    ctl.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('busy store: the dashboard waits 250 ms, not 5000, for a held write lock; the write stays queued and lands on the next flush', async () => {
+  const { dir, storePath, ctl } = fixture();
+  const locker = new DatabaseSync(storePath);
+  try {
+    todo(ctl.store, 'item');
+    ctl.state(VP);
+    await ctl.handle({ kind: 'click', x: 5, y: lineOf(0) }, VP);
+    locker.exec('BEGIN IMMEDIATE');
+    const t0 = Date.now();
+    assert.equal(ctl.flush(), true, 'the timeout is reported');
+    const waited = Date.now() - t0;
+    assert.ok(waited >= 200 && waited < 1500, `waited ${waited} ms`);
+    assert.equal(ctl.pending(), 1);
+    assert.match(ctl.ui().notice ?? '', /store is busy/);
+    locker.exec('ROLLBACK');
+    assert.equal(ctl.flush(), false);
+    assert.equal(ctl.pending(), 0);
+    assert.ok(ctl.store.takeSelection());
+  } finally {
+    locker.close();
+    ctl.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('change detection: a failed data_version read marks it degraded, says so once, and keeps rebuilding', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-click-lag-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), '{}\n');
+  const ctl = openDashboard(join(dir, '.sterling', 'sterling.db'), {
+    dataVersionProbe: () => ({
+      read() {
+        throw new Error('disk gone');
+      },
+      close() {},
+    }),
+  });
+  try {
+    const b0 = ctl.stats().builds;
+    ctl.state(VP);
+    ctl.state(VP);
+    assert.equal(ctl.stats().builds - b0, 2, 'without a version every call rebuilds');
+    assert.match(ctl.stats().changeDetection, /^degraded: data_version read failed — disk gone/);
+    assert.match(ctl.ui().notice ?? '', /data_version read failed — disk gone/);
+    assert.match(ctl.state(VP).footer, /^⚠ .*data_version read failed/);
+    await ctl.handle({ kind: 'tab', index: 1 }, VP); // a tab switch clears the notice
+    ctl.state(VP);
+    assert.equal(ctl.ui().notice, undefined, 'the notice is shown once, not on every rebuild');
+  } finally {
     ctl.close();
     rmSync(dir, { recursive: true, force: true });
   }

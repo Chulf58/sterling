@@ -12,9 +12,10 @@ import { existsSync } from 'node:fs';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 
 export interface DataVersionProbe {
-  /** one token covering every probed file; it changes after any commit to any of them.
-   *  undefined when a read failed: the caller must then treat the data as changed. */
-  read(): string | undefined;
+  /** one token covering every probed file; it changes after any commit to any
+   *  of them. Throws when a read fails: the caller treats the data as changed
+   *  and says that change detection is degraded. */
+  read(): string;
   close(): void;
 }
 
@@ -35,12 +36,7 @@ export function openDataVersionProbe(paths: string[]): DataVersionProbe {
   }
   return {
     read() {
-      try {
-        return conns.map((c) => String((c.stmt.get() as { data_version: number }).data_version)).join(':');
-      } catch {
-        // a failed read is never "unchanged": the caller rebuilds from the store
-        return undefined;
-      }
+      return conns.map((c) => String((c.stmt.get() as { data_version: number }).data_version)).join(':');
     },
     close() {
       for (const c of conns) c.db.close();

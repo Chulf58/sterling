@@ -37,7 +37,16 @@ export interface DashboardOptions {
   deferWrites?: boolean;
   /** Count the project store's method calls for stats() (STERLING_TUI_PROFILE). */
   profile?: boolean;
+  /** Replaces the data_version probe; tests use it to make a read fail. */
+  dataVersionProbe?: (paths: string[]) => DataVersionProbe;
 }
+
+/** How long the dashboard's store connections wait for another connection's
+ *  write lock before a write gives up (SQLite's busy timeout; the store's
+ *  default is 5000 ms). Short, because the dashboard's writes run on the
+ *  terminal's event loop: a write that times out stays queued and is retried
+ *  on the next flush. */
+export const DASHBOARD_BUSY_TIMEOUT_MS = 250;
 
 /** Counters for the profile log; cumulative since openDashboard. */
 export interface DashboardStats {
@@ -66,8 +75,16 @@ export interface DashboardController {
   /** execute effects (the impure seam); true when one of them is a quit */
   applyEffects(effects: Effect[]): Promise<boolean>;
   /** run the held store writes; a failure becomes ui.notice, never a throw.
+   *  A write that met a busy lock stays queued for the next flush.
    *  True when a write failed, so the host redraws to show the notice. */
   flush(): boolean;
+  /** how many store writes are still queued */
+  pending(): number;
+  /** Run the held writes before a quit. True when the host may exit: every
+   *  write was saved, or the user already saw the failure and asked again.
+   *  False holds the quit once and says why in ui.notice; the next quit
+   *  discards, any other event disarms. */
+  requestQuit(): boolean;
   stats(): DashboardStats;
   close(): void;
 }
@@ -121,7 +138,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       domainsAvailable = false;
     }
   }
-  const stores = routed ? openRoutedStores(projectRoot, { mount: true }).stores : new MountedStores(storePath, mounts, { skipMissing: true });
+  const stores = routed ? openRoutedStores(projectRoot, { mount: true }).stores : new MountedStores(storePath, mounts, { skipMissing: true, busyTimeoutMs: DASHBOARD_BUSY_TIMEOUT_MS });
   const store = stores.project;
   const projectName = basename(projectRoot) + (domainsAvailable ? '' : ' — domains unavailable (project-only)');
   let ui: UiState = initialUi;
@@ -133,12 +150,21 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   // there every call rebuilds, as before, and stats() says so.
   let probe: DataVersionProbe | undefined;
   let changeDetection = 'data_version';
+  let degradeSaid = false;
+  /** Change detection failed: rebuild on every call (correct, only slower),
+   *  record why in stats(), and say it once on screen. */
+  function degrade(reason: string): void {
+    changeDetection = `degraded: ${reason}`;
+    if (degradeSaid) return;
+    degradeSaid = true;
+    ui = { ...ui, notice: `change detection degraded: ${reason}; the dashboard rebuilds on every redraw` };
+  }
   if (routed) changeDetection = 'none: Postgres storage has no data_version';
   else {
     try {
-      probe = openDataVersionProbe([storePath, ...mounts.map((m) => m.dbPath)]);
+      probe = (options.dataVersionProbe ?? openDataVersionProbe)([storePath, ...mounts.map((m) => m.dbPath)]);
     } catch (err) {
-      changeDetection = `none: data_version probe failed to open — ${(err as Error).message}`;
+      degrade(`data_version probe failed to open — ${(err as Error).message}`);
     }
   }
   let frame: { vp: string; day: string; ui: UiState; roster: AgentRosterSnapshot | undefined; dataVersion: string | undefined; built: DashboardFrame } | undefined;
@@ -146,7 +172,14 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   const vpKey = (vp: ControllerViewport): string => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null]);
   const today = (): string => new Date().toDateString();
   function currentFrame(vp: ControllerViewport): DashboardFrame {
-    const dataVersion = probe?.read();
+    let dataVersion: string | undefined;
+    if (probe) {
+      try {
+        dataVersion = probe.read();
+      } catch (err) {
+        degrade(`data_version read failed — ${(err as Error).message}`);
+      }
+    }
     const key = vpKey(vp);
     const day = today();
     if (frame && dataVersion !== undefined && frame.dataVersion === dataVersion && frame.ui === ui && frame.roster === roster && frame.vp === key && frame.day === day) return frame.built;
@@ -179,7 +212,15 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   // run on the input path, before the redraw, through SQLite's 5000 ms busy
   // timeout, and an exhausted timeout reached the TUI's fatal handler. Only
   // the latest selection is kept: a burst of clicks ends in one write.
+  // A write that meets another connection's lock gives up after
+  // DASHBOARD_BUSY_TIMEOUT_MS and stays queued; the notice it sets is cleared
+  // once the retry succeeds. Any other failure drops the write and says so.
   let pending: (SelectEffect | BoardEditEffect)[] = [];
+  let retryNotice: string | undefined;
+  const isBusy = (err: unknown): boolean => {
+    const code = (err as { errcode?: unknown } | null)?.errcode;
+    return code === 5 || code === 6 || /database is (locked|busy)|SQLITE_BUSY|SQLITE_LOCKED/i.test((err as Error | null)?.message ?? '');
+  };
   function flush(): boolean {
     if (!pending.length) return false;
     const batch = pending;
@@ -194,10 +235,36 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
         else runEffects(store, [e]);
       } catch (err) {
         failed = true;
-        ui = { ...ui, notice: e.type === 'select' ? `selection not handed to the next prompt — ${(err as Error).message}` : `board edit not saved — ${(err as Error).message}` };
+        const msg = (err as Error).message;
+        if (isBusy(err)) {
+          pending.push(e);
+          retryNotice = `${e.type === 'select' ? 'selection' : 'board edit'} not saved yet: the store is busy (${msg}); retrying`;
+          ui = { ...ui, notice: retryNotice };
+        } else {
+          ui = { ...ui, notice: e.type === 'select' ? `selection not handed to the next prompt — ${msg}` : `board edit not saved — ${msg}` };
+        }
       }
     }
+    if (!failed && retryNotice !== undefined) {
+      if (ui.notice === retryNotice) {
+        const { notice: _saved, ...rest } = ui;
+        ui = rest;
+      }
+      retryNotice = undefined;
+    }
     return failed;
+  }
+
+  let quitArmed = false;
+  function requestQuit(): boolean {
+    if (quitArmed) return true;
+    const failed = flush();
+    if (!failed && !pending.length) return true;
+    quitArmed = true;
+    const notice = `${ui.notice ?? 'writes not saved'} — press q again to quit and discard them`;
+    ui = { ...ui, notice };
+    if (pending.length) retryNotice = notice;
+    return false;
   }
 
   // System tab: the agent roster snapshot, read ON TAB ACTIVATION only (never
@@ -505,12 +572,16 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       const drawn = frame && frame.ui === ui && frame.roster === roster && frame.vp === vpKey(vp) ? frame.built : undefined;
       const result = reduce(store, ui, event, vp, stores, roster, resolveProjectHeadSha, drawn);
       ui = result.ui;
+      // a held quit is discarded by the next quit only; any other event disarms it
+      if (!result.effects.some((e) => e.type === 'quit')) quitArmed = false;
       // System tab: (re)load the roster ONLY on activation (never the redraw loop)
       if (ui.tab === SYSTEM_TAB && (prevTab !== SYSTEM_TAB || !roster)) roster = loadRoster();
       return applyEffects(result.effects);
     },
     applyEffects,
     flush,
+    pending: () => pending.length,
+    requestQuit,
     stats: () => ({ builds, storeCalls, changeDetection }),
     close: () => {
       // the probe's read-only connections close first, so the store's own

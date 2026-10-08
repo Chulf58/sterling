@@ -180,9 +180,11 @@ async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
   const s0 = profilePath ? ctl.stats() : undefined;
   const t0 = performance.now();
   if (await ctl.handle(event, viewport())) {
-    ctl.flush(); // the last selection still reaches the store before the exit
-    restoreTerminal();
-    process.exit(0);
+    // the held writes run first; one that fails holds the quit and says so,
+    // and q again quits, discarding them explicitly
+    if (ctl.requestQuit()) shutdown(0);
+    redraw();
+    return;
   }
   const t1 = performance.now();
   profiled(`event:${event.kind}`, () => redraw(), () => ({
@@ -226,19 +228,36 @@ function restoreTerminal(): void {
   try { releaseTuiLock(lockPath, process.pid); } catch { /* best effort */ }
 }
 
+// The one exit path: a last attempt at the held store writes, then the
+// terminal restore, then the messages on the restored shell, where they can
+// be read. A write that still fails is printed, never dropped silently (P5).
+let shuttingDown = false;
+function shutdown(code: number, message?: string): never {
+  let unsaved: string | undefined;
+  if (!shuttingDown) {
+    shuttingDown = true;
+    try {
+      if (ctl.flush() || ctl.pending() > 0) unsaved = ctl.ui().notice ?? `${ctl.pending()} write(s) still queued`;
+    } catch (err) {
+      unsaved = (err as Error)?.message ?? String(err);
+    }
+  }
+  restoreTerminal();
+  if (message) console.error(message);
+  if (unsaved) console.error(`sterling-tui: store writes not saved at exit — ${unsaved}`);
+  process.exit(code);
+}
+
 // Any uncaught throw (a store read error mid-redraw, a rejected handler) must
 // restore the terminal and report LOUD on the restored shell — never a silent
-// corrupt exit (P5). Both handlers, since handle() runs as a floating promise.
-process.on('uncaughtException', (err) => {
-  restoreTerminal();
-  console.error(`sterling-tui: fatal — ${(err as Error)?.stack ?? err}`);
-  process.exit(1);
-});
-process.on('unhandledRejection', (err) => {
-  restoreTerminal();
-  console.error(`sterling-tui: fatal (unhandled rejection) — ${(err as Error)?.stack ?? err}`);
-  process.exit(1);
-});
+// corrupt exit (P5). Both handlers, since the event queue is a promise chain.
+process.on('uncaughtException', (err) => shutdown(1, `sterling-tui: fatal — ${(err as Error)?.stack ?? err}`));
+process.on('unhandledRejection', (err) => shutdown(1, `sterling-tui: fatal (unhandled rejection) — ${(err as Error)?.stack ?? err}`));
+// A signal from outside (the pane closed, kill) takes the same path. Ctrl-C
+// itself arrives as a key while input is grabbed, and quits like q.
+for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]] as const) {
+  process.on(signal, () => shutdown(code, `sterling-tui: ${signal} — exiting`));
+}
 
 // Alternate screen buffer (§11 dashboard): no scrollback, so the 1 Hz redraw
 // can never grow the scrollbar or push the view down. The cursor stays hidden
@@ -258,5 +277,13 @@ term.on('resize', () =>
 );
 // live view over the durable store: the tick rebuilds only when the store's
 // data_version, the ui or the viewport moved, and draws only when that or the agent view changed
-setInterval(() => serial(() => void profiled('tick', () => redraw(true), () => ({}))), 1000);
+// A write still queued (it met a busy lock) is retried on each tick.
+setInterval(
+  () =>
+    serial(() => {
+      profiled('tick', () => redraw(true));
+      if (ctl.pending() > 0) scheduleFlush();
+    }),
+  1000
+);
 redraw();
