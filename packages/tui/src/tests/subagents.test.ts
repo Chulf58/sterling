@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -13,6 +13,7 @@ import {
   readContextUsage,
   readSubagents,
   subagentTranscriptPath,
+  TRANSCRIPT_ALIVE_MS,
   type SubagentView,
 } from '../subagents.js';
 import { QUADRANTS, SPRITE_ROWS, TILE_BG, TILE_COLS } from '../avatars/index.js';
@@ -161,6 +162,53 @@ test('register: a row H10 stamped residue_reported_at is ended at that stamp, ne
     const v = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: join(root, 'none') }).view(NOW);
     assert.equal(v.active, 0);
     assert.equal(v.agents[0]!.status, 'done');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** Write the subagent's transcript under a claude home and set its mtime to msBefore NOW. */
+function transcriptAged(root: string, sessionId: string, agentId: string, msBefore: number): string {
+  const home = claudeHome(root, sessionId, agentId, [transcriptLine('user')]);
+  const file = join(home, 'projects', root.replace(/[^A-Za-z0-9]/g, '-'), sessionId, 'subagents', `agent-${agentId}.jsonl`);
+  utimesSync(file, (NOW - msBefore) / 1000, (NOW - msBefore) / 1000);
+  return home;
+}
+
+test('register: an H10 residue stamp is unconfirmed, a stamped agent whose transcript was written within TRANSCRIPT_ALIVE_MS is still running and counted, even past the 60 min H10 stamps at', () => {
+  const root = project();
+  try {
+    writeSession(root, 's1');
+    const home = transcriptAged(root, 's1', 'a1', 30_000);
+    writeRegister(root, [row('a1', 'researcher', 2 * 3_600_000, { residue_reported_at: iso(3_600_000) })]);
+    const src = readSubagents(root, NOW, undefined, home);
+    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status, r.endedAt]), [['a1', 'running', null]]);
+    assert.equal(src.rows[0]!.elapsedMs, 2 * 3_600_000);
+    assert.equal(createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: home }).view(NOW).active, 1, 'the tab count includes it');
+    // a stamped live row from another session is listed and counted foreign, like any live row
+    writeSession(root, 's2');
+    const foreign = readSubagents(root, NOW, undefined, home);
+    assert.equal(foreign.rows.length, 1);
+    assert.equal(foreign.foreignLive, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('register: a stamped agent whose transcript is stale or missing is ended at the stamp, and a real ended is never revived by a fresh transcript', () => {
+  const root = project();
+  try {
+    writeSession(root, 's1');
+    const home = transcriptAged(root, 's1', 'a1', TRANSCRIPT_ALIVE_MS + 1_000);
+    transcriptAged(root, 's1', 'a3', 1_000);
+    writeRegister(root, [
+      row('a1', 'researcher', 7_200_000, { residue_reported_at: iso(30_000) }),
+      row('a2', 'researcher', 7_200_000, { residue_reported_at: iso(30_000) }),
+      row('a3', 'researcher', 7_200_000, { ended: { at: iso(100_000), event: 'subagent-stop' }, residue_reported_at: iso(20_000) }),
+    ]);
+    const src = readSubagents(root, NOW, undefined, home);
+    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status]), [['a1', 'done'], ['a2', 'done'], ['a3', 'resumable']], 'a1: stale transcript, a2: no transcript, a3: a real ended wins over a fresh transcript');
+    assert.equal(src.rows[0]!.endedAt, NOW - 30_000, 'a stamp without proof of life is the end');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

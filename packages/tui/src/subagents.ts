@@ -22,7 +22,12 @@
 // listed. Without a readable session.json nothing can be told apart by
 // session, so the old rule holds: ended rows linger DONE_LINGER_MS as `done`.
 //
-// Live means a register row with no `ended`. A resumed agent keeps its
+// Live means a register row with no `ended`. An H10 residue stamp is only a
+// guess that the agent is gone (it stamps any row older than an hour with no
+// file touches, and a long read-only agent touches nothing), so a stamped row
+// with no `ended` is unconfirmed: it stays running while its transcript was
+// written within TRANSCRIPT_ALIVE_MS, and is treated as ended at the stamp only
+// once the transcript has gone quiet or cannot be found. A resumed agent keeps its
 // agent_id across rounds, so rows are grouped by agent_id and the latest round
 // decides the status; the portrait assignment is keyed by agent_id as well.
 //
@@ -42,6 +47,13 @@ import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_COLS
 
 /** How long a missing subagent transcript is left unsearched before the next look. */
 const TRANSCRIPT_RETRY_MS = 10_000;
+
+/** How recently a subagent's transcript must have been written for an H10
+ *  residue-stamped row to count as still running. A working agent writes a
+ *  transcript line per tool call and per reply, so ten minutes of silence
+ *  covers a long tool call and still drops a dead agent within a refresh or
+ *  two of the window closing. */
+export const TRANSCRIPT_ALIVE_MS = 10 * 60_000;
 
 /** How long an ended agent stays in the block, shown as done, when the current session is unknown. */
 export const DONE_LINGER_MS = 5 * 60_000;
@@ -94,10 +106,12 @@ export function readCurrentSessionId(projectRoot: string): string | null {
  *  ended row only from that session; a round with a real `ended` is resumable
  *  with no time limit. With it unknown: every
  *  row, an ended one done for lingerMs. H10 stamps residue_reported_at on a row
- *  whose subagent is gone without a stop event: the stamp counts as the end
- *  (done, lingering lingerMs) but never as resumable, since nothing shows such
- *  a subagent can be resumed. */
-export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_LINGER_MS): SubagentSource {
+ *  it guesses is gone, with no stop event: the stamp is unconfirmed, so the row
+ *  stays running while its transcript's mtime is within TRANSCRIPT_ALIVE_MS of
+ *  now. Without that proof the stamp counts as the end (done, lingering
+ *  lingerMs) but never as resumable, since nothing shows such a subagent can
+ *  be resumed. A real `ended` always ends the row. */
+export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_LINGER_MS, claudeConfigDir = defaultClaudeConfigDir()): SubagentSource {
   const reg = readRegister(projectRoot);
   if (reg.availability !== 'ok') return { availability: reg.availability, rows: [], foreignLive: 0 };
   const currentSession = readCurrentSessionId(projectRoot);
@@ -112,12 +126,13 @@ export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_
   for (const [agentId, rounds] of byAgent) {
     rounds.sort((a, b) => roundOf(b) - roundOf(a) || Date.parse(b.at) - Date.parse(a.at));
     const latest = rounds[0]!;
-    const live = !latest.ended && !latest.residue_reported_at;
+    const provenAlive = !latest.ended && Boolean(latest.residue_reported_at) && transcriptIsFresh(projectRoot, latest.session_id, latest.agent_id, now, claudeConfigDir);
+    const live = !latest.ended && (!latest.residue_reported_at || provenAlive);
     const foreign = currentSession !== null && latest.session_id !== currentSession;
     if (foreign && !live) continue;
     const startedAt = Date.parse(latest.at);
     if (Number.isNaN(startedAt)) continue;
-    const endStamp = latest.ended ? latest.ended.at : latest.residue_reported_at ? String(latest.residue_reported_at) : null;
+    const endStamp = latest.ended ? latest.ended.at : latest.residue_reported_at && !provenAlive ? String(latest.residue_reported_at) : null;
     const endedAt = endStamp === null ? null : Date.parse(endStamp);
     // only a real stop event shows a subagent can be resumed; a residue stamp does not
     const resumable = currentSession !== null && Boolean(latest.ended);
@@ -141,6 +156,18 @@ export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_
     return aRun ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0);
   });
   return { availability: 'ok', rows, foreignLive };
+}
+
+/** Whether the subagent's transcript was written within TRANSCRIPT_ALIVE_MS of
+ *  now: false for a transcript that is missing, unreadable or quiet. */
+function transcriptIsFresh(projectRoot: string, sessionId: string, agentId: string, now: number, claudeConfigDir: string): boolean {
+  const path = subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir);
+  if (!path) return false;
+  try {
+    return now - statSync(path).mtimeMs <= TRANSCRIPT_ALIVE_MS;
+  } catch {
+    return false;
+  }
 }
 
 /** The dispatch description from the dispatch-state record of a tool_use_id
@@ -350,7 +377,7 @@ export function createSubagentTracker(
 
   function refresh(now: number): void {
     lastRead = now;
-    source = readSubagents(projectRoot, now, lingerMs);
+    source = readSubagents(projectRoot, now, lingerMs, claudeConfigDir);
     // a corrupt read leaves the assignment alone, so faces do not reshuffle
     if (source.availability === 'corrupt') return;
     avatars = assign(source.rows.map((r) => r.agentId), avatars.current, rng, { poolSize: POOL_SIZE, freed: avatars.freed });
