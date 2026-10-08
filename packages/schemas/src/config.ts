@@ -240,7 +240,7 @@ export const configSchema = z.object({
       // librarian is mechanical clerking — cheap model, low effort (P8). The
       // roster is classless (decision agent-roster-is-classless-four-agents), and
       // the debugger role it rejected has no key here.
-      librarian: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
+      librarian: agentModelEntry.default({ model: 'claude-haiku-5-5', effort: 'low' }),
       // reviewer judges a diff (decision
       // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
       // dispatch pins its model explicitly; this is the install-time default.
