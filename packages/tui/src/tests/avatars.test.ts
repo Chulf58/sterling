@@ -197,17 +197,19 @@ test('pool: two dark eyes stay visible in rest, bob and tilt, and a blink turns 
   }
 });
 
-test('pool: the face centre is never hair-coloured (issue #30)', () => {
+test('pool: the face centre holds only skin, the eyes and the shading keys, so no avatar has a moustache (issue #30)', () => {
+  // pixel rows 2-3, four columns wide, on every avatar and every frame; the skin key of each tone is the face fill
+  const skinKey = ['D', 'g', 'L'];
+  const eyeKey = Object.keys(pal).find((k) => pal[k] === EYE)!;
+  const shading = ['E', 'M', 'h'];
   pool.avatars.forEach((a, i) => {
-    // the top of the head, in the rest frame, is the hair (or the hat on it); a bald head shows skin there
-    const skin = pal[a.frames[0]![4]![5]!];
-    const top = new Set([4, 5, 6, 7].map((c) => pal[a.frames[0]![0]![c]!]).filter((colour) => colour !== skin));
+    const allowed = new Set([skinKey[a.parts.skin]!, eyeKey, ...shading]);
     a.frames.forEach((rows, f) => {
       // the tilt frame leans one pixel to the right, so its face centre is one column over
-      const [from, to] = f === 3 ? [5, 8] : [4, 7];
+      const from = f === 3 ? 5 : 4;
       for (let r = 2; r <= 3; r++) {
-        for (let c = from; c <= to; c++) {
-          assert.ok(!top.has(pal[rows[r]![c]!]), `avatar ${i} (${a.parts.extra}) frame ${f} pixel ${r},${c} is ${rows[r]![c]}, the hair colour`);
+        for (let c = from; c < from + 4; c++) {
+          assert.ok(allowed.has(rows[r]![c]!), `avatar ${i} (${a.parts.style}) frame ${f} pixel ${r},${c} is ${rows[r]![c]}, not skin, eye or shading`);
         }
       }
     });
