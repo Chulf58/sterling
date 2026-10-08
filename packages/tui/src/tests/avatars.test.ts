@@ -197,6 +197,23 @@ test('pool: two dark eyes stay visible in rest, bob and tilt, and a blink turns 
   }
 });
 
+test('pool: the face centre is never hair-coloured (issue #30)', () => {
+  pool.avatars.forEach((a, i) => {
+    // the top of the head, in the rest frame, is the hair (or the hat on it); a bald head shows skin there
+    const skin = pal[a.frames[0]![4]![5]!];
+    const top = new Set([4, 5, 6, 7].map((c) => pal[a.frames[0]![0]![c]!]).filter((colour) => colour !== skin));
+    a.frames.forEach((rows, f) => {
+      // the tilt frame leans one pixel to the right, so its face centre is one column over
+      const [from, to] = f === 3 ? [5, 8] : [4, 7];
+      for (let r = 2; r <= 3; r++) {
+        for (let c = from; c <= to; c++) {
+          assert.ok(!top.has(pal[rows[r]![c]!]), `avatar ${i} (${a.parts.extra}) frame ${f} pixel ${r},${c} is ${rows[r]![c]}, the hair colour`);
+        }
+      }
+    });
+  });
+});
+
 test('tile: 8 cols by 3 rows, padded one col each side, every cell on the tile colour, no frame glyphs', () => {
   assert.equal(TILE_COLS, 8);
   for (let a = 0; a < POOL_SIZE; a++) {
