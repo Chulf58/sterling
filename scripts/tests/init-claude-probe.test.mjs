@@ -14,7 +14,7 @@ import { probeClaude } from '../lib/claude-probe.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const FRESH_FLAGS = ['--project-name', 'claude-probe', '--stack-tags', 'node', '--domain-description', 'node=test domain node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups', '--mode', 'work'];
-const CLAUDE_FILES = ['sterling-launch.sh', 'sterling.bat', 'tui.bat', '.claude'];
+const CLAUDE_FILES = ['sterling-launch.sh', 'claude-code.bat', 'opencode.bat', '.claude'];
 const SKIP_LINE = /^.*Claude Code not found.*$/gm;
 
 const scratch = new Set();
@@ -40,6 +40,7 @@ function init(dir, extraEnv = {}) {
     CLAUDE_CONFIG_DIR: tmp('sterling-cp-cfg-'),
     STERLING_CODEX_PROBE: 'absent',
     STERLING_OPENCODE_SETUP_DISABLE: '1',
+    STERLING_LAUNCHER_HOST: 'windows', // a WSL2 host: the .bat openers (scripts/lib/launchers.mjs)
     ...extraEnv,
   };
   for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k];
@@ -99,7 +100,7 @@ test('(a) claude absent: no Claude-only file is written, ONE loud line names the
   assert.ok(!existsSync(join(dir, '.sterling', 'synced-version')), 'no agent sync happened, so no synced-version marker');
   const lines = r.stdout.match(SKIP_LINE) ?? [];
   assert.equal(lines.length, 1, `exactly one skip line, got: ${JSON.stringify(lines)}`);
-  for (const name of ['sterling-launch.sh', 'sterling.bat', 'tui.bat', '.claude/agents', '.claude/settings.json']) {
+  for (const name of ['sterling-launch.sh', 'claude-code.bat', 'opencode.bat', 'claude-code.sh', 'opencode.sh', '.claude/agents', '.claude/settings.json']) {
     assert.ok(lines[0].includes(name), `the line names ${name}`);
   }
   assert.ok(!/codex/i.test(r.stdout.replace(lines[0], '')), 'the ~/.claude.json Codex probe did not run');
@@ -155,7 +156,7 @@ test('(b) a later init with claude present adds the Claude files a claude-less i
   assert.ok(!existsSync(join(dir, 'sterling-launch.sh')));
   const r = init(dir, { STERLING_CLAUDE_PROBE: 'ok' });
   assert.equal(r.code, 0, r.stderr);
-  for (const f of ['sterling-launch.sh', 'sterling.bat', 'tui.bat', '.claude/agents/librarian.md', '.claude/settings.json']) {
+  for (const f of ['sterling-launch.sh', 'claude-code.bat', 'opencode.bat', '.claude/agents/librarian.md', '.claude/settings.json']) {
     assert.ok(existsSync(join(dir, f)), `${f} added by the later init`);
   }
 });

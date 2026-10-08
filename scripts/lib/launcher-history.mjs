@@ -51,7 +51,9 @@ const QUOTED_PATH = /^"[^"\n]+"$/;
 /**
  * Every placeholder any version of the three launcher templates carries, with what any
  * version of init rendered into it (scripts/init-impl.mjs and scripts/init.mjs history):
- *   SESSION            sterling-<basename lower-cased, non [a-z0-9] runs as '-'>
+ *   SESSION            sterling-<basename lower-cased, non [a-z0-9] runs as '-'>, since
+ *                      2026-10 followed by -<4 hex of the project path hash>
+ *   LEGACY_SESSION     the first form of SESSION (no hash)
  *   SPLIT_RATIO        a percent (tmux, today's bats) or the 0..1 fraction (2026-06 bats)
  *   PLUGIN_DIR, TUI_BUNDLE, WIN_PROJECT_DIR   a path inside "..." in the template
  *   WT, NODE           a path, quoted by init itself
@@ -62,6 +64,7 @@ const QUOTED_PATH = /^"[^"\n]+"$/;
  */
 export const PLACEHOLDER_VALUES = {
   SESSION: (v) => /^[a-z0-9-]+$/.test(v),
+  LEGACY_SESSION: (v) => /^[a-z0-9-]+$/.test(v),
   SPLIT_RATIO: (v) => /^(?:\d+|\d*\.\d+)$/.test(v),
   PLUGIN_DIR: (v) => BARE_PATH.test(v),
   TUI_BUNDLE: (v) => BARE_PATH.test(v),

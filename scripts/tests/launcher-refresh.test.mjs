@@ -7,7 +7,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -158,6 +158,7 @@ function runInit(target, initScript = join(REPO, 'scripts', 'init.mjs')) {
       STERLING_PLUGIN_ROOT_MATCH: tmp('sterling-lh-prm-'),
       STERLING_CODEX_PROBE: 'absent',
       STERLING_CLAUDE_PROBE: 'ok',
+      STERLING_LAUNCHER_HOST: 'windows', // a WSL2 host: the .bat openers
       CLAUDE_CONFIG_DIR: cfg,
     },
   });
@@ -176,7 +177,8 @@ test('init: the 2026-09-19 launcher is rewritten from the current template and a
   assert.match(row(first.out, 'sterling-launch.sh'), /earlier generated version/);
   assert.ok(row(first.out, 'sterling-launch.sh').includes(`rendered for /home/demo/sterling-clone, now ${REPO.replace(/\\/g, '/')}`), row(first.out, 'sterling-launch.sh'));
   const after1 = readFileSync(join(target, 'sterling-launch.sh'), 'utf8');
-  assert.match(after1, /tmux set-option -t "\$SESSION" mouse on/);
+  // a line only the current template has (the per-mode sessions target "=$S:")
+  assert.match(after1, /tmux set-option -t "=\$S:" mouse on/);
   assert.ok(after1.includes(`TUI_BUNDLE="${REPO.replace(/\\/g, '/')}/tui/sterling-tui.mjs"`), after1);
   assert.doesNotMatch(after1, /packages\/tui\/bundle/);
 
@@ -211,12 +213,17 @@ test('init: a 43232a67 launcher with flags appended to the claude command is not
   assert.ok(loudLine(out, 'sterling-launch.sh'), out);
 });
 
-test('init: a current launcher is left as is; older generated .bat files are refreshed; a hand-edited .bat stays byte-identical', () => {
+// CHANGED (decision launchers-consolidated-to-claude-code-and-opencode-pair): init no
+// longer generates sterling.bat or tui.bat, so it no longer refreshes them. An older
+// render of either is now reported stale and left byte-identical (deleting an unedited
+// one is /sterling:update's job, step 2). This test used to pin that both were refreshed.
+test('init: a current launcher is left as is; older generated sterling.bat and tui.bat are reported stale and left byte-identical', () => {
   const target = tmp('sterling-lh-project-');
   const fresh = runInit(target);
   assert.equal(fresh.code, 0, fresh.out);
   const current = {};
-  for (const f of ['sterling-launch.sh', 'sterling.bat', 'tui.bat']) current[f] = readFileSync(join(target, f), 'utf8');
+  current['sterling-launch.sh'] = readFileSync(join(target, 'sterling-launch.sh'), 'utf8');
+  for (const f of ['sterling.bat', 'tui.bat']) assert.ok(!existsSync(join(target, f)), `${f} is no longer generated`);
 
   // The oldest committed version of each .bat template, rendered with values the init of
   // its day produced (scripts/init.mjs at 495cef15).
@@ -238,18 +245,10 @@ test('init: a current launcher is left as is; older generated .bat files are ref
   assert.equal(second.code, 0, second.out);
   assert.match(row(second.out, 'sterling-launch.sh'), /\bmatches\b/);
   assert.equal(readFileSync(join(target, 'sterling-launch.sh'), 'utf8'), current['sterling-launch.sh']);
-  for (const f of ['sterling.bat', 'tui.bat']) {
-    assert.match(row(second.out, f), /\brefreshed\b/, second.out);
-    assert.equal(readFileSync(join(target, f), 'utf8'), current[f], `${f} is the current render again`);
+  for (const [f, name] of [['sterling.bat', 'launcher-win.bat'], ['tui.bat', 'tui-win.bat']]) {
+    assert.match(row(second.out, f), /\bstale\b/, second.out);
+    assert.equal(readFileSync(join(target, f), 'utf8'), renderOldest(name), `${f} is left byte-identical`);
   }
-
-  const handBat = current['tui.bat'].replace('\r\n', '\r\nREM my own line\r\n');
-  writeFileSync(join(target, 'tui.bat'), handBat);
-  const third = runInit(target);
-  assert.equal(third.code, 0, third.out);
-  assert.equal(readFileSync(join(target, 'tui.bat'), 'utf8'), handBat);
-  assert.match(row(third.out, 'tui.bat'), /\bdiffers\b/);
-  assert.ok(loudLine(third.out, 'tui.bat'), third.out);
 });
 
 // ---- the replay of earlier renderer versions (residuals of the launcher-refresh re-check) ----
@@ -454,15 +453,16 @@ test('init on an installed copy with no bin/launcher-history.json: a differing l
   // A launcher that differs but names no clone, so it is not the clone-launcher replacement.
   const noClone = SEP19.replace(' --plugin-dir "$PLUGIN_DIR"', '');
   assert.notEqual(noClone, SEP19);
-  const handBat = readFileSync(join(target, 'tui.bat'), 'utf8').replace('\r\n', '\r\nREM my own line\r\n');
   writeFileSync(join(target, 'sterling-launch.sh'), noClone);
-  writeFileSync(join(target, 'tui.bat'), handBat);
 
   const { code, out } = runInit(target, installedInit);
   assert.equal(code, 0, out);
   assert.equal(readFileSync(join(target, 'sterling-launch.sh'), 'utf8'), noClone);
-  assert.equal(readFileSync(join(target, 'tui.bat'), 'utf8'), handBat);
-  for (const file of ['sterling-launch.sh', 'tui.bat']) {
+  // CHANGED: tui.bat was the second subject here; init no longer generates it, and the
+  // openers that replace it are refreshed by their generated-marker stamp, which needs no
+  // template history. So the engine is the only launcher this degraded path still covers.
+  for (const file of ['claude-code.bat', 'opencode.bat']) assert.match(row(out, file), /\bmatches\b/, out);
+  for (const file of ['sterling-launch.sh']) {
     assert.match(row(out, file), /\bdiffers\b.*could not be checked \(no template history\)/, out);
     const loud = loudLine(out, file);
     assert.ok(loud, out);
