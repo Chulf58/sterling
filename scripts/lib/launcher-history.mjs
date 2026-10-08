@@ -40,6 +40,12 @@ import { INSTALLED_PATHS } from './launcher-tmux.mjs';
 
 /** The launcher templates init renders, by file name under templates/. */
 export const LAUNCHER_TEMPLATES = ['launcher-tmux.sh', 'launcher-win.bat', 'tui-win.bat'];
+/** Templates deleted from templates/ whose renders init and update still recognise, to
+ *  delete an unedited copy: launcher-win-native.bat rendered sterling-windows.bat
+ *  (decision launchers-consolidated-to-claude-code-and-opencode-pair). Every committed
+ *  version counts as an earlier one, since there is no current text. */
+export const RETIRED_LAUNCHER_TEMPLATES = ['launcher-win-native.bat'];
+const ALL_TEMPLATES = [...LAUNCHER_TEMPLATES, ...RETIRED_LAUNCHER_TEMPLATES];
 export const LAUNCHER_HISTORY_REL = 'bin/launcher-history.json';
 /** Snapshot key for the earlier installed-copy {{PLUGIN_PATHS}} blocks. */
 export const INSTALLED_BLOCKS_KEY = 'installed-plugin-paths';
@@ -60,6 +66,10 @@ const QUOTED_PATH = /^"[^"\n]+"$/;
  *   CLAUDE             "<claude>" --plugin-dir "<clone>"
  *   CLAUDE_PLUGIN_FLAG '' (installed copy) or the authoring flag, unchanged since 43232a67
  *   PLUGIN_PATHS       the authoring PLUGIN_DIR/TUI_BUNDLE pair, or a known installed block
+ *   WIN_PLUGIN_DIR, WIN_NODE, WIN_TUI_BUNDLE   launcher-win-native.bat: a path inside "..."
+ *   SNAPSHOT_SCRIPT, PROJECT_DIR_POSIX        launcher-win-native.bat: a path inside '...'
+ *   MCP_ARGS           '' (host-native) or the strict Windows-node MCP config flags
+ *   MCP_MODE_NOTE      one 'rem MODE: host-native|dual-context ...' line
  * scripts/tests/launcher-refresh.test.mjs checks every historical placeholder is listed.
  */
 export const PLACEHOLDER_VALUES = {
@@ -73,6 +83,13 @@ export const PLACEHOLDER_VALUES = {
   NODE: (v) => QUOTED_PATH.test(v),
   CLAUDE: (v) => /^"[^"\n]+" --plugin-dir "[^"\n]+"$/.test(v),
   CLAUDE_PLUGIN_FLAG: (v) => v === '' || v === ' --plugin-dir "$PLUGIN_DIR"',
+  WIN_PLUGIN_DIR: (v) => BARE_PATH.test(v),
+  WIN_NODE: (v) => BARE_PATH.test(v),
+  WIN_TUI_BUNDLE: (v) => BARE_PATH.test(v),
+  SNAPSHOT_SCRIPT: (v) => /^[^'\n]+$/.test(v),
+  PROJECT_DIR_POSIX: (v) => /^[^'\n]+$/.test(v),
+  MCP_ARGS: (v) => v === '' || /^ --mcp-config "[^"\n]+\\\.claude-plugin\\sterling-mcp-win\.json" --strict-mcp-config$/.test(v),
+  MCP_MODE_NOTE: (v) => /^rem MODE: (?:host-native|dual-context) [^\n]*$/.test(v),
   PLUGIN_PATHS: (v, { installedBlocks }) =>
     /^PLUGIN_DIR="[^"\n]+"\nTUI_BUNDLE="[^"\n]+"$/.test(v) || installedBlocks.has(v),
 };
@@ -130,6 +147,8 @@ export const replayFailureLine = (failures, consequence) => {
 };
 
 const currentText = (repoRoot, name) => lf(readFileSync(join(repoRoot, 'templates', name), 'utf8'));
+// A retired template has no current text: all its committed versions are earlier ones.
+const currentOrNull = (repoRoot, name) => (RETIRED_LAUNCHER_TEMPLATES.includes(name) ? null : currentText(repoRoot, name));
 // A git runner: (args, {input?, encoding?}) -> {status, stdout, stderr}. `input` is stdin (a Buffer with encoding buffer);
 // `encoding: 'buffer'` returns stdout as a Buffer (cat-file sizes are in bytes).
 const defaultGit = (repoRoot) => (args, { input, encoding = 'utf8' } = {}) =>
@@ -294,7 +313,7 @@ function gitHistory(repoRoot, git, spawn) {
   // fails to match, and the launcher is left alone. Commits whose closures are
   // byte-identical render the same block, so each distinct closure is replayed once.
   const closure = Object.keys(rendererClosure((rel) => readFileSync(join(repoRoot, rel), 'utf8')));
-  const templateRels = LAUNCHER_TEMPLATES.map((name) => `templates/${name}`);
+  const templateRels = ALL_TEMPLATES.map((name) => `templates/${name}`);
   // One log for the templates and the closure together (one history walk, not four, each
   // ~0.5 s on a WSL2 /mnt/c clone). A commit that touched only some of those files is read
   // for all of them, which only adds commits whose texts are already listed. --full-history
@@ -307,7 +326,7 @@ function gitHistory(repoRoot, git, spawn) {
   // older renderer imports is read in rendererClosures, one batched call per import level.
   blobs.fetch(shas.flatMap((sha) => [...templateRels, ...closure].map((rel) => `${sha}:${rel}`)));
   const templates = new Map();
-  for (const name of LAUNCHER_TEMPLATES) {
+  for (const name of ALL_TEMPLATES) {
     const set = new Set();
     for (const sha of shas) {
       const text = blobs.get(`${sha}:templates/${name}`);
@@ -371,15 +390,15 @@ export function historicalLauncherTemplates({ repoRoot, git = defaultGit(repoRoo
   const fromGit = gitHistory(repoRoot, git, spawn);
   const templates = new Map();
   if (fromGit) {
-    for (const name of LAUNCHER_TEMPLATES) {
-      const current = currentText(repoRoot, name);
+    for (const name of ALL_TEMPLATES) {
+      const current = currentOrNull(repoRoot, name);
       templates.set(name, [...fromGit.templates.get(name)].filter((t) => t !== current));
     }
     return { templates, installedBlocks: new Set([INSTALLED_PATHS, ...fromGit.installedBlocks]), degraded: null, replayFailures: fromGit.replayFailures };
   }
   const path = join(repoRoot, LAUNCHER_HISTORY_REL);
   const snapshot = loadSnapshot(path);
-  for (const name of LAUNCHER_TEMPLATES) templates.set(name, snapshot.ok ? (snapshot.data[name] ?? []).map(lf) : []);
+  for (const name of ALL_TEMPLATES) templates.set(name, snapshot.ok ? (snapshot.data[name] ?? []).map(lf) : []);
   const installedBlocks = new Set([INSTALLED_PATHS, ...(snapshot.ok ? snapshot.data[INSTALLED_BLOCKS_KEY] ?? [] : [])]);
   const degraded = snapshot.ok ? null : `no git history at ${repoRoot} (installed plugin copy) and ${snapshot.reason}`;
   return { templates, installedBlocks, degraded, replayFailures: [] };
@@ -419,8 +438,8 @@ export function launcherHistorySnapshot({ repoRoot, git = defaultGit(repoRoot), 
   if (!history) throw new Error(`launcher history: no git history at ${repoRoot} — ${LAUNCHER_HISTORY_REL} can only be built from a clone`);
   if (history.replayFailures.length) warn(replayFailureLine(history.replayFailures, `${LAUNCHER_HISTORY_REL} was built without them`));
   const out = { [INSTALLED_BLOCKS_KEY]: [...history.installedBlocks].sort() };
-  for (const name of LAUNCHER_TEMPLATES) {
-    const current = currentText(repoRoot, name);
+  for (const name of ALL_TEMPLATES) {
+    const current = currentOrNull(repoRoot, name);
     out[name] = [...history.templates.get(name)].filter((t) => t !== current).sort();
   }
   const sorted = Object.fromEntries(Object.keys(out).sort().map((k) => [k, out[k]]));

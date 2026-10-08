@@ -387,8 +387,8 @@ test('behind: fast-forward then build → check → test, then the project fan-o
 });
 
 // Launchers baked before the plugin layout (sterling.bat, tui.bat, sterling-launch.sh)
-// name packages/tui/bundle/sterling-tui.mjs, which no longer ships; only init re-bakes
-// them per project, so a consumer update says so once.
+// name packages/tui/bundle/sterling-tui.mjs, which no longer ships. The fan-out now
+// refreshes unedited ones; a consumer update still says once what to do about an edited one.
 test('consumer update: one line tells the user to re-run /sterling:init per project so launchers run tui/sterling-tui.mjs; an authoring clone is not told', async () => {
   for (const [role, expected] of [[null, 1], ['consumer', 1], ['authoring', 0]]) {
     const cwd = scratchCwd();
@@ -2330,4 +2330,81 @@ test('commands/update.md documents the OpenCode spec requirement: only the semve
   const doc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'commands', 'update.md'), 'utf8');
   assert.match(doc, /github:Chulf58\/sterling#semver:>=0\.18\.0/);
   assert.match(doc, /pinned to a tag or commit \(`#v0\.18\.58`\) resolves to that one revision and never updates/);
+});
+
+// Launchers (decision launchers-consolidated-to-claude-code-and-opencode-pair): the update
+// writes the engine and an opener pair per installed tool into each initialized registered
+// project, deletes an unedited sterling.bat / tui.bat / sterling-windows.bat and keeps an
+// edited one. The consumer fan-out does it for every project; the authoring branch, which
+// syncs agents for the invoking project only, still refreshes launchers everywhere.
+function launcherFixture(cwd) {
+  mkdirSync(join(cwd, 'templates'), { recursive: true });
+  for (const t of ['launcher-tmux.sh', 'opener-win.bat', 'opener-linux.sh', 'launcher-win.bat', 'tui-win.bat']) {
+    writeFileSync(join(cwd, 'templates', t), readFileSync(join(REPO_ROOT, 'templates', t), 'utf8'));
+  }
+  const proj = mkdtempSync(join(tmpdir(), 'sterling-update-launchers-proj-'));
+  mkdirSync(join(proj, '.sterling'), { recursive: true });
+  writeFileSync(join(proj, '.sterling', 'config.json'), JSON.stringify({ tui_split_ratio: 0.4 }));
+  const pristine = readFileSync(join(REPO_ROOT, 'templates', 'launcher-win.bat'), 'utf8').replaceAll('{{WIN_PROJECT_DIR}}', 'C:\\Users\\demo\\proj').replace(/\r?\n/g, '\r\n');
+  writeFileSync(join(proj, 'sterling.bat'), pristine);
+  writeFileSync(join(proj, 'tui.bat'), '@echo off\r\nrem my own re-opener\r\n');
+  const bin = mkdtempSync(join(tmpdir(), 'sterling-update-launchers-bin-'));
+  writeFileSync(join(bin, 'claude'), '#!/bin/sh\n');
+  chmodSync(join(bin, 'claude'), 0o755);
+  const home = mkdtempSync(join(tmpdir(), 'sterling-update-launchers-home-'));
+  // claude found on PATH, opencode not (nothing on PATH, no ~/.opencode/bin), a WSL2 host
+  const env = { ...process.env, PATH: bin, STERLING_LAUNCHER_HOST: 'windows', STERLING_LAUNCHER_OPENCODE: undefined };
+  delete env.STERLING_LAUNCHER_OPENCODE;
+  return { proj, env, home, cleanup: () => [proj, bin, home].forEach((d) => rmSync(d, { recursive: true, force: true })) };
+}
+function assertLaunchersRefreshed(proj, text) {
+  assert.ok(existsSync(join(proj, 'sterling-launch.sh')), text);
+  assert.match(readFileSync(join(proj, 'sterling-launch.sh'), 'utf8'), /^SPLIT_RATIO=40 /m, 'the project\'s own split ratio');
+  assert.ok(existsSync(join(proj, 'claude-code.bat')), 'claude is installed: its opener');
+  assert.ok(!existsSync(join(proj, 'opencode.bat')), 'opencode is not installed: no opener');
+  assert.ok(!existsSync(join(proj, 'sterling.bat')), 'the unedited sterling.bat is deleted');
+  assert.equal(readFileSync(join(proj, 'tui.bat'), 'utf8'), '@echo off\r\nrem my own re-opener\r\n', 'the hand-written tui.bat is kept');
+  assert.match(text, /sterling\.bat: removed — deleted — an unedited generated copy/);
+  assert.match(text, /tui\.bat: differs — kept/);
+  assert.match(readFileSync(join(proj, '.gitignore'), 'utf8'), /^claude-code\.bat$/m, 'the new names are ignored');
+}
+
+test('consumer update: the fan-out writes the launchers per installed tool, deletes an unedited retired launcher and keeps an edited one', async () => {
+  const cwd = scratchCwd();
+  const fx = launcherFixture(cwd);
+  try {
+    const { exec } = fakeExec({ behind: 1, changed: ['scripts/prep.mjs'] });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(String(l)), projects: [{ name: 'proj', repo_path: fx.proj }], opts: {}, env: fx.env, home: fx.home });
+    const text = lines.join('\n');
+    assert.equal(report.exit, 0, text);
+    assertLaunchersRefreshed(fx.proj, text);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    fx.cleanup();
+  }
+});
+
+test('authoring role: agents are synced for the invoking project only, but the launchers are refreshed in every registered project', async () => {
+  const cwd = authoringCwd();
+  const fx = launcherFixture(cwd);
+  const invoking = mkdtempSync(join(tmpdir(), 'sterling-update-launchers-inv-'));
+  try {
+    const { exec, calls } = fakeExec();
+    const lines = [];
+    const report = await runUpdate({
+      cwd, exec, log: (l) => lines.push(String(l)), invokingProject: invoking, opts: {}, env: fx.env, home: fx.home,
+      projects: [{ name: 'inv', repo_path: invoking }, { name: 'proj', repo_path: fx.proj }],
+    });
+    const text = lines.join('\n');
+    assert.equal(report.exit, 0, text);
+    assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 1, 'agents: the invoking project only');
+    assert.match(text, /▸ launchers in every registered project \(2\)/);
+    assertLaunchersRefreshed(fx.proj, text);
+    assert.ok(!existsSync(join(invoking, 'sterling-launch.sh')), 'a registered directory with no .sterling/config.json is not initialized: skipped');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(invoking, { recursive: true, force: true });
+    fx.cleanup();
+  }
 });

@@ -9,9 +9,14 @@
 //     terminal window it finds at launch; nothing about the terminal is written at init,
 //     decision bb5e25cd)
 //
-// sterling.bat and tui.bat are no longer generated: re-opening an opener re-attaches and
-// re-adds a closed TUI pane, and `./sterling-launch.sh tui` does the rest. A copy an
-// earlier init wrote is reported as stale and left on disk, like sterling-windows.bat.
+// The engine is written when Claude Code or OpenCode is installed, and an opener pair
+// only for a tool that is (user-ruled 2026-10-08, "Yes, per tool found").
+//
+// sterling.bat, tui.bat and sterling-windows.bat are no longer generated: re-opening an
+// opener re-attaches and re-adds a closed TUI pane, and `./sterling-launch.sh tui` does
+// the rest. A copy that is still a pristine render of one of their templates (the
+// current one, or an earlier version from launcher-history) is deleted; a copy that is
+// not is left in place and reported. init and /sterling:update both do this.
 //
 // REFRESH: the engine keeps the template-history rule (scripts/lib/launcher-history.mjs):
 // a pristine render of an earlier template version is rewritten, anything else is left
@@ -23,30 +28,32 @@
 // built. What needs a workspace package (init's dead-term check, the S6 clone-launcher
 // recogniser) is passed in by the caller.
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { appendFileSync, chmodSync, existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, delimiter, join, resolve } from 'node:path';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
 import { renderTmuxLauncher } from './launcher-tmux.mjs';
-import { historicalLauncherTemplates, olderGeneratedLauncher, replayFailureLine } from './launcher-history.mjs';
+import { historicalLauncherTemplates, matchTemplateRender, olderGeneratedLauncher, replayFailureLine } from './launcher-history.mjs';
 
 export const ENGINE_NAME = 'sterling-launch.sh';
 export const OPENER_TEMPLATES = { windows: 'opener-win.bat', linux: 'opener-linux.sh' };
 export const OPENERS = {
   windows: [
-    { file: 'claude-code.bat', mode: 'claude', app: 'Claude Code' },
-    { file: 'opencode.bat', mode: 'opencode', app: 'OpenCode' },
+    { file: 'claude-code.bat', mode: 'claude', tool: 'claude', app: 'Claude Code' },
+    { file: 'opencode.bat', mode: 'opencode', tool: 'opencode', app: 'OpenCode' },
   ],
   linux: [
-    { file: 'claude-code.sh', mode: 'claude', app: 'Claude Code' },
-    { file: 'opencode.sh', mode: 'opencode', app: 'OpenCode' },
+    { file: 'claude-code.sh', mode: 'claude', tool: 'claude', app: 'Claude Code' },
+    { file: 'opencode.sh', mode: 'opencode', tool: 'opencode', app: 'OpenCode' },
   ],
 };
-/** Launchers init wrote before and writes no more; reported, never deleted here. */
+/** Launchers init wrote before and writes no more: the template each was rendered from,
+ *  and why it is gone. A pristine render is deleted; anything else is kept and reported. */
 export const RETIRED_LAUNCHERS = {
-  'sterling.bat': 'init no longer generates it (decision launchers-consolidated-to-claude-code-and-opencode-pair); claude-code.bat and opencode.bat replace it',
-  'tui.bat': 'init no longer generates it (decision launchers-consolidated-to-claude-code-and-opencode-pair); re-opening claude-code.bat or opencode.bat re-adds a closed TUI pane',
-  'sterling-windows.bat': 'retired (decision native-windows-launcher-retired-wsl2-only) — init no longer generates or maintains it; Sterling runs under WSL2 via claude-code.bat and opencode.bat',
+  'sterling.bat': { template: 'launcher-win.bat', why: 'no longer generated (decision launchers-consolidated-to-claude-code-and-opencode-pair); claude-code.bat and opencode.bat replace it' },
+  'tui.bat': { template: 'tui-win.bat', why: 'no longer generated (decision launchers-consolidated-to-claude-code-and-opencode-pair); re-opening claude-code.bat or opencode.bat re-adds a closed TUI pane' },
+  'sterling-windows.bat': { template: 'launcher-win-native.bat', why: 'retired (decision native-windows-launcher-retired-wsl2-only); Sterling runs under WSL2 via claude-code.bat and opencode.bat' },
 };
 /** Every launcher name a project's .gitignore carries, retired ones included (a stale copy stays ignored). */
 export const LAUNCHER_GITIGNORE_ENTRIES = [
@@ -55,6 +62,8 @@ export const LAUNCHER_GITIGNORE_ENTRIES = [
 ];
 /** Test seam and manual override for launcherHost: 'windows' or 'linux'. */
 export const LAUNCHER_HOST_ENV = 'STERLING_LAUNCHER_HOST';
+/** Test seam and manual override for the OpenCode lookup: 'found' or 'absent'. */
+export const LAUNCHER_OPENCODE_ENV = 'STERLING_LAUNCHER_OPENCODE';
 
 const lf = (s) => s.replace(/\r\n/g, '\n');
 // A generated bash launcher must be executable: the .bat openers run ./sterling-launch.sh,
@@ -90,6 +99,57 @@ export function launcherHost({ env = process.env, platform = process.platform, o
   if (platform === 'win32') return 'windows';
   if (platform === 'linux' && (env.WSL_DISTRO_NAME || /microsoft/i.test(osrelease()))) return 'windows';
   return 'linux';
+}
+
+const executableFile = (path) => {
+  try {
+    const st = statSync(path);
+    return st.isFile() && (st.mode & 0o111) !== 0;
+  } catch (err) {
+    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') return false;
+    throw err;
+  }
+};
+/** `command -v <name>` over env.PATH, without a shell. */
+export const onPath = (name, env = process.env) =>
+  (env.PATH ?? '').split(delimiter).some((dir) => dir && executableFile(join(dir, name)));
+
+/**
+ * Which tools get an opener, found the way the engine finds them at run time: claude on
+ * PATH; opencode on PATH or at ~/.opencode/bin/opencode. `claude` overrides the claude
+ * lookup (init passes its own Claude Code probe). STERLING_LAUNCHER_OPENCODE ('found' or
+ * 'absent') overrides the opencode lookup; any other value throws.
+ */
+export function launcherTools({ env = process.env, home = homedir(), claude } = {}) {
+  const forced = env[LAUNCHER_OPENCODE_ENV];
+  if (forced && forced !== 'found' && forced !== 'absent') {
+    throw new Error(`${LAUNCHER_OPENCODE_ENV} must be 'found' or 'absent' (got '${forced}')`);
+  }
+  return {
+    claude: claude ?? onPath('claude', env),
+    opencode: forced ? forced === 'found' : onPath('opencode', env) || executableFile(join(home, '.opencode', 'bin', 'opencode')),
+  };
+}
+
+/**
+ * The launcher template history, read once and only when first needed (a git walk and
+ * one child node on a clone). `warns` collects the replay-failure line.
+ */
+export function launcherHistoryLoader(pluginRoot) {
+  let history = null;
+  const warns = [];
+  return {
+    warns,
+    get() {
+      if (!history) {
+        history = historicalLauncherTemplates({ repoRoot: pluginRoot });
+        if (history.replayFailures.length) {
+          warns.push(`\n⚠ ${replayFailureLine(history.replayFailures, 'a launcher rendered by one of them is left untouched as if hand-edited. Fix or report the renderer commit named above.')}`);
+        }
+      }
+      return history;
+    },
+  };
 }
 
 /** /mnt/c/Users/cuj/X -> C:\Users\cuj\X (WSL drvfs); else just backslash-ize. */
@@ -136,6 +196,8 @@ export function renderOpener(pluginRoot, target, host, opener) {
  * @param {object} o
  * @param {number} o.splitPercent TUI pane width
  * @param {'windows'|'linux'} o.host from launcherHost()
+ * @param {{claude: boolean, opencode: boolean}} [o.tools] from launcherTools(): an opener only for a tool found
+ * @param {ReturnType<typeof launcherHistoryLoader>} [o.history] share one history read with removeRetiredLaunchers
  * @param {boolean} [o.installedCopy]
  * @param {(label: string, text: string) => string} [o.checkText] throws on a bad render (init's dead-term check)
  * @param {(text: string) => {clonePath: string|null}|null} [o.cloneLauncherTarget] S6: is an engine a clone launcher
@@ -144,6 +206,8 @@ export function renderOpener(pluginRoot, target, host, opener) {
 export function ensureLaunchers(target, pluginRoot, {
   splitPercent,
   host,
+  tools = { claude: true, opencode: true },
+  history = launcherHistoryLoader(pluginRoot),
   installedCopy = isInstalledCopy(pluginRoot),
   checkText = (_label, text) => text,
   cloneLauncherTarget = () => null,
@@ -158,19 +222,10 @@ export function ensureLaunchers(target, pluginRoot, {
   // launcher): a pristine render of an EARLIER template version is rewritten and
   // reported `refreshed`; one matching no version is a hand edit, left untouched with a
   // loud line. The versions are read only once the engine differs.
-  let history = null;
-  const olderGenerated = (text) => {
-    if (!history) {
-      history = historicalLauncherTemplates({ repoRoot: pluginRoot });
-      if (history.replayFailures.length) {
-        warns.push(`\n⚠ ${replayFailureLine(history.replayFailures, 'a launcher rendered by one of them is left untouched as if hand-edited. Fix or report the renderer commit named above.')}`);
-      }
-    }
-    return olderGeneratedLauncher(text, 'launcher-tmux.sh', history);
-  };
+  const olderGenerated = (text) => olderGeneratedLauncher(text, 'launcher-tmux.sh', history.get());
   const leftUntouched = (file) => {
-    if (history.degraded) {
-      warns.push(`\n⚠ ${file} differs from the current render and could not be checked against earlier versions (no template history: ${history.degraded}), so it was left untouched. To refresh it, delete it and re-run /sterling:init.`);
+    if (history.get().degraded) {
+      warns.push(`\n⚠ ${file} differs from the current render and could not be checked against earlier versions (no template history: ${history.get().degraded}), so it was left untouched. To refresh it, delete it and re-run /sterling:init.`);
       return { item: file, status: 'differs', detail: 'left untouched — could not be checked (no template history); delete it and re-run /sterling:init to regenerate' };
     }
     warns.push(`\n⚠ ${file} differs from the current render and matches no earlier version of its template (hand-edited, or rendered for another path), so it was left untouched. To refresh it, delete it and re-run /sterling:init.`);
@@ -214,7 +269,7 @@ export function ensureLaunchers(target, pluginRoot, {
 
   // (2) this host's two openers, stamped with the generated-marker hash
   const prefix = host === 'windows' ? 'rem' : '#';
-  for (const opener of OPENERS[host]) {
+  for (const opener of OPENERS[host].filter((o) => tools[o.tool])) {
     const text = checkText(opener.file, renderOpener(pluginRoot, target, host, opener));
     const path = join(target, opener.file);
     const created = host === 'windows'
@@ -239,12 +294,56 @@ export function ensureLaunchers(target, pluginRoot, {
     }
     if (host === 'linux') ensureExecutable(path);
   }
+  warns.unshift(...history.warns.splice(0));
   return { items, warns, oldClonePaths };
 }
 
-/** A `stale` row for every retired launcher present in `target`; the files are not touched. */
-export function retiredLauncherRows(target) {
-  return Object.entries(RETIRED_LAUNCHERS)
-    .filter(([file]) => existsSync(join(target, file)))
-    .map(([file, why]) => ({ item: file, status: 'stale', detail: `${why}. Left on disk untouched: delete it yourself when you no longer want it` }));
+/**
+ * Delete each retired launcher in `target` that is still a pristine render of its template:
+ * the current text, or an earlier version from launcher-history, with any placeholder
+ * values (the refresh rule init applies to the engine). A launcher an earlier init
+ * stamped (generated-marker) counts only while its stamp still verifies, and is matched
+ * without its stamp line. Anything else is kept and reported as `differs`.
+ * @returns {{items: {item: string, status: string, detail: string}[], warns: string[]}}
+ */
+export function removeRetiredLaunchers(target, pluginRoot, { history = launcherHistoryLoader(pluginRoot) } = {}) {
+  const items = [];
+  const warns = [];
+  for (const [file, { template, why }] of Object.entries(RETIRED_LAUNCHERS)) {
+    const path = join(target, file);
+    if (!existsSync(path)) continue;
+    let body = lf(readFileSync(path, 'utf8'));
+    const stamp = verifyStamp(body, 'rem');
+    if (stamp?.unmodified) {
+      const lines = body.split('\n');
+      body = [lines[0], ...lines.slice(2)].join('\n');
+    }
+    const known = history.get();
+    const currentPath = join(pluginRoot, 'templates', template);
+    const generated = stamp?.unmodified !== false && (
+      (existsSync(currentPath) && matchTemplateRender(body, readFileSync(currentPath, 'utf8'), { installedBlocks: known.installedBlocks }) !== null)
+      || olderGeneratedLauncher(body, template, known) !== null);
+    if (generated) {
+      unlinkSync(path);
+      items.push({ item: file, status: 'removed', detail: `deleted — an unedited generated copy; ${why}` });
+      continue;
+    }
+    const unchecked = known.degraded && stamp === null ? ` It could not be checked against earlier versions (no template history: ${known.degraded}).` : '';
+    warns.push(`\n⚠ ${file} is ${why.replace(/ \(decision [^)]*\)/, '')}, but it was edited or not generated by Sterling, so it was kept.${unchecked} Delete it yourself when you no longer want it.`);
+    items.push({ item: file, status: 'differs', detail: `kept — ${why}; it matches no generated version (edited, or not generated by Sterling): delete it yourself when you no longer want it` });
+  }
+  warns.unshift(...history.warns.splice(0));
+  return { items, warns };
+}
+
+/** Append the launcher names missing from `target`/.gitignore (per entry, never rewriting a
+ *  line) and return them. init has its own .gitignore pass; /sterling:update uses this so a
+ *  project init'd before the openers existed does not show them as untracked. */
+export function ensureLauncherIgnores(target) {
+  const path = join(target, '.gitignore');
+  const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const lines = existing.split(/\r?\n/);
+  const missing = LAUNCHER_GITIGNORE_ENTRIES.filter((e) => !lines.includes(e));
+  if (missing.length) appendFileSync(path, `${existing && !existing.endsWith('\n') ? '\n' : ''}${missing.join('\n')}\n`);
+  return missing;
 }

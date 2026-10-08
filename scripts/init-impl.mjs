@@ -46,7 +46,7 @@ import { ensureProjectIdentity, withIdentityIgnore, IGNORE_ALL, IGNORE_KEEP_IDEN
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, userScopeCodexServer, codexUserScopeLine } from './lib/codex-mcp.mjs';
-import { ensureLaunchers, launcherHost, retiredLauncherRows, LAUNCHER_GITIGNORE_ENTRIES } from './lib/launchers.mjs';
+import { ensureLaunchers, launcherHistoryLoader, launcherHost, launcherTools, removeRetiredLaunchers, LAUNCHER_GITIGNORE_ENTRIES } from './lib/launchers.mjs';
 import { isInstalledCopy } from './lib/installed-copy.mjs';
 import { cloneLauncherTarget, enableMarketplaceAutoUpdate, cloneCleanupLines } from './lib/consumer-cutover.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
@@ -178,8 +178,10 @@ const claudeHost = claudeProbe.installed;
 // Which openers the launchers get (scripts/lib/launchers.mjs): read here, in the verify
 // pass, so a bad STERLING_LAUNCHER_HOST refuses before anything is written.
 let launcherHostKind;
+let launcherToolsFound;
 try {
   launcherHostKind = launcherHost();
+  launcherToolsFound = launcherTools({ claude: claudeHost });
 } catch (err) {
   fail(err.message, 2);
 }
@@ -393,7 +395,7 @@ if (!recorded) {
 const items = []; // { item, status: created|matches|differs|exists|refused|refreshed|stale|skipped|failed, detail }
 const warns = [];
 if (!claudeHost) {
-  warns.push(`\n⚠ Claude Code not found (${claudeProbe.reason}) — skipped the Claude-only files: sterling-launch.sh, claude-code.bat and opencode.bat (claude-code.sh and opencode.sh on Linux), .claude/agents/, .claude/settings.json and the codex user-scope check. Wrote the OpenCode side only; install Claude Code and re-run /sterling:init to add them.`);
+  warns.push(`\n⚠ Claude Code not found (${claudeProbe.reason}) — skipped the Claude-only files: claude-code.bat (claude-code.sh on Linux), .claude/agents/, .claude/settings.json and the codex user-scope check. Wrote the OpenCode side only; install Claude Code and re-run /sterling:init to add them.`);
 }
 
 // directories: a present directory is simply `exists` (a dir cannot be hand-edited)
@@ -820,9 +822,10 @@ if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
 const installedCopy = isInstalledCopy(pluginRoot);
 const oldClonePaths = [];
 
-// Claude-only (decision init-without-claude-code-probes-and-skips-claude-artifacts-loudly):
-// the launchers are generated only where Claude Code is installed, as before.
-if (claudeHost) {
+// Per tool found (user-ruled 2026-10-08, "Yes, per tool found"): the engine when Claude
+// Code or OpenCode is installed, and the opener pair of each tool that is.
+const launcherHistory = launcherHistoryLoader(pluginRoot);
+if (launcherToolsFound.claude || launcherToolsFound.opencode) {
   // WSL/tmux launchers (§11, decision launchers-consolidated-to-claude-code-and-opencode-
   // pair): the engine sterling-launch.sh claude|opencode|tui, plus claude-code.bat and
   // opencode.bat on a Windows (WSL2) host or claude-code.sh and opencode.sh on a native
@@ -831,6 +834,8 @@ if (claudeHost) {
   const launchers = ensureLaunchers(target, pluginRoot, {
     splitPercent: Math.round(eff.splitRatio * 100),
     host: launcherHostKind,
+    tools: launcherToolsFound,
+    history: launcherHistory,
     installedCopy,
     checkText: assertNoDeadTerms,
     cloneLauncherTarget,
@@ -841,9 +846,11 @@ if (claudeHost) {
 }
 
 // (4) launchers init no longer generates (sterling.bat, tui.bat, and the native-Windows
-// sterling-windows.bat): a copy an earlier init wrote is left on disk for the user to
-// delete (never deleted or migrated here) and reported, so it is not silent.
-items.push(...retiredLauncherRows(target));
+// sterling-windows.bat): a copy that is still a pristine generated render is deleted; an
+// edited one is kept and reported (scripts/lib/launchers.mjs removeRetiredLaunchers).
+const retired = removeRetiredLaunchers(target, pluginRoot, { history: launcherHistory });
+items.push(...retired.items);
+warns.push(...retired.warns);
 
 // (5) the double-click updater entry: brings the machine's Sterling CLONE to
 // origin's default branch with NO Claude session in the loop (the updater is

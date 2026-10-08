@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { renderTmuxLauncher } from '../lib/launcher-tmux.mjs';
 import { stampBody, verifyStamp } from '../lib/generated-marker.mjs';
 import {
-  ensureLaunchers, launcherHost, legacySessionName, renderOpener, retiredLauncherRows, sessionName,
+  ensureLauncherIgnores, ensureLaunchers, launcherHost, launcherTools, legacySessionName, removeRetiredLaunchers, renderOpener, sessionName,
   LAUNCHER_GITIGNORE_ENTRIES, OPENERS,
 } from '../lib/launchers.mjs';
 
@@ -408,14 +408,54 @@ test('ensureLaunchers: checkText sees every render before it is written', () => 
   assert.deepEqual(seen, ['sterling-launch.sh', 'claude-code.bat', 'opencode.bat']);
 });
 
-test('retiredLauncherRows: sterling.bat, tui.bat and sterling-windows.bat are reported stale when present, and only then', () => {
+test('removeRetiredLaunchers: a current-template render of sterling.bat and tui.bat (any project path) is deleted; a hand-written one is kept and reported; none present is silent', () => {
   const target = tmp('sterling-ln-target-');
-  assert.deepEqual(retiredLauncherRows(target), []);
-  for (const f of ['sterling.bat', 'tui.bat']) writeFileSync(join(target, f), '@echo off\r\n');
-  const rows = retiredLauncherRows(target);
-  assert.deepEqual(rows.map((r) => [r.item, r.status]), [['sterling.bat', 'stale'], ['tui.bat', 'stale']]);
-  assert.match(rows[0].detail, /claude-code\.bat and opencode\.bat replace it/);
-  for (const r of rows) assert.match(r.detail, /delete it yourself/);
+  assert.deepEqual(removeRetiredLaunchers(target, REPO), { items: [], warns: [] });
+  const render = (name, dir) => readFileSync(join(REPO, 'templates', name), 'utf8').replaceAll('{{WIN_PROJECT_DIR}}', dir).replace(/\r?\n/g, '\r\n');
+  writeFileSync(join(target, 'sterling.bat'), render('launcher-win.bat', 'D:\\elsewhere\\proj'));
+  writeFileSync(join(target, 'tui.bat'), '@echo off\r\nrem my own\r\n');
+  const r = removeRetiredLaunchers(target, REPO);
+  assert.deepEqual(r.items.map((i) => [i.item, i.status]), [['sterling.bat', 'removed'], ['tui.bat', 'differs']]);
+  assert.ok(!existsSync(join(target, 'sterling.bat')));
+  assert.equal(readFileSync(join(target, 'tui.bat'), 'utf8'), '@echo off\r\nrem my own\r\n');
+  assert.match(r.items[1].detail, /kept — no longer generated .*re-adds a closed TUI pane/);
+  assert.ok(r.warns.some((w) => w.includes('tui.bat') && /kept/.test(w)), r.warns.join('\n'));
+});
+
+test('launcherTools: claude on PATH; opencode on PATH or in ~/.opencode/bin; the claude argument and STERLING_LAUNCHER_OPENCODE override; a bad override throws', () => {
+  const bin = tmp('sterling-ln-path-');
+  const home = tmp('sterling-ln-home-');
+  assert.deepEqual(launcherTools({ env: { PATH: bin }, home }), { claude: false, opencode: false });
+  script(join(bin, 'claude'), '#!/bin/sh\n');
+  writeFileSync(join(bin, 'opencode'), 'not executable');
+  assert.deepEqual(launcherTools({ env: { PATH: bin }, home }), { claude: true, opencode: false }, 'a file without the execute bit is not a program');
+  mkdirSync(join(home, '.opencode', 'bin'), { recursive: true });
+  script(join(home, '.opencode', 'bin', 'opencode'), '#!/bin/sh\n');
+  assert.deepEqual(launcherTools({ env: { PATH: bin }, home }), { claude: true, opencode: true });
+  assert.deepEqual(launcherTools({ env: { PATH: bin }, home, claude: false }), { claude: false, opencode: true });
+  assert.deepEqual(launcherTools({ env: { PATH: bin, STERLING_LAUNCHER_OPENCODE: 'absent' }, home }), { claude: true, opencode: false });
+  assert.deepEqual(launcherTools({ env: { PATH: '', STERLING_LAUNCHER_OPENCODE: 'found' }, home: tmp('sterling-ln-home-') }), { claude: false, opencode: true });
+  assert.throws(() => launcherTools({ env: { STERLING_LAUNCHER_OPENCODE: 'yes' } }), /STERLING_LAUNCHER_OPENCODE must be 'found' or 'absent' \(got 'yes'\)/);
+});
+
+test('ensureLaunchers: an opener only for a tool that is found', () => {
+  for (const [tools, files] of [[{ claude: true, opencode: false }, ['claude-code.sh']], [{ claude: false, opencode: true }, ['opencode.sh']]]) {
+    const target = tmp('sterling-ln-target-');
+    const r = ensureLaunchers(target, REPO, { splitPercent: 35, host: 'linux', tools, installedCopy: false });
+    assert.deepEqual(r.items.map((i) => i.item), ['sterling-launch.sh', ...files]);
+    for (const o of OPENERS.linux) assert.equal(existsSync(join(target, o.file)), files.includes(o.file), o.file);
+  }
+});
+
+test('ensureLauncherIgnores: appends only the missing launcher names, once', () => {
+  const target = tmp('sterling-ln-target-');
+  writeFileSync(join(target, '.gitignore'), 'node_modules/\nsterling.bat');
+  const added = ensureLauncherIgnores(target);
+  assert.ok(!added.includes('sterling.bat') && added.includes('claude-code.bat'), added.join(','));
+  assert.deepEqual(ensureLauncherIgnores(target), []);
+  const lines = readFileSync(join(target, '.gitignore'), 'utf8').split('\n');
+  assert.equal(lines[0], 'node_modules/');
+  assert.equal(lines.filter((l) => l === 'sterling.bat').length, 1);
 });
 
 test('LAUNCHER_GITIGNORE_ENTRIES: the engine, all four openers and the retired names', () => {

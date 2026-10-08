@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ProjectRegistry } from '@sterling/store';
 import { findDeadTerms } from '../lib/agent-distribution.mjs';
 import { renderClaudeText } from '../lib/agent-fences.mjs';
+import { stampBody } from '../lib/generated-marker.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -136,6 +137,8 @@ function init(dir, args = [], extraEnv = {}, { cwd = dir } = {}) {
       HOME: scratchHome(dir),
       // a WSL2 host: claude-code.bat + opencode.bat (scripts/lib/launchers.mjs launcherHost); an explicit value wins
       STERLING_LAUNCHER_HOST: 'windows',
+      // OpenCode found, so the opencode opener is written too (Claude Code via STERLING_CLAUDE_PROBE)
+      STERLING_LAUNCHER_OPENCODE: 'found',
       ...extraEnv,
     },
   });
@@ -356,7 +359,10 @@ test('retired native launcher: init writes no sterling-windows.bat even with a W
   }
 });
 
-test('retired native launcher: an existing sterling-windows.bat is left byte-identical and reported as retired', () => {
+// CHANGED (decision launchers-consolidated-to-claude-code-and-opencode-pair): a retired
+// launcher that is a pristine generated render is now deleted; this hand-written one
+// matches no render, so it is kept and reported as differs (it was 'stale').
+test('retired native launcher: an existing hand-written sterling-windows.bat is left byte-identical and reported as kept', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
@@ -367,7 +373,7 @@ test('retired native launcher: an existing sterling-windows.bat is left byte-ide
     assert.equal(r.code, 0, r.stderr);
     assert.equal(readFileSync(bat, 'utf8'), body, 'the existing file is neither deleted nor rewritten');
     const line = statusLineFor(r.stdout, 'sterling-windows.bat') ?? '';
-    assert.match(line, /^sterling-windows\.bat\s+stale\b/, `reported, not silent — got: ${line}`);
+    assert.match(line, /^sterling-windows\.bat\s+differs\b.*kept/, `reported, not silent — got: ${line}`);
     assert.match(line, /retired/, 'the report says the launcher is retired');
     assert.match(line, /delete/i, 'the report tells the user they may delete it');
   } finally {
@@ -402,7 +408,7 @@ test('launchers: a Windows (WSL2) host gets claude-code.bat + opencode.bat, a na
   }
 });
 
-test('launchers: an existing sterling.bat and tui.bat are left byte-identical and reported stale, naming what replaces them', () => {
+test('launchers: a hand-written sterling.bat and tui.bat are kept byte-identical and reported, naming what replaces them', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
@@ -412,12 +418,64 @@ test('launchers: an existing sterling.bat and tui.bat are left byte-identical an
     assert.equal(r.code, 0, r.stderr);
     for (const [f, body] of Object.entries(old)) {
       assert.equal(readFileSync(join(dir, f), 'utf8'), body, `${f} is neither deleted nor rewritten`);
-      assert.match(statusLineFor(r.stdout, f) ?? '', new RegExp(`^${escapeRe(f)}\\s+stale\\b.*no longer generates it`), `${f} reported stale`);
+      assert.match(statusLineFor(r.stdout, f) ?? '', new RegExp(`^${escapeRe(f)}\\s+differs\\b.*kept — no longer generated`), `${f} reported as kept`);
     }
     assert.match(statusLineFor(r.stdout, 'sterling.bat'), /claude-code\.bat and opencode\.bat replace it/);
     assert.match(statusLineFor(r.stdout, 'tui.bat'), /re-adds a closed TUI pane/);
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// A retired launcher that is still a pristine generated render is deleted: the current
+// template of sterling.bat / tui.bat, or any committed version of the deleted
+// launcher-win-native.bat (sterling-windows.bat), stamped or not. Edited ones are kept.
+test('launchers: unedited generated sterling.bat, tui.bat and sterling-windows.bat are deleted; an edited stamped sterling-windows.bat is kept', () => {
+  const show = (sha, rel) => spawnSync('git', ['show', `${sha}:${rel}`], { cwd: root, encoding: 'utf8' }).stdout;
+  const crlf = (t) => t.replace(/\r?\n/g, '\r\n');
+  const fill = (t, values) => t.replace(/\{\{([A-Z_]+)\}\}/g, (_, k) => values[k]);
+  const WIN = { WIN_PROJECT_DIR: 'C:\\Users\\demo\\proj' };
+  const NATIVE = {
+    WIN_PLUGIN_DIR: 'C:\\Users\\demo\\sterling', WIN_NODE: 'C:\\Program Files\\nodejs\\node.exe',
+    WIN_TUI_BUNDLE: 'C:\\Users\\demo\\sterling\\tui\\sterling-tui.mjs', SPLIT_RATIO: '0.35', MCP_ARGS: '',
+    MCP_MODE_NOTE: 'rem MODE: host-native — sterling comes from --plugin-dir; no --strict, so other MCP servers (codex) still load.',
+  };
+  const dirs = [];
+  try {
+    // (1) current sterling.bat / tui.bat renders and the newest stamped native launcher: all deleted
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+    dirs.push(dir);
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    writeFileSync(join(dir, 'sterling.bat'), crlf(fill(readFileSync(join(root, 'templates', 'launcher-win.bat'), 'utf8'), WIN)));
+    writeFileSync(join(dir, 'tui.bat'), crlf(fill(readFileSync(join(root, 'templates', 'tui-win.bat'), 'utf8'), WIN)));
+    const newestNative = show('6496fe07', 'templates/launcher-win-native.bat');
+    assert.ok(newestNative.includes('{{MCP_ARGS}}'), 'CONTROL: the retired template is read from git');
+    writeFileSync(join(dir, 'sterling-windows.bat'), crlf(stampBody(fill(newestNative, NATIVE), 'rem')));
+    const r = init(dir, []);
+    assert.equal(r.code, 0, r.stderr);
+    for (const f of ['sterling.bat', 'tui.bat', 'sterling-windows.bat']) {
+      assert.ok(!existsSync(join(dir, f)), `${f} deleted`);
+      assert.match(statusLineFor(r.stdout, f) ?? '', new RegExp(`^${escapeRe(f)}\\s+removed\\b.*unedited generated copy`), `${f} reported removed`);
+    }
+
+    // (2) the first, unstamped native launcher (50c31433) is recognised too; a stamped copy
+    // edited after it was stamped (its body no longer matches its stamp) is kept
+    const old = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+    dirs.push(old);
+    assert.equal(init(old, FRESH_FLAGS).code, 0);
+    writeFileSync(join(old, 'sterling-windows.bat'), crlf(fill(show('50c31433', 'templates/launcher-win-native.bat'), NATIVE)));
+    const oldRun = init(old, []);
+    assert.equal(oldRun.code, 0, oldRun.stderr);
+    assert.ok(!existsSync(join(old, 'sterling-windows.bat')), 'the unstamped 50c31433 render is deleted');
+
+    const edited = crlf(stampBody(fill(newestNative, NATIVE), 'rem')).replace('move-focus left', 'move-focus right');
+    writeFileSync(join(old, 'sterling-windows.bat'), edited);
+    const keep = init(old, []);
+    assert.equal(keep.code, 0, keep.stderr);
+    assert.equal(readFileSync(join(old, 'sterling-windows.bat'), 'utf8'), edited, 'an edited copy is kept byte-identical');
+    assert.match(statusLineFor(keep.stdout, 'sterling-windows.bat') ?? '', /^sterling-windows\.bat\s+differs\b.*kept/);
+  } finally {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
 
