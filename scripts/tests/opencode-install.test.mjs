@@ -810,6 +810,7 @@ test('no Sterling installed: the TUI shim imports cleanly and its setup logs ONE
   copyFileSync(join(plugins, 'sterling-tui', 'tui.tsx'), tuiCopy);
   const env = { ...process.env, HOME: home };
   delete env.CLAUDE_CONFIG_DIR;
+  delete env.XDG_CACHE_HOME;
   const probe = (shim, label) => spawnSync(process.execPath, ['--input-type=module', '-e', `
     const p = (await import(${JSON.stringify(pathToFileURL(shim).href)})).default;
     const r = await p.setup({ location: { directory: ${JSON.stringify(dir)} } });

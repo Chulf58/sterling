@@ -47,12 +47,14 @@ export { INSTALLED_PATHS };
 
 /**
  * @param {string} pluginRoot
- * @param {{session: string, splitPercent: number, installed?: boolean}} opts
+ * @param {{session: string, legacySession?: string, splitPercent: number, installed?: boolean}} opts
+ *   `legacySession` is the pre-hash name the engine still attaches to (default: `session`).
  *   `installed` defaults to isInstalledCopy(pluginRoot); tests pass it explicitly.
  */
-export function renderTmuxLauncher(pluginRoot, { session, splitPercent, installed = isInstalledCopy(pluginRoot) }) {
+export function renderTmuxLauncher(pluginRoot, { session, legacySession = session, splitPercent, installed = isInstalledCopy(pluginRoot) }) {
   return readFileSync(join(pluginRoot, 'templates', 'launcher-tmux.sh'), 'utf8')
     .replaceAll('{{SESSION}}', () => session)
+    .replaceAll('{{LEGACY_SESSION}}', () => legacySession)
     .replaceAll('{{PLUGIN_PATHS}}', () => (installed ? INSTALLED_PATHS : AUTHORING_PATHS(pluginRoot)))
     .replaceAll('{{CLAUDE_PLUGIN_FLAG}}', () => (installed ? '' : ' --plugin-dir "$PLUGIN_DIR"'))
     .replaceAll('{{SPLIT_RATIO}}', () => String(splitPercent));
