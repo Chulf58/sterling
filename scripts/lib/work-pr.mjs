@@ -493,9 +493,10 @@ const splitRepo = (repo) => {
   return { host, owner, name };
 };
 
-/** The PR's mergeStateStatus, reviewDecision and EVERY review thread (paged),
- * as { merge_state_status, review_decision, threads: [{id, resolved, outdated,
- * path, url, comment_ids}] }. `repo` is 'host/owner/repo'. */
+/** The PR's mergeStateStatus, reviewDecision, the head commit's check rollup
+ * state (null when the head has no checks) and EVERY review thread (paged), as
+ * { merge_state_status, review_decision, check_rollup, threads: [{id, resolved,
+ * outdated, path, url, comment_ids}] }. `repo` is 'host/owner/repo'. */
 export function fetchPrMergeState(cwd, repo, number) {
   const { host, owner, name } = splitRepo(repo);
   const threads = [];
@@ -503,12 +504,12 @@ export function fetchPrMergeState(cwd, repo, number) {
   let state = null;
   for (;;) {
     const page = after ? `, after:"${after}"` : '';
-    const query = `query { repository(owner:"${owner}", name:"${name}") { pullRequest(number:${number}) { mergeStateStatus reviewDecision reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
+    const query = `query { repository(owner:"${owner}", name:"${name}") { pullRequest(number:${number}) { mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
     const pull = ghGraphql(cwd, host, query)?.repository?.pullRequest;
     if (!pull || typeof pull.mergeStateStatus !== 'string' || !Array.isArray(pull.reviewThreads?.nodes)) {
       throw new Error(`GraphQL returned no mergeStateStatus/reviewThreads for ${repo}#${number}`);
     }
-    state ??= { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null };
+    state ??= { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: pull.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? null };
     for (const t of pull.reviewThreads.nodes) {
       const comments = t?.comments?.nodes ?? [];
       threads.push({ id: t.id, resolved: t.isResolved === true, outdated: t.isOutdated === true, path: t.path ?? null, url: comments[0]?.url ?? null, comment_ids: comments.map((c) => c.databaseId) });
@@ -521,20 +522,41 @@ export function fetchPrMergeState(cwd, repo, number) {
   return { ...state, threads };
 }
 
+const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/** fetchPrMergeState, read again ONCE after `retryDelayMs` when GitHub answers
+ * UNKNOWN: it computes mergeability lazily, so a first read right after a push
+ * or a resolve is often UNKNOWN. A second UNKNOWN is returned as it is and
+ * mergeBlockers blocks on it. */
+export function fetchSettledMergeState(cwd, repo, number, { retryDelayMs = 3000, sleep = sleepMs } = {}) {
+  const first = fetchPrMergeState(cwd, repo, number);
+  if (first.merge_state_status !== 'UNKNOWN') return first;
+  sleep(retryDelayMs);
+  return fetchPrMergeState(cwd, repo, number);
+}
+
 /** What blocks a human from merging, from fetchPrMergeState's result:
  * { mergeable_now, blockers: [string], unresolved_threads: [{id, path, url}],
  * awaiting_human_review }. Unresolved threads always block. A BLOCKED PR with
  * no unresolved thread whose reviewDecision is REVIEW_REQUIRED waits only for a
  * human's approval, which the loop can never give: that is reported
- * (awaiting_human_review) but does not stop the loop from ending clean. Every
- * other state outside CLEAN/HAS_HOOKS/UNSTABLE blocks, unknown ones included. */
+ * (awaiting_human_review) but does not stop the loop from ending clean, and
+ * only when the head's check rollup is SUCCESS or absent (a failing or pending
+ * required check also shows as BLOCKED, so any other rollup blocks and is
+ * named). Every other state outside CLEAN/HAS_HOOKS/UNSTABLE blocks, unknown
+ * ones included; UNKNOWN says to retry shortly. */
 export function mergeBlockers(state) {
   const unresolved = state.threads.filter((t) => !t.resolved).map(({ id, path, url }) => ({ id, path, url }));
   const blockers = unresolved.map((t) => `unresolved review thread ${t.id}${t.path ? ` on ${t.path}` : ''}${t.url ? ` (${t.url})` : ''}`);
   const status = state.merge_state_status;
   let awaiting = false;
   if (!MERGEABLE_STATES.has(status)) {
-    if (status === 'BLOCKED' && unresolved.length === 0 && state.review_decision === 'REVIEW_REQUIRED') awaiting = true;
+    const rollup = state.check_rollup ?? null;
+    if (status === 'BLOCKED' && unresolved.length === 0 && state.review_decision === 'REVIEW_REQUIRED') {
+      if (rollup === null || rollup === 'SUCCESS') awaiting = true;
+      else blockers.push(`mergeStateStatus is BLOCKED and the head commit's checks are ${rollup}, not only a required human review`);
+    }
+    else if (status === 'UNKNOWN') blockers.push('mergeStateStatus is UNKNOWN (GitHub is still computing mergeability; retry shortly)');
     else if (status === 'BLOCKED' && unresolved.length > 0) blockers.push('mergeStateStatus is BLOCKED');
     else if (status === 'BLOCKED') blockers.push(`mergeStateStatus is BLOCKED (reviewDecision ${state.review_decision ?? 'none'}) with no unresolved thread: a ruleset or required check blocks the merge`);
     else blockers.push(`mergeStateStatus is ${status}`);
@@ -546,8 +568,9 @@ export function mergeBlockers(state) {
  * wait helper returns in comments[].id; a reply anywhere in the thread counts).
  * Every id is matched to a thread BEFORE any mutation, so an unknown id throws
  * with nothing resolved. Returns { resolved: [{comment_id, thread_id}],
- * already_resolved: [comment_id] }; a failed mutation throws naming the threads
- * already resolved. */
+ * already_resolved: [comment_id], same_thread_as_resolved: [{comment_id,
+ * thread_id}] } (a later id in a thread this call just resolved); a failed
+ * mutation throws naming the threads already resolved. */
 export function resolveReviewThreads(cwd, repo, number, commentIds) {
   const { host } = splitRepo(repo);
   const { threads } = fetchPrMergeState(cwd, repo, number);
@@ -556,13 +579,17 @@ export function resolveReviewThreads(cwd, repo, number, commentIds) {
   if (missing.length) throw new Error(`no review thread of ${repo}#${number} holds comment ${missing.join(', ')} — nothing resolved`);
   const resolved = [];
   const alreadyResolved = [];
+  const sameThread = [];
   const done = new Set();
   for (const { id, thread } of plan) {
     if (thread.resolved) {
       alreadyResolved.push(id);
       continue;
     }
-    if (done.has(thread.id)) continue;
+    if (done.has(thread.id)) {
+      sameThread.push({ comment_id: id, thread_id: thread.id });
+      continue;
+    }
     if (!/^[A-Za-z0-9_=-]+$/.test(thread.id)) throw new Error(`review thread id ${JSON.stringify(thread.id)} is not a usable node id`);
     try {
       const out = ghGraphql(cwd, host, `mutation { resolveReviewThread(input:{threadId:"${thread.id}"}) { thread { id isResolved } } }`);
@@ -573,5 +600,5 @@ export function resolveReviewThreads(cwd, repo, number, commentIds) {
     done.add(thread.id);
     resolved.push({ comment_id: id, thread_id: thread.id });
   }
-  return { resolved, already_resolved: alreadyResolved };
+  return { resolved, already_resolved: alreadyResolved, same_thread_as_resolved: sameThread };
 }

@@ -46,7 +46,9 @@ function oneLine(s) {
 //   pullRequest pages, one per call; default: CLEAN, no threads) and exits 1 when
 //   fail_merge exists. A resolveReviewThread mutation records the thread id on
 //   resolved.log and answers isResolved true, exits 1 when fail_resolve exists,
-//   or answers a GraphQL errors payload when resolve_errors exists.
+//   or answers a GraphQL errors payload when resolve_errors exists; a file
+//   fail_resolve_after holding N exits 1 once resolved.log has N lines. A
+//   merge-state query answers a GraphQL errors payload when merge_errors exists.
 //   A path whose repo is not acme/widget answers 404; a file named
 //   fail_<endpoint> makes that endpoint exit 1; delay_ms delays every answer.
 const FAKE_GH_IMPL = `
@@ -63,6 +65,9 @@ if (path === 'graphql') {
   if (q.includes('resolveReviewThread')) {
     if (existsSync(join(state, 'fail_resolve'))) { console.error('gh: GraphQL: Resource not accessible by integration (resolveReviewThread)'); process.exit(1); }
     if (existsSync(join(state, 'resolve_errors'))) { process.stdout.write('{"errors":[{"message":"thread cannot be resolved"}],"data":null}'); process.exit(0); }
+    const after = join(state, 'fail_resolve_after');
+    const logged = existsSync(join(state, 'resolved.log')) ? readFileSync(join(state, 'resolved.log'), 'utf8').split('\\n').filter(Boolean).length : 0;
+    if (existsSync(after) && logged >= Number(readFileSync(after, 'utf8'))) { console.error('gh: GraphQL: Resource not accessible by integration (resolveReviewThread, later thread)'); process.exit(1); }
     const id = q.match(/threadId:"([^"]*)"/)[1];
     appendFileSync(join(state, 'resolved.log'), id + '\\n');
     process.stdout.write(JSON.stringify({ data: { resolveReviewThread: { thread: { id, isResolved: true } } } }));
@@ -70,6 +75,7 @@ if (path === 'graphql') {
   }
   if (q.includes('reviewThreads')) {
     if (existsSync(join(state, 'fail_merge'))) { console.error('gh: Server Error (HTTP 502) (merge state)'); process.exit(1); }
+    if (existsSync(join(state, 'merge_errors'))) { process.stdout.write('{"errors":[{"message":"Could not resolve to a Repository"}],"data":null}'); process.exit(0); }
     const countFile = join(state, 'count_merge');
     const n = existsSync(countFile) ? Number(readFileSync(countFile, 'utf8')) : 0;
     writeFileSync(countFile, String(n + 1));
@@ -906,6 +912,7 @@ test('--resolve-threads resolves the thread holding each comment id through reso
     assert.equal(r.out.pr_number, 7);
     assert.deepEqual(r.out.resolved, [{ comment_id: 101, thread_id: 'PRRT_a' }, { comment_id: 102, thread_id: 'PRRT_b' }]);
     assert.deepEqual(r.out.already_resolved, [103]);
+    assert.deepEqual(r.out.same_thread_as_resolved, [{ comment_id: 111, thread_id: 'PRRT_a' }], 'a second id in a thread resolved this call is reported, not dropped');
     assert.deepEqual(resolvedLog(f), ['PRRT_a', 'PRRT_b']);
     assert.equal(resolveMutations(f).length, 2);
     assert.ok(resolveMutations(f)[0].includes('github.com'), 'names the host');
@@ -958,6 +965,121 @@ test('--resolve-threads refuses malformed input before any gh call: no ids, a no
       assert.equal(r.out.status, 'error');
     }
     assert.equal(calls(f).length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+// ------------------------------------------------ check rollup, UNKNOWN retry, partial failures
+
+const withRollup = (state) => ({ commits: { nodes: [{ commit: { statusCheckRollup: state === null ? null : { state } } }] } });
+
+for (const [rollup, grants] of [['SUCCESS', true], [null, true], ['FAILURE', false], ['PENDING', false]]) {
+  test(`--settle clean: BLOCKED + REVIEW_REQUIRED + check rollup ${rollup} ${grants ? 'awaits the human review and settles clean' : 'is refused, naming the check state'}`, () => {
+    const f = makeFixture();
+    try {
+      arm(f);
+      putMerge(f, [mergePage('BLOCKED', [], { reviewDecision: 'REVIEW_REQUIRED', ...withRollup(rollup) })]);
+      const r = run(f, ['--settle', 'clean', '--pr', '7']);
+      if (grants) {
+        assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+        assert.equal(r.out.status, 'clean');
+        assert.equal(r.out.awaiting_human_review, true);
+        assert.equal(r.out.mergeable_now, false);
+        assert.equal(r.out.check_rollup, rollup);
+        assert.equal(JSON.parse(readFileSync(loopPath(f), 'utf8')).status, 'clean');
+      } else {
+        assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+        assert.equal(r.out.status, 'blocked');
+        assert.equal(r.out.awaiting_human_review, false);
+        assert.equal(r.out.check_rollup, rollup);
+        assert.ok(r.out.error.includes(`checks are ${rollup}`), r.out.error);
+        assert.equal(JSON.parse(readFileSync(loopPath(f), 'utf8')).status, 'owed');
+      }
+    } finally {
+      f.cleanup();
+    }
+  });
+}
+
+test('--settle clean: the merge-state query asks for the head commit statusCheckRollup', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    run(f, ['--settle', 'clean', '--pr', '7']);
+    assert.ok(mergeCalls(f)[0].some((a) => a.includes('commits(last:1)') && a.includes('statusCheckRollup { state }')));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--settle clean: an UNKNOWN merge state is read once more after the retry delay; CLEAN the second time settles clean', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('UNKNOWN'), mergePage('CLEAN')]);
+    const r = run(f, ['--settle', 'clean', '--pr', '7', '--unknown-retry-delay', '0']);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'clean');
+    assert.equal(r.out.merge_state_status, 'CLEAN');
+    assert.equal(r.out.mergeable_now, true);
+    assert.equal(mergeCalls(f).length, 2, 'exactly one re-read');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--settle clean: still UNKNOWN after the one re-read blocks with a retry-shortly note; a bad delay is refused', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('UNKNOWN')]);
+    const r = run(f, ['--settle', 'clean', '--pr', '7', '--unknown-retry-delay', '0']);
+    assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'blocked');
+    assert.match(r.out.error, /UNKNOWN.*retry shortly/);
+    assert.equal(mergeCalls(f).length, 2, 'read twice, never more');
+    assert.equal(JSON.parse(readFileSync(loopPath(f), 'utf8')).status, 'owed');
+    const bad = run(f, ['--settle', 'clean', '--pr', '7', '--unknown-retry-delay', '-1']);
+    assert.equal(bad.code, 1);
+    assert.match(bad.out.error, /unknown-retry-delay/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--settle clean: a GraphQL errors payload on the merge-state query fails loud, exit 1, loop untouched', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    const before = readFileSync(loopPath(f), 'utf8');
+    writeFileSync(join(f.state, 'merge_errors'), '');
+    const r = run(f, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'error');
+    assert.match(r.out.error, /GraphQL returned errors: Could not resolve to a Repository/);
+    assert.match(r.stderr, /Could not resolve to a Repository/);
+    assert.equal(readFileSync(loopPath(f), 'utf8'), before);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--resolve-threads: a failure on the second thread exits 1 naming the thread already resolved, and the first stays resolved', () => {
+  const f = makeFixture();
+  try {
+    putMerge(f, [mergePage('BLOCKED', [
+      thread('PRRT_a', { comments: { nodes: [{ databaseId: 101, url: 'u1' }] } }),
+      thread('PRRT_b', { comments: { nodes: [{ databaseId: 102, url: 'u2' }] } }),
+    ])]);
+    writeFileSync(join(f.state, 'fail_resolve_after'), '1');
+    const r = run(f, ['--resolve-threads', '101,102', '--pr', '7']);
+    assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'error');
+    assert.match(r.out.error, /gh api graphql failed/);
+    assert.match(r.out.error, /already resolved this call: PRRT_a\)/);
+    assert.match(r.stderr, /already resolved this call: PRRT_a/);
+    assert.deepEqual(resolvedLog(f), ['PRRT_a']);
   } finally {
     f.cleanup();
   }

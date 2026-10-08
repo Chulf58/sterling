@@ -7,7 +7,7 @@
 //        [--since-review <id>] [--head <sha>] [--timeout <s>] [--interval <s>]
 //        [--request-copilot] [--target <dir>]
 //   node scripts/pr-review-wait.mjs --resolve-threads <comment-id,...> --pr <n|pr-url> [--target <dir>]
-//   node scripts/pr-review-wait.mjs --settle <clean|capped|escalated> --pr <n|pr-url> [--target <dir>]
+//   node scripts/pr-review-wait.mjs --settle <clean|capped|escalated> --pr <n|pr-url> [--unknown-retry-delay <s>] [--target <dir>]
 //
 // WAIT: the repo is bound to origin exactly as work-mode /sterling:merge binds
 // it (parseOriginRepo over origin's fetch URL); a PR URL or --repo naming any
@@ -59,7 +59,8 @@
 // returned (comments[].id) for findings that are dispositioned, it resolves each
 // one's thread through the GraphQL resolveReviewThread mutation. Every id is
 // matched to a thread before any mutation; an unknown id or a gh failure exits
-// 1 naming it. Exit 0 with {status:'resolved', pr_number, resolved, already_resolved}.
+// 1 naming it. Exit 0 with {status:'resolved', pr_number, resolved, already_resolved,
+// same_thread_as_resolved}.
 //
 // SETTLE: the deliberate conductor act that discharges H10's 'PR review loop
 // owed' duty — writes the outcome on .sterling/transient/pr-loop.json when the
@@ -70,12 +71,16 @@
 // merge state that is not CLEAN/HAS_HOOKS/UNSTABLE, refuse the clean outcome
 // (status 'blocked', exit 1, the blockers and unresolved threads named, nothing
 // written); a PR that only awaits a required human review settles clean and the
-// output says so. A clean output carries merge_state_status, review_decision,
-// mergeable_now and awaiting_human_review. A gh failure refuses too.
+// output says so, but only while the head's check rollup is SUCCESS or absent
+// (a failing or pending required check also shows as BLOCKED). An UNKNOWN merge
+// state, which GitHub computes lazily, is read once more after
+// --unknown-retry-delay seconds (default 3) and blocks if still UNKNOWN. A clean
+// output carries merge_state_status, review_decision, check_rollup, mergeable_now
+// and awaiting_human_review. A gh failure refuses too.
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { fetchPrMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
+import { fetchSettledMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (name) => {
@@ -160,15 +165,24 @@ if (argv.includes('--resolve-threads')) {
   }
 }
 
+// --unknown-retry-delay <s>: the wait before the one re-read of an UNKNOWN merge state.
+function retryDelayMs() {
+  const raw = flag('--unknown-retry-delay');
+  if (raw === undefined) return 3000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`--unknown-retry-delay must be a number of seconds >= 0, got '${raw}'`);
+  return n * 1000;
+}
+
 if (argv.includes('--settle')) {
   let merge = null;
   try {
     const originRepo = originRepoOrThrow();
     // Only a clean outcome claims the PR is ready for a human, so only it asks GitHub.
     const guard = (armed) => {
-      const state = fetchPrMergeState(target, originRepo, armed.pr_number);
+      const state = fetchSettledMergeState(target, originRepo, armed.pr_number, { retryDelayMs: retryDelayMs() });
       const verdict = mergeBlockers(state);
-      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review };
+      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review };
       if (verdict.blockers.length) {
         const err = new Error(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join('; ')} — resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`);
         err.blocked = { ...merge, blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads };
