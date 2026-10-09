@@ -31714,7 +31714,15 @@ var SterlingTools = class _SterlingTools {
           if (unreached.length)
             steps.push(`for ${unreached.map((v) => v.path).join(", ")}: wire it in, or knowledge_update the state to 'built'`);
           if (missingEntry) {
-            steps.push(`mark the file a registry reaches as the entry, one targeted call: knowledge_edit(id: '${a.id}', field: 'files[path=<entry path>].entry', find: 'false', replace: 'true') \u2014 a tool entry is server.ts or tools.ts with the tool name in its role`);
+            const checksReach = reachabilityFor(treeRoot).cloneStatus() === "clone";
+            const markEntry = `knowledge_edit(id: '${a.id}', field: 'files[path=<entry path>].entry', find: 'false', replace: 'true')`;
+            const addFiles = `add the files it owns first: knowledge_append(id: '${a.id}', field: 'files', entries: [{path, role}], resolves: [<this item's id>])`;
+            const markClone = `mark the file a registry reaches as the entry, one targeted call: ${markEntry} \u2014 a tool entry is server.ts or tools.ts with the tool name in its role`;
+            if (checksReach) {
+              steps.push(files.length === 0 ? `${addFiles}; then ${markClone}` : markClone);
+            } else {
+              steps.push(files.length === 0 ? `${addFiles}; reachability is not checked in this tree, so mark an entry (${markEntry}) only if you want one recorded` : `reachability is not checked in this tree, so marking an entry is optional: ${markEntry}`);
+            }
           }
           const flagged = [.../* @__PURE__ */ new Set([...unverifiedPaths, ...unreached.map((v) => v.path), ...looksWired.map((v) => v.path)])];
           this.maintenanceEnqueue({
