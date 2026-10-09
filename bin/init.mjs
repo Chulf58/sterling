@@ -5093,7 +5093,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 left in place and ignored; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -5104,8 +5104,9 @@ var init_config = __esm({
       effort: effortLevel.optional()
     }).strict();
     OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+    CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
     agentModelEntry = external_exports.object({
-      model: external_exports.string(),
+      model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
       effort: effortLevel,
       hard_task: modelPin.optional(),
       opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
@@ -14834,6 +14835,50 @@ function storeWriteTools(pluginRoot2 = sterlingRootFrom()) {
   if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd7(join24(pluginRoot2, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
   return tools;
 }
+function opencodeModelRef(model) {
+  if (typeof model !== "string" || !CLAUDE_MODEL_ID_RE.test(model)) throw new TypeError(`opencodeModelRef: model must be a Claude model id, got ${JSON.stringify(model)}`);
+  return `anthropic/${model}`;
+}
+function opencodeModelFor({ model, opencodeModel } = {}) {
+  if (opencodeModel === void 0) return opencodeModelRef(model);
+  if (typeof opencodeModel !== "string" || !OPENCODE_MODEL_REF_RE.test(opencodeModel)) {
+    throw new TypeError(`opencodeModelFor: opencode_model must be <provider>/<model>, got ${JSON.stringify(opencodeModel)}`);
+  }
+  return opencodeModel;
+}
+function configuredFullAgentModels(projectDir) {
+  const where = fwd7(join24(projectDir, ".sterling", "config.json"));
+  const leave = (why) => ({
+    refused: {
+      item: ".sterling/config.json models",
+      status: "refused",
+      refused: true,
+      detail: `${why}; no OpenCode agent file was written`,
+      instruction: `REFUSED: ${why}, so no OpenCode agent file was written. Remedy: fix ${where} (the System tab writes config.models), then rerun /sterling:update.`
+    }
+  });
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync16(join24(projectDir, ".sterling", "config.json"), "utf8"));
+  } catch (err) {
+    return leave(err.code === "ENOENT" ? `${where} does not exist` : `${where} could not be read (${err.message})`);
+  }
+  let parsed;
+  try {
+    parsed = parseConfig(raw);
+  } catch (err) {
+    return leave(`${where} does not validate (${err.message.replace(/\s+/g, " ")})`);
+  }
+  const models = {};
+  for (const name4 of ROSTER) {
+    const key = AGENT_MODEL_KEY[name4];
+    if (key === void 0) continue;
+    const entry = parsed.models[key];
+    if (entry === void 0) continue;
+    models[name4] = opencodeModelFor({ model: entry.model, opencodeModel: entry.opencode_model });
+  }
+  return { models };
+}
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname9(fileURLToPath3(moduleUrl));
   for (let dir = start; ; dir = dirname9(dir)) {
@@ -14867,16 +14912,12 @@ function frontmatterModel(content) {
   const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
-function ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
-  const rows = [];
-  for (const { path, content, previous: _previous, ...row } of planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models })) {
-    if (content !== void 0) {
-      mkdirSync7(dirname9(path), { recursive: true });
-      writeFileSync7(path, content);
-    }
-    rows.push(row);
-  }
-  return rows;
+function stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
+  const planned = planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models });
+  return {
+    rows: planned.map(({ path, content, previous, ...row }) => row),
+    writes: planned.filter((r) => r.content !== void 0).map(({ path, content, previous }) => ({ path, content, previous }))
+  };
 }
 function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
   const registry2 = loadRegistry(join24(pluginRoot2, "agent-templates", "registry.json"));
@@ -14916,6 +14957,45 @@ function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models =
   }
   return rows;
 }
+function writeFileAtomic(path, content, { writeFile = writeFileSync7, rename = renameSync3 } = {}) {
+  const tmp = `${path}.tmp-${randomUUID5()}`;
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync3(tmp, { force: true });
+    throw err;
+  }
+}
+function writeFullAgentFiles(writes, fs = {}) {
+  const done = [];
+  try {
+    for (const w of writes) {
+      mkdirSync7(dirname9(w.path), { recursive: true });
+      writeFileAtomic(w.path, w.content, fs);
+      done.push(w);
+    }
+  } catch (err) {
+    try {
+      restoreFullAgentFiles(done, fs);
+    } catch (restoreErr) {
+      throw new Error(`${err.message}; rollback: ${restoreErr.message}`, { cause: err });
+    }
+    throw err;
+  }
+}
+function restoreFullAgentFiles(writes, fs = {}) {
+  const failed = [];
+  for (const w of writes) {
+    try {
+      if (w.previous === null) rmSync3(w.path, { force: true });
+      else writeFileAtomic(w.path, w.previous, fs);
+    } catch (err) {
+      failed.push(`${fwd7(w.path)}: ${err.message}`);
+    }
+  }
+  if (failed.length) throw new Error(`could not restore ${failed.join("; ")}`);
+}
 function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir9(), installed, probe = probeOpenCode }) {
   if (!isAbsolute(projectDir)) throw new TypeError(`setupOpenCode: projectDir must be absolute, got ${projectDir}`);
   if (env.STERLING_OPENCODE_SETUP_DISABLE === "1") return { skipped: "Sterling on OpenCode SKIPPED (STERLING_OPENCODE_SETUP_DISABLE=1)" };
@@ -14939,7 +15019,15 @@ function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env,
     rows.push({ item: ".sterling/config.json handoff", status: "skipped", detail: `${err.message} \u2014 excluding only Sterling's own .opencode paths` });
   }
   rows.push(ensureExcluded({ projectDir, handoff, tracked, unmaintained }));
-  const agentRows = ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked });
+  const configured = configuredFullAgentModels(projectDir);
+  if (configured.refused) rows.push(configured.refused);
+  const staged = stageFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models: configured.models ?? {} });
+  let agentRows = staged.rows;
+  if (configured.refused) {
+    agentRows = agentRows.map((r) => ["created", "refreshed"].includes(r.status) ? { ...r, status: "skipped", detail: `would be ${r.status}; not written because .sterling/config.json was refused` } : r);
+  } else {
+    writeFullAgentFiles(staged.writes);
+  }
   const conductorRow = agentRows.find((r) => r.item === `${STERLING_AGENTS_SUBDIR}/conductor.md`);
   const conductorOk = ["created", "matches", "refreshed"].includes(conductorRow?.status);
   rows.push(...ensureProjectConfig({ projectDir, env, home, tracked, conductorOk, opencodeVersion: oc.version }));
