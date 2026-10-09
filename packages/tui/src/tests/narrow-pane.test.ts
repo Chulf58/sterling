@@ -118,6 +118,37 @@ test('narrow tabs: at 33 columns every tab, the active one included, is drawn in
   }
 });
 
+test('narrow tabs: under 3 columns per tab the bar is a window that always holds the active tab, and every drawn cell clicks to its own tab', () => {
+  const tabs = ['Tasks (13)', 'Knowledge', 'Queue', 'Agents (2 running · 3 quiet)', 'System'].map((label, index) => ({ label, active: index === 4, index }));
+  assert.deepEqual(fitTabs(tabs, 12).map((t) => [t.label, t.index]), [['A', 3], ['System', 4]], 'width 12: the active tab plus the neighbour that fits');
+  assert.deepEqual(fitTabs(tabs, 8).map((t) => [t.label, t.index]), [['System', 4]]);
+  assert.deepEqual(fitTabs(tabs, 5).map((t) => [t.label, t.index]), [['Sy…', 4]], 'width 5: the active name clipped to the pane');
+  const { store, cleanup } = fixture();
+  try {
+    const agents = { running: 2 };
+    for (const width of [12, 8, 5]) {
+      for (const active of [TASKS_TAB, KNOWLEDGE_TAB, QUEUE_TAB, AGENTS_TAB, SYSTEM_TAB]) {
+        const ui = st({ tab: active, cursor: 1 });
+        const s = buildDashboardState(store, ui, width, 20, '', false, undefined, undefined, agents);
+        assert.ok(cellsWidth(s) <= width, `width ${width}, tab ${active}: the bar uses ${cellsWidth(s)} columns`);
+        const at = s.tabs.findIndex((t) => t.active);
+        assert.notEqual(at, -1, `width ${width}, tab ${active}: the active tab is in the bar`);
+        const { screen, puts } = capture(width, 30);
+        draw(screen, s);
+        const put = puts.find((p) => p.y === s.bodyTop - 2 && p.str === ` ${s.tabs[at]!.label} `);
+        assert.ok(put && put.x + put.str.length <= width, `width ${width}, tab ${active}: the active tab is drawn inside the pane`);
+        for (let i = 0; i < s.tabs.length; i++) {
+          const r = reduce(store, ui, { kind: 'click', x: tabX(s, i), y: s.bodyTop - 1 }, { width, maxBodyLines: 20, agents });
+          assert.equal(r.ui.tab, s.tabs[i]!.index, `width ${width}: a click on '${s.tabs[i]!.label}' goes to tab ${s.tabs[i]!.index}`);
+          assert.equal(r.ui.cursor, 0, 'the click switched (a switch resets the cursor)');
+        }
+      }
+    }
+  } finally {
+    cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 2. Warnings: one notice row in the warning colour
 // ---------------------------------------------------------------------------
@@ -284,6 +315,16 @@ test('queue: the wheel scrolls the list under the pointer; the other list stays 
     const p = reduce(store, ui, { kind: 'wheel', dy: 1, y: pendingLine }, vp).ui;
     assert.equal(p.scroll, 3, 'the pending list scrolled');
     assert.equal(p.historyScroll ?? 0, 0, 'the history list did not');
+
+    // a wheel over the tab bar, the notice row or the footer scrolls nothing
+    const height = 20;
+    for (const [where, y] of [['tab bar', s.bodyTop - 1], ['spacer', s.bodyTop], ['notice row', height - 1], ['footer', height]] as const) {
+      const r = reduce(store, ui, { kind: 'wheel', dy: 1, y }, vp);
+      assert.equal(r.ui, ui, `a wheel over the ${where} (line ${y}) is a no-op`);
+    }
+    // the last drawn lines of each list still take it
+    assert.equal(reduce(store, ui, { kind: 'wheel', dy: 1, y: s.bodyTop + s.queueCompleted!.startRow }, vp).ui.scroll, 3, 'the overflow-note line belongs to pending');
+    assert.equal(reduce(store, ui, { kind: 'wheel', dy: 1, y: s.bodyTop + max }, vp).ui.historyScroll, 3, 'the last body line belongs to history');
 
     // clamped at both ends, and a tab switch resets both lists
     let far = ui;

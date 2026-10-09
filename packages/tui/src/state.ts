@@ -1033,11 +1033,14 @@ type TabCell = { label: string; active: boolean; index: number };
 /**
  * Fit the tab bar into `width` columns (each cell is ' label '). Steps, first
  * fit wins: full labels; inactive tabs drop their '(…)' count; the active tab
- * drops its count too; inactive tabs shorten to 3 letters, then to 1. The
- * active tab keeps its whole name, and only when even that does not fit is
- * it clipped with an ellipsis. Works from the label text, so a count of any
- * length ('Agents (2 running · 3 quiet)') goes the same way. The click
- * hit-test measures these fitted labels, so a shortened tab stays clickable.
+ * drops its count too; inactive tabs shorten to 3 letters, then to 1; the
+ * active name is clipped with an ellipsis. When even 1-letter cells for every
+ * tab do not fit, the bar becomes a window: the active tab (clipped to the
+ * pane) plus as many 1-letter neighbours as fit, nearest first. Works from the
+ * label text, so a count of any length ('Agents (2 running · 3 quiet)') goes
+ * the same way. The result may be a subset: each cell keeps its TABS `index`,
+ * and the click hit-test measures these cells, so every drawn tab is
+ * clickable. Under 3 columns no cell fits at all.
  */
 export function fitTabs(tabs: TabCell[], width: number): TabCell[] {
   if (!Number.isFinite(width)) return tabs;
@@ -1053,8 +1056,31 @@ export function fitTabs(tabs: TabCell[], width: number): TabCell[] {
     const labels = tabs.map((t) => (t.active ? active(t.label) : inactive(t.label)));
     if (labels.reduce((n, l) => n + l.length + 2, 0) <= width) return tabs.map((t, i) => ({ ...t, label: labels[i]! }));
   }
+  // every tab as a cell still fits when the active name keeps at least 3 columns ('Sy…')
   const room = width - 3 * tabs.filter((t) => !t.active).length - 2;
-  return tabs.map((t) => ({ ...t, label: t.active ? clipEllipsis(bare(t.label), Math.max(1, room)) : bare(t.label).slice(0, 1) }));
+  const activeName = bare(tabs.find((t) => t.active)?.label ?? '');
+  if (room >= Math.min(3, activeName.length)) return tabs.map((t) => ({ ...t, label: t.active ? clipEllipsis(bare(t.label), room) : bare(t.label).slice(0, 1) }));
+  const ai = Math.max(0, tabs.findIndex((t) => t.active));
+  const window: TabCell[] = [{ ...tabs[ai]!, label: clipEllipsis(bare(tabs[ai]!.label), Math.max(1, width - 2)) }];
+  let used = window[0]!.label.length + 2;
+  let lo = ai;
+  let hi = ai;
+  for (let grew = true; grew; ) {
+    grew = false;
+    if (hi + 1 < tabs.length && used + 3 <= width) {
+      hi += 1;
+      window.push({ ...tabs[hi]!, label: bare(tabs[hi]!.label).slice(0, 1) });
+      used += 3;
+      grew = true;
+    }
+    if (lo > 0 && used + 3 <= width) {
+      lo -= 1;
+      window.unshift({ ...tabs[lo]!, label: bare(tabs[lo]!.label).slice(0, 1) });
+      used += 3;
+      grew = true;
+    }
+  }
+  return window;
 }
 
 /** The key help for the tab and mode on screen: at most 48 columns (the
@@ -1804,7 +1830,12 @@ function reduceNodes(
       // the clamp needs only the drawn content height, which a scroll does not change
       const st = drawn && ui.tab !== SYSTEM_TAB ? drawn.state : buildSelf(ui);
       const qc = st.queueCompleted;
-      if (qc && event.y !== undefined && event.y - 1 >= st.bodyTop + qc.startRow) {
+      // Queue: each list takes the wheel only over its own drawn lines (body
+      // offsets 0..startRow-1 for pending with its overflow note, startRow..
+      // maxBodyLines-1 for history); over the tabs, notice or footer it is a no-op
+      const off = qc && event.y !== undefined ? event.y - 1 - st.bodyTop : undefined;
+      if (off !== undefined && (off < 0 || off >= maxBodyLines)) return { ui, effects };
+      if (qc && off !== undefined && off >= qc.startRow) {
         const historyTotal = qc.lines.length + (st.queueActivity ? 1 + st.queueActivity.lines.length : 0);
         const historyLines = Math.max(0, maxBodyLines - qc.startRow - 1);
         const max = Number.isFinite(maxBodyLines) ? Math.max(0, historyTotal - historyLines) : 0;
