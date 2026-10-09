@@ -22,7 +22,18 @@
 // listed. Without a readable session.json nothing can be told apart by
 // session, so the old rule holds: ended rows linger DONE_LINGER_MS as `done`.
 //
-// Live means a register row with no `ended`. A resumed agent keeps its
+// Live means a register row with no `ended`. An H10 residue stamp is only a
+// guess that the agent is gone (it stamps any row older than an hour with no
+// file touches, and a long read-only agent touches nothing), so a stamped row
+// with no `ended` is unconfirmed and its own transcript decides: it is ended
+// at the stamp when the transcript ends on the agent's handback (the
+// tool_result Claude Code writes with toolEndsTurn: true), running while the
+// transcript was written within TRANSCRIPT_ALIVE_MS, and `quiet` otherwise.
+// Quiet means unknown: a live agent inside one long tool call writes nothing,
+// and an agent that ended with a plain reply or was killed leaves no marker,
+// so a quiet row is listed and counted as quiet, apart from the running
+// count (the tab header shows both), and never dropped as done. H1 deletes the register at every SessionStart, which bounds how long
+// a dead agent can sit there as quiet. A resumed agent keeps its
 // agent_id across rounds, so rows are grouped by agent_id and the latest round
 // decides the status; the portrait assignment is keyed by agent_id as well.
 //
@@ -36,13 +47,25 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { AGENT_MODEL_KEY, parseConfig } from '@sterling/schemas';
 import { readRegister, dispatchStateDir, dispatchStateKey, type RegisterEntry } from '../../../scripts/lib/dispatch-register.mjs';
-import { deriveAgentTranscript, fillPct, latestUsage } from '../../../scripts/hooks/lib/transcript.mjs';
+import { deriveAgentTranscript, fillPct, latestUsage, readTail } from '../../../scripts/hooks/lib/transcript.mjs';
 import { sterlingRootFrom } from '../../../scripts/lib/opencode-install.mjs';
 import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_COLS, DONE_FADE, fadeToTile, type AssignState } from './avatars/index.js';
 import { NEON_EDGE } from './theme.js';
 
 /** How long a missing subagent transcript is left unsearched before the next look. */
 const TRANSCRIPT_RETRY_MS = 10_000;
+
+/** How recently a subagent's transcript must have been written for an H10
+ *  residue-stamped row to count as still running. A working agent writes a
+ *  transcript line per tool call and per reply; past this window with no end
+ *  marker the row is quiet, not done. */
+export const TRANSCRIPT_ALIVE_MS = 10 * 60_000;
+
+/** How much of a transcript's end is read first for the handback marker: the
+ *  marker line is small, and only hook attachments follow it. A hook
+ *  attachment can itself be longer than this, so a window holding no whole
+ *  user or assistant entry is read again at the shared 1 MiB tail. */
+const END_MARKER_TAIL_BYTES = 64 * 1024;
 
 /** How long an ended agent stays in the block, shown as done, when the current session is unknown. */
 export const DONE_LINGER_MS = 5 * 60_000;
@@ -54,8 +77,9 @@ export interface SubagentRow {
   /** the latest round's session, which names the transcript directory */
   sessionId: string;
   agentType: string | null;
-  /** done is the fallback for an ended row when the current session is unknown */
-  status: 'running' | 'resumable' | 'done';
+  /** done is the fallback for an ended row when the current session is unknown;
+   *  quiet is a residue-stamped row whose transcript neither ended nor was written lately */
+  status: 'running' | 'quiet' | 'resumable' | 'done';
   /** the latest round's start */
   startedAt: number;
   endedAt: number | null;
@@ -67,7 +91,7 @@ export interface SubagentRow {
 export interface SubagentSource {
   availability: RegisterAvailability;
   rows: SubagentRow[];
-  /** listed live rows whose session is not the one session.json names; always 0 when session.json is unreadable */
+  /** listed running or quiet rows whose session is not the one session.json names; always 0 when session.json is unreadable */
   foreignLive: number;
 }
 
@@ -95,10 +119,13 @@ export function readCurrentSessionId(projectRoot: string): string | null {
  *  ended row only from that session; a round with a real `ended` is resumable
  *  with no time limit. With it unknown: every
  *  row, an ended one done for lingerMs. H10 stamps residue_reported_at on a row
- *  whose subagent is gone without a stop event: the stamp counts as the end
- *  (done, lingering lingerMs) but never as resumable, since nothing shows such
- *  a subagent can be resumed. */
-export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_LINGER_MS): SubagentSource {
+ *  it guesses is gone, with no stop event: the stamp is unconfirmed, so the
+ *  row's transcript decides (transcriptState). A handback marker makes the
+ *  stamp the end (done, lingering lingerMs, never resumable, since nothing
+ *  shows such a subagent can be resumed); a recent write keeps it running;
+ *  anything else is quiet, listed with no time limit like a running row but
+ *  left out of the running count. A real `ended` always ends the row. */
+export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_LINGER_MS, claudeConfigDir = defaultClaudeConfigDir()): SubagentSource {
   const reg = readRegister(projectRoot);
   if (reg.availability !== 'ok') return { availability: reg.availability, rows: [], foreignLive: 0 };
   const currentSession = readCurrentSessionId(projectRoot);
@@ -113,12 +140,12 @@ export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_
   for (const [agentId, rounds] of byAgent) {
     rounds.sort((a, b) => roundOf(b) - roundOf(a) || Date.parse(b.at) - Date.parse(a.at));
     const latest = rounds[0]!;
-    const live = !latest.ended && !latest.residue_reported_at;
+    const transcript = !latest.ended && latest.residue_reported_at ? transcriptState(projectRoot, latest.session_id, latest.agent_id, now, claudeConfigDir) : null;
     const foreign = currentSession !== null && latest.session_id !== currentSession;
-    if (foreign && !live) continue;
+    if (foreign && (latest.ended || transcript === 'finished')) continue;
     const startedAt = Date.parse(latest.at);
     if (Number.isNaN(startedAt)) continue;
-    const endStamp = latest.ended ? latest.ended.at : latest.residue_reported_at ? String(latest.residue_reported_at) : null;
+    const endStamp = latest.ended ? latest.ended.at : transcript === 'finished' ? String(latest.residue_reported_at) : null;
     const endedAt = endStamp === null ? null : Date.parse(endStamp);
     // only a real stop event shows a subagent can be resumed; a residue stamp does not
     const resumable = currentSession !== null && Boolean(latest.ended);
@@ -129,19 +156,58 @@ export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_
       agentId,
       sessionId: latest.session_id,
       agentType: typeof latest.agent_type === 'string' && latest.agent_type ? latest.agent_type : null,
-      status: endedAt === null ? 'running' : resumable ? 'resumable' : 'done',
+      status: transcript === 'quiet' ? 'quiet' : endedAt === null ? 'running' : resumable ? 'resumable' : 'done',
       startedAt,
       endedAt,
       elapsedMs: Math.max(0, (endedAt ?? now) - startedAt),
       toolUseId: (withId?.tool_use_id as string | undefined) ?? null,
     });
   }
-  rows.sort((a, b) => {
-    const [aRun, bRun] = [a.status === 'running', b.status === 'running'];
-    if (aRun !== bRun) return aRun ? -1 : 1;
-    return aRun ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0);
-  });
+  // running, then quiet (both oldest start first), then ended rows, newest ended first
+  const rank = (r: SubagentRow): number => (r.status === 'running' ? 0 : r.status === 'quiet' ? 1 : 2);
+  rows.sort((a, b) => rank(a) - rank(b) || (rank(a) < 2 ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0)));
   return { availability: 'ok', rows, foreignLive };
+}
+
+/** What a residue-stamped row's own transcript shows: finished when it ends
+ *  on the agent's handback, fresh when it was written within
+ *  TRANSCRIPT_ALIVE_MS of now, quiet otherwise (a missing or unreadable
+ *  transcript included, since it proves nothing either way). */
+function transcriptState(projectRoot: string, sessionId: string, agentId: string, now: number, claudeConfigDir: string): 'finished' | 'fresh' | 'quiet' {
+  const path = subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir);
+  if (!path) return 'quiet';
+  try {
+    if (endsOnHandback(path)) return 'finished';
+    return now - statSync(path).mtimeMs <= TRANSCRIPT_ALIVE_MS ? 'fresh' : 'quiet';
+  } catch {
+    return 'quiet';
+  }
+}
+
+/** Whether the transcript's last user or assistant entry carries
+ *  toolEndsTurn: true. Claude Code writes that field on the tool_result of a
+ *  tool that ends the agent's turn (SubagentHandback), and only hook
+ *  attachments follow it; a resumed round appends a new user entry after it.
+ *  An agent that ends with a plain reply has no such entry. */
+export function endsOnHandback(path: string): boolean {
+  const entry = lastTurnEntry(readTail(path, END_MARKER_TAIL_BYTES)) ?? lastTurnEntry(readTail(path));
+  return entry?.toolEndsTurn === true;
+}
+
+/** The last whole user or assistant entry in a tail window, or undefined when
+ *  the window holds none. */
+function lastTurnEntry(tail: string | null): { toolEndsTurn?: unknown } | undefined {
+  const lines = (tail ?? '').split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let entry: { type?: unknown; toolEndsTurn?: unknown } | null;
+    try {
+      entry = JSON.parse(lines[i]!) as typeof entry;
+    } catch {
+      continue; // a blank line, or the tail window's truncated first line
+    }
+    if (entry?.type === 'user' || entry?.type === 'assistant') return entry;
+  }
+  return undefined;
 }
 
 /** The dispatch description from the dispatch-state record of a tool_use_id
@@ -265,7 +331,7 @@ export interface SubagentAgentView {
   type: string;
   description: string | null;
   model: string | null;
-  status: 'running' | 'resumable' | 'done';
+  status: SubagentRow['status'];
   elapsedMs: number;
   /** context fill, or null while unknown */
   contextPct: number | null;
@@ -277,8 +343,10 @@ export interface SubagentAgentView {
 
 export interface SubagentView {
   availability: RegisterAvailability;
-  /** running agents */
+  /** running agents: the transcript was written within TRANSCRIPT_ALIVE_MS, or the row is unstamped */
   active: number;
+  /** quiet agents: listed and maybe live, but silent with no handback; unset reads as 0 */
+  quiet?: number;
   agents: SubagentAgentView[];
   /** listed live agents from a session other than the one session.json names; unset reads as 0 */
   foreignLive?: number;
@@ -351,7 +419,7 @@ export function createSubagentTracker(
 
   function refresh(now: number): void {
     lastRead = now;
-    source = readSubagents(projectRoot, now, lingerMs);
+    source = readSubagents(projectRoot, now, lingerMs, claudeConfigDir);
     // a corrupt read leaves the assignment alone, so faces do not reshuffle
     if (source.availability === 'corrupt') return;
     avatars = assign(source.rows.map((r) => r.agentId), avatars.current, rng, { poolSize: POOL_SIZE, freed: avatars.freed });
@@ -387,12 +455,18 @@ export function createSubagentTracker(
         description: r.toolUseId ? descriptions.get(r.toolUseId) ?? null : null,
         model: context.get(r.agentId)?.model ?? (r.agentType ? models.get(r.agentType) ?? null : null),
         status: r.status,
-        elapsedMs: r.status === 'running' ? Math.max(0, now - r.startedAt) : r.elapsedMs,
+        elapsedMs: r.endedAt === null ? Math.max(0, now - r.startedAt) : r.elapsedMs,
         contextPct: context.get(r.agentId)?.pct ?? null,
         contextTokens: context.get(r.agentId)?.tokens ?? null,
         idleMs: r.endedAt === null ? null : Math.max(0, now - r.endedAt),
       }));
-      return { availability: source.availability, active: agents.filter((a) => a.status === 'running').length, agents, foreignLive: source.foreignLive };
+      return {
+        availability: source.availability,
+        active: agents.filter((a) => a.status === 'running').length,
+        quiet: agents.filter((a) => a.status === 'quiet').length,
+        agents,
+        foreignLive: source.foreignLive,
+      };
     },
   };
 }
@@ -482,10 +556,10 @@ function clip(text: string, width: number): string {
   return width <= 1 ? chars.slice(0, width).join('') : chars.slice(0, width - 1).join('') + '…';
 }
 
-/** The cards, then, when live agents come from a session other than the one
+/** The cards, then, when running or quiet agents come from a session other than the one
  *  session.json names, one dim line under them saying so (dropped when there
  *  is no room: the cards win). neonEdge draws each tile's status edge
- *  (theme.ts NEON_EDGE: running cyan, resumable pink, done muted). */
+ *  (theme.ts NEON_EDGE: running cyan, quiet amber, resumable pink, done muted). */
 export function composeSubagentBlock(view: SubagentView, width: number, maxHeight: number, tick: number, opts: { neonEdge?: boolean } = {}): SubagentBlock {
   const cards = composeCards(view, width, maxHeight, tick, opts.neonEdge === true);
   if (!view.foreignLive || cards.height + 1 > maxHeight) return cards;
@@ -494,7 +568,7 @@ export function composeSubagentBlock(view: SubagentView, width: number, maxHeigh
   return { ...cards, height: cards.height + 1, puts: [...cards.puts, put] };
 }
 
-const FOREIGN_SESSION_NOTE = 'session.json names another session; live agents from the other one are listed';
+const FOREIGN_SESSION_NOTE = 'session.json names another session; running and quiet agents from the other one are listed';
 
 /** Lay the cards out in at most maxHeight rows of a width-column area. A readable
  *  register with no agents draws one dim line, so the tab is never blank. */
@@ -551,7 +625,8 @@ function composeCards(view: SubagentView, width: number, maxHeight: number, tick
     const ty = side ? y0 : y0 + TILE_H;
     puts.push({ x: tx, y: ty, attr: done ? { bold: true, dim: true } : { bold: true }, text: clip(a.type, textW) });
     const status = a.status === 'resumable' ? resumableStatus(a, textW) : `${a.status} · ${a.contextPct === null ? '?' : `${a.contextPct}%`} ctx`;
-    puts.push({ x: tx, y: ty + 1, attr: done ? { dim: true } : { color: 'green' }, text: clip(status, textW) });
+    // quiet is unknown, not done: its status line is yellow, apart from both green and dim
+    puts.push({ x: tx, y: ty + 1, attr: a.status === 'quiet' ? { color: 'yellow' } : done ? { dim: true } : { color: 'green' }, text: clip(status, textW) });
     puts.push({ x: tx, y: ty + 2, attr: { dim: true }, text: clip(a.model ?? 'model unknown', textW) });
     if (a.description) puts.push({ x: tx, y: ty + 3, attr: { dim: true }, text: clip(a.description, textW) });
   }

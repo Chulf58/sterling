@@ -12,9 +12,9 @@ import { createSignal, For, Index, Show, untrack } from "solid-js";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 
 // packages/tui/dist/controller.js
-import { readFileSync as readFileSync12, writeFileSync as writeFileSync5, existsSync as existsSync8 } from "node:fs";
+import { readFileSync as readFileSync12, writeFileSync as writeFileSync5, existsSync as existsSync9 } from "node:fs";
 import { basename as basename2, dirname as dirname5, join as join16 } from "node:path";
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID5 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
 // packages/store/dist/index.js
@@ -4908,10 +4908,13 @@ var modelPin = external_exports.object({
   model: external_exports.string(),
   effort: effortLevel.optional()
 }).strict();
+var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+var CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
 var agentModelEntry = external_exports.object({
-  model: external_exports.string(),
+  model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
   effort: effortLevel,
-  hard_task: modelPin.optional()
+  hard_task: modelPin.optional(),
+  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
 }).strict();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
@@ -5074,11 +5077,11 @@ var configSchema = external_exports.object({
     implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
     researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    classifiers: agentModelEntry.default({ model: "claude-haiku-4-5", effort: "low" }),
+    classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // librarian is mechanical clerking — cheap model, low effort (P8). The
     // roster is classless (decision agent-roster-is-classless-four-agents), and
     // the debugger role it rejected has no key here.
-    librarian: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    librarian: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
@@ -10932,17 +10935,73 @@ var BANNER_ROWS = [
   "\u2580\u2580\u2580  \u2580  \u2580\u2580\u2580 \u2580 \u2580 \u2580\u2580\u2580 \u2580\u2580\u2580 \u2580  \u2580 \u2580\u2580\u2580\u2580"
 ];
 var WORDMARK = "STERLING";
+var SPACED_WORDMARK = "S T E R L I N G";
 var ART_WIDTH = Math.max(...BANNER_ROWS.map((r) => r.length));
-function bannerLines(width, show) {
+var FULL_SCENE_ROWS = 8;
+var COMPACT_SCENE_ROWS = 4;
+var COMPACT_BELOW_HEIGHT = 24;
+function sceneRows(width, height = Infinity) {
+  if (!(width >= WORDMARK.length))
+    return 0;
+  if (width < ART_WIDTH || height < COMPACT_BELOW_HEIGHT)
+    return COMPACT_SCENE_ROWS;
+  return FULL_SCENE_ROWS;
+}
+function sceneLayout(rows) {
+  return rows >= FULL_SCENE_ROWS ? { sunRows: 4, horizon: 4, gridRows: 3 } : { sunRows: 2, horizon: 2, gridRows: 1 };
+}
+var textWidth = (width) => Number.isFinite(width) ? Math.floor(width) : ART_WIDTH;
+function bannerLines(width, show, height = Infinity) {
   if (!show)
     return [];
-  if (!Number.isFinite(width))
-    return [...BANNER_ROWS];
-  if (width >= ART_WIDTH)
-    return [...BANNER_ROWS];
-  if (width < 1)
+  const rows = sceneRows(width, height);
+  if (rows === 0)
     return [];
-  return [WORDMARK.slice(0, width)];
+  return sceneText(textWidth(width), rows, "").slice(0, rows - 1);
+}
+function horizonLabel(width, name) {
+  if (!name)
+    return { x: 0, text: "" };
+  const label = ` ${name} `;
+  if ([...label].length >= width)
+    return { x: 0, text: [...name].slice(0, Math.max(0, width)).join("") };
+  return { x: Math.floor((width - [...label].length) / 2), text: label };
+}
+function wordmarkFor(width, rows) {
+  if (rows >= FULL_SCENE_ROWS)
+    return { row: 1, x: Math.floor((width - ART_WIDTH) / 2), lines: BANNER_ROWS };
+  const text = width >= SPACED_WORDMARK.length ? SPACED_WORDMARK : WORDMARK;
+  return { row: 1, x: Math.floor((width - text.length) / 2), lines: [text] };
+}
+function raySpacing(y, g) {
+  return 6 + y * 6 / g;
+}
+function sceneText(width, rows, projectName) {
+  const w = textWidth(width);
+  if (rows <= 0 || w < 1)
+    return [];
+  const { horizon, gridRows } = sceneLayout(rows);
+  const grid = Array.from({ length: rows }, () => Array(w).fill(" "));
+  const mark = wordmarkFor(w, rows);
+  mark.lines.forEach((line, i) => [...line].forEach((ch, k) => {
+    const x = mark.x + k;
+    if (x >= 0 && x < w)
+      grid[mark.row + i][x] = ch;
+  }));
+  grid[horizon].fill("\u2500");
+  const label = horizonLabel(w, projectName);
+  [...label.text].forEach((ch, k) => grid[horizon][label.x + k] = ch);
+  const cx = Math.floor(w / 2);
+  const g = gridRows * 2;
+  for (let row = 0; row < gridRows; row++) {
+    const s2 = raySpacing(row * 2 + 1, g);
+    for (let k = -Math.ceil(cx / s2); k <= Math.ceil((w - cx) / s2); k++) {
+      const x = Math.round(cx + k * s2);
+      if (x >= 0 && x < w)
+        grid[horizon + 1 + row][x] = k < 0 ? "\u2571" : k > 0 ? "\u2572" : "\u2502";
+    }
+  }
+  return grid.map((cells2) => cells2.join("").trimEnd());
 }
 
 // packages/tui/dist/state.js
@@ -10967,6 +11026,9 @@ var AGENTS_TAB = TABS.indexOf("Agents");
 var SYSTEM_TAB = TABS.indexOf("System");
 var ARTICLE_STATE_FILTERS = ["all", "planned", "built", "wired_in", "active", "dormant", "deprecated"];
 var initialUi = { tab: 0, cursor: 0, expanded: [], searchQuery: "", scroll: 0 };
+function isOpenCodeOnlyEntry(entry) {
+  return entry.vendor !== void 0 && entry.vendor !== "anthropic";
+}
 var EMPTY_ROSTER = {
   agents: [],
   configModels: {},
@@ -10986,12 +11048,25 @@ function effortOptions(key) {
   return ["low", "medium", "high"];
 }
 var MODEL_VALUE_RE = /^claude-/;
+function modelOptions(entries, config) {
+  const opts = entries.map((entry) => ({ kind: "entry", entry }));
+  if (config?.opencode_model)
+    opts.push({ kind: "clear" });
+  return opts;
+}
 function visibleTabs(agents) {
   return TABS.map((_, i) => i).filter((i) => i !== AGENTS_TAB || agents !== void 0);
 }
-var STATE_COLUMN_WIDTH = Math.max(...ARTICLE_STATE_FILTERS.slice(1).map((n) => n.length)) + 2;
+var STATE_GLYPHS = {
+  planned: "\u25CB",
+  built: "\u25D4",
+  wired_in: "\u25D1",
+  active: "\u25CF",
+  dormant: "\u25CC",
+  deprecated: "\xD7"
+};
 function stateColumn(card) {
-  return card.state ? `${`[${card.state}]`.padEnd(STATE_COLUMN_WIDTH)} ` : "";
+  return card.state ? `${STATE_GLYPHS[card.state] ?? "?"} ` : "";
 }
 function cardsFor(store, tab, expanded = []) {
   if (tab === 0)
@@ -11001,6 +11076,19 @@ function cardsFor(store, tab, expanded = []) {
 var catId = (type) => `cat:${type}`;
 var srcId = (type, source) => `src:${type}:${source}`;
 var subId = (type, source, key) => `sub:${type}:${source}:${key}`;
+function nodeId(node) {
+  if (node.kind === "category")
+    return catId(node.type);
+  if (node.kind === "source")
+    return srcId(node.catType, node.source);
+  if (node.kind === "subcategory")
+    return subId(node.catType, node.source, node.key);
+  return node.card.id;
+}
+function resolveCursor(ui, nodes) {
+  const held = ui.selectedId === void 0 ? -1 : nodes.findIndex((n) => nodeId(n) === ui.selectedId);
+  return Math.min(held >= 0 ? held : ui.cursor, Math.max(0, nodes.length - 1));
+}
 function rankTermsOf(query) {
   const words = query.trim().split(/\s+/).filter((t) => t.length > 0 && t.length < 64).map((t) => `${t.replace(/\*+$/, "")}*`);
   const seen = /* @__PURE__ */ new Set();
@@ -11126,11 +11214,14 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
     ];
     for (const name of agentNames)
       lines.push({ text: clip3(`    ${name}`), kind: "body" });
+    if (config.opencode_model)
+      lines.push({ text: clip3(`    OpenCode: ${config.opencode_model}`), kind: "body" });
     if (selector && selector.key === key) {
       if (selector.stage === "model") {
-        snap.catalog.entries.forEach((e, oi) => {
+        modelOptions(snap.catalog.entries, config).forEach((o, oi) => {
           const m = oi === selector.highlight ? "\u203A " : "  ";
-          lines.push({ text: clip3(`  ${m}${e.id} ${e.label}`), kind: "option", selected: oi === selector.highlight });
+          const text = o.kind === "clear" ? "OpenCode: use the Claude model" : isOpenCodeOnlyEntry(o.entry) ? `${o.entry.vendor}/${o.entry.id} ${o.entry.label} (OpenCode only)` : `${o.entry.id} ${o.entry.label}`;
+          lines.push({ text: clip3(`  ${m}${text}`), kind: "option", selected: oi === selector.highlight });
         });
       } else {
         effortOptions(key).forEach((eff, oi) => {
@@ -11222,17 +11313,75 @@ function tabsFor(store, activeTab, agents) {
   return visibleTabs(agents).map((i) => {
     const label = TABS[i];
     return {
-      label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label === "Agents" && agents ? `${label} (${agents.running})` : label,
+      label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label === "Agents" && agents ? `${label} (${agents.running} running${agents.quiet ? ` \xB7 ${agents.quiet} quiet` : ""})` : label,
       active: i === activeTab,
       index: i
     };
   });
 }
+function fitTabs(tabs, width) {
+  if (!Number.isFinite(width))
+    return tabs;
+  const bare = (l) => l.replace(/ \(.*\)$/, "");
+  const steps = [
+    [(l) => l, (l) => l],
+    [(l) => l, bare],
+    [bare, bare],
+    [bare, (l) => bare(l).slice(0, 3)],
+    [bare, (l) => bare(l).slice(0, 1)]
+  ];
+  for (const [active, inactive] of steps) {
+    const labels = tabs.map((t) => t.active ? active(t.label) : inactive(t.label));
+    if (labels.reduce((n, l) => n + l.length + 2, 0) <= width)
+      return tabs.map((t, i) => ({ ...t, label: labels[i] }));
+  }
+  const room = width - 3 * tabs.filter((t) => !t.active).length - 2;
+  const activeName = bare(tabs.find((t) => t.active)?.label ?? "");
+  if (room >= Math.min(3, activeName.length))
+    return tabs.map((t) => ({ ...t, label: t.active ? clipEllipsis(bare(t.label), room) : bare(t.label).slice(0, 1) }));
+  const ai = Math.max(0, tabs.findIndex((t) => t.active));
+  const window = [{ ...tabs[ai], label: clipEllipsis(bare(tabs[ai].label), Math.max(1, width - 2)) }];
+  let used = window[0].label.length + 2;
+  let lo = ai;
+  let hi = ai;
+  for (let grew = true; grew; ) {
+    grew = false;
+    if (hi + 1 < tabs.length && used + 3 <= width) {
+      hi += 1;
+      window.push({ ...tabs[hi], label: bare(tabs[hi].label).slice(0, 1) });
+      used += 3;
+      grew = true;
+    }
+    if (lo > 0 && used + 3 <= width) {
+      lo -= 1;
+      window.unshift({ ...tabs[lo], label: bare(tabs[lo].label).slice(0, 1) });
+      used += 3;
+      grew = true;
+    }
+  }
+  return window;
+}
+function footerFor(ui, tabCount, width) {
+  const tabs = `1-${tabCount} tabs`;
+  let text;
+  if (ui.tab === TASKS_TAB)
+    text = ui.boardEdit ? "editing \xB7 enter save \xB7 esc cancel" : `${tabs} \xB7 \u2191\u2193 \xB7 enter expand \xB7 e edit \xB7 q quit`;
+  else if (ui.tab === KNOWLEDGE_TAB)
+    text = "type to search \xB7 esc clear \xB7 ^f state \xB7 \u2190\u2192 tabs";
+  else if (ui.tab === QUEUE_TAB)
+    text = `${tabs} \xB7 \u2191\u2193 pending \xB7 wheel scrolls \xB7 q quit`;
+  else if (ui.tab === AGENTS_TAB)
+    text = `\u2190/\u2192 or ${tabs} \xB7 q quit`;
+  else
+    text = `${tabs} \xB7 enter change \xB7 esc cancel \xB7 q quit`;
+  return clipEllipsis(text, width);
+}
+var noticeFor = (ui, width) => ui.notice ? clipEllipsis(`\u26A0 ${ui.notice}`, width) : void 0;
 function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents) {
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows = [];
   let screenRow = 0;
-  for (const text of view.banner) {
+  for (const text of view.banner.slice(ui.notice ? 1 : 0)) {
     rows.push({ id: `sysbanner:${screenRow}`, type: "system-banner", selected: false, expanded: false, lines: [{ text, kind: "meta" }], screenRow });
     screenRow += 1;
   }
@@ -11267,22 +11416,26 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, max
     tabs,
     rows,
     emptyMessage: view.rows.length ? void 0 : "(no configured models)",
-    footer: `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 rows \xB7 enter change model/effort \xB7 esc cancel \xB7 q quit`,
+    footer: footerFor(ui, visibleTabs(agents).length, width),
+    notice: noticeFor(ui, width),
     banner,
     projectName,
     bodyTop,
     scroll
   };
 }
-function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents) {
-  const banner = bannerLines(width, showBanner);
+function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents, height = Infinity) {
+  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents, height).state;
+}
+function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents, height = Infinity) {
+  const banner = bannerLines(width, showBanner, height);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
-  const tabs = tabsFor(store, ui.tab, agents);
+  const tabs = fitTabs(tabsFor(store, ui.tab, agents), width);
   if (ui.tab === SYSTEM_TAB)
-    return systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents);
+    return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents), nodes: [], cursor: ui.cursor };
   const nodes = nodesFor(store, ui, knowledge);
-  const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
-  let rows = [];
+  const cursor = resolveCursor(ui, nodes);
+  const rows = [];
   let screenRow = 0;
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i];
@@ -11349,54 +11502,46 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
     rows.push({ id, type, selected, expanded, lines, screenRow });
     screenRow += lines.length;
   }
+  const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
   let queueCompleted;
   let queueActivity;
+  let scroll;
   if (ui.tab === QUEUE_TAB) {
-    const totalLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
-    const startRow = Number.isFinite(maxBodyLines) ? Math.max(1, Math.floor(maxBodyLines / 2)) : totalLines;
-    let overflow;
-    if (totalLines > startRow) {
-      const keep = [];
-      for (const r of rows) {
-        if (r.screenRow + r.lines.length <= startRow - 1)
-          keep.push(r);
-        else
-          break;
-      }
-      overflow = `\u2026 ${rows.length - keep.length} more pending`;
-      rows = keep;
-    }
+    const finite = Number.isFinite(maxBodyLines);
+    const startRow = finite ? Math.max(1, Math.floor(maxBodyLines / 2)) : totalBodyLines;
+    const pendingLines = totalBodyLines > startRow ? startRow - 1 : startRow;
+    scroll = Math.max(0, Math.min(ui.scroll ?? 0, totalBodyLines - pendingLines));
+    const hidden = rows.filter((r) => r.screenRow < scroll || r.screenRow + r.lines.length > scroll + pendingLines).length;
     const completed = completedQueueLines(store);
-    queueCompleted = {
-      startRow,
-      header: "\u2014 completed \u2014",
-      lines: completed.length ? completed : ["(nothing completed yet)"],
-      ...overflow ? { overflow } : {}
-    };
     const activity = activityLines(store);
     queueActivity = {
       header: "\u2014 activity \u2014",
       lines: activity.length ? activity : ["(no activity yet)"]
     };
+    const lines = completed.length ? completed : ["(nothing completed yet)"];
+    const historyTotal = lines.length + 1 + queueActivity.lines.length;
+    const historyLines = finite ? Math.max(0, maxBodyLines - startRow - 1) : historyTotal;
+    queueCompleted = {
+      startRow,
+      pendingLines,
+      scroll: Math.max(0, Math.min(ui.historyScroll ?? 0, historyTotal - historyLines)),
+      header: "\u2014 completed \u2014",
+      lines,
+      ...hidden > 0 ? { overflow: `\u2026 ${hidden} more pending` } : {}
+    };
+  } else {
+    const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
+    scroll = Math.max(0, Math.min(ui.scroll ?? 0, maxScroll));
   }
-  const scrollable = ui.tab !== QUEUE_TAB;
-  const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
-  const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
-  const scroll = scrollable ? Math.max(0, Math.min(ui.scroll ?? 0, maxScroll)) : 0;
   const searchActive = ui.tab === KNOWLEDGE_TAB;
-  return {
+  const state = {
     tabs,
     rows,
     emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
-    footer: (
-      // Fix round (Opus review of 71c1f41): a Tasks-tab board_edit notice
-      // (lost-update refusal, vanished item, failed HEAD resolve) must be
-      // VISIBLE, not just carried in ui.notice — render.ts prints
-      // state.footer unconditionally, so this is the one line available to
-      // this scope's two files without touching render.ts. Mirrors the
-      // System tab's own '⚠ ' convention (buildSystemTab's banner).
-      ui.tab === TASKS_TAB && ui.notice ? `\u26A0 ${ui.notice}` : ui.tab === AGENTS_TAB ? `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 q quit` : `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears \xB7 ctrl-f article state" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
-    ),
+    footer: footerFor(ui, visibleTabs(agents).length, width),
+    // a board_edit refusal, a failed selection write or a degraded store read
+    // (ui.notice) is drawn on its own row in the warning colour
+    notice: noticeFor(ui, width),
     searchLine: searchActive ? `search: ${ui.searchQuery}${ui.stateFilter ? `  state: ${ui.stateFilter}` : ""}` : void 0,
     queueCompleted,
     queueActivity,
@@ -11405,9 +11550,15 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
     bodyTop,
     scroll
   };
+  return { ui, state, nodes, cursor };
+}
+function bodyWindow(state, maxBodyLines) {
+  const qc = state.queueCompleted;
+  return qc ? Math.min(maxBodyLines, qc.pendingLines ?? qc.startRow) : maxBodyLines;
 }
 function screenLineToRow(state, line1, maxBodyLines = Infinity) {
   const scroll = state.scroll ?? 0;
+  maxBodyLines = bodyWindow(state, maxBodyLines);
   const abs = line1 - 1 - state.bodyTop + scroll;
   if (abs < scroll || abs >= scroll + maxBodyLines)
     return -1;
@@ -11418,22 +11569,43 @@ function screenLineToRow(state, line1, maxBodyLines = Infinity) {
   }
   return -1;
 }
-function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadSha = defaultResolveHeadSha) {
+function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadSha = defaultResolveHeadSha, frame2) {
+  const drawn = frame2 !== void 0 && frame2.ui === ui ? frame2 : void 0;
+  const nodes = drawn ? drawn.nodes : nodesFor(store, ui, knowledge);
+  const cursor = drawn ? drawn.cursor : ui.tab === SYSTEM_TAB ? ui.cursor : resolveCursor(ui, nodes);
+  const base2 = cursor === ui.cursor ? ui : { ...ui, cursor };
+  const out = reduceNodes(store, base2, event, viewport, knowledge, roster, resolveHeadSha, nodes, drawn);
+  if (out.ui === base2)
+    return { ui, effects: out.effects };
+  return { ui: holdSelection(base2, out.ui, nodes), effects: out.effects };
+}
+function holdSelection(prev, next, nodes) {
+  const fresh = next.tab !== prev.tab || next.searchQuery !== prev.searchQuery || next.stateFilter !== prev.stateFilter;
+  const cardTab = next.tab !== SYSTEM_TAB && next.tab !== AGENTS_TAB;
+  const node = !fresh && cardTab && nodes.length ? nodes[Math.min(next.cursor, nodes.length - 1)] : void 0;
+  const selectedId = node ? nodeId(node) : void 0;
+  if (selectedId === next.selectedId)
+    return next;
+  if (selectedId !== void 0)
+    return { ...next, selectedId };
+  const { selectedId: _dropped, ...rest } = next;
+  return rest;
+}
+function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadSha, nodes, drawn) {
   const maxBodyLines = viewport.maxBodyLines ?? Infinity;
-  const nodes = nodesFor(store, ui, knowledge);
   const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects = [];
-  const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
+  const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: void 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
   const reachable = visibleTabs(viewport.agents);
   const stepTab = (dir) => reachable[(reachable.indexOf(ui.tab) + dir + reachable.length) % reachable.length] ?? reachable[0];
-  const scrollable = ui.tab !== QUEUE_TAB;
-  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster, viewport.agents);
+  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster, viewport.agents, viewport.height);
   const revealAt = (cursor) => {
-    if (!scrollable || !Number.isFinite(maxBodyLines))
+    if (!Number.isFinite(maxBodyLines))
       return { ...ui, cursor };
-    const st = buildSelf({ ...ui, cursor });
+    const st = drawn && ui.tab !== SYSTEM_TAB ? drawn.state : buildSelf({ ...ui, cursor });
     const total = st.rows.length ? st.rows[st.rows.length - 1].screenRow + st.rows[st.rows.length - 1].lines.length : 0;
-    const max = Math.max(0, total - maxBodyLines);
+    const window = bodyWindow(st, maxBodyLines);
+    const max = Math.max(0, total - window);
     let scroll = ui.scroll ?? 0;
     const bannerOffset = ui.tab === SYSTEM_TAB ? st.rows.filter((r) => r.type === "system-banner").length : 0;
     const row = st.rows[cursor + bannerOffset];
@@ -11442,8 +11614,8 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
       const bottom = row.screenRow + row.lines.length;
       if (top < scroll)
         scroll = top;
-      else if (bottom > scroll + maxBodyLines)
-        scroll = Math.min(top, bottom - maxBodyLines);
+      else if (bottom > scroll + window)
+        scroll = Math.min(top, bottom - window);
     }
     return { ...ui, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
   };
@@ -11538,7 +11710,7 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
             return { ui: revealAt(sysClamp(ui.cursor - 1)), effects };
           case "DOWN": {
             if (sel) {
-              const n = sel.stage === "model" ? roster.catalog.entries.length : effortOptions(sel.key).length;
+              const n = sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key]).length : effortOptions(sel.key).length;
               return { ui: { ...ui, selector: { ...sel, highlight: Math.min(Math.max(0, n - 1), sel.highlight + 1) } }, effects };
             }
             if (editing)
@@ -11593,7 +11765,21 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
               return { ui: { ...ui, cursor, selector: { key, stage: "model", highlight: 0 }, notice: void 0 }, effects };
             }
             if (sel.stage === "model") {
-              const entry = roster.catalog.entries[sel.highlight];
+              const keyConfig = roster.configModels[sel.key];
+              const option = modelOptions(roster.catalog.entries, keyConfig)[sel.highlight];
+              if (option && keyConfig && (option.kind === "clear" || isOpenCodeOnlyEntry(option.entry))) {
+                const agents = roster.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
+                const to = option.kind === "clear" ? void 0 : `${option.entry.vendor}/${option.entry.id}`;
+                if (to !== void 0 && !OPENCODE_MODEL_REF_RE.test(to)) {
+                  return { ui: { ...ui, selector: void 0, notice: `OpenCode model refused: '${to}' is not a <provider>/<model> id` }, effects };
+                }
+                if (to !== void 0 && agents.length === 0) {
+                  return { ui: { ...ui, selector: void 0, notice: `OpenCode model refused: '${sel.key}' has no agent, so an OpenCode model would govern nothing` }, effects };
+                }
+                effects.push({ type: "opencode_model", key: sel.key, from: keyConfig.opencode_model, to, model: keyConfig.model, effort: keyConfig.effort, agents });
+                return { ui: { ...ui, selector: void 0, notice: void 0 }, effects };
+              }
+              const entry = option?.kind === "entry" ? option.entry : void 0;
               return { ui: { ...ui, selector: { key: sel.key, stage: "effort", highlight: 0, model: entry ? entry.id : "" } }, effects };
             }
             const efforts = effortOptions(sel.key);
@@ -11673,7 +11859,7 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
         return { ui, effects };
       }
       if (ch === " " && ui.tab === SYSTEM_TAB) {
-        return reduce(store, ui, { kind: "key", name: "ENTER" }, viewport, knowledge, roster, resolveHeadSha);
+        return reduceNodes(store, ui, { kind: "key", name: "ENTER" }, viewport, knowledge, roster, resolveHeadSha, nodes, drawn);
       }
       if (ch === " ")
         return { ui: activate(clamp(ui.cursor)), effects };
@@ -11681,8 +11867,10 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
         const node = nodes[clamp(ui.cursor)];
         if (node && node.kind === "card" && node.card.type !== "objective") {
           const rec = store.get(node.card.id);
-          const version = rec && typeof rec.version === "number" ? rec.version : 0;
-          return { ui: { ...ui, boardEdit: { id: node.card.id, text: node.card.body, version }, notice: void 0 }, effects };
+          if (!rec || typeof rec.text !== "string")
+            return { ui: { ...ui, notice: "board item no longer exists \u2014 nothing to edit" }, effects };
+          const version = typeof rec.version === "number" ? rec.version : 0;
+          return { ui: { ...ui, boardEdit: { id: node.card.id, text: rec.text, version }, notice: void 0 }, effects };
         }
         return { ui, effects };
       }
@@ -11698,14 +11886,25 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
         return { ui, effects };
       return { ui: switchTab(event.index), effects };
     case "wheel": {
-      if (!scrollable)
-        return { ui: { ...ui, cursor: clamp(ui.cursor + (event.dy > 0 ? 1 : -1)) }, effects };
-      const desired = (ui.scroll ?? 0) + (event.dy > 0 ? 3 : -3);
-      const st = buildSelf({ ...ui, scroll: desired });
-      return { ui: { ...ui, scroll: st.scroll }, effects };
+      const step = event.dy > 0 ? 3 : -3;
+      const st = drawn && ui.tab !== SYSTEM_TAB ? drawn.state : buildSelf(ui);
+      const qc = st.queueCompleted;
+      const off = qc && event.y !== void 0 ? event.y - 1 - st.bodyTop : void 0;
+      if (off !== void 0 && (off < 0 || off >= maxBodyLines))
+        return { ui, effects };
+      if (qc && off !== void 0 && off >= qc.startRow) {
+        const historyTotal = qc.lines.length + (st.queueActivity ? 1 + st.queueActivity.lines.length : 0);
+        const historyLines = Math.max(0, maxBodyLines - qc.startRow - 1);
+        const max2 = Number.isFinite(maxBodyLines) ? Math.max(0, historyTotal - historyLines) : 0;
+        return { ui: { ...ui, historyScroll: Math.max(0, Math.min((ui.historyScroll ?? 0) + step, max2)) }, effects };
+      }
+      const rows = st.rows;
+      const total = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
+      const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - bodyWindow(st, maxBodyLines)) : 0;
+      return { ui: { ...ui, scroll: Math.max(0, Math.min((ui.scroll ?? 0) + step, max)) }, effects };
     }
     case "click": {
-      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster, viewport.agents);
+      const state = drawn ? drawn.state : buildSelf(ui);
       if (event.y === state.bodyTop - 1) {
         let x = 1;
         for (let i = 0; i < state.tabs.length; i++) {
@@ -11722,7 +11921,7 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
       return { ui, effects };
     }
     case "rightclick":
-      return { ui: { ...ui, expanded: [], scroll: 0 }, effects };
+      return { ui: { ...ui, expanded: [], scroll: 0, historyScroll: void 0 }, effects };
   }
   return { ui, effects };
 }
@@ -11804,9 +12003,37 @@ function applyHandoffToggle(e, onError, path) {
   }
 }
 
+// packages/tui/dist/data-version.js
+import { existsSync as existsSync3 } from "node:fs";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+function openDataVersionProbe(paths) {
+  const conns = [];
+  try {
+    for (const path of paths) {
+      if (!existsSync3(path))
+        continue;
+      const db = new DatabaseSync3(path, { readOnly: true });
+      conns.push({ db, stmt: db.prepare("PRAGMA data_version") });
+    }
+  } catch (err) {
+    for (const c of conns)
+      c.db.close();
+    throw err;
+  }
+  return {
+    read() {
+      return conns.map((c) => String(c.stmt.get().data_version)).join(":");
+    },
+    close() {
+      for (const c of conns)
+        c.db.close();
+    }
+  };
+}
+
 // scripts/lib/agent-distribution.mjs
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync5, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync3, mkdirSync as mkdirSync3, statSync as statSync3, lstatSync as lstatSync3, unlinkSync, renameSync, linkSync } from "node:fs";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync4, mkdirSync as mkdirSync3, statSync as statSync3, lstatSync as lstatSync3, unlinkSync, renameSync, linkSync } from "node:fs";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -12021,7 +12248,7 @@ function userScopeCodexServer({ env = process.env, home = homedir4(), readFile =
 
 // scripts/lib/handoff-projection.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync4 } from "node:fs";
+import { existsSync as existsSync5 } from "node:fs";
 import { join as join11, resolve as resolve5 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
@@ -12223,10 +12450,10 @@ function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
     }
     return { stdout: r.stdout || "" };
   };
-  if (!existsSync4(root)) return { files: [], unknown: null };
+  if (!existsSync5(root)) return { files: [], unknown: null };
   const inside = run(["rev-parse", "--is-inside-work-tree"]);
   if (inside.failed) {
-    if (inside.notARepo && !existsSync4(join11(root, ".git"))) return { files: [], unknown: null };
+    if (inside.notARepo && !existsSync5(join11(root, ".git"))) return { files: [], unknown: null };
     return { files: [], unknown: inside.failed };
   }
   if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
@@ -12275,12 +12502,13 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync as readdirSync4, realpathSync as realpathSync4, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
+import { existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync as readdirSync4, realpathSync as realpathSync4, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname4, isAbsolute, join as join13, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync5, readFileSync as readFileSync8, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync8, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { join as join12, resolve as resolve6, sep as sep2 } from "node:path";
 var RESOLVER_IMPORTS = [
@@ -12426,7 +12654,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync5, readFileSync8, readdirSync3, join12, homedir5);
+)(existsSync6, readFileSync8, readdirSync3, join12, homedir5);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -12523,13 +12751,20 @@ function storeWriteTools(pluginRoot = sterlingRootFrom()) {
   return tools;
 }
 function opencodeModelRef(model) {
-  if (typeof model !== "string" || !model) throw new TypeError(`opencodeModelRef: model must be a non-empty string, got ${JSON.stringify(model)}`);
+  if (typeof model !== "string" || !CLAUDE_MODEL_ID_RE.test(model)) throw new TypeError(`opencodeModelRef: model must be a Claude model id, got ${JSON.stringify(model)}`);
   return `anthropic/${model}`;
+}
+function opencodeModelFor({ model, opencodeModel } = {}) {
+  if (opencodeModel === void 0) return opencodeModelRef(model);
+  if (typeof opencodeModel !== "string" || !OPENCODE_MODEL_REF_RE.test(opencodeModel)) {
+    throw new TypeError(`opencodeModelFor: opencode_model must be <provider>/<model>, got ${JSON.stringify(opencodeModel)}`);
+  }
+  return opencodeModel;
 }
 function sterlingRootFrom(moduleUrl = new URL("../../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname4(fileURLToPath(moduleUrl));
   for (let dir = start; ; dir = dirname4(dir)) {
-    if (existsSync6(join13(dir, "agent-templates", "registry.json"))) return dir;
+    if (existsSync7(join13(dir, "agent-templates", "registry.json"))) return dir;
     if (dirname4(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
@@ -12560,6 +12795,18 @@ function frontmatterModel(content) {
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
 function ensureFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models = {} }) {
+  const { rows, writes } = stageFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models });
+  writeFullAgentFiles(writes);
+  return rows;
+}
+function stageFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models = {} }) {
+  const planned = planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models });
+  return {
+    rows: planned.map(({ path, content, previous, ...row }) => row),
+    writes: planned.filter((r) => r.content !== void 0).map(({ path, content, previous }) => ({ path, content, previous }))
+  };
+}
+function planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models = {} }) {
   const registry = loadRegistry(join13(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const rows = [];
@@ -12572,7 +12819,8 @@ function ensureFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const disk = existsSync6(path) ? normalize3(readFileSync9(path, "utf8")) : null;
+    const raw = existsSync7(path) ? readFileSync9(path, "utf8") : null;
+    const disk = raw === null ? null : normalize3(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
       if (!m || m[1] !== name) {
@@ -12592,28 +12840,73 @@ function ensureFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models
       rows.push({ item: rel, status: "matches" });
       continue;
     }
-    mkdirSync5(dirname4(path), { recursive: true });
-    writeFileSync3(path, agent.content);
-    rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
+    rows.push({ item: rel, status: disk === null ? "created" : "refreshed", path, content: agent.content, previous: raw });
   }
   return rows;
 }
-function swapFullAgentModel({ projectDir: projectDir2, pluginRoot, agents, model }) {
-  if (!existsSync6(join13(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
-  const ref = opencodeModelRef(model);
+function swapFullAgentModel({ projectDir: projectDir2, pluginRoot, agents, model, opencodeModel }) {
+  if (!existsSync7(join13(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir2, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
   return { rows: ensureFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models }) };
 }
+function stageFullAgentModel({ projectDir: projectDir2, pluginRoot, agents, model, opencodeModel }) {
+  if (!existsSync7(join13(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  const ref = opencodeModelFor({ model, opencodeModel });
+  const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
+  const ls = git(projectDir2, ["ls-files", "--", ".opencode"]);
+  const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
+  return stageFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models });
+}
+function writeFileAtomic(path, content, { writeFile = writeFileSync3, rename = renameSync2 } = {}) {
+  const tmp = `${path}.tmp-${randomUUID3()}`;
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync2(tmp, { force: true });
+    throw err;
+  }
+}
+function writeFullAgentFiles(writes, fs = {}) {
+  const done = [];
+  try {
+    for (const w of writes) {
+      mkdirSync5(dirname4(w.path), { recursive: true });
+      writeFileAtomic(w.path, w.content, fs);
+      done.push(w);
+    }
+  } catch (err) {
+    try {
+      restoreFullAgentFiles(done, fs);
+    } catch (restoreErr) {
+      throw new Error(`${err.message}; rollback: ${restoreErr.message}`, { cause: err });
+    }
+    throw err;
+  }
+}
+function restoreFullAgentFiles(writes, fs = {}) {
+  const failed = [];
+  for (const w of writes) {
+    try {
+      if (w.previous === null) rmSync2(w.path, { force: true });
+      else writeFileAtomic(w.path, w.previous, fs);
+    } catch (err) {
+      failed.push(`${fwd2(w.path)}: ${err.message}`);
+    }
+  }
+  if (failed.length) throw new Error(`could not restore ${failed.join("; ")}`);
+}
 
 // scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync7, readFileSync as readFileSync10 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync10 } from "node:fs";
 import { join as join14 } from "node:path";
 var CONFIG_REL3 = join14(".sterling", "config.json");
 var STORE_DB_REL = join14(".sterling", "sterling.db");
 function storeBackend(root) {
-  const dbExists = () => existsSync7(join14(root, STORE_DB_REL));
+  const dbExists = () => existsSync8(join14(root, STORE_DB_REL));
   let text;
   try {
     text = readFileSync10(join14(root, CONFIG_REL3), "utf8");
@@ -12631,10 +12924,10 @@ function storeBackend(root) {
 }
 
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync11, renameSync as renameSync2, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync11, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { hostname } from "node:os";
 import { join as join15 } from "node:path";
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 function selectionFilePath(root, host = hostname()) {
   const safeHost = String(host).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
   return join15(root, ".sterling", "transient", `selection.${safeHost}.json`);
@@ -12642,12 +12935,13 @@ function selectionFilePath(root, host = hostname()) {
 function writeSelectionFile(root, type, recordId, at) {
   const path = selectionFilePath(root);
   mkdirSync6(join15(root, ".sterling", "transient"), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${randomUUID3()}`;
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID4()}`;
   writeFileSync4(tmp, JSON.stringify({ type, record_id: recordId, at }));
-  renameSync2(tmp, path);
+  renameSync3(tmp, path);
 }
 
 // packages/tui/dist/controller.js
+var DASHBOARD_BUSY_TIMEOUT_MS = 250;
 function openDashboard(storePath, options = {}) {
   const disabled = options.disabledEffects ?? {};
   const configPath2 = join16(dirname5(storePath), "config.json");
@@ -12679,8 +12973,131 @@ function openDashboard(storePath, options = {}) {
   }
   const stores = routed ? openRoutedStores(projectRoot, { mount: true }).stores : new MountedStores(storePath, mounts, { skipMissing: true });
   const store = stores.project;
+  let writeStore;
+  try {
+    writeStore = routed ? store : new SterlingStore(storePath, { busyTimeoutMs: DASHBOARD_BUSY_TIMEOUT_MS });
+  } catch (err) {
+    stores.close();
+    throw err;
+  }
   const projectName = basename2(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
   let ui = initialUi;
+  let probe;
+  let changeDetection = "data_version";
+  let degradeSaid = false;
+  function degrade(reason) {
+    changeDetection = `degraded: ${reason}`;
+    if (degradeSaid)
+      return;
+    degradeSaid = true;
+    ui = { ...ui, notice: `change detection degraded: ${reason}; the dashboard rebuilds on every redraw` };
+  }
+  if (routed)
+    changeDetection = "none: Postgres storage has no data_version";
+  else {
+    try {
+      probe = (options.dataVersionProbe ?? openDataVersionProbe)([storePath, ...mounts.map((m) => m.dbPath)]);
+    } catch (err) {
+      degrade(`data_version probe failed to open \u2014 ${err.message}`);
+    }
+  }
+  let frame2;
+  let builds = 0;
+  const vpKey = (vp) => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null]);
+  const today = () => (/* @__PURE__ */ new Date()).toDateString();
+  function currentFrame(vp) {
+    let dataVersion;
+    if (probe) {
+      try {
+        dataVersion = probe.read();
+      } catch (err) {
+        degrade(`data_version read failed \u2014 ${err.message}`);
+      }
+    }
+    const key = vpKey(vp);
+    const day = today();
+    if (frame2 && dataVersion !== void 0 && frame2.dataVersion === dataVersion && frame2.ui === ui && frame2.roster === roster && frame2.vp === key && frame2.day === day)
+      return frame2.built;
+    builds++;
+    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height);
+    frame2 = { vp: key, day, ui, roster, dataVersion, built };
+    return built;
+  }
+  let storeCalls = 0;
+  const countCalls = (target) => {
+    const proto = Object.getPrototypeOf(target);
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      const fn = Object.getOwnPropertyDescriptor(proto, name)?.value;
+      if (name === "constructor" || typeof fn !== "function")
+        continue;
+      Object.defineProperty(target, name, {
+        configurable: true,
+        writable: true,
+        value: (...args) => {
+          storeCalls++;
+          return fn.apply(target, args);
+        }
+      });
+    }
+  };
+  if (options.profile) {
+    countCalls(store);
+    if (writeStore !== store)
+      countCalls(writeStore);
+  }
+  let pending = [];
+  let retryNotice;
+  const isBusy = (err) => {
+    const code = err?.errcode;
+    return code === 5 || code === 6 || /database is (locked|busy)|SQLITE_BUSY|SQLITE_LOCKED/i.test(err?.message ?? "");
+  };
+  function flush() {
+    if (!pending.length)
+      return false;
+    const batch = pending;
+    pending = [];
+    let failed = false;
+    for (const e of batch) {
+      try {
+        if (e.type === "select" && routed)
+          writeSelectionFile(projectRoot, e.recordType, e.id, (/* @__PURE__ */ new Date()).toISOString());
+        else
+          runEffects(writeStore, [e]);
+      } catch (err) {
+        failed = true;
+        const msg = err.message;
+        if (isBusy(err) && options.deferWrites) {
+          pending.push(e);
+          retryNotice = `${e.type === "select" ? "selection" : "board edit"} not saved yet: the store is busy (${msg}); retrying`;
+          ui = { ...ui, notice: retryNotice };
+        } else {
+          ui = { ...ui, notice: e.type === "select" ? `selection not handed to the next prompt \u2014 ${msg}` : `board edit not saved \u2014 ${msg}` };
+        }
+      }
+    }
+    if (!failed && retryNotice !== void 0) {
+      if (ui.notice === retryNotice) {
+        const { notice: _saved, ...rest } = ui;
+        ui = rest;
+      }
+      retryNotice = void 0;
+    }
+    return failed;
+  }
+  let quitArmed = false;
+  function requestQuit() {
+    if (quitArmed)
+      return true;
+    const failed = flush();
+    if (!failed && !pending.length)
+      return true;
+    quitArmed = true;
+    const notice = `${ui.notice ?? "writes not saved"} \u2014 press q again to quit and discard them`;
+    ui = { ...ui, notice };
+    if (pending.length)
+      retryNotice = notice;
+    return false;
+  }
   let roster;
   function readInstalledModelEffort(name) {
     try {
@@ -12755,7 +13172,7 @@ function openDashboard(storePath, options = {}) {
     const mode = readRawMode();
     const handoff = readHandoff();
     const codexWired = probeCodexWired();
-    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync8(join16(agentsDir, `${name}.md`))).map((name) => {
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync9(join16(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
       return { name, installedModel: v.model, installedEffort: v.effort };
     });
@@ -12799,11 +13216,13 @@ function openDashboard(storePath, options = {}) {
     try {
       const raw = JSON.parse(readFileSync12(configPath2, "utf8"));
       raw.models = raw.models ?? {};
-      raw.models[e.key] = { model: e.to.model, effort: e.to.effort };
+      const prev = raw.models[e.key] ?? {};
+      raw.models[e.key] = { ...prev, model: e.to.model, effort: e.to.effort };
       writeFileSync5(configPath2, JSON.stringify(raw, null, 2) + "\n");
+      const opencodeModel = typeof prev.opencode_model === "string" ? prev.opencode_model : void 0;
       for (const name of e.agents) {
         const p = join16(agentsDir, `${name}.md`);
-        if (!existsSync8(p))
+        if (!existsSync9(p))
           continue;
         const content = readFileSync12(p, "utf8");
         const hdr = parseInstalledHeader(content);
@@ -12815,7 +13234,7 @@ function openDashboard(storePath, options = {}) {
         }));
       }
       try {
-        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model });
+        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model, opencodeModel });
         const refused = (oc.rows ?? []).filter((r) => r.status === "refused");
         if (refused.length)
           ui = { ...ui, notice: `model swap for '${e.key}': OpenCode agent file(s) not updated \u2014 ${refused.map((r) => r.detail).join("; ")}` };
@@ -12823,7 +13242,7 @@ function openDashboard(storePath, options = {}) {
         ui = { ...ui, notice: `model swap for '${e.key}': config.models and the Claude agents were updated, but the OpenCode agent re-render failed \u2014 ${ocErr.message}` };
       }
       store.create({
-        id: randomUUID4(),
+        id: randomUUID5(),
         type: "decision",
         created_at: nowISO,
         updated_at: nowISO,
@@ -12837,14 +13256,100 @@ function openDashboard(storePath, options = {}) {
         statement: `config.models['${e.key}'] set to ${e.to.model} / ${e.to.effort} (was ${e.from.model} / ${e.from.effort}); ${e.agents.length} installed agent file(s) re-stamped via the System tab.`,
         rationale: "Model/effort pin changed from the TUI System tab (config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL\u2194Windows machine boundary, d53dc92c).",
         alternatives_rejected: []
-      }, { operation_id: randomUUID4() });
+      }, { operation_id: randomUUID5() });
     } catch (err) {
       ui = { ...ui, notice: `model swap for '${e.key}' failed partway \u2014 ${err.message}` };
     }
   }
+  function applyOpenCodeModel(e) {
+    const nowISO = (/* @__PURE__ */ new Date()).toISOString();
+    const fail = (msg) => {
+      ui = { ...ui, notice: `OpenCode model for '${e.key}' not changed \u2014 ${msg}; config.json and the OpenCode agents are as they were` };
+    };
+    let configBefore;
+    let configAfter;
+    let claudeModel;
+    try {
+      if (e.to !== void 0 && !OPENCODE_MODEL_REF_RE.test(e.to))
+        throw new Error(`'${e.to}' is not a <provider>/<model> id`);
+      configBefore = readFileSync12(configPath2, "utf8");
+      const raw = JSON.parse(configBefore);
+      raw.models = raw.models ?? {};
+      const { opencode_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
+      raw.models[e.key] = e.to === void 0 ? rest : { ...rest, opencode_model: e.to };
+      configAfter = JSON.stringify(raw, null, 2) + "\n";
+      claudeModel = typeof rest.model === "string" ? rest.model : e.model;
+    } catch (err) {
+      fail(err.message);
+      return;
+    }
+    let writes;
+    try {
+      const staged = stageFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: claudeModel, opencodeModel: e.to });
+      const refused = (staged.rows ?? []).filter((r) => r.status === "refused");
+      if (refused.length) {
+        fail(`OpenCode agent file(s) refused: ${refused.map((r) => r.detail).join("; ")}`);
+        return;
+      }
+      writes = staged.writes ?? [];
+    } catch (err) {
+      fail(`the OpenCode agent render failed: ${err.message}`);
+      return;
+    }
+    try {
+      writeFullAgentFiles(writes);
+    } catch (err) {
+      fail(`writing the OpenCode agents failed: ${err.message}`);
+      return;
+    }
+    try {
+      writeFileAtomic(configPath2, configAfter, options.configWriteFs);
+    } catch (err) {
+      const rollback = [];
+      try {
+        writeFileAtomic(configPath2, configBefore, options.configWriteFs);
+      } catch (restoreErr) {
+        rollback.push(`config.json not restored: ${restoreErr.message}`);
+      }
+      try {
+        restoreFullAgentFiles(writes);
+      } catch (restoreErr) {
+        rollback.push(`OpenCode agents not restored: ${restoreErr.message}`);
+      }
+      if (rollback.length) {
+        ui = { ...ui, notice: `OpenCode model for '${e.key}': writing config.json failed (${err.message}) and the rollback failed \u2014 ${rollback.join("; ")}` };
+        return;
+      }
+      fail(`writing config.json failed: ${err.message}`);
+      return;
+    }
+    const shown = (v) => v ?? `anthropic/${claudeModel}`;
+    try {
+      store.create({
+        id: randomUUID5(),
+        type: "decision",
+        created_at: nowISO,
+        updated_at: nowISO,
+        author: "conductor",
+        status: "active",
+        superseded_by: null,
+        links: [],
+        scope: "project",
+        stack_tags: [],
+        title: `OpenCode model: ${e.key} ${shown(e.from)}\u2192${shown(e.to)} (System tab)`,
+        statement: `config.models['${e.key}'].opencode_model ${e.to === void 0 ? "cleared" : `set to ${e.to}`} (was ${e.from ?? "unset"}); the OpenCode agents for this role now run ${shown(e.to)}, and Claude Code keeps ${claudeModel}.`,
+        rationale: "OpenCode model override changed from the TUI System tab (decision opencode-only-model-override-per-role-for-openai-picks: the Claude model stays for Claude Code, and only the OpenCode agent files are re-rendered).",
+        alternatives_rejected: []
+      }, { operation_id: randomUUID5() });
+    } catch (err) {
+      ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}, but recording the decision failed \u2014 ${err.message}` };
+      return;
+    }
+    ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}; Claude Code keeps ${claudeModel}.` };
+  }
   async function applyEffects(all) {
     const effects = all.filter((e) => {
-      if (e.type !== "model_swap" && e.type !== "select")
+      if (e.type !== "model_swap" && e.type !== "opencode_model" && e.type !== "select")
         return true;
       const off = disabled[e.type];
       if (off === void 0)
@@ -12856,6 +13361,9 @@ function openDashboard(storePath, options = {}) {
     const swaps = effects.filter((e) => e.type === "model_swap");
     for (const e of swaps)
       await applySwap(e);
+    const overrides = effects.filter((e) => e.type === "opencode_model");
+    for (const e of overrides)
+      applyOpenCodeModel(e);
     const notice = (msg) => {
       ui = { ...ui, notice: msg };
     };
@@ -12902,40 +13410,52 @@ function openDashboard(storePath, options = {}) {
     } else if (toggleWrote) {
       notice("config.json updated \u2014 hooks pick this up on their next invocation; restart the session to reload the MCP server.");
     }
-    if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length)
+    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length)
       roster = loadRoster();
-    if (routed) {
-      for (const e of effects) {
-        if (e.type !== "select")
-          continue;
-        try {
-          writeSelectionFile(projectRoot, e.recordType, e.id, (/* @__PURE__ */ new Date()).toISOString());
-        } catch (err) {
-          notice(`selection not handed to the next prompt \u2014 ${err.message}`);
-        }
-      }
-      return runEffects(store, effects.filter((e) => e.type !== "select"));
+    for (const e of effects) {
+      if (e.type === "select")
+        pending = [...pending.filter((p) => p.type !== "select"), e];
+      else if (e.type === "board_edit")
+        pending.push(e);
     }
-    return runEffects(store, effects);
+    if (!options.deferWrites)
+      flush();
+    return effects.some((e) => e.type === "quit");
   }
   return {
     stores,
     store,
+    writeStore,
     projectName,
     configPath: configPath2,
     ui: () => ui,
     roster: () => roster,
-    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents),
+    state: (vp) => currentFrame(vp).state,
     async handle(event, vp) {
       const prevTab = ui.tab;
-      const result = reduce(store, ui, event, vp, stores, roster, resolveProjectHeadSha);
+      const drawn = frame2 && frame2.ui === ui && frame2.roster === roster && frame2.vp === vpKey(vp) ? frame2.built : void 0;
+      const result = reduce(store, ui, event, vp, stores, roster, resolveProjectHeadSha, drawn);
       ui = result.ui;
+      if (!result.effects.some((e) => e.type === "quit"))
+        quitArmed = false;
       if (ui.tab === SYSTEM_TAB && (prevTab !== SYSTEM_TAB || !roster))
         roster = loadRoster();
       return applyEffects(result.effects);
     },
     applyEffects,
-    close: () => stores.close()
+    flush,
+    pending: () => pending.length,
+    requestQuit,
+    stats: () => ({ builds, storeCalls, changeDetection }),
+    close: () => {
+      try {
+        probe?.close();
+        if (writeStore !== store)
+          writeStore.close();
+      } finally {
+        stores.close();
+      }
+    }
   };
 }
 
@@ -13357,14 +13877,14 @@ var pool_default = {
         skin: 1,
         clothes: 1,
         acc: "feather",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "ccdeeeeeff..",
           "..eeeggggf..",
-          "..fgAeeAgf..",
-          "..ggeeeegg..",
+          "..fgAggAgf..",
+          "..gggggggg..",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -13372,15 +13892,15 @@ var pool_default = {
           "ccdeeeeeff..",
           "..eeeggggf..",
           "..fggggggf..",
-          "..ggeeeegg..",
+          "..gggggggg..",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
         [
           ".ccceeeeeef.",
           "..ceeeggggf.",
-          "..fgAeeAgf..",
-          "..ggeeeegg..",
+          "..fgAggAgf..",
+          "..gggggggg..",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -13388,7 +13908,7 @@ var pool_default = {
           ".ccceeeeeef.",
           "..ceeeggggf.",
           "....gAggAg..",
-          "...gggeeggg.",
+          "...gggggggg.",
           ".....UggU...",
           "iiUUUUjgUUii"
         ]
@@ -13537,14 +14057,14 @@ var pool_default = {
         skin: 1,
         clothes: 1,
         acc: "earrings",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "...gnnnng...",
           "..gggggggg..",
-          "..ggAppAgg..",
-          ".FggppppggF.",
+          "..ggAggAgg..",
+          ".FggggggggF.",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -13552,15 +14072,15 @@ var pool_default = {
           "...gnnnng...",
           "..gggggggg..",
           "..gggggggg..",
-          ".FggppppggF.",
+          ".FggggggggF.",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
         [
           "....nnnnnn..",
           "..gggggggg..",
-          "..ggAppAgg..",
-          ".FggppppggF.",
+          "..ggAggAgg..",
+          ".FggggggggF.",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -13568,7 +14088,7 @@ var pool_default = {
           "....nnnnnn..",
           "...gggggggg.",
           "...ggAggAgg.",
-          "..ggggppgggg",
+          "..gggggggggg",
           ".....UggU...",
           "iiUUUUjgUUii"
         ]
@@ -14032,14 +14552,14 @@ var pool_default = {
         skin: 2,
         clothes: 2,
         acc: "earrings",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..pppppppp..",
           ".ppLLLLLLpp.",
-          ".FzLAppALzF.",
-          ".FzLppppLzF.",
+          ".FzLALLALzF.",
+          ".FzLLLLLLzF.",
           ".N..LLLL..N.",
           "NNOOOOPLOONN"
         ],
@@ -14047,15 +14567,15 @@ var pool_default = {
           "..pppppppp..",
           ".ppLLLLLLpp.",
           ".FzLLLLLLzF.",
-          ".FzLppppLzF.",
+          ".FzLLLLLLzF.",
           ".N..LLLL..N.",
           "NNOOOOPLOONN"
         ],
         [
           "...pppppppp.",
           "..ppLLLLLLpp",
-          ".FzLAppALzF.",
-          ".FzLppppLzF.",
+          ".FzLALLALzF.",
+          ".FzLLLLLLzF.",
           ".N..LLLL..N.",
           "NNOOOOPLOONN"
         ],
@@ -14063,7 +14583,7 @@ var pool_default = {
           "...pppppppp.",
           "..ppLLLLLLpp",
           "..ppLALLALpp",
-          "..FpLLppLLpF",
+          "..FpLLLLLLpF",
           "..pp.OLLO.pp",
           "NNOOOOPLOONN"
         ]
@@ -14122,14 +14642,14 @@ var pool_default = {
         skin: 2,
         clothes: 3,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..00000000..",
           "..LLLLLLLLY.",
-          "..LLAssALLZ.",
-          "..LLssssLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -14137,15 +14657,15 @@ var pool_default = {
           "..00000000..",
           "..LLLLLLLLY.",
           "..LLLLLLLLZ.",
-          "..LLssssLL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
         [
           "....000000..",
           "..LLLLLLLLY.",
-          "..LLAssALLZ.",
-          "..LLssssLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -14153,7 +14673,7 @@ var pool_default = {
           "....00000000",
           "...LLLLLLLLL",
           "...LLALLALLL",
-          "...LLLssLLL.",
+          "...LLLLLLLL.",
           ".....LLLH...",
           "GGHHLLILHHGG"
         ]
@@ -14212,14 +14732,14 @@ var pool_default = {
         skin: 2,
         clothes: 0,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..llllllll..",
           "..LLLLLLLLY.",
-          "..LLAaaALLZ.",
-          "..LLaaaaLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -14227,15 +14747,15 @@ var pool_default = {
           "..llllllll..",
           "..LLLLLLLLY.",
           "..LLLLLLLLZ.",
-          "..LLaaaaLL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
         [
           "....llllll..",
           "..LLLLLLLLY.",
-          "..LLAaaALLZ.",
-          "..LLaaaaLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -14243,7 +14763,7 @@ var pool_default = {
           "....llllllll",
           "...LLLLLLLLL",
           "...LLALLALLL",
-          "...LLLaaLLL.",
+          "...LLLLLLLL.",
           ".....wLLw...",
           "vvwwwwxLwwvv"
         ]
@@ -14302,14 +14822,14 @@ var pool_default = {
         skin: 2,
         clothes: 3,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..2222223...",
           "..32LLLL33Y.",
-          "..3LA22AL3Z.",
-          "..LL2222LL..",
+          "..3LALLAL3Z.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -14317,15 +14837,15 @@ var pool_default = {
           "..2222223...",
           "..32LLLL33Y.",
           "..3LLLLLL3Z.",
-          "..LL2222LL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
         [
           "...22222L3..",
           "..22LLLLL3Y.",
-          "..3LA22AL3Z.",
-          "..LL2222LL..",
+          "..3LALLAL3Z.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -14333,7 +14853,7 @@ var pool_default = {
           "...22222L3..",
           "...2LLLLLLYY",
           "...LLALLAL33",
-          "...LLL22LL3.",
+          "...LLLLLLL3.",
           ".....LLLH...",
           "GGHHLLILHHGG"
         ]
@@ -14392,14 +14912,14 @@ var pool_default = {
         skin: 0,
         clothes: 0,
         acc: "earrings",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "....DDDD....",
           "..DDDDDDDD..",
-          "..DDA22ADD..",
-          ".FDD2222DDF.",
+          "..DDADDADD..",
+          ".FDDDDDDDDF.",
           "....DDDD....",
           "vvwwwwxDwwvv"
         ],
@@ -14407,15 +14927,15 @@ var pool_default = {
           "....DDDD....",
           "..DDDDDDDD..",
           "..DDDDDDDD..",
-          ".FDD2222DDF.",
+          ".FDDDDDDDDF.",
           "....DDDD....",
           "vvwwwwxDwwvv"
         ],
         [
           ".....DDDD...",
           "...DDDDDDDD.",
-          "..DDA22ADD..",
-          ".FDD2222DDF.",
+          "..DDADDADD..",
+          ".FDDDDDDDDF.",
           "....DDDD....",
           "vvwwwwxDwwvv"
         ],
@@ -14423,7 +14943,7 @@ var pool_default = {
           ".....DDDD...",
           "...DDDDDDDD.",
           "...DDADDADD.",
-          "..DDDD22DDDD",
+          "..DDDDDDDDDD",
           ".....wDDw...",
           "vvwwwwxDwwvv"
         ]
@@ -14842,14 +15362,14 @@ var pool_default = {
         skin: 2,
         clothes: 0,
         acc: "none",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..eeeeeeff..",
           "..eLLLLLLf..",
-          "..LLAeeALL..",
-          "..LLeeeeLL..",
+          "..LLALLALL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -14857,15 +15377,15 @@ var pool_default = {
           "..eeeeeeff..",
           "..eLLLLLLf..",
           "..LLLLLLLL..",
-          "..LLeeeeLL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
         [
           "....eeeeeef.",
           "...LLLLLLe..",
-          "..LLAeeALL..",
-          "..LLeeeeLL..",
+          "..LLALLALL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -14873,7 +15393,7 @@ var pool_default = {
           "...eeeeeeef.",
           "...eLLLLLLf.",
           "...LLALLALL.",
-          "...LLLeeLLL.",
+          "...LLLLLLLL.",
           ".....wLLw...",
           "vvwwwwxLwwvv"
         ]
@@ -14932,14 +15452,14 @@ var pool_default = {
         skin: 1,
         clothes: 0,
         acc: "feather",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "ccQQQQQQQQ..",
           "QQQggggggQQ.",
-          ".QRgAQQAgRQ.",
-          ".QRgQQQQgRQ.",
+          ".QRgAggAgRQ.",
+          ".QRggggggRQ.",
           "....gggg....",
           "vvwwwwxgwwvv"
         ],
@@ -14947,15 +15467,15 @@ var pool_default = {
           "ccQQQQQQQQ..",
           "QQQggggggQQ.",
           ".QRggggggRQ.",
-          ".QRgQQQQgRQ.",
+          ".QRggggggRQ.",
           "....gggg....",
           "vvwwwwxgwwvv"
         ],
         [
           "ccdQQQQQQQQ.",
           "..QQggggggQQ",
-          ".QRgAQQAgRQ.",
-          ".QRgQQQQgRQ.",
+          ".QRgAggAgRQ.",
+          ".QRggggggRQ.",
           "....gggg....",
           "vvwwwwxgwwvv"
         ],
@@ -14963,7 +15483,7 @@ var pool_default = {
           ".cdQQQQQQQQ.",
           "..QQggggggQQ",
           "..QQgAggAgQQ",
-          "..QRggQQggRQ",
+          "..QRggggggRQ",
           "..QQ.wggw.QQ",
           "vvwwwwxgwwvv"
         ]
@@ -15067,14 +15587,14 @@ var pool_default = {
         skin: 0,
         clothes: 4,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..QQQQQQRR..",
           "..QDDDDDDRY.",
-          "..DDAQQADDZ.",
-          "..DDQQQQDD..",
+          "..DDADDADDZ.",
+          "..DDDDDDDD..",
           "....DDDD....",
           "ttuuuDDuuutt"
         ],
@@ -15082,15 +15602,15 @@ var pool_default = {
           "..QQQQQQRR..",
           "..QDDDDDDRY.",
           "..DDDDDDDDZ.",
-          "..DDQQQQDD..",
+          "..DDDDDDDD..",
           "....DDDD....",
           "ttuuuDDuuutt"
         ],
         [
           "....QQQQQQ..",
           "...DDDDDDQY.",
-          "..DDAQQADDZ.",
-          "..DDQQQQDD..",
+          "..DDADDADDZ.",
+          "..DDDDDDDD..",
           "....DDDD....",
           "ttuuuDDuuutt"
         ],
@@ -15098,7 +15618,7 @@ var pool_default = {
           "...QQQQQQQRR",
           "...QDDDDDDRY",
           "...DDADDADDD",
-          "...DDDQQDDD.",
+          "...DDDDDDDD.",
           ".....UDDu...",
           "ttuuUUDuuutt"
         ]
@@ -15255,11 +15775,10 @@ function cells(avatarIndex, frame2) {
   }
   return out;
 }
-function tileCells(avatarIndex, frame2) {
-  return cells(avatarIndex, frame2).map((row) => {
-    const pad = { ch: " ", bg: TILE_BG };
-    return [pad, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), pad];
-  });
+function tileCells(avatarIndex, frame2, edge) {
+  const left = edge === void 0 ? { ch: " ", bg: TILE_BG } : { ch: "\u258C", fg: edge, bg: TILE_BG };
+  const right = edge === void 0 ? { ch: " ", bg: TILE_BG } : { ch: "\u2590", fg: edge, bg: TILE_BG };
+  return cells(avatarIndex, frame2).map((row) => [left, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), right]);
 }
 var ANIMATION_MS = 333;
 var SEQUENCE = [
@@ -15299,7 +15818,7 @@ function frameAt(tick2, phase, running) {
 }
 
 // opencode/sterling-tui/view.ts
-import { existsSync as existsSync9 } from "node:fs";
+import { existsSync as existsSync10 } from "node:fs";
 import { dirname as dirname6, join as join17 } from "node:path";
 var SIDEBAR_WIDTH = 34;
 var TOP_TASKS = 5;
@@ -15457,6 +15976,12 @@ function keyToUiEvent(key) {
   if (ch.length === 1 && ch >= " " && ch !== "\x7F") return { kind: "char", ch };
   return void 0;
 }
+function footerLines(st) {
+  return [st.notice ? { text: st.notice, warn: true } : { text: "" }, { text: st.footer, dim: true }];
+}
+function paintedFg(line, colours) {
+  return line.warn ? colours.warning : line.dim ? colours.muted : void 0;
+}
 function escapeLeavesView(ui) {
   if (ui.boardEdit || ui.selector || ui.sparringModelEdit !== void 0) return false;
   if (ui.tab === KNOWLEDGE_TAB && ui.searchQuery) return false;
@@ -15467,7 +15992,7 @@ function findStorePath(start, env) {
   let dir = start;
   for (; ; ) {
     const candidate = join17(dir, ".sterling", "sterling.db");
-    if (existsSync9(candidate) || existsSync9(join17(dir, ".sterling", "config.json")) && storeBackend(dir) === "routed") return candidate;
+    if (existsSync10(candidate) || existsSync10(join17(dir, ".sterling", "config.json")) && storeBackend(dir) === "routed") return candidate;
     const parent = dirname6(dir);
     if (parent === dir) return void 0;
     dir = parent;
@@ -15571,7 +16096,6 @@ function Sidebar(props) {
       <text fg={muted()}>{hint()}</text>
     </box>;
 }
-var footerLines = (st) => [{ text: "" }, { text: st.footer, dim: true }];
 function paint(st, maxBodyLines) {
   const lines = [{ text: st.searchLine ?? "", dim: true }];
   if (st.emptyMessage) lines.push({ text: st.emptyMessage, dim: true });
@@ -15601,6 +16125,7 @@ function FullView(props) {
   const [failure, setFailure] = createSignal();
   const muted = () => props.api.theme?.text?.muted;
   const highlight = () => props.api.theme?.background?.raised?.high;
+  const colours = () => ({ muted: muted(), warning: props.api.theme?.text?.feedback?.warning?.base });
   const palette2 = () => ({ text: props.api.theme?.text?.base, muted: muted(), surface: props.api.theme?.background?.base });
   const width = () => Math.max(20, dims().width - 2);
   const subagentSession = () => {
@@ -15661,14 +16186,14 @@ function FullView(props) {
           </For>
         </box>
         <For each={view().lines}>
-          {(l) => <text fg={l.dim ? muted() : void 0} bg={l.selected ? highlight() : void 0}>{l.text || " "}</text>}
+          {(l) => <text fg={paintedFg(l, colours())} bg={l.selected ? highlight() : void 0}>{l.text || " "}</text>}
         </For>
         <Show when={extra().length}>
           <text> </text>
           <Index each={extra()}>{(l) => <StyledLine spans={l()} palette={palette2()} />}</Index>
         </Show>
         <For each={view().footer}>
-          {(l) => <text fg={l.dim ? muted() : void 0}>{l.text || " "}</text>}
+          {(l) => <text fg={paintedFg(l, colours())}>{l.text || " "}</text>}
         </For>
       </Show>
       <Show when={failure()}>

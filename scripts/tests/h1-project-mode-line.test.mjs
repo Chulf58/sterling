@@ -103,6 +103,39 @@ for (const [label, cfg, expected] of [
   });
 }
 
+// GitHub issue #39 (user-ruled 2026-10-08): work mode in a git repo with no
+// 'origin' remote merges locally, so the line must not promise a pull request.
+// A work repo WITH origin keeps the WORK line; a non-git directory is not "no
+// origin" (the WORK tests above run in one).
+const NO_ORIGIN_LINE = "Project mode: WORK (config.mode — TUI System tab) — this repository has no 'origin' remote, so /sterling:merge merges locally like hobby mode: no pull request and no Copilot review will happen.";
+for (const [label, remote, expected] of [
+  ['no origin remote', null, NO_ORIGIN_LINE],
+  ['only a non-origin remote', 'upstream', NO_ORIGIN_LINE],
+  ['a GitHub origin', 'origin', WORK_LINE],
+]) {
+  test(`H1 (work, git repo with ${label}): the mode line says ${expected === WORK_LINE ? 'a pull request' : 'the merge is local'}`, () => {
+    const dir = project({ ...BASE_CONFIG, mode: 'work', handoff: { enabled: true } });
+    try {
+      const sh = (args) => assert.equal(spawnSync('git', args, { cwd: dir, encoding: 'utf8' }).status, 0, `git ${args.join(' ')}`);
+      sh(['init', '-b', 'main']);
+      if (remote) sh(['remote', 'add', remote, 'https://github.com/acme/widget.git']);
+      assert.deepEqual(modeLines(context(dir)), [expected]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('H1 (hobby, git repo with no origin): the hobby line is unchanged', () => {
+  const dir = project({ ...BASE_CONFIG, mode: 'hobby' });
+  try {
+    assert.equal(spawnSync('git', ['init', '-b', 'main'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    assert.deepEqual(modeLines(context(dir)), [HOBBY_LINE]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('H1 reads an invalid mode as INVALID, never as either flow', () => {
   const dir = project({ ...BASE_CONFIG, mode: 'Work' });
   try {

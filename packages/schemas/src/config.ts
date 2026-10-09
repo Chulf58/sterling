@@ -23,15 +23,31 @@ const modelPin = z.object({
   effort: effortLevel.optional(),
 }).strict();
 
+// An OpenCode model reference, <provider>/<model> (for example
+// openai/gpt-5.6-terra): the form an OpenCode agent's `model:` line takes.
+export const OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+// A Claude model id as config.models.<agent>.model holds it (claude-sonnet-5-5,
+// an alias such as opus, or an id with a context suffix such as
+// claude-opus-4-6[1m]). The value lands on a frontmatter `model:` line in the
+// Claude and OpenCode agent files, so whitespace, a newline or YAML syntax is
+// refused here, when the config is written.
+export const CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+
 // models.<agent>: the default pin plus an optional hard_task pin the conductor
 // passes when it escalates that agent. effort is REQUIRED on the default pin:
 // it fills {{EFFORT}} in the agent template, and resolveModelVars
 // (scripts/lib/agent-distribution.mjs) throws at render time without it, so a
 // config missing it is refused here, when it is written.
+// opencode_model is the role's OpenCode-only override (decision
+// opencode-only-model-override-per-role-for-openai-picks): `model` stays the
+// Claude model Claude Code runs, and the OpenCode agent pins opencode_model
+// when it is set, anthropic/<model> otherwise.
 const agentModelEntry = z.object({
-  model: z.string(),
+  model: z.string().regex(CLAUDE_MODEL_ID_RE, 'model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines'),
   effort: effortLevel,
   hard_task: modelPin.optional(),
+  opencode_model: z.string().regex(OPENCODE_MODEL_REF_RE, 'opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra').optional(),
 }).strict();
 
 // One pin per vendor, shared by sparring_partner.models and review.models.
@@ -236,11 +252,11 @@ export const configSchema = z.object({
       implementor: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'high' }),
       researcher: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'medium' }),
       scout: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
-      classifiers: agentModelEntry.default({ model: 'claude-haiku-4-5', effort: 'low' }),
+      classifiers: agentModelEntry.default({ model: 'claude-haiku-5-5', effort: 'low' }),
       // librarian is mechanical clerking — cheap model, low effort (P8). The
       // roster is classless (decision agent-roster-is-classless-four-agents), and
       // the debugger role it rejected has no key here.
-      librarian: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
+      librarian: agentModelEntry.default({ model: 'claude-haiku-5-5', effort: 'low' }),
       // reviewer judges a diff (decision
       // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
       // dispatch pins its model explicitly; this is the install-time default.

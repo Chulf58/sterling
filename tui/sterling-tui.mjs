@@ -2324,11 +2324,11 @@ var require_format = __commonJS({
         minus = "-";
         arg = -arg;
       }
-      var degrees = epsilonFloor(arg), frac = arg - degrees;
-      if (!frac) {
+      var degrees = epsilonFloor(arg), frac2 = arg - degrees;
+      if (!frac2) {
         return minus + degrees + "\xB0";
       }
-      var minutes = epsilonFloor(frac * 60), seconds = epsilonFloor(frac * 3600 - minutes * 60);
+      var minutes = epsilonFloor(frac2 * 60), seconds = epsilonFloor(frac2 * 3600 - minutes * 60);
       if (seconds) {
         return minus + degrees + "\xB0" + ("" + minutes).padStart(2, "0") + "\u2032" + ("" + seconds).padStart(2, "0") + "\u2033";
       }
@@ -9672,22 +9672,22 @@ var require_NextGenEvents = __commonJS({
       }
       return this;
     };
-    NextGenEvents.listenerWrapper = function(listener, event2, contextScope, serial, nice) {
+    NextGenEvents.listenerWrapper = function(listener, event2, contextScope, serial2, nice) {
       var returnValue, listenerCallback, eventMaster = event2.master || event2, interruptible = !!event2.master || event2.emitter.__ngev.interruptible;
       if (eventMaster.interrupt) {
         return;
       }
       if (listener.async) {
         if (contextScope) {
-          contextScope.ready = !serial;
+          contextScope.ready = !serial2;
         }
         if (nice < 0) {
           if (globalData.recursions >= -nice) {
-            event2.emitter.__ngev.desync(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial, NextGenEvents.SYNC));
+            event2.emitter.__ngev.desync(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial2, NextGenEvents.SYNC));
             return;
           }
         } else {
-          setTimeout(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial, NextGenEvents.SYNC), nice);
+          setTimeout(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial2, NextGenEvents.SYNC), nice);
           return;
         }
         listenerCallback = (arg) => {
@@ -9701,7 +9701,7 @@ var require_NextGenEvents = __commonJS({
           } else if (eventMaster.listenersDone >= eventMaster.listeners.length && eventMaster.callback) {
             NextGenEvents.emitCallback(event2);
           }
-          if (serial) {
+          if (serial2) {
             NextGenEvents.processScopeQueue(contextScope, true, true);
           }
         };
@@ -9713,11 +9713,11 @@ var require_NextGenEvents = __commonJS({
       } else {
         if (nice < 0) {
           if (globalData.recursions >= -nice) {
-            event2.emitter.__ngev.desync(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial, NextGenEvents.SYNC));
+            event2.emitter.__ngev.desync(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial2, NextGenEvents.SYNC));
             return;
           }
         } else {
-          setTimeout(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial, NextGenEvents.SYNC), nice);
+          setTimeout(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial2, NextGenEvents.SYNC), nice);
           return;
         }
         if (listener.eventObject) {
@@ -9904,13 +9904,13 @@ var require_NextGenEvents = __commonJS({
       master.sync = false;
     };
     NextGenEvents.emitToOneListener = function(event2, listener, removedListeners) {
-      var self2 = event2.emitter, eventMaster = event2.master || event2, context = event2.master ? event2.master.context : listener.context, contextScope, serial, currentNice, emitRemoveListener = false;
+      var self2 = event2.emitter, eventMaster = event2.master || event2, context = event2.master ? event2.master.context : listener.context, contextScope, serial2, currentNice, emitRemoveListener = false;
       if (context) {
         if (context.status === NextGenEvents.CONTEXT_DISABLED) {
           return;
         }
         currentNice = Math.max(eventMaster.nice, listener.nice, context.nice);
-        serial = context.serial;
+        serial2 = context.serial;
         contextScope = NextGenEvents.getContextScope(context, eventMaster.depth);
       } else {
         currentNice = Math.max(eventMaster.nice, listener.nice);
@@ -9928,7 +9928,7 @@ var require_NextGenEvents = __commonJS({
       if (context && (context.status === NextGenEvents.CONTEXT_QUEUED || !contextScope.ready)) {
         contextScope.queue.push({ event: event2, listener, nice: currentNice });
       } else {
-        NextGenEvents.listenerWrapper(listener, event2, contextScope, serial, currentNice);
+        NextGenEvents.listenerWrapper(listener, event2, contextScope, serial2, currentNice);
       }
       if (emitRemoveListener && self2.__ngev.listeners.removeListener.length) {
         self2.emit("removeListener", [listener]);
@@ -10372,7 +10372,7 @@ var require_NextGenEvents = __commonJS({
       }
       return this;
     };
-    NextGenEvents.processScopeQueue = function(contextScope, serial, isCompletionCallback) {
+    NextGenEvents.processScopeQueue = function(contextScope, serial2, isCompletionCallback) {
       var job, event2, eventMaster, emitter;
       if (isCompletionCallback) {
         contextScope.ready = true;
@@ -10386,7 +10386,7 @@ var require_NextGenEvents = __commonJS({
         if (eventMaster.interrupt) {
           continue;
         }
-        NextGenEvents.listenerWrapper(job.listener, event2, contextScope, serial, job.nice);
+        NextGenEvents.listenerWrapper(job.listener, event2, contextScope, serial2, job.nice);
       }
       globalData.recursions--;
     };
@@ -13217,7 +13217,7 @@ var require_singleColumnMenu = __commonJS({
       if (!this.grabbing) {
         this.grabInput();
       }
-      var start = {}, end = {}, textWidth, outerWidth, paddingLength, menuItems, offsetY = 0, lineCount = 0, scrollLines = 0, controller, finished = false, alreadyCleanedUp = false;
+      var start = {}, end = {}, textWidth2, outerWidth, paddingLength, menuItems, offsetY = 0, lineCount = 0, scrollLines = 0, controller, finished = false, alreadyCleanedUp = false;
       var init = () => {
         computeItems(menuItemsArg);
         if (options.y !== void 0) {
@@ -13236,17 +13236,17 @@ var require_singleColumnMenu = __commonJS({
         }
       };
       var computeItems = (menuItems_) => {
-        textWidth = 0;
+        textWidth2 = 0;
         paddingLength = Math.max(stringWidth(options.leftPadding), stringWidth(options.selectedLeftPadding));
         menuItems_ = menuItems_.map((element) => {
           if (typeof element !== "string") {
             element = "" + element;
           }
-          textWidth = Math.max(textWidth, stringWidth(element));
+          textWidth2 = Math.max(textWidth2, stringWidth(element));
           return element;
         });
-        if (!options.oneLineItem && textWidth > options.itemMaxWidth - paddingLength) {
-          outerWidth = Math.min(textWidth + paddingLength, this.width);
+        if (!options.oneLineItem && textWidth2 > options.itemMaxWidth - paddingLength) {
+          outerWidth = Math.min(textWidth2 + paddingLength, this.width);
           menuItems = menuItems_.map((element, index) => {
             var item, lines, lineLength = options.itemMaxWidth - paddingLength;
             lines = string.wordwrap(element, {
@@ -13266,15 +13266,15 @@ var require_singleColumnMenu = __commonJS({
           });
           lineCount = offsetY;
         } else {
-          textWidth = Math.min(textWidth, options.itemMaxWidth - paddingLength);
-          outerWidth = Math.min(textWidth + paddingLength, this.width);
+          textWidth2 = Math.min(textWidth2, options.itemMaxWidth - paddingLength);
+          outerWidth = Math.min(textWidth2 + paddingLength, this.width);
           menuItems = menuItems_.map((element, index) => {
             var elementWidth = stringWidth(element);
             return {
               offsetY: index,
               index,
               text: element,
-              displayText: [elementWidth > textWidth ? element.slice(0, textWidth - 1) + "\u2026" : element + " ".repeat(textWidth - elementWidth)]
+              displayText: [elementWidth > textWidth2 ? element.slice(0, textWidth2 - 1) + "\u2026" : element + " ".repeat(textWidth2 - elementWidth)]
             };
           });
           lineCount = menuItems.length;
@@ -39067,12 +39067,14 @@ var require_termkit_no_lazy_require = __commonJS({
 });
 
 // packages/tui/dist/main.js
+import { appendFileSync, mkdirSync as mkdirSync9 } from "node:fs";
 import { dirname as dirname8, join as join19 } from "node:path";
+import { performance } from "node:perf_hooks";
 
 // packages/tui/dist/controller.js
-import { readFileSync as readFileSync12, writeFileSync as writeFileSync5, existsSync as existsSync8 } from "node:fs";
+import { readFileSync as readFileSync12, writeFileSync as writeFileSync5, existsSync as existsSync9 } from "node:fs";
 import { basename as basename2, dirname as dirname5, join as join16 } from "node:path";
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID5 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
 // packages/store/dist/index.js
@@ -43966,10 +43968,13 @@ var modelPin = external_exports.object({
   model: external_exports.string(),
   effort: effortLevel.optional()
 }).strict();
+var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+var CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
 var agentModelEntry = external_exports.object({
-  model: external_exports.string(),
+  model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
   effort: effortLevel,
-  hard_task: modelPin.optional()
+  hard_task: modelPin.optional(),
+  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
 }).strict();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
@@ -44132,11 +44137,11 @@ var configSchema = external_exports.object({
     implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
     researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    classifiers: agentModelEntry.default({ model: "claude-haiku-4-5", effort: "low" }),
+    classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // librarian is mechanical clerking — cheap model, low effort (P8). The
     // roster is classless (decision agent-roster-is-classless-four-agents), and
     // the debugger role it rejected has no key here.
-    librarian: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    librarian: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
@@ -49990,22 +49995,166 @@ var BANNER_ROWS = [
   "\u2580\u2580\u2580  \u2580  \u2580\u2580\u2580 \u2580 \u2580 \u2580\u2580\u2580 \u2580\u2580\u2580 \u2580  \u2580 \u2580\u2580\u2580\u2580"
 ];
 var WORDMARK = "STERLING";
+var SPACED_WORDMARK = "S T E R L I N G";
 var ART_WIDTH = Math.max(...BANNER_ROWS.map((r) => r.length));
-function bannerLines(width, show) {
+var FULL_SCENE_ROWS = 8;
+var COMPACT_SCENE_ROWS = 4;
+var COMPACT_BELOW_HEIGHT = 24;
+function sceneRows(width, height = Infinity) {
+  if (!(width >= WORDMARK.length))
+    return 0;
+  if (width < ART_WIDTH || height < COMPACT_BELOW_HEIGHT)
+    return COMPACT_SCENE_ROWS;
+  return FULL_SCENE_ROWS;
+}
+function sceneLayout(rows) {
+  return rows >= FULL_SCENE_ROWS ? { sunRows: 4, horizon: 4, gridRows: 3 } : { sunRows: 2, horizon: 2, gridRows: 1 };
+}
+var textWidth = (width) => Number.isFinite(width) ? Math.floor(width) : ART_WIDTH;
+function bannerLines(width, show, height = Infinity) {
   if (!show)
     return [];
-  if (!Number.isFinite(width))
-    return [...BANNER_ROWS];
-  if (width >= ART_WIDTH)
-    return [...BANNER_ROWS];
-  if (width < 1)
+  const rows = sceneRows(width, height);
+  if (rows === 0)
     return [];
-  return [WORDMARK.slice(0, width)];
+  return sceneText(textWidth(width), rows, "").slice(0, rows - 1);
 }
-var RAMP = [231, 255, 253, 251, 249, 103, 66, 60];
-function bannerPaletteIndex(t) {
+function horizonLabel(width, name) {
+  if (!name)
+    return { x: 0, text: "" };
+  const label = ` ${name} `;
+  if ([...label].length >= width)
+    return { x: 0, text: [...name].slice(0, Math.max(0, width)).join("") };
+  return { x: Math.floor((width - [...label].length) / 2), text: label };
+}
+function wordmarkFor(width, rows) {
+  if (rows >= FULL_SCENE_ROWS)
+    return { row: 1, x: Math.floor((width - ART_WIDTH) / 2), lines: BANNER_ROWS };
+  const text = width >= SPACED_WORDMARK.length ? SPACED_WORDMARK : WORDMARK;
+  return { row: 1, x: Math.floor((width - text.length) / 2), lines: [text] };
+}
+var SUN_STOPS = ["#ffd319", "#ff901f", "#ff2975"];
+var SKY_STOPS = ["#00005f", "#3a0a6e", "#a0207e"];
+var CHROME = ["#ffffff", "#c8f4ff", "#6fd3ff", "#2a3fbf", "#9ee6ff", "#f0fbff"];
+var GROUND_STOPS = ["#2b0057", "#00005f"];
+var GRID = "#ff2bd6";
+var SUN_INK = "#2b0057";
+var HORIZON_LINE = "#00e5ff";
+var NAME_FG = "#ffffff";
+function rgbOf(hex) {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return [n >> 16 & 255, n >> 8 & 255, n & 255];
+}
+function lerpStops(stops, t) {
   const u = t <= 0 ? 0 : t >= 1 ? 1 : t;
-  return RAMP[Math.round(u * (RAMP.length - 1))];
+  const pos = u * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(pos));
+  const f = pos - i;
+  const [a, b] = [rgbOf(stops[i]), rgbOf(stops[i + 1])];
+  return `#${a.map((v, k) => Math.round(v + (b[k] - v) * f).toString(16).padStart(2, "0")).join("")}`;
+}
+var frac = (y, n) => n <= 1 ? 0 : y / (n - 1);
+function sunPixel(x, y, n, cx) {
+  const r = n + 1;
+  const dy = y + 0.5 - r;
+  const dx = (x - cx) / 1.5;
+  if (dx * dx + dy * dy > r * r)
+    return void 0;
+  if (y >= n / 2 && (y - n / 2) % 2 === 1)
+    return void 0;
+  return lerpStops(SUN_STOPS, frac(y, n));
+}
+function raySpacing(y, g) {
+  return 6 + y * 6 / g;
+}
+function gridLine(x, y, g, cx) {
+  const h = g >= 6 ? y === 2 || y === 5 : y === g - 1;
+  const s2 = raySpacing(y, g);
+  return { h, v: Math.round(cx + Math.round((x - cx) / s2) * s2) === x };
+}
+function pairCell(x, y, top, bottom) {
+  return top === bottom ? { x, y, ch: " ", bg: top } : { x, y, ch: "\u2580", fg: top, bg: bottom };
+}
+function scenePixels(width, rows, projectName) {
+  const w = textWidth(width);
+  if (rows <= 0 || w < 1)
+    return [];
+  const { sunRows, horizon, gridRows } = sceneLayout(rows);
+  const cx = Math.floor(w / 2);
+  const n = sunRows * 2;
+  const mark = wordmarkFor(w, rows);
+  const out = [];
+  const skyPixel = (x, y) => {
+    if (rows >= FULL_SCENE_ROWS) {
+      const artY = y - mark.row * 2;
+      const ch = mark.lines[Math.floor(artY / 2)]?.[x - mark.x];
+      if (artY >= 0 && ch !== void 0 && (artY % 2 === 0 ? "\u2580\u2588" : "\u2584\u2588").includes(ch))
+        return CHROME[artY];
+    }
+    return sunPixel(x, y, n, cx) ?? lerpStops(SKY_STOPS, frac(y, n));
+  };
+  for (let row = 0; row < sunRows; row++) {
+    for (let x = 0; x < w; x++)
+      out.push(pairCell(x, row, skyPixel(x, row * 2), skyPixel(x, row * 2 + 1)));
+  }
+  if (rows < FULL_SCENE_ROWS) {
+    const line = mark.lines[0];
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === " ")
+        continue;
+      const x = mark.x + i;
+      if (x < 0 || x >= w)
+        continue;
+      const bg = skyPixel(x, mark.row * 2);
+      const fg = sunPixel(x, mark.row * 2, n, cx) === void 0 ? CHROME[0] : SUN_INK;
+      out[mark.row * w + x] = { x, y: mark.row, ch: line[i], fg, bg };
+    }
+  }
+  const ground = GROUND_STOPS[0];
+  const label = horizonLabel(w, projectName);
+  const labelChars = [...label.text];
+  for (let x = 0; x < w; x++) {
+    const li = x - label.x;
+    const ch = li >= 0 && li < labelChars.length ? labelChars[li] : void 0;
+    out.push(ch === void 0 ? { x, y: horizon, ch: "\u2501", fg: HORIZON_LINE, bg: ground } : { x, y: horizon, ch, fg: NAME_FG, bg: ground });
+  }
+  const g = gridRows * 2;
+  const gridPixel = (x, y) => {
+    const { h, v } = gridLine(x, y, g, cx);
+    return h || v ? GRID : lerpStops(GROUND_STOPS, frac(y, g));
+  };
+  for (let row = 0; row < gridRows; row++) {
+    for (let x = 0; x < w; x++)
+      out.push(pairCell(x, horizon + 1 + row, gridPixel(x, row * 2), gridPixel(x, row * 2 + 1)));
+  }
+  return out;
+}
+function sceneText(width, rows, projectName) {
+  const w = textWidth(width);
+  if (rows <= 0 || w < 1)
+    return [];
+  const { horizon, gridRows } = sceneLayout(rows);
+  const grid = Array.from({ length: rows }, () => Array(w).fill(" "));
+  const mark = wordmarkFor(w, rows);
+  mark.lines.forEach((line, i) => [...line].forEach((ch, k) => {
+    const x = mark.x + k;
+    if (x >= 0 && x < w)
+      grid[mark.row + i][x] = ch;
+  }));
+  grid[horizon].fill("\u2500");
+  const label = horizonLabel(w, projectName);
+  [...label.text].forEach((ch, k) => grid[horizon][label.x + k] = ch);
+  const cx = Math.floor(w / 2);
+  const g = gridRows * 2;
+  for (let row = 0; row < gridRows; row++) {
+    const s2 = raySpacing(row * 2 + 1, g);
+    for (let k = -Math.ceil(cx / s2); k <= Math.ceil((w - cx) / s2); k++) {
+      const x = Math.round(cx + k * s2);
+      if (x >= 0 && x < w)
+        grid[horizon + 1 + row][x] = k < 0 ? "\u2571" : k > 0 ? "\u2572" : "\u2502";
+    }
+  }
+  return grid.map((cells2) => cells2.join("").trimEnd());
 }
 
 // packages/tui/dist/state.js
@@ -50030,6 +50179,9 @@ var AGENTS_TAB = TABS.indexOf("Agents");
 var SYSTEM_TAB = TABS.indexOf("System");
 var ARTICLE_STATE_FILTERS = ["all", "planned", "built", "wired_in", "active", "dormant", "deprecated"];
 var initialUi = { tab: 0, cursor: 0, expanded: [], searchQuery: "", scroll: 0 };
+function isOpenCodeOnlyEntry(entry) {
+  return entry.vendor !== void 0 && entry.vendor !== "anthropic";
+}
 var EMPTY_ROSTER = {
   agents: [],
   configModels: {},
@@ -50049,12 +50201,25 @@ function effortOptions(key) {
   return ["low", "medium", "high"];
 }
 var MODEL_VALUE_RE = /^claude-/;
+function modelOptions(entries, config) {
+  const opts = entries.map((entry) => ({ kind: "entry", entry }));
+  if (config?.opencode_model)
+    opts.push({ kind: "clear" });
+  return opts;
+}
 function visibleTabs(agents) {
   return TABS.map((_, i) => i).filter((i) => i !== AGENTS_TAB || agents !== void 0);
 }
-var STATE_COLUMN_WIDTH = Math.max(...ARTICLE_STATE_FILTERS.slice(1).map((n) => n.length)) + 2;
+var STATE_GLYPHS = {
+  planned: "\u25CB",
+  built: "\u25D4",
+  wired_in: "\u25D1",
+  active: "\u25CF",
+  dormant: "\u25CC",
+  deprecated: "\xD7"
+};
 function stateColumn(card) {
-  return card.state ? `${`[${card.state}]`.padEnd(STATE_COLUMN_WIDTH)} ` : "";
+  return card.state ? `${STATE_GLYPHS[card.state] ?? "?"} ` : "";
 }
 function cardsFor(store, tab, expanded = []) {
   if (tab === 0)
@@ -50064,6 +50229,19 @@ function cardsFor(store, tab, expanded = []) {
 var catId = (type) => `cat:${type}`;
 var srcId = (type, source) => `src:${type}:${source}`;
 var subId = (type, source, key) => `sub:${type}:${source}:${key}`;
+function nodeId(node) {
+  if (node.kind === "category")
+    return catId(node.type);
+  if (node.kind === "source")
+    return srcId(node.catType, node.source);
+  if (node.kind === "subcategory")
+    return subId(node.catType, node.source, node.key);
+  return node.card.id;
+}
+function resolveCursor(ui, nodes) {
+  const held = ui.selectedId === void 0 ? -1 : nodes.findIndex((n) => nodeId(n) === ui.selectedId);
+  return Math.min(held >= 0 ? held : ui.cursor, Math.max(0, nodes.length - 1));
+}
 function rankTermsOf(query) {
   const words = query.trim().split(/\s+/).filter((t) => t.length > 0 && t.length < 64).map((t) => `${t.replace(/\*+$/, "")}*`);
   const seen = /* @__PURE__ */ new Set();
@@ -50192,11 +50370,14 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
     ];
     for (const name of agentNames)
       lines.push({ text: clip2(`    ${name}`), kind: "body" });
+    if (config.opencode_model)
+      lines.push({ text: clip2(`    OpenCode: ${config.opencode_model}`), kind: "body" });
     if (selector && selector.key === key) {
       if (selector.stage === "model") {
-        snap.catalog.entries.forEach((e, oi) => {
+        modelOptions(snap.catalog.entries, config).forEach((o, oi) => {
           const m = oi === selector.highlight ? "\u203A " : "  ";
-          lines.push({ text: clip2(`  ${m}${e.id} ${e.label}`), kind: "option", selected: oi === selector.highlight });
+          const text = o.kind === "clear" ? "OpenCode: use the Claude model" : isOpenCodeOnlyEntry(o.entry) ? `${o.entry.vendor}/${o.entry.id} ${o.entry.label} (OpenCode only)` : `${o.entry.id} ${o.entry.label}`;
+          lines.push({ text: clip2(`  ${m}${text}`), kind: "option", selected: oi === selector.highlight });
         });
       } else {
         effortOptions(key).forEach((eff, oi) => {
@@ -50288,17 +50469,75 @@ function tabsFor(store, activeTab, agents) {
   return visibleTabs(agents).map((i) => {
     const label = TABS[i];
     return {
-      label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label === "Agents" && agents ? `${label} (${agents.running})` : label,
+      label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label === "Agents" && agents ? `${label} (${agents.running} running${agents.quiet ? ` \xB7 ${agents.quiet} quiet` : ""})` : label,
       active: i === activeTab,
       index: i
     };
   });
 }
+function fitTabs(tabs, width) {
+  if (!Number.isFinite(width))
+    return tabs;
+  const bare = (l) => l.replace(/ \(.*\)$/, "");
+  const steps = [
+    [(l) => l, (l) => l],
+    [(l) => l, bare],
+    [bare, bare],
+    [bare, (l) => bare(l).slice(0, 3)],
+    [bare, (l) => bare(l).slice(0, 1)]
+  ];
+  for (const [active, inactive] of steps) {
+    const labels = tabs.map((t) => t.active ? active(t.label) : inactive(t.label));
+    if (labels.reduce((n, l) => n + l.length + 2, 0) <= width)
+      return tabs.map((t, i) => ({ ...t, label: labels[i] }));
+  }
+  const room = width - 3 * tabs.filter((t) => !t.active).length - 2;
+  const activeName = bare(tabs.find((t) => t.active)?.label ?? "");
+  if (room >= Math.min(3, activeName.length))
+    return tabs.map((t) => ({ ...t, label: t.active ? clipEllipsis(bare(t.label), room) : bare(t.label).slice(0, 1) }));
+  const ai = Math.max(0, tabs.findIndex((t) => t.active));
+  const window2 = [{ ...tabs[ai], label: clipEllipsis(bare(tabs[ai].label), Math.max(1, width - 2)) }];
+  let used = window2[0].label.length + 2;
+  let lo = ai;
+  let hi = ai;
+  for (let grew = true; grew; ) {
+    grew = false;
+    if (hi + 1 < tabs.length && used + 3 <= width) {
+      hi += 1;
+      window2.push({ ...tabs[hi], label: bare(tabs[hi].label).slice(0, 1) });
+      used += 3;
+      grew = true;
+    }
+    if (lo > 0 && used + 3 <= width) {
+      lo -= 1;
+      window2.unshift({ ...tabs[lo], label: bare(tabs[lo].label).slice(0, 1) });
+      used += 3;
+      grew = true;
+    }
+  }
+  return window2;
+}
+function footerFor(ui, tabCount, width) {
+  const tabs = `1-${tabCount} tabs`;
+  let text;
+  if (ui.tab === TASKS_TAB)
+    text = ui.boardEdit ? "editing \xB7 enter save \xB7 esc cancel" : `${tabs} \xB7 \u2191\u2193 \xB7 enter expand \xB7 e edit \xB7 q quit`;
+  else if (ui.tab === KNOWLEDGE_TAB)
+    text = "type to search \xB7 esc clear \xB7 ^f state \xB7 \u2190\u2192 tabs";
+  else if (ui.tab === QUEUE_TAB)
+    text = `${tabs} \xB7 \u2191\u2193 pending \xB7 wheel scrolls \xB7 q quit`;
+  else if (ui.tab === AGENTS_TAB)
+    text = `\u2190/\u2192 or ${tabs} \xB7 q quit`;
+  else
+    text = `${tabs} \xB7 enter change \xB7 esc cancel \xB7 q quit`;
+  return clipEllipsis(text, width);
+}
+var noticeFor = (ui, width) => ui.notice ? clipEllipsis(`\u26A0 ${ui.notice}`, width) : void 0;
 function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents) {
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows = [];
   let screenRow = 0;
-  for (const text of view.banner) {
+  for (const text of view.banner.slice(ui.notice ? 1 : 0)) {
     rows.push({ id: `sysbanner:${screenRow}`, type: "system-banner", selected: false, expanded: false, lines: [{ text, kind: "meta" }], screenRow });
     screenRow += 1;
   }
@@ -50333,22 +50572,26 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, ma
     tabs,
     rows,
     emptyMessage: view.rows.length ? void 0 : "(no configured models)",
-    footer: `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 rows \xB7 enter change model/effort \xB7 esc cancel \xB7 q quit`,
+    footer: footerFor(ui, visibleTabs(agents).length, width),
+    notice: noticeFor(ui, width),
     banner,
     projectName,
     bodyTop: bodyTop2,
     scroll
   };
 }
-function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster, agents) {
-  const banner = bannerLines(width, showBanner2);
+function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster, agents, height = Infinity) {
+  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner2, knowledge, roster, agents, height).state;
+}
+function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster, agents, height = Infinity) {
+  const banner = bannerLines(width, showBanner2, height);
   const bodyTop2 = banner.length + CHROME_BELOW_BANNER;
-  const tabs = tabsFor(store, ui.tab, agents);
+  const tabs = fitTabs(tabsFor(store, ui.tab, agents), width);
   if (ui.tab === SYSTEM_TAB)
-    return systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents);
+    return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents), nodes: [], cursor: ui.cursor };
   const nodes = nodesFor(store, ui, knowledge);
-  const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
-  let rows = [];
+  const cursor = resolveCursor(ui, nodes);
+  const rows = [];
   let screenRow = 0;
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i];
@@ -50415,54 +50658,46 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
     rows.push({ id, type, selected, expanded, lines, screenRow });
     screenRow += lines.length;
   }
+  const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
   let queueCompleted;
   let queueActivity;
+  let scroll;
   if (ui.tab === QUEUE_TAB) {
-    const totalLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
-    const startRow = Number.isFinite(maxBodyLines) ? Math.max(1, Math.floor(maxBodyLines / 2)) : totalLines;
-    let overflow;
-    if (totalLines > startRow) {
-      const keep = [];
-      for (const r of rows) {
-        if (r.screenRow + r.lines.length <= startRow - 1)
-          keep.push(r);
-        else
-          break;
-      }
-      overflow = `\u2026 ${rows.length - keep.length} more pending`;
-      rows = keep;
-    }
+    const finite = Number.isFinite(maxBodyLines);
+    const startRow = finite ? Math.max(1, Math.floor(maxBodyLines / 2)) : totalBodyLines;
+    const pendingLines = totalBodyLines > startRow ? startRow - 1 : startRow;
+    scroll = Math.max(0, Math.min(ui.scroll ?? 0, totalBodyLines - pendingLines));
+    const hidden = rows.filter((r) => r.screenRow < scroll || r.screenRow + r.lines.length > scroll + pendingLines).length;
     const completed = completedQueueLines(store);
-    queueCompleted = {
-      startRow,
-      header: "\u2014 completed \u2014",
-      lines: completed.length ? completed : ["(nothing completed yet)"],
-      ...overflow ? { overflow } : {}
-    };
     const activity = activityLines(store);
     queueActivity = {
       header: "\u2014 activity \u2014",
       lines: activity.length ? activity : ["(no activity yet)"]
     };
+    const lines = completed.length ? completed : ["(nothing completed yet)"];
+    const historyTotal = lines.length + 1 + queueActivity.lines.length;
+    const historyLines = finite ? Math.max(0, maxBodyLines - startRow - 1) : historyTotal;
+    queueCompleted = {
+      startRow,
+      pendingLines,
+      scroll: Math.max(0, Math.min(ui.historyScroll ?? 0, historyTotal - historyLines)),
+      header: "\u2014 completed \u2014",
+      lines,
+      ...hidden > 0 ? { overflow: `\u2026 ${hidden} more pending` } : {}
+    };
+  } else {
+    const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
+    scroll = Math.max(0, Math.min(ui.scroll ?? 0, maxScroll));
   }
-  const scrollable = ui.tab !== QUEUE_TAB;
-  const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
-  const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
-  const scroll = scrollable ? Math.max(0, Math.min(ui.scroll ?? 0, maxScroll)) : 0;
   const searchActive = ui.tab === KNOWLEDGE_TAB;
-  return {
+  const state = {
     tabs,
     rows,
     emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
-    footer: (
-      // Fix round (Opus review of 71c1f41): a Tasks-tab board_edit notice
-      // (lost-update refusal, vanished item, failed HEAD resolve) must be
-      // VISIBLE, not just carried in ui.notice — render.ts prints
-      // state.footer unconditionally, so this is the one line available to
-      // this scope's two files without touching render.ts. Mirrors the
-      // System tab's own '⚠ ' convention (buildSystemTab's banner).
-      ui.tab === TASKS_TAB && ui.notice ? `\u26A0 ${ui.notice}` : ui.tab === AGENTS_TAB ? `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 q quit` : `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears \xB7 ctrl-f article state" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
-    ),
+    footer: footerFor(ui, visibleTabs(agents).length, width),
+    // a board_edit refusal, a failed selection write or a degraded store read
+    // (ui.notice) is drawn on its own row in the warning colour
+    notice: noticeFor(ui, width),
     searchLine: searchActive ? `search: ${ui.searchQuery}${ui.stateFilter ? `  state: ${ui.stateFilter}` : ""}` : void 0,
     queueCompleted,
     queueActivity,
@@ -50471,9 +50706,15 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
     bodyTop: bodyTop2,
     scroll
   };
+  return { ui, state, nodes, cursor };
+}
+function bodyWindow(state, maxBodyLines) {
+  const qc = state.queueCompleted;
+  return qc ? Math.min(maxBodyLines, qc.pendingLines ?? qc.startRow) : maxBodyLines;
 }
 function screenLineToRow(state, line1, maxBodyLines = Infinity) {
   const scroll = state.scroll ?? 0;
+  maxBodyLines = bodyWindow(state, maxBodyLines);
   const abs = line1 - 1 - state.bodyTop + scroll;
   if (abs < scroll || abs >= scroll + maxBodyLines)
     return -1;
@@ -50484,22 +50725,43 @@ function screenLineToRow(state, line1, maxBodyLines = Infinity) {
   }
   return -1;
 }
-function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHeadSha = defaultResolveHeadSha) {
+function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHeadSha = defaultResolveHeadSha, frame) {
+  const drawn = frame !== void 0 && frame.ui === ui ? frame : void 0;
+  const nodes = drawn ? drawn.nodes : nodesFor(store, ui, knowledge);
+  const cursor = drawn ? drawn.cursor : ui.tab === SYSTEM_TAB ? ui.cursor : resolveCursor(ui, nodes);
+  const base2 = cursor === ui.cursor ? ui : { ...ui, cursor };
+  const out = reduceNodes(store, base2, event2, viewport2, knowledge, roster, resolveHeadSha, nodes, drawn);
+  if (out.ui === base2)
+    return { ui, effects: out.effects };
+  return { ui: holdSelection(base2, out.ui, nodes), effects: out.effects };
+}
+function holdSelection(prev, next, nodes) {
+  const fresh = next.tab !== prev.tab || next.searchQuery !== prev.searchQuery || next.stateFilter !== prev.stateFilter;
+  const cardTab = next.tab !== SYSTEM_TAB && next.tab !== AGENTS_TAB;
+  const node = !fresh && cardTab && nodes.length ? nodes[Math.min(next.cursor, nodes.length - 1)] : void 0;
+  const selectedId = node ? nodeId(node) : void 0;
+  if (selectedId === next.selectedId)
+    return next;
+  if (selectedId !== void 0)
+    return { ...next, selectedId };
+  const { selectedId: _dropped, ...rest } = next;
+  return rest;
+}
+function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHeadSha, nodes, drawn) {
   const maxBodyLines = viewport2.maxBodyLines ?? Infinity;
-  const nodes = nodesFor(store, ui, knowledge);
   const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects = [];
-  const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
+  const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: void 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
   const reachable = visibleTabs(viewport2.agents);
   const stepTab = (dir) => reachable[(reachable.indexOf(ui.tab) + dir + reachable.length) % reachable.length] ?? reachable[0];
-  const scrollable = ui.tab !== QUEUE_TAB;
-  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster, viewport2.agents);
+  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster, viewport2.agents, viewport2.height);
   const revealAt = (cursor) => {
-    if (!scrollable || !Number.isFinite(maxBodyLines))
+    if (!Number.isFinite(maxBodyLines))
       return { ...ui, cursor };
-    const st = buildSelf({ ...ui, cursor });
+    const st = drawn && ui.tab !== SYSTEM_TAB ? drawn.state : buildSelf({ ...ui, cursor });
     const total = st.rows.length ? st.rows[st.rows.length - 1].screenRow + st.rows[st.rows.length - 1].lines.length : 0;
-    const max = Math.max(0, total - maxBodyLines);
+    const window2 = bodyWindow(st, maxBodyLines);
+    const max = Math.max(0, total - window2);
     let scroll = ui.scroll ?? 0;
     const bannerOffset = ui.tab === SYSTEM_TAB ? st.rows.filter((r) => r.type === "system-banner").length : 0;
     const row = st.rows[cursor + bannerOffset];
@@ -50508,8 +50770,8 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
       const bottom = row.screenRow + row.lines.length;
       if (top < scroll)
         scroll = top;
-      else if (bottom > scroll + maxBodyLines)
-        scroll = Math.min(top, bottom - maxBodyLines);
+      else if (bottom > scroll + window2)
+        scroll = Math.min(top, bottom - window2);
     }
     return { ...ui, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
   };
@@ -50604,7 +50866,7 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
             return { ui: revealAt(sysClamp(ui.cursor - 1)), effects };
           case "DOWN": {
             if (sel) {
-              const n = sel.stage === "model" ? roster.catalog.entries.length : effortOptions(sel.key).length;
+              const n = sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key]).length : effortOptions(sel.key).length;
               return { ui: { ...ui, selector: { ...sel, highlight: Math.min(Math.max(0, n - 1), sel.highlight + 1) } }, effects };
             }
             if (editing)
@@ -50659,7 +50921,21 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
               return { ui: { ...ui, cursor, selector: { key, stage: "model", highlight: 0 }, notice: void 0 }, effects };
             }
             if (sel.stage === "model") {
-              const entry = roster.catalog.entries[sel.highlight];
+              const keyConfig = roster.configModels[sel.key];
+              const option = modelOptions(roster.catalog.entries, keyConfig)[sel.highlight];
+              if (option && keyConfig && (option.kind === "clear" || isOpenCodeOnlyEntry(option.entry))) {
+                const agents = roster.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
+                const to = option.kind === "clear" ? void 0 : `${option.entry.vendor}/${option.entry.id}`;
+                if (to !== void 0 && !OPENCODE_MODEL_REF_RE.test(to)) {
+                  return { ui: { ...ui, selector: void 0, notice: `OpenCode model refused: '${to}' is not a <provider>/<model> id` }, effects };
+                }
+                if (to !== void 0 && agents.length === 0) {
+                  return { ui: { ...ui, selector: void 0, notice: `OpenCode model refused: '${sel.key}' has no agent, so an OpenCode model would govern nothing` }, effects };
+                }
+                effects.push({ type: "opencode_model", key: sel.key, from: keyConfig.opencode_model, to, model: keyConfig.model, effort: keyConfig.effort, agents });
+                return { ui: { ...ui, selector: void 0, notice: void 0 }, effects };
+              }
+              const entry = option?.kind === "entry" ? option.entry : void 0;
               return { ui: { ...ui, selector: { key: sel.key, stage: "effort", highlight: 0, model: entry ? entry.id : "" } }, effects };
             }
             const efforts = effortOptions(sel.key);
@@ -50739,7 +51015,7 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
         return { ui, effects };
       }
       if (ch === " " && ui.tab === SYSTEM_TAB) {
-        return reduce(store, ui, { kind: "key", name: "ENTER" }, viewport2, knowledge, roster, resolveHeadSha);
+        return reduceNodes(store, ui, { kind: "key", name: "ENTER" }, viewport2, knowledge, roster, resolveHeadSha, nodes, drawn);
       }
       if (ch === " ")
         return { ui: activate(clamp(ui.cursor)), effects };
@@ -50747,8 +51023,10 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
         const node = nodes[clamp(ui.cursor)];
         if (node && node.kind === "card" && node.card.type !== "objective") {
           const rec = store.get(node.card.id);
-          const version = rec && typeof rec.version === "number" ? rec.version : 0;
-          return { ui: { ...ui, boardEdit: { id: node.card.id, text: node.card.body, version }, notice: void 0 }, effects };
+          if (!rec || typeof rec.text !== "string")
+            return { ui: { ...ui, notice: "board item no longer exists \u2014 nothing to edit" }, effects };
+          const version = typeof rec.version === "number" ? rec.version : 0;
+          return { ui: { ...ui, boardEdit: { id: node.card.id, text: rec.text, version }, notice: void 0 }, effects };
         }
         return { ui, effects };
       }
@@ -50764,14 +51042,25 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
         return { ui, effects };
       return { ui: switchTab(event2.index), effects };
     case "wheel": {
-      if (!scrollable)
-        return { ui: { ...ui, cursor: clamp(ui.cursor + (event2.dy > 0 ? 1 : -1)) }, effects };
-      const desired = (ui.scroll ?? 0) + (event2.dy > 0 ? 3 : -3);
-      const st = buildSelf({ ...ui, scroll: desired });
-      return { ui: { ...ui, scroll: st.scroll }, effects };
+      const step = event2.dy > 0 ? 3 : -3;
+      const st = drawn && ui.tab !== SYSTEM_TAB ? drawn.state : buildSelf(ui);
+      const qc = st.queueCompleted;
+      const off = qc && event2.y !== void 0 ? event2.y - 1 - st.bodyTop : void 0;
+      if (off !== void 0 && (off < 0 || off >= maxBodyLines))
+        return { ui, effects };
+      if (qc && off !== void 0 && off >= qc.startRow) {
+        const historyTotal = qc.lines.length + (st.queueActivity ? 1 + st.queueActivity.lines.length : 0);
+        const historyLines = Math.max(0, maxBodyLines - qc.startRow - 1);
+        const max2 = Number.isFinite(maxBodyLines) ? Math.max(0, historyTotal - historyLines) : 0;
+        return { ui: { ...ui, historyScroll: Math.max(0, Math.min((ui.historyScroll ?? 0) + step, max2)) }, effects };
+      }
+      const rows = st.rows;
+      const total = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
+      const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - bodyWindow(st, maxBodyLines)) : 0;
+      return { ui: { ...ui, scroll: Math.max(0, Math.min((ui.scroll ?? 0) + step, max)) }, effects };
     }
     case "click": {
-      const state = buildDashboardState(store, ui, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster, viewport2.agents);
+      const state = drawn ? drawn.state : buildSelf(ui);
       if (event2.y === state.bodyTop - 1) {
         let x = 1;
         for (let i = 0; i < state.tabs.length; i++) {
@@ -50788,7 +51077,7 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
       return { ui, effects };
     }
     case "rightclick":
-      return { ui: { ...ui, expanded: [], scroll: 0 }, effects };
+      return { ui: { ...ui, expanded: [], scroll: 0, historyScroll: void 0 }, effects };
   }
   return { ui, effects };
 }
@@ -50870,9 +51159,37 @@ function applyHandoffToggle(e, onError, path) {
   }
 }
 
+// packages/tui/dist/data-version.js
+import { existsSync as existsSync3 } from "node:fs";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+function openDataVersionProbe(paths) {
+  const conns = [];
+  try {
+    for (const path of paths) {
+      if (!existsSync3(path))
+        continue;
+      const db = new DatabaseSync3(path, { readOnly: true });
+      conns.push({ db, stmt: db.prepare("PRAGMA data_version") });
+    }
+  } catch (err) {
+    for (const c of conns)
+      c.db.close();
+    throw err;
+  }
+  return {
+    read() {
+      return conns.map((c) => String(c.stmt.get().data_version)).join(":");
+    },
+    close() {
+      for (const c of conns)
+        c.db.close();
+    }
+  };
+}
+
 // scripts/lib/agent-distribution.mjs
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync5, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync3, mkdirSync as mkdirSync3, statSync as statSync3, lstatSync as lstatSync3, unlinkSync, renameSync, linkSync } from "node:fs";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync4, mkdirSync as mkdirSync3, statSync as statSync3, lstatSync as lstatSync3, unlinkSync, renameSync, linkSync } from "node:fs";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -51087,7 +51404,7 @@ function userScopeCodexServer({ env = process.env, home = homedir4(), readFile =
 
 // scripts/lib/handoff-projection.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync4 } from "node:fs";
+import { existsSync as existsSync5 } from "node:fs";
 import { join as join11, resolve as resolve5 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
@@ -51289,10 +51606,10 @@ function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
     }
     return { stdout: r.stdout || "" };
   };
-  if (!existsSync4(root)) return { files: [], unknown: null };
+  if (!existsSync5(root)) return { files: [], unknown: null };
   const inside = run(["rev-parse", "--is-inside-work-tree"]);
   if (inside.failed) {
-    if (inside.notARepo && !existsSync4(join11(root, ".git"))) return { files: [], unknown: null };
+    if (inside.notARepo && !existsSync5(join11(root, ".git"))) return { files: [], unknown: null };
     return { files: [], unknown: inside.failed };
   }
   if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
@@ -51341,12 +51658,13 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync as readdirSync4, realpathSync as realpathSync4, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
+import { existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync as readdirSync4, realpathSync as realpathSync4, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname4, isAbsolute, join as join13, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync5, readFileSync as readFileSync8, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync8, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { join as join12, resolve as resolve6, sep as sep2 } from "node:path";
 var RESOLVER_IMPORTS = [
@@ -51492,7 +51810,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync5, readFileSync8, readdirSync3, join12, homedir5);
+)(existsSync6, readFileSync8, readdirSync3, join12, homedir5);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -51589,13 +51907,20 @@ function storeWriteTools(pluginRoot = sterlingRootFrom()) {
   return tools;
 }
 function opencodeModelRef(model) {
-  if (typeof model !== "string" || !model) throw new TypeError(`opencodeModelRef: model must be a non-empty string, got ${JSON.stringify(model)}`);
+  if (typeof model !== "string" || !CLAUDE_MODEL_ID_RE.test(model)) throw new TypeError(`opencodeModelRef: model must be a Claude model id, got ${JSON.stringify(model)}`);
   return `anthropic/${model}`;
+}
+function opencodeModelFor({ model, opencodeModel } = {}) {
+  if (opencodeModel === void 0) return opencodeModelRef(model);
+  if (typeof opencodeModel !== "string" || !OPENCODE_MODEL_REF_RE.test(opencodeModel)) {
+    throw new TypeError(`opencodeModelFor: opencode_model must be <provider>/<model>, got ${JSON.stringify(opencodeModel)}`);
+  }
+  return opencodeModel;
 }
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname4(fileURLToPath(moduleUrl));
   for (let dir = start; ; dir = dirname4(dir)) {
-    if (existsSync6(join13(dir, "agent-templates", "registry.json"))) return dir;
+    if (existsSync7(join13(dir, "agent-templates", "registry.json"))) return dir;
     if (dirname4(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
@@ -51626,6 +51951,18 @@ function frontmatterModel(content) {
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
 function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
+  const { rows, writes } = stageFullAgents({ projectDir, pluginRoot, tracked, models });
+  writeFullAgentFiles(writes);
+  return rows;
+}
+function stageFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
+  const planned = planFullAgents({ projectDir, pluginRoot, tracked, models });
+  return {
+    rows: planned.map(({ path, content, previous, ...row }) => row),
+    writes: planned.filter((r) => r.content !== void 0).map(({ path, content, previous }) => ({ path, content, previous }))
+  };
+}
+function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   const registry = loadRegistry(join13(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const rows = [];
@@ -51638,7 +51975,8 @@ function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const disk = existsSync6(path) ? normalize3(readFileSync9(path, "utf8")) : null;
+    const raw = existsSync7(path) ? readFileSync9(path, "utf8") : null;
+    const disk = raw === null ? null : normalize3(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
       if (!m || m[1] !== name) {
@@ -51658,28 +51996,73 @@ function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       rows.push({ item: rel, status: "matches" });
       continue;
     }
-    mkdirSync5(dirname4(path), { recursive: true });
-    writeFileSync3(path, agent.content);
-    rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
+    rows.push({ item: rel, status: disk === null ? "created" : "refreshed", path, content: agent.content, previous: raw });
   }
   return rows;
 }
-function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
-  if (!existsSync6(join13(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
-  const ref = opencodeModelRef(model);
+function swapFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
+  if (!existsSync7(join13(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
   return { rows: ensureFullAgents({ projectDir, pluginRoot, tracked, models }) };
 }
+function stageFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
+  if (!existsSync7(join13(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  const ref = opencodeModelFor({ model, opencodeModel });
+  const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
+  const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
+  const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
+  return stageFullAgents({ projectDir, pluginRoot, tracked, models });
+}
+function writeFileAtomic(path, content, { writeFile = writeFileSync3, rename = renameSync2 } = {}) {
+  const tmp = `${path}.tmp-${randomUUID3()}`;
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync2(tmp, { force: true });
+    throw err;
+  }
+}
+function writeFullAgentFiles(writes, fs = {}) {
+  const done = [];
+  try {
+    for (const w of writes) {
+      mkdirSync5(dirname4(w.path), { recursive: true });
+      writeFileAtomic(w.path, w.content, fs);
+      done.push(w);
+    }
+  } catch (err) {
+    try {
+      restoreFullAgentFiles(done, fs);
+    } catch (restoreErr) {
+      throw new Error(`${err.message}; rollback: ${restoreErr.message}`, { cause: err });
+    }
+    throw err;
+  }
+}
+function restoreFullAgentFiles(writes, fs = {}) {
+  const failed = [];
+  for (const w of writes) {
+    try {
+      if (w.previous === null) rmSync2(w.path, { force: true });
+      else writeFileAtomic(w.path, w.previous, fs);
+    } catch (err) {
+      failed.push(`${fwd2(w.path)}: ${err.message}`);
+    }
+  }
+  if (failed.length) throw new Error(`could not restore ${failed.join("; ")}`);
+}
 
 // scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync7, readFileSync as readFileSync10 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync10 } from "node:fs";
 import { join as join14 } from "node:path";
 var CONFIG_REL3 = join14(".sterling", "config.json");
 var STORE_DB_REL = join14(".sterling", "sterling.db");
 function storeBackend(root) {
-  const dbExists = () => existsSync7(join14(root, STORE_DB_REL));
+  const dbExists = () => existsSync8(join14(root, STORE_DB_REL));
   let text;
   try {
     text = readFileSync10(join14(root, CONFIG_REL3), "utf8");
@@ -51697,10 +52080,10 @@ function storeBackend(root) {
 }
 
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync11, renameSync as renameSync2, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync11, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { hostname } from "node:os";
 import { join as join15 } from "node:path";
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 function selectionFilePath(root, host = hostname()) {
   const safeHost = String(host).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
   return join15(root, ".sterling", "transient", `selection.${safeHost}.json`);
@@ -51708,12 +52091,13 @@ function selectionFilePath(root, host = hostname()) {
 function writeSelectionFile(root, type, recordId, at) {
   const path = selectionFilePath(root);
   mkdirSync6(join15(root, ".sterling", "transient"), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${randomUUID3()}`;
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID4()}`;
   writeFileSync4(tmp, JSON.stringify({ type, record_id: recordId, at }));
-  renameSync2(tmp, path);
+  renameSync3(tmp, path);
 }
 
 // packages/tui/dist/controller.js
+var DASHBOARD_BUSY_TIMEOUT_MS = 250;
 function openDashboard(storePath2, options = {}) {
   const disabled = options.disabledEffects ?? {};
   const configPath2 = join16(dirname5(storePath2), "config.json");
@@ -51745,8 +52129,131 @@ function openDashboard(storePath2, options = {}) {
   }
   const stores = routed ? openRoutedStores(projectRoot, { mount: true }).stores : new MountedStores(storePath2, mounts, { skipMissing: true });
   const store = stores.project;
+  let writeStore;
+  try {
+    writeStore = routed ? store : new SterlingStore(storePath2, { busyTimeoutMs: DASHBOARD_BUSY_TIMEOUT_MS });
+  } catch (err) {
+    stores.close();
+    throw err;
+  }
   const projectName = basename2(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
   let ui = initialUi;
+  let probe;
+  let changeDetection = "data_version";
+  let degradeSaid = false;
+  function degrade(reason) {
+    changeDetection = `degraded: ${reason}`;
+    if (degradeSaid)
+      return;
+    degradeSaid = true;
+    ui = { ...ui, notice: `change detection degraded: ${reason}; the dashboard rebuilds on every redraw` };
+  }
+  if (routed)
+    changeDetection = "none: Postgres storage has no data_version";
+  else {
+    try {
+      probe = (options.dataVersionProbe ?? openDataVersionProbe)([storePath2, ...mounts.map((m) => m.dbPath)]);
+    } catch (err) {
+      degrade(`data_version probe failed to open \u2014 ${err.message}`);
+    }
+  }
+  let frame;
+  let builds = 0;
+  const vpKey = (vp) => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null]);
+  const today = () => (/* @__PURE__ */ new Date()).toDateString();
+  function currentFrame(vp) {
+    let dataVersion;
+    if (probe) {
+      try {
+        dataVersion = probe.read();
+      } catch (err) {
+        degrade(`data_version read failed \u2014 ${err.message}`);
+      }
+    }
+    const key = vpKey(vp);
+    const day = today();
+    if (frame && dataVersion !== void 0 && frame.dataVersion === dataVersion && frame.ui === ui && frame.roster === roster && frame.vp === key && frame.day === day)
+      return frame.built;
+    builds++;
+    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height);
+    frame = { vp: key, day, ui, roster, dataVersion, built };
+    return built;
+  }
+  let storeCalls = 0;
+  const countCalls = (target) => {
+    const proto = Object.getPrototypeOf(target);
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      const fn = Object.getOwnPropertyDescriptor(proto, name)?.value;
+      if (name === "constructor" || typeof fn !== "function")
+        continue;
+      Object.defineProperty(target, name, {
+        configurable: true,
+        writable: true,
+        value: (...args2) => {
+          storeCalls++;
+          return fn.apply(target, args2);
+        }
+      });
+    }
+  };
+  if (options.profile) {
+    countCalls(store);
+    if (writeStore !== store)
+      countCalls(writeStore);
+  }
+  let pending = [];
+  let retryNotice;
+  const isBusy = (err) => {
+    const code = err?.errcode;
+    return code === 5 || code === 6 || /database is (locked|busy)|SQLITE_BUSY|SQLITE_LOCKED/i.test(err?.message ?? "");
+  };
+  function flush() {
+    if (!pending.length)
+      return false;
+    const batch = pending;
+    pending = [];
+    let failed = false;
+    for (const e of batch) {
+      try {
+        if (e.type === "select" && routed)
+          writeSelectionFile(projectRoot, e.recordType, e.id, (/* @__PURE__ */ new Date()).toISOString());
+        else
+          runEffects(writeStore, [e]);
+      } catch (err) {
+        failed = true;
+        const msg = err.message;
+        if (isBusy(err) && options.deferWrites) {
+          pending.push(e);
+          retryNotice = `${e.type === "select" ? "selection" : "board edit"} not saved yet: the store is busy (${msg}); retrying`;
+          ui = { ...ui, notice: retryNotice };
+        } else {
+          ui = { ...ui, notice: e.type === "select" ? `selection not handed to the next prompt \u2014 ${msg}` : `board edit not saved \u2014 ${msg}` };
+        }
+      }
+    }
+    if (!failed && retryNotice !== void 0) {
+      if (ui.notice === retryNotice) {
+        const { notice: _saved, ...rest } = ui;
+        ui = rest;
+      }
+      retryNotice = void 0;
+    }
+    return failed;
+  }
+  let quitArmed = false;
+  function requestQuit() {
+    if (quitArmed)
+      return true;
+    const failed = flush();
+    if (!failed && !pending.length)
+      return true;
+    quitArmed = true;
+    const notice = `${ui.notice ?? "writes not saved"} \u2014 press q again to quit and discard them`;
+    ui = { ...ui, notice };
+    if (pending.length)
+      retryNotice = notice;
+    return false;
+  }
   let roster;
   function readInstalledModelEffort(name) {
     try {
@@ -51821,7 +52328,7 @@ function openDashboard(storePath2, options = {}) {
     const mode = readRawMode();
     const handoff = readHandoff();
     const codexWired = probeCodexWired();
-    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync8(join16(agentsDir, `${name}.md`))).map((name) => {
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync9(join16(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
       return { name, installedModel: v.model, installedEffort: v.effort };
     });
@@ -51865,11 +52372,13 @@ function openDashboard(storePath2, options = {}) {
     try {
       const raw = JSON.parse(readFileSync12(configPath2, "utf8"));
       raw.models = raw.models ?? {};
-      raw.models[e.key] = { model: e.to.model, effort: e.to.effort };
+      const prev = raw.models[e.key] ?? {};
+      raw.models[e.key] = { ...prev, model: e.to.model, effort: e.to.effort };
       writeFileSync5(configPath2, JSON.stringify(raw, null, 2) + "\n");
+      const opencodeModel = typeof prev.opencode_model === "string" ? prev.opencode_model : void 0;
       for (const name of e.agents) {
         const p = join16(agentsDir, `${name}.md`);
-        if (!existsSync8(p))
+        if (!existsSync9(p))
           continue;
         const content = readFileSync12(p, "utf8");
         const hdr = parseInstalledHeader(content);
@@ -51881,7 +52390,7 @@ function openDashboard(storePath2, options = {}) {
         }));
       }
       try {
-        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model });
+        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model, opencodeModel });
         const refused = (oc.rows ?? []).filter((r) => r.status === "refused");
         if (refused.length)
           ui = { ...ui, notice: `model swap for '${e.key}': OpenCode agent file(s) not updated \u2014 ${refused.map((r) => r.detail).join("; ")}` };
@@ -51889,7 +52398,7 @@ function openDashboard(storePath2, options = {}) {
         ui = { ...ui, notice: `model swap for '${e.key}': config.models and the Claude agents were updated, but the OpenCode agent re-render failed \u2014 ${ocErr.message}` };
       }
       store.create({
-        id: randomUUID4(),
+        id: randomUUID5(),
         type: "decision",
         created_at: nowISO,
         updated_at: nowISO,
@@ -51903,14 +52412,100 @@ function openDashboard(storePath2, options = {}) {
         statement: `config.models['${e.key}'] set to ${e.to.model} / ${e.to.effort} (was ${e.from.model} / ${e.from.effort}); ${e.agents.length} installed agent file(s) re-stamped via the System tab.`,
         rationale: "Model/effort pin changed from the TUI System tab (config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL\u2194Windows machine boundary, d53dc92c).",
         alternatives_rejected: []
-      }, { operation_id: randomUUID4() });
+      }, { operation_id: randomUUID5() });
     } catch (err) {
       ui = { ...ui, notice: `model swap for '${e.key}' failed partway \u2014 ${err.message}` };
     }
   }
+  function applyOpenCodeModel(e) {
+    const nowISO = (/* @__PURE__ */ new Date()).toISOString();
+    const fail = (msg) => {
+      ui = { ...ui, notice: `OpenCode model for '${e.key}' not changed \u2014 ${msg}; config.json and the OpenCode agents are as they were` };
+    };
+    let configBefore;
+    let configAfter;
+    let claudeModel;
+    try {
+      if (e.to !== void 0 && !OPENCODE_MODEL_REF_RE.test(e.to))
+        throw new Error(`'${e.to}' is not a <provider>/<model> id`);
+      configBefore = readFileSync12(configPath2, "utf8");
+      const raw = JSON.parse(configBefore);
+      raw.models = raw.models ?? {};
+      const { opencode_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
+      raw.models[e.key] = e.to === void 0 ? rest : { ...rest, opencode_model: e.to };
+      configAfter = JSON.stringify(raw, null, 2) + "\n";
+      claudeModel = typeof rest.model === "string" ? rest.model : e.model;
+    } catch (err) {
+      fail(err.message);
+      return;
+    }
+    let writes;
+    try {
+      const staged = stageFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: claudeModel, opencodeModel: e.to });
+      const refused = (staged.rows ?? []).filter((r) => r.status === "refused");
+      if (refused.length) {
+        fail(`OpenCode agent file(s) refused: ${refused.map((r) => r.detail).join("; ")}`);
+        return;
+      }
+      writes = staged.writes ?? [];
+    } catch (err) {
+      fail(`the OpenCode agent render failed: ${err.message}`);
+      return;
+    }
+    try {
+      writeFullAgentFiles(writes);
+    } catch (err) {
+      fail(`writing the OpenCode agents failed: ${err.message}`);
+      return;
+    }
+    try {
+      writeFileAtomic(configPath2, configAfter, options.configWriteFs);
+    } catch (err) {
+      const rollback = [];
+      try {
+        writeFileAtomic(configPath2, configBefore, options.configWriteFs);
+      } catch (restoreErr) {
+        rollback.push(`config.json not restored: ${restoreErr.message}`);
+      }
+      try {
+        restoreFullAgentFiles(writes);
+      } catch (restoreErr) {
+        rollback.push(`OpenCode agents not restored: ${restoreErr.message}`);
+      }
+      if (rollback.length) {
+        ui = { ...ui, notice: `OpenCode model for '${e.key}': writing config.json failed (${err.message}) and the rollback failed \u2014 ${rollback.join("; ")}` };
+        return;
+      }
+      fail(`writing config.json failed: ${err.message}`);
+      return;
+    }
+    const shown = (v) => v ?? `anthropic/${claudeModel}`;
+    try {
+      store.create({
+        id: randomUUID5(),
+        type: "decision",
+        created_at: nowISO,
+        updated_at: nowISO,
+        author: "conductor",
+        status: "active",
+        superseded_by: null,
+        links: [],
+        scope: "project",
+        stack_tags: [],
+        title: `OpenCode model: ${e.key} ${shown(e.from)}\u2192${shown(e.to)} (System tab)`,
+        statement: `config.models['${e.key}'].opencode_model ${e.to === void 0 ? "cleared" : `set to ${e.to}`} (was ${e.from ?? "unset"}); the OpenCode agents for this role now run ${shown(e.to)}, and Claude Code keeps ${claudeModel}.`,
+        rationale: "OpenCode model override changed from the TUI System tab (decision opencode-only-model-override-per-role-for-openai-picks: the Claude model stays for Claude Code, and only the OpenCode agent files are re-rendered).",
+        alternatives_rejected: []
+      }, { operation_id: randomUUID5() });
+    } catch (err) {
+      ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}, but recording the decision failed \u2014 ${err.message}` };
+      return;
+    }
+    ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}; Claude Code keeps ${claudeModel}.` };
+  }
   async function applyEffects(all) {
     const effects = all.filter((e) => {
-      if (e.type !== "model_swap" && e.type !== "select")
+      if (e.type !== "model_swap" && e.type !== "opencode_model" && e.type !== "select")
         return true;
       const off = disabled[e.type];
       if (off === void 0)
@@ -51922,6 +52517,9 @@ function openDashboard(storePath2, options = {}) {
     const swaps = effects.filter((e) => e.type === "model_swap");
     for (const e of swaps)
       await applySwap(e);
+    const overrides = effects.filter((e) => e.type === "opencode_model");
+    for (const e of overrides)
+      applyOpenCodeModel(e);
     const notice = (msg) => {
       ui = { ...ui, notice: msg };
     };
@@ -51968,134 +52566,288 @@ function openDashboard(storePath2, options = {}) {
     } else if (toggleWrote) {
       notice("config.json updated \u2014 hooks pick this up on their next invocation; restart the session to reload the MCP server.");
     }
-    if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length)
+    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length)
       roster = loadRoster();
-    if (routed) {
-      for (const e of effects) {
-        if (e.type !== "select")
-          continue;
-        try {
-          writeSelectionFile(projectRoot, e.recordType, e.id, (/* @__PURE__ */ new Date()).toISOString());
-        } catch (err) {
-          notice(`selection not handed to the next prompt \u2014 ${err.message}`);
-        }
-      }
-      return runEffects(store, effects.filter((e) => e.type !== "select"));
+    for (const e of effects) {
+      if (e.type === "select")
+        pending = [...pending.filter((p) => p.type !== "select"), e];
+      else if (e.type === "board_edit")
+        pending.push(e);
     }
-    return runEffects(store, effects);
+    if (!options.deferWrites)
+      flush();
+    return effects.some((e) => e.type === "quit");
   }
   return {
     stores,
     store,
+    writeStore,
     projectName,
     configPath: configPath2,
     ui: () => ui,
     roster: () => roster,
-    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents),
+    state: (vp) => currentFrame(vp).state,
     async handle(event2, vp) {
       const prevTab = ui.tab;
-      const result = reduce(store, ui, event2, vp, stores, roster, resolveProjectHeadSha);
+      const drawn = frame && frame.ui === ui && frame.roster === roster && frame.vp === vpKey(vp) ? frame.built : void 0;
+      const result = reduce(store, ui, event2, vp, stores, roster, resolveProjectHeadSha, drawn);
       ui = result.ui;
+      if (!result.effects.some((e) => e.type === "quit"))
+        quitArmed = false;
       if (ui.tab === SYSTEM_TAB && (prevTab !== SYSTEM_TAB || !roster))
         roster = loadRoster();
       return applyEffects(result.effects);
     },
     applyEffects,
-    close: () => stores.close()
+    flush,
+    pending: () => pending.length,
+    requestQuit,
+    stats: () => ({ builds, storeCalls, changeDetection }),
+    close: () => {
+      try {
+        probe?.close();
+        if (writeStore !== store)
+          writeStore.close();
+      } finally {
+        stores.close();
+      }
+    }
   };
 }
 
+// packages/tui/dist/theme.js
+var THEME_LEVELS = ["truecolor", "256", "16", "plain"];
+var THEME_ENV = "STERLING_TUI_COLOR";
+var PALETTE = {
+  /** xterm 17: the colour the ScreenBuffer paints as background, so the overlay meets the body without a seam */
+  night: "#00005f",
+  text: "#f2ecff",
+  pink: "#ff2d95",
+  cyan: "#00e5ff",
+  muted: "#8787af",
+  /** xterm 215, the warning amber */
+  amber: "#ffaf5f"
+};
+var XTERM = {
+  /** #00005f; the 256 palette has no darker violet, and the cube's violets (53, 54, 55) are too bright for a page */
+  background: 17,
+  /** #d7d7ff */
+  text: 189,
+  /** #8787af */
+  muted: 103,
+  /** #ff5faf */
+  pink: 205,
+  /** #00ffff */
+  cyan: 51,
+  /** #ffaf5f */
+  amber: 215,
+  /** #ff5f5f */
+  error: 203,
+  /** #00ffaf */
+  success: 49,
+  /** #5f00af, the selection bar */
+  selection: 55,
+  /** #ffffff */
+  bright: 231
+};
+var NEON_EDGE = {
+  running: PALETTE.cyan,
+  resumable: PALETTE.pink,
+  /** amber, like the quiet status line's yellow: unknown, neither running nor done */
+  quiet: PALETTE.amber,
+  done: PALETTE.muted
+};
+function detectThemeLevel(env, support = {}) {
+  const forced = env[THEME_ENV];
+  if (forced !== void 0 && forced !== "") {
+    if (THEME_LEVELS.includes(forced))
+      return forced;
+    throw new Error(`${THEME_ENV}=${forced} is not one of ${THEME_LEVELS.join(", ")}`);
+  }
+  if (env.NO_COLOR !== void 0 && env.NO_COLOR !== "")
+    return "plain";
+  if (/^(truecolor|24bits?)$/.test(env.COLORTERM ?? "") || env.TERM_PROGRAM === "tmux" || support.trueColor === true)
+    return "truecolor";
+  if (support["256colors"] === true || /256color/.test(env.TERM ?? ""))
+    return "256";
+  return "16";
+}
+var PLAIN_THEME = {
+  level: "plain",
+  fill: {},
+  name: { bold: true },
+  tab: {},
+  tabActive: { inverse: true },
+  search: { dim: true },
+  text: {},
+  muted: { dim: true },
+  heading: { dim: true },
+  title: (selected, expanded) => ({ inverse: selected, bold: expanded }),
+  warn: (attr) => attr,
+  map: (attr) => attr,
+  fullWidthSelection: false,
+  bannerOverlay: false,
+  sceneArt: {},
+  sceneHorizon: {},
+  sceneGrid: {},
+  blankSgr: ""
+};
+function xtermTheme(level) {
+  const bg = XTERM.background;
+  const on = (attr) => ({ bgColor: bg, ...attr });
+  const muted = on({ color: XTERM.muted });
+  return {
+    level,
+    fill: { bgColor: bg },
+    name: on({ color: XTERM.pink, bold: true }),
+    tab: muted,
+    tabActive: { color: bg, bgColor: XTERM.pink, bold: true },
+    search: on({ color: XTERM.cyan }),
+    text: on({ color: XTERM.text }),
+    muted,
+    heading: on({ color: XTERM.pink, bold: true }),
+    title: (selected, expanded) => selected ? { color: XTERM.bright, bgColor: XTERM.selection, bold: expanded } : on({ color: XTERM.text, bold: expanded }),
+    warn: (attr) => ({ ...attr, color: XTERM.amber, bold: true }),
+    map: (attr) => {
+      const color = attr.color === "green" ? XTERM.success : attr.color === "red" ? XTERM.error : attr.dim ? XTERM.muted : XTERM.text;
+      return attr.bold ? on({ color, bold: true }) : on({ color });
+    },
+    fullWidthSelection: true,
+    bannerOverlay: true,
+    sceneArt: on({ color: XTERM.bright, bold: true }),
+    sceneHorizon: on({ color: XTERM.cyan }),
+    sceneGrid: on({ color: XTERM.pink }),
+    blankSgr: `\x1B[48;5;${bg}m`
+  };
+}
+var SIXTEEN = {
+  level: "16",
+  fill: {},
+  name: { color: "magenta", bold: true },
+  tab: { dim: true },
+  tabActive: { color: "brightWhite", bgColor: "magenta", bold: true },
+  search: { color: "cyan" },
+  text: {},
+  muted: { dim: true },
+  heading: { color: "magenta", bold: true },
+  title: (selected, expanded) => selected ? { color: "brightWhite", bgColor: "magenta", bold: expanded } : { bold: expanded },
+  warn: (attr) => ({ ...attr, dim: false, color: "yellow", bold: true }),
+  map: (attr) => attr,
+  fullWidthSelection: true,
+  bannerOverlay: false,
+  sceneArt: { color: "brightWhite", bold: true },
+  sceneHorizon: { color: "cyan" },
+  sceneGrid: { color: "magenta" },
+  blankSgr: ""
+};
+var TRUECOLOR = xtermTheme("truecolor");
+var XTERM256 = xtermTheme("256");
+function themeFor(level) {
+  if (level === "plain")
+    return PLAIN_THEME;
+  if (level === "16")
+    return SIXTEEN;
+  return level === "truecolor" ? TRUECOLOR : XTERM256;
+}
+
 // packages/tui/dist/render.js
-function draw(screen2, state, opts = {}) {
-  const blockHeight = opts.block?.height ?? 0;
-  screen2.fill({ attr: {} });
-  const top = state.banner.length;
-  const bw = Math.max(1, ...state.banner.map((row) => row.length));
-  state.banner.forEach((row, by) => {
-    for (let cx = 0; cx < row.length; cx++) {
-      if (row[cx] === " ")
-        continue;
-      const t = bw <= 1 ? 0 : cx / (bw - 1);
-      screen2.put({ x: cx, y: by, attr: { color: bannerPaletteIndex(t) } }, row[cx]);
-    }
+function drawSceneText(screen2, t, rows, projectName) {
+  const { horizon } = sceneLayout(rows);
+  sceneText(screen2.width, rows, "").forEach((text, y) => {
+    if (!text)
+      return;
+    const attr = y === horizon ? t.sceneHorizon : y > horizon ? t.sceneGrid : t.sceneArt;
+    screen2.put({ x: 0, y, attr }, text);
   });
-  screen2.put({ x: 0, y: top, attr: { bold: true } }, state.projectName);
+  const label = horizonLabel(screen2.width, projectName);
+  if (label.text)
+    screen2.put({ x: label.x, y: horizon, attr: t.name }, label.text);
+}
+function draw(screen2, state, opts = {}) {
+  const t = opts.theme ?? PLAIN_THEME;
+  const blockHeight = opts.block?.height ?? 0;
+  screen2.fill({ attr: t.fill });
+  const top = state.banner.length;
+  if (top === 0)
+    screen2.put({ x: 0, y: 0, attr: t.name }, state.projectName);
+  else if (!t.bannerOverlay)
+    drawSceneText(screen2, t, top + 1, state.projectName);
   let x = 0;
   for (const tab of state.tabs) {
     const label = ` ${tab.label} `;
-    screen2.put({ x, y: top + 1, attr: tab.active ? { inverse: true } : {} }, label);
+    screen2.put({ x, y: top + 1, attr: tab.active ? t.tabActive : t.tab }, label);
     x += label.length;
   }
   if (state.searchLine) {
-    screen2.put({ x: 0, y: top + 2, attr: { dim: true } }, state.searchLine);
+    screen2.put({ x: 0, y: top + 2, attr: t.search }, state.searchLine);
   }
   const lastBodyLine = screen2.height - 3;
+  const qc = state.queueCompleted;
+  const lastRowLine = qc ? Math.min(lastBodyLine, state.bodyTop + (qc.pendingLines ?? qc.startRow) - 1) : lastBodyLine;
   let y = state.bodyTop;
   if (state.emptyMessage && y <= lastBodyLine) {
-    screen2.put({ x: 0, y, attr: { dim: true } }, state.emptyMessage);
+    screen2.put({ x: 0, y, attr: t.muted }, state.emptyMessage);
     y += 1;
   }
   let bodyIdx = 0;
   for (const row of state.rows) {
-    if (y > lastBodyLine)
+    if (y > lastRowLine)
       break;
     for (const line of row.lines) {
       if (bodyIdx++ < state.scroll)
         continue;
-      if (y > lastBodyLine)
+      if (y > lastRowLine)
         break;
-      const attr = line.kind === "title" ? { inverse: row.selected, bold: row.expanded } : line.kind === "meta" ? { dim: true } : {};
-      screen2.put({ x: 0, y, attr }, line.text);
+      const base2 = line.kind === "title" ? t.title(row.selected, row.expanded) : line.kind === "meta" ? t.muted : t.text;
+      const attr = line.text.startsWith("\u26A0") ? t.warn(base2) : base2;
+      const text = line.kind === "title" && row.selected && t.fullWidthSelection ? line.text.padEnd(screen2.width) : line.text;
+      screen2.put({ x: 0, y, attr }, text);
       y += 1;
     }
   }
-  if (state.queueCompleted) {
-    const qc = state.queueCompleted;
+  if (qc) {
     if (qc.overflow)
-      screen2.put({ x: 0, y: state.bodyTop + qc.startRow - 1, attr: { dim: true } }, qc.overflow);
+      screen2.put({ x: 0, y: state.bodyTop + qc.startRow - 1, attr: t.muted }, qc.overflow);
     let cy = state.bodyTop + qc.startRow;
     if (cy <= lastBodyLine) {
-      screen2.put({ x: 0, y: cy, attr: { dim: true } }, qc.header);
+      screen2.put({ x: 0, y: cy, attr: t.heading }, qc.header);
       cy += 1;
     }
-    for (const line of qc.lines) {
+    const history = qc.lines.map((text) => ({ text, attr: t.muted }));
+    if (state.queueActivity) {
+      history.push({ text: state.queueActivity.header, attr: t.heading });
+      for (const text of state.queueActivity.lines)
+        history.push({ text, attr: t.muted });
+    }
+    for (const line of history.slice(qc.scroll ?? 0)) {
       if (cy > lastBodyLine)
         break;
-      screen2.put({ x: 0, y: cy, attr: { dim: true } }, line);
+      screen2.put({ x: 0, y: cy, attr: line.attr }, line.text);
       cy += 1;
-    }
-    if (state.queueActivity) {
-      const qa = state.queueActivity;
-      if (cy <= lastBodyLine) {
-        screen2.put({ x: 0, y: cy, attr: { dim: true } }, qa.header);
-        cy += 1;
-      }
-      for (const line of qa.lines) {
-        if (cy > lastBodyLine)
-          break;
-        screen2.put({ x: 0, y: cy, attr: { dim: true } }, line);
-        cy += 1;
-      }
     }
   }
   if (opts.block && blockHeight > 0) {
     const top2 = state.bodyTop;
     for (const p of opts.block.puts)
-      screen2.put({ x: p.x, y: top2 + p.y, attr: p.attr }, p.text);
+      screen2.put({ x: p.x, y: top2 + p.y, attr: t.map(p.attr) }, p.text);
   }
-  const footerY = blockHeight > 0 ? screen2.height - 1 : Math.min(y + 1, screen2.height - 1);
-  screen2.put({ x: 0, y: footerY, attr: { dim: true } }, state.footer);
+  if (state.notice)
+    screen2.put({ x: 0, y: screen2.height - 2, attr: t.warn({ ...t.text, bold: true }) }, state.notice);
+  screen2.put({ x: 0, y: screen2.height - 1, attr: t.muted }, state.footer);
   screen2.draw({ delta: true });
 }
-function clearPixels(term2, prev, next) {
+function clearPixels(term2, prev, next, blankSgr = "") {
   const keep = new Set(next.map((p) => `${p.x},${p.y}`));
   let wrote = false;
   for (const key of prev.keys()) {
     if (keep.has(key))
       continue;
     const [x, y] = key.split(",").map(Number);
-    if (!wrote)
+    if (!wrote) {
       term2.styleReset();
+      if (blankSgr)
+        term2.noFormat(blankSgr);
+    }
     term2.moveTo(x + 1, y + 1);
     term2.noFormat(" ");
     wrote = true;
@@ -52105,7 +52857,7 @@ function sgr24(hex, background) {
   const n = Number.parseInt(hex.slice(1), 16);
   return `\x1B[${background ? 48 : 38};2;${n >> 16 & 255};${n >> 8 & 255};${n & 255}m`;
 }
-function paintPixels(term2, pixels, prev, trueColor2 = false) {
+function paintPixels(term2, pixels, prev, trueColor2 = false, blankSgr = "") {
   const next = /* @__PURE__ */ new Map();
   let wrote = false;
   for (const p of pixels) {
@@ -52116,6 +52868,8 @@ function paintPixels(term2, pixels, prev, trueColor2 = false) {
       continue;
     term2.styleReset();
     term2.moveTo(p.x + 1, p.y + 1);
+    if (p.bg === void 0 && blankSgr)
+      term2.noFormat(blankSgr);
     if (p.fg !== void 0) {
       if (trueColor2)
         term2.noFormat(sgr24(p.fg, false));
@@ -52171,24 +52925,24 @@ function mouseToEvent(name, data) {
     case "MOUSE_RIGHT_BUTTON_PRESSED":
       return { kind: "rightclick" };
     case "MOUSE_WHEEL_UP":
-      return { kind: "wheel", dy: -1 };
+      return { kind: "wheel", dy: -1, y: data.y };
     case "MOUSE_WHEEL_DOWN":
-      return { kind: "wheel", dy: 1 };
+      return { kind: "wheel", dy: 1, y: data.y };
     default:
       return void 0;
   }
 }
 
 // packages/tui/dist/subagents.js
-import { existsSync as existsSync11, readFileSync as readFileSync14, readdirSync as readdirSync7, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync12, readFileSync as readFileSync14, readdirSync as readdirSync7, statSync as statSync6 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { join as join18 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync7, readFileSync as readFileSync13, writeFileSync as writeFileSync6, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync9, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync5, chmodSync } from "node:fs";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync13, writeFileSync as writeFileSync6, rmSync as rmSync4, rmdirSync, renameSync as renameSync4, existsSync as existsSync10, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync5, chmodSync } from "node:fs";
 import { join as join17, resolve as resolve8, dirname as dirname6, isAbsolute as isAbsolute2 } from "node:path";
-import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
-import { randomBytes, createHash as createHash2 } from "node:crypto";
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
+import { randomBytes, createHash as createHash3 } from "node:crypto";
 function registerPath(root) {
   return join17(root, ".sterling", "transient", "dispatch-register.json");
 }
@@ -52212,7 +52966,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync9(p)) return { availability: "absent", arr: [] };
+  if (!existsSync10(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync13(p, "utf8");
@@ -52248,28 +53002,28 @@ function dispatchStateDir(root) {
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
-  return `sha256-${createHash2("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+  return `sha256-${createHash3("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync10, statSync as statSync5, readdirSync as readdirSync6 } from "node:fs";
+import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync11, statSync as statSync5, readdirSync as readdirSync6 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
   const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
-  if (existsSync10(flat)) return flat;
+  if (existsSync11(flat)) return flat;
   const wfRoot = `${sessionDir}/subagents/workflows`;
   try {
     for (const d of readdirSync6(wfRoot)) {
       const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
-      if (existsSync10(candidate)) return candidate;
+      if (existsSync11(candidate)) return candidate;
     }
   } catch {
   }
   return flat;
 }
 function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync10(path)) return null;
+  if (!existsSync11(path)) return null;
   const fd = openSync3(path, "r");
   try {
     const size = fstatSync(fd).size;
@@ -52729,14 +53483,14 @@ var pool_default = {
         skin: 1,
         clothes: 1,
         acc: "feather",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "ccdeeeeeff..",
           "..eeeggggf..",
-          "..fgAeeAgf..",
-          "..ggeeeegg..",
+          "..fgAggAgf..",
+          "..gggggggg..",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -52744,15 +53498,15 @@ var pool_default = {
           "ccdeeeeeff..",
           "..eeeggggf..",
           "..fggggggf..",
-          "..ggeeeegg..",
+          "..gggggggg..",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
         [
           ".ccceeeeeef.",
           "..ceeeggggf.",
-          "..fgAeeAgf..",
-          "..ggeeeegg..",
+          "..fgAggAgf..",
+          "..gggggggg..",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -52760,7 +53514,7 @@ var pool_default = {
           ".ccceeeeeef.",
           "..ceeeggggf.",
           "....gAggAg..",
-          "...gggeeggg.",
+          "...gggggggg.",
           ".....UggU...",
           "iiUUUUjgUUii"
         ]
@@ -52909,14 +53663,14 @@ var pool_default = {
         skin: 1,
         clothes: 1,
         acc: "earrings",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "...gnnnng...",
           "..gggggggg..",
-          "..ggAppAgg..",
-          ".FggppppggF.",
+          "..ggAggAgg..",
+          ".FggggggggF.",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -52924,15 +53678,15 @@ var pool_default = {
           "...gnnnng...",
           "..gggggggg..",
           "..gggggggg..",
-          ".FggppppggF.",
+          ".FggggggggF.",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
         [
           "....nnnnnn..",
           "..gggggggg..",
-          "..ggAppAgg..",
-          ".FggppppggF.",
+          "..ggAggAgg..",
+          ".FggggggggF.",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -52940,7 +53694,7 @@ var pool_default = {
           "....nnnnnn..",
           "...gggggggg.",
           "...ggAggAgg.",
-          "..ggggppgggg",
+          "..gggggggggg",
           ".....UggU...",
           "iiUUUUjgUUii"
         ]
@@ -53404,14 +54158,14 @@ var pool_default = {
         skin: 2,
         clothes: 2,
         acc: "earrings",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..pppppppp..",
           ".ppLLLLLLpp.",
-          ".FzLAppALzF.",
-          ".FzLppppLzF.",
+          ".FzLALLALzF.",
+          ".FzLLLLLLzF.",
           ".N..LLLL..N.",
           "NNOOOOPLOONN"
         ],
@@ -53419,15 +54173,15 @@ var pool_default = {
           "..pppppppp..",
           ".ppLLLLLLpp.",
           ".FzLLLLLLzF.",
-          ".FzLppppLzF.",
+          ".FzLLLLLLzF.",
           ".N..LLLL..N.",
           "NNOOOOPLOONN"
         ],
         [
           "...pppppppp.",
           "..ppLLLLLLpp",
-          ".FzLAppALzF.",
-          ".FzLppppLzF.",
+          ".FzLALLALzF.",
+          ".FzLLLLLLzF.",
           ".N..LLLL..N.",
           "NNOOOOPLOONN"
         ],
@@ -53435,7 +54189,7 @@ var pool_default = {
           "...pppppppp.",
           "..ppLLLLLLpp",
           "..ppLALLALpp",
-          "..FpLLppLLpF",
+          "..FpLLLLLLpF",
           "..pp.OLLO.pp",
           "NNOOOOPLOONN"
         ]
@@ -53494,14 +54248,14 @@ var pool_default = {
         skin: 2,
         clothes: 3,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..00000000..",
           "..LLLLLLLLY.",
-          "..LLAssALLZ.",
-          "..LLssssLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -53509,15 +54263,15 @@ var pool_default = {
           "..00000000..",
           "..LLLLLLLLY.",
           "..LLLLLLLLZ.",
-          "..LLssssLL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
         [
           "....000000..",
           "..LLLLLLLLY.",
-          "..LLAssALLZ.",
-          "..LLssssLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -53525,7 +54279,7 @@ var pool_default = {
           "....00000000",
           "...LLLLLLLLL",
           "...LLALLALLL",
-          "...LLLssLLL.",
+          "...LLLLLLLL.",
           ".....LLLH...",
           "GGHHLLILHHGG"
         ]
@@ -53584,14 +54338,14 @@ var pool_default = {
         skin: 2,
         clothes: 0,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..llllllll..",
           "..LLLLLLLLY.",
-          "..LLAaaALLZ.",
-          "..LLaaaaLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -53599,15 +54353,15 @@ var pool_default = {
           "..llllllll..",
           "..LLLLLLLLY.",
           "..LLLLLLLLZ.",
-          "..LLaaaaLL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
         [
           "....llllll..",
           "..LLLLLLLLY.",
-          "..LLAaaALLZ.",
-          "..LLaaaaLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -53615,7 +54369,7 @@ var pool_default = {
           "....llllllll",
           "...LLLLLLLLL",
           "...LLALLALLL",
-          "...LLLaaLLL.",
+          "...LLLLLLLL.",
           ".....wLLw...",
           "vvwwwwxLwwvv"
         ]
@@ -53674,14 +54428,14 @@ var pool_default = {
         skin: 2,
         clothes: 3,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..2222223...",
           "..32LLLL33Y.",
-          "..3LA22AL3Z.",
-          "..LL2222LL..",
+          "..3LALLAL3Z.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -53689,15 +54443,15 @@ var pool_default = {
           "..2222223...",
           "..32LLLL33Y.",
           "..3LLLLLL3Z.",
-          "..LL2222LL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
         [
           "...22222L3..",
           "..22LLLLL3Y.",
-          "..3LA22AL3Z.",
-          "..LL2222LL..",
+          "..3LALLAL3Z.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -53705,7 +54459,7 @@ var pool_default = {
           "...22222L3..",
           "...2LLLLLLYY",
           "...LLALLAL33",
-          "...LLL22LL3.",
+          "...LLLLLLL3.",
           ".....LLLH...",
           "GGHHLLILHHGG"
         ]
@@ -53764,14 +54518,14 @@ var pool_default = {
         skin: 0,
         clothes: 0,
         acc: "earrings",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "....DDDD....",
           "..DDDDDDDD..",
-          "..DDA22ADD..",
-          ".FDD2222DDF.",
+          "..DDADDADD..",
+          ".FDDDDDDDDF.",
           "....DDDD....",
           "vvwwwwxDwwvv"
         ],
@@ -53779,15 +54533,15 @@ var pool_default = {
           "....DDDD....",
           "..DDDDDDDD..",
           "..DDDDDDDD..",
-          ".FDD2222DDF.",
+          ".FDDDDDDDDF.",
           "....DDDD....",
           "vvwwwwxDwwvv"
         ],
         [
           ".....DDDD...",
           "...DDDDDDDD.",
-          "..DDA22ADD..",
-          ".FDD2222DDF.",
+          "..DDADDADD..",
+          ".FDDDDDDDDF.",
           "....DDDD....",
           "vvwwwwxDwwvv"
         ],
@@ -53795,7 +54549,7 @@ var pool_default = {
           ".....DDDD...",
           "...DDDDDDDD.",
           "...DDADDADD.",
-          "..DDDD22DDDD",
+          "..DDDDDDDDDD",
           ".....wDDw...",
           "vvwwwwxDwwvv"
         ]
@@ -54214,14 +54968,14 @@ var pool_default = {
         skin: 2,
         clothes: 0,
         acc: "none",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..eeeeeeff..",
           "..eLLLLLLf..",
-          "..LLAeeALL..",
-          "..LLeeeeLL..",
+          "..LLALLALL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -54229,15 +54983,15 @@ var pool_default = {
           "..eeeeeeff..",
           "..eLLLLLLf..",
           "..LLLLLLLL..",
-          "..LLeeeeLL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
         [
           "....eeeeeef.",
           "...LLLLLLe..",
-          "..LLAeeALL..",
-          "..LLeeeeLL..",
+          "..LLALLALL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -54245,7 +54999,7 @@ var pool_default = {
           "...eeeeeeef.",
           "...eLLLLLLf.",
           "...LLALLALL.",
-          "...LLLeeLLL.",
+          "...LLLLLLLL.",
           ".....wLLw...",
           "vvwwwwxLwwvv"
         ]
@@ -54304,14 +55058,14 @@ var pool_default = {
         skin: 1,
         clothes: 0,
         acc: "feather",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "ccQQQQQQQQ..",
           "QQQggggggQQ.",
-          ".QRgAQQAgRQ.",
-          ".QRgQQQQgRQ.",
+          ".QRgAggAgRQ.",
+          ".QRggggggRQ.",
           "....gggg....",
           "vvwwwwxgwwvv"
         ],
@@ -54319,15 +55073,15 @@ var pool_default = {
           "ccQQQQQQQQ..",
           "QQQggggggQQ.",
           ".QRggggggRQ.",
-          ".QRgQQQQgRQ.",
+          ".QRggggggRQ.",
           "....gggg....",
           "vvwwwwxgwwvv"
         ],
         [
           "ccdQQQQQQQQ.",
           "..QQggggggQQ",
-          ".QRgAQQAgRQ.",
-          ".QRgQQQQgRQ.",
+          ".QRgAggAgRQ.",
+          ".QRggggggRQ.",
           "....gggg....",
           "vvwwwwxgwwvv"
         ],
@@ -54335,7 +55089,7 @@ var pool_default = {
           ".cdQQQQQQQQ.",
           "..QQggggggQQ",
           "..QQgAggAgQQ",
-          "..QRggQQggRQ",
+          "..QRggggggRQ",
           "..QQ.wggw.QQ",
           "vvwwwwxgwwvv"
         ]
@@ -54439,14 +55193,14 @@ var pool_default = {
         skin: 0,
         clothes: 4,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..QQQQQQRR..",
           "..QDDDDDDRY.",
-          "..DDAQQADDZ.",
-          "..DDQQQQDD..",
+          "..DDADDADDZ.",
+          "..DDDDDDDD..",
           "....DDDD....",
           "ttuuuDDuuutt"
         ],
@@ -54454,15 +55208,15 @@ var pool_default = {
           "..QQQQQQRR..",
           "..QDDDDDDRY.",
           "..DDDDDDDDZ.",
-          "..DDQQQQDD..",
+          "..DDDDDDDD..",
           "....DDDD....",
           "ttuuuDDuuutt"
         ],
         [
           "....QQQQQQ..",
           "...DDDDDDQY.",
-          "..DDAQQADDZ.",
-          "..DDQQQQDD..",
+          "..DDADDADDZ.",
+          "..DDDDDDDD..",
           "....DDDD....",
           "ttuuuDDuuutt"
         ],
@@ -54470,7 +55224,7 @@ var pool_default = {
           "...QQQQQQQRR",
           "...QDDDDDDRY",
           "...DDADDADDD",
-          "...DDDQQDDD.",
+          "...DDDDDDDD.",
           ".....UDDu...",
           "ttuuUUDuuutt"
         ]
@@ -54627,11 +55381,10 @@ function cells(avatarIndex, frame) {
   }
   return out;
 }
-function tileCells(avatarIndex, frame) {
-  return cells(avatarIndex, frame).map((row) => {
-    const pad = { ch: " ", bg: TILE_BG };
-    return [pad, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), pad];
-  });
+function tileCells(avatarIndex, frame, edge) {
+  const left = edge === void 0 ? { ch: " ", bg: TILE_BG } : { ch: "\u258C", fg: edge, bg: TILE_BG };
+  const right = edge === void 0 ? { ch: " ", bg: TILE_BG } : { ch: "\u2590", fg: edge, bg: TILE_BG };
+  return cells(avatarIndex, frame).map((row) => [left, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), right]);
 }
 var ANIMATION_MS = 333;
 var SEQUENCE = [
@@ -54672,6 +55425,8 @@ function frameAt(tick, phase, running) {
 
 // packages/tui/dist/subagents.js
 var TRANSCRIPT_RETRY_MS = 1e4;
+var TRANSCRIPT_ALIVE_MS = 10 * 6e4;
+var END_MARKER_TAIL_BYTES = 64 * 1024;
 var DONE_LINGER_MS = 5 * 6e4;
 function roundOf(e) {
   return typeof e.round === "number" ? e.round : 1;
@@ -54684,7 +55439,7 @@ function readCurrentSessionId(projectRoot) {
     return null;
   }
 }
-function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
+function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS, claudeConfigDir = defaultClaudeConfigDir()) {
   const reg = readRegister(projectRoot);
   if (reg.availability !== "ok")
     return { availability: reg.availability, rows: [], foreignLive: 0 };
@@ -54700,14 +55455,14 @@ function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
   for (const [agentId, rounds] of byAgent) {
     rounds.sort((a, b) => roundOf(b) - roundOf(a) || Date.parse(b.at) - Date.parse(a.at));
     const latest = rounds[0];
-    const live = !latest.ended && !latest.residue_reported_at;
+    const transcript = !latest.ended && latest.residue_reported_at ? transcriptState(projectRoot, latest.session_id, latest.agent_id, now, claudeConfigDir) : null;
     const foreign = currentSession !== null && latest.session_id !== currentSession;
-    if (foreign && !live)
+    if (foreign && (latest.ended || transcript === "finished"))
       continue;
     const startedAt = Date.parse(latest.at);
     if (Number.isNaN(startedAt))
       continue;
-    const endStamp = latest.ended ? latest.ended.at : latest.residue_reported_at ? String(latest.residue_reported_at) : null;
+    const endStamp = latest.ended ? latest.ended.at : transcript === "finished" ? String(latest.residue_reported_at) : null;
     const endedAt = endStamp === null ? null : Date.parse(endStamp);
     const resumable = currentSession !== null && Boolean(latest.ended);
     if (endedAt !== null && (Number.isNaN(endedAt) || !resumable && now - endedAt > lingerMs))
@@ -54719,27 +55474,53 @@ function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
       agentId,
       sessionId: latest.session_id,
       agentType: typeof latest.agent_type === "string" && latest.agent_type ? latest.agent_type : null,
-      status: endedAt === null ? "running" : resumable ? "resumable" : "done",
+      status: transcript === "quiet" ? "quiet" : endedAt === null ? "running" : resumable ? "resumable" : "done",
       startedAt,
       endedAt,
       elapsedMs: Math.max(0, (endedAt ?? now) - startedAt),
       toolUseId: withId?.tool_use_id ?? null
     });
   }
-  rows.sort((a, b) => {
-    const [aRun, bRun] = [a.status === "running", b.status === "running"];
-    if (aRun !== bRun)
-      return aRun ? -1 : 1;
-    return aRun ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0);
-  });
+  const rank = (r) => r.status === "running" ? 0 : r.status === "quiet" ? 1 : 2;
+  rows.sort((a, b) => rank(a) - rank(b) || (rank(a) < 2 ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0)));
   return { availability: "ok", rows, foreignLive };
+}
+function transcriptState(projectRoot, sessionId, agentId, now, claudeConfigDir) {
+  const path = subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir);
+  if (!path)
+    return "quiet";
+  try {
+    if (endsOnHandback(path))
+      return "finished";
+    return now - statSync6(path).mtimeMs <= TRANSCRIPT_ALIVE_MS ? "fresh" : "quiet";
+  } catch {
+    return "quiet";
+  }
+}
+function endsOnHandback(path) {
+  const entry = lastTurnEntry(readTail(path, END_MARKER_TAIL_BYTES)) ?? lastTurnEntry(readTail(path));
+  return entry?.toolEndsTurn === true;
+}
+function lastTurnEntry(tail) {
+  const lines = (tail ?? "").split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let entry;
+    try {
+      entry = JSON.parse(lines[i]);
+    } catch {
+      continue;
+    }
+    if (entry?.type === "user" || entry?.type === "assistant")
+      return entry;
+  }
+  return void 0;
 }
 function readDispatchDescription(projectRoot, toolUseId) {
   const dir = dispatchStateDir(projectRoot);
   const key = dispatchStateKey(toolUseId);
   let file = join18(dir, `live-${key}.json`);
   try {
-    if (!existsSync11(file)) {
+    if (!existsSync12(file)) {
       const done = readdirSync7(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
       if (!done)
         return null;
@@ -54773,7 +55554,7 @@ function readAgentModel(projectRoot, type) {
 function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir = defaultClaudeConfigDir()) {
   const projects = join18(claudeConfigDir, "projects");
   const slug = projectRoot.replace(/[^A-Za-z0-9]/g, "-");
-  const sessionUnder = (dir2) => existsSync11(join18(projects, dir2, sessionId));
+  const sessionUnder = (dir2) => existsSync12(join18(projects, dir2, sessionId));
   let dir = sessionUnder(slug) ? slug : void 0;
   if (!dir) {
     let all;
@@ -54869,7 +55650,7 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
   }
   function refresh(now) {
     lastRead = now;
-    source = readSubagents(projectRoot, now, lingerMs);
+    source = readSubagents(projectRoot, now, lingerMs, claudeConfigDir);
     if (source.availability === "corrupt")
       return;
     avatars = assign(source.rows.map((r) => r.agentId), avatars.current, rng, { poolSize: POOL_SIZE, freed: avatars.freed });
@@ -54912,12 +55693,18 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
         description: r.toolUseId ? descriptions.get(r.toolUseId) ?? null : null,
         model: context.get(r.agentId)?.model ?? (r.agentType ? models.get(r.agentType) ?? null : null),
         status: r.status,
-        elapsedMs: r.status === "running" ? Math.max(0, now - r.startedAt) : r.elapsedMs,
+        elapsedMs: r.endedAt === null ? Math.max(0, now - r.startedAt) : r.elapsedMs,
         contextPct: context.get(r.agentId)?.pct ?? null,
         contextTokens: context.get(r.agentId)?.tokens ?? null,
         idleMs: r.endedAt === null ? null : Math.max(0, now - r.endedAt)
       }));
-      return { availability: source.availability, active: agents.filter((a) => a.status === "running").length, agents, foreignLive: source.foreignLive };
+      return {
+        availability: source.availability,
+        active: agents.filter((a) => a.status === "running").length,
+        quiet: agents.filter((a) => a.status === "quiet").length,
+        agents,
+        foreignLive: source.foreignLive
+      };
     }
   };
 }
@@ -54955,8 +55742,8 @@ function clip(text, width) {
     return text;
   return width <= 1 ? chars.slice(0, width).join("") : chars.slice(0, width - 1).join("") + "\u2026";
 }
-function composeSubagentBlock(view, width, maxHeight, tick) {
-  const cards = composeCards(view, width, maxHeight, tick);
+function composeSubagentBlock(view, width, maxHeight, tick, opts = {}) {
+  const cards = composeCards(view, width, maxHeight, tick, opts.neonEdge === true);
   if (!view.foreignLive || cards.height + 1 > maxHeight)
     return cards;
   if (cards.height === 0 && width < 1)
@@ -54964,8 +55751,8 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
   const put = { x: 0, y: cards.height, attr: { dim: true }, text: clip(FOREIGN_SESSION_NOTE, width) };
   return { ...cards, height: cards.height + 1, puts: [...cards.puts, put] };
 }
-var FOREIGN_SESSION_NOTE = "session.json names another session; live agents from the other one are listed";
-function composeCards(view, width, maxHeight, tick) {
+var FOREIGN_SESSION_NOTE = "session.json names another session; running and quiet agents from the other one are listed";
+function composeCards(view, width, maxHeight, tick, neonEdge) {
   const empty = { height: 0, puts: [], pixels: [] };
   if (maxHeight < 1 || width < 1)
     return empty;
@@ -55001,7 +55788,7 @@ function composeCards(view, width, maxHeight, tick) {
     const done = a.status !== "running";
     const x0 = i % perRow * (cardW + CARD_GAP);
     const y0 = bandY[Math.floor(i / perRow)];
-    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done)).forEach((line, r) => line.forEach((cell, c) => {
+    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done), neonEdge ? NEON_EDGE[a.status] : void 0).forEach((line, r) => line.forEach((cell, c) => {
       const px = { x: x0 + c, y: y0 + r, ch: cell.ch };
       if (cell.fg !== void 0)
         px.fg = done ? fadeToTile(cell.fg, DONE_FADE) : cell.fg;
@@ -55013,7 +55800,7 @@ function composeCards(view, width, maxHeight, tick) {
     const ty = side ? y0 : y0 + TILE_H;
     puts.push({ x: tx, y: ty, attr: done ? { bold: true, dim: true } : { bold: true }, text: clip(a.type, textW) });
     const status = a.status === "resumable" ? resumableStatus(a, textW) : `${a.status} \xB7 ${a.contextPct === null ? "?" : `${a.contextPct}%`} ctx`;
-    puts.push({ x: tx, y: ty + 1, attr: done ? { dim: true } : { color: "green" }, text: clip(status, textW) });
+    puts.push({ x: tx, y: ty + 1, attr: a.status === "quiet" ? { color: "yellow" } : done ? { dim: true } : { color: "green" }, text: clip(status, textW) });
     puts.push({ x: tx, y: ty + 2, attr: { dim: true }, text: clip(a.model ?? "model unknown", textW) });
     if (a.description)
       puts.push({ x: tx, y: ty + 3, attr: { dim: true }, text: clip(a.description, textW) });
@@ -55124,51 +55911,92 @@ if (smoke) {
   console.error(`sterling-tui smoke: terminal stack loaded (${term.width}x${term.height})`);
   process.exit(0);
 }
+var theme;
+try {
+  theme = themeFor(detectThemeLevel(process.env, term.support ?? {}));
+} catch (err) {
+  console.error(`sterling-tui: ${err.message}`);
+  process.exit(2);
+}
 var lockPath = join19(dirname8(storePath), "transient", "tui.lock");
 var owner = acquireTuiLock(lockPath, process.pid);
 if (owner !== null) {
   console.error(`sterling-tui: already running (pid ${owner}) for this store \u2014 exiting politely (\xA711)`);
   process.exit(0);
 }
-var ctl = openDashboard(storePath);
+var profileEnv = process.env.STERLING_TUI_PROFILE;
+var profilePath = !profileEnv ? void 0 : profileEnv === "1" ? join19(dirname8(storePath), "transient", "tui-profile.log") : profileEnv;
+var ctl = openDashboard(storePath, { deferWrites: true, profile: profilePath !== void 0 });
+if (profilePath) {
+  mkdirSync9(dirname8(profilePath), { recursive: true });
+  appendFileSync(profilePath, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), start: true, pid: process.pid, changeDetection: ctl.stats().changeDetection }) + "\n");
+}
+function profiled(kind, work, extra = () => ({})) {
+  if (!profilePath)
+    return work();
+  const s0 = ctl.stats();
+  const t0 = performance.now();
+  const out = work();
+  const ms = Math.round((performance.now() - t0) * 100) / 100;
+  const s1 = ctl.stats();
+  appendFileSync(profilePath, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), kind, ms, builds: s1.builds - s0.builds, storeCalls: s1.storeCalls - s0.storeCalls, ...extra() }) + "\n");
+  return out;
+}
 var showBanner = process.env.STERLING_NO_BANNER !== "1";
 var screen = new termkit.default.ScreenBuffer({ dst: term });
 var subagents = createSubagentTracker(dirname8(dirname8(storePath)));
 var shownView = { availability: "absent", active: 0, agents: [] };
 var bodyTop = 0;
 function fullBodyLines() {
-  return visibleBodyLines(term.height, bannerLines(term.width, showBanner).length);
+  return visibleBodyLines(term.height, bannerLines(term.width, showBanner, term.height).length);
 }
 function subagentBlock(tick) {
   if (ctl.ui().tab !== AGENTS_TAB)
     return { height: 0, puts: [], pixels: [] };
-  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2, tick);
+  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2, tick, { neonEdge: theme.level !== "plain" });
 }
 function viewport() {
-  return { width: term.width, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active } };
+  return { width: term.width, height: term.height, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active, quiet: shownView.quiet ?? 0 } };
 }
 var painted;
 var pixelLayout = "";
 var forceFull = true;
 var animation;
-var trueColor = /^(truecolor|24bits?)$/.test(process.env.COLORTERM ?? "") || process.env.TERM_PROGRAM === "tmux" || term.support?.trueColor === true;
+var trueColor = theme.level === "truecolor";
+var bannerKey = "";
+var bannerPx = [];
+function updateBannerPixels(state) {
+  const key = theme.bannerOverlay && state.banner.length > 0 ? `${term.width}|${state.banner.length}|${state.projectName}` : "";
+  if (key === bannerKey)
+    return;
+  bannerKey = key;
+  bannerPx = key ? scenePixels(term.width, state.banner.length + 1, state.projectName) : [];
+}
 function layoutKey(block) {
-  return `${term.width}x${term.height}|` + block.pixels.map((p) => `${p.x},${p.y}`).join(";");
+  return `${term.width}x${term.height}|${bannerKey}|` + block.pixels.map((p) => `${p.x},${p.y}`).join(";");
 }
 function screenPixels(block) {
-  return block.pixels.map((p) => ({ ...p, y: p.y + bodyTop }));
+  return [...bannerPx, ...block.pixels.map((p) => ({ ...p, y: p.y + bodyTop }))];
 }
 function animate() {
   const block = subagentBlock(Math.floor(Date.now() / ANIMATION_MS));
   if (layoutKey(block) !== pixelLayout)
     return;
-  painted = paintPixels(term, screenPixels(block), painted, trueColor);
+  painted = paintPixels(term, screenPixels(block), painted, trueColor, theme.blankSgr);
 }
-function redraw() {
+var drawnState;
+var drawnView = "";
+function redraw(onlyIfChanged = false) {
   const now = Date.now();
   shownView = subagents.view(now);
   const state = ctl.state(viewport());
+  const viewKey = ctl.ui().tab === AGENTS_TAB ? JSON.stringify(shownView) : String(shownView.active);
+  if (onlyIfChanged && !forceFull && state === drawnState && viewKey === drawnView)
+    return false;
+  drawnState = state;
+  drawnView = viewKey;
   bodyTop = state.bodyTop;
+  updateBannerPixels(state);
   const block = subagentBlock(Math.floor(now / ANIMATION_MS));
   const key = layoutKey(block);
   const full = forceFull || key !== pixelLayout;
@@ -55176,9 +56004,9 @@ function redraw() {
   forceFull = false;
   const pixels = screenPixels(block);
   if (full && painted)
-    clearPixels(term, painted, pixels);
-  draw(screen, state, { block });
-  painted = paintPixels(term, pixels, full ? void 0 : painted, trueColor);
+    clearPixels(term, painted, pixels, theme.blankSgr);
+  draw(screen, state, { block, theme });
+  painted = paintPixels(term, pixels, full ? void 0 : painted, trueColor, theme.blankSgr);
   const running = shownView.active > 0 && block.pixels.length > 0;
   if (running && !animation)
     animation = setInterval(animate, ANIMATION_MS);
@@ -55186,15 +56014,41 @@ function redraw() {
     clearInterval(animation);
     animation = void 0;
   }
+  return true;
+}
+var queue = Promise.resolve();
+function serial(job) {
+  queue = queue.then(job);
 }
 async function handle(event2) {
   if (!event2)
     return;
+  const s0 = profilePath ? ctl.stats() : void 0;
+  const t0 = performance.now();
   if (await ctl.handle(event2, viewport())) {
-    restoreTerminal();
-    process.exit(0);
+    if (ctl.requestQuit())
+      shutdown(0);
+    redraw();
+    return;
   }
-  redraw();
+  const t1 = performance.now();
+  profiled(`event:${event2.kind}`, () => redraw(), () => ({
+    handleMs: Math.round((t1 - t0) * 100) / 100,
+    builds: ctl.stats().builds - s0.builds,
+    storeCalls: ctl.stats().storeCalls - s0.storeCalls
+  }));
+  scheduleFlush();
+}
+var flushScheduled = false;
+function scheduleFlush() {
+  if (flushScheduled)
+    return;
+  flushScheduled = true;
+  setImmediate(() => serial(() => {
+    flushScheduled = false;
+    if (profiled("flush", () => ctl.flush()))
+      redraw();
+  }));
 }
 var terminalRestored = false;
 function restoreTerminal() {
@@ -55222,27 +56076,45 @@ function restoreTerminal() {
   } catch {
   }
 }
-process.on("uncaughtException", (err) => {
+var shuttingDown = false;
+function shutdown(code, message) {
+  let unsaved;
+  if (!shuttingDown) {
+    shuttingDown = true;
+    try {
+      if (ctl.flush() || ctl.pending() > 0)
+        unsaved = ctl.ui().notice ?? `${ctl.pending()} write(s) still queued`;
+    } catch (err) {
+      unsaved = err?.message ?? String(err);
+    }
+  }
   restoreTerminal();
-  console.error(`sterling-tui: fatal \u2014 ${err?.stack ?? err}`);
-  process.exit(1);
-});
-process.on("unhandledRejection", (err) => {
-  restoreTerminal();
-  console.error(`sterling-tui: fatal (unhandled rejection) \u2014 ${err?.stack ?? err}`);
-  process.exit(1);
-});
+  if (message)
+    console.error(message);
+  if (unsaved)
+    console.error(`sterling-tui: store writes not saved at exit \u2014 ${unsaved}`);
+  process.exit(code);
+}
+process.on("uncaughtException", (err) => shutdown(1, `sterling-tui: fatal \u2014 ${err?.stack ?? err}`));
+process.on("unhandledRejection", (err) => shutdown(1, `sterling-tui: fatal (unhandled rejection) \u2014 ${err?.stack ?? err}`));
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) {
+  process.on(signal, () => shutdown(code, `sterling-tui: ${signal} \u2014 exiting`));
+}
 term.fullscreen(true);
 term.hideCursor();
 term.grabInput({ mouse: "button" });
-term.on("key", (name) => void handle(keyToEvent(name)));
-term.on("mouse", (name, data) => void handle(mouseToEvent(name, data)));
-term.on("resize", () => {
+term.on("key", (name) => serial(() => handle(keyToEvent(name))));
+term.on("mouse", (name, data) => serial(() => handle(mouseToEvent(name, data))));
+term.on("resize", () => serial(() => {
   screen = new termkit.default.ScreenBuffer({ dst: term });
   forceFull = true;
   redraw();
-});
-setInterval(redraw, 1e3);
+}));
+setInterval(() => serial(() => {
+  profiled("tick", () => redraw(true));
+  if (ctl.pending() > 0)
+    scheduleFlush();
+}), 1e3);
 redraw();
 /*! Bundled license information:
 

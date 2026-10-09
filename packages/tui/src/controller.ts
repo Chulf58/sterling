@@ -9,8 +9,8 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { MountedStores, SterlingStore, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
-import { parseConfig, AGENT_MODEL_KEY } from '@sterling/schemas';
-import { buildDashboardFrame, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect } from './state.js';
+import { parseConfig, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE } from '@sterling/schemas';
+import { buildDashboardFrame, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect } from './state.js';
 import { applyHandoffToggle, applyModeToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
 import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
 // Static, so esbuild inlines both into the bundles: an installed copy has no
@@ -19,7 +19,7 @@ import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
 import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/lib/agent-distribution.mjs';
 import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
-import { sterlingRootFrom, swapFullAgentModel } from '../../../scripts/lib/opencode-install.mjs';
+import { sterlingRootFrom, swapFullAgentModel, stageFullAgentModel, writeFileAtomic, writeFullAgentFiles, restoreFullAgentFiles, type AtomicWriteFs, type StagedWrite } from '../../../scripts/lib/opencode-install.mjs';
 import { storeBackend } from '../../../scripts/hooks/lib/store-backend.mjs';
 import { writeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mjs';
 
@@ -27,7 +27,7 @@ import { writeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mj
  *  shown when the effect is dropped; null drops it without a notice (for an
  *  effect that fires on every card activation, where a notice would be noise
  *  and the host labels the state instead). */
-export type DisableableEffect = 'model_swap' | 'select';
+export type DisableableEffect = 'model_swap' | 'opencode_model' | 'select';
 
 export interface DashboardOptions {
   disabledEffects?: Partial<Record<DisableableEffect, string | null>>;
@@ -41,6 +41,9 @@ export interface DashboardOptions {
   dataVersionProbe?: (paths: string[]) => DataVersionProbe;
   /** the `r` key (a github_refresh effect): the host's GitHub poller polls now */
   onGithubRefresh?: () => void;
+  /** The file operations the OpenCode-override config.json write uses; tests
+   *  use it to make that write fail part-way. */
+  configWriteFs?: AtomicWriteFs;
 }
 
 /** How long the held selection and board-edit writes wait for another
@@ -395,7 +398,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       config = { models: {}, models_catalog: { staleness_days: 45 } };
     }
     const cfg = config as {
-      models?: Record<string, { model: string; effort: string }>;
+      models?: Record<string, { model: string; effort: string; opencode_model?: string }>;
       models_catalog?: { staleness_days?: number };
       sparring_partner?: { enabled?: boolean; models?: { openai?: { model?: string } } };
       tdd?: { enabled?: boolean };
@@ -464,10 +467,13 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     const nowISO = new Date().toISOString();
     try {
       // 1. config.models write — the authoritative per-project declaration
-      const raw = JSON.parse(readFileSync(configPath, 'utf8')) as { models?: Record<string, unknown> };
+      // The entry's other fields (hard_task, the OpenCode override) are kept.
+      const raw = JSON.parse(readFileSync(configPath, 'utf8')) as { models?: Record<string, Record<string, unknown> | undefined> };
       raw.models = raw.models ?? {};
-      raw.models[e.key] = { model: e.to.model, effort: e.to.effort };
+      const prev = raw.models[e.key] ?? {};
+      raw.models[e.key] = { ...prev, model: e.to.model, effort: e.to.effort };
       writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
+      const opencodeModel = typeof prev.opencode_model === 'string' ? prev.opencode_model : undefined;
 
       // 2. surgical installed-frontmatter projection on each governed agent file
       for (const name of e.agents) {
@@ -492,7 +498,8 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // Its own try: an OpenCode failure is reported, and the decision below
       // is still written for the Claude swap that already happened.
       try {
-        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model });
+        // A role with an OpenCode override keeps it: only its Claude model changed.
+        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model, opencodeModel });
         const refused = (oc.rows ?? []).filter((r) => r.status === 'refused');
         if (refused.length) ui = { ...ui, notice: `model swap for '${e.key}': OpenCode agent file(s) not updated — ${refused.map((r) => r.detail).join('; ')}` };
       } catch (ocErr) {
@@ -524,10 +531,102 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     }
   }
 
+  /** Execute an opencode_model effect (decision
+   *  opencode-only-model-override-per-role-for-openai-picks): set or clear
+   *  config.models[key].opencode_model and re-render the key's Sterling-full
+   *  OpenCode agents, all or nothing. Every agent render and refusal check runs
+   *  first, with nothing written; then the agent files and config.json are
+   *  written, and a failure puts every written file back, so config.json stays
+   *  byte-identical. The decision is recorded only once both have converged.
+   *  The Claude agent files under .claude/agents are never written here. */
+  function applyOpenCodeModel(e: OpenCodeModelEffect): void {
+    const nowISO = new Date().toISOString();
+    const fail = (msg: string) => { ui = { ...ui, notice: `OpenCode model for '${e.key}' not changed — ${msg}; config.json and the OpenCode agents are as they were` }; };
+    let configBefore: string;
+    let configAfter: string;
+    let claudeModel: string;
+    try {
+      if (e.to !== undefined && !OPENCODE_MODEL_REF_RE.test(e.to)) throw new Error(`'${e.to}' is not a <provider>/<model> id`);
+      configBefore = readFileSync(configPath, 'utf8');
+      const raw = JSON.parse(configBefore) as { models?: Record<string, Record<string, unknown> | undefined> };
+      raw.models = raw.models ?? {};
+      // a key the file does not carry yet takes its current (default) Claude values
+      const { opencode_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
+      raw.models[e.key] = e.to === undefined ? rest : { ...rest, opencode_model: e.to };
+      configAfter = JSON.stringify(raw, null, 2) + '\n';
+      claudeModel = typeof rest.model === 'string' ? rest.model : e.model;
+    } catch (err) {
+      fail((err as Error).message);
+      return;
+    }
+    // 1. stage: render every target agent; a refusal stops the change before any write
+    let writes: StagedWrite[];
+    try {
+      const staged = stageFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: claudeModel, opencodeModel: e.to });
+      const refused = (staged.rows ?? []).filter((r) => r.status === 'refused');
+      if (refused.length) {
+        fail(`OpenCode agent file(s) refused: ${refused.map((r) => r.detail).join('; ')}`);
+        return;
+      }
+      writes = staged.writes ?? [];
+    } catch (err) {
+      fail(`the OpenCode agent render failed: ${(err as Error).message}`);
+      return;
+    }
+    // 2. commit: the agent files, then config.json; a failure restores what was written
+    try {
+      writeFullAgentFiles(writes);
+    } catch (err) {
+      fail(`writing the OpenCode agents failed: ${(err as Error).message}`);
+      return;
+    }
+    // config.json is replaced atomically (temp file, then rename), so a failed
+    // write never leaves it truncated
+    try {
+      writeFileAtomic(configPath, configAfter, options.configWriteFs);
+    } catch (err) {
+      // the two restores run independently, so one failing never skips the other
+      const rollback: string[] = [];
+      try { writeFileAtomic(configPath, configBefore, options.configWriteFs); } catch (restoreErr) { rollback.push(`config.json not restored: ${(restoreErr as Error).message}`); }
+      try { restoreFullAgentFiles(writes); } catch (restoreErr) { rollback.push(`OpenCode agents not restored: ${(restoreErr as Error).message}`); }
+      if (rollback.length) {
+        ui = { ...ui, notice: `OpenCode model for '${e.key}': writing config.json failed (${(err as Error).message}) and the rollback failed — ${rollback.join('; ')}` };
+        return;
+      }
+      fail(`writing config.json failed: ${(err as Error).message}`);
+      return;
+    }
+    // 3. converged: record the change
+    const shown = (v?: string) => v ?? `anthropic/${claudeModel}`;
+    try {
+      store.create({
+        id: randomUUID(),
+        type: 'decision',
+        created_at: nowISO,
+        updated_at: nowISO,
+        author: 'conductor',
+        status: 'active',
+        superseded_by: null,
+        links: [],
+        scope: 'project',
+        stack_tags: [],
+        title: `OpenCode model: ${e.key} ${shown(e.from)}→${shown(e.to)} (System tab)`,
+        statement: `config.models['${e.key}'].opencode_model ${e.to === undefined ? 'cleared' : `set to ${e.to}`} (was ${e.from ?? 'unset'}); the OpenCode agents for this role now run ${shown(e.to)}, and Claude Code keeps ${claudeModel}.`,
+        rationale:
+          'OpenCode model override changed from the TUI System tab (decision opencode-only-model-override-per-role-for-openai-picks: the Claude model stays for Claude Code, and only the OpenCode agent files are re-rendered).',
+        alternatives_rejected: [],
+      }, { operation_id: randomUUID() });
+    } catch (err) {
+      ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}, but recording the decision failed — ${(err as Error).message}` };
+      return;
+    }
+    ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}; Claude Code keeps ${claudeModel}.` };
+  }
+
   async function applyEffects(all: Effect[]): Promise<boolean> {
     // the host's effect switch: a declined effect never reaches its writer
     const effects = all.filter((e) => {
-      if (e.type !== 'model_swap' && e.type !== 'select') return true;
+      if (e.type !== 'model_swap' && e.type !== 'opencode_model' && e.type !== 'select') return true;
       const off = disabled[e.type];
       if (off === undefined) return true;
       if (off !== null) ui = { ...ui, notice: off };
@@ -535,6 +634,8 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     });
     const swaps = effects.filter((e): e is ModelSwapEffect => e.type === 'model_swap');
     for (const e of swaps) await applySwap(e);
+    const overrides = effects.filter((e): e is OpenCodeModelEffect => e.type === 'opencode_model');
+    for (const e of overrides) applyOpenCodeModel(e);
     const notice = (msg: string) => { ui = { ...ui, notice: msg }; };
     const sparringModels = effects.filter((e): e is SparringModelEffect => e.type === 'sparring_model');
     for (const e of sparringModels) applySparringModel(e);
@@ -573,7 +674,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // that does not — restart the session to pick the new value up there.
       notice('config.json updated — hooks pick this up on their next invocation; restart the session to reload the MCP server.');
     }
-    if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length) roster = loadRoster();
+    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length) roster = loadRoster();
     for (const e of effects) {
       if (e.type === 'select') pending = [...pending.filter((p) => p.type !== 'select'), e];
       else if (e.type === 'board_edit') pending.push(e);
