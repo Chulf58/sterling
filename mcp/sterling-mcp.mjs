@@ -31220,7 +31220,7 @@ var SterlingTools = class _SterlingTools {
       const withConsumer = consumedBy !== void 0 ? { consumed_by: consumedBy } : {};
       return serverOwned.has(f.name) ? { ...f, ...withConsumer, required: false, server_owned: true } : defaulted.has(f.name) ? { ...f, ...withConsumer, required: false } : { ...f, ...withConsumer };
     });
-    addFieldCondition(fields, "type", `knowledge_create requires fields.type set to '${described.type}', equal to its outer type argument: it selects this schema. Fixed afterwards: every other write refuses it.`);
+    addFieldCondition(fields, "type", `knowledge_create takes type once, as the top-level type argument or as fields.type, set to '${described.type}': it selects this schema (if both are given they must match). Fixed afterwards: every other write refuses it.`);
     for (const name of MUTATION_REFUSED_FIELDS) {
       addFieldCondition(fields, name, "Creation-only: knowledge_create routes the record by it, and every later write refuses it.");
     }
@@ -31239,7 +31239,7 @@ var SterlingTools = class _SterlingTools {
     for (const [path, extras] of pathExtras)
       addFieldCondition(fields, path, `Also refused: ${extras.join("; ")}.`);
     const rules = [
-      "knowledge_create requires fields.type equal to its outer type argument.",
+      "knowledge_create takes type once, as the top-level type argument or as fields.type; if both are given they must match.",
       `${DEDUP_OVERRIDE_FIELD}: true is accepted in the fields of every knowledge_create; it is a directive and is never stored.`,
       ...described.type === DEDUP_GUARDED_TYPE ? [`A new ${DEDUP_GUARDED_TYPE} that overlaps an existing one is refused unless ${DEDUP_OVERRIDE_FIELD}: true is set.`] : []
     ];
@@ -37180,7 +37180,7 @@ Extend fields to carry the surviving ruling(s) forward, or re-call with orphans_
 
 // packages/mcp-server/dist/server.js
 var passthrough = external_exports.object({}).passthrough();
-var KNOWLEDGE_CREATE_FIELD_VARIANTS = Object.keys(RECORD_TYPES).map((type) => {
+var buildCreateFieldVariants = (discriminatorOptional) => Object.keys(RECORD_TYPES).map((type) => {
   const rawShape = objectShapeFor(type);
   if (!rawShape)
     throw new Error(`knowledge_create input schema: '${type}' is registered but has no unwrappable object shape`);
@@ -37191,14 +37191,50 @@ var KNOWLEDGE_CREATE_FIELD_VARIANTS = Object.keys(RECORD_TYPES).map((type) => {
       continue;
     fieldsShape[key] = defaulted.has(key) ? node.optional() : node;
   }
-  fieldsShape.type = external_exports.literal(type);
+  fieldsShape.type = discriminatorOptional ? external_exports.literal(type).optional() : external_exports.literal(type);
   fieldsShape[DEDUP_OVERRIDE_FIELD] = external_exports.boolean().optional();
   return external_exports.object(fieldsShape).strict();
 });
+var KNOWLEDGE_CREATE_FIELD_VARIANTS = buildCreateFieldVariants(false);
 if (KNOWLEDGE_CREATE_FIELD_VARIANTS.length < 2) {
   throw new Error(`knowledge_create input schema: RECORD_TYPES registered only ${KNOWLEDGE_CREATE_FIELD_VARIANTS.length} type(s) \u2014 z.discriminatedUnion needs at least 2`);
 }
 var knowledgeCreateFieldsSchema = external_exports.discriminatedUnion("type", KNOWLEDGE_CREATE_FIELD_VARIANTS);
+function resolveCreateType(args2) {
+  if (typeof args2 !== "object" || args2 === null || Array.isArray(args2))
+    return { args: args2 };
+  const input = args2;
+  const fields = input.fields;
+  if (typeof fields !== "object" || fields === null || Array.isArray(fields))
+    return { args: args2 };
+  const outer = input.type;
+  const inner = fields.type;
+  if (outer === void 0 && inner === void 0) {
+    return {
+      error: `knowledge_create: no record type given. Set it once, either as the top-level 'type' argument or as 'fields.type' (one is enough), e.g. {"type":"decision","fields":{"title":"\u2026","statement":"\u2026","alternatives_rejected":[],"rationale":"\u2026"}}. Registered: ${Object.keys(RECORD_TYPES).sort().join(", ")}.`
+    };
+  }
+  if (outer !== void 0 && inner !== void 0 && outer !== inner) {
+    return {
+      error: `knowledge_create: the top-level 'type' ('${String(outer)}') does not match 'fields.type' ('${String(inner)}'). Give the type once, or set both to the same registered type.`
+    };
+  }
+  const type = outer ?? inner;
+  return { args: { ...input, type, fields: { ...fields, type } } };
+}
+var knowledgeCreateParseSchema = external_exports.object({ type: external_exports.string(), fields: knowledgeCreateFieldsSchema, projection: external_exports.enum(["full", "digest"]).optional() }).strict();
+var knowledgeCreateInput = external_exports.object({
+  type: external_exports.string().optional().describe("record type; give it here or as fields.type (one copy is enough)"),
+  fields: external_exports.union(buildCreateFieldVariants(true)),
+  projection: external_exports.enum(["full", "digest"]).optional()
+}).strict();
+knowledgeCreateInput.safeParseAsync = async (data, params) => {
+  const resolved = resolveCreateType(data);
+  if ("error" in resolved) {
+    return { success: false, error: new ZodError2([{ code: "custom", path: ["type"], message: resolved.error }]) };
+  }
+  return knowledgeCreateParseSchema.safeParseAsync(resolved.args, params);
+};
 var strict = (shape) => external_exports.object(shape).strict();
 function unreadableDomainWarning(d) {
   return `sterling: domain '${d.name}' is mounted but its store at '${d.dbPath}' could not be read (${d.error}); reads skip it until the store is repaired and the session restarts, so its knowledge is not in any result, and writes into it are refused.`;
@@ -37250,17 +37286,11 @@ function createSterlingServer(target) {
   const server = new McpServer({ name: "sterling", version: "0.1.0" });
   const json = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
   server.registerTool("knowledge_create", {
-    description: "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. A links entry with rel 'supersedes' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel 'cites' for a deliberate partial override. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." + createDomainsNote,
-    inputSchema: strict({ type: external_exports.string(), fields: knowledgeCreateFieldsSchema, projection: external_exports.enum(["full", "digest"]).optional() })
-  }, ({ type, fields, projection }) => {
-    const { type: fieldsType, ...restFields } = fields;
-    if (fieldsType !== type) {
-      if (!(type in RECORD_TYPES)) {
-        throw new Error(`knowledge_create: outer 'type' ('${type}') is not a registered record type \u2014 fields.type is '${fieldsType}'; registered: ${Object.keys(RECORD_TYPES).sort().join(", ")}.`);
-      }
-      throw new Error(`knowledge_create: outer 'type' ('${type}') does not match fields.type ('${fieldsType}') \u2014 set both to the same registered type`);
-    }
-    return json(tools.writeProjected(tools.knowledgeCreate(type, restFields), projection));
+    description: 'Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type\'s allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. Example: {"type":"decision","fields":{"title":"...","statement":"...","alternatives_rejected":[],"rationale":"..."}}. A colliding feature_article slug is refused. A links entry with rel \'supersedes\' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel \'cites\' for a deliberate partial override. A domain:<name> scope with file_keys (or an article\'s files) is refused: repo paths stay project. A reference_material\'s location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain\'s description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.' + createDomainsNote,
+    inputSchema: knowledgeCreateInput
+  }, ({ fields, projection }) => {
+    const { type: recordType2, ...restFields } = fields;
+    return json(tools.writeProjected(tools.knowledgeCreate(recordType2, restFields), projection));
   });
   server.registerTool("knowledge_query", {
     description: `Retrieve knowledge: filter (types, stack_tags) \u2192 file_keys join \u2192 rank (rank_terms: single keywords, never prose) \u2192 cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW \u2014 raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: "full" (default), "digest" (one headline line per record \u2014 scan wide, then knowledge_get the few you need), or "count". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (higher is more relevant, unbounded; score_scale names the scale it was applied on: fts5_bm25 is -bm25 on SQLite, pg_bm25_v1 on Postgres; a min_score is not portable across scales). Each record carries \`source\` ('project' or 'domain:<name>'); missing_domains lists configured domains with no store, which were not searched; unreadable_domains lists mounted domains that could not be read, each with its error, and their records are not in the result.`,
