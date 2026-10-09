@@ -214,6 +214,19 @@ export function paintPixels(term: PixelTerm, pixels: readonly BlockPixel[], prev
   return next;
 }
 
+/** The rows `scroll .. scroll + height - 1` of a card block composed at full
+ *  height, moved up to row 0: the Agents tab's scroll window. Text and pixels
+ *  outside the window are dropped, so nothing is drawn over the notice or
+ *  the footer. */
+export function windowBlock(block: SubagentBlock, scroll: number, height: number): SubagentBlock {
+  const inside = (y: number): boolean => y >= scroll && y < scroll + height;
+  return {
+    height: Math.max(0, Math.min(height, block.height - scroll)),
+    puts: block.puts.filter((p) => inside(p.y)).map((p) => ({ ...p, y: p.y - scroll })),
+    pixels: block.pixels.filter((p) => inside(p.y)).map((p) => ({ ...p, y: p.y - scroll })),
+  };
+}
+
 /** Translate terminal-kit key names to state-layer events. Printable keys
  *  travel as chars — the state layer decides per mode (search input vs 'q'
  *  quit vs digit hotkeys vs '/'); named keys cover navigation/control. */
@@ -240,6 +253,13 @@ export function keyToEvent(name: string): UiEvent | undefined {
       return { kind: 'key', name: 'QUIT' };
     case 'CTRL_F':
       return { kind: 'key', name: 'STATE_FILTER' };
+    case 'PAGE_UP':
+    case 'PAGE_DOWN':
+    case 'HOME':
+    case 'END':
+      return { kind: 'key', name };
+    case 'F1':
+      return { kind: 'key', name: 'HELP' };
     default:
       if (name.length === 1 && name >= ' ') return { kind: 'char', ch: name };
       return undefined;

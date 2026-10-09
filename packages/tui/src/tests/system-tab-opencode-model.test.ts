@@ -99,3 +99,9 @@ test('without an override the picker offers no clear option', () => {
   const r = drive(snapshot(), 0, ['ENTER', 'DOWN', 'DOWN', 'DOWN']);
   assert.equal(r.ui.selector?.highlight, 1, 'DOWN stops on the last catalog entry');
 });
+
+test('END in the model picker reaches the clear option when an override is set', () => {
+  const r = drive(snapshot({ model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' }), 0, ['ENTER', 'END', 'ENTER']);
+  assert.equal(overrideOf(r.effects)?.to, undefined, 'the last option clears the override');
+  assert.equal(overrideOf(r.effects)?.from, 'openai/gpt-5.6-terra');
+});

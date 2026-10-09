@@ -78,6 +78,12 @@ test('keyToUiEvent: navigation keys, printable characters, shift+tab, ctrl chord
   assert.deepEqual(keyToUiEvent({ name: 'enter' }), { kind: 'key', name: 'ENTER' });
   assert.deepEqual(keyToUiEvent({ name: 'escape' }), { kind: 'key', name: 'ESCAPE' });
   assert.deepEqual(keyToUiEvent({ name: 'backspace' }), { kind: 'key', name: 'BACKSPACE' });
+  // the page keys and F1 (board fb516a43), under OpenTUI's own key names
+  assert.deepEqual(keyToUiEvent({ name: 'pageup', sequence: '\x1b[5~' }), { kind: 'key', name: 'PAGE_UP' });
+  assert.deepEqual(keyToUiEvent({ name: 'pagedown', sequence: '\x1b[6~' }), { kind: 'key', name: 'PAGE_DOWN' });
+  assert.deepEqual(keyToUiEvent({ name: 'home', sequence: '\x1b[H' }), { kind: 'key', name: 'HOME' });
+  assert.deepEqual(keyToUiEvent({ name: 'end', sequence: '\x1b[F' }), { kind: 'key', name: 'END' });
+  assert.deepEqual(keyToUiEvent({ name: 'f1', sequence: '\x1bOP' }), { kind: 'key', name: 'HELP' });
   assert.deepEqual(keyToUiEvent({ name: 'space', sequence: ' ' }), { kind: 'char', ch: ' ' });
   assert.deepEqual(keyToUiEvent({ name: 'a', sequence: 'A', shift: true }), { kind: 'char', ch: 'A' });
   assert.deepEqual(keyToUiEvent({ name: '3', sequence: '3' }), { kind: 'char', ch: '3' });
@@ -85,8 +91,9 @@ test('keyToUiEvent: navigation keys, printable characters, shift+tab, ctrl chord
   assert.equal(keyToUiEvent({ name: 'x', meta: true, sequence: 'x' }), undefined);
 });
 
-test('escapeLeavesView: Esc leaves only when no edit, picker or search is open', () => {
+test('escapeLeavesView: Esc leaves only when no help, edit, picker or search is open', () => {
   assert.equal(escapeLeavesView(initialUi), true);
+  assert.equal(escapeLeavesView({ ...initialUi, help: { scroll: 0 } }), false, 'Esc closes the key help, not the view');
   assert.equal(escapeLeavesView({ ...initialUi, tab: 1, searchQuery: 'x' }), false);
   assert.equal(escapeLeavesView({ ...initialUi, boardEdit: { id: 'i', text: '', version: 1 } }), false);
   assert.equal(escapeLeavesView({ ...initialUi, tab: 3, sparringModelEdit: '' }), false);
