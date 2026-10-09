@@ -14,7 +14,10 @@ import { probeClaude } from '../lib/claude-probe.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const FRESH_FLAGS = ['--project-name', 'claude-probe', '--stack-tags', 'node', '--domain-description', 'node=test domain node', '--toolchain', 'node:**/*.mjs', '--backup-path', 'backups', '--mode', 'work'];
-const CLAUDE_FILES = ['sterling-launch.sh', 'sterling.bat', 'tui.bat', '.claude'];
+// The engine is written when either tool is found, an opener pair per tool found (user-ruled
+// 2026-10-08, "Yes, per tool found"). The helper says OpenCode is absent unless a case says
+// otherwise, so with Claude Code absent too no launcher is written.
+const CLAUDE_FILES = ['sterling-launch.sh', 'claude-code.bat', '.claude'];
 const SKIP_LINE = /^.*Claude Code not found.*$/gm;
 
 const scratch = new Set();
@@ -40,6 +43,8 @@ function init(dir, extraEnv = {}) {
     CLAUDE_CONFIG_DIR: tmp('sterling-cp-cfg-'),
     STERLING_CODEX_PROBE: 'absent',
     STERLING_OPENCODE_SETUP_DISABLE: '1',
+    STERLING_LAUNCHER_HOST: 'windows', // a WSL2 host: the .bat openers (scripts/lib/launchers.mjs)
+    STERLING_LAUNCHER_OPENCODE: 'absent', // no opencode.* unless a case says found
     ...extraEnv,
   };
   for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k];
@@ -99,7 +104,9 @@ test('(a) claude absent: no Claude-only file is written, ONE loud line names the
   assert.ok(!existsSync(join(dir, '.sterling', 'synced-version')), 'no agent sync happened, so no synced-version marker');
   const lines = r.stdout.match(SKIP_LINE) ?? [];
   assert.equal(lines.length, 1, `exactly one skip line, got: ${JSON.stringify(lines)}`);
-  for (const name of ['sterling-launch.sh', 'sterling.bat', 'tui.bat', '.claude/agents', '.claude/settings.json']) {
+  // CHANGED: sterling-launch.sh and the opencode openers are no longer Claude-only (they are
+  // written when OpenCode is found), so the line names only the Claude Code opener.
+  for (const name of ['claude-code.bat', 'claude-code.sh', '.claude/agents', '.claude/settings.json']) {
     assert.ok(lines[0].includes(name), `the line names ${name}`);
   }
   assert.ok(!/codex/i.test(r.stdout.replace(lines[0], '')), 'the ~/.claude.json Codex probe did not run');
@@ -155,7 +162,7 @@ test('(b) a later init with claude present adds the Claude files a claude-less i
   assert.ok(!existsSync(join(dir, 'sterling-launch.sh')));
   const r = init(dir, { STERLING_CLAUDE_PROBE: 'ok' });
   assert.equal(r.code, 0, r.stderr);
-  for (const f of ['sterling-launch.sh', 'sterling.bat', 'tui.bat', '.claude/agents/librarian.md', '.claude/settings.json']) {
+  for (const f of ['sterling-launch.sh', 'claude-code.bat', '.claude/agents/librarian.md', '.claude/settings.json']) {
     assert.ok(existsSync(join(dir, f)), `${f} added by the later init`);
   }
 });
@@ -176,4 +183,28 @@ test('an unrecognized STERLING_CLAUDE_PROBE value fails init loud', () => {
   const r = init(dir, { STERLING_CLAUDE_PROBE: 'garbage' });
   assert.notEqual(r.code, 0);
   assert.match(r.stderr + r.stdout, /STERLING_CLAUDE_PROBE must be/);
+});
+
+test('launchers per tool found: the engine with either tool, claude-code.* only with Claude Code, opencode.* only with OpenCode', () => {
+  const cases = [
+    ['claude only', { STERLING_CLAUDE_PROBE: 'ok', STERLING_LAUNCHER_OPENCODE: 'absent' }, ['sterling-launch.sh', 'claude-code.bat'], ['opencode.bat']],
+    ['opencode only', { STERLING_CLAUDE_PROBE: 'absent', STERLING_LAUNCHER_OPENCODE: 'found' }, ['sterling-launch.sh', 'opencode.bat'], ['claude-code.bat']],
+    ['both', { STERLING_CLAUDE_PROBE: 'ok', STERLING_LAUNCHER_OPENCODE: 'found' }, ['sterling-launch.sh', 'claude-code.bat', 'opencode.bat'], []],
+    ['neither', { STERLING_CLAUDE_PROBE: 'absent', STERLING_LAUNCHER_OPENCODE: 'absent' }, [], ['sterling-launch.sh', 'claude-code.bat', 'opencode.bat']],
+  ];
+  for (const [label, env, written, absent] of cases) {
+    const dir = tmp('sterling-cp-tools-');
+    const r = init(dir, env);
+    assert.equal(r.code, 0, `${label}: ${r.stderr}`);
+    for (const f of written) assert.ok(existsSync(join(dir, f)), `${label}: ${f} written`);
+    for (const f of absent) assert.ok(!existsSync(join(dir, f)), `${label}: no ${f}`);
+  }
+});
+
+test('an unknown STERLING_LAUNCHER_OPENCODE stops init before anything is written', () => {
+  const dir = tmp('sterling-cp-tools-');
+  const r = init(dir, { STERLING_CLAUDE_PROBE: 'ok', STERLING_LAUNCHER_OPENCODE: 'maybe' });
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /STERLING_LAUNCHER_OPENCODE must be 'found' or 'absent' \(got 'maybe'\)/);
+  assert.ok(!existsSync(join(dir, '.sterling')));
 });

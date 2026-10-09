@@ -4897,10 +4897,12 @@ var modelPin = external_exports.object({
   model: external_exports.string(),
   effort: effortLevel.optional()
 }).strict();
+var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 var agentModelEntry = external_exports.object({
   model: external_exports.string(),
   effort: effortLevel,
-  hard_task: modelPin.optional()
+  hard_task: modelPin.optional(),
+  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
 }).strict();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
@@ -5063,11 +5065,11 @@ var configSchema = external_exports.object({
     implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
     researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    classifiers: agentModelEntry.default({ model: "claude-haiku-4-5", effort: "low" }),
+    classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // librarian is mechanical clerking — cheap model, low effort (P8). The
     // roster is classless (decision agent-roster-is-classless-four-agents), and
     // the debugger role it rejected has no key here.
-    librarian: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    librarian: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.

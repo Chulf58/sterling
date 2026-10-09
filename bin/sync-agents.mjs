@@ -4725,10 +4725,12 @@ var modelPin = external_exports.object({
   model: external_exports.string(),
   effort: effortLevel.optional()
 }).strict();
+var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 var agentModelEntry = external_exports.object({
   model: external_exports.string(),
   effort: effortLevel,
-  hard_task: modelPin.optional()
+  hard_task: modelPin.optional(),
+  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
 }).strict();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
@@ -4892,11 +4894,11 @@ var configSchema = external_exports.object({
     implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
     researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    classifiers: agentModelEntry.default({ model: "claude-haiku-4-5", effort: "low" }),
+    classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // librarian is mechanical clerking — cheap model, low effort (P8). The
     // roster is classless (decision agent-roster-is-classless-four-agents), and
     // the debugger role it rejected has no key here.
-    librarian: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    librarian: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
@@ -6314,8 +6316,8 @@ function syncOpenCodeAgents({ registryPath, templatesDir, targetDir: targetDir2,
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync5, mkdirSync as mkdirSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync3, rmSync, statSync as statSync2, unlinkSync as unlinkSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
+import { existsSync as existsSync5, mkdirSync as mkdirSync3, readFileSync as readFileSync6, readdirSync as readdirSync4, realpathSync as realpathSync3, renameSync as renameSync2, rmSync, statSync as statSync2, unlinkSync as unlinkSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { dirname, isAbsolute, join as join9, resolve as resolve6 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7461,6 +7463,17 @@ function frontmatterModel(content) {
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
 function ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
+  const rows = [];
+  for (const { path, content, previous: _previous, ...row } of planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models })) {
+    if (content !== void 0) {
+      mkdirSync3(dirname(path), { recursive: true });
+      writeFileSync2(path, content);
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
   const registry = loadRegistry(join9(pluginRoot2, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot2);
   const rows = [];
@@ -7473,7 +7486,8 @@ function ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const disk = existsSync5(path) ? normalize3(readFileSync6(path, "utf8")) : null;
+    const raw = existsSync5(path) ? readFileSync6(path, "utf8") : null;
+    const disk = raw === null ? null : normalize3(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
       if (!m || m[1] !== name) {
@@ -7493,9 +7507,7 @@ function ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models
       rows.push({ item: rel, status: "matches" });
       continue;
     }
-    mkdirSync3(dirname(path), { recursive: true });
-    writeFileSync2(path, agent.content);
-    rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
+    rows.push({ item: rel, status: disk === null ? "created" : "refreshed", path, content: agent.content, previous: raw });
   }
   return rows;
 }

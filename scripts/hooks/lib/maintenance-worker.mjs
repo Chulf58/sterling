@@ -52,7 +52,7 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildOpencodeArgs, buildOpencodeConfig, opencodeEnv, opencodePrompt, opencodeStreamJournal } from './maintenance-worker-opencode.mjs';
 
-export const WORKER_MODEL = 'claude-sonnet-5-5';
+export const WORKER_MODEL = 'claude-haiku-5-5';
 export const WORKER_EFFORT = 'medium';
 export const WORKER_AGENT = 'librarian';
 /** Per-run runaway guard passed to --max-budget-usd on every launch. There is
