@@ -31,6 +31,8 @@ export const PALETTE = {
   pink: '#ff2bd6',
   cyan: '#00e5ff',
   muted: '#8787af',
+  /** the Now playing app's DIM: inactive tab names and footer descriptions */
+  purple: '#6b5b8c',
   /** xterm 220, the warning amber */
   amber: '#ffd319',
 } as const;
@@ -43,6 +45,8 @@ export const XTERM = {
   text: 231,
   /** #8787af */
   muted: 103,
+  /** #5f5f87, the nearest 256 index to PALETTE.purple #6b5b8c */
+  purple: 60,
   /** #ff00d7 */
   pink: 200,
   /** #00d7ff */
@@ -72,6 +76,7 @@ export interface Theme {
   fill: AttrLike;
   /** the project-name header row, drawn when the banner scene is not */
   name: AttrLike;
+  /** an inactive tab name */
   tab: AttrLike;
   tabActive: AttrLike;
   /** the search bar on the spacer row */
@@ -82,6 +87,10 @@ export interface Theme {
   muted: AttrLike;
   /** the Queue tab's section headers */
   heading: AttrLike;
+  /** a footer key name (the Now playing app's bold pink) */
+  footerKey: AttrLike;
+  /** a footer description and its ' · ' separators (the app's purple) */
+  footerDesc: AttrLike;
   title(selected: boolean, expanded: boolean): AttrLike;
   /** a '⚠ ' line: amber bold over whatever the line would have been */
   warn(attr: AttrLike): AttrLike;
@@ -115,6 +124,9 @@ export function detectThemeLevel(env: Readonly<Record<string, string | undefined
   return '16';
 }
 
+// one object for both footer roles: render draws a run of identical attr objects as one put
+const footerPlain: AttrLike = { dim: true };
+
 /** The look from before the theme, and render.draw's default. */
 export const PLAIN_THEME: Theme = {
   level: 'plain',
@@ -126,6 +138,8 @@ export const PLAIN_THEME: Theme = {
   text: {},
   muted: { dim: true },
   heading: { dim: true },
+  footerKey: footerPlain,
+  footerDesc: footerPlain,
   title: (selected, expanded) => ({ inverse: selected, bold: expanded }),
   warn: (attr) => attr,
   map: (attr) => attr,
@@ -145,13 +159,16 @@ function xtermTheme(level: 'truecolor' | '256'): Theme {
     level,
     fill: { bgColor: bg },
     name: on({ color: XTERM.pink, bold: true }),
-    tab: muted,
+    // inactive tab names take the app's purple, the active one stays pink
+    tab: on({ color: XTERM.purple }),
     // bold underlined pink on the page black: the active tab needs no coloured block
     tabActive: on({ color: XTERM.pink, bold: true, underline: true }),
     search: on({ color: XTERM.cyan }),
     text: on({ color: XTERM.text }),
     muted,
     heading: on({ color: XTERM.pink, bold: true }),
+    footerKey: on({ color: XTERM.pink, bold: true }),
+    footerDesc: on({ color: XTERM.purple }),
     // the selected title is bold cyan on the page black; no coloured bar
     title: (selected, expanded) => (selected ? on({ color: XTERM.cyan, bold: true }) : on({ color: XTERM.text, bold: expanded })),
     warn: (attr) => ({ ...attr, color: XTERM.amber, bold: true }),
@@ -180,6 +197,8 @@ const SIXTEEN: Theme = {
   text: {},
   muted: { dim: true },
   heading: { color: 'magenta', bold: true },
+  footerKey: footerPlain,
+  footerDesc: footerPlain,
   title: (selected, expanded) => (selected ? { color: 'brightWhite', bgColor: 'magenta', bold: expanded } : { bold: expanded }),
   warn: (attr) => ({ ...attr, dim: false, color: 'yellow', bold: true }),
   map: (attr) => attr,

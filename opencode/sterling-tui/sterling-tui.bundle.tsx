@@ -11362,24 +11362,27 @@ function fitTabs(tabs, width) {
   }
   return window;
 }
+var FOOTER_SEPARATOR = " \xB7 ";
+var footerText = (segments) => segments.map((s2) => s2.key && s2.desc ? `${s2.key} ${s2.desc}` : s2.key || s2.desc).join(FOOTER_SEPARATOR);
 function footerFor(ui, tabCount, width) {
-  const tabs = `1-${tabCount} tabs`;
-  let text;
+  const k = (key, desc = "") => ({ key, desc });
+  const tabs = k(`1-${tabCount}`, "tabs");
+  let segments;
   if (ui.help)
-    text = "\u2191\u2193 PgUp PgDn scroll \xB7 any other key closes";
+    segments = [k("\u2191\u2193 PgUp PgDn", "scroll"), k("any other key", "closes")];
   else if (ui.tab === TASKS_TAB)
-    text = ui.boardEdit ? "editing \xB7 enter save \xB7 esc cancel" : `${tabs} \xB7 enter open \xB7 e edit \xB7 ? help \xB7 q quit`;
+    segments = ui.boardEdit ? [k("", "editing"), k("enter", "save"), k("esc", "cancel")] : [tabs, k("enter", "open"), k("e", "edit"), k("?", "help"), k("q", "quit")];
   else if (ui.tab === KNOWLEDGE_TAB)
-    text = "type to search \xB7 esc clear \xB7 ^f state \xB7 F1 help";
+    segments = [k("type", "to search"), k("esc", "clear"), k("^f", "state"), k("F1", "help")];
   else if (ui.tab === QUEUE_TAB)
-    text = `${tabs} \xB7 \u2191\u2193 pending \xB7 wheel \xB7 ? help \xB7 q quit`;
+    segments = [tabs, k("\u2191\u2193", "pending"), k("wheel"), k("?", "help"), k("q", "quit")];
   else if (ui.tab === AGENTS_TAB)
-    text = `\u2190/\u2192 or ${tabs} \xB7 \u2191\u2193 scroll \xB7 ? help \xB7 q quit`;
+    segments = [k(`\u2190/\u2192 or ${tabs.key}`, "tabs"), k("\u2191\u2193", "scroll"), k("?", "help"), k("q", "quit")];
   else if (ui.tab === GITHUB_TAB)
-    text = `${tabs} \xB7 \u2191\u2193 \xB7 r refresh \xB7 ? help \xB7 q quit`;
+    segments = [tabs, k("\u2191\u2193"), k("r", "refresh"), k("?", "help"), k("q", "quit")];
   else
-    text = `${tabs} \xB7 enter change \xB7 esc \xB7 ? help \xB7 q quit`;
-  return clipEllipsis(text, width);
+    segments = [tabs, k("enter", "change"), k("esc"), k("?", "help"), k("q", "quit")];
+  return { footer: clipEllipsis(footerText(segments), width), footerSegments: segments };
 }
 var HELP_LINES = [
   "Keys",
@@ -11410,7 +11413,7 @@ function helpDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBo
   return {
     tabs,
     rows: [{ id: "help", type: "help", selected: false, expanded: false, lines, screenRow: 0 }],
-    footer: footerFor(ui, visibleTabs(agents, github).length, width),
+    ...footerFor(ui, visibleTabs(agents, github).length, width),
     notice: noticeFor(ui, width),
     strip: githubStrip(github, width),
     banner,
@@ -11518,7 +11521,7 @@ function githubDashboardState(ui, width, banner, projectName, bodyTop, tabs, max
   return {
     tabs,
     rows: [{ id: "github", type: "github", selected: false, expanded: false, lines, screenRow: 0 }],
-    footer: footerFor(ui, visibleTabs(agents, github).length, width),
+    ...footerFor(ui, visibleTabs(agents, github).length, width),
     notice: noticeFor(ui, width),
     strip: githubStrip(github, width),
     banner,
@@ -11566,7 +11569,7 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, max
     tabs,
     rows,
     emptyMessage: view.rows.length ? void 0 : "(no configured models)",
-    footer: footerFor(ui, visibleTabs(agents, github).length, width),
+    ...footerFor(ui, visibleTabs(agents, github).length, width),
     notice: noticeFor(ui, width),
     strip: githubStrip(github, width),
     banner,
@@ -11692,7 +11695,7 @@ function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinit
     tabs,
     rows,
     emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
-    footer: footerFor(ui, visibleTabs(agents, github).length, width),
+    ...footerFor(ui, visibleTabs(agents, github).length, width),
     // a board_edit refusal, a failed selection write or a degraded store read
     // (ui.notice) is drawn on its own row in the warning colour
     notice: noticeFor(ui, width),
