@@ -21,6 +21,7 @@ import {
   TASKS_TAB,
   type DashboardState,
   type UiState,
+  footerText,
 } from '../state.js';
 import { draw, type AttrLike } from '../render.js';
 import { bannerLines, COMPACT_BELOW_HEIGHT, COMPACT_SCENE_ROWS, FULL_SCENE_ROWS } from '../banner.js';
@@ -204,6 +205,12 @@ test('footer: at most 48 columns, different per tab and for the Tasks editor, pi
     assert.match(footers[1]!, /enter save · esc cancel/);
     assert.match(footers[2]!, /type to search/);
     assert.doesNotMatch(footers[2]!, /1-\d tabs/, 'digits type into the search on Knowledge, so the footer does not offer them');
+    // the segments carry the same text the OpenCode host shows, key names first
+    const states = modes.map(([, ui]) => buildDashboardState(store, ui, Infinity, 20, '', false, undefined, undefined, agents));
+    states.forEach((d, i) => assert.equal(footerText(d.footerSegments), d.footer, `${modes[i]![0]}: segments join to the footer text`));
+    assert.deepEqual(states[0]!.footerSegments[1], { key: 'enter', desc: 'open' });
+    assert.deepEqual(states[1]!.footerSegments[0], { key: '', desc: 'editing' });
+    assert.deepEqual(states[2]!.footerSegments.map((g) => g.key), ['type', 'esc', '^f', 'F1']);
     // clipped to a narrower pane
     const narrow = buildDashboardState(store, st(), 33, 20).footer;
     assert.equal(narrow.length, 33);

@@ -1,7 +1,7 @@
 // Thin terminal-kit render layer (revised §2.1): prints what the state layer
 // derived; owns NOTHING testable. Mouse + key events are translated to the
 // state layer's UiEvent vocabulary and fed to reduce().
-import type { DashboardState, UiEvent } from './state.js';
+import { FOOTER_SEPARATOR, type DashboardState, type UiEvent } from './state.js';
 import type { BlockPixel, SubagentBlock } from './subagents.js';
 import { horizonLabel, sceneLayout, sceneText } from './banner.js';
 import { PLAIN_THEME, type Theme } from './theme.js';
@@ -138,8 +138,37 @@ export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOption
     const base = state.strip.dim ? t.muted : t.text;
     screen.put({ x: 0, y: screen.height - 2, attr: state.strip.text.startsWith('⚠') ? t.warn(base) : base }, state.strip.text);
   }
-  screen.put({ x: 0, y: screen.height - 1, attr: t.muted }, state.footer);
+  drawFooter(screen, t, state);
   screen.draw({ delta: true });
+}
+
+/** The footer in the Now playing app's style: each key in footerKey, each
+ *  description and the ' · ' separators in footerDesc. The text is always
+ *  state.footer (already clipped to the pane, an ellipsis included); the
+ *  segments only say where one attr ends and the next begins. Runs that share
+ *  an attr object (16 colours, plain) are one put. */
+function drawFooter(screen: ScreenLike, t: Theme, state: DashboardState): void {
+  const runs: { len: number; attr: AttrLike }[] = [];
+  const add = (len: number, attr: AttrLike): void => {
+    const last = runs[runs.length - 1];
+    if (last && last.attr === attr) last.len += len;
+    else runs.push({ len, attr });
+  };
+  state.footerSegments.forEach((seg, i) => {
+    if (i > 0) add(FOOTER_SEPARATOR.length, t.footerDesc);
+    if (seg.key) add(seg.key.length, t.footerKey);
+    if (seg.desc) add(seg.desc.length + (seg.key ? 1 : 0), t.footerDesc);
+  });
+  const y = screen.height - 1;
+  let x = 0;
+  for (const run of runs) {
+    const text = state.footer.slice(x, x + run.len);
+    if (text === '') break;
+    screen.put({ x, y, attr: run.attr }, text);
+    x += text.length;
+  }
+  // an ellipsis the clip added past the last run keeps the description colour
+  if (x < state.footer.length) screen.put({ x, y, attr: t.footerDesc }, state.footer.slice(x));
 }
 
 /** The slice of terminal-kit's Terminal that paints a truecolour cell. */
