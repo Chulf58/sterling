@@ -10,6 +10,7 @@ import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objec
 import { MountedStores, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { holdRoutedStores } from './held-stores.js';
+import { WorkerGuard, guardWorkerTools, type WorkerPolicyArgs } from './worker-policy.js';
 import { SterlingTools, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS, DEDUP_OVERRIDE_FIELD, mountedDomainSurface } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
@@ -290,7 +291,10 @@ function openStoreArg(storePath: string): { store: MountedStores; config: Sterli
  * returned `store` is held (holdRoutedStores): when its connection closes, the
  * next call opens a new one.
  */
-export function createSterlingServer(target: string | { projectRoot: string }): { server: McpServer; store: MountedStores; tools: SterlingTools } {
+export function createSterlingServer(
+  target: string | { projectRoot: string },
+  opts: { workerPolicy?: WorkerPolicyArgs } = {}
+): { server: McpServer; store: MountedStores; tools: SterlingTools } {
   let opened: { store: MountedStores; config: SterlingConfig; repoRoot: string };
   if (typeof target === 'string') {
     opened = openStoreArg(target);
@@ -331,6 +335,9 @@ export function createSterlingServer(target: string | { projectRoot: string }): 
     ? ` Mounted domains at server start: ${bootDomains.join('; ')} (the receipt's mounted_domains is current). A record about one of these subjects takes scope domain:<name>; a record about this repo stays project.`
     : '';
   const server = new McpServer({ name: 'sterling', version: '0.1.0' });
+  // Worker mode (worker-policy.ts): every tool registered below runs through
+  // the run's batch policy, so this must stay before the first registerTool.
+  if (opts.workerPolicy) guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store));
 
   const json = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
 
