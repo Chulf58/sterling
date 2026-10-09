@@ -87,7 +87,7 @@ export {
   type PgStoreKind,
 } from './pg-driver.js';
 import type { StoreDriver } from './driver.js';
-import { SqliteDriver } from './sqlite-driver.js';
+import { SqliteDriver, DEFAULT_BUSY_TIMEOUT_MS } from './sqlite-driver.js';
 
 /** Opens the driver for a store path when SterlingStore is given none. */
 export type StoreDriverFactory = (path: string, options: { busyTimeoutMs?: number }) => StoreDriver;
@@ -237,6 +237,38 @@ export class StoreMovedError extends Error {
     );
     this.name = 'StoreMovedError';
   }
+}
+
+/**
+ * A write that waited the connection's busy timeout for SQLite's write lock and
+ * never got it (SQLITE_BUSY, 'database is locked'): another connection held the
+ * lock for longer than the timeout. SterlingStore.tx() rolls the transaction
+ * back before throwing this, so NOTHING from that transaction was written. It
+ * says nothing about OTHER transactions of a multi-step caller; the tool layer
+ * words that part. The raw SQLite error is kept as `cause`. The text carries
+ * the words 'database is locked' on purpose: the maintenance worker's runner
+ * classifies a busy result by them.
+ */
+export class StoreBusyError extends Error {
+  constructor(
+    readonly busy_timeout_ms: number,
+    cause: unknown
+  ) {
+    super(
+      `the store was locked by another connection for longer than ${busy_timeout_ms} ms; this transaction was rolled back and nothing from it was written (SQLITE_BUSY, database is locked).`,
+      { cause }
+    );
+    this.name = 'StoreBusyError';
+  }
+}
+
+/** True for SQLite's busy error: result code 5 (extended codes keep it in the low byte) or its message. */
+function isSqliteBusy(e: unknown): boolean {
+  if (e instanceof StoreBusyError) return false;
+  const code = (e as { errcode?: unknown } | null)?.errcode;
+  if (typeof code === 'number' && (code & 0xff) === 5) return true;
+  const message = (e as { message?: unknown } | null)?.message;
+  return typeof message === 'string' && /database is locked/i.test(message);
 }
 
 /** The operation_id from `options`, validated; undefined when the caller passed none. */
@@ -4194,7 +4226,11 @@ export class SterlingStore {
     // transaction" branch with NO transaction open, so each statement
     // autocommitted individually and atomicity silently disappeared for the
     // life of the connection.
-    this.db.begin();
+    try {
+      this.db.begin();
+    } catch (e) {
+      throw this.asBusy(e);
+    }
     this.txDepth++;
     try {
       // Live-version recheck INSIDE the write lock (closes the TOCTOU above):
@@ -4217,10 +4253,16 @@ export class SterlingStore {
       } catch {
         /* the original error below is the one that matters */
       }
-      throw e;
+      throw this.asBusy(e);
     } finally {
       this.txDepth--;
     }
+  }
+
+  /** A SQLite busy error from BEGIN, the transaction body or COMMIT becomes the named StoreBusyError; any other error is returned unchanged. */
+  private asBusy(e: unknown): unknown {
+    if (!isSqliteBusy(e)) return e;
+    return new StoreBusyError(this.db.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS, e);
   }
 
   /**
