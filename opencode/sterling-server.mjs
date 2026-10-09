@@ -16368,7 +16368,7 @@ function opencodeHostTail(pluginRoot) {
     "This session runs on OpenCode, not Claude Code. The layer above is this project's CLAUDE.md rendered for OpenCode: each Claude-only rule Sterling ships is replaced by its OpenCode text. The other differences:",
     "",
     install,
-    "- **/plugin, --plugin-dir and the marketplace** do not apply. OpenCode loads Sterling through the plugin shim in its config dir. Sterling's commands are registered as OpenCode slash commands under the same names (`/sterling:<name>`), and each command this layer names also points at its file under the commands directory. .claude/agents and .claude/settings.json are Claude Code surfaces and are absent here.",
+    "- **/plugin, --plugin-dir and the marketplace** do not apply. OpenCode loads Sterling through the plugin shim in its config dir. Sterling's commands are registered as OpenCode slash commands under the same names (`/sterling:<name>`), except `sterling:dashboard`, which does not exist here: open the dashboard with `/sterling` or <leader>k. Each command this layer names also points at its file under the commands directory. .claude/agents and .claude/settings.json are Claude Code surfaces and are absent here.",
     "- **There is no stop block.** When a turn ends, Sterling settles the files it changed. Capture and reconcile duties it finds arrive as a STERLING NOTICE in the next turn; act on them before new work.",
     `- **The conductor role** (${pluginRoot ? `\`${pluginRoot}/agent-templates/conductor.md\`` : "agent-templates/conductor.md"}) is yours in the main session. Dispatch subagents with the \`subagent\` tool.`
   ].join("\n");
@@ -16544,6 +16544,7 @@ function pruneShownNotices(root) {
 // packages/opencode-plugin/src/config.mjs
 var COMMAND_PREFIX = "sterling:";
 var SKILL_PREFIX = "sterling:";
+var OPENCODE_UNREGISTERED_COMMANDS = ["dashboard"];
 var HOST_MAP = [
   [/(?:the )?`?AskUserQuestion`? tool\b/g, "OpenCode's `question` tool"],
   [/\b(an?|the) `?AskUserQuestion`? (form|call)\b/g, (_, art, noun) => `${art === "the" ? "the" : "a"} \`question\` tool ${noun}`],
@@ -16591,7 +16592,7 @@ function renderRegistrations(root) {
   const skillsDir = join25(root, "skills");
   if (!existsSync15(commandsDir)) throw new Error(`no commands directory at ${commandsDir}`);
   if (!existsSync15(skillsDir)) throw new Error(`no skills directory at ${skillsDir}`);
-  for (const file of readdirSync6(commandsDir).filter((f) => f.endsWith(".md")).sort()) {
+  for (const file of readdirSync6(commandsDir).filter((f) => f.endsWith(".md") && !OPENCODE_UNREGISTERED_COMMANDS.includes(f.slice(0, -3))).sort()) {
     const name = `${COMMAND_PREFIX}${file.slice(0, -3)}`;
     try {
       const { description, body } = renderSource(join25(commandsDir, file), root, `commands/${file}`);

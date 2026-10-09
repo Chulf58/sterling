@@ -1,5 +1,5 @@
 // The OpenCode server plugin's registration seam (packages/opencode-plugin/src/config.mjs):
-// every Sterling command and skill registered with host-correct bodies, and the
+// every Sterling command (except OPENCODE_UNREGISTERED_COMMANDS) and skill registered with host-correct bodies, and the
 // `sterling` MCP entry injected from the loaded copy (decision
 // sterling-opencode-plugin-injects-its-own-mcp-entry). Driven through a stubbed
 // plugin context whose editors behave as OpenCode 2.0.21's: a transform callback
@@ -75,12 +75,12 @@ const noticesOf = (dir) => {
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : [];
 };
 
-test('every commands/*.md registers as sterling:<name> and every SKILL.md as a skill, with no Claude-only phrase left', async (t) => {
+test('every commands/*.md except OPENCODE_UNREGISTERED_COMMANDS registers as sterling:<name> and every SKILL.md as a skill, with no Claude-only phrase left', async (t) => {
   const project = tempProject(t);
   const ctx = stubCtx(project);
   await cfg.createConfigHandler({ sterlingRoot: repo, now: () => NOW })(ctx);
   const { commands, skills } = ctx.run();
-  assert.deepEqual([...commands.keys()].sort(), commandFiles().map((n) => `sterling:${n}`));
+  assert.deepEqual([...commands.keys()].sort(), commandFiles().filter((n) => !cfg.OPENCODE_UNREGISTERED_COMMANDS.includes(n)).map((n) => `sterling:${n}`));
   assert.deepEqual([...skills.keys()].filter((k) => k !== 'opencode').sort(), skillDirs().map((n) => `sterling:${n}`));
   assert.ok(skills.has('opencode'), 'built-in skills are kept');
   for (const s of skills.values()) {
@@ -277,7 +277,7 @@ test('review-brief, grill and delegating-to-subagents: the OpenCode render names
   assert.ok(!briefClaude.includes('gpt-6.1-sol'), 'review-brief: the Claude render does not name gpt-6.1-sol');
 });
 
-test('dashboard.md: the OpenCode render names the TUI plugin and no tmux or launcher; the Claude render is the unfenced text', async (t) => {
+test('dashboard.md: sterling:dashboard is not registered on OpenCode; the OpenCode render points at /sterling; the Claude render is the unfenced text', async (t) => {
   const { renderClaudeText } = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'agent-fences.mjs')).href);
   const source = readFileSync(join(repo, 'commands', 'dashboard.md'), 'utf8');
   assert.match(source, /^<!-- claude-only -->$/m, 'the Claude Code text is fenced');
@@ -287,14 +287,22 @@ test('dashboard.md: the OpenCode render names the TUI plugin and no tmux or laun
   assert.doesNotMatch(claude, /<!--|OpenCode|<leader>k/, 'no marker or OpenCode text reaches the Claude render');
   assert.match(claude, /`\.\/sterling-launch\.sh tui`/);
 
+  // A prompt command cannot open the TUI view (issue 51), so OpenCode gets no sterling:dashboard.
+  assert.deepEqual(cfg.OPENCODE_UNREGISTERED_COMMANDS, ['dashboard']);
   const project = tempProject(t);
   const ctx = stubCtx(project);
   await cfg.createConfigHandler({ sterlingRoot: repo, now: () => NOW })(ctx);
-  await ctx.run().commands.get('sterling:dashboard').execute({ sessionID: 's', prompt: { text: '' }, delivery: 'steer' });
-  const oc = ctx.prompts[0].text;
+  const registered = ctx.run().commands;
+  assert.ok(!registered.has('sterling:dashboard'), 'sterling:dashboard is not offered on OpenCode');
+  assert.ok(registered.has('sterling:status'), 'the other commands still register');
+  assert.deepEqual(cfg.renderRegistrations(repo).failures, [], 'nothing fails to render');
+
+  // The text an agent reading the file on OpenCode gets: the TUI command, no launcher.
+  const oc = cfg.hostMapText(cfg.splitFrontmatter(source, 'commands/dashboard.md').body, repo, 'commands/dashboard.md');
   assert.doesNotMatch(oc, /tmux|launcher|sterling-launch|\.bat\b|split pane|<!--/i);
-  assert.match(oc, /`<leader>k` \(ctrl\+x then k by default\)/);
+  assert.match(oc, /no `\/sterling:dashboard` command/);
   assert.match(oc, /`\/sterling`/);
+  assert.match(oc, /`<leader>k` \(ctrl\+x then k by default\)/);
   // The fix for a missing panel depends on the host that installed the copy (decision
   // sterling-on-opencode-installs-from-a-git-release-branch-v2):
   // the OpenCode copy updates through opencode plugin update, a Claude Code copy through Claude Code.
