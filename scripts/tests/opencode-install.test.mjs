@@ -47,6 +47,14 @@ function run(dir, home, extra = {}) {
   return setupOpenCode({ projectDir: dir, pluginRoot: repoRoot, env: { HOME: home }, home, installed: false, probe: OC2, ...extra });
 }
 
+/** A child-process env that owns every input the Sterling lookup reads: HOME is the temp one, and the real cache and config roots are dropped. */
+function isolatedEnv(home) {
+  const env = { ...process.env, HOME: home };
+  delete env.CLAUDE_CONFIG_DIR;
+  delete env.XDG_CACHE_HOME;
+  return env;
+}
+
 const fwdPath = (p) => p.replaceAll('\\', '/');
 const statusOf = (result, suffix) => result.rows.find((r) => r.item.endsWith(suffix))?.status;
 const untracked = (dir) => git(dir, ['status', '--porcelain', '--untracked-files=all']).split('\n').filter(Boolean);
@@ -872,7 +880,7 @@ test('server and TUI shims delegate to the resolved Sterling; non-Sterling proje
   const plain = tui.setup({ location: { directory: tmp('oc-plain-') } });
   assert.equal(typeof plain, 'function', 'a no-op disposer');
   assert.equal(tui.setup({ location: { directory: dir } }), `clone:${dir}`);
-  const mcp = spawnSync(process.execPath, [mcpLauncherPath({ home }), '--store', '.sterling/sterling.db'], { encoding: 'utf8' });
+  const mcp = spawnSync(process.execPath, [mcpLauncherPath({ home }), '--store', '.sterling/sterling.db'], { encoding: 'utf8', env: isolatedEnv(home) });
   assert.equal(mcp.stdout.trim(), 'clone ["--store",".sterling/sterling.db"]');
 });
 
@@ -884,8 +892,7 @@ test('no Sterling installed: the TUI shim imports cleanly and its setup logs ONE
   const plugins = join(opencodeConfigDir({ env: {}, home }), 'plugins');
   const tuiCopy = join(tmp('oc-tui-'), 'tui.mjs');
   copyFileSync(join(plugins, 'sterling-tui', 'tui.tsx'), tuiCopy);
-  const env = { ...process.env, HOME: home };
-  delete env.CLAUDE_CONFIG_DIR;
+  const env = isolatedEnv(home);
   const probe = (shim, label) => spawnSync(process.execPath, ['--input-type=module', '-e', `
     const p = (await import(${JSON.stringify(pathToFileURL(shim).href)})).default;
     const r = await p.setup({ location: { directory: ${JSON.stringify(dir)} } });
@@ -948,9 +955,7 @@ test('installed-copy shims pick the highest installed version at run time, acros
   stubInstalledCopy(join(cache, 'sterling', '0.10.0'), '0.10.0');
   const dir = project('hobby');
   setupOpenCode({ projectDir: dir, pluginRoot: repoRoot, env: { HOME: home }, home, installed: true, probe: OC2 });
-  const env = { ...process.env, HOME: home };
-  delete env.CLAUDE_CONFIG_DIR;
-  delete env.XDG_CACHE_HOME;
+  const env = isolatedEnv(home);
   const runMcp = () => spawnSync(process.execPath, [mcpLauncherPath({ home }), '--store', 's.db'], { encoding: 'utf8', env });
   assert.equal(runMcp().stdout.trim(), 'v0.10.0 ["--store","s.db"]');
   stubInstalledCopy(join(npm, '1759500000000', 'node_modules', '@chulf58', 'sterling'), '0.11.0', 'package.json');

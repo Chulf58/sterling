@@ -10,8 +10,8 @@
     "implementor": { "model": "claude-sonnet-5-5", "effort": "high" },
     "researcher": { "model": "claude-sonnet-5-5", "effort": "medium" },
     "scout": { "model": "claude-sonnet-5-5", "effort": "low" },
-    "classifiers": { "model": "claude-haiku-4-5", "effort": "low" },
-    "librarian": { "model": "claude-sonnet-5-5", "effort": "low" },
+    "classifiers": { "model": "claude-haiku-5-5", "effort": "low" },
+    "librarian": { "model": "claude-haiku-5-5", "effort": "low" },
     "reviewer": { "model": "claude-opus-5-5", "effort": "high" }
   },
   "session_events": {

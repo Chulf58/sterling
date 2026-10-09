@@ -402,6 +402,7 @@ test('the host tail names the Sterling root and the Claude Code surfaces OpenCod
   }
   assert.ok(!tail.includes('${CLAUDE_PLUGIN_ROOT}'), 'the tail names the variable without the shell form, so the layer greps clean');
   assert.match(tail, /Sterling's commands are registered as OpenCode slash commands under the same names/, 'config.mjs registers the commands, so the tail says so');
+  assert.match(tail, /except `sterling:dashboard`, which does not exist here: open the dashboard with `\/sterling` or <leader>k/, 'the one command that is not registered is named, with the way to open the dashboard');
   assert.doesNotMatch(tail, /Slash commands[^.]*absent/, 'slash commands are not described as absent');
   assert.match(server.opencodeHostTail(null), /could not be resolved/, 'an unresolved root is said out loud');
 });

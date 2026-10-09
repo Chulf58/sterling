@@ -15,6 +15,7 @@ import { renderUnavailable } from '../../../scripts/hooks/lib/undeclared-source.
 import { queueDepthLine, reconcileBacklog } from '../../../scripts/hooks/lib/maintenance-state.mjs';
 import { handoffFilesLine, machineRoleLine, mountedDomainLines, pendingIssueReportsLine, projectModeLine, readProjectConfig, storageLine, tddPostureLine } from '../../../scripts/hooks/lib/operating-state.mjs';
 import { samePath } from '../../../scripts/lib/post-update-sync.mjs';
+import { noOriginRemote } from '../../../scripts/lib/work-pr.mjs';
 
 /**
  * The config-derived lines, read live on every request so a TUI toggle shows on
@@ -26,7 +27,7 @@ import { samePath } from '../../../scripts/lib/post-update-sync.mjs';
 export function operatingStateLines(root, pluginRoot, { opener } = {}) {
   const { config, configUnreadable } = readProjectConfig(root);
   const atClone = Boolean(pluginRoot && samePath(root, pluginRoot));
-  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable }), handoffFilesLine({ config, configUnreadable, root }), storageLine({ config, configUnreadable, root }), ...mountedDomainLines({ config, configUnreadable, opener, root }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
+  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: config?.mode === 'work' && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root }), storageLine({ config, configUnreadable, root }), ...mountedDomainLines({ config, configUnreadable, opener, root }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
   return { lines, config };
 }
 

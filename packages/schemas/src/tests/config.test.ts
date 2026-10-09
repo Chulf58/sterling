@@ -139,6 +139,7 @@ test('conductor pressure: the shared context-window table carries verified per-m
   assert.equal(sharedWindows['claude-opus-5'], 1_000_000);
   assert.equal(sharedWindows['claude-sonnet-5'], 1_000_000);
   assert.equal(sharedWindows['claude-haiku-4-5'], 200_000);
+  assert.equal(sharedWindows['claude-haiku-5-5'], 1_000_000);
   const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));
   // Reversed by decision context-window-default-is-a-real-fallback (user-ruled
   // 2026-09-22, "Make it real: fall back to 1M"): a model with no per-model
