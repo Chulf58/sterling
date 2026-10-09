@@ -61,6 +61,20 @@ export function parseOriginRepo(url) {
   return { host, repo: `${host}/${owner}/${name}` };
 }
 
+/** True only when git answers and 'origin' is not among the remotes: a repo
+ * that never had a GitHub remote (decision project-mode-hobby-work-toggle-decides-flow,
+ * user-ruled 2026-10-08: such a project merges locally even in work mode). A
+ * directory git cannot read is NOT "no origin": it keeps the work-mode path,
+ * whose own preconditions refuse it by name. */
+export function noOriginRemote(cwd) {
+  const r = spawnSync('git', ['remote'], { cwd, encoding: 'utf8', timeout: 30_000 });
+  return r.status === 0 && !r.stdout.split('\n').map((l) => l.trim()).includes('origin');
+}
+
+/** The loud line printed when work mode falls back to a local merge. */
+export const NO_ORIGIN_LOCAL_MERGE_NOTICE =
+  "direct-merge: WORK mode, but this repository has no 'origin' remote — merging LOCALLY like hobby mode. NO pull request was opened and NO Copilot review happened; nothing was pushed.";
+
 /** Cheap preconditions, checked BEFORE the battery. Returns { repo } or { refusal }. */
 export function workPreflight(cwd) {
   const url = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd, encoding: 'utf8', timeout: 30_000 });

@@ -893,6 +893,62 @@ for (const mode of [undefined, 'hobby']) {
   });
 }
 
+// GitHub issue #39 (user-ruled 2026-10-08, 'Fall back to local merge'): a WORK
+// project whose repository has no 'origin' remote has no PR path, so the gate
+// merges locally like hobby mode and says loudly that no PR and no Copilot
+// review happened. A work project WITH origin keeps the PR flow (every `work:`
+// test above); a directory that is not a git repo is not "no origin".
+test("work + no 'origin' remote: merges LOCALLY like hobby, says loudly that no PR and no Copilot review happened, calls no gh, arms no PR loop", () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    git(p.dir, ['remote', 'remove', 'origin']);
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `the no-origin work merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const notice = /WORK mode, but this repository has no 'origin' remote — merging LOCALLY like hobby mode\. NO pull request was opened and NO Copilot review happened/;
+    assert.match(r.stderr, notice, 'the fallback is announced');
+    assert.equal(r.stderr.match(new RegExp(notice.source, 'g')).length, 2, 'announced at the start and again after the merge output');
+    const out = parseSingleJson(r.stdout, 'no-origin work merge');
+    assert.equal(out.mode, undefined, 'the report is the hobby merge report, not the work-mode PR report');
+    assert.equal(out.work_mode_local_fallback, true, 'the report says the fallback applied');
+    assert.equal(out.pushed, false, 'nothing is pushed: there is no origin');
+    assert.deepEqual(ghCalls(p.gh.state), [], 'the fallback never calls gh');
+    assert.notEqual(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'main received the merge');
+    assert.equal(gitMaybe(p.dir, ['rev-parse', '--verify', `refs/heads/${p.branchName}`]), null, 'the merged branch is deleted like hobby');
+    assert.equal(existsSync(prLoopFile(p)), false, 'no PR review loop duty is armed');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("work + a GitHub origin: unchanged — no local-fallback notice, no work_mode_local_fallback, the PR flow runs", () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, oneLine(r.stderr));
+    assert.doesNotMatch(r.stderr, /merging LOCALLY like hobby mode/);
+    const out = parseSingleJson(r.stdout, 'work with origin');
+    assert.equal(out.mode, 'work');
+    assert.equal(out.work_mode_local_fallback, undefined);
+    assert.equal(out.pr_number !== null, true, 'a PR was opened');
+    assertBaseUntouched(p, 'work with origin');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("work + no 'origin' remote but another remote: still the local fallback (only a missing 'origin' triggers it)", () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    git(p.dir, ['remote', 'rename', 'origin', 'upstream']);
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /has no 'origin' remote — merging LOCALLY/);
+    assert.deepEqual(ghCalls(p.gh.state), []);
+  } finally {
+    p.cleanup();
+  }
+});
+
 // The shipping flow follows the mode and nothing else (decision
 // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
 // the handoff setting, on or off, changes neither flow, and /sterling:merge

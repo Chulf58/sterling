@@ -8,6 +8,8 @@
 // WORK mode (config.mode, decision project-mode-hobby-work-toggle-decides-flow):
 // the same preflight, then push the branch and open or reuse a GitHub PR
 // (scripts/lib/work-pr.mjs) — never a merge, sweep or push of the base.
+// A work repo with no 'origin' remote has no PR path and merges locally like hobby
+// (GitHub issue #39), announced loudly.
 //   node scripts/direct-merge.mjs [--into <branch>] [--branch <branch>] [--target <dir>]
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
@@ -23,7 +25,7 @@ import { releaseAfterMerge } from './lib/opencode-release.mjs';
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { SterlingStore } from '@sterling/store';
 import { readProjectMode } from './lib/handoff-projection.mjs';
-import { workPreflight, shipAsPr, pushWithWindowsRetry, localBranchRefusal, installWorkResult, armPrLoop, PR_LOOP_REL } from './lib/work-pr.mjs';
+import { workPreflight, shipAsPr, pushWithWindowsRetry, localBranchRefusal, installWorkResult, armPrLoop, noOriginRemote, NO_ORIGIN_LOCAL_MERGE_NOTICE, PR_LOOP_REL } from './lib/work-pr.mjs';
 // Attestation disclosure (decision attestation-staleness-disclosure-only-never-
 // a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
 // block above the merge action.
@@ -60,6 +62,15 @@ try {
   mode = readProjectMode(storeRoot);
 } catch (e) {
   modeError = e;
+}
+// WORK mode in a repo with no 'origin' remote has no PR path (GitHub issue #39;
+// user-ruled 2026-10-08: some projects never have a GitHub repo). It runs as
+// HOBBY: a local merge, announced loudly below. A work repo WITH origin, or a
+// directory git cannot read, keeps the work flow and its refusals.
+const noOriginFallback = mode === 'work' && isGitRepo(target) && noOriginRemote(target);
+if (noOriginFallback) {
+  mode = 'hobby';
+  console.error(NO_ORIGIN_LOCAL_MERGE_NOTICE);
 }
 const work = mode === 'work' ? installWorkResult() : null;
 const stage = (name) => {
@@ -963,5 +974,7 @@ if (mergedHead.status === 0) {
   opencodeRelease = { status: 'skipped' };
 }
 
-console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed, opencode_release: opencodeRelease.status, ...(parkedClosed ? { parked_items_closed: parkedClosed } : {}) }, null, 2));
+// The fallback is said again at the END, after the merge output, where it is read.
+if (noOriginFallback) console.error(NO_ORIGIN_LOCAL_MERGE_NOTICE);
+console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed, opencode_release: opencodeRelease.status, ...(noOriginFallback ? { work_mode_local_fallback: true } : {}), ...(parkedClosed ? { parked_items_closed: parkedClosed } : {}) }, null, 2));
 if (opencodeRelease.status === 'failed') process.exit(1);

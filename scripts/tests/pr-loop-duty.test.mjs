@@ -3,6 +3,7 @@
 // that cannot be evaluated says, and the exact next-action text. The H10 hook
 // behavior around it stays pinned by h10-pr-review-loop.test.mjs.
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -45,6 +46,18 @@ test('hobby, mode-less, unarmed and settled projects owe nothing', () => {
     } finally {
       p.cleanup();
     }
+  }
+});
+
+// GitHub issue #39: a work project in a git repo with no 'origin' remote merges
+// locally and never arms the loop, so H10 owes it no PR review.
+test("a work project in a git repo with no 'origin' remote owes no PR review loop", () => {
+  const p = project('work');
+  try {
+    assert.equal(spawnSync('git', ['init', '-b', 'main'], { cwd: p.dir, encoding: 'utf8' }).status, 0);
+    assert.deepEqual(duty.evaluatePrLoop(p.dir), { state: null, degraded: null });
+  } finally {
+    p.cleanup();
   }
 });
 
