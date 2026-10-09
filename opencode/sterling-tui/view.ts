@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { boardDisplayLabel } from '@sterling/schemas';
 import type { SterlingStore } from '@sterling/store';
-import { KNOWLEDGE_TAB, type UiEvent, type UiState } from '@sterling/tui/dist/state.js';
+import { KNOWLEDGE_TAB, type DashboardState, type UiEvent, type UiState } from '@sterling/tui/dist/state.js';
 import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_COLS, DONE_FADE, fadeToTile, type AssignState } from '@sterling/tui/dist/avatars/index.js';
 import { storeBackend } from '../../scripts/hooks/lib/store-backend.mjs';
 
@@ -289,6 +289,26 @@ export function keyToUiEvent(key: KeyLike): UiEvent | undefined {
   const ch = key.sequence ?? '';
   if (ch.length === 1 && ch >= ' ' && ch !== '\x7f') return { kind: 'char', ch };
   return undefined;
+}
+
+/** One line of the full view: selected rows get the highlight, dim lines the
+ *  muted colour, warn lines (the notice row) the host's warning colour. */
+export interface Painted {
+  text: string;
+  selected?: boolean;
+  dim?: boolean;
+  warn?: boolean;
+}
+
+/** What the full view draws below the board body and the sub-agent block: the
+ *  notice row in the warning style (blank when there is none), the footer. */
+export function footerLines(st: Pick<DashboardState, 'notice' | 'footer'>): Painted[] {
+  return [st.notice ? { text: st.notice, warn: true } : { text: '' }, { text: st.footer, dim: true }];
+}
+
+/** The foreground a painted line is drawn in; undefined is the host's default text colour. */
+export function paintedFg(line: Painted, colours: { muted?: string; warning?: string }): string | undefined {
+  return line.warn ? colours.warning : line.dim ? colours.muted : undefined;
 }
 
 /** Esc leaves the full view only when it has nothing of its own to cancel:

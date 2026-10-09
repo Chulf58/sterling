@@ -74,7 +74,11 @@ export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOption
     // the spacer line (row top+2) doubles as the search bar while a query/input is live
     screen.put({ x: 0, y: top + 2, attr: t.search }, state.searchLine);
   }
-  const lastBodyLine = screen.height - 3; // reserve the blank spacer + footer
+  const lastBodyLine = screen.height - 3; // reserve the notice row + footer
+  // the Queue tab's pending list stops at its window above the divider;
+  // screenLineToRow stops at the same line
+  const qc = state.queueCompleted;
+  const lastRowLine = qc ? Math.min(lastBodyLine, state.bodyTop + (qc.pendingLines ?? qc.startRow) - 1) : lastBodyLine;
   let y = state.bodyTop; // 0-based rows: header 0, tab bar 1, blank/search 2, body from bodyTop
   if (state.emptyMessage && y <= lastBodyLine) {
     screen.put({ x: 0, y, attr: t.muted }, state.emptyMessage);
@@ -85,10 +89,10 @@ export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOption
   // same offset, so the screen and the click hit-test agree by construction.
   let bodyIdx = 0;
   for (const row of state.rows) {
-    if (y > lastBodyLine) break;
+    if (y > lastRowLine) break;
     for (const line of row.lines) {
       if (bodyIdx++ < state.scroll) continue;
-      if (y > lastBodyLine) break;
+      if (y > lastRowLine) break;
       const base = line.kind === 'title' ? t.title(row.selected, row.expanded) : line.kind === 'meta' ? t.muted : t.text;
       // '⚠ ' is the state layer's warning convention (notices, degraded sources)
       const attr = line.text.startsWith('⚠') ? t.warn(base) : base;
@@ -98,43 +102,34 @@ export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOption
       y += 1;
     }
   }
-  if (state.queueCompleted) {
-    // lower-half completed section (§11): drain-log lines, dim, never selectable.
-    // The state layer already truncated pending above the fixed divider.
-    const qc = state.queueCompleted;
+  if (qc) {
+    // lower-half history (§11): the completed header stays put, and below it
+    // the drain-log lines then the ACTIVITY section (board 39d6462d) scroll as
+    // one list by qc.scroll. Log lines: dim, never selectable.
     if (qc.overflow) screen.put({ x: 0, y: state.bodyTop + qc.startRow - 1, attr: t.muted }, qc.overflow);
     let cy = state.bodyTop + qc.startRow;
     if (cy <= lastBodyLine) {
       screen.put({ x: 0, y: cy, attr: t.heading }, qc.header);
       cy += 1;
     }
-    for (const line of qc.lines) {
-      if (cy > lastBodyLine) break;
-      screen.put({ x: 0, y: cy, attr: t.muted }, line);
-      cy += 1;
-    }
-    // ACTIVITY section (board 39d6462d): drawn immediately below completed,
-    // same log-line convention (dim, never selectable) — a separate section,
-    // not a change to what queueCompleted means.
+    const history: { text: string; attr: AttrLike }[] = qc.lines.map((text) => ({ text, attr: t.muted }));
     if (state.queueActivity) {
-      const qa = state.queueActivity;
-      if (cy <= lastBodyLine) {
-        screen.put({ x: 0, y: cy, attr: t.heading }, qa.header);
-        cy += 1;
-      }
-      for (const line of qa.lines) {
-        if (cy > lastBodyLine) break;
-        screen.put({ x: 0, y: cy, attr: t.muted }, line);
-        cy += 1;
-      }
+      history.push({ text: state.queueActivity.header, attr: t.heading });
+      for (const text of state.queueActivity.lines) history.push({ text, attr: t.muted });
+    }
+    for (const line of history.slice(qc.scroll ?? 0)) {
+      if (cy > lastBodyLine) break;
+      screen.put({ x: 0, y: cy, attr: line.attr }, line.text);
+      cy += 1;
     }
   }
   if (opts.block && blockHeight > 0) {
     const top = state.bodyTop;
     for (const p of opts.block.puts) screen.put({ x: p.x, y: top + p.y, attr: t.map(p.attr) }, p.text);
   }
-  const footerY = blockHeight > 0 ? screen.height - 1 : Math.min(y + 1, screen.height - 1);
-  screen.put({ x: 0, y: footerY, attr: t.muted }, state.footer);
+  // the notice and the footer are pinned to the last two rows, below every list
+  if (state.notice) screen.put({ x: 0, y: screen.height - 2, attr: t.warn({ ...t.text, bold: true }) }, state.notice);
+  screen.put({ x: 0, y: screen.height - 1, attr: t.muted }, state.footer);
   screen.draw({ delta: true });
 }
 
@@ -251,9 +246,9 @@ export function mouseToEvent(name: string, data: { x: number; y: number }): UiEv
     case 'MOUSE_RIGHT_BUTTON_PRESSED':
       return { kind: 'rightclick' };
     case 'MOUSE_WHEEL_UP':
-      return { kind: 'wheel', dy: -1 };
+      return { kind: 'wheel', dy: -1, y: data.y };
     case 'MOUSE_WHEEL_DOWN':
-      return { kind: 'wheel', dy: 1 };
+      return { kind: 'wheel', dy: 1, y: data.y };
     default:
       return undefined;
   }

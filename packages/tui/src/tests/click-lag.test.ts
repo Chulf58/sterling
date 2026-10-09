@@ -100,7 +100,7 @@ test('click lag (c): a failed store write becomes a notice; handle() and flush()
       await ctl.handle({ kind: 'click', x: 5, y: lineOf(0) }, VP); // rejects on regression
       if (deferWrites) assert.equal(ctl.flush(), true, 'flush reports the failure so the host redraws');
       assert.match(ctl.ui().notice ?? '', /^selection not handed to the next prompt — disk I\/O error$/);
-      assert.match(ctl.state(VP).footer, /^⚠ selection not handed to the next prompt/, 'the notice is drawn');
+      assert.match(ctl.state(VP).notice ?? '', /^⚠ selection not handed to the next prompt/, 'the notice is drawn');
     } finally {
       ctl.close();
       rmSync(dir, { recursive: true, force: true });
@@ -271,7 +271,7 @@ test('change detection: a failed data_version read marks it degraded, says so on
     assert.equal(ctl.stats().builds - b0, 2, 'without a version every call rebuilds');
     assert.match(ctl.stats().changeDetection, /^degraded: data_version read failed — disk gone/);
     assert.match(ctl.ui().notice ?? '', /data_version read failed — disk gone/);
-    assert.match(ctl.state(VP).footer, /^⚠ .*data_version read failed/);
+    assert.match(ctl.state(VP).notice ?? '', /^⚠ .*data_version read failed/);
     await ctl.handle({ kind: 'tab', index: 1 }, VP); // a tab switch clears the notice
     ctl.state(VP);
     assert.equal(ctl.ui().notice, undefined, 'the notice is shown once, not on every rebuild');
