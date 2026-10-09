@@ -108,7 +108,7 @@ test('plain level: the attributes from before the theme (bold name, inverse tab 
 });
 
 for (const level of ['truecolor', '256'] as const) {
-  test(`${level} level: the page is painted black, explicit colours replace dim and inverse, a full-width selection bar, amber bold warnings`, () => {
+  test(`${level} level: the page is painted black, explicit colours replace dim and inverse, the selected title is bold cyan on black, amber bold warnings`, () => {
     const { screen, puts, fills } = capture(60);
     draw(screen, sampleState(), { theme: themeFor(level) });
     assert.deepEqual(fills, [{ bgColor: XTERM.background }]);
@@ -118,11 +118,19 @@ for (const level of ['truecolor', '256'] as const) {
       assert.equal(typeof p.attr.bgColor, 'number', `every put carries a background: ${JSON.stringify(p.str)}`);
       assert.equal(typeof p.attr.color, 'number', `every put carries a colour: ${JSON.stringify(p.str)}`);
     }
-    const coloured = puts.filter((p) => p.attr.bgColor !== XTERM.background).map((p) => p.str.trim());
-    assert.deepEqual(coloured, ['Selected title'], 'only the selection bar keeps a coloured background: tabs, name row, notice and footer are on black');
+    assert.deepEqual(puts.filter((p) => p.attr.bgColor !== XTERM.background), [], 'no put has a non-black background, the selection included');
     const sel = find(puts, 'Selected title');
-    assert.equal(sel.str.length, 60, 'the selected title is padded to the pane width');
-    assert.deepEqual(sel.attr, { color: XTERM.bright, bgColor: XTERM.selection, bold: true });
+    assert.equal(sel.str, 'Selected title', 'no full-width padding: the selection is not a bar');
+    assert.deepEqual(sel.attr, { bgColor: XTERM.background, color: XTERM.cyan, bold: true });
+    // the selection must differ visibly from an unselected row: colour and bold
+    const other = find(puts, 'Other title');
+    assert.deepEqual(other.attr, { bgColor: XTERM.background, color: XTERM.text, bold: false });
+    assert.notEqual(sel.attr.color, other.attr.color, 'selected colour differs');
+    assert.equal(sel.attr.bold, true);
+    assert.notEqual(other.attr.bold, true, 'an unselected, collapsed title is not bold');
+    const t = themeFor(level);
+    assert.deepEqual(t.title(true, false), { bgColor: XTERM.background, color: XTERM.cyan, bold: true }, 'selected is bold cyan even when collapsed');
+    assert.notDeepEqual(t.title(true, true), t.title(false, true), 'a selected expanded title still differs from an unselected expanded one');
     assert.deepEqual(find(puts, ' Tasks ').attr, { bgColor: XTERM.background, color: XTERM.pink, bold: true, underline: true });
     assert.equal(find(puts, ' Knowledge ').attr.color, XTERM.muted);
     assert.equal(find(puts, ' Knowledge ').attr.bgColor, XTERM.background, 'inactive tabs sit on the page black');
@@ -173,10 +181,10 @@ test('256 palette: every text colour reads at 4.5:1 or better on its background'
   assert.equal(PALETTE.text, '#ffffff');
   assert.deepEqual(xtermRgb(XTERM.text), [255, 255, 255], 'body text is white');
   for (const [name, fg] of Object.entries(XTERM)) {
-    if (name === 'background' || name === 'selection') continue;
+    if (name === 'background') continue;
     assert.ok(contrast(fg, XTERM.background) >= 4.5, `${name} (${fg}) on the background: ${contrast(fg, XTERM.background).toFixed(2)}`);
   }
-  assert.ok(contrast(XTERM.bright, XTERM.selection) >= 4.5, 'selected text on the selection bar');
+  assert.ok(contrast(XTERM.cyan, XTERM.background) >= 4.5, 'selected text (bold cyan) on the page black');
 });
 
 // ---------------------------------------------------------------------------
