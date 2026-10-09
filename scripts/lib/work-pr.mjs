@@ -436,9 +436,11 @@ export function parsePrUrl(url) {
  * `prRef` is the PR number or its full URL. BOUND (Sol review): the armed
  * state must be coherent (pr_url, repo and pr_number agree), its repo must be
  * `originRepo` (the current origin), `prRef` must name that same PR, and the
- * loop must still be OWED — a settled loop is never re-settled. Throws
+ * loop must still be OWED — a settled loop is never re-settled. `guard`, when
+ * given, runs last with the armed state and throws to refuse (the clean
+ * outcome uses it to check that GitHub would let the PR merge). Throws
  * (nothing written) otherwise. */
-export function settlePrLoop(root, outcome, prRef, { originRepo, now = new Date().toISOString() }) {
+export function settlePrLoop(root, outcome, prRef, { originRepo, now = new Date().toISOString(), guard = null }) {
   if (!PR_LOOP_OUTCOMES.includes(outcome)) throw new Error(`--settle must be one of ${PR_LOOP_OUTCOMES.join('|')}, got '${outcome}'`);
   const ref = /^\d+$/.test(String(prRef ?? '')) ? { repo: null, number: Number(prRef) } : parsePrUrl(prRef);
   if (!ref) throw new Error('--settle needs --pr <number|PR URL>, the PR the loop was armed for');
@@ -456,7 +458,147 @@ export function settlePrLoop(root, outcome, prRef, { originRepo, now = new Date(
     throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} — nothing settled (${unstick})`);
   }
   if (s.status !== 'owed') throw new Error(`the loop for ${s.pr_url} is already settled '${s.status}' (${s.settled_at}); only an owed loop can be settled`);
+  if (guard) guard(s);
   const next = { ...s, status: outcome, settled_at: now };
   writeAtomic(prLoopPath(root), next);
   return next;
+}
+
+// ------------------------------------------------- merge state + review threads
+// GitHub can refuse a merge although every Copilot finding was answered: an
+// org ruleset with required_review_thread_resolution blocks until each review
+// thread is RESOLVED, and replying never resolves it (GitHub issue #42). The
+// loop therefore resolves the thread of each dispositioned finding and asks
+// GitHub for the merge state before it settles clean. All calls are GraphQL
+// through `gh api graphql`; a gh failure or a GraphQL errors payload throws.
+
+const MERGEABLE_STATES = new Set(['CLEAN', 'HAS_HOOKS', 'UNSTABLE']);
+
+function ghGraphql(cwd, host, query) {
+  const args = ['api', '--hostname', host, 'graphql', '-f', `query=${query}`];
+  const r = gh(cwd, args);
+  if (r.error || r.status !== 0) throw new Error(`gh api graphql failed (${r.error ? r.error.message : `exit ${r.status}`}): ${streams(r)}`);
+  let reply;
+  try {
+    reply = JSON.parse(r.stdout);
+  } catch (e) {
+    throw new Error(`gh api graphql returned invalid JSON (${e.message}): ${String(r.stdout).slice(0, 200)}`);
+  }
+  if (Array.isArray(reply?.errors) && reply.errors.length) throw new Error(`GraphQL returned errors: ${reply.errors.map((e) => e?.message ?? JSON.stringify(e)).join('; ')}`);
+  return reply?.data;
+}
+
+const splitRepo = (repo) => {
+  const [host, owner, name] = String(repo).split('/');
+  return { host, owner, name };
+};
+
+/** The PR's mergeStateStatus, reviewDecision, the head commit's check rollup
+ * state (null when the head has no checks) and EVERY review thread (paged), as
+ * { merge_state_status, review_decision, check_rollup, threads: [{id, resolved,
+ * outdated, path, url, comment_ids}] }. `repo` is 'host/owner/repo'. */
+export function fetchPrMergeState(cwd, repo, number) {
+  const { host, owner, name } = splitRepo(repo);
+  const threads = [];
+  let after = null;
+  let state = null;
+  for (;;) {
+    const page = after ? `, after:"${after}"` : '';
+    const query = `query { repository(owner:"${owner}", name:"${name}") { pullRequest(number:${number}) { mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
+    const pull = ghGraphql(cwd, host, query)?.repository?.pullRequest;
+    if (!pull || typeof pull.mergeStateStatus !== 'string' || !Array.isArray(pull.reviewThreads?.nodes)) {
+      throw new Error(`GraphQL returned no mergeStateStatus/reviewThreads for ${repo}#${number}`);
+    }
+    state ??= { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: pull.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? null };
+    for (const t of pull.reviewThreads.nodes) {
+      const comments = t?.comments?.nodes ?? [];
+      threads.push({ id: t.id, resolved: t.isResolved === true, outdated: t.isOutdated === true, path: t.path ?? null, url: comments[0]?.url ?? null, comment_ids: comments.map((c) => c.databaseId) });
+    }
+    const info = pull.reviewThreads.pageInfo;
+    if (!info?.hasNextPage) break;
+    if (typeof info.endCursor !== 'string' || !/^[A-Za-z0-9_=-]+$/.test(info.endCursor)) throw new Error(`GraphQL reviewThreads cursor is unusable: ${JSON.stringify(info.endCursor)}`);
+    after = info.endCursor;
+  }
+  return { ...state, threads };
+}
+
+const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/** fetchPrMergeState, read again ONCE after `retryDelayMs` when GitHub answers
+ * UNKNOWN: it computes mergeability lazily, so a first read right after a push
+ * or a resolve is often UNKNOWN. A second UNKNOWN is returned as it is and
+ * mergeBlockers blocks on it. */
+export function fetchSettledMergeState(cwd, repo, number, { retryDelayMs = 3000, sleep = sleepMs } = {}) {
+  const first = fetchPrMergeState(cwd, repo, number);
+  if (first.merge_state_status !== 'UNKNOWN') return first;
+  sleep(retryDelayMs);
+  return fetchPrMergeState(cwd, repo, number);
+}
+
+/** What blocks a human from merging, from fetchPrMergeState's result:
+ * { mergeable_now, blockers: [string], unresolved_threads: [{id, path, url}],
+ * awaiting_human_review }. Unresolved threads always block. A BLOCKED PR with
+ * no unresolved thread whose reviewDecision is REVIEW_REQUIRED waits only for a
+ * human's approval, which the loop can never give: that is reported
+ * (awaiting_human_review) but does not stop the loop from ending clean, and
+ * only when the head's check rollup is SUCCESS or absent (a failing or pending
+ * required check also shows as BLOCKED, so any other rollup blocks and is
+ * named). Every other state outside CLEAN/HAS_HOOKS/UNSTABLE blocks, unknown
+ * ones included; UNKNOWN says to retry shortly. */
+export function mergeBlockers(state) {
+  const unresolved = state.threads.filter((t) => !t.resolved).map(({ id, path, url }) => ({ id, path, url }));
+  const blockers = unresolved.map((t) => `unresolved review thread ${t.id}${t.path ? ` on ${t.path}` : ''}${t.url ? ` (${t.url})` : ''}`);
+  const status = state.merge_state_status;
+  let awaiting = false;
+  if (!MERGEABLE_STATES.has(status)) {
+    const rollup = state.check_rollup ?? null;
+    if (status === 'BLOCKED' && unresolved.length === 0 && state.review_decision === 'REVIEW_REQUIRED') {
+      if (rollup === null || rollup === 'SUCCESS') awaiting = true;
+      else blockers.push(`mergeStateStatus is BLOCKED and the head commit's checks are ${rollup}, not only a required human review`);
+    }
+    else if (status === 'UNKNOWN') blockers.push('mergeStateStatus is UNKNOWN (GitHub is still computing mergeability; retry shortly)');
+    else if (status === 'BLOCKED' && unresolved.length > 0) blockers.push('mergeStateStatus is BLOCKED');
+    else if (status === 'BLOCKED') blockers.push(`mergeStateStatus is BLOCKED (reviewDecision ${state.review_decision ?? 'none'}) with no unresolved thread: a ruleset or required check blocks the merge`);
+    else blockers.push(`mergeStateStatus is ${status}`);
+  }
+  return { mergeable_now: blockers.length === 0 && !awaiting, blockers, unresolved_threads: unresolved, awaiting_human_review: awaiting };
+}
+
+/** Resolve the review thread of each given review-comment id (the REST id the
+ * wait helper returns in comments[].id; a reply anywhere in the thread counts).
+ * Every id is matched to a thread BEFORE any mutation, so an unknown id throws
+ * with nothing resolved. Returns { resolved: [{comment_id, thread_id}],
+ * already_resolved: [comment_id], same_thread_as_resolved: [{comment_id,
+ * thread_id}] } (a later id in a thread this call just resolved); a failed
+ * mutation throws naming the threads already resolved. */
+export function resolveReviewThreads(cwd, repo, number, commentIds) {
+  const { host } = splitRepo(repo);
+  const { threads } = fetchPrMergeState(cwd, repo, number);
+  const plan = commentIds.map((id) => ({ id, thread: threads.find((t) => t.comment_ids.includes(id)) }));
+  const missing = plan.filter((p) => !p.thread).map((p) => p.id);
+  if (missing.length) throw new Error(`no review thread of ${repo}#${number} holds comment ${missing.join(', ')} — nothing resolved`);
+  const resolved = [];
+  const alreadyResolved = [];
+  const sameThread = [];
+  const done = new Set();
+  for (const { id, thread } of plan) {
+    if (thread.resolved) {
+      alreadyResolved.push(id);
+      continue;
+    }
+    if (done.has(thread.id)) {
+      sameThread.push({ comment_id: id, thread_id: thread.id });
+      continue;
+    }
+    if (!/^[A-Za-z0-9_=-]+$/.test(thread.id)) throw new Error(`review thread id ${JSON.stringify(thread.id)} is not a usable node id`);
+    try {
+      const out = ghGraphql(cwd, host, `mutation { resolveReviewThread(input:{threadId:"${thread.id}"}) { thread { id isResolved } } }`);
+      if (out?.resolveReviewThread?.thread?.isResolved !== true) throw new Error(`resolveReviewThread did not leave thread ${thread.id} resolved: ${JSON.stringify(out)}`);
+    } catch (e) {
+      throw new Error(`${e.message} (already resolved this call: ${resolved.map((r) => r.thread_id).join(', ') || 'none'})`);
+    }
+    done.add(thread.id);
+    resolved.push({ comment_id: id, thread_id: thread.id });
+  }
+  return { resolved, already_resolved: alreadyResolved, same_thread_as_resolved: sameThread };
 }

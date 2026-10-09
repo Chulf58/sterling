@@ -36,6 +36,7 @@ import { readProjectMode, ProjectModeError, readHandoffSetting, handoffUnmaintai
 import { ContainmentError } from './contained-fs.mjs';
 import { workIdentityRefusal, withIdentityIgnore, withNestedIgnore, IGNORE_NESTED } from './project-identity.mjs';
 import { isInstalledCopy } from './installed-copy.mjs';
+import { ensureLauncherIgnores, ensureLaunchers, launcherHistoryLoader, launcherHost, launcherTools, removeRetiredLaunchers } from './launchers.mjs';
 import { installHostOf, sterlingUpdateRemedy } from './sterling-roots.mjs';
 
 // Build + test batteries dominate an update (measured on this machine: build
@@ -157,6 +158,9 @@ const GENERATED_TRACKED = [
   /^tui\/sterling-tui\.mjs$/,
   /^opencode\/sterling-server\.mjs$/,
   /^opencode\/sterling-tui\/sterling-tui\.bundle\.tsx$/,
+  // The Postgres worker: an EXTRA_ENTRIES member the same build emits beside every
+  // family's bundles (hooks, bin, mcp, tui, opencode, opencode/sterling-tui).
+  /^(hooks|bin|mcp|tui|opencode|opencode\/sterling-tui)\/pg-worker\.js$/,
   /^architecture\.md$/,
   /^rulings\.md$/,
 ];
@@ -614,6 +618,51 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   const fail = (code) => {
     if (report.exit === 0) report.exit = code;
   };
+  // Project launchers (decision launchers-consolidated-to-claude-code-and-opencode-pair):
+  // the engine and an opener pair per installed tool, refreshed by the ensure rules in
+  // scripts/lib/launchers.mjs, and the retired sterling.bat / tui.bat /
+  // sterling-windows.bat deleted when unedited. Builtins only: init's dead-term check
+  // (it needs @sterling/schemas) is not run here; update renders the same templates from
+  // the same code, which init and the test suite check. The S6 clone-launcher rule only
+  // applies to an installed copy, which this updater refuses above. A project with no
+  // .sterling/config.json is not initialized and is skipped. Returns the lines to print;
+  // a failure is one ⚠ line, never a failed update.
+  let launcherSetup = null;
+  const launcherHistory = launcherHistoryLoader(cwd);
+  const projectLaunchers = (repoPath) => {
+    try {
+      if (!existsSync(join(repoPath, '.sterling', 'config.json'))) return [];
+      launcherSetup ??= { host: launcherHost({ env }), tools: launcherTools({ env, home }) };
+      const { host, tools } = launcherSetup;
+      const rows = [];
+      const warns = [];
+      if (tools.claude || tools.opencode) {
+        const ratio = JSON.parse(readFileSync(join(repoPath, '.sterling', 'config.json'), 'utf8')).tui_split_ratio;
+        // tui_split_ratio defaults to 0.35 (packages/schemas/src/config.ts); a value the
+        // schema would refuse stops the launchers for this project, loudly.
+        if (ratio !== undefined && !(typeof ratio === 'number' && ratio > 0 && ratio <= 1)) throw new Error(`tui_split_ratio in .sterling/config.json is ${JSON.stringify(ratio)}, not a number in (0, 1]`);
+        const r = ensureLaunchers(repoPath, cwd, { splitPercent: Math.round((ratio ?? 0.35) * 100), host, tools, history: launcherHistory, installedCopy: false });
+        rows.push(...r.items);
+        warns.push(...r.warns);
+      }
+      if (tools.claude || tools.opencode) {
+        const retired = removeRetiredLaunchers(repoPath, cwd, { history: launcherHistory });
+        rows.push(...retired.items);
+        warns.push(...retired.warns);
+      } else {
+        // no opener was written, so the old launchers are the project's only ones
+        // (user-ruled 2026-10-08, "Keep old ones if no tool (Recommended)")
+        warns.push('⚠ Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of the two.');
+      }
+      const ignored = ensureLauncherIgnores(repoPath);
+      const out = rows.filter((r) => r.status !== 'matches').map((r) => `${r.item}: ${r.status} — ${r.detail}`);
+      if (ignored.length) out.push(`.gitignore: added ${ignored.join(', ')}`);
+      return [...out, ...warns.map((w) => w.trim())];
+    } catch (err) {
+      return [`⚠ launchers ensure FAILED (nonfatal): ${err?.message ?? err}`];
+    }
+  };
+
   // The registered project list, resolved the SAME way on both paths. An
   // unreadable registry (or an unloadable store module) is never an empty list:
   // it is logged and null is returned, so no project is refreshed, and the
@@ -806,6 +855,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         }
       }
       if (!launchers) continue;
+      for (const line of projectLaunchers(p.repo_path)) log(`      ${line}`);
       // Deliver the double-click updater to every registered project — the
       // update event is how a machine receives new artifacts, so a project
       // init'd before this launcher existed gets one here rather than waiting
@@ -857,8 +907,10 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // legitimately newer (Dome Farmer, docs/sterling-issues.md:109-116). A ROLE branch, not a
   // --no-check flag (already-current-requires-a-completion-marker-not-git-currency rejects the
   // flag). Only the INVOKING project is synced — no registry fan-out, no handoff projection
-  // (it would regenerate architecture.md from the store: the very drift this avoids), no
-  // launchers. The marker is NOT written: it attests the full post-merge sequence, which did
+  // (it would regenerate architecture.md from the store: the very drift this avoids). The
+  // launchers are the exception (user ask 2026-10-08, decision
+  // launchers-consolidated-to-claude-code-and-opencode-pair): they are refreshed in EVERY
+  // registered project, since the openers are how each project is started. The marker is NOT written: it attests the full post-merge sequence, which did
   // not run; the authoring branch never reads it either, so it cannot go stale-and-bite.
   // The invoking directory must be a REGISTERED project (or inside one): sync-agents would
   // otherwise install a whole agent roster into whatever directory the shell happened to be in.
@@ -894,6 +946,12 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     log(`\nAUTHORING clone — nothing to pull; syncing ${project.repo_path} only`);
     if (opts.force) log('  (--force has no meaning on the authoring machine: there is no rebuild to force)');
     refreshProjects([project], { launchers: false, handoff: false });
+    log(`\n▸ launchers in every registered project (${registered.length})`);
+    for (const p of registered) {
+      const lines = projectLaunchers(p.repo_path);
+      log(`  • ${p.name}: ${lines.length ? '' : 'up to date'}`.trimEnd());
+      for (const line of lines) log(`      ${line}`);
+    }
     warnIfLauncherNamesOldBundle(project.repo_path, log);
     if (normPath(project.repo_path) === normPath(cwd)) {
       log("▸ the clone's contract files are hand-maintained — not checked");
@@ -1283,13 +1341,13 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // as failed.
   stampConsumerRoleIfAbsent(cwd, log);
 
-  // Launchers (sterling.bat, tui.bat, sterling-launch.sh) are baked per project by
-  // init, and those baked before the plugin layout name packages/tui/bundle/
-  // sterling-tui.mjs, which no longer ships (decision
-  // sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone). Nothing
-  // in this fan-out re-bakes them, so a consumer is told once. Only a consumer clone
-  // reaches this point: the authoring branch above returns before any pull.
-  log(`\n▸ launchers — re-run /sterling:init in each Sterling project so its launchers run ${SHIPPED_TUI_BUNDLE} (launchers baked before this version point at ${OLD_TUI_BUNDLE}, which no longer ships).`);
+  // Launchers: the fan-out below refreshes each project's sterling-launch.sh and openers
+  // (projectLaunchers above), including those baked before the plugin layout that name
+  // packages/tui/bundle/sterling-tui.mjs, which no longer ships (decision
+  // sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone). One edited
+  // by hand is kept and named there, so a consumer is told once what to do about it.
+  // Only a consumer clone reaches this point: the authoring branch above returns first.
+  log(`\n▸ launchers — refreshed in each registered project below, so they run ${SHIPPED_TUI_BUNDLE} (launchers baked before this version point at ${OLD_TUI_BUNDLE}, which no longer ships). A launcher edited by hand is kept and named; delete it and re-run /sterling:init in that project to regenerate it.`);
   // S6 (decision s6-consumer-cutover-init-on-installed-copy-fixes-launchers): init run
   // through a --plugin-dir launcher is the CLONE's init and re-bakes the clone launcher,
   // so the route off the clone is named here too.
