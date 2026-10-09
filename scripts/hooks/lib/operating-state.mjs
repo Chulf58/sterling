@@ -111,11 +111,13 @@ export function tddPostureLine({ config, configUnreadable }) {
  * informational only. Same three states as the TDD line: an absent key IS the
  * schema default (hobby); an unreadable config is UNKNOWN, never the default; a
  * value outside hobby/work reads INVALID, never as either flow.
+ * `noOrigin` (work mode in a git repo with no 'origin' remote, GitHub issue #39) says the
+ * merge is local, because there is no PR path.
  * The line says only how work ships. Whether the handoff files are written is a
  * separate setting with its own line, handoffFilesLine below (decision
  * project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting).
  */
-export function projectModeLine({ config, configUnreadable }) {
+export function projectModeLine({ config, configUnreadable, noOrigin = false }) {
   if (configUnreadable) {
     return (
       'Project mode: UNKNOWN — the project config could not be read, so config.mode could not be determined. ' +
@@ -126,7 +128,9 @@ export function projectModeLine({ config, configUnreadable }) {
   if (mode === undefined || mode === 'hobby' || mode === 'work') {
     return (
       `Project mode: ${mode === 'work' ? 'WORK' : 'HOBBY'} (config.mode — TUI System tab) — ` +
-      (mode === 'work'
+      (mode === 'work' && noOrigin
+        ? "this repository has no 'origin' remote, so /sterling:merge merges locally like hobby mode: no pull request and no Copilot review will happen."
+        : mode === 'work'
         ? 'work ships as a pull request through /sterling:merge, followed by the review loop; nothing is merged directly.'
         : 'work ships by direct merge through /sterling:merge.')
     );

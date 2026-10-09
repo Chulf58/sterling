@@ -2,13 +2,18 @@
 import { createRequire as __cr } from "node:module"; const require = __cr(import.meta.url);
 
 // scripts/pr-review-wait.mjs
-import { spawnSync } from "node:child_process";
+import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
 import { join as join2, resolve } from "node:path";
 
 // scripts/lib/work-pr.mjs
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
+function gh(cwd, args) {
+  return spawnSync("gh", args, { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
+}
+var streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? "")).trim();
 function parseOriginRepo(url) {
   const u = String(url ?? "").trim();
   let host;
@@ -56,7 +61,7 @@ function parsePrUrl(url) {
   const m = String(url ?? "").match(/^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/);
   return m ? { repo: `${m[1]}/${m[2]}/${m[3]}`, number: Number(m[4]) } : null;
 }
-function settlePrLoop(root, outcome, prRef, { originRepo, now = (/* @__PURE__ */ new Date()).toISOString() }) {
+function settlePrLoop(root, outcome, prRef, { originRepo, now = (/* @__PURE__ */ new Date()).toISOString(), guard = null }) {
   if (!PR_LOOP_OUTCOMES.includes(outcome)) throw new Error(`--settle must be one of ${PR_LOOP_OUTCOMES.join("|")}, got '${outcome}'`);
   const ref = /^\d+$/.test(String(prRef ?? "")) ? { repo: null, number: Number(prRef) } : parsePrUrl(prRef);
   if (!ref) throw new Error("--settle needs --pr <number|PR URL>, the PR the loop was armed for");
@@ -72,9 +77,107 @@ function settlePrLoop(root, outcome, prRef, { originRepo, now = (/* @__PURE__ */
     throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} \u2014 nothing settled (${unstick})`);
   }
   if (s.status !== "owed") throw new Error(`the loop for ${s.pr_url} is already settled '${s.status}' (${s.settled_at}); only an owed loop can be settled`);
+  if (guard) guard(s);
   const next = { ...s, status: outcome, settled_at: now };
   writeAtomic(prLoopPath(root), next);
   return next;
+}
+var MERGEABLE_STATES = /* @__PURE__ */ new Set(["CLEAN", "HAS_HOOKS", "UNSTABLE"]);
+function ghGraphql(cwd, host, query) {
+  const args = ["api", "--hostname", host, "graphql", "-f", `query=${query}`];
+  const r = gh(cwd, args);
+  if (r.error || r.status !== 0) throw new Error(`gh api graphql failed (${r.error ? r.error.message : `exit ${r.status}`}): ${streams(r)}`);
+  let reply;
+  try {
+    reply = JSON.parse(r.stdout);
+  } catch (e) {
+    throw new Error(`gh api graphql returned invalid JSON (${e.message}): ${String(r.stdout).slice(0, 200)}`);
+  }
+  if (Array.isArray(reply?.errors) && reply.errors.length) throw new Error(`GraphQL returned errors: ${reply.errors.map((e) => e?.message ?? JSON.stringify(e)).join("; ")}`);
+  return reply?.data;
+}
+var splitRepo = (repo) => {
+  const [host, owner2, name2] = String(repo).split("/");
+  return { host, owner: owner2, name: name2 };
+};
+function fetchPrMergeState(cwd, repo, number) {
+  const { host, owner: owner2, name: name2 } = splitRepo(repo);
+  const threads = [];
+  let after = null;
+  let state = null;
+  for (; ; ) {
+    const page = after ? `, after:"${after}"` : "";
+    const query = `query { repository(owner:"${owner2}", name:"${name2}") { pullRequest(number:${number}) { mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
+    const pull = ghGraphql(cwd, host, query)?.repository?.pullRequest;
+    if (!pull || typeof pull.mergeStateStatus !== "string" || !Array.isArray(pull.reviewThreads?.nodes)) {
+      throw new Error(`GraphQL returned no mergeStateStatus/reviewThreads for ${repo}#${number}`);
+    }
+    state ??= { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: pull.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? null };
+    for (const t of pull.reviewThreads.nodes) {
+      const comments = t?.comments?.nodes ?? [];
+      threads.push({ id: t.id, resolved: t.isResolved === true, outdated: t.isOutdated === true, path: t.path ?? null, url: comments[0]?.url ?? null, comment_ids: comments.map((c) => c.databaseId) });
+    }
+    const info = pull.reviewThreads.pageInfo;
+    if (!info?.hasNextPage) break;
+    if (typeof info.endCursor !== "string" || !/^[A-Za-z0-9_=-]+$/.test(info.endCursor)) throw new Error(`GraphQL reviewThreads cursor is unusable: ${JSON.stringify(info.endCursor)}`);
+    after = info.endCursor;
+  }
+  return { ...state, threads };
+}
+var sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+function fetchSettledMergeState(cwd, repo, number, { retryDelayMs: retryDelayMs2 = 3e3, sleep: sleep2 = sleepMs } = {}) {
+  const first = fetchPrMergeState(cwd, repo, number);
+  if (first.merge_state_status !== "UNKNOWN") return first;
+  sleep2(retryDelayMs2);
+  return fetchPrMergeState(cwd, repo, number);
+}
+function mergeBlockers(state) {
+  const unresolved = state.threads.filter((t) => !t.resolved).map(({ id, path, url }) => ({ id, path, url }));
+  const blockers = unresolved.map((t) => `unresolved review thread ${t.id}${t.path ? ` on ${t.path}` : ""}${t.url ? ` (${t.url})` : ""}`);
+  const status = state.merge_state_status;
+  let awaiting = false;
+  if (!MERGEABLE_STATES.has(status)) {
+    const rollup = state.check_rollup ?? null;
+    if (status === "BLOCKED" && unresolved.length === 0 && state.review_decision === "REVIEW_REQUIRED") {
+      if (rollup === null || rollup === "SUCCESS") awaiting = true;
+      else blockers.push(`mergeStateStatus is BLOCKED and the head commit's checks are ${rollup}, not only a required human review`);
+    } else if (status === "UNKNOWN") blockers.push("mergeStateStatus is UNKNOWN (GitHub is still computing mergeability; retry shortly)");
+    else if (status === "BLOCKED" && unresolved.length > 0) blockers.push("mergeStateStatus is BLOCKED");
+    else if (status === "BLOCKED") blockers.push(`mergeStateStatus is BLOCKED (reviewDecision ${state.review_decision ?? "none"}) with no unresolved thread: a ruleset or required check blocks the merge`);
+    else blockers.push(`mergeStateStatus is ${status}`);
+  }
+  return { mergeable_now: blockers.length === 0 && !awaiting, blockers, unresolved_threads: unresolved, awaiting_human_review: awaiting };
+}
+function resolveReviewThreads(cwd, repo, number, commentIds) {
+  const { host } = splitRepo(repo);
+  const { threads } = fetchPrMergeState(cwd, repo, number);
+  const plan = commentIds.map((id) => ({ id, thread: threads.find((t) => t.comment_ids.includes(id)) }));
+  const missing = plan.filter((p) => !p.thread).map((p) => p.id);
+  if (missing.length) throw new Error(`no review thread of ${repo}#${number} holds comment ${missing.join(", ")} \u2014 nothing resolved`);
+  const resolved = [];
+  const alreadyResolved = [];
+  const sameThread = [];
+  const done = /* @__PURE__ */ new Set();
+  for (const { id, thread } of plan) {
+    if (thread.resolved) {
+      alreadyResolved.push(id);
+      continue;
+    }
+    if (done.has(thread.id)) {
+      sameThread.push({ comment_id: id, thread_id: thread.id });
+      continue;
+    }
+    if (!/^[A-Za-z0-9_=-]+$/.test(thread.id)) throw new Error(`review thread id ${JSON.stringify(thread.id)} is not a usable node id`);
+    try {
+      const out = ghGraphql(cwd, host, `mutation { resolveReviewThread(input:{threadId:"${thread.id}"}) { thread { id isResolved } } }`);
+      if (out?.resolveReviewThread?.thread?.isResolved !== true) throw new Error(`resolveReviewThread did not leave thread ${thread.id} resolved: ${JSON.stringify(out)}`);
+    } catch (e) {
+      throw new Error(`${e.message} (already resolved this call: ${resolved.map((r) => r.thread_id).join(", ") || "none"})`);
+    }
+    done.add(thread.id);
+    resolved.push({ comment_id: id, thread_id: thread.id });
+  }
+  return { resolved, already_resolved: alreadyResolved, same_thread_as_resolved: sameThread };
 }
 
 // scripts/pr-review-wait.mjs
@@ -116,19 +219,68 @@ function readPinnedLogins() {
   return logins ?? [];
 }
 var isCopilot = (r, pinned) => typeof r?.user?.login === "string" && r.user.type === "Bot" && Number.isInteger(r.id) && (pinned.length ? pinned.includes(r.user.login) : COPILOT_LOGIN.test(r.user.login));
-if (argv.includes("--settle")) {
+function originRepoOrThrow() {
+  const url = spawnSync2("git", ["remote", "get-url", "origin"], { cwd: target, encoding: "utf8", timeout: 3e4 });
+  const originRepo = url.status === 0 ? parseOriginRepo(url.stdout)?.repo : null;
+  if (!originRepo) throw new Error(`origin in ${target} is missing or not a GitHub repository URL \u2014 this mode is bound to origin`);
+  return originRepo;
+}
+function refuse(label, e) {
+  process.stderr.write(`pr-review-wait: ${label} \u2014 ${e.message}
+`);
+  process.stdout.write(JSON.stringify({ status: "error", error: e.message }) + "\n");
+  process.exit(1);
+}
+if (argv.includes("--resolve-threads")) {
   try {
-    const url = spawnSync("git", ["remote", "get-url", "origin"], { cwd: target, encoding: "utf8", timeout: 3e4 });
-    const originRepo = url.status === 0 ? parseOriginRepo(url.stdout)?.repo : null;
-    if (!originRepo) throw new Error(`origin in ${target} is missing or not a GitHub repository URL \u2014 settle is bound to origin`);
-    const s = settlePrLoop(target, flag("--settle"), flag("--pr"), { originRepo });
-    process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at }) + "\n");
+    const originRepo = originRepoOrThrow();
+    const raw = flag("--resolve-threads") ?? "";
+    const ids = raw.split(",").map((x) => x.trim()).filter(Boolean);
+    if (!ids.length || !ids.every((x) => /^\d+$/.test(x))) throw new Error(`--resolve-threads needs a comma-separated list of review comment ids, got '${raw}'`);
+    const prRef = flag("--pr") ?? "";
+    const ref = /^\d+$/.test(prRef) ? { repo: originRepo, number: Number(prRef) } : parsePrUrl(prRef);
+    if (!ref) throw new Error("--resolve-threads needs --pr <number|PR URL>");
+    if (ref.repo !== originRepo) throw new Error(`the PR ${prRef} is not in origin's repo (${originRepo}) \u2014 the PR repo is bound to origin`);
+    const out = resolveReviewThreads(target, originRepo, ref.number, ids.map(Number));
+    process.stdout.write(JSON.stringify({ status: "resolved", pr_number: ref.number, ...out }) + "\n");
     process.exit(0);
   } catch (e) {
-    process.stderr.write(`pr-review-wait: settle refused \u2014 ${e.message}
+    refuse("resolve-threads failed", e);
+  }
+}
+function retryDelayMs() {
+  const raw = flag("--unknown-retry-delay");
+  if (raw === void 0) return 3e3;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`--unknown-retry-delay must be a number of seconds >= 0, got '${raw}'`);
+  return n * 1e3;
+}
+if (argv.includes("--settle")) {
+  let merge = null;
+  try {
+    const originRepo = originRepoOrThrow();
+    const guard = (armed) => {
+      const state = fetchSettledMergeState(target, originRepo, armed.pr_number, { retryDelayMs: retryDelayMs() });
+      const verdict = mergeBlockers(state);
+      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review };
+      if (verdict.blockers.length) {
+        const err = new Error(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join("; ")} \u2014 resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`);
+        err.blocked = { ...merge, blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads };
+        throw err;
+      }
+    };
+    const outcome = flag("--settle");
+    const s = settlePrLoop(target, outcome, flag("--pr"), { originRepo, guard: outcome === "clean" ? guard : null });
+    process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at, ...merge ?? {} }) + "\n");
+    process.exit(0);
+  } catch (e) {
+    if (e.blocked) {
+      process.stderr.write(`pr-review-wait: settle refused \u2014 ${e.message}
 `);
-    process.stdout.write(JSON.stringify({ status: "error", error: e.message }) + "\n");
-    process.exit(1);
+      process.stdout.write(JSON.stringify({ status: "blocked", error: e.message, ...e.blocked }) + "\n");
+      process.exit(1);
+    }
+    refuse("settle refused", e);
   }
 }
 var valued = /* @__PURE__ */ new Set(["--repo", "--since-review", "--head", "--timeout", "--interval", "--target"]);
@@ -152,7 +304,7 @@ var expectedHead = headRaw === void 0 ? null : headRaw.toLowerCase();
 var requestCopilot = argv.includes("--request-copilot");
 var pinnedLogins = readPinnedLogins();
 result.identity_confirmed = pinnedLogins.length > 0;
-var originUrl = spawnSync("git", ["remote", "get-url", "origin"], { cwd: target, encoding: "utf8", timeout: 3e4 });
+var originUrl = spawnSync2("git", ["remote", "get-url", "origin"], { cwd: target, encoding: "utf8", timeout: 3e4 });
 if (originUrl.status !== 0) error(`no 'origin' remote in ${target} \u2014 the PR repo is bound to origin and is never guessed`);
 var origin = parseOriginRepo(originUrl.stdout);
 if (!origin) error(`origin's URL '${originUrl.stdout.trim()}' is not a GitHub repository URL \u2014 the PR repo is bound to origin`);
@@ -176,7 +328,7 @@ function ghApi(path, { paginate = false, extra = [] } = {}) {
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw new DeadlineReached();
   const args = ["api", "--hostname", origin.host, ...paginate ? ["--paginate"] : [], ...extra, path];
-  const r = spawnSync("gh", args, { cwd: target, encoding: "utf8", timeout: Math.min(GH_CALL_TIMEOUT_MS, remaining), env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
+  const r = spawnSync2("gh", args, { cwd: target, encoding: "utf8", timeout: Math.min(GH_CALL_TIMEOUT_MS, remaining), env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
   if (r.error?.code === "ETIMEDOUT" && Date.now() >= deadline) throw new DeadlineReached();
   if (r.error || r.status !== 0) {
     throw new Error(`gh ${args.join(" ")} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || r.stdout || "").trim()}`);
