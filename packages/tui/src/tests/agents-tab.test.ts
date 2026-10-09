@@ -32,11 +32,14 @@ test('agents tab: it sits after Queue and before System', () => {
   assert.equal(SYSTEM_TAB, AGENTS_TAB + 1);
 });
 
-test('agents tab: enabled by the host, the bar shows "Agents (N)" with the running count; disabled, it is absent', () => {
+test('agents tab: enabled by the host, the bar shows "Agents (N running · M quiet)", the quiet part only when M > 0; disabled, it is absent', () => {
   const { store, cleanup } = fixture();
   try {
-    assert.deepEqual(labels(buildDashboardState(store, initialUi, 120, 20, '', false, undefined, undefined, { running: 2 })).slice(2), ['Queue', 'Agents (2)', 'System']);
-    assert.deepEqual(labels(buildDashboardState(store, initialUi, 120, 20, '', false, undefined, undefined, { running: 0 })).slice(3), ['Agents (0)', 'System']);
+    assert.deepEqual(labels(buildDashboardState(store, initialUi, 120, 20, '', false, undefined, undefined, { running: 2 })).slice(2), ['Queue', 'Agents (2 running)', 'System']);
+    assert.deepEqual(labels(buildDashboardState(store, initialUi, 120, 20, '', false, undefined, undefined, { running: 0 })).slice(3), ['Agents (0 running)', 'System']);
+    assert.deepEqual(labels(buildDashboardState(store, initialUi, 120, 20, '', false, undefined, undefined, { running: 3, quiet: 1 })).slice(3), ['Agents (3 running · 1 quiet)', 'System']);
+    assert.deepEqual(labels(buildDashboardState(store, initialUi, 120, 20, '', false, undefined, undefined, { running: 0, quiet: 4 })).slice(3), ['Agents (0 running · 4 quiet)', 'System'], 'four quiet agents are not shown as zero');
+    assert.deepEqual(labels(buildDashboardState(store, initialUi, 120, 20, '', false, undefined, undefined, { running: 2, quiet: 0 })).slice(3), ['Agents (2 running)', 'System']);
     assert.deepEqual(labels(buildDashboardState(store, initialUi)), ['Tasks (0)', 'Knowledge', 'Queue', 'System'], 'a host without the Agents tab keeps its four tabs');
     assert.deepEqual(visibleTabs(), [0, 1, 2, 4]);
     assert.deepEqual(visibleTabs({ running: 0 }), [0, 1, 2, 3, 4]);
