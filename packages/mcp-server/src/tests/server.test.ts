@@ -977,6 +977,54 @@ test('working_tree resolution (comsoft-juiced incident): copy files resolve agai
   }
 });
 
+test('knowledge_create takes type ONCE (GitHub issue #55): top level only, fields only, both equal; a conflict or no type is refused naming where to set it; per-type parse stays strict', async () => {
+  const { client, cleanup } = await harness();
+  try {
+    const body = { title: 'one-copy', statement: 'S', alternatives_rejected: [], rationale: 'R' };
+    const call = (args: Record<string, unknown>) => client.callTool({ name: 'knowledge_create', arguments: { projection: 'full', ...args } });
+    const text = (r: unknown) => ((r as { content: { text: string }[] }).content[0].text);
+
+    // advertised schema: type is not required anywhere, so a client validating
+    // before the call accepts a one-copy form.
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'knowledge_create')!;
+    const served = tool.inputSchema as { required?: string[]; properties?: Record<string, unknown> };
+    assert.ok(!(served.required ?? []).includes('type'), 'top-level type is optional in the served schema');
+    assert.match(tool.description ?? '', /Example: \{"type":"decision"/, 'the description carries a working example call');
+
+    // top level only: fields.type is filled from it
+    const outerOnly = payload(await call({ type: 'decision', fields: body })) as { record: { type: string; title: string } };
+    assert.equal(outerOnly.record.type, 'decision');
+    assert.equal(outerOnly.record.title, 'one-copy');
+
+    // fields only: the top-level value is filled from it
+    const innerOnly = payload(await call({ fields: { type: 'decision', ...body, title: 'inner-only' } })) as { record: { type: string; title: string } };
+    assert.equal(innerOnly.record.type, 'decision');
+    assert.equal(innerOnly.record.title, 'inner-only');
+
+    // both, equal: still works
+    const both = payload(await call({ type: 'decision', fields: { type: 'decision', ...body, title: 'both' } })) as { record: { title: string } };
+    assert.equal(both.record.title, 'both');
+
+    // both, different: the error names both places and both values
+    const conflict = await call({ type: 'decision', fields: { type: 'anti_pattern', ...body } });
+    assert.equal(conflict.isError, true);
+    assert.match(text(conflict), /top-level 'type' \('decision'\) does not match 'fields\.type' \('anti_pattern'\)/);
+
+    // neither: one error naming where to put it
+    const neither = await call({ fields: body });
+    assert.equal(neither.isError, true);
+    assert.match(text(neither), /no record type given\. Set it once, either as the top-level 'type' argument or as 'fields\.type'/);
+
+    // a top-level-only call still gets the variant-scoped parse: a decision
+    // body under type anti_pattern is refused naming a field that variant requires
+    const wrong = await call({ type: 'anti_pattern', fields: body });
+    assert.equal(wrong.isError, true);
+    assert.match(text(wrong), /trigger/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('knowledge_create is typed per-type (decision foreign_7c7f6db1, probe research_finding foreign_15c8e6b5): served anyOf, discriminator-hint description, server-owned absence, size guard', async () => {
   const { client, tools, cleanup } = await harness();
   try {
@@ -988,7 +1036,7 @@ test('knowledge_create is typed per-type (decision foreign_7c7f6db1, probe resea
     // hint a model needs to pick the right branch and stay inside it.
     assert.match(
       tool!.description ?? '',
-      /Set fields\.type to select one schema branch/,
+      /Give `type` once, as the top-level `type` or as fields\.type/,
       'knowledge_create names the discriminator convention in prose, since the served schema cannot'
     );
 
@@ -1016,15 +1064,15 @@ test('knowledge_create is typed per-type (decision foreign_7c7f6db1, probe resea
       }
 
       // required[] matches knowledge_schema's own required set (the SAME
-      // derivation this layer reuses) plus 'type' itself — the one field
-      // knowledge_schema masks as server-owned that THIS layer re-admits as a
-      // caller-supplied discriminator literal.
+      // derivation this layer reuses). The advertised discriminator literal is
+      // OPTIONAL (GitHub issue #55: type is given once, top level or here), so
+      // 'type' is not in required[]; the server still enforces the per-type
+      // parse (see the one-copy test below).
       const described = tools.knowledgeSchema(typeConst!);
-      const expectedRequired = [...described.required, 'type'].sort();
       assert.deepEqual(
         [...(variant.required ?? [])].sort(),
-        expectedRequired,
-        `${typeConst} variant's required[] matches knowledge_schema's required set plus the discriminator`
+        [...described.required].sort(),
+        `${typeConst} variant's required[] matches knowledge_schema's required set`
       );
 
       // dedup_override is admitted on every variant (the create-time directive
