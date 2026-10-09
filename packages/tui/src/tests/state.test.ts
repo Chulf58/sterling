@@ -12,7 +12,7 @@ import { buildDashboardState, initialUi, reduce, screenLineToRow, visibleBodyLin
 /** The tabs a host that does not paint the Agents cards reaches (the default viewport). */
 const HOST_TABS = TABS.filter((t) => t !== 'Agents');
 import * as stateMod from '../state.js';
-import { bannerLines, bannerPaletteIndex, ART_WIDTH, WORDMARK, BANNER_ROWS } from '../banner.js';
+import { bannerLines, ART_WIDTH, WORDMARK, BANNER_ROWS, FULL_SCENE_ROWS, COMPACT_SCENE_ROWS, COMPACT_BELOW_HEIGHT } from '../banner.js';
 import { keyToEvent, mouseToEvent, draw } from '../render.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
@@ -354,23 +354,20 @@ test('header row: project folder name rides on the state; tabs shift to the seco
   }
 });
 
-test('banner (§11): width-aware rows, suppression, palette gradient endpoints', () => {
-  // full 3-row art at/above its width; the 1-line wordmark below it; clipped narrower
-  assert.deepEqual(bannerLines(ART_WIDTH, true), [...BANNER_ROWS]);
-  assert.deepEqual(bannerLines(Infinity, true), [...BANNER_ROWS], 'unbounded width gets the art');
-  assert.deepEqual(bannerLines(ART_WIDTH - 1, true), [WORDMARK], 'too narrow for art → 1-line wordmark');
-  assert.deepEqual(bannerLines(5, true), [WORDMARK.slice(0, 5)], 'narrower than the wordmark → clipped');
+test('banner (§11): the sunset scene is 8 rows, 4 when narrower than the art or shorter than 24 rows, none when suppressed or no room', () => {
+  // bannerLines is the scene minus its last row: state.ts counts that row as the
+  // project-name header, and the scene writes the name on its horizon
+  assert.equal(bannerLines(ART_WIDTH, true).length, FULL_SCENE_ROWS - 1);
+  assert.deepEqual(bannerLines(ART_WIDTH, true).slice(1, 4), BANNER_ROWS.map((r) => r.trimEnd()), 'the art sits on rows 1-3');
+  assert.equal(bannerLines(Infinity, true).length, FULL_SCENE_ROWS - 1, 'unbounded width gets the full scene');
+  assert.equal(bannerLines(ART_WIDTH - 1, true).length, COMPACT_SCENE_ROWS - 1, 'too narrow for the art → compact scene');
+  assert.equal(bannerLines(WORDMARK.length, true).length, COMPACT_SCENE_ROWS - 1, 'room for the 1-line wordmark → compact scene');
+  assert.deepEqual(bannerLines(WORDMARK.length - 1, true), [], 'narrower than the wordmark → nothing');
   assert.deepEqual(bannerLines(0, true), [], 'no room → nothing');
   assert.deepEqual(bannerLines(ART_WIDTH, false), [], 'suppressed → nothing regardless of width');
-
-  // gradient: light at the left, steel at the right; clamps; always a palette index
-  assert.notEqual(bannerPaletteIndex(0), bannerPaletteIndex(1), 'endpoints differ');
-  for (const t of [-1, 0, 0.5, 1, 2]) {
-    const idx = bannerPaletteIndex(t);
-    assert.ok(Number.isInteger(idx) && idx >= 0 && idx <= 255, `valid 256-palette index at t=${t}`);
-  }
-  assert.equal(bannerPaletteIndex(-1), bannerPaletteIndex(0), 'clamps below 0');
-  assert.equal(bannerPaletteIndex(2), bannerPaletteIndex(1), 'clamps above 1');
+  // the pane height (not yet passed by state.ts): short panes get the compact scene
+  assert.equal(bannerLines(80, true, COMPACT_BELOW_HEIGHT - 1).length, COMPACT_SCENE_ROWS - 1);
+  assert.equal(bannerLines(80, true, COMPACT_BELOW_HEIGHT).length, FULL_SCENE_ROWS - 1);
 });
 
 test('banner layout: bodyTop follows banner height; suppressed = today\'s layout; geometry ripples', () => {
@@ -381,20 +378,21 @@ test('banner layout: bodyTop follows banner height; suppressed = today\'s layout
     assert.deepEqual(s.banner, []);
     assert.equal(s.bodyTop, 3, 'no banner → today\'s layout');
 
-    // shown wide: 3 art rows push bodyTop to 6; body screenRows stay body-relative
+    // shown wide: the 8-row scene (7 banner rows + the header row it covers)
+    // pushes bodyTop to 10; body screenRows stay body-relative
     s = buildDashboardState(store, initialUi, Infinity, Infinity, 'Sterling', true);
-    assert.deepEqual(s.banner, [...BANNER_ROWS]);
-    assert.equal(s.bodyTop, 6, 'banner.length (3) + header + tabs + spacer');
+    assert.equal(s.banner.length, FULL_SCENE_ROWS - 1);
+    assert.equal(s.bodyTop, 10, 'banner.length (7) + header (the scene\'s horizon-and-grid row) + tabs + spacer');
     assert.equal(s.projectName, 'Sterling');
     assert.deepEqual(s.rows.map((r) => r.screenRow), [0, 1], 'rows stay body-relative');
 
-    // clicks map through the banner-shifted bodyTop: first body row is line 7
-    assert.equal(screenLineToRow(s, 7), 0, 'first body row under a 3-row banner');
-    assert.equal(screenLineToRow(s, 6), -1, 'the spacer line is not a body row');
+    // clicks map through the banner-shifted bodyTop: first body row is line 11
+    assert.equal(screenLineToRow(s, 11), 0, 'first body row under the 8-row scene');
+    assert.equal(screenLineToRow(s, 10), -1, 'the spacer line is not a body row');
 
-    // tab-bar click now lands on terminal line bodyTop-1 (=5), not 2; the x is
+    // tab-bar click now lands on terminal line bodyTop-1 (=9), not 2; the x is
     // derived from the banner-shifted state's own rendered tab labels
-    const tabClick = reduce(store, initialUi, { kind: 'click', x: tabClickX(s, 1), y: 5 }, { showBanner: true });
+    const tabClick = reduce(store, initialUi, { kind: 'click', x: tabClickX(s, 1), y: 9 }, { showBanner: true });
     assert.equal(tabClick.ui.tab, 1, 'Knowledge selected on the banner-shifted tab row');
     // a click on a banner row selects nothing
     const bannerClick = reduce(store, initialUi, { kind: 'click', x: 1, y: 2 }, { showBanner: true });

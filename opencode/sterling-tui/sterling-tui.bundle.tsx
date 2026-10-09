@@ -10935,17 +10935,73 @@ var BANNER_ROWS = [
   "\u2580\u2580\u2580  \u2580  \u2580\u2580\u2580 \u2580 \u2580 \u2580\u2580\u2580 \u2580\u2580\u2580 \u2580  \u2580 \u2580\u2580\u2580\u2580"
 ];
 var WORDMARK = "STERLING";
+var SPACED_WORDMARK = "S T E R L I N G";
 var ART_WIDTH = Math.max(...BANNER_ROWS.map((r) => r.length));
-function bannerLines(width, show) {
+var FULL_SCENE_ROWS = 8;
+var COMPACT_SCENE_ROWS = 4;
+var COMPACT_BELOW_HEIGHT = 24;
+function sceneRows(width, height = Infinity) {
+  if (!(width >= WORDMARK.length))
+    return 0;
+  if (width < ART_WIDTH || height < COMPACT_BELOW_HEIGHT)
+    return COMPACT_SCENE_ROWS;
+  return FULL_SCENE_ROWS;
+}
+function sceneLayout(rows) {
+  return rows >= FULL_SCENE_ROWS ? { sunRows: 4, horizon: 4, gridRows: 3 } : { sunRows: 2, horizon: 2, gridRows: 1 };
+}
+var textWidth = (width) => Number.isFinite(width) ? Math.floor(width) : ART_WIDTH;
+function bannerLines(width, show, height = Infinity) {
   if (!show)
     return [];
-  if (!Number.isFinite(width))
-    return [...BANNER_ROWS];
-  if (width >= ART_WIDTH)
-    return [...BANNER_ROWS];
-  if (width < 1)
+  const rows = sceneRows(width, height);
+  if (rows === 0)
     return [];
-  return [WORDMARK.slice(0, width)];
+  return sceneText(textWidth(width), rows, "").slice(0, rows - 1);
+}
+function horizonLabel(width, name) {
+  if (!name)
+    return { x: 0, text: "" };
+  const label = ` ${name} `;
+  if ([...label].length >= width)
+    return { x: 0, text: [...name].slice(0, Math.max(0, width)).join("") };
+  return { x: Math.floor((width - [...label].length) / 2), text: label };
+}
+function wordmarkFor(width, rows) {
+  if (rows >= FULL_SCENE_ROWS)
+    return { row: 1, x: Math.floor((width - ART_WIDTH) / 2), lines: BANNER_ROWS };
+  const text = width >= SPACED_WORDMARK.length ? SPACED_WORDMARK : WORDMARK;
+  return { row: 1, x: Math.floor((width - text.length) / 2), lines: [text] };
+}
+function raySpacing(y, g) {
+  return 6 + y * 6 / g;
+}
+function sceneText(width, rows, projectName) {
+  const w = textWidth(width);
+  if (rows <= 0 || w < 1)
+    return [];
+  const { horizon, gridRows } = sceneLayout(rows);
+  const grid = Array.from({ length: rows }, () => Array(w).fill(" "));
+  const mark = wordmarkFor(w, rows);
+  mark.lines.forEach((line, i) => [...line].forEach((ch, k) => {
+    const x = mark.x + k;
+    if (x >= 0 && x < w)
+      grid[mark.row + i][x] = ch;
+  }));
+  grid[horizon].fill("\u2500");
+  const label = horizonLabel(w, projectName);
+  [...label.text].forEach((ch, k) => grid[horizon][label.x + k] = ch);
+  const cx = Math.floor(w / 2);
+  const g = gridRows * 2;
+  for (let row = 0; row < gridRows; row++) {
+    const s2 = raySpacing(row * 2 + 1, g);
+    for (let k = -Math.ceil(cx / s2); k <= Math.ceil((w - cx) / s2); k++) {
+      const x = Math.round(cx + k * s2);
+      if (x >= 0 && x < w)
+        grid[horizon + 1 + row][x] = k < 0 ? "\u2571" : k > 0 ? "\u2572" : "\u2502";
+    }
+  }
+  return grid.map((cells2) => cells2.join("").trimEnd());
 }
 
 // packages/tui/dist/state.js
@@ -15653,11 +15709,10 @@ function cells(avatarIndex, frame2) {
   }
   return out;
 }
-function tileCells(avatarIndex, frame2) {
-  return cells(avatarIndex, frame2).map((row) => {
-    const pad = { ch: " ", bg: TILE_BG };
-    return [pad, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), pad];
-  });
+function tileCells(avatarIndex, frame2, edge) {
+  const left = edge === void 0 ? { ch: " ", bg: TILE_BG } : { ch: "\u258C", fg: edge, bg: TILE_BG };
+  const right = edge === void 0 ? { ch: " ", bg: TILE_BG } : { ch: "\u2590", fg: edge, bg: TILE_BG };
+  return cells(avatarIndex, frame2).map((row) => [left, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), right]);
 }
 var ANIMATION_MS = 333;
 var SEQUENCE = [

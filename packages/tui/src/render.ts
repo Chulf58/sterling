@@ -3,16 +3,18 @@
 // state layer's UiEvent vocabulary and fed to reduce().
 import type { DashboardState, UiEvent } from './state.js';
 import type { BlockPixel, SubagentBlock } from './subagents.js';
-import { bannerPaletteIndex } from './banner.js';
+import { horizonLabel, sceneLayout, sceneText } from './banner.js';
+import { PLAIN_THEME, type Theme } from './theme.js';
 
 // minimal structural types for the slice of terminal-kit we use
 export interface AttrLike {
   bold?: boolean;
   dim?: boolean;
   inverse?: boolean;
-  /** a named palette color ('yellow') or a 0–255 256-palette index (banner
-   *  gradient). A regular ScreenBuffer is 256-palette only — no truecolor. */
+  /** a named palette color ('yellow') or a 0–255 256-palette index. A regular
+   *  ScreenBuffer is 256-palette only: truecolour goes through the pixel overlay. */
   color?: string | number;
+  bgColor?: string | number;
 }
 export interface ScreenLike {
   width: number;
@@ -26,47 +28,56 @@ export interface DrawOptions {
   /** the Agents tab's cards, drawn from the top of the body; their portrait
    *  pixels are painted afterwards by paintPixels (truecolour) */
   block?: SubagentBlock;
+  /** the colour theme (theme.ts); without one, the plain look */
+  theme?: Theme;
+}
+
+/** The banner scene as text through the ScreenBuffer (the 16-colour and plain
+ *  levels), the project name on the horizon. */
+function drawSceneText(screen: ScreenLike, t: Theme, rows: number, projectName: string): void {
+  const { horizon } = sceneLayout(rows);
+  sceneText(screen.width, rows, '').forEach((text, y) => {
+    if (!text) return;
+    const attr = y === horizon ? t.sceneHorizon : y > horizon ? t.sceneGrid : t.sceneArt;
+    screen.put({ x: 0, y, attr }, text);
+  });
+  const label = horizonLabel(screen.width, projectName);
+  if (label.text) screen.put({ x: label.x, y: horizon, attr: t.name }, label.text);
 }
 
 export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOptions = {}): void {
+  const t = opts.theme ?? PLAIN_THEME;
   const blockHeight = opts.block?.height ?? 0;
   // The frame is composed off-screen into a ScreenBuffer and delta-drawn:
   // only cells that changed since the previous frame reach the terminal, so
   // an unchanged dashboard writes nothing — no flicker. put() coordinates
   // are 0-based and clip at the buffer edge (no wrap), so a long line can
   // never push the pane into a real scroll.
-  screen.fill({ attr: {} });
-  // rows 0..top-1: the banner wordmark, painted with a per-column 256-palette
-  // silver→steel gradient (spaces stay default). Suppressed/too-narrow → no
-  // rows, and everything below shifts up to the prior layout.
+  screen.fill({ attr: t.fill });
+  // rows 0..top: the banner scene over the banner rows and the header row
+  // below them, the project folder name written on its horizon, so a glance
+  // tells you which project's session this pane observes. With the overlay
+  // these cells stay blank and main.ts paints the scene's pixels over them.
+  // Suppressed or no room → row 0 is the plain name row and the layout is
+  // the one from before the banner. Tabs sit on the next row, the
+  // spacer/search bar below that (in sync with bodyTop = top + 3).
   const top = state.banner.length;
-  const bw = Math.max(1, ...state.banner.map((row) => row.length));
-  state.banner.forEach((row, by) => {
-    for (let cx = 0; cx < row.length; cx++) {
-      if (row[cx] === ' ') continue;
-      const t = bw <= 1 ? 0 : cx / (bw - 1);
-      screen.put({ x: cx, y: by, attr: { color: bannerPaletteIndex(t) } }, row[cx]);
-    }
-  });
-  // row `top`: the project folder name (bold) — a glance tells you which
-  // project's session this pane observes, so you never type into the wrong one.
-  // Tabs sit on the next row, the spacer/search bar below that (in sync with
-  // bodyTop = top + 3).
-  screen.put({ x: 0, y: top, attr: { bold: true } }, state.projectName);
+  if (top === 0) screen.put({ x: 0, y: 0, attr: t.name }, state.projectName);
+  else if (!t.bannerOverlay) drawSceneText(screen, t, top + 1, state.projectName);
   let x = 0;
   for (const tab of state.tabs) {
     const label = ` ${tab.label} `; // x extents must stay in sync with the click mapping in state.ts
-    screen.put({ x, y: top + 1, attr: tab.active ? { inverse: true } : {} }, label);
+    screen.put({ x, y: top + 1, attr: tab.active ? t.tabActive : t.tab }, label);
     x += label.length;
   }
   if (state.searchLine) {
     // the spacer line (row top+2) doubles as the search bar while a query/input is live
-    screen.put({ x: 0, y: top + 2, attr: { dim: true } }, state.searchLine);
+    screen.put({ x: 0, y: top + 2, attr: t.search }, state.searchLine);
   }
   const lastBodyLine = screen.height - 3; // reserve the blank spacer + footer
   let y = state.bodyTop; // 0-based rows: header 0, tab bar 1, blank/search 2, body from bodyTop
   if (state.emptyMessage && y <= lastBodyLine) {
-    screen.put({ x: 0, y, attr: { dim: true } }, state.emptyMessage);
+    screen.put({ x: 0, y, attr: t.muted }, state.emptyMessage);
     y += 1;
   }
   // draw the body window: skip the first state.scroll body lines (scrolled
@@ -78,9 +89,12 @@ export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOption
     for (const line of row.lines) {
       if (bodyIdx++ < state.scroll) continue;
       if (y > lastBodyLine) break;
-      const attr =
-        line.kind === 'title' ? { inverse: row.selected, bold: row.expanded } : line.kind === 'meta' ? { dim: true } : {};
-      screen.put({ x: 0, y, attr }, line.text);
+      const base = line.kind === 'title' ? t.title(row.selected, row.expanded) : line.kind === 'meta' ? t.muted : t.text;
+      // '⚠ ' is the state layer's warning convention (notices, degraded sources)
+      const attr = line.text.startsWith('⚠') ? t.warn(base) : base;
+      // a selected title is a full-width bar where the theme has one
+      const text = line.kind === 'title' && row.selected && t.fullWidthSelection ? line.text.padEnd(screen.width) : line.text;
+      screen.put({ x: 0, y, attr }, text);
       y += 1;
     }
   }
@@ -88,15 +102,15 @@ export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOption
     // lower-half completed section (§11): drain-log lines, dim, never selectable.
     // The state layer already truncated pending above the fixed divider.
     const qc = state.queueCompleted;
-    if (qc.overflow) screen.put({ x: 0, y: state.bodyTop + qc.startRow - 1, attr: { dim: true } }, qc.overflow);
+    if (qc.overflow) screen.put({ x: 0, y: state.bodyTop + qc.startRow - 1, attr: t.muted }, qc.overflow);
     let cy = state.bodyTop + qc.startRow;
     if (cy <= lastBodyLine) {
-      screen.put({ x: 0, y: cy, attr: { dim: true } }, qc.header);
+      screen.put({ x: 0, y: cy, attr: t.heading }, qc.header);
       cy += 1;
     }
     for (const line of qc.lines) {
       if (cy > lastBodyLine) break;
-      screen.put({ x: 0, y: cy, attr: { dim: true } }, line);
+      screen.put({ x: 0, y: cy, attr: t.muted }, line);
       cy += 1;
     }
     // ACTIVITY section (board 39d6462d): drawn immediately below completed,
@@ -105,22 +119,22 @@ export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOption
     if (state.queueActivity) {
       const qa = state.queueActivity;
       if (cy <= lastBodyLine) {
-        screen.put({ x: 0, y: cy, attr: { dim: true } }, qa.header);
+        screen.put({ x: 0, y: cy, attr: t.heading }, qa.header);
         cy += 1;
       }
       for (const line of qa.lines) {
         if (cy > lastBodyLine) break;
-        screen.put({ x: 0, y: cy, attr: { dim: true } }, line);
+        screen.put({ x: 0, y: cy, attr: t.muted }, line);
         cy += 1;
       }
     }
   }
   if (opts.block && blockHeight > 0) {
     const top = state.bodyTop;
-    for (const p of opts.block.puts) screen.put({ x: p.x, y: top + p.y, attr: p.attr }, p.text);
+    for (const p of opts.block.puts) screen.put({ x: p.x, y: top + p.y, attr: t.map(p.attr) }, p.text);
   }
   const footerY = blockHeight > 0 ? screen.height - 1 : Math.min(y + 1, screen.height - 1);
-  screen.put({ x: 0, y: footerY, attr: { dim: true } }, state.footer);
+  screen.put({ x: 0, y: footerY, attr: t.muted }, state.footer);
   screen.draw({ delta: true });
 }
 
@@ -139,14 +153,18 @@ export interface PixelTerm {
  *  while a cell that now holds text differs from the buffer's last frame and
  *  is rewritten by the delta draw. (A full, non-delta draw is no substitute:
  *  terminal-kit repaints every line again on the delta draw after it, which
- *  wipes portraits the animation only patches.) */
-export function clearPixels(term: PixelTerm, prev: ReadonlyMap<string, string>, next: readonly BlockPixel[]): void {
+ *  wipes portraits the animation only patches.) blankSgr is the theme's page
+ *  background ('' leaves the terminal's own). */
+export function clearPixels(term: PixelTerm, prev: ReadonlyMap<string, string>, next: readonly BlockPixel[], blankSgr = ''): void {
   const keep = new Set(next.map((p) => `${p.x},${p.y}`));
   let wrote = false;
   for (const key of prev.keys()) {
     if (keep.has(key)) continue;
     const [x, y] = key.split(',').map(Number) as [number, number];
-    if (!wrote) term.styleReset();
+    if (!wrote) {
+      term.styleReset();
+      if (blankSgr) term.noFormat(blankSgr);
+    }
     term.moveTo(x + 1, y + 1);
     term.noFormat(' ');
     wrote = true;
@@ -162,11 +180,12 @@ function sgr24(hex: string, background: boolean): string {
  *  terminal with 24-bit colour: the ScreenBuffer is 256-palette only. Those
  *  cells hold blank spaces in the buffer, so its delta draw leaves them alone.
  *  With `prev` (the map this function returned last time) only changed cells
- *  are written; without it every pixel is. A pixel with no colour is written
- *  with the default background, so transparency shows the host's own.
+ *  are written; without it every pixel is. A pixel with no bg is written on
+ *  blankSgr, the theme's page background ('' is the terminal's default), so
+ *  transparency shows the page behind it.
  *  trueColor writes the 24-bit SGR itself; otherwise terminal-kit's
  *  colorRgbHex picks the nearest colour its terminal detection allows. */
-export function paintPixels(term: PixelTerm, pixels: readonly BlockPixel[], prev?: ReadonlyMap<string, string>, trueColor = false): Map<string, string> {
+export function paintPixels(term: PixelTerm, pixels: readonly BlockPixel[], prev?: ReadonlyMap<string, string>, trueColor = false, blankSgr = ''): Map<string, string> {
   const next = new Map<string, string>();
   let wrote = false;
   for (const p of pixels) {
@@ -176,6 +195,7 @@ export function paintPixels(term: PixelTerm, pixels: readonly BlockPixel[], prev
     if (prev?.get(key) === sig) continue;
     term.styleReset();
     term.moveTo(p.x + 1, p.y + 1);
+    if (p.bg === undefined && blankSgr) term.noFormat(blankSgr);
     if (p.fg !== undefined) {
       if (trueColor) term.noFormat(sgr24(p.fg, false));
       else term.colorRgbHex(p.fg);

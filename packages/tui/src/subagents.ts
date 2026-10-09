@@ -50,6 +50,7 @@ import { readRegister, dispatchStateDir, dispatchStateKey, type RegisterEntry } 
 import { deriveAgentTranscript, fillPct, latestUsage, readTail } from '../../../scripts/hooks/lib/transcript.mjs';
 import { sterlingRootFrom } from '../../../scripts/lib/opencode-install.mjs';
 import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_COLS, DONE_FADE, fadeToTile, type AssignState } from './avatars/index.js';
+import { NEON_EDGE } from './theme.js';
 
 /** How long a missing subagent transcript is left unsearched before the next look. */
 const TRANSCRIPT_RETRY_MS = 10_000;
@@ -557,9 +558,10 @@ function clip(text: string, width: number): string {
 
 /** The cards, then, when running or quiet agents come from a session other than the one
  *  session.json names, one dim line under them saying so (dropped when there
- *  is no room: the cards win). */
-export function composeSubagentBlock(view: SubagentView, width: number, maxHeight: number, tick: number): SubagentBlock {
-  const cards = composeCards(view, width, maxHeight, tick);
+ *  is no room: the cards win). neonEdge draws each tile's status edge
+ *  (theme.ts NEON_EDGE: running cyan, quiet amber, resumable pink, done muted). */
+export function composeSubagentBlock(view: SubagentView, width: number, maxHeight: number, tick: number, opts: { neonEdge?: boolean } = {}): SubagentBlock {
+  const cards = composeCards(view, width, maxHeight, tick, opts.neonEdge === true);
   if (!view.foreignLive || cards.height + 1 > maxHeight) return cards;
   if (cards.height === 0 && width < 1) return cards;
   const put: BlockPut = { x: 0, y: cards.height, attr: { dim: true }, text: clip(FOREIGN_SESSION_NOTE, width) };
@@ -570,7 +572,7 @@ const FOREIGN_SESSION_NOTE = 'session.json names another session; running and qu
 
 /** Lay the cards out in at most maxHeight rows of a width-column area. A readable
  *  register with no agents draws one dim line, so the tab is never blank. */
-function composeCards(view: SubagentView, width: number, maxHeight: number, tick: number): SubagentBlock {
+function composeCards(view: SubagentView, width: number, maxHeight: number, tick: number, neonEdge: boolean): SubagentBlock {
   const empty: SubagentBlock = { height: 0, puts: [], pixels: [] };
   if (maxHeight < 1 || width < 1) return empty;
   const note = (text: string): SubagentBlock => ({ height: 1, puts: [{ x: 0, y: 0, attr: { dim: true }, text: clip(text, width) }], pixels: [] });
@@ -609,8 +611,8 @@ function composeCards(view: SubagentView, width: number, maxHeight: number, tick
     const x0 = (i % perRow) * (cardW + CARD_GAP);
     const y0 = bandY[Math.floor(i / perRow)]!;
     // the tile: every cell carries a bg, so the tint covers the padding and the transparent pixels.
-    // A done agent rests on frame 0 and its portrait is faded.
-    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done)).forEach((line, r) =>
+    // A done agent rests on frame 0 and its portrait is faded, its edge with it.
+    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done), neonEdge ? NEON_EDGE[a.status] : undefined).forEach((line, r) =>
       line.forEach((cell, c) => {
         const px: BlockPixel = { x: x0 + c, y: y0 + r, ch: cell.ch };
         if (cell.fg !== undefined) px.fg = done ? fadeToTile(cell.fg, DONE_FADE) : cell.fg;

@@ -2324,11 +2324,11 @@ var require_format = __commonJS({
         minus = "-";
         arg = -arg;
       }
-      var degrees = epsilonFloor(arg), frac = arg - degrees;
-      if (!frac) {
+      var degrees = epsilonFloor(arg), frac2 = arg - degrees;
+      if (!frac2) {
         return minus + degrees + "\xB0";
       }
-      var minutes = epsilonFloor(frac * 60), seconds = epsilonFloor(frac * 3600 - minutes * 60);
+      var minutes = epsilonFloor(frac2 * 60), seconds = epsilonFloor(frac2 * 3600 - minutes * 60);
       if (seconds) {
         return minus + degrees + "\xB0" + ("" + minutes).padStart(2, "0") + "\u2032" + ("" + seconds).padStart(2, "0") + "\u2033";
       }
@@ -13217,7 +13217,7 @@ var require_singleColumnMenu = __commonJS({
       if (!this.grabbing) {
         this.grabInput();
       }
-      var start = {}, end = {}, textWidth, outerWidth, paddingLength, menuItems, offsetY = 0, lineCount = 0, scrollLines = 0, controller, finished = false, alreadyCleanedUp = false;
+      var start = {}, end = {}, textWidth2, outerWidth, paddingLength, menuItems, offsetY = 0, lineCount = 0, scrollLines = 0, controller, finished = false, alreadyCleanedUp = false;
       var init = () => {
         computeItems(menuItemsArg);
         if (options.y !== void 0) {
@@ -13236,17 +13236,17 @@ var require_singleColumnMenu = __commonJS({
         }
       };
       var computeItems = (menuItems_) => {
-        textWidth = 0;
+        textWidth2 = 0;
         paddingLength = Math.max(stringWidth(options.leftPadding), stringWidth(options.selectedLeftPadding));
         menuItems_ = menuItems_.map((element) => {
           if (typeof element !== "string") {
             element = "" + element;
           }
-          textWidth = Math.max(textWidth, stringWidth(element));
+          textWidth2 = Math.max(textWidth2, stringWidth(element));
           return element;
         });
-        if (!options.oneLineItem && textWidth > options.itemMaxWidth - paddingLength) {
-          outerWidth = Math.min(textWidth + paddingLength, this.width);
+        if (!options.oneLineItem && textWidth2 > options.itemMaxWidth - paddingLength) {
+          outerWidth = Math.min(textWidth2 + paddingLength, this.width);
           menuItems = menuItems_.map((element, index) => {
             var item, lines, lineLength = options.itemMaxWidth - paddingLength;
             lines = string.wordwrap(element, {
@@ -13266,15 +13266,15 @@ var require_singleColumnMenu = __commonJS({
           });
           lineCount = offsetY;
         } else {
-          textWidth = Math.min(textWidth, options.itemMaxWidth - paddingLength);
-          outerWidth = Math.min(textWidth + paddingLength, this.width);
+          textWidth2 = Math.min(textWidth2, options.itemMaxWidth - paddingLength);
+          outerWidth = Math.min(textWidth2 + paddingLength, this.width);
           menuItems = menuItems_.map((element, index) => {
             var elementWidth = stringWidth(element);
             return {
               offsetY: index,
               index,
               text: element,
-              displayText: [elementWidth > textWidth ? element.slice(0, textWidth - 1) + "\u2026" : element + " ".repeat(textWidth - elementWidth)]
+              displayText: [elementWidth > textWidth2 ? element.slice(0, textWidth2 - 1) + "\u2026" : element + " ".repeat(textWidth2 - elementWidth)]
             };
           });
           lineCount = menuItems.length;
@@ -49995,22 +49995,166 @@ var BANNER_ROWS = [
   "\u2580\u2580\u2580  \u2580  \u2580\u2580\u2580 \u2580 \u2580 \u2580\u2580\u2580 \u2580\u2580\u2580 \u2580  \u2580 \u2580\u2580\u2580\u2580"
 ];
 var WORDMARK = "STERLING";
+var SPACED_WORDMARK = "S T E R L I N G";
 var ART_WIDTH = Math.max(...BANNER_ROWS.map((r) => r.length));
-function bannerLines(width, show) {
+var FULL_SCENE_ROWS = 8;
+var COMPACT_SCENE_ROWS = 4;
+var COMPACT_BELOW_HEIGHT = 24;
+function sceneRows(width, height = Infinity) {
+  if (!(width >= WORDMARK.length))
+    return 0;
+  if (width < ART_WIDTH || height < COMPACT_BELOW_HEIGHT)
+    return COMPACT_SCENE_ROWS;
+  return FULL_SCENE_ROWS;
+}
+function sceneLayout(rows) {
+  return rows >= FULL_SCENE_ROWS ? { sunRows: 4, horizon: 4, gridRows: 3 } : { sunRows: 2, horizon: 2, gridRows: 1 };
+}
+var textWidth = (width) => Number.isFinite(width) ? Math.floor(width) : ART_WIDTH;
+function bannerLines(width, show, height = Infinity) {
   if (!show)
     return [];
-  if (!Number.isFinite(width))
-    return [...BANNER_ROWS];
-  if (width >= ART_WIDTH)
-    return [...BANNER_ROWS];
-  if (width < 1)
+  const rows = sceneRows(width, height);
+  if (rows === 0)
     return [];
-  return [WORDMARK.slice(0, width)];
+  return sceneText(textWidth(width), rows, "").slice(0, rows - 1);
 }
-var RAMP = [231, 255, 253, 251, 249, 103, 66, 60];
-function bannerPaletteIndex(t) {
+function horizonLabel(width, name) {
+  if (!name)
+    return { x: 0, text: "" };
+  const label = ` ${name} `;
+  if ([...label].length >= width)
+    return { x: 0, text: [...name].slice(0, Math.max(0, width)).join("") };
+  return { x: Math.floor((width - [...label].length) / 2), text: label };
+}
+function wordmarkFor(width, rows) {
+  if (rows >= FULL_SCENE_ROWS)
+    return { row: 1, x: Math.floor((width - ART_WIDTH) / 2), lines: BANNER_ROWS };
+  const text = width >= SPACED_WORDMARK.length ? SPACED_WORDMARK : WORDMARK;
+  return { row: 1, x: Math.floor((width - text.length) / 2), lines: [text] };
+}
+var SUN_STOPS = ["#ffd319", "#ff901f", "#ff2975"];
+var SKY_STOPS = ["#00005f", "#3a0a6e", "#a0207e"];
+var CHROME = ["#ffffff", "#c8f4ff", "#6fd3ff", "#2a3fbf", "#9ee6ff", "#f0fbff"];
+var GROUND_STOPS = ["#2b0057", "#00005f"];
+var GRID = "#ff2bd6";
+var SUN_INK = "#2b0057";
+var HORIZON_LINE = "#00e5ff";
+var NAME_FG = "#ffffff";
+function rgbOf(hex) {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return [n >> 16 & 255, n >> 8 & 255, n & 255];
+}
+function lerpStops(stops, t) {
   const u = t <= 0 ? 0 : t >= 1 ? 1 : t;
-  return RAMP[Math.round(u * (RAMP.length - 1))];
+  const pos = u * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(pos));
+  const f = pos - i;
+  const [a, b] = [rgbOf(stops[i]), rgbOf(stops[i + 1])];
+  return `#${a.map((v, k) => Math.round(v + (b[k] - v) * f).toString(16).padStart(2, "0")).join("")}`;
+}
+var frac = (y, n) => n <= 1 ? 0 : y / (n - 1);
+function sunPixel(x, y, n, cx) {
+  const r = n + 1;
+  const dy = y + 0.5 - r;
+  const dx = (x - cx) / 1.5;
+  if (dx * dx + dy * dy > r * r)
+    return void 0;
+  if (y >= n / 2 && (y - n / 2) % 2 === 1)
+    return void 0;
+  return lerpStops(SUN_STOPS, frac(y, n));
+}
+function raySpacing(y, g) {
+  return 6 + y * 6 / g;
+}
+function gridLine(x, y, g, cx) {
+  const h = g >= 6 ? y === 2 || y === 5 : y === g - 1;
+  const s2 = raySpacing(y, g);
+  return { h, v: Math.round(cx + Math.round((x - cx) / s2) * s2) === x };
+}
+function pairCell(x, y, top, bottom) {
+  return top === bottom ? { x, y, ch: " ", bg: top } : { x, y, ch: "\u2580", fg: top, bg: bottom };
+}
+function scenePixels(width, rows, projectName) {
+  const w = textWidth(width);
+  if (rows <= 0 || w < 1)
+    return [];
+  const { sunRows, horizon, gridRows } = sceneLayout(rows);
+  const cx = Math.floor(w / 2);
+  const n = sunRows * 2;
+  const mark = wordmarkFor(w, rows);
+  const out = [];
+  const skyPixel = (x, y) => {
+    if (rows >= FULL_SCENE_ROWS) {
+      const artY = y - mark.row * 2;
+      const ch = mark.lines[Math.floor(artY / 2)]?.[x - mark.x];
+      if (artY >= 0 && ch !== void 0 && (artY % 2 === 0 ? "\u2580\u2588" : "\u2584\u2588").includes(ch))
+        return CHROME[artY];
+    }
+    return sunPixel(x, y, n, cx) ?? lerpStops(SKY_STOPS, frac(y, n));
+  };
+  for (let row = 0; row < sunRows; row++) {
+    for (let x = 0; x < w; x++)
+      out.push(pairCell(x, row, skyPixel(x, row * 2), skyPixel(x, row * 2 + 1)));
+  }
+  if (rows < FULL_SCENE_ROWS) {
+    const line = mark.lines[0];
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === " ")
+        continue;
+      const x = mark.x + i;
+      if (x < 0 || x >= w)
+        continue;
+      const bg = skyPixel(x, mark.row * 2);
+      const fg = sunPixel(x, mark.row * 2, n, cx) === void 0 ? CHROME[0] : SUN_INK;
+      out[mark.row * w + x] = { x, y: mark.row, ch: line[i], fg, bg };
+    }
+  }
+  const ground = GROUND_STOPS[0];
+  const label = horizonLabel(w, projectName);
+  const labelChars = [...label.text];
+  for (let x = 0; x < w; x++) {
+    const li = x - label.x;
+    const ch = li >= 0 && li < labelChars.length ? labelChars[li] : void 0;
+    out.push(ch === void 0 ? { x, y: horizon, ch: "\u2501", fg: HORIZON_LINE, bg: ground } : { x, y: horizon, ch, fg: NAME_FG, bg: ground });
+  }
+  const g = gridRows * 2;
+  const gridPixel = (x, y) => {
+    const { h, v } = gridLine(x, y, g, cx);
+    return h || v ? GRID : lerpStops(GROUND_STOPS, frac(y, g));
+  };
+  for (let row = 0; row < gridRows; row++) {
+    for (let x = 0; x < w; x++)
+      out.push(pairCell(x, horizon + 1 + row, gridPixel(x, row * 2), gridPixel(x, row * 2 + 1)));
+  }
+  return out;
+}
+function sceneText(width, rows, projectName) {
+  const w = textWidth(width);
+  if (rows <= 0 || w < 1)
+    return [];
+  const { horizon, gridRows } = sceneLayout(rows);
+  const grid = Array.from({ length: rows }, () => Array(w).fill(" "));
+  const mark = wordmarkFor(w, rows);
+  mark.lines.forEach((line, i) => [...line].forEach((ch, k) => {
+    const x = mark.x + k;
+    if (x >= 0 && x < w)
+      grid[mark.row + i][x] = ch;
+  }));
+  grid[horizon].fill("\u2500");
+  const label = horizonLabel(w, projectName);
+  [...label.text].forEach((ch, k) => grid[horizon][label.x + k] = ch);
+  const cx = Math.floor(w / 2);
+  const g = gridRows * 2;
+  for (let row = 0; row < gridRows; row++) {
+    const s2 = raySpacing(row * 2 + 1, g);
+    for (let k = -Math.ceil(cx / s2); k <= Math.ceil((w - cx) / s2); k++) {
+      const x = Math.round(cx + k * s2);
+      if (x >= 0 && x < w)
+        grid[horizon + 1 + row][x] = k < 0 ? "\u2571" : k > 0 ? "\u2572" : "\u2502";
+    }
+  }
+  return grid.map((cells2) => cells2.join("").trimEnd());
 }
 
 // packages/tui/dist/state.js
@@ -52405,34 +52549,176 @@ function openDashboard(storePath2, options = {}) {
   };
 }
 
+// packages/tui/dist/theme.js
+var THEME_LEVELS = ["truecolor", "256", "16", "plain"];
+var THEME_ENV = "STERLING_TUI_COLOR";
+var PALETTE = {
+  /** xterm 17: the colour the ScreenBuffer paints as background, so the overlay meets the body without a seam */
+  night: "#00005f",
+  text: "#f2ecff",
+  pink: "#ff2d95",
+  cyan: "#00e5ff",
+  muted: "#8787af",
+  /** xterm 215, the warning amber */
+  amber: "#ffaf5f"
+};
+var XTERM = {
+  /** #00005f; the 256 palette has no darker violet, and the cube's violets (53, 54, 55) are too bright for a page */
+  background: 17,
+  /** #d7d7ff */
+  text: 189,
+  /** #8787af */
+  muted: 103,
+  /** #ff5faf */
+  pink: 205,
+  /** #00ffff */
+  cyan: 51,
+  /** #ffaf5f */
+  amber: 215,
+  /** #ff5f5f */
+  error: 203,
+  /** #00ffaf */
+  success: 49,
+  /** #5f00af, the selection bar */
+  selection: 55,
+  /** #ffffff */
+  bright: 231
+};
+var NEON_EDGE = {
+  running: PALETTE.cyan,
+  resumable: PALETTE.pink,
+  /** amber, like the quiet status line's yellow: unknown, neither running nor done */
+  quiet: PALETTE.amber,
+  done: PALETTE.muted
+};
+function detectThemeLevel(env, support = {}) {
+  const forced = env[THEME_ENV];
+  if (forced !== void 0 && forced !== "") {
+    if (THEME_LEVELS.includes(forced))
+      return forced;
+    throw new Error(`${THEME_ENV}=${forced} is not one of ${THEME_LEVELS.join(", ")}`);
+  }
+  if (env.NO_COLOR !== void 0 && env.NO_COLOR !== "")
+    return "plain";
+  if (/^(truecolor|24bits?)$/.test(env.COLORTERM ?? "") || env.TERM_PROGRAM === "tmux" || support.trueColor === true)
+    return "truecolor";
+  if (support["256colors"] === true || /256color/.test(env.TERM ?? ""))
+    return "256";
+  return "16";
+}
+var PLAIN_THEME = {
+  level: "plain",
+  fill: {},
+  name: { bold: true },
+  tab: {},
+  tabActive: { inverse: true },
+  search: { dim: true },
+  text: {},
+  muted: { dim: true },
+  heading: { dim: true },
+  title: (selected, expanded) => ({ inverse: selected, bold: expanded }),
+  warn: (attr) => attr,
+  map: (attr) => attr,
+  fullWidthSelection: false,
+  bannerOverlay: false,
+  sceneArt: {},
+  sceneHorizon: {},
+  sceneGrid: {},
+  blankSgr: ""
+};
+function xtermTheme(level) {
+  const bg = XTERM.background;
+  const on = (attr) => ({ bgColor: bg, ...attr });
+  const muted = on({ color: XTERM.muted });
+  return {
+    level,
+    fill: { bgColor: bg },
+    name: on({ color: XTERM.pink, bold: true }),
+    tab: muted,
+    tabActive: { color: bg, bgColor: XTERM.pink, bold: true },
+    search: on({ color: XTERM.cyan }),
+    text: on({ color: XTERM.text }),
+    muted,
+    heading: on({ color: XTERM.pink, bold: true }),
+    title: (selected, expanded) => selected ? { color: XTERM.bright, bgColor: XTERM.selection, bold: expanded } : on({ color: XTERM.text, bold: expanded }),
+    warn: (attr) => ({ ...attr, color: XTERM.amber, bold: true }),
+    map: (attr) => {
+      const color = attr.color === "green" ? XTERM.success : attr.color === "red" ? XTERM.error : attr.dim ? XTERM.muted : XTERM.text;
+      return attr.bold ? on({ color, bold: true }) : on({ color });
+    },
+    fullWidthSelection: true,
+    bannerOverlay: true,
+    sceneArt: on({ color: XTERM.bright, bold: true }),
+    sceneHorizon: on({ color: XTERM.cyan }),
+    sceneGrid: on({ color: XTERM.pink }),
+    blankSgr: `\x1B[48;5;${bg}m`
+  };
+}
+var SIXTEEN = {
+  level: "16",
+  fill: {},
+  name: { color: "magenta", bold: true },
+  tab: { dim: true },
+  tabActive: { color: "brightWhite", bgColor: "magenta", bold: true },
+  search: { color: "cyan" },
+  text: {},
+  muted: { dim: true },
+  heading: { color: "magenta", bold: true },
+  title: (selected, expanded) => selected ? { color: "brightWhite", bgColor: "magenta", bold: expanded } : { bold: expanded },
+  warn: (attr) => ({ ...attr, dim: false, color: "yellow", bold: true }),
+  map: (attr) => attr,
+  fullWidthSelection: true,
+  bannerOverlay: false,
+  sceneArt: { color: "brightWhite", bold: true },
+  sceneHorizon: { color: "cyan" },
+  sceneGrid: { color: "magenta" },
+  blankSgr: ""
+};
+var TRUECOLOR = xtermTheme("truecolor");
+var XTERM256 = xtermTheme("256");
+function themeFor(level) {
+  if (level === "plain")
+    return PLAIN_THEME;
+  if (level === "16")
+    return SIXTEEN;
+  return level === "truecolor" ? TRUECOLOR : XTERM256;
+}
+
 // packages/tui/dist/render.js
-function draw(screen2, state, opts = {}) {
-  const blockHeight = opts.block?.height ?? 0;
-  screen2.fill({ attr: {} });
-  const top = state.banner.length;
-  const bw = Math.max(1, ...state.banner.map((row) => row.length));
-  state.banner.forEach((row, by) => {
-    for (let cx = 0; cx < row.length; cx++) {
-      if (row[cx] === " ")
-        continue;
-      const t = bw <= 1 ? 0 : cx / (bw - 1);
-      screen2.put({ x: cx, y: by, attr: { color: bannerPaletteIndex(t) } }, row[cx]);
-    }
+function drawSceneText(screen2, t, rows, projectName) {
+  const { horizon } = sceneLayout(rows);
+  sceneText(screen2.width, rows, "").forEach((text, y) => {
+    if (!text)
+      return;
+    const attr = y === horizon ? t.sceneHorizon : y > horizon ? t.sceneGrid : t.sceneArt;
+    screen2.put({ x: 0, y, attr }, text);
   });
-  screen2.put({ x: 0, y: top, attr: { bold: true } }, state.projectName);
+  const label = horizonLabel(screen2.width, projectName);
+  if (label.text)
+    screen2.put({ x: label.x, y: horizon, attr: t.name }, label.text);
+}
+function draw(screen2, state, opts = {}) {
+  const t = opts.theme ?? PLAIN_THEME;
+  const blockHeight = opts.block?.height ?? 0;
+  screen2.fill({ attr: t.fill });
+  const top = state.banner.length;
+  if (top === 0)
+    screen2.put({ x: 0, y: 0, attr: t.name }, state.projectName);
+  else if (!t.bannerOverlay)
+    drawSceneText(screen2, t, top + 1, state.projectName);
   let x = 0;
   for (const tab of state.tabs) {
     const label = ` ${tab.label} `;
-    screen2.put({ x, y: top + 1, attr: tab.active ? { inverse: true } : {} }, label);
+    screen2.put({ x, y: top + 1, attr: tab.active ? t.tabActive : t.tab }, label);
     x += label.length;
   }
   if (state.searchLine) {
-    screen2.put({ x: 0, y: top + 2, attr: { dim: true } }, state.searchLine);
+    screen2.put({ x: 0, y: top + 2, attr: t.search }, state.searchLine);
   }
   const lastBodyLine = screen2.height - 3;
   let y = state.bodyTop;
   if (state.emptyMessage && y <= lastBodyLine) {
-    screen2.put({ x: 0, y, attr: { dim: true } }, state.emptyMessage);
+    screen2.put({ x: 0, y, attr: t.muted }, state.emptyMessage);
     y += 1;
   }
   let bodyIdx = 0;
@@ -52444,36 +52730,38 @@ function draw(screen2, state, opts = {}) {
         continue;
       if (y > lastBodyLine)
         break;
-      const attr = line.kind === "title" ? { inverse: row.selected, bold: row.expanded } : line.kind === "meta" ? { dim: true } : {};
-      screen2.put({ x: 0, y, attr }, line.text);
+      const base2 = line.kind === "title" ? t.title(row.selected, row.expanded) : line.kind === "meta" ? t.muted : t.text;
+      const attr = line.text.startsWith("\u26A0") ? t.warn(base2) : base2;
+      const text = line.kind === "title" && row.selected && t.fullWidthSelection ? line.text.padEnd(screen2.width) : line.text;
+      screen2.put({ x: 0, y, attr }, text);
       y += 1;
     }
   }
   if (state.queueCompleted) {
     const qc = state.queueCompleted;
     if (qc.overflow)
-      screen2.put({ x: 0, y: state.bodyTop + qc.startRow - 1, attr: { dim: true } }, qc.overflow);
+      screen2.put({ x: 0, y: state.bodyTop + qc.startRow - 1, attr: t.muted }, qc.overflow);
     let cy = state.bodyTop + qc.startRow;
     if (cy <= lastBodyLine) {
-      screen2.put({ x: 0, y: cy, attr: { dim: true } }, qc.header);
+      screen2.put({ x: 0, y: cy, attr: t.heading }, qc.header);
       cy += 1;
     }
     for (const line of qc.lines) {
       if (cy > lastBodyLine)
         break;
-      screen2.put({ x: 0, y: cy, attr: { dim: true } }, line);
+      screen2.put({ x: 0, y: cy, attr: t.muted }, line);
       cy += 1;
     }
     if (state.queueActivity) {
       const qa = state.queueActivity;
       if (cy <= lastBodyLine) {
-        screen2.put({ x: 0, y: cy, attr: { dim: true } }, qa.header);
+        screen2.put({ x: 0, y: cy, attr: t.heading }, qa.header);
         cy += 1;
       }
       for (const line of qa.lines) {
         if (cy > lastBodyLine)
           break;
-        screen2.put({ x: 0, y: cy, attr: { dim: true } }, line);
+        screen2.put({ x: 0, y: cy, attr: t.muted }, line);
         cy += 1;
       }
     }
@@ -52481,21 +52769,24 @@ function draw(screen2, state, opts = {}) {
   if (opts.block && blockHeight > 0) {
     const top2 = state.bodyTop;
     for (const p of opts.block.puts)
-      screen2.put({ x: p.x, y: top2 + p.y, attr: p.attr }, p.text);
+      screen2.put({ x: p.x, y: top2 + p.y, attr: t.map(p.attr) }, p.text);
   }
   const footerY = blockHeight > 0 ? screen2.height - 1 : Math.min(y + 1, screen2.height - 1);
-  screen2.put({ x: 0, y: footerY, attr: { dim: true } }, state.footer);
+  screen2.put({ x: 0, y: footerY, attr: t.muted }, state.footer);
   screen2.draw({ delta: true });
 }
-function clearPixels(term2, prev, next) {
+function clearPixels(term2, prev, next, blankSgr = "") {
   const keep = new Set(next.map((p) => `${p.x},${p.y}`));
   let wrote = false;
   for (const key of prev.keys()) {
     if (keep.has(key))
       continue;
     const [x, y] = key.split(",").map(Number);
-    if (!wrote)
+    if (!wrote) {
       term2.styleReset();
+      if (blankSgr)
+        term2.noFormat(blankSgr);
+    }
     term2.moveTo(x + 1, y + 1);
     term2.noFormat(" ");
     wrote = true;
@@ -52505,7 +52796,7 @@ function sgr24(hex, background) {
   const n = Number.parseInt(hex.slice(1), 16);
   return `\x1B[${background ? 48 : 38};2;${n >> 16 & 255};${n >> 8 & 255};${n & 255}m`;
 }
-function paintPixels(term2, pixels, prev, trueColor2 = false) {
+function paintPixels(term2, pixels, prev, trueColor2 = false, blankSgr = "") {
   const next = /* @__PURE__ */ new Map();
   let wrote = false;
   for (const p of pixels) {
@@ -52516,6 +52807,8 @@ function paintPixels(term2, pixels, prev, trueColor2 = false) {
       continue;
     term2.styleReset();
     term2.moveTo(p.x + 1, p.y + 1);
+    if (p.bg === void 0 && blankSgr)
+      term2.noFormat(blankSgr);
     if (p.fg !== void 0) {
       if (trueColor2)
         term2.noFormat(sgr24(p.fg, false));
@@ -55027,11 +55320,10 @@ function cells(avatarIndex, frame) {
   }
   return out;
 }
-function tileCells(avatarIndex, frame) {
-  return cells(avatarIndex, frame).map((row) => {
-    const pad = { ch: " ", bg: TILE_BG };
-    return [pad, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), pad];
-  });
+function tileCells(avatarIndex, frame, edge) {
+  const left = edge === void 0 ? { ch: " ", bg: TILE_BG } : { ch: "\u258C", fg: edge, bg: TILE_BG };
+  const right = edge === void 0 ? { ch: " ", bg: TILE_BG } : { ch: "\u2590", fg: edge, bg: TILE_BG };
+  return cells(avatarIndex, frame).map((row) => [left, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), right]);
 }
 var ANIMATION_MS = 333;
 var SEQUENCE = [
@@ -55389,8 +55681,8 @@ function clip(text, width) {
     return text;
   return width <= 1 ? chars.slice(0, width).join("") : chars.slice(0, width - 1).join("") + "\u2026";
 }
-function composeSubagentBlock(view, width, maxHeight, tick) {
-  const cards = composeCards(view, width, maxHeight, tick);
+function composeSubagentBlock(view, width, maxHeight, tick, opts = {}) {
+  const cards = composeCards(view, width, maxHeight, tick, opts.neonEdge === true);
   if (!view.foreignLive || cards.height + 1 > maxHeight)
     return cards;
   if (cards.height === 0 && width < 1)
@@ -55399,7 +55691,7 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
   return { ...cards, height: cards.height + 1, puts: [...cards.puts, put] };
 }
 var FOREIGN_SESSION_NOTE = "session.json names another session; running and quiet agents from the other one are listed";
-function composeCards(view, width, maxHeight, tick) {
+function composeCards(view, width, maxHeight, tick, neonEdge) {
   const empty = { height: 0, puts: [], pixels: [] };
   if (maxHeight < 1 || width < 1)
     return empty;
@@ -55435,7 +55727,7 @@ function composeCards(view, width, maxHeight, tick) {
     const done = a.status !== "running";
     const x0 = i % perRow * (cardW + CARD_GAP);
     const y0 = bandY[Math.floor(i / perRow)];
-    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done)).forEach((line, r) => line.forEach((cell, c) => {
+    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done), neonEdge ? NEON_EDGE[a.status] : void 0).forEach((line, r) => line.forEach((cell, c) => {
       const px = { x: x0 + c, y: y0 + r, ch: cell.ch };
       if (cell.fg !== void 0)
         px.fg = done ? fadeToTile(cell.fg, DONE_FADE) : cell.fg;
@@ -55558,6 +55850,13 @@ if (smoke) {
   console.error(`sterling-tui smoke: terminal stack loaded (${term.width}x${term.height})`);
   process.exit(0);
 }
+var theme;
+try {
+  theme = themeFor(detectThemeLevel(process.env, term.support ?? {}));
+} catch (err) {
+  console.error(`sterling-tui: ${err.message}`);
+  process.exit(2);
+}
 var lockPath = join19(dirname8(storePath), "transient", "tui.lock");
 var owner = acquireTuiLock(lockPath, process.pid);
 if (owner !== null) {
@@ -55593,7 +55892,7 @@ function fullBodyLines() {
 function subagentBlock(tick) {
   if (ctl.ui().tab !== AGENTS_TAB)
     return { height: 0, puts: [], pixels: [] };
-  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2, tick);
+  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2, tick, { neonEdge: theme.level !== "plain" });
 }
 function viewport() {
   return { width: term.width, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active, quiet: shownView.quiet ?? 0 } };
@@ -55602,18 +55901,27 @@ var painted;
 var pixelLayout = "";
 var forceFull = true;
 var animation;
-var trueColor = /^(truecolor|24bits?)$/.test(process.env.COLORTERM ?? "") || process.env.TERM_PROGRAM === "tmux" || term.support?.trueColor === true;
+var trueColor = theme.level === "truecolor";
+var bannerKey = "";
+var bannerPx = [];
+function updateBannerPixels(state) {
+  const key = theme.bannerOverlay && state.banner.length > 0 ? `${term.width}|${state.banner.length}|${state.projectName}` : "";
+  if (key === bannerKey)
+    return;
+  bannerKey = key;
+  bannerPx = key ? scenePixels(term.width, state.banner.length + 1, state.projectName) : [];
+}
 function layoutKey(block) {
-  return `${term.width}x${term.height}|` + block.pixels.map((p) => `${p.x},${p.y}`).join(";");
+  return `${term.width}x${term.height}|${bannerKey}|` + block.pixels.map((p) => `${p.x},${p.y}`).join(";");
 }
 function screenPixels(block) {
-  return block.pixels.map((p) => ({ ...p, y: p.y + bodyTop }));
+  return [...bannerPx, ...block.pixels.map((p) => ({ ...p, y: p.y + bodyTop }))];
 }
 function animate() {
   const block = subagentBlock(Math.floor(Date.now() / ANIMATION_MS));
   if (layoutKey(block) !== pixelLayout)
     return;
-  painted = paintPixels(term, screenPixels(block), painted, trueColor);
+  painted = paintPixels(term, screenPixels(block), painted, trueColor, theme.blankSgr);
 }
 var drawnState;
 var drawnView = "";
@@ -55627,6 +55935,7 @@ function redraw(onlyIfChanged = false) {
   drawnState = state;
   drawnView = viewKey;
   bodyTop = state.bodyTop;
+  updateBannerPixels(state);
   const block = subagentBlock(Math.floor(now / ANIMATION_MS));
   const key = layoutKey(block);
   const full = forceFull || key !== pixelLayout;
@@ -55634,9 +55943,9 @@ function redraw(onlyIfChanged = false) {
   forceFull = false;
   const pixels = screenPixels(block);
   if (full && painted)
-    clearPixels(term, painted, pixels);
-  draw(screen, state, { block });
-  painted = paintPixels(term, pixels, full ? void 0 : painted, trueColor);
+    clearPixels(term, painted, pixels, theme.blankSgr);
+  draw(screen, state, { block, theme });
+  painted = paintPixels(term, pixels, full ? void 0 : painted, trueColor, theme.blankSgr);
   const running = shownView.active > 0 && block.pixels.length > 0;
   if (running && !animation)
     animation = setInterval(animate, ANIMATION_MS);
