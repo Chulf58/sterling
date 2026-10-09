@@ -482,6 +482,26 @@ test('a background child dispatch also ends when its execution fails or is inter
   }
 });
 
+test('a call the user backgrounds mid-run (no background input, result status running) stays live until its child execution ends', async () => {
+  const p = makeProject({ records: [] });
+  try {
+    const { ctx, plugin, cleanup } = await setup(p.dir, { ses_root: {}, ses_ctrlb: { parentID: 'ses_root' } });
+    const before = { tool: 'subagent', sessionID: 'ses_root', agent: 'build', messageID: 'm', id: 'call_ctrlb', input: { agent: 'sterling/implementor', description: 'fg', prompt: 'edit src/a.mjs' } };
+    await ctx.hooks.tool['execute.before'](before);
+    await ctx.hooks.tool['execute.after']({ ...before, status: 'completed', result: { content: 'backgrounded', metadata: { sessionID: 'ses_ctrlb', status: 'running' } } });
+    assert.ok(stateRecords(p.dir).some((r) => r.tool_use_id === 'call_ctrlb' && !r.terminal), 'a ctrl+B call stays running after its call returns');
+    assert.ok(registerRows(p.dir).some((r) => r.agent_id === 'ses_ctrlb' && !r.ended), 'its register round stays live');
+    assert.equal(server.liveDispatch(p.dir).live, true);
+    await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_ctrlb' } });
+    assert.deepEqual(stateRecords(p.dir).filter((r) => !r.terminal).map((r) => r.tool_use_id), [], 'its child execution end closes the dispatch');
+    assert.ok(registerRows(p.dir).every((r) => r.ended), 'and its register round');
+    assert.equal(server.liveDispatch(p.dir).live, false);
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('a background child that ends before its subagent call returns is ended when the call binds it', async () => {
   const p = makeProject({ records: [] });
   try {
