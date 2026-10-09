@@ -232,11 +232,14 @@ test('help overlay: ? or F1 opens it over any tab, it lists the keys, scrolls, a
     assert.ok(f1.ui.help);
     assert.deepEqual(reduce(store, f1.ui, key('ESCAPE'), vp).ui.boardEdit, editing.boardEdit);
     assert.equal(reduce(store, editing, { kind: 'char', ch: '?' }, vp).ui.boardEdit?.text, 'draft?', "'?' types into the editor");
-    // Knowledge: '?' opens the help while the search is empty, and is search text once a query is typed
-    assert.ok(reduce(store, st({ tab: KNOWLEDGE_TAB }), { kind: 'char', ch: '?' }, vp).ui.help);
+    // Knowledge: '?' is search text like every printable key, even with the search empty; F1 is the help key there
+    const empty = reduce(store, st({ tab: KNOWLEDGE_TAB }), { kind: 'char', ch: '?' }, vp).ui;
+    assert.equal(empty.help, undefined);
+    assert.equal(empty.searchQuery, '?');
     const typed = reduce(store, st({ tab: KNOWLEDGE_TAB, searchQuery: 'a' }), { kind: 'char', ch: '?' }, vp).ui;
     assert.equal(typed.help, undefined);
     assert.equal(typed.searchQuery, 'a?');
+    assert.ok(reduce(store, st({ tab: KNOWLEDGE_TAB, searchQuery: 'a' }), key('HELP'), vp).ui.help, 'F1 opens the help on Knowledge');
   } finally {
     cleanup();
   }
@@ -339,6 +342,31 @@ test('Agents tab: windowBlock draws only the scrolled window of the card block, 
   assert.deepEqual(windowBlock(block, 0, 30).puts.length, 20);
 });
 
+test('controller: Ctrl-C held for an unsaved write, then one q quits (the notice asks for exactly that)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-nav-quit-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), '{}\n');
+  const ctl = openDashboard(join(dir, '.sterling', 'sterling.db'), { deferWrites: true });
+  try {
+    const vp = { width: 100, maxBodyLines: 40, showBanner: false };
+    ctl.store.create({ ...envelope('todo'), text: 'item', source: 'user' });
+    ctl.state(vp);
+    ctl.writeStore.writeSelection = () => {
+      throw new Error('disk I/O error');
+    };
+    await ctl.handle(key('ENTER'), vp);
+    // main.ts: a quit effect asks requestQuit, which flushes; the failed write holds the quit
+    assert.equal(await ctl.handle(key('QUIT'), vp), true);
+    assert.equal(ctl.requestQuit(), false, 'the failed flush holds the quit');
+    assert.match(ctl.ui().notice ?? '', /press q again to quit and discard/);
+    assert.equal(await ctl.handle({ kind: 'char', ch: 'q' }, vp), true, 'one q is the confirming quit');
+    assert.equal(ctl.requestQuit(), true, 'and the host exits');
+  } finally {
+    ctl.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('controller: the Agents block height is part of the frame key, so a shorter block re-clamps the scroll', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-nav-ctl-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
@@ -349,7 +377,13 @@ test('controller: the Agents block height is part of the frame key, so a shorter
     await ctl.handle({ kind: 'tab', index: AGENTS_TAB }, vp);
     await ctl.handle(key('END'), vp);
     assert.equal(ctl.state(vp).scroll, 30);
-    assert.equal(ctl.state({ ...vp, agentsLines: 20 }).scroll, 10, 'an agent that finished shortens the block: the window follows');
+    const shorter = { ...vp, agentsLines: 20 };
+    assert.equal(ctl.state(shorter).scroll, 10, 'an agent that finished shortens the block: the window follows');
+    await ctl.handle(key('UP'), shorter);
+    assert.equal(ctl.state(shorter).scroll, 9, 'the first Up after the shrink moves from the window on screen');
+    await ctl.handle(key('END'), vp);
+    await ctl.handle({ kind: 'wheel', dy: -1 }, shorter);
+    assert.equal(ctl.state(shorter).scroll, 7, 'the wheel too');
   } finally {
     ctl.close();
     rmSync(dir, { recursive: true, force: true });

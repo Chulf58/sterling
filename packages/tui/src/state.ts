@@ -1768,11 +1768,12 @@ function reduceNodes(
     const github = ui.tab === GITHUB_TAB && viewport.github !== undefined;
     if (!github && ui.tab !== AGENTS_TAB) return undefined;
     const total = github ? ((drawn ? drawn.state : buildSelf(ui)).rows[0]?.lines.length ?? 0) : viewport.agentsLines ?? 0;
-    const at = ui.scroll ?? 0;
+    // from the offset on screen: a stored one past a block that has since shrunk is clamped first
+    const at = clampScroll(ui.scroll ?? 0, total, maxBodyLines);
     const page = Number.isFinite(maxBodyLines) ? Math.max(1, maxBodyLines - 1) : total;
     const to = name === 'UP' ? at - 1 : name === 'DOWN' ? at + 1 : name === 'PAGE_UP' ? at - page : name === 'PAGE_DOWN' ? at + page : name === 'HOME' ? 0 : total;
     const scroll = clampScroll(to, total, maxBodyLines);
-    return scroll === at ? ui : { ...ui, scroll };
+    return scroll === (ui.scroll ?? 0) ? ui : { ...ui, scroll };
   };
 
   /** A click on the System tab does what the keyboard does: on a row it moves
@@ -2128,9 +2129,9 @@ function reduceNodes(
       if (ui.tab === TASKS_TAB && ui.boardEdit) {
         return { ui: { ...ui, boardEdit: { ...ui.boardEdit, text: ui.boardEdit.text + ch } }, effects };
       }
-      // '?' opens the key help; on Knowledge only while the search is empty,
-      // since the field takes every printable key once a query is typed
-      if (ch === '?' && !(ui.tab === KNOWLEDGE_TAB && ui.searchQuery)) return { ui: { ...ui, help: { scroll: 0 } }, effects };
+      // '?' opens the key help; on Knowledge it is search text like every
+      // printable key, and F1 opens the help there
+      if (ch === '?' && ui.tab !== KNOWLEDGE_TAB) return { ui: { ...ui, help: { scroll: 0 } }, effects };
       // the Knowledge tab is an always-visible search field: EVERY printable key
       // feeds the query — 'q' and digits included (they are not hotkeys here).
       if (ui.tab === KNOWLEDGE_TAB) {
@@ -2215,7 +2216,9 @@ function reduceNodes(
       // the Agents tab draws the host's card block, not rows
       const total = ui.tab === AGENTS_TAB ? viewport.agentsLines ?? 0 : rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
       const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - bodyWindow(st, maxBodyLines)) : 0;
-      return { ui: { ...ui, scroll: Math.max(0, Math.min((ui.scroll ?? 0) + step, max)) }, effects };
+      // from the offset on screen, clamped, so the first turn after the content shrank moves it
+      const at = Math.min(ui.scroll ?? 0, max);
+      return { ui: { ...ui, scroll: Math.max(0, Math.min(at + step, max)) }, effects };
     }
     case 'click': {
       // hit-test the frame on screen when the host passed it; otherwise build

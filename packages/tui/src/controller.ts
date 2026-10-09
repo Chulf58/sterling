@@ -603,6 +603,10 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // the frame on screen, when it was drawn from this ui and roster at this
       // viewport: the reducer hit-tests it instead of reading the store again
       const drawn = frame && frame.ui === ui && frame.roster === roster && frame.vp === vpKey(hitVp) ? frame.built : undefined;
+      // a quit held for unsaved writes says "press q again": that q confirms
+      // it on any tab and in any mode, before the reducer can read it as text
+      // or as its own quit question
+      if (quitArmed && event.kind === 'char' && event.ch === 'q') return true;
       const result = reduce(store, ui, event, hitVp, stores, roster, resolveProjectHeadSha, drawn);
       ui = result.ui;
       // a held quit is discarded by the next quit only; any other event disarms it
