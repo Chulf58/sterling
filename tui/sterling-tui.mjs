@@ -39074,7 +39074,7 @@ import { performance } from "node:perf_hooks";
 // packages/tui/dist/controller.js
 import { readFileSync as readFileSync12, writeFileSync as writeFileSync5, existsSync as existsSync9 } from "node:fs";
 import { basename as basename2, dirname as dirname5, join as join16 } from "node:path";
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID5 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
 // packages/store/dist/index.js
@@ -43968,10 +43968,12 @@ var modelPin = external_exports.object({
   model: external_exports.string(),
   effort: effortLevel.optional()
 }).strict();
+var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 var agentModelEntry = external_exports.object({
   model: external_exports.string(),
   effort: effortLevel,
-  hard_task: modelPin.optional()
+  hard_task: modelPin.optional(),
+  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
 }).strict();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
@@ -50032,6 +50034,9 @@ var AGENTS_TAB = TABS.indexOf("Agents");
 var SYSTEM_TAB = TABS.indexOf("System");
 var ARTICLE_STATE_FILTERS = ["all", "planned", "built", "wired_in", "active", "dormant", "deprecated"];
 var initialUi = { tab: 0, cursor: 0, expanded: [], searchQuery: "", scroll: 0 };
+function isOpenCodeOnlyEntry(entry) {
+  return entry.vendor !== void 0 && entry.vendor !== "anthropic";
+}
 var EMPTY_ROSTER = {
   agents: [],
   configModels: {},
@@ -50051,6 +50056,12 @@ function effortOptions(key) {
   return ["low", "medium", "high"];
 }
 var MODEL_VALUE_RE = /^claude-/;
+function modelOptions(entries, config) {
+  const opts = entries.map((entry) => ({ kind: "entry", entry }));
+  if (config?.opencode_model)
+    opts.push({ kind: "clear" });
+  return opts;
+}
 function visibleTabs(agents) {
   return TABS.map((_, i) => i).filter((i) => i !== AGENTS_TAB || agents !== void 0);
 }
@@ -50207,11 +50218,14 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
     ];
     for (const name of agentNames)
       lines.push({ text: clip2(`    ${name}`), kind: "body" });
+    if (config.opencode_model)
+      lines.push({ text: clip2(`    OpenCode: ${config.opencode_model}`), kind: "body" });
     if (selector && selector.key === key) {
       if (selector.stage === "model") {
-        snap.catalog.entries.forEach((e, oi) => {
+        modelOptions(snap.catalog.entries, config).forEach((o, oi) => {
           const m = oi === selector.highlight ? "\u203A " : "  ";
-          lines.push({ text: clip2(`  ${m}${e.id} ${e.label}`), kind: "option", selected: oi === selector.highlight });
+          const text = o.kind === "clear" ? "OpenCode: use the Claude model" : isOpenCodeOnlyEntry(o.entry) ? `${o.entry.vendor}/${o.entry.id} ${o.entry.label} (OpenCode only)` : `${o.entry.id} ${o.entry.label}`;
+          lines.push({ text: clip2(`  ${m}${text}`), kind: "option", selected: oi === selector.highlight });
         });
       } else {
         effortOptions(key).forEach((eff, oi) => {
@@ -50646,7 +50660,7 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
             return { ui: revealAt(sysClamp(ui.cursor - 1)), effects };
           case "DOWN": {
             if (sel) {
-              const n = sel.stage === "model" ? roster.catalog.entries.length : effortOptions(sel.key).length;
+              const n = sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key]).length : effortOptions(sel.key).length;
               return { ui: { ...ui, selector: { ...sel, highlight: Math.min(Math.max(0, n - 1), sel.highlight + 1) } }, effects };
             }
             if (editing)
@@ -50701,7 +50715,21 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
               return { ui: { ...ui, cursor, selector: { key, stage: "model", highlight: 0 }, notice: void 0 }, effects };
             }
             if (sel.stage === "model") {
-              const entry = roster.catalog.entries[sel.highlight];
+              const keyConfig = roster.configModels[sel.key];
+              const option = modelOptions(roster.catalog.entries, keyConfig)[sel.highlight];
+              if (option && keyConfig && (option.kind === "clear" || isOpenCodeOnlyEntry(option.entry))) {
+                const agents = roster.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
+                const to = option.kind === "clear" ? void 0 : `${option.entry.vendor}/${option.entry.id}`;
+                if (to !== void 0 && !OPENCODE_MODEL_REF_RE.test(to)) {
+                  return { ui: { ...ui, selector: void 0, notice: `OpenCode model refused: '${to}' is not a <provider>/<model> id` }, effects };
+                }
+                if (to !== void 0 && agents.length === 0) {
+                  return { ui: { ...ui, selector: void 0, notice: `OpenCode model refused: '${sel.key}' has no agent, so an OpenCode model would govern nothing` }, effects };
+                }
+                effects.push({ type: "opencode_model", key: sel.key, from: keyConfig.opencode_model, to, model: keyConfig.model, effort: keyConfig.effort, agents });
+                return { ui: { ...ui, selector: void 0, notice: void 0 }, effects };
+              }
+              const entry = option?.kind === "entry" ? option.entry : void 0;
               return { ui: { ...ui, selector: { key: sel.key, stage: "effort", highlight: 0, model: entry ? entry.id : "" } }, effects };
             }
             const efforts = effortOptions(sel.key);
@@ -51419,7 +51447,8 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync as readdirSync4, realpathSync as realpathSync4, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
+import { existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync as readdirSync4, realpathSync as realpathSync4, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname4, isAbsolute, join as join13, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -51670,6 +51699,13 @@ function opencodeModelRef(model) {
   if (typeof model !== "string" || !model) throw new TypeError(`opencodeModelRef: model must be a non-empty string, got ${JSON.stringify(model)}`);
   return `anthropic/${model}`;
 }
+function opencodeModelFor({ model, opencodeModel } = {}) {
+  if (opencodeModel === void 0) return opencodeModelRef(model);
+  if (typeof opencodeModel !== "string" || !OPENCODE_MODEL_REF_RE.test(opencodeModel)) {
+    throw new TypeError(`opencodeModelFor: opencode_model must be <provider>/<model>, got ${JSON.stringify(opencodeModel)}`);
+  }
+  return opencodeModel;
+}
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname4(fileURLToPath(moduleUrl));
   for (let dir = start; ; dir = dirname4(dir)) {
@@ -51704,6 +51740,17 @@ function frontmatterModel(content) {
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
 function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
+  const rows = [];
+  for (const { path, content, previous: _previous, ...row } of planFullAgents({ projectDir, pluginRoot, tracked, models })) {
+    if (content !== void 0) {
+      mkdirSync5(dirname4(path), { recursive: true });
+      writeFileSync3(path, content);
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   const registry = loadRegistry(join13(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const rows = [];
@@ -51716,7 +51763,8 @@ function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const disk = existsSync7(path) ? normalize3(readFileSync9(path, "utf8")) : null;
+    const raw = existsSync7(path) ? readFileSync9(path, "utf8") : null;
+    const disk = raw === null ? null : normalize3(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
       if (!m || m[1] !== name) {
@@ -51736,19 +51784,68 @@ function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       rows.push({ item: rel, status: "matches" });
       continue;
     }
-    mkdirSync5(dirname4(path), { recursive: true });
-    writeFileSync3(path, agent.content);
-    rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
+    rows.push({ item: rel, status: disk === null ? "created" : "refreshed", path, content: agent.content, previous: raw });
   }
   return rows;
 }
-function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
+function swapFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
   if (!existsSync7(join13(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
-  const ref = opencodeModelRef(model);
+  const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
   return { rows: ensureFullAgents({ projectDir, pluginRoot, tracked, models }) };
+}
+function stageFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
+  if (!existsSync7(join13(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  const ref = opencodeModelFor({ model, opencodeModel });
+  const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
+  const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
+  const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
+  const planned = planFullAgents({ projectDir, pluginRoot, tracked, models });
+  return {
+    rows: planned.map(({ path, content, previous, ...row }) => row),
+    writes: planned.filter((r) => r.content !== void 0).map(({ path, content, previous }) => ({ path, content, previous }))
+  };
+}
+function writeFileAtomic(path, content, { writeFile = writeFileSync3, rename = renameSync2 } = {}) {
+  const tmp = `${path}.tmp-${randomUUID3()}`;
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync2(tmp, { force: true });
+    throw err;
+  }
+}
+function writeFullAgentFiles(writes, fs = {}) {
+  const done = [];
+  try {
+    for (const w of writes) {
+      mkdirSync5(dirname4(w.path), { recursive: true });
+      writeFileAtomic(w.path, w.content, fs);
+      done.push(w);
+    }
+  } catch (err) {
+    try {
+      restoreFullAgentFiles(done, fs);
+    } catch (restoreErr) {
+      throw new Error(`${err.message}; rollback: ${restoreErr.message}`, { cause: err });
+    }
+    throw err;
+  }
+}
+function restoreFullAgentFiles(writes, fs = {}) {
+  const failed = [];
+  for (const w of writes) {
+    try {
+      if (w.previous === null) rmSync2(w.path, { force: true });
+      else writeFileAtomic(w.path, w.previous, fs);
+    } catch (err) {
+      failed.push(`${fwd2(w.path)}: ${err.message}`);
+    }
+  }
+  if (failed.length) throw new Error(`could not restore ${failed.join("; ")}`);
 }
 
 // scripts/hooks/lib/store-backend.mjs
@@ -51775,10 +51872,10 @@ function storeBackend(root) {
 }
 
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync11, renameSync as renameSync2, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync11, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { hostname } from "node:os";
 import { join as join15 } from "node:path";
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 function selectionFilePath(root, host = hostname()) {
   const safeHost = String(host).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
   return join15(root, ".sterling", "transient", `selection.${safeHost}.json`);
@@ -51786,9 +51883,9 @@ function selectionFilePath(root, host = hostname()) {
 function writeSelectionFile(root, type, recordId, at) {
   const path = selectionFilePath(root);
   mkdirSync6(join15(root, ".sterling", "transient"), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${randomUUID3()}`;
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID4()}`;
   writeFileSync4(tmp, JSON.stringify({ type, record_id: recordId, at }));
-  renameSync2(tmp, path);
+  renameSync3(tmp, path);
 }
 
 // packages/tui/dist/controller.js
@@ -52067,8 +52164,10 @@ function openDashboard(storePath2, options = {}) {
     try {
       const raw = JSON.parse(readFileSync12(configPath2, "utf8"));
       raw.models = raw.models ?? {};
-      raw.models[e.key] = { model: e.to.model, effort: e.to.effort };
+      const prev = raw.models[e.key] ?? {};
+      raw.models[e.key] = { ...prev, model: e.to.model, effort: e.to.effort };
       writeFileSync5(configPath2, JSON.stringify(raw, null, 2) + "\n");
+      const opencodeModel = typeof prev.opencode_model === "string" ? prev.opencode_model : void 0;
       for (const name of e.agents) {
         const p = join16(agentsDir, `${name}.md`);
         if (!existsSync9(p))
@@ -52083,7 +52182,7 @@ function openDashboard(storePath2, options = {}) {
         }));
       }
       try {
-        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model });
+        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model, opencodeModel });
         const refused = (oc.rows ?? []).filter((r) => r.status === "refused");
         if (refused.length)
           ui = { ...ui, notice: `model swap for '${e.key}': OpenCode agent file(s) not updated \u2014 ${refused.map((r) => r.detail).join("; ")}` };
@@ -52091,7 +52190,7 @@ function openDashboard(storePath2, options = {}) {
         ui = { ...ui, notice: `model swap for '${e.key}': config.models and the Claude agents were updated, but the OpenCode agent re-render failed \u2014 ${ocErr.message}` };
       }
       store.create({
-        id: randomUUID4(),
+        id: randomUUID5(),
         type: "decision",
         created_at: nowISO,
         updated_at: nowISO,
@@ -52105,14 +52204,100 @@ function openDashboard(storePath2, options = {}) {
         statement: `config.models['${e.key}'] set to ${e.to.model} / ${e.to.effort} (was ${e.from.model} / ${e.from.effort}); ${e.agents.length} installed agent file(s) re-stamped via the System tab.`,
         rationale: "Model/effort pin changed from the TUI System tab (config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL\u2194Windows machine boundary, d53dc92c).",
         alternatives_rejected: []
-      }, { operation_id: randomUUID4() });
+      }, { operation_id: randomUUID5() });
     } catch (err) {
       ui = { ...ui, notice: `model swap for '${e.key}' failed partway \u2014 ${err.message}` };
     }
   }
+  function applyOpenCodeModel(e) {
+    const nowISO = (/* @__PURE__ */ new Date()).toISOString();
+    const fail = (msg) => {
+      ui = { ...ui, notice: `OpenCode model for '${e.key}' not changed \u2014 ${msg}; config.json and the OpenCode agents are as they were` };
+    };
+    let configBefore;
+    let configAfter;
+    let claudeModel;
+    try {
+      if (e.to !== void 0 && !OPENCODE_MODEL_REF_RE.test(e.to))
+        throw new Error(`'${e.to}' is not a <provider>/<model> id`);
+      configBefore = readFileSync12(configPath2, "utf8");
+      const raw = JSON.parse(configBefore);
+      raw.models = raw.models ?? {};
+      const { opencode_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
+      raw.models[e.key] = e.to === void 0 ? rest : { ...rest, opencode_model: e.to };
+      configAfter = JSON.stringify(raw, null, 2) + "\n";
+      claudeModel = typeof rest.model === "string" ? rest.model : e.model;
+    } catch (err) {
+      fail(err.message);
+      return;
+    }
+    let writes;
+    try {
+      const staged = stageFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: claudeModel, opencodeModel: e.to });
+      const refused = (staged.rows ?? []).filter((r) => r.status === "refused");
+      if (refused.length) {
+        fail(`OpenCode agent file(s) refused: ${refused.map((r) => r.detail).join("; ")}`);
+        return;
+      }
+      writes = staged.writes ?? [];
+    } catch (err) {
+      fail(`the OpenCode agent render failed: ${err.message}`);
+      return;
+    }
+    try {
+      writeFullAgentFiles(writes);
+    } catch (err) {
+      fail(`writing the OpenCode agents failed: ${err.message}`);
+      return;
+    }
+    try {
+      writeFileAtomic(configPath2, configAfter, options.configWriteFs);
+    } catch (err) {
+      const rollback = [];
+      try {
+        writeFileAtomic(configPath2, configBefore, options.configWriteFs);
+      } catch (restoreErr) {
+        rollback.push(`config.json not restored: ${restoreErr.message}`);
+      }
+      try {
+        restoreFullAgentFiles(writes);
+      } catch (restoreErr) {
+        rollback.push(`OpenCode agents not restored: ${restoreErr.message}`);
+      }
+      if (rollback.length) {
+        ui = { ...ui, notice: `OpenCode model for '${e.key}': writing config.json failed (${err.message}) and the rollback failed \u2014 ${rollback.join("; ")}` };
+        return;
+      }
+      fail(`writing config.json failed: ${err.message}`);
+      return;
+    }
+    const shown = (v) => v ?? `anthropic/${claudeModel}`;
+    try {
+      store.create({
+        id: randomUUID5(),
+        type: "decision",
+        created_at: nowISO,
+        updated_at: nowISO,
+        author: "conductor",
+        status: "active",
+        superseded_by: null,
+        links: [],
+        scope: "project",
+        stack_tags: [],
+        title: `OpenCode model: ${e.key} ${shown(e.from)}\u2192${shown(e.to)} (System tab)`,
+        statement: `config.models['${e.key}'].opencode_model ${e.to === void 0 ? "cleared" : `set to ${e.to}`} (was ${e.from ?? "unset"}); the OpenCode agents for this role now run ${shown(e.to)}, and Claude Code keeps ${claudeModel}.`,
+        rationale: "OpenCode model override changed from the TUI System tab (decision opencode-only-model-override-per-role-for-openai-picks: the Claude model stays for Claude Code, and only the OpenCode agent files are re-rendered).",
+        alternatives_rejected: []
+      }, { operation_id: randomUUID5() });
+    } catch (err) {
+      ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}, but recording the decision failed \u2014 ${err.message}` };
+      return;
+    }
+    ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}; Claude Code keeps ${claudeModel}.` };
+  }
   async function applyEffects(all) {
     const effects = all.filter((e) => {
-      if (e.type !== "model_swap" && e.type !== "select")
+      if (e.type !== "model_swap" && e.type !== "opencode_model" && e.type !== "select")
         return true;
       const off = disabled[e.type];
       if (off === void 0)
@@ -52124,6 +52309,9 @@ function openDashboard(storePath2, options = {}) {
     const swaps = effects.filter((e) => e.type === "model_swap");
     for (const e of swaps)
       await applySwap(e);
+    const overrides = effects.filter((e) => e.type === "opencode_model");
+    for (const e of overrides)
+      applyOpenCodeModel(e);
     const notice = (msg) => {
       ui = { ...ui, notice: msg };
     };
@@ -52170,7 +52358,7 @@ function openDashboard(storePath2, options = {}) {
     } else if (toggleWrote) {
       notice("config.json updated \u2014 hooks pick this up on their next invocation; restart the session to reload the MCP server.");
     }
-    if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length)
+    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length)
       roster = loadRoster();
     for (const e of effects) {
       if (e.type === "select")
@@ -52399,10 +52587,10 @@ import { homedir as homedir6 } from "node:os";
 import { join as join18 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync7, readFileSync as readFileSync13, writeFileSync as writeFileSync6, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync10, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync5, chmodSync } from "node:fs";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync13, writeFileSync as writeFileSync6, rmSync as rmSync4, rmdirSync, renameSync as renameSync4, existsSync as existsSync10, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync5, chmodSync } from "node:fs";
 import { join as join17, resolve as resolve8, dirname as dirname6, isAbsolute as isAbsolute2 } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
-import { randomBytes, createHash as createHash2 } from "node:crypto";
+import { randomBytes, createHash as createHash3 } from "node:crypto";
 function registerPath(root) {
   return join17(root, ".sterling", "transient", "dispatch-register.json");
 }
@@ -52462,7 +52650,7 @@ function dispatchStateDir(root) {
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
-  return `sha256-${createHash2("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+  return `sha256-${createHash3("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
 }
 
 // scripts/hooks/lib/transcript.mjs

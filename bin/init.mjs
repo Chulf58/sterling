@@ -5093,7 +5093,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 left in place and ignored; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -5103,10 +5103,12 @@ var init_config = __esm({
       model: external_exports.string(),
       effort: effortLevel.optional()
     }).strict();
+    OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
     agentModelEntry = external_exports.object({
       model: external_exports.string(),
       effort: effortLevel,
-      hard_task: modelPin.optional()
+      hard_task: modelPin.optional(),
+      opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
     }).strict();
     vendorPins = external_exports.object({
       openai: modelPin.optional(),
@@ -11597,7 +11599,7 @@ var init_resolve = __esm({
 // scripts/init-impl.mjs
 init_dist();
 init_dist2();
-import { existsSync as existsSync13, mkdirSync as mkdirSync8, readFileSync as readFileSync17, writeFileSync as writeFileSync8, appendFileSync as appendFileSync4, statSync as statSync8, unlinkSync as unlinkSync7, renameSync as renameSync3, realpathSync as realpathSync6 } from "node:fs";
+import { existsSync as existsSync13, mkdirSync as mkdirSync8, readFileSync as readFileSync17, writeFileSync as writeFileSync8, appendFileSync as appendFileSync4, statSync as statSync8, unlinkSync as unlinkSync7, renameSync as renameSync4, realpathSync as realpathSync6 } from "node:fs";
 import { spawnSync as spawnSync10 } from "node:child_process";
 import { join as join25, resolve as resolve8, dirname as dirname10, basename as basename3 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
@@ -14094,11 +14096,12 @@ function renderUnavailable(reason) {
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { createHash as createHash4 } from "node:crypto";
-import { existsSync as existsSync12, mkdirSync as mkdirSync7, readFileSync as readFileSync16, readdirSync as readdirSync5, realpathSync as realpathSync5, rmSync as rmSync3, statSync as statSync7, unlinkSync as unlinkSync6, writeFileSync as writeFileSync7 } from "node:fs";
+import { createHash as createHash4, randomUUID as randomUUID5 } from "node:crypto";
+import { existsSync as existsSync12, mkdirSync as mkdirSync7, readFileSync as readFileSync16, readdirSync as readdirSync5, realpathSync as realpathSync5, renameSync as renameSync3, rmSync as rmSync3, statSync as statSync7, unlinkSync as unlinkSync6, writeFileSync as writeFileSync7 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
 import { dirname as dirname9, isAbsolute, join as join24, resolve as resolve7 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
+init_dist();
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
 var PROJECT_CONFIG_REL = ".opencode/opencode.json";
 var CONDUCTOR_AGENT = "sterling/conductor";
@@ -14865,6 +14868,17 @@ function frontmatterModel(content) {
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
 function ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
+  const rows = [];
+  for (const { path, content, previous: _previous, ...row } of planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models })) {
+    if (content !== void 0) {
+      mkdirSync7(dirname9(path), { recursive: true });
+      writeFileSync7(path, content);
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models = {} }) {
   const registry2 = loadRegistry(join24(pluginRoot2, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot2);
   const rows = [];
@@ -14877,7 +14891,8 @@ function ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const disk = existsSync12(path) ? normalize5(readFileSync16(path, "utf8")) : null;
+    const raw = existsSync12(path) ? readFileSync16(path, "utf8") : null;
+    const disk = raw === null ? null : normalize5(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
       if (!m || m[1] !== name4) {
@@ -14897,9 +14912,7 @@ function ensureFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models
       rows.push({ item: rel, status: "matches" });
       continue;
     }
-    mkdirSync7(dirname9(path), { recursive: true });
-    writeFileSync7(path, agent.content);
-    rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
+    rows.push({ item: rel, status: disk === null ? "created" : "refreshed", path, content: agent.content, previous: raw });
   }
   return rows;
 }
@@ -15370,7 +15383,7 @@ var claudeMdPath = join25(target, "CLAUDE.md");
 var writeAtomic = (p, content) => {
   const tmp = `${p}.tmp-${process.pid}`;
   writeFileSync8(tmp, content);
-  renameSync3(tmp, p);
+  renameSync4(tmp, p);
 };
 var SENTINEL_VOCAB = [
   { re: /\bknowledge_\w+/, label: "a knowledge_ tool name" },
