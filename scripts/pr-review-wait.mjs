@@ -6,7 +6,8 @@
 //   node scripts/pr-review-wait.mjs <pr-url|number> [--repo host/owner/repo]
 //        [--since-review <id>] [--head <sha>] [--timeout <s>] [--interval <s>]
 //        [--request-copilot] [--target <dir>]
-//   node scripts/pr-review-wait.mjs --settle <clean|capped|escalated> --pr <n|pr-url> [--target <dir>]
+//   node scripts/pr-review-wait.mjs --resolve-threads <comment-id,...> --pr <n|pr-url> [--target <dir>]
+//   node scripts/pr-review-wait.mjs --settle <clean|capped|escalated> --pr <n|pr-url> [--unknown-retry-delay <s>] [--target <dir>]
 //
 // WAIT: the repo is bound to origin exactly as work-mode /sterling:merge binds
 // it (parseOriginRepo over origin's fetch URL); a PR URL or --repo naming any
@@ -52,15 +53,34 @@
 // and may change: such a review is not clean until the body has been read.
 // Exit 0 = review, 2 = timeout, 1 = error. Timeout and error are never clean.
 //
+// RESOLVE-THREADS: replying to a finding never resolves its review thread, and
+// an org ruleset (required_review_thread_resolution) blocks the merge until it
+// is resolved (GitHub issue #42). Given the review-comment ids the wait helper
+// returned (comments[].id) for findings that are dispositioned, it resolves each
+// one's thread through the GraphQL resolveReviewThread mutation. Every id is
+// matched to a thread before any mutation; an unknown id or a gh failure exits
+// 1 naming it. Exit 0 with {status:'resolved', pr_number, resolved, already_resolved,
+// same_thread_as_resolved}.
+//
 // SETTLE: the deliberate conductor act that discharges H10's 'PR review loop
 // owed' duty — writes the outcome on .sterling/transient/pr-loop.json when the
 // armed loop is owed, coherent, in origin's repo, and the PR --pr names
 // (number or full URL). Exit 0 with {status, pr_number, pr_url}; any refusal
-// exits 1 and writes nothing.
+// exits 1 and writes nothing. Settling 'clean' first asks GitHub for the PR's
+// mergeStateStatus, reviewDecision and review threads: unresolved threads, or a
+// merge state that is not CLEAN/HAS_HOOKS/UNSTABLE, refuse the clean outcome
+// (status 'blocked', exit 1, the blockers and unresolved threads named, nothing
+// written); a PR that only awaits a required human review settles clean and the
+// output says so, but only while the head's check rollup is SUCCESS or absent
+// (a failing or pending required check also shows as BLOCKED). An UNKNOWN merge
+// state, which GitHub computes lazily, is read once more after
+// --unknown-retry-delay seconds (default 3) and blocks if still UNKNOWN. A clean
+// output carries merge_state_status, review_decision, check_rollup, mergeable_now
+// and awaiting_human_review. A gh failure refuses too.
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { parseOriginRepo, parsePrUrl, settlePrLoop } from './lib/work-pr.mjs';
+import { fetchSettledMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (name) => {
@@ -113,19 +133,73 @@ function readPinnedLogins() {
 const isCopilot = (r, pinned) =>
   typeof r?.user?.login === 'string' && r.user.type === 'Bot' && Number.isInteger(r.id) && (pinned.length ? pinned.includes(r.user.login) : COPILOT_LOGIN.test(r.user.login));
 
-// ------------------------------------------------------------------ settle
-if (argv.includes('--settle')) {
+// ------------------------------------------------- resolve-threads and settle
+// Both act on origin's repo only, before any wait argument is parsed.
+function originRepoOrThrow() {
+  const url = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+  const originRepo = url.status === 0 ? parseOriginRepo(url.stdout)?.repo : null;
+  if (!originRepo) throw new Error(`origin in ${target} is missing or not a GitHub repository URL — this mode is bound to origin`);
+  return originRepo;
+}
+function refuse(label, e) {
+  process.stderr.write(`pr-review-wait: ${label} — ${e.message}\n`);
+  process.stdout.write(JSON.stringify({ status: 'error', error: e.message }) + '\n');
+  process.exit(1);
+}
+
+if (argv.includes('--resolve-threads')) {
   try {
-    const url = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
-    const originRepo = url.status === 0 ? parseOriginRepo(url.stdout)?.repo : null;
-    if (!originRepo) throw new Error(`origin in ${target} is missing or not a GitHub repository URL — settle is bound to origin`);
-    const s = settlePrLoop(target, flag('--settle'), flag('--pr'), { originRepo });
-    process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at }) + '\n');
+    const originRepo = originRepoOrThrow();
+    const raw = flag('--resolve-threads') ?? '';
+    const ids = raw.split(',').map((x) => x.trim()).filter(Boolean);
+    if (!ids.length || !ids.every((x) => /^\d+$/.test(x))) throw new Error(`--resolve-threads needs a comma-separated list of review comment ids, got '${raw}'`);
+    const prRef = flag('--pr') ?? '';
+    const ref = /^\d+$/.test(prRef) ? { repo: originRepo, number: Number(prRef) } : parsePrUrl(prRef);
+    if (!ref) throw new Error('--resolve-threads needs --pr <number|PR URL>');
+    if (ref.repo !== originRepo) throw new Error(`the PR ${prRef} is not in origin's repo (${originRepo}) — the PR repo is bound to origin`);
+    const out = resolveReviewThreads(target, originRepo, ref.number, ids.map(Number));
+    process.stdout.write(JSON.stringify({ status: 'resolved', pr_number: ref.number, ...out }) + '\n');
     process.exit(0);
   } catch (e) {
-    process.stderr.write(`pr-review-wait: settle refused — ${e.message}\n`);
-    process.stdout.write(JSON.stringify({ status: 'error', error: e.message }) + '\n');
-    process.exit(1);
+    refuse('resolve-threads failed', e);
+  }
+}
+
+// --unknown-retry-delay <s>: the wait before the one re-read of an UNKNOWN merge state.
+function retryDelayMs() {
+  const raw = flag('--unknown-retry-delay');
+  if (raw === undefined) return 3000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`--unknown-retry-delay must be a number of seconds >= 0, got '${raw}'`);
+  return n * 1000;
+}
+
+if (argv.includes('--settle')) {
+  let merge = null;
+  try {
+    const originRepo = originRepoOrThrow();
+    // Only a clean outcome claims the PR is ready for a human, so only it asks GitHub.
+    const guard = (armed) => {
+      const state = fetchSettledMergeState(target, originRepo, armed.pr_number, { retryDelayMs: retryDelayMs() });
+      const verdict = mergeBlockers(state);
+      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review };
+      if (verdict.blockers.length) {
+        const err = new Error(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join('; ')} — resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`);
+        err.blocked = { ...merge, blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads };
+        throw err;
+      }
+    };
+    const outcome = flag('--settle');
+    const s = settlePrLoop(target, outcome, flag('--pr'), { originRepo, guard: outcome === 'clean' ? guard : null });
+    process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at, ...(merge ?? {}) }) + '\n');
+    process.exit(0);
+  } catch (e) {
+    if (e.blocked) {
+      process.stderr.write(`pr-review-wait: settle refused — ${e.message}\n`);
+      process.stdout.write(JSON.stringify({ status: 'blocked', error: e.message, ...e.blocked }) + '\n');
+      process.exit(1);
+    }
+    refuse('settle refused', e);
   }
 }
 
