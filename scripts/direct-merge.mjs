@@ -8,6 +8,8 @@
 // WORK mode (config.mode, decision project-mode-hobby-work-toggle-decides-flow):
 // the same preflight, then push the branch and open or reuse a GitHub PR
 // (scripts/lib/work-pr.mjs) — never a merge, sweep or push of the base.
+// A work repo with no 'origin' remote has no PR path and merges locally like hobby
+// (GitHub issue #39), announced loudly.
 //   node scripts/direct-merge.mjs [--into <branch>] [--branch <branch>] [--target <dir>]
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
@@ -23,7 +25,7 @@ import { releaseAfterMerge } from './lib/opencode-release.mjs';
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { SterlingStore } from '@sterling/store';
 import { readProjectMode } from './lib/handoff-projection.mjs';
-import { workPreflight, shipAsPr, pushWithWindowsRetry, localBranchRefusal, installWorkResult, armPrLoop, PR_LOOP_REL } from './lib/work-pr.mjs';
+import { workPreflight, shipAsPr, pushWithWindowsRetry, localBranchRefusal, installWorkResult, armPrLoop, noOriginRemote, NO_ORIGIN_LOCAL_MERGE_NOTICE, PR_LOOP_REL } from './lib/work-pr.mjs';
 // Attestation disclosure (decision attestation-staleness-disclosure-only-never-
 // a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
 // block above the merge action.
@@ -61,7 +63,24 @@ try {
 } catch (e) {
   modeError = e;
 }
-const work = mode === 'work' ? installWorkResult() : null;
+// WORK mode in a repo with no 'origin' remote has no PR path (GitHub issue #39;
+// user-ruled 2026-10-08: some projects never have a GitHub repo). It runs as
+// a local merge like hobby, announced loudly below. A work repo WITH origin, or a
+// directory git cannot read, keeps the work flow and its refusals. The configured
+// mode stays 'work' (the stdout envelope keeps its work shape); `shipsPr` says
+// whether the PR flow runs, `noOriginFallback` that the local flow runs instead.
+// The fallback is decided ONCE here and holds for the whole run.
+const noOriginFallback = mode === 'work' && isGitRepo(target) && noOriginRemote(target);
+const shipsPr = mode === 'work' && !noOriginFallback;
+if (noOriginFallback) console.error(NO_ORIGIN_LOCAL_MERGE_NOTICE);
+const work = mode === 'work' ? installWorkResult({ localFallback: noOriginFallback }) : null;
+// The local flow's own report. In work mode (the fallback) it goes through the
+// work envelope so every exit prints ONE object; hobby prints it bare.
+function emit(report, code = 0) {
+  if (work) work.finishLocal(report, code);
+  console.log(JSON.stringify(report, null, 2));
+  if (code) process.exit(code);
+}
 const stage = (name) => {
   if (work) work.state.stage = name;
 };
@@ -107,7 +126,7 @@ if (!linkedWorktree && !existsSync(join(target, CONFIG_REL))) {
 // branch out in two worktrees). Refused here, before the store and the battery,
 // with the exact way out. WORK mode only pushes the branch and opens a PR, so it
 // proceeds. An unreadable mode keeps its own refusal below.
-if (linkedWorktree && !modeError && mode !== 'work') {
+if (linkedWorktree && !modeError && !shipsPr) {
   const head = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: target, encoding: 'utf8', timeout: 60_000 });
   const wtBranch = head.status === 0 && head.stdout.trim() ? head.stdout.trim() : '<branch>';
   fail(
@@ -130,7 +149,7 @@ if (modeError) fail(`direct-merge: ${modeError?.message ?? modeError} — refusi
 // Work-only preconditions, cheap and before the battery: --no-push cannot ship
 // a PR, and origin and gh must be usable.
 let workRepo;
-if (mode === 'work') {
+if (shipsPr) {
   stage('work-preflight');
   if (process.argv.includes('--no-push')) {
     fail(
@@ -187,7 +206,7 @@ if (branch === into) {
       `non-zero after a SUCCESSFUL merge (stale bundles / failed sweep) says so on its first line.`
   );
 }
-if (mode === 'work') {
+if (shipsPr) {
   const notBranch = localBranchRefusal(target, branch);
   if (notBranch) fail(notBranch, 2);
 }
@@ -690,7 +709,7 @@ for (const line of attestationDisclosure) console.error(line);
 // WORK MODE ends here: push the branch and open or reuse its PR. Nothing below
 // (merge, board nudge, sweep, rebuild, parked sweep, base push) runs — a human
 // merges the PR.
-if (work) {
+if (shipsPr) {
   const shipped = shipAsPr({ cwd: target, repo: workRepo, branch, base: into, mergeBase, branchTip, state: work.state, log: (m) => console.error(m) });
   if (shipped) work.fail(shipped.error, shipped.exitCode);
   // ARM the H10 'PR review loop owed' duty on create AND reuse (slice S3): a
@@ -806,8 +825,7 @@ try {
       `Sweep merged branches manually when convenient: git branch --merged ${into}`,
     ].join('\n')
   );
-  console.log(JSON.stringify({ ...merged, branches_swept: null, sweep_failed: true }, null, 2));
-  process.exit(1);
+  emit({ ...merged, branches_swept: null, sweep_failed: true }, 1);
 }
 
 // POST-merge bundle freshness — the one staleness the battery structurally cannot
@@ -842,8 +860,7 @@ if (existsSync(bundleChecker)) {
         (rebuilt.stdout + rebuilt.stderr).trim(),
       ].join('\n')
     );
-    console.log(JSON.stringify({ ...merged, branches_swept: swept, bundles_unverified: true }, null, 2));
-    process.exit(1);
+    emit({ ...merged, branches_swept: swept, bundles_unverified: true }, 1);
   }
   const bundles = spawnSync(process.execPath, [bundleChecker], { cwd: target, encoding: 'utf8', timeout: 300_000 });
   if (bundles.status !== 0) {
@@ -859,8 +876,7 @@ if (existsSync(bundleChecker)) {
         (bundles.stdout + bundles.stderr).trim(),
       ].join('\n')
     );
-    console.log(JSON.stringify({ ...merged, branches_swept: swept, bundles_stale: true }, null, 2));
-    process.exit(1);
+    emit({ ...merged, branches_swept: swept, bundles_stale: true }, 1);
   }
 }
 
@@ -918,7 +934,11 @@ try {
 // NEVER reported as a merge failure — the merge stands; the exit code still
 // goes non-zero so an unpushed base cannot read as a clean gate.
 let pushed = false;
-if (process.argv.includes('--no-push')) {
+if (noOriginFallback) {
+  // Decided at startup: there was no origin, so nothing is pushed even if a
+  // remote named origin appeared during the battery (the merge is local only).
+  console.error("direct-merge: no 'origin' remote at start — push skipped (loud).");
+} else if (process.argv.includes('--no-push')) {
   console.error('direct-merge: push to origin SKIPPED (--no-push) — consumers cannot see this merge until you push.');
 } else {
   const remotes = spawnSync('git', ['remote'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
@@ -941,8 +961,7 @@ if (process.argv.includes('--no-push')) {
           (push.stderr || push.stdout || String(push.error?.message ?? '')).trim(),
         ].join('\n')
       );
-      console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed: false, opencode_release: 'skipped' }, null, 2));
-      process.exit(1);
+      emit({ ...merged, branches_swept: swept, pushed: false, opencode_release: 'skipped' }, 1);
     }
   }
 }
@@ -963,5 +982,6 @@ if (mergedHead.status === 0) {
   opencodeRelease = { status: 'skipped' };
 }
 
-console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed, opencode_release: opencodeRelease.status, ...(parkedClosed ? { parked_items_closed: parkedClosed } : {}) }, null, 2));
-if (opencodeRelease.status === 'failed') process.exit(1);
+// The fallback is said again at the END, after the merge output, where it is read.
+if (noOriginFallback) console.error(NO_ORIGIN_LOCAL_MERGE_NOTICE);
+emit({ ...merged, branches_swept: swept, pushed, opencode_release: opencodeRelease.status, ...(parkedClosed ? { parked_items_closed: parkedClosed } : {}) }, opencodeRelease.status === 'failed' ? 1 : 0);

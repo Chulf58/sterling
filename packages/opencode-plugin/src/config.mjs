@@ -34,6 +34,13 @@ import { addNotice } from './notices.mjs';
 export const COMMAND_PREFIX = 'sterling:';
 export const SKILL_PREFIX = 'sterling:';
 
+// Commands/<name>.md files that are not registered on OpenCode. A registered command only
+// puts its body into the session as a prompt (execute above); it cannot open a TUI view,
+// and the plugin API this file uses has no call that does. The dashboard is the TUI
+// plugin's own `/sterling` command (<leader>k), so a prompt command named
+// sterling:dashboard would only talk about it (GitHub issue 51).
+export const OPENCODE_UNREGISTERED_COMMANDS = ['dashboard'];
+
 // Claude Code phrase -> OpenCode phrase, applied in order after ${CLAUDE_PLUGIN_ROOT}.
 // Each AskUserQuestion phrasing the sources use has its own rule, so the result reads.
 const HOST_MAP = [
@@ -85,7 +92,8 @@ function renderSource(path, root, label) {
 }
 
 /**
- * Every commands/*.md and skills/*\/SKILL.md under `root`, rendered for OpenCode.
+ * Every commands/*.md except OPENCODE_UNREGISTERED_COMMANDS and every skills/*\/SKILL.md
+ * under `root`, rendered for OpenCode.
  * An item that fails to render lands in `failures` with its label, never thrown.
  */
 export function renderRegistrations(root) {
@@ -96,7 +104,7 @@ export function renderRegistrations(root) {
   const skillsDir = join(root, 'skills');
   if (!existsSync(commandsDir)) throw new Error(`no commands directory at ${commandsDir}`);
   if (!existsSync(skillsDir)) throw new Error(`no skills directory at ${skillsDir}`);
-  for (const file of readdirSync(commandsDir).filter((f) => f.endsWith('.md')).sort()) {
+  for (const file of readdirSync(commandsDir).filter((f) => f.endsWith('.md') && !OPENCODE_UNREGISTERED_COMMANDS.includes(f.slice(0, -3))).sort()) {
     const name = `${COMMAND_PREFIX}${file.slice(0, -3)}`;
     try {
       const { description, body } = renderSource(join(commandsDir, file), root, `commands/${file}`);
