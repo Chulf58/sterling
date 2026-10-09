@@ -251,6 +251,8 @@ let terminalRestored = false;
 function restoreTerminal(): void {
   if (terminalRestored) return;
   terminalRestored = true;
+  // a running git or gh would outlive the dashboard: kill it first
+  try { github.close(); } catch { /* best effort */ }
   try { term.grabInput(false); } catch { /* best effort */ }
   try { term.hideCursor(false); } catch { /* best effort */ }
   try { term.fullscreen(false); } catch { /* best effort */ } // leave the alternate screen, restoring the shell
@@ -288,6 +290,9 @@ process.on('unhandledRejection', (err) => shutdown(1, `sterling-tui: fatal (unha
 for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]] as const) {
   process.on(signal, () => shutdown(code, `sterling-tui: ${signal} — exiting`));
 }
+// every path above goes through restoreTerminal; this covers a process.exit
+// that does not, so no git or gh poll is ever orphaned
+process.on('exit', () => github.close());
 
 // Alternate screen buffer (§11 dashboard): no scrollback, so the 1 Hz redraw
 // can never grow the scrollbar or push the view down. The cursor stays hidden

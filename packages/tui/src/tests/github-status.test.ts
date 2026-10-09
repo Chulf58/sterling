@@ -12,7 +12,10 @@ import {
   deriveGithub,
   nextPollDelay,
   FAST_POLL_MS,
+  GITHUB_QUERY,
   IDLE_POLL_MS,
+  MERGED_CANDIDATES,
+  MERGED_SHOWN,
   MAX_BACKOFF_MS,
   POLL_MS,
   STALE_MS,
@@ -138,6 +141,23 @@ test('derivation: unresolved threads, draft, merge state, review decision and th
   assert.deepEqual(r.merged, [{ number: 40, title: 'Earlier', mergedAt: '2026-10-08T10:00:00Z' }]);
 });
 
+test('derivation: recently merged is the newest MERGED_SHOWN by mergedAt, not by last update', () => {
+  assert.match(GITHUB_QUERY, new RegExp(`states: MERGED, first: ${MERGED_CANDIDATES},`), 'the query takes the candidate pool');
+  assert.ok(MERGED_CANDIDATES > MERGED_SHOWN);
+  // listed in UPDATED_AT order, as GitHub returns them: #10 was merged long
+  // ago but commented on today, so it comes first
+  const merged = [
+    { number: 10, title: 'old, updated today', mergedAt: '2026-01-01T00:00:00Z' },
+    { number: 44, title: 'd', mergedAt: '2026-10-06T00:00:00Z' },
+    { number: 46, title: 'f', mergedAt: '2026-10-08T00:00:00Z' },
+    { number: 43, title: 'c', mergedAt: '2026-10-05T00:00:00Z' },
+    { number: 45, title: 'e', mergedAt: '2026-10-07T00:00:00Z' },
+    { number: 42, title: 'b', mergedAt: '2026-10-04T00:00:00Z' },
+    { number: 41, title: 'a', mergedAt: '2026-10-03T00:00:00Z' },
+  ];
+  assert.deepEqual(deriveGithub(JSON.parse(response([], merged))).merged.map((m) => m.number), [46, 45, 44, 43, 42]);
+});
+
 test('derivation: a response without a repository throws GitHub\'s own error', () => {
   assert.throws(() => deriveGithub({ data: { repository: null }, errors: [{ message: "Could not resolve to a Repository with the name 'x/y'." }] }), /Could not resolve to a Repository/);
   assert.throws(() => deriveGithub({}), /no repository/);
@@ -174,6 +194,49 @@ test('poller: one poll in flight; tick and refresh never wait on it and never st
   assert.equal(poller.snapshot().state, 'ok');
   assert.equal(poller.refresh(), true, 'r polls at once when nothing is in flight');
   assert.equal(calls.length, 3);
+});
+
+/** A fake execFile whose processes record a kill, answered by the test. */
+function killableExec(): { exec: ExecFile; calls: (Call & { killed: boolean })[] } {
+  const calls: (Call & { killed: boolean })[] = [];
+  const exec: ExecFile = (file, args, _opts, callback) => {
+    const call = { file, args, done: callback, killed: false };
+    calls.push(call);
+    return { kill: () => { call.killed = true; } };
+  };
+  return { exec, calls };
+}
+
+test('poller lifecycle: close during git kills git, and its late answer never starts gh', () => {
+  const { exec, calls } = killableExec();
+  const poller = createGithubPoller({ root: '/proj', execFile: exec, readLoop: () => null, clock: () => 0 });
+  poller.tick(0);
+  assert.equal(calls.length, 1);
+  poller.close();
+  assert.equal(calls[0]!.killed, true, 'the running git was killed');
+  calls[0]!.done(null, `${ORIGIN}\n`, '');
+  assert.equal(calls.length, 1, 'git answering after close does not start gh');
+  assert.equal(poller.snapshot().state, 'loading', 'nothing settles after close');
+  assert.equal(poller.inFlight(), false);
+  assert.equal(poller.tick(1_000_000), false, 'no poll after close');
+  assert.equal(poller.refresh(), false);
+  poller.close();
+  assert.equal(calls.length, 1, 'a second close is a no-op');
+});
+
+test('poller lifecycle: close during gh kills gh, and its answer is dropped', () => {
+  const { exec, calls } = killableExec();
+  const poller = createGithubPoller({ root: '/proj', execFile: exec, readLoop: () => null, clock: () => 0 });
+  poller.tick(0);
+  calls[0]!.done(null, `${ORIGIN}\n`, '');
+  assert.equal(calls[1]!.file, 'gh');
+  poller.close();
+  assert.equal(calls[1]!.killed, true, 'the running gh was killed');
+  assert.equal(calls[0]!.killed, false, 'git had already exited');
+  calls[1]!.done(Object.assign(new Error('killed'), { killed: true, signal: 'SIGTERM' }), '', '');
+  assert.equal(poller.snapshot().state, 'loading', 'the killed gh is not reported as offline');
+  assert.equal(poller.tick(1_000_000), false);
+  assert.equal(calls.length, 2);
 });
 
 test('poller: never spawnSync — the module runs processes only through the async execFile', () => {
@@ -248,28 +311,36 @@ test('poller: hidden when gh is missing, origin is missing, or origin is not on 
 });
 
 test('poller: the version moves only when the content changes; stale data is kept for 10 min, then dropped', () => {
-  let t = 5_000_000;
+  let t = 1_000;
   let reply: { stdout?: string; err?: ExecFileError; stderr?: string } = { stdout: response([prNode()]) };
   const { exec } = answeringExec(ORIGIN, () => reply);
   const poller = createGithubPoller({ root: '/proj', execFile: exec, readLoop: () => null, clock: () => t });
   poller.tick(t);
   const first = poller.snapshot();
   assert.equal(first.state, 'ok');
-  // the same answer a minute later: fetchedAt moves, so the version does too;
-  // a refresh inside the same millisecond with the same answer does not
+  // the same payload five minutes later: the poll time is bookkeeping, not
+  // content, so the version and the snapshot object stay the same
+  t = 301_000;
+  assert.equal(poller.refresh(), true);
+  assert.equal(poller.snapshot().version, first.version, 'an identical payload at a later clock keeps the version');
+  assert.equal(poller.snapshot(), first, 'and the same snapshot object');
+  // a changed payload moves it
+  reply = { stdout: response([prNode({ title: 'Renamed' })]) };
   poller.refresh();
-  assert.equal(poller.snapshot(), first, 'an identical poll keeps the same snapshot object');
-  t += 60_000;
+  const changed = poller.snapshot();
+  assert.equal(changed.version, first.version + 1, 'a changed payload moves the version');
+  t = 361_000;
   reply = { err: ghError('exit 1'), stderr: 'dial tcp: i/o timeout' };
   poller.refresh();
   const failed = poller.snapshot();
   assert.equal(failed.state, 'failed');
-  assert.ok(failed.version > first.version);
-  assert.equal(failed.data, first.data, 'the last good data is kept while it is fresh');
+  assert.ok(failed.version > changed.version);
+  assert.equal(failed.data, changed.data, 'the last good data is kept while it is fresh');
+  assert.equal(failed.asOf, 301_000, 'as of the last good poll');
   const strip = githubStrip(failed, 200)!;
   assert.equal(strip.dim, true);
-  assert.match(strip.text, new RegExp(`^PR as of ${hhmm(first.data!.fetchedAt)} · #41`));
-  t = first.data!.fetchedAt + STALE_MS + 1;
+  assert.match(strip.text, new RegExp(`^PR as of ${hhmm(301_000)} · #41`));
+  t = 301_000 + STALE_MS + 1;
   poller.tick(t);
   assert.equal(poller.snapshot().data, undefined, 'dropped after STALE_MS');
   assert.deepEqual(githubStrip(poller.snapshot(), 80), { text: 'gh offline', dim: true });
@@ -289,7 +360,7 @@ test('poller: the PR loop comes from readLoop; an unreadable pr-loop.json is sho
 // ---------------------------------------------------------------- the strip
 
 const pr = (over: Partial<GithubPr> = {}): GithubPr => ({ number: 41, title: 'Fix', branch: 'fix-42', draft: false, merge: 'CLEAN', review: '', checks: 'pass', unresolved: 0, copilot: 'none', ...over });
-const ok = (open: GithubPr[], extra: Partial<GithubSnapshot> = {}): GithubSnapshot => ({ version: 1, state: 'ok', repo: 'o/r', data: { open, merged: [], fetchedAt: 0 }, ...extra });
+const ok = (open: GithubPr[], extra: Partial<GithubSnapshot> = {}): GithubSnapshot => ({ version: 1, state: 'ok', repo: 'o/r', data: { open, merged: [] }, ...extra });
 
 test('strip: hidden states — no poller, loading, hidden, and a hobby project with no open PR and no owed loop', () => {
   assert.equal(githubStrip(undefined), undefined);
@@ -391,7 +462,7 @@ test('GitHub tab: shown only with a poller; lists open PRs, the loop and recent 
       version: 4,
       state: 'ok',
       repo: 'Chulf58/sterling',
-      data: { open: [pr({ review: 'CHANGES_REQUESTED', unresolved: 3, copilot: 'reviewed' })], merged: [{ number: 40, title: 'Earlier', mergedAt: '2026-10-08T10:00:00Z' }], fetchedAt: Date.parse('2026-10-09T08:00:00Z') },
+      data: { open: [pr({ review: 'CHANGES_REQUESTED', unresolved: 3, copilot: 'reviewed' })], merged: [{ number: 40, title: 'Earlier', mergedAt: '2026-10-08T10:00:00Z' }] },
       loop: { status: 'owed', pr: 41 },
     };
     assert.ok(!buildDashboardState(store, st()).tabs.some((t) => t.index === GITHUB_TAB), 'no poller, no tab');
@@ -400,7 +471,7 @@ test('GitHub tab: shown only with a poller; lists open PRs, the loop and recent 
     assert.equal(s.tabs.at(-1)!.active, true);
     const text = s.rows.flatMap((r) => r.lines.map((l) => l.text));
     assert.deepEqual(text, [
-      `Chulf58/sterling · as of ${hhmm(github.data!.fetchedAt)}`,
+      'Chulf58/sterling',
       '',
       'open pull requests (1)',
       '  #41 Fix',
@@ -445,6 +516,42 @@ test('the r key: a github_refresh effect on a host with a poller, text in the se
     assert.equal(edit.ui.boardEdit!.text, 'abr');
   } finally {
     cleanup();
+  }
+});
+
+test('controller: a click is hit-tested against the drawn frame when the strip vanished before the redraw', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-github-click-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), '{}\n');
+  const ctl = openDashboard(join(dir, '.sterling', 'sterling.db'), { deferWrites: true });
+  try {
+    addTodos(ctl.store, 30);
+    const height = 20;
+    const withStrip = { width: 60, height, showBanner: false, maxBodyLines: visibleBodyLines(height, 0, 1), github: ok([pr()]) };
+    const drawn = ctl.state(withStrip);
+    assert.ok(drawn.strip, 'drawn with the strip');
+    // 0-based row height-3 is the notice row on screen; without the strip it would be the last body line
+    const y = height - 3 + 1;
+    const gone = { ...withStrip, maxBodyLines: visibleBodyLines(height), github: ok([], { version: 2 }) };
+    const before = ctl.ui();
+    await ctl.handle({ kind: 'click', x: 5, y }, gone);
+    assert.equal(ctl.ui(), before, 'the click on the drawn notice row does nothing');
+    // the wheel clamps against the drawn frame too: 30 lines in 14 rows scroll
+    // to 16, in the 15 rows of the undrawn layout only to 15
+    for (let i = 0; i < 5; i++) {
+      await ctl.handle({ kind: 'wheel', dy: 1, y: 5 }, withStrip);
+      ctl.state(withStrip);
+    }
+    assert.equal(ctl.ui().scroll, 15);
+    await ctl.handle({ kind: 'wheel', dy: 1, y: 5 }, gone);
+    assert.equal(ctl.ui().scroll, 16, 'clamped by the drawn 14-row body, not the undrawn 15-row one');
+    // control: once the new layout is drawn, the notice row is a body line
+    ctl.state(gone);
+    await ctl.handle({ kind: 'click', x: 5, y }, gone);
+    assert.notEqual(ctl.ui().cursor, before.cursor, 'after the redraw the row is clickable');
+  } finally {
+    ctl.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

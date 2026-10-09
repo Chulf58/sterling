@@ -1164,7 +1164,7 @@ export function githubStrip(github: GithubSnapshot | undefined, width = Infinity
   const owed = loop?.status === 'owed' ? loop : undefined;
   if (open.length === 0 && !owed) return undefined;
   const parts: string[] = [];
-  if (github.state === 'failed') parts.push(`as of ${clockOf(data!.fetchedAt)}`);
+  if (github.state === 'failed' && github.asOf !== undefined) parts.push(`as of ${clockOf(github.asOf)}`);
   const lead = open.find((p) => p.number === loop?.pr) ?? open[0];
   if (lead) {
     parts.push(prParts(lead).join(' '));
@@ -1198,7 +1198,7 @@ export function githubTabLines(github: GithubSnapshot, width = Infinity): RowLin
     return lines;
   }
   const data = github.data;
-  meta(`${github.repo ?? ''}${data ? ` · as of ${clockOf(data.fetchedAt)}` : ''}`);
+  meta(`${github.repo ?? ''}${github.asOf !== undefined ? ` · as of ${clockOf(github.asOf)}` : ''}`);
   if (github.state === 'failed') meta(`${github.reason ?? 'gh failed'}${data ? ' (showing the last good poll)' : ''}`);
   if (github.loopError) lines.push({ text: clip(`⚠ pr-loop.json unreadable: ${github.loopError}`), kind: 'body' });
   if (data) {

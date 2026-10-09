@@ -7,8 +7,10 @@
 // The poller never blocks the dashboard: every process runs through an
 // async execFile (never spawnSync), at most one poll is in flight, and the
 // result is an immutable snapshot the 1 s tick hands to the state layer. The
-// snapshot's `version` moves only when its content changes, so an unchanged
-// poll costs no redraw. The state layer derives the strip row and the GitHub
+// snapshot's `version` moves only when what it shows changes: when the last
+// good poll happened is the poller's own bookkeeping, outside the snapshot, so
+// an unchanged poll costs no rebuild. close() kills a running git or gh, so
+// quitting the dashboard leaves no process behind. The state layer derives the strip row and the GitHub
 // tab from the snapshot and never runs gh itself.
 //
 // parseOriginRepo and readPrLoop are imported from scripts/lib/work-pr.mjs,
@@ -59,7 +61,9 @@ export interface GithubSnapshot {
   readonly reason?: string;
   readonly failure?: GithubFailure;
   /** the last good poll; after a failure it is kept for STALE_MS, then dropped */
-  readonly data?: { readonly open: readonly GithubPr[]; readonly merged: readonly GithubMerged[]; readonly fetchedAt: number };
+  readonly data?: { readonly open: readonly GithubPr[]; readonly merged: readonly GithubMerged[] };
+  /** failed with data kept: when that data was fetched (epoch ms) */
+  readonly asOf?: number;
   readonly loop?: GithubLoop;
   /** pr-loop.json exists but could not be read (readPrLoop threw) */
   readonly loopError?: string;
@@ -92,6 +96,14 @@ export type ExecFile = (
  *  scripts/pr-review-wait.mjs does while no login is pinned. */
 const COPILOT_LOGIN = /copilot/i;
 
+/** GitHub cannot order pull requests by merge time, so the query takes this
+ *  many merged PRs by last update and deriveGithub keeps the MERGED_SHOWN
+ *  newest by mergedAt. A PR merged earlier but updated later can take a
+ *  candidate slot; the newest merges are missed only when more than
+ *  MERGED_CANDIDATES - MERGED_SHOWN older PRs were updated after them. */
+export const MERGED_CANDIDATES = 20;
+export const MERGED_SHOWN = 5;
+
 export const GITHUB_QUERY = `query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     open: pullRequests(states: OPEN, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
@@ -103,7 +115,7 @@ export const GITHUB_QUERY = `query($owner: String!, $name: String!) {
         reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on Bot { login } ... on User { login } } } }
       }
     }
-    merged: pullRequests(states: MERGED, first: 5, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    merged: pullRequests(states: MERGED, first: ${MERGED_CANDIDATES}, orderBy: {field: UPDATED_AT, direction: DESC}) {
       nodes { number title mergedAt }
     }
   }
@@ -161,7 +173,10 @@ export function deriveGithub(response: unknown): { open: GithubPr[]; merged: Git
       copilot: copilotOf(pr, headOid),
     };
   });
-  const merged = nodes(obj(repo).merged).map((pr): GithubMerged => ({ number: Number(pr.number), title: str(pr.title), mergedAt: str(pr.mergedAt) }));
+  const merged = nodes(obj(repo).merged)
+    .map((pr): GithubMerged => ({ number: Number(pr.number), title: str(pr.title), mergedAt: str(pr.mergedAt) }))
+    .sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt) || b.number - a.number)
+    .slice(0, MERGED_SHOWN);
   return { open, merged };
 }
 
@@ -208,6 +223,9 @@ export interface GithubPoller {
   /** The `r` key: poll now unless one is already in flight. */
   refresh(): boolean;
   inFlight(): boolean;
+  /** Kill the running git or gh, if any, and never start another; a git
+   *  that already answered does not go on to start gh. Safe to call twice. */
+  close(): void;
 }
 
 function loopOf(readLoop: (root: string) => unknown, root: string): Pick<GithubSnapshot, 'loop' | 'loopError'> {
@@ -230,6 +248,23 @@ export function createGithubPoller(options: GithubPollerOptions): GithubPoller {
   let busy = false;
   let nextAt = 0;
   let failures = 0;
+  /** when the data in `current` was last fetched: freshness bookkeeping, not content */
+  let lastGoodAt = 0;
+  /** the process this poll is waiting on, so close() can kill it */
+  let child: { kill?: () => unknown } | undefined;
+  let closed = false;
+
+  /** Run one process for this poll; after close() the callback is dropped. */
+  function spawn(file: string, args: readonly string[], done: (err: ExecFileError | null, stdout: string, stderr: string) => void): void {
+    let answered = false;
+    const proc = run(file, args, execOpts, (err, stdout, stderr) => {
+      answered = true;
+      child = undefined;
+      if (!closed) done(err, stdout, stderr);
+    });
+    // a callback that already ran (a test's synchronous fake) left nothing to kill
+    if (!answered && !closed && proc && typeof proc === 'object') child = proc as { kill?: () => unknown };
+  }
 
   /** Publish `next` (without its version); the version moves only on a change. */
   function publish(next: Omit<GithubSnapshot, 'version'>): void {
@@ -246,18 +281,18 @@ export function createGithubPoller(options: GithubPollerOptions): GithubPoller {
 
   function poll(): void {
     busy = true;
-    run('git', ['remote', 'get-url', 'origin'], execOpts, (gitErr, gitOut) => {
+    spawn('git', ['remote', 'get-url', 'origin'], (gitErr, gitOut) => {
       const origin = gitErr ? null : parseOriginRepo(gitOut);
       if (!origin) return settle({ state: 'hidden', reason: gitErr ? 'no origin remote' : 'origin is not a GitHub repository' });
       if (origin.host !== 'github.com') return settle({ state: 'hidden', reason: `origin is on ${origin.host}, not github.com` });
       const [, owner, name] = origin.repo.split('/');
       const repo = `${owner}/${name}`;
       const args = ['api', 'graphql', '-f', `query=${GITHUB_QUERY}`, '-f', `owner=${owner}`, '-f', `name=${name}`];
-      run('gh', args, execOpts, (ghErr, ghOut, ghStderr) => {
+      spawn('gh', args, (ghErr, ghOut, ghStderr) => {
         const at = clock();
         const loop = loopOf(readLoop, options.root);
         if (ghErr && ghErr.code === 'ENOENT') return settle({ state: 'hidden', reason: 'gh not installed' });
-        const keep = current.data && at - current.data.fetchedAt <= STALE_MS ? { data: current.data } : {};
+        const keep = current.data && at - lastGoodAt <= STALE_MS ? { data: current.data, asOf: lastGoodAt } : {};
         if (ghErr) return settle({ state: 'failed', repo, ...classifyGhFailure(ghErr, String(ghStderr ?? ''), repo), ...keep, ...loop });
         let derived: { open: GithubPr[]; merged: GithubMerged[] };
         try {
@@ -265,7 +300,8 @@ export function createGithubPoller(options: GithubPollerOptions): GithubPoller {
         } catch (err) {
           return settle({ state: 'failed', repo, failure: 'error', reason: `gh failed: ${(err as Error).message}`, ...keep, ...loop });
         }
-        settle({ state: 'ok', repo, data: { ...derived, fetchedAt: at }, ...loop });
+        lastGoodAt = at;
+        settle({ state: 'ok', repo, data: derived, ...loop });
       });
     });
   }
@@ -273,8 +309,9 @@ export function createGithubPoller(options: GithubPollerOptions): GithubPoller {
   return {
     snapshot: () => current,
     tick(now) {
-      if (current.state === 'failed' && current.data && now - current.data.fetchedAt > STALE_MS) {
-        const { version: _v, data: _d, ...rest } = current;
+      if (closed) return false;
+      if (current.state === 'failed' && current.data && now - lastGoodAt > STALE_MS) {
+        const { version: _v, data: _d, asOf: _a, ...rest } = current;
         publish(rest);
       }
       if (busy || now < nextAt) return false;
@@ -282,10 +319,18 @@ export function createGithubPoller(options: GithubPollerOptions): GithubPoller {
       return true;
     },
     refresh() {
-      if (busy) return false;
+      if (closed || busy) return false;
       poll();
       return true;
     },
     inFlight: () => busy,
+    close() {
+      if (closed) return;
+      closed = true;
+      busy = false;
+      const proc = child;
+      child = undefined;
+      proc?.kill?.();
+    },
   };
 }
