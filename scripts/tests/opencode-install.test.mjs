@@ -3,7 +3,7 @@
 // Every test runs against a temp HOME and temp git projects, with OpenCode stubbed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, copyFileSync, cpSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, copyFileSync, cpSync, symlinkSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -694,8 +694,9 @@ test('Sterling-full roster: conductor primary, Sterling lines kept, permissions 
   const read = (n) => readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8');
   assert.match(read('conductor'), /^---\ndescription: .+\nmode: primary\n---\n<!-- sterling-full /);
   assert.match(read('conductor'), /dispatch those names/);
-  // The implementor's only permissions are the store-write denies its Claude disallowedTools carry.
-  assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\npermission:\n( {2}sterling_\w+: deny\n)+---\n/);
+  // The implementor's only permissions are the store-write denies its Claude disallowedTools carry;
+  // its model is the config.models default the System tab shows (the fixture config has no models).
+  assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\nmodel: anthropic\/claude-sonnet-5-5\npermission:\n( {2}sterling_\w+: deny\n)+---\n/);
   assert.match(read('researcher'), /\npermission:\n {2}edit: deny\n/);
   assert.match(read('scout'), /\n {2}bash: deny\n/);
   // Sterling-only lines survive: the full body is longer than the portable render of the same template.
@@ -719,18 +720,20 @@ test('Sterling-full roster: a local edit or a foreign file is refused, never ove
   assert.equal(readFileSync(join(dir, STERLING_AGENTS_SUBDIR, 'scout.md'), 'utf8'), 'my scout\n');
 });
 
-test('model swap: the swapped roster agent is re-rendered with the matching OpenCode model; the rest carry none', () => {
+test('model swap: the swapped roster agent is re-rendered with the matching OpenCode model; the rest keep theirs', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   run(dir, home);
   const read = (n) => readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8');
-  assert.doesNotMatch(read('implementor'), /^model:/m, 'a fresh install pins no model');
+  assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5'], 'a fresh install pins the config.models default');
   const r = swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor', 'librarian'], model: 'claude-opus-5-5' });
   assert.equal(statusOf(r, '/implementor.md'), 'refreshed');
   assert.equal(statusOf(r, '/conductor.md'), 'matches');
   assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\nmodel: anthropic\/claude-opus-5-5\n/);
-  for (const n of ['conductor', 'researcher', 'scout']) assert.doesNotMatch(read(n), /^model:/m, n);
-  // A later sync keeps the pin: the installed file is valid Sterling output, so it is matched, not reverted.
+  assert.doesNotMatch(read('conductor'), /^model:/m, 'conductor');
+  for (const n of ['researcher', 'scout']) assert.deepEqual(read(n).match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5'], n);
+  // A later sync keeps the pin once config.models says the same, as the System tab writes it before the swap.
+  writeConfig(dir, { implementor: { model: 'claude-opus-5-5', effort: 'high' }, librarian: { model: 'claude-opus-5-5', effort: 'low' } });
   assert.equal(statusOf(run(dir, home), '/implementor.md'), 'matches');
   assert.match(read('implementor'), /^model: anthropic\/claude-opus-5-5$/m);
   // Swapping again replaces the pin rather than adding a second line.
@@ -750,7 +753,8 @@ test('model swap: a role with an OpenCode override pins openai/<id>; a role with
   swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['reviewer'], model: 'claude-opus-5-5' });
   assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: openai/gpt-5.6-terra']);
   assert.deepEqual(read('reviewer').match(/^model: .*$/gm), ['model: anthropic/claude-opus-5-5']);
-  // A later sync keeps the override pin.
+  // A later sync keeps the override pin once config.models carries it, as the System tab writes it.
+  writeConfig(dir, { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' } });
   assert.equal(statusOf(run(dir, home), '/implementor.md'), 'matches');
   // Clearing the override (no opencodeModel) goes back to the role's Claude model.
   swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5' });
@@ -901,15 +905,26 @@ test('update: a changed config.models is re-applied, a cleared override goes bac
   });
 });
 
-test('a role config.json does not carry gets no pin on install and keeps the pin it has on update; defaults are never written', () => {
+test('a role config.json does not write pins the default the System tab shows; the conductor has no config entry and keeps the pin it has', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
-  writeConfig(dir, { reviewer: { model: 'claude-opus-5-5', effort: 'high' } });
+  writeConfig(dir, { reviewer: { model: 'claude-haiku-4-5', effort: 'high' } });
   run(dir, home);
-  assert.deepEqual(pinsOf(dir), { conductor: null, implementor: null, researcher: null, scout: null, reviewer: 'model: anthropic/claude-opus-5-5', librarian: null });
-  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['scout'], model: 'claude-haiku-4-5' });
-  assert.equal(statusOf(run(dir, home), '/scout.md'), 'matches');
-  assert.equal(pinsOf(dir).scout, 'model: anthropic/claude-haiku-4-5');
+  // the defaults are the config schema's (packages/schemas/src/config.ts, models)
+  assert.deepEqual(pinsOf(dir), {
+    conductor: null,
+    implementor: 'model: anthropic/claude-sonnet-5-5',
+    researcher: 'model: anthropic/claude-sonnet-5-5',
+    scout: 'model: anthropic/claude-sonnet-5-5',
+    reviewer: 'model: anthropic/claude-haiku-4-5',
+    librarian: 'model: anthropic/claude-sonnet-5-5',
+  });
+  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['conductor', 'scout'], model: 'claude-opus-5-5' });
+  const r = run(dir, home);
+  assert.equal(statusOf(r, '/conductor.md'), 'matches', 'no config entry: the pin on disk is kept');
+  assert.equal(pinsOf(dir).conductor, 'model: anthropic/claude-opus-5-5');
+  assert.equal(statusOf(r, '/scout.md'), 'refreshed', 'config.models is the authority for a governed role');
+  assert.equal(pinsOf(dir).scout, 'model: anthropic/claude-sonnet-5-5');
 });
 
 test('a hand-edited agent is refused and left byte-identical when config.models changes; the other roles are still applied', () => {
@@ -940,6 +955,8 @@ test('a missing, unreadable or invalid config.json is refused loudly and every p
     ['not JSON', () => writeFileSync(cfg, '{ "mode": '), /config\.json could not be read/],
     ['a directory', () => mkdirSync(cfg), /config\.json could not be read/],
     ['fails the schema', () => writeConfig(dir, { ...ALL_ROLES, implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'gpt-5.6-terra' } }), /config\.json does not validate/],
+    // a model with a newline would add its own frontmatter line to the agent file
+    ['a model with a newline', () => writeConfig(dir, { ...ALL_ROLES, scout: { model: 'claude-sonnet-5-5\nhooks: x', effort: 'low' } }), /config\.json does not validate .*Claude model id/],
   ];
   for (const [label, breakIt, why] of cases) {
     breakIt();
@@ -948,17 +965,45 @@ test('a missing, unreadable or invalid config.json is refused loudly and every p
     assert.equal(row?.status, 'refused', label);
     assert.equal(row.refused, true, label);
     assert.match(row.detail, why, label);
-    assert.match(row.instruction, /^REFUSED: .*keep the model pins they have/, label);
+    assert.match(row.instruction, /^REFUSED: .*no OpenCode agent file was written/, label);
     assert.ok(formatOpenCodeRows(r).some((l) => l.startsWith('OpenCode refused: .sterling/config.json models')), label);
     assert.deepEqual(agentFiles(dir), before, `${label}: no agent file changed`);
+    assert.ok(r.rows.filter((x) => x.item.startsWith(`${STERLING_AGENTS_SUBDIR}/`)).every((x) => x.status === 'matches'), `${label}: every agent is reported as it is`);
     rmSync(cfg, { recursive: true, force: true });
   }
-  // a fresh install without a config.json pins nothing, rather than the schema defaults
+  // a project without a config.json gets no agent file at all, and no default_agent
   const fresh = project('hobby');
   rmSync(join(fresh, '.sterling', 'config.json'));
   const r = run(fresh, home);
   assert.equal(configRow(r)?.status, 'refused');
-  assert.deepEqual(pinsOf(fresh), { conductor: null, implementor: null, researcher: null, scout: null, reviewer: null, librarian: null });
+  assert.equal(existsSync(join(fresh, STERLING_AGENTS_SUBDIR)), false);
+  assert.equal(statusOf(r, '/conductor.md'), 'skipped');
+  assert.equal(JSON.parse(readFileSync(join(fresh, '.opencode', 'opencode.json'), 'utf8')).default_agent, undefined);
+});
+
+test('install and update write the agents atomically: a write that cannot start changes no agent and leaves no temp file', { skip: process.getuid?.() === 0 && 'root ignores directory permissions' }, () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  writeConfig(dir, ALL_ROLES);
+  run(dir, home);
+  const before = agentFiles(dir);
+  writeConfig(dir, { ...ALL_ROLES, implementor: { model: 'claude-opus-5-5', effort: 'high' }, librarian: { model: 'claude-opus-5-5', effort: 'low' } });
+  // a directory that takes no new file: an in-place write would still succeed, a temp file and rename cannot
+  const agentsDir = join(dir, STERLING_AGENTS_SUBDIR);
+  chmodSync(agentsDir, 0o555);
+  try {
+    assert.throws(() => run(dir, home), /EACCES/);
+  } finally {
+    chmodSync(agentsDir, 0o755);
+  }
+  assert.deepEqual(agentFiles(dir), before);
+});
+
+test('opencodeModelRef refuses a model with a newline or YAML syntax; the config schema refuses it when written', async () => {
+  for (const bad of ['claude-sonnet-5-5\nhooks: x', 'claude sonnet', 'a: b', '']) assert.throws(() => opencodeModelRef(bad), /Claude model id/, JSON.stringify(bad));
+  const { parseConfig } = await import('@sterling/schemas');
+  assert.throws(() => parseConfig({ models: { scout: { model: 'claude-sonnet-5-5\nhooks: x', effort: 'low' } } }), /Claude model id/);
+  assert.equal(parseConfig({ models: { scout: { model: 'claude-opus-4-6[1m]', effort: 'low' } } }).models.scout.model, 'claude-opus-4-6[1m]');
 });
 
 test('opencodeModelRef maps a Claude model id to the anthropic provider; sterlingRootFrom finds the plugin root', () => {

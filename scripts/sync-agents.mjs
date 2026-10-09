@@ -80,10 +80,17 @@ const claudeHost = claudeProbe.installed;
 // config.models is the authoritative model/effort source (98064d77): read the
 // target project's config when present, else the shipped default config, so a
 // refresh resolves {{MODEL}}/{{EFFORT}} to pinned ids (never a leftover token).
+// A config that does not parse or validate is a refusal (exit 2) like the ones
+// above, before anything is written, so /sterling:update relays it.
 const configPath = join(targetDir, '.sterling', 'config.json');
-const config = parseConfig(
-  JSON.parse(readFileSync(existsSync(configPath) ? configPath : join(pluginRoot, 'templates', 'default-config.json'), 'utf8'))
-);
+const configSource = existsSync(configPath) ? configPath : join(pluginRoot, 'templates', 'default-config.json');
+let config;
+try {
+  config = parseConfig(JSON.parse(readFileSync(configSource, 'utf8')));
+} catch (err) {
+  console.log(`refused_config: ${configSource.replace(/\\/g, '/')} does not validate (${err.message.replace(/\s+/g, ' ')}); fix it (the TUI System tab writes config.models), then rerun /sterling:update; nothing synced`);
+  process.exit(2);
+}
 
 const { report, restartInstruction } = !claudeHost ? { report: [], restartInstruction: '' } : syncAgents({
   templatesDir: join(pluginRoot, 'agent-templates'),

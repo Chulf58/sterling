@@ -27,6 +27,13 @@ const modelPin = z.object({
 // openai/gpt-5.6-terra): the form an OpenCode agent's `model:` line takes.
 export const OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+// A Claude model id as config.models.<agent>.model holds it (claude-sonnet-5-5,
+// an alias such as opus, or an id with a context suffix such as
+// claude-opus-4-6[1m]). The value lands on a frontmatter `model:` line in the
+// Claude and OpenCode agent files, so whitespace, a newline or YAML syntax is
+// refused here, when the config is written.
+export const CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
+
 // models.<agent>: the default pin plus an optional hard_task pin the conductor
 // passes when it escalates that agent. effort is REQUIRED on the default pin:
 // it fills {{EFFORT}} in the agent template, and resolveModelVars
@@ -37,7 +44,7 @@ export const OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9
 // Claude model Claude Code runs, and the OpenCode agent pins opencode_model
 // when it is set, anthropic/<model> otherwise.
 const agentModelEntry = z.object({
-  model: z.string(),
+  model: z.string().regex(CLAUDE_MODEL_ID_RE, 'model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines'),
   effort: effortLevel,
   hard_task: modelPin.optional(),
   opencode_model: z.string().regex(OPENCODE_MODEL_REF_RE, 'opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra').optional(),
