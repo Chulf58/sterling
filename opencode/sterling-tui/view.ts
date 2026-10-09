@@ -285,6 +285,12 @@ export function keyToUiEvent(key: KeyLike): UiEvent | undefined {
     case 'enter': return { kind: 'key', name: 'ENTER' };
     case 'escape': return { kind: 'key', name: 'ESCAPE' };
     case 'backspace': return { kind: 'key', name: 'BACKSPACE' };
+    // OpenTUI's names for these keys (its parseKeypress table: "[5~" → pageup, "[H" → home, "OP" → f1)
+    case 'pageup': return { kind: 'key', name: 'PAGE_UP' };
+    case 'pagedown': return { kind: 'key', name: 'PAGE_DOWN' };
+    case 'home': return { kind: 'key', name: 'HOME' };
+    case 'end': return { kind: 'key', name: 'END' };
+    case 'f1': return { kind: 'key', name: 'HELP' };
   }
   const ch = key.sequence ?? '';
   if (ch.length === 1 && ch >= ' ' && ch !== '\x7f') return { kind: 'char', ch };
@@ -312,10 +318,10 @@ export function paintedFg(line: Painted, colours: { muted?: string; warning?: st
 }
 
 /** Esc leaves the full view only when it has nothing of its own to cancel:
- *  an open board edit, model picker, sparring-model edit, or Knowledge query
- *  takes the Esc first, as it does in the terminal TUI. */
+ *  an open key help, board edit, model picker, sparring-model edit, or
+ *  Knowledge query takes the Esc first, as it does in the terminal TUI. */
 export function escapeLeavesView(ui: UiState): boolean {
-  if (ui.boardEdit || ui.selector || ui.sparringModelEdit !== undefined) return false;
+  if (ui.help || ui.boardEdit || ui.selector || ui.sparringModelEdit !== undefined) return false;
   if (ui.tab === KNOWLEDGE_TAB && ui.searchQuery) return false;
   return true;
 }

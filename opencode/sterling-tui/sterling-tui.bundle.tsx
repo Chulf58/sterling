@@ -11365,19 +11365,59 @@ function fitTabs(tabs, width) {
 function footerFor(ui, tabCount, width) {
   const tabs = `1-${tabCount} tabs`;
   let text;
-  if (ui.tab === TASKS_TAB)
-    text = ui.boardEdit ? "editing \xB7 enter save \xB7 esc cancel" : `${tabs} \xB7 \u2191\u2193 \xB7 enter expand \xB7 e edit \xB7 q quit`;
+  if (ui.help)
+    text = "\u2191\u2193 PgUp PgDn scroll \xB7 any other key closes";
+  else if (ui.tab === TASKS_TAB)
+    text = ui.boardEdit ? "editing \xB7 enter save \xB7 esc cancel" : `${tabs} \xB7 enter open \xB7 e edit \xB7 ? help \xB7 q quit`;
   else if (ui.tab === KNOWLEDGE_TAB)
-    text = "type to search \xB7 esc clear \xB7 ^f state \xB7 \u2190\u2192 tabs";
+    text = "type to search \xB7 esc clear \xB7 ^f state \xB7 F1 help";
   else if (ui.tab === QUEUE_TAB)
-    text = `${tabs} \xB7 \u2191\u2193 pending \xB7 wheel scrolls \xB7 q quit`;
+    text = `${tabs} \xB7 \u2191\u2193 pending \xB7 wheel \xB7 ? help \xB7 q quit`;
   else if (ui.tab === AGENTS_TAB)
-    text = `\u2190/\u2192 or ${tabs} \xB7 q quit`;
+    text = `\u2190/\u2192 or ${tabs} \xB7 \u2191\u2193 scroll \xB7 ? help \xB7 q quit`;
   else if (ui.tab === GITHUB_TAB)
-    text = `${tabs} \xB7 \u2191\u2193 scroll \xB7 r refresh \xB7 q quit`;
+    text = `${tabs} \xB7 \u2191\u2193 \xB7 r refresh \xB7 ? help \xB7 q quit`;
   else
-    text = `${tabs} \xB7 enter change \xB7 esc cancel \xB7 q quit`;
+    text = `${tabs} \xB7 enter change \xB7 esc \xB7 ? help \xB7 q quit`;
   return clipEllipsis(text, width);
+}
+var HELP_LINES = [
+  "Keys",
+  "\u2190/\u2192 or tab   previous / next tab",
+  "1-9          go to that tab (not on Knowledge)",
+  "\u2191/\u2193          move the selection, or scroll",
+  "PgUp/PgDn    move or scroll a page",
+  "Home/End     first / last row, top / bottom",
+  "enter/space  open, fold, select or change",
+  "click        the same as enter on that row",
+  "wheel        scroll; right-click folds all",
+  "e            edit the task (Tasks)",
+  "type, esc    search, clear it (Knowledge)",
+  "^f           article state filter (Knowledge)",
+  "r            refresh GitHub now",
+  "esc          cancel a picker or an edit",
+  "? or F1      this help (F1 on Knowledge)",
+  "q            quit; asks first, q again quits",
+  "ctrl-c       quit at once, from anywhere"
+];
+var QUIT_PROMPT = "quit? q again quits, any other key stays";
+function clampScroll(scroll, total, window) {
+  const max = Number.isFinite(window) ? Math.max(0, total - window) : 0;
+  return Math.max(0, Math.min(scroll, max));
+}
+function helpDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, agents, github) {
+  const lines = HELP_LINES.map((text, i) => ({ text: clipEllipsis(text, width), kind: i === 0 ? "title" : "body" }));
+  return {
+    tabs,
+    rows: [{ id: "help", type: "help", selected: false, expanded: false, lines, screenRow: 0 }],
+    footer: footerFor(ui, visibleTabs(agents, github).length, width),
+    notice: noticeFor(ui, width),
+    strip: githubStrip(github, width),
+    banner,
+    projectName,
+    bodyTop,
+    scroll: clampScroll(ui.help?.scroll ?? 0, lines.length, maxBodyLines)
+  };
 }
 var noticeFor = (ui, width) => ui.notice ? clipEllipsis(`\u26A0 ${ui.notice}`, width) : void 0;
 var clockOf = (ms) => new Date(ms).toTimeString().slice(0, 5);
@@ -11535,13 +11575,15 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, max
     scroll
   };
 }
-function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents, height = Infinity, github) {
-  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents, height, github).state;
+function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents, height = Infinity, github, agentsLines = 0) {
+  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents, height, github, agentsLines).state;
 }
-function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents, height = Infinity, github) {
+function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents, height = Infinity, github, agentsLines = 0) {
   const banner = bannerLines(width, showBanner, height);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
   const tabs = fitTabs(tabsFor(store, ui.tab, agents, github), width);
+  if (ui.help)
+    return { ui, state: helpDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, agents, github), nodes: [], cursor: ui.cursor };
   if (ui.tab === SYSTEM_TAB)
     return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents, github), nodes: [], cursor: ui.cursor };
   if (ui.tab === GITHUB_TAB && github)
@@ -11643,8 +11685,7 @@ function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinit
       ...hidden > 0 ? { overflow: `\u2026 ${hidden} more pending` } : {}
     };
   } else {
-    const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
-    scroll = Math.max(0, Math.min(ui.scroll ?? 0, maxScroll));
+    scroll = clampScroll(ui.scroll ?? 0, ui.tab === AGENTS_TAB ? agentsLines : totalBodyLines, maxBodyLines);
   }
   const searchActive = ui.tab === KNOWLEDGE_TAB;
   const state = {
@@ -11685,13 +11726,69 @@ function screenLineToRow(state, line1, maxBodyLines = Infinity) {
 }
 function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadSha = defaultResolveHeadSha, frame2) {
   const drawn = frame2 !== void 0 && frame2.ui === ui ? frame2 : void 0;
-  const nodes = drawn ? drawn.nodes : nodesFor(store, ui, knowledge);
-  const cursor = drawn ? drawn.cursor : ui.tab === SYSTEM_TAB ? ui.cursor : resolveCursor(ui, nodes);
-  const base2 = cursor === ui.cursor ? ui : { ...ui, cursor };
+  const start = ui.quitConfirm && !(event.kind === "char" && event.ch === "q") ? withoutQuitConfirm(ui) : ui;
+  if (start.help)
+    return reduceHelp(start, event, viewport);
+  const nodes = drawn ? drawn.nodes : nodesFor(store, start, knowledge);
+  const cursor = drawn ? drawn.cursor : start.tab === SYSTEM_TAB ? start.cursor : resolveCursor(start, nodes);
+  const base2 = cursor === start.cursor ? start : { ...start, cursor };
   const out = reduceNodes(store, base2, event, viewport, knowledge, roster, resolveHeadSha, nodes, drawn);
   if (out.ui === base2)
-    return { ui, effects: out.effects };
+    return { ui: start, effects: out.effects };
   return { ui: holdSelection(base2, out.ui, nodes), effects: out.effects };
+}
+function withoutQuitConfirm(ui) {
+  const { quitConfirm: _armed, ...rest } = ui;
+  if (rest.notice !== QUIT_PROMPT)
+    return rest;
+  const { notice: _prompt, ...clean } = rest;
+  return clean;
+}
+function reduceHelp(ui, event, viewport) {
+  const window = viewport.maxBodyLines ?? Infinity;
+  const at = ui.help?.scroll ?? 0;
+  const scrollTo = (n) => {
+    const scroll = clampScroll(n, HELP_LINES.length, window);
+    return { ui: scroll === at ? ui : { ...ui, help: { scroll } }, effects: [] };
+  };
+  const page = Number.isFinite(window) ? Math.max(1, window - 1) : HELP_LINES.length;
+  if (event.kind === "wheel")
+    return scrollTo(at + (event.dy > 0 ? 3 : -3));
+  if (event.kind === "key") {
+    switch (event.name) {
+      case "QUIT":
+        return { ui, effects: [{ type: "quit" }] };
+      case "UP":
+        return scrollTo(at - 1);
+      case "DOWN":
+        return scrollTo(at + 1);
+      case "PAGE_UP":
+        return scrollTo(at - page);
+      case "PAGE_DOWN":
+        return scrollTo(at + page);
+      case "HOME":
+        return scrollTo(0);
+      case "END":
+        return scrollTo(HELP_LINES.length);
+    }
+  }
+  const { help: _closed, ...rest } = ui;
+  return { ui: rest, effects: [] };
+}
+function pageTarget(rows, from, dir, window) {
+  if (!rows.length)
+    return 0;
+  const at = Math.max(0, Math.min(from, rows.length - 1));
+  const step = Number.isFinite(window) ? Math.max(1, window - 1) : Infinity;
+  const target = rows[at].screenRow + dir * step;
+  let i = at;
+  if (dir > 0)
+    while (i + 1 < rows.length && rows[i + 1].screenRow <= target)
+      i++;
+  else
+    while (i - 1 >= 0 && rows[i - 1].screenRow >= target)
+      i--;
+  return i === at ? Math.max(0, Math.min(at + dir, rows.length - 1)) : i;
 }
 function holdSelection(prev, next, nodes) {
   const fresh = next.tab !== prev.tab || next.searchQuery !== prev.searchQuery || next.stateFilter !== prev.stateFilter;
@@ -11734,6 +11831,52 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
     return { ...ui, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
   };
   const moveCursor = (delta) => revealAt(clamp(ui.cursor + delta));
+  const pickerOptions = (sel) => sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key]).length : effortOptions(sel.key).length;
+  const revealPicker = (next) => {
+    const sel = next.selector;
+    if (!sel || !roster || !Number.isFinite(maxBodyLines))
+      return next;
+    const st = buildSelf(next);
+    const row = st.rows.find((r) => r.id === `sys:${sel.key}`);
+    if (!row)
+      return next;
+    const options = pickerOptions(sel);
+    const line = row.screenRow + row.lines.length - options + sel.highlight;
+    let scroll = st.scroll;
+    if (line < scroll)
+      scroll = line + 1 - row.screenRow <= maxBodyLines ? row.screenRow : line;
+    else if (line + 1 > scroll + maxBodyLines)
+      scroll = line + 1 - maxBodyLines;
+    const total = st.rows.length ? st.rows[st.rows.length - 1].screenRow + st.rows[st.rows.length - 1].lines.length : 0;
+    return { ...next, scroll: clampScroll(scroll, total, maxBodyLines) };
+  };
+  const scrollOnly = (name) => {
+    const github = ui.tab === GITHUB_TAB && viewport.github !== void 0;
+    if (!github && ui.tab !== AGENTS_TAB)
+      return void 0;
+    const total = github ? (drawn ? drawn.state : buildSelf(ui)).rows[0]?.lines.length ?? 0 : viewport.agentsLines ?? 0;
+    const at = clampScroll(ui.scroll ?? 0, total, maxBodyLines);
+    const page = Number.isFinite(maxBodyLines) ? Math.max(1, maxBodyLines - 1) : total;
+    const to = name === "UP" ? at - 1 : name === "DOWN" ? at + 1 : name === "PAGE_UP" ? at - page : name === "PAGE_DOWN" ? at + page : name === "HOME" ? 0 : total;
+    const scroll = clampScroll(to, total, maxBodyLines);
+    return scroll === (ui.scroll ?? 0) ? ui : { ...ui, scroll };
+  };
+  const clickSystem = (state, index, line1) => {
+    const row = state.rows[index];
+    if (row.type !== "system" || row.id === "sys:storage" || ui.sparringModelEdit !== void 0 || !roster)
+      return { ui, effects };
+    const enter = { kind: "key", name: "ENTER" };
+    const sel = ui.selector;
+    if (sel) {
+      const options = pickerOptions(sel);
+      const k = line1 - 1 - state.bodyTop + state.scroll - row.screenRow - (row.lines.length - options);
+      if (row.id !== `sys:${sel.key}` || k < 0 || k >= options)
+        return { ui, effects };
+      return reduceNodes(store, { ...ui, selector: { ...sel, highlight: k } }, enter, viewport, knowledge, roster, resolveHeadSha, nodes, drawn);
+    }
+    const cursor = state.rows.filter((r) => r.type === "system").indexOf(row);
+    return reduceNodes(store, { ...ui, cursor }, enter, viewport, knowledge, roster, resolveHeadSha, nodes, drawn);
+  };
   const toggle = (id) => ui.expanded.includes(id) ? ui.expanded.filter((x) => x !== id) : [...ui.expanded, id];
   const activate = (index) => {
     const node = nodes[index];
@@ -11757,6 +11900,12 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
   };
   switch (event.kind) {
     case "key":
+      if (event.name === "QUIT") {
+        effects.push({ type: "quit" });
+        return { ui, effects };
+      }
+      if (event.name === "HELP")
+        return { ui: { ...ui, help: { scroll: 0 } }, effects };
       if (ui.tab === TASKS_TAB && ui.boardEdit) {
         const be = ui.boardEdit;
         switch (event.name) {
@@ -11817,19 +11966,26 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
         const editing = ui.sparringModelEdit !== void 0;
         switch (event.name) {
           case "UP":
-            if (sel)
-              return { ui: { ...ui, selector: { ...sel, highlight: Math.max(0, sel.highlight - 1) } }, effects };
-            if (editing)
-              return { ui, effects };
-            return { ui: revealAt(sysClamp(ui.cursor - 1)), effects };
-          case "DOWN": {
+          case "DOWN":
+          case "PAGE_UP":
+          case "PAGE_DOWN":
+          case "HOME":
+          case "END": {
+            const name = event.name;
             if (sel) {
-              const n = sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key]).length : effortOptions(sel.key).length;
-              return { ui: { ...ui, selector: { ...sel, highlight: Math.min(Math.max(0, n - 1), sel.highlight + 1) } }, effects };
+              const n = pickerOptions(sel);
+              const page = Number.isFinite(maxBodyLines) ? Math.max(1, maxBodyLines - 1) : n;
+              const to = name === "UP" ? sel.highlight - 1 : name === "DOWN" ? sel.highlight + 1 : name === "PAGE_UP" ? sel.highlight - page : name === "PAGE_DOWN" ? sel.highlight + page : name === "HOME" ? 0 : n - 1;
+              return { ui: revealPicker({ ...ui, selector: { ...sel, highlight: Math.max(0, Math.min(to, n - 1)) } }), effects };
             }
             if (editing)
               return { ui, effects };
-            return { ui: revealAt(sysClamp(ui.cursor + 1)), effects };
+            if (name === "UP" || name === "DOWN")
+              return { ui: revealAt(sysClamp(ui.cursor + (name === "UP" ? -1 : 1))), effects };
+            if (name === "HOME" || name === "END")
+              return { ui: revealAt(sysClamp(name === "HOME" ? 0 : Infinity)), effects };
+            const selectable = buildSelf(ui).rows.filter((r) => r.type === "system" && r.id !== "sys:storage");
+            return { ui: revealAt(sysClamp(pageTarget(selectable, ui.cursor, name === "PAGE_UP" ? -1 : 1, maxBodyLines))), effects };
           }
           case "ESCAPE":
             if (sel)
@@ -11876,7 +12032,7 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
               if (roster.catalog.entries.length === 0) {
                 return { ui: { ...ui, cursor, notice: "model catalog empty or invalid \u2014 nothing to pick; refresh the catalog first" }, effects };
               }
-              return { ui: { ...ui, cursor, selector: { key, stage: "model", highlight: 0 }, notice: void 0 }, effects };
+              return { ui: revealPicker({ ...ui, cursor, selector: { key, stage: "model", highlight: 0 }, notice: void 0 }), effects };
             }
             if (sel.stage === "model") {
               const keyConfig = roster.configModels[sel.key];
@@ -11894,7 +12050,7 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
                 return { ui: { ...ui, selector: void 0, notice: void 0 }, effects };
               }
               const entry = option?.kind === "entry" ? option.entry : void 0;
-              return { ui: { ...ui, selector: { key: sel.key, stage: "effort", highlight: 0, model: entry ? entry.id : "" } }, effects };
+              return { ui: revealPicker({ ...ui, selector: { key: sel.key, stage: "effort", highlight: 0, model: entry ? entry.id : "" } }), effects };
             }
             const efforts = effortOptions(sel.key);
             const effort = efforts[sel.highlight] ?? efforts[0];
@@ -11920,9 +12076,6 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
         }
       }
       switch (event.name) {
-        case "QUIT":
-          effects.push({ type: "quit" });
-          return { ui, effects };
         case "ESCAPE":
           if (ui.tab === KNOWLEDGE_TAB) {
             return { ui: { ...ui, searchQuery: "", cursor: 0, scroll: 0 }, effects };
@@ -11947,14 +12100,24 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
           return { ui: switchTab(stepTab(1)), effects };
         case "UP":
         case "DOWN": {
-          if (ui.tab === GITHUB_TAB && viewport.github) {
-            const st = drawn ? drawn.state : buildSelf(ui);
-            const total = st.rows[0]?.lines.length ?? 0;
-            const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - maxBodyLines) : 0;
-            const scroll = Math.max(0, Math.min((ui.scroll ?? 0) + (event.name === "UP" ? -1 : 1), max));
-            return { ui: scroll === (ui.scroll ?? 0) ? ui : { ...ui, scroll }, effects };
-          }
+          const scrolled = scrollOnly(event.name);
+          if (scrolled)
+            return { ui: scrolled, effects };
           return { ui: moveCursor(event.name === "UP" ? -1 : 1), effects };
+        }
+        case "PAGE_UP":
+        case "PAGE_DOWN":
+        case "HOME":
+        case "END": {
+          const scrolled = scrollOnly(event.name);
+          if (scrolled)
+            return { ui: scrolled, effects };
+          if (event.name === "HOME")
+            return { ui: revealAt(0), effects };
+          if (event.name === "END")
+            return { ui: revealAt(clamp(nodes.length - 1)), effects };
+          const st = drawn ? drawn.state : buildSelf(ui);
+          return { ui: revealAt(clamp(pageTarget(st.rows, ui.cursor, event.name === "PAGE_UP" ? -1 : 1, bodyWindow(st, maxBodyLines)))), effects };
         }
         case "ENTER":
           return { ui: activate(clamp(ui.cursor)), effects };
@@ -11972,12 +12135,17 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
       if (ui.tab === TASKS_TAB && ui.boardEdit) {
         return { ui: { ...ui, boardEdit: { ...ui.boardEdit, text: ui.boardEdit.text + ch } }, effects };
       }
+      if (ch === "?" && ui.tab !== KNOWLEDGE_TAB)
+        return { ui: { ...ui, help: { scroll: 0 } }, effects };
       if (ui.tab === KNOWLEDGE_TAB) {
         return { ui: { ...ui, searchQuery: ui.searchQuery + ch, cursor: 0, scroll: 0 }, effects };
       }
       if (ch === "q") {
-        effects.push({ type: "quit" });
-        return { ui, effects };
+        if (ui.quitConfirm) {
+          effects.push({ type: "quit" });
+          return { ui, effects };
+        }
+        return { ui: { ...ui, quitConfirm: true, notice: QUIT_PROMPT }, effects };
       }
       if (ch === "r" && viewport.github) {
         effects.push({ type: "github_refresh" });
@@ -12024,9 +12192,10 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
         return { ui: { ...ui, historyScroll: Math.max(0, Math.min((ui.historyScroll ?? 0) + step, max2)) }, effects };
       }
       const rows = st.rows;
-      const total = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
+      const total = ui.tab === AGENTS_TAB ? viewport.agentsLines ?? 0 : rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
       const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - bodyWindow(st, maxBodyLines)) : 0;
-      return { ui: { ...ui, scroll: Math.max(0, Math.min((ui.scroll ?? 0) + step, max)) }, effects };
+      const at = Math.min(ui.scroll ?? 0, max);
+      return { ui: { ...ui, scroll: Math.max(0, Math.min(at + step, max)) }, effects };
     }
     case "click": {
       const state = drawn ? drawn.state : buildSelf(ui);
@@ -12041,6 +12210,8 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
         return { ui, effects };
       }
       const row = screenLineToRow(state, event.y, maxBodyLines);
+      if (row !== -1 && ui.tab === SYSTEM_TAB)
+        return roster ? clickSystem(state, row, event.y) : { ui, effects };
       if (row !== -1)
         return { ui: activate(row), effects };
       return { ui, effects };
@@ -13128,7 +13299,7 @@ function openDashboard(storePath, options = {}) {
   }
   let frame2;
   let builds = 0;
-  const vpKey = (vp) => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null, vp.github ? vp.github.version : null]);
+  const vpKey = (vp) => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null, vp.github ? vp.github.version : null, vp.agentsLines ?? null]);
   const today = () => (/* @__PURE__ */ new Date()).toDateString();
   function currentFrame(vp) {
     let dataVersion;
@@ -13144,7 +13315,7 @@ function openDashboard(storePath, options = {}) {
     if (frame2 && dataVersion !== void 0 && frame2.dataVersion === dataVersion && frame2.ui === ui && frame2.roster === roster && frame2.vp === key && frame2.day === day)
       return frame2.built;
     builds++;
-    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height, vp.github);
+    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height, vp.github, vp.agentsLines);
     frame2 = { vp: key, viewport: vp, day, ui, roster, dataVersion, built };
     return built;
   }
@@ -13563,6 +13734,8 @@ function openDashboard(storePath, options = {}) {
       const pointer = event.kind === "click" || event.kind === "wheel";
       const hitVp = pointer && frame2 && frame2.ui === ui && frame2.roster === roster ? frame2.viewport : vp;
       const drawn = frame2 && frame2.ui === ui && frame2.roster === roster && frame2.vp === vpKey(hitVp) ? frame2.built : void 0;
+      if (quitArmed && event.kind === "char" && event.ch === "q")
+        return true;
       const result = reduce(store, ui, event, hitVp, stores, roster, resolveProjectHeadSha, drawn);
       ui = result.ui;
       if (!result.effects.some((e) => e.type === "quit"))
@@ -16100,6 +16273,17 @@ function keyToUiEvent(key) {
       return { kind: "key", name: "ESCAPE" };
     case "backspace":
       return { kind: "key", name: "BACKSPACE" };
+    // OpenTUI's names for these keys (its parseKeypress table: "[5~" → pageup, "[H" → home, "OP" → f1)
+    case "pageup":
+      return { kind: "key", name: "PAGE_UP" };
+    case "pagedown":
+      return { kind: "key", name: "PAGE_DOWN" };
+    case "home":
+      return { kind: "key", name: "HOME" };
+    case "end":
+      return { kind: "key", name: "END" };
+    case "f1":
+      return { kind: "key", name: "HELP" };
   }
   const ch = key.sequence ?? "";
   if (ch.length === 1 && ch >= " " && ch !== "\x7F") return { kind: "char", ch };
@@ -16112,7 +16296,7 @@ function paintedFg(line, colours) {
   return line.warn ? colours.warning : line.dim ? colours.muted : void 0;
 }
 function escapeLeavesView(ui) {
-  if (ui.boardEdit || ui.selector || ui.sparringModelEdit !== void 0) return false;
+  if (ui.help || ui.boardEdit || ui.selector || ui.sparringModelEdit !== void 0) return false;
   if (ui.tab === KNOWLEDGE_TAB && ui.searchQuery) return false;
   return true;
 }

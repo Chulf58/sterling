@@ -201,6 +201,8 @@ test('controller: q on the Tasks tab reports quit', async () => {
   const f = fixture();
   const ctl = openDashboard(f.storePath);
   try {
+    // q asks first (board fb516a43); the second q reports the quit
+    assert.equal(await ctl.handle({ kind: 'char', ch: 'q' }, VP), false);
     assert.equal(await ctl.handle({ kind: 'char', ch: 'q' }, VP), true);
     assert.equal(await ctl.handle({ kind: 'key', name: 'DOWN' }, VP), false);
   } finally {
