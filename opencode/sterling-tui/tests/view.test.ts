@@ -8,7 +8,7 @@ import { SterlingStore } from '@sterling/store';
 import { initialUi } from '@sterling/tui/dist/state.js';
 import { mulberry32, POOL_SIZE, SEQUENCE, TILE_BG, DONE_FADE, fadeToTile } from '@sterling/tui/dist/avatars/index.js';
 import * as view from '../view.ts';
-import { SIDEBAR_WIDTH, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readSidebarSummary, readSubagents, sidebarLines, bodyLinesFor, emptyAvatars, portraitLines, stepAvatars, subagentRowLines, subagentSpanLines, PORTRAIT_HEIGHT, PORTRAIT_WIDTH, type SpanLine, type SubagentRow, type SidebarSummary, type SubagentSource } from '../view.ts';
+import { SIDEBAR_WIDTH, escapeLeavesView, findStorePath, footerLines, paintedFg, guarded, keyToUiEvent, readSidebarSummary, readSubagents, sidebarLines, bodyLinesFor, emptyAvatars, portraitLines, stepAvatars, subagentRowLines, subagentSpanLines, PORTRAIT_HEIGHT, PORTRAIT_WIDTH, type SpanLine, type SubagentRow, type SidebarSummary, type SubagentSource } from '../view.ts';
 
 const ID = '0123abcd-0000-4000-8000-000000000000';
 
@@ -297,4 +297,16 @@ test('full view: the controller body window shrinks by the sub-agent block so th
   assert.equal(bodyLinesFor(40, 0), 32);
   assert.equal(bodyLinesFor(40, 1 + 1 + 2 * PORTRAIT_HEIGHT + 1), 32 - 9);
   assert.equal(bodyLinesFor(20, 50), 3, 'never below three rows');
+});
+
+test('full view: the notice row is drawn in the warning colour, the footer muted, and no notice leaves a blank row', () => {
+  const colours = { muted: '#808080', warning: '#ffaa00' };
+  const [notice, footer] = footerLines({ notice: '⚠ selection not handed to the next prompt', footer: '1-4 tabs · q quit' });
+  assert.deepEqual(notice, { text: '⚠ selection not handed to the next prompt', warn: true });
+  assert.equal(paintedFg(notice!, colours), '#ffaa00', 'the host warning colour (theme.text.feedback.warning.base)');
+  assert.equal(paintedFg(footer!, colours), '#808080', 'the footer stays muted');
+  const [blank] = footerLines({ footer: 'q quit' });
+  assert.deepEqual(blank, { text: '' });
+  assert.equal(paintedFg(blank!, colours), undefined, 'a blank row takes the default colour');
+  assert.equal(paintedFg({ text: 'x', warn: true }, { muted: '#808080' }), undefined, 'a theme without a warning colour falls back to the default text colour, never muted');
 });

@@ -18,7 +18,7 @@ import { useKeyboard, useTerminalDimensions } from '@opentui/solid';
 import { openDashboard, type DashboardController } from '@sterling/tui/dist/controller.js';
 import { TASKS_TAB, type DashboardState } from '@sterling/tui/dist/state.js';
 import { ANIMATION_MS } from '@sterling/tui/dist/avatars/index.js';
-import { SIDEBAR_WIDTH, bodyLinesFor, emptyAvatars, escapeLeavesView, findStorePath, guarded, keyToUiEvent, readSidebarSummary, readSubagents, sidebarLines, stepAvatars, subagentSpanLines, type AvatarState, type Guarded, type KeyLike, type ModelRefLike, type Span, type SpanLine, type SubagentRow, type SubagentSession, type TokenUsageLike } from './view.ts';
+import { SIDEBAR_WIDTH, bodyLinesFor, emptyAvatars, escapeLeavesView, findStorePath, footerLines, guarded, keyToUiEvent, paintedFg, readSidebarSummary, readSubagents, sidebarLines, stepAvatars, subagentSpanLines, type AvatarState, type Guarded, type KeyLike, type ModelRefLike, type Span, type SpanLine, type SubagentRow, type SubagentSession, type TokenUsageLike, type Painted } from './view.ts';
 
 const ROUTE = 'sterling';
 /** OpenCode events that change a sub-agent row: a child appears, starts or ends a run, finishes a step. */
@@ -31,7 +31,8 @@ type Route = { type: string; [k: string]: unknown };
 interface Api {
   /** OpenCode 2's project location; undefined outside a project. */
   location?: { directory: string };
-  theme?: { text?: { base?: string; muted?: string }; background?: { base?: string; raised?: { base?: string; high?: string } } };
+  /** text.feedback.warning.base: OpenCode 2.0.23 reads it for its own warnings */
+  theme?: { text?: { base?: string; muted?: string; feedback?: { warning?: { base?: string } } }; background?: { base?: string; raised?: { base?: string; high?: string } } };
   keymap: {
     layer(input: () => unknown): void;
     shortcuts(id: string): readonly string[];
@@ -190,15 +191,6 @@ function Sidebar(props: { api: Api; sessionID: string }) {
   );
 }
 
-interface Painted {
-  text: string;
-  selected?: boolean;
-  dim?: boolean;
-}
-
-/** What the full view draws below the board body and the sub-agent block: a blank line, the footer. */
-const footerLines = (st: DashboardState): Painted[] => [{ text: '' }, { text: st.footer, dim: true }];
-
 /** Flatten a DashboardState into display lines the way render.ts paints it:
  *  header, tab bar, search/spacer, the scrolled body window, the queue tab's
  *  completed and activity sections, the footer. */
@@ -232,6 +224,7 @@ function FullView(props: { api: Api; sessionID: () => string | undefined; close:
   const [failure, setFailure] = createSignal<string | undefined>();
   const muted = () => props.api.theme?.text?.muted;
   const highlight = () => props.api.theme?.background?.raised?.high;
+  const colours = () => ({ muted: muted(), warning: props.api.theme?.text?.feedback?.warning?.base });
   const palette = (): Palette => ({ text: props.api.theme?.text?.base, muted: muted(), surface: props.api.theme?.background?.base });
   const width = () => Math.max(20, dims().width - 2);
   /** the sub-agent block sits under the Tasks tab's board rows, for the session the view was opened from */
@@ -302,14 +295,14 @@ function FullView(props: { api: Api; sessionID: () => string | undefined; close:
           </For>
         </box>
         <For each={(view() as { lines: Painted[] }).lines}>
-          {(l) => <text fg={l.dim ? muted() : undefined} bg={l.selected ? highlight() : undefined}>{l.text || ' '}</text>}
+          {(l) => <text fg={paintedFg(l, colours())} bg={l.selected ? highlight() : undefined}>{l.text || ' '}</text>}
         </For>
         <Show when={extra().length}>
           <text> </text>
           <Index each={extra()}>{(l) => <StyledLine spans={l()} palette={palette()} />}</Index>
         </Show>
         <For each={(view() as { footer: Painted[] }).footer}>
-          {(l) => <text fg={l.dim ? muted() : undefined}>{l.text || ' '}</text>}
+          {(l) => <text fg={paintedFg(l, colours())}>{l.text || ' '}</text>}
         </For>
       </Show>
       <Show when={failure()}>

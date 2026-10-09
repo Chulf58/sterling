@@ -75,11 +75,14 @@ export interface UiState {
   /** Knowledge tab: show only feature articles in this state (ctrl-f cycles
    *  ARTICLE_STATE_FILTERS). Absent → all. Other record types are not filtered. */
   stateFilter?: string;
-  /** body scroll offset in display LINES (0-based) for the scrollable card tabs
-   *  (Tasks/Knowledge). Absent → 0. buildDashboardState clamps it to the
-   *  content height each frame; the queue tab has a fixed layout and never
-   *  scrolls. Wheel moves it; ↑/↓ adjust it to keep the selected row in view. */
+  /** body scroll offset in display LINES (0-based). Absent → 0.
+   *  buildDashboardState clamps it to the content height each frame; on the
+   *  Queue tab it scrolls the pending list inside its upper-half window. Wheel
+   *  moves it; ↑/↓ adjust it to keep the selected row in view. */
   scroll?: number;
+  /** Queue tab: scroll offset of the history list (completed + activity) in
+   *  lines, independent of the pending list's `scroll`. Absent → 0. */
+  historyScroll?: number;
   /** System tab (run r-f9a7): the inline model/effort selector state machine.
    *  Absent → the plain roster is shown; present → a picker is open on
    *  ui.selector.key (model stage, then effort stage). ESCAPE clears it. */
@@ -361,6 +364,9 @@ export interface Viewport {
   /** whether the banner is shown (STERLING_NO_BANNER=1 → false) — drives the
    *  banner height, hence bodyTop and the tab-bar click row */
   showBanner?: boolean;
+  /** pane rows: under COMPACT_BELOW_HEIGHT the banner is the 4-row scene, so
+   *  bodyTop and the tab-bar click row move with it. Absent → unbounded. */
+  height?: number;
 }
 
 export interface DashboardState {
@@ -368,7 +374,12 @@ export interface DashboardState {
   tabs: { label: string; active: boolean; index: number }[];
   rows: Row[];
   emptyMessage?: string;
+  /** the mode's key help, at most 48 columns and clipped to the pane; the
+   *  renderer pins it to the last row */
   footer: string;
+  /** a warning ('⚠ …', clipped to the pane) drawn on its own row just above
+   *  the footer in the warning colour; absent when there is none */
+  notice?: string;
   /** Knowledge-tab search bar (always-visible field), shown on the spacer line */
   searchLine?: string;
   /** queue tab only: the completed (drain log) section in the lower half —
@@ -376,6 +387,12 @@ export interface DashboardState {
   queueCompleted?: {
     /** body-line offset of the divider (fixed at half the viewport) */
     startRow: number;
+    /** lines of the pending list's window (rows above it scroll by `scroll`);
+     *  absent → startRow */
+    pendingLines?: number;
+    /** history scroll: lines of `lines` + the activity section skipped from
+     *  the top, clamped. Absent → 0 */
+    scroll?: number;
     header: string;
     lines: string[];
     /** present when pending was clipped at the divider: '… N more pending' */
@@ -515,14 +532,24 @@ export type UiEvent =
   | { kind: 'tab'; index: number } // direct tab select, 0-based; out-of-range ignored here
   | { kind: 'click'; x: number; y: number }
   | { kind: 'rightclick' }
-  | { kind: 'wheel'; dy: number };
+  | { kind: 'wheel'; dy: number; y?: number }; // y: 1-based screen line, picks the Queue tab's list
 
-/** The Knowledge tab's state column: a fixed-width `[state]` cell on feature
- *  article rows, nothing on any other row. Padded to the widest tag
- *  ('[deprecated]') so titles line up. */
-const STATE_COLUMN_WIDTH = Math.max(...ARTICLE_STATE_FILTERS.slice(1).map((n) => n.length)) + 2;
+/** One glyph per feature-article state, filling up along the lifecycle
+ *  (planned → built → wired_in → active); the expanded card's meta line names
+ *  the state in words. */
+export const STATE_GLYPHS: Readonly<Record<string, string>> = {
+  planned: '○',
+  built: '◔',
+  wired_in: '◑',
+  active: '●',
+  dormant: '◌',
+  deprecated: '×',
+};
+/** The Knowledge tab's state column: a 1-character glyph and a space on
+ *  feature article rows ('?' for a state not in STATE_GLYPHS), nothing on any
+ *  other row. */
 function stateColumn(card: Card): string {
-  return card.state ? `${`[${card.state}]`.padEnd(STATE_COLUMN_WIDTH)} ` : '';
+  return card.state ? `${STATE_GLYPHS[card.state] ?? '?'} ` : '';
 }
 
 export function cardsFor(store: SterlingStore, tab: number, expanded: string[] = []): Card[] {
@@ -1047,6 +1074,77 @@ function tabsFor(store: SterlingStore, activeTab: number, agents?: AgentsTab): {
   });
 }
 
+type TabCell = { label: string; active: boolean; index: number };
+
+/**
+ * Fit the tab bar into `width` columns (each cell is ' label '). Steps, first
+ * fit wins: full labels; inactive tabs drop their '(…)' count; the active tab
+ * drops its count too; inactive tabs shorten to 3 letters, then to 1; the
+ * active name is clipped with an ellipsis. When even 1-letter cells for every
+ * tab do not fit, the bar becomes a window: the active tab (clipped to the
+ * pane) plus as many 1-letter neighbours as fit, nearest first. Works from the
+ * label text, so a count of any length ('Agents (2 running · 3 quiet)') goes
+ * the same way. The result may be a subset: each cell keeps its TABS `index`,
+ * and the click hit-test measures these cells, so every drawn tab is
+ * clickable. Under 3 columns no cell fits at all.
+ */
+export function fitTabs(tabs: TabCell[], width: number): TabCell[] {
+  if (!Number.isFinite(width)) return tabs;
+  const bare = (l: string): string => l.replace(/ \(.*\)$/, '');
+  const steps: [(l: string) => string, (l: string) => string][] = [
+    [(l) => l, (l) => l],
+    [(l) => l, bare],
+    [bare, bare],
+    [bare, (l) => bare(l).slice(0, 3)],
+    [bare, (l) => bare(l).slice(0, 1)],
+  ];
+  for (const [active, inactive] of steps) {
+    const labels = tabs.map((t) => (t.active ? active(t.label) : inactive(t.label)));
+    if (labels.reduce((n, l) => n + l.length + 2, 0) <= width) return tabs.map((t, i) => ({ ...t, label: labels[i]! }));
+  }
+  // every tab as a cell still fits when the active name keeps at least 3 columns ('Sy…')
+  const room = width - 3 * tabs.filter((t) => !t.active).length - 2;
+  const activeName = bare(tabs.find((t) => t.active)?.label ?? '');
+  if (room >= Math.min(3, activeName.length)) return tabs.map((t) => ({ ...t, label: t.active ? clipEllipsis(bare(t.label), room) : bare(t.label).slice(0, 1) }));
+  const ai = Math.max(0, tabs.findIndex((t) => t.active));
+  const window: TabCell[] = [{ ...tabs[ai]!, label: clipEllipsis(bare(tabs[ai]!.label), Math.max(1, width - 2)) }];
+  let used = window[0]!.label.length + 2;
+  let lo = ai;
+  let hi = ai;
+  for (let grew = true; grew; ) {
+    grew = false;
+    if (hi + 1 < tabs.length && used + 3 <= width) {
+      hi += 1;
+      window.push({ ...tabs[hi]!, label: bare(tabs[hi]!.label).slice(0, 1) });
+      used += 3;
+      grew = true;
+    }
+    if (lo > 0 && used + 3 <= width) {
+      lo -= 1;
+      window.unshift({ ...tabs[lo]!, label: bare(tabs[lo]!.label).slice(0, 1) });
+      used += 3;
+      grew = true;
+    }
+  }
+  return window;
+}
+
+/** The key help for the tab and mode on screen: at most 48 columns (the
+ *  launcher's 35% pane), then clipped to the pane. */
+function footerFor(ui: UiState, tabCount: number, width: number): string {
+  const tabs = `1-${tabCount} tabs`;
+  let text: string;
+  if (ui.tab === TASKS_TAB) text = ui.boardEdit ? 'editing · enter save · esc cancel' : `${tabs} · ↑↓ · enter expand · e edit · q quit`;
+  else if (ui.tab === KNOWLEDGE_TAB) text = 'type to search · esc clear · ^f state · ←→ tabs';
+  else if (ui.tab === QUEUE_TAB) text = `${tabs} · ↑↓ pending · wheel scrolls · q quit`;
+  else if (ui.tab === AGENTS_TAB) text = `←/→ or ${tabs} · q quit`;
+  else text = `${tabs} · enter change · esc cancel · q quit`;
+  return clipEllipsis(text, width);
+}
+
+/** The one notice row: the transient ui.notice as a '⚠ ' warning, clipped. */
+const noticeFor = (ui: UiState, width: number): string | undefined => (ui.notice ? clipEllipsis(`⚠ ${ui.notice}`, width) : undefined);
+
 function systemDashboardState(
   ui: UiState,
   width: number,
@@ -1061,9 +1159,10 @@ function systemDashboardState(
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows: Row[] = [];
   let screenRow = 0;
-  // the ⚠ notice (findings 24/43, 41/43) rides view.banner from buildSystemTab, so
-  // it renders here through the normal banner loop below.
-  for (const text of view.banner) {
+  // the ⚠ notice (findings 24/43, 41/43) leads view.banner from buildSystemTab;
+  // it is drawn on the notice row instead (state.notice), so only the catalog
+  // status rows go into the body here.
+  for (const text of view.banner.slice(ui.notice ? 1 : 0)) {
     rows.push({ id: `sysbanner:${screenRow}`, type: 'system-banner', selected: false, expanded: false, lines: [{ text, kind: 'meta' }], screenRow });
     screenRow += 1;
   }
@@ -1109,7 +1208,8 @@ function systemDashboardState(
     tabs,
     rows,
     emptyMessage: view.rows.length ? undefined : '(no configured models)',
-    footer: `←/→ or 1-${visibleTabs(agents).length} tabs · ↑/↓ rows · enter change model/effort · esc cancel · q quit`,
+    footer: footerFor(ui, visibleTabs(agents).length, width),
+    notice: noticeFor(ui, width),
     banner,
     projectName,
     bodyTop,
@@ -1128,21 +1228,23 @@ export interface DashboardFrame {
   cursor: number;
 }
 
-export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab): DashboardState {
-  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents).state;
+export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab, height = Infinity): DashboardState {
+  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents, height).state;
 }
 
-export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab): DashboardFrame {
-  const banner = bannerLines(width, showBanner);
+export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab, height = Infinity): DashboardFrame {
+  // the pane height picks the compact scene under COMPACT_BELOW_HEIGHT rows;
+  // the host passes the same height to visibleBodyLines, so draw and clicks agree
+  const banner = bannerLines(width, showBanner, height);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
   // Computed ONCE here and threaded into every projection, so the Tasks count
   // and the widths the hit-test measures can never come from two places.
-  const tabs = tabsFor(store, ui.tab, agents);
+  const tabs = fitTabs(tabsFor(store, ui.tab, agents), width);
   // System tab (run r-f9a7): its own projection, not a card/knowledge list.
   if (ui.tab === SYSTEM_TAB) return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents), nodes: [], cursor: ui.cursor };
   const nodes = nodesFor(store, ui, knowledge);
   const cursor = resolveCursor(ui, nodes);
-  let rows: Row[] = [];
+  const rows: Row[] = [];
   let screenRow = 0;
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i];
@@ -1214,46 +1316,47 @@ export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = I
     rows.push({ id, type, selected, expanded, lines, screenRow });
     screenRow += lines.length;
   }
-  // queue tab: fixed half-split — pending rows are TRUNCATED in the state
-  // layer so the click hit-test and the screen agree by construction; the
-  // completed (drain log) section owns the lower half (§3.2.7/§11)
+  const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
+  // queue tab: fixed half-split. The pending list owns the upper half as a
+  // window of `pendingLines` lines scrolled by ui.scroll (the renderer and
+  // screenLineToRow both stop at it, so a row below the window is neither
+  // drawn nor clickable); the history list (completed, then activity) owns the
+  // lower half under a fixed header and scrolls by ui.historyScroll
+  // (§3.2.7/§11). An unbounded viewport shows everything and never scrolls.
   let queueCompleted: DashboardState['queueCompleted'];
   let queueActivity: DashboardState['queueActivity'];
+  let scroll: number;
   if (ui.tab === QUEUE_TAB) {
-    const totalLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
-    const startRow = Number.isFinite(maxBodyLines) ? Math.max(1, Math.floor(maxBodyLines / 2)) : totalLines;
-    let overflow: string | undefined;
-    if (totalLines > startRow) {
-      const keep: Row[] = [];
-      for (const r of rows) {
-        if (r.screenRow + r.lines.length <= startRow - 1) keep.push(r);
-        else break;
-      }
-      overflow = `… ${rows.length - keep.length} more pending`;
-      rows = keep;
-    }
+    const finite = Number.isFinite(maxBodyLines);
+    const startRow = finite ? Math.max(1, Math.floor(maxBodyLines / 2)) : totalBodyLines;
+    // the row above the divider carries the overflow note when pending does not fit
+    const pendingLines = totalBodyLines > startRow ? startRow - 1 : startRow;
+    scroll = Math.max(0, Math.min(ui.scroll ?? 0, totalBodyLines - pendingLines));
+    const hidden = rows.filter((r) => r.screenRow < scroll || r.screenRow + r.lines.length > scroll + pendingLines).length;
     const completed = completedQueueLines(store);
-    queueCompleted = {
-      startRow,
-      header: '— completed —',
-      lines: completed.length ? completed : ['(nothing completed yet)'],
-      ...(overflow ? { overflow } : {}),
-    };
     const activity = activityLines(store);
     queueActivity = {
       header: '— activity —',
       lines: activity.length ? activity : ['(no activity yet)'],
     };
+    const lines = completed.length ? completed : ['(nothing completed yet)'];
+    const historyTotal = lines.length + 1 + queueActivity.lines.length;
+    const historyLines = finite ? Math.max(0, maxBodyLines - startRow - 1) : historyTotal;
+    queueCompleted = {
+      startRow,
+      pendingLines,
+      scroll: Math.max(0, Math.min(ui.historyScroll ?? 0, historyTotal - historyLines)),
+      header: '— completed —',
+      lines,
+      ...(hidden > 0 ? { overflow: `… ${hidden} more pending` } : {}),
+    };
+  } else {
+    // body scroll: clamp the persisted offset to the content height so the
+    // render window and the click hit-test agree; an unbounded viewport
+    // (maxBodyLines = Infinity, e.g. tests) yields maxScroll 0 → scroll 0
+    const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
+    scroll = Math.max(0, Math.min(ui.scroll ?? 0, maxScroll));
   }
-  // body scroll (scrollable card tabs only): clamp the persisted offset to the
-  // content height so the render window and the click hit-test agree. The
-  // queue tab has a fixed layout and never scrolls; an unbounded viewport
-  // (maxBodyLines = Infinity, e.g. tests) yields maxScroll 0 → scroll 0, so all
-  // pre-scroll behaviour is unchanged.
-  const scrollable = ui.tab !== QUEUE_TAB;
-  const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
-  const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
-  const scroll = scrollable ? Math.max(0, Math.min(ui.scroll ?? 0, maxScroll)) : 0;
   // the Knowledge search field is ALWAYS visible (no '/' toggle) — its line
   // shows on the spacer row on the Knowledge tab regardless of the query.
   const searchActive = ui.tab === KNOWLEDGE_TAB;
@@ -1270,22 +1373,10 @@ export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = I
             ? '(queue empty)'
             : '(empty)'
         : undefined,
-    footer:
-      // Fix round (Opus review of 71c1f41): a Tasks-tab board_edit notice
-      // (lost-update refusal, vanished item, failed HEAD resolve) must be
-      // VISIBLE, not just carried in ui.notice — render.ts prints
-      // state.footer unconditionally, so this is the one line available to
-      // this scope's two files without touching render.ts. Mirrors the
-      // System tab's own '⚠ ' convention (buildSystemTab's banner).
-      // A notice on the Knowledge and Queue tabs is shown the same way: a
-      // failed selection write from a click there reports here.
-      ui.notice && (ui.tab === TASKS_TAB || ui.tab === KNOWLEDGE_TAB || ui.tab === QUEUE_TAB)
-        ? `⚠ ${ui.notice}`
-        : ui.tab === AGENTS_TAB
-          ? `←/→ or 1-${visibleTabs(agents).length} tabs · q quit`
-          : `←/→ or 1-${visibleTabs(agents).length} tabs · ↑/↓ or wheel · enter/click select+expand · right-click collapse · q quit` +
-          (ui.tab === KNOWLEDGE_TAB ? ' · type to search · esc clears · ctrl-f article state' : '') +
-          (ui.tab === TASKS_TAB ? (ui.boardEdit ? ' · enter save · esc cancel' : ' · e edit') : ''),
+    footer: footerFor(ui, visibleTabs(agents).length, width),
+    // a board_edit refusal, a failed selection write or a degraded store read
+    // (ui.notice) is drawn on its own row in the warning colour
+    notice: noticeFor(ui, width),
     searchLine: searchActive ? `search: ${ui.searchQuery}${ui.stateFilter ? `  state: ${ui.stateFilter}` : ''}` : undefined,
     queueCompleted,
     queueActivity,
@@ -1297,10 +1388,18 @@ export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = I
   return { ui, state, nodes, cursor };
 }
 
+/** Body lines the row list may use: the viewport, or on the Queue tab the
+ *  pending list's window above the divider (render.ts stops at the same line). */
+function bodyWindow(state: DashboardState, maxBodyLines: number): number {
+  const qc = state.queueCompleted;
+  return qc ? Math.min(maxBodyLines, qc.pendingLines ?? qc.startRow) : maxBodyLines;
+}
+
 /** Map an absolute screen line (1-based, terminal convention) to a row index, or -1.
  *  maxBodyLines bounds the hit-test to the rendered viewport (visibleBodyLines). */
 export function screenLineToRow(state: DashboardState, line1: number, maxBodyLines = Infinity): number {
   const scroll = state.scroll ?? 0;
+  maxBodyLines = bodyWindow(state, maxBodyLines);
   // render draws absolute body line `abs` at bodyTop + (abs - scroll); invert
   // with + scroll. Visible window is [scroll, scroll + maxBodyLines). With
   // scroll 0 this is identical to the prior bodyLine math.
@@ -1373,16 +1472,14 @@ function reduceNodes(
 
   // a tab switch resets the cursor + scroll AND dismisses any open selector
   // (and any in-progress sparring-partner model edit, same discard-on-switch rule)
-  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: undefined, notice: undefined, sparringModelEdit: undefined, boardEdit: undefined });
+  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: undefined, selector: undefined, notice: undefined, sparringModelEdit: undefined, boardEdit: undefined });
 
   // the tabs this host can reach, in bar order: a digit picks the n-th, left/right step through them
   const reachable = visibleTabs(viewport.agents);
   const stepTab = (dir: number): number => reachable[(reachable.indexOf(ui.tab) + dir + reachable.length) % reachable.length] ?? reachable[0]!;
 
-  // the queue tab has a fixed layout; only the card tabs scroll
-  const scrollable = ui.tab !== QUEUE_TAB;
   const buildSelf = (uiNext: UiState): DashboardState =>
-    buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster, viewport.agents);
+    buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster, viewport.agents, viewport.height);
 
   // move the selection by `delta` and keep it inside the scroll window so the
   // viewport follows the cursor. An unbounded viewport or a non-scrolling tab
@@ -1391,12 +1488,14 @@ function reduceNodes(
    *  by the generic tabs and the System tab's sparring rows (which sit past the
    *  config.models keys and would otherwise leave the edit caret below the fold). */
   const revealAt = (cursor: number): UiState => {
-    if (!scrollable || !Number.isFinite(maxBodyLines)) return { ...ui, cursor };
+    if (!Number.isFinite(maxBodyLines)) return { ...ui, cursor };
     // row heights do not depend on the cursor, so on the card tabs the drawn
     // frame's geometry serves (the System tab's picker rows follow the cursor)
     const st = drawn && ui.tab !== SYSTEM_TAB ? drawn.state : buildSelf({ ...ui, cursor });
     const total = st.rows.length ? st.rows[st.rows.length - 1].screenRow + st.rows[st.rows.length - 1].lines.length : 0;
-    const max = Math.max(0, total - maxBodyLines);
+    // the Queue tab's pending list scrolls inside its own window
+    const window = bodyWindow(st, maxBodyLines);
+    const max = Math.max(0, total - window);
     let scroll = ui.scroll ?? 0;
     // ui.cursor addresses only the SELECTABLE rows (config.models roster +
     // sparring/tdd toggles) — systemDashboardState prepends the
@@ -1409,7 +1508,7 @@ function reduceNodes(
       const top = row.screenRow;
       const bottom = row.screenRow + row.lines.length;
       if (top < scroll) scroll = top; // selection above the window → scroll up to its top
-      else if (bottom > scroll + maxBodyLines) scroll = Math.min(top, bottom - maxBodyLines); // below → reveal it
+      else if (bottom > scroll + window) scroll = Math.min(top, bottom - window); // below → reveal it
     }
     return { ...ui, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
   };
@@ -1789,25 +1888,34 @@ function reduceNodes(
       return { ui: switchTab(event.index), effects };
     case 'wheel': {
       // wheel scrolls the viewport by lines (so you can read a tall expanded
-      // record); on the fixed queue tab it keeps moving the cursor.
-      if (!scrollable) return { ui: { ...ui, cursor: clamp(ui.cursor + (event.dy > 0 ? 1 : -1)) }, effects };
-      const desired = (ui.scroll ?? 0) + (event.dy > 0 ? 3 : -3);
-      if (drawn && ui.tab !== SYSTEM_TAB) {
-        // the clamp needs only the drawn content height, which a scroll does not change
-        const rows = drawn.state.rows;
-        const total = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
-        const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - maxBodyLines) : 0;
-        return { ui: { ...ui, scroll: Math.max(0, Math.min(desired, max)) }, effects };
+      // record). On the Queue tab it scrolls the list under the pointer: the
+      // history list below the divider, else the pending list.
+      const step = event.dy > 0 ? 3 : -3;
+      // the clamp needs only the drawn content height, which a scroll does not change
+      const st = drawn && ui.tab !== SYSTEM_TAB ? drawn.state : buildSelf(ui);
+      const qc = st.queueCompleted;
+      // Queue: each list takes the wheel only over its own drawn lines (body
+      // offsets 0..startRow-1 for pending with its overflow note, startRow..
+      // maxBodyLines-1 for history); over the tabs, notice or footer it is a no-op
+      const off = qc && event.y !== undefined ? event.y - 1 - st.bodyTop : undefined;
+      if (off !== undefined && (off < 0 || off >= maxBodyLines)) return { ui, effects };
+      if (qc && off !== undefined && off >= qc.startRow) {
+        const historyTotal = qc.lines.length + (st.queueActivity ? 1 + st.queueActivity.lines.length : 0);
+        const historyLines = Math.max(0, maxBodyLines - qc.startRow - 1);
+        const max = Number.isFinite(maxBodyLines) ? Math.max(0, historyTotal - historyLines) : 0;
+        return { ui: { ...ui, historyScroll: Math.max(0, Math.min((ui.historyScroll ?? 0) + step, max)) }, effects };
       }
-      const st = buildSelf({ ...ui, scroll: desired });
-      return { ui: { ...ui, scroll: st.scroll }, effects };
+      const rows = st.rows;
+      const total = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
+      const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - bodyWindow(st, maxBodyLines)) : 0;
+      return { ui: { ...ui, scroll: Math.max(0, Math.min((ui.scroll ?? 0) + step, max)) }, effects };
     }
     case 'click': {
       // hit-test the frame on screen when the host passed it; otherwise build
       // the same geometry the renderer drew with — wrapped heights, the
       // queue tab's pending truncation, AND the banner-driven bodyTop must all
       // match the screen, so the tab-bar row and body hit-test track the banner
-      const state = drawn ? drawn.state : buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster, viewport.agents);
+      const state = drawn ? drawn.state : buildSelf(ui);
       // tab bar sits one line above the body block (its own header row is just
       // above the body); terminal line = bodyTop - 1. Pick the tab by x extent.
       if (event.y === state.bodyTop - 1) {
@@ -1830,7 +1938,7 @@ function reduceNodes(
     }
     case 'rightclick':
       // collapse everything — the quick "back to overview" gesture
-      return { ui: { ...ui, expanded: [], scroll: 0 }, effects };
+      return { ui: { ...ui, expanded: [], scroll: 0, historyScroll: undefined }, effects };
   }
   return { ui, effects };
 }
