@@ -50034,9 +50034,9 @@ function wordmarkFor(width, rows) {
   return { row: 1, x: Math.floor((width - text.length) / 2), lines: [text] };
 }
 var SUN_STOPS = ["#ffd319", "#ff901f", "#ff2975"];
-var SKY_STOPS = ["#00005f", "#3a0a6e", "#a0207e"];
+var SKY_STOPS = ["#000000", "#3a0a6e", "#a0207e"];
 var CHROME = ["#ffffff", "#c8f4ff", "#6fd3ff", "#2a3fbf", "#9ee6ff", "#f0fbff"];
-var GROUND_STOPS = ["#2b0057", "#00005f"];
+var GROUND_STOPS = ["#2b0057", "#000000"];
 var GRID = "#ff2bd6";
 var SUN_INK = "#2b0057";
 var HORIZON_LINE = "#00e5ff";
@@ -53182,9 +53182,9 @@ function createGithubPoller(options) {
 var THEME_LEVELS = ["truecolor", "256", "16", "plain"];
 var THEME_ENV = "STERLING_TUI_COLOR";
 var PALETTE = {
-  /** xterm 17: the colour the ScreenBuffer paints as background, so the overlay meets the body without a seam */
-  night: "#00005f",
-  text: "#f2ecff",
+  /** xterm 16: the colour the ScreenBuffer paints as background, so the overlay meets the body without a seam */
+  night: "#000000",
+  text: "#ffffff",
   pink: "#ff2d95",
   cyan: "#00e5ff",
   muted: "#8787af",
@@ -53192,10 +53192,10 @@ var PALETTE = {
   amber: "#ffaf5f"
 };
 var XTERM = {
-  /** #00005f; the 256 palette has no darker violet, and the cube's violets (53, 54, 55) are too bright for a page */
-  background: 17,
-  /** #d7d7ff */
-  text: 189,
+  /** #000000, the 256 palette's explicit black; not the terminal default, which ScreenBuffer cannot draw and which may be any colour */
+  background: 16,
+  /** #ffffff */
+  text: 231,
   /** #8787af */
   muted: 103,
   /** #ff5faf */
@@ -53264,7 +53264,8 @@ function xtermTheme(level) {
     fill: { bgColor: bg },
     name: on({ color: XTERM.pink, bold: true }),
     tab: muted,
-    tabActive: { color: bg, bgColor: XTERM.pink, bold: true },
+    // bold underlined pink on the page black: the active tab needs no coloured block
+    tabActive: on({ color: XTERM.pink, bold: true, underline: true }),
     search: on({ color: XTERM.cyan }),
     text: on({ color: XTERM.text }),
     muted,
