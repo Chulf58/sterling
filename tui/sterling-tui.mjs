@@ -50033,10 +50033,10 @@ function wordmarkFor(width, rows) {
   const text = width >= SPACED_WORDMARK.length ? SPACED_WORDMARK : WORDMARK;
   return { row: 1, x: Math.floor((width - text.length) / 2), lines: [text] };
 }
-var SUN_STOPS = ["#ffd319", "#ff901f", "#ff2975"];
+var SUN_STOPS = ["#ffd319", "#ff8c42", "#ff2bd6"];
 var SKY_STOPS = ["#000000", "#3a0a6e", "#a0207e"];
 var CHROME = ["#ffffff", "#c8f4ff", "#6fd3ff", "#2a3fbf", "#9ee6ff", "#f0fbff"];
-var GROUND_STOPS = ["#2b0057", "#000000"];
+var GROUND_STOPS = ["#2a1840", "#000000"];
 var GRID = "#ff2bd6";
 var SUN_INK = "#2b0057";
 var HORIZON_LINE = "#00e5ff";
@@ -53185,11 +53185,11 @@ var PALETTE = {
   /** xterm 16: the colour the ScreenBuffer paints as background, so the overlay meets the body without a seam */
   night: "#000000",
   text: "#ffffff",
-  pink: "#ff2d95",
+  pink: "#ff2bd6",
   cyan: "#00e5ff",
   muted: "#8787af",
-  /** xterm 215, the warning amber */
-  amber: "#ffaf5f"
+  /** xterm 220, the warning amber */
+  amber: "#ffd319"
 };
 var XTERM = {
   /** #000000, the 256 palette's explicit black; not the terminal default, which ScreenBuffer cannot draw and which may be any colour */
@@ -53198,12 +53198,12 @@ var XTERM = {
   text: 231,
   /** #8787af */
   muted: 103,
-  /** #ff5faf */
-  pink: 205,
-  /** #00ffff */
-  cyan: 51,
-  /** #ffaf5f */
-  amber: 215,
+  /** #ff00d7 */
+  pink: 200,
+  /** #00d7ff */
+  cyan: 45,
+  /** #ffd700 */
+  amber: 220,
   /** #ff5f5f */
   error: 203,
   /** #00ffaf */
