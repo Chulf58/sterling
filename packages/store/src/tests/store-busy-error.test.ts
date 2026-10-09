@@ -206,7 +206,7 @@ test('BUSY from COMMIT with a successful rollback: StoreBusyError, nothing writt
   });
 });
 
-test('BUSY from COMMIT with a FAILING rollback: uncertain outcome, never "safe to re-send", connection retired', { skip }, () => {
+test('BUSY from COMMIT with a FAILING rollback: uncertain outcome, never "safe to re-send", connection retired for reads and writes', { skip }, () => {
   withFaultyDriver((store, driver) => {
     const busy = sqliteError('database is locked', 5);
     const rollbackFailure = new Error('rollback failed');
@@ -228,7 +228,13 @@ test('BUSY from COMMIT with a FAILING rollback: uncertain outcome, never "safe t
     // loudly instead of continuing as if clean.
     driver.failCommit = undefined;
     driver.failRollback = undefined;
-    assert.throws(() => store.create(decisionInput('00000000-0000-4000-8000-0000000000b2')), /unknown transaction state/);
+    const retired = /connection was retired after a failed ROLLBACK/;
+    assert.throws(() => store.create(decisionInput('00000000-0000-4000-8000-0000000000b2')), retired);
+    // Reads are refused too: the handle may still hold the failed transaction open,
+    // so a read through it could show the uncommitted row and make the write look landed.
+    assert.throws(() => store.count({}), retired);
+    assert.throws(() => store.get(ID), retired);
+    assert.throws(() => store.query({}), retired);
   });
 });
 
@@ -238,7 +244,8 @@ test('a failed rollback after a non-busy error still rethrows the original error
     driver.failRollback = new Error('rollback failed');
     assert.throws(() => store.withTransaction(() => { throw boom; }), (e: unknown) => e === boom);
     driver.failRollback = undefined;
-    assert.throws(() => store.withTransaction(() => undefined), /unknown transaction state/);
+    assert.throws(() => store.withTransaction(() => undefined), /connection was retired after a failed ROLLBACK/);
+    assert.throws(() => store.count({}), /connection was retired after a failed ROLLBACK/);
   });
 });
 

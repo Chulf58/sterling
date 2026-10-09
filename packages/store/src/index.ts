@@ -285,14 +285,15 @@ export class StoreBusyError extends Error {
  * A busy failure inside a transaction was followed by a ROLLBACK that failed
  * too, so SQLite may still hold the transaction open and whether it committed
  * is not known. Never safe to re-send blindly: read the store first. The
- * original busy error is `cause`. tx() retires the connection (every later
- * write on it throws), so reopen the store to continue.
+ * original busy error is `cause`. tx() retires the connection (it is closed
+ * and every later read or write on it throws), so reopen the store and check
+ * the outcome through the new connection.
  */
 export class StoreOutcomeUncertainError extends Error {
   constructor(cause: unknown) {
     super(
-      'the store was busy and the rollback that followed also failed, so whether this transaction committed is not known; check the store before re-sending. ' +
-        'This connection can no longer write: reopen the store.',
+      'the store was busy and the rollback that followed also failed, so whether this transaction committed is not known; check before re-sending, through a reopened store. ' +
+        'This connection was retired and refuses every read and write: reopen the store.',
       { cause }
     );
     this.name = 'StoreOutcomeUncertainError';
@@ -4197,9 +4198,6 @@ export class SterlingStore {
    */
   private txDepth = 0;
 
-  /** Set when a ROLLBACK failed: the connection's transaction state is unknown, so tx() refuses every later write. */
-  private txRetired: unknown;
-
   /** Open read transactions on this handle (readTx). A write may not start inside one. */
   private readDepth = 0;
 
@@ -4266,12 +4264,6 @@ export class SterlingStore {
     // transaction" branch with NO transaction open, so each statement
     // autocommitted individually and atomicity silently disappeared for the
     // life of the connection.
-    if (this.txRetired) {
-      throw new Error(
-        'SterlingStore: a failed ROLLBACK left this connection in an unknown transaction state, so it refuses every write; reopen the store. Nothing was written.',
-        { cause: this.txRetired }
-      );
-    }
     try {
       this.db.begin();
     } catch (e) {
@@ -4294,14 +4286,16 @@ export class SterlingStore {
     } catch (e) {
       // A ROLLBACK that itself throws must never REPLACE the original failure —
       // the caller would be told about the cleanup and never about the cause.
-      // But it leaves SQLite's transaction state unknown, so the connection is
-      // retired (txRetired refuses every later write) rather than reset as if
-      // clean. A busy failure whose rollback failed is reported as uncertain,
-      // never as a clean "did not commit": the COMMIT may have landed.
+      // But it leaves SQLite's transaction state unknown, and the handle may
+      // still hold the failed transaction open, so a read through it could show
+      // uncommitted rows. The connection is therefore retired: closed, and
+      // replaced by a driver that refuses every read and write by name. A busy
+      // failure whose rollback failed is reported as uncertain, never as a
+      // clean "did not commit": the COMMIT may have landed.
       try {
         this.db.rollback();
       } catch (rollbackError) {
-        this.txRetired = rollbackError;
+        this.retireConnection(rollbackError);
         if (isSqliteBusy(e)) throw new StoreOutcomeUncertainError(e);
         throw e;
       }
@@ -4309,6 +4303,36 @@ export class SterlingStore {
     } finally {
       this.txDepth--;
     }
+  }
+
+  /**
+   * A ROLLBACK failed, so the connection's transaction state is unknown. Close
+   * it (SQLite drops an open transaction on close) and swap in a driver whose
+   * every statement and transaction method throws, so no later read or write
+   * can see or build on the unknown state. `close` stays callable.
+   */
+  private retireConnection(rollbackError: unknown): void {
+    const old = this.db;
+    try {
+      old.close();
+    } catch {
+      /* the connection is refused below whether or not it closed cleanly */
+    }
+    const refusal = () =>
+      new Error(
+        'SterlingStore: this connection was retired after a failed ROLLBACK left its transaction state unknown, so it refuses every read and write; reopen the store. Nothing was read or written.',
+        { cause: rollbackError }
+      );
+    this.db = new Proxy(old, {
+      get(target, prop) {
+        if (prop === 'close') return () => target.close();
+        const value = Reflect.get(target, prop, target) as unknown;
+        if (typeof value !== 'function') return value;
+        return () => {
+          throw refusal();
+        };
+      },
+    });
   }
 
   /** A SQLite busy error from BEGIN, the transaction body or COMMIT becomes the named StoreBusyError; any other error is returned unchanged. */
