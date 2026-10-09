@@ -4879,8 +4879,9 @@ var modelPin = external_exports.object({
   effort: effortLevel.optional()
 }).strict();
 var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+var CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
 var agentModelEntry = external_exports.object({
-  model: external_exports.string(),
+  model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
   effort: effortLevel,
   hard_task: modelPin.optional(),
   opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()

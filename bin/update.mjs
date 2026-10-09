@@ -5724,7 +5724,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 left in place and ignored; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -5735,8 +5735,9 @@ var init_config = __esm({
       effort: effortLevel.optional()
     }).strict();
     OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+    CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
     agentModelEntry = external_exports.object({
-      model: external_exports.string(),
+      model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
       effort: effortLevel,
       hard_task: modelPin.optional(),
       opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
@@ -6474,6 +6475,7 @@ __export(dist_exports, {
   BROKER_PROTOCOL: () => BROKER_PROTOCOL,
   BROKER_REGISTRY_MAX_BYTES: () => BROKER_REGISTRY_MAX_BYTES,
   BUILD_ID_FILE: () => BUILD_ID_FILE,
+  CLAUDE_MODEL_ID_RE: () => CLAUDE_MODEL_ID_RE,
   DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS: () => DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS,
   DIGEST_CLIP: () => DIGEST_CLIP,
   DRAIN_VERBS: () => DRAIN_VERBS,
