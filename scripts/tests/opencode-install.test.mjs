@@ -3,14 +3,14 @@
 // Every test runs against a temp HOME and temp git projects, with OpenCode stubbed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, cpSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, copyFileSync, cpSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   setupOpenCode, formatOpenCodeRows, opencodeConfigDir, mcpLauncherPath, STERLING_AGENTS_SUBDIR, CONDUCTOR_AGENT,
-  swapFullAgentModel, opencodeModelRef, sterlingRootFrom, storeWriteTools, materializeTui,
+  swapFullAgentModel, opencodeModelRef, opencodeModelFor, writeFullAgentFiles, stageFullAgentModel, sterlingRootFrom, storeWriteTools, materializeTui,
 } from '../lib/opencode-install.mjs';
 import { renderPortableText } from '../lib/agent-fences.mjs';
 
@@ -744,6 +744,82 @@ test('model swap: the swapped roster agent is re-rendered with the matching Open
   // Swapping again replaces the pin rather than adding a second line.
   swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5' });
   assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5']);
+});
+
+test('model swap: a role with an OpenCode override pins openai/<id>; a role without one pins anthropic/<id>', () => {
+  // decision opencode-only-model-override-per-role-for-openai-picks
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const read = (n) => readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8');
+  const swapped = swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-5.6-terra' });
+  // the rows are the public shape only: the staged path/content/previous stay internal
+  for (const row of swapped.rows) assert.deepEqual(Object.keys(row).filter((k) => ['path', 'content', 'previous'].includes(k)), [], row.item);
+  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['reviewer'], model: 'claude-opus-5-5' });
+  assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: openai/gpt-5.6-terra']);
+  assert.deepEqual(read('reviewer').match(/^model: .*$/gm), ['model: anthropic/claude-opus-5-5']);
+  // A later sync keeps the override pin.
+  assert.equal(statusOf(run(dir, home), '/implementor.md'), 'matches');
+  // Clearing the override (no opencodeModel) goes back to the role's Claude model.
+  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5' });
+  assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5']);
+  // A malformed override is refused before any file is written.
+  const before = read('implementor');
+  assert.throws(() => swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5', opencodeModel: 'gpt-5.6-terra\nhooks: x' }), /opencode_model/);
+  assert.equal(read('implementor'), before);
+});
+
+test('writeFullAgentFiles: a write that fails part-way leaves the target intact and restores the files already written', () => {
+  const dir = tmp('oc-atomic-');
+  const a = join(dir, 'a.md');
+  const b = join(dir, 'b.md');
+  writeFileSync(a, 'old a\n');
+  writeFileSync(b, 'old b\n');
+  const writes = [
+    { path: a, content: 'new a\n', previous: 'old a\n' },
+    { path: b, content: 'new b, long enough to be cut short\n', previous: 'old b\n' },
+    { path: join(dir, 'c.md'), content: 'new c\n', previous: null },
+  ];
+  // the write of b stops after a few bytes, as a full disk would
+  let calls = 0;
+  const writeFile = (p, c) => {
+    calls += 1;
+    if (calls === 2) { writeFileSync(p, c.slice(0, 5)); throw new Error('ENOSPC: no space left'); }
+    writeFileSync(p, c);
+  };
+  assert.throws(() => writeFullAgentFiles(writes, { writeFile }), /ENOSPC/);
+  assert.equal(readFileSync(b, 'utf8'), 'old b\n', 'the file whose write failed is untouched');
+  assert.equal(readFileSync(a, 'utf8'), 'old a\n', 'the file already written is restored');
+  assert.deepEqual(readdirSync(dir).sort(), ['a.md', 'b.md'], 'no temp file left and c.md never created');
+  // a clean run replaces each file whole and creates the new one
+  writeFullAgentFiles(writes);
+  assert.deepEqual(readdirSync(dir).sort().map((n) => readFileSync(join(dir, n), 'utf8')), ['new a\n', 'new b, long enough to be cut short\n', 'new c\n']);
+});
+
+test('stageFullAgentModel keeps the raw bytes as previous: a CRLF agent is restored byte-identical after a failed write', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const impl = join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md');
+  const crlf = readFileSync(impl, 'utf8').replace(/\n/g, '\r\n');
+  writeFileSync(impl, crlf);
+  const staged = stageFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor', 'reviewer'], model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-5.6-terra' });
+  assert.equal(statusOf(staged, '/implementor.md'), 'refreshed', 'a CRLF Sterling file is not mistaken for a hand edit');
+  assert.equal(staged.writes.find((w) => w.path === impl).previous, crlf);
+  let calls = 0;
+  const writeFile = (p, c) => { calls += 1; if (calls === 2) throw new Error('ENOSPC: no space left'); writeFileSync(p, c); };
+  assert.throws(() => writeFullAgentFiles(staged.writes, { writeFile }), /ENOSPC/);
+  assert.equal(readFileSync(impl, 'utf8'), crlf, 'the CRLF file is back byte for byte');
+});
+
+test('opencodeModelFor: the override when set, else anthropic/<Claude model>', () => {
+  assert.equal(opencodeModelFor({ model: 'claude-sonnet-5-5' }), 'anthropic/claude-sonnet-5-5');
+  assert.equal(opencodeModelFor({ model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-6.1-sol' }), 'openai/gpt-6.1-sol');
+  assert.equal(opencodeModelFor({ model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-6-astra' }), 'openai/gpt-6-astra');
+  for (const bad of ['gpt-6-astra', 'openai/', '', 'openai/gpt 6', 42]) {
+    assert.throws(() => opencodeModelFor({ model: 'claude-sonnet-5-5', opencodeModel: bad }), /opencode_model/, JSON.stringify(bad));
+  }
+  assert.throws(() => opencodeModelFor({}), /model/);
 });
 
 test('model swap: a hand-edited Sterling-full file is refused and left byte-identical', () => {

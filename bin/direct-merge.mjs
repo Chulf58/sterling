@@ -5039,7 +5039,7 @@ function normalizeRawConfig(raw) {
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
-var effortLevel, modelPin, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -5049,10 +5049,12 @@ var init_config = __esm({
       model: external_exports.string(),
       effort: effortLevel.optional()
     }).strict();
+    OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
     agentModelEntry = external_exports.object({
       model: external_exports.string(),
       effort: effortLevel,
-      hard_task: modelPin.optional()
+      hard_task: modelPin.optional(),
+      opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
     }).strict();
     vendorPins = external_exports.object({
       openai: modelPin.optional(),

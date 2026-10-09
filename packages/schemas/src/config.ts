@@ -23,15 +23,24 @@ const modelPin = z.object({
   effort: effortLevel.optional(),
 }).strict();
 
+// An OpenCode model reference, <provider>/<model> (for example
+// openai/gpt-5.6-terra): the form an OpenCode agent's `model:` line takes.
+export const OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 // models.<agent>: the default pin plus an optional hard_task pin the conductor
 // passes when it escalates that agent. effort is REQUIRED on the default pin:
 // it fills {{EFFORT}} in the agent template, and resolveModelVars
 // (scripts/lib/agent-distribution.mjs) throws at render time without it, so a
 // config missing it is refused here, when it is written.
+// opencode_model is the role's OpenCode-only override (decision
+// opencode-only-model-override-per-role-for-openai-picks): `model` stays the
+// Claude model Claude Code runs, and the OpenCode agent pins opencode_model
+// when it is set, anthropic/<model> otherwise.
 const agentModelEntry = z.object({
   model: z.string(),
   effort: effortLevel,
   hard_task: modelPin.optional(),
+  opencode_model: z.string().regex(OPENCODE_MODEL_REF_RE, 'opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra').optional(),
 }).strict();
 
 // One pin per vendor, shared by sparring_partner.models and review.models.

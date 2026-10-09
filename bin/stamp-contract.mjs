@@ -4725,10 +4725,12 @@ var modelPin = external_exports.object({
   model: external_exports.string(),
   effort: effortLevel.optional()
 }).strict();
+var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 var agentModelEntry = external_exports.object({
   model: external_exports.string(),
   effort: effortLevel,
-  hard_task: modelPin.optional()
+  hard_task: modelPin.optional(),
+  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
 }).strict();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
