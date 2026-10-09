@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   setupOpenCode, formatOpenCodeRows, opencodeConfigDir, mcpLauncherPath, STERLING_AGENTS_SUBDIR, CONDUCTOR_AGENT,
-  swapFullAgentModel, opencodeModelRef, opencodeModelFor, writeFullAgentFiles, sterlingRootFrom, storeWriteTools, materializeTui,
+  swapFullAgentModel, opencodeModelRef, opencodeModelFor, writeFullAgentFiles, stageFullAgentModel, sterlingRootFrom, storeWriteTools, materializeTui,
 } from '../lib/opencode-install.mjs';
 import { renderPortableText } from '../lib/agent-fences.mjs';
 
@@ -786,6 +786,22 @@ test('writeFullAgentFiles: a write that fails part-way leaves the target intact 
   // a clean run replaces each file whole and creates the new one
   writeFullAgentFiles(writes);
   assert.deepEqual(readdirSync(dir).sort().map((n) => readFileSync(join(dir, n), 'utf8')), ['new a\n', 'new b, long enough to be cut short\n', 'new c\n']);
+});
+
+test('stageFullAgentModel keeps the raw bytes as previous: a CRLF agent is restored byte-identical after a failed write', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const impl = join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md');
+  const crlf = readFileSync(impl, 'utf8').replace(/\n/g, '\r\n');
+  writeFileSync(impl, crlf);
+  const staged = stageFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor', 'reviewer'], model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-5.6-terra' });
+  assert.equal(statusOf(staged, '/implementor.md'), 'refreshed', 'a CRLF Sterling file is not mistaken for a hand edit');
+  assert.equal(staged.writes.find((w) => w.path === impl).previous, crlf);
+  let calls = 0;
+  const writeFile = (p, c) => { calls += 1; if (calls === 2) throw new Error('ENOSPC: no space left'); writeFileSync(p, c); };
+  assert.throws(() => writeFullAgentFiles(staged.writes, { writeFile }), /ENOSPC/);
+  assert.equal(readFileSync(impl, 'utf8'), crlf, 'the CRLF file is back byte for byte');
 });
 
 test('opencodeModelFor: the override when set, else anthropic/<Claude model>', () => {

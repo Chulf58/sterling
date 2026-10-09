@@ -1122,7 +1122,9 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const disk = existsSync(path) ? normalize(readFileSync(path, 'utf8')) : null;
+    // raw is kept for a rollback, byte for byte; disk is the copy that is checked and compared
+    const raw = existsSync(path) ? readFileSync(path, 'utf8') : null;
+    const disk = raw === null ? null : normalize(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
       if (!m || m[1] !== name) {
@@ -1141,7 +1143,7 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       rows.push({ item: rel, status: 'matches' });
       continue;
     }
-    rows.push({ item: rel, status: disk === null ? 'created' : 'refreshed', path, content: agent.content, previous: disk });
+    rows.push({ item: rel, status: disk === null ? 'created' : 'refreshed', path, content: agent.content, previous: raw });
   }
   return rows;
 }
@@ -1185,7 +1187,7 @@ export function stageFullAgentModel({ projectDir, pluginRoot, agents, model, ope
 /** Replace one file atomically: write a temp file beside it, then rename it
  *  over the target, so a failed write never leaves the target half-written.
  *  The temp file is removed when the write or the rename fails. */
-function writeFileAtomic(path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
+export function writeFileAtomic(path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
   const tmp = `${path}.tmp-${randomUUID()}`;
   try {
     writeFile(tmp, content);

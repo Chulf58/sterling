@@ -403,25 +403,25 @@ for (const path of ['set', 'clear'] as const) {
     }
   });
 
-  test(`controller: an override ${path} whose config.json write and restore both fail still restores the agent files`, async () => {
+  test(`controller: an override ${path} whose config.json write stops part-way keeps the original config bytes and restores the agent files`, async () => {
     const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
-    const ctl = openDashboard(f.storePath);
+    // every config.json write (the commit and its restore) stops after a few bytes, as a full disk would
+    const configWriteFs = { writeFile: (p: string, c: string) => { writeFileSync(p, c.slice(0, 7)); throw new Error('ENOSPC: no space left'); } };
+    const ctl = openDashboard(f.storePath, { configWriteFs });
     try {
       await ctl.applyEffects([{ type: 'model_swap', key: 'reviewer', from: { model: 'claude-r', effort: 'high' }, to: { model: 'claude-r', effort: 'high' }, agents: ['reviewer'], decisionTitle: 'setup' }]);
-      // a read-only config.json fails the write and the restore of the original text alike
-      chmodSync(f.configPath, 0o444);
       const before = snapshotFiles(f);
       const decisions = decisionCount(ctl);
       await ctl.applyEffects([effect(['implementor', 'reviewer'])]);
-      assert.deepEqual(snapshotFiles(f), before, 'both written agent files were restored; config.json was never changed');
-      assert.deepEqual(readdirSync(f.ocDir).filter((n) => !n.endsWith('.md')), [], 'no temp file is left behind');
+      assert.deepEqual(snapshotFiles(f), before, 'config.json keeps its original bytes; both written agent files were restored');
+      assert.deepEqual(readdirSync(join(f.dir, '.sterling')).filter((n) => n.startsWith('config.json.')), [], 'no config temp file is left behind');
+      assert.deepEqual(readdirSync(f.ocDir).filter((n) => !n.endsWith('.md')), [], 'no agent temp file is left behind');
       assert.equal(decisionCount(ctl), decisions);
       const notice = ctl.ui().notice ?? '';
-      assert.match(notice, /writing config\.json failed \(EACCES[^)]*\) and the rollback failed — config\.json not restored: EACCES/);
+      assert.match(notice, /writing config\.json failed \(ENOSPC[^)]*\) and the rollback failed — config\.json not restored: ENOSPC/);
       assert.doesNotMatch(notice, /OpenCode agents not restored/, 'the agent restore ran and succeeded');
     } finally {
       ctl.close();
-      chmodSync(f.configPath, 0o644);
       rmSync(f.dir, { recursive: true, force: true });
     }
   });

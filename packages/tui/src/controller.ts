@@ -19,7 +19,7 @@ import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
 import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/lib/agent-distribution.mjs';
 import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
-import { sterlingRootFrom, swapFullAgentModel, stageFullAgentModel, writeFullAgentFiles, restoreFullAgentFiles, type StagedWrite } from '../../../scripts/lib/opencode-install.mjs';
+import { sterlingRootFrom, swapFullAgentModel, stageFullAgentModel, writeFileAtomic, writeFullAgentFiles, restoreFullAgentFiles, type AtomicWriteFs, type StagedWrite } from '../../../scripts/lib/opencode-install.mjs';
 import { storeBackend } from '../../../scripts/hooks/lib/store-backend.mjs';
 import { writeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mjs';
 
@@ -39,6 +39,9 @@ export interface DashboardOptions {
   profile?: boolean;
   /** Replaces the data_version probe; tests use it to make a read fail. */
   dataVersionProbe?: (paths: string[]) => DataVersionProbe;
+  /** The file operations the OpenCode-override config.json write uses; tests
+   *  use it to make that write fail part-way. */
+  configWriteFs?: AtomicWriteFs;
 }
 
 /** How long the held selection and board-edit writes wait for another
@@ -572,12 +575,14 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       fail(`writing the OpenCode agents failed: ${(err as Error).message}`);
       return;
     }
+    // config.json is replaced atomically (temp file, then rename), so a failed
+    // write never leaves it truncated
     try {
-      writeFileSync(configPath, configAfter);
+      writeFileAtomic(configPath, configAfter, options.configWriteFs);
     } catch (err) {
       // the two restores run independently, so one failing never skips the other
       const rollback: string[] = [];
-      try { writeFileSync(configPath, configBefore); } catch (restoreErr) { rollback.push(`config.json not restored: ${(restoreErr as Error).message}`); }
+      try { writeFileAtomic(configPath, configBefore, options.configWriteFs); } catch (restoreErr) { rollback.push(`config.json not restored: ${(restoreErr as Error).message}`); }
       try { restoreFullAgentFiles(writes); } catch (restoreErr) { rollback.push(`OpenCode agents not restored: ${(restoreErr as Error).message}`); }
       if (rollback.length) {
         ui = { ...ui, notice: `OpenCode model for '${e.key}': writing config.json failed (${(err as Error).message}) and the rollback failed — ${rollback.join('; ')}` };
