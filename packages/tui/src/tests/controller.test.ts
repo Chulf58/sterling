@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -317,9 +317,89 @@ test('controller: a malformed override is refused before config.json is written'
       { type: 'opencode_model', key: 'implementor', to: 'gpt-5.6-terra', model: 'claude-a', effort: 'high', agents: ['implementor'] },
     ]);
     assert.equal(readFileSync(f.configPath, 'utf8'), before);
-    assert.match(ctl.ui().notice ?? '', /OpenCode model for 'implementor' failed/);
+    assert.match(ctl.ui().notice ?? '', /OpenCode model for 'implementor' not changed/);
   } finally {
     ctl.close();
     rmSync(f.dir, { recursive: true, force: true });
   }
 });
+
+// Sol review of 42c626ce: an override is all or nothing. A refused or failed
+// OpenCode projection leaves config.json and every agent file byte-identical and
+// records no decision, on the set path and on the clear path.
+function overrideFixture(opencodeModel?: string) {
+  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high', ...(opencodeModel ? { opencode_model: opencodeModel } : {}) }, reviewer: { model: 'claude-r', effort: 'high' } } });
+  const ocDir = join(f.dir, '.opencode', 'agents', 'sterling');
+  mkdirSync(ocDir, { recursive: true });
+  return { ...f, ocDir };
+}
+function snapshotFiles(f: { configPath: string; ocDir: string }): Record<string, string> {
+  const out: Record<string, string> = { config: readFileSync(f.configPath, 'utf8') };
+  for (const n of readdirSync(f.ocDir)) out[n] = readFileSync(join(f.ocDir, n), 'utf8');
+  return out;
+}
+function decisionCount(ctl: DashboardController): number {
+  return ctl.store.query({ types: ['decision'], cap: 50 }).length;
+}
+for (const path of ['set', 'clear'] as const) {
+  const effect = (agents: string[]) => path === 'set'
+    ? { type: 'opencode_model' as const, key: 'implementor', to: 'openai/gpt-5.6-terra', model: 'claude-a', effort: 'high', agents }
+    : { type: 'opencode_model' as const, key: 'implementor', from: 'openai/gpt-6-astra', model: 'claude-a', effort: 'high', agents };
+
+  test(`controller: an override ${path} with a hand-edited OpenCode agent changes nothing and records no decision`, async () => {
+    const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
+    const ctl = openDashboard(f.storePath);
+    try {
+      // install the Sterling-full set at the starting pin, then hand-edit the target
+      await ctl.applyEffects([{ type: 'model_swap', key: 'reviewer', from: { model: 'claude-r', effort: 'high' }, to: { model: 'claude-r', effort: 'high' }, agents: ['reviewer'], decisionTitle: 'setup' }]);
+      writeFileSync(join(f.ocDir, 'implementor.md'), readFileSync(join(f.ocDir, 'implementor.md'), 'utf8') + '\nmine\n');
+      const before = snapshotFiles(f);
+      const decisions = decisionCount(ctl);
+      await ctl.applyEffects([effect(['implementor'])]);
+      assert.deepEqual(snapshotFiles(f), before, 'config.json and every agent file are byte-identical');
+      assert.equal(decisionCount(ctl), decisions, 'no decision recorded');
+      assert.match(ctl.ui().notice ?? '', /not changed — OpenCode agent file\(s\) refused/);
+    } finally {
+      ctl.close();
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+
+  test(`controller: an override ${path} whose render throws changes nothing and records no decision`, async () => {
+    const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
+    // a directory where the implementor file belongs makes the render throw (EISDIR)
+    mkdirSync(join(f.ocDir, 'implementor.md'));
+    const ctl = openDashboard(f.storePath);
+    try {
+      const config = readFileSync(f.configPath, 'utf8');
+      await ctl.applyEffects([effect(['implementor'])]);
+      assert.equal(readFileSync(f.configPath, 'utf8'), config);
+      assert.deepEqual(readdirSync(f.ocDir), ['implementor.md'], 'no agent file was written');
+      assert.equal(decisionCount(ctl), 0);
+      assert.match(ctl.ui().notice ?? '', /not changed — the OpenCode agent render failed/);
+    } finally {
+      ctl.close();
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+
+  test(`controller: an override ${path} whose second agent write fails restores the first and leaves config.json alone`, async () => {
+    const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
+    const ctl = openDashboard(f.storePath);
+    try {
+      await ctl.applyEffects([{ type: 'model_swap', key: 'reviewer', from: { model: 'claude-r', effort: 'high' }, to: { model: 'claude-r', effort: 'high' }, agents: ['reviewer'], decisionTitle: 'setup' }]);
+      // implementor is written before reviewer (roster order); a read-only reviewer file fails the second write
+      chmodSync(join(f.ocDir, 'reviewer.md'), 0o444);
+      const before = snapshotFiles(f);
+      const decisions = decisionCount(ctl);
+      await ctl.applyEffects([effect(['implementor', 'reviewer'])]);
+      assert.deepEqual(snapshotFiles(f), before, 'the written implementor file was restored; config.json untouched');
+      assert.equal(decisionCount(ctl), decisions);
+      assert.match(ctl.ui().notice ?? '', /not changed — writing the OpenCode agents failed/);
+    } finally {
+      ctl.close();
+      chmodSync(join(f.ocDir, 'reviewer.md'), 0o644);
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+}

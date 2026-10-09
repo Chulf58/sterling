@@ -19,7 +19,7 @@ import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
 import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/lib/agent-distribution.mjs';
 import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
-import { sterlingRootFrom, swapFullAgentModel } from '../../../scripts/lib/opencode-install.mjs';
+import { sterlingRootFrom, swapFullAgentModel, stageFullAgentModel, writeFullAgentFiles, restoreFullAgentFiles, type StagedWrite } from '../../../scripts/lib/opencode-install.mjs';
 import { storeBackend } from '../../../scripts/hooks/lib/store-backend.mjs';
 import { writeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mjs';
 
@@ -525,30 +525,69 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
 
   /** Execute an opencode_model effect (decision
    *  opencode-only-model-override-per-role-for-openai-picks): set or clear
-   *  config.models[key].opencode_model, re-render the key's Sterling-full
-   *  OpenCode agents, and record the change as a decision like a model swap.
+   *  config.models[key].opencode_model and re-render the key's Sterling-full
+   *  OpenCode agents, all or nothing. Every agent render and refusal check runs
+   *  first, with nothing written; then the agent files and config.json are
+   *  written, and a failure puts every written file back, so config.json stays
+   *  byte-identical. The decision is recorded only once both have converged.
    *  The Claude agent files under .claude/agents are never written here. */
   function applyOpenCodeModel(e: OpenCodeModelEffect): void {
     const nowISO = new Date().toISOString();
+    const fail = (msg: string) => { ui = { ...ui, notice: `OpenCode model for '${e.key}' not changed — ${msg}; config.json and the OpenCode agents are as they were` }; };
+    let configBefore: string;
+    let configAfter: string;
+    let claudeModel: string;
     try {
       if (e.to !== undefined && !OPENCODE_MODEL_REF_RE.test(e.to)) throw new Error(`'${e.to}' is not a <provider>/<model> id`);
-      const raw = JSON.parse(readFileSync(configPath, 'utf8')) as { models?: Record<string, Record<string, unknown> | undefined> };
+      configBefore = readFileSync(configPath, 'utf8');
+      const raw = JSON.parse(configBefore) as { models?: Record<string, Record<string, unknown> | undefined> };
       raw.models = raw.models ?? {};
       // a key the file does not carry yet takes its current (default) Claude values
       const { opencode_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
       raw.models[e.key] = e.to === undefined ? rest : { ...rest, opencode_model: e.to };
-      writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
-      const claudeModel = typeof rest.model === 'string' ? rest.model : e.model;
-      const shown = (v?: string) => v ?? `anthropic/${claudeModel}`;
-      let notice = `OpenCode model for '${e.key}' set to ${shown(e.to)}; Claude Code keeps ${claudeModel}.`;
-      try {
-        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: claudeModel, opencodeModel: e.to });
-        const refused = (oc.rows ?? []).filter((r) => r.status === 'refused');
-        if (refused.length) notice = `OpenCode model for '${e.key}': config.models was updated, but OpenCode agent file(s) were not — ${refused.map((r) => r.detail).join('; ')}`;
-      } catch (ocErr) {
-        notice = `OpenCode model for '${e.key}': config.models was updated, but the OpenCode agent re-render failed — ${(ocErr as Error).message}`;
+      configAfter = JSON.stringify(raw, null, 2) + '\n';
+      claudeModel = typeof rest.model === 'string' ? rest.model : e.model;
+    } catch (err) {
+      fail((err as Error).message);
+      return;
+    }
+    // 1. stage: render every target agent; a refusal stops the change before any write
+    let writes: StagedWrite[];
+    try {
+      const staged = stageFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: claudeModel, opencodeModel: e.to });
+      const refused = (staged.rows ?? []).filter((r) => r.status === 'refused');
+      if (refused.length) {
+        fail(`OpenCode agent file(s) refused: ${refused.map((r) => r.detail).join('; ')}`);
+        return;
       }
-      ui = { ...ui, notice };
+      writes = staged.writes ?? [];
+    } catch (err) {
+      fail(`the OpenCode agent render failed: ${(err as Error).message}`);
+      return;
+    }
+    // 2. commit: the agent files, then config.json; a failure restores what was written
+    try {
+      writeFullAgentFiles(writes);
+    } catch (err) {
+      fail(`writing the OpenCode agents failed: ${(err as Error).message}`);
+      return;
+    }
+    try {
+      writeFileSync(configPath, configAfter);
+    } catch (err) {
+      try {
+        writeFileSync(configPath, configBefore);
+        restoreFullAgentFiles(writes);
+      } catch (restoreErr) {
+        ui = { ...ui, notice: `OpenCode model for '${e.key}': writing config.json failed (${(err as Error).message}) and the rollback failed too — ${(restoreErr as Error).message}` };
+        return;
+      }
+      fail(`writing config.json failed: ${(err as Error).message}`);
+      return;
+    }
+    // 3. converged: record the change
+    const shown = (v?: string) => v ?? `anthropic/${claudeModel}`;
+    try {
       store.create({
         id: randomUUID(),
         type: 'decision',
@@ -567,8 +606,10 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
         alternatives_rejected: [],
       }, { operation_id: randomUUID() });
     } catch (err) {
-      ui = { ...ui, notice: `OpenCode model for '${e.key}' failed — ${(err as Error).message}` };
+      ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}, but recording the decision failed — ${(err as Error).message}` };
+      return;
     }
+    ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}; Claude Code keeps ${claudeModel}.` };
   }
 
   async function applyEffects(all: Effect[]): Promise<boolean> {
