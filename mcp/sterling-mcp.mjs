@@ -21914,6 +21914,7 @@ function decodeLiveRecordRow(op, row) {
   return record2;
 }
 var SUPPORTED_SCHEMA_VERSION = 2;
+var MODELS_CATALOG_LOCATION = ".sterling/models-catalog";
 var OperationRepeatedError = class extends Error {
   operation_id;
   original_id;
@@ -24118,7 +24119,7 @@ var SterlingStore = class _SterlingStore {
       stack_tags: [],
       title: "Models catalog",
       kind: "doc",
-      location: ".sterling/models-catalog",
+      location: MODELS_CATALOG_LOCATION,
       summary: "KB-maintained model catalog for the TUI System tab.",
       source_date: dateStr,
       capture_date: dateStr,
@@ -31577,7 +31578,7 @@ var SterlingTools = class _SterlingTools {
           }
         };
       }
-      if (record2.type === "reference_material" && record2.kind === "doc" && this.repoRoot) {
+      if (record2.type === "reference_material" && record2.kind === "doc" && this.repoRoot && record2.location !== MODELS_CATALOG_LOCATION) {
         const r = record2;
         const rel = repoPathOfLocation(r.location);
         const tree = rel === void 0 ? void 0 : this.treeRootFor(record2);
