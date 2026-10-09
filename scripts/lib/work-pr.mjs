@@ -61,6 +61,20 @@ export function parseOriginRepo(url) {
   return { host, repo: `${host}/${owner}/${name}` };
 }
 
+/** True only when git answers and 'origin' is not among the remotes: a repo
+ * that never had a GitHub remote (decision project-mode-hobby-work-toggle-decides-flow,
+ * user-ruled 2026-10-08: such a project merges locally even in work mode). A
+ * directory git cannot read is NOT "no origin": it keeps the work-mode path,
+ * whose own preconditions refuse it by name. */
+export function noOriginRemote(cwd) {
+  const r = spawnSync('git', ['remote'], { cwd, encoding: 'utf8', timeout: 30_000 });
+  return r.status === 0 && !r.stdout.split('\n').map((l) => l.trim()).includes('origin');
+}
+
+/** The loud line printed when work mode falls back to a local merge. */
+export const NO_ORIGIN_LOCAL_MERGE_NOTICE =
+  "direct-merge: WORK mode, but this repository has no 'origin' remote — merging LOCALLY like hobby mode. NO pull request was opened and NO Copilot review happened; nothing was pushed.";
+
 /** Cheap preconditions, checked BEFORE the battery. Returns { repo } or { refusal }. */
 export function workPreflight(cwd) {
   const url = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd, encoding: 'utf8', timeout: 30_000 });
@@ -205,8 +219,11 @@ export function pushWithWindowsRetry(cwd, pushArgs, log) {
  * Human text stays on stderr. `state` is mutated by the caller as it goes
  * (stage, branch, pushed, pr_*); an exit that bypasses fail() (a helper's own
  * process.exit) is caught by the exit hook, which reports the last stderr
- * message as the error. Install it only once the mode is KNOWN to be work. */
-export function installWorkResult() {
+ * message as the error. Install it only once the mode is KNOWN to be work.
+ * `localFallback` (work mode in a repo with no origin, GitHub issue #39) adds
+ * `work_mode_local_fallback: true` to every object, and `finishLocal` writes the
+ * local merge's own report inside the same envelope. */
+export function installWorkResult({ localFallback = false } = {}) {
   const state = { stage: 'start', branch: null, pushed: false, pr_url: null, pr_number: null, created: false };
   const stderr = console.error.bind(console);
   let lastError = null;
@@ -231,6 +248,7 @@ export function installWorkResult() {
     pr_url: state.pr_url,
     pr_number: state.pr_number,
     created: state.created,
+    ...(localFallback ? { work_mode_local_fallback: true } : {}),
   });
   process.on('exit', (code) => {
     write(result(false, lastError ?? `exited with code ${code} during stage '${state.stage}' without a result`, code));
@@ -252,6 +270,13 @@ export function installWorkResult() {
       state.stage = 'done';
       write(result(true, null, 0));
       process.exit(0);
+    },
+    /** The local-merge fallback's exit: the envelope plus the merge's own report
+     * (merged_into, branch_merged, branches_swept, …), ok only on exit 0. */
+    finishLocal(report, code = 0) {
+      if (code === 0) state.stage = 'done';
+      write({ ...result(code === 0, code === 0 ? null : lastError ?? `exited with code ${code} during stage '${state.stage}'`, code), ...report });
+      process.exit(code);
     },
   };
 }
