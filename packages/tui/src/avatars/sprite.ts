@@ -86,12 +86,12 @@ export function cells(avatarIndex: number, frame: number): Cell[][] {
 }
 
 /** The sprite on its tile: TILE_COLS cells per row, every cell with a bg (transparent pixels and the
- *  padding show the tile colour). The fg stays unset only on cells that draw no pixel. */
-export function tileCells(avatarIndex: number, frame: number): Cell[][] {
-  return cells(avatarIndex, frame).map((row) => {
-    const pad: Cell = { ch: ' ', bg: TILE_BG };
-    return [pad, ...row.map((c): Cell => ({ ...c, bg: c.bg ?? TILE_BG })), pad];
-  });
+ *  padding show the tile colour). The fg stays unset only on cells that draw no pixel. With `edge`
+ *  (a hex colour) the padding columns carry a thin neon bar in it on the tile's outer edges. */
+export function tileCells(avatarIndex: number, frame: number, edge?: string): Cell[][] {
+  const left: Cell = edge === undefined ? { ch: ' ', bg: TILE_BG } : { ch: '▌', fg: edge, bg: TILE_BG };
+  const right: Cell = edge === undefined ? { ch: ' ', bg: TILE_BG } : { ch: '▐', fg: edge, bg: TILE_BG };
+  return cells(avatarIndex, frame).map((row) => [left, ...row.map((c): Cell => ({ ...c, bg: c.bg ?? TILE_BG })), right]);
 }
 
 // Milliseconds per animation tick, while a subagent is running. The Agents tab redraws on this beat.

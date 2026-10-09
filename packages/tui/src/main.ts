@@ -7,7 +7,8 @@ import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { openDashboard } from './controller.js';
 import { visibleBodyLines, AGENTS_TAB, type DashboardState } from './state.js';
-import { bannerLines } from './banner.js';
+import { bannerLines, scenePixels } from './banner.js';
+import { detectThemeLevel, themeFor, type Theme } from './theme.js';
 import { clearPixels, draw, keyToEvent, mouseToEvent, paintPixels } from './render.js';
 import { composeSubagentBlock, createSubagentTracker, type BlockPixel, type SubagentBlock, type SubagentView } from './subagents.js';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
@@ -34,6 +35,16 @@ if (smoke) {
   // prove the bundled terminal stack resolves (termconfig etc.) without a TTY
   console.error(`sterling-tui smoke: terminal stack loaded (${term.width}x${term.height})`);
   process.exit(0);
+}
+
+// the colour level (theme.ts): STERLING_TUI_COLOR, else NO_COLOR, else what the
+// terminal supports. An unknown STERLING_TUI_COLOR value stops here, loud.
+let theme: Theme;
+try {
+  theme = themeFor(detectThemeLevel(process.env, term.support ?? {}));
+} catch (err) {
+  console.error(`sterling-tui: ${(err as Error).message}`);
+  process.exit(2);
 }
 
 // single instance per store (§11): a live owner turns this launch away politely
@@ -94,7 +105,7 @@ function fullBodyLines(): number {
 
 function subagentBlock(tick: number): SubagentBlock {
   if (ctl.ui().tab !== AGENTS_TAB) return { height: 0, puts: [], pixels: [] };
-  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2, tick);
+  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2, tick, { neonEdge: theme.level !== 'plain' });
 }
 
 // One viewport snapshot for both the draw and the click hit-test (the sync
@@ -105,31 +116,40 @@ function viewport() {
   return { width: term.width, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active, quiet: shownView.quiet ?? 0 } };
 }
 
-// Portrait pixels are painted outside the ScreenBuffer (truecolour): when
-// their positions change, the old ones are blanked and all are repainted.
+// Portrait and banner-scene pixels are painted outside the ScreenBuffer
+// (truecolour): when their positions change, the old ones are blanked and all
+// are repainted.
 let painted: Map<string, string> | undefined;
 let pixelLayout = '';
 let forceFull = true;
 let animation: ReturnType<typeof setInterval> | undefined;
-// terminal-kit takes its colour support from TERM_PROGRAM first and maps tmux
-// to 16 colours, yet tmux itself accepts 24-bit SGR and converts it for the
-// outer terminal; so inside tmux (the dashboard's home) the pixels carry RGB.
-const trueColor =
-  /^(truecolor|24bits?)$/.test(process.env.COLORTERM ?? '') || process.env.TERM_PROGRAM === 'tmux' || term.support?.trueColor === true;
+// inside tmux (the dashboard's home) the pixels carry RGB: see detectThemeLevel
+const trueColor = theme.level === 'truecolor';
+
+// The banner scene's pixels, from the last drawn state; recomputed only when
+// the pane width, the scene's height or the project name changes.
+let bannerKey = '';
+let bannerPx: BlockPixel[] = [];
+function updateBannerPixels(state: DashboardState): void {
+  const key = theme.bannerOverlay && state.banner.length > 0 ? `${term.width}|${state.banner.length}|${state.projectName}` : '';
+  if (key === bannerKey) return;
+  bannerKey = key;
+  bannerPx = key ? scenePixels(term.width, state.banner.length + 1, state.projectName) : [];
+}
 
 function layoutKey(block: SubagentBlock): string {
-  return `${term.width}x${term.height}|` + block.pixels.map((p) => `${p.x},${p.y}`).join(';');
+  return `${term.width}x${term.height}|${bannerKey}|` + block.pixels.map((p) => `${p.x},${p.y}`).join(';');
 }
 
 function screenPixels(block: SubagentBlock): BlockPixel[] {
-  return block.pixels.map((p) => ({ ...p, y: p.y + bodyTop }));
+  return [...bannerPx, ...block.pixels.map((p) => ({ ...p, y: p.y + bodyTop }))];
 }
 
 function animate(): void {
   const block = subagentBlock(Math.floor(Date.now() / ANIMATION_MS));
   // the layout moved since the last redraw: that redraw's successor repaints it
   if (layoutKey(block) !== pixelLayout) return;
-  painted = paintPixels(term, screenPixels(block), painted, trueColor);
+  painted = paintPixels(term, screenPixels(block), painted, trueColor, theme.blankSgr);
 }
 
 // what the last redraw drew: the 1 Hz tick skips a redraw that would draw the same
@@ -147,16 +167,17 @@ function redraw(onlyIfChanged = false): boolean {
   drawnState = state;
   drawnView = viewKey;
   bodyTop = state.bodyTop;
+  updateBannerPixels(state);
   const block = subagentBlock(Math.floor(now / ANIMATION_MS));
   const key = layoutKey(block);
   const full = forceFull || key !== pixelLayout;
   pixelLayout = key;
   forceFull = false;
   const pixels = screenPixels(block);
-  if (full && painted) clearPixels(term, painted, pixels);
+  if (full && painted) clearPixels(term, painted, pixels, theme.blankSgr);
   // the roster is the cached activation snapshot — the 1 Hz redraw never re-reads it
-  draw(screen, state, { block });
-  painted = paintPixels(term, pixels, full ? undefined : painted, trueColor);
+  draw(screen, state, { block, theme });
+  painted = paintPixels(term, pixels, full ? undefined : painted, trueColor, theme.blankSgr);
   const running = shownView.active > 0 && block.pixels.length > 0;
   if (running && !animation) animation = setInterval(animate, ANIMATION_MS);
   else if (!running && animation) {
