@@ -20,6 +20,7 @@ import {
   recordCentralityHits,
   recordCentralTerms,
   classifyClaimPath,
+  MODELS_CATALOG_LOCATION,
   fitDomains,
   MountedStores,
   SterlingStore,
@@ -4332,7 +4333,11 @@ export class SterlingTools {
       // §3.2.5: repo-located docs — out-of-band edits caught at read time.
       // File mtime newer than source_date → verify_before_use + ONE deduplicated
       // refresh_reference maintenance item (a hundred stale reads, one queue entry).
-      if (record.type === 'reference_material' && (record as unknown as { kind: string }).kind === 'doc' && this.repoRoot) {
+      // The seeded 'Models catalog' holds its content in its own `catalog` field;
+      // its location is a synthetic name and nothing writes a file there, so
+      // there is nothing to stat (issue #57). Only that seeded location is
+      // exempt: a catalog reference pointing at a real repo doc stays file-backed.
+      if (record.type === 'reference_material' && (record as unknown as { kind: string }).kind === 'doc' && this.repoRoot && (record as unknown as { location?: unknown }).location !== MODELS_CATALOG_LOCATION) {
         const r = record as unknown as { id: string; title: string; location: string; source_date: string; file_baselines?: Record<string, string> };
         // ONLY A REPO PATH IS A FILE (issue #13): a URL or prose location, and
         // an absolute/escaping path, is not repo-located — nothing to stat, no

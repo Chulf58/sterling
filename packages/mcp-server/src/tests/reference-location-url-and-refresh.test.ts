@@ -357,3 +357,43 @@ test('#13 a genuinely missing local file still mints ONE refresh_reference item'
     cleanup();
   }
 });
+
+// GitHub issue #57: Sterling seeds the 'Models catalog' reference with the
+// location '.sterling/models-catalog', a name for a catalog the record holds in
+// its own `catalog` field. Nothing writes a file there, so the read-time check
+// minted a false "no longer exists on disk" item.
+test('#57 the seeded Models catalog mints no refresh_reference item, while a genuinely missing file still does', () => {
+  const { store, tools, cleanup } = fixture();
+  try {
+    store.bootstrapCatalogIfAbsent({ models: { reviewer: { model: 'claude-opus-4-8' } } }, '2026-09-06T00:00:00.000Z');
+    const seeded = readRefs(tools).find((r) => r.title === 'Models catalog');
+    assert.ok(seeded, 'the catalog was seeded');
+    assert.equal(seeded.location, '.sterling/models-catalog');
+    const gone = mkRef(tools, 'docs/gone.md');
+    readRefs(tools);
+    readRefs(tools);
+    const items = refreshItems(tools);
+    assert.deepEqual(
+      items.map((i) => i.feature_link),
+      [gone.id],
+      'only the genuinely missing file mints; the seeded catalog does not'
+    );
+    assert.equal(readRefs(tools).find((r) => r.title === 'Models catalog')?.verify_before_use, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test('#57 boundary: a reference with a catalog whose location is a missing repo file still mints', () => {
+  const { tools, cleanup } = fixture();
+  try {
+    const ref = mkRef(tools, 'docs/gone-catalog.md', { catalog: { entries: [{ id: 'claude-opus-4-8', label: 'Opus 4.8', tier: 'opus', status: 'active' }] } });
+    assert.ok(ref.catalog, 'the record carries a catalog');
+    readRefs(tools);
+    const items = refreshItems(tools);
+    assert.deepEqual(items.map((i) => i.feature_link), [ref.id]);
+    assert.deepEqual(items[0].file_keys, ['docs/gone-catalog.md']);
+  } finally {
+    cleanup();
+  }
+});

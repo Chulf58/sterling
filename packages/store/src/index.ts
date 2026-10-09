@@ -198,6 +198,9 @@ export function decodeLiveRecordRow(op: string, row: { body: string; scope: stri
 // ---------------------------------------------------------------------------
 export const SUPPORTED_SCHEMA_VERSION = 2;
 
+/** The synthetic location bootstrapCatalogIfAbsent seeds on the 'Models catalog' reference: a name, not a file. */
+export const MODELS_CATALOG_LOCATION = '.sterling/models-catalog';
+
 /**
  * Per-call options for a create, enqueue or supersede (decision
  * postgres-operation-id-minted-by-caller-refused-on-repeat-no-schema-bump).
@@ -3977,7 +3980,7 @@ export class SterlingStore {
       stack_tags: [],
       title: 'Models catalog',
       kind: 'doc',
-      location: '.sterling/models-catalog',
+      location: MODELS_CATALOG_LOCATION,
       summary: 'KB-maintained model catalog for the TUI System tab.',
       source_date: dateStr,
       capture_date: dateStr,

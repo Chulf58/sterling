@@ -8750,7 +8750,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, OperationRepeatedError, StoreMovedError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, OperationRepeatedError, StoreMovedError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -8775,6 +8775,7 @@ var init_dist2 = __esm({
       }
     };
     SUPPORTED_SCHEMA_VERSION = 2;
+    MODELS_CATALOG_LOCATION = ".sterling/models-catalog";
     OperationRepeatedError = class extends Error {
       operation_id;
       original_id;
@@ -10769,7 +10770,7 @@ var init_dist2 = __esm({
           stack_tags: [],
           title: "Models catalog",
           kind: "doc",
-          location: ".sterling/models-catalog",
+          location: MODELS_CATALOG_LOCATION,
           summary: "KB-maintained model catalog for the TUI System tab.",
           source_date: dateStr,
           capture_date: dateStr,
