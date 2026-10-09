@@ -11057,9 +11057,16 @@ function modelOptions(entries, config) {
 function visibleTabs(agents) {
   return TABS.map((_, i) => i).filter((i) => i !== AGENTS_TAB || agents !== void 0);
 }
-var STATE_COLUMN_WIDTH = Math.max(...ARTICLE_STATE_FILTERS.slice(1).map((n) => n.length)) + 2;
+var STATE_GLYPHS = {
+  planned: "\u25CB",
+  built: "\u25D4",
+  wired_in: "\u25D1",
+  active: "\u25CF",
+  dormant: "\u25CC",
+  deprecated: "\xD7"
+};
 function stateColumn(card) {
-  return card.state ? `${`[${card.state}]`.padEnd(STATE_COLUMN_WIDTH)} ` : "";
+  return card.state ? `${STATE_GLYPHS[card.state] ?? "?"} ` : "";
 }
 function cardsFor(store, tab, expanded = []) {
   if (tab === 0)
@@ -11312,11 +11319,69 @@ function tabsFor(store, activeTab, agents) {
     };
   });
 }
+function fitTabs(tabs, width) {
+  if (!Number.isFinite(width))
+    return tabs;
+  const bare = (l) => l.replace(/ \(.*\)$/, "");
+  const steps = [
+    [(l) => l, (l) => l],
+    [(l) => l, bare],
+    [bare, bare],
+    [bare, (l) => bare(l).slice(0, 3)],
+    [bare, (l) => bare(l).slice(0, 1)]
+  ];
+  for (const [active, inactive] of steps) {
+    const labels = tabs.map((t) => t.active ? active(t.label) : inactive(t.label));
+    if (labels.reduce((n, l) => n + l.length + 2, 0) <= width)
+      return tabs.map((t, i) => ({ ...t, label: labels[i] }));
+  }
+  const room = width - 3 * tabs.filter((t) => !t.active).length - 2;
+  const activeName = bare(tabs.find((t) => t.active)?.label ?? "");
+  if (room >= Math.min(3, activeName.length))
+    return tabs.map((t) => ({ ...t, label: t.active ? clipEllipsis(bare(t.label), room) : bare(t.label).slice(0, 1) }));
+  const ai = Math.max(0, tabs.findIndex((t) => t.active));
+  const window = [{ ...tabs[ai], label: clipEllipsis(bare(tabs[ai].label), Math.max(1, width - 2)) }];
+  let used = window[0].label.length + 2;
+  let lo = ai;
+  let hi = ai;
+  for (let grew = true; grew; ) {
+    grew = false;
+    if (hi + 1 < tabs.length && used + 3 <= width) {
+      hi += 1;
+      window.push({ ...tabs[hi], label: bare(tabs[hi].label).slice(0, 1) });
+      used += 3;
+      grew = true;
+    }
+    if (lo > 0 && used + 3 <= width) {
+      lo -= 1;
+      window.unshift({ ...tabs[lo], label: bare(tabs[lo].label).slice(0, 1) });
+      used += 3;
+      grew = true;
+    }
+  }
+  return window;
+}
+function footerFor(ui, tabCount, width) {
+  const tabs = `1-${tabCount} tabs`;
+  let text;
+  if (ui.tab === TASKS_TAB)
+    text = ui.boardEdit ? "editing \xB7 enter save \xB7 esc cancel" : `${tabs} \xB7 \u2191\u2193 \xB7 enter expand \xB7 e edit \xB7 q quit`;
+  else if (ui.tab === KNOWLEDGE_TAB)
+    text = "type to search \xB7 esc clear \xB7 ^f state \xB7 \u2190\u2192 tabs";
+  else if (ui.tab === QUEUE_TAB)
+    text = `${tabs} \xB7 \u2191\u2193 pending \xB7 wheel scrolls \xB7 q quit`;
+  else if (ui.tab === AGENTS_TAB)
+    text = `\u2190/\u2192 or ${tabs} \xB7 q quit`;
+  else
+    text = `${tabs} \xB7 enter change \xB7 esc cancel \xB7 q quit`;
+  return clipEllipsis(text, width);
+}
+var noticeFor = (ui, width) => ui.notice ? clipEllipsis(`\u26A0 ${ui.notice}`, width) : void 0;
 function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents) {
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows = [];
   let screenRow = 0;
-  for (const text of view.banner) {
+  for (const text of view.banner.slice(ui.notice ? 1 : 0)) {
     rows.push({ id: `sysbanner:${screenRow}`, type: "system-banner", selected: false, expanded: false, lines: [{ text, kind: "meta" }], screenRow });
     screenRow += 1;
   }
@@ -11351,25 +11416,26 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, max
     tabs,
     rows,
     emptyMessage: view.rows.length ? void 0 : "(no configured models)",
-    footer: `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 rows \xB7 enter change model/effort \xB7 esc cancel \xB7 q quit`,
+    footer: footerFor(ui, visibleTabs(agents).length, width),
+    notice: noticeFor(ui, width),
     banner,
     projectName,
     bodyTop,
     scroll
   };
 }
-function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents) {
-  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents).state;
+function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents, height = Infinity) {
+  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents, height).state;
 }
-function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents) {
-  const banner = bannerLines(width, showBanner);
+function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents, height = Infinity) {
+  const banner = bannerLines(width, showBanner, height);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
-  const tabs = tabsFor(store, ui.tab, agents);
+  const tabs = fitTabs(tabsFor(store, ui.tab, agents), width);
   if (ui.tab === SYSTEM_TAB)
     return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents), nodes: [], cursor: ui.cursor };
   const nodes = nodesFor(store, ui, knowledge);
   const cursor = resolveCursor(ui, nodes);
-  let rows = [];
+  const rows = [];
   let screenRow = 0;
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i];
@@ -11436,56 +11502,46 @@ function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinit
     rows.push({ id, type, selected, expanded, lines, screenRow });
     screenRow += lines.length;
   }
+  const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
   let queueCompleted;
   let queueActivity;
+  let scroll;
   if (ui.tab === QUEUE_TAB) {
-    const totalLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
-    const startRow = Number.isFinite(maxBodyLines) ? Math.max(1, Math.floor(maxBodyLines / 2)) : totalLines;
-    let overflow;
-    if (totalLines > startRow) {
-      const keep = [];
-      for (const r of rows) {
-        if (r.screenRow + r.lines.length <= startRow - 1)
-          keep.push(r);
-        else
-          break;
-      }
-      overflow = `\u2026 ${rows.length - keep.length} more pending`;
-      rows = keep;
-    }
+    const finite = Number.isFinite(maxBodyLines);
+    const startRow = finite ? Math.max(1, Math.floor(maxBodyLines / 2)) : totalBodyLines;
+    const pendingLines = totalBodyLines > startRow ? startRow - 1 : startRow;
+    scroll = Math.max(0, Math.min(ui.scroll ?? 0, totalBodyLines - pendingLines));
+    const hidden = rows.filter((r) => r.screenRow < scroll || r.screenRow + r.lines.length > scroll + pendingLines).length;
     const completed = completedQueueLines(store);
-    queueCompleted = {
-      startRow,
-      header: "\u2014 completed \u2014",
-      lines: completed.length ? completed : ["(nothing completed yet)"],
-      ...overflow ? { overflow } : {}
-    };
     const activity = activityLines(store);
     queueActivity = {
       header: "\u2014 activity \u2014",
       lines: activity.length ? activity : ["(no activity yet)"]
     };
+    const lines = completed.length ? completed : ["(nothing completed yet)"];
+    const historyTotal = lines.length + 1 + queueActivity.lines.length;
+    const historyLines = finite ? Math.max(0, maxBodyLines - startRow - 1) : historyTotal;
+    queueCompleted = {
+      startRow,
+      pendingLines,
+      scroll: Math.max(0, Math.min(ui.historyScroll ?? 0, historyTotal - historyLines)),
+      header: "\u2014 completed \u2014",
+      lines,
+      ...hidden > 0 ? { overflow: `\u2026 ${hidden} more pending` } : {}
+    };
+  } else {
+    const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
+    scroll = Math.max(0, Math.min(ui.scroll ?? 0, maxScroll));
   }
-  const scrollable = ui.tab !== QUEUE_TAB;
-  const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
-  const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
-  const scroll = scrollable ? Math.max(0, Math.min(ui.scroll ?? 0, maxScroll)) : 0;
   const searchActive = ui.tab === KNOWLEDGE_TAB;
   const state = {
     tabs,
     rows,
     emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
-    footer: (
-      // Fix round (Opus review of 71c1f41): a Tasks-tab board_edit notice
-      // (lost-update refusal, vanished item, failed HEAD resolve) must be
-      // VISIBLE, not just carried in ui.notice — render.ts prints
-      // state.footer unconditionally, so this is the one line available to
-      // this scope's two files without touching render.ts. Mirrors the
-      // System tab's own '⚠ ' convention (buildSystemTab's banner).
-      // A notice on the Knowledge and Queue tabs is shown the same way: a
-      // failed selection write from a click there reports here.
-      ui.notice && (ui.tab === TASKS_TAB || ui.tab === KNOWLEDGE_TAB || ui.tab === QUEUE_TAB) ? `\u26A0 ${ui.notice}` : ui.tab === AGENTS_TAB ? `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 q quit` : `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears \xB7 ctrl-f article state" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
-    ),
+    footer: footerFor(ui, visibleTabs(agents).length, width),
+    // a board_edit refusal, a failed selection write or a degraded store read
+    // (ui.notice) is drawn on its own row in the warning colour
+    notice: noticeFor(ui, width),
     searchLine: searchActive ? `search: ${ui.searchQuery}${ui.stateFilter ? `  state: ${ui.stateFilter}` : ""}` : void 0,
     queueCompleted,
     queueActivity,
@@ -11496,8 +11552,13 @@ function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinit
   };
   return { ui, state, nodes, cursor };
 }
+function bodyWindow(state, maxBodyLines) {
+  const qc = state.queueCompleted;
+  return qc ? Math.min(maxBodyLines, qc.pendingLines ?? qc.startRow) : maxBodyLines;
+}
 function screenLineToRow(state, line1, maxBodyLines = Infinity) {
   const scroll = state.scroll ?? 0;
+  maxBodyLines = bodyWindow(state, maxBodyLines);
   const abs = line1 - 1 - state.bodyTop + scroll;
   if (abs < scroll || abs >= scroll + maxBodyLines)
     return -1;
@@ -11534,17 +11595,17 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
   const maxBodyLines = viewport.maxBodyLines ?? Infinity;
   const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects = [];
-  const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
+  const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: void 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
   const reachable = visibleTabs(viewport.agents);
   const stepTab = (dir) => reachable[(reachable.indexOf(ui.tab) + dir + reachable.length) % reachable.length] ?? reachable[0];
-  const scrollable = ui.tab !== QUEUE_TAB;
-  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster, viewport.agents);
+  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster, viewport.agents, viewport.height);
   const revealAt = (cursor) => {
-    if (!scrollable || !Number.isFinite(maxBodyLines))
+    if (!Number.isFinite(maxBodyLines))
       return { ...ui, cursor };
     const st = drawn && ui.tab !== SYSTEM_TAB ? drawn.state : buildSelf({ ...ui, cursor });
     const total = st.rows.length ? st.rows[st.rows.length - 1].screenRow + st.rows[st.rows.length - 1].lines.length : 0;
-    const max = Math.max(0, total - maxBodyLines);
+    const window = bodyWindow(st, maxBodyLines);
+    const max = Math.max(0, total - window);
     let scroll = ui.scroll ?? 0;
     const bannerOffset = ui.tab === SYSTEM_TAB ? st.rows.filter((r) => r.type === "system-banner").length : 0;
     const row = st.rows[cursor + bannerOffset];
@@ -11553,8 +11614,8 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
       const bottom = row.screenRow + row.lines.length;
       if (top < scroll)
         scroll = top;
-      else if (bottom > scroll + maxBodyLines)
-        scroll = Math.min(top, bottom - maxBodyLines);
+      else if (bottom > scroll + window)
+        scroll = Math.min(top, bottom - window);
     }
     return { ...ui, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
   };
@@ -11825,20 +11886,25 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
         return { ui, effects };
       return { ui: switchTab(event.index), effects };
     case "wheel": {
-      if (!scrollable)
-        return { ui: { ...ui, cursor: clamp(ui.cursor + (event.dy > 0 ? 1 : -1)) }, effects };
-      const desired = (ui.scroll ?? 0) + (event.dy > 0 ? 3 : -3);
-      if (drawn && ui.tab !== SYSTEM_TAB) {
-        const rows = drawn.state.rows;
-        const total = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
-        const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - maxBodyLines) : 0;
-        return { ui: { ...ui, scroll: Math.max(0, Math.min(desired, max)) }, effects };
+      const step = event.dy > 0 ? 3 : -3;
+      const st = drawn && ui.tab !== SYSTEM_TAB ? drawn.state : buildSelf(ui);
+      const qc = st.queueCompleted;
+      const off = qc && event.y !== void 0 ? event.y - 1 - st.bodyTop : void 0;
+      if (off !== void 0 && (off < 0 || off >= maxBodyLines))
+        return { ui, effects };
+      if (qc && off !== void 0 && off >= qc.startRow) {
+        const historyTotal = qc.lines.length + (st.queueActivity ? 1 + st.queueActivity.lines.length : 0);
+        const historyLines = Math.max(0, maxBodyLines - qc.startRow - 1);
+        const max2 = Number.isFinite(maxBodyLines) ? Math.max(0, historyTotal - historyLines) : 0;
+        return { ui: { ...ui, historyScroll: Math.max(0, Math.min((ui.historyScroll ?? 0) + step, max2)) }, effects };
       }
-      const st = buildSelf({ ...ui, scroll: desired });
-      return { ui: { ...ui, scroll: st.scroll }, effects };
+      const rows = st.rows;
+      const total = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
+      const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - bodyWindow(st, maxBodyLines)) : 0;
+      return { ui: { ...ui, scroll: Math.max(0, Math.min((ui.scroll ?? 0) + step, max)) }, effects };
     }
     case "click": {
-      const state = drawn ? drawn.state : buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster, viewport.agents);
+      const state = drawn ? drawn.state : buildSelf(ui);
       if (event.y === state.bodyTop - 1) {
         let x = 1;
         for (let i = 0; i < state.tabs.length; i++) {
@@ -11855,7 +11921,7 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
       return { ui, effects };
     }
     case "rightclick":
-      return { ui: { ...ui, expanded: [], scroll: 0 }, effects };
+      return { ui: { ...ui, expanded: [], scroll: 0, historyScroll: void 0 }, effects };
   }
   return { ui, effects };
 }
@@ -12937,7 +13003,7 @@ function openDashboard(storePath, options = {}) {
   }
   let frame2;
   let builds = 0;
-  const vpKey = (vp) => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null]);
+  const vpKey = (vp) => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null]);
   const today = () => (/* @__PURE__ */ new Date()).toDateString();
   function currentFrame(vp) {
     let dataVersion;
@@ -12953,7 +13019,7 @@ function openDashboard(storePath, options = {}) {
     if (frame2 && dataVersion !== void 0 && frame2.dataVersion === dataVersion && frame2.ui === ui && frame2.roster === roster && frame2.vp === key && frame2.day === day)
       return frame2.built;
     builds++;
-    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents);
+    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height);
     frame2 = { vp: key, day, ui, roster, dataVersion, built };
     return built;
   }
@@ -15910,6 +15976,12 @@ function keyToUiEvent(key) {
   if (ch.length === 1 && ch >= " " && ch !== "\x7F") return { kind: "char", ch };
   return void 0;
 }
+function footerLines(st) {
+  return [st.notice ? { text: st.notice, warn: true } : { text: "" }, { text: st.footer, dim: true }];
+}
+function paintedFg(line, colours) {
+  return line.warn ? colours.warning : line.dim ? colours.muted : void 0;
+}
 function escapeLeavesView(ui) {
   if (ui.boardEdit || ui.selector || ui.sparringModelEdit !== void 0) return false;
   if (ui.tab === KNOWLEDGE_TAB && ui.searchQuery) return false;
@@ -16024,7 +16096,6 @@ function Sidebar(props) {
       <text fg={muted()}>{hint()}</text>
     </box>;
 }
-var footerLines = (st) => [{ text: "" }, { text: st.footer, dim: true }];
 function paint(st, maxBodyLines) {
   const lines = [{ text: st.searchLine ?? "", dim: true }];
   if (st.emptyMessage) lines.push({ text: st.emptyMessage, dim: true });
@@ -16054,6 +16125,7 @@ function FullView(props) {
   const [failure, setFailure] = createSignal();
   const muted = () => props.api.theme?.text?.muted;
   const highlight = () => props.api.theme?.background?.raised?.high;
+  const colours = () => ({ muted: muted(), warning: props.api.theme?.text?.feedback?.warning?.base });
   const palette2 = () => ({ text: props.api.theme?.text?.base, muted: muted(), surface: props.api.theme?.background?.base });
   const width = () => Math.max(20, dims().width - 2);
   const subagentSession = () => {
@@ -16114,14 +16186,14 @@ function FullView(props) {
           </For>
         </box>
         <For each={view().lines}>
-          {(l) => <text fg={l.dim ? muted() : void 0} bg={l.selected ? highlight() : void 0}>{l.text || " "}</text>}
+          {(l) => <text fg={paintedFg(l, colours())} bg={l.selected ? highlight() : void 0}>{l.text || " "}</text>}
         </For>
         <Show when={extra().length}>
           <text> </text>
           <Index each={extra()}>{(l) => <StyledLine spans={l()} palette={palette2()} />}</Index>
         </Show>
         <For each={view().footer}>
-          {(l) => <text fg={l.dim ? muted() : void 0}>{l.text || " "}</text>}
+          {(l) => <text fg={paintedFg(l, colours())}>{l.text || " "}</text>}
         </For>
       </Show>
       <Show when={failure()}>
