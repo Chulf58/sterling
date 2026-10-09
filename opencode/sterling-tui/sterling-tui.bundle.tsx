@@ -11222,7 +11222,7 @@ function tabsFor(store, activeTab, agents) {
   return visibleTabs(agents).map((i) => {
     const label = TABS[i];
     return {
-      label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label === "Agents" && agents ? `${label} (${agents.running})` : label,
+      label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label === "Agents" && agents ? `${label} (${agents.running} running${agents.quiet ? ` \xB7 ${agents.quiet} quiet` : ""})` : label,
       active: i === activeTab,
       index: i
     };
