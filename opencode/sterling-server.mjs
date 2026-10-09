@@ -18472,7 +18472,8 @@ function createDispatchHandlers({ rootOf, fenced, now = () => Date.now() }) {
       logDisclosures(root, await recordDispatchPost(root, { ...shape, tool_response: { agentId: child, prompt: shape.tool_input.prompt } }));
       await registerRound(root, input, child);
       const end = { session_id: input.sessionID, agent_id: child };
-      if (input.input?.background !== true) {
+      const backgrounded = input.input?.background === true || input.result?.metadata?.status === "running";
+      if (!backgrounded) {
         logDisclosures(root, await finishDispatchAndRegisterEnd(root, end));
         return;
       }

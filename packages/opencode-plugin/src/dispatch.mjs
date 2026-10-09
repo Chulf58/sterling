@@ -15,9 +15,12 @@
 // names (H20's briefTerritory), so H20's DISPATCH OVERLAP sees a running subagent.
 //
 // OpenCode has no SubagentStop. A foreground subagent has finished when its call
-// returns, so that dispatch is ended there; a background one (background: true)
-// is ended when its child session's execution ends, succeeded, failed or
-// interrupted (endChildDispatch, called from the settlement gate). A child that
+// returns with metadata.status 'completed', so that dispatch is ended there. A
+// backgrounded one is ended when its child session's execution ends, succeeded,
+// failed or interrupted (endChildDispatch, called from the settlement gate). A
+// call is backgrounded when it was launched with background: true or when the
+// user moved it to the background mid-call (ctrl+B): the tool returns the same
+// metadata.status 'running' for both, so that status is the signal. A child that
 // ends before its call's execute.after binds it is ended at that bind: the
 // server notes every execution end (noteExecutionEnd) before the gate reads the
 // register, and the bind checks for an end at or after the call's own Pre.
@@ -269,7 +272,8 @@ export function createDispatchHandlers({ rootOf, fenced, now = () => Date.now() 
       logDisclosures(root, await recordDispatchPost(root, { ...shape, tool_response: { agentId: child, prompt: shape.tool_input.prompt } }));
       await registerRound(root, input, child);
       const end = { session_id: input.sessionID, agent_id: child };
-      if (input.input?.background !== true) {
+      const backgrounded = input.input?.background === true || input.result?.metadata?.status === 'running';
+      if (!backgrounded) {
         logDisclosures(root, await finishDispatchAndRegisterEnd(root, end));
         return;
       }
