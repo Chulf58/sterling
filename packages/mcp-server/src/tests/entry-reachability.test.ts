@@ -748,6 +748,9 @@ test('an unreadable clone identity is not read as "library": the item still mint
       assert.equal(items.length, 1, label);
       assert.equal(items[0].feature_link, art.id, label);
       assert.match(items[0].text, NO_ENTRY, label);
+      assert.match(items[0].text, /reachability is not checked in this tree/, label);
+      assert.match(items[0].text, /marking an entry is optional/, label);
+      assert.doesNotMatch(items[0].text, /server\.ts or tools\.ts/, label);
     } finally {
       cleanup();
     }
