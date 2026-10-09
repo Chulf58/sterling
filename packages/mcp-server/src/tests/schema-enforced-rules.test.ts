@@ -91,7 +91,7 @@ function setPath(record: Rec, path: string, value: string, leafIsArray: boolean)
   });
 }
 
-test('type: marked with the condition that knowledge_create requires it as fields.type, which the served input schema enforces', async () => {
+test('type: marked with the condition that knowledge_create takes it once (top level or fields.type), which the served input schema advertises', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-schema-rules-mcp-'));
   const { server, store, tools } = createSterlingServer(join(dir, 'sterling.db'));
   const client = new Client({ name: 'test-client', version: '0.0.1' });
@@ -103,14 +103,14 @@ test('type: marked with the condition that knowledge_create requires it as field
     const variants = (createTool!.inputSchema as unknown as { properties: { fields: { anyOf: { properties: Rec; required?: string[] }[] } } }).properties.fields.anyOf;
     for (const variant of variants) {
       const type = (variant.properties.type as { const: string }).const;
-      assert.ok(variant.required?.includes('type'), `${type}: the served create schema requires fields.type`);
+      assert.ok(!variant.required?.includes('type'), `${type}: the served create schema leaves fields.type optional (type is given once)`);
       const field = (tools.knowledgeSchema(type).fields as Described[]).find((f) => f.name === 'type');
       assert.equal(field?.server_owned, true);
-      assert.match(field?.condition ?? '', new RegExp(`knowledge_create requires fields\\.type set to '${type}'`));
+      assert.match(field?.condition ?? '', new RegExp(`knowledge_create takes type once, .* set to '${type}'`));
       assert.match(field?.condition ?? '', /every other write refuses it/);
       assert.ok(
-        tools.knowledgeSchema(type).rules.includes('knowledge_create requires fields.type equal to its outer type argument.'),
-        `${type}: rules state the fields.type requirement`
+        tools.knowledgeSchema(type).rules.includes('knowledge_create takes type once, as the top-level type argument or as fields.type; if both are given they must match.'),
+        `${type}: rules state the one-copy type contract`
       );
     }
     const schemaTool = listed.find((t) => t.name === 'knowledge_schema');

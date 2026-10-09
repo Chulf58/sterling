@@ -1,7 +1,7 @@
 {
   "name": "@chulf58/sterling",
   "type": "module",
-  "version": "0.19.36",
+  "version": "0.19.37",
   "description": "Sterling monorepo — plugin sources. The shipped plugin is described in STERLING-SPEC.md section 2.2.",
   "publishConfig": {
     "access": "public"

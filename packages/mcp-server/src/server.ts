@@ -5,7 +5,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { z } from 'zod';
+import { z, ZodError } from 'zod';
 import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS } from '@sterling/schemas';
 import { MountedStores, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
@@ -96,7 +96,7 @@ const passthrough = z.object({}).passthrough();
  * a wrong-variant body is refused naming exactly that variant's missing/extra
  * fields, never a generic union failure.
  */
-const KNOWLEDGE_CREATE_FIELD_VARIANTS = Object.keys(RECORD_TYPES).map((type) => {
+const buildCreateFieldVariants = (discriminatorOptional: boolean) => Object.keys(RECORD_TYPES).map((type) => {
   const rawShape = objectShapeFor(type);
   if (!rawShape) throw new Error(`knowledge_create input schema: '${type}' is registered but has no unwrappable object shape`);
   const defaulted = new Set(CREATE_DEFAULTED_FIELDS);
@@ -107,12 +107,15 @@ const KNOWLEDGE_CREATE_FIELD_VARIANTS = Object.keys(RECORD_TYPES).map((type) => 
   }
   // the per-variant discriminator the decision names — re-added after the
   // SERVER_OWNED_FIELDS strip above (which also matches bare 'type').
-  fieldsShape.type = z.literal(type);
+  // `discriminatorOptional` builds the ADVERTISED variants (see
+  // knowledgeCreateInput): type may be given once, at the top level OR here.
+  fieldsShape.type = discriminatorOptional ? z.literal(type).optional() : z.literal(type);
   // create-time directive, never a stored field (the tool handler strips it
   // before the candidate is built) — admitted on every variant, not type-specific.
   fieldsShape[DEDUP_OVERRIDE_FIELD] = z.boolean().optional();
   return z.object(fieldsShape).strict();
 });
+const KNOWLEDGE_CREATE_FIELD_VARIANTS = buildCreateFieldVariants(false);
 
 // z.discriminatedUnion needs a TUPLE of at least two ZodObjects at the type
 // level; KNOWLEDGE_CREATE_FIELD_VARIANTS is built by a runtime .map over the
@@ -131,6 +134,64 @@ const knowledgeCreateFieldsSchema = z.discriminatedUnion(
   'type',
   KNOWLEDGE_CREATE_FIELD_VARIANTS as unknown as [z.ZodDiscriminatedUnionOption<'type'>, ...z.ZodDiscriminatedUnionOption<'type'>[]]
 );
+
+/**
+ * `type` IS GIVEN ONCE (GitHub issue #55): at the top level of knowledge_create
+ * or as fields.type, whichever the caller finds natural. The discriminated
+ * union above needs fields.type to pick a variant, so the missing copy is
+ * filled in from the other BEFORE it runs, and the per-type parse then stays
+ * exactly as strict as before. Returns the normalized arguments, or the error
+ * text for a call that names no type or two different ones.
+ */
+function resolveCreateType(args: unknown): { args: unknown } | { error: string } {
+  if (typeof args !== 'object' || args === null || Array.isArray(args)) return { args };
+  const input = args as Record<string, unknown>;
+  const fields = input.fields;
+  if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) return { args };
+  const outer = input.type;
+  const inner = (fields as Record<string, unknown>).type;
+  if (outer === undefined && inner === undefined) {
+    return {
+      error:
+        "knowledge_create: no record type given. Set it once, either as the top-level 'type' argument or as 'fields.type' " +
+        `(one is enough), e.g. {"type":"decision","fields":{"title":"…","statement":"…","alternatives_rejected":[],"rationale":"…"}}. Registered: ${Object.keys(RECORD_TYPES).sort().join(', ')}.`,
+    };
+  }
+  if (outer !== undefined && inner !== undefined && outer !== inner) {
+    return {
+      error: `knowledge_create: the top-level 'type' ('${String(outer)}') does not match 'fields.type' ('${String(inner)}'). Give the type once, or set both to the same registered type.`,
+    };
+  }
+  const type = outer ?? inner;
+  return { args: { ...input, type, fields: { ...fields, type } } };
+}
+
+/**
+ * The knowledge_create input as ADVERTISED to MCP clients: top-level `type` and
+ * every variant's `type` literal are optional, so a client that validates
+ * against the served JSON Schema before calling does not reject a one-copy
+ * call. The ADVERTISED shape is looser than what is ENFORCED: the SDK's
+ * parse (safeParseAsync, overridden below) first runs resolveCreateType, then
+ * validates against `knowledgeCreateParseSchema`, the strict discriminated
+ * union, so per-type validation and its variant-scoped errors are unchanged.
+ */
+const knowledgeCreateParseSchema = z
+  .object({ type: z.string(), fields: knowledgeCreateFieldsSchema, projection: z.enum(['full', 'digest']).optional() })
+  .strict();
+const knowledgeCreateInput = z
+  .object({
+    type: z.string().optional().describe("record type; give it here or as fields.type (one copy is enough)"),
+    fields: z.union(buildCreateFieldVariants(true) as unknown as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]),
+    projection: z.enum(['full', 'digest']).optional(),
+  })
+  .strict();
+knowledgeCreateInput.safeParseAsync = async (data, params) => {
+  const resolved = resolveCreateType(data);
+  if ('error' in resolved) {
+    return { success: false, error: new ZodError([{ code: 'custom', path: ['type'], message: resolved.error }]) };
+  }
+  return knowledgeCreateParseSchema.safeParseAsync(resolved.args, params) as never;
+};
 
 /**
  * Every tool's TOP-LEVEL parameters are STRICT: an unknown key is a loud
@@ -277,31 +338,19 @@ export function createSterlingServer(target: string | { projectRoot: string }): 
     'knowledge_create',
     {
       description:
-        "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. A links entry with rel 'supersedes' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel 'cites' for a deliberate partial override. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." +
+        "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. Example: {\"type\":\"decision\",\"fields\":{\"title\":\"...\",\"statement\":\"...\",\"alternatives_rejected\":[],\"rationale\":\"...\"}}. A colliding feature_article slug is refused. A links entry with rel 'supersedes' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel 'cites' for a deliberate partial override. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." +
         createDomainsNote,
-      inputSchema: strict({ type: z.string(), fields: knowledgeCreateFieldsSchema, projection: z.enum(['full', 'digest']).optional() }),
+      inputSchema: knowledgeCreateInput,
     },
-    ({ type, fields, projection }) => {
-      // `fields.type` is the schema's own discriminator (see the design note
-      // above for why it has to live here, not on a sibling key) — it is
-      // VALIDATED as part of `fields` but is not itself a stored field, so it
-      // is stripped back out here, after confirming it agrees with the outer
-      // `type` argument (a caller setting the two inconsistently is refused
-      // loudly rather than silently routed to whichever branch parsed).
-      // tools.knowledgeCreate never sees a `type` key inside fields — its own
-      // refuseServerOwnedFields guard (tools.ts) refuses that unconditionally,
-      // matching (correctly) even a value equal to the real type.
-      const { type: fieldsType, ...restFields } = fields as { type: string } & Record<string, unknown>;
-      if (fieldsType !== type) {
-        // Two causes reach this mismatch, each with its own remedy (decision
-        // d0b88e27): an unregistered OUTER type (the union side is literal,
-        // the outer param is a bare string) vs two registered types disagreeing.
-        if (!(type in RECORD_TYPES)) {
-          throw new Error(`knowledge_create: outer 'type' ('${type}') is not a registered record type — fields.type is '${fieldsType}'; registered: ${Object.keys(RECORD_TYPES).sort().join(', ')}.`);
-        }
-        throw new Error(`knowledge_create: outer 'type' ('${type}') does not match fields.type ('${fieldsType}') — set both to the same registered type`);
-      }
-      return json(tools.writeProjected(tools.knowledgeCreate(type, restFields), projection));
+    ({ fields, projection }) => {
+      // The input parse (knowledgeCreateInput) has already filled whichever
+      // copy of `type` the caller left out and refused two that differ, so
+      // `type` and `fields.type` agree here. `fields.type` is the union's own
+      // discriminator, not a stored field, so it is stripped back out:
+      // tools.knowledgeCreate's refuseServerOwnedFields refuses a `type` key
+      // inside fields unconditionally, even one equal to the real type.
+      const { type: recordType, ...restFields } = fields as { type: string } & Record<string, unknown>;
+      return json(tools.writeProjected(tools.knowledgeCreate(recordType, restFields), projection));
     }
   );
 

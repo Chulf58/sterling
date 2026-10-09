@@ -3762,7 +3762,7 @@ export class SterlingTools {
     addFieldCondition(
       fields,
       'type',
-      `knowledge_create requires fields.type set to '${described.type}', equal to its outer type argument: it selects this schema. Fixed afterwards: every other write refuses it.`
+      `knowledge_create takes type once, as the top-level type argument or as fields.type, set to '${described.type}': it selects this schema (if both are given they must match). Fixed afterwards: every other write refuses it.`
     );
     for (const name of MUTATION_REFUSED_FIELDS) {
       addFieldCondition(fields, name, 'Creation-only: knowledge_create routes the record by it, and every later write refuses it.');
@@ -3786,7 +3786,7 @@ export class SterlingTools {
     }
     for (const [path, extras] of pathExtras) addFieldCondition(fields, path, `Also refused: ${extras.join('; ')}.`);
     const rules = [
-      'knowledge_create requires fields.type equal to its outer type argument.',
+      'knowledge_create takes type once, as the top-level type argument or as fields.type; if both are given they must match.',
       `${DEDUP_OVERRIDE_FIELD}: true is accepted in the fields of every knowledge_create; it is a directive and is never stored.`,
       ...(described.type === DEDUP_GUARDED_TYPE
         ? [`A new ${DEDUP_GUARDED_TYPE} that overlaps an existing one is refused unless ${DEDUP_OVERRIDE_FIELD}: true is set.`]
