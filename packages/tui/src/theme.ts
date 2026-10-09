@@ -2,8 +2,8 @@
 // tui-synthwave-theme-sunset-banner-project-name-on-horizon): a black
 // background the TUI paints itself (the deep violet it first had read badly,
 // user 2026-10-09), white body text, hot pink and cyan accents, an explicit
-// muted colour instead of the terminal's dim, amber bold warnings and a violet
-// full-width selection bar instead of inverse video.
+// muted colour instead of the terminal's dim, amber bold warnings and a bold
+// cyan selected title on the page black instead of inverse video.
 //
 // Four capability levels. The body is drawn through terminal-kit's regular
 // ScreenBuffer, which takes 256-palette indexes only (decisions f509a5b7 and
@@ -53,8 +53,6 @@ export const XTERM = {
   error: 203,
   /** #00ffaf */
   success: 49,
-  /** #5f00af, the selection bar */
-  selection: 55,
   /** #ffffff */
   bright: 231,
 } as const;
@@ -154,14 +152,14 @@ function xtermTheme(level: 'truecolor' | '256'): Theme {
     text: on({ color: XTERM.text }),
     muted,
     heading: on({ color: XTERM.pink, bold: true }),
-    title: (selected, expanded) =>
-      selected ? { color: XTERM.bright, bgColor: XTERM.selection, bold: expanded } : on({ color: XTERM.text, bold: expanded }),
+    // the selected title is bold cyan on the page black; no coloured bar
+    title: (selected, expanded) => (selected ? on({ color: XTERM.cyan, bold: true }) : on({ color: XTERM.text, bold: expanded })),
     warn: (attr) => ({ ...attr, color: XTERM.amber, bold: true }),
     map: (attr) => {
       const color = attr.color === 'green' ? XTERM.success : attr.color === 'red' ? XTERM.error : attr.dim ? XTERM.muted : XTERM.text;
       return attr.bold ? on({ color, bold: true }) : on({ color });
     },
-    fullWidthSelection: true,
+    fullWidthSelection: false,
     bannerOverlay: true,
     sceneArt: on({ color: XTERM.bright, bold: true }),
     sceneHorizon: on({ color: XTERM.cyan }),
