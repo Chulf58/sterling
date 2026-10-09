@@ -13421,6 +13421,8 @@ function openDashboard(storePath, options = {}) {
   let pending = [];
   let retryNotice;
   const isBusy = (err) => {
+    if (err instanceof StoreBusyError)
+      return true;
     const code = err?.errcode;
     return code === 5 || code === 6 || /database is (locked|busy)|SQLITE_BUSY|SQLITE_LOCKED/i.test(err?.message ?? "");
   };
