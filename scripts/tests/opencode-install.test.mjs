@@ -919,6 +919,10 @@ test('a role config.json does not write pins the default the System tab shows; t
     reviewer: 'model: anthropic/claude-haiku-4-5',
     librarian: 'model: anthropic/claude-sonnet-5-5',
   });
+  // a literal models.undefined entry is schema-valid (any agent name is a key) and must not reach the conductor
+  writeConfig(dir, { reviewer: { model: 'claude-haiku-4-5', effort: 'high' }, undefined: { model: 'claude-haiku-4-5', effort: 'low' } });
+  assert.equal(configRow(run(dir, home)), undefined, 'the config validates');
+  assert.equal(pinsOf(dir).conductor, null, 'models.undefined does not pin the conductor');
   swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['conductor', 'scout'], model: 'claude-opus-5-5' });
   const r = run(dir, home);
   assert.equal(statusOf(r, '/conductor.md'), 'matches', 'no config entry: the pin on disk is kept');

@@ -1084,7 +1084,11 @@ export function configuredFullAgentModels(projectDir) {
   }
   const models = {};
   for (const name of ROSTER) {
-    const entry = parsed.models[AGENT_MODEL_KEY[name]];
+    // resolve the key first: a role without one (the conductor) must never read
+    // models['undefined'], which a schema-valid config can carry
+    const key = AGENT_MODEL_KEY[name];
+    if (key === undefined) continue;
+    const entry = parsed.models[key];
     if (entry === undefined) continue;
     models[name] = opencodeModelFor({ model: entry.model, opencodeModel: entry.opencode_model });
   }
