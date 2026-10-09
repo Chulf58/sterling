@@ -410,9 +410,10 @@ test('SPEC2 control: queue modestly over the deep threshold keeps the CURRENT bo
   try {
     // Lane mix changed with board 27c87783: reconcile_needed is the background
     // worker's lane and no longer counts toward the conductor's depth, so the
-    // conductor's lanes (stale_research 12 + article_missing 8) carry the 20.
-    maintenanceLane(store, 'stale_research', 12, 's');
-    maintenanceLane(store, 'article_missing', 8, 'a');
+    // conductor's lanes carry the 20. CHANGED (GitHub #56): stale_research and article_missing became worker
+    // lanes, so capture_owed 12 + research_owed 8 stand in for them.
+    maintenanceLane(store, 'capture_owed', 12, 's');
+    maintenanceLane(store, 'research_owed', 8, 'a');
     maintenanceLane(store, 'reconcile_needed', 5, 'r');
     // conductor total 20 — modestly over the threshold of 15, the scale SPEC2 says
     // must keep today's shape unchanged.
@@ -423,8 +424,8 @@ test('SPEC2 control: queue modestly over the deep threshold keeps the CURRENT bo
     const ctx = additionalContext(r);
 
     assert.match(ctx, /MAINTENANCE QUEUE IS DEEP — 20 drainable items/, 'the conductor\'s total is still reported');
-    assert.ok(pairedNear(ctx, 12, 'stale_research'), 'the stale_research lane is named with its count');
-    assert.ok(pairedNear(ctx, 8, 'article_missing'), 'the article_missing lane is named with its count');
+    assert.ok(pairedNear(ctx, 12, 'capture_owed'), 'the capture_owed lane is named with its count');
+    assert.ok(pairedNear(ctx, 8, 'research_owed'), 'the research_owed lane is named with its count');
     assert.match(ctx, /5 items in lane reconcile_needed are drained by the background worker/, 'the worker\'s lane is named as the worker\'s');
     assert.match(ctx, WHOLE_QUEUE_INSTRUCTION, 'at a modest overage the current unconditional drain-before-new-work ask is unchanged');
   } finally {
@@ -444,8 +445,10 @@ test('SPEC2: queue far over the threshold (hundreds) names the top lane with its
   const { dir, store, cleanup } = makeProject({ maintenance_queue: { deep_threshold: 15 } });
   try {
     maintenanceLane(store, 'reconcile_needed', 150, 'r');
-    maintenanceLane(store, 'stale_research', 100, 's');
-    maintenanceLane(store, 'article_missing', 50, 'a');
+    // CHANGED (GitHub #56): stale_research and article_missing became worker lanes; capture_owed and
+    // research_owed keep the conductor's share at 150.
+    maintenanceLane(store, 'capture_owed', 100, 's');
+    maintenanceLane(store, 'research_owed', 50, 'a');
     // total 300 — far over the threshold of 15, the scale the board item says makes
     // the current unconditional instruction unfollowable ("5 closed against 210").
 
@@ -455,7 +458,10 @@ test('SPEC2: queue far over the threshold (hundreds) names the top lane with its
     const ctx = additionalContext(r);
 
     assert.match(ctx, /MAINTENANCE QUEUE IS (VERY )?DEEP/, 'the deep-queue signal still fires at scale (banner wording may legitimately escalate to "VERY DEEP")');
-    assert.ok(pairedNear(ctx, 150, 'reconcile_needed'), 'the top (largest) lane is named together with its count');
+    // reconcile_needed is the largest lane but a worker lane, so the top lane the conductor is asked to drain is capture_owed.
+    assert.ok(pairedNear(ctx, 100, 'capture_owed'), 'the top conductor lane is named together with its count');
+    assert.match(ctx, /Drain the biggest lane now \(100 items in lane capture_owed\)/, 'the drain ask names the top conductor lane');
+    assert.match(ctx, /150 items in lane reconcile_needed are drained by the background worker, not by you/, 'the worker lane is named as the worker\'s');
     assert.match(ctx, BOUNDED_DRAIN_ASK, 'a bounded ask (offering a drain slice) is present at scale');
     assert.doesNotMatch(ctx, WHOLE_QUEUE_INSTRUCTION, 'the unconditional whole-queue-before-new-work instruction — unfollowable at this size — is gone');
   } finally {
@@ -477,8 +483,8 @@ test('SPEC2 boundary: queue at EXACTLY 10x the deep threshold (150) fires the VE
   const { dir, store, cleanup } = makeProject({ maintenance_queue: { deep_threshold: 15 } });
   try {
     // Lane changed with board 27c87783: only the conductor's lanes count, and
-    // reconcile_needed is the worker's.
-    maintenanceLane(store, 'stale_research', 150, 'r'); // deep_threshold(15) * 10 exactly
+    // reconcile_needed is the worker's. CHANGED (GitHub #56): so is stale_research now, so capture_owed carries it.
+    maintenanceLane(store, 'capture_owed', 150, 'r'); // deep_threshold(15) * 10 exactly
     const r = h1(dir, 'startup');
     assert.equal(r.code, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
     assert.ok(r.out, 'H1 must emit parseable JSON');

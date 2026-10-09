@@ -1,6 +1,6 @@
 // stdio entry point: sterling-mcp --project <project root>
 // (hobby back-compat: sterling-mcp --store <path-to-sterling.db>)
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { resolveStoreRoute } from '@sterling/store/routing';
@@ -23,6 +23,21 @@ if ((projectArg === undefined) === (storeArg === undefined) || !(projectArg ?? s
   process.exit(2);
 }
 const flagName = projectArg !== undefined ? '--project' : '--store';
+// Worker mode (GitHub #56): the maintenance worker's per-run MCP config passes
+// both flags; the server then refuses every mutation the policy file does not
+// allow. One without the other, an empty value, or a relative policy path
+// refuses boot, so a misbuilt config never serves an unguarded worker.
+const workerPolicyArg = valueOf('--worker-policy');
+const workerTokenArg = valueOf('--worker-token');
+if ((workerPolicyArg === undefined) !== (workerTokenArg === undefined) || workerPolicyArg === '' || workerTokenArg === '') {
+  console.error('sterling-mcp: worker mode needs both --worker-policy <absolute path to eligible.json> and --worker-token <run lock token>, each with a value');
+  process.exit(2);
+}
+if (workerPolicyArg !== undefined && !isAbsolute(workerPolicyArg)) {
+  console.error(`sterling-mcp: --worker-policy must be an absolute path, got '${workerPolicyArg}'`);
+  process.exit(2);
+}
+const workerPolicy = workerPolicyArg !== undefined ? { path: workerPolicyArg, token: workerTokenArg as string } : undefined;
 const pathArg = (projectArg ?? storeArg) as string;
 
 // P5: an unexpanded config placeholder must refuse boot loudly, never open a
@@ -67,7 +82,7 @@ export const storePath = projectRoot !== undefined ? join(projectRoot, '.sterlin
 // the runtime marker. The error is printed by name and the process exits 1.
 let created: ReturnType<typeof createSterlingServer>;
 try {
-  created = createSterlingServer(projectRoot !== undefined ? { projectRoot } : storePath);
+  created = createSterlingServer(projectRoot !== undefined ? { projectRoot } : storePath, { workerPolicy });
 } catch (e) {
   // The class name: ProjectModeError and ProjectIdentityError keep name 'Error'.
   const err = e as Error;

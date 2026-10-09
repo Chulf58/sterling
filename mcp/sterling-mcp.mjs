@@ -6887,7 +6887,7 @@ var require_dist = __commonJS({
 });
 
 // packages/mcp-server/dist/main.js
-import { dirname as dirname8, join as join12, resolve as resolve4 } from "node:path";
+import { dirname as dirname8, isAbsolute as isAbsolute2, join as join12, resolve as resolve4 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
@@ -18485,6 +18485,19 @@ var knowledgeWriteSchema = external_exports.object({
   type: external_exports.string().min(1),
   at: external_exports.string().min(1)
 }).strict();
+var WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+var workerPolicyItemSchema = external_exports.object({
+  id: external_exports.string().uuid(),
+  lane: external_exports.enum(WORKER_POLICY_LANES),
+  target_id: external_exports.string().uuid().nullable(),
+  file_keys: external_exports.array(external_exports.string().min(1))
+}).passthrough();
+var workerPolicySchema = external_exports.object({
+  policy_version: external_exports.literal(1),
+  token: external_exports.string().min(1),
+  run_id: external_exports.string().min(1),
+  policy_items: external_exports.array(workerPolicyItemSchema)
+}).passthrough();
 
 // packages/schemas/dist/config.js
 var effortLevel = external_exports.enum(["low", "medium", "high", "xhigh"]);
@@ -28846,7 +28859,7 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // packages/mcp-server/dist/server.js
-import { readFileSync as readFileSync6, existsSync as existsSync5 } from "node:fs";
+import { readFileSync as readFileSync7, existsSync as existsSync5 } from "node:fs";
 import { join as join11, dirname as dirname6 } from "node:path";
 
 // packages/mcp-server/dist/held-stores.js
@@ -28897,10 +28910,237 @@ function holdRoutedStores(opened, reopen, announce) {
   });
 }
 
+// packages/mcp-server/dist/worker-policy.js
+import { readFileSync as readFileSync4 } from "node:fs";
+import { posix } from "node:path";
+var WORKER_STAMP_KEY = "worker_stamp";
+var WORKER_FIELD_ALLOW_LIST = {
+  reconcile_needed: {
+    feature_article: ["files", "history", "live_test_refs", "what_it_does", "intended_behavior"],
+    reference_material: ["summary", "source_date", "capture_date"]
+  },
+  state_review: {
+    feature_article: ["state", "state_reason", "files", "history"]
+  },
+  stale_research: {
+    research_finding: ["source_date", "capture_date", "answer"]
+  },
+  refresh_reference: {
+    reference_material: ["summary", "source_date", "capture_date"]
+  },
+  article_missing: {
+    feature_article: ["files"]
+  }
+};
+var WORKER_READ_TOOLS = /* @__PURE__ */ new Set([
+  "knowledge_query",
+  "knowledge_get",
+  "knowledge_render",
+  "knowledge_schema",
+  "knowledge_stats",
+  "knowledge_preflight",
+  "board_query",
+  "board_get",
+  "maintenance_query"
+]);
+var WorkerPolicyRefusal = class extends Error {
+  tool;
+  rule;
+  itemIds;
+  constructor(tool, rule, detail, itemIds = []) {
+    super(`worker policy refused ${tool}: rule '${rule}' \u2014 ${detail}. Policy item(s): ${itemIds.length ? itemIds.join(", ") : "none"}. Nothing was written.`);
+    this.tool = tool;
+    this.rule = rule;
+    this.itemIds = itemIds;
+    this.name = "WorkerPolicyRefusal";
+  }
+};
+var rootField = (field) => field.split(/[.[]/)[0];
+var FIELD_WRITES = /* @__PURE__ */ new Set(["knowledge_update", "knowledge_edit", "knowledge_append", "knowledge_array_remove"]);
+var WorkerGuard = class {
+  args;
+  records;
+  constructor(args2, records) {
+    this.args = args2;
+    this.records = records;
+  }
+  /** The policy as it stands now, or a refusal naming why there is none. */
+  load(tool) {
+    let raw;
+    try {
+      raw = readFileSync4(this.args.path, "utf8");
+    } catch (e) {
+      throw new WorkerPolicyRefusal(tool, "policy_unreadable", `the policy file ${this.args.path} could not be read (${e.message})`);
+    }
+    let json;
+    try {
+      json = JSON.parse(raw);
+    } catch (e) {
+      throw new WorkerPolicyRefusal(tool, "policy_unreadable", `the policy file ${this.args.path} is not JSON (${e.message})`);
+    }
+    const parsed = workerPolicySchema.safeParse(json);
+    if (!parsed.success) {
+      const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+      throw new WorkerPolicyRefusal(tool, "policy_schema", `the policy file ${this.args.path} fails the worker policy schema (${issues})`);
+    }
+    if (parsed.data.token !== this.args.token) {
+      throw new WorkerPolicyRefusal(tool, "policy_token_mismatch", `the policy file's token is not this run's --worker-token, so it belongs to another run`);
+    }
+    return parsed.data;
+  }
+  /**
+   * Decide one tool call before it runs. Returns null for a read tool, the
+   * authorized item for an allowed write, and throws WorkerPolicyRefusal
+   * otherwise.
+   *
+   * Which item a write is judged against:
+   * - A write with `resolves` names exactly one policy item and is judged
+   *   against that item's lane only, so an edit one lane allows can never
+   *   close an item of another lane on the same record. The record must be
+   *   the item's target_id; an article_missing item has none (H10 mints it
+   *   with no feature_link), so its join may name any record, and the lane
+   *   rules below decide whether that record can take the join.
+   * - A write without `resolves` closes nothing. It is allowed when at least
+   *   one policy item targets the record and that item's lane allows it; the
+   *   stamp names the first such item in policy order.
+   * - knowledge_line_ref_fix belongs to reconcile_needed items only.
+   */
+  authorize(tool, input) {
+    if (WORKER_READ_TOOLS.has(tool))
+      return null;
+    const policy = this.load(tool);
+    const items = policy.policy_items;
+    const stamp = (item, closes) => ({ run_id: policy.run_id, item_id: item.id, closes });
+    if (tool === "maintenance_remove") {
+      const id2 = String(input.id);
+      const item = items.find((i) => i.id === id2);
+      if (!item)
+        throw new WorkerPolicyRefusal(tool, "item_not_in_batch", `item '${id2}' is not one of this run's policy items`);
+      return stamp(item, [id2]);
+    }
+    if (tool !== "knowledge_line_ref_fix" && !FIELD_WRITES.has(tool)) {
+      throw new WorkerPolicyRefusal(tool, "tool_not_allowed_in_worker_mode", `the worker writes only factual refreshes, and ${tool} is not one of them`);
+    }
+    const id = String(input.id);
+    const resolves = Array.isArray(input.resolves) ? input.resolves.map(String) : [];
+    const outside = resolves.filter((r) => !items.some((i) => i.id === r));
+    if (outside.length) {
+      const targeting = items.filter((i) => i.target_id === id).map((i) => i.id);
+      throw new WorkerPolicyRefusal(tool, "resolves_outside_batch", `resolves names ${outside.join(", ")}, which ${outside.length === 1 ? "is not a policy item" : "are not policy items"}`, targeting);
+    }
+    if (resolves.length > 1) {
+      throw new WorkerPolicyRefusal(tool, "resolves_one_item", `a worker write closes one policy item and is judged by that item's lane, but resolves names ${resolves.length}`, resolves);
+    }
+    let candidates;
+    if (resolves.length === 1) {
+      const item = items.find((i) => i.id === resolves[0]);
+      if (item.target_id === null ? item.lane !== "article_missing" : item.target_id !== id) {
+        throw new WorkerPolicyRefusal(tool, "target_not_in_batch", `resolves names ${item.id}, whose target is ${item.target_id ?? "not set"}, not record '${id}'`, [item.id]);
+      }
+      candidates = [item];
+    } else {
+      candidates = items.filter((i) => i.target_id !== null && i.target_id === id);
+      if (!candidates.length) {
+        throw new WorkerPolicyRefusal(tool, "target_not_in_batch", `record '${id}' is not the target_id of any policy item (worker mode needs the exact full uuid; an article_missing join names its item in resolves)`);
+      }
+    }
+    if (tool === "knowledge_line_ref_fix") {
+      const reconcile = candidates.filter((i) => i.lane === "reconcile_needed");
+      if (!reconcile.length) {
+        throw new WorkerPolicyRefusal(tool, "line_ref_fix_lane", `a line-reference fix belongs to a reconcile_needed item, and ${candidates.map((i) => `${i.id} is ${i.lane}`).join(", ")}`, candidates.map((i) => i.id));
+      }
+      candidates = reconcile;
+    }
+    const candidateIds = candidates.map((i) => i.id);
+    if (!this.records.projectStoreHolds(id)) {
+      throw new WorkerPolicyRefusal(tool, "target_not_project_held", `record '${id}' is not held by the project store`, candidateIds);
+    }
+    const ordered = candidates;
+    if (tool === "knowledge_line_ref_fix")
+      return stamp(ordered[0], resolves);
+    if (tool === "knowledge_update" && input.expected_version === void 0) {
+      throw new WorkerPolicyRefusal(tool, "expected_version_required", "a worker update states the version it read (decision change v)", candidateIds);
+    }
+    const record2 = this.records.get(id);
+    if (!record2)
+      throw new WorkerPolicyRefusal(tool, "target_not_project_held", `record '${id}' was not found`, candidateIds);
+    const fields = tool === "knowledge_update" ? Object.keys(input.body ?? {}) : [rootField(String(tool === "knowledge_array_remove" ? input.selector : input.field))];
+    const faults = [];
+    for (const item of ordered) {
+      const fault = this.laneFault(tool, item, record2, fields, input);
+      if (fault === null)
+        return stamp(item, resolves);
+      faults.push({ rule: fault.rule, text: `${item.id} (${item.lane}): ${fault.text}` });
+    }
+    const rule = faults.every((f) => f.rule === "append_join") ? "append_join" : "field_not_allowed";
+    throw new WorkerPolicyRefusal(tool, rule, faults.map((f) => f.text).join("; "), candidateIds);
+  }
+  /** The ids among `closes` the store no longer holds: the items this call
+   *  actually closed, read after it ran. */
+  closed(closes) {
+    return closes.filter((id) => this.records.get(id) === void 0);
+  }
+  /** Why this item does not allow the write, or null when it does. */
+  laneFault(tool, item, record2, fields, input) {
+    const allowed = WORKER_FIELD_ALLOW_LIST[item.lane][record2.type];
+    if (!allowed)
+      return { rule: "field_not_allowed", text: `lane ${item.lane} does not write a ${record2.type}` };
+    const disallowed = fields.filter((f) => !allowed.includes(f));
+    if (disallowed.length)
+      return { rule: "field_not_allowed", text: `field(s) ${disallowed.join(", ")} not in lane ${item.lane}'s allow-list for ${record2.type} (${allowed.join(", ")})` };
+    if (item.lane === "article_missing")
+      return appendJoinFault(tool, item, record2, input);
+    return null;
+  }
+};
+function appendJoinFault(tool, item, record2, input) {
+  const fault = (text) => ({ rule: "append_join", text });
+  if (tool !== "knowledge_append" || input.field !== "files")
+    return fault("an article_missing item allows only a knowledge_append to files");
+  const itemKeys = new Set(item.file_keys.map((k) => normalizeRepoPath(k)));
+  const ownedDirs = new Set((record2.files ?? []).map((f) => posix.dirname(normalizeRepoPath(f.path))));
+  const entries = Array.isArray(input.entries) ? input.entries : [];
+  for (const entry of entries) {
+    const path = entry?.path;
+    if (typeof path !== "string")
+      return fault("every appended entry needs a path");
+    const p = normalizeRepoPath(path);
+    if (!itemKeys.has(p))
+      return fault(`appended path ${p} is not one of the item's file_keys`);
+    if (!ownedDirs.has(posix.dirname(p)))
+      return fault(`the article owns no path in ${posix.dirname(p)}/, so joining ${p} is not mechanical`);
+  }
+  return null;
+}
+function stampReceipt(tool, result, stamp) {
+  const content = result?.content;
+  let receipt;
+  try {
+    receipt = content?.length === 1 && content[0].type === "text" ? JSON.parse(content[0].text) : void 0;
+  } catch {
+    receipt = void 0;
+  }
+  if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt)) {
+    throw new Error(`${tool}: the write landed, but its result is not a JSON object receipt, so the worker stamp ${JSON.stringify(stamp)} could not be attached`);
+  }
+  return { ...result, content: [{ type: "text", text: JSON.stringify({ ...receipt, [WORKER_STAMP_KEY]: stamp }) }] };
+}
+function guardWorkerTools(server, guard) {
+  const register = server.registerTool.bind(server);
+  server.registerTool = (name, config2, cb) => register(name, config2, (...a) => {
+    const allowed = guard.authorize(name, a[0] ?? {});
+    const result = cb(...a);
+    if (!allowed)
+      return result;
+    const finish = (r) => stampReceipt(name, r, { run_id: allowed.run_id, item_id: allowed.item_id, resolved: guard.closed(allowed.closes) });
+    return result instanceof Promise ? result.then(finish) : finish(result);
+  });
+}
+
 // packages/mcp-server/dist/tools.js
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync as existsSync4, lstatSync as lstatSync5, mkdirSync as mkdirSync4, readFileSync as readFileSync5, readdirSync as readdirSync3, realpathSync as realpathSync3, renameSync as renameSync2, statSync as statSync3, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { appendFileSync, chmodSync, existsSync as existsSync4, lstatSync as lstatSync5, mkdirSync as mkdirSync4, readFileSync as readFileSync6, readdirSync as readdirSync3, realpathSync as realpathSync3, renameSync as renameSync2, statSync as statSync3, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { basename as basename2, dirname as dirname5, isAbsolute, join as join10, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
@@ -29099,7 +29339,7 @@ function readHeadFile(root, key) {
 }
 
 // packages/mcp-server/dist/entry-reachability.js
-import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync4 } from "node:fs";
+import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "node:fs";
 import { join as join9 } from "node:path";
 var MCP_TOOL_FILES = /* @__PURE__ */ new Set(["packages/mcp-server/src/server.ts", "packages/mcp-server/src/tools.ts"]);
 var TOOL_NAME_TOKEN = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
@@ -29326,7 +29566,7 @@ var EntryReachability = class {
       return notReached(`${spawner} does not exist`);
     let text;
     try {
-      text = readFileSync4(join9(this.root, spawner), "utf8");
+      text = readFileSync5(join9(this.root, spawner), "utf8");
     } catch (err) {
       return notReached(`${spawner} could not be read (${err.message})`);
     }
@@ -29341,7 +29581,7 @@ var EntryReachability = class {
     const out = /* @__PURE__ */ new Map();
     const add = (rel) => {
       try {
-        out.set(rel, readFileSync4(join9(this.root, rel), "utf8"));
+        out.set(rel, readFileSync5(join9(this.root, rel), "utf8"));
       } catch (err) {
         const code = err.code;
         if (code !== "ENOENT" && code !== "EISDIR")
@@ -29401,7 +29641,7 @@ var EntryReachability = class {
     if (!existsSync3(abs))
       return { ok: false, why: `${rel} is missing` };
     try {
-      return { ok: true, value: parse3(readFileSync4(abs, "utf8")) };
+      return { ok: true, value: parse3(readFileSync5(abs, "utf8")) };
     } catch (err) {
       return { ok: false, why: `${rel} could not be parsed (${err.message})` };
     }
@@ -29635,7 +29875,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (!fileLst.isFile()) {
       throw new Error(`config_set: .sterling/config.json is not a regular file \u2014 refusing. Nothing was written.`);
     }
-    currentBytes = readFileSync5(configPath);
+    currentBytes = readFileSync6(configPath);
   } else {
     currentBytes = Buffer.alloc(0);
   }
@@ -29711,7 +29951,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     }
     let raceBytes;
     try {
-      raceBytes = readFileSync5(configPath);
+      raceBytes = readFileSync6(configPath);
     } catch {
       raceBytes = Buffer.alloc(0);
     }
@@ -30646,7 +30886,7 @@ var SterlingTools = class _SterlingTools {
     if (!root)
       return void 0;
     try {
-      return createHash3("sha256").update(readFileSync5(join10(root, rel))).digest("hex");
+      return createHash3("sha256").update(readFileSync6(join10(root, rel))).digest("hex");
     } catch {
       return void 0;
     }
@@ -35185,7 +35425,7 @@ ${JSON.stringify(entry)}
     const MIN_LINE_BYTES = 30;
     if (statSync3(ledgerPath).size <= KNOWLEDGE_WRITES_COMPACT_LINES * MIN_LINE_BYTES)
       return;
-    const lines = readFileSync5(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
+    const lines = readFileSync6(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
     if (lines.length <= KNOWLEDGE_WRITES_COMPACT_LINES)
       return;
     const latest = /* @__PURE__ */ new Map();
@@ -35317,7 +35557,7 @@ ${JSON.stringify(entry)}
     let events = [];
     if (existsSync4(eventsPath)) {
       try {
-        const parsed = JSON.parse(readFileSync5(eventsPath, "utf8"));
+        const parsed = JSON.parse(readFileSync6(eventsPath, "utf8"));
         if (Array.isArray(parsed))
           events = parsed;
       } catch {
@@ -37334,14 +37574,14 @@ var StoreArgInPostgresStorageError = class extends Error {
 };
 function openStoreArg(storePath2) {
   const configPath = join11(dirname6(storePath2), "config.json");
-  const raw = existsSync5(configPath) ? JSON.parse(readFileSync6(configPath, "utf8")) : {};
+  const raw = existsSync5(configPath) ? JSON.parse(readFileSync7(configPath, "utf8")) : {};
   const config2 = parseConfig(raw);
   if (raw.storage === "postgres")
     throw new StoreArgInPostgresStorageError(configPath);
   const store = new MountedStores(storePath2, resolveDomainMounts(config2), { skipMissing: true });
   return { store, config: config2, repoRoot: dirname6(dirname6(storePath2)) };
 }
-function createSterlingServer(target) {
+function createSterlingServer(target, opts = {}) {
   let opened;
   if (typeof target === "string") {
     opened = openStoreArg(target);
@@ -37371,6 +37611,11 @@ function createSterlingServer(target) {
   });
   const createDomainsNote = bootDomains.length ? ` Mounted domains at server start: ${bootDomains.join("; ")} (the receipt's mounted_domains is current). A record about one of these subjects takes scope domain:<name>; a record about this repo stays project.` : "";
   const server = new McpServer({ name: "sterling", version: "0.1.0" });
+  const toolWrappers = [];
+  if (opts.workerPolicy) {
+    guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store));
+    toolWrappers.push("worker_policy");
+  }
   const mapBusy = (name, e) => e instanceof StoreBusyError ? busyRefusal(name, e, false) : e;
   const registerTool = server.registerTool.bind(server);
   server.registerTool = ((name, config3, handler) => registerTool(name, config3, ((...args2) => {
@@ -37383,6 +37628,7 @@ function createSterlingServer(target) {
       throw mapBusy(name, e);
     }
   })));
+  toolWrappers.push("busy_refusal");
   const json = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
   server.registerTool("knowledge_create", {
     description: 'Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type\'s allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. Example: {"type":"decision","fields":{"title":"...","statement":"...","alternatives_rejected":[],"rationale":"..."}}. A colliding feature_article slug is refused. A links entry with rel \'supersedes\' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel \'cites\' for a deliberate partial override. A domain:<name> scope with file_keys (or an article\'s files) is refused: repo paths stay project. A reference_material\'s location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain\'s description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.' + createDomainsNote,
@@ -37402,7 +37648,7 @@ function createSterlingServer(target) {
       projection: external_exports.enum(["full", "digest", "count"]).optional(),
       min_score: external_exports.number().optional()
     })
-  }, (opts) => json(tools.knowledgeQueryResult(opts)));
+  }, (opts2) => json(tools.knowledgeQueryResult(opts2)));
   server.registerTool("knowledge_get", {
     description: "Fetch one record by id (full uuid, exact slug, or unambiguous 8-char prefix) \u2014 the full-fidelity read. version:<n> reads an archived prior version. With `field`: a windowed read of just that field \u2014 strings page by characters, arrays by elements (offset/length); returns {kind, total_chars|total_entries, offset, value|entries}; an offset past the end returns empty with the true total. Scalar/object fields return whole and refuse offset/length. Unknown field is refused naming the valid set; offset/length without field is refused. unreadable_domains (only when a mounted domain could not be read: each with its error) means a record held there cannot be found by this read.",
     inputSchema: strict({
@@ -37639,17 +37885,17 @@ function createSterlingServer(target) {
       projection: external_exports.enum(["text", "full", "digest", "headline"]).optional()
     })
   }, (args2) => json(tools.maintenanceQueryResult(args2)));
-  return { server, store, tools };
+  return { server, store, tools, toolWrappers };
 }
 
 // packages/mcp-server/dist/runtime.js
-import { readFileSync as readFileSync7, mkdirSync as mkdirSync5, writeFileSync as writeFileSync3 } from "node:fs";
+import { readFileSync as readFileSync8, mkdirSync as mkdirSync5, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname7 } from "node:path";
 function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */ new Date()).toISOString()) {
   try {
     let buildId = "unknown";
     try {
-      const raw = readFileSync7(buildIdPath(serverDir), "utf8").trim();
+      const raw = readFileSync8(buildIdPath(serverDir), "utf8").trim();
       if (raw)
         buildId = raw;
     } catch {
@@ -37667,10 +37913,10 @@ function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */
 // packages/mcp-server/dist/broker.js
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { chmodSync as chmodSync2, readFileSync as readFileSync8, realpathSync as realpathSync4 } from "node:fs";
+import { chmodSync as chmodSync2, readFileSync as readFileSync9, realpathSync as realpathSync4 } from "node:fs";
 function buildIdOf(serverDir) {
   try {
-    return readFileSync8(buildIdPath(serverDir), "utf8").trim() || "unknown";
+    return readFileSync9(buildIdPath(serverDir), "utf8").trim() || "unknown";
   } catch {
     return "unknown";
   }
@@ -37841,6 +38087,17 @@ if (projectArg === void 0 === (storeArg === void 0) || !(projectArg ?? storeArg)
   process.exit(2);
 }
 var flagName = projectArg !== void 0 ? "--project" : "--store";
+var workerPolicyArg = valueOf("--worker-policy");
+var workerTokenArg = valueOf("--worker-token");
+if (workerPolicyArg === void 0 !== (workerTokenArg === void 0) || workerPolicyArg === "" || workerTokenArg === "") {
+  console.error("sterling-mcp: worker mode needs both --worker-policy <absolute path to eligible.json> and --worker-token <run lock token>, each with a value");
+  process.exit(2);
+}
+if (workerPolicyArg !== void 0 && !isAbsolute2(workerPolicyArg)) {
+  console.error(`sterling-mcp: --worker-policy must be an absolute path, got '${workerPolicyArg}'`);
+  process.exit(2);
+}
+var workerPolicy = workerPolicyArg !== void 0 ? { path: workerPolicyArg, token: workerTokenArg } : void 0;
 var pathArg = projectArg ?? storeArg;
 if (pathArg.includes("${")) {
   console.error(`sterling-mcp: ${flagName} path contains an unexpanded placeholder: '${pathArg}' \u2014 refusing to create a phantom store (P5). In --mcp-config or project-scope configs use \${CLAUDE_PROJECT_DIR:-.} (plugin-scope configs expand the bare form).`);
@@ -37850,7 +38107,7 @@ var projectRoot = projectArg !== void 0 ? resolve4(projectArg) : void 0;
 var storePath = projectRoot !== void 0 ? join12(projectRoot, ".sterling", "sterling.db") : resolve4(pathArg);
 var created;
 try {
-  created = createSterlingServer(projectRoot !== void 0 ? { projectRoot } : storePath);
+  created = createSterlingServer(projectRoot !== void 0 ? { projectRoot } : storePath, { workerPolicy });
 } catch (e) {
   const err = e;
   console.error(`sterling-mcp: ${err?.constructor?.name ?? err?.name ?? "Error"}: ${err?.message ?? String(e)}`);

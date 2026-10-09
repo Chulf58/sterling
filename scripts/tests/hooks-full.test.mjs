@@ -187,10 +187,10 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
     // 63 items, most already-finished work never closed (reported 2026-07-29).
     // Threshold 2 (was 5) with board 27c87783: reconcile_needed is the background
     // worker's lane and no longer counts toward the conductor's depth, so the
-    // conductor's 2 article_missing items are what cross it.
+    // conductor's 2 capture_owed items are what cross it (CHANGED, GitHub #56: article_missing became a worker lane).
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ maintenance_queue: { deep_threshold: 2 } }));
     for (let i = 0; i < 2; i++) {
-      store.create({ ...envelope('todo'), text: `a${i}`, source: 'system', system_reason: 'article_missing' });
+      store.create({ ...envelope('todo'), text: `a${i}`, source: 'system', system_reason: 'capture_owed' });
     }
     const deep = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
     const ctx = deep.hookSpecificOutput.additionalContext;
@@ -198,7 +198,7 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
     // Lane phrasing changed with board 18a22b56: "N item(s) in lane <reason>" —
     // the "×N" form collided with h1-accuracy's truncation-artifact guard.
     assert.match(ctx, /3 items in lane reconcile_needed are drained by the background worker/, 'the lane split says WHAT is owed and who drains it');
-    assert.match(ctx, /2 items in lane article_missing/);
+    assert.match(ctx, /2 items in lane capture_owed/);
     assert.match(ctx, /\/sterling:drain/, 'and names the remedy');
     assert.match(ctx, /ALREADY DONE/, 'and warns that queue items are detected debt, not necessarily owed debt');
     // CHANGED 2026-09-22 (route A): see the note near :130 — H1 injects no
@@ -226,8 +226,9 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
       // not counted, and never appear as a drainable lane.
       // Lane changed with board 27c87783: drainable items that count toward the
       // threshold are the conductor's lanes, not the worker's reconcile_needed.
+      // CHANGED (GitHub #56): article_missing became a worker lane too, so capture_owed stands in.
       for (let i = 0; i < 5; i++) {
-        parkedStore.create({ ...envelope('todo'), text: `r${i}`, source: 'system', system_reason: 'article_missing' });
+        parkedStore.create({ ...envelope('todo'), text: `r${i}`, source: 'system', system_reason: 'capture_owed' });
       }
       const mixed = JSON.parse(runHook('h1-session-start.mjs', hookInput(parkedDir, { hook_event_name: 'SessionStart' }), parkedDir, { NO_COLOR: '1' }).stdout);
       const mixedCtx = mixed.hookSpecificOutput.additionalContext;

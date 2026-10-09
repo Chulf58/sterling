@@ -559,7 +559,7 @@ if (debt.length > 0) {
   const remedy = [
     '',
     'This does NOT block the merge. The background maintenance worker judges each item and closes the ones already paid;',
-    'an item it leaves open is logged as owes prose in .sterling/maintenance-worker.jsonl. Close what remains with ONE of the two sanctioned discharges',
+    'an item it hands off is logged as needs_conductor, with a reason, in .sterling/maintenance-worker.jsonl. Close what remains with ONE of the two sanctioned discharges',
     '(decision foreign_5f330fbe arm A1; drain requires an explicit `resolves` claim, never a bare knowledge_update), or /sterling:drain:',
     '  (a) BEHAVIOR CHANGED: reconcile the article with a real write carrying resolves:[<full item id>].',
     '  (b) VERIFIED UNAFFECTED: `resolves` deletes the WHOLE item and re-baselines EVERY file the article owns, so verify every',

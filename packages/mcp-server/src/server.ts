@@ -10,6 +10,7 @@ import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objec
 import { MountedStores, StoreBusyError, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { holdRoutedStores } from './held-stores.js';
+import { WorkerGuard, guardWorkerTools, type WorkerPolicyArgs } from './worker-policy.js';
 import { SterlingTools, busyRefusal, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS, DEDUP_OVERRIDE_FIELD, mountedDomainSurface } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
@@ -290,7 +291,10 @@ function openStoreArg(storePath: string): { store: MountedStores; config: Sterli
  * returned `store` is held (holdRoutedStores): when its connection closes, the
  * next call opens a new one.
  */
-export function createSterlingServer(target: string | { projectRoot: string }): { server: McpServer; store: MountedStores; tools: SterlingTools } {
+export function createSterlingServer(
+  target: string | { projectRoot: string },
+  opts: { workerPolicy?: WorkerPolicyArgs } = {}
+): { server: McpServer; store: MountedStores; tools: SterlingTools; toolWrappers: readonly string[] } {
   let opened: { store: MountedStores; config: SterlingConfig; repoRoot: string };
   if (typeof target === 'string') {
     opened = openStoreArg(target);
@@ -331,6 +335,20 @@ export function createSterlingServer(target: string | { projectRoot: string }): 
     ? ` Mounted domains at server start: ${bootDomains.join('; ')} (the receipt's mounted_domains is current). A record about one of these subjects takes scope domain:<name>; a record about this repo stays project.`
     : '';
   const server = new McpServer({ name: 'sterling', version: '0.1.0' });
+  // Worker mode (worker-policy.ts): every tool registered below runs through
+  // the run's batch policy, so this must stay before the first registerTool.
+  // It is installed BEFORE the busy wrapper below, so the busy wrapper sits
+  // inside it: a call runs worker authorization, then the busy-mapped handler,
+  // then the worker's receipt stamp. A policy refusal is thrown before the
+  // busy mapping and is never relabelled as busy; a busy error in worker mode
+  // keeps its text, 'database is locked' included, which the worker matches.
+  // toolWrappers records the install order, outermost first, so a test can
+  // pin it (worker-policy-busy.test.ts).
+  const toolWrappers: string[] = [];
+  if (opts.workerPolicy) {
+    guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store));
+    toolWrappers.push('worker_policy');
+  }
   // A StoreBusyError that reaches the wire still raw came from a tool whose
   // write has not been cleared as one transaction (tools.ts maps the cleared
   // ones itself and throws a plain Error), so it says an earlier write may have
@@ -350,6 +368,7 @@ export function createSterlingServer(target: string | { projectRoot: string }): 
         }
       }) as never
     )) as typeof server.registerTool;
+  toolWrappers.push('busy_refusal');
 
   const json = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
 
@@ -870,5 +889,5 @@ export function createSterlingServer(target: string | { projectRoot: string }): 
   // handoff_write / handoff_read were removed with the staged pipeline
   // (decision sterling-claude-code-scale-down-boundary, 2ad87dd1).
 
-  return { server, store, tools };
+  return { server, store, tools, toolWrappers };
 }

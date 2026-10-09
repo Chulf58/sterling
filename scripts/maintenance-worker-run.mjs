@@ -1,13 +1,17 @@
 // Background maintenance worker RUNNER (decision
-// maintenance-queue-background-haiku-worker-simple-redesign). Started detached
-// by scripts/hooks/lib/maintenance-worker.mjs's launcher from H10 (Stop) or
-// H19's Bash surface (after a git commit); stdout/stderr go to
-// .sterling/maintenance-worker.log. It holds the lock (checked by --token) while
-// the headless `claude -p` child runs, journals every maintenance_remove call and
-// verdict to .sterling/maintenance-worker.jsonl, and records spend and the outcome
-// in .sterling/transient/maintenance-worker.state.json for the launcher and H1.
-//   node scripts/maintenance-worker-run.mjs --project <dir> [--trigger commit|stop] [--token <lock token>] [--budget-usd <n>] [--dry-run]
-// --dry-run prints the exact claude argv and exits without spawning anything.
+// maintenance-worker-drains-every-lane-and-writes-factual-refresh-on-sonnet).
+// Started detached by scripts/hooks/lib/maintenance-worker.mjs's launcher from
+// H10 (Stop), H19's Bash surface (after a git commit) or a previous run that made
+// progress (trigger 'chain'); stdout/stderr go to .sterling/maintenance-worker.log.
+// It holds the lock (checked by --token) while the headless child runs, journals
+// every close, knowledge write and verdict to .sterling/maintenance-worker.jsonl,
+// records the outcome in .sterling/transient/maintenance-worker.state.json for the
+// launcher and H1, and re-enters the launcher when work is left.
+//   node scripts/maintenance-worker-run.mjs --project <dir> --token <lock token> [--trigger commit|stop|chain] [--budget-usd <n>]
+//   node scripts/maintenance-worker-run.mjs --project <dir> --dry-run [--token <lock token>]
+// A real run needs the launcher's token: the token binds the batch policy its
+// Sterling server enforces, and a run without one is recorded as failed.
+// --dry-run prints the exact argv and exits without spawning anything.
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { pluginRootFrom, runWorker } from './hooks/lib/maintenance-worker.mjs';
