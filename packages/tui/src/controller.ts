@@ -39,6 +39,8 @@ export interface DashboardOptions {
   profile?: boolean;
   /** Replaces the data_version probe; tests use it to make a read fail. */
   dataVersionProbe?: (paths: string[]) => DataVersionProbe;
+  /** the `r` key (a github_refresh effect): the host's GitHub poller polls now */
+  onGithubRefresh?: () => void;
 }
 
 /** How long the held selection and board-edit writes wait for another
@@ -59,8 +61,9 @@ export interface DashboardStats {
 }
 
 /** The viewport a host passes: every field is required except the optional
- *  Agents tab and the pane height (a host without the banner has no use for it). */
-export type ControllerViewport = Required<Omit<Viewport, 'agents' | 'height'>> & Pick<Viewport, 'agents' | 'height'>;
+ *  Agents tab, the pane height (a host without the banner has no use for it)
+ *  and the GitHub snapshot (a host without a GitHub poller). */
+export type ControllerViewport = Required<Omit<Viewport, 'agents' | 'height' | 'github'>> & Pick<Viewport, 'agents' | 'height' | 'github'>;
 
 export interface DashboardController {
   readonly stores: MountedStores;
@@ -184,7 +187,8 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   }
   let frame: { vp: string; day: string; ui: UiState; roster: AgentRosterSnapshot | undefined; dataVersion: string | undefined; built: DashboardFrame } | undefined;
   let builds = 0;
-  const vpKey = (vp: ControllerViewport): string => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null]);
+  // the GitHub snapshot's version moves only when its content does, so an unchanged poll rebuilds nothing
+  const vpKey = (vp: ControllerViewport): string => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null, vp.github ? vp.github.version : null]);
   const today = (): string => new Date().toDateString();
   function currentFrame(vp: ControllerViewport): DashboardFrame {
     let dataVersion: string | undefined;
@@ -199,7 +203,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     const day = today();
     if (frame && dataVersion !== undefined && frame.dataVersion === dataVersion && frame.ui === ui && frame.roster === roster && frame.vp === key && frame.day === day) return frame.built;
     builds++;
-    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height);
+    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height, vp.github);
     frame = { vp: key, day, ui, roster, dataVersion, built };
     return built;
   }
@@ -573,6 +577,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     for (const e of effects) {
       if (e.type === 'select') pending = [...pending.filter((p) => p.type !== 'select'), e];
       else if (e.type === 'board_edit') pending.push(e);
+      else if (e.type === 'github_refresh') options.onGithubRefresh?.();
     }
     if (!options.deferWrites) flush();
     return effects.some((e) => e.type === 'quit');

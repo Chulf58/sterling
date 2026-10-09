@@ -27,7 +27,7 @@ const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over })
 const labels = (s: DashboardState): string[] => s.tabs.map((t) => t.label);
 
 test('agents tab: it sits after Queue and before System', () => {
-  assert.deepEqual([...TABS], ['Tasks', 'Knowledge', 'Queue', 'Agents', 'System']);
+  assert.deepEqual([...TABS], ['Tasks', 'Knowledge', 'Queue', 'Agents', 'System', 'GitHub']);
   assert.equal(AGENTS_TAB, TABS.indexOf('Queue') + 1);
   assert.equal(SYSTEM_TAB, AGENTS_TAB + 1);
 });
