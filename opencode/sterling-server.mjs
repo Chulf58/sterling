@@ -5054,7 +5054,7 @@ function normalizeRawConfig(raw) {
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
-var effortLevel, modelPin, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -5064,10 +5064,12 @@ var init_config = __esm({
       model: external_exports.string(),
       effort: effortLevel.optional()
     }).strict();
+    OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
     agentModelEntry = external_exports.object({
       model: external_exports.string(),
       effort: effortLevel,
-      hard_task: modelPin.optional()
+      hard_task: modelPin.optional(),
+      opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
     }).strict();
     vendorPins = external_exports.object({
       openai: modelPin.optional(),
@@ -15714,8 +15716,8 @@ import { existsSync as existsSync13, readFileSync as readFileSync12 } from "node
 import { basename as basename2, join as join22 } from "node:path";
 
 // scripts/lib/opencode-install.mjs
-import { createHash as createHash3 } from "node:crypto";
-import { existsSync as existsSync12, mkdirSync as mkdirSync9, readFileSync as readFileSync11, readdirSync as readdirSync5, realpathSync as realpathSync7, rmSync as rmSync5, statSync as statSync4, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
+import { existsSync as existsSync12, mkdirSync as mkdirSync9, readFileSync as readFileSync11, readdirSync as readdirSync5, realpathSync as realpathSync7, renameSync as renameSync4, rmSync as rmSync5, statSync as statSync4, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
 import { dirname as dirname8, isAbsolute as isAbsolute4, join as join21, resolve as resolve11 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15993,6 +15995,7 @@ function isInstalledCopy(root, { env = process.env, home = homedir6() } = {}) {
 }
 
 // scripts/lib/opencode-install.mjs
+init_dist();
 init_agent_distribution();
 init_agent_fences();
 
@@ -16492,16 +16495,16 @@ function logLine(root, line) {
 }
 
 // packages/opencode-plugin/src/notices.mjs
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { existsSync as existsSync14, mkdirSync as mkdirSync11, readFileSync as readFileSync13, renameSync as renameSync4, rmSync as rmSync6, writeFileSync as writeFileSync5 } from "node:fs";
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { existsSync as existsSync14, mkdirSync as mkdirSync11, readFileSync as readFileSync13, renameSync as renameSync5, rmSync as rmSync6, writeFileSync as writeFileSync5 } from "node:fs";
 import { dirname as dirname10, join as join24 } from "node:path";
 var NOTICES_REL = ".sterling/transient/opencode-notices.json";
 function writeJsonAtomic(path, value) {
   mkdirSync11(dirname10(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${randomUUID2()}.tmp`;
+  const tmp = `${path}.${process.pid}.${randomUUID3()}.tmp`;
   try {
     writeFileSync5(tmp, JSON.stringify(value));
-    renameSync4(tmp, path);
+    renameSync5(tmp, path);
   } catch (e) {
     rmSync6(tmp, { force: true });
     throw e;
@@ -16517,7 +16520,7 @@ function readNotices(root) {
 function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString()) {
   const notices = readNotices(root);
   if (notices.some((n) => n.text === text && !n.shown_at)) return;
-  notices.push({ id: randomUUID2(), at: now, text });
+  notices.push({ id: randomUUID3(), at: now, text });
   writeJsonAtomic(join24(root, NOTICES_REL), notices);
 }
 function takeNotices(root, now) {
@@ -16791,9 +16794,9 @@ import { readFileSync as readFileSync17 } from "node:fs";
 import { join as join28 } from "node:path";
 
 // scripts/hooks/lib/maintenance-worker.mjs
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync as closeSync6, existsSync as existsSync17, mkdirSync as mkdirSync13, openSync as openSync6, readFileSync as readFileSync16, renameSync as renameSync5, rmSync as rmSync7, rmdirSync as rmdirSync2, statSync as statSync5, writeFileSync as writeFileSync7, appendFileSync as appendFileSync3 } from "node:fs";
+import { closeSync as closeSync6, existsSync as existsSync17, mkdirSync as mkdirSync13, openSync as openSync6, readFileSync as readFileSync16, renameSync as renameSync6, rmSync as rmSync7, rmdirSync as rmdirSync2, statSync as statSync5, writeFileSync as writeFileSync7, appendFileSync as appendFileSync3 } from "node:fs";
 import { dirname as dirname12, isAbsolute as isAbsolute5, join as join27, resolve as resolve12, sep as sep3 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
@@ -16860,7 +16863,7 @@ function readJson(path) {
 }
 function rotateIfLarge(path, limit = ROTATE_BYTES) {
   try {
-    if (statSync5(path).size > limit) renameSync5(path, `${path}.1`);
+    if (statSync5(path).size > limit) renameSync6(path, `${path}.1`);
   } catch (e) {
     if (e?.code !== "ENOENT") throw e;
   }
@@ -16954,7 +16957,7 @@ function lockState(lock, nowMs, isAlive = pidAlive) {
   return isAlive(lock.pid) ? "live" : "stale";
 }
 function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
-  const token = randomUUID3();
+  const token = randomUUID4();
   const body = JSON.stringify({ ...content, token });
   const tryCreate = () => {
     try {
@@ -17965,7 +17968,7 @@ POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart 
 
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { existsSync as existsSync20, mkdirSync as mkdirSync14, readFileSync as readFileSync20, renameSync as renameSync6, writeFileSync as writeFileSync9 } from "node:fs";
+import { existsSync as existsSync20, mkdirSync as mkdirSync14, readFileSync as readFileSync20, renameSync as renameSync7, writeFileSync as writeFileSync9 } from "node:fs";
 import { delimiter, dirname as dirname13, join as join31 } from "node:path";
 function noOriginRemote(cwd) {
   const r = spawnSync5("git", ["remote"], { cwd, encoding: "utf8", timeout: 3e4 });
@@ -18018,7 +18021,7 @@ function maintenanceLines(state, config, root) {
 init_dist2();
 
 // scripts/hooks/lib/plan-lock.mjs
-import { closeSync as closeSync7, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync15, openSync as openSync7, readSync as readSync3, renameSync as renameSync7, unlinkSync as unlinkSync3, writeFileSync as writeFileSync10 } from "node:fs";
+import { closeSync as closeSync7, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync15, openSync as openSync7, readSync as readSync3, renameSync as renameSync8, unlinkSync as unlinkSync3, writeFileSync as writeFileSync10 } from "node:fs";
 import { join as join32 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
@@ -19100,19 +19103,19 @@ function createResearchRecorder({ rootOf, fenced, now }) {
 import { join as join42 } from "node:path";
 
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync18, readFileSync as readFileSync23, renameSync as renameSync8, rmSync as rmSync10, writeFileSync as writeFileSync12 } from "node:fs";
+import { mkdirSync as mkdirSync18, readFileSync as readFileSync23, renameSync as renameSync9, rmSync as rmSync10, writeFileSync as writeFileSync12 } from "node:fs";
 import { hostname as hostname2 } from "node:os";
 import { join as join41 } from "node:path";
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID5 } from "node:crypto";
 function selectionFilePath(root, host = hostname2()) {
   const safeHost = String(host).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
   return join41(root, ".sterling", "transient", `selection.${safeHost}.json`);
 }
 function takeSelectionFile(root) {
   const path = selectionFilePath(root);
-  const claimed = `${path}.taken-${process.pid}-${randomUUID4()}`;
+  const claimed = `${path}.taken-${process.pid}-${randomUUID5()}`;
   try {
-    renameSync8(path, claimed);
+    renameSync9(path, claimed);
   } catch (e) {
     if (e?.code === "ENOENT") return void 0;
     throw e;
@@ -19160,14 +19163,14 @@ TUI selection (one-shot): the user has selected ${selection.type} '${selection.r
 // packages/opencode-plugin/src/settle.mjs
 init_dist();
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { randomUUID as randomUUID7 } from "node:crypto";
-import { existsSync as existsSync27, mkdirSync as mkdirSync20, readFileSync as readFileSync26, renameSync as renameSync10, rmSync as rmSync12, writeFileSync as writeFileSync14 } from "node:fs";
+import { randomUUID as randomUUID8 } from "node:crypto";
+import { existsSync as existsSync27, mkdirSync as mkdirSync20, readFileSync as readFileSync26, renameSync as renameSync11, rmSync as rmSync12, writeFileSync as writeFileSync14 } from "node:fs";
 import { dirname as dirname17, join as join45 } from "node:path";
 
 // scripts/hooks/lib/session-duties.mjs
 init_dist();
 init_dist2();
-import { randomUUID as randomUUID5 } from "node:crypto";
+import { randomUUID as randomUUID6 } from "node:crypto";
 import { existsSync as existsSync26, readFileSync as readFileSync24, readdirSync as readdirSync9 } from "node:fs";
 import { join as join43 } from "node:path";
 var ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -19390,7 +19393,7 @@ var researchOwedText = (queryTexts) => `research owed: session research not capt
 var captureOwedText = (count, clipped) => `capture owed: direct-mode session touched ${count} file(s) and ended without capture${clipped}`;
 function systemTodo(now, fields) {
   return {
-    id: randomUUID5(),
+    id: randomUUID6(),
     type: "todo",
     created_at: now,
     updated_at: now,
@@ -19410,8 +19413,8 @@ var hasOpenSystemTodo = (store, reason) => store.query({ types: ["todo"], cap: 1
 
 // scripts/hooks/lib/settlement.mjs
 init_dist2();
-import { createHash as createHash4, randomUUID as randomUUID6 } from "node:crypto";
-import { readFileSync as readFileSync25, writeFileSync as writeFileSync13, mkdirSync as mkdirSync19, rmSync as rmSync11, statSync as statSync9, renameSync as renameSync9 } from "node:fs";
+import { createHash as createHash4, randomUUID as randomUUID7 } from "node:crypto";
+import { readFileSync as readFileSync25, writeFileSync as writeFileSync13, mkdirSync as mkdirSync19, rmSync as rmSync11, statSync as statSync9, renameSync as renameSync10 } from "node:fs";
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { join as join44, dirname as dirname16 } from "node:path";
 function hashFile(root, rel) {
@@ -19440,7 +19443,7 @@ function loadGeneratedProjections(root) {
 }
 function buildReconcileItem(article, fileKeys, now) {
   return {
-    id: randomUUID6(),
+    id: randomUUID7(),
     type: "todo",
     created_at: now,
     updated_at: now,
@@ -19474,7 +19477,7 @@ function mintSettlementReconcile(store, root, candidatePaths, now = (/* @__PURE_
     const drifted = [...freshPaths].filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
     if (!drifted.length) continue;
     const fileKeys = drifted.sort();
-    const { record } = store.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now), { operation_id: randomUUID6() });
+    const { record } = store.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now), { operation_id: randomUUID7() });
     minted.push({ article_id: article.id, paths: record.file_keys ?? fileKeys });
   }
   return minted;
@@ -19558,10 +19561,10 @@ function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
       throw e;
     }
   }
-  const tmp = `${p}.${process.pid}.${randomUUID6()}.tmp`;
+  const tmp = `${p}.${process.pid}.${randomUUID7()}.tmp`;
   try {
     writeFileSync13(tmp, JSON.stringify(snapshot));
-    renameSync9(tmp, p);
+    renameSync10(tmp, p);
   } catch (e) {
     rmSync11(tmp, { force: true });
     throw e;
@@ -19716,10 +19719,10 @@ ${owed.map((d) => `- ${describe(d)}`).join("\n")}`);
 }
 function writeJsonAtomic2(path, value) {
   mkdirSync20(dirname17(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${randomUUID7()}.tmp`;
+  const tmp = `${path}.${process.pid}.${randomUUID8()}.tmp`;
   try {
     writeFileSync14(tmp, JSON.stringify(value));
-    renameSync10(tmp, path);
+    renameSync11(tmp, path);
   } catch (e) {
     rmSync12(tmp, { force: true });
     throw e;
