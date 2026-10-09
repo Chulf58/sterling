@@ -31,8 +31,8 @@
 // transcript was written within TRANSCRIPT_ALIVE_MS, and `quiet` otherwise.
 // Quiet means unknown: a live agent inside one long tool call writes nothing,
 // and an agent that ended with a plain reply or was killed leaves no marker,
-// so a quiet row is listed but neither counted as running nor dropped as
-// done. H1 deletes the register at every SessionStart, which bounds how long
+// so a quiet row is listed and counted as quiet, apart from the running
+// count (the tab header shows both), and never dropped as done. H1 deletes the register at every SessionStart, which bounds how long
 // a dead agent can sit there as quiet. A resumed agent keeps its
 // agent_id across rounds, so rows are grouped by agent_id and the latest round
 // decides the status; the portrait assignment is keyed by agent_id as well.
@@ -60,8 +60,10 @@ const TRANSCRIPT_RETRY_MS = 10_000;
  *  marker the row is quiet, not done. */
 export const TRANSCRIPT_ALIVE_MS = 10 * 60_000;
 
-/** How much of a transcript's end is read for the handback marker: the marker
- *  line is small, and only hook attachments follow it. */
+/** How much of a transcript's end is read first for the handback marker: the
+ *  marker line is small, and only hook attachments follow it. A hook
+ *  attachment can itself be longer than this, so a window holding no whole
+ *  user or assistant entry is read again at the shared 1 MiB tail. */
 const END_MARKER_TAIL_BYTES = 64 * 1024;
 
 /** How long an ended agent stays in the block, shown as done, when the current session is unknown. */
@@ -187,7 +189,14 @@ function transcriptState(projectRoot: string, sessionId: string, agentId: string
  *  attachments follow it; a resumed round appends a new user entry after it.
  *  An agent that ends with a plain reply has no such entry. */
 export function endsOnHandback(path: string): boolean {
-  const lines = (readTail(path, END_MARKER_TAIL_BYTES) ?? '').split('\n');
+  const entry = lastTurnEntry(readTail(path, END_MARKER_TAIL_BYTES)) ?? lastTurnEntry(readTail(path));
+  return entry?.toolEndsTurn === true;
+}
+
+/** The last whole user or assistant entry in a tail window, or undefined when
+ *  the window holds none. */
+function lastTurnEntry(tail: string | null): { toolEndsTurn?: unknown } | undefined {
+  const lines = (tail ?? '').split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
     let entry: { type?: unknown; toolEndsTurn?: unknown } | null;
     try {
@@ -195,9 +204,9 @@ export function endsOnHandback(path: string): boolean {
     } catch {
       continue; // a blank line, or the tail window's truncated first line
     }
-    if (entry?.type === 'user' || entry?.type === 'assistant') return entry.toolEndsTurn === true;
+    if (entry?.type === 'user' || entry?.type === 'assistant') return entry;
   }
-  return false;
+  return undefined;
 }
 
 /** The dispatch description from the dispatch-state record of a tool_use_id
@@ -333,8 +342,10 @@ export interface SubagentAgentView {
 
 export interface SubagentView {
   availability: RegisterAvailability;
-  /** running agents */
+  /** running agents: the transcript was written within TRANSCRIPT_ALIVE_MS, or the row is unstamped */
   active: number;
+  /** quiet agents: listed and maybe live, but silent with no handback; unset reads as 0 */
+  quiet?: number;
   agents: SubagentAgentView[];
   /** listed live agents from a session other than the one session.json names; unset reads as 0 */
   foreignLive?: number;
@@ -448,7 +459,13 @@ export function createSubagentTracker(
         contextTokens: context.get(r.agentId)?.tokens ?? null,
         idleMs: r.endedAt === null ? null : Math.max(0, now - r.endedAt),
       }));
-      return { availability: source.availability, active: agents.filter((a) => a.status === 'running').length, agents, foreignLive: source.foreignLive };
+      return {
+        availability: source.availability,
+        active: agents.filter((a) => a.status === 'running').length,
+        quiet: agents.filter((a) => a.status === 'quiet').length,
+        agents,
+        foreignLive: source.foreignLive,
+      };
     },
   };
 }
@@ -538,7 +555,7 @@ function clip(text: string, width: number): string {
   return width <= 1 ? chars.slice(0, width).join('') : chars.slice(0, width - 1).join('') + '…';
 }
 
-/** The cards, then, when live agents come from a session other than the one
+/** The cards, then, when running or quiet agents come from a session other than the one
  *  session.json names, one dim line under them saying so (dropped when there
  *  is no room: the cards win). */
 export function composeSubagentBlock(view: SubagentView, width: number, maxHeight: number, tick: number): SubagentBlock {
@@ -549,7 +566,7 @@ export function composeSubagentBlock(view: SubagentView, width: number, maxHeigh
   return { ...cards, height: cards.height + 1, puts: [...cards.puts, put] };
 }
 
-const FOREIGN_SESSION_NOTE = 'session.json names another session; live agents from the other one are listed';
+const FOREIGN_SESSION_NOTE = 'session.json names another session; running and quiet agents from the other one are listed';
 
 /** Lay the cards out in at most maxHeight rows of a width-column area. A readable
  *  register with no agents draws one dim line, so the tab is never blank. */

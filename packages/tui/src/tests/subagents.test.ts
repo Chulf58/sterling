@@ -227,7 +227,7 @@ test('register: a stamped agent whose transcript is stale or missing is quiet, n
   }
 });
 
-test('register (#34 regression): a live agent silent past TRANSCRIPT_ALIVE_MS inside one long tool call is quiet: listed, out of the running count, never dropped as done, and running again once it writes', () => {
+test('register (#34 regression): a live agent silent past TRANSCRIPT_ALIVE_MS inside one long tool call is listed and counted under quiet, not under running, never dropped as done, and counted running again once it writes', () => {
   const root = project();
   try {
     writeSession(root, 's1');
@@ -241,11 +241,12 @@ test('register (#34 regression): a live agent silent past TRANSCRIPT_ALIVE_MS in
     assert.deepEqual(src.rows.map((r) => [r.agentId, r.status, r.endedAt]), [['a1', 'quiet', null]]);
     assert.equal(src.rows[0]!.elapsedMs, 2 * 3_600_000, 'a quiet row keeps counting its run time');
     const v = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: home }).view(NOW);
-    assert.equal(v.active, 0, 'quiet is not counted as running');
+    assert.deepEqual([v.active, v.quiet], [0, 1], 'counted under quiet, not under running: the live agent is not hidden from the count');
     assert.deepEqual(v.agents.map((a) => [a.agentId, a.status, a.idleMs]), [['a1', 'quiet', null]], 'and not shown as done');
     // the tool call returns and the transcript is written again
     utimesSync(file, (NOW - 1_000) / 1000, (NOW - 1_000) / 1000);
-    assert.equal(createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: home }).view(NOW).active, 1);
+    const again = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: home }).view(NOW);
+    assert.deepEqual([again.active, again.quiet], [1, 0]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -280,6 +281,10 @@ test('transcript end marker: the last user or assistant entry decides, hook atta
     assert.equal(endsOnHandback(at([transcriptLine('user'), transcriptLine('assistant')])), false, 'a plain reply carries no marker');
     // a line longer than the tail window: the window starts inside it, so that part does not parse
     assert.equal(endsOnHandback(at([JSON.stringify({ type: 'user', message: { content: 'x'.repeat(70_000) } }), ...HANDBACK_TRANSCRIPT])), true);
+    // a hook attachment longer than the 64 KiB first window after the marker: the window holds no whole entry, so the 1 MiB tail is read
+    const bigAttachment = JSON.stringify({ type: 'attachment', attachment: { type: 'hook_success', hookEvent: 'SubagentStop', content: 'y'.repeat(200_000) } });
+    assert.equal(endsOnHandback(at([...HANDBACK_TRANSCRIPT, bigAttachment])), true, 'an oversized attachment after the handback does not hide it');
+    assert.equal(endsOnHandback(at([transcriptLine('user'), TOOL_USE_LINE, bigAttachment])), false, 'nor invents one');
     assert.equal(endsOnHandback(at([])), false, 'an empty transcript');
     assert.equal(endsOnHandback(join(root, 'no-such-file.jsonl')), false);
   } finally {
@@ -862,7 +867,7 @@ test('block: live agents from another session add one dim line saying the sessio
   const b = composeSubagentBlock({ ...view(agents), foreignLive: 1 }, 160, 30, 0);
   assert.equal(b.height, plain.height + 1);
   const line = b.puts.find((p) => /another session/.test(p.text))!;
-  assert.equal(line.text, 'session.json names another session; live agents from the other one are listed');
+  assert.equal(line.text, 'session.json names another session; running and quiet agents from the other one are listed');
   assert.deepEqual([line.x, line.y, line.attr.dim], [0, plain.height, true]);
   assert.equal(composeSubagentBlock({ ...view(agents), foreignLive: 1 }, 160, plain.height, 0).height, plain.height, 'no room: the cards win');
   const none = composeSubagentBlock({ ...view(agents), foreignLive: 1 }, 0, 30, 0);
