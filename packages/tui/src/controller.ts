@@ -39,6 +39,8 @@ export interface DashboardOptions {
   profile?: boolean;
   /** Replaces the data_version probe; tests use it to make a read fail. */
   dataVersionProbe?: (paths: string[]) => DataVersionProbe;
+  /** the `r` key (a github_refresh effect): the host's GitHub poller polls now */
+  onGithubRefresh?: () => void;
   /** The file operations the OpenCode-override config.json write uses; tests
    *  use it to make that write fail part-way. */
   configWriteFs?: AtomicWriteFs;
@@ -62,8 +64,9 @@ export interface DashboardStats {
 }
 
 /** The viewport a host passes: every field is required except the optional
- *  Agents tab and the pane height (a host without the banner has no use for it). */
-export type ControllerViewport = Required<Omit<Viewport, 'agents' | 'height'>> & Pick<Viewport, 'agents' | 'height'>;
+ *  Agents tab, the pane height (a host without the banner has no use for it)
+ *  and the GitHub snapshot (a host without a GitHub poller). */
+export type ControllerViewport = Required<Omit<Viewport, 'agents' | 'height' | 'github'>> & Pick<Viewport, 'agents' | 'height' | 'github'>;
 
 export interface DashboardController {
   readonly stores: MountedStores;
@@ -185,9 +188,10 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       degrade(`data_version probe failed to open — ${(err as Error).message}`);
     }
   }
-  let frame: { vp: string; day: string; ui: UiState; roster: AgentRosterSnapshot | undefined; dataVersion: string | undefined; built: DashboardFrame } | undefined;
+  let frame: { vp: string; viewport: ControllerViewport; day: string; ui: UiState; roster: AgentRosterSnapshot | undefined; dataVersion: string | undefined; built: DashboardFrame } | undefined;
   let builds = 0;
-  const vpKey = (vp: ControllerViewport): string => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null]);
+  // the GitHub snapshot's version moves only when its content does, so an unchanged poll rebuilds nothing
+  const vpKey = (vp: ControllerViewport): string => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null, vp.github ? vp.github.version : null]);
   const today = (): string => new Date().toDateString();
   function currentFrame(vp: ControllerViewport): DashboardFrame {
     let dataVersion: string | undefined;
@@ -202,8 +206,8 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     const day = today();
     if (frame && dataVersion !== undefined && frame.dataVersion === dataVersion && frame.ui === ui && frame.roster === roster && frame.vp === key && frame.day === day) return frame.built;
     builds++;
-    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height);
-    frame = { vp: key, day, ui, roster, dataVersion, built };
+    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height, vp.github);
+    frame = { vp: key, viewport: vp, day, ui, roster, dataVersion, built };
     return built;
   }
 
@@ -674,6 +678,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     for (const e of effects) {
       if (e.type === 'select') pending = [...pending.filter((p) => p.type !== 'select'), e];
       else if (e.type === 'board_edit') pending.push(e);
+      else if (e.type === 'github_refresh') options.onGithubRefresh?.();
     }
     if (!options.deferWrites) flush();
     return effects.some((e) => e.type === 'quit');
@@ -690,10 +695,16 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     state: (vp) => currentFrame(vp).state,
     async handle(event, vp) {
       const prevTab = ui.tab;
+      // A click or a wheel acts on the frame on screen, at the viewport it was
+      // drawn with: the host's viewport can already differ (a finished GitHub
+      // poll adds or removes the strip row), and that layout is not drawn
+      // until the next redraw.
+      const pointer = event.kind === 'click' || event.kind === 'wheel';
+      const hitVp = pointer && frame && frame.ui === ui && frame.roster === roster ? frame.viewport : vp;
       // the frame on screen, when it was drawn from this ui and roster at this
       // viewport: the reducer hit-tests it instead of reading the store again
-      const drawn = frame && frame.ui === ui && frame.roster === roster && frame.vp === vpKey(vp) ? frame.built : undefined;
-      const result = reduce(store, ui, event, vp, stores, roster, resolveProjectHeadSha, drawn);
+      const drawn = frame && frame.ui === ui && frame.roster === roster && frame.vp === vpKey(hitVp) ? frame.built : undefined;
+      const result = reduce(store, ui, event, hitVp, stores, roster, resolveProjectHeadSha, drawn);
       ui = result.ui;
       // a held quit is discarded by the next quit only; any other event disarms it
       if (!result.effects.some((e) => e.type === 'quit')) quitArmed = false;

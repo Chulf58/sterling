@@ -307,12 +307,13 @@ const key = (name: string) => ({ kind: 'key', name });
 // TABS registry — the last tab; hotkey + hit-test scale by TABS.length
 // ===========================================================================
 
-test('phase4 registry: TABS ends with "System" after the Agents tab; state.SYSTEM_TAB === 4', () => {
+test('phase4 registry: "System" follows the Agents tab, then the host-enabled GitHub tab; state.SYSTEM_TAB === 4', () => {
   assert.strictEqual(typeof STc.SYSTEM_TAB, 'number', 'state.SYSTEM_TAB must be an exported number');
-  assert.equal(STc.SYSTEM_TAB, SYS_TAB, 'the System tab is index 4 (last, after Agents)');
-  assert.equal(TABS.length, 5, 'TABS has five entries');
+  assert.equal(STc.SYSTEM_TAB, SYS_TAB, 'the System tab is index 4 (after Agents)');
+  assert.equal(TABS.length, 6, 'TABS has six entries');
   assert.equal(TABS[3], 'Agents', 'TABS[3] is the "Agents" label');
   assert.equal(TABS[4], 'System', 'TABS[4] is the "System" label');
+  assert.equal(TABS[5], 'GitHub', 'TABS[5] is the "GitHub" label (board 87bca3f8), shown only on a host with a GitHub poller');
 });
 
 test('phase4 registry: on a host without the Agents tab the digit-4 hotkey selects the System tab', () => {
