@@ -92,7 +92,8 @@ function renderSource(path, root, label) {
 }
 
 /**
- * Every commands/*.md and skills/*\/SKILL.md under `root`, rendered for OpenCode.
+ * Every commands/*.md except OPENCODE_UNREGISTERED_COMMANDS and every skills/*\/SKILL.md
+ * under `root`, rendered for OpenCode.
  * An item that fails to render lands in `failures` with its label, never thrown.
  */
 export function renderRegistrations(root) {

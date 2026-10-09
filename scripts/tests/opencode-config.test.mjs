@@ -1,5 +1,5 @@
 // The OpenCode server plugin's registration seam (packages/opencode-plugin/src/config.mjs):
-// every Sterling command and skill registered with host-correct bodies, and the
+// every Sterling command (except OPENCODE_UNREGISTERED_COMMANDS) and skill registered with host-correct bodies, and the
 // `sterling` MCP entry injected from the loaded copy (decision
 // sterling-opencode-plugin-injects-its-own-mcp-entry). Driven through a stubbed
 // plugin context whose editors behave as OpenCode 2.0.21's: a transform callback
@@ -75,7 +75,7 @@ const noticesOf = (dir) => {
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : [];
 };
 
-test('every commands/*.md registers as sterling:<name> and every SKILL.md as a skill, with no Claude-only phrase left', async (t) => {
+test('every commands/*.md except OPENCODE_UNREGISTERED_COMMANDS registers as sterling:<name> and every SKILL.md as a skill, with no Claude-only phrase left', async (t) => {
   const project = tempProject(t);
   const ctx = stubCtx(project);
   await cfg.createConfigHandler({ sterlingRoot: repo, now: () => NOW })(ctx);
