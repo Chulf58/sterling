@@ -5,7 +5,7 @@
 //
 // WHAT IT DOES. After a commit (H19's Bash surface) or at Stop (H10), when the
 // queue holds open items in the worker's lanes (WORKER_LANES) that are clean
-// against HEAD and not yet judged, the hook calls maybeLaunchMaintenanceWorker.
+// against HEAD and still unjudged, the hook calls maybeLaunchMaintenanceWorker.
 // That starts ONE detached node runner (scripts/maintenance-worker-run.mjs),
 // which runs a headless `claude -p` librarian on Claude Sonnet 5.5 at MEDIUM
 // effort over a bounded, lane-fair batch. The child closes already-paid items
