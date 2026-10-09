@@ -925,7 +925,8 @@ test('a role config.json does not write pins the default the System tab shows; t
     researcher: 'model: anthropic/claude-sonnet-5-5',
     scout: 'model: anthropic/claude-sonnet-5-5',
     reviewer: 'model: anthropic/claude-haiku-4-5',
-    librarian: 'model: anthropic/claude-sonnet-5-5',
+    // the librarian's schema default moved to claude-haiku-5-5 (haiku-5-5-classifiers)
+    librarian: 'model: anthropic/claude-haiku-5-5',
   });
   // a literal models.undefined entry is schema-valid (any agent name is a key) and must not reach the conductor
   writeConfig(dir, { reviewer: { model: 'claude-haiku-4-5', effort: 'high' }, undefined: { model: 'claude-haiku-4-5', effort: 'low' } });
