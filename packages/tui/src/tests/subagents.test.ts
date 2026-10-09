@@ -808,7 +808,7 @@ test('tracker: a resumable agent carries its idle time and the tokens its transc
       row('a4', 'scout', 600_000, { session_id: 'older', ended: { at: iso(60_000), event: 'subagent-stop' } }),
     ]);
     const v = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: home }).view(NOW);
-    assert.equal(v.active, 1, 'active counts running agents only; it is the number in "Agents (N)"');
+    assert.equal(v.active, 1, 'active counts running agents only; it is the running number in "Agents (N running · M quiet)"');
     assert.deepEqual(v.agents.map((a) => [a.agentId, a.status]), [['a3', 'running'], ['a2', 'resumable'], ['a1', 'resumable']], 'running first, then resumable newest ended first; the other session is absent');
     const a2 = v.agents[1]!;
     assert.equal(a2.idleMs, 720_000);
