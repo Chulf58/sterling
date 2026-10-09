@@ -168,6 +168,25 @@ test('the root session context carries project mode and TDD posture, read live f
   }
 });
 
+// GitHub issue #39: work mode in a git repo with no 'origin' remote merges locally,
+// so the OpenCode context says so; with an origin it keeps the pull-request line.
+test('the root session context says the merge is local for a work project with no origin remote, and a pull request once origin exists', async () => {
+  const dir = makeProject({ project_name: 'fixture-proj', mode: 'work' });
+  try {
+    const h = handler(dir, { sessions: { ses_root: {} } });
+    const i = input('ses_root');
+    await h.onContext(i);
+    assert.match(textOf(i), /Project mode: WORK \(config\.mode — TUI System tab\) — this repository has no 'origin' remote, so \/sterling:merge merges locally like hobby mode: no pull request and no Copilot review will happen\./);
+    assert.equal(spawnSync('git', ['remote', 'add', 'origin', 'https://github.com/acme/widget.git'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    const j = input('ses_root');
+    await h.onContext(j);
+    assert.match(textOf(j), /Project mode: WORK \(config\.mode — TUI System tab\) — work ships as a pull request through \/sterling:merge/);
+    assert.doesNotMatch(textOf(j), /no 'origin' remote/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('an unreadable config reads UNKNOWN on both lines, never the default', async () => {
   const dir = makeProject('{ not json');
   try {
