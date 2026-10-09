@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, delimiter } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { parseOriginRepo } from '../lib/work-pr.mjs';
+import { evaluatePrLoop } from '../hooks/lib/pr-loop-duty.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ATTRIBUTION = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
@@ -892,6 +893,114 @@ for (const mode of [undefined, 'hobby']) {
     }
   });
 }
+
+// GitHub issue #39 (user-ruled 2026-10-08, 'Fall back to local merge'): a WORK
+// project whose repository has no 'origin' remote has no PR path, so the gate
+// merges locally like hobby mode and says loudly that no PR and no Copilot
+// review happened. A work project WITH origin keeps the PR flow (every `work:`
+// test above); a directory that is not a git repo is not "no origin".
+test("work + no 'origin' remote: merges LOCALLY like hobby, says loudly that no PR and no Copilot review happened, calls no gh, arms no PR loop", () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    git(p.dir, ['remote', 'remove', 'origin']);
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `the no-origin work merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const notice = /WORK mode, but this repository has no 'origin' remote — merging LOCALLY like hobby mode\. NO pull request was opened and NO Copilot review happened/;
+    assert.match(r.stderr, notice, 'the fallback is announced');
+    assert.equal(r.stderr.match(new RegExp(notice.source, 'g')).length, 2, 'announced at the start and again after the merge output');
+    const out = parseSingleJson(r.stdout, 'no-origin work merge');
+    // CONTRACT FIX (Sol review): the configured mode stays 'work', so the work
+    // envelope keeps its shape on every exit and carries the fallback marker,
+    // with the local merge's own report inside it. This used to read as the bare
+    // hobby report (mode undefined).
+    assert.equal(out.mode, 'work', 'the work envelope is kept');
+    assert.equal(out.ok, true);
+    assert.equal(out.stage, 'done');
+    assert.equal(out.exit, 0);
+    assert.equal(out.work_mode_local_fallback, true, 'the report says the fallback applied');
+    assert.equal(out.pr_url, null, 'no PR');
+    assert.equal(out.pr_number, null, 'no PR');
+    assert.equal(out.merged_into, 'main', "the local merge's own report rides the envelope");
+    assert.equal(out.branch_merged, p.branchName);
+    assert.equal(out.pushed, false, 'nothing is pushed: there is no origin');
+    assert.deepEqual(ghCalls(p.gh.state), [], 'the fallback never calls gh');
+    assert.notEqual(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'main received the merge');
+    assert.equal(gitMaybe(p.dir, ['rev-parse', '--verify', `refs/heads/${p.branchName}`]), null, 'the merged branch is deleted like hobby');
+    // The state the PR flow would have written: no file, and the duty rule H10
+    // and the OpenCode plugin share reads nothing owed and nothing degraded.
+    assert.equal(existsSync(prLoopFile(p)), false, 'no pr-loop.json is armed');
+    assert.deepEqual(evaluatePrLoop(p.dir), { state: null, degraded: null }, 'the shared PR-loop duty rule owes nothing');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("work + no 'origin' at start, but origin appears DURING the battery: the fallback holds, nothing is pushed, origin's base is unchanged", () => {
+  const p = makeProject({ mode: 'work', checkScript: `git remote add origin ${ORIGIN_URL}` });
+  try {
+    git(p.dir, ['remote', 'remove', 'origin']);
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.ok(gitMaybe(p.dir, ['remote', 'get-url', 'origin']), 'the battery did add origin');
+    const out = parseSingleJson(r.stdout, 'origin appears mid-run');
+    assert.equal(out.mode, 'work');
+    assert.equal(out.work_mode_local_fallback, true);
+    assert.equal(out.pushed, false, 'the fallback never pushes');
+    assert.equal(git(p.origin, ['rev-parse', 'main']), p.originMainSha, "origin's base did not move");
+    assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch was not pushed either');
+    assert.notEqual(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'main received the merge locally');
+    assert.deepEqual(ghCalls(p.gh.state), []);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("work + no 'origin' remote: a refusal exit keeps the work envelope and carries the fallback marker", () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    git(p.dir, ['remote', 'remove', 'origin']);
+    writeFileSync(join(p.dir, 'src', 'f0.mjs'), 'export const f0 = 99;\n');
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 1, `a dirty tree refuses — stderr=${oneLine(r.stderr)}`);
+    const out = parseSingleJson(r.stdout, 'fallback refusal');
+    assert.equal(out.mode, 'work');
+    assert.equal(out.ok, false);
+    assert.equal(out.stage, 'dirty-tree');
+    assert.equal(out.exit, 1);
+    assert.equal(out.work_mode_local_fallback, true);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("work + a GitHub origin: unchanged — no local-fallback notice, no work_mode_local_fallback, the PR flow runs", () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, oneLine(r.stderr));
+    assert.doesNotMatch(r.stderr, /merging LOCALLY like hobby mode/);
+    const out = parseSingleJson(r.stdout, 'work with origin');
+    assert.equal(out.mode, 'work');
+    assert.equal(out.work_mode_local_fallback, undefined);
+    assert.equal(out.pr_number !== null, true, 'a PR was opened');
+    assertBaseUntouched(p, 'work with origin');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test("work + no 'origin' remote but another remote: still the local fallback (only a missing 'origin' triggers it)", () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    git(p.dir, ['remote', 'rename', 'origin', 'upstream']);
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /has no 'origin' remote — merging LOCALLY/);
+    assert.deepEqual(ghCalls(p.gh.state), []);
+  } finally {
+    p.cleanup();
+  }
+});
 
 // The shipping flow follows the mode and nothing else (decision
 // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):

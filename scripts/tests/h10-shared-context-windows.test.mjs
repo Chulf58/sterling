@@ -85,6 +85,7 @@ test('the shipped shared table maps the models the old per-project seed carried,
   assert.equal(SHARED.windows['claude-opus-5'], 1_000_000);
   assert.equal(SHARED.windows['claude-sonnet-5'], 1_000_000);
   assert.equal(SHARED.windows['claude-haiku-4-5'], 200_000);
+  assert.equal(SHARED.windows['claude-haiku-5-5'], 1_000_000);
 });
 
 test('templates/default-config.json no longer seeds per-model windows into new projects, and keeps the real default', () => {

@@ -676,6 +676,59 @@ test('outside a Sterling clone nothing is judgeable, so an active article with n
   }
 });
 
+/** A consumer tree: no Sterling clone markers, so reachability is never checked. */
+function consumerProject() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-entry-consumer-text-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  write(dir, 'scripts/run.mjs', '// consumer script\n');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  return { dir, tools, cleanup: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
+}
+
+test('consumer tree, empty files[]: the item says to append the owned files and names no server.ts or tools.ts (issue #53)', () => {
+  const { tools, cleanup } = consumerProject();
+  try {
+    const art = mkArticle(tools, 'active', [], 'consumer-no-files');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const items = stateReviews(tools);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].feature_link, art.id);
+    assert.match(items[0].text, NO_ENTRY);
+    assert.doesNotMatch(items[0].text, /server\.ts or tools\.ts/);
+    assert.match(items[0].text, /knowledge_append\(id: '[^']+', field: 'files', entries: \[\{path, role\}\], resolves: \[<this item's id>\]\)/);
+    assert.match(items[0].text, /reachability is not checked in this tree/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('clone, empty files[]: the item appends the owned files first and still names server.ts or tools.ts', () => {
+  const { tools, cleanup } = project();
+  try {
+    mkArticle(tools, 'active', [], 'clone-no-files');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const items = stateReviews(tools);
+    assert.equal(items.length, 1);
+    assert.match(items[0].text, /add the files it owns first: knowledge_append\(/);
+    assert.match(items[0].text, /a tool entry is server\.ts or tools\.ts with the tool name in its role/);
+    assert.doesNotMatch(items[0].text, /reachability is not checked in this tree/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('consumer tree, files[] with no entry, read three times: no item is minted', () => {
+  const { tools, cleanup } = consumerProject();
+  try {
+    mkArticle(tools, 'active', [{ path: 'scripts/run.mjs', role: 'the script' }], 'consumer-with-files');
+    for (let i = 0; i < 3; i++) tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(stateReviews(tools).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
 test('an unreadable clone identity is not read as "library": the item still mints', () => {
   const cases: [string, (dir: string) => void][] = [
     ['a plugin manifest that does not parse', (dir) => write(dir, '.claude-plugin/plugin.json', '{ not json')],
@@ -695,6 +748,9 @@ test('an unreadable clone identity is not read as "library": the item still mint
       assert.equal(items.length, 1, label);
       assert.equal(items[0].feature_link, art.id, label);
       assert.match(items[0].text, NO_ENTRY, label);
+      assert.match(items[0].text, /reachability is not checked in this tree/, label);
+      assert.match(items[0].text, /marking an entry is optional/, label);
+      assert.doesNotMatch(items[0].text, /server\.ts or tools\.ts/, label);
     } finally {
       cleanup();
     }

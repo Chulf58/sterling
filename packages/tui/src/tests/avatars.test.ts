@@ -197,6 +197,25 @@ test('pool: two dark eyes stay visible in rest, bob and tilt, and a blink turns 
   }
 });
 
+test('pool: the face centre holds only skin, the eyes and the shading keys, so no avatar has a moustache (issue #30)', () => {
+  // pixel rows 2-3, four columns wide, on every avatar and every frame; the skin key of each tone is the face fill
+  const skinKey = ['D', 'g', 'L'];
+  const eyeKey = Object.keys(pal).find((k) => pal[k] === EYE)!;
+  const shading = ['E', 'M', 'h'];
+  pool.avatars.forEach((a, i) => {
+    const allowed = new Set([skinKey[a.parts.skin]!, eyeKey, ...shading]);
+    a.frames.forEach((rows, f) => {
+      // the tilt frame leans one pixel to the right, so its face centre is one column over
+      const from = f === 3 ? 5 : 4;
+      for (let r = 2; r <= 3; r++) {
+        for (let c = from; c < from + 4; c++) {
+          assert.ok(allowed.has(rows[r]![c]!), `avatar ${i} (${a.parts.style}) frame ${f} pixel ${r},${c} is ${rows[r]![c]}, not skin, eye or shading`);
+        }
+      }
+    });
+  });
+});
+
 test('tile: 8 cols by 3 rows, padded one col each side, every cell on the tile colour, no frame glyphs', () => {
   assert.equal(TILE_COLS, 8);
   for (let a = 0; a < POOL_SIZE; a++) {
