@@ -108,7 +108,7 @@ test('plain level: the attributes from before the theme (bold name, inverse tab 
 });
 
 for (const level of ['truecolor', '256'] as const) {
-  test(`${level} level: the page is painted violet, explicit colours replace dim and inverse, a full-width selection bar, amber bold warnings`, () => {
+  test(`${level} level: the page is painted black, explicit colours replace dim and inverse, a full-width selection bar, amber bold warnings`, () => {
     const { screen, puts, fills } = capture(60);
     draw(screen, sampleState(), { theme: themeFor(level) });
     assert.deepEqual(fills, [{ bgColor: XTERM.background }]);
@@ -118,11 +118,14 @@ for (const level of ['truecolor', '256'] as const) {
       assert.equal(typeof p.attr.bgColor, 'number', `every put carries a background: ${JSON.stringify(p.str)}`);
       assert.equal(typeof p.attr.color, 'number', `every put carries a colour: ${JSON.stringify(p.str)}`);
     }
+    const coloured = puts.filter((p) => p.attr.bgColor !== XTERM.background).map((p) => p.str.trim());
+    assert.deepEqual(coloured, ['Selected title'], 'only the selection bar keeps a coloured background: tabs, name row, notice and footer are on black');
     const sel = find(puts, 'Selected title');
     assert.equal(sel.str.length, 60, 'the selected title is padded to the pane width');
     assert.deepEqual(sel.attr, { color: XTERM.bright, bgColor: XTERM.selection, bold: true });
-    assert.deepEqual(find(puts, ' Tasks ').attr, { color: XTERM.background, bgColor: XTERM.pink, bold: true });
+    assert.deepEqual(find(puts, ' Tasks ').attr, { bgColor: XTERM.background, color: XTERM.pink, bold: true, underline: true });
     assert.equal(find(puts, ' Knowledge ').attr.color, XTERM.muted);
+    assert.equal(find(puts, ' Knowledge ').attr.bgColor, XTERM.background, 'inactive tabs sit on the page black');
     assert.equal(find(puts, 'meta line').attr.color, XTERM.muted);
     assert.equal(find(puts, '/ query').attr.color, XTERM.cyan);
     assert.deepEqual(find(puts, '⚠ a notice').attr, { bgColor: XTERM.background, color: XTERM.amber, bold: true });
@@ -165,14 +168,15 @@ const contrast = (a: number, b: number): number => {
 };
 
 test('256 palette: every text colour reads at 4.5:1 or better on its background', () => {
-  assert.deepEqual(xtermRgb(XTERM.background), [0, 0, 0x5f], 'index 17 is the #00005f the scene meets');
-  assert.equal(PALETTE.night, '#00005f');
+  assert.deepEqual(xtermRgb(XTERM.background), [0, 0, 0], 'index 16 is the black the scene meets');
+  assert.equal(PALETTE.night, '#000000');
+  assert.equal(PALETTE.text, '#ffffff');
+  assert.deepEqual(xtermRgb(XTERM.text), [255, 255, 255], 'body text is white');
   for (const [name, fg] of Object.entries(XTERM)) {
     if (name === 'background' || name === 'selection') continue;
     assert.ok(contrast(fg, XTERM.background) >= 4.5, `${name} (${fg}) on the background: ${contrast(fg, XTERM.background).toFixed(2)}`);
   }
   assert.ok(contrast(XTERM.bright, XTERM.selection) >= 4.5, 'selected text on the selection bar');
-  assert.ok(contrast(XTERM.background, XTERM.pink) >= 4.5, 'the active tab label on pink');
 });
 
 // ---------------------------------------------------------------------------
@@ -271,7 +275,7 @@ test('paintPixels / clearPixels: a cell with no bg, and a blanked cell, are writ
     noFormat: (s: string) => calls.push(`put ${s}`),
   };
   const sgr = themeFor('truecolor').blankSgr;
-  assert.equal(sgr, '\x1b[48;5;17m');
+  assert.equal(sgr, '\x1b[48;5;16m');
   const prev = paintPixels(term, [{ x: 0, y: 0, ch: '▄', fg: '#ffffff' }, { x: 1, y: 0, ch: ' ', bg: '#000000' }], undefined, false, sgr);
   assert.deepEqual(calls, ['reset', 'move 1,1', `put ${sgr}`, 'fg #ffffff', 'put ▄', 'reset', 'move 2,1', 'bg #000000', 'put  ', 'reset']);
   calls.length = 0;
@@ -318,4 +322,11 @@ test('themeFor: one theme object per level; map() turns the Agents tab\'s host-n
   assert.deepEqual(t.map({ dim: true }), { bgColor: XTERM.background, color: XTERM.muted });
   assert.deepEqual(t.map({ bold: true, dim: true }), { bgColor: XTERM.background, color: XTERM.muted, bold: true });
   assert.deepEqual(PLAIN_THEME.map({ color: 'green' }), { color: 'green' });
+});
+
+test('scene meets the page: the sky starts on the page black, and the body and the overlay blanks use it', () => {
+  assert.deepEqual(xtermRgb(XTERM.background), [0, 0, 0]);
+  const px = scenePixels(60, FULL_SCENE_ROWS, 'x');
+  assert.equal(px.find((p) => p.x === 0 && p.y === 0)!.fg, PALETTE.night, 'the top pixel of the corner is the page colour');
+  assert.equal(themeFor('truecolor').blankSgr, `\x1b[48;5;${XTERM.background}m`);
 });

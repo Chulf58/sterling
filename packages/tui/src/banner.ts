@@ -89,10 +89,10 @@ function wordmarkFor(width: number, rows: number): { row: number; x: number; lin
 // ---------------------------------------------------------------------------
 
 const SUN_STOPS = ['#ffd319', '#ff901f', '#ff2975'] as const;
-const SKY_STOPS = ['#00005f', '#3a0a6e', '#a0207e'] as const;
+const SKY_STOPS = ['#000000', '#3a0a6e', '#a0207e'] as const;
 /** the chrome wordmark, one colour per pixel row of the 3-row art (6 pixel rows) */
 export const CHROME = ['#ffffff', '#c8f4ff', '#6fd3ff', '#2a3fbf', '#9ee6ff', '#f0fbff'] as const;
-const GROUND_STOPS = ['#2b0057', '#00005f'] as const;
+const GROUND_STOPS = ['#2b0057', '#000000'] as const;
 const GRID = '#ff2bd6';
 /** a letter's colour over the sun */
 const SUN_INK = '#2b0057';
