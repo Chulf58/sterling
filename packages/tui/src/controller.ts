@@ -7,11 +7,12 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { MountedStores, resolveDomainMounts, catalogStatus, type DomainMount, type SterlingStore } from '@sterling/store';
+import { MountedStores, SterlingStore, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { parseConfig, AGENT_MODEL_KEY } from '@sterling/schemas';
-import { buildDashboardState, initialUi, reduce, runEffects, SYSTEM_TAB, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect } from './state.js';
+import { buildDashboardFrame, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect } from './state.js';
 import { applyHandoffToggle, applyModeToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
+import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
 // Static, so esbuild inlines both into the bundles: an installed copy has no
 // node_modules and no packages/*/dist, so a run-time import of the scripts/lib
 // SOURCE (which imports @sterling/schemas) cannot load there.
@@ -30,6 +31,31 @@ export type DisableableEffect = 'model_swap' | 'select';
 
 export interface DashboardOptions {
   disabledEffects?: Partial<Record<DisableableEffect, string | null>>;
+  /** Hold store writes (the selection, a board edit) until the host calls
+   *  flush(), so they run after the frame is drawn. Default false: handle()
+   *  runs them before it returns. */
+  deferWrites?: boolean;
+  /** Count the project store's method calls for stats() (STERLING_TUI_PROFILE). */
+  profile?: boolean;
+  /** Replaces the data_version probe; tests use it to make a read fail. */
+  dataVersionProbe?: (paths: string[]) => DataVersionProbe;
+}
+
+/** How long the held selection and board-edit writes wait for another
+ *  connection's write lock before giving up (SQLite's busy timeout; the
+ *  store's default is 5000 ms). Short, because they run on the terminal's
+ *  event loop. Only their own connection (writeStore) uses it. With
+ *  deferWrites a write that times out stays queued for the next flush. */
+export const DASHBOARD_BUSY_TIMEOUT_MS = 250;
+
+/** Counters for the profile log; cumulative since openDashboard. */
+export interface DashboardStats {
+  /** dashboard frames built from the store */
+  builds: number;
+  /** project-store method calls, internal ones included; 0 unless options.profile */
+  storeCalls: number;
+  /** how the state cache detects store changes: 'data_version', or why it cannot (it then rebuilds on every call) */
+  changeDetection: string;
 }
 
 /** The viewport a host passes: every field is required except the optional Agents tab. */
@@ -38,6 +64,9 @@ export type ControllerViewport = Required<Omit<Viewport, 'agents'>> & Pick<Viewp
 export interface DashboardController {
   readonly stores: MountedStores;
   readonly store: SterlingStore;
+  /** the connection the held selection and board-edit writes run on, with
+   *  DASHBOARD_BUSY_TIMEOUT_MS (the same handle as `store` on Postgres storage) */
+  readonly writeStore: SterlingStore;
   /** the project's folder name, plus a loud suffix when domains could not load */
   readonly projectName: string;
   readonly configPath: string;
@@ -48,6 +77,18 @@ export interface DashboardController {
   handle(event: UiEvent, vp: ControllerViewport): Promise<boolean>;
   /** execute effects (the impure seam); true when one of them is a quit */
   applyEffects(effects: Effect[]): Promise<boolean>;
+  /** run the held store writes; a failure becomes ui.notice, never a throw.
+   *  A write that met a busy lock stays queued for the next flush.
+   *  True when a write failed, so the host redraws to show the notice. */
+  flush(): boolean;
+  /** how many store writes are still queued */
+  pending(): number;
+  /** Run the held writes before a quit. True when the host may exit: every
+   *  write was saved, or the user already saw the failure and asked again.
+   *  False holds the quit once and says why in ui.notice; the next quit
+   *  discards, any other event disarms. */
+  requestQuit(): boolean;
+  stats(): DashboardStats;
   close(): void;
 }
 
@@ -102,8 +143,149 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   }
   const stores = routed ? openRoutedStores(projectRoot, { mount: true }).stores : new MountedStores(storePath, mounts, { skipMissing: true });
   const store = stores.project;
+  // The held writes get their own connection with the short busy timeout.
+  // Every other connection keeps the store's default, so opening the store,
+  // the catalog bootstrap and a model swap's decision record still wait out
+  // an ordinary MCP write lock instead of failing after 250 ms.
+  let writeStore: SterlingStore;
+  try {
+    writeStore = routed ? store : new SterlingStore(storePath, { busyTimeoutMs: DASHBOARD_BUSY_TIMEOUT_MS });
+  } catch (err) {
+    stores.close();
+    throw err;
+  }
   const projectName = basename(projectRoot) + (domainsAvailable ? '' : ' — domains unavailable (project-only)');
   let ui: UiState = initialUi;
+
+  // The state cache (GitHub #35): the last built frame is reused until the
+  // UiState, the roster, the viewport, the day (today's queue log stamps drop
+  // the date) or a store's PRAGMA data_version moves, so the 1 Hz redraw over
+  // an unchanged store reads nothing. Postgres storage has no data_version:
+  // there every call rebuilds, as before, and stats() says so.
+  let probe: DataVersionProbe | undefined;
+  let changeDetection = 'data_version';
+  let degradeSaid = false;
+  /** Change detection failed: rebuild on every call (correct, only slower),
+   *  record why in stats(), and say it once on screen. */
+  function degrade(reason: string): void {
+    changeDetection = `degraded: ${reason}`;
+    if (degradeSaid) return;
+    degradeSaid = true;
+    ui = { ...ui, notice: `change detection degraded: ${reason}; the dashboard rebuilds on every redraw` };
+  }
+  if (routed) changeDetection = 'none: Postgres storage has no data_version';
+  else {
+    try {
+      probe = (options.dataVersionProbe ?? openDataVersionProbe)([storePath, ...mounts.map((m) => m.dbPath)]);
+    } catch (err) {
+      degrade(`data_version probe failed to open — ${(err as Error).message}`);
+    }
+  }
+  let frame: { vp: string; day: string; ui: UiState; roster: AgentRosterSnapshot | undefined; dataVersion: string | undefined; built: DashboardFrame } | undefined;
+  let builds = 0;
+  const vpKey = (vp: ControllerViewport): string => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null]);
+  const today = (): string => new Date().toDateString();
+  function currentFrame(vp: ControllerViewport): DashboardFrame {
+    let dataVersion: string | undefined;
+    if (probe) {
+      try {
+        dataVersion = probe.read();
+      } catch (err) {
+        degrade(`data_version read failed — ${(err as Error).message}`);
+      }
+    }
+    const key = vpKey(vp);
+    const day = today();
+    if (frame && dataVersion !== undefined && frame.dataVersion === dataVersion && frame.ui === ui && frame.roster === roster && frame.vp === key && frame.day === day) return frame.built;
+    builds++;
+    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents);
+    frame = { vp: key, day, ui, roster, dataVersion, built };
+    return built;
+  }
+
+  // Profile counters: every project-store method call (both connections),
+  // wrapped on these instances only when the host asks (STERLING_TUI_PROFILE).
+  let storeCalls = 0;
+  const countCalls = (target: SterlingStore): void => {
+    const proto = Object.getPrototypeOf(target) as object;
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      const fn = Object.getOwnPropertyDescriptor(proto, name)?.value as unknown;
+      if (name === 'constructor' || typeof fn !== 'function') continue;
+      Object.defineProperty(target, name, {
+        configurable: true,
+        writable: true,
+        value: (...args: unknown[]) => {
+          storeCalls++;
+          return (fn as (...a: unknown[]) => unknown).apply(target, args);
+        },
+      });
+    }
+  };
+  if (options.profile) {
+    countCalls(store);
+    if (writeStore !== store) countCalls(writeStore);
+  }
+
+  // Store writes wait here until flush(). A click's selection write used to
+  // run on the input path, before the redraw, through SQLite's 5000 ms busy
+  // timeout, and an exhausted timeout reached the TUI's fatal handler. Only
+  // the latest selection is kept: a burst of clicks ends in one write.
+  // A write that meets another connection's lock gives up after
+  // DASHBOARD_BUSY_TIMEOUT_MS. With deferWrites it stays queued, the host
+  // retries it (main.ts does on each tick) and the notice it sets is cleared
+  // once the retry succeeds. Without deferWrites no host flushes again (the
+  // OpenCode dashboard), so it is dropped with a notice like any other failure.
+  let pending: (SelectEffect | BoardEditEffect)[] = [];
+  let retryNotice: string | undefined;
+  const isBusy = (err: unknown): boolean => {
+    const code = (err as { errcode?: unknown } | null)?.errcode;
+    return code === 5 || code === 6 || /database is (locked|busy)|SQLITE_BUSY|SQLITE_LOCKED/i.test((err as Error | null)?.message ?? '');
+  };
+  function flush(): boolean {
+    if (!pending.length) return false;
+    const batch = pending;
+    pending = [];
+    let failed = false;
+    for (const e of batch) {
+      try {
+        // Postgres storage keeps the selection slot local to this checkout and
+        // host (decision postgres-store-backend-design-sync-bridge-schema-per-store,
+        // point 9): the shared store's selection row would hand it to another machine's prompt.
+        if (e.type === 'select' && routed) writeSelectionFile(projectRoot, e.recordType, e.id, new Date().toISOString());
+        else runEffects(writeStore, [e]);
+      } catch (err) {
+        failed = true;
+        const msg = (err as Error).message;
+        if (isBusy(err) && options.deferWrites) {
+          pending.push(e);
+          retryNotice = `${e.type === 'select' ? 'selection' : 'board edit'} not saved yet: the store is busy (${msg}); retrying`;
+          ui = { ...ui, notice: retryNotice };
+        } else {
+          ui = { ...ui, notice: e.type === 'select' ? `selection not handed to the next prompt — ${msg}` : `board edit not saved — ${msg}` };
+        }
+      }
+    }
+    if (!failed && retryNotice !== undefined) {
+      if (ui.notice === retryNotice) {
+        const { notice: _saved, ...rest } = ui;
+        ui = rest;
+      }
+      retryNotice = undefined;
+    }
+    return failed;
+  }
+
+  let quitArmed = false;
+  function requestQuit(): boolean {
+    if (quitArmed) return true;
+    const failed = flush();
+    if (!failed && !pending.length) return true;
+    quitArmed = true;
+    const notice = `${ui.notice ?? 'writes not saved'} — press q again to quit and discard them`;
+    ui = { ...ui, notice };
+    if (pending.length) retryNotice = notice;
+    return false;
+  }
 
   // System tab: the agent roster snapshot, read ON TAB ACTIVATION only (never
   // the redraw loop, per decision foreign_98064d77 — perf). Undefined until the
@@ -387,40 +569,50 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       notice('config.json updated — hooks pick this up on their next invocation; restart the session to reload the MCP server.');
     }
     if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length) roster = loadRoster();
-    // Postgres storage keeps the selection slot local to this checkout and host
-    // (decision postgres-store-backend-design-sync-bridge-schema-per-store, point
-    // 9): the shared store's selection row would hand it to another machine's prompt.
-    if (routed) {
-      for (const e of effects) {
-        if (e.type !== 'select') continue;
-        try {
-          writeSelectionFile(projectRoot, e.recordType, e.id, new Date().toISOString());
-        } catch (err) {
-          notice(`selection not handed to the next prompt — ${(err as Error).message}`);
-        }
-      }
-      return runEffects(store, effects.filter((e) => e.type !== 'select'));
+    for (const e of effects) {
+      if (e.type === 'select') pending = [...pending.filter((p) => p.type !== 'select'), e];
+      else if (e.type === 'board_edit') pending.push(e);
     }
-    return runEffects(store, effects);
+    if (!options.deferWrites) flush();
+    return effects.some((e) => e.type === 'quit');
   }
 
   return {
     stores,
     store,
+    writeStore,
     projectName,
     configPath,
     ui: () => ui,
     roster: () => roster,
-    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents),
+    state: (vp) => currentFrame(vp).state,
     async handle(event, vp) {
       const prevTab = ui.tab;
-      const result = reduce(store, ui, event, vp, stores, roster, resolveProjectHeadSha);
+      // the frame on screen, when it was drawn from this ui and roster at this
+      // viewport: the reducer hit-tests it instead of reading the store again
+      const drawn = frame && frame.ui === ui && frame.roster === roster && frame.vp === vpKey(vp) ? frame.built : undefined;
+      const result = reduce(store, ui, event, vp, stores, roster, resolveProjectHeadSha, drawn);
       ui = result.ui;
+      // a held quit is discarded by the next quit only; any other event disarms it
+      if (!result.effects.some((e) => e.type === 'quit')) quitArmed = false;
       // System tab: (re)load the roster ONLY on activation (never the redraw loop)
       if (ui.tab === SYSTEM_TAB && (prevTab !== SYSTEM_TAB || !roster)) roster = loadRoster();
       return applyEffects(result.effects);
     },
     applyEffects,
-    close: () => stores.close(),
+    flush,
+    pending: () => pending.length,
+    requestQuit,
+    stats: () => ({ builds, storeCalls, changeDetection }),
+    close: () => {
+      // the probe's read-only connections close first, so the store's own
+      // close is the last one on each file
+      try {
+        probe?.close();
+        if (writeStore !== store) writeStore.close();
+      } finally {
+        stores.close();
+      }
+    },
   };
 }
