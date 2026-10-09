@@ -514,8 +514,11 @@ test('reduce: keys — tab cycling, cursor clamp, enter selects + toggles expand
 
     const quit = reduce(store, ui, { kind: 'key', name: 'QUIT' });
     assert.deepEqual(quit.effects, [{ type: 'quit' }]);
-    const charQuit = reduce(store, ui, { kind: 'char', ch: 'q' });
-    assert.deepEqual(charQuit.effects, [{ type: 'quit' }], "the 'q' char quits outside search input");
+    // 'q' asks first (board fb516a43): the second 'q' quits outside search input
+    const charAsk = reduce(store, ui, { kind: 'char', ch: 'q' });
+    assert.deepEqual(charAsk.effects, [], "the first 'q' asks");
+    const charQuit = reduce(store, charAsk.ui, { kind: 'char', ch: 'q' });
+    assert.deepEqual(charQuit.effects, [{ type: 'quit' }], "the second 'q' quits outside search input");
   } finally {
     cleanup();
   }
@@ -1464,7 +1467,8 @@ test('P3 AC9: arrows navigate the Knowledge tree (cursor moves, no quit); other 
 
     // cross-check: on a NON-Knowledge tab, 'q' still quits and a digit still switches tabs
     const onTodos = st({ tab: 0 });
-    const qQuit = reduce(store, onTodos, { kind: 'char', ch: 'q' });
+    // 'q' asks first (board fb516a43), so the quit is the second press
+    const qQuit = reduce(store, reduce(store, onTodos, { kind: 'char', ch: 'q' }).ui, { kind: 'char', ch: 'q' });
     assert.deepEqual(qQuit.effects, [{ type: 'quit' }], "'q' keeps quitting on the Tasks tab (hotkeys preserved off the Knowledge tab)");
     const digit = reduce(store, onTodos, { kind: 'char', ch: '2' });
     assert.equal(digit.ui.tab, 1, "a digit still switches tabs off the Knowledge tab (TABS index '2' → tab 1)");

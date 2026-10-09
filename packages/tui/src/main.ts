@@ -10,7 +10,7 @@ import { githubStripRows, visibleBodyLines, AGENTS_TAB, type DashboardState } fr
 import { createGithubPoller } from './github-status.js';
 import { bannerLines, scenePixels } from './banner.js';
 import { detectThemeLevel, themeFor, type Theme } from './theme.js';
-import { clearPixels, draw, keyToEvent, mouseToEvent, paintPixels } from './render.js';
+import { clearPixels, draw, keyToEvent, mouseToEvent, paintPixels, windowBlock } from './render.js';
 import { composeSubagentBlock, createSubagentTracker, type BlockPixel, type SubagentBlock, type SubagentView } from './subagents.js';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
 import { ANIMATION_MS } from './avatars/sprite.js';
@@ -112,9 +112,17 @@ function fullBodyLines(): number {
   return visibleBodyLines(term.height, bannerLines(term.width, showBanner, term.height).length, githubStripRows(github.snapshot()));
 }
 
-function subagentBlock(tick: number): SubagentBlock {
-  if (ctl.ui().tab !== AGENTS_TAB) return { height: 0, puts: [], pixels: [] };
-  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2 - githubStripRows(github.snapshot()), tick, { neonEdge: theme.level !== 'plain' });
+// The Agents tab's cards are composed at full height, then windowed by the
+// body scroll: the state layer clamps that scroll by the block's height
+// (viewport().agentsLines), so the arrows, page keys and wheel reach every card.
+function fullAgentsBlock(tick: number): SubagentBlock {
+  return composeSubagentBlock(shownView, term.width, Infinity, tick, { neonEdge: theme.level !== 'plain' });
+}
+
+function subagentBlock(tick: number, scroll: number): SubagentBlock {
+  const ui = ctl.ui();
+  if (ui.tab !== AGENTS_TAB || ui.help) return { height: 0, puts: [], pixels: [] };
+  return windowBlock(fullAgentsBlock(tick), scroll, fullBodyLines());
 }
 
 // One viewport snapshot for both the draw and the click hit-test (the sync
@@ -122,7 +130,8 @@ function subagentBlock(tick: number): SubagentBlock {
 // with). bodyTop follows the banner height, so it is threaded as showBanner.
 // The Agents tab is enabled here, and its label carries the running count.
 function viewport() {
-  return { width: term.width, height: term.height, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active }, github: github.snapshot() };
+  const agentsLines = ctl.ui().tab === AGENTS_TAB ? fullAgentsBlock(0).height : 0;
+  return { width: term.width, height: term.height, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active }, github: github.snapshot(), agentsLines };
 }
 
 // Portrait and banner-scene pixels are painted outside the ScreenBuffer
@@ -155,7 +164,7 @@ function screenPixels(block: SubagentBlock): BlockPixel[] {
 }
 
 function animate(): void {
-  const block = subagentBlock(Math.floor(Date.now() / ANIMATION_MS));
+  const block = subagentBlock(Math.floor(Date.now() / ANIMATION_MS), drawnState?.scroll ?? 0);
   // the layout moved since the last redraw: that redraw's successor repaints it
   if (layoutKey(block) !== pixelLayout) return;
   painted = paintPixels(term, screenPixels(block), painted, trueColor, theme.blankSgr);
@@ -177,7 +186,7 @@ function redraw(onlyIfChanged = false): boolean {
   drawnView = viewKey;
   bodyTop = state.bodyTop;
   updateBannerPixels(state);
-  const block = subagentBlock(Math.floor(now / ANIMATION_MS));
+  const block = subagentBlock(Math.floor(now / ANIMATION_MS), state.scroll);
   const key = layoutKey(block);
   const full = forceFull || key !== pixelLayout;
   pixelLayout = key;
@@ -286,7 +295,8 @@ function shutdown(code: number, message?: string): never {
 process.on('uncaughtException', (err) => shutdown(1, `sterling-tui: fatal — ${(err as Error)?.stack ?? err}`));
 process.on('unhandledRejection', (err) => shutdown(1, `sterling-tui: fatal (unhandled rejection) — ${(err as Error)?.stack ?? err}`));
 // A signal from outside (the pane closed, kill) takes the same path. Ctrl-C
-// itself arrives as a key while input is grabbed, and quits like q.
+// itself arrives as a key while input is grabbed and quits at once from any
+// tab or editor; q asks first (state.ts QUIT_PROMPT).
 for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]] as const) {
   process.on(signal, () => shutdown(code, `sterling-tui: ${signal} — exiting`));
 }

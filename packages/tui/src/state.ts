@@ -116,6 +116,13 @@ export interface UiState {
    *  the live record and refuses the commit (visible notice, buffer KEPT) if
    *  the stored version has moved — the lost-update guard. */
   boardEdit?: { id: string; text: string; version: number };
+  /** The key help overlay (`?` or F1), drawn over the body of any tab with its
+   *  own scroll offset. Absent → closed. Any key but the scroll keys and
+   *  Ctrl-C closes it. */
+  help?: { scroll: number };
+  /** `q` was pressed once and the notice asks for a second `q`. The next `q`
+   *  quits; any other event clears it (reduce()). */
+  quitConfirm?: boolean;
 }
 
 /** The System-tab inline selector (run r-f9a7). `key` is the config.models key
@@ -353,6 +360,9 @@ export interface Viewport {
    *  snapshot. It enables the GitHub tab and the strip row; the state layer
    *  only reads it and never runs gh. */
   github?: GithubSnapshot;
+  /** the Agents tab's card block height in lines, composed by the host
+   *  (main.ts) at full height; it bounds the Agents tab's scroll. Absent → 0. */
+  agentsLines?: number;
 }
 
 export interface DashboardState {
@@ -507,7 +517,7 @@ export type Effect =
   | GithubRefreshEffect;
 
 export type UiEvent =
-  | { kind: 'key'; name: 'LEFT' | 'RIGHT' | 'TAB' | 'UP' | 'DOWN' | 'ENTER' | 'SPACE' | 'QUIT' | 'ESCAPE' | 'BACKSPACE' | 'STATE_FILTER' }
+  | { kind: 'key'; name: 'LEFT' | 'RIGHT' | 'TAB' | 'UP' | 'DOWN' | 'ENTER' | 'SPACE' | 'QUIT' | 'ESCAPE' | 'BACKSPACE' | 'STATE_FILTER' | 'PAGE_UP' | 'PAGE_DOWN' | 'HOME' | 'END' | 'HELP' }
   | { kind: 'char'; ch: string } // printable keys — search input, 'q' quit, digit hotkeys, '/' search
   | { kind: 'tab'; index: number } // direct tab select, 0-based; out-of-range ignored here
   | { kind: 'click'; x: number; y: number }
@@ -1109,13 +1119,64 @@ export function fitTabs(tabs: TabCell[], width: number): TabCell[] {
 function footerFor(ui: UiState, tabCount: number, width: number): string {
   const tabs = `1-${tabCount} tabs`;
   let text: string;
-  if (ui.tab === TASKS_TAB) text = ui.boardEdit ? 'editing · enter save · esc cancel' : `${tabs} · ↑↓ · enter expand · e edit · q quit`;
-  else if (ui.tab === KNOWLEDGE_TAB) text = 'type to search · esc clear · ^f state · ←→ tabs';
-  else if (ui.tab === QUEUE_TAB) text = `${tabs} · ↑↓ pending · wheel scrolls · q quit`;
-  else if (ui.tab === AGENTS_TAB) text = `←/→ or ${tabs} · q quit`;
-  else if (ui.tab === GITHUB_TAB) text = `${tabs} · ↑↓ scroll · r refresh · q quit`;
-  else text = `${tabs} · enter change · esc cancel · q quit`;
+  if (ui.help) text = '↑↓ PgUp PgDn scroll · any other key closes';
+  else if (ui.tab === TASKS_TAB) text = ui.boardEdit ? 'editing · enter save · esc cancel' : `${tabs} · enter open · e edit · ? help · q quit`;
+  // '?' types into the search here, so the footer offers F1
+  else if (ui.tab === KNOWLEDGE_TAB) text = 'type to search · esc clear · ^f state · F1 help';
+  else if (ui.tab === QUEUE_TAB) text = `${tabs} · ↑↓ pending · wheel · ? help · q quit`;
+  else if (ui.tab === AGENTS_TAB) text = `←/→ or ${tabs} · ↑↓ scroll · ? help · q quit`;
+  else if (ui.tab === GITHUB_TAB) text = `${tabs} · ↑↓ · r refresh · ? help · q quit`;
+  else text = `${tabs} · enter change · esc · ? help · q quit`;
   return clipEllipsis(text, width);
+}
+
+/** The key help overlay's lines (`?` or F1), each at most 48 columns before
+ *  the pane clips it. The first line is the heading. */
+export const HELP_LINES: readonly string[] = [
+  'Keys',
+  '←/→ or tab   previous / next tab',
+  '1-9          go to that tab (not on Knowledge)',
+  '↑/↓          move the selection, or scroll',
+  'PgUp/PgDn    move or scroll a page',
+  'Home/End     first / last row, top / bottom',
+  'enter/space  open, fold, select or change',
+  'click        the same as enter on that row',
+  'wheel        scroll; right-click folds all',
+  'e            edit the task (Tasks)',
+  'type, esc    search, clear it (Knowledge)',
+  '^f           article state filter (Knowledge)',
+  'r            refresh GitHub now',
+  'esc          cancel a picker or an edit',
+  '? or F1      this help (F1 on Knowledge)',
+  'q            quit; asks first, q again quits',
+  'ctrl-c       quit at once, from anywhere',
+];
+
+/** The text `q` shows: the first press asks, the second quits. */
+export const QUIT_PROMPT = 'quit? q again quits, any other key stays';
+
+/** Clamp a scroll offset for `total` content lines in a `window`-line body;
+ *  an unbounded window never scrolls. */
+function clampScroll(scroll: number, total: number, window: number): number {
+  const max = Number.isFinite(window) ? Math.max(0, total - window) : 0;
+  return Math.max(0, Math.min(scroll, max));
+}
+
+/** The help overlay's state: HELP_LINES as one display-only row over the
+ *  body, scrolled by ui.help.scroll. The tab bar, notice and strip stay. */
+function helpDashboardState(ui: UiState, width: number, banner: string[], projectName: string, bodyTop: number, tabs: TabCell[], maxBodyLines: number, agents?: AgentsTab, github?: GithubSnapshot): DashboardState {
+  const lines: RowLine[] = HELP_LINES.map((text, i) => ({ text: clipEllipsis(text, width), kind: i === 0 ? 'title' : 'body' }));
+  return {
+    tabs,
+    rows: [{ id: 'help', type: 'help', selected: false, expanded: false, lines, screenRow: 0 }],
+    footer: footerFor(ui, visibleTabs(agents, github).length, width),
+    notice: noticeFor(ui, width),
+    strip: githubStrip(github, width),
+    banner,
+    projectName,
+    bodyTop,
+    scroll: clampScroll(ui.help?.scroll ?? 0, lines.length, maxBodyLines),
+  };
 }
 
 /** The one notice row: the transient ui.notice as a '⚠ ' warning, clipped. */
@@ -1333,11 +1394,11 @@ export interface DashboardFrame {
   cursor: number;
 }
 
-export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab, height = Infinity, github?: GithubSnapshot): DashboardState {
-  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents, height, github).state;
+export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab, height = Infinity, github?: GithubSnapshot, agentsLines = 0): DashboardState {
+  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents, height, github, agentsLines).state;
 }
 
-export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab, height = Infinity, github?: GithubSnapshot): DashboardFrame {
+export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab, height = Infinity, github?: GithubSnapshot, agentsLines = 0): DashboardFrame {
   // the pane height picks the compact scene under COMPACT_BELOW_HEIGHT rows;
   // the host passes the same height to visibleBodyLines, so draw and clicks agree
   const banner = bannerLines(width, showBanner, height);
@@ -1345,6 +1406,8 @@ export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = I
   // Computed ONCE here and threaded into every projection, so the Tasks count
   // and the widths the hit-test measures can never come from two places.
   const tabs = fitTabs(tabsFor(store, ui.tab, agents, github), width);
+  // the key help overlay covers the body of whichever tab is open
+  if (ui.help) return { ui, state: helpDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, agents, github), nodes: [], cursor: ui.cursor };
   // System tab (run r-f9a7): its own projection, not a card/knowledge list.
   if (ui.tab === SYSTEM_TAB) return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents, github), nodes: [], cursor: ui.cursor };
   // GitHub tab: the poller snapshot's display lines; the store is not read for its body.
@@ -1460,9 +1523,9 @@ export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = I
   } else {
     // body scroll: clamp the persisted offset to the content height so the
     // render window and the click hit-test agree; an unbounded viewport
-    // (maxBodyLines = Infinity, e.g. tests) yields maxScroll 0 → scroll 0
-    const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
-    scroll = Math.max(0, Math.min(ui.scroll ?? 0, maxScroll));
+    // (maxBodyLines = Infinity, e.g. tests) yields maxScroll 0 → scroll 0.
+    // The Agents tab has no rows: the host's card block height bounds it.
+    scroll = clampScroll(ui.scroll ?? 0, ui.tab === AGENTS_TAB ? agentsLines : totalBodyLines, maxBodyLines);
   }
   // the Knowledge search field is ALWAYS visible (no '/' toggle) — its line
   // shows on the spacer row on the Knowledge tab regardless of the query.
@@ -1539,13 +1602,73 @@ export function reduce(
   frame?: DashboardFrame
 ): { ui: UiState; effects: Effect[] } {
   const drawn = frame !== undefined && frame.ui === ui ? frame : undefined;
-  const nodes = drawn ? drawn.nodes : nodesFor(store, ui, knowledge);
-  const cursor = drawn ? drawn.cursor : ui.tab === SYSTEM_TAB ? ui.cursor : resolveCursor(ui, nodes);
-  const base = cursor === ui.cursor ? ui : { ...ui, cursor };
+  // a pending `q` confirmation lasts one event: only a second `q` uses it
+  const start = ui.quitConfirm && !(event.kind === 'char' && event.ch === 'q') ? withoutQuitConfirm(ui) : ui;
+  if (start.help) return reduceHelp(start, event, viewport);
+  const nodes = drawn ? drawn.nodes : nodesFor(store, start, knowledge);
+  const cursor = drawn ? drawn.cursor : start.tab === SYSTEM_TAB ? start.cursor : resolveCursor(start, nodes);
+  const base = cursor === start.cursor ? start : { ...start, cursor };
   const out = reduceNodes(store, base, event, viewport, knowledge, roster, resolveHeadSha, nodes, drawn);
   // a no-op event hands back the caller's own UiState, so its frame stays current
-  if (out.ui === base) return { ui, effects: out.effects };
+  if (out.ui === base) return { ui: start, effects: out.effects };
   return { ui: holdSelection(base, out.ui, nodes), effects: out.effects };
+}
+
+/** Drop the `q` confirmation, and its prompt when that is the notice showing. */
+function withoutQuitConfirm(ui: UiState): UiState {
+  const { quitConfirm: _armed, ...rest } = ui;
+  if (rest.notice !== QUIT_PROMPT) return rest;
+  const { notice: _prompt, ...clean } = rest;
+  return clean;
+}
+
+/** The help overlay owns input while open: the scroll keys and the wheel
+ *  scroll it, Ctrl-C quits, and every other key, char or click closes it
+ *  without acting on the tab below. */
+function reduceHelp(ui: UiState, event: UiEvent, viewport: Viewport): { ui: UiState; effects: Effect[] } {
+  const window = viewport.maxBodyLines ?? Infinity;
+  const at = ui.help?.scroll ?? 0;
+  const scrollTo = (n: number): { ui: UiState; effects: Effect[] } => {
+    const scroll = clampScroll(n, HELP_LINES.length, window);
+    return { ui: scroll === at ? ui : { ...ui, help: { scroll } }, effects: [] };
+  };
+  const page = Number.isFinite(window) ? Math.max(1, window - 1) : HELP_LINES.length;
+  if (event.kind === 'wheel') return scrollTo(at + (event.dy > 0 ? 3 : -3));
+  if (event.kind === 'key') {
+    switch (event.name) {
+      case 'QUIT':
+        return { ui, effects: [{ type: 'quit' }] };
+      case 'UP':
+        return scrollTo(at - 1);
+      case 'DOWN':
+        return scrollTo(at + 1);
+      case 'PAGE_UP':
+        return scrollTo(at - page);
+      case 'PAGE_DOWN':
+        return scrollTo(at + page);
+      case 'HOME':
+        return scrollTo(0);
+      case 'END':
+        return scrollTo(HELP_LINES.length);
+    }
+  }
+  const { help: _closed, ...rest } = ui;
+  return { ui: rest, effects: [] };
+}
+
+/** The row a page key moves to from row `from`: the last row starting at most
+ *  a page below it (PgDn) or the first row starting at most a page above it
+ *  (PgUp), always at least one row on. A page is the window less one line, so
+ *  one line of context stays; an unbounded window jumps to the end. */
+function pageTarget(rows: readonly Row[], from: number, dir: 1 | -1, window: number): number {
+  if (!rows.length) return 0;
+  const at = Math.max(0, Math.min(from, rows.length - 1));
+  const step = Number.isFinite(window) ? Math.max(1, window - 1) : Infinity;
+  const target = rows[at]!.screenRow + dir * step;
+  let i = at;
+  if (dir > 0) while (i + 1 < rows.length && rows[i + 1]!.screenRow <= target) i++;
+  else while (i - 1 >= 0 && rows[i - 1]!.screenRow >= target) i--;
+  return i === at ? Math.max(0, Math.min(at + dir, rows.length - 1)) : i;
 }
 
 /** Keep the selection by id: after an event on a card tab, ui.selectedId names
@@ -1622,6 +1745,56 @@ function reduceNodes(
   };
   const moveCursor = (delta: number): UiState => revealAt(clamp(ui.cursor + delta));
 
+  /** The open System picker with its highlight scrolled into view: the
+   *  highlighted option line, and the row's title too when both fit. */
+  const revealPicker = (next: UiState): UiState => {
+    const sel = next.selector;
+    if (!sel || !roster || !Number.isFinite(maxBodyLines)) return next;
+    const st = buildSelf(next);
+    const row = st.rows.find((r) => r.id === `sys:${sel.key}`);
+    if (!row) return next;
+    const options = sel.stage === 'model' ? roster.catalog.entries.length : effortOptions(sel.key).length;
+    const line = row.screenRow + row.lines.length - options + sel.highlight;
+    let scroll = st.scroll;
+    if (line < scroll) scroll = line + 1 - row.screenRow <= maxBodyLines ? row.screenRow : line;
+    else if (line + 1 > scroll + maxBodyLines) scroll = line + 1 - maxBodyLines;
+    const total = st.rows.length ? st.rows[st.rows.length - 1]!.screenRow + st.rows[st.rows.length - 1]!.lines.length : 0;
+    return { ...next, scroll: clampScroll(scroll, total, maxBodyLines) };
+  };
+
+  /** The tabs with nothing to select (GitHub, Agents): the keys scroll the
+   *  body by lines instead. Returns undefined on every other tab. */
+  const scrollOnly = (name: string): UiState | undefined => {
+    const github = ui.tab === GITHUB_TAB && viewport.github !== undefined;
+    if (!github && ui.tab !== AGENTS_TAB) return undefined;
+    const total = github ? ((drawn ? drawn.state : buildSelf(ui)).rows[0]?.lines.length ?? 0) : viewport.agentsLines ?? 0;
+    const at = ui.scroll ?? 0;
+    const page = Number.isFinite(maxBodyLines) ? Math.max(1, maxBodyLines - 1) : total;
+    const to = name === 'UP' ? at - 1 : name === 'DOWN' ? at + 1 : name === 'PAGE_UP' ? at - page : name === 'PAGE_DOWN' ? at + page : name === 'HOME' ? 0 : total;
+    const scroll = clampScroll(to, total, maxBodyLines);
+    return scroll === at ? ui : { ...ui, scroll };
+  };
+
+  /** A click on the System tab does what the keyboard does: on a row it moves
+   *  the cursor there and presses ENTER; on an open picker's option it
+   *  highlights that option and presses ENTER. The catalog banner, the
+   *  read-only storage row, the picker's own title and a click while the
+   *  model field is being typed do nothing. */
+  const clickSystem = (state: DashboardState, index: number, line1: number): { ui: UiState; effects: Effect[] } => {
+    const row = state.rows[index]!;
+    if (row.type !== 'system' || row.id === 'sys:storage' || ui.sparringModelEdit !== undefined || !roster) return { ui, effects };
+    const enter: UiEvent = { kind: 'key', name: 'ENTER' };
+    const sel = ui.selector;
+    if (sel) {
+      const options = sel.stage === 'model' ? roster.catalog.entries.length : effortOptions(sel.key).length;
+      const k = line1 - 1 - state.bodyTop + state.scroll - row.screenRow - (row.lines.length - options);
+      if (row.id !== `sys:${sel.key}` || k < 0 || k >= options) return { ui, effects };
+      return reduceNodes(store, { ...ui, selector: { ...sel, highlight: k } }, enter, viewport, knowledge, roster, resolveHeadSha, nodes, drawn);
+    }
+    const cursor = state.rows.filter((r) => r.type === 'system').indexOf(row);
+    return reduceNodes(store, { ...ui, cursor }, enter, viewport, knowledge, roster, resolveHeadSha, nodes, drawn);
+  };
+
   const toggle = (id: string): string[] =>
     ui.expanded.includes(id) ? ui.expanded.filter((x) => x !== id) : [...ui.expanded, id];
 
@@ -1652,10 +1825,18 @@ function reduceNodes(
 
   switch (event.kind) {
     case 'key':
+      // Ctrl-C quits the same way on every tab and in every mode, an open
+      // editor or picker included (the held writes still flush first)
+      if (event.name === 'QUIT') {
+        effects.push({ type: 'quit' });
+        return { ui, effects };
+      }
+      // F1 opens the key help from anywhere; an open editor keeps its buffer
+      if (event.name === 'HELP') return { ui: { ...ui, help: { scroll: 0 } }, effects };
       // Tasks tab board-item edit (user-ruled 2026-09-28, board f25e5547 lane
       // J): while ui.boardEdit is open, ENTER commits, BACKSPACE deletes, and
       // ESCAPE cancels — every other named key is swallowed (no cursor
-      // movement, no quit) so the editor owns input the same way the System
+      // movement; Ctrl-C and F1 were handled above) so the editor owns input the same way the System
       // tab's sparringModelEdit does. Checked first, ahead of the System-tab
       // selector block below, since the two never overlap (boardEdit is only
       // ever opened on TASKS_TAB).
@@ -1765,16 +1946,25 @@ function reduceNodes(
         const editing = ui.sparringModelEdit !== undefined;
         switch (event.name) {
           case 'UP':
-            if (sel) return { ui: { ...ui, selector: { ...sel, highlight: Math.max(0, sel.highlight - 1) } }, effects };
-            if (editing) return { ui, effects }; // arrow keys are no-ops while typing the model field
-            return { ui: revealAt(sysClamp(ui.cursor - 1)), effects };
-          case 'DOWN': {
+          case 'DOWN':
+          case 'PAGE_UP':
+          case 'PAGE_DOWN':
+          case 'HOME':
+          case 'END': {
+            const name = event.name;
             if (sel) {
+              // the picker's highlight moves and the body scrolls to keep it on screen
               const n = sel.stage === 'model' ? roster.catalog.entries.length : effortOptions(sel.key).length;
-              return { ui: { ...ui, selector: { ...sel, highlight: Math.min(Math.max(0, n - 1), sel.highlight + 1) } }, effects };
+              const page = Number.isFinite(maxBodyLines) ? Math.max(1, maxBodyLines - 1) : n;
+              const to = name === 'UP' ? sel.highlight - 1 : name === 'DOWN' ? sel.highlight + 1 : name === 'PAGE_UP' ? sel.highlight - page : name === 'PAGE_DOWN' ? sel.highlight + page : name === 'HOME' ? 0 : n - 1;
+              return { ui: revealPicker({ ...ui, selector: { ...sel, highlight: Math.max(0, Math.min(to, n - 1)) } }), effects };
             }
-            if (editing) return { ui, effects };
-            return { ui: revealAt(sysClamp(ui.cursor + 1)), effects };
+            if (editing) return { ui, effects }; // navigation keys are no-ops while typing the model field
+            if (name === 'UP' || name === 'DOWN') return { ui: revealAt(sysClamp(ui.cursor + (name === 'UP' ? -1 : 1))), effects };
+            if (name === 'HOME' || name === 'END') return { ui: revealAt(sysClamp(name === 'HOME' ? 0 : Infinity)), effects };
+            // a page: over the selectable rows (the catalog banner and the read-only storage row hold no cursor)
+            const selectable = buildSelf(ui).rows.filter((r) => r.type === 'system' && r.id !== 'sys:storage');
+            return { ui: revealAt(sysClamp(pageTarget(selectable, ui.cursor, name === 'PAGE_UP' ? -1 : 1, maxBodyLines))), effects };
           }
           case 'ESCAPE':
             if (sel) return { ui: { ...ui, selector: undefined }, effects };
@@ -1840,12 +2030,12 @@ function reduceNodes(
                 return { ui: { ...ui, cursor, notice: 'model catalog empty or invalid — nothing to pick; refresh the catalog first' }, effects };
               }
               // open the MODEL picker on the key under the cursor (highlight 0)
-              return { ui: { ...ui, cursor, selector: { key, stage: 'model', highlight: 0 }, notice: undefined }, effects };
+              return { ui: revealPicker({ ...ui, cursor, selector: { key, stage: 'model', highlight: 0 }, notice: undefined }), effects };
             }
             if (sel.stage === 'model') {
               // confirm the highlighted model → advance to the EFFORT picker
               const entry = roster.catalog.entries[sel.highlight];
-              return { ui: { ...ui, selector: { key: sel.key, stage: 'effort', highlight: 0, model: entry ? entry.id : '' } }, effects };
+              return { ui: revealPicker({ ...ui, selector: { key: sel.key, stage: 'effort', highlight: 0, model: entry ? entry.id : '' } }), effects };
             }
             // effort stage → COMMIT: validate the model floor, then emit the swap
             const efforts = effortOptions(sel.key);
@@ -1874,9 +2064,6 @@ function reduceNodes(
         }
       }
       switch (event.name) {
-        case 'QUIT':
-          effects.push({ type: 'quit' });
-          return { ui, effects };
         case 'ESCAPE':
           // the Knowledge field is always live: Esc clears the query + cursor
           if (ui.tab === KNOWLEDGE_TAB) {
@@ -1901,15 +2088,22 @@ function reduceNodes(
           return { ui: switchTab(stepTab(1)), effects };
         case 'UP':
         case 'DOWN': {
-          // the GitHub tab has nothing to select: the arrows scroll its lines
-          if (ui.tab === GITHUB_TAB && viewport.github) {
-            const st = drawn ? drawn.state : buildSelf(ui);
-            const total = st.rows[0]?.lines.length ?? 0;
-            const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - maxBodyLines) : 0;
-            const scroll = Math.max(0, Math.min((ui.scroll ?? 0) + (event.name === 'UP' ? -1 : 1), max));
-            return { ui: scroll === (ui.scroll ?? 0) ? ui : { ...ui, scroll }, effects };
-          }
+          // the GitHub and Agents tabs have nothing to select: the arrows scroll their lines
+          const scrolled = scrollOnly(event.name);
+          if (scrolled) return { ui: scrolled, effects };
           return { ui: moveCursor(event.name === 'UP' ? -1 : 1), effects };
+        }
+        case 'PAGE_UP':
+        case 'PAGE_DOWN':
+        case 'HOME':
+        case 'END': {
+          const scrolled = scrollOnly(event.name);
+          if (scrolled) return { ui: scrolled, effects };
+          if (event.name === 'HOME') return { ui: revealAt(0), effects };
+          if (event.name === 'END') return { ui: revealAt(clamp(nodes.length - 1)), effects };
+          // a page of the list on screen; on the Queue tab, of the pending window
+          const st = drawn ? drawn.state : buildSelf(ui);
+          return { ui: revealAt(clamp(pageTarget(st.rows, ui.cursor, event.name === 'PAGE_UP' ? -1 : 1, bodyWindow(st, maxBodyLines)))), effects };
         }
         case 'ENTER':
           return { ui: activate(clamp(ui.cursor)), effects };
@@ -1934,14 +2128,22 @@ function reduceNodes(
       if (ui.tab === TASKS_TAB && ui.boardEdit) {
         return { ui: { ...ui, boardEdit: { ...ui.boardEdit, text: ui.boardEdit.text + ch } }, effects };
       }
+      // '?' opens the key help; on Knowledge only while the search is empty,
+      // since the field takes every printable key once a query is typed
+      if (ch === '?' && !(ui.tab === KNOWLEDGE_TAB && ui.searchQuery)) return { ui: { ...ui, help: { scroll: 0 } }, effects };
       // the Knowledge tab is an always-visible search field: EVERY printable key
       // feeds the query — 'q' and digits included (they are not hotkeys here).
       if (ui.tab === KNOWLEDGE_TAB) {
         return { ui: { ...ui, searchQuery: ui.searchQuery + ch, cursor: 0, scroll: 0 }, effects };
       }
+      // q asks first: the notice says so, a second q quits and any other
+      // event clears the question (reduce()). Ctrl-C quits at once.
       if (ch === 'q') {
-        effects.push({ type: 'quit' });
-        return { ui, effects };
+        if (ui.quitConfirm) {
+          effects.push({ type: 'quit' });
+          return { ui, effects };
+        }
+        return { ui: { ...ui, quitConfirm: true, notice: QUIT_PROMPT }, effects };
       }
       // 'r' polls GitHub now, on a host that runs the poller; the edit buffers
       // and the Knowledge search field above keep the letter as text
@@ -2010,7 +2212,8 @@ function reduceNodes(
         return { ui: { ...ui, historyScroll: Math.max(0, Math.min((ui.historyScroll ?? 0) + step, max)) }, effects };
       }
       const rows = st.rows;
-      const total = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
+      // the Agents tab draws the host's card block, not rows
+      const total = ui.tab === AGENTS_TAB ? viewport.agentsLines ?? 0 : rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
       const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - bodyWindow(st, maxBodyLines)) : 0;
       return { ui: { ...ui, scroll: Math.max(0, Math.min((ui.scroll ?? 0) + step, max)) }, effects };
     }
@@ -2037,6 +2240,7 @@ function reduceNodes(
         return { ui, effects };
       }
       const row = screenLineToRow(state, event.y, maxBodyLines);
+      if (row !== -1 && ui.tab === SYSTEM_TAB) return roster ? clickSystem(state, row, event.y) : { ui, effects };
       if (row !== -1) return { ui: activate(row), effects };
       return { ui, effects };
     }
