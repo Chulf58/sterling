@@ -5609,7 +5609,7 @@ function knowledgeWritesTempOwnerPid(fileName) {
   const pid = Number(m[1]);
   return Number.isSafeInteger(pid) ? pid : null;
 }
-var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_PROCESS_FILE, knowledgeWritesProcessFile, KNOWLEDGE_WRITES_TEMP_FILE, knowledgeWritesTempFile, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema;
+var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_PROCESS_FILE, knowledgeWritesProcessFile, KNOWLEDGE_WRITES_TEMP_FILE, knowledgeWritesTempFile, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, knowledgeWriteSchema, WORKER_POLICY_LANES, workerPolicyItemSchema, workerPolicySchema;
 var init_transient = __esm({
   "packages/schemas/dist/transient.js"() {
     "use strict";
@@ -5652,6 +5652,19 @@ var init_transient = __esm({
       type: external_exports.string().min(1),
       at: external_exports.string().min(1)
     }).strict();
+    WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+    workerPolicyItemSchema = external_exports.object({
+      id: external_exports.string().uuid(),
+      lane: external_exports.enum(WORKER_POLICY_LANES),
+      target_id: external_exports.string().uuid().nullable(),
+      file_keys: external_exports.array(external_exports.string().min(1))
+    }).passthrough();
+    workerPolicySchema = external_exports.object({
+      policy_version: external_exports.literal(1),
+      token: external_exports.string().min(1),
+      run_id: external_exports.string().min(1),
+      policy_items: external_exports.array(workerPolicyItemSchema)
+    }).passthrough();
   }
 });
 
@@ -6509,6 +6522,7 @@ __export(dist_exports, {
   TODO_SYSTEM_REQUIRES: () => TODO_SYSTEM_REQUIRES,
   TODO_SYSTEM_SOURCE: () => TODO_SYSTEM_SOURCE,
   TODO_USER_ONLY_FIELDS: () => TODO_USER_ONLY_FIELDS,
+  WORKER_POLICY_LANES: () => WORKER_POLICY_LANES,
   WRITE_REFUSED_LINK_RELS: () => WRITE_REFUSED_LINK_RELS,
   addFieldCondition: () => addFieldCondition,
   antiPatternSchema: () => antiPatternSchema,
@@ -6582,7 +6596,9 @@ __export(dist_exports, {
   unknownFieldsIn: () => unknownFieldsIn,
   unreadConfigKeys: () => unreadConfigKeys,
   validateRecord: () => validateRecord,
-  verifiableAt: () => verifiableAt
+  verifiableAt: () => verifiableAt,
+  workerPolicyItemSchema: () => workerPolicyItemSchema,
+  workerPolicySchema: () => workerPolicySchema
 });
 var init_dist = __esm({
   "packages/schemas/dist/index.js"() {

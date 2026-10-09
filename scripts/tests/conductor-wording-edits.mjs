@@ -144,6 +144,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'You own the full suite and `npm run check`, run once,',
     after: 'You own the project\'s own full test suite and check command (`npm run check` in a Node project that has that script), run once,',
   },
+  {
+    commit: 'GitHub #56',
+    date: '2026-10-09',
+    reason: 'the background worker drains five lanes, writes small factual refreshes and hands the rest off as needs_conductor (decision maintenance-worker-drains-every-lane-and-writes-factual-refresh-on-sonnet)',
+    before: 'A background worker closes already-paid `reconcile_needed` items by itself, in batches of 5 or after 30 minutes, so \"worker not running\" at session start is normal. Every other lane (`state_review`, `promotion_review`, `refresh_reference`, `stale_research`, the capture and article lanes) and every `reconcile_needed` item the worker judged \"owes prose\" is yours. When H1 says the queue is deep, read the lane split before draining: only the reconcile lane has a worker.',
+    after: 'A background worker drains `reconcile_needed`, `state_review`, `stale_research`, `refresh_reference` and `article_missing` by itself, once 5 items are eligible or the oldest has waited 30 minutes, so \"worker not running\" at session start is normal. It closes already-paid items and writes small factual refreshes, and hands the rest to you as `needs_conductor` with a reason. Every other lane, such as `promotion_review`, `deletion_candidate` and `capture_owed`, and every handed-off item is yours. When H1 says the queue is deep, read the lane split before draining: only the five worker lanes have a worker.',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

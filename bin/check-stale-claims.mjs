@@ -4805,7 +4805,7 @@ var init_records = __esm({
 });
 
 // packages/schemas/dist/transient.js
-var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_RETENTION_MS, knowledgeWriteSchema;
+var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_RETENTION_MS, knowledgeWriteSchema, WORKER_POLICY_LANES, workerPolicyItemSchema, workerPolicySchema;
 var init_transient = __esm({
   "packages/schemas/dist/transient.js"() {
     "use strict";
@@ -4842,6 +4842,19 @@ var init_transient = __esm({
       type: external_exports.string().min(1),
       at: external_exports.string().min(1)
     }).strict();
+    WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+    workerPolicyItemSchema = external_exports.object({
+      id: external_exports.string().uuid(),
+      lane: external_exports.enum(WORKER_POLICY_LANES),
+      target_id: external_exports.string().uuid().nullable(),
+      file_keys: external_exports.array(external_exports.string().min(1))
+    }).passthrough();
+    workerPolicySchema = external_exports.object({
+      policy_version: external_exports.literal(1),
+      token: external_exports.string().min(1),
+      run_id: external_exports.string().min(1),
+      policy_items: external_exports.array(workerPolicyItemSchema)
+    }).passthrough();
   }
 });
 

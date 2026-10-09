@@ -13,7 +13,7 @@ var __export = (target, all) => {
 // node_modules/zod/v3/helpers/util.js
 var util, objectUtil, ZodParsedType, getParsedType;
 var init_util = __esm({
-  "../../../node_modules/zod/v3/helpers/util.js"() {
+  "node_modules/zod/v3/helpers/util.js"() {
     (function(util2) {
       util2.assertEqual = (_) => {
       };
@@ -150,7 +150,7 @@ var init_util = __esm({
 // node_modules/zod/v3/ZodError.js
 var ZodIssueCode, quotelessJson, ZodError;
 var init_ZodError = __esm({
-  "../../../node_modules/zod/v3/ZodError.js"() {
+  "node_modules/zod/v3/ZodError.js"() {
     init_util();
     ZodIssueCode = util.arrayToEnum([
       "invalid_type",
@@ -274,7 +274,7 @@ var init_ZodError = __esm({
 // node_modules/zod/v3/locales/en.js
 var errorMap, en_default;
 var init_en = __esm({
-  "../../../node_modules/zod/v3/locales/en.js"() {
+  "node_modules/zod/v3/locales/en.js"() {
     init_ZodError();
     init_util();
     errorMap = (issue, _ctx) => {
@@ -390,7 +390,7 @@ function getErrorMap() {
 }
 var overrideErrorMap;
 var init_errors = __esm({
-  "../../../node_modules/zod/v3/errors.js"() {
+  "node_modules/zod/v3/errors.js"() {
     init_en();
     overrideErrorMap = en_default;
   }
@@ -418,7 +418,7 @@ function addIssueToContext(ctx, issueData) {
 }
 var makeIssue, EMPTY_PATH, ParseStatus, INVALID, DIRTY, OK, isAborted, isDirty, isValid, isAsync;
 var init_parseUtil = __esm({
-  "../../../node_modules/zod/v3/helpers/parseUtil.js"() {
+  "node_modules/zod/v3/helpers/parseUtil.js"() {
     init_errors();
     init_en();
     makeIssue = (params) => {
@@ -515,14 +515,14 @@ var init_parseUtil = __esm({
 
 // node_modules/zod/v3/helpers/typeAliases.js
 var init_typeAliases = __esm({
-  "../../../node_modules/zod/v3/helpers/typeAliases.js"() {
+  "node_modules/zod/v3/helpers/typeAliases.js"() {
   }
 });
 
 // node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 var init_errorUtil = __esm({
-  "../../../node_modules/zod/v3/helpers/errorUtil.js"() {
+  "node_modules/zod/v3/helpers/errorUtil.js"() {
     (function(errorUtil2) {
       errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
       errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
@@ -724,7 +724,7 @@ function custom(check, _params = {}, fatal) {
 }
 var ParseInputLazyPath, handleResult, ZodType, cuidRegex, cuid2Regex, ulidRegex, uuidRegex, nanoidRegex, jwtRegex, durationRegex, emailRegex, _emojiRegex, emojiRegex, ipv4Regex, ipv4CidrRegex, ipv6Regex, ipv6CidrRegex, base64Regex, base64urlRegex, dateRegexSource, dateRegex, ZodString, ZodNumber, ZodBigInt, ZodBoolean, ZodDate, ZodSymbol, ZodUndefined, ZodNull, ZodAny, ZodUnknown, ZodNever, ZodVoid, ZodArray, ZodObject, ZodUnion, getDiscriminator, ZodDiscriminatedUnion, ZodIntersection, ZodTuple, ZodRecord, ZodMap, ZodSet, ZodFunction, ZodLazy, ZodLiteral, ZodEnum, ZodNativeEnum, ZodPromise, ZodEffects, ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodNaN, BRAND, ZodBranded, ZodPipeline, ZodReadonly, late, ZodFirstPartyTypeKind, instanceOfType, stringType, numberType, nanType, bigIntType, booleanType, dateType, symbolType, undefinedType, nullType, anyType, unknownType, neverType, voidType, arrayType, objectType, strictObjectType, unionType, discriminatedUnionType, intersectionType, tupleType, recordType, mapType, setType, functionType, lazyType, literalType, enumType, nativeEnumType, promiseType, effectsType, optionalType, nullableType, preprocessType, pipelineType, ostring, onumber, oboolean, coerce, NEVER;
 var init_types = __esm({
-  "../../../node_modules/zod/v3/types.js"() {
+  "node_modules/zod/v3/types.js"() {
     init_ZodError();
     init_errors();
     init_errorUtil();
@@ -4098,7 +4098,7 @@ __export(external_exports, {
   void: () => voidType
 });
 var init_external = __esm({
-  "../../../node_modules/zod/v3/external.js"() {
+  "node_modules/zod/v3/external.js"() {
     init_errors();
     init_parseUtil();
     init_typeAliases();
@@ -4110,7 +4110,7 @@ var init_external = __esm({
 
 // node_modules/zod/index.js
 var init_zod = __esm({
-  "../../../node_modules/zod/index.js"() {
+  "node_modules/zod/index.js"() {
     init_external();
     init_external();
   }
@@ -4985,7 +4985,7 @@ var init_records = __esm({
 });
 
 // packages/schemas/dist/transient.js
-var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_RETENTION_MS, knowledgeWriteSchema;
+var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_RETENTION_MS, knowledgeWriteSchema, WORKER_POLICY_LANES, workerPolicyItemSchema, workerPolicySchema;
 var init_transient = __esm({
   "packages/schemas/dist/transient.js"() {
     "use strict";
@@ -5023,6 +5023,19 @@ var init_transient = __esm({
       type: external_exports.string().min(1),
       at: external_exports.string().min(1)
     }).strict();
+    WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+    workerPolicyItemSchema = external_exports.object({
+      id: external_exports.string().uuid(),
+      lane: external_exports.enum(WORKER_POLICY_LANES),
+      target_id: external_exports.string().uuid().nullable(),
+      file_keys: external_exports.array(external_exports.string().min(1))
+    }).passthrough();
+    workerPolicySchema = external_exports.object({
+      policy_version: external_exports.literal(1),
+      token: external_exports.string().min(1),
+      run_id: external_exports.string().min(1),
+      policy_items: external_exports.array(workerPolicyItemSchema)
+    }).passthrough();
   }
 });
 

@@ -335,7 +335,7 @@ test('P3 [masquerade]: branch bumps both manifest versions AND converts package.
 // file) prints both sanctioned discharge routes and never the old sentence.
 // =========================================================================
 
-test('P4 [remedy]: manifests are bumped version-only (excluded, non-blocking) but a non-manifest owned file (src/thing.mjs) is genuinely changed with a stale baseline — the disclosure names the co-owner debt (not the manifests), the remedy says it does not block, names BOTH sanctioned discharges ("resolves" and a verification-append mention matching /VERIFIED UNAFFECTED/ and /knowledge_append/) and the worker "owes prose" note, and never contains "auto-drains" — sabotage: reverting to the old refusal remedy text, which must flip this red ("does NOT block", "owes prose" or a discharge mention absent, or "auto-drains" reappears)', () => {
+test('P4 [remedy]: manifests are bumped version-only (excluded, non-blocking) but a non-manifest owned file (src/thing.mjs) is genuinely changed with a stale baseline — the disclosure names the co-owner debt (not the manifests), the remedy says it does not block, names BOTH sanctioned discharges ("resolves" and a verification-append mention matching /VERIFIED UNAFFECTED/ and /knowledge_append/) and the worker needs_conductor note, and never contains "auto-drains" — sabotage: reverting to the old refusal remedy text, which must flip this red ("does NOT block", "needs_conductor" or a discharge mention absent, or "auto-drains" reappears)', () => {
   const { dir, cleanup } = makeGitProjectNoRun();
   try {
     const basePkg = manifestContent('0.1.0');
@@ -363,7 +363,7 @@ test('P4 [remedy]: manifests are bumped version-only (excluded, non-blocking) bu
     assert.ok(!disclosure(r.stderr).includes('package.json'), 'the version-only manifests are never disclosed as debt');
     assert.match(r.stderr, /does NOT block the merge/, 'the remedy says the debt does not block');
     assert.ok(r.stderr.includes('resolves'), 'the remedy names the real-reconcile discharge (resolves: [...])');
-    assert.match(r.stderr, /owes prose/, 'the remedy names what the background worker leaves open');
+    assert.match(r.stderr, /logged as needs_conductor, with a reason/, 'the remedy names what the background worker hands off');
     assert.match(r.stderr, /VERIFIED UNAFFECTED/, 'the remedy names the verification-discharge event text');
     assert.match(r.stderr, /knowledge_append/, 'the remedy names the verification-discharge call shape');
     assert.doesNotMatch(r.stderr, /auto-drains/, 'the retracted false claim ("the update auto-drains its item") must not reappear');
