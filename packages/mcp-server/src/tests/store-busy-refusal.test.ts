@@ -32,7 +32,7 @@ function release(holder: DatabaseSync): void {
 
 const DECISION = { title: 'busy refusal', statement: 'a locked store refuses with a named error', alternatives_rejected: [], rationale: 'issue 59' };
 
-test('knowledge_append and knowledge_update under a held lock refuse with the safe-to-re-send text, write nothing, and succeed after release', () => {
+test('knowledge_append, knowledge_update and knowledge_edit under a held lock refuse with the safe-to-re-send text, write nothing, and succeed after release', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-busy-refusal-'));
   const path = join(dir, 'sterling.db');
   const store = new SterlingStore(path, { busyTimeoutMs: 200 });
@@ -45,6 +45,7 @@ test('knowledge_append and knowledge_update under a held lock refuse with the sa
     const attempts: Array<[string, () => unknown]> = [
       ['knowledge_append', () => tools.knowledgeAppend(record.id, 'alternatives_rejected', [{ option: 'raw error', reason: 'says nothing about the write' }])],
       ['knowledge_update', () => tools.knowledgeUpdate(record.id, { rationale: 'changed under a lock' })],
+      ['knowledge_edit', () => tools.knowledgeEdit(record.id, 'statement', 'a named error', 'an edit made under a lock')],
     ];
     for (const [op, attempt] of attempts) {
       assert.throws(
@@ -52,7 +53,7 @@ test('knowledge_append and knowledge_update under a held lock refuse with the sa
         (e: unknown) => {
           assert.ok(e instanceof Error);
           assert.ok(e.message.startsWith(`${op}: `), `names the tool: ${e.message}`);
-          assert.match(e.message, /locked by another connection for longer than 200 ms; this transaction was rolled back and nothing from it was written/);
+          assert.match(e.message, /locked by another connection for longer than 200 ms; this transaction did not commit and nothing from it was written/);
           assert.match(e.message, /database is locked/);
           assert.match(e.message, /safe to re-send/);
           assert.doesNotMatch(e.message, /may have landed/);
@@ -65,13 +66,18 @@ test('knowledge_append and knowledge_update under a held lock refuse with the sa
 
     release(holder);
     holder = undefined;
-    const stored = store.get(record.id) as { alternatives_rejected: unknown[]; rationale: string; version: number };
+    const stored = store.get(record.id) as { alternatives_rejected: unknown[]; rationale: string; statement: string; version: number };
     assert.equal(stored.alternatives_rejected.length, 0, 'the refused append wrote no row');
     assert.equal(stored.rationale, 'issue 59', 'the refused update wrote nothing');
-    assert.equal(stored.version, 1, 'neither refusal bumped the version');
+    assert.equal(stored.statement, DECISION.statement, 'the refused edit wrote nothing');
+    assert.equal(stored.version, 1, 'no refusal bumped the version');
 
-    assert.doesNotThrow(() => attempts[0][1](), 'the append succeeds once the lock is released');
-    assert.equal((store.get(record.id) as { alternatives_rejected: unknown[] }).alternatives_rejected.length, 1);
+    // Every refused call succeeds when re-sent after the release, as the text promises.
+    for (const [op, attempt] of attempts) assert.doesNotThrow(attempt, `${op} succeeds once the lock is released`);
+    const after = store.get(record.id) as { alternatives_rejected: unknown[]; rationale: string; statement: string };
+    assert.equal(after.alternatives_rejected.length, 1);
+    assert.equal(after.rationale, 'changed under a lock');
+    assert.match(after.statement, /an edit made under a lock/);
   } finally {
     if (holder) release(holder);
     store.close();

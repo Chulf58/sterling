@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SterlingStore, StoreBusyError } from '../index.js';
+import { SterlingStore, SqliteDriver, StoreBusyError, StoreOutcomeUncertainError } from '../index.js';
 import { sqliteOnly } from './pg-test-support.js';
 
 const skip = sqliteOnly('SQLITE_BUSY is SQLite-specific; the Postgres driver has no busy timeout');
@@ -69,7 +69,7 @@ function withHeldLock(run: (victim: SterlingStore, release: () => void) => void)
 }
 
 const EXPECTED_TEXT =
-  /^the store was locked by another connection for longer than 200 ms; this transaction was rolled back and nothing from it was written/;
+  /^the store was locked by another connection for longer than 200 ms; this transaction did not commit and nothing from it was written/;
 
 test('a write blocked past busyTimeoutMs throws StoreBusyError, writes nothing, and succeeds once the lock is released', { skip }, () => {
   withHeldLock((victim, release) => {
@@ -124,5 +124,156 @@ test('an error that is not SQLITE_BUSY passes through tx() unchanged', { skip },
         }),
       (e: unknown) => e === boom
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Injected-driver arms: a SqliteDriver whose COMMIT and ROLLBACK can be made to
+// throw, so every exit of tx() is exercised without racing a second process.
+// ---------------------------------------------------------------------------
+
+/** What node:sqlite throws for a busy statement: a message plus the numeric result code. */
+function sqliteError(message: string, errcode: number): Error {
+  return Object.assign(new Error(message), { errcode });
+}
+
+class FaultyDriver extends SqliteDriver {
+  failCommit: unknown;
+  failRollback: unknown;
+  rollbacks = 0;
+  override commit(): void {
+    if (this.failCommit !== undefined) throw this.failCommit;
+    super.commit();
+  }
+  override rollback(): void {
+    this.rollbacks++;
+    if (this.failRollback !== undefined) throw this.failRollback;
+    super.rollback();
+  }
+}
+
+function withFaultyDriver(run: (store: SterlingStore, driver: FaultyDriver) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-store-busy-injected-'));
+  const path = join(dir, 'sterling.db');
+  const driver = new FaultyDriver(path, { busyTimeoutMs: 200 });
+  const store = new SterlingStore(path, { driver });
+  try {
+    run(store, driver);
+  } finally {
+    try {
+      // An arm that retired the connection left its transaction open on purpose.
+      driver.failCommit = undefined;
+      driver.failRollback = undefined;
+      driver.exec('ROLLBACK');
+    } catch {
+      /* no transaction was open */
+    }
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('BUSY from inside the transaction body: rolled back, StoreBusyError, nothing written', { skip }, () => {
+  withFaultyDriver((store, driver) => {
+    const busy = sqliteError('database is locked', 5);
+    assert.throws(
+      () =>
+        store.withTransaction(() => {
+          store.create(decisionInput(ID));
+          throw busy;
+        }),
+      (e: unknown) => e instanceof StoreBusyError && e.cause === busy && EXPECTED_TEXT.test(e.message)
+    );
+    assert.equal(driver.rollbacks, 1);
+    assert.equal(store.count({}), 0, 'the row created before the BUSY was rolled back');
+    assert.doesNotThrow(() => store.create(decisionInput(ID)), 'the connection is clean afterwards');
+  });
+});
+
+test('BUSY from COMMIT with a successful rollback: StoreBusyError, nothing written, connection usable', { skip }, () => {
+  withFaultyDriver((store, driver) => {
+    const busy = sqliteError('database is locked', 5);
+    driver.failCommit = busy;
+    assert.throws(
+      () => store.create(decisionInput(ID)),
+      (e: unknown) => e instanceof StoreBusyError && e.cause === busy && EXPECTED_TEXT.test(e.message)
+    );
+    driver.failCommit = undefined;
+    assert.equal(driver.rollbacks, 1);
+    assert.equal(store.count({}), 0);
+    assert.doesNotThrow(() => store.create(decisionInput(ID)));
+    assert.equal(store.count({}), 1);
+  });
+});
+
+test('BUSY from COMMIT with a FAILING rollback: uncertain outcome, never "safe to re-send", connection retired', { skip }, () => {
+  withFaultyDriver((store, driver) => {
+    const busy = sqliteError('database is locked', 5);
+    const rollbackFailure = new Error('rollback failed');
+    driver.failCommit = busy;
+    driver.failRollback = rollbackFailure;
+    let caught: unknown;
+    try {
+      store.create(decisionInput(ID));
+    } catch (e) {
+      caught = e;
+    }
+    assert.ok(caught instanceof StoreOutcomeUncertainError, `expected StoreOutcomeUncertainError, got ${String(caught)}`);
+    assert.ok(!(caught instanceof StoreBusyError));
+    assert.equal(caught.cause, busy, 'the original BUSY is kept as cause');
+    assert.match(caught.message, /whether this transaction committed is not known/);
+    assert.doesNotMatch(caught.message, /safe to re-send|did not commit and nothing/);
+
+    // The transaction state is unknown, so the connection refuses further writes
+    // loudly instead of continuing as if clean.
+    driver.failCommit = undefined;
+    driver.failRollback = undefined;
+    assert.throws(() => store.create(decisionInput('00000000-0000-4000-8000-0000000000b2')), /unknown transaction state/);
+  });
+});
+
+test('a failed rollback after a non-busy error still rethrows the original error and retires the connection', { skip }, () => {
+  withFaultyDriver((store, driver) => {
+    const boom = new Error('not a lock problem');
+    driver.failRollback = new Error('rollback failed');
+    assert.throws(() => store.withTransaction(() => { throw boom; }), (e: unknown) => e === boom);
+    driver.failRollback = undefined;
+    assert.throws(() => store.withTransaction(() => undefined), /unknown transaction state/);
+  });
+});
+
+test('extended busy codes are still busy but never claim the timeout ran out; other codes pass through', { skip }, () => {
+  withFaultyDriver((store) => {
+    const attempt = (err: Error) => () =>
+      store.withTransaction(() => {
+        throw err;
+      });
+    // Base code 5: the timeout wording.
+    assert.throws(attempt(sqliteError('database is locked', 5)), (e: unknown) => e instanceof StoreBusyError && /locked by another connection for longer than 200 ms/.test(e.message));
+    for (const [code, name] of [
+      [261, 'SQLITE_BUSY_RECOVERY'],
+      [517, 'SQLITE_BUSY_SNAPSHOT'],
+      [773, 'SQLITE_BUSY_TIMEOUT'],
+    ] as const) {
+      assert.throws(
+        attempt(sqliteError('database is locked', code)),
+        (e: unknown) => {
+          assert.ok(e instanceof StoreBusyError, `code ${code} is busy`);
+          assert.equal(e.sqlite_errcode, code);
+          assert.match(e.message, new RegExp(`the store was busy \\(${name}\\); this transaction did not commit and nothing from it was written`));
+          assert.doesNotMatch(e.message, /longer than/);
+          // The worker's BUSY_RE (/database is locked|SQLITE_BUSY/i) keeps matching.
+          assert.match(e.message, /database is locked/);
+          assert.match(e.message, /SQLITE_BUSY/);
+          return true;
+        },
+        name
+      );
+    }
+    // An extended code with no name here still reads as busy, with the number.
+    assert.throws(attempt(sqliteError('busy', 1029)), (e: unknown) => e instanceof StoreBusyError && /extended code 1029/.test(e.message));
+    // SQLITE_LOCKED (6) is a different condition and passes through unchanged.
+    const locked = sqliteError('database table is locked', 6);
+    assert.throws(attempt(locked), (e: unknown) => e === locked);
   });
 });
