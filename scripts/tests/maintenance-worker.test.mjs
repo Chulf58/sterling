@@ -260,7 +260,7 @@ test('builds the probed claude argv: Sonnet 5.5, low effort, librarian, dontAsk,
     const args = buildWorkerArgs({ prompt: 'P', mcpConfig });
     assert.deepEqual(args, [
       '-p', 'P',
-      '--model', 'claude-sonnet-5-5',
+      '--model', 'claude-haiku-5-5',
       '--effort', 'medium',
       '--agent', 'librarian',
       '--permission-mode', 'dontAsk',
@@ -586,7 +586,7 @@ test('runWorker --dry-run prints the argv and spawns nothing', async () => {
     const out = JSON.parse(printed[0]);
     assert.equal(out.dry_run, true);
     assert.equal(out.command, 'claude');
-    assert.deepEqual(out.argv.slice(2, 6), ['--model', 'claude-sonnet-5-5', '--effort', 'medium']);
+    assert.deepEqual(out.argv.slice(2, 6), ['--model', 'claude-haiku-5-5', '--effort', 'medium']);
     assert.equal(existsSync(fx.paths.lock), false);
   } finally {
     fx.cleanup();
