@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectThemeLevel, themeFor, PLAIN_THEME, THEME_ENV, XTERM, PALETTE, NEON_EDGE, type Theme } from '../theme.js';
-import { scenePixels, sceneText, sceneLayout, horizonLabel, bannerLines, FULL_SCENE_ROWS, COMPACT_SCENE_ROWS, ART_WIDTH, BANNER_ROWS } from '../banner.js';
+import { scenePixels, lerpStops, sceneText, sceneLayout, horizonLabel, bannerLines, FULL_SCENE_ROWS, COMPACT_SCENE_ROWS, ART_WIDTH, BANNER_ROWS } from '../banner.js';
 import { draw, paintPixels, clearPixels, type AttrLike } from '../render.js';
 import { composeSubagentBlock, type SubagentView } from '../subagents.js';
 import { tileCells, TILE_BG, TILE_COLS, fadeToTile, DONE_FADE } from '../avatars/index.js';
@@ -174,6 +174,32 @@ const contrast = (a: number, b: number): number => {
   const [la, lb] = [luminance(xtermRgb(a)), luminance(xtermRgb(b))];
   return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
 };
+
+test('Now playing palette: pink 200 / cyan 45 / amber 220 and their truecolour twins', () => {
+  assert.equal(XTERM.pink, 200);
+  assert.deepEqual(xtermRgb(XTERM.pink), [255, 0, 215], 'xterm 200 is #ff00d7');
+  assert.equal(PALETTE.pink, '#ff2bd6');
+  assert.equal(XTERM.cyan, 45);
+  assert.deepEqual(xtermRgb(XTERM.cyan), [0, 215, 255], 'xterm 45 is #00d7ff');
+  assert.equal(PALETTE.cyan, '#00e5ff');
+  assert.equal(XTERM.amber, 220);
+  assert.deepEqual(xtermRgb(XTERM.amber), [255, 215, 0], 'xterm 220 is #ffd700');
+  assert.equal(PALETTE.amber, '#ffd319');
+  assert.equal(XTERM.muted, 103);
+  assert.equal(XTERM.success, 49);
+  assert.equal(XTERM.error, 203);
+});
+
+test('banner sunset: the sun runs gold, orange, pink and the ground starts at #2a1840', () => {
+  const px = scenePixels(60, FULL_SCENE_ROWS, 'myproj');
+  const sunColours = new Set(px.flatMap((p) => [p.fg, p.bg]));
+  assert.ok(sunColours.has('#ffd319'), 'the sun top is #ffd319');
+  assert.equal(lerpStops(['#ffd319', '#ff8c42', '#ff2bd6'], 0.5), '#ff8c42');
+  const { horizon } = sceneLayout(FULL_SCENE_ROWS);
+  const ground = px.filter((p) => p.y > horizon);
+  assert.ok(ground.some((p) => p.bg === '#2a1840' || p.fg === '#2a1840'), 'the ground starts at #2a1840');
+  assert.ok(ground.every((p) => p.bg !== '#2b0057' && p.fg !== '#2b0057'), 'the old ground purple is gone');
+});
 
 test('256 palette: every text colour reads at 4.5:1 or better on its background', () => {
   assert.deepEqual(xtermRgb(XTERM.background), [0, 0, 0], 'index 16 is the black the scene meets');
