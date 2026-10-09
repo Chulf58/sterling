@@ -44132,11 +44132,11 @@ var configSchema = external_exports.object({
     implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
     researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    classifiers: agentModelEntry.default({ model: "claude-haiku-4-5", effort: "low" }),
+    classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // librarian is mechanical clerking — cheap model, low effort (P8). The
     // roster is classless (decision agent-roster-is-classless-four-agents), and
     // the debugger role it rejected has no key here.
-    librarian: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    librarian: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
@@ -52729,14 +52729,14 @@ var pool_default = {
         skin: 1,
         clothes: 1,
         acc: "feather",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "ccdeeeeeff..",
           "..eeeggggf..",
-          "..fgAeeAgf..",
-          "..ggeeeegg..",
+          "..fgAggAgf..",
+          "..gggggggg..",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -52744,15 +52744,15 @@ var pool_default = {
           "ccdeeeeeff..",
           "..eeeggggf..",
           "..fggggggf..",
-          "..ggeeeegg..",
+          "..gggggggg..",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
         [
           ".ccceeeeeef.",
           "..ceeeggggf.",
-          "..fgAeeAgf..",
-          "..ggeeeegg..",
+          "..fgAggAgf..",
+          "..gggggggg..",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -52760,7 +52760,7 @@ var pool_default = {
           ".ccceeeeeef.",
           "..ceeeggggf.",
           "....gAggAg..",
-          "...gggeeggg.",
+          "...gggggggg.",
           ".....UggU...",
           "iiUUUUjgUUii"
         ]
@@ -52909,14 +52909,14 @@ var pool_default = {
         skin: 1,
         clothes: 1,
         acc: "earrings",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "...gnnnng...",
           "..gggggggg..",
-          "..ggAppAgg..",
-          ".FggppppggF.",
+          "..ggAggAgg..",
+          ".FggggggggF.",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -52924,15 +52924,15 @@ var pool_default = {
           "...gnnnng...",
           "..gggggggg..",
           "..gggggggg..",
-          ".FggppppggF.",
+          ".FggggggggF.",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
         [
           "....nnnnnn..",
           "..gggggggg..",
-          "..ggAppAgg..",
-          ".FggppppggF.",
+          "..ggAggAgg..",
+          ".FggggggggF.",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -52940,7 +52940,7 @@ var pool_default = {
           "....nnnnnn..",
           "...gggggggg.",
           "...ggAggAgg.",
-          "..ggggppgggg",
+          "..gggggggggg",
           ".....UggU...",
           "iiUUUUjgUUii"
         ]
@@ -53404,14 +53404,14 @@ var pool_default = {
         skin: 2,
         clothes: 2,
         acc: "earrings",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..pppppppp..",
           ".ppLLLLLLpp.",
-          ".FzLAppALzF.",
-          ".FzLppppLzF.",
+          ".FzLALLALzF.",
+          ".FzLLLLLLzF.",
           ".N..LLLL..N.",
           "NNOOOOPLOONN"
         ],
@@ -53419,15 +53419,15 @@ var pool_default = {
           "..pppppppp..",
           ".ppLLLLLLpp.",
           ".FzLLLLLLzF.",
-          ".FzLppppLzF.",
+          ".FzLLLLLLzF.",
           ".N..LLLL..N.",
           "NNOOOOPLOONN"
         ],
         [
           "...pppppppp.",
           "..ppLLLLLLpp",
-          ".FzLAppALzF.",
-          ".FzLppppLzF.",
+          ".FzLALLALzF.",
+          ".FzLLLLLLzF.",
           ".N..LLLL..N.",
           "NNOOOOPLOONN"
         ],
@@ -53435,7 +53435,7 @@ var pool_default = {
           "...pppppppp.",
           "..ppLLLLLLpp",
           "..ppLALLALpp",
-          "..FpLLppLLpF",
+          "..FpLLLLLLpF",
           "..pp.OLLO.pp",
           "NNOOOOPLOONN"
         ]
@@ -53494,14 +53494,14 @@ var pool_default = {
         skin: 2,
         clothes: 3,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..00000000..",
           "..LLLLLLLLY.",
-          "..LLAssALLZ.",
-          "..LLssssLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -53509,15 +53509,15 @@ var pool_default = {
           "..00000000..",
           "..LLLLLLLLY.",
           "..LLLLLLLLZ.",
-          "..LLssssLL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
         [
           "....000000..",
           "..LLLLLLLLY.",
-          "..LLAssALLZ.",
-          "..LLssssLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -53525,7 +53525,7 @@ var pool_default = {
           "....00000000",
           "...LLLLLLLLL",
           "...LLALLALLL",
-          "...LLLssLLL.",
+          "...LLLLLLLL.",
           ".....LLLH...",
           "GGHHLLILHHGG"
         ]
@@ -53584,14 +53584,14 @@ var pool_default = {
         skin: 2,
         clothes: 0,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..llllllll..",
           "..LLLLLLLLY.",
-          "..LLAaaALLZ.",
-          "..LLaaaaLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -53599,15 +53599,15 @@ var pool_default = {
           "..llllllll..",
           "..LLLLLLLLY.",
           "..LLLLLLLLZ.",
-          "..LLaaaaLL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
         [
           "....llllll..",
           "..LLLLLLLLY.",
-          "..LLAaaALLZ.",
-          "..LLaaaaLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -53615,7 +53615,7 @@ var pool_default = {
           "....llllllll",
           "...LLLLLLLLL",
           "...LLALLALLL",
-          "...LLLaaLLL.",
+          "...LLLLLLLL.",
           ".....wLLw...",
           "vvwwwwxLwwvv"
         ]
@@ -53674,14 +53674,14 @@ var pool_default = {
         skin: 2,
         clothes: 3,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..2222223...",
           "..32LLLL33Y.",
-          "..3LA22AL3Z.",
-          "..LL2222LL..",
+          "..3LALLAL3Z.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -53689,15 +53689,15 @@ var pool_default = {
           "..2222223...",
           "..32LLLL33Y.",
           "..3LLLLLL3Z.",
-          "..LL2222LL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
         [
           "...22222L3..",
           "..22LLLLL3Y.",
-          "..3LA22AL3Z.",
-          "..LL2222LL..",
+          "..3LALLAL3Z.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -53705,7 +53705,7 @@ var pool_default = {
           "...22222L3..",
           "...2LLLLLLYY",
           "...LLALLAL33",
-          "...LLL22LL3.",
+          "...LLLLLLL3.",
           ".....LLLH...",
           "GGHHLLILHHGG"
         ]
@@ -53764,14 +53764,14 @@ var pool_default = {
         skin: 0,
         clothes: 0,
         acc: "earrings",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "....DDDD....",
           "..DDDDDDDD..",
-          "..DDA22ADD..",
-          ".FDD2222DDF.",
+          "..DDADDADD..",
+          ".FDDDDDDDDF.",
           "....DDDD....",
           "vvwwwwxDwwvv"
         ],
@@ -53779,15 +53779,15 @@ var pool_default = {
           "....DDDD....",
           "..DDDDDDDD..",
           "..DDDDDDDD..",
-          ".FDD2222DDF.",
+          ".FDDDDDDDDF.",
           "....DDDD....",
           "vvwwwwxDwwvv"
         ],
         [
           ".....DDDD...",
           "...DDDDDDDD.",
-          "..DDA22ADD..",
-          ".FDD2222DDF.",
+          "..DDADDADD..",
+          ".FDDDDDDDDF.",
           "....DDDD....",
           "vvwwwwxDwwvv"
         ],
@@ -53795,7 +53795,7 @@ var pool_default = {
           ".....DDDD...",
           "...DDDDDDDD.",
           "...DDADDADD.",
-          "..DDDD22DDDD",
+          "..DDDDDDDDDD",
           ".....wDDw...",
           "vvwwwwxDwwvv"
         ]
@@ -54214,14 +54214,14 @@ var pool_default = {
         skin: 2,
         clothes: 0,
         acc: "none",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..eeeeeeff..",
           "..eLLLLLLf..",
-          "..LLAeeALL..",
-          "..LLeeeeLL..",
+          "..LLALLALL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -54229,15 +54229,15 @@ var pool_default = {
           "..eeeeeeff..",
           "..eLLLLLLf..",
           "..LLLLLLLL..",
-          "..LLeeeeLL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
         [
           "....eeeeeef.",
           "...LLLLLLe..",
-          "..LLAeeALL..",
-          "..LLeeeeLL..",
+          "..LLALLALL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -54245,7 +54245,7 @@ var pool_default = {
           "...eeeeeeef.",
           "...eLLLLLLf.",
           "...LLALLALL.",
-          "...LLLeeLLL.",
+          "...LLLLLLLL.",
           ".....wLLw...",
           "vvwwwwxLwwvv"
         ]
@@ -54304,14 +54304,14 @@ var pool_default = {
         skin: 1,
         clothes: 0,
         acc: "feather",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "ccQQQQQQQQ..",
           "QQQggggggQQ.",
-          ".QRgAQQAgRQ.",
-          ".QRgQQQQgRQ.",
+          ".QRgAggAgRQ.",
+          ".QRggggggRQ.",
           "....gggg....",
           "vvwwwwxgwwvv"
         ],
@@ -54319,15 +54319,15 @@ var pool_default = {
           "ccQQQQQQQQ..",
           "QQQggggggQQ.",
           ".QRggggggRQ.",
-          ".QRgQQQQgRQ.",
+          ".QRggggggRQ.",
           "....gggg....",
           "vvwwwwxgwwvv"
         ],
         [
           "ccdQQQQQQQQ.",
           "..QQggggggQQ",
-          ".QRgAQQAgRQ.",
-          ".QRgQQQQgRQ.",
+          ".QRgAggAgRQ.",
+          ".QRggggggRQ.",
           "....gggg....",
           "vvwwwwxgwwvv"
         ],
@@ -54335,7 +54335,7 @@ var pool_default = {
           ".cdQQQQQQQQ.",
           "..QQggggggQQ",
           "..QQgAggAgQQ",
-          "..QRggQQggRQ",
+          "..QRggggggRQ",
           "..QQ.wggw.QQ",
           "vvwwwwxgwwvv"
         ]
@@ -54439,14 +54439,14 @@ var pool_default = {
         skin: 0,
         clothes: 4,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..QQQQQQRR..",
           "..QDDDDDDRY.",
-          "..DDAQQADDZ.",
-          "..DDQQQQDD..",
+          "..DDADDADDZ.",
+          "..DDDDDDDD..",
           "....DDDD....",
           "ttuuuDDuuutt"
         ],
@@ -54454,15 +54454,15 @@ var pool_default = {
           "..QQQQQQRR..",
           "..QDDDDDDRY.",
           "..DDDDDDDDZ.",
-          "..DDQQQQDD..",
+          "..DDDDDDDD..",
           "....DDDD....",
           "ttuuuDDuuutt"
         ],
         [
           "....QQQQQQ..",
           "...DDDDDDQY.",
-          "..DDAQQADDZ.",
-          "..DDQQQQDD..",
+          "..DDADDADDZ.",
+          "..DDDDDDDD..",
           "....DDDD....",
           "ttuuuDDuuutt"
         ],
@@ -54470,7 +54470,7 @@ var pool_default = {
           "...QQQQQQQRR",
           "...QDDDDDDRY",
           "...DDADDADDD",
-          "...DDDQQDDD.",
+          "...DDDDDDDD.",
           ".....UDDu...",
           "ttuuUUDuuutt"
         ]
