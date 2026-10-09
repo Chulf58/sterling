@@ -397,6 +397,9 @@ export interface DashboardState {
   /** the mode's key help, at most 48 columns and clipped to the pane; the
    *  renderer pins it to the last row */
   footer: string;
+  /** the same help as key/description pairs, for the renderer to colour; the
+   *  renderer cuts them to `footer`'s length, so the text is only `footer` */
+  footerSegments: FooterSegment[];
   /** a warning ('⚠ …', clipped to the pane) drawn on its own row just above
    *  the footer (above the strip when there is one) in the warning colour;
    *  absent when there is none */
@@ -1160,20 +1163,36 @@ export function fitTabs(tabs: TabCell[], width: number): TabCell[] {
   return window;
 }
 
+/** One footer hint: a key name and what it does. Either may be empty (a bare
+ *  label like 'editing' is a desc with no key, 'wheel' a key with no desc). */
+export interface FooterSegment {
+  key: string;
+  desc: string;
+}
+
+/** The footer segments as the plain text the OpenCode host shows: 'key desc'
+ *  pairs joined by ' · '. The renderer draws these in two colours. */
+export const FOOTER_SEPARATOR = ' · ';
+export const footerText = (segments: readonly FooterSegment[]): string =>
+  segments.map((s) => (s.key && s.desc ? `${s.key} ${s.desc}` : s.key || s.desc)).join(FOOTER_SEPARATOR);
+
 /** The key help for the tab and mode on screen: at most 48 columns (the
- *  launcher's 35% pane), then clipped to the pane. */
-function footerFor(ui: UiState, tabCount: number, width: number): string {
-  const tabs = `1-${tabCount} tabs`;
-  let text: string;
-  if (ui.help) text = '↑↓ PgUp PgDn scroll · any other key closes';
-  else if (ui.tab === TASKS_TAB) text = ui.boardEdit ? 'editing · enter save · esc cancel' : `${tabs} · enter open · e edit · ? help · q quit`;
+ *  launcher's 35% pane), then clipped to the pane. `footer` is the clipped
+ *  plain text; `footerSegments` are the unclipped pairs the renderer colours,
+ *  cut to the same length. */
+function footerFor(ui: UiState, tabCount: number, width: number): { footer: string; footerSegments: FooterSegment[] } {
+  const k = (key: string, desc = ''): FooterSegment => ({ key, desc });
+  const tabs = k(`1-${tabCount}`, 'tabs');
+  let segments: FooterSegment[];
+  if (ui.help) segments = [k('↑↓ PgUp PgDn', 'scroll'), k('any other key', 'closes')];
+  else if (ui.tab === TASKS_TAB) segments = ui.boardEdit ? [k('', 'editing'), k('enter', 'save'), k('esc', 'cancel')] : [tabs, k('enter', 'open'), k('e', 'edit'), k('?', 'help'), k('q', 'quit')];
   // '?' types into the search here, so the footer offers F1
-  else if (ui.tab === KNOWLEDGE_TAB) text = 'type to search · esc clear · ^f state · F1 help';
-  else if (ui.tab === QUEUE_TAB) text = `${tabs} · ↑↓ pending · wheel · ? help · q quit`;
-  else if (ui.tab === AGENTS_TAB) text = `←/→ or ${tabs} · ↑↓ scroll · ? help · q quit`;
-  else if (ui.tab === GITHUB_TAB) text = `${tabs} · ↑↓ · r refresh · ? help · q quit`;
-  else text = `${tabs} · enter change · esc · ? help · q quit`;
-  return clipEllipsis(text, width);
+  else if (ui.tab === KNOWLEDGE_TAB) segments = [k('type', 'to search'), k('esc', 'clear'), k('^f', 'state'), k('F1', 'help')];
+  else if (ui.tab === QUEUE_TAB) segments = [tabs, k('↑↓', 'pending'), k('wheel'), k('?', 'help'), k('q', 'quit')];
+  else if (ui.tab === AGENTS_TAB) segments = [k(`←/→ or ${tabs.key}`, 'tabs'), k('↑↓', 'scroll'), k('?', 'help'), k('q', 'quit')];
+  else if (ui.tab === GITHUB_TAB) segments = [tabs, k('↑↓'), k('r', 'refresh'), k('?', 'help'), k('q', 'quit')];
+  else segments = [tabs, k('enter', 'change'), k('esc'), k('?', 'help'), k('q', 'quit')];
+  return { footer: clipEllipsis(footerText(segments), width), footerSegments: segments };
 }
 
 /** The key help overlay's lines (`?` or F1), each at most 48 columns before
@@ -1215,7 +1234,7 @@ function helpDashboardState(ui: UiState, width: number, banner: string[], projec
   return {
     tabs,
     rows: [{ id: 'help', type: 'help', selected: false, expanded: false, lines, screenRow: 0 }],
-    footer: footerFor(ui, visibleTabs(agents, github).length, width),
+    ...footerFor(ui, visibleTabs(agents, github).length, width),
     notice: noticeFor(ui, width),
     strip: githubStrip(github, width),
     banner,
@@ -1345,7 +1364,7 @@ function githubDashboardState(ui: UiState, width: number, banner: string[], proj
   return {
     tabs,
     rows: [{ id: 'github', type: 'github', selected: false, expanded: false, lines, screenRow: 0 }],
-    footer: footerFor(ui, visibleTabs(agents, github).length, width),
+    ...footerFor(ui, visibleTabs(agents, github).length, width),
     notice: noticeFor(ui, width),
     strip: githubStrip(github, width),
     banner,
@@ -1419,7 +1438,7 @@ function systemDashboardState(
     tabs,
     rows,
     emptyMessage: view.rows.length ? undefined : '(no configured models)',
-    footer: footerFor(ui, visibleTabs(agents, github).length, width),
+    ...footerFor(ui, visibleTabs(agents, github).length, width),
     notice: noticeFor(ui, width),
     strip: githubStrip(github, width),
     banner,
@@ -1589,7 +1608,7 @@ export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = I
             ? '(queue empty)'
             : '(empty)'
         : undefined,
-    footer: footerFor(ui, visibleTabs(agents, github).length, width),
+    ...footerFor(ui, visibleTabs(agents, github).length, width),
     // a board_edit refusal, a failed selection write or a degraded store read
     // (ui.notice) is drawn on its own row in the warning colour
     notice: noticeFor(ui, width),

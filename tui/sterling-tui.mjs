@@ -50518,24 +50518,27 @@ function fitTabs(tabs, width) {
   }
   return window2;
 }
+var FOOTER_SEPARATOR = " \xB7 ";
+var footerText = (segments) => segments.map((s2) => s2.key && s2.desc ? `${s2.key} ${s2.desc}` : s2.key || s2.desc).join(FOOTER_SEPARATOR);
 function footerFor(ui, tabCount, width) {
-  const tabs = `1-${tabCount} tabs`;
-  let text;
+  const k = (key, desc = "") => ({ key, desc });
+  const tabs = k(`1-${tabCount}`, "tabs");
+  let segments;
   if (ui.help)
-    text = "\u2191\u2193 PgUp PgDn scroll \xB7 any other key closes";
+    segments = [k("\u2191\u2193 PgUp PgDn", "scroll"), k("any other key", "closes")];
   else if (ui.tab === TASKS_TAB)
-    text = ui.boardEdit ? "editing \xB7 enter save \xB7 esc cancel" : `${tabs} \xB7 enter open \xB7 e edit \xB7 ? help \xB7 q quit`;
+    segments = ui.boardEdit ? [k("", "editing"), k("enter", "save"), k("esc", "cancel")] : [tabs, k("enter", "open"), k("e", "edit"), k("?", "help"), k("q", "quit")];
   else if (ui.tab === KNOWLEDGE_TAB)
-    text = "type to search \xB7 esc clear \xB7 ^f state \xB7 F1 help";
+    segments = [k("type", "to search"), k("esc", "clear"), k("^f", "state"), k("F1", "help")];
   else if (ui.tab === QUEUE_TAB)
-    text = `${tabs} \xB7 \u2191\u2193 pending \xB7 wheel \xB7 ? help \xB7 q quit`;
+    segments = [tabs, k("\u2191\u2193", "pending"), k("wheel"), k("?", "help"), k("q", "quit")];
   else if (ui.tab === AGENTS_TAB)
-    text = `\u2190/\u2192 or ${tabs} \xB7 \u2191\u2193 scroll \xB7 ? help \xB7 q quit`;
+    segments = [k(`\u2190/\u2192 or ${tabs.key}`, "tabs"), k("\u2191\u2193", "scroll"), k("?", "help"), k("q", "quit")];
   else if (ui.tab === GITHUB_TAB)
-    text = `${tabs} \xB7 \u2191\u2193 \xB7 r refresh \xB7 ? help \xB7 q quit`;
+    segments = [tabs, k("\u2191\u2193"), k("r", "refresh"), k("?", "help"), k("q", "quit")];
   else
-    text = `${tabs} \xB7 enter change \xB7 esc \xB7 ? help \xB7 q quit`;
-  return clipEllipsis(text, width);
+    segments = [tabs, k("enter", "change"), k("esc"), k("?", "help"), k("q", "quit")];
+  return { footer: clipEllipsis(footerText(segments), width), footerSegments: segments };
 }
 var HELP_LINES = [
   "Keys",
@@ -50566,7 +50569,7 @@ function helpDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxB
   return {
     tabs,
     rows: [{ id: "help", type: "help", selected: false, expanded: false, lines, screenRow: 0 }],
-    footer: footerFor(ui, visibleTabs(agents, github2).length, width),
+    ...footerFor(ui, visibleTabs(agents, github2).length, width),
     notice: noticeFor(ui, width),
     strip: githubStrip(github2, width),
     banner,
@@ -50677,7 +50680,7 @@ function githubDashboardState(ui, width, banner, projectName, bodyTop2, tabs, ma
   return {
     tabs,
     rows: [{ id: "github", type: "github", selected: false, expanded: false, lines, screenRow: 0 }],
-    footer: footerFor(ui, visibleTabs(agents, github2).length, width),
+    ...footerFor(ui, visibleTabs(agents, github2).length, width),
     notice: noticeFor(ui, width),
     strip: githubStrip(github2, width),
     banner,
@@ -50725,7 +50728,7 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, ma
     tabs,
     rows,
     emptyMessage: view.rows.length ? void 0 : "(no configured models)",
-    footer: footerFor(ui, visibleTabs(agents, github2).length, width),
+    ...footerFor(ui, visibleTabs(agents, github2).length, width),
     notice: noticeFor(ui, width),
     strip: githubStrip(github2, width),
     banner,
@@ -50851,7 +50854,7 @@ function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinit
     tabs,
     rows,
     emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes2.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
-    footer: footerFor(ui, visibleTabs(agents, github2).length, width),
+    ...footerFor(ui, visibleTabs(agents, github2).length, width),
     // a board_edit refusal, a failed selection write or a degraded store read
     // (ui.notice) is drawn on its own row in the warning colour
     notice: noticeFor(ui, width),
@@ -53188,6 +53191,8 @@ var PALETTE = {
   pink: "#ff2bd6",
   cyan: "#00e5ff",
   muted: "#8787af",
+  /** the Now playing app's DIM: inactive tab names and footer descriptions */
+  purple: "#6b5b8c",
   /** xterm 220, the warning amber */
   amber: "#ffd319"
 };
@@ -53198,6 +53203,8 @@ var XTERM = {
   text: 231,
   /** #8787af */
   muted: 103,
+  /** #5f5f87, the nearest 256 index to PALETTE.purple #6b5b8c */
+  purple: 60,
   /** #ff00d7 */
   pink: 200,
   /** #00d7ff */
@@ -53233,6 +53240,7 @@ function detectThemeLevel(env, support = {}) {
     return "256";
   return "16";
 }
+var footerPlain = { dim: true };
 var PLAIN_THEME = {
   level: "plain",
   fill: {},
@@ -53243,6 +53251,8 @@ var PLAIN_THEME = {
   text: {},
   muted: { dim: true },
   heading: { dim: true },
+  footerKey: footerPlain,
+  footerDesc: footerPlain,
   title: (selected, expanded) => ({ inverse: selected, bold: expanded }),
   warn: (attr) => attr,
   map: (attr) => attr,
@@ -53261,13 +53271,16 @@ function xtermTheme(level) {
     level,
     fill: { bgColor: bg },
     name: on({ color: XTERM.pink, bold: true }),
-    tab: muted,
+    // inactive tab names take the app's purple, the active one stays pink
+    tab: on({ color: XTERM.purple }),
     // bold underlined pink on the page black: the active tab needs no coloured block
     tabActive: on({ color: XTERM.pink, bold: true, underline: true }),
     search: on({ color: XTERM.cyan }),
     text: on({ color: XTERM.text }),
     muted,
     heading: on({ color: XTERM.pink, bold: true }),
+    footerKey: on({ color: XTERM.pink, bold: true }),
+    footerDesc: on({ color: XTERM.purple }),
     // the selected title is bold cyan on the page black; no coloured bar
     title: (selected, expanded) => selected ? on({ color: XTERM.cyan, bold: true }) : on({ color: XTERM.text, bold: expanded }),
     warn: (attr) => ({ ...attr, color: XTERM.amber, bold: true }),
@@ -53293,6 +53306,8 @@ var SIXTEEN = {
   text: {},
   muted: { dim: true },
   heading: { color: "magenta", bold: true },
+  footerKey: footerPlain,
+  footerDesc: footerPlain,
   title: (selected, expanded) => selected ? { color: "brightWhite", bgColor: "magenta", bold: expanded } : { bold: expanded },
   warn: (attr) => ({ ...attr, dim: false, color: "yellow", bold: true }),
   map: (attr) => attr,
@@ -53401,8 +53416,37 @@ function draw(screen2, state, opts = {}) {
     const base2 = state.strip.dim ? t.muted : t.text;
     screen2.put({ x: 0, y: screen2.height - 2, attr: state.strip.text.startsWith("\u26A0") ? t.warn(base2) : base2 }, state.strip.text);
   }
-  screen2.put({ x: 0, y: screen2.height - 1, attr: t.muted }, state.footer);
+  drawFooter(screen2, t, state);
   screen2.draw({ delta: true });
+}
+function drawFooter(screen2, t, state) {
+  const runs = [];
+  const add = (len, attr) => {
+    const last = runs[runs.length - 1];
+    if (last && last.attr === attr)
+      last.len += len;
+    else
+      runs.push({ len, attr });
+  };
+  state.footerSegments.forEach((seg, i) => {
+    if (i > 0)
+      add(FOOTER_SEPARATOR.length, t.footerDesc);
+    if (seg.key)
+      add(seg.key.length, t.footerKey);
+    if (seg.desc)
+      add(seg.desc.length + (seg.key ? 1 : 0), t.footerDesc);
+  });
+  const y = screen2.height - 1;
+  let x = 0;
+  for (const run of runs) {
+    const text = state.footer.slice(x, x + run.len);
+    if (text === "")
+      break;
+    screen2.put({ x, y, attr: run.attr }, text);
+    x += text.length;
+  }
+  if (x < state.footer.length)
+    screen2.put({ x, y, attr: t.footerDesc }, state.footer.slice(x));
 }
 function clearPixels(term2, prev, next, blankSgr = "") {
   const keep = new Set(next.map((p) => `${p.x},${p.y}`));

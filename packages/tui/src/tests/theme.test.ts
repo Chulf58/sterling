@@ -73,6 +73,7 @@ function sampleState(banner: string[] = []): DashboardState {
     scroll: 0,
     queueCompleted: { startRow: 6, header: 'Completed', lines: ['12:00 drained · x'] },
     footer: 'q quit',
+    footerSegments: [{ key: 'q', desc: 'quit' }],
   } as unknown as DashboardState;
 }
 
@@ -132,7 +133,15 @@ for (const level of ['truecolor', '256'] as const) {
     assert.deepEqual(t.title(true, false), { bgColor: XTERM.background, color: XTERM.cyan, bold: true }, 'selected is bold cyan even when collapsed');
     assert.notDeepEqual(t.title(true, true), t.title(false, true), 'a selected expanded title still differs from an unselected expanded one');
     assert.deepEqual(find(puts, ' Tasks ').attr, { bgColor: XTERM.background, color: XTERM.pink, bold: true, underline: true });
-    assert.equal(find(puts, ' Knowledge ').attr.color, XTERM.muted);
+    // expected value changed from XTERM.muted (103): inactive tab names are the Now playing purple
+    assert.equal(find(puts, ' Knowledge ').attr.color, XTERM.purple);
+    assert.equal(XTERM.purple, 60);
+    assert.equal(find(puts, ' Knowledge ').attr.bold, undefined, 'an inactive tab is not bold or underlined');
+    assert.equal(find(puts, ' Knowledge ').attr.underline, undefined);
+    // expected value changed from one muted 'q quit' put: key in bold pink, description in purple, both on black
+    assert.deepEqual(find(puts, 'q').attr, { bgColor: XTERM.background, color: XTERM.pink, bold: true });
+    assert.deepEqual(find(puts, ' quit').attr, { bgColor: XTERM.background, color: XTERM.purple });
+    assert.equal(find(puts, 'q').y, 39, 'the footer is the last row');
     assert.equal(find(puts, ' Knowledge ').attr.bgColor, XTERM.background, 'inactive tabs sit on the page black');
     assert.equal(find(puts, 'meta line').attr.color, XTERM.muted);
     assert.equal(find(puts, '/ query').attr.color, XTERM.cyan);
@@ -140,6 +149,39 @@ for (const level of ['truecolor', '256'] as const) {
     assert.deepEqual(find(puts, 'Completed').attr, { bgColor: XTERM.background, color: XTERM.pink, bold: true });
   });
 }
+
+// the footer's colour runs, on a state with a separator, a bare label and a clip
+for (const level of ['truecolor', '256'] as const) {
+  test(`${level} level: the footer draws keys bold pink and descriptions and separators purple, cut to the clipped text`, () => {
+    const t = themeFor(level);
+    const segments = [{ key: '', desc: 'editing' }, { key: 'enter', desc: 'save' }, { key: 'wheel', desc: '' }];
+    const state = { ...sampleState(), footer: 'editing · enter save · wheel', footerSegments: segments };
+    const { screen, puts } = capture(60);
+    draw(screen, state, { theme: t });
+    const row = puts.filter((p) => p.y === 39).map((p) => [p.x, p.str, p.attr.color, p.attr.bold === true] as const);
+    assert.deepEqual(row, [
+      [0, 'editing · ', XTERM.purple, false],
+      [10, 'enter', XTERM.pink, true],
+      [15, ' save · ', XTERM.purple, false],
+      [23, 'wheel', XTERM.pink, true],
+    ]);
+    // clipped to 14 columns by state.ts: the text is the clipped footer, the ellipsis keeps the description colour
+    const clipped = capture(14);
+    draw(clipped.screen, { ...state, footer: 'editing · en…' }, { theme: t });
+    assert.deepEqual(clipped.puts.filter((p) => p.y === 39).map((p) => [p.str, p.attr.color]), [['editing · ', XTERM.purple], ['en…', XTERM.pink]]);
+    assert.equal(clipped.puts.filter((p) => p.y === 39).map((p) => p.str).join(''), 'editing · en…', 'exactly the clipped footer is drawn');
+  });
+}
+
+test('16 and plain levels: the footer keeps its single dim put, tabs keep their look', () => {
+  for (const level of ['16', 'plain'] as const) {
+    const t = themeFor(level);
+    const { screen, puts } = capture(60);
+    draw(screen, sampleState(), { theme: t });
+    assert.deepEqual(find(puts, 'q quit').attr, { dim: true }, `${level}: one dim 'q quit' put, as before`);
+    assert.deepEqual(find(puts, ' Knowledge ').attr, t.level === '16' ? { dim: true } : {}, `${level}: inactive tab as before`);
+  }
+});
 
 test('16 level: the terminal background stays, named colours, a magenta selection bar', () => {
   const t = themeFor('16');
@@ -186,6 +228,9 @@ test('Now playing palette: pink 200 / cyan 45 / amber 220 and their truecolour t
   assert.deepEqual(xtermRgb(XTERM.amber), [255, 215, 0], 'xterm 220 is #ffd700');
   assert.equal(PALETTE.amber, '#ffd319');
   assert.equal(XTERM.muted, 103);
+  assert.equal(XTERM.purple, 60);
+  assert.deepEqual(xtermRgb(XTERM.purple), [95, 95, 135], 'xterm 60 is #5f5f87');
+  assert.equal(PALETTE.purple, '#6b5b8c', "the app's DIM");
   assert.equal(XTERM.success, 49);
   assert.equal(XTERM.error, 203);
 });
@@ -208,9 +253,14 @@ test('256 palette: every text colour reads at 4.5:1 or better on its background'
   assert.deepEqual(xtermRgb(XTERM.text), [255, 255, 255], 'body text is white');
   for (const [name, fg] of Object.entries(XTERM)) {
     if (name === 'background') continue;
+    // The one exemption: the Now playing purple (inactive tab names, footer descriptions) reads at 3.47:1 on black (the user's 3.5:1).
+    // The user accepted that on 2026-10-09 (question form, 'Copy the app's style (Recommended)'); every other colour keeps 4.5:1.
+    if (name === 'purple') continue;
     assert.ok(contrast(fg, XTERM.background) >= 4.5, `${name} (${fg}) on the background: ${contrast(fg, XTERM.background).toFixed(2)}`);
   }
   assert.ok(contrast(XTERM.cyan, XTERM.background) >= 4.5, 'selected text (bold cyan) on the page black');
+  // the exempt purple is bounded, not unchecked: it must not slip below the ratio the user saw (3.47 measured)
+  assert.ok(contrast(XTERM.purple, XTERM.background) >= 3.4, `purple on the background: ${contrast(XTERM.purple, XTERM.background).toFixed(2)}`);
 });
 
 // ---------------------------------------------------------------------------
