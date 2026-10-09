@@ -196,8 +196,8 @@ interface Painted {
   dim?: boolean;
 }
 
-/** What the full view draws below the board body and the sub-agent block: a blank line, the footer. */
-const footerLines = (st: DashboardState): Painted[] => [{ text: '' }, { text: st.footer, dim: true }];
+/** What the full view draws below the board body and the sub-agent block: the notice row (blank when there is none), the footer. */
+const footerLines = (st: DashboardState): Painted[] => [{ text: st.notice ?? '' }, { text: st.footer, dim: true }];
 
 /** Flatten a DashboardState into display lines the way render.ts paints it:
  *  header, tab bar, search/spacer, the scrolled body window, the queue tab's

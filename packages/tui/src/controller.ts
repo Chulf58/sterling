@@ -58,8 +58,9 @@ export interface DashboardStats {
   changeDetection: string;
 }
 
-/** The viewport a host passes: every field is required except the optional Agents tab. */
-export type ControllerViewport = Required<Omit<Viewport, 'agents'>> & Pick<Viewport, 'agents'>;
+/** The viewport a host passes: every field is required except the optional
+ *  Agents tab and the pane height (a host without the banner has no use for it). */
+export type ControllerViewport = Required<Omit<Viewport, 'agents' | 'height'>> & Pick<Viewport, 'agents' | 'height'>;
 
 export interface DashboardController {
   readonly stores: MountedStores;
@@ -183,7 +184,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   }
   let frame: { vp: string; day: string; ui: UiState; roster: AgentRosterSnapshot | undefined; dataVersion: string | undefined; built: DashboardFrame } | undefined;
   let builds = 0;
-  const vpKey = (vp: ControllerViewport): string => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null]);
+  const vpKey = (vp: ControllerViewport): string => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null]);
   const today = (): string => new Date().toDateString();
   function currentFrame(vp: ControllerViewport): DashboardFrame {
     let dataVersion: string | undefined;
@@ -198,7 +199,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     const day = today();
     if (frame && dataVersion !== undefined && frame.dataVersion === dataVersion && frame.ui === ui && frame.roster === roster && frame.vp === key && frame.day === day) return frame.built;
     builds++;
-    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents);
+    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height);
     frame = { vp: key, day, ui, roster, dataVersion, built };
     return built;
   }

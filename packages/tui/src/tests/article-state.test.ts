@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
-import { buildDashboardState, initialUi, reduce, ARTICLE_STATE_FILTERS, KNOWLEDGE_TAB, type UiState } from '../state.js';
+import { buildDashboardState, initialUi, reduce, ARTICLE_STATE_FILTERS, KNOWLEDGE_TAB, STATE_GLYPHS, type UiState } from '../state.js';
 import { keyToEvent } from '../render.js';
 import { toCard } from '../viewmodel.js';
 
@@ -54,9 +54,11 @@ test('article state: the Knowledge tab shows a state column on article rows and 
   const { store, cleanup } = fixture();
   try {
     const lines = titles(buildDashboardState(store, st({ tab: KNOWLEDGE_TAB, expanded: EXPANDED })));
-    assert.match(lines.find((l) => l.includes('built-one title'))!, /\[built\]\s+built-one title/);
-    assert.match(lines.find((l) => l.includes('dormant-one title'))!, /\[dormant\]\s+dormant-one title/);
-    assert.doesNotMatch(lines.find((l) => l.includes('A ruling'))!, /\[/, 'a non-article row carries no state column');
+    // the state column is one glyph and a space (board c533a872: a 12-column tag did not fit a narrow pane)
+    assert.ok(lines.find((l) => l.includes('built-one title'))!.endsWith(`${STATE_GLYPHS.built} built-one title`));
+    assert.ok(lines.find((l) => l.includes('dormant-one title'))!.endsWith(`${STATE_GLYPHS.dormant} dormant-one title`));
+    const ruling = lines.find((l) => l.includes('A ruling'))!;
+    assert.ok(Object.values(STATE_GLYPHS).every((g) => !ruling.includes(g)), 'a non-article row carries no state column');
   } finally {
     cleanup();
   }

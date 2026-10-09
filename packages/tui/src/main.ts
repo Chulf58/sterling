@@ -99,8 +99,10 @@ let shownView: SubagentView = { availability: 'absent', active: 0, agents: [] };
 // the screen row the body starts on, taken from the last drawn state: the cards start there
 let bodyTop = 0;
 
+// the pane height picks the banner scene (4 rows under COMPACT_BELOW_HEIGHT),
+// the same height viewport() hands the state layer, so draw and clicks agree
 function fullBodyLines(): number {
-  return visibleBodyLines(term.height, bannerLines(term.width, showBanner).length);
+  return visibleBodyLines(term.height, bannerLines(term.width, showBanner, term.height).length);
 }
 
 function subagentBlock(tick: number): SubagentBlock {
@@ -113,7 +115,7 @@ function subagentBlock(tick: number): SubagentBlock {
 // with). bodyTop follows the banner height, so it is threaded as showBanner.
 // The Agents tab is enabled here, and its label carries the running count.
 function viewport() {
-  return { width: term.width, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active } };
+  return { width: term.width, height: term.height, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active } };
 }
 
 // Portrait and banner-scene pixels are painted outside the ScreenBuffer

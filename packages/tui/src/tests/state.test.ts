@@ -254,12 +254,13 @@ test('queue tab (§3.2.7/§11): system items only, fixed half divider with trunc
     assert.match(s.queueCompleted!.lines[0], / created · src\/a\.mjs \(\+2\)$/, 'file-key fallback with (+N); seq beats stamp');
 
     // fixed half split: maxBodyLines 6 → divider at body offset 3; pending
-    // truncated in the STATE layer so clicks can never hit clipped rows
+    // is windowed above it (board c533a872: the list scrolls instead of
+    // dropping rows), so clicks can never hit a row below the window
     for (let i = 0; i < 5; i++) store.create({ ...envelope('todo'), text: `q-item ${i}`, source: 'system', system_reason: 'capture_owed' });
     s = buildDashboardState(store, ui, Infinity, 6);
     assert.equal(s.queueCompleted!.startRow, 3);
-    const pendingLines = s.rows.length ? s.rows.at(-1)!.screenRow + s.rows.at(-1)!.lines.length : 0;
-    assert.ok(pendingLines <= 2, 'pending clipped above the divider (one line reserved for the overflow note)');
+    assert.equal(s.queueCompleted!.pendingLines, 2, 'pending clipped above the divider (one line reserved for the overflow note)');
+    for (let off = 2; off < 6; off++) assert.equal(screenLineToRow(s, 4 + off, 6), -1, `body line ${off} (overflow note and below) is not a pending row`);
     assert.match(s.queueCompleted!.overflow!, /… \d+ more pending/);
 
     // a click in the completed region maps to no row — log lines are not records
@@ -721,8 +722,9 @@ test('renderer translation tables: terminal-kit names map to the state vocabular
   assert.equal(keyToEvent('F5'), undefined, 'unmapped named keys stay inert');
   assert.deepEqual(mouseToEvent('MOUSE_LEFT_BUTTON_PRESSED', { x: 3, y: 4 }), { kind: 'click', x: 3, y: 4 });
   assert.deepEqual(mouseToEvent('MOUSE_RIGHT_BUTTON_PRESSED', { x: 1, y: 1 }), { kind: 'rightclick' });
-  assert.deepEqual(mouseToEvent('MOUSE_WHEEL_DOWN', { x: 0, y: 0 }), { kind: 'wheel', dy: 1 });
-  assert.deepEqual(mouseToEvent('MOUSE_WHEEL_UP', { x: 0, y: 0 }), { kind: 'wheel', dy: -1 });
+  // the wheel carries its line so the Queue tab can scroll the list under the pointer
+  assert.deepEqual(mouseToEvent('MOUSE_WHEEL_DOWN', { x: 0, y: 7 }), { kind: 'wheel', dy: 1, y: 7 });
+  assert.deepEqual(mouseToEvent('MOUSE_WHEEL_UP', { x: 0, y: 0 }), { kind: 'wheel', dy: -1, y: 0 });
   assert.equal(mouseToEvent('MOUSE_MOTION', { x: 0, y: 0 }), undefined);
 });
 
