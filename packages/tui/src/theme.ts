@@ -1,6 +1,7 @@
 // The dashboard's synthwave theme (decision
-// tui-synthwave-theme-sunset-banner-project-name-on-horizon): a deep violet
-// background the TUI paints itself, hot pink and cyan accents, an explicit
+// tui-synthwave-theme-sunset-banner-project-name-on-horizon): a black
+// background the TUI paints itself (the deep violet it first had read badly,
+// user 2026-10-09), white body text, hot pink and cyan accents, an explicit
 // muted colour instead of the terminal's dim, amber bold warnings and a violet
 // full-width selection bar instead of inverse video.
 //
@@ -24,9 +25,9 @@ export const THEME_ENV = 'STERLING_TUI_COLOR';
 
 /** The truecolour palette the banner scene and the avatar edges use. */
 export const PALETTE = {
-  /** xterm 17: the colour the ScreenBuffer paints as background, so the overlay meets the body without a seam */
-  night: '#00005f',
-  text: '#f2ecff',
+  /** xterm 16: the colour the ScreenBuffer paints as background, so the overlay meets the body without a seam */
+  night: '#000000',
+  text: '#ffffff',
   pink: '#ff2d95',
   cyan: '#00e5ff',
   muted: '#8787af',
@@ -36,10 +37,10 @@ export const PALETTE = {
 
 /** The 256-palette indexes the ScreenBuffer draws the body with (truecolour and 256 levels). */
 export const XTERM = {
-  /** #00005f; the 256 palette has no darker violet, and the cube's violets (53, 54, 55) are too bright for a page */
-  background: 17,
-  /** #d7d7ff */
-  text: 189,
+  /** #000000, the 256 palette's explicit black; not the terminal default, which ScreenBuffer cannot draw and which may be any colour */
+  background: 16,
+  /** #ffffff */
+  text: 231,
   /** #8787af */
   muted: 103,
   /** #ff5faf */
@@ -147,7 +148,8 @@ function xtermTheme(level: 'truecolor' | '256'): Theme {
     fill: { bgColor: bg },
     name: on({ color: XTERM.pink, bold: true }),
     tab: muted,
-    tabActive: { color: bg, bgColor: XTERM.pink, bold: true },
+    // bold underlined pink on the page black: the active tab needs no coloured block
+    tabActive: on({ color: XTERM.pink, bold: true, underline: true }),
     search: on({ color: XTERM.cyan }),
     text: on({ color: XTERM.text }),
     muted,

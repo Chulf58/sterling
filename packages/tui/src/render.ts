@@ -11,6 +11,7 @@ export interface AttrLike {
   bold?: boolean;
   dim?: boolean;
   inverse?: boolean;
+  underline?: boolean;
   /** a named palette color ('yellow') or a 0–255 256-palette index. A regular
    *  ScreenBuffer is 256-palette only: truecolour goes through the pixel overlay. */
   color?: string | number;
