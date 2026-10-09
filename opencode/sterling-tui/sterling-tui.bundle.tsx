@@ -4909,8 +4909,9 @@ var modelPin = external_exports.object({
   effort: effortLevel.optional()
 }).strict();
 var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+var CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
 var agentModelEntry = external_exports.object({
-  model: external_exports.string(),
+  model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
   effort: effortLevel,
   hard_task: modelPin.optional(),
   opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
@@ -12628,7 +12629,7 @@ function storeWriteTools(pluginRoot = sterlingRootFrom()) {
   return tools;
 }
 function opencodeModelRef(model) {
-  if (typeof model !== "string" || !model) throw new TypeError(`opencodeModelRef: model must be a non-empty string, got ${JSON.stringify(model)}`);
+  if (typeof model !== "string" || !CLAUDE_MODEL_ID_RE.test(model)) throw new TypeError(`opencodeModelRef: model must be a Claude model id, got ${JSON.stringify(model)}`);
   return `anthropic/${model}`;
 }
 function opencodeModelFor({ model, opencodeModel } = {}) {
@@ -12672,15 +12673,16 @@ function frontmatterModel(content) {
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
 function ensureFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models = {} }) {
-  const rows = [];
-  for (const { path, content, previous: _previous, ...row } of planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models })) {
-    if (content !== void 0) {
-      mkdirSync5(dirname4(path), { recursive: true });
-      writeFileSync3(path, content);
-    }
-    rows.push(row);
-  }
+  const { rows, writes } = stageFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models });
+  writeFullAgentFiles(writes);
   return rows;
+}
+function stageFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models = {} }) {
+  const planned = planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models });
+  return {
+    rows: planned.map(({ path, content, previous, ...row }) => row),
+    writes: planned.filter((r) => r.content !== void 0).map(({ path, content, previous }) => ({ path, content, previous }))
+  };
 }
 function planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models = {} }) {
   const registry = loadRegistry(join13(pluginRoot, "agent-templates", "registry.json"));
@@ -12734,11 +12736,7 @@ function stageFullAgentModel({ projectDir: projectDir2, pluginRoot, agents, mode
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir2, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
-  const planned = planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models });
-  return {
-    rows: planned.map(({ path, content, previous, ...row }) => row),
-    writes: planned.filter((r) => r.content !== void 0).map(({ path, content, previous }) => ({ path, content, previous }))
-  };
+  return stageFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models });
 }
 function writeFileAtomic(path, content, { writeFile = writeFileSync3, rename = renameSync2 } = {}) {
   const tmp = `${path}.tmp-${randomUUID3()}`;
