@@ -4970,7 +4970,7 @@ var init_records = __esm({
 });
 
 // packages/schemas/dist/transient.js
-var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_RETENTION_MS, knowledgeWriteSchema;
+var NO_CAPTURE_LANES, noCaptureLaneSchema, sessionEventSchema, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_RETENTION_MS, knowledgeWriteSchema, WORKER_POLICY_LANES, workerPolicyItemSchema, workerPolicySchema;
 var init_transient = __esm({
   "packages/schemas/dist/transient.js"() {
     "use strict";
@@ -5007,6 +5007,19 @@ var init_transient = __esm({
       type: external_exports.string().min(1),
       at: external_exports.string().min(1)
     }).strict();
+    WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+    workerPolicyItemSchema = external_exports.object({
+      id: external_exports.string().uuid(),
+      lane: external_exports.enum(WORKER_POLICY_LANES),
+      target_id: external_exports.string().uuid().nullable(),
+      file_keys: external_exports.array(external_exports.string().min(1))
+    }).passthrough();
+    workerPolicySchema = external_exports.object({
+      policy_version: external_exports.literal(1),
+      token: external_exports.string().min(1),
+      run_id: external_exports.string().min(1),
+      policy_items: external_exports.array(workerPolicyItemSchema)
+    }).passthrough();
   }
 });
 
@@ -14466,11 +14479,21 @@ import { dirname as dirname11, isAbsolute as isAbsolute2, join as join27, resolv
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
 var SERVER = "sterling";
-var OPENCODE_ALLOWED_TOOLS = ["execute", "mcp", "read", "grep", ...["maintenance_query", "knowledge_get", "maintenance_remove", "knowledge_line_ref_fix"].map((v) => `${SERVER}_${v}`)];
+var OPENCODE_ALLOWED_TOOLS = [
+  "execute",
+  "mcp",
+  "read",
+  "grep",
+  "webfetch",
+  "websearch",
+  ...["maintenance_query", "knowledge_get", "maintenance_remove", "knowledge_line_ref_fix", "knowledge_update", "knowledge_edit", "knowledge_append", "knowledge_array_remove", "knowledge_query", "knowledge_schema"].map((v) => `${SERVER}_${v}`)
+];
 
 // scripts/hooks/lib/maintenance-worker.mjs
+var WORKER_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
 var BATCH_MIN_ITEMS = 5;
 var BATCH_MAX_WAIT_MS = 30 * 6e4;
+var WORKER_CAPABILITY = "factual_refresh_v1";
 var DEBOUNCE_MS = 2 * 6e4;
 var BACKOFF_MS = 30 * 6e4;
 var WORKER_TIMEOUT_MS = 20 * 6e4;
@@ -14480,9 +14503,21 @@ var WORKER_DISABLE_ENV = "STERLING_MAINTENANCE_WORKER_DISABLE";
 var SERVER2 = "sterling";
 var mcp = (name) => `mcp__${SERVER2}__${name}`;
 var mcpPlugin = (name) => `mcp__plugin_sterling_sterling__${name}`;
-var WORKER_TOOLS = [mcp("maintenance_query"), mcp("knowledge_get"), mcp("maintenance_remove"), mcp("knowledge_line_ref_fix"), mcpPlugin("knowledge_line_ref_fix"), "Read", "Grep"];
+var WRITE_GRANT = ["knowledge_update", "knowledge_edit", "knowledge_append", "knowledge_array_remove"];
+var WORKER_TOOLS = [
+  mcp("maintenance_query"),
+  mcp("knowledge_get"),
+  mcp("maintenance_remove"),
+  mcp("knowledge_line_ref_fix"),
+  mcpPlugin("knowledge_line_ref_fix"),
+  ...[...WRITE_GRANT, "knowledge_query", "knowledge_schema"].flatMap((t) => [mcp(t), mcpPlugin(t)]),
+  "Read",
+  "Grep",
+  "WebSearch",
+  "WebFetch"
+];
 var WORKER_DISALLOWED_TOOLS = [
-  ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => mcp(`knowledge_${v}`)),
+  ...["create", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => mcp(`knowledge_${v}`)),
   ...["add", "remove", "update", "edit"].map((v) => mcp(`board_${v}`)),
   mcp("config_set"),
   mcp("domain_describe"),
@@ -14490,6 +14525,7 @@ var WORKER_DISALLOWED_TOOLS = [
   "Edit",
   "Bash"
 ];
+var KNOWLEDGE_WRITE_TOOLS = [...WRITE_GRANT, "knowledge_line_ref_fix", "knowledge_create", "knowledge_retire", "knowledge_supersede", "knowledge_split", "knowledge_extract", "knowledge_promote", "knowledge_link"];
 var OPENCODE_MODEL_KEY = "opencode_model";
 var OPENCODE_MODEL_UNSET = `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
 function workerPaths(root) {
@@ -14513,10 +14549,10 @@ function readJson(path) {
   }
 }
 var sortedKeys = (keys) => JSON.stringify([...keys ?? []].map(String).sort());
-function judgedVerdicts(root) {
+function journalLines(root, files = null) {
   const { journal } = workerPaths(root);
-  const map = /* @__PURE__ */ new Map();
-  for (const path of [`${journal}.1`, journal]) {
+  const out = [];
+  for (const path of files ?? [`${journal}.1`, journal]) {
     let text;
     try {
       text = readFileSync17(path, "utf8");
@@ -14526,27 +14562,50 @@ function judgedVerdicts(root) {
     }
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
-      let v;
       try {
-        v = JSON.parse(line);
+        out.push(JSON.parse(line));
       } catch {
-        continue;
       }
-      if (!v?.item_id || v.kind !== "verdict") continue;
-      if ((v.verdict === "owes_prose" || v.verdict === "refused") && v.evidence === true && Array.isArray(v.file_keys)) {
-        map.set(v.item_id, { verdict: v.verdict, keys: sortedKeys(v.file_keys), head: v.head ?? null });
-      } else if (v.verdict === "closed") map.delete(v.item_id);
     }
+  }
+  return out;
+}
+function judgedVerdicts(root) {
+  const map = /* @__PURE__ */ new Map();
+  for (const v of journalLines(root)) {
+    if (!v?.item_id || v.kind !== "verdict") continue;
+    const handoff = v.verdict === "needs_conductor" && v.capability === WORKER_CAPABILITY;
+    if ((handoff || v.verdict === "refused") && v.evidence === true && Array.isArray(v.file_keys)) {
+      map.set(v.item_id, {
+        verdict: v.verdict,
+        keys: sortedKeys(v.file_keys),
+        head: v.head ?? null,
+        reason: typeof v.reason === "string" ? v.reason : null,
+        lane: typeof v.lane === "string" ? v.lane : null,
+        capability: v.capability ?? null
+      });
+    } else if (v.verdict === "closed") map.delete(v.item_id);
   }
   return map;
 }
-function owesProseVerdicts(root) {
+function handoffVerdicts(root) {
   const out = /* @__PURE__ */ new Map();
-  for (const [id, v] of judgedVerdicts(root)) if (v.verdict === "owes_prose") out.set(id, v.keys);
+  for (const [id, v] of judgedVerdicts(root)) if (v.verdict === "needs_conductor") out.set(id, { keys: v.keys, reason: v.reason, lane: v.lane });
   return out;
 }
-function isJudgedOwesProse(item, verdicts) {
-  return verdicts.get(item.id) === sortedKeys(item.file_keys);
+function isHandedOff(item, handoffs) {
+  return handoffs.get(item.id)?.keys === sortedKeys(item.file_keys);
+}
+function workerWriteCount(root) {
+  return { count: countWrites(journalLines(root)), path: ".sterling/maintenance-worker.jsonl" };
+}
+function countWrites(lines) {
+  let count = 0;
+  for (const v of lines) {
+    if (v?.kind === "writes_carried" && Number.isFinite(v.count)) count += v.count;
+    else if (v?.kind === "tool_call" && v.is_error === false && KNOWLEDGE_WRITE_TOOLS.includes(v.tool)) count++;
+  }
+  return count;
 }
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -14682,53 +14741,78 @@ function refreshRegistryRow(cwd, { config: config2, configUnreadable: configUnre
 // scripts/hooks/lib/maintenance-state.mjs
 import { readFileSync as readFileSync19 } from "node:fs";
 import { join as join29 } from "node:path";
-var WORKER_LANE = "reconcile_needed";
+var isWorkerLane = (r) => WORKER_LANES.includes(r);
+var REASONS_SHOWN = 3;
+var REASON_CLIP = 120;
+var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+var inLane = (n, r) => `${n} item${n === 1 ? "" : "s"} in lane ${r}`;
 function readMaintenanceState(store2, cwd) {
-  const reconcile2 = { count: 0, owesProse: 0, oldest: null, unjudged: 0, oldestUnjudged: null };
+  const reconcile2 = { count: 0, lanes: [], handedOff: 0, handoffs: [], oldest: null, unjudged: 0, oldestUnjudged: null, writes: null };
   let queueReasonEntries2 = [];
   let queueReasons2 = [];
   let drainable2 = 0;
   let parked2 = 0;
   const systemTotal = store2.count({ types: ["todo"], source: "system" });
   const system = systemTotal > 0 ? store2.query({ types: ["todo"], source: "system", cap: systemTotal }) : [];
-  const reconcileItems = system.filter((t) => t.system_reason === WORKER_LANE);
-  reconcile2.count = reconcileItems.length;
+  const workerItems = system.filter((t) => isWorkerLane(t.system_reason));
+  reconcile2.count = workerItems.length;
+  reconcile2.lanes = WORKER_LANES.map((r) => [r, workerItems.filter((t) => t.system_reason === r).length]).filter(([, n]) => n > 0);
+  const handedByLane = /* @__PURE__ */ new Map();
   try {
-    const verdicts = owesProseVerdicts(cwd);
-    const unjudged = reconcileItems.filter((t) => !isJudgedOwesProse(t, verdicts));
-    reconcile2.owesProse = reconcileItems.length - unjudged.length;
+    const verdicts = handoffVerdicts(cwd);
+    const handed = workerItems.filter((t) => isHandedOff(t, verdicts));
+    const unjudged = workerItems.filter((t) => !isHandedOff(t, verdicts));
+    reconcile2.handedOff = handed.length;
+    reconcile2.handoffs = handed.map((t) => ({ id: t.id, lane: t.system_reason, reason: verdicts.get(t.id)?.reason ?? null }));
+    for (const t of handed) handedByLane.set(t.system_reason, (handedByLane.get(t.system_reason) ?? 0) + 1);
     reconcile2.unjudged = unjudged.length;
     reconcile2.oldestUnjudged = unjudged.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
+    reconcile2.writes = workerWriteCount(cwd);
   } catch {
-    reconcile2.owesProse = null;
+    reconcile2.handedOff = null;
     reconcile2.unjudged = null;
   }
-  reconcile2.oldest = reconcileItems.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
+  reconcile2.oldest = workerItems.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
   const drainableItems = system.filter((t) => t.system_reason !== "file_parked");
   drainable2 = drainableItems.length;
   parked2 = system.length - drainable2;
   const byReason = /* @__PURE__ */ new Map();
   for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
-  queueReasonEntries2 = [...byReason.entries()].sort((a, b) => b[1] - a[1]);
-  queueReasons2 = queueReasonEntries2.map(([r, n]) => `${n} item${n === 1 ? "" : "s"} in lane ${r}`);
+  queueReasonEntries2 = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => [r, n, handedByLane.get(r) ?? 0]);
+  queueReasons2 = queueReasonEntries2.map(([r, n]) => inLane(n, r));
   return { total: systemTotal, reconcile: reconcile2, drainable: drainable2, parked: parked2, queueReasonEntries: queueReasonEntries2, queueReasons: queueReasons2 };
 }
 function queueDepthLine({ drainable: drainable2, parked: parked2, queueReasons: queueReasons2, queueReasonEntries: queueReasonEntries2, deepThreshold: rawThreshold }) {
   const TOO_DEEP_MULTIPLIER = 10;
   let queueContext2 = "";
   const deepThreshold = Math.max(1, rawThreshold ?? 15);
-  const workerEntry = queueReasonEntries2.find(([r]) => r === WORKER_LANE);
-  const workerCount = workerEntry ? workerEntry[1] : 0;
-  const conductorEntries = queueReasonEntries2.filter(([r]) => r !== WORKER_LANE);
-  const conductorLanes = queueReasonEntries2.length ? queueReasons2.filter((_, i) => queueReasonEntries2[i][0] !== WORKER_LANE) : queueReasons2;
+  const reasonText = new Map(queueReasonEntries2.map(([r], i) => [r, queueReasons2[i]]));
+  const conductorEntries = [];
+  const conductorText = /* @__PURE__ */ new Map();
+  const workerEntries = [];
+  for (const [r, n, handed = 0] of queueReasonEntries2) {
+    if (!isWorkerLane(r)) {
+      conductorEntries.push([r, n]);
+      conductorText.set(r, reasonText.get(r) ?? inLane(n, r));
+      continue;
+    }
+    if (handed > 0) {
+      conductorEntries.push([r, handed]);
+      conductorText.set(r, `${inLane(handed, r)} handed to you by the worker`);
+    }
+    if (n - handed > 0) workerEntries.push([r, n - handed]);
+  }
+  conductorEntries.sort((a, b) => b[1] - a[1]);
+  workerEntries.sort((a, b) => WORKER_LANES.indexOf(a[0]) - WORKER_LANES.indexOf(b[0]));
+  const conductorLanes = queueReasonEntries2.length ? conductorEntries.map(([r]) => conductorText.get(r)) : queueReasons2;
   const conductorCount = queueReasonEntries2.length ? conductorEntries.reduce((s2, [, n]) => s2 + n, 0) : drainable2;
-  const workerNote = workerCount ? `The ${workerCount} item${workerCount === 1 ? "" : "s"} in lane ${WORKER_LANE} ${workerCount === 1 ? "is" : "are"} drained by the background worker, not by you (its state is on the RECONCILE BACKLOG line). ` : "";
+  const be = (n) => n === 1 ? "is" : "are";
+  const workerNote = workerEntries.length ? `The ${inLane(workerEntries[0][1], workerEntries[0][0])} ${be(workerEntries[0][1])} drained by the background worker, not by you` + workerEntries.slice(1).map(([r, n]) => `, and so ${be(n)} ${inLane(n, r)}`).join("") + ` (its state is on the RECONCILE BACKLOG line). ` : "";
   if (conductorCount >= deepThreshold) {
     const parkedNote = parked2 > 0 ? ` plus ${parked2} file_parked (close at branch merge, not by drain \u2014 excluded from this count)` : "";
     if (conductorCount >= deepThreshold * TOO_DEEP_MULTIPLIER && conductorEntries.length) {
       const topLanes = conductorLanes.slice(0, 3);
-      const [topReason, topCount] = conductorEntries[0];
-      const topPhrase = `${topCount} item${topCount === 1 ? "" : "s"} in lane ${topReason}`;
+      const topPhrase = conductorText.get(conductorEntries[0][0]);
       const laneLead = conductorEntries.length > topLanes.length ? `Too many lanes to name in full, and "drain it all before new work" is not a workable ask at this size. The biggest lanes: ${topLanes.join(", ")}. ` : `"Drain it all before new work" is not a workable ask at this size. The lane split: ${topLanes.join(", ")}. `;
       queueContext2 = `
 
@@ -14781,21 +14865,21 @@ function workerStateFileProblem(cwd) {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return `worker state file ${shown} unreadable: not a JSON object`;
   return null;
 }
-var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 function lastRunClause(last, nowMs) {
   if (!last) return ". No run recorded yet";
   if (last.ok === false) return "";
   const age = ageText(last.at, nowMs);
   const parts = [age === "unknown" ? "time unknown" : `${age} ago`];
   if (Number.isFinite(last.verdicts)) parts.push(plural(last.verdicts, "verdict"));
-  if (Number.isFinite(last.closes_ok)) parts.push(`${last.closes_ok} closed`);
+  if (Number.isFinite(last.closes_ok)) parts.push(`${last.closes_ok + (Number.isFinite(last.resolves_closed) ? last.resolves_closed : 0)} closed`);
+  if (Number.isFinite(last.writes_ok) && last.writes_ok > 0) parts.push(plural(last.writes_ok, "factual edit"));
   return `. Last run: ${parts.join(", ")}`;
 }
 function workerStateText({ ws, reconcile: reconcile2, cwd, config: config2, nowMs, env }) {
   try {
     if (ws.running) return `worker running (pid ${ws.pid}, since ${ws.since})`;
     const cfg = config2 === void 0 ? readProjectConfig2(cwd) : config2;
-    const byHand = "reconcile items wait for /sterling:drain";
+    const byHand = "the worker's items wait for /sterling:drain";
     if (cfg?.maintenance_worker?.enabled === false) return `worker disabled by config (${byHand})`;
     if (env[WORKER_DISABLE_ENV] === "1") return `worker disabled by ${WORKER_DISABLE_ENV} (${byHand})`;
     const stateProblem = workerStateFileProblem(cwd);
@@ -14822,14 +14906,22 @@ function workerStateText({ ws, reconcile: reconcile2, cwd, config: config2, nowM
     return `worker state unknown (${stateUnknownReason(e)})`;
   }
 }
-function owesProseSentence(owed, total) {
-  if (owed === 0) return "";
-  const drafts = owed === 1 ? "was judged" : "were judged";
-  const yours = owed === 1 ? "is yours" : "are yours";
-  if (owed === total) {
-    return `${total === 1 ? "The 1 item" : `All ${total} items`} ${drafts} 'owes prose' by the worker and ${yours} to draft. `;
-  }
-  return `${owed} of the ${total} items ${drafts} 'owes prose' by the worker and ${yours} to draft. The worker handles the other ${total - owed}. `;
+function handoffSentence(handed, total, handoffs = []) {
+  if (handed === 0) return "";
+  const were = handed === 1 ? "was handed" : "were handed";
+  const yours = handed === 1 ? "is yours" : "are yours";
+  const lead = handed === total ? `${total === 1 ? "The 1 item" : `All ${total} items`} ${were} to you by the worker (needs_conductor) and ${yours}. ` : `${handed} of the ${total} items ${were} to you by the worker (needs_conductor) and ${yours}. The worker handles the other ${total - handed}. `;
+  const shown = handoffs.slice(0, REASONS_SHOWN).map((h) => {
+    const reason = String(h.reason ?? "no reason recorded").replace(/\s+/g, " ").trim();
+    return `${String(h.id).slice(0, 8)} (${h.lane}): ${reason.length > REASON_CLIP ? `${reason.slice(0, REASON_CLIP - 1)}\u2026` : reason}`;
+  });
+  if (!shown.length) return lead;
+  const more = handoffs.length - shown.length;
+  return `${lead}Why: ${shown.join("; ")}${more > 0 ? ` (+${more} more in .sterling/maintenance-worker.jsonl)` : ""}. `;
+}
+function auditSentence(writes) {
+  if (!writes || !writes.count) return "";
+  return `Worker writes on record: ${writes.count} (spot-check a few in ${writes.path}). `;
 }
 function reconcileBacklog({ reconcile: reconcile2, cwd, config: config2, nowMs = Date.now(), env = process.env }) {
   let reconcileBanner2 = "";
@@ -14846,11 +14938,12 @@ function reconcileBacklog({ reconcile: reconcile2, cwd, config: config2, nowMs =
       worker = `worker state unknown (${stateUnknownReason(e)})`;
     }
     const age = ageText(reconcile2.oldest, nowMs);
-    const inLane = (n) => `${n} item${n === 1 ? "" : "s"} in lane reconcile_needed`;
-    reconcileBanner2 = ` \xB7 ${inLane(reconcile2.count)}, oldest ${age}, ${worker}${lastRunNote}`;
+    const lanes = reconcile2.lanes?.length ? reconcile2.lanes : [["reconcile_needed", reconcile2.count]];
+    const lanesText2 = lanes.map(([r, n]) => inLane(n, r)).join(", ");
+    reconcileBanner2 = ` \xB7 ${lanesText2}, oldest ${age}, ${worker}${lastRunNote}`;
     reconcileContext2 = `
 
-RECONCILE BACKLOG: ${inLane(reconcile2.count)}, the oldest of all items open since ${reconcile2.oldest ?? "unknown"} (${age}). ` + (reconcile2.owesProse === null ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items owe prose is unknown. ` : owesProseSentence(reconcile2.owesProse, reconcile2.count)) + `${worker}${lastRunNote}.`;
+RECONCILE BACKLOG: ${lanesText2}, the oldest of all items open since ${reconcile2.oldest ?? "unknown"} (${age}). ` + (reconcile2.handedOff === null ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items it handed to you is unknown. ` : handoffSentence(reconcile2.handedOff ?? 0, reconcile2.count, reconcile2.handoffs)) + auditSentence(reconcile2.writes) + `${worker}${lastRunNote}.`;
   }
   return { banner: reconcileBanner2, line: reconcileContext2.replace(/^\n\n/, "") };
 }

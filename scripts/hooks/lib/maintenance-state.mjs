@@ -12,29 +12,43 @@ import {
   BATCH_MAX_WAIT_MS,
   BATCH_MIN_ITEMS,
   WORKER_DISABLE_ENV,
+  WORKER_LANES,
   ageText,
-  isJudgedOwesProse,
-  owesProseVerdicts,
+  handoffVerdicts,
+  isHandedOff,
   workerBreakage,
   workerPaths,
   workerStatus,
+  workerWriteCount,
 } from './maintenance-worker.mjs';
 
-// The lane the background worker drains (maintenance-worker.mjs openReconcileItems);
+// The lanes the background worker drains (maintenance-worker.mjs WORKER_LANES);
 // every other drainable lane is the conductor's, drained with /sterling:drain.
-const WORKER_LANE = 'reconcile_needed';
+// RESPONSIBILITY, NOT LANE (decision
+// maintenance-worker-drains-every-lane-and-writes-factual-refresh-on-sonnet,
+// design (f) and change (viii)): an item the worker handed off (a standing
+// needs_conductor verdict) is the conductor's whatever its lane.
+const isWorkerLane = (r) => WORKER_LANES.includes(r);
+/** At most this many handoff reasons are named on the backlog line. */
+const REASONS_SHOWN = 3;
+const REASON_CLIP = 120;
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const inLane = (n, r) => `${n} item${n === 1 ? '' : 's'} in lane ${r}`;
 
 /**
  * The system-todo summary: the TRUE total (store.count, never a capped read), the
- * reconcile backlog (count, owes-prose count, oldest created_at), the drainable and
- * parked counts and the per-lane breakdown.
+ * worker backlog (`reconcile`, named for its first lane: count, per-lane counts,
+ * handed-off count and reasons, oldest created_at, the journal's write count),
+ * the drainable and parked counts and the per-lane breakdown. Each
+ * queueReasonEntries entry is [lane, count, handedOff]; handedOff is the part of
+ * a worker lane the worker handed to the conductor.
  */
 export function readMaintenanceState(store, cwd) {
   // unjudged / oldestUnjudged: what the worker still has to look at, i.e. the open
-  // items not judged 'owes prose' for their current file_keys. H1 cannot see a
-  // 'refused' verdict (that needs HEAD) or a dirty-file exclusion (that needs git,
-  // and H1 never spawns), so this can over-count what the launcher finds eligible.
-  const reconcile = { count: 0, owesProse: 0, oldest: null, unjudged: 0, oldestUnjudged: null };
+  // items not handed off for their current file_keys. H1 cannot see a 'refused'
+  // verdict (that needs HEAD) or a dirty-file exclusion (that needs git, and H1
+  // never spawns), so this can over-count what the launcher finds eligible.
+  const reconcile = { count: 0, lanes: [], handedOff: 0, handoffs: [], oldest: null, unjudged: 0, oldestUnjudged: null, writes: null };
   let queueReasonEntries = [];
   let queueReasons = [];
   let drainable = 0;
@@ -48,25 +62,30 @@ export function readMaintenanceState(store, cwd) {
   // project: 15 by-design-open file_parked items tripped this every session
   // start). It stays in counts.maintenance (the human's banner shows the true
   // total); only the DRAIN signal excludes it.
-  // RECONCILE BACKLOG AGE (decision maintenance-queue-background-haiku-worker-
-  // simple-redesign point (5)): the count and the oldest created_at, so a
-  // backlog nobody drains shows its age instead of only its size.
-  const reconcileItems = system.filter((t) => t.system_reason === WORKER_LANE);
-  reconcile.count = reconcileItems.length;
-  // 'owes prose' is judged per (item id, current file_keys) in the worker's
-  // JSONL, never marked on the item itself.
+  // BACKLOG AGE: the count and the oldest created_at, so a backlog nobody
+  // drains shows its age instead of only its size.
+  const workerItems = system.filter((t) => isWorkerLane(t.system_reason));
+  reconcile.count = workerItems.length;
+  reconcile.lanes = WORKER_LANES.map((r) => [r, workerItems.filter((t) => t.system_reason === r).length]).filter(([, n]) => n > 0);
+  // A handoff is judged per (item id, current file_keys) in the worker's JSONL,
+  // never marked on the item itself.
+  const handedByLane = new Map();
   try {
-    const verdicts = owesProseVerdicts(cwd);
-    const unjudged = reconcileItems.filter((t) => !isJudgedOwesProse(t, verdicts));
-    reconcile.owesProse = reconcileItems.length - unjudged.length;
+    const verdicts = handoffVerdicts(cwd);
+    const handed = workerItems.filter((t) => isHandedOff(t, verdicts));
+    const unjudged = workerItems.filter((t) => !isHandedOff(t, verdicts));
+    reconcile.handedOff = handed.length;
+    reconcile.handoffs = handed.map((t) => ({ id: t.id, lane: t.system_reason, reason: verdicts.get(t.id)?.reason ?? null }));
+    for (const t of handed) handedByLane.set(t.system_reason, (handedByLane.get(t.system_reason) ?? 0) + 1);
     reconcile.unjudged = unjudged.length;
     reconcile.oldestUnjudged = unjudged.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
+    reconcile.writes = workerWriteCount(cwd);
   } catch {
     // unreadable journal: say so below, never a confident 0
-    reconcile.owesProse = null;
+    reconcile.handedOff = null;
     reconcile.unjudged = null;
   }
-  reconcile.oldest = reconcileItems.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
+  reconcile.oldest = workerItems.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
   const drainableItems = system.filter((t) => t.system_reason !== 'file_parked');
   drainable = drainableItems.length;
   parked = system.length - drainable;
@@ -78,8 +97,8 @@ export function readMaintenanceState(store, cwd) {
   // common cap literal.
   const byReason = new Map();
   for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
-  queueReasonEntries = [...byReason.entries()].sort((a, b) => b[1] - a[1]);
-  queueReasons = queueReasonEntries.map(([r, n]) => `${n} item${n === 1 ? '' : 's'} in lane ${r}`);
+  queueReasonEntries = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => [r, n, handedByLane.get(r) ?? 0]);
+  queueReasons = queueReasonEntries.map(([r, n]) => inLane(n, r));
   return { total: systemTotal, reconcile, drainable, parked, queueReasonEntries, queueReasons };
 }
 
@@ -115,21 +134,38 @@ export function queueDepthLine({ drainable, parked, queueReasons, queueReasonEnt
   // whole injection (including an already-consumed rotation note — unrecoverable).
   const deepThreshold = Math.max(1, rawThreshold ?? 15);
   // WHO DRAINS WHAT (board 27c87783; the user asked on 2026-10-03 why the conductor
-  // drained by hand when a background worker exists): reconcile_needed is the
-  // worker's lane, so it is named as the worker's and kept out of the depth that
-  // asks the conductor to drain. Counting it made the line fire, and tell the
-  // conductor to drain, on debt that was only the worker's. The threshold now
-  // counts the conductor's lanes alone; the worker's backlog has its own line.
-  const workerEntry = queueReasonEntries.find(([r]) => r === WORKER_LANE);
-  const workerCount = workerEntry ? workerEntry[1] : 0;
-  const conductorEntries = queueReasonEntries.filter(([r]) => r !== WORKER_LANE);
-  const conductorLanes = queueReasonEntries.length
-    ? queueReasons.filter((_, i) => queueReasonEntries[i][0] !== WORKER_LANE)
-    : queueReasons;
+  // drained by hand when a background worker exists): the worker's lanes are
+  // named as the worker's and kept out of the depth that asks the conductor to
+  // drain. Counting them made the line fire, and tell the conductor to drain, on
+  // debt that was only the worker's. COUNTED BY RESPONSIBILITY (change (viii)):
+  // an item the worker handed off (entry[2]) is the conductor's, so it counts
+  // here and is named as handed to you.
+  const reasonText = new Map(queueReasonEntries.map(([r], i) => [r, queueReasons[i]]));
+  const conductorEntries = [];
+  const conductorText = new Map();
+  const workerEntries = [];
+  for (const [r, n, handed = 0] of queueReasonEntries) {
+    if (!isWorkerLane(r)) {
+      conductorEntries.push([r, n]);
+      conductorText.set(r, reasonText.get(r) ?? inLane(n, r));
+      continue;
+    }
+    if (handed > 0) {
+      conductorEntries.push([r, handed]);
+      conductorText.set(r, `${inLane(handed, r)} handed to you by the worker`);
+    }
+    if (n - handed > 0) workerEntries.push([r, n - handed]);
+  }
+  conductorEntries.sort((a, b) => b[1] - a[1]);
+  workerEntries.sort((a, b) => WORKER_LANES.indexOf(a[0]) - WORKER_LANES.indexOf(b[0]));
+  const conductorLanes = queueReasonEntries.length ? conductorEntries.map(([r]) => conductorText.get(r)) : queueReasons;
   // A caller that passes no lane breakdown has nothing to separate: its total stands.
   const conductorCount = queueReasonEntries.length ? conductorEntries.reduce((s, [, n]) => s + n, 0) : drainable;
-  const workerNote = workerCount
-    ? `The ${workerCount} item${workerCount === 1 ? '' : 's'} in lane ${WORKER_LANE} ${workerCount === 1 ? 'is' : 'are'} drained by the background worker, not by you (its state is on the RECONCILE BACKLOG line). `
+  const be = (n) => (n === 1 ? 'is' : 'are');
+  const workerNote = workerEntries.length
+    ? `The ${inLane(workerEntries[0][1], workerEntries[0][0])} ${be(workerEntries[0][1])} drained by the background worker, not by you` +
+      workerEntries.slice(1).map(([r, n]) => `, and so ${be(n)} ${inLane(n, r)}`).join('') +
+      ` (its state is on the RECONCILE BACKLOG line). `
     : '';
   if (conductorCount >= deepThreshold) {
     const parkedNote =
@@ -142,8 +178,7 @@ export function queueDepthLine({ drainable, parked, queueReasons, queueReasonEnt
       // bare number) — the same phrasing the moderate tier already uses — so a
       // lane count can never be misread as a truncated/capped total.
       const topLanes = conductorLanes.slice(0, 3);
-      const [topReason, topCount] = conductorEntries[0];
-      const topPhrase = `${topCount} item${topCount === 1 ? '' : 's'} in lane ${topReason}`;
+      const topPhrase = conductorText.get(conductorEntries[0][0]);
       // "too many to name in full" is only true past the top-3 we actually show
       // (reviewer cosmetic note: it read as false with exactly 2 lanes).
       const laneLead =
@@ -230,8 +265,6 @@ function workerStateFileProblem(cwd) {
   return null;
 }
 
-const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-
 /**
  * How the last worker run went, as a clause that follows a routine state: its
  * age, its verdict count and its close count (all three written by runWorker
@@ -247,7 +280,8 @@ function lastRunClause(last, nowMs) {
   const age = ageText(last.at, nowMs);
   const parts = [age === 'unknown' ? 'time unknown' : `${age} ago`];
   if (Number.isFinite(last.verdicts)) parts.push(plural(last.verdicts, 'verdict'));
-  if (Number.isFinite(last.closes_ok)) parts.push(`${last.closes_ok} closed`);
+  if (Number.isFinite(last.closes_ok)) parts.push(`${last.closes_ok + (Number.isFinite(last.resolves_closed) ? last.resolves_closed : 0)} closed`);
+  if (Number.isFinite(last.writes_ok) && last.writes_ok > 0) parts.push(plural(last.writes_ok, 'factual edit'));
   return `. Last run: ${parts.join(', ')}`;
 }
 
@@ -264,7 +298,7 @@ function workerStateText({ ws, reconcile, cwd, config, nowMs, env }) {
   try {
     if (ws.running) return `worker running (pid ${ws.pid}, since ${ws.since})`;
     const cfg = config === undefined ? readProjectConfig(cwd) : config;
-    const byHand = 'reconcile items wait for /sterling:drain';
+    const byHand = "the worker's items wait for /sterling:drain";
     if (cfg?.maintenance_worker?.enabled === false) return `worker disabled by config (${byHand})`;
     if (env[WORKER_DISABLE_ENV] === '1') return `worker disabled by ${WORKER_DISABLE_ENV} (${byHand})`;
     // Back-off is derived from the state file, so an unreadable one leaves it unknown.
@@ -295,16 +329,31 @@ function workerStateText({ ws, reconcile, cwd, config, nowMs, env }) {
   }
 }
 
-/** The items the worker judged 'owes prose' are the conductor's to draft; it
- *  handles the rest. Nothing owed is no sentence. */
-function owesProseSentence(owed, total) {
-  if (owed === 0) return '';
-  const drafts = owed === 1 ? 'was judged' : 'were judged';
-  const yours = owed === 1 ? 'is yours' : 'are yours';
-  if (owed === total) {
-    return `${total === 1 ? 'The 1 item' : `All ${total} items`} ${drafts} 'owes prose' by the worker and ${yours} to draft. `;
-  }
-  return `${owed} of the ${total} items ${drafts} 'owes prose' by the worker and ${yours} to draft. The worker handles the other ${total - owed}. `;
+/** The items the worker handed off are the conductor's; it handles the rest.
+ *  A bounded selection of their reasons follows (design (f)), each with the
+ *  item's short id and lane. Nothing handed off is no sentence. */
+function handoffSentence(handed, total, handoffs = []) {
+  if (handed === 0) return '';
+  const were = handed === 1 ? 'was handed' : 'were handed';
+  const yours = handed === 1 ? 'is yours' : 'are yours';
+  const lead =
+    handed === total
+      ? `${total === 1 ? 'The 1 item' : `All ${total} items`} ${were} to you by the worker (needs_conductor) and ${yours}. `
+      : `${handed} of the ${total} items ${were} to you by the worker (needs_conductor) and ${yours}. The worker handles the other ${total - handed}. `;
+  const shown = handoffs.slice(0, REASONS_SHOWN).map((h) => {
+    const reason = String(h.reason ?? 'no reason recorded').replace(/\s+/g, ' ').trim();
+    return `${String(h.id).slice(0, 8)} (${h.lane}): ${reason.length > REASON_CLIP ? `${reason.slice(0, REASON_CLIP - 1)}…` : reason}`;
+  });
+  if (!shown.length) return lead;
+  const more = handoffs.length - shown.length;
+  return `${lead}Why: ${shown.join('; ')}${more > 0 ? ` (+${more} more in .sterling/maintenance-worker.jsonl)` : ''}. `;
+}
+
+/** The sample-audit pointer (decision point (4), change CUT): how many writes
+ *  the worker landed, and where they are, for an informational spot check. */
+function auditSentence(writes) {
+  if (!writes || !writes.count) return '';
+  return `Worker writes on record: ${writes.count} (spot-check a few in ${writes.path}). `;
 }
 
 /**
@@ -314,9 +363,10 @@ function owesProseSentence(owed, total) {
  *   nowMs / env  overrides for tests
  */
 export function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), env = process.env }) {
-  // RECONCILE BACKLOG LINE: one '·' segment on the human banner (after the
-  // maintenance clause, so that clause's text is unchanged) and one line for the
-  // conductor, who drafts the prose the worker leaves owed. Silent when there
+  // RECONCILE BACKLOG LINE (the worker's backlog across its lanes): one '·'
+  // segment on the human banner (after the maintenance clause, so that clause's
+  // text is unchanged) and one line for the conductor, who takes the items the
+  // worker hands off. Silent when there
   // is no reconcile item (P1). Worker state comes from its lockfile. A BROKEN
   // last run (workerBreakage: non-zero exit, error result, permission denials,
   // MCP not connected) adds one clause naming its reason and the log, and then
@@ -338,14 +388,17 @@ export function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), e
     }
     const age = ageText(reconcile.oldest, nowMs);
     // Counts keep H1's "N item(s) in lane <reason>" shape, so a round number
-    // can never read as a truncated cap (h1-accuracy AC1).
-    const inLane = (n) => `${n} item${n === 1 ? '' : 's'} in lane reconcile_needed`;
-    reconcileBanner = ` · ${inLane(reconcile.count)}, oldest ${age}, ${worker}${lastRunNote}`;
+    // can never read as a truncated cap (h1-accuracy AC1). A state without a
+    // lane split (an older caller) is all reconcile_needed.
+    const lanes = reconcile.lanes?.length ? reconcile.lanes : [['reconcile_needed', reconcile.count]];
+    const lanesText = lanes.map(([r, n]) => inLane(n, r)).join(', ');
+    reconcileBanner = ` · ${lanesText}, oldest ${age}, ${worker}${lastRunNote}`;
     reconcileContext =
-      `\n\nRECONCILE BACKLOG: ${inLane(reconcile.count)}, the oldest of all items open since ${reconcile.oldest ?? 'unknown'} (${age}). ` +
-      (reconcile.owesProse === null
-        ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items owe prose is unknown. `
-        : owesProseSentence(reconcile.owesProse, reconcile.count)) +
+      `\n\nRECONCILE BACKLOG: ${lanesText}, the oldest of all items open since ${reconcile.oldest ?? 'unknown'} (${age}). ` +
+      (reconcile.handedOff === null
+        ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items it handed to you is unknown. `
+        : handoffSentence(reconcile.handedOff ?? 0, reconcile.count, reconcile.handoffs)) +
+      auditSentence(reconcile.writes) +
       `${worker}${lastRunNote}.`;
   }
   return { banner: reconcileBanner, line: reconcileContext.replace(/^\n\n/, '') };

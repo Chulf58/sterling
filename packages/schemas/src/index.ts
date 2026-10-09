@@ -65,8 +65,8 @@ export {
   exampleRecordFor,
 } from './records.js';
 export type { RecordType, RecordTypeEntry, DurableRecord, FieldShape, BoardNeeds } from './records.js';
-export { sessionEventSchema, NO_CAPTURE_LANES, noCaptureLaneSchema } from './transient.js';
-export type { SessionEvent, NoCaptureLane } from './transient.js';
+export { sessionEventSchema, NO_CAPTURE_LANES, noCaptureLaneSchema, WORKER_POLICY_LANES, workerPolicyItemSchema, workerPolicySchema } from './transient.js';
+export type { SessionEvent, NoCaptureLane, WorkerPolicyLane, WorkerPolicyItem, WorkerPolicy } from './transient.js';
 export { knowledgeWriteSchema, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, KNOWLEDGE_WRITES_TEMP_FILE, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid } from './transient.js';
 export type { KnowledgeWrite } from './transient.js';
 export { configSchema, parseConfig, normalizeRawConfig, AGENT_TOOL_NAME_RE, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, unreadConfigKeys, describeUnreadConfigKeys } from './config.js';

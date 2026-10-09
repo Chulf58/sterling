@@ -1,19 +1,22 @@
 // BACKGROUND MAINTENANCE WORKER — launcher, runner core and status reader
-// (decision maintenance-queue-background-haiku-worker-simple-redesign; the CLI
-// behaviour it relies on is finding headless-claude-background-worker-probe-
-// september-2026).
+// (decision maintenance-worker-drains-every-lane-and-writes-factual-refresh-on-sonnet,
+// GitHub #56; the CLI behaviour it relies on is finding
+// headless-claude-background-worker-probe-september-2026).
 //
 // WHAT IT DOES. After a commit (H19's Bash surface) or at Stop (H10), when the
-// queue holds an open reconcile_needed item that is clean against HEAD and not
-// yet judged, the hook calls maybeLaunchMaintenanceWorker. That starts ONE
-// detached node runner (scripts/maintenance-worker-run.mjs), which runs a
-// headless `claude -p` librarian on Claude Sonnet 5.5 at MEDIUM effort (decision
-// point (0)). The child judges each item: already paid -> maintenance_remove
-// (the server's attested close checks HEAD); not paid -> an 'owes_prose'
-// verdict in its final report. The runner streams the child's output, logs
-// every maintenance_remove call and every verdict to a JSONL file, records the
-// run's outcome and cost in its state file, and releases the lock when the child
-// exits (or is killed after WORKER_TIMEOUT_MS).
+// queue holds open items in the worker's lanes (WORKER_LANES) that are clean
+// against HEAD and still unjudged, the hook calls maybeLaunchMaintenanceWorker.
+// That starts ONE detached node runner (scripts/maintenance-worker-run.mjs),
+// which runs a headless `claude -p` librarian on Claude Sonnet 5.5 at MEDIUM
+// effort over a bounded, lane-fair batch. The child closes already-paid items
+// (maintenance_remove, or resolves on its completing write), writes the small
+// factual refresh itself (files[], entry marks, state, source_date, one
+// corrected sentence) and hands every item that needs a ruling or new prose to
+// the conductor as a 'needs_conductor' verdict with a reason. The runner
+// streams the child's output, journals every write and close and every
+// verdict to a JSONL file, records the run's outcome and cost in its state
+// file, releases the lock when the child exits (or is killed after
+// WORKER_TIMEOUT_MS), and starts the next run itself while runs make progress.
 //
 // WHY A RUNNER BETWEEN THE HOOK AND claude. The child has no Write or Bash
 // grant, so it cannot keep its own log, and a hook cannot wait for it. The
@@ -22,25 +25,34 @@
 // and the state file. Nothing is printed at Stop or after a commit; H1 shows
 // only a BROKEN last run, once, on its session-start line.
 //
+// AUTHORIZATION. The batch policy is eligible.json (token-bound). The
+// launcher writes it, and the per-run MCP config hands its path and the lock
+// token to the worker's own Sterling server as argv (--worker-policy,
+// --worker-token), which checks every mutation before it runs. The stream
+// parser here only observes: a successful knowledge_* write whose receipt
+// lacks this run's stamp (STAMP_KEY) fails the run as an unpoliced write.
+//
 // BATCHING: a trigger launches only when BATCH_MIN_ITEMS items are eligible or
 // the oldest has waited BATCH_MAX_WAIT_MS; below that the outcome is a quiet,
-// logged 'batching' (not a run, so no no_progress and no back-off).
+// logged 'batching' (not a run, so no no_progress and no back-off). One run
+// takes at most RUN_BATCH_MAX items, round-robin across lanes, oldest first.
+// CHAINING: a run that closed or fixed an item and left eligible work starts
+// the launcher again; lock, debounce and back-off still apply.
 // LINE REFERENCES: the child may repair a moved path:line reference with
-// knowledge_line_ref_fix; the runner journals each call; a fix alone is never
-// progress (only the close that follows it is). A database-locked
-// maintenance_remove is retry-later ('busy'), never a refusal.
+// knowledge_line_ref_fix; a fix alone is never progress (the server accepts a
+// shift back and forth). A database-locked maintenance_remove is retry-later
+// ('busy'), never a refusal.
 //
 // OPENCODE HOST (board item Parity P8): on a machine without `claude`, the
 // OpenCode plugin launches with host 'opencode'; the runner then runs `opencode
 // run` (maintenance-worker-opencode.mjs), whose event parser feeds the same
-// journal and evidence gate.
+// journal, stamp check and evidence gate.
 //
-// WHAT IT DOES NOT DO: author article prose, create records, edit a queue item,
-// or retry a close the server refused. It does not guarantee a verdict is
-// right: every close is logged so it can be spot-checked (decision point (6)).
-// RESIDUAL: maintenance_remove can remove ANY system item; only the prompt
-// limits the worker to reconcile_needed. The JSONL records every call, so a
-// stray removal is visible after the fact, not prevented.
+// WHAT IT DOES NOT DO: create, retire, supersede, split or link records, write
+// behaviour prose beyond one corrected sentence, or retry a close the server
+// refused. It does not guarantee an edit is right: every write is stamped and
+// journalled, and H1 shows the journal count for a sample spot check
+// (decision point (4)).
 //
 // DEPENDENCY-FREE (node builtins only): bundled into H1/H10/H19 and imported
 // directly by the runner script, so it must not import a workspace package.
@@ -52,21 +64,41 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildOpencodeArgs, buildOpencodeConfig, opencodeEnv, opencodePrompt, opencodeStreamJournal } from './maintenance-worker-opencode.mjs';
 
-export const WORKER_MODEL = 'claude-haiku-5-5';
+/** Sonnet 5.5, not Haiku: the worker writes factual edits, and an unreviewed
+ *  wrong edit makes the store lie (decision
+ *  maintenance-worker-drains-every-lane-and-writes-factual-refresh-on-sonnet,
+ *  user ruling (2)). */
+export const WORKER_MODEL = 'claude-sonnet-5-5';
 export const WORKER_EFFORT = 'medium';
 export const WORKER_AGENT = 'librarian';
 /** Per-run runaway guard passed to --max-budget-usd on every launch. There is
- *  no daily cap: the worker runs whenever the queue has eligible work (user
- *  ruling 2026-09-30, decision
- *  maintenance-worker-notices-session-start-only-and-no-sliver-launch). */
-export const WORKER_RUN_BUDGET_USD = 2;
-/** BATCHING (decision maintenance-queue-background-haiku-worker-simple-redesign,
- *  point (2a), user-ruled 2026-09-30): a trigger launches only when at least
+ *  no daily cap: the worker runs whenever the queue has eligible work (same
+ *  decision, design (g) and ruling (5)). A run that reaches it after making
+ *  progress is a normal bounded end, not a failure (change (vi)). */
+export const WORKER_RUN_BUDGET_USD = 5;
+/** The queue lanes the worker drains (user ruling (1)). Every other lane is
+ *  the conductor's. */
+export const WORKER_LANES = ['reconcile_needed', 'state_review', 'stale_research', 'refresh_reference', 'article_missing'];
+/** One run takes at most this many items, picked round-robin across lanes and
+ *  oldest first within a lane (design (g)); the rest wait for the next run. */
+export const RUN_BATCH_MAX = 12;
+/** BATCHING (user-ruled 2026-09-30): a trigger launches only when at least
  *  this many items are eligible, or the oldest eligible item has waited
  *  BATCH_MAX_WAIT_MS. The audit measured launches for a single item paying the
  *  worker's fixed startup cost for one judgment. */
 export const BATCH_MIN_ITEMS = 5;
 export const BATCH_MAX_WAIT_MS = 30 * 60_000;
+/** The receipt key the worker's Sterling server stamps on every allowed write,
+ *  {run_id, item_id} (change (i)). The server side names the key; adjust it
+ *  here if it differs. */
+export const STAMP_KEY = 'worker_stamp';
+/** eligible.json's policy shape version (change (ii)). */
+export const POLICY_VERSION = 1;
+/** Capability marker on every verdict line this worker writes. A
+ *  needs_conductor verdict stands only with it, so an owes_prose verdict from
+ *  the judge-only worker is judged once more under the write grant (change
+ *  (ix)); rotation carries the marker forward. */
+export const WORKER_CAPABILITY = 'factual_refresh_v1';
 /** A burst of commits/Stops inside this window starts one worker, not many. */
 export const DEBOUNCE_MS = 2 * 60_000;
 /** No relaunch this long after a run that failed (error_max_budget included). */
@@ -100,16 +132,32 @@ const mcp = (name) => `mcp__${SERVER}__${name}`;
 /** The name the plugin-mounted server gives the same tool. */
 const mcpPlugin = (name) => `mcp__plugin_sterling_sterling__${name}`;
 /** Every tool the child may call. dontAsk alone denies MCP calls (probe (B)),
- *  so each is named. Read/Grep are the librarian's own read-only tools; no
- *  Bash, so the child judges from the item, the article and the committed
- *  files rather than from git diffs. knowledge_line_ref_fix is the one article
- *  write it gets (decision point (3a)): the server checks the new line at HEAD
- *  contains the anchor and changes nothing else, so it can only move a
- *  path:line reference. Both mounted names are allowed. */
-export const WORKER_TOOLS = [mcp('maintenance_query'), mcp('knowledge_get'), mcp('maintenance_remove'), mcp('knowledge_line_ref_fix'), mcpPlugin('knowledge_line_ref_fix'), 'Read', 'Grep'];
-/** Denied explicitly, so a project's permissions.allow cannot widen the worker. */
+ *  so each is named. Read/Grep are the librarian's own read-only tools and
+ *  WebSearch/WebFetch re-check stale_research and refresh_reference claims
+ *  (user ruling (3)); no Bash, so the child judges from the item, the record
+ *  and the committed files rather than from git diffs. The update-shaped
+ *  knowledge writes are granted for the small factual refresh (ruling (1),
+ *  design (c)); the worker's own Sterling server limits each one to the batch
+ *  policy before it runs. knowledge_line_ref_fix can only move a path:line
+ *  reference. Both mounted names are allowed for the writes and the new reads. */
+const WRITE_GRANT = ['knowledge_update', 'knowledge_edit', 'knowledge_append', 'knowledge_array_remove'];
+export const WORKER_TOOLS = [
+  mcp('maintenance_query'),
+  mcp('knowledge_get'),
+  mcp('maintenance_remove'),
+  mcp('knowledge_line_ref_fix'),
+  mcpPlugin('knowledge_line_ref_fix'),
+  ...[...WRITE_GRANT, 'knowledge_query', 'knowledge_schema'].flatMap((t) => [mcp(t), mcpPlugin(t)]),
+  'Read',
+  'Grep',
+  'WebSearch',
+  'WebFetch',
+];
+/** Denied explicitly, so a project's permissions.allow cannot widen the worker
+ *  (ruling (3), design (c)): every record-shaping write, every board write,
+ *  config and domain writes, and shell and file writes. */
 export const WORKER_DISALLOWED_TOOLS = [
-  ...['create', 'update', 'append', 'edit', 'array_remove', 'retire', 'supersede', 'split', 'extract', 'promote', 'link'].map((v) => mcp(`knowledge_${v}`)),
+  ...['create', 'retire', 'supersede', 'split', 'extract', 'promote', 'link'].map((v) => mcp(`knowledge_${v}`)),
   ...['add', 'remove', 'update', 'edit'].map((v) => mcp(`board_${v}`)),
   mcp('config_set'),
   mcp('domain_describe'),
@@ -117,6 +165,10 @@ export const WORKER_DISALLOWED_TOOLS = [
   'Edit',
   'Bash',
 ];
+/** Short names of the knowledge writes whose successful receipt must carry this
+ *  run's stamp. The denied ones are listed too: if one ever succeeded, it is
+ *  an unpoliced write. */
+export const KNOWLEDGE_WRITE_TOOLS = [...WRITE_GRANT, 'knowledge_line_ref_fix', 'knowledge_create', 'knowledge_retire', 'knowledge_supersede', 'knowledge_split', 'knowledge_extract', 'knowledge_promote', 'knowledge_link'];
 
 /** The two runner hosts (board item Parity P8). The launcher records the one its
  *  caller chose in eligible.json; H1/H10/H19 run on Claude Code and pass none,
@@ -178,8 +230,9 @@ export function rotateIfLarge(path, limit = ROTATE_BYTES) {
 }
 
 /** Rotate the JSONL like rotateIfLarge, but carry every still-standing
- *  owes_prose / refused verdict forward into the new file, so a second
- *  rotation can never drop a judgment and relaunch work already judged. */
+ *  needs_conductor / refused verdict forward into the new file, with its
+ *  reason, lane and capability marker, so a second rotation can never drop a
+ *  judgment or a handoff reason and relaunch work already judged. */
 export function rotateJournal(root, limit = ROTATE_BYTES) {
   const { journal } = workerPaths(root);
   try {
@@ -189,22 +242,40 @@ export function rotateJournal(root, limit = ROTATE_BYTES) {
     throw e;
   }
   const standing = judgedVerdicts(root);
+  // The old backup is about to be replaced, so its write count is carried.
+  const writes = { count: countWrites(journalLines(root, [`${journal}.1`])) };
   renameSync(journal, `${journal}.1`);
   const at = new Date().toISOString();
   // judgedVerdicts holds evidence-backed verdicts only, so only those carry.
-  const lines = [...standing].map(([item_id, v]) => JSON.stringify({ at, kind: 'verdict', carried: true, item_id, verdict: v.verdict, file_keys: JSON.parse(v.keys), evidence: true, ...(v.head ? { head: v.head } : {}) }));
+  const lines = [...standing].map(([item_id, v]) =>
+    JSON.stringify({
+      at,
+      kind: 'verdict',
+      carried: true,
+      item_id,
+      verdict: v.verdict,
+      file_keys: JSON.parse(v.keys),
+      evidence: true,
+      ...(v.head ? { head: v.head } : {}),
+      ...(v.lane ? { lane: v.lane } : {}),
+      ...(v.reason ? { reason: v.reason } : {}),
+      ...(v.capability ? { capability: v.capability } : {}),
+    })
+  );
+  // The sample-audit count survives too: the .1 backup is the one older file
+  // kept, so this rotation would otherwise lose the replaced backup's count.
+  if (writes.count) lines.push(JSON.stringify({ at, kind: 'writes_carried', count: writes.count }));
   if (lines.length) writeFileSync(journal, lines.join('\n') + '\n');
 }
 
 const sortedKeys = (keys) => JSON.stringify([...(keys ?? [])].map(String).sort());
 
-/** item id -> {verdict, keys, head} for its LATEST standing evidence-backed
- *  'owes_prose' or 'refused' verdict, from the JSONL's .1 backup then the
- *  JSONL. A later 'closed' verdict for the id clears it. */
-export function judgedVerdicts(root) {
+/** The JSONL then its .1 backup's parsed lines, oldest first; a torn line (a
+ *  killed run) is skipped. */
+function journalLines(root, files = null) {
   const { journal } = workerPaths(root);
-  const map = new Map();
-  for (const path of [`${journal}.1`, journal]) {
+  const out = [];
+  for (const path of files ?? [`${journal}.1`, journal]) {
     let text;
     try {
       text = readFileSync(path, 'utf8');
@@ -214,66 +285,124 @@ export function judgedVerdicts(root) {
     }
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
-      let v;
       try {
-        v = JSON.parse(line);
+        out.push(JSON.parse(line));
       } catch {
-        continue; // a torn last line from a killed run judges nothing
+        // a torn last line from a killed run judges nothing
       }
-      if (!v?.item_id || v.kind !== 'verdict') continue;
-      // Only an EVIDENCE-BACKED verdict stands (the runner's gate stamps
-      // evidence:true). A legacy or gate-failed owes_prose, and an 'unjudged'
-      // line, judge nothing and never suppress a relaunch; 'closed' clears.
-      if ((v.verdict === 'owes_prose' || v.verdict === 'refused') && v.evidence === true && Array.isArray(v.file_keys)) {
-        map.set(v.item_id, { verdict: v.verdict, keys: sortedKeys(v.file_keys), head: v.head ?? null });
-      } else if (v.verdict === 'closed') map.delete(v.item_id);
     }
+  }
+  return out;
+}
+
+/** item id -> {verdict, keys, head, reason, lane, capability} for its LATEST
+ *  standing verdict, from the JSONL's .1 backup then the JSONL. Standing:
+ *  an evidence-backed 'needs_conductor' that carries WORKER_CAPABILITY, or an
+ *  evidence-backed 'refused'. A legacy 'owes_prose' (the judge-only worker's,
+ *  no marker) does not stand, so that item is judged once more under the write
+ *  grant (change (ix)). A later 'closed' verdict for the id clears it. */
+export function judgedVerdicts(root) {
+  const map = new Map();
+  for (const v of journalLines(root)) {
+    if (!v?.item_id || v.kind !== 'verdict') continue;
+    // Only an EVIDENCE-BACKED verdict stands (the runner's gate stamps
+    // evidence:true). A gate-failed verdict, an 'unjudged' or a temporary
+    // 'retry' line judges nothing and never suppresses a relaunch.
+    const handoff = v.verdict === 'needs_conductor' && v.capability === WORKER_CAPABILITY;
+    if ((handoff || v.verdict === 'refused') && v.evidence === true && Array.isArray(v.file_keys)) {
+      map.set(v.item_id, {
+        verdict: v.verdict,
+        keys: sortedKeys(v.file_keys),
+        head: v.head ?? null,
+        reason: typeof v.reason === 'string' ? v.reason : null,
+        lane: typeof v.lane === 'string' ? v.lane : null,
+        capability: v.capability ?? null,
+      });
+    } else if (v.verdict === 'closed') map.delete(v.item_id);
   }
   return map;
 }
 
-/** item id -> sorted file_keys of its standing 'owes_prose' verdict. */
-export function owesProseVerdicts(root) {
+/** item id -> {keys, reason, lane} of its standing 'needs_conductor' verdict:
+ *  the items the worker handed to the conductor. */
+export function handoffVerdicts(root) {
   const out = new Map();
-  for (const [id, v] of judgedVerdicts(root)) if (v.verdict === 'owes_prose') out.set(id, v.keys);
+  for (const [id, v] of judgedVerdicts(root)) if (v.verdict === 'needs_conductor') out.set(id, { keys: v.keys, reason: v.reason, lane: v.lane });
   return out;
 }
 
-/** Is this item judged 'owes prose' for exactly its CURRENT file_keys? A
- *  re-mint that adds paths makes it launchable again. */
-export function isJudgedOwesProse(item, verdicts) {
-  return verdicts.get(item.id) === sortedKeys(item.file_keys);
+/** Is this item handed to the conductor for exactly its CURRENT file_keys? A
+ *  re-mint that adds paths makes it the worker's again. */
+export function isHandedOff(item, handoffs) {
+  return handoffs.get(item.id)?.keys === sortedKeys(item.file_keys);
 }
 
-/** Is this item judged for its CURRENT state? owes_prose: same file_keys.
- *  refused (a close the server refused): same file_keys AND the same HEAD — a
- *  new commit may make the close attestable, so it becomes launchable again. */
+/** How many knowledge writes the worker landed, from the
+ *  JSONL and its .1 backup (a carried count from a rotation included): the
+ *  sample-audit pointer H1 shows (design (4), change CUT: a count and a path,
+ *  not a rendered sample). */
+export function workerWriteCount(root) {
+  return { count: countWrites(journalLines(root)), path: '.sterling/maintenance-worker.jsonl' };
+}
+
+function countWrites(lines) {
+  let count = 0;
+  for (const v of lines) {
+    if (v?.kind === 'writes_carried' && Number.isFinite(v.count)) count += v.count;
+    // Every landed write counts, an unpoliced one too: the count points a
+    // reader at what to spot-check.
+    else if (v?.kind === 'tool_call' && v.is_error === false && KNOWLEDGE_WRITE_TOOLS.includes(v.tool)) count++;
+  }
+  return count;
+}
+
+/** Is this item judged for its CURRENT state? needs_conductor: same
+ *  file_keys. refused (a close the server refused): same file_keys AND the
+ *  same HEAD — a new commit may make the close attestable, so it becomes
+ *  launchable again. */
 export function isJudged(item, verdicts, head) {
   const v = verdicts.get(item.id);
   if (!v || v.keys !== sortedKeys(item.file_keys)) return false;
-  return v.verdict === 'owes_prose' || (v.verdict === 'refused' && Boolean(head) && v.head === head);
+  return v.verdict === 'needs_conductor' || (v.verdict === 'refused' && Boolean(head) && v.head === head);
 }
 
-/** The owning article's slug as the reconcile text names it
- *  ("reconcile article '<slug>' — …"), or null. */
+/** The target record's slug as the item text names it ("reconcile article
+ *  '<slug>' — …", "re-verify research finding '<slug>' — …"), or null. */
 export function articleSlug(item) {
-  return /^reconcile article '([^']+)'/.exec(String(item?.text ?? ''))?.[1] ?? null;
+  return /^(?:reconcile article|re-verify research finding) '([^']+)'/.exec(String(item?.text ?? ''))?.[1] ?? null;
 }
 
-/** Every open reconcile_needed item, read with the same count-then-capped-query
- *  H1 uses so it can never truncate. */
-export function openReconcileItems(store) {
+/** Every open item in the worker's lanes, read with the same
+ *  count-then-capped-query H1 uses so it can never truncate. */
+export function openWorkerItems(store) {
   const total = store.count({ types: ['todo'], source: 'system' });
   if (!total) return [];
-  return store.query({ types: ['todo'], source: 'system', cap: total }).filter((t) => t.system_reason === 'reconcile_needed');
+  return store.query({ types: ['todo'], source: 'system', cap: total }).filter((t) => WORKER_LANES.includes(t.system_reason));
 }
 
-/** Open reconcile_needed items not judged for their current state. Without a
+/** Open worker-lane items not judged for their current state. Without a
  *  `head`, a refused verdict never counts as judged (the caller has no HEAD to
  *  compare against). */
-export function unjudgedReconcileItems(store, root, head = null) {
+export function unjudgedWorkerItems(store, root, head = null) {
   const verdicts = judgedVerdicts(root);
-  return openReconcileItems(store).filter((t) => !isJudged(t, verdicts, head));
+  return openWorkerItems(store).filter((t) => !isJudged(t, verdicts, head));
+}
+
+/** At most `max` items, round-robin across WORKER_LANES in their order and
+ *  oldest first within a lane (design (g)), so one deep lane cannot starve the
+ *  others. An item without a usable created_at sorts first in its lane, as the
+ *  batching check counts it as already waited. */
+export function selectBatch(items, max = RUN_BATCH_MAX) {
+  const age = (t) => {
+    const ms = Date.parse(t.created_at ?? '');
+    return Number.isFinite(ms) ? ms : -Infinity;
+  };
+  const byLane = WORKER_LANES.map((lane) => items.filter((t) => t.system_reason === lane).sort((a, b) => age(a) - age(b)));
+  const out = [];
+  for (let i = 0; out.length < max && byLane.some((q) => i < q.length); i++) {
+    for (const q of byLane) if (i < q.length && out.length < max) out.push(q[i]);
+  }
+  return out;
 }
 
 /** HEAD sha and the project root's prefix inside the git top-level (''
@@ -387,8 +516,14 @@ export function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
  *  ${CLAUDE_PLUGIN_ROOT} to THIS plugin root (clone or installed copy), and
  *  ${CLAUDE_PROJECT_DIR} to THIS project so the child reads and writes this
  *  project's store — also in a sibling project. The bare `node` resolves on the
- *  child's PATH, which it inherits from the session that launched the hook. */
-export function resolveMcpConfig(pluginRoot, projectRoot) {
+ *  child's PATH, which it inherits from the session that launched the hook.
+ *  `policy` {path, token}, for a worker run, appends `--worker-policy <absolute
+ *  path> --worker-token <token>` so the worker's own server enforces the batch
+ *  policy before every mutation (change (i): argv, never ambient env). */
+export function resolveMcpConfig(pluginRoot, projectRoot, policy = null) {
+  if (policy && (typeof policy.token !== 'string' || !policy.token || typeof policy.path !== 'string' || !isAbsolute(policy.path))) {
+    throw new Error(`the worker policy needs an absolute eligible.json path and a non-empty token (got path ${JSON.stringify(policy.path)})`);
+  }
   const path = join(pluginRoot, '.claude-plugin', 'sterling-mcp.json');
   let parsed;
   try {
@@ -401,7 +536,8 @@ export function resolveMcpConfig(pluginRoot, projectRoot) {
     throw new Error(`${path} has no mcpServers.${SERVER} {command, args} entry`);
   }
   const bind = (s) => String(s).split('${CLAUDE_PLUGIN_ROOT}').join(pluginRoot).split('${CLAUDE_PROJECT_DIR}').join(projectRoot);
-  return JSON.stringify({ mcpServers: { [SERVER]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
+  const policyArgs = policy ? ['--worker-policy', policy.path, '--worker-token', policy.token] : [];
+  return JSON.stringify({ mcpServers: { [SERVER]: { ...entry, command: bind(entry.command), args: [...entry.args.map(bind), ...policyArgs] } } });
 }
 
 export function readWorkerPrompt(pluginRoot) {
@@ -413,15 +549,16 @@ export function readWorkerPrompt(pluginRoot) {
   }
 }
 
-/** The shipped prompt, plus the ELIGIBLE items the launcher chose (clean,
- *  unjudged) when it passed any, plus every standing judged verdict
- *  (owes_prose, refused) so the child skips those unless they changed. */
+/** The shipped prompt, plus the ELIGIBLE batch the launcher chose (clean,
+ *  unjudged, lane-fair) when it passed one, with each item's lane and target,
+ *  plus every standing judged verdict (needs_conductor, refused) so the child
+ *  skips those unless they changed. */
 export function workerPrompt(pluginRoot, root, eligible = null) {
   let prompt = readWorkerPrompt(pluginRoot);
   if (eligible) {
     prompt +=
-      `\nELIGIBLE (judge ONLY these items; every other open item is dirty against HEAD or already judged, so leave it alone):\n` +
-      eligible.items.map((t) => `- ${t.id} file_keys ${sortedKeys(t.file_keys)}`).join('\n') +
+      `\nELIGIBLE (work ONLY these items; every other open item is dirty against HEAD, already judged or left for a later run, so leave it alone):\n` +
+      eligible.items.map((t) => `- ${t.id} lane ${t.lane ?? 'reconcile_needed'} target ${t.feature_link ?? 'none'} file_keys ${sortedKeys(t.file_keys)}`).join('\n') +
       '\n';
   }
   const judged = [...judgedVerdicts(root)].map(([id, v]) => `- ${id} ${v.verdict} file_keys ${v.keys}${v.verdict === 'refused' ? ` at HEAD ${v.head}` : ''}`);
@@ -486,7 +623,7 @@ function logLauncherNote(root, reason, detail) {
 }
 
 function failDetail(reason) {
-  return `launch FAILED (${reason}) — reconcile items stay open; it retries after the 30-minute back-off, or drain by hand with /sterling:drain.`;
+  return `launch FAILED (${reason}) — the worker's items stay open; it retries after the 30-minute back-off, or drain by hand with /sterling:drain.`;
 }
 
 /**
@@ -497,7 +634,7 @@ function failDetail(reason) {
  * log write itself fails, the result says so in `log_error`.
  *   opts.root       project root (the hook's normalized input.cwd)
  *   opts.config     .sterling/config.json (raw or parsed; null = defaults)
- *   opts.store      an open SterlingStore (or opts.items: the open reconcile items)
+ *   opts.store      an open SterlingStore (or opts.items: the open queue items)
  *   opts.trigger    'commit' | 'stop'
  *   opts.spawn      child_process.spawn (injected by tests)
  *   opts.spawnSync  for the git HEAD and dirty checks (injected by tests)
@@ -540,10 +677,11 @@ function launchWorker(opts) {
     if (env[WORKER_ENV_FLAG] === '1') return { launched: false, reason: 'inside_worker' };
     if (env[WORKER_DISABLE_ENV] === '1') return { launched: false, reason: 'disabled_env' };
     if (opts.config?.maintenance_worker?.enabled === false) return { launched: false, reason: 'disabled' };
-    // Cheap filter first (no git): items already judged 'owes prose' for their
-    // current file_keys. Refused verdicts need HEAD, checked below.
+    // Cheap filter first (no git): only the worker's lanes, minus items handed
+    // to the conductor for their current file_keys. Refused verdicts need
+    // HEAD, checked below.
     const verdicts = judgedVerdicts(opts.root);
-    const open = (opts.items ?? openReconcileItems(opts.store)).filter((t) => !isJudged(t, verdicts, null));
+    const open = (opts.items ?? openWorkerItems(opts.store)).filter((t) => WORKER_LANES.includes(t.system_reason) && !isJudged(t, verdicts, null));
     if (open.length === 0) return { launched: false, reason: 'queue_empty' };
 
     const nowMs = opts.now ?? Date.now();
@@ -562,7 +700,9 @@ function launchWorker(opts) {
     }
     if (lockState(readJson(paths.lock), nowMs, opts.isAlive) === 'live') return { launched: false, reason: 'already_running' };
     const lastLaunch = Number(readJson(paths.lastLaunch)?.at_ms);
-    if (Number.isFinite(lastLaunch) && nowMs - lastLaunch < DEBOUNCE_MS) return { launched: false, reason: 'debounced' };
+    // A chained launch follows a run that just ended under this lock, so the
+    // debounce (meant for bursts of Stop and commit triggers) does not apply.
+    if (opts.trigger !== 'chain' && Number.isFinite(lastLaunch) && nowMs - lastLaunch < DEBOUNCE_MS) return { launched: false, reason: 'debounced' };
 
     // A close is attested against HEAD: an item whose files are dirty would only
     // be refused, and a refused verdict stands until HEAD moves. When git cannot
@@ -571,7 +711,7 @@ function launchWorker(opts) {
     const git = gitState(opts.root, opts.spawnSync);
     const dirty = git && dirtyPaths(opts.root, [...new Set(open.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git.prefix);
     if (!dirty) {
-      return { launched: false, reason: 'git_failed', detail: `git could not report HEAD or the working-tree state in ${opts.root}, so every reconcile item counts as dirty and no worker starts; drain with /sterling:drain.` };
+      return { launched: false, reason: 'git_failed', detail: `git could not report HEAD or the working-tree state in ${opts.root}, so every queue item counts as dirty and no worker starts; drain with /sterling:drain.` };
     }
     const eligible = open.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
     if (eligible.length === 0) return { launched: false, reason: 'none_eligible' };
@@ -587,11 +727,14 @@ function launchWorker(opts) {
       return Number.isFinite(created) ? nowMs - created : Infinity;
     };
     const oldestWaitMs = Math.max(...eligible.map(waited));
-    if (eligible.length < BATCH_MIN_ITEMS && oldestWaitMs < BATCH_MAX_WAIT_MS) {
+    // A chained launch is the continuation of a run that made progress (ruling
+    // (5): it goes on until the eligible queue is empty), so a short young tail
+    // is not made to wait for the next external trigger.
+    if (opts.trigger !== 'chain' && eligible.length < BATCH_MIN_ITEMS && oldestWaitMs < BATCH_MAX_WAIT_MS) {
       return {
         launched: false,
         reason: 'batching',
-        detail: `${eligible.length} of ${BATCH_MIN_ITEMS} eligible reconcile items, oldest waited ${ageText(new Date(nowMs - oldestWaitMs).toISOString(), nowMs)} of ${Math.round(BATCH_MAX_WAIT_MS / 60_000)}m — no worker until ${BATCH_MIN_ITEMS} are eligible or the oldest has waited that long`,
+        detail: `${eligible.length} of ${BATCH_MIN_ITEMS} eligible items, oldest waited ${ageText(new Date(nowMs - oldestWaitMs).toISOString(), nowMs)} of ${Math.round(BATCH_MAX_WAIT_MS / 60_000)}m — no worker until ${BATCH_MIN_ITEMS} are eligible or the oldest has waited that long`,
       };
     }
 
@@ -616,16 +759,46 @@ function launchWorker(opts) {
     const startedAt = new Date(nowMs).toISOString();
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: 'launching' }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: 'already_running' };
-    writeFileSync(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
-    // The child judges ONLY these (PARTIAL 2); the runner checks the token.
-    // The runner host travels with the eligible list, bound to this launch by the token.
-    const runnerHost = host === 'opencode' ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
-    writeFileSync(paths.eligible, JSON.stringify({ token, head: git.head, ...runnerHost, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
-
+    // From here the lock is ours: anything that fails before the runner is
+    // spawned releases it, so a failed write cannot hold the slot until the
+    // stale-lock timeout.
+    let launched = false;
+    let stage = 'write the launch files';
     let logFd;
     try {
+      writeFileSync(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
+      // The child judges ONLY these (PARTIAL 2); the runner checks the token.
+      // The runner host travels with the eligible list, bound to this launch by the token.
+      const runnerHost = host === 'opencode' ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
+      // THE BATCH POLICY (change (ii)): eligible.json is token-bound, and the
+      // worker's own Sterling server reads it through --worker-policy. `items`
+      // keeps its shape for the runner and the prompt; `policy_items` is the
+      // server's per-item contract {id, lane, target_id, file_keys} (slice A
+      // reads it there because `items` already had another shape).
+      // `queue_snapshot` is every eligible item, so a run that made progress can
+      // re-enter this launcher with what is left (ruling (5), chaining).
+      // `chain_attempted` is every item an earlier run of this chain acted on;
+      // the runner leaves them out of the next chained launch, and
+      // an external trigger (stop, commit) starts with none.
+      const batch = selectBatch(eligible);
+      const chainAttempted = opts.trigger === 'chain' && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
+      writeFileSync(
+        paths.eligible,
+        JSON.stringify({
+          token,
+          head: git.head,
+          ...runnerHost,
+          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })),
+          policy_version: POLICY_VERSION,
+          run_id: randomUUID(),
+          policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
+          queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? '' })),
+          chain_attempted: chainAttempted,
+        })
+      );
       rotateIfLarge(paths.log);
       logFd = openSync(paths.log, 'a');
+      stage = 'spawn';
       const child = opts.spawn(
         process.execPath,
         [runner, '--project', opts.root, '--trigger', String(opts.trigger), '--token', token, '--budget-usd', String(WORKER_RUN_BUDGET_USD)],
@@ -635,13 +808,15 @@ function launchWorker(opts) {
       // may have exited; the runner never started, so free the slot.
       child.on?.('error', () => releaseLock(paths, token));
       child.unref?.();
+      launched = true;
+      stage = 'record the running lock';
       writeFileSync(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: 'running', token }));
-      return { launched: true, reason: 'launched', pid: child.pid, items: eligible.length, host };
+      return { launched: true, reason: 'launched', pid: child.pid, items: batch.length, eligible: eligible.length, host };
     } catch (e) {
-      releaseLock(paths, token);
-      return { launched: false, reason: 'error', detail: failDetail(`spawn: ${e?.message ?? e}`) };
+      return { launched: false, reason: 'error', detail: failDetail(`${stage}: ${e?.message ?? e}`) };
     } finally {
       if (logFd !== undefined) closeSync(logFd);
+      if (!launched) releaseLock(paths, token);
     }
   } catch (e) {
     return { launched: false, reason: 'error', detail: failDetail(e?.message ?? String(e)) };
@@ -711,10 +886,64 @@ export function parseVerdicts(resultText) {
   return verdicts;
 }
 
+/** The short tool name of a knowledge write the stamp check covers, or null. */
+export function knowledgeWriteName(name) {
+  const short = String(name).replace(/^mcp__(?:plugin_sterling_)?sterling__/, '');
+  return KNOWLEDGE_WRITE_TOOLS.includes(short) ? short : null;
+}
+
+/** The run stamp {run_id, item_id} in a write receipt's text, or null. The
+ *  receipt is JSON (the server's json() wrapper); the key is searched a few
+ *  levels deep so a receipt that nests it still counts. A text that is not
+ *  JSON (an OpenCode execute output that wrapped it) is searched for the key's
+ *  own object. */
+export function findStamp(text) {
+  // `resolved` is the server's list of the items the write closed; a stamp
+  // without it closed nothing.
+  const valid = (s) =>
+    s && typeof s === 'object' && typeof s.run_id === 'string' && typeof s.item_id === 'string'
+      ? { run_id: s.run_id, item_id: s.item_id, resolved: Array.isArray(s.resolved) ? s.resolved.map(String) : [] }
+      : null;
+  const search = (v, depth) => {
+    if (!v || typeof v !== 'object' || depth > 4) return null;
+    if (Object.prototype.hasOwnProperty.call(v, STAMP_KEY)) return valid(v[STAMP_KEY]);
+    for (const child of Object.values(v)) {
+      const hit = search(child, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const raw = String(text ?? '');
+  try {
+    return search(JSON.parse(raw), 0);
+  } catch {
+    const m = new RegExp(`"${STAMP_KEY}"\\s*:\\s*(\\{[^{}]*\\})`).exec(raw);
+    if (!m) return null;
+    try {
+      return valid(JSON.parse(m[1]));
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** One journal entry for a knowledge write the child made. The runner adds
+ *  the stamp it finds in the receipt. A line-reference fix takes no resolves,
+ *  so its entry records none even if the child passed one. */
+export function writeEntry(tool, input, is_error, result) {
+  const shape =
+    tool === 'knowledge_line_ref_fix'
+      ? { field: input.field ?? null, find: input.find ?? null, replace: input.replace ?? null, anchor: input.anchor ?? null }
+      : { field: input.field ?? null, resolves: Array.isArray(input.resolves) ? input.resolves.map(String) : [] };
+  return { kind: 'tool_call', tool, article_id: input.id ?? null, ...shape, is_error, result };
+}
+
 /**
  * A stream-json consumer: feed() it stdout chunks; it journals every
- * maintenance_remove call with its result as soon as the result arrives (so a
- * killed run still leaves its closes on record) and keeps the final result.
+ * maintenance_remove call and every knowledge write with its result as soon as
+ * the result arrives (so a killed run still leaves its closes and writes on
+ * record) and keeps the final result. Each journal call passes the result's
+ * full text as a second argument, so the runner can check a write's stamp.
  * `observe(name, input)` fires for every OTHER tool call only when its
  * tool_result arrives WITHOUT is_error (paired by tool_use_id), so a call that
  * failed is never evidence. `launchKeys` maps item id -> the file_keys the
@@ -728,17 +957,17 @@ export function streamJournal(journal, observe = () => {}, launchKeys = new Map(
   let buf = '';
   const pending = new Map();
   const calls = new Map();
-  const out = { result: null, removes: 0, closedOk: 0, lineRefFixes: 0, lineRefFixesOk: 0, lines: 0, mcpStatus: null, sterlingOk: 0 };
-  const isFix = (name) => String(name).endsWith('__knowledge_line_ref_fix');
-  const fixEntry = (input, is_error, result) => ({ kind: 'tool_call', tool: 'knowledge_line_ref_fix', article_id: input.id ?? null, field: input.field ?? null, find: input.find ?? null, replace: input.replace ?? null, anchor: input.anchor ?? null, is_error, result });
+  const out = { result: null, removes: 0, closedOk: 0, lineRefFixes: 0, lineRefFixesOk: 0, writes: 0, writesOk: 0, lines: 0, mcpStatus: null, sterlingOk: 0 };
+  const removeEntry = (input, is_error, result) => ({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error, result });
   const handle = (e) => {
     out.lines++;
     const content = e?.message?.content;
     if (e?.type === 'assistant' && Array.isArray(content)) {
       for (const c of content) {
         if (c?.type !== 'tool_use') continue;
-        if (String(c.name).endsWith('__maintenance_remove')) pending.set(c.id, { fix: false, input: c.input ?? {} });
-        else if (isFix(c.name)) pending.set(c.id, { fix: true, input: c.input ?? {} });
+        const write = knowledgeWriteName(c.name);
+        if (String(c.name).endsWith('__maintenance_remove')) pending.set(c.id, { write: null, input: c.input ?? {} });
+        else if (write) pending.set(c.id, { write, input: c.input ?? {} });
         else calls.set(c.id, { name: String(c.name), input: c.input ?? {} });
       }
     } else if (e?.type === 'user' && Array.isArray(content)) {
@@ -754,20 +983,22 @@ export function streamJournal(journal, observe = () => {}, launchKeys = new Map(
           continue;
         }
         if (!pending.has(c.tool_use_id)) continue;
-        const { fix, input } = pending.get(c.tool_use_id);
+        const { write, input } = pending.get(c.tool_use_id);
         pending.delete(c.tool_use_id);
         const text = Array.isArray(c.content) ? c.content.map((p) => p?.text ?? '').join('') : String(c.content ?? '');
-        if (fix) {
-          // A refused fix is the tool doing its job, not an error of the run.
-          journal(fixEntry(input, Boolean(c.is_error), text.slice(0, 400)));
-          out.lineRefFixes++;
+        if (write) {
+          // A refused write is the server doing its job, not an error of the run.
+          journal(writeEntry(write, input, Boolean(c.is_error), text.slice(0, 400)), text);
+          if (write === 'knowledge_line_ref_fix') out.lineRefFixes++;
+          else out.writes++;
           if (!c.is_error) {
-            out.lineRefFixesOk++;
+            if (write === 'knowledge_line_ref_fix') out.lineRefFixesOk++;
+            else out.writesOk++;
             out.sterlingOk++;
           }
           continue;
         }
-        journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error: Boolean(c.is_error), result: text.slice(0, 400) });
+        journal(removeEntry(input, Boolean(c.is_error), text.slice(0, 400)), text);
         out.removes++;
         if (!c.is_error) {
           out.closedOk++;
@@ -802,8 +1033,8 @@ export function streamJournal(journal, observe = () => {}, launchKeys = new Map(
     end() {
       feedLine(buf);
       buf = '';
-      for (const { fix, input } of pending.values()) {
-        journal(fix ? fixEntry(input, null, 'no result before the run ended') : { kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error: null, result: 'no result before the run ended' });
+      for (const { write, input } of pending.values()) {
+        journal(write ? writeEntry(write, input, null, 'no result before the run ended') : removeEntry(input, null, 'no result before the run ended'), '');
       }
       pending.clear();
       return out;
@@ -811,32 +1042,72 @@ export function streamJournal(journal, observe = () => {}, launchKeys = new Map(
   };
 }
 
-/** Did the stream show the child SUCCESSFULLY read this item's article AND
- *  one of its files? The article counts by uuid, an 8+ char uuid prefix, or
- *  its slug. A file counts by a Read of it (`seenFiles`), or by a Grep whose
- *  path is that file or a directory containing it (`seenGrepPaths`; a Grep
- *  with no path searched the project root) — conductor ruling 2026-09-29. */
-export function hasEvidence(item, seenArticles, seenFiles, root, seenGrepPaths = new Set()) {
+/** Did the stream show the child SUCCESSFULLY read what this item's lane
+ *  needs before a handoff verdict can stand (design (e))?
+ *  - reconcile_needed, state_review: the target article AND one of its files.
+ *  - stale_research: the target finding AND a re-check (a web call, or a Read
+ *    or Grep in this run).
+ *  - refresh_reference: the target AND one of its files, or a web call when
+ *    the item names no file.
+ *  - article_missing: one of its files AND a knowledge_query (the search for
+ *    an existing owner).
+ *  The target counts by uuid, an 8+ char uuid prefix, or its slug. A file
+ *  counts by a Read of it (`seenFiles`), or by a Grep whose path is that file
+ *  or a directory containing it (`seenGrepPaths`; a Grep with no path
+ *  searched the project root) — conductor ruling 2026-09-29. `run` carries
+ *  the run-wide reads {web, queried}: the stream does not tie a web call or a
+ *  query to one item, so those two count per run, not per item. */
+export function hasEvidence(item, seenArticles, seenFiles, root, seenGrepPaths = new Set(), run = {}) {
   const link = String(item.feature_link ?? '');
-  const article = [...seenArticles].some((id) => (link && (id === link || (id.length >= 8 && link.startsWith(id)))) || (item.slug && id === item.slug));
-  const file = (item.file_keys ?? []).some((k) => {
-    const target = resolve(root, k);
-    if (seenFiles.has(target)) return true;
-    for (const g of seenGrepPaths) if (target === g || target.startsWith(g.endsWith(sep) ? g : g + sep)) return true;
+  const target = [...seenArticles].some((id) => (link && (id === link || (id.length >= 8 && link.startsWith(id)))) || (item.slug && id === item.slug));
+  const keys = item.file_keys ?? [];
+  const file = keys.some((k) => {
+    const t = resolve(root, k);
+    if (seenFiles.has(t)) return true;
+    for (const g of seenGrepPaths) if (t === g || t.startsWith(g.endsWith(sep) ? g : g + sep)) return true;
     return false;
   });
-  return article && file;
+  const web = Boolean(run.web);
+  switch (item.lane ?? 'reconcile_needed') {
+    case 'stale_research':
+      return target && (web || seenFiles.size > 0 || seenGrepPaths.size > 0);
+    case 'refresh_reference':
+      return target && (file || (keys.length === 0 && web));
+    case 'article_missing':
+      return file && Boolean(run.queried);
+    default:
+      return target && file;
+  }
+}
+
+/** A reason that names a temporary failure: a busy store, a version (CAS)
+ *  conflict, the budget, a timeout or an unavailable source. Such an item is
+ *  retried by a later run, never handed off (changes (f) and (v)). */
+export const TEMPORARY_RE = /database is locked|SQLITE_BUSY|version conflict|expected_version|stale version|\bCAS\b|budget|timed out|timeout|rate.?limit|unavailable|unreachable|fetch failed|could not (?:fetch|reach|load)/i;
+/** The server's refusal of a write outside the batch policy ("worker policy
+ *  refused <tool>: rule '<rule>' — …"): a handoff, never temporary. */
+export const POLICY_REFUSAL_RE = /worker policy refused/i;
+
+/** The settings the runner relaunches with, from .sterling/config.json: null
+ *  for no file (defaults), or a {problem} when it cannot be read. */
+function readProjectConfig(root) {
+  const c = readJson(join(root, '.sterling', 'config.json'));
+  if (c?.unreadable) return { problem: `config.json unreadable (${c.unreadable})` };
+  return { config: c };
 }
 
 /**
- * The runner's body: run the child on the launcher's ELIGIBLE items, journal
- * every maintenance_remove call and verdict (a refused close becomes a
- * 'refused' verdict keyed by id, file_keys and HEAD), charge the run to
- * today's spend, record the outcome, release the lock. Returns the process
- * exit code. opts: {root, pluginRoot, spawn, now, dryRun, out, log, trigger,
- * token, budgetUsd, claudeBin, timeoutMs, logCapBytes, host, opencodeBin,
- * opencodeModel}; host and the opencode fields default to what the launcher
- * recorded in eligible.json, and host to 'claude'.
+ * The runner's body: run the child on the launcher's ELIGIBLE batch, journal
+ * every maintenance_remove call, knowledge write and verdict (a refused close
+ * becomes a 'refused' verdict keyed by id, file_keys and HEAD), record the
+ * outcome, release the lock, then start the next run when this one made
+ * progress and eligible work is left. Returns the process exit code. opts:
+ * {root, pluginRoot, spawn, now, dryRun, out, log, trigger, token, budgetUsd,
+ * claudeBin, timeoutMs, logCapBytes, host, opencodeBin, opencodeModel,
+ * relaunch, spawnSync}; host and the opencode fields default to what the
+ * launcher recorded in eligible.json, and host to 'claude'. `relaunch(items)`
+ * replaces the chained launcher call, and `spawnSync` is the chained launch's
+ * git probe (both tests only).
  */
 export async function runWorker(opts) {
   const paths = workerPaths(opts.root);
@@ -855,11 +1126,12 @@ export async function runWorker(opts) {
   const abs = (p) => (isAbsolute(String(p)) ? resolve(String(p)) : resolve(opts.root, String(p)));
   // The host comes from the launcher (eligible.json) unless the caller names one.
   const hostOf = (eligible) => opts.host ?? eligible?.host ?? 'claude';
-  /** {bin, args, env} for the chosen host. The OpenCode runner has no per-run
-   *  budget flag, so only the timeout bounds it. */
+  /** {bin, args, env} for the chosen host. Both hosts share WORKER_TIMEOUT_MS
+   *  (change (vii)); the OpenCode runner has no per-run budget flag, so only
+   *  the timeout bounds it. */
   const buildRun = (eligible) => {
     const prompt = workerPrompt(opts.pluginRoot, opts.root, eligible);
-    const mcpConfig = resolveMcpConfig(opts.pluginRoot, opts.root);
+    const mcpConfig = resolveMcpConfig(opts.pluginRoot, opts.root, eligible ? { path: resolve(paths.eligible), token: eligible.token } : null);
     const host = hostOf(eligible);
     if (host === 'opencode') {
       const ocBin = opts.opencodeBin ?? eligible?.opencode_bin;
@@ -901,186 +1173,333 @@ export async function runWorker(opts) {
     writeLastRun(opts.root, { run: runId, trigger: opts.trigger, ...outcome });
     journal({ kind: 'run_summary', ...outcome });
   };
+  // Set when this run should start the next one, after the lock is released.
+  let chain = null;
+  let exitCode = 1;
   try {
-    // A malformed or zero budget is a recorded failure (state written, back-off
-    // armed), never a silent exit.
-    if (!budgetOk) {
-      record({ ok: false, at: iso(), error: `invalid --budget-usd '${rawBudget}' (needs a number >= ${MIN_RUN_BUDGET_USD})` });
-      return 1;
-    }
-    let eligible = null;
-    if (opts.token) {
-      eligible = readEligible();
+    exitCode = await (async () => {
+      // A malformed or zero budget is a recorded failure (state written, back-off
+      // armed), never a silent exit.
+      if (!budgetOk) {
+        record({ ok: false, at: iso(), error: `invalid --budget-usd '${rawBudget}' (needs a number >= ${MIN_RUN_BUDGET_USD})` });
+        return 1;
+      }
+      // A run without the launcher's token has no batch policy, so its server
+      // would not police the write grant: refuse it (fail closed, change (i)).
+      if (!opts.token) {
+        record({ ok: false, at: iso(), error: 'no launch token: a worker run needs the batch policy the launcher writes (use --dry-run to print the argv)' });
+        return 1;
+      }
+      const eligible = readEligible();
       if (!eligible) {
         record({ ok: false, at: iso(), error: 'the eligible-item list is missing or belongs to another launch' });
         return 1;
       }
-    }
-    let run;
-    try {
-      run = buildRun(eligible);
-    } catch (e) {
-      record({ ok: false, at: iso(), error: e?.message ?? String(e) });
-      return 1;
-    }
-    // A refused close on an eligible item is recorded as a 'refused' verdict
-    // keyed by id, file_keys and HEAD, so the launcher skips it until one of
-    // them changes (an item the server always refuses must not relaunch the
-    // worker at every Stop). A permission denial is not a server refusal.
-    const byId = new Map((eligible?.items ?? []).map((t) => [t.id, t]));
-    // What was already refused for an item's current file_keys BEFORE this run:
-    // refusing it again is not information, so it is not progress (else an item
-    // the server always refuses would relaunch at every new HEAD with no back-off).
-    const standing = judgedVerdicts(opts.root);
-    const repeatRefusal = (id) => {
-      const v = standing.get(id);
-      return Boolean(v) && v.verdict === 'refused' && v.keys === sortedKeys(byId.get(id)?.file_keys);
-    };
-    let refusedVerdicts = 0;
-    let newRefusals = 0;
-    let busyCalls = 0;
-    const journalCall = (entry) => {
-      journal(entry);
-      if (entry.kind === 'tool_call' && entry.tool === 'maintenance_remove' && entry.is_error === true && BUSY_RE.test(entry.result ?? '')) {
-        // A locked store is retry-later, not the server's judgment: no 'refused'
-        // verdict, no evidence stamp, so judgedVerdicts ignores it and the item
-        // stays eligible for a later run.
-        busyCalls++;
-        if (byId.has(entry.item_id)) journal({ kind: 'verdict', item_id: entry.item_id, verdict: 'busy', reason: String(entry.result ?? '').slice(0, 200) });
-      } else if (entry.kind === 'tool_call' && entry.is_error === true && byId.has(entry.item_id) && !/permission/i.test(entry.result ?? '')) {
-        // The server's refusal IS the evidence for this verdict.
-        journal({ kind: 'verdict', item_id: entry.item_id, verdict: 'refused', file_keys: byId.get(entry.item_id).file_keys, head: eligible.head, evidence: true, reason: String(entry.result ?? '').slice(0, 200) });
-        refusedVerdicts++;
-        if (!repeatRefusal(entry.item_id)) newRefusals++;
-      }
-    };
-    // EVIDENCE GATE (P3, not the prompt alone): what the child actually read.
-    // Fed only by calls whose result came back without an error.
-    const seenArticles = new Set();
-    const seenFiles = new Set();
-    const seenGrepPaths = new Set();
-    const observe = (name, input) => {
-      if (name.endsWith('__knowledge_get') && input.id) seenArticles.add(String(input.id));
-      else if (name === 'Read' && input.file_path) seenFiles.add(abs(input.file_path));
-      else if (name === 'Grep') seenGrepPaths.add(input.path ? abs(input.path) : resolve(opts.root));
-    };
-    // Both hosts' parsers feed the SAME journalCall and observe, so one gate judges both.
-    const launchKeys = new Map([...byId].map(([id, t]) => [id, t.file_keys ?? []]));
-    const stream = run.host === 'opencode' ? opencodeStreamJournal(journalCall, observe, launchKeys) : streamJournal(journalCall, observe, launchKeys);
-    const timeoutMs = opts.timeoutMs ?? WORKER_TIMEOUT_MS;
-    const logCap = opts.logCapBytes ?? LOG_RUN_CAP_BYTES;
-    let logged = 0;
-    const { code, spawnError, timedOut } = await new Promise((resolve) => {
-      let child;
+      let run;
       try {
-        child = opts.spawn(run.bin, run.args, { cwd: opts.root, stdio: ['ignore', 'pipe', 'inherit'], env: { ...process.env, [WORKER_ENV_FLAG]: '1', CLAUDE_PROJECT_DIR: opts.root, ...run.env } });
+        run = buildRun(eligible);
       } catch (e) {
-        resolve({ code: null, spawnError: e, timedOut: false });
-        return;
+        record({ ok: false, at: iso(), error: e?.message ?? String(e) });
+        return 1;
       }
-      let timedOut = false;
-      let killTimer;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill?.('SIGTERM');
-        killTimer = setTimeout(() => child.kill?.('SIGKILL'), 10_000);
-        killTimer.unref?.();
-      }, timeoutMs);
-      child.stdout.on('data', (d) => {
-        const s = String(d);
-        // The log keeps at most logCap bytes of one run's stream; the JSONL
-        // journals every tool call regardless.
-        if (logged < logCap) {
-          const piece = s.slice(0, logCap - logged);
-          log(piece);
-          logged += piece.length;
-          if (logged >= logCap) log(`\n[maintenance-worker-run: log truncated at ${logCap} bytes for this run; the JSONL keeps every tool call]\n`);
+      // A refused close on an eligible item is recorded as a 'refused' verdict
+      // keyed by id, file_keys and HEAD, so the launcher skips it until one of
+      // them changes (an item the server always refuses must not relaunch the
+      // worker at every Stop). A permission denial is not a server refusal.
+      const byId = new Map(eligible.items.map((t) => [t.id, t]));
+      // What was already refused for an item's current file_keys BEFORE this run:
+      // refusing it again is not information, so it is not progress (else an item
+      // the server always refuses would relaunch at every new HEAD with no back-off).
+      const standing = judgedVerdicts(opts.root);
+      const repeatRefusal = (id) => {
+        const v = standing.get(id);
+        return Boolean(v) && v.verdict === 'refused' && v.keys === sortedKeys(byId.get(id)?.file_keys);
+      };
+      let refusedVerdicts = 0;
+      let newRefusals = 0;
+      let busyCalls = 0;
+      // FAIL CLOSED (change (i)): every successful knowledge write must carry
+      // this run's stamp naming an item of this batch. The server checks
+      // before the write; this is the after-the-fact observation of it.
+      let writesStamped = 0;
+      let policyRefusals = 0;
+      const unpoliced = [];
+      const closedIds = new Set();
+      const resolvedIds = new Set();
+      // Items this run actually acted on (a stamped mutation, a remove attempt, an
+      // evidence-backed handoff, a retry or a refusal). Only these are kept out of
+      // the next chained launch: an offered item the child never touched (a budget
+      // cap ended the run first) stays eligible for it.
+      const actedIds = new Set();
+      const journalCall = (entry, raw = '') => {
+        if (entry.kind === 'tool_call' && entry.tool === 'maintenance_remove' && byId.has(entry.item_id)) actedIds.add(entry.item_id);
+        // Every successful mutation, a remove included, must carry this run's
+        // stamp. A remove's stamp must name the removed item itself.
+        const mutation = entry.kind === 'tool_call' && entry.is_error === false && (entry.tool === 'maintenance_remove' || KNOWLEDGE_WRITE_TOOLS.includes(entry.tool));
+        if (mutation) {
+          const stamp = findStamp(raw);
+          const remove = entry.tool === 'maintenance_remove';
+          entry = { ...entry, stamp };
+          if (!stamp || stamp.run_id !== eligible.run_id || !byId.has(stamp.item_id) || (remove && stamp.item_id !== entry.item_id)) {
+            unpoliced.push(`${entry.tool} on ${(remove ? entry.item_id : entry.article_id) ?? 'unknown record'}`);
+            journal({ ...entry, unpoliced: true });
+            return;
+          }
+          journal(entry);
+          actedIds.add(stamp.item_id);
+          if (remove) {
+            closedIds.add(entry.item_id);
+            return;
+          }
+          if (entry.tool === 'knowledge_line_ref_fix') return; // never progress on its own
+          writesStamped++;
+          // A closure comes from the server's receipt, never from the request:
+          // a partial article_missing join keeps its item open.
+          for (const id of stamp.resolved) {
+            if (!byId.has(id)) continue;
+            resolvedIds.add(id);
+            actedIds.add(id);
+          }
+          return;
         }
-        stream.feed(s);
+        journal(entry);
+        if (entry.tool !== 'maintenance_remove') {
+          if (entry.kind === 'tool_call' && entry.is_error === true && POLICY_REFUSAL_RE.test(entry.result ?? '')) policyRefusals++;
+          return;
+        }
+        if (entry.kind === 'tool_call' && entry.is_error === true && BUSY_RE.test(entry.result ?? '')) {
+          // A locked store is retry-later, not the server's judgment: no 'refused'
+          // verdict, no evidence stamp, so judgedVerdicts ignores it and the item
+          // stays eligible for a later run.
+          busyCalls++;
+          if (byId.has(entry.item_id)) journal({ kind: 'verdict', item_id: entry.item_id, verdict: 'busy', reason: String(entry.result ?? '').slice(0, 200) });
+        } else if (entry.kind === 'tool_call' && entry.is_error === true && byId.has(entry.item_id) && !/permission/i.test(entry.result ?? '')) {
+          // The server's refusal IS the evidence for this verdict.
+          actedIds.add(entry.item_id);
+          journal({ kind: 'verdict', item_id: entry.item_id, lane: byId.get(entry.item_id).lane ?? null, verdict: 'refused', file_keys: byId.get(entry.item_id).file_keys, head: eligible.head, evidence: true, reason: String(entry.result ?? '').slice(0, 200) });
+          refusedVerdicts++;
+          if (!repeatRefusal(entry.item_id)) newRefusals++;
+        }
+      };
+      // EVIDENCE GATE (P3, not the prompt alone): what the child actually read.
+      // Fed only by calls whose result came back without an error.
+      const seenArticles = new Set();
+      const seenFiles = new Set();
+      const seenGrepPaths = new Set();
+      const runReads = { web: false, queried: false };
+      const observe = (name, input) => {
+        if (name.endsWith('__knowledge_get') && input.id) seenArticles.add(String(input.id));
+        else if (name.endsWith('__knowledge_query')) runReads.queried = true;
+        else if (name === 'Read' && input.file_path) seenFiles.add(abs(input.file_path));
+        else if (name === 'Grep') seenGrepPaths.add(input.path ? abs(input.path) : resolve(opts.root));
+        else if (name === 'WebSearch' || name === 'WebFetch') runReads.web = true;
+      };
+      // Both hosts' parsers feed the SAME journalCall and observe, so one gate judges both.
+      const launchKeys = new Map([...byId].map(([id, t]) => [id, t.file_keys ?? []]));
+      const stream = run.host === 'opencode' ? opencodeStreamJournal(journalCall, observe, launchKeys) : streamJournal(journalCall, observe, launchKeys);
+      const timeoutMs = opts.timeoutMs ?? WORKER_TIMEOUT_MS;
+      const logCap = opts.logCapBytes ?? LOG_RUN_CAP_BYTES;
+      let logged = 0;
+      const { code, spawnError, timedOut } = await new Promise((resolve) => {
+        let child;
+        try {
+          child = opts.spawn(run.bin, run.args, { cwd: opts.root, stdio: ['ignore', 'pipe', 'inherit'], env: { ...process.env, [WORKER_ENV_FLAG]: '1', CLAUDE_PROJECT_DIR: opts.root, ...run.env } });
+        } catch (e) {
+          resolve({ code: null, spawnError: e, timedOut: false });
+          return;
+        }
+        let timedOut = false;
+        let killTimer;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          child.kill?.('SIGTERM');
+          killTimer = setTimeout(() => child.kill?.('SIGKILL'), 10_000);
+          killTimer.unref?.();
+        }, timeoutMs);
+        child.stdout.on('data', (d) => {
+          const s = String(d);
+          // The log keeps at most logCap bytes of one run's stream; the JSONL
+          // journals every tool call regardless.
+          if (logged < logCap) {
+            const piece = s.slice(0, logCap - logged);
+            log(piece);
+            logged += piece.length;
+            if (logged >= logCap) log(`\n[maintenance-worker-run: log truncated at ${logCap} bytes for this run; the JSONL keeps every tool call]\n`);
+          }
+          stream.feed(s);
+        });
+        child.on('error', (e) => {
+          clearTimeout(timer);
+          resolve({ code: null, spawnError: e, timedOut });
+        });
+        child.on('close', (c) => {
+          clearTimeout(timer);
+          clearTimeout(killTimer);
+          resolve({ code: c, spawnError: null, timedOut });
+        });
       });
-      child.on('error', (e) => {
-        clearTimeout(timer);
-        resolve({ code: null, spawnError: e, timedOut });
-      });
-      child.on('close', (c) => {
-        clearTimeout(timer);
-        clearTimeout(killTimer);
-        resolve({ code: c, spawnError: null, timedOut });
-      });
-    });
-    const { result, removes, closedOk, lineRefFixes, lineRefFixesOk, mcpStatus, sterlingOk } = stream.end();
-    if (spawnError) {
-      record({ ok: false, at: iso(), error: `could not start ${run.bin}: ${spawnError.message ?? spawnError}` });
-      return 1;
-    }
-    const verdicts = parseVerdicts(result?.result);
-    let evidenced = 0;
-    for (const v of verdicts) {
-      if (v.verdict !== 'owes_prose') {
+      const { result, removes, closedOk, lineRefFixes, lineRefFixesOk, writes, mcpStatus, sterlingOk } = stream.end();
+      if (spawnError) {
+        record({ ok: false, at: iso(), error: `could not start ${run.bin}: ${spawnError.message ?? spawnError}` });
+        return 1;
+      }
+      const verdicts = parseVerdicts(result?.result);
+      const marker = { capability: WORKER_CAPABILITY };
+      let evidenced = 0;
+      let retries = 0;
+      for (const v of verdicts) {
+        const item = byId.get(v.item_id);
+        const lane = item?.lane ?? v.lane ?? null;
         // Only the allowed fields are copied from the child: evidence, head and
         // file_keys are the runner's to set. A 'refused' verdict comes only
         // from the runner's own stream observation, never from the child.
         if (v.verdict === 'refused') {
-          journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, verdict: 'unjudged', reason: 'a refused verdict is recorded by the runner, not the child', claimed_reason: v.reason ?? null });
-        } else {
-          journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, verdict: v.verdict, reason: v.reason ?? null });
+          journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, lane, verdict: 'unjudged', reason: 'a refused verdict is recorded by the runner, not the child', claimed_reason: v.reason ?? null, ...marker });
+          continue;
         }
-        continue;
+        // A legacy 'owes_prose' from the child is the old name of a handoff.
+        if (v.verdict !== 'needs_conductor' && v.verdict !== 'owes_prose') {
+          if (v.verdict === 'retry') {
+            retries++;
+            if (byId.has(v.item_id)) actedIds.add(v.item_id);
+          }
+          journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, lane, verdict: v.verdict, reason: v.reason ?? null, ...marker });
+          continue;
+        }
+        const reason = typeof v.reason === 'string' ? v.reason.trim() : '';
+        if (!reason) {
+          journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, lane, verdict: 'unjudged', reason: 'a handoff without a reason', ...marker });
+          continue;
+        }
+        // A temporary failure is never a standing handoff: the item stays the
+        // worker's and a later run retries it.
+        // A worker-policy refusal is a standing handoff whatever its detail
+        // names: the write is outside the policy, so retrying cannot help.
+        if (!POLICY_REFUSAL_RE.test(reason) && TEMPORARY_RE.test(reason)) {
+          retries++;
+          if (item) actedIds.add(v.item_id);
+          journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, lane, verdict: 'retry', reason: reason.slice(0, 300), claimed: 'needs_conductor', ...marker });
+          continue;
+        }
+        // A handoff stands only when the stream shows the reads its lane
+        // needs. Otherwise it is 'unjudged' and suppresses nothing.
+        if (item && hasEvidence(item, seenArticles, seenFiles, opts.root, seenGrepPaths, runReads)) {
+          journal({ kind: 'verdict', item_id: v.item_id, article: v.article ?? null, lane, verdict: 'needs_conductor', reason: reason.slice(0, 300), file_keys: item.file_keys, evidence: true, ...marker });
+          evidenced++;
+          actedIds.add(v.item_id);
+        } else {
+          journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, lane, verdict: 'unjudged', reason: 'no evidence', claimed_reason: reason.slice(0, 300), ...marker });
+        }
       }
-      // An owes_prose verdict stands only when the stream shows the child
-      // read BOTH the item's article (knowledge_get) AND one of its files
-      // (Read/Grep). Otherwise it is 'unjudged' and suppresses nothing.
-      const item = byId.get(v.item_id);
-      if (item && hasEvidence(item, seenArticles, seenFiles, opts.root, seenGrepPaths)) {
-        journal({ kind: 'verdict', ...v, file_keys: item.file_keys, evidence: true });
-        evidenced++;
-      } else {
-        journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, verdict: 'unjudged', reason: 'no evidence', claimed_reason: v.reason ?? null });
+      // A resolves claim on a successful stamped write closed its item.
+      for (const id of resolvedIds) closedIds.add(id);
+      // PROGRESS (change (vi)): a close (maintenance_remove or resolves) or a
+      // landed factual edit. A line-reference fix is never progress on its own
+      // (the server accepts a shift back and forth).
+      const progressed = closedIds.size > 0 || writesStamped > 0;
+      // What lets a chain go on, and what keeps a run out of the back-off.
+      const chainProgress = progressed || evidenced > 0 || newRefusals > 0 || policyRefusals > 0;
+      const subtype = String(result?.subtype ?? '');
+      const budgetCapped = /max_budget/i.test(subtype);
+      // A budget cap reached after progress is a normal bounded end.
+      const budgetEnd = budgetCapped && progressed;
+      const denials = Array.isArray(result?.permission_denials) ? result.permission_denials.length : 0;
+      const problems = [
+        timedOut ? `killed after ${Math.round(timeoutMs / 60_000)} min timeout` : null,
+        code !== 0 && !budgetEnd ? `exit ${code}` : null,
+        result ? null : run.host === 'opencode' ? 'no final text or error event from opencode run' : 'no stream-json result event',
+        (result?.is_error || subtype.startsWith('error')) && !budgetEnd ? `error result (${result?.subtype ?? 'unknown'})` : null,
+        denials ? `${denials} permission denial(s)` : null,
+        mcpBroken(mcpStatus, sterlingOk) ? `MCP server '${SERVER}' not connected (${mcpStatus}${mcpStatus === 'failed' || mcpStatus === 'disconnected' ? '' : '; no successful sterling tool call'})` : null,
+        unpoliced.length ? `unpoliced write: ${unpoliced.length} successful knowledge write(s) without this run's ${STAMP_KEY} (${unpoliced.slice(0, 3).join('; ')})` : null,
+      ].filter(Boolean);
+      const cost = Number(result?.total_cost_usd);
+      // No reported cost (killed, crashed, hung: no result event) records null,
+      // never a made-up $0.
+      const reported = result && Number.isFinite(cost);
+      const ok = problems.length === 0;
+      record({
+        ok,
+        at: iso(),
+        error: problems.length ? problems.join('; ') : null,
+        verdicts: verdicts.length,
+        closed: verdicts.filter((v) => v.verdict === 'closed').length,
+        remove_calls: removes,
+        closes_ok: closedOk,
+        resolves_closed: resolvedIds.size,
+        writes: writes,
+        writes_ok: writesStamped,
+        unpoliced_writes: unpoliced.length,
+        evidenced_verdicts: evidenced,
+        retry_verdicts: retries,
+        // No evidence-backed handoff, no close, no landed edit and no NEW
+        // refusal: back off like a failure. A locked-database remove is none of
+        // these: a run that only hit the lock backs off, which is the retry delay.
+        refused_verdicts: refusedVerdicts,
+        policy_refusals: policyRefusals,
+        busy_calls: busyCalls,
+        line_ref_fixes: lineRefFixes,
+        line_ref_fixes_ok: lineRefFixesOk,
+        no_progress: !chainProgress,
+        budget_capped: budgetCapped,
+        cost_usd: reported ? cost : null,
+        // The MCP server's status from the stream's init event (null: never
+        // reported); mcpBroken says when it counts as breakage.
+        mcp_status: mcpStatus,
+        host: run.host,
+      });
+      // CHAINING (ruling (5)): a run that closed or fixed an item, handed one
+      // off with evidence, or met a new refusal starts the next one when
+      // eligible work is left. Every item this chain has already acted on is
+      // left out, so an item a run edited but did not close is not picked again
+      // until an external trigger; that also bounds the chain (each link must
+      // act on a new item to go on). An offered item the child never touched
+      // stays in. The
+      // launcher re-checks every item (judged, dirty, batching) and applies
+      // lock and back-off (not the debounce, which is for external triggers).
+      if (ok && chainProgress) {
+        const attempted = new Set([...(Array.isArray(eligible.chain_attempted) ? eligible.chain_attempted.map(String) : []), ...actedIds]);
+        const snapshot = Array.isArray(eligible.queue_snapshot) ? eligible.queue_snapshot : [];
+        const left = snapshot.filter((t) => t && !closedIds.has(t.id) && !attempted.has(t.id));
+        if (left.length) chain = { items: left, attempted: [...attempted], host: eligible.host, opencodeBin: eligible.opencode_bin };
       }
-    }
-    const denials = Array.isArray(result?.permission_denials) ? result.permission_denials.length : 0;
-    const problems = [
-      timedOut ? `killed after ${Math.round(timeoutMs / 60_000)} min timeout` : null,
-      code !== 0 ? `exit ${code}` : null,
-      result ? null : run.host === 'opencode' ? 'no final text or error event from opencode run' : 'no stream-json result event',
-      result?.is_error || String(result?.subtype ?? '').startsWith('error') ? `error result (${result?.subtype ?? 'unknown'})` : null,
-      denials ? `${denials} permission denial(s)` : null,
-      mcpBroken(mcpStatus, sterlingOk) ? `MCP server '${SERVER}' not connected (${mcpStatus}${mcpStatus === 'failed' || mcpStatus === 'disconnected' ? '' : '; no successful sterling tool call'})` : null,
-    ].filter(Boolean);
-    const cost = Number(result?.total_cost_usd);
-    // No reported cost (killed, crashed, hung: no result event) records null,
-    // never a made-up $0.
-    const reported = result && Number.isFinite(cost);
-    record({
-      ok: problems.length === 0,
-      at: iso(),
-      error: problems.length ? problems.join('; ') : null,
-      verdicts: verdicts.length,
-      closed: verdicts.filter((v) => v.verdict === 'closed').length,
-      remove_calls: removes,
-      closes_ok: closedOk,
-      evidenced_verdicts: evidenced,
-      // No evidence-backed verdict, no close and no NEW refusal: back off like a
-      // failure. A line-reference fix is NEVER progress on its own: the server
-      // accepts a shift back and forth (2->4, then 4->2) when both lines hold the
-      // anchor, so counting fixes would loop a $2 run at every trigger. A run that
-      // fixes and then closes counts through closes_ok; a refused close through
-      // newRefusals. A locked-database remove is none of these: a run that only
-      // hit the lock backs off, which is the retry delay.
-      refused_verdicts: refusedVerdicts,
-      busy_calls: busyCalls,
-      line_ref_fixes: lineRefFixes,
-      line_ref_fixes_ok: lineRefFixesOk,
-      no_progress: evidenced === 0 && closedOk === 0 && newRefusals === 0,
-      cost_usd: reported ? cost : null,
-      // The MCP server's status from the stream's init event (null: never
-      // reported); mcpBroken says when it counts as breakage.
-      mcp_status: mcpStatus,
-      host: run.host,
-    });
-    return problems.length === 0 ? 0 : 1;
+      return ok ? 0 : 1;
+    })();
   } finally {
     // Release only OUR lock: a stale-lock takeover may have replaced it.
     releaseLock(paths, token);
+  }
+  if (chain) {
+    const relaunched = relaunchAfterRun(opts, chain);
+    journal({ kind: 'chain', launched: relaunched.launched, reason: relaunched.reason, items_left: chain.items.length, ...(relaunched.detail ? { detail: relaunched.detail } : {}) });
+  }
+  return exitCode;
+}
+
+/** Re-enter the launcher after a run that made progress. The runner's own
+ *  environment carries WORKER_ENV_FLAG (it guards the child's hooks), so it is
+ *  dropped here or the launcher would refuse as 'inside_worker'. Never throws. */
+function relaunchAfterRun(opts, chain) {
+  try {
+    if (opts.relaunch) return opts.relaunch(chain.items, chain) ?? { launched: false, reason: 'unknown' };
+    const cfg = readProjectConfig(opts.root);
+    if (cfg.problem) return { launched: false, reason: 'error', detail: `not chained: ${cfg.problem}` };
+    const { [WORKER_ENV_FLAG]: _inside, ...env } = process.env;
+    return maybeLaunchMaintenanceWorker({
+      root: opts.root,
+      config: cfg.config,
+      items: chain.items,
+      trigger: 'chain',
+      chainAttempted: chain.attempted,
+      spawn: opts.spawn,
+      pluginRoot: opts.pluginRoot,
+      env,
+      // Test seams the runner already carries; unset in a real run.
+      ...(opts.now ? { now: opts.now() } : {}),
+      ...(opts.spawnSync ? { spawnSync: opts.spawnSync } : {}),
+      ...(chain.host === 'opencode' ? { host: 'opencode', opencodeBin: chain.opencodeBin } : {}),
+    });
+  } catch (e) {
+    return { launched: false, reason: 'error', detail: `not chained: ${e?.message ?? e}` };
   }
 }

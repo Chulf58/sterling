@@ -4719,6 +4719,19 @@ var knowledgeWriteSchema = external_exports.object({
   type: external_exports.string().min(1),
   at: external_exports.string().min(1)
 }).strict();
+var WORKER_POLICY_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+var workerPolicyItemSchema = external_exports.object({
+  id: external_exports.string().uuid(),
+  lane: external_exports.enum(WORKER_POLICY_LANES),
+  target_id: external_exports.string().uuid().nullable(),
+  file_keys: external_exports.array(external_exports.string().min(1))
+}).passthrough();
+var workerPolicySchema = external_exports.object({
+  policy_version: external_exports.literal(1),
+  token: external_exports.string().min(1),
+  run_id: external_exports.string().min(1),
+  policy_items: external_exports.array(workerPolicyItemSchema)
+}).passthrough();
 
 // packages/schemas/dist/config.js
 var effortLevel = external_exports.enum(["low", "medium", "high", "xhigh"]);

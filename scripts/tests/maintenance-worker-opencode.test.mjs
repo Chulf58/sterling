@@ -72,9 +72,12 @@ const lastRun = (fx) => JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_ru
 /** Lock + eligible.json the way the launcher writes them for the opencode host. */
 function opencodeRun(fx, items, { model = 'anthropic/claude-sonnet-5-5', token = 'tok' } = {}) {
   writeFileSync(fx.paths.lock, JSON.stringify({ pid: process.pid, started_at: new Date(NOW).toISOString(), token }));
-  writeFileSync(fx.paths.eligible, JSON.stringify({ token, head: HEAD, host: 'opencode', opencode_bin: '/opt/oc/opencode.exe', opencode_model: model, items }));
+  writeFileSync(fx.paths.eligible, JSON.stringify({ token, head: HEAD, host: 'opencode', opencode_bin: '/opt/oc/opencode.exe', opencode_model: model, run_id: OC_RUN_ID, items }));
   return { root: fx.project, pluginRoot: fx.plugin, token, budgetUsd: 2, now: () => NOW, log: () => {} };
 }
+const OC_RUN_ID = 'run-oc-1';
+/** A successful maintenance_remove receipt as the worker's server returns it. */
+const removedText = (item, runId = OC_RUN_ID) => JSON.stringify({ removed: item, worker_stamp: { run_id: runId, item_id: item, resolved: [item] } });
 const ITEM = { id: 'item-a', file_keys: ['src/a.mjs'], feature_link: FIXTURE_FEATURE_ID, slug: 'probe-article' };
 const owes = (id = ITEM.id) => JSON.stringify({ item_id: id, article: 'probe-article', verdict: 'owes_prose', file_keys: ['forged'], reason: 'the article misses the new flag' });
 
@@ -123,24 +126,31 @@ test('[gate] an OpenCode run with knowledge_get on the article and a read of its
     assert.equal(call.opts.env.OPENCODE_DISABLE_PROJECT_CONFIG, '1');
     const config = JSON.parse(call.opts.env.OPENCODE_CONFIG_CONTENT);
     assert.equal(config.model, 'anthropic/claude-sonnet-5-5');
-    assert.deepEqual(config.mcp.sterling, { type: 'local', command: ['node', join(fx.plugin, 'mcp', 'sterling-mcp.mjs'), '--store', join(fx.project, '.sterling', 'sterling.db')], enabled: true });
+    // CHANGED (GitHub #56, change (i)): the batch policy reaches the server as argv on this host too.
+    assert.deepEqual(config.mcp.sterling, { type: 'local', command: ['node', join(fx.plugin, 'mcp', 'sterling-mcp.mjs'), '--store', join(fx.project, '.sterling', 'sterling.db'), '--worker-policy', fx.paths.eligible, '--worker-token', 'tok'], enabled: true });
     // board item d1149d0e, measured on 2.0.22: a top-level deny is overridden by the
     // default agent's own rules (last match wins), so the child runs as its own
     // agent whose permission is an allow-list: '*' denied FIRST, then the
     // worker's tools allowed, as the claude host's --allowedTools.
-    const allowList = { '*': 'deny', execute: 'allow', mcp: 'allow', read: 'allow', grep: 'allow', sterling_maintenance_query: 'allow', sterling_knowledge_get: 'allow', sterling_maintenance_remove: 'allow', sterling_knowledge_line_ref_fix: 'allow' };
+    // CHANGED (GitHub #56, change (vii)): web tools and the factual-refresh grant, as on the claude host.
+    const allowList = {
+      '*': 'deny', execute: 'allow', mcp: 'allow', read: 'allow', grep: 'allow', webfetch: 'allow', websearch: 'allow',
+      sterling_maintenance_query: 'allow', sterling_knowledge_get: 'allow', sterling_maintenance_remove: 'allow', sterling_knowledge_line_ref_fix: 'allow',
+      sterling_knowledge_update: 'allow', sterling_knowledge_edit: 'allow', sterling_knowledge_append: 'allow', sterling_knowledge_array_remove: 'allow', sterling_knowledge_query: 'allow', sterling_knowledge_schema: 'allow',
+    };
     const agent = config.agent[OPENCODE_WORKER_AGENT];
     assert.deepEqual(Object.entries(agent.permission), Object.entries(allowList), 'the agent allow-list, in this order');
     assert.deepEqual(Object.entries(config.permission), Object.entries(allowList), 'the top-level permission is the same allow-list');
     assert.equal(agent.mode, 'primary');
     assert.equal(agent.model, 'anthropic/claude-sonnet-5-5');
     assert.deepEqual(OPENCODE_ALLOWED_TOOLS, Object.keys(allowList).slice(1));
-    for (const k of ['shell', 'bash', 'edit', 'write', 'patch', 'subagent', 'task', 'glob', 'webfetch', 'sterling_no_capture', 'sterling_capture_pending', 'sterling_concept_designed', 'sterling_knowledge_update', 'sterling_domain_describe', 'codex_codex']) {
+    for (const k of ['shell', 'bash', 'edit', 'write', 'patch', 'subagent', 'task', 'glob', 'sterling_no_capture', 'sterling_capture_pending', 'sterling_concept_designed', 'sterling_knowledge_create', 'sterling_knowledge_retire', 'sterling_knowledge_supersede', 'sterling_board_add', 'sterling_config_set', 'sterling_domain_describe', 'codex_codex']) {
       assert.equal(agent.permission[k], undefined, `${k} falls to the '*' deny`);
     }
 
     const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
-    assert.deepEqual(verdicts.map((v) => [v.item_id, v.verdict, v.evidence ?? null]), [['item-a', 'owes_prose', true]]);
+    // CHANGED (GitHub #56): the child's legacy 'owes_prose' is the old name of a handoff; it stands as needs_conductor.
+    assert.deepEqual(verdicts.map((v) => [v.item_id, v.verdict, v.evidence ?? null]), [['item-a', 'needs_conductor', true]]);
     assert.deepEqual(verdicts[0].file_keys, ['src/a.mjs'], 'file_keys are the runner\'s, never the child\'s');
     assert.deepEqual([...judgedVerdicts(fx.project).keys()], ['item-a']);
     const run = lastRun(fx);
@@ -183,7 +193,7 @@ test('[gate] a child-written refused verdict does not stand on OpenCode either; 
     const items = [ITEM, { ...ITEM, id: 'item-b', file_keys: ['src/b.mjs'] }];
     const child = fakeOpencode([
       sterling('maintenance_remove', { id: 'item-a' }, 'error', 'ERROR: maintenance_remove: src/a.mjs differs from HEAD'),
-      sterling('maintenance_remove', { id: 'item-b' }, 'completed', '{"removed":true}'),
+      sterling('maintenance_remove', { id: 'item-b' }, 'completed', removedText('item-b')),
       text(JSON.stringify({ item_id: 'item-b', verdict: 'refused', evidence: true, head: 'forged' })),
     ]);
     assert.equal(await runWorker({ ...opencodeRun(fx, items), spawn: child.fn }), 0);
@@ -476,6 +486,96 @@ test('[d1149d0e] the claude host prompt is byte-identical to the shipped prompt 
     assert.equal(dry.host, 'claude');
     assert.equal(dry.argv[0], '-p');
     assert.equal(dry.argv[1], shipped);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// ------------------------------------------------------------ GitHub #56 on the OpenCode host
+
+test('[#56 opencode] a knowledge write inside execute is journalled with its stamp; an unstamped one fails the run; webfetch counts as a web re-check', async () => {
+  for (const [name, output, policed] of [
+    ['stamped', JSON.stringify({ ok: true, worker_stamp: { run_id: 'run-oc', item_id: ITEM.id } }), true],
+    ['unstamped', JSON.stringify({ ok: true }), false],
+  ]) {
+    const fx = fixture();
+    try {
+      const opts = opencodeRun(fx, [ITEM]);
+      const e = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+      writeFileSync(fx.paths.eligible, JSON.stringify({ ...e, run_id: 'run-oc' }));
+      const child = fakeOpencode([
+        sterling('knowledge_get', { id: FIXTURE_FEATURE_ID }),
+        read('src/a.mjs'),
+        sterling('knowledge_edit', { id: FIXTURE_FEATURE_ID, field: 'files[path=src/a.mjs].role', find: 'a', replace: 'b' }, 'completed', output),
+        part('webfetch', { status: 'completed', input: { url: 'https://example.com' }, output: 'page' }),
+        text(JSON.stringify({ item_id: ITEM.id, verdict: 'closed', reason: 'role refreshed' })),
+      ]);
+      const code = await runWorker({ ...opts, spawn: child.fn });
+      const write = readJournal(fx).find((l) => l.tool === 'knowledge_edit');
+      assert.equal(write.is_error, false, name);
+      assert.equal(write.field, 'files[path=src/a.mjs].role', name);
+      if (policed) {
+        assert.equal(code, 0, name);
+        assert.deepEqual(write.stamp, { run_id: 'run-oc', item_id: ITEM.id, resolved: [] });
+        assert.equal(lastRun(fx).writes_ok, 1);
+      } else {
+        assert.equal(code, 1, name);
+        assert.match(lastRun(fx).error, /unpoliced write/);
+      }
+    } finally {
+      fx.cleanup();
+    }
+  }
+  const observed = [];
+  const s = opencodeStreamJournal(() => {}, (n, i) => observed.push([n, i]));
+  s.feed(JSON.stringify(part('webfetch', { status: 'completed', input: { url: 'u' }, output: 'x' })) + '\n' + JSON.stringify(part('websearch', { status: 'completed', input: { query: 'q' }, output: 'x' })) + '\n');
+  s.end();
+  assert.deepEqual(observed.map(([n]) => n), ['WebFetch', 'WebSearch']);
+});
+
+test('[#56 opencode remove stamp] a successful remove without this run\'s stamp, with a stamp naming another item, or inside a failed execute (the stamp never reached the stream) fails the run as unpoliced', async () => {
+  const items = [ITEM, { ...ITEM, id: 'item-b', file_keys: ['src/b.mjs'] }];
+  const cases = [
+    ['no stamp', sterling('maintenance_remove', { id: 'item-a' }, 'completed', '{"removed":true}')],
+    ['a stamp naming another item', sterling('maintenance_remove', { id: 'item-a' }, 'completed', removedText('item-b'))],
+    ['a stamp from another run', sterling('maintenance_remove', { id: 'item-a' }, 'completed', removedText('item-a', 'run-other'))],
+    ['a failed execute', failedExecute('maintenance_remove', { id: 'item-a' })],
+  ];
+  for (const [name, event] of cases) {
+    const fx = fixture();
+    try {
+      assert.equal(await runWorker({ ...opencodeRun(fx, items), spawn: fakeOpencode([event, text('{"verdict":"none","reason":"x"}')]).fn }), 1, name);
+      const run = lastRun(fx);
+      assert.match(run.error, /unpoliced write: 1 successful knowledge write\(s\) without this run's worker_stamp \(maintenance_remove on item-a\)/, name);
+      assert.equal(readJournal(fx).find((l) => l.tool === 'maintenance_remove').unpoliced, true, name);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test('[#56 opencode shared output] an execute holding two Sterling writes gives neither a stamp, even when its one output carries a valid stamp: the run fails closed', async () => {
+  const fx = fixture();
+  try {
+    const stamp = JSON.stringify({ ok: true, worker_stamp: { run_id: OC_RUN_ID, item_id: ITEM.id, resolved: [] } });
+    const twoWrites = part('execute', {
+      status: 'completed',
+      input: { code: 'await tools.sterling.knowledge_edit(...); await tools.sterling.knowledge_update(...)' },
+      output: stamp,
+      metadata: {
+        metadata: {
+          toolCalls: [
+            { tool: 'sterling.knowledge_edit', status: 'completed', input: { id: FIXTURE_FEATURE_ID, field: 'files[path=src/a.mjs].role', find: 'a', replace: 'b' } },
+            { tool: 'sterling.knowledge_update', status: 'completed', input: { id: FIXTURE_FEATURE_ID, body: { what_it_does: 'x.' }, expected_version: 2 } },
+          ],
+          truncated: false,
+        },
+      },
+    });
+    assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: fakeOpencode([twoWrites, text('{"verdict":"none","reason":"x"}')]).fn }), 1);
+    const writes = readJournal(fx).filter((l) => l.kind === 'tool_call');
+    assert.deepEqual(writes.map((w) => [w.tool, w.unpoliced ?? false, w.stamp ?? null]), [['knowledge_edit', true, null], ['knowledge_update', true, null]]);
+    assert.match(lastRun(fx).error, /unpoliced write: 2 successful knowledge write\(s\)/);
   } finally {
     fx.cleanup();
   }

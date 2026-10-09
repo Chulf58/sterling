@@ -138,8 +138,10 @@ test('AC1: 250 system maintenance items across lanes — H1 reports the TRUE tot
     // spread across multiple registered system_reason lanes, well above any plausible
     // default query/read cap (25, 50, 60, 100 are all common cap literals in this repo)
     for (let i = 0; i < 100; i++) maintenanceItem(store, `reconcile article ${i}`, { system_reason: 'reconcile_needed' });
-    for (let i = 0; i < 100; i++) maintenanceItem(store, `stale research ${i}`, { system_reason: 'stale_research' });
-    for (let i = 0; i < 50; i++) maintenanceItem(store, `article missing ${i}`, { system_reason: 'article_missing' });
+    // CHANGED (GitHub #56): stale_research and article_missing became worker lanes, so the conductor's lanes
+    // here are capture_owed and research_owed.
+    for (let i = 0; i < 100; i++) maintenanceItem(store, `capture owed ${i}`, { system_reason: 'capture_owed' });
+    for (let i = 0; i < 50; i++) maintenanceItem(store, `research owed ${i}`, { system_reason: 'research_owed' });
 
     const r = h1(dir, 'startup');
     assert.equal(r.code, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
@@ -147,7 +149,7 @@ test('AC1: 250 system maintenance items across lanes — H1 reports the TRUE tot
 
     const ctx = additionalContext(r) ?? '';
     // Split with board 27c87783: reconcile_needed is the background worker's lane, so the
-    // headline counts only the conductor's lanes (stale_research 100 + article_missing 50 =
+    // headline counts only the conductor's lanes (capture_owed 100 + research_owed 50 =
     // 150) and the worker sentence carries the reconcile_needed count (100). Both exact,
     // neither capped, and together they are the TRUE 250.
     const headline = ctx.match(/MAINTENANCE QUEUE IS (?:VERY )?DEEP — (\d+) drainable items/);

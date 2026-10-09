@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { maybeLaunchMaintenanceWorker } from '../hooks/lib/maintenance-worker.mjs';
+import { WORKER_CAPABILITY, maybeLaunchMaintenanceWorker } from '../hooks/lib/maintenance-worker.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(root, 'scripts', 'hooks', 'h1-session-start.mjs');
@@ -57,15 +57,16 @@ test('H1 prints the reconcile count and the OLDEST item age on the banner and to
     const oldest = daysAgo(3, 2);
     reconcileItem(p.store, oldest);
     const judged = reconcileItem(p.store, daysAgo(0), "reconcile article 'y' — changed");
-    // 'owes prose' lives in the worker's JSONL, keyed by id + current file_keys (never on the item).
-    writeFileSync(join(p.dir, '.sterling', 'maintenance-worker.jsonl'), JSON.stringify({ kind: 'verdict', item_id: judged.id, verdict: 'owes_prose', file_keys: ['src/a.mjs'], reason: 'new flag', evidence: true }) + '\n');
+    // A handoff lives in the worker's JSONL, keyed by id + current file_keys (never on the item).
+    // CHANGED (GitHub #56): a standing handoff is a needs_conductor verdict with the capability marker.
+    writeFileSync(join(p.dir, '.sterling', 'maintenance-worker.jsonl'), JSON.stringify({ kind: 'verdict', item_id: judged.id, lane: 'reconcile_needed', verdict: 'needs_conductor', file_keys: ['src/a.mjs'], reason: 'new flag', evidence: true, capability: WORKER_CAPABILITY }) + '\n');
     const out = h1(p.dir);
     // Old wording "worker not running" replaced by the worker's real state (board 27c87783):
     // 2 of the 3 items are unjudged and the oldest waited far past 30 minutes, so a launch is due.
     assert.match(out.systemMessage, /3 maintenance items pending · 3 items in lane reconcile_needed, oldest 3d 2h, worker launches at your next Stop or git commit to judge 2 items \(oldest unjudged 3d 2h\)\. No run recorded yet$/);
     const ctx = out.hookSpecificOutput.additionalContext;
     assert.match(ctx, new RegExp(`RECONCILE BACKLOG: 3 items in lane reconcile_needed, the oldest of all items open since ${oldest.replace(/[.]/g, '\\.')} \\(3d 2h\\)\\. `));
-    assert.match(ctx, /1 of the 3 items was judged 'owes prose' by the worker and is yours to draft\. The worker handles the other 2\. worker launches/);
+    assert.match(ctx, new RegExp(`1 of the 3 items was handed to you by the worker \\(needs_conductor\\) and is yours\\. The worker handles the other 2\\. Why: ${judged.id.slice(0, 8)} \\(reconcile_needed\\): new flag\\. worker launches`));
   } finally {
     p.cleanup();
   }
