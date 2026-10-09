@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   setupOpenCode, formatOpenCodeRows, opencodeConfigDir, mcpLauncherPath, STERLING_AGENTS_SUBDIR, CONDUCTOR_AGENT,
-  swapFullAgentModel, opencodeModelRef, sterlingRootFrom, storeWriteTools, materializeTui,
+  swapFullAgentModel, opencodeModelRef, opencodeModelFor, sterlingRootFrom, storeWriteTools, materializeTui,
 } from '../lib/opencode-install.mjs';
 import { renderPortableText } from '../lib/agent-fences.mjs';
 
@@ -736,6 +736,37 @@ test('model swap: the swapped roster agent is re-rendered with the matching Open
   // Swapping again replaces the pin rather than adding a second line.
   swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5' });
   assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5']);
+});
+
+test('model swap: a role with an OpenCode override pins openai/<id>; a role without one pins anthropic/<id>', () => {
+  // decision opencode-only-model-override-per-role-for-openai-picks
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const read = (n) => readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8');
+  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-5.6-terra' });
+  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['reviewer'], model: 'claude-opus-5-5' });
+  assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: openai/gpt-5.6-terra']);
+  assert.deepEqual(read('reviewer').match(/^model: .*$/gm), ['model: anthropic/claude-opus-5-5']);
+  // A later sync keeps the override pin.
+  assert.equal(statusOf(run(dir, home), '/implementor.md'), 'matches');
+  // Clearing the override (no opencodeModel) goes back to the role's Claude model.
+  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5' });
+  assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5']);
+  // A malformed override is refused before any file is written.
+  const before = read('implementor');
+  assert.throws(() => swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5', opencodeModel: 'gpt-5.6-terra\nhooks: x' }), /opencode_model/);
+  assert.equal(read('implementor'), before);
+});
+
+test('opencodeModelFor: the override when set, else anthropic/<Claude model>', () => {
+  assert.equal(opencodeModelFor({ model: 'claude-sonnet-5-5' }), 'anthropic/claude-sonnet-5-5');
+  assert.equal(opencodeModelFor({ model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-6.1-sol' }), 'openai/gpt-6.1-sol');
+  assert.equal(opencodeModelFor({ model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-6-astra' }), 'openai/gpt-6-astra');
+  for (const bad of ['gpt-6-astra', 'openai/', '', 'openai/gpt 6', 42]) {
+    assert.throws(() => opencodeModelFor({ model: 'claude-sonnet-5-5', opencodeModel: bad }), /opencode_model/, JSON.stringify(bad));
+  }
+  assert.throws(() => opencodeModelFor({}), /model/);
 });
 
 test('model swap: a hand-edited Sterling-full file is refused and left byte-identical', () => {

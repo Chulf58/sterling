@@ -14,4 +14,6 @@ export function swapFullAgentModel(opts: {
   pluginRoot: string;
   agents: string[];
   model: string;
+  /** the role's OpenCode-only override (<provider>/<model>); absent pins anthropic/<model> */
+  opencodeModel?: string;
 }): { skipped: string; rows?: undefined } | { rows: OpenCodeRow[]; skipped?: undefined };

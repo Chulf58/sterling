@@ -1032,6 +1032,26 @@ export function opencodeModelRef(model) {
   return `anthropic/${model}`;
 }
 
+// The <provider>/<model> form of an OpenCode model; the same pattern as
+// OPENCODE_MODEL_REF_RE in packages/schemas/src/config.ts, which validates
+// config.models.<role>.opencode_model when the config is written.
+const OPENCODE_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * The OpenCode model for one config.models role (decision
+ * opencode-only-model-override-per-role-for-openai-picks): the role's
+ * OpenCode-only override when it is set (for example openai/gpt-5.6-terra),
+ * else anthropic/<the role's Claude model>. A malformed override is refused,
+ * because the value lands on a frontmatter `model:` line.
+ */
+export function opencodeModelFor({ model, opencodeModel } = {}) {
+  if (opencodeModel === undefined) return opencodeModelRef(model);
+  if (typeof opencodeModel !== 'string' || !OPENCODE_REF_RE.test(opencodeModel)) {
+    throw new TypeError(`opencodeModelFor: opencode_model must be <provider>/<model>, got ${JSON.stringify(opencodeModel)}`);
+  }
+  return opencodeModel;
+}
+
 /** The Sterling plugin root above a module: the nearest directory holding agent-templates/registry.json. */
 export function sterlingRootFrom(moduleUrl = import.meta.url) {
   const start = dirname(fileURLToPath(moduleUrl));
@@ -1117,12 +1137,13 @@ export function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} 
 
 /**
  * The System-tab model swap on OpenCode: re-render the project's Sterling-full set,
- * pinning the OpenCode model for `model` on every swapped roster agent. A project
- * whose Sterling-full set was never installed is skipped; nothing is created.
+ * pinning the OpenCode model for the role on every swapped roster agent: the role's
+ * `opencodeModel` override when set, else anthropic/<model>. A project whose
+ * Sterling-full set was never installed is skipped; nothing is created.
  */
-export function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
+export function swapFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
   if (!existsSync(join(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
-  const ref = opencodeModelRef(model);
+  const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ['ls-files', '--', '.opencode']);
   const tracked = ls.status === 0 ? ls.stdout.split('\n').filter(Boolean) : [];

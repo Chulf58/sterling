@@ -252,3 +252,74 @@ test('controller: the handoff row says why — not set for an absent key, the tr
     rmSync(f.dir, { recursive: true, force: true });
   }
 });
+
+// decision opencode-only-model-override-per-role-for-openai-picks
+test('controller: an OpenCode override writes config.models.<key>.opencode_model and the OpenCode agent only; the Claude agent file is unchanged', async () => {
+  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high', hard_task: { model: 'claude-h' } } } });
+  const ocDir = join(f.dir, '.opencode', 'agents', 'sterling');
+  mkdirSync(ocDir, { recursive: true });
+  const claudeAgent = join(f.dir, '.claude', 'agents', 'implementor.md');
+  mkdirSync(join(f.dir, '.claude', 'agents'), { recursive: true });
+  writeFileSync(claudeAgent, '---\nname: implementor\nmodel: claude-a\neffort: high\n---\nbody\n');
+  const claudeBefore = readFileSync(claudeAgent, 'utf8');
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.applyEffects([
+      { type: 'opencode_model', key: 'implementor', to: 'openai/gpt-5.6-terra', model: 'claude-a', effort: 'high', agents: ['implementor'] },
+    ]);
+    assert.deepEqual(JSON.parse(readFileSync(f.configPath, 'utf8')).models.implementor, { model: 'claude-a', effort: 'high', hard_task: { model: 'claude-h' }, opencode_model: 'openai/gpt-5.6-terra' });
+    assert.match(readFileSync(join(ocDir, 'implementor.md'), 'utf8'), /^model: openai\/gpt-5\.6-terra$/m);
+    assert.equal(readFileSync(claudeAgent, 'utf8'), claudeBefore, 'the Claude Code agent file is byte-identical');
+    assert.match(ctl.ui().notice ?? '', /set to openai\/gpt-5\.6-terra; Claude Code keeps claude-a/);
+    const decisions = ctl.store.query({ types: ['decision'], cap: 10 }) as Array<{ title: string }>;
+    assert.ok(decisions.some((d) => d.title === 'OpenCode model: implementor anthropic/claude-a→openai/gpt-5.6-terra (System tab)'), JSON.stringify(decisions.map((d) => d.title)));
+
+    // a later Claude swap on the same key keeps the override, on disk and on OpenCode
+    await ctl.applyEffects([
+      { type: 'model_swap', key: 'implementor', from: { model: 'claude-a', effort: 'high' }, to: { model: 'claude-b', effort: 'low' }, agents: ['implementor'], decisionTitle: 't' },
+    ]);
+    assert.deepEqual(JSON.parse(readFileSync(f.configPath, 'utf8')).models.implementor, { model: 'claude-b', effort: 'low', hard_task: { model: 'claude-h' }, opencode_model: 'openai/gpt-5.6-terra' });
+    assert.deepEqual(readFileSync(join(ocDir, 'implementor.md'), 'utf8').match(/^model: .*$/gm), ['model: openai/gpt-5.6-terra']);
+
+    // clearing the override returns the OpenCode agent to the role's Claude model
+    await ctl.applyEffects([
+      { type: 'opencode_model', key: 'implementor', from: 'openai/gpt-5.6-terra', model: 'claude-b', effort: 'low', agents: ['implementor'] },
+    ]);
+    assert.equal('opencode_model' in JSON.parse(readFileSync(f.configPath, 'utf8')).models.implementor, false);
+    assert.deepEqual(readFileSync(join(ocDir, 'implementor.md'), 'utf8').match(/^model: .*$/gm), ['model: anthropic/claude-b']);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('controller: an override for a key the config file does not carry writes the key with its current Claude values', async () => {
+  const f = fixture();
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.applyEffects([
+      { type: 'opencode_model', key: 'reviewer', to: 'openai/gpt-6.1-sol', model: 'claude-opus-5-5', effort: 'high', agents: ['reviewer'] },
+    ]);
+    assert.deepEqual(JSON.parse(readFileSync(f.configPath, 'utf8')).models.reviewer, { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' });
+    assert.equal(existsSync(join(f.dir, '.opencode')), false, 'no OpenCode agents installed, none created');
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('controller: a malformed override is refused before config.json is written', async () => {
+  const f = fixture({ models: { implementor: { model: 'claude-a', effort: 'high' } } });
+  const before = readFileSync(f.configPath, 'utf8');
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.applyEffects([
+      { type: 'opencode_model', key: 'implementor', to: 'gpt-5.6-terra', model: 'claude-a', effort: 'high', agents: ['implementor'] },
+    ]);
+    assert.equal(readFileSync(f.configPath, 'utf8'), before);
+    assert.match(ctl.ui().notice ?? '', /OpenCode model for 'implementor' failed/);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
