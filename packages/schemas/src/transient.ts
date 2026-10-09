@@ -169,3 +169,35 @@ export const knowledgeWriteSchema = z
   })
   .strict();
 export type KnowledgeWrite = z.infer<typeof knowledgeWriteSchema>;
+
+// The maintenance worker's batch policy (GitHub #56, decision
+// maintenance-worker-drains-every-lane-and-writes-factual-refresh-on-sonnet,
+// changes (i) and (ii)). The launcher's token-bound eligible.json
+// (.sterling/transient/maintenance-worker.eligible.json) is the policy file:
+// the worker's MCP server reads it through `--worker-policy <path>
+// --worker-token <token>` and refuses every mutation it does not allow.
+// eligible.json already carries `items` ({id, file_keys, feature_link, slug},
+// the runner's judging list), so the policy items live under `policy_items`.
+// Unknown keys pass through, at the top level and on each item: the launcher
+// and runner keep their own fields, and an unknown key never widens what the
+// server allows, because the server reads only the keys named here.
+export const WORKER_POLICY_LANES = ['reconcile_needed', 'state_review', 'stale_research', 'refresh_reference', 'article_missing'] as const;
+export type WorkerPolicyLane = (typeof WORKER_POLICY_LANES)[number];
+export const workerPolicyItemSchema = z
+  .object({
+    id: z.string().uuid(),
+    lane: z.enum(WORKER_POLICY_LANES),
+    target_id: z.string().uuid().nullable(),
+    file_keys: z.array(z.string().min(1)),
+  })
+  .passthrough();
+export type WorkerPolicyItem = z.infer<typeof workerPolicyItemSchema>;
+export const workerPolicySchema = z
+  .object({
+    policy_version: z.literal(1),
+    token: z.string().min(1),
+    run_id: z.string().min(1),
+    policy_items: z.array(workerPolicyItemSchema),
+  })
+  .passthrough();
+export type WorkerPolicy = z.infer<typeof workerPolicySchema>;
