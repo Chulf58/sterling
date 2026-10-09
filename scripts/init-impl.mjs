@@ -46,8 +46,7 @@ import { ensureProjectIdentity, withIdentityIgnore, IGNORE_ALL, IGNORE_KEEP_IDEN
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, userScopeCodexServer, codexUserScopeLine } from './lib/codex-mcp.mjs';
-import { renderTmuxLauncher } from './lib/launcher-tmux.mjs';
-import { historicalLauncherTemplates, olderGeneratedLauncher, replayFailureLine } from './lib/launcher-history.mjs';
+import { ensureLaunchers, launcherHistoryLoader, launcherHost, launcherTools, removeRetiredLaunchers, LAUNCHER_GITIGNORE_ENTRIES } from './lib/launchers.mjs';
 import { isInstalledCopy } from './lib/installed-copy.mjs';
 import { cloneLauncherTarget, enableMarketplaceAutoUpdate, cloneCleanupLines } from './lib/consumer-cutover.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
@@ -176,6 +175,16 @@ const claudeProbe = !claudeProbeOverride
       ? { installed: false, reason: 'STERLING_CLAUDE_PROBE=absent' }
       : fail(`STERLING_CLAUDE_PROBE must be 'ok' or 'absent' (got '${claudeProbeOverride}')`, 2);
 const claudeHost = claudeProbe.installed;
+// Which openers the launchers get (scripts/lib/launchers.mjs): read here, in the verify
+// pass, so a bad STERLING_LAUNCHER_HOST refuses before anything is written.
+let launcherHostKind;
+let launcherToolsFound;
+try {
+  launcherHostKind = launcherHost();
+  launcherToolsFound = launcherTools({ claude: claudeHost });
+} catch (err) {
+  fail(err.message, 2);
+}
 
 // recorded config = the declaration source on re-runs (§12 ensure-manifest)
 const configPath = join(target, '.sterling', 'config.json');
@@ -386,7 +395,7 @@ if (!recorded) {
 const items = []; // { item, status: created|matches|differs|exists|refused|refreshed|stale|skipped|failed, detail }
 const warns = [];
 if (!claudeHost) {
-  warns.push(`\n⚠ Claude Code not found (${claudeProbe.reason}) — skipped the Claude-only files: sterling-launch.sh, sterling.bat, tui.bat, .claude/agents/, .claude/settings.json and the codex user-scope check. Wrote the OpenCode side only; install Claude Code and re-run /sterling:init to add them.`);
+  warns.push(`\n⚠ Claude Code not found (${claudeProbe.reason}) — skipped the Claude-only files: claude-code.bat (claude-code.sh on Linux), .claude/agents/, .claude/settings.json and the codex user-scope check. Wrote the OpenCode side only; install Claude Code and re-run /sterling:init to add them.`);
 }
 
 // directories: a present directory is simply `exists` (a dir cannot be hand-edited)
@@ -813,135 +822,41 @@ if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
 const installedCopy = isInstalledCopy(pluginRoot);
 const oldClonePaths = [];
 
-// Claude-only (decision init-without-claude-code-probes-and-skips-claude-artifacts-loudly):
-// sterling-launch.sh starts `claude`, and the .bat files only call it.
-if (claudeHost) {
-  // WSL/tmux launchers (§11, decision foreign_bb5e25cd): all projects are WSL (company
-  // policy), so init generates the new-way launchers — a thin Windows .bat that
-  // double-clicks into `wt -> wsl --cd <project> -> bash -lic ./sterling-launch.sh`,
-  // plus the per-project tmux launcher sterling-launch.sh (claude left, TUI right).
-  // node/claude are detected at RUNTIME inside the .sh; the .bat needs no exe paths.
-  const toWindowsPath = (p) => {
-    // /mnt/c/Users/cuj/X -> C:\Users\cuj\X (WSL drvfs); else just backslash-ize
-    const m = /^\/mnt\/([a-z])(\/.*)?$/.exec(p);
-    return m ? `${m[1].toUpperCase()}:${(m[2] ?? '/').replace(/\//g, '\\')}` : p.replace(/\//g, '\\');
-  };
-  // tmux session names forbid '.'/':' and choke on spaces — bake a sanitized,
-  // per-project name so multiple projects run at once but never the same one twice
-  const sanitizeSession = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
-  const winProjectDir = toWindowsPath(fwd(target));
-  const sessionName = `sterling-${sanitizeSession(basename(target))}`;
-  const splitPercent = Math.round(eff.splitRatio * 100);
-  // the .sh is bash — ALWAYS LF (a CRLF shebang/line breaks bash); the .bat files
-  // are ALWAYS CRLF (cmd.exe misparses LF-only batch files), regardless of eol config
-  const lf = (s) => s.replace(/\r\n/g, '\n');
-  const crlf = (s) => s.replace(/\r?\n/g, '\r\n');
-  // Older generated launchers (decision init-and-update-refresh-an-older-generated-
-  // launcher): a launcher that is a pristine render of an EARLIER template version is
-  // rewritten and reported `refreshed`; one matching no version is a hand edit, left
-  // untouched with a loud line. The /sterling:update ensure pass runs this same code.
-  // The versions (git on a clone, bin/launcher-history.json on an installed copy;
-  // scripts/lib/launcher-history.mjs) are read only once a launcher differs.
-  let launcherHistory = null;
-  const olderGenerated = (text, templateName) => {
-    if (!launcherHistory) {
-      launcherHistory = historicalLauncherTemplates({ repoRoot: pluginRoot });
-      if (launcherHistory.replayFailures.length) {
-        warns.push(`\n⚠ ${replayFailureLine(launcherHistory.replayFailures, 'a launcher rendered by one of them is left untouched as if hand-edited. Fix or report the renderer commit named above.')}`);
-      }
-    }
-    return olderGeneratedLauncher(text, templateName, launcherHistory);
-  };
-  const refreshedDetail = (oldPath, newPath) =>
-    'an earlier generated version of the template; rewritten from the current one' +
-    (oldPath && oldPath !== newPath ? ` (it was rendered for ${oldPath}, now ${newPath})` : '');
-  const leftUntouched = (file) => {
-    if (launcherHistory.degraded) {
-      warns.push(`\n⚠ ${file} differs from the current render and could not be checked against earlier versions (no template history: ${launcherHistory.degraded}), so it was left untouched. To refresh it, delete it and re-run /sterling:init.`);
-      return { item: file, status: 'differs', detail: 'left untouched — could not be checked (no template history); delete it and re-run /sterling:init to regenerate' };
-    }
-    warns.push(`\n⚠ ${file} differs from the current render and matches no earlier version of its template (hand-edited, or rendered for another path), so it was left untouched. To refresh it, delete it and re-run /sterling:init.`);
-    return { item: file, status: 'differs', detail: 'left untouched (matches no generated version: hand-edited or another path) — delete it and re-run /sterling:init to regenerate' };
-  };
-  // sterling.bat and tui.bat: created, matches, refreshed or (hand-edited) differs
-  const ensureBat = (file, path, expected, templateName, createdDetail) => {
-    const existing = existsSync(path) ? readFileSync(path, 'utf8') : null;
-    if (existing === null) {
-      writeFileSync(path, expected);
-      items.push({ item: file, status: 'created', detail: createdDetail });
-      return;
-    }
-    if (normalize(existing) === normalize(expected)) {
-      items.push({ item: file, status: 'matches', detail: 'unchanged' });
-      return;
-    }
-    const old = olderGenerated(existing, templateName);
-    if (old) {
-      writeFileSync(path, expected);
-      items.push({ item: file, status: 'refreshed', detail: refreshedDetail(old.WIN_PROJECT_DIR, winProjectDir) });
-    } else {
-      items.push(leftUntouched(file));
-    }
-  };
-
-  // (1) the tmux launcher — the actual split lives here; both .bat files call it
-  // (an installed plugin copy gets NO --plugin-dir and resolves the TUI at run time;
-  // the authoring clone keeps both — see scripts/lib/launcher-tmux.mjs)
-  const expectedTmuxLauncher = assertNoDeadTerms('sterling-launch.sh', lf(
-    renderTmuxLauncher(pluginRoot, { session: sessionName, splitPercent })
-  ));
-  const tmuxLauncherPath = join(target, 'sterling-launch.sh');
-  const existingTmuxLauncher = existsSync(tmuxLauncherPath) ? readFileSync(tmuxLauncherPath, 'utf8') : null;
-  const cloneLauncher = installedCopy && existingTmuxLauncher !== null ? cloneLauncherTarget(existingTmuxLauncher) : null;
-  if (existingTmuxLauncher === null) {
-    writeFileSync(tmuxLauncherPath, expectedTmuxLauncher);
-    items.push({ item: 'sterling-launch.sh', status: 'created', detail: `tmux session ${sessionName}, ${splitPercent}% TUI pane` });
-  } else if (normalize(existingTmuxLauncher) === normalize(expectedTmuxLauncher)) {
-    items.push({ item: 'sterling-launch.sh', status: 'matches', detail: 'generated content unchanged' });
-  } else if (cloneLauncher) {
-    writeFileSync(tmuxLauncherPath, expectedTmuxLauncher);
-    if (cloneLauncher.clonePath) oldClonePaths.push(cloneLauncher.clonePath);
-    const from = cloneLauncher.clonePath ? `the clone ${cloneLauncher.clonePath}` : 'a clone (the old launcher does not record its path)';
-    items.push({ item: 'sterling-launch.sh', status: 'replaced', detail: `the old launcher started claude with --plugin-dir pointing at ${from}, which overrides the installed plugin; regenerated in the installed-copy shape` });
-  } else {
-    const old = olderGenerated(existingTmuxLauncher, 'launcher-tmux.sh');
-    if (old) {
-      writeFileSync(tmuxLauncherPath, expectedTmuxLauncher);
-      const oldPluginDir = old.PLUGIN_DIR ?? /^PLUGIN_DIR="([^"]+)"/.exec(old.PLUGIN_PATHS ?? '')?.[1];
-      const newPluginDir = installedCopy ? 'the installed copy, resolved at run time' : fwd(pluginRoot);
-      items.push({ item: 'sterling-launch.sh', status: 'refreshed', detail: refreshedDetail(oldPluginDir, newPluginDir) });
-    } else {
-      items.push(leftUntouched('sterling-launch.sh'));
-    }
-  }
-
-  // (2) the double-click Windows entry: Windows Terminal -> WSL -> the tmux launcher
-  const expectedLauncher = assertNoDeadTerms('sterling.bat', crlf(
-    readFileSync(join(pluginRoot, 'templates', 'launcher-win.bat'), 'utf8')
-      .replaceAll('{{WIN_PROJECT_DIR}}', winProjectDir)
-  ));
-  ensureBat('sterling.bat', join(target, 'sterling.bat'), expectedLauncher, 'launcher-win.bat', `double-click -> wsl ${winProjectDir}`);
-
-  // (3) the §13 dashboard re-opener: re-adds the TUI pane to the running session
-  const expectedTuiLauncher = assertNoDeadTerms('tui.bat', crlf(
-    readFileSync(join(pluginRoot, 'templates', 'tui-win.bat'), 'utf8')
-      .replaceAll('{{WIN_PROJECT_DIR}}', winProjectDir)
-  ));
-  ensureBat('tui.bat', join(target, 'tui.bat'), expectedTuiLauncher, 'tui-win.bat', 'double-click -> ./sterling-launch.sh tui');
+// Per tool found (user-ruled 2026-10-08, "Yes, per tool found"): the engine when Claude
+// Code or OpenCode is installed, and the opener pair of each tool that is.
+const launcherHistory = launcherHistoryLoader(pluginRoot);
+if (launcherToolsFound.claude || launcherToolsFound.opencode) {
+  // WSL/tmux launchers (§11, decision launchers-consolidated-to-claude-code-and-opencode-
+  // pair): the engine sterling-launch.sh claude|opencode|tui, plus claude-code.bat and
+  // opencode.bat on a Windows (WSL2) host or claude-code.sh and opencode.sh on a native
+  // Linux host. node/claude/opencode and the terminal are found at RUN time, so init
+  // bakes no program paths. Ensure logic in scripts/lib/launchers.mjs.
+  const launchers = ensureLaunchers(target, pluginRoot, {
+    splitPercent: Math.round(eff.splitRatio * 100),
+    host: launcherHostKind,
+    tools: launcherToolsFound,
+    history: launcherHistory,
+    installedCopy,
+    checkText: assertNoDeadTerms,
+    cloneLauncherTarget,
+  });
+  items.push(...launchers.items);
+  warns.push(...launchers.warns);
+  oldClonePaths.push(...launchers.oldClonePaths);
 }
 
-// (4) the native-Windows launcher (sterling-windows.bat) is RETIRED — decision
-// native-windows-launcher-retired-wsl2-only: Sterling runs WSL2-only, so init no
-// longer generates it. A copy an earlier init wrote is left on disk for the user
-// to delete (never deleted or migrated here) and reported, so it is not silent.
-const nativeLauncherPath = join(target, 'sterling-windows.bat');
-if (existsSync(nativeLauncherPath)) {
-  items.push({
-    item: 'sterling-windows.bat',
-    status: 'stale',
-    detail:
-      'retired (decision native-windows-launcher-retired-wsl2-only) — init no longer generates or maintains it; Sterling runs under WSL2 via sterling.bat. Left on disk untouched: delete it yourself when you no longer want it',
-  });
+// (4) launchers init no longer generates (sterling.bat, tui.bat, and the native-Windows
+// sterling-windows.bat): a copy that is still a pristine generated render is deleted; an
+// edited one is kept and reported (scripts/lib/launchers.mjs removeRetiredLaunchers).
+// With neither tool found no opener was written, so the old ones are the project's only
+// launchers: they are kept until a run that finds a tool writes the new ones (user-ruled
+// 2026-10-08, "Keep old ones if no tool (Recommended)").
+if (launcherToolsFound.claude || launcherToolsFound.opencode) {
+  const retired = removeRetiredLaunchers(target, pluginRoot, { history: launcherHistory });
+  items.push(...retired.items);
+  warns.push(...retired.warns);
+} else {
+  warns.push('\n⚠ Neither Claude Code nor OpenCode was found, so no opener was written and any old launchers (sterling.bat, tui.bat, sterling-windows.bat) were kept. They are removed on the next run that finds one of the two.');
 }
 
 // (5) the double-click updater entry: brings the machine's Sterling CLONE to
@@ -1278,7 +1193,7 @@ if (identityIgnore.changed) {
   existingIgnore = identityIgnore.text;
   items.push({ item: '.gitignore (.sterling entry)', status: 'refreshed', detail: `${IGNORE_ALL} + ${IGNORE_KEEP_IDENTITY} so .sterling/project.json can be committed` });
 }
-const entries = [IGNORE_ALL, IGNORE_KEEP_IDENTITY, IGNORE_NESTED, 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, '.claude/agents/'];
+const entries = [IGNORE_ALL, IGNORE_KEEP_IDENTITY, IGNORE_NESTED, ...LAUNCHER_GITIGNORE_ENTRIES, UPDATE_LAUNCHER_NAME, CONSUMER_CHECK_LAUNCHER_NAME, '.claude/agents/'];
 // the SOURCE/plugin repo's generated MCP config is machine-specific → gitignore it
 // (consuming projects never get one — the plugin carries its own declaration).
 // (still keyed on --target: this ensures the TARGET's .gitignore, and a consuming
