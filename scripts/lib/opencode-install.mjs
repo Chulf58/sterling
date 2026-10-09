@@ -59,7 +59,7 @@ import { isInstalledCopy } from './installed-copy.mjs';
 import { RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, STERLING_NPM_PACKAGE, installHostOf, readCopyVersion, compareSterlingVersions, scanInstalledSterling, sterlingInstallRemedy, sterlingPluginSpecs } from './sterling-roots.mjs';
 import { parseJsonc } from './jsonc.mjs';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
-import { OPENCODE_MODEL_REF_RE } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE, parseConfig } from '@sterling/schemas';
 import { sha256, loadRegistry } from './agent-distribution.mjs';
 import { renderOpenCodeFullText } from './agent-fences.mjs';
 import { renderOpenCodeAgent, parseOpenCodeHeader } from './opencode-agents.mjs';
@@ -1048,6 +1048,50 @@ export function opencodeModelFor({ model, opencodeModel } = {}) {
   return opencodeModel;
 }
 
+/**
+ * The OpenCode model each Sterling-full roster agent pins on install and update
+ * (user-ruled 2026-10-09, "Yes, apply on install"): for a roster agent whose
+ * config.models key (AGENT_MODEL_KEY) is written in .sterling/config.json, the
+ * role's opencode_model override, else anthropic/<model>. A role the file does
+ * not carry gets no entry, so its agent keeps the pin it has; schema defaults are
+ * never applied here. A config.json that is missing, unreadable or does not
+ * validate yields no entries and a refused row (P5): the pins stay as they are.
+ */
+export function configuredFullAgentModels(projectDir) {
+  const where = fwd(join(projectDir, '.sterling', 'config.json'));
+  const leave = (why) => ({
+    models: {},
+    row: {
+      item: '.sterling/config.json models',
+      status: 'refused',
+      refused: true,
+      detail: `${why}; the OpenCode agent model pins were not applied`,
+      instruction: `REFUSED: ${why}, so the OpenCode agents keep the model pins they have. Remedy: fix ${where} (the System tab writes config.models), then rerun /sterling:update.`,
+    },
+  });
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(join(projectDir, '.sterling', 'config.json'), 'utf8'));
+  } catch (err) {
+    return leave(err.code === 'ENOENT' ? `${where} does not exist` : `${where} could not be read (${err.message})`);
+  }
+  let parsed;
+  try {
+    parsed = parseConfig(raw);
+  } catch (err) {
+    return leave(`${where} does not validate (${err.message.replace(/\s+/g, ' ')})`);
+  }
+  const written = raw.models !== null && typeof raw.models === 'object' ? raw.models : {};
+  const models = {};
+  for (const name of ROSTER) {
+    const key = AGENT_MODEL_KEY[name];
+    if (key === undefined || !Object.hasOwn(written, key)) continue;
+    const entry = parsed.models[key];
+    models[name] = opencodeModelFor({ model: entry.model, opencodeModel: entry.opencode_model });
+  }
+  return { models };
+}
+
 /** The Sterling plugin root above a module: the nearest directory holding agent-templates/registry.json. */
 export function sterlingRootFrom(moduleUrl = import.meta.url) {
   const start = dirname(fileURLToPath(moduleUrl));
@@ -1089,7 +1133,8 @@ function frontmatterModel(content) {
 
 /**
  * Render and write the Sterling-full conductor and roster. `models` maps a roster
- * name to the OpenCode model to pin (the System-tab swap); an agent not in it keeps
+ * name to the OpenCode model to pin (the System-tab swap, or config.models on
+ * install and update); an agent not in it keeps
  * the model its installed, unedited file already pins, so a sync never reverts a swap.
  */
 export function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
@@ -1266,8 +1311,12 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
     rows.push({ item: '.sterling/config.json handoff', status: 'skipped', detail: `${err.message} — excluding only Sterling's own .opencode paths` });
   }
   rows.push(ensureExcluded({ projectDir, handoff, tracked, unmaintained }));
+  // Each governed role pins the model config.models names for it (decision
+  // opencode-only-model-override-per-role-for-openai-picks).
+  const configured = configuredFullAgentModels(projectDir);
+  if (configured.row) rows.push(configured.row);
   // The agents render first so default_agent is set only when the conductor file is Sterling's.
-  const agentRows = ensureFullAgents({ projectDir, pluginRoot, tracked });
+  const agentRows = ensureFullAgents({ projectDir, pluginRoot, tracked, models: configured.models });
   const conductorRow = agentRows.find((r) => r.item === `${STERLING_AGENTS_SUBDIR}/conductor.md`);
   const conductorOk = ['created', 'matches', 'refreshed'].includes(conductorRow?.status);
   rows.push(...ensureProjectConfig({ projectDir, env, home, tracked, conductorOk, opencodeVersion: oc.version }));

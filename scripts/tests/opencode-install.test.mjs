@@ -833,6 +833,134 @@ test('model swap: a project without the Sterling-full OpenCode set is skipped an
   assert.equal(existsSync(join(dir, '.opencode')), false);
 });
 
+// ---------- install and update pin each role from config.models -----------
+// (user-ruled 2026-10-09: install and /sterling:update write each role's model into the OpenCode agents)
+
+function writeConfig(dir, models) {
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby', ...(models === undefined ? {} : { models }) }));
+}
+const pinsOf = (dir) => Object.fromEntries(['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'librarian']
+  .map((n) => [n, readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8').match(/^model: (\S+)$/gm)?.join('|') ?? null]));
+const agentFiles = (dir) => Object.fromEntries(readdirSync(join(dir, STERLING_AGENTS_SUBDIR)).sort().map((n) => [n, readFileSync(join(dir, STERLING_AGENTS_SUBDIR, n), 'utf8')]));
+const configRow = (r) => r.rows.find((x) => x.item === '.sterling/config.json models');
+const ALL_ROLES = {
+  implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' },
+  researcher: { model: 'claude-sonnet-5-5', effort: 'medium' },
+  scout: { model: 'claude-haiku-4-5', effort: 'low' },
+  librarian: { model: 'claude-sonnet-5-5', effort: 'low' },
+  reviewer: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' },
+};
+
+test('install: every governed role pins its config.models model (the override when set), the conductor none, .claude/agents untouched', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  writeConfig(dir, ALL_ROLES);
+  mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
+  writeFileSync(join(dir, '.claude', 'agents', 'implementor.md'), 'claude agent\n');
+  const r = run(dir, home);
+  assert.equal(configRow(r), undefined, 'a valid config adds no row');
+  assert.deepEqual(pinsOf(dir), {
+    conductor: null,
+    implementor: 'model: openai/gpt-5.6-terra',
+    researcher: 'model: anthropic/claude-sonnet-5-5',
+    scout: 'model: anthropic/claude-haiku-4-5',
+    reviewer: 'model: openai/gpt-6.1-sol',
+    librarian: 'model: anthropic/claude-sonnet-5-5',
+  });
+  assert.match(readFileSync(join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md'), 'utf8'), /^---\ndescription: .+\nmode: subagent\nmodel: openai\/gpt-5\.6-terra\n/);
+  assert.deepEqual(readdirSync(join(dir, '.claude', 'agents')), ['implementor.md']);
+  assert.equal(readFileSync(join(dir, '.claude', 'agents', 'implementor.md'), 'utf8'), 'claude agent\n');
+  // a second run with the same config changes nothing
+  const again = run(dir, home);
+  for (const n of ['conductor', 'implementor', 'reviewer']) assert.equal(statusOf(again, `/${n}.md`), 'matches', n);
+});
+
+test('update: a changed config.models is re-applied, a cleared override goes back to anthropic/<model>', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  writeConfig(dir, ALL_ROLES);
+  run(dir, home);
+  writeConfig(dir, {
+    ...ALL_ROLES,
+    implementor: { model: 'claude-opus-5-5', effort: 'high' },
+    scout: { model: 'claude-haiku-4-5', effort: 'low', opencode_model: 'openai/gpt-5.6-terra' },
+    reviewer: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' },
+  });
+  const r = run(dir, home);
+  assert.equal(statusOf(r, '/implementor.md'), 'refreshed');
+  assert.equal(statusOf(r, '/scout.md'), 'refreshed');
+  assert.equal(statusOf(r, '/reviewer.md'), 'matches', 'only the Claude model changed, and the override still wins');
+  assert.equal(statusOf(r, '/researcher.md'), 'matches');
+  assert.deepEqual(pinsOf(dir), {
+    conductor: null,
+    implementor: 'model: anthropic/claude-opus-5-5',
+    researcher: 'model: anthropic/claude-sonnet-5-5',
+    scout: 'model: openai/gpt-5.6-terra',
+    reviewer: 'model: openai/gpt-6.1-sol',
+    librarian: 'model: anthropic/claude-sonnet-5-5',
+  });
+});
+
+test('a role config.json does not carry gets no pin on install and keeps the pin it has on update; defaults are never written', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  writeConfig(dir, { reviewer: { model: 'claude-opus-5-5', effort: 'high' } });
+  run(dir, home);
+  assert.deepEqual(pinsOf(dir), { conductor: null, implementor: null, researcher: null, scout: null, reviewer: 'model: anthropic/claude-opus-5-5', librarian: null });
+  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['scout'], model: 'claude-haiku-4-5' });
+  assert.equal(statusOf(run(dir, home), '/scout.md'), 'matches');
+  assert.equal(pinsOf(dir).scout, 'model: anthropic/claude-haiku-4-5');
+});
+
+test('a hand-edited agent is refused and left byte-identical when config.models changes; the other roles are still applied', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  writeConfig(dir, ALL_ROLES);
+  run(dir, home);
+  const p = join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md');
+  writeFileSync(p, readFileSync(p, 'utf8') + '\nmine\n');
+  const before = readFileSync(p, 'utf8');
+  writeConfig(dir, { ...ALL_ROLES, implementor: { model: 'claude-opus-5-5', effort: 'high' }, researcher: { model: 'claude-opus-5-5', effort: 'medium' } });
+  const r = run(dir, home);
+  assert.equal(statusOf(r, '/implementor.md'), 'refused');
+  assert.equal(readFileSync(p, 'utf8'), before);
+  assert.equal(statusOf(r, '/researcher.md'), 'refreshed');
+  assert.equal(pinsOf(dir).researcher, 'model: anthropic/claude-opus-5-5');
+});
+
+test('a missing, unreadable or invalid config.json is refused loudly and every pin stays as it is', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  writeConfig(dir, ALL_ROLES);
+  run(dir, home);
+  const before = agentFiles(dir);
+  const cfg = join(dir, '.sterling', 'config.json');
+  const cases = [
+    ['missing', () => rmSync(cfg), /config\.json does not exist/],
+    ['not JSON', () => writeFileSync(cfg, '{ "mode": '), /config\.json could not be read/],
+    ['a directory', () => mkdirSync(cfg), /config\.json could not be read/],
+    ['fails the schema', () => writeConfig(dir, { ...ALL_ROLES, implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'gpt-5.6-terra' } }), /config\.json does not validate/],
+  ];
+  for (const [label, breakIt, why] of cases) {
+    breakIt();
+    const r = run(dir, home);
+    const row = configRow(r);
+    assert.equal(row?.status, 'refused', label);
+    assert.equal(row.refused, true, label);
+    assert.match(row.detail, why, label);
+    assert.match(row.instruction, /^REFUSED: .*keep the model pins they have/, label);
+    assert.ok(formatOpenCodeRows(r).some((l) => l.startsWith('OpenCode refused: .sterling/config.json models')), label);
+    assert.deepEqual(agentFiles(dir), before, `${label}: no agent file changed`);
+    rmSync(cfg, { recursive: true, force: true });
+  }
+  // a fresh install without a config.json pins nothing, rather than the schema defaults
+  const fresh = project('hobby');
+  rmSync(join(fresh, '.sterling', 'config.json'));
+  const r = run(fresh, home);
+  assert.equal(configRow(r)?.status, 'refused');
+  assert.deepEqual(pinsOf(fresh), { conductor: null, implementor: null, researcher: null, scout: null, reviewer: null, librarian: null });
+});
+
 test('opencodeModelRef maps a Claude model id to the anthropic provider; sterlingRootFrom finds the plugin root', () => {
   assert.equal(opencodeModelRef('claude-sonnet-5-5'), 'anthropic/claude-sonnet-5-5');
   assert.throws(() => opencodeModelRef(''), /model/);
