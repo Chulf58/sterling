@@ -317,9 +317,13 @@ export interface Row {
 }
 
 /** Pane geometry threaded in from the renderer side; Infinity = unbounded. */
-/** Enables the Agents tab; `running` is the live agent count shown in its label. */
+/** Enables the Agents tab; its label shows `running` and, when there are any, `quiet`
+ *  (listed agents with no handback whose transcript has been silent past the
+ *  alive window: maybe live, so counted apart rather than hidden). */
 export interface AgentsTab {
   running: number;
+  /** unset reads as 0 */
+  quiet?: number;
 }
 
 /** The tab indices a host can reach: every tab, minus Agents unless the host enabled it. */
@@ -994,7 +998,7 @@ function tabsFor(store: SterlingStore, activeTab: number, agents?: AgentsTab): {
   return visibleTabs(agents).map((i) => {
     const label: string = TABS[i]!;
     return {
-      label: label === 'Tasks' && taskCount !== null ? `${label} (${taskCount})` : label === 'Agents' && agents ? `${label} (${agents.running})` : label,
+      label: label === 'Tasks' && taskCount !== null ? `${label} (${taskCount})` : label === 'Agents' && agents ? `${label} (${agents.running} running${agents.quiet ? ` · ${agents.quiet} quiet` : ''})` : label,
       active: i === activeTab,
       index: i,
     };
