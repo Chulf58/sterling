@@ -76,6 +76,14 @@ async function harness(opts: { worker?: boolean } = { worker: true }) {
   ).record.id;
   const queued = (tools.maintenanceEnqueue({ reason: 'stale_research', text: 'does x hold? is stale', feature_link: finding }) as unknown as { record: { id: string } }).record
     .id;
+  // An article_missing item as H10 mints it: no feature_link, so the policy
+  // carries target_id null. Its second path sits in a directory the join
+  // article does not own, so a join of the first path is partial.
+  const missing = (
+    tools.maintenanceEnqueue({ reason: 'article_missing', text: 'src/c/two.ts and src/d/other.ts have no owning article', file_keys: ['src/c/two.ts', 'src/d/other.ts'] }) as unknown as {
+      record: { id: string };
+    }
+  ).record.id;
   const ids = {
     recon,
     state,
@@ -87,7 +95,7 @@ async function harness(opts: { worker?: boolean } = { worker: true }) {
     stateItem: randomUUID(),
     staleItem: queued,
     refItem: randomUUID(),
-    missItem: randomUUID(),
+    missItem: missing,
   };
   const policy = {
     token: TOKEN,
@@ -101,7 +109,7 @@ async function harness(opts: { worker?: boolean } = { worker: true }) {
       { id: ids.stateItem, lane: 'state_review', target_id: state, file_keys: [] },
       { id: ids.staleItem, lane: 'stale_research', target_id: finding, file_keys: [] },
       { id: ids.refItem, lane: 'refresh_reference', target_id: reference, file_keys: [] },
-      { id: ids.missItem, lane: 'article_missing', target_id: join_, file_keys: ['src/c/two.ts', 'src/d/other.ts'] },
+      { id: ids.missItem, lane: 'article_missing', target_id: null, file_keys: ['src/c/two.ts', 'src/d/other.ts'] },
     ],
   };
   const writePolicy = (value: unknown) => writeFileSync(policyPath, typeof value === 'string' ? value : JSON.stringify(value));
@@ -185,7 +193,7 @@ test('reconcile_needed: a factual field on the batch target is allowed and stamp
       body: { what_it_does: 'does the corrected thing.' },
       expected_version: h.version(h.ids.recon),
     });
-    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.reconItem });
+    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.reconItem, resolved: [] });
     assert.equal(h.get(h.ids.recon).what_it_does, 'does the corrected thing.');
 
     const before = h.version(h.ids.recon);
@@ -208,7 +216,7 @@ test('state_review: state_reason is allowed and stamped; a prose edit is refused
       body: { state_reason: 'in use by the runner' },
       expected_version: h.version(h.ids.state),
     });
-    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.stateItem });
+    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.stateItem, resolved: [] });
     await h.refused('knowledge_edit', { id: h.ids.state, field: 'what_it_does', find: 'does', replace: 'did' }, 'field_not_allowed', h.ids.stateItem);
     await h.refused('knowledge_update', { id: h.ids.finding, body: { state_reason: 'x' }, expected_version: 1 }, 'field_not_allowed', h.ids.staleItem);
   } finally {
@@ -224,7 +232,7 @@ test('stale_research: source_date is allowed and stamped; the question is refuse
       body: { source_date: '2026-10-09', capture_date: '2026-10-09' },
       expected_version: h.version(h.ids.finding),
     });
-    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.staleItem });
+    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.staleItem, resolved: [] });
     assert.equal(h.get(h.ids.finding).source_date, '2026-10-09');
     await h.refused('knowledge_update', { id: h.ids.finding, body: { question: 'a new question?' }, expected_version: h.version(h.ids.finding) }, 'field_not_allowed', h.ids.staleItem);
   } finally {
@@ -240,7 +248,7 @@ test('refresh_reference: summary is allowed and stamped; location is refused', a
       body: { summary: 'new summary' },
       expected_version: h.version(h.ids.reference),
     });
-    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.refItem });
+    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.refItem, resolved: [] });
     await h.refused(
       'knowledge_update',
       { id: h.ids.reference, body: { location: 'https://example.com/elsewhere' }, expected_version: h.version(h.ids.reference) },
@@ -252,23 +260,58 @@ test('refresh_reference: summary is allowed and stamped; location is refused', a
   }
 });
 
-test('article_missing: a join in a directory the article already owns is allowed; another directory, a foreign path or another write is refused', async () => {
+test('article_missing: with target_id null (as H10 mints it), a join that names its item in resolves is allowed in a directory the article already owns; another directory, a foreign path, another write or no resolves is refused', async () => {
   const h = await harness();
   try {
-    const receipt = await h.ok('knowledge_append', { id: h.ids.join, field: 'files', entries: [{ path: 'src/c/two.ts', role: 'the second file' }] });
-    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.missItem });
+    const join = (path: string, extra: Loose = {}) => ({ id: h.ids.join, field: 'files', entries: [{ path, role: 'a file' }], resolves: [h.ids.missItem], ...extra });
+    const before = h.version(h.ids.join);
+    const dir = await h.refused('knowledge_append', join('src/d/other.ts'), 'append_join', h.ids.missItem);
+    assert.match(dir, /owns no path in src\/d\//);
+    const foreign = await h.refused('knowledge_append', join('src/c/three.ts'), 'append_join', h.ids.missItem);
+    assert.match(foreign, /not one of the item's file_keys/);
+    await h.refused('knowledge_append', { id: h.ids.join, field: 'history', entries: [{ date: '2026-10-09T00:00:00.000Z', event: 'x' }], resolves: [h.ids.missItem] }, 'field_not_allowed', h.ids.missItem);
+    await h.refused('knowledge_edit', { id: h.ids.join, field: 'what_it_does', find: 'does', replace: 'did', resolves: [h.ids.missItem] }, 'field_not_allowed', h.ids.missItem);
+    await h.refused('knowledge_append', { id: h.ids.join, field: 'files', entries: [{ path: 'src/c/two.ts', role: 'x' }] }, 'target_not_in_batch');
+    await h.refused('knowledge_append', join('src/c/two.ts', { id: h.ids.decision }), 'field_not_allowed', h.ids.missItem);
+    assert.equal(h.version(h.ids.join), before);
+
+    // The join covers one of the item's two paths: the server rewrites the
+    // item and keeps it open, and the stamp says it closed nothing.
+    const receipt = await h.ok('knowledge_append', join('src/c/two.ts'));
+    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.missItem, resolved: [] });
     assert.deepEqual(
       (h.get(h.ids.join).files as { path: string }[]).map((f) => f.path),
       ['src/c/one.ts', 'src/c/two.ts']
     );
-    const before = h.version(h.ids.join);
-    const dir = await h.refused('knowledge_append', { id: h.ids.join, field: 'files', entries: [{ path: 'src/d/other.ts', role: 'x' }] }, 'append_join', h.ids.missItem);
-    assert.match(dir, /owns no path in src\/d\//);
-    const foreign = await h.refused('knowledge_append', { id: h.ids.join, field: 'files', entries: [{ path: 'src/c/three.ts', role: 'x' }] }, 'append_join', h.ids.missItem);
-    assert.match(foreign, /not one of the item's file_keys/);
-    await h.refused('knowledge_append', { id: h.ids.join, field: 'history', entries: [{ date: '2026-10-09T00:00:00.000Z', event: 'x' }] }, 'field_not_allowed', h.ids.missItem);
-    await h.refused('knowledge_edit', { id: h.ids.join, field: 'what_it_does', find: 'does', replace: 'did' }, 'field_not_allowed', h.ids.missItem);
-    assert.equal(h.version(h.ids.join), before);
+    assert.deepEqual(h.get(h.ids.missItem).file_keys, ['src/d/other.ts'], 'the item stays open with the path nothing owns');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('cross-lane: a write that resolves an item is judged by that item\'s lane only; resolves names one item; a line-reference fix needs a reconcile_needed item', async () => {
+  const h = await harness();
+  try {
+    const stateOnRecon = randomUUID();
+    h.writePolicy({ ...h.policy, policy_items: [...h.policy.policy_items, { id: stateOnRecon, lane: 'state_review', target_id: h.ids.recon, file_keys: [] }] });
+    const before = h.version(h.ids.recon);
+    const edit = { id: h.ids.recon, body: { what_it_does: 'does the corrected thing.' }, expected_version: before };
+    // reconcile_needed allows what_it_does, but the write closes the state_review item.
+    const crossed = await h.refused('knowledge_update', { ...edit, resolves: [stateOnRecon] }, 'field_not_allowed', stateOnRecon);
+    assert.match(crossed, /lane state_review/);
+    assert.doesNotMatch(crossed, /reconcile_needed\)/, 'the reconcile_needed item is not consulted');
+    await h.refused('knowledge_update', { ...edit, resolves: [h.ids.reconItem, stateOnRecon] }, 'resolves_one_item');
+    await h.refused('knowledge_update', { ...edit, resolves: [h.ids.stateItem] }, 'target_not_in_batch', h.ids.stateItem);
+    assert.equal(h.version(h.ids.recon), before);
+
+    const fix = { field: 'what_it_does', find: 'src/b/one.ts:1', replace: 'src/b/one.ts:2', anchor: 'export const b' };
+    const lane = await h.refused('knowledge_line_ref_fix', { id: h.ids.state, ...fix }, 'line_ref_fix_lane', h.ids.stateItem);
+    assert.match(lane, /is state_review/);
+    assert.equal(h.version(h.ids.state), 1);
+
+    // Without resolves the write closes nothing, and the stamp names the item whose lane allowed it.
+    const receipt = await h.ok('knowledge_update', edit);
+    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.reconItem, resolved: [] });
   } finally {
     await h.cleanup();
   }
@@ -297,7 +340,7 @@ test('maintenance_remove: an item outside the batch is refused; a batch item is 
   try {
     await h.refused('maintenance_remove', { id: randomUUID() }, 'item_not_in_batch');
     const receipt = await h.ok('maintenance_remove', { id: h.ids.staleItem });
-    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.staleItem });
+    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.staleItem, resolved: [h.ids.staleItem] });
   } finally {
     await h.cleanup();
   }

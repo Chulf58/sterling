@@ -258,7 +258,7 @@ test('[finding 2a] an item with an uncommitted change to any file_key is not lau
   }
 });
 
-test('builds the probed claude argv: Sonnet 5.5, low effort, librarian, dontAsk, every tool named, every write denied, strict MCP, stream-json + verbose, budget cap', () => {
+test('builds the probed claude argv: Sonnet 5.5, medium effort, librarian, dontAsk, every tool named, every write denied, strict MCP, stream-json + verbose, budget cap', () => {
   const fx = fixture();
   try {
     const mcpConfig = resolveMcpConfig(fx.plugin, fx.project);
@@ -470,23 +470,35 @@ test('[finding 7] runWorker journals every maintenance_remove call and result fr
       toolUse('r1', 'Read', { file_path: 'src/b.mjs' }),
       toolOk('r1'),
       removeCall('t1', '11111111-1111-1111-1111-111111111111'),
-      removeResult('t1', 'Closed as ALREADY-PAID'),
+      removeResult('t1', removedText('11111111-1111-1111-1111-111111111111')),
       removeCall('t2', '33333333-3333-3333-3333-333333333333'),
       removeResult('t2', 'refused: worktree differs from HEAD', true),
       resultEvent({ result }),
     ]);
     writeState(fx, { spend: { '2026-09-29': 1 } });
     writeFileSync(fx.paths.lock, JSON.stringify({ pid: process.pid, started_at: new Date(NOW).toISOString(), token: 'tok' }));
-    writeFileSync(fx.paths.eligible, JSON.stringify({ token: 'tok', head: HEAD, items: [{ id: '22222222-2222-2222-2222-222222222222', file_keys: ['src/b.mjs'], feature_link: 'bbbbbbbb-0000-0000-0000-000000000000', slug: 'b' }] }));
+    writeFileSync(
+      fx.paths.eligible,
+      JSON.stringify({
+        token: 'tok',
+        head: HEAD,
+        run_id: RUN_ID,
+        items: [
+          { id: '11111111-1111-1111-1111-111111111111', file_keys: ['src/a.mjs'], feature_link: null, slug: null },
+          { id: '22222222-2222-2222-2222-222222222222', file_keys: ['src/b.mjs'], feature_link: 'bbbbbbbb-0000-0000-0000-000000000000', slug: 'b' },
+        ],
+      })
+    );
     const code = await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: sp.fn, trigger: 'stop', token: 'tok', budgetUsd: 2, now: () => NOW, ...quiet });
     assert.equal(code, 0);
     assert.equal(sp.calls[0].cmd, 'claude');
     assert.ok(sp.calls[0].args[1].startsWith('PROMPT BODY\n'), 'the shipped prompt file leads the -p argument');
     const lines = readJournal(fx);
     assert.deepEqual(lines.map((l) => l.kind), ['tool_call', 'tool_call', 'verdict', 'verdict', 'run_summary']);
-    assert.deepEqual([lines[0].item_id, lines[0].is_error, lines[0].result], ['11111111-1111-1111-1111-111111111111', false, 'Closed as ALREADY-PAID']);
+    assert.deepEqual([lines[0].item_id, lines[0].is_error, lines[0].result], ['11111111-1111-1111-1111-111111111111', false, removedText('11111111-1111-1111-1111-111111111111')]);
+    assert.deepEqual(lines[0].stamp, { run_id: RUN_ID, item_id: '11111111-1111-1111-1111-111111111111', resolved: ['11111111-1111-1111-1111-111111111111'] });
     assert.equal(lines[1].is_error, true, 'a refused close is on record too');
-    assert.deepEqual([lines[0].item_file_keys_at_launch, lines[1].item_file_keys_at_launch], [null, null], 'ids not in eligible.json journal null');
+    assert.deepEqual([lines[0].item_file_keys_at_launch, lines[1].item_file_keys_at_launch], [['src/a.mjs'], null], 'an id not in eligible.json journals null');
     assert.equal(lines[3].verdict, 'needs_conductor');
     assert.equal(lines[3].capability, WORKER_CAPABILITY, 'a handoff carries the capability marker');
     assert.equal(lines[4].remove_calls, 2);
@@ -826,6 +838,8 @@ function eligibleRun(fx, items, token = 'tok', head = HEAD) {
   return { root: fx.project, pluginRoot: fx.plugin, token, budgetUsd: 2, now: () => NOW, ...quiet };
 }
 const RUN_ID = 'run-test-1';
+/** A successful maintenance_remove receipt as the worker's server returns it: stamped with the run and the removed item. */
+const removedText = (item, runId = RUN_ID) => JSON.stringify({ removed: item, [STAMP_KEY]: { run_id: runId, item_id: item, resolved: [item] } });
 const owes = (id, slug) => JSON.stringify({ item_id: id, article: slug, verdict: 'needs_conductor', file_keys: ['ignored-by-the-gate'], reason: 'the article does not name the new flag' });
 
 test('[gate] a needs_conductor verdict stands only when the stream shows a SUCCESSFUL knowledge_get on its article AND a successful Read/Grep covering one of its files; otherwise it is journalled unjudged/no evidence', async () => {
@@ -972,7 +986,7 @@ test('[no progress] a run with 0 evidence-backed verdicts and 0 closes backs off
     assert.equal(after.launched, true);
     assert.equal(after.line, undefined, 'the relaunch after the back-off prints nothing');
 
-    const closing = fakeClaude([removeCall('t1', 'A'), removeResult('t1', 'Closed as ALREADY-PAID'), resultEvent({})]);
+    const closing = fakeClaude([removeCall('t1', 'A'), removeResult('t1', removedText('A')), resultEvent({})]);
     await runWorker({ ...eligibleRun(fx, items, 'tok2'), spawn: closing.fn });
     assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.no_progress, false, 'a successful close is progress');
     const refusing = fakeClaude([removeCall('t1', 'A'), removeResult('t1', 'refused: worktree differs', true), resultEvent({})]);
@@ -1058,8 +1072,8 @@ test('[breakage] the run summary records the MCP server status from the init eve
     const disconnected = fakeClaude([initWith('disconnected'), toolUse('k1', 'mcp__sterling__knowledge_get', { id: 'x' }), toolOk('k1'), resultEvent({})]);
     assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: disconnected.fn }), 1, 'an explicit disconnected status is broken');
 
-    const closedWhilePending = fakeClaude([initWith('pending'), removeCall('t1', 'A'), removeResult('t1', 'Closed'), resultEvent({})]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: closedWhilePending.fn }), 0, 'a successful maintenance_remove is a successful sterling call');
+    const closedWhilePending = fakeClaude([initWith('pending'), removeCall('t1', 'A'), removeResult('t1', removedText('A')), resultEvent({})]);
+    assert.equal(await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: closedWhilePending.fn }), 0, 'a successful maintenance_remove is a successful sterling call');
 
     const silent = fakeClaude([{ type: 'system', subtype: 'init' }, resultEvent({})]);
     assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: silent.fn }), 0, 'no mcp_servers in the init event is unknown, not broken');
@@ -1301,7 +1315,7 @@ test('[busy] a maintenance_remove that fails with a locked database is retry-lat
     // the tool call itself is still on record
     assert.equal(lines.filter((l) => l.kind === 'tool_call' && l.is_error === true).length, 2);
     // the retry after the lock clears closes it and is progress
-    await busyRun(fx, items, [removeCall('t1', 'A'), removeResult('t1', BUSY_TEXT, true), removeCall('t2', 'A'), removeResult('t2', 'Closed as ALREADY-PAID')], 'tok2');
+    await busyRun(fx, items, [removeCall('t1', 'A'), removeResult('t1', BUSY_TEXT, true), removeCall('t2', 'A'), removeResult('t2', removedText('A'))], 'tok2');
     const after = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.equal(after.no_progress, false);
     assert.equal(after.closes_ok, 1);
@@ -1440,7 +1454,7 @@ test('[line-ref] ping-pong: two runs that each make an evidenced fix (2->4, then
     assert.equal(blocked.reason, 'backoff');
     assert.equal(sp.calls.length, 0);
     // fix, then the attested close: progress through closes_ok
-    await run('t3', [...evidenceForA(), lineFix('f3', {}), fixOk('f3'), removeCall('c1', 'A'), removeResult('c1', 'Closed as ALREADY-PAID')]);
+    await run('t3', [...evidenceForA(), lineFix('f3', {}), fixOk('f3'), removeCall('c1', 'A'), removeResult('c1', removedText('A'))]);
     const closed = lastRun(fx);
     assert.equal(closed.no_progress, false);
     assert.equal(closed.closes_ok, 1);
@@ -1623,7 +1637,7 @@ test('[#56 stamp] a successful knowledge write without this run\'s stamp fails t
       if (policed) {
         assert.equal(code, 0, name);
         assert.equal(last.ok, true, name);
-        assert.deepEqual(writes[0].stamp, { run_id: RUN_ID, item_id: 'A' });
+        assert.deepEqual(writes[0].stamp, { run_id: RUN_ID, item_id: 'A', resolved: [] });
         assert.equal(last.writes_ok, 1);
         assert.equal(last.unpoliced_writes, 0);
         assert.equal(last.no_progress, false, 'a landed factual edit is progress');
@@ -1640,27 +1654,57 @@ test('[#56 stamp] a successful knowledge write without this run\'s stamp fails t
     }
   }
   assert.equal(STAMP_KEY, 'worker_stamp');
-  assert.deepEqual(findStamp('prefix {"worker_stamp":{"run_id":"r","item_id":"i"}} suffix'), { run_id: 'r', item_id: 'i' }, 'a wrapped receipt (an OpenCode execute output) still yields its stamp');
-  assert.deepEqual(findStamp(JSON.stringify({ receipt: { worker_stamp: { run_id: 'r', item_id: 'i' } } })), { run_id: 'r', item_id: 'i' }, 'a nested stamp counts');
+  assert.deepEqual(findStamp('prefix {"worker_stamp":{"run_id":"r","item_id":"i","resolved":["i"]}} suffix'), { run_id: 'r', item_id: 'i', resolved: ['i'] }, 'a wrapped receipt (an OpenCode execute output) still yields its stamp');
+  assert.deepEqual(findStamp(JSON.stringify({ receipt: { worker_stamp: { run_id: 'r', item_id: 'i' } } })), { run_id: 'r', item_id: 'i', resolved: [] }, 'a nested stamp counts; one without resolved closed nothing');
   assert.equal(findStamp('updated what_it_does'), null);
   assert.equal(findStamp(JSON.stringify({ worker_stamp: { run_id: 'r' } })), null, 'a stamp without an item is no stamp');
 });
 
-test('[#56 resolves] a stamped write that claims resolves on a batch item closes it: progress, counted as resolves_closed', async () => {
-  const fx = fixture();
-  try {
-    const child = fakeClaude([
-      ...evidenceForA(),
-      writeCall('w1', 'knowledge_append', { id: LINK, field: 'files', value: [{ path: 'src/a.mjs', role: 'x' }], resolves: ['A', 'not-in-batch'] }),
-      writeResult('w1', stampedText('A')),
-      resultEvent({ result: JSON.stringify({ item_id: 'A', lane: 'reconcile_needed', verdict: 'closed', reason: 'files[] role refreshed' }) }),
-    ]);
-    assert.equal(await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: child.fn, relaunch: () => ({ launched: false, reason: 'test' }) }), 0);
-    const last = lastRun(fx);
-    assert.deepEqual([last.ok, last.resolves_closed, last.writes_ok, last.no_progress], [true, 1, 1, false]);
-    assert.deepEqual(readJournal(fx).find((l) => l.tool === 'knowledge_append').resolves, ['A', 'not-in-batch']);
-  } finally {
-    fx.cleanup();
+test('[#56 resolves] a closure comes from the server receipt: a stamp whose resolved names the item closes it; a write that asked to resolve it but came back retained does not', async () => {
+  const join = { id: LINK, field: 'files', entries: [{ path: 'src/a.mjs', role: 'x' }], resolves: ['A'] };
+  const cases = [
+    ['resolved by the server', ['A'], 1],
+    ['retained by the server (a partial article_missing join)', [], 0],
+  ];
+  for (const [name, resolved, closes] of cases) {
+    const fx = fixture();
+    try {
+      const child = fakeClaude([
+        ...evidenceForA(),
+        writeCall('w1', 'knowledge_append', join),
+        writeResult('w1', JSON.stringify({ ok: true, [STAMP_KEY]: { run_id: RUN_ID, item_id: 'A', resolved } })),
+        resultEvent({ result: JSON.stringify({ item_id: 'A', lane: 'reconcile_needed', verdict: 'closed', reason: 'files[] role refreshed' }) }),
+      ]);
+      assert.equal(await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: child.fn, relaunch: () => ({ launched: false, reason: 'test' }) }), 0, name);
+      const last = lastRun(fx);
+      assert.deepEqual([last.ok, last.resolves_closed, last.writes_ok, last.no_progress], [true, closes, 1, false], name);
+      assert.deepEqual(readJournal(fx).find((l) => l.tool === 'knowledge_append').resolves, ['A'], `${name}: the request is journalled as sent`);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test('[#56 remove stamp] a successful maintenance_remove without this run\'s stamp, or with a stamp naming another item, is an unpoliced write: the run fails and the item is not counted closed', async () => {
+  const items = [...ITEM_A, { id: 'B', file_keys: ['src/b.mjs'], feature_link: null, slug: null }];
+  const cases = [
+    ['no stamp', 'Closed as ALREADY-PAID'],
+    ['a stamp from another run', removedText('A', 'run-other')],
+    ['a stamp naming another batch item', removedText('B')],
+  ];
+  for (const [name, text] of cases) {
+    const fx = fixture();
+    try {
+      const child = fakeClaude([removeCall('c1', 'A'), removeResult('c1', text), resultEvent({})]);
+      assert.equal(await runWorker({ ...eligibleRun(fx, items), spawn: child.fn, relaunch: () => ({ launched: false, reason: 'test' }) }), 1, name);
+      const last = lastRun(fx);
+      assert.equal(last.ok, false, name);
+      assert.match(last.error, /unpoliced write: 1 successful knowledge write\(s\) without this run's worker_stamp \(maintenance_remove on A\)/, name);
+      assert.equal(last.unpoliced_writes, 1, name);
+      assert.equal(readJournal(fx).find((l) => l.tool === 'maintenance_remove').unpoliced, true, name);
+    } finally {
+      fx.cleanup();
+    }
   }
 });
 
@@ -1668,7 +1712,7 @@ test('[#56 budget] a budget cap reached after progress is a normal end; without 
   const fx = fixture();
   try {
     const capped = (events) => fakeClaude([...events, resultEvent({ subtype: 'error_max_budget_usd', is_error: true, total_cost_usd: 5.02 })], { code: 1 });
-    const progressed = capped([removeCall('c1', 'A'), removeResult('c1', 'Closed as ALREADY-PAID')]);
+    const progressed = capped([removeCall('c1', 'A'), removeResult('c1', removedText('A'))]);
     assert.equal(await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: progressed.fn, relaunch: () => ({ launched: false, reason: 'test' }) }), 0);
     let last = lastRun(fx);
     assert.deepEqual([last.ok, last.error, last.budget_capped, last.no_progress, last.cost_usd], [true, null, true, false, 5.02]);
@@ -1699,7 +1743,7 @@ test('[#56 chain] a run that closed an item with eligible work left re-enters th
       calls.push({ items: items.map((t) => t.id), lockHeld: existsSync(fx.paths.lock) });
       return { launched: true, reason: 'launched' };
     };
-    const closing = fakeClaude([removeCall('c1', 'A'), removeResult('c1', 'Closed as ALREADY-PAID'), resultEvent({})]);
+    const closing = fakeClaude([removeCall('c1', 'A'), removeResult('c1', removedText('A')), resultEvent({})]);
     assert.equal(await runWorker({ ...armWithSnapshot('t1', snapshot), spawn: closing.fn, relaunch }), 0);
     assert.deepEqual(calls, [{ items: ['B'], lockHeld: false }], 'the closed item is dropped, and the relaunch comes after the lock is released');
     assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').map((l) => [l.launched, l.items_left]), [[true, 1]]);
@@ -1708,11 +1752,11 @@ test('[#56 chain] a run that closed an item with eligible work left re-enters th
     await runWorker({ ...armWithSnapshot('t2', snapshot), spawn: idle.fn, relaunch });
     assert.equal(calls.length, 1, 'no progress: no chain (the back-off applies instead)');
 
-    const lastOne = fakeClaude([removeCall('c1', 'A'), removeResult('c1', 'Closed as ALREADY-PAID'), resultEvent({})]);
+    const lastOne = fakeClaude([removeCall('c1', 'A'), removeResult('c1', removedText('A')), resultEvent({})]);
     await runWorker({ ...armWithSnapshot('t3', [snapshot[0]]), spawn: lastOne.fn, relaunch });
     assert.equal(calls.length, 1, 'nothing left: no chain');
 
-    const failed = fakeClaude([removeCall('c1', 'A'), removeResult('c1', 'Closed as ALREADY-PAID'), resultEvent({ permission_denials: [{ tool_name: 'Bash' }] })]);
+    const failed = fakeClaude([removeCall('c1', 'A'), removeResult('c1', removedText('A')), resultEvent({ permission_denials: [{ tool_name: 'Bash' }] })]);
     await runWorker({ ...armWithSnapshot('t4', snapshot), spawn: failed.fn, relaunch });
     assert.equal(calls.length, 1, 'a failed run does not chain');
   } finally {
@@ -1720,41 +1764,97 @@ test('[#56 chain] a run that closed an item with eligible work left re-enters th
   }
 });
 
-test('[#56 chain] the default relaunch goes through the real launcher: debounce still applies, and past it the next runner is spawned for what is left, without the runner\'s inside-worker flag blocking it', async () => {
+test('[#56 chain] multi-run: an edit that does not close its item, an evidence-backed handoff and a close each let the chain go on, and every item an earlier run was offered stays out of it', async () => {
+  const fx = fixture();
+  try {
+    const item = (id) => ({ id, file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' });
+    const snap = (ids) => ids.map((id) => ({ id, system_reason: 'reconcile_needed', file_keys: ['src/a.mjs'], feature_link: LINK }));
+    const arm = (token, batch, snapshot, attempted) => {
+      const opts = eligibleRun(fx, batch.map(item), token);
+      const e = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+      writeFileSync(fx.paths.eligible, JSON.stringify({ ...e, queue_snapshot: snap(snapshot), chain_attempted: attempted }));
+      return opts;
+    };
+    const calls = [];
+    const relaunch = (items, chain) => {
+      calls.push({ items: items.map((t) => t.id), attempted: chain.attempted });
+      return { launched: true, reason: 'launched' };
+    };
+    // Run 1: a stamped edit on A that closes nothing. A stays open, but the chain moves past it.
+    const edit = [...evidenceForA(), writeCall('w1', 'knowledge_update', { id: LINK, body: { what_it_does: 'x.' }, expected_version: 2 }), writeResult('w1', stampedText('A'))];
+    await runWorker({ ...arm('t1', ['A'], ['A', 'B', 'C'], []), spawn: fakeClaude([...edit, resultEvent({})]).fn, relaunch });
+    assert.equal(lastRun(fx).resolves_closed, 0);
+    assert.deepEqual(calls.at(-1), { items: ['B', 'C'], attempted: ['A'] }, 'the edited, unclosed item is not offered again in this chain');
+
+    // Run 2: only an evidence-backed handoff. The snapshot still names A; the carried attempts keep it out.
+    await runWorker({ ...arm('t2', ['B'], ['A', 'B', 'C'], ['A']), spawn: fakeClaude([...evidenceForA(), resultEvent({ result: owes('B', 'art-a') })]).fn, relaunch });
+    assert.equal(lastRun(fx).evidenced_verdicts, 1);
+    assert.equal(lastRun(fx).no_progress, false, 'an evidence-backed handoff is progress');
+    assert.deepEqual(calls.at(-1), { items: ['C'], attempted: ['A', 'B'] });
+
+    // Run 3: a close with nothing left that this chain has not been offered: the chain ends.
+    await runWorker({ ...arm('t3', ['C'], ['A', 'B', 'C'], ['A', 'B']), spawn: fakeClaude([removeCall('c1', 'C'), removeResult('c1', removedText('C')), resultEvent({})]).fn, relaunch });
+    assert.equal(lastRun(fx).closes_ok, 1);
+    assert.equal(calls.length, 2, 'nothing left: no third relaunch');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[#56 chain] the default relaunch goes through the real launcher inside the debounce window, spawns the next runner for the items no run of the chain was offered, and carries the attempted ids in eligible.json; the runner\'s inside-worker flag does not block it', async () => {
   const fx = fixture();
   const prevEnv = process.env.STERLING_MAINTENANCE_WORKER;
   const prevDisable = process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
   try {
-    const items = [laneItem('a1', 'reconcile_needed', 60), laneItem('a2', 'state_review', 60)];
+    // 13 items: the first batch holds 12 (RUN_BATCH_MAX), so one is left for the chain.
+    const items = Array.from({ length: 13 }, (_, i) => laneItem(`a${i + 1}`, 'reconcile_needed', 100 - i));
     assert.equal(launch(fx, { spawn: fakeSpawn().fn, items }).launched, true);
+    const first = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    assert.equal(first.policy_items.length, RUN_BATCH_MAX);
+    assert.deepEqual(first.chain_attempted, [], 'an external trigger starts the chain with no attempts');
     const token = JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token;
-    const eligible = readFileSync(fx.paths.eligible, 'utf8');
     const runner = fakeSpawn({ pid: 5151 });
-    const spawn = (cmd, args, opts) => (cmd === process.execPath ? runner.fn(cmd, args, opts) : fakeClaude([removeCall('c1', 'a1'), removeResult('c1', 'Closed as ALREADY-PAID'), resultEvent({})]).fn(cmd, args, opts));
+    const spawn = (cmd, args, opts) =>
+      cmd === process.execPath ? runner.fn(cmd, args, opts) : fakeClaude([removeCall('c1', 'a1'), removeResult('c1', removedText('a1', first.run_id)), resultEvent({})]).fn(cmd, args, opts);
     process.env.STERLING_MAINTENANCE_WORKER = '1'; // the runner's own environment carries the flag
     // The npm test preload sets the test-run guard; this test injects every spawn, so it lifts it.
     delete process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
-    const run = () => runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, now: () => NOW, spawnSync: CLEAN_GIT, ...quiet });
-
-    assert.equal(await run(), 0);
-    assert.equal(runner.calls.length, 0);
-    assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').map((l) => [l.launched, l.reason]), [[false, 'debounced']], 'inside the debounce window: no chained launch');
-
-    writeFileSync(fx.paths.lastLaunch, JSON.stringify({ at_ms: NOW - DEBOUNCE_MS - 1 }));
-    writeFileSync(fx.paths.lock, JSON.stringify({ pid: process.pid, started_at: new Date(NOW).toISOString(), token }));
-    writeFileSync(fx.paths.eligible, eligible);
-    assert.equal(await run(), 0);
-    assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').at(-1).launched, true);
+    // The launch above wrote last-launch at NOW, so the chained launch below is inside the debounce window.
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, now: () => NOW, spawnSync: CLEAN_GIT, ...quiet }), 0);
+    assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').map((l) => [l.launched, l.reason, l.items_left]), [[true, 'launched', 1]], 'a chained launch is not debounced');
     assert.equal(runner.calls.length, 1);
     assert.equal(runner.calls[0].args[4], 'chain', 'the chained run carries trigger chain');
     assert.equal(runner.calls[0].opts.env.STERLING_MAINTENANCE_WORKER, '1', 'the launcher marks the new runner again');
     const next = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
-    assert.deepEqual(next.policy_items.map((t) => t.id), ['a2'], 'the closed item is not offered again');
+    assert.deepEqual(next.policy_items.map((t) => t.id), ['a13'], 'only the item no run of this chain was offered');
+    assert.deepEqual([...next.chain_attempted].sort(), first.policy_items.map((t) => t.id).sort(), 'the attempted ids travel with the chain');
+
+    // An external trigger past the debounce starts over: no carried attempts.
+    rmSync(fx.paths.lock, { force: true });
+    const fresh = launch(fx, { spawn: fakeSpawn().fn, items: items.slice(1), now: NOW + DEBOUNCE_MS + 1 });
+    assert.equal(fresh.launched, true);
+    assert.deepEqual(JSON.parse(readFileSync(fx.paths.eligible, 'utf8')).chain_attempted, []);
   } finally {
     if (prevEnv === undefined) delete process.env.STERLING_MAINTENANCE_WORKER;
     else process.env.STERLING_MAINTENANCE_WORKER = prevEnv;
     if (prevDisable === undefined) delete process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
     else process.env.STERLING_MAINTENANCE_WORKER_DISABLE = prevDisable;
+    fx.cleanup();
+  }
+});
+
+test('[#56 lock] a failure after the lock is taken (writing eligible.json) releases the lock and is logged; the spawn never happens', () => {
+  const fx = fixture();
+  try {
+    mkdirSync(fx.paths.eligible, { recursive: true }); // a directory where the file goes: the write throws EISDIR
+    const sp = fakeSpawn();
+    const r = launch(fx, { spawn: sp.fn });
+    assert.equal(r.launched, false);
+    assert.equal(r.reason, 'error');
+    assert.match(r.detail, /launch FAILED \(write the launch files: EISDIR/);
+    assert.equal(sp.calls.length, 0);
+    assert.equal(existsSync(fx.paths.lock), false, 'the slot is freed for the next trigger');
+  } finally {
     fx.cleanup();
   }
 });

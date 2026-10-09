@@ -458,7 +458,10 @@ test('SPEC2: queue far over the threshold (hundreds) names the top lane with its
     const ctx = additionalContext(r);
 
     assert.match(ctx, /MAINTENANCE QUEUE IS (VERY )?DEEP/, 'the deep-queue signal still fires at scale (banner wording may legitimately escalate to "VERY DEEP")');
-    assert.ok(pairedNear(ctx, 150, 'reconcile_needed'), 'the top (largest) lane is named together with its count');
+    // reconcile_needed is the largest lane but a worker lane, so the top lane the conductor is asked to drain is capture_owed.
+    assert.ok(pairedNear(ctx, 100, 'capture_owed'), 'the top conductor lane is named together with its count');
+    assert.match(ctx, /Drain the biggest lane now \(100 items in lane capture_owed\)/, 'the drain ask names the top conductor lane');
+    assert.match(ctx, /150 items in lane reconcile_needed are drained by the background worker, not by you/, 'the worker lane is named as the worker\'s');
     assert.match(ctx, BOUNDED_DRAIN_ASK, 'a bounded ask (offering a drain slice) is present at scale');
     assert.doesNotMatch(ctx, WHOLE_QUEUE_INSTRUCTION, 'the unconditional whole-queue-before-new-work instruction — unfollowable at this size — is gone');
   } finally {

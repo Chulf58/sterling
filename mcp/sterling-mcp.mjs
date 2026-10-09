@@ -28990,41 +28990,74 @@ var WorkerGuard = class {
   }
   /**
    * Decide one tool call before it runs. Returns null for a read tool, the
-   * stamp for an allowed write, and throws WorkerPolicyRefusal otherwise.
+   * authorized item for an allowed write, and throws WorkerPolicyRefusal
+   * otherwise.
+   *
+   * Which item a write is judged against:
+   * - A write with `resolves` names exactly one policy item and is judged
+   *   against that item's lane only, so an edit one lane allows can never
+   *   close an item of another lane on the same record. The record must be
+   *   the item's target_id; an article_missing item has none (H10 mints it
+   *   with no feature_link), so its join may name any record, and the lane
+   *   rules below decide whether that record can take the join.
+   * - A write without `resolves` closes nothing. It is allowed when at least
+   *   one policy item targets the record and that item's lane allows it; the
+   *   stamp names the first such item in policy order.
+   * - knowledge_line_ref_fix belongs to reconcile_needed items only.
    */
   authorize(tool, input) {
     if (WORKER_READ_TOOLS.has(tool))
       return null;
     const policy = this.load(tool);
     const items = policy.policy_items;
-    const stamp = (item) => ({ run_id: policy.run_id, item_id: item.id });
+    const stamp = (item, closes) => ({ run_id: policy.run_id, item_id: item.id, closes });
     if (tool === "maintenance_remove") {
       const id2 = String(input.id);
       const item = items.find((i) => i.id === id2);
       if (!item)
         throw new WorkerPolicyRefusal(tool, "item_not_in_batch", `item '${id2}' is not one of this run's policy items`);
-      return stamp(item);
+      return stamp(item, [id2]);
     }
     if (tool !== "knowledge_line_ref_fix" && !FIELD_WRITES.has(tool)) {
       throw new WorkerPolicyRefusal(tool, "tool_not_allowed_in_worker_mode", `the worker writes only factual refreshes, and ${tool} is not one of them`);
     }
     const id = String(input.id);
-    const candidates = items.filter((i) => i.target_id !== null && i.target_id === id);
-    if (!candidates.length) {
-      throw new WorkerPolicyRefusal(tool, "target_not_in_batch", `record '${id}' is not the target_id of any policy item (worker mode needs the exact full uuid)`);
+    const resolves = Array.isArray(input.resolves) ? input.resolves.map(String) : [];
+    const outside = resolves.filter((r) => !items.some((i) => i.id === r));
+    if (outside.length) {
+      const targeting = items.filter((i) => i.target_id === id).map((i) => i.id);
+      throw new WorkerPolicyRefusal(tool, "resolves_outside_batch", `resolves names ${outside.join(", ")}, which ${outside.length === 1 ? "is not a policy item" : "are not policy items"}`, targeting);
+    }
+    if (resolves.length > 1) {
+      throw new WorkerPolicyRefusal(tool, "resolves_one_item", `a worker write closes one policy item and is judged by that item's lane, but resolves names ${resolves.length}`, resolves);
+    }
+    let candidates;
+    if (resolves.length === 1) {
+      const item = items.find((i) => i.id === resolves[0]);
+      if (item.target_id === null ? item.lane !== "article_missing" : item.target_id !== id) {
+        throw new WorkerPolicyRefusal(tool, "target_not_in_batch", `resolves names ${item.id}, whose target is ${item.target_id ?? "not set"}, not record '${id}'`, [item.id]);
+      }
+      candidates = [item];
+    } else {
+      candidates = items.filter((i) => i.target_id !== null && i.target_id === id);
+      if (!candidates.length) {
+        throw new WorkerPolicyRefusal(tool, "target_not_in_batch", `record '${id}' is not the target_id of any policy item (worker mode needs the exact full uuid; an article_missing join names its item in resolves)`);
+      }
+    }
+    if (tool === "knowledge_line_ref_fix") {
+      const reconcile = candidates.filter((i) => i.lane === "reconcile_needed");
+      if (!reconcile.length) {
+        throw new WorkerPolicyRefusal(tool, "line_ref_fix_lane", `a line-reference fix belongs to a reconcile_needed item, and ${candidates.map((i) => `${i.id} is ${i.lane}`).join(", ")}`, candidates.map((i) => i.id));
+      }
+      candidates = reconcile;
     }
     const candidateIds = candidates.map((i) => i.id);
     if (!this.records.projectStoreHolds(id)) {
       throw new WorkerPolicyRefusal(tool, "target_not_project_held", `record '${id}' is not held by the project store`, candidateIds);
     }
-    const resolves = Array.isArray(input.resolves) ? input.resolves.map(String) : [];
-    const outside = resolves.filter((r) => !items.some((i) => i.id === r));
-    if (outside.length) {
-      throw new WorkerPolicyRefusal(tool, "resolves_outside_batch", `resolves names ${outside.join(", ")}, which ${outside.length === 1 ? "is not a policy item" : "are not policy items"}`, candidateIds);
-    }
-    const ordered = [...candidates.filter((i) => resolves.includes(i.id)), ...candidates.filter((i) => !resolves.includes(i.id))];
+    const ordered = candidates;
     if (tool === "knowledge_line_ref_fix")
-      return stamp(ordered[0]);
+      return stamp(ordered[0], resolves);
     if (tool === "knowledge_update" && input.expected_version === void 0) {
       throw new WorkerPolicyRefusal(tool, "expected_version_required", "a worker update states the version it read (decision change v)", candidateIds);
     }
@@ -29036,11 +29069,16 @@ var WorkerGuard = class {
     for (const item of ordered) {
       const fault = this.laneFault(tool, item, record2, fields, input);
       if (fault === null)
-        return stamp(item);
+        return stamp(item, resolves);
       faults.push({ rule: fault.rule, text: `${item.id} (${item.lane}): ${fault.text}` });
     }
     const rule = faults.every((f) => f.rule === "append_join") ? "append_join" : "field_not_allowed";
     throw new WorkerPolicyRefusal(tool, rule, faults.map((f) => f.text).join("; "), candidateIds);
+  }
+  /** The ids among `closes` the store no longer holds: the items this call
+   *  actually closed, read after it ran. */
+  closed(closes) {
+    return closes.filter((id) => this.records.get(id) === void 0);
   }
   /** Why this item does not allow the write, or null when it does. */
   laneFault(tool, item, record2, fields, input) {
@@ -29090,11 +29128,12 @@ function stampReceipt(tool, result, stamp) {
 function guardWorkerTools(server, guard) {
   const register = server.registerTool.bind(server);
   server.registerTool = (name, config2, cb) => register(name, config2, (...a) => {
-    const stamp = guard.authorize(name, a[0] ?? {});
+    const allowed = guard.authorize(name, a[0] ?? {});
     const result = cb(...a);
-    if (!stamp)
+    if (!allowed)
       return result;
-    return result instanceof Promise ? result.then((r) => stampReceipt(name, r, stamp)) : stampReceipt(name, result, stamp);
+    const finish = (r) => stampReceipt(name, r, { run_id: allowed.run_id, item_id: allowed.item_id, resolved: guard.closed(allowed.closes) });
+    return result instanceof Promise ? result.then(finish) : finish(result);
   });
 }
 
@@ -37572,8 +37611,11 @@ function createSterlingServer(target, opts = {}) {
   });
   const createDomainsNote = bootDomains.length ? ` Mounted domains at server start: ${bootDomains.join("; ")} (the receipt's mounted_domains is current). A record about one of these subjects takes scope domain:<name>; a record about this repo stays project.` : "";
   const server = new McpServer({ name: "sterling", version: "0.1.0" });
-  if (opts.workerPolicy)
+  const toolWrappers = [];
+  if (opts.workerPolicy) {
     guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store));
+    toolWrappers.push("worker_policy");
+  }
   const mapBusy = (name, e) => e instanceof StoreBusyError ? busyRefusal(name, e, false) : e;
   const registerTool = server.registerTool.bind(server);
   server.registerTool = ((name, config3, handler) => registerTool(name, config3, ((...args2) => {
@@ -37586,6 +37628,7 @@ function createSterlingServer(target, opts = {}) {
       throw mapBusy(name, e);
     }
   })));
+  toolWrappers.push("busy_refusal");
   const json = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
   server.registerTool("knowledge_create", {
     description: 'Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type\'s allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. Example: {"type":"decision","fields":{"title":"...","statement":"...","alternatives_rejected":[],"rationale":"..."}}. A colliding feature_article slug is refused. A links entry with rel \'supersedes\' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel \'cites\' for a deliberate partial override. A domain:<name> scope with file_keys (or an article\'s files) is refused: repo paths stay project. A reference_material\'s location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain\'s description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.' + createDomainsNote,
@@ -37842,7 +37885,7 @@ function createSterlingServer(target, opts = {}) {
       projection: external_exports.enum(["text", "full", "digest", "headline"]).optional()
     })
   }, (args2) => json(tools.maintenanceQueryResult(args2)));
-  return { server, store, tools };
+  return { server, store, tools, toolWrappers };
 }
 
 // packages/mcp-server/dist/runtime.js

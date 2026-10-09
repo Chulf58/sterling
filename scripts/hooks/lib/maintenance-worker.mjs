@@ -700,7 +700,9 @@ function launchWorker(opts) {
     }
     if (lockState(readJson(paths.lock), nowMs, opts.isAlive) === 'live') return { launched: false, reason: 'already_running' };
     const lastLaunch = Number(readJson(paths.lastLaunch)?.at_ms);
-    if (Number.isFinite(lastLaunch) && nowMs - lastLaunch < DEBOUNCE_MS) return { launched: false, reason: 'debounced' };
+    // A chained launch follows a run that just ended under this lock, so the
+    // debounce (meant for bursts of Stop and commit triggers) does not apply.
+    if (opts.trigger !== 'chain' && Number.isFinite(lastLaunch) && nowMs - lastLaunch < DEBOUNCE_MS) return { launched: false, reason: 'debounced' };
 
     // A close is attested against HEAD: an item whose files are dirty would only
     // be refused, and a refused verdict stands until HEAD moves. When git cannot
@@ -754,36 +756,46 @@ function launchWorker(opts) {
     const startedAt = new Date(nowMs).toISOString();
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: 'launching' }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: 'already_running' };
-    writeFileSync(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
-    // The child judges ONLY these (PARTIAL 2); the runner checks the token.
-    // The runner host travels with the eligible list, bound to this launch by the token.
-    const runnerHost = host === 'opencode' ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
-    // THE BATCH POLICY (change (ii)): eligible.json is token-bound, and the
-    // worker's own Sterling server reads it through --worker-policy. `items`
-    // keeps its shape for the runner and the prompt; `policy_items` is the
-    // server's per-item contract {id, lane, target_id, file_keys} (slice A
-    // reads it there because `items` already had another shape).
-    // `queue_snapshot` is every eligible item, so a run that made progress can
-    // re-enter this launcher with what is left (ruling (5), chaining).
-    const batch = selectBatch(eligible);
-    writeFileSync(
-      paths.eligible,
-      JSON.stringify({
-        token,
-        head: git.head,
-        ...runnerHost,
-        items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })),
-        policy_version: POLICY_VERSION,
-        run_id: randomUUID(),
-        policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
-        queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? '' })),
-      })
-    );
-
+    // From here the lock is ours: anything that fails before the runner is
+    // spawned releases it, so a failed write cannot hold the slot until the
+    // stale-lock timeout.
+    let launched = false;
+    let stage = 'write the launch files';
     let logFd;
     try {
+      writeFileSync(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
+      // The child judges ONLY these (PARTIAL 2); the runner checks the token.
+      // The runner host travels with the eligible list, bound to this launch by the token.
+      const runnerHost = host === 'opencode' ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
+      // THE BATCH POLICY (change (ii)): eligible.json is token-bound, and the
+      // worker's own Sterling server reads it through --worker-policy. `items`
+      // keeps its shape for the runner and the prompt; `policy_items` is the
+      // server's per-item contract {id, lane, target_id, file_keys} (slice A
+      // reads it there because `items` already had another shape).
+      // `queue_snapshot` is every eligible item, so a run that made progress can
+      // re-enter this launcher with what is left (ruling (5), chaining).
+      // `chain_attempted` is every item an earlier run of this chain was
+      // offered; the runner leaves them out of the next chained launch, and
+      // an external trigger (stop, commit) starts with none.
+      const batch = selectBatch(eligible);
+      const chainAttempted = opts.trigger === 'chain' && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
+      writeFileSync(
+        paths.eligible,
+        JSON.stringify({
+          token,
+          head: git.head,
+          ...runnerHost,
+          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })),
+          policy_version: POLICY_VERSION,
+          run_id: randomUUID(),
+          policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
+          queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? '' })),
+          chain_attempted: chainAttempted,
+        })
+      );
       rotateIfLarge(paths.log);
       logFd = openSync(paths.log, 'a');
+      stage = 'spawn';
       const child = opts.spawn(
         process.execPath,
         [runner, '--project', opts.root, '--trigger', String(opts.trigger), '--token', token, '--budget-usd', String(WORKER_RUN_BUDGET_USD)],
@@ -793,13 +805,15 @@ function launchWorker(opts) {
       // may have exited; the runner never started, so free the slot.
       child.on?.('error', () => releaseLock(paths, token));
       child.unref?.();
+      launched = true;
+      stage = 'record the running lock';
       writeFileSync(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: 'running', token }));
       return { launched: true, reason: 'launched', pid: child.pid, items: batch.length, eligible: eligible.length, host };
     } catch (e) {
-      releaseLock(paths, token);
-      return { launched: false, reason: 'error', detail: failDetail(`spawn: ${e?.message ?? e}`) };
+      return { launched: false, reason: 'error', detail: failDetail(`${stage}: ${e?.message ?? e}`) };
     } finally {
       if (logFd !== undefined) closeSync(logFd);
+      if (!launched) releaseLock(paths, token);
     }
   } catch (e) {
     return { launched: false, reason: 'error', detail: failDetail(e?.message ?? String(e)) };
@@ -881,7 +895,12 @@ export function knowledgeWriteName(name) {
  *  JSON (an OpenCode execute output that wrapped it) is searched for the key's
  *  own object. */
 export function findStamp(text) {
-  const valid = (s) => (s && typeof s === 'object' && typeof s.run_id === 'string' && typeof s.item_id === 'string' ? { run_id: s.run_id, item_id: s.item_id } : null);
+  // `resolved` is the server's list of the items the write closed; a stamp
+  // without it closed nothing.
+  const valid = (s) =>
+    s && typeof s === 'object' && typeof s.run_id === 'string' && typeof s.item_id === 'string'
+      ? { run_id: s.run_id, item_id: s.item_id, resolved: Array.isArray(s.resolved) ? s.resolved.map(String) : [] }
+      : null;
   const search = (v, depth) => {
     if (!v || typeof v !== 'object' || depth > 4) return null;
     if (Object.prototype.hasOwnProperty.call(v, STAMP_KEY)) return valid(v[STAMP_KEY]);
@@ -1200,27 +1219,40 @@ export async function runWorker(opts) {
       // this run's stamp naming an item of this batch. The server checks
       // before the write; this is the after-the-fact observation of it.
       let writesStamped = 0;
+      let policyRefusals = 0;
       const unpoliced = [];
       const closedIds = new Set();
       const resolvedIds = new Set();
       const journalCall = (entry, raw = '') => {
-        if (entry.kind === 'tool_call' && KNOWLEDGE_WRITE_TOOLS.includes(entry.tool) && entry.is_error === false) {
+        // Every successful mutation, a remove included, must carry this run's
+        // stamp. A remove's stamp must name the removed item itself.
+        const mutation = entry.kind === 'tool_call' && entry.is_error === false && (entry.tool === 'maintenance_remove' || KNOWLEDGE_WRITE_TOOLS.includes(entry.tool));
+        if (mutation) {
           const stamp = findStamp(raw);
+          const remove = entry.tool === 'maintenance_remove';
           entry = { ...entry, stamp };
-          if (!stamp || stamp.run_id !== eligible.run_id || !byId.has(stamp.item_id)) {
-            unpoliced.push(`${entry.tool} on ${entry.article_id ?? 'unknown record'}`);
+          if (!stamp || stamp.run_id !== eligible.run_id || !byId.has(stamp.item_id) || (remove && stamp.item_id !== entry.item_id)) {
+            unpoliced.push(`${entry.tool} on ${(remove ? entry.item_id : entry.article_id) ?? 'unknown record'}`);
             journal({ ...entry, unpoliced: true });
             return;
           }
           journal(entry);
+          if (remove) {
+            closedIds.add(entry.item_id);
+            return;
+          }
           if (entry.tool === 'knowledge_line_ref_fix') return; // never progress on its own
           writesStamped++;
-          for (const id of entry.resolves ?? []) if (byId.has(id)) resolvedIds.add(id);
+          // A closure comes from the server's receipt, never from the request:
+          // a partial article_missing join keeps its item open.
+          for (const id of stamp.resolved) if (byId.has(id)) resolvedIds.add(id);
           return;
         }
         journal(entry);
-        if (entry.tool !== 'maintenance_remove') return;
-        if (entry.is_error === false && byId.has(entry.item_id)) closedIds.add(entry.item_id);
+        if (entry.tool !== 'maintenance_remove') {
+          if (entry.kind === 'tool_call' && entry.is_error === true && POLICY_REFUSAL_RE.test(entry.result ?? '')) policyRefusals++;
+          return;
+        }
         if (entry.kind === 'tool_call' && entry.is_error === true && BUSY_RE.test(entry.result ?? '')) {
           // A locked store is retry-later, not the server's judgment: no 'refused'
           // verdict, no evidence stamp, so judgedVerdicts ignores it and the item
@@ -1345,6 +1377,8 @@ export async function runWorker(opts) {
       // landed factual edit. A line-reference fix is never progress on its own
       // (the server accepts a shift back and forth).
       const progressed = closedIds.size > 0 || writesStamped > 0;
+      // What lets a chain go on, and what keeps a run out of the back-off.
+      const chainProgress = progressed || evidenced > 0 || newRefusals > 0 || policyRefusals > 0;
       const subtype = String(result?.subtype ?? '');
       const budgetCapped = /max_budget/i.test(subtype);
       // A budget cap reached after progress is a normal bounded end.
@@ -1382,10 +1416,11 @@ export async function runWorker(opts) {
         // refusal: back off like a failure. A locked-database remove is none of
         // these: a run that only hit the lock backs off, which is the retry delay.
         refused_verdicts: refusedVerdicts,
+        policy_refusals: policyRefusals,
         busy_calls: busyCalls,
         line_ref_fixes: lineRefFixes,
         line_ref_fixes_ok: lineRefFixesOk,
-        no_progress: evidenced === 0 && !progressed && newRefusals === 0,
+        no_progress: !chainProgress,
         budget_capped: budgetCapped,
         cost_usd: reported ? cost : null,
         // The MCP server's status from the stream's init event (null: never
@@ -1393,13 +1428,18 @@ export async function runWorker(opts) {
         mcp_status: mcpStatus,
         host: run.host,
       });
-      // CHAINING (ruling (5)): a run that closed or fixed an item starts the
-      // next one when eligible work is left. The launcher re-checks every item
-      // (judged, dirty, batching) and applies lock, debounce and back-off.
-      if (ok && progressed) {
+      // CHAINING (ruling (5)): a run that closed or fixed an item, handed one
+      // off with evidence, or met a new refusal starts the next one when
+      // eligible work is left. Every item this chain has already been offered
+      // is left out, so an item a run edited but did not close is not picked
+      // again until an external trigger; that also bounds the chain. The
+      // launcher re-checks every item (judged, dirty, batching) and applies
+      // lock and back-off (not the debounce, which is for external triggers).
+      if (ok && chainProgress) {
+        const attempted = new Set([...(Array.isArray(eligible.chain_attempted) ? eligible.chain_attempted.map(String) : []), ...eligible.items.map((t) => t.id)]);
         const snapshot = Array.isArray(eligible.queue_snapshot) ? eligible.queue_snapshot : [];
-        const left = snapshot.filter((t) => t && !closedIds.has(t.id));
-        if (left.length) chain = { items: left, host: eligible.host, opencodeBin: eligible.opencode_bin };
+        const left = snapshot.filter((t) => t && !closedIds.has(t.id) && !attempted.has(t.id));
+        if (left.length) chain = { items: left, attempted: [...attempted], host: eligible.host, opencodeBin: eligible.opencode_bin };
       }
       return ok ? 0 : 1;
     })();
@@ -1419,7 +1459,7 @@ export async function runWorker(opts) {
  *  dropped here or the launcher would refuse as 'inside_worker'. Never throws. */
 function relaunchAfterRun(opts, chain) {
   try {
-    if (opts.relaunch) return opts.relaunch(chain.items) ?? { launched: false, reason: 'unknown' };
+    if (opts.relaunch) return opts.relaunch(chain.items, chain) ?? { launched: false, reason: 'unknown' };
     const cfg = readProjectConfig(opts.root);
     if (cfg.problem) return { launched: false, reason: 'error', detail: `not chained: ${cfg.problem}` };
     const { [WORKER_ENV_FLAG]: _inside, ...env } = process.env;
@@ -1428,6 +1468,7 @@ function relaunchAfterRun(opts, chain) {
       config: cfg.config,
       items: chain.items,
       trigger: 'chain',
+      chainAttempted: chain.attempted,
       spawn: opts.spawn,
       pluginRoot: opts.pluginRoot,
       env,

@@ -4,7 +4,10 @@
 // stamp. A policy refusal under a held lock stays a policy refusal, and an
 // allowed write under a held lock keeps the busy text, 'database is locked'
 // included, which the worker's runner matches to classify a busy result.
-// The allowed arm waits the server's default 5000 ms busy timeout.
+// Both outcomes would also hold with the wrappers the other way round, so the
+// install order is pinned on its own through createSterlingServer's
+// toolWrappers (outermost first). The allowed arm waits the server's default
+// 5000 ms busy timeout.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -37,7 +40,8 @@ test('worker mode under a held lock: a refused write is the policy refusal, an a
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   const path = join(dir, '.sterling', 'sterling.db');
   const policyPath = join(dir, 'maintenance-worker.eligible.json');
-  const { server, store, tools } = createSterlingServer(path, { workerPolicy: { path: policyPath, token: TOKEN } });
+  const { server, store, tools, toolWrappers } = createSterlingServer(path, { workerPolicy: { path: policyPath, token: TOKEN } });
+  assert.deepEqual(toolWrappers, ['worker_policy', 'busy_refusal'], 'the worker guard is installed first, so it wraps the busy mapping');
   const article = (
     tools.knowledgeCreate('feature_article', {
       slug: 'busy-article',
@@ -92,6 +96,18 @@ test('worker mode under a held lock: a refused write is the policy refusal, an a
     if (holder) release(holder);
     await client.close();
     await server.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('without worker mode only the busy wrapper is installed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-worker-busy-plain-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const { store, toolWrappers } = createSterlingServer(join(dir, '.sterling', 'sterling.db'));
+  try {
+    assert.deepEqual(toolWrappers, ['busy_refusal']);
+  } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
   }

@@ -294,7 +294,7 @@ function openStoreArg(storePath: string): { store: MountedStores; config: Sterli
 export function createSterlingServer(
   target: string | { projectRoot: string },
   opts: { workerPolicy?: WorkerPolicyArgs } = {}
-): { server: McpServer; store: MountedStores; tools: SterlingTools } {
+): { server: McpServer; store: MountedStores; tools: SterlingTools; toolWrappers: readonly string[] } {
   let opened: { store: MountedStores; config: SterlingConfig; repoRoot: string };
   if (typeof target === 'string') {
     opened = openStoreArg(target);
@@ -342,7 +342,13 @@ export function createSterlingServer(
   // then the worker's receipt stamp. A policy refusal is thrown before the
   // busy mapping and is never relabelled as busy; a busy error in worker mode
   // keeps its text, 'database is locked' included, which the worker matches.
-  if (opts.workerPolicy) guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store));
+  // toolWrappers records the install order, outermost first, so a test can
+  // pin it (worker-policy-busy.test.ts).
+  const toolWrappers: string[] = [];
+  if (opts.workerPolicy) {
+    guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store));
+    toolWrappers.push('worker_policy');
+  }
   // A StoreBusyError that reaches the wire still raw came from a tool whose
   // write has not been cleared as one transaction (tools.ts maps the cleared
   // ones itself and throws a plain Error), so it says an earlier write may have
@@ -362,6 +368,7 @@ export function createSterlingServer(
         }
       }) as never
     )) as typeof server.registerTool;
+  toolWrappers.push('busy_refusal');
 
   const json = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
 
@@ -882,5 +889,5 @@ export function createSterlingServer(
   // handoff_write / handoff_read were removed with the staged pipeline
   // (decision sterling-claude-code-scale-down-boundary, 2ad87dd1).
 
-  return { server, store, tools };
+  return { server, store, tools, toolWrappers };
 }

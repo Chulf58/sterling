@@ -12674,7 +12674,7 @@ function launchWorker(opts) {
     }
     if (lockState(readJson(paths.lock), nowMs, opts.isAlive) === "live") return { launched: false, reason: "already_running" };
     const lastLaunch = Number(readJson(paths.lastLaunch)?.at_ms);
-    if (Number.isFinite(lastLaunch) && nowMs - lastLaunch < DEBOUNCE_MS) return { launched: false, reason: "debounced" };
+    if (opts.trigger !== "chain" && Number.isFinite(lastLaunch) && nowMs - lastLaunch < DEBOUNCE_MS) return { launched: false, reason: "debounced" };
     const git = gitState(opts.root, opts.spawnSync);
     const dirty = git && dirtyPaths(opts.root, [...new Set(open2.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git.prefix);
     if (!dirty) {
@@ -12712,26 +12712,31 @@ function launchWorker(opts) {
     const startedAt = new Date(nowMs).toISOString();
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: "already_running" };
-    writeFileSync6(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
-    const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
-    const batch = selectBatch(eligible);
-    writeFileSync6(
-      paths.eligible,
-      JSON.stringify({
-        token,
-        head: git.head,
-        ...runnerHost,
-        items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })),
-        policy_version: POLICY_VERSION,
-        run_id: randomUUID3(),
-        policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
-        queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? "" }))
-      })
-    );
+    let launched = false;
+    let stage = "write the launch files";
     let logFd;
     try {
+      writeFileSync6(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
+      const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
+      const batch = selectBatch(eligible);
+      const chainAttempted = opts.trigger === "chain" && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
+      writeFileSync6(
+        paths.eligible,
+        JSON.stringify({
+          token,
+          head: git.head,
+          ...runnerHost,
+          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })),
+          policy_version: POLICY_VERSION,
+          run_id: randomUUID3(),
+          policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
+          queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? "" })),
+          chain_attempted: chainAttempted
+        })
+      );
       rotateIfLarge(paths.log);
       logFd = openSync6(paths.log, "a");
+      stage = "spawn";
       const child = opts.spawn(
         process.execPath,
         [runner, "--project", opts.root, "--trigger", String(opts.trigger), "--token", token, "--budget-usd", String(WORKER_RUN_BUDGET_USD)],
@@ -12739,13 +12744,15 @@ function launchWorker(opts) {
       );
       child.on?.("error", () => releaseLock(paths, token));
       child.unref?.();
+      launched = true;
+      stage = "record the running lock";
       writeFileSync6(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
       return { launched: true, reason: "launched", pid: child.pid, items: batch.length, eligible: eligible.length, host };
     } catch (e) {
-      releaseLock(paths, token);
-      return { launched: false, reason: "error", detail: failDetail(`spawn: ${e?.message ?? e}`) };
+      return { launched: false, reason: "error", detail: failDetail(`${stage}: ${e?.message ?? e}`) };
     } finally {
       if (logFd !== void 0) closeSync6(logFd);
+      if (!launched) releaseLock(paths, token);
     }
   } catch (e) {
     return { launched: false, reason: "error", detail: failDetail(e?.message ?? String(e)) };

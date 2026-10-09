@@ -29,7 +29,13 @@ export interface WorkerPolicyArgs {
 /** The receipt key every allowed worker write carries. The worker's stream
  *  parser (slice B) fails the run on a successful write result without it. */
 export const WORKER_STAMP_KEY = 'worker_stamp';
-export type WorkerStamp = { run_id: string; item_id: string };
+/** `resolved` lists the queue items this call named for closing (`resolves`,
+ *  or the removed id) that are gone from the store after it ran. The runner
+ *  counts a closure only from this list, never from the request: an
+ *  article_missing join that covers part of an item rewrites the item and
+ *  leaves it open. */
+export type WorkerStamp = { run_id: string; item_id: string; resolved: string[] };
+type Authorized = { run_id: string; item_id: string; closes: string[] };
 
 /**
  * Which fields a worker write may touch, by the lane of the policy item that
@@ -42,7 +48,8 @@ export type WorkerStamp = { run_id: string; item_id: string };
  * - article_missing allows only a knowledge_append to `files`, under the
  *   directory rule in appendJoinFault (change iv).
  * - knowledge_line_ref_fix is not keyed by this list: its own checks fix
- *   which fields it can touch, and it needs only a batch target.
+ *   which fields it can touch, and it needs a reconcile_needed item that
+ *   targets the record.
  */
 export const WORKER_FIELD_ALLOW_LIST: Readonly<Record<WorkerPolicyLane, Readonly<Record<string, readonly string[]>>>> = {
   reconcile_needed: {
@@ -136,19 +143,32 @@ export class WorkerGuard {
 
   /**
    * Decide one tool call before it runs. Returns null for a read tool, the
-   * stamp for an allowed write, and throws WorkerPolicyRefusal otherwise.
+   * authorized item for an allowed write, and throws WorkerPolicyRefusal
+   * otherwise.
+   *
+   * Which item a write is judged against:
+   * - A write with `resolves` names exactly one policy item and is judged
+   *   against that item's lane only, so an edit one lane allows can never
+   *   close an item of another lane on the same record. The record must be
+   *   the item's target_id; an article_missing item has none (H10 mints it
+   *   with no feature_link), so its join may name any record, and the lane
+   *   rules below decide whether that record can take the join.
+   * - A write without `resolves` closes nothing. It is allowed when at least
+   *   one policy item targets the record and that item's lane allows it; the
+   *   stamp names the first such item in policy order.
+   * - knowledge_line_ref_fix belongs to reconcile_needed items only.
    */
-  authorize(tool: string, input: Record<string, unknown>): WorkerStamp | null {
+  authorize(tool: string, input: Record<string, unknown>): Authorized | null {
     if (WORKER_READ_TOOLS.has(tool)) return null;
     const policy = this.load(tool);
     const items = policy.policy_items;
-    const stamp = (item: WorkerPolicyItem): WorkerStamp => ({ run_id: policy.run_id, item_id: item.id });
+    const stamp = (item: WorkerPolicyItem, closes: string[]): Authorized => ({ run_id: policy.run_id, item_id: item.id, closes });
 
     if (tool === 'maintenance_remove') {
       const id = String(input.id);
       const item = items.find((i) => i.id === id);
       if (!item) throw new WorkerPolicyRefusal(tool, 'item_not_in_batch', `item '${id}' is not one of this run's policy items`);
-      return stamp(item);
+      return stamp(item, [id]);
     }
 
     if (tool !== 'knowledge_line_ref_fix' && !FIELD_WRITES.has(tool)) {
@@ -156,9 +176,38 @@ export class WorkerGuard {
     }
 
     const id = String(input.id);
-    const candidates = items.filter((i) => i.target_id !== null && i.target_id === id);
-    if (!candidates.length) {
-      throw new WorkerPolicyRefusal(tool, 'target_not_in_batch', `record '${id}' is not the target_id of any policy item (worker mode needs the exact full uuid)`);
+    const resolves = Array.isArray(input.resolves) ? (input.resolves as unknown[]).map(String) : [];
+    const outside = resolves.filter((r) => !items.some((i) => i.id === r));
+    if (outside.length) {
+      const targeting = items.filter((i) => i.target_id === id).map((i) => i.id);
+      throw new WorkerPolicyRefusal(tool, 'resolves_outside_batch', `resolves names ${outside.join(', ')}, which ${outside.length === 1 ? 'is not a policy item' : 'are not policy items'}`, targeting);
+    }
+    if (resolves.length > 1) {
+      throw new WorkerPolicyRefusal(tool, 'resolves_one_item', `a worker write closes one policy item and is judged by that item's lane, but resolves names ${resolves.length}`, resolves);
+    }
+    let candidates: WorkerPolicyItem[];
+    if (resolves.length === 1) {
+      const item = items.find((i) => i.id === resolves[0]) as WorkerPolicyItem;
+      if (item.target_id === null ? item.lane !== 'article_missing' : item.target_id !== id) {
+        throw new WorkerPolicyRefusal(tool, 'target_not_in_batch', `resolves names ${item.id}, whose target is ${item.target_id ?? 'not set'}, not record '${id}'`, [item.id]);
+      }
+      candidates = [item];
+    } else {
+      candidates = items.filter((i) => i.target_id !== null && i.target_id === id);
+      if (!candidates.length) {
+        throw new WorkerPolicyRefusal(
+          tool,
+          'target_not_in_batch',
+          `record '${id}' is not the target_id of any policy item (worker mode needs the exact full uuid; an article_missing join names its item in resolves)`
+        );
+      }
+    }
+    if (tool === 'knowledge_line_ref_fix') {
+      const reconcile = candidates.filter((i) => i.lane === 'reconcile_needed');
+      if (!reconcile.length) {
+        throw new WorkerPolicyRefusal(tool, 'line_ref_fix_lane', `a line-reference fix belongs to a reconcile_needed item, and ${candidates.map((i) => `${i.id} is ${i.lane}`).join(', ')}`, candidates.map((i) => i.id));
+      }
+      candidates = reconcile;
     }
     const candidateIds = candidates.map((i) => i.id);
     // Physical holder, never the body's `scope` (anti_pattern
@@ -166,15 +215,9 @@ export class WorkerGuard {
     if (!this.records.projectStoreHolds(id)) {
       throw new WorkerPolicyRefusal(tool, 'target_not_project_held', `record '${id}' is not held by the project store`, candidateIds);
     }
-    const resolves = Array.isArray(input.resolves) ? (input.resolves as unknown[]).map(String) : [];
-    const outside = resolves.filter((r) => !items.some((i) => i.id === r));
-    if (outside.length) {
-      throw new WorkerPolicyRefusal(tool, 'resolves_outside_batch', `resolves names ${outside.join(', ')}, which ${outside.length === 1 ? 'is not a policy item' : 'are not policy items'}`, candidateIds);
-    }
-    // Prefer the item this write closes, so the stamp names it.
-    const ordered = [...candidates.filter((i) => resolves.includes(i.id)), ...candidates.filter((i) => !resolves.includes(i.id))];
+    const ordered = candidates;
 
-    if (tool === 'knowledge_line_ref_fix') return stamp(ordered[0]);
+    if (tool === 'knowledge_line_ref_fix') return stamp(ordered[0], resolves);
 
     if (tool === 'knowledge_update' && input.expected_version === undefined) {
       throw new WorkerPolicyRefusal(tool, 'expected_version_required', 'a worker update states the version it read (decision change v)', candidateIds);
@@ -189,11 +232,17 @@ export class WorkerGuard {
     const faults: Fault[] = [];
     for (const item of ordered) {
       const fault = this.laneFault(tool, item, record, fields, input);
-      if (fault === null) return stamp(item);
+      if (fault === null) return stamp(item, resolves);
       faults.push({ rule: fault.rule, text: `${item.id} (${item.lane}): ${fault.text}` });
     }
     const rule = faults.every((f) => f.rule === 'append_join') ? 'append_join' : 'field_not_allowed';
     throw new WorkerPolicyRefusal(tool, rule, faults.map((f) => f.text).join('; '), candidateIds);
+  }
+
+  /** The ids among `closes` the store no longer holds: the items this call
+   *  actually closed, read after it ran. */
+  closed(closes: string[]): string[] {
+    return closes.filter((id) => this.records.get(id) === undefined);
   }
 
   /** Why this item does not allow the write, or null when it does. */
@@ -255,9 +304,10 @@ export function guardWorkerTools(server: McpServer, guard: WorkerGuard): void {
   const register = server.registerTool.bind(server) as unknown as (name: string, config: unknown, cb: Handler) => unknown;
   (server as unknown as { registerTool: typeof register }).registerTool = (name, config, cb) =>
     register(name, config, (...a: unknown[]) => {
-      const stamp = guard.authorize(name, (a[0] ?? {}) as Record<string, unknown>);
+      const allowed = guard.authorize(name, (a[0] ?? {}) as Record<string, unknown>);
       const result = cb(...a);
-      if (!stamp) return result;
-      return result instanceof Promise ? result.then((r) => stampReceipt(name, r, stamp)) : stampReceipt(name, result, stamp);
+      if (!allowed) return result;
+      const finish = (r: unknown) => stampReceipt(name, r, { run_id: allowed.run_id, item_id: allowed.item_id, resolved: guard.closed(allowed.closes) });
+      return result instanceof Promise ? result.then(finish) : finish(result);
     });
 }

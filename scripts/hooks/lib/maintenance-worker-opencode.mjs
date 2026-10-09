@@ -159,7 +159,7 @@ export function opencodeStreamJournal(journal, observe = () => {}, launchKeys = 
   // (a remove, a knowledge write) still happened server-side and counts; a
   // read is never evidence (task-end review 2026-10-02). Every journal call
   // passes the result text as a second argument for the runner's stamp check.
-  const sterlingCall = (name, input, is_error, text, executeFailed) => {
+  const sterlingCall = (name, input, is_error, text, executeFailed, stampText = text) => {
     const ok = is_error === false;
     const resultText = executeFailed && ok ? `the execute failed after this call completed: ${text}` : text;
     const marked = executeFailed ? { execute_failed: true } : {};
@@ -168,7 +168,7 @@ export function opencodeStreamJournal(journal, observe = () => {}, launchKeys = 
         journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error: null, result: 'no result before the run ended' }, '');
         return;
       }
-      journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error, result: resultText.slice(0, 400), ...marked }, text);
+      journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error, result: resultText.slice(0, 400), ...marked }, stampText);
       out.removes++;
       if (ok) {
         out.closedOk++;
@@ -178,7 +178,7 @@ export function opencodeStreamJournal(journal, observe = () => {}, launchKeys = 
     }
     const write = knowledgeWriteName(name);
     if (write) {
-      journal({ ...writeEntry(write, input, is_error, is_error === null ? 'no result before the run ended' : resultText.slice(0, 400)), ...marked }, is_error === null ? '' : text);
+      journal({ ...writeEntry(write, input, is_error, is_error === null ? 'no result before the run ended' : resultText.slice(0, 400)), ...marked }, is_error === null ? '' : stampText);
       if (is_error === null) return;
       const fix = write === 'knowledge_line_ref_fix';
       if (fix) out.lineRefFixes++;
@@ -210,11 +210,20 @@ export function opencodeStreamJournal(journal, observe = () => {}, launchKeys = 
         // call's own result text only when the execute made exactly one call.
         const whole = String(state.output ?? state.error ?? '');
         const text = ours.length === 1 ? whole : `(execute made ${ours.length} sterling calls; OpenCode reports one combined output) ${whole}`;
+        // One output cannot show which mutation a stamp in it belongs to, so
+        // when an execute holds more than one mutation (a remove or a
+        // knowledge write) none of them is given a stamp: each successful one
+        // is an unpoliced write and the run fails closed.
+        const mutates = (c) => {
+          const n = String(c.tool).slice(SERVER.length + 1);
+          return n === 'maintenance_remove' || knowledgeWriteName(n) !== null;
+        };
+        const shared = ours.filter(mutates).length > 1;
         for (const c of ours) {
           const name = String(c.tool).slice(SERVER.length + 1);
           const innerFinished = c.status === 'completed' || c.status === 'error';
           const is_error = finished && innerFinished ? c.status === 'error' : null;
-          sterlingCall(name, c.input ?? {}, is_error, text, status === 'error');
+          sterlingCall(name, c.input ?? {}, is_error, text, status === 'error', shared && mutates(c) ? '' : text);
         }
         return;
       }

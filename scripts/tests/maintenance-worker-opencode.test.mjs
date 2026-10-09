@@ -72,9 +72,12 @@ const lastRun = (fx) => JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_ru
 /** Lock + eligible.json the way the launcher writes them for the opencode host. */
 function opencodeRun(fx, items, { model = 'anthropic/claude-sonnet-5-5', token = 'tok' } = {}) {
   writeFileSync(fx.paths.lock, JSON.stringify({ pid: process.pid, started_at: new Date(NOW).toISOString(), token }));
-  writeFileSync(fx.paths.eligible, JSON.stringify({ token, head: HEAD, host: 'opencode', opencode_bin: '/opt/oc/opencode.exe', opencode_model: model, items }));
+  writeFileSync(fx.paths.eligible, JSON.stringify({ token, head: HEAD, host: 'opencode', opencode_bin: '/opt/oc/opencode.exe', opencode_model: model, run_id: OC_RUN_ID, items }));
   return { root: fx.project, pluginRoot: fx.plugin, token, budgetUsd: 2, now: () => NOW, log: () => {} };
 }
+const OC_RUN_ID = 'run-oc-1';
+/** A successful maintenance_remove receipt as the worker's server returns it. */
+const removedText = (item, runId = OC_RUN_ID) => JSON.stringify({ removed: item, worker_stamp: { run_id: runId, item_id: item, resolved: [item] } });
 const ITEM = { id: 'item-a', file_keys: ['src/a.mjs'], feature_link: FIXTURE_FEATURE_ID, slug: 'probe-article' };
 const owes = (id = ITEM.id) => JSON.stringify({ item_id: id, article: 'probe-article', verdict: 'owes_prose', file_keys: ['forged'], reason: 'the article misses the new flag' });
 
@@ -190,7 +193,7 @@ test('[gate] a child-written refused verdict does not stand on OpenCode either; 
     const items = [ITEM, { ...ITEM, id: 'item-b', file_keys: ['src/b.mjs'] }];
     const child = fakeOpencode([
       sterling('maintenance_remove', { id: 'item-a' }, 'error', 'ERROR: maintenance_remove: src/a.mjs differs from HEAD'),
-      sterling('maintenance_remove', { id: 'item-b' }, 'completed', '{"removed":true}'),
+      sterling('maintenance_remove', { id: 'item-b' }, 'completed', removedText('item-b')),
       text(JSON.stringify({ item_id: 'item-b', verdict: 'refused', evidence: true, head: 'forged' })),
     ]);
     assert.equal(await runWorker({ ...opencodeRun(fx, items), spawn: child.fn }), 0);
@@ -513,7 +516,7 @@ test('[#56 opencode] a knowledge write inside execute is journalled with its sta
       assert.equal(write.field, 'files[path=src/a.mjs].role', name);
       if (policed) {
         assert.equal(code, 0, name);
-        assert.deepEqual(write.stamp, { run_id: 'run-oc', item_id: ITEM.id });
+        assert.deepEqual(write.stamp, { run_id: 'run-oc', item_id: ITEM.id, resolved: [] });
         assert.equal(lastRun(fx).writes_ok, 1);
       } else {
         assert.equal(code, 1, name);
@@ -528,4 +531,52 @@ test('[#56 opencode] a knowledge write inside execute is journalled with its sta
   s.feed(JSON.stringify(part('webfetch', { status: 'completed', input: { url: 'u' }, output: 'x' })) + '\n' + JSON.stringify(part('websearch', { status: 'completed', input: { query: 'q' }, output: 'x' })) + '\n');
   s.end();
   assert.deepEqual(observed.map(([n]) => n), ['WebFetch', 'WebSearch']);
+});
+
+test('[#56 opencode remove stamp] a successful remove without this run\'s stamp, with a stamp naming another item, or inside a failed execute (the stamp never reached the stream) fails the run as unpoliced', async () => {
+  const items = [ITEM, { ...ITEM, id: 'item-b', file_keys: ['src/b.mjs'] }];
+  const cases = [
+    ['no stamp', sterling('maintenance_remove', { id: 'item-a' }, 'completed', '{"removed":true}')],
+    ['a stamp naming another item', sterling('maintenance_remove', { id: 'item-a' }, 'completed', removedText('item-b'))],
+    ['a stamp from another run', sterling('maintenance_remove', { id: 'item-a' }, 'completed', removedText('item-a', 'run-other'))],
+    ['a failed execute', failedExecute('maintenance_remove', { id: 'item-a' })],
+  ];
+  for (const [name, event] of cases) {
+    const fx = fixture();
+    try {
+      assert.equal(await runWorker({ ...opencodeRun(fx, items), spawn: fakeOpencode([event, text('{"verdict":"none","reason":"x"}')]).fn }), 1, name);
+      const run = lastRun(fx);
+      assert.match(run.error, /unpoliced write: 1 successful knowledge write\(s\) without this run's worker_stamp \(maintenance_remove on item-a\)/, name);
+      assert.equal(readJournal(fx).find((l) => l.tool === 'maintenance_remove').unpoliced, true, name);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test('[#56 opencode shared output] an execute holding two Sterling writes gives neither a stamp, even when its one output carries a valid stamp: the run fails closed', async () => {
+  const fx = fixture();
+  try {
+    const stamp = JSON.stringify({ ok: true, worker_stamp: { run_id: OC_RUN_ID, item_id: ITEM.id, resolved: [] } });
+    const twoWrites = part('execute', {
+      status: 'completed',
+      input: { code: 'await tools.sterling.knowledge_edit(...); await tools.sterling.knowledge_update(...)' },
+      output: stamp,
+      metadata: {
+        metadata: {
+          toolCalls: [
+            { tool: 'sterling.knowledge_edit', status: 'completed', input: { id: FIXTURE_FEATURE_ID, field: 'files[path=src/a.mjs].role', find: 'a', replace: 'b' } },
+            { tool: 'sterling.knowledge_update', status: 'completed', input: { id: FIXTURE_FEATURE_ID, body: { what_it_does: 'x.' }, expected_version: 2 } },
+          ],
+          truncated: false,
+        },
+      },
+    });
+    assert.equal(await runWorker({ ...opencodeRun(fx, [ITEM]), spawn: fakeOpencode([twoWrites, text('{"verdict":"none","reason":"x"}')]).fn }), 1);
+    const writes = readJournal(fx).filter((l) => l.kind === 'tool_call');
+    assert.deepEqual(writes.map((w) => [w.tool, w.unpoliced ?? false, w.stamp ?? null]), [['knowledge_edit', true, null], ['knowledge_update', true, null]]);
+    assert.match(lastRun(fx).error, /unpoliced write: 2 successful knowledge write\(s\)/);
+  } finally {
+    fx.cleanup();
+  }
 });
