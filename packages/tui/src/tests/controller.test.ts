@@ -383,22 +383,45 @@ for (const path of ['set', 'clear'] as const) {
     }
   });
 
-  test(`controller: an override ${path} whose second agent write fails restores the first and leaves config.json alone`, async () => {
+  test(`controller: an override ${path} whose agent write fails changes nothing and records no decision`, async () => {
     const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
     const ctl = openDashboard(f.storePath);
     try {
       await ctl.applyEffects([{ type: 'model_swap', key: 'reviewer', from: { model: 'claude-r', effort: 'high' }, to: { model: 'claude-r', effort: 'high' }, agents: ['reviewer'], decisionTitle: 'setup' }]);
-      // implementor is written before reviewer (roster order); a read-only reviewer file fails the second write
-      chmodSync(join(f.ocDir, 'reviewer.md'), 0o444);
+      // a read-only agents directory refuses the temp file every atomic write needs
+      chmodSync(f.ocDir, 0o555);
       const before = snapshotFiles(f);
       const decisions = decisionCount(ctl);
       await ctl.applyEffects([effect(['implementor', 'reviewer'])]);
-      assert.deepEqual(snapshotFiles(f), before, 'the written implementor file was restored; config.json untouched');
+      assert.deepEqual(snapshotFiles(f), before, 'config.json and every agent file are byte-identical');
       assert.equal(decisionCount(ctl), decisions);
       assert.match(ctl.ui().notice ?? '', /not changed — writing the OpenCode agents failed/);
     } finally {
       ctl.close();
-      chmodSync(join(f.ocDir, 'reviewer.md'), 0o644);
+      chmodSync(f.ocDir, 0o755);
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  });
+
+  test(`controller: an override ${path} whose config.json write and restore both fail still restores the agent files`, async () => {
+    const f = overrideFixture(path === 'clear' ? 'openai/gpt-6-astra' : undefined);
+    const ctl = openDashboard(f.storePath);
+    try {
+      await ctl.applyEffects([{ type: 'model_swap', key: 'reviewer', from: { model: 'claude-r', effort: 'high' }, to: { model: 'claude-r', effort: 'high' }, agents: ['reviewer'], decisionTitle: 'setup' }]);
+      // a read-only config.json fails the write and the restore of the original text alike
+      chmodSync(f.configPath, 0o444);
+      const before = snapshotFiles(f);
+      const decisions = decisionCount(ctl);
+      await ctl.applyEffects([effect(['implementor', 'reviewer'])]);
+      assert.deepEqual(snapshotFiles(f), before, 'both written agent files were restored; config.json was never changed');
+      assert.deepEqual(readdirSync(f.ocDir).filter((n) => !n.endsWith('.md')), [], 'no temp file is left behind');
+      assert.equal(decisionCount(ctl), decisions);
+      const notice = ctl.ui().notice ?? '';
+      assert.match(notice, /writing config\.json failed \(EACCES[^)]*\) and the rollback failed — config\.json not restored: EACCES/);
+      assert.doesNotMatch(notice, /OpenCode agents not restored/, 'the agent restore ran and succeeded');
+    } finally {
+      ctl.close();
+      chmodSync(f.configPath, 0o644);
       rmSync(f.dir, { recursive: true, force: true });
     }
   });

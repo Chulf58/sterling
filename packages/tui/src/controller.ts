@@ -575,11 +575,12 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     try {
       writeFileSync(configPath, configAfter);
     } catch (err) {
-      try {
-        writeFileSync(configPath, configBefore);
-        restoreFullAgentFiles(writes);
-      } catch (restoreErr) {
-        ui = { ...ui, notice: `OpenCode model for '${e.key}': writing config.json failed (${(err as Error).message}) and the rollback failed too — ${(restoreErr as Error).message}` };
+      // the two restores run independently, so one failing never skips the other
+      const rollback: string[] = [];
+      try { writeFileSync(configPath, configBefore); } catch (restoreErr) { rollback.push(`config.json not restored: ${(restoreErr as Error).message}`); }
+      try { restoreFullAgentFiles(writes); } catch (restoreErr) { rollback.push(`OpenCode agents not restored: ${(restoreErr as Error).message}`); }
+      if (rollback.length) {
+        ui = { ...ui, notice: `OpenCode model for '${e.key}': writing config.json failed (${(err as Error).message}) and the rollback failed — ${rollback.join('; ')}` };
         return;
       }
       fail(`writing config.json failed: ${(err as Error).message}`);

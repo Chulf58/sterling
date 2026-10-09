@@ -50,8 +50,8 @@
 // OpenCode not installed, or not 2.x: one loud skip line, nothing written.
 
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1094,7 +1094,7 @@ function frontmatterModel(content) {
  */
 export function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   const rows = [];
-  for (const { path, content, ...row } of planFullAgents({ projectDir, pluginRoot, tracked, models })) {
+  for (const { path, content, previous: _previous, ...row } of planFullAgents({ projectDir, pluginRoot, tracked, models })) {
     if (content !== undefined) {
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, content);
@@ -1182,30 +1182,50 @@ export function stageFullAgentModel({ projectDir, pluginRoot, agents, model, ope
   };
 }
 
-/** Write staged files in order. On a failure, the files already written are put
- *  back (restoreFullAgentFiles) and the error is rethrown. */
-export function writeFullAgentFiles(writes) {
-  const done = [];
+/** Replace one file atomically: write a temp file beside it, then rename it
+ *  over the target, so a failed write never leaves the target half-written.
+ *  The temp file is removed when the write or the rename fails. */
+function writeFileAtomic(path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
+  const tmp = `${path}.tmp-${randomUUID()}`;
   try {
-    for (const w of writes) {
-      mkdirSync(dirname(w.path), { recursive: true });
-      writeFileSync(w.path, w.content);
-      done.push(w);
-    }
+    writeFile(tmp, content);
+    rename(tmp, path);
   } catch (err) {
-    restoreFullAgentFiles(done);
+    rmSync(tmp, { force: true });
     throw err;
   }
 }
 
-/** Put staged files back to their previous content, deleting the ones that did
- *  not exist before. Every file is attempted; the failures are thrown together. */
-export function restoreFullAgentFiles(writes) {
+/** Write staged files in order, each atomically. On a failure, the files already
+ *  written are put back (restoreFullAgentFiles) and the error is rethrown; a
+ *  rollback failure is added to the error message. `fs` is a test seam. */
+export function writeFullAgentFiles(writes, fs = {}) {
+  const done = [];
+  try {
+    for (const w of writes) {
+      mkdirSync(dirname(w.path), { recursive: true });
+      writeFileAtomic(w.path, w.content, fs);
+      done.push(w);
+    }
+  } catch (err) {
+    try {
+      restoreFullAgentFiles(done, fs);
+    } catch (restoreErr) {
+      throw new Error(`${err.message}; rollback: ${restoreErr.message}`, { cause: err });
+    }
+    throw err;
+  }
+}
+
+/** Put staged files back to their previous content (atomically), deleting the
+ *  ones that did not exist before. Every file is attempted; the failures are
+ *  thrown together. */
+export function restoreFullAgentFiles(writes, fs = {}) {
   const failed = [];
   for (const w of writes) {
     try {
       if (w.previous === null) rmSync(w.path, { force: true });
-      else writeFileSync(w.path, w.previous);
+      else writeFileAtomic(w.path, w.previous, fs);
     } catch (err) {
       failed.push(`${fwd(w.path)}: ${err.message}`);
     }

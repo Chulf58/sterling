@@ -29,5 +29,9 @@ export function stageFullAgentModel(opts: {
   model: string;
   opencodeModel?: string;
 }): { skipped: string; rows?: undefined; writes?: undefined } | { rows: OpenCodeRow[]; writes: StagedWrite[]; skipped?: undefined };
-export function writeFullAgentFiles(writes: StagedWrite[]): void;
-export function restoreFullAgentFiles(writes: StagedWrite[]): void;
+export interface AtomicWriteFs {
+  writeFile?: (path: string, content: string) => void;
+  rename?: (from: string, to: string) => void;
+}
+export function writeFullAgentFiles(writes: StagedWrite[], fs?: AtomicWriteFs): void;
+export function restoreFullAgentFiles(writes: StagedWrite[], fs?: AtomicWriteFs): void;
