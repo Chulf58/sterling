@@ -7893,6 +7893,39 @@ var StoreMovedError = class extends Error {
     this.name = "StoreMovedError";
   }
 };
+var SQLITE_BUSY_EXTENDED = {
+  261: "SQLITE_BUSY_RECOVERY",
+  517: "SQLITE_BUSY_SNAPSHOT",
+  773: "SQLITE_BUSY_TIMEOUT"
+};
+var StoreBusyError = class extends Error {
+  busy_timeout_ms;
+  sqlite_errcode;
+  constructor(busy_timeout_ms, cause) {
+    const code = cause?.errcode;
+    const errcode = typeof code === "number" ? code : void 0;
+    const outcome = "this transaction did not commit and nothing from it was written";
+    super(errcode === void 0 || errcode === 5 ? `the store was locked by another connection for longer than ${busy_timeout_ms} ms; ${outcome} (SQLITE_BUSY, database is locked).` : `the store was busy (${SQLITE_BUSY_EXTENDED[errcode] ?? `SQLITE_BUSY, extended code ${errcode}`}); ${outcome} (SQLITE_BUSY, database is locked).`, { cause });
+    this.busy_timeout_ms = busy_timeout_ms;
+    this.sqlite_errcode = errcode;
+    this.name = "StoreBusyError";
+  }
+};
+var StoreOutcomeUncertainError = class extends Error {
+  constructor(cause) {
+    super("the store was busy and the rollback that followed also failed, so whether this transaction committed is not known; check before re-sending, through a reopened store. This connection was retired and refuses every read and write: reopen the store.", { cause });
+    this.name = "StoreOutcomeUncertainError";
+  }
+};
+function isSqliteBusy(e) {
+  if (e instanceof StoreBusyError)
+    return false;
+  const code = e?.errcode;
+  if (typeof code === "number" && (code & 255) === 5)
+    return true;
+  const message = e?.message;
+  return typeof message === "string" && /database is locked/i.test(message);
+}
 function operationIdOf(options, op) {
   const id = options?.operation_id;
   if (id === void 0)
@@ -10222,7 +10255,11 @@ var SterlingStore = class _SterlingStore {
     if (this.readDepth > 0) {
       throw new Error("SterlingStore: a write cannot start inside a read transaction (readTx); nothing was written.");
     }
-    this.db.begin();
+    try {
+      this.db.begin();
+    } catch (e) {
+      throw this.asBusy(e);
+    }
     this.txDepth++;
     try {
       this.assertLiveSchemaVersion("transaction");
@@ -10233,12 +10270,48 @@ var SterlingStore = class _SterlingStore {
     } catch (e) {
       try {
         this.db.rollback();
-      } catch {
+      } catch (rollbackError) {
+        this.retireConnection(rollbackError);
+        if (isSqliteBusy(e))
+          throw new StoreOutcomeUncertainError(e);
+        throw e;
       }
-      throw e;
+      throw this.asBusy(e);
     } finally {
       this.txDepth--;
     }
+  }
+  /**
+   * A ROLLBACK failed, so the connection's transaction state is unknown. Close
+   * it (SQLite drops an open transaction on close) and swap in a driver whose
+   * every statement and transaction method throws, so no later read or write
+   * can see or build on the unknown state. `close` stays callable.
+   */
+  retireConnection(rollbackError) {
+    const old = this.db;
+    try {
+      old.close();
+    } catch {
+    }
+    const refusal = () => new Error("SterlingStore: this connection was retired after a failed ROLLBACK left its transaction state unknown, so it refuses every read and write; reopen the store. Nothing was read or written.", { cause: rollbackError });
+    this.db = new Proxy(old, {
+      get(target, prop) {
+        if (prop === "close")
+          return () => target.close();
+        const value = Reflect.get(target, prop, target);
+        if (typeof value !== "function")
+          return value;
+        return () => {
+          throw refusal();
+        };
+      }
+    });
+  }
+  /** A SQLite busy error from BEGIN, the transaction body or COMMIT becomes the named StoreBusyError; any other error is returned unchanged. */
+  asBusy(e) {
+    if (!isSqliteBusy(e))
+      return e;
+    return new StoreBusyError(this.db.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS, e);
   }
   /**
    * PUBLIC transaction boundary for the tool layer (decision

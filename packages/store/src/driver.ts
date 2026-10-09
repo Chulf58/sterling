@@ -67,6 +67,9 @@ export interface StoreDialect {
 export interface StoreDriver {
   readonly dialect: StoreDialect;
 
+  /** How long begin() waits for the write lock before it throws, when the driver has such a wait (SQLite's busy timeout). Named in StoreBusyError. */
+  readonly busyTimeoutMs?: number;
+
   // The statement API.
   prepare(sql: string): StoreStatement;
   exec(sql: string): void;

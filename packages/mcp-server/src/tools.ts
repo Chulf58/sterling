@@ -24,6 +24,7 @@ import {
   fitDomains,
   MountedStores,
   SterlingStore,
+  StoreBusyError,
   allocateShares,
   type QueryOptions,
   type ToolStore,
@@ -1760,6 +1761,30 @@ function pidIsGone(pid: number): boolean {
   } catch (err) {
     return (err as NodeJS.ErrnoException)?.code === 'ESRCH';
   }
+}
+
+/**
+ * Write tools whose whole write is ONE store transaction when it runs outside a
+ * wider transaction, so a StoreBusyError (nothing from that transaction was
+ * written) means the call changed nothing and is safe to re-send. Audited for
+ * knowledgeUpdate's in-place branches only; every other write tool, and
+ * knowledgeUpdate's attestation branch (a supersede plus one remove per claim,
+ * each its own transaction), gets the "may have landed" wording instead.
+ */
+const SINGLE_TRANSACTION_WRITE_TOOLS: ReadonlySet<string> = new Set(['knowledge_update', 'knowledge_append', 'knowledge_edit']);
+
+/**
+ * The refusal a caller reads when the store stayed locked past its busy timeout
+ * (issue #59). The store's own text says what happened to ITS transaction (it
+ * keeps the words 'database is locked' that the maintenance worker's runner
+ * matches); this adds what the caller needs next: whether to re-send. A tool
+ * that wrote in more than one transaction cannot say 'nothing was written'.
+ */
+export function busyRefusal(op: string, e: StoreBusyError, safeToResend: boolean): Error {
+  const next = safeToResend
+    ? 'This call wrote nothing, so it is safe to re-send.'
+    : 'An earlier write in this call may have landed; check before re-sending.';
+  return new Error(`${op}: ${e.message} ${next}`, { cause: e });
 }
 
 /**
@@ -8764,6 +8789,8 @@ export class SterlingTools {
       }
     } catch (err) {
       if (err instanceof ZodError) throw this.renderValidationFailure(err, old.type, toolName);
+      // The attestation branch writes in several transactions (supersede, then one remove per claim).
+      if (err instanceof StoreBusyError) throw busyRefusal(toolName, err, !replaced && SINGLE_TRANSACTION_WRITE_TOOLS.has(toolName));
       throw err;
     }
     // NOTE FOR THE NEXT READER: there is deliberately NO post-write repair step
@@ -8773,7 +8800,13 @@ export class SterlingTools {
     // post-commit throw reported as "nothing was written", and an unguarded
     // read-modify-write). It now happens inside dischargeAppendJoin's own
     // transaction; re-introducing anything here would re-open exactly that gap.
-    this.repointPromotionReview(chain, updated.id, ts);
+    try {
+      this.repointPromotionReview(chain, updated.id, ts);
+    } catch (err) {
+      // The record write above has already committed.
+      if (err instanceof StoreBusyError) throw busyRefusal(toolName, err, false);
+      throw err;
+    }
     // The PHYSICAL holder decides, as for the repo-path rule above: a record's
     // body scope is not where it lives. `updated.id` is the replacement's id on
     // the attestation path.

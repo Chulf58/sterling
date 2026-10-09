@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { MountedStores, SterlingStore, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
+import { MountedStores, SterlingStore, StoreBusyError, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { parseConfig, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE } from '@sterling/schemas';
 import { buildDashboardFrame, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect } from './state.js';
@@ -246,6 +246,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   let pending: (SelectEffect | BoardEditEffect)[] = [];
   let retryNotice: string | undefined;
   const isBusy = (err: unknown): boolean => {
+    if (err instanceof StoreBusyError) return true;
     const code = (err as { errcode?: unknown } | null)?.errcode;
     return code === 5 || code === 6 || /database is (locked|busy)|SQLITE_BUSY|SQLITE_LOCKED/i.test((err as Error | null)?.message ?? '');
   };

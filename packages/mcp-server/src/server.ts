@@ -7,10 +7,10 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { z, ZodError } from 'zod';
 import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS } from '@sterling/schemas';
-import { MountedStores, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
+import { MountedStores, StoreBusyError, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { holdRoutedStores } from './held-stores.js';
-import { SterlingTools, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS, DEDUP_OVERRIDE_FIELD, mountedDomainSurface } from './tools.js';
+import { SterlingTools, busyRefusal, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS, DEDUP_OVERRIDE_FIELD, mountedDomainSurface } from './tools.js';
 
 const passthrough = z.object({}).passthrough();
 
@@ -331,6 +331,25 @@ export function createSterlingServer(target: string | { projectRoot: string }): 
     ? ` Mounted domains at server start: ${bootDomains.join('; ')} (the receipt's mounted_domains is current). A record about one of these subjects takes scope domain:<name>; a record about this repo stays project.`
     : '';
   const server = new McpServer({ name: 'sterling', version: '0.1.0' });
+  // A StoreBusyError that reaches the wire still raw came from a tool whose
+  // write has not been cleared as one transaction (tools.ts maps the cleared
+  // ones itself and throws a plain Error), so it says an earlier write may have
+  // landed instead of claiming a clean refusal (issue #59).
+  const mapBusy = (name: string, e: unknown): unknown => (e instanceof StoreBusyError ? busyRefusal(name, e, false) : e);
+  const registerTool = server.registerTool.bind(server);
+  server.registerTool = ((name: string, config: never, handler: (...args: unknown[]) => unknown) =>
+    registerTool(
+      name,
+      config,
+      ((...args: unknown[]) => {
+        try {
+          const result = handler(...args);
+          return result instanceof Promise ? result.catch((e: unknown) => { throw mapBusy(name, e); }) : result;
+        } catch (e) {
+          throw mapBusy(name, e);
+        }
+      }) as never
+    )) as typeof server.registerTool;
 
   const json = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
 
