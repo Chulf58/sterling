@@ -256,19 +256,19 @@ var require_tty = __commonJS({
 var require_escape = __commonJS({
   "node_modules/string-kit/lib/escape.js"(exports) {
     "use strict";
-    exports.regExp = exports.regExpPattern = (str) => str.replace(/([.*+?^${}()|[\]/\\])/g, "\\$1");
-    exports.regExpReplacement = (str) => str.replace(/\$/g, "$$$$");
-    exports.format = (str) => str.replace(/%/g, "%%");
-    exports.jsSingleQuote = (str) => exports.control(str).replace(/'/g, "\\'");
-    exports.jsDoubleQuote = (str) => exports.control(str).replace(/"/g, '\\"');
-    exports.shellArg = (str) => "'" + str.replace(/'/g, "'\\''") + "'";
+    exports.regExp = exports.regExpPattern = (str2) => str2.replace(/([.*+?^${}()|[\]/\\])/g, "\\$1");
+    exports.regExpReplacement = (str2) => str2.replace(/\$/g, "$$$$");
+    exports.format = (str2) => str2.replace(/%/g, "%%");
+    exports.jsSingleQuote = (str2) => exports.control(str2).replace(/'/g, "\\'");
+    exports.jsDoubleQuote = (str2) => exports.control(str2).replace(/"/g, '\\"');
+    exports.shellArg = (str2) => "'" + str2.replace(/'/g, "'\\''") + "'";
     var escapeControlMap = {
       "\r": "\\r",
       "\n": "\\n",
       "	": "\\t",
       "\x7F": "\\x7f"
     };
-    exports.control = (str, keepNewLineAndTab = false) => str.replace(/[\x00-\x1f\x7f]/g, (match) => {
+    exports.control = (str2, keepNewLineAndTab = false) => str2.replace(/[\x00-\x1f\x7f]/g, (match) => {
       if (keepNewLineAndTab && (match === "\n" || match === "	")) {
         return match;
       }
@@ -288,17 +288,17 @@ var require_escape = __commonJS({
       '"': "&quot;",
       "'": "&#039;"
     };
-    exports.html = (str) => str.replace(/[&<>]/g, (match) => escapeHtmlMap[match]);
-    exports.htmlAttr = (str) => str.replace(/[&<>"]/g, (match) => escapeHtmlMap[match]);
-    exports.htmlSpecialChars = (str) => str.replace(/[&<>"']/g, (match) => escapeHtmlMap[match]);
-    exports.unicodePercentEncode = (str) => str.replace(/[\x00-\x1f\u0100-\uffff\x7f%]/g, (match) => {
+    exports.html = (str2) => str2.replace(/[&<>]/g, (match) => escapeHtmlMap[match]);
+    exports.htmlAttr = (str2) => str2.replace(/[&<>"]/g, (match) => escapeHtmlMap[match]);
+    exports.htmlSpecialChars = (str2) => str2.replace(/[&<>"']/g, (match) => escapeHtmlMap[match]);
+    exports.unicodePercentEncode = (str2) => str2.replace(/[\x00-\x1f\u0100-\uffff\x7f%]/g, (match) => {
       try {
         return encodeURI(match);
       } catch (error) {
         return "";
       }
     });
-    exports.httpHeaderValue = (str) => exports.unicodePercentEncode(str);
+    exports.httpHeaderValue = (str2) => exports.unicodePercentEncode(str2);
   }
 });
 
@@ -479,9 +479,9 @@ var require_ansi = __commonJS({
       "106": { bgColor: 14 },
       "107": { bgColor: 15 }
     };
-    ansi.parse = (str) => {
+    ansi.parse = (str2) => {
       var ansiCodes, raw, part, style, output = [];
-      for ([, ansiCodes, raw] of str.matchAll(/\x1b\[([0-9;]+)m|(.[^\x1b]*)/g)) {
+      for ([, ansiCodes, raw] of str2.matchAll(/\x1b\[([0-9;]+)m|(.[^\x1b]*)/g)) {
         if (raw) {
           if (output.length) {
             output[output.length - 1].text += raw;
@@ -531,13 +531,13 @@ var require_unicode = __commonJS({
     var unicode = {};
     module.exports = unicode;
     unicode.encode = (array) => String.fromCodePoint(...array);
-    unicode.decode = (str) => Array.from(str, (c) => c.codePointAt(0));
-    unicode.firstCodePoint = (str) => str.codePointAt(0);
-    unicode.firstChar = (str) => str.length ? String.fromCodePoint(str.codePointAt(0)) : void 0;
-    unicode.toArray = (str) => Array.from(str);
-    unicode.toCells = (Cell, str, tabWidth = 4, linePosition = 0, ...extraCellArgs) => {
+    unicode.decode = (str2) => Array.from(str2, (c) => c.codePointAt(0));
+    unicode.firstCodePoint = (str2) => str2.codePointAt(0);
+    unicode.firstChar = (str2) => str2.length ? String.fromCodePoint(str2.codePointAt(0)) : void 0;
+    unicode.toArray = (str2) => Array.from(str2);
+    unicode.toCells = (Cell, str2, tabWidth = 4, linePosition = 0, ...extraCellArgs) => {
       var char, code, fillSize, width, output = [];
-      for (char of str) {
+      for (char of str2) {
         code = char.codePointAt(0);
         if (code === 10) {
           linePosition = 0;
@@ -559,35 +559,35 @@ var require_unicode = __commonJS({
       return output;
     };
     unicode.fromCells = (cells2) => {
-      var cell, str = "";
+      var cell, str2 = "";
       for (cell of cells2) {
         if (!cell.filler) {
-          str += cell.char;
+          str2 += cell.char;
         }
       }
-      return str;
+      return str2;
     };
-    unicode.length = (str) => {
+    unicode.length = (str2) => {
       var char, length = 0;
-      for (char of str) {
+      for (char of str2) {
         length++;
       }
       return length;
     };
-    unicode.truncateLength = unicode.truncate = (str, limit) => {
+    unicode.truncateLength = unicode.truncate = (str2, limit) => {
       var position = 0, length = 0;
-      for (let char of str) {
+      for (let char of str2) {
         if (length === limit) {
-          return str.slice(0, position);
+          return str2.slice(0, position);
         }
         length++;
         position += char.length;
       }
-      return str;
+      return str2;
     };
-    unicode.width = (str) => {
+    unicode.width = (str2) => {
       var char, count = 0;
-      for (char of str) {
+      for (char of str2) {
         count += unicode.codePointWidth(char.codePointAt(0));
       }
       return count;
@@ -605,18 +605,18 @@ var require_unicode = __commonJS({
     var lastTruncateWidth = 0;
     unicode.getLastTruncateWidth = () => lastTruncateWidth;
     unicode.widthLimit = // DEPRECATED
-    unicode.truncateWidth = (str, limit) => {
+    unicode.truncateWidth = (str2, limit) => {
       var char, charWidth, position = 0;
       lastTruncateWidth = 0;
-      for (char of str) {
+      for (char of str2) {
         charWidth = unicode.codePointWidth(char.codePointAt(0));
         if (lastTruncateWidth + charWidth > limit) {
-          return str.slice(0, position);
+          return str2.slice(0, position);
         }
         lastTruncateWidth += charWidth;
         position += char.length;
       }
-      return str;
+      return str2;
     };
     unicode.surrogatePair = (char) => {
       var code = char.charCodeAt(0);
@@ -666,8 +666,8 @@ var require_unicode = __commonJS({
       return 1;
     };
     unicode.isFullWidthCodePoint = (code) => unicode.codePointWidth(code) === 2;
-    unicode.toFullWidth = (str) => {
-      return String.fromCodePoint(...Array.from(str, (char) => {
+    unicode.toFullWidth = (str2) => {
+      return String.fromCodePoint(...Array.from(str2, (char) => {
         var code = char.codePointAt(0);
         return code >= 33 && code <= 126 ? 65280 + code - 32 : code;
       }));
@@ -748,15 +748,15 @@ var require_inspect = __commonJS({
         options.proto = false;
         options.funcDetails = false;
       }
-      var str = inspect_(runtime, options, variable);
-      if (str.length > options.outputMaxLength) {
-        str = options.style.truncate(str, options.outputMaxLength);
+      var str2 = inspect_(runtime, options, variable);
+      if (str2.length > options.outputMaxLength) {
+        str2 = options.style.truncate(str2, options.outputMaxLength);
       }
-      return str;
+      return str2;
     }
     exports.inspect = inspect;
     function inspect_(runtime, options, variable) {
-      var i, funcName, length, proto, propertyList, isTrivialConstructor, constructor, keyIsProperty, type, pre, isArray, isFunc, specialObject, str = "", key = "", descriptorStr = "", indent = "", descriptor, nextAncestors;
+      var i, funcName, length, proto, propertyList, isTrivialConstructor, constructor, keyIsProperty, type, pre, isArray, isFunc, specialObject, str2 = "", key = "", descriptorStr = "", indent = "", descriptor, nextAncestors;
       type = typeof variable;
       if (runtime.depth) {
         indent = (options.tab ?? options.style.tab).repeat(options.noMarkup ? runtime.depth - 1 : runtime.depth);
@@ -803,25 +803,25 @@ var require_inspect = __commonJS({
       }
       pre = runtime.noPre ? "" : indent + key;
       if (variable === void 0) {
-        str += pre + options.style.constant("undefined") + descriptorStr + options.style.newline;
+        str2 += pre + options.style.constant("undefined") + descriptorStr + options.style.newline;
       } else if (variable === EMPTY) {
-        str += pre + options.style.constant("[empty]") + descriptorStr + options.style.newline;
+        str2 += pre + options.style.constant("[empty]") + descriptorStr + options.style.newline;
       } else if (variable === null) {
-        str += pre + options.style.constant("null") + descriptorStr + options.style.newline;
+        str2 += pre + options.style.constant("null") + descriptorStr + options.style.newline;
       } else if (variable === false) {
-        str += pre + options.style.constant("false") + descriptorStr + options.style.newline;
+        str2 += pre + options.style.constant("false") + descriptorStr + options.style.newline;
       } else if (variable === true) {
-        str += pre + options.style.constant("true") + descriptorStr + options.style.newline;
+        str2 += pre + options.style.constant("true") + descriptorStr + options.style.newline;
       } else if (type === "number") {
-        str += pre + options.style.number(variable.toString()) + (options.noType || options.noTypeButConstructor ? "" : " " + options.style.type("number")) + descriptorStr + options.style.newline;
+        str2 += pre + options.style.number(variable.toString()) + (options.noType || options.noTypeButConstructor ? "" : " " + options.style.type("number")) + descriptorStr + options.style.newline;
       } else if (type === "string") {
         if (variable.length > options.maxLength) {
-          str += pre + (options.noMarkup ? "" : '"') + options.style.string(escape.control(variable.slice(0, options.maxLength - 1))) + "\u2026" + (options.noMarkup ? "" : '"') + (options.noType || options.noTypeButConstructor ? "" : " " + options.style.type("string") + options.style.length("(" + variable.length + " - TRUNCATED)")) + descriptorStr + options.style.newline;
+          str2 += pre + (options.noMarkup ? "" : '"') + options.style.string(escape.control(variable.slice(0, options.maxLength - 1))) + "\u2026" + (options.noMarkup ? "" : '"') + (options.noType || options.noTypeButConstructor ? "" : " " + options.style.type("string") + options.style.length("(" + variable.length + " - TRUNCATED)")) + descriptorStr + options.style.newline;
         } else {
-          str += pre + (options.noMarkup ? "" : '"') + options.style.string(escape.control(variable)) + (options.noMarkup ? "" : '"') + (options.noType || options.noTypeButConstructor ? "" : " " + options.style.type("string") + options.style.length("(" + variable.length + ")")) + descriptorStr + options.style.newline;
+          str2 += pre + (options.noMarkup ? "" : '"') + options.style.string(escape.control(variable)) + (options.noMarkup ? "" : '"') + (options.noType || options.noTypeButConstructor ? "" : " " + options.style.type("string") + options.style.length("(" + variable.length + ")")) + descriptorStr + options.style.newline;
         }
       } else if (Buffer.isBuffer(variable)) {
-        str += pre + options.style.inspect(variable.inspect()) + (options.noType ? "" : " " + options.style.type("Buffer") + options.style.length("(" + variable.length + ")")) + descriptorStr + options.style.newline;
+        str2 += pre + options.style.inspect(variable.inspect()) + (options.noType ? "" : " " + options.style.type("Buffer") + options.style.length("(" + variable.length + ")")) + descriptorStr + options.style.newline;
       } else if (type === "object" || type === "function") {
         funcName = length = "";
         isFunc = false;
@@ -845,17 +845,17 @@ var require_inspect = __commonJS({
         isTrivialConstructor = !variable.constructor || TRIVIAL_CONSTRUCTOR.has(variable.constructor);
         constructor = options.style.constructorName(constructor);
         proto = Object.getPrototypeOf(variable);
-        str += pre;
+        str2 += pre;
         if (!options.noType && (!options.noTypeButConstructor || !isTrivialConstructor)) {
           if (runtime.forceType && !options.noType && !options.noTypeButConstructor) {
-            str += options.style.type(runtime.forceType);
+            str2 += options.style.type(runtime.forceType);
           } else if (options.noTypeButConstructor) {
-            str += constructor;
+            str2 += constructor;
           } else {
-            str += constructor + funcName + length + " " + options.style.type(type) + descriptorStr;
+            str2 += constructor + funcName + length + " " + options.style.type(type) + descriptorStr;
           }
           if (!isFunc || options.funcDetails) {
-            str += " ";
+            str2 += " ";
           }
         }
         if (isArray && options.noArrayProperty) {
@@ -868,12 +868,12 @@ var require_inspect = __commonJS({
         }
         specialObject = specialObjectSubstitution(variable, runtime, options);
         if (options.protoBlackList && options.protoBlackList.has(proto)) {
-          str += options.style.limit("[skip]") + options.style.newline;
+          str2 += options.style.limit("[skip]") + options.style.newline;
         } else if (specialObject !== void 0) {
           if (typeof specialObject === "string") {
-            str += "=> " + specialObject + options.style.newline;
+            str2 += "=> " + specialObject + options.style.newline;
           } else {
-            str += "=> " + inspect_(
+            str2 += "=> " + inspect_(
               {
                 depth: runtime.depth,
                 ancestors: runtime.ancestors,
@@ -884,23 +884,23 @@ var require_inspect = __commonJS({
             );
           }
         } else if (isFunc && !options.funcDetails) {
-          str += options.style.newline;
+          str2 += options.style.newline;
         } else if (!propertyList.length && !options.proto) {
-          str += (options.noMarkup ? "" : isArray ? "[]" : "{}") + options.style.newline;
+          str2 += (options.noMarkup ? "" : isArray ? "[]" : "{}") + options.style.newline;
         } else if (runtime.depth >= options.depth) {
-          str += options.style.limit("[depth limit]") + options.style.newline;
+          str2 += options.style.limit("[depth limit]") + options.style.newline;
         } else if (runtime.ancestors.indexOf(variable) !== -1) {
-          str += options.style.limit("[circular]") + options.style.newline;
+          str2 += options.style.limit("[circular]") + options.style.newline;
         } else {
-          str += (options.noMarkup ? "" : isArray ? "[" : "{") + options.style.newline;
+          str2 += (options.noMarkup ? "" : isArray ? "[" : "{") + options.style.newline;
           nextAncestors = runtime.ancestors.slice();
           nextAncestors.push(variable);
-          for (i = 0; i < propertyList.length && str.length < options.outputMaxLength; i++) {
+          for (i = 0; i < propertyList.length && str2.length < options.outputMaxLength; i++) {
             if (!isArray && (options.propertyBlackList && options.propertyBlackList.has(propertyList[i]) || options.useInspectPropertyBlackList && variable.inspectPropertyBlackList instanceof Set && variable.inspectPropertyBlackList.has(propertyList[i]))) {
               continue;
             }
             if (isArray && options.noArrayProperty && !(propertyList[i] in variable)) {
-              str += inspect_(
+              str2 += inspect_(
                 {
                   depth: runtime.depth + 1,
                   ancestors: nextAncestors,
@@ -918,7 +918,7 @@ var require_inspect = __commonJS({
                 }
                 keyIsProperty = !isArray || !descriptor.enumerable || isNaN(propertyList[i]);
                 if (!options.noDescriptor && descriptor && (descriptor.get || descriptor.set)) {
-                  str += inspect_(
+                  str2 += inspect_(
                     {
                       depth: runtime.depth + 1,
                       ancestors: nextAncestors,
@@ -931,7 +931,7 @@ var require_inspect = __commonJS({
                     { get: descriptor.get, set: descriptor.set }
                   );
                 } else {
-                  str += inspect_(
+                  str2 += inspect_(
                     {
                       depth: runtime.depth + 1,
                       ancestors: nextAncestors,
@@ -944,7 +944,7 @@ var require_inspect = __commonJS({
                   );
                 }
               } catch (error) {
-                str += inspect_(
+                str2 += inspect_(
                   {
                     depth: runtime.depth + 1,
                     ancestors: nextAncestors,
@@ -958,11 +958,11 @@ var require_inspect = __commonJS({
               }
             }
             if (i < propertyList.length - 1) {
-              str += options.style.comma;
+              str2 += options.style.comma;
             }
           }
           if (options.proto) {
-            str += inspect_(
+            str2 += inspect_(
               {
                 depth: runtime.depth + 1,
                 ancestors: nextAncestors,
@@ -973,18 +973,18 @@ var require_inspect = __commonJS({
               proto
             );
           }
-          str += options.noMarkup ? "" : indent + (isArray ? "]" : "}") + options.style.newline;
+          str2 += options.noMarkup ? "" : indent + (isArray ? "]" : "}") + options.style.newline;
         }
       }
       if (runtime.depth === 0) {
         if (options.style.trim) {
-          str = str.trim();
+          str2 = str2.trim();
         }
         if (options.style === "html") {
-          str = escape.html(str);
+          str2 = escape.html(str2);
         }
       }
-      return str;
+      return str2;
     }
     function keyNeedingQuotes(key) {
       if (!key.length) {
@@ -1016,9 +1016,9 @@ var require_inspect = __commonJS({
         if (process && process.binding && process.binding("util") && process.binding("util").getPromiseDetails) {
           let details = process.binding("util").getPromiseDetails(object);
           let state = promiseStates[details[0]];
-          let str = "Promise <" + state + ">";
+          let str2 = "Promise <" + state + ">";
           if (state === "fulfilled") {
-            str += " " + inspect_(
+            str2 += " " + inspect_(
               {
                 depth: runtime.depth,
                 ancestors: runtime.ancestors,
@@ -1029,7 +1029,7 @@ var require_inspect = __commonJS({
             );
           } else if (state === "rejected") {
             if (details[1] instanceof Error) {
-              str += " " + inspectError(
+              str2 += " " + inspectError(
                 {
                   style: options.style,
                   noErrorStack: true
@@ -1037,7 +1037,7 @@ var require_inspect = __commonJS({
                 details[1]
               );
             } else {
-              str += " " + inspect_(
+              str2 += " " + inspect_(
                 {
                   depth: runtime.depth,
                   ancestors: runtime.ancestors,
@@ -1048,7 +1048,7 @@ var require_inspect = __commonJS({
               );
             }
           }
-          return str;
+          return str2;
         }
       }
       if (object._bsontype) {
@@ -1060,7 +1060,7 @@ var require_inspect = __commonJS({
       return;
     }
     function inspectError(options, error) {
-      var str = "", stack, type, code;
+      var str2 = "", stack, type, code;
       if (arguments.length < 2) {
         error = options;
         options = {};
@@ -1073,18 +1073,18 @@ var require_inspect = __commonJS({
         options.style = inspectStyle[options.style];
       }
       if (!(error instanceof Error)) {
-        str += "[not an Error] ";
+        str2 += "[not an Error] ";
         if (typeof error === "string") {
           let maxLength = 5e3;
           if (error.length > maxLength) {
-            str += options.style.errorMessage(escape.control(error.slice(0, maxLength - 1), true)) + "\u2026" + options.style.length("(" + error.length + " - TRUNCATED)") + options.style.newline;
+            str2 += options.style.errorMessage(escape.control(error.slice(0, maxLength - 1), true)) + "\u2026" + options.style.length("(" + error.length + " - TRUNCATED)") + options.style.newline;
           } else {
-            str += options.style.errorMessage(escape.control(error, true)) + options.style.newline;
+            str2 += options.style.errorMessage(escape.control(error, true)) + options.style.newline;
           }
-          return str;
+          return str2;
         } else if (!error || typeof error !== "object" || !error.name || typeof error.name !== "string" || !error.message || typeof error.message !== "string") {
-          str += inspect(options, error);
-          return str;
+          str2 += inspect(options, error);
+          return str2;
         }
       }
       if (error.stack && !options.noErrorStack) {
@@ -1092,15 +1092,15 @@ var require_inspect = __commonJS({
       }
       type = error.type || error.constructor.name;
       code = error.code || error.name || error.errno || error.number;
-      str += options.style.errorType(type) + (code ? " [" + options.style.errorType(code) + "]" : "") + ": ";
-      str += options.style.errorMessage(error.message) + "\n";
+      str2 += options.style.errorType(type) + (code ? " [" + options.style.errorType(code) + "]" : "") + ": ";
+      str2 += options.style.errorMessage(error.message) + "\n";
       if (stack) {
-        str += options.style.errorStack(stack) + "\n";
+        str2 += options.style.errorStack(stack) + "\n";
       }
       if (error.from) {
-        str += options.style.newline + options.style.errorFromMessage("From error:") + options.style.newline + inspectError(options, error.from);
+        str2 += options.style.newline + options.style.errorFromMessage("From error:") + options.style.newline + inspectError(options, error.from);
       }
-      return str;
+      return str2;
     }
     exports.inspectError = inspectError;
     function inspectStack(options, stack) {
@@ -1138,20 +1138,20 @@ var require_inspect = __commonJS({
     }
     exports.inspectStack = inspectStack;
     var inspectStyle = {};
-    var inspectStyleNoop = (str) => str;
+    var inspectStyleNoop = (str2) => str2;
     inspectStyle.none = {
       trim: false,
       tab: "    ",
       newline: "\n",
       comma: "",
       limit: inspectStyleNoop,
-      type: (str) => "<" + str + ">",
+      type: (str2) => "<" + str2 + ">",
       constant: inspectStyleNoop,
       funcName: inspectStyleNoop,
-      constructorName: (str) => "<" + str + ">",
+      constructorName: (str2) => "<" + str2 + ">",
       length: inspectStyleNoop,
       key: inspectStyleNoop,
-      index: (str) => "[" + str + "] ",
+      index: (str2) => "[" + str2 + "] ",
       number: inspectStyleNoop,
       inspect: inspectStyleNoop,
       string: inspectStyleNoop,
@@ -1165,7 +1165,7 @@ var require_inspect = __commonJS({
       errorStackLine: inspectStyleNoop,
       errorStackColumn: inspectStyleNoop,
       errorFromMessage: inspectStyleNoop,
-      truncate: (str, maxLength) => str.slice(0, maxLength - 1) + "\u2026"
+      truncate: (str2, maxLength) => str2.slice(0, maxLength - 1) + "\u2026"
     };
     inspectStyle.inline = Object.assign({}, inspectStyle.none, {
       trim: true,
@@ -1177,61 +1177,61 @@ var require_inspect = __commonJS({
       //type: () => '' ,
     });
     inspectStyle.color = Object.assign({}, inspectStyle.none, {
-      limit: (str) => ansi.bold + ansi.brightRed + str + ansi.reset,
-      type: (str) => ansi.italic + ansi.brightBlack + str + ansi.reset,
-      constant: (str) => ansi.cyan + str + ansi.reset,
-      funcName: (str) => ansi.italic + ansi.magenta + str + ansi.reset,
-      constructorName: (str) => ansi.magenta + str + ansi.reset,
-      length: (str) => ansi.italic + ansi.brightBlack + str + ansi.reset,
-      key: (str) => ansi.green + str + ansi.reset,
-      index: (str) => ansi.blue + "[" + str + "]" + ansi.reset + " ",
-      number: (str) => ansi.cyan + str + ansi.reset,
-      inspect: (str) => ansi.cyan + str + ansi.reset,
-      string: (str) => ansi.blue + str + ansi.reset,
-      errorType: (str) => ansi.red + ansi.bold + str + ansi.reset,
-      errorMessage: (str) => ansi.red + ansi.italic + str + ansi.reset,
-      errorStack: (str) => ansi.brightBlack + str + ansi.reset,
-      errorStackKeyword: (str) => ansi.italic + ansi.bold + str + ansi.reset,
-      errorStackMethod: (str) => ansi.brightYellow + str + ansi.reset,
-      errorStackMethodAs: (str) => ansi.yellow + str + ansi.reset,
-      errorStackFile: (str) => ansi.brightCyan + str + ansi.reset,
-      errorStackLine: (str) => ansi.blue + str + ansi.reset,
-      errorStackColumn: (str) => ansi.magenta + str + ansi.reset,
-      errorFromMessage: (str) => ansi.yellow + ansi.underline + str + ansi.reset,
-      truncate: (str, maxLength) => {
+      limit: (str2) => ansi.bold + ansi.brightRed + str2 + ansi.reset,
+      type: (str2) => ansi.italic + ansi.brightBlack + str2 + ansi.reset,
+      constant: (str2) => ansi.cyan + str2 + ansi.reset,
+      funcName: (str2) => ansi.italic + ansi.magenta + str2 + ansi.reset,
+      constructorName: (str2) => ansi.magenta + str2 + ansi.reset,
+      length: (str2) => ansi.italic + ansi.brightBlack + str2 + ansi.reset,
+      key: (str2) => ansi.green + str2 + ansi.reset,
+      index: (str2) => ansi.blue + "[" + str2 + "]" + ansi.reset + " ",
+      number: (str2) => ansi.cyan + str2 + ansi.reset,
+      inspect: (str2) => ansi.cyan + str2 + ansi.reset,
+      string: (str2) => ansi.blue + str2 + ansi.reset,
+      errorType: (str2) => ansi.red + ansi.bold + str2 + ansi.reset,
+      errorMessage: (str2) => ansi.red + ansi.italic + str2 + ansi.reset,
+      errorStack: (str2) => ansi.brightBlack + str2 + ansi.reset,
+      errorStackKeyword: (str2) => ansi.italic + ansi.bold + str2 + ansi.reset,
+      errorStackMethod: (str2) => ansi.brightYellow + str2 + ansi.reset,
+      errorStackMethodAs: (str2) => ansi.yellow + str2 + ansi.reset,
+      errorStackFile: (str2) => ansi.brightCyan + str2 + ansi.reset,
+      errorStackLine: (str2) => ansi.blue + str2 + ansi.reset,
+      errorStackColumn: (str2) => ansi.magenta + str2 + ansi.reset,
+      errorFromMessage: (str2) => ansi.yellow + ansi.underline + str2 + ansi.reset,
+      truncate: (str2, maxLength) => {
         var trail = ansi.gray + "\u2026" + ansi.reset;
-        str = str.slice(0, maxLength - trail.length);
-        var lastEscape = str.lastIndexOf("\x1B");
-        if (lastEscape >= str.length - 6) {
-          str = str.slice(0, lastEscape);
+        str2 = str2.slice(0, maxLength - trail.length);
+        var lastEscape = str2.lastIndexOf("\x1B");
+        if (lastEscape >= str2.length - 6) {
+          str2 = str2.slice(0, lastEscape);
         }
-        return str + trail;
+        return str2 + trail;
       }
     });
     inspectStyle.html = Object.assign({}, inspectStyle.none, {
       tab: "&nbsp;&nbsp;&nbsp;&nbsp;",
       newline: "<br />",
-      limit: (str) => '<span style="color:red">' + str + "</span>",
-      type: (str) => '<i style="color:gray">' + str + "</i>",
-      constant: (str) => '<span style="color:cyan">' + str + "</span>",
-      funcName: (str) => '<i style="color:magenta">' + str + "</i>",
-      constructorName: (str) => '<span style="color:magenta">' + str + "</span>",
-      length: (str) => '<i style="color:gray">' + str + "</i>",
-      key: (str) => '<span style="color:green">' + str + "</span>",
-      index: (str) => '<span style="color:blue">[' + str + "]</span> ",
-      number: (str) => '<span style="color:cyan">' + str + "</span>",
-      inspect: (str) => '<span style="color:cyan">' + str + "</span>",
-      string: (str) => '<span style="color:blue">' + str + "</span>",
-      errorType: (str) => '<span style="color:red">' + str + "</span>",
-      errorMessage: (str) => '<span style="color:red">' + str + "</span>",
-      errorStack: (str) => '<span style="color:gray">' + str + "</span>",
-      errorStackKeyword: (str) => "<i>" + str + "</i>",
-      errorStackMethod: (str) => '<span style="color:yellow">' + str + "</span>",
-      errorStackMethodAs: (str) => '<span style="color:yellow">' + str + "</span>",
-      errorStackFile: (str) => '<span style="color:cyan">' + str + "</span>",
-      errorStackLine: (str) => '<span style="color:blue">' + str + "</span>",
-      errorStackColumn: (str) => '<span style="color:gray">' + str + "</span>",
-      errorFromMessage: (str) => '<span style="color:yellow">' + str + "</span>"
+      limit: (str2) => '<span style="color:red">' + str2 + "</span>",
+      type: (str2) => '<i style="color:gray">' + str2 + "</i>",
+      constant: (str2) => '<span style="color:cyan">' + str2 + "</span>",
+      funcName: (str2) => '<i style="color:magenta">' + str2 + "</i>",
+      constructorName: (str2) => '<span style="color:magenta">' + str2 + "</span>",
+      length: (str2) => '<i style="color:gray">' + str2 + "</i>",
+      key: (str2) => '<span style="color:green">' + str2 + "</span>",
+      index: (str2) => '<span style="color:blue">[' + str2 + "]</span> ",
+      number: (str2) => '<span style="color:cyan">' + str2 + "</span>",
+      inspect: (str2) => '<span style="color:cyan">' + str2 + "</span>",
+      string: (str2) => '<span style="color:blue">' + str2 + "</span>",
+      errorType: (str2) => '<span style="color:red">' + str2 + "</span>",
+      errorMessage: (str2) => '<span style="color:red">' + str2 + "</span>",
+      errorStack: (str2) => '<span style="color:gray">' + str2 + "</span>",
+      errorStackKeyword: (str2) => "<i>" + str2 + "</i>",
+      errorStackMethod: (str2) => '<span style="color:yellow">' + str2 + "</span>",
+      errorStackMethodAs: (str2) => '<span style="color:yellow">' + str2 + "</span>",
+      errorStackFile: (str2) => '<span style="color:cyan">' + str2 + "</span>",
+      errorStackLine: (str2) => '<span style="color:blue">' + str2 + "</span>",
+      errorStackColumn: (str2) => '<span style="color:gray">' + str2 + "</span>",
+      errorFromMessage: (str2) => '<span style="color:yellow">' + str2 + "</span>"
     });
   }
 });
@@ -1476,16 +1476,16 @@ var require_StringNumber = __commonJS({
       if (this.special !== null) {
         return "" + this.special;
       }
-      var str = this.sign < 0 ? "-" : "";
+      var str2 = this.sign < 0 ? "-" : "";
       if (!this.digits.length) {
-        return str + "0";
+        return str2 + "0";
       }
-      str += this.digits[0];
+      str2 += this.digits[0];
       if (this.digits.length > 1) {
-        str += this.decimalSeparator + this.digits.join("").slice(1);
+        str2 += this.decimalSeparator + this.digits.join("").slice(1);
       }
-      str += "e" + (this.exposant > 0 ? "+" : "") + (this.exposant - 1);
-      return str;
+      str2 += "e" + (this.exposant > 0 ? "+" : "") + (this.exposant - 1);
+      return str2;
     };
     var SUPER_NUMBER = ["\u2070", "\xB9", "\xB2", "\xB3", "\u2074", "\u2075", "\u2076", "\u2077", "\u2078", "\u2079"];
     var SUPER_MINUS = "\u207B";
@@ -1494,23 +1494,23 @@ var require_StringNumber = __commonJS({
       if (this.special !== null) {
         return "" + this.special;
       }
-      var str = this.sign < 0 ? "-" : "";
+      var str2 = this.sign < 0 ? "-" : "";
       if (!this.digits.length) {
-        return str + "0";
+        return str2 + "0";
       }
-      str += this.digits[0];
+      str2 += this.digits[0];
       if (this.digits.length > 1) {
-        str += this.decimalSeparator + this.digits.join("").slice(1);
+        str2 += this.decimalSeparator + this.digits.join("").slice(1);
       }
       var exposantStr = (this.exposant <= 0 ? SUPER_MINUS : "") + ("" + Math.abs(this.exposant - 1)).split("").map((c) => SUPER_NUMBER[c.charCodeAt(0) - ZERO_CHAR_CODE]).join("");
-      str += " \xD7 10" + exposantStr;
-      return str;
+      str2 += " \xD7 10" + exposantStr;
+      return str2;
     };
     StringNumber.prototype.toNoExp = StringNumber.prototype.toNoExpString = function(leadingZero = 1, trailingZero = 0, onlyIfDecimal = false, forcePlusSign = false, exposant = this.exposant) {
       if (this.special !== null) {
         return "" + this.special;
       }
-      var integerDigits = [], decimalDigits = [], str = this.sign < 0 ? "-" : forcePlusSign ? "+" : "";
+      var integerDigits = [], decimalDigits = [], str2 = this.sign < 0 ? "-" : forcePlusSign ? "+" : "";
       if (!this.digits.length) {
         if (leadingZero > 1) {
           this.fillZeroes(integerDigits, leadingZero - 1, leadingZero);
@@ -1545,13 +1545,13 @@ var require_StringNumber = __commonJS({
           this.fillZeroes(decimalDigits, trailingZero - this.digits.length + exposant);
         }
       }
-      str += this.groupSeparator ? this.groupDigits(integerDigits, this.groupSeparator) : integerDigits.join("");
+      str2 += this.groupSeparator ? this.groupDigits(integerDigits, this.groupSeparator) : integerDigits.join("");
       if (decimalDigits.length) {
-        str += this.decimalSeparator + (this.decimalGroupSeparator ? this.groupDigits(decimalDigits, this.decimalGroupSeparator) : decimalDigits.join(""));
+        str2 += this.decimalSeparator + (this.decimalGroupSeparator ? this.groupDigits(decimalDigits, this.decimalGroupSeparator) : decimalDigits.join(""));
       } else if (this.forceDecimalSeparator) {
-        str += this.decimalSeparator;
+        str2 += this.decimalSeparator;
       }
-      return str;
+      return str2;
     };
     var MUL_PREFIX = ["", "k", "M", "G", "T", "P", "E", "Z", "Y"];
     var SUB_MUL_PREFIX = ["", "m", "\xB5", "n", "p", "f", "a", "z", "y"];
@@ -1640,11 +1640,11 @@ var require_StringNumber = __commonJS({
     };
     var GROUP_SIZE = 3;
     StringNumber.prototype.groupDigits = function(digits, separator, inverseOrder = false) {
-      var str = "", offset = inverseOrder ? 0 : GROUP_SIZE - digits.length % GROUP_SIZE, i = 0, iMax = digits.length;
+      var str2 = "", offset = inverseOrder ? 0 : GROUP_SIZE - digits.length % GROUP_SIZE, i = 0, iMax = digits.length;
       for (; i < iMax; i++) {
-        str += i && (i + offset) % GROUP_SIZE === 0 ? separator + digits[i] : digits[i];
+        str2 += i && (i + offset) % GROUP_SIZE === 0 ? separator + digits[i] : digits[i];
       }
-      return str;
+      return str2;
     };
     StringNumber.prototype.appendNumerals = function(intoArray, sourceArray, start = 0, end = sourceArray.length, leftPlace = end) {
       for (let i = start, place = leftPlace; i < end; i++, place--) {
@@ -1701,14 +1701,14 @@ var require_format = __commonJS({
     var naturalSort = require_naturalSort();
     var StringNumber = require_StringNumber();
     exports.formatMethod = function(...args2) {
-      var arg, str = args2[0], autoIndex = 1, length = args2.length;
-      if (typeof str !== "string") {
-        if (!str) {
-          str = "";
-        } else if (typeof str.toString === "function") {
-          str = str.toString();
+      var arg, str2 = args2[0], autoIndex = 1, length = args2.length;
+      if (typeof str2 !== "string") {
+        if (!str2) {
+          str2 = "";
+        } else if (typeof str2.toString === "function") {
+          str2 = str2.toString();
         } else {
-          str = "";
+          str2 = "";
         }
       }
       var runtime = {
@@ -1717,9 +1717,9 @@ var require_format = __commonJS({
         markupStack: []
       };
       if (this.markupReset && this.startingMarkupReset) {
-        str = (typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset) + str;
+        str2 = (typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset) + str2;
       }
-      str = str.replace(
+      str2 = str2.replace(
         /\^\[([^\]]*)]?|\^(.)|(%%)|%([+-]?)([0-9]*)(?:\[([^\]]*)\])?([a-zA-Z])/g,
         (match, complexMarkup, markup, doublePercent, relative, index, modeArg, mode) => {
           var replacement, i, tmp, fn, fnArgString, argMatches, argList = [];
@@ -1810,7 +1810,7 @@ var require_format = __commonJS({
         }
       );
       if (runtime.hasMarkup && this.markupReset && this.endingMarkupReset) {
-        str += typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset;
+        str2 += typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset;
       }
       if (this.extraArguments) {
         for (; autoIndex < length; autoIndex++) {
@@ -1818,24 +1818,24 @@ var require_format = __commonJS({
           if (arg === null || arg === void 0) {
             continue;
           } else if (typeof arg === "string") {
-            str += arg;
+            str2 += arg;
           } else if (typeof arg === "number") {
-            str += arg;
+            str2 += arg;
           } else if (typeof arg.toString === "function") {
-            str += arg.toString();
+            str2 += arg.toString();
           }
         }
       }
-      return str;
+      return str2;
     };
-    exports.markupMethod = function(str) {
-      if (typeof str !== "string") {
-        if (!str) {
-          str = "";
-        } else if (typeof str.toString === "function") {
-          str = str.toString();
+    exports.markupMethod = function(str2) {
+      if (typeof str2 !== "string") {
+        if (!str2) {
+          str2 = "";
+        } else if (typeof str2.toString === "function") {
+          str2 = str2.toString();
         } else {
-          str = "";
+          str2 = "";
         }
       }
       var runtime = {
@@ -1845,7 +1845,7 @@ var require_format = __commonJS({
       };
       if (this.parse) {
         let markupObjects, markupObject, match, complexMarkup, markup, raw, lastChunk, output = [];
-        for ([match, complexMarkup, markup, raw] of str.matchAll(/\^\[([^\]]*)]?|\^(.)|([^^]+)/g)) {
+        for ([match, complexMarkup, markup, raw] of str2.matchAll(/\^\[([^\]]*)]?|\^(.)|([^^]+)/g)) {
           if (raw) {
             if (output.length) {
               output[output.length - 1].text += raw;
@@ -1889,13 +1889,13 @@ var require_format = __commonJS({
         return output;
       }
       if (this.markupReset && this.startingMarkupReset) {
-        str = (typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset) + str;
+        str2 = (typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset) + str2;
       }
-      str = str.replace(/\^\[([^\]]*)]?|\^(.)/g, (match, complexMarkup, markup) => markupReplace.call(this, runtime, match, complexMarkup || markup));
+      str2 = str2.replace(/\^\[([^\]]*)]?|\^(.)/g, (match, complexMarkup, markup) => markupReplace.call(this, runtime, match, complexMarkup || markup));
       if (runtime.hasMarkup && this.markupReset && this.endingMarkupReset) {
-        str += typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset;
+        str2 += typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset;
       }
-      return str;
+      return str2;
     };
     function markupReplace(runtime, match, markup) {
       var markupTarget, key, value, replacement, colonIndex;
@@ -1963,13 +1963,13 @@ var require_format = __commonJS({
         }
       }
     }
-    exports.stripMarkup = (str) => str.replace(
+    exports.stripMarkup = (str2) => str2.replace(
       /\^\[[^\]]*]?|\^./g,
       (match) => match === "^^" ? "^" : match === "^ " ? " " : ""
     );
-    exports.escapeMarkup = (str) => str.replace(/\^/g, "^^");
+    exports.escapeMarkup = (str2) => str2.replace(/\^/g, "^^");
     var DEFAULT_FORMATTER = {
-      argumentSanitizer: (str) => escape.control(str, true),
+      argumentSanitizer: (str2) => escape.control(str2, true),
       extraArguments: true,
       color: false,
       noMarkup: false,
@@ -2029,27 +2029,27 @@ var require_format = __commonJS({
       },
       dataMarkup: {
         fg: (markupStack, key, value) => {
-          var str = ansi.fgColor[value] || ansi.trueColor(value);
-          markupStack.push(str);
-          return str;
+          var str2 = ansi.fgColor[value] || ansi.trueColor(value);
+          markupStack.push(str2);
+          return str2;
         },
         bg: (markupStack, key, value) => {
-          var str = ansi.bgColor[value] || ansi.bgTrueColor(value);
-          markupStack.push(str);
-          return str;
+          var str2 = ansi.bgColor[value] || ansi.bgTrueColor(value);
+          markupStack.push(str2);
+          return str2;
         }
       },
       markupCatchAll: (markupStack, key, value) => {
-        var str = "";
+        var str2 = "";
         if (value === void 0) {
           if (key[0] === "#") {
-            str = ansi.trueColor(key);
+            str2 = ansi.trueColor(key);
           } else if (typeof ansi[key] === "string") {
-            str = ansi[key];
+            str2 = ansi[key];
           }
         }
-        markupStack.push(str);
-        return str;
+        markupStack.push(str2);
+        return str2;
       }
     };
     DEFAULT_FORMATTER.dataMarkup.color = DEFAULT_FORMATTER.dataMarkup.c = DEFAULT_FORMATTER.dataMarkup.fgColor = DEFAULT_FORMATTER.dataMarkup.fg;
@@ -2061,13 +2061,13 @@ var require_format = __commonJS({
     exports.formatThirdPartyMarkup = exports.formatMethod.bind(Object.assign({}, DEFAULT_FORMATTER, { noMarkup: true, escapeMarkup: true }));
     exports.createMarkup = (options) => exports.markupMethod.bind(Object.assign({}, DEFAULT_FORMATTER, options));
     exports.markup = exports.markupMethod.bind(DEFAULT_FORMATTER);
-    exports.format.count = function(str, noMarkup = false) {
+    exports.format.count = function(str2, noMarkup = false) {
       var markup, index, relative, autoIndex = 1, maxIndex = 0;
-      if (typeof str !== "string") {
+      if (typeof str2 !== "string") {
         return 0;
       }
       var regexp = noMarkup ? /%([+-]?)([0-9]*)(?:\[[^\]]*\])?[a-zA-EG-Z]/g : /%([+-]?)([0-9]*)(?:\[[^\]]*\])?[a-zA-EG-Z]|(\^\[[^\]]*]?|\^.)/g;
-      for ([, relative, index, markup] of str.matchAll(regexp)) {
+      for ([, relative, index, markup] of str2.matchAll(regexp)) {
         if (markup) {
           continue;
         }
@@ -2090,8 +2090,8 @@ var require_format = __commonJS({
       }
       return maxIndex;
     };
-    exports.format.hasFormatting = function(str) {
-      if (str.search(/\^(.?)|(%%)|%([+-]?)([0-9]*)(?:\[([^\]]*)\])?([a-zA-Z])/) !== -1) {
+    exports.format.hasFormatting = function(str2) {
+      if (str2.search(/\^(.?)|(%%)|%([+-]?)([0-9]*)(?:\[([^\]]*)\])?([a-zA-Z])/) !== -1) {
         return true;
       }
       return false;
@@ -2121,7 +2121,7 @@ var require_format = __commonJS({
     modes.r.noSanitize = true;
     modes.S = (arg, modeArg, options) => {
       var subModes = stringModeArg(modeArg);
-      var interpret = options.escapeMarkup ? (str) => options.argumentSanitizer ? options.argumentSanitizer(str) : str : (str) => exports.markupMethod.call(options, options.argumentSanitizer ? options.argumentSanitizer(str) : str);
+      var interpret = options.escapeMarkup ? (str2) => options.argumentSanitizer ? options.argumentSanitizer(str2) : str2 : (str2) => exports.markupMethod.call(options, options.argumentSanitizer ? options.argumentSanitizer(str2) : str2);
       if (typeof arg === "string") {
         return interpret(arg);
       }
@@ -2324,11 +2324,11 @@ var require_format = __commonJS({
         minus = "-";
         arg = -arg;
       }
-      var degrees = epsilonFloor(arg), frac = arg - degrees;
-      if (!frac) {
+      var degrees = epsilonFloor(arg), frac2 = arg - degrees;
+      if (!frac2) {
         return minus + degrees + "\xB0";
       }
-      var minutes = epsilonFloor(frac * 60), seconds = epsilonFloor(frac * 3600 - minutes * 60);
+      var minutes = epsilonFloor(frac2 * 60), seconds = epsilonFloor(frac2 * 3600 - minutes * 60);
       if (seconds) {
         return minus + degrees + "\xB0" + ("" + minutes).padStart(2, "0") + "\u2032" + ("" + seconds).padStart(2, "0") + "\u2033";
       }
@@ -2344,7 +2344,7 @@ var require_format = __commonJS({
       if (Number.isNaN(arg.getTime())) {
         return "(invalid)";
       }
-      var datePart = "", timePart = "", str = "", subModes = dateTimeModeArg(modeArg), roundingType = subModes.roundingType, forceDecimalSeparator = subModes.useAbbreviation;
+      var datePart = "", timePart = "", str2 = "", subModes = dateTimeModeArg(modeArg), roundingType = subModes.roundingType, forceDecimalSeparator = subModes.useAbbreviation;
       if (subModes.years) {
         if (datePart) {
           datePart += "-";
@@ -2391,18 +2391,18 @@ var require_format = __commonJS({
         }
       }
       if (datePart) {
-        if (str) {
-          str += " ";
+        if (str2) {
+          str2 += " ";
         }
-        str += datePart;
+        str2 += datePart;
       }
       if (timePart) {
-        if (str) {
-          str += " ";
+        if (str2) {
+          str2 += " ";
         }
-        str += timePart;
+        str2 += timePart;
       }
-      return str;
+      return str2;
     };
     modes.T.noSanitize = true;
     modes.t = (arg, modeArg) => {
@@ -2540,31 +2540,31 @@ var require_format = __commonJS({
     modes.D.noSanitize = true;
     var COMMON_MODE_ARG_FORMAT_REGEX = /([a-zA-Z])(.[^a-zA-Z]*)/g;
     var MODE_ARG_FORMAT_REGEX = /([a-zA-Z]|^)([^a-zA-Z]*)/g;
-    function commonModeArg(str, modeArg) {
+    function commonModeArg(str2, modeArg) {
       for (let [, k, v] of modeArg.matchAll(COMMON_MODE_ARG_FORMAT_REGEX)) {
         if (k === "L") {
-          let width = unicode.width(str);
+          let width = unicode.width(str2);
           v = +v || 1;
           if (width > v) {
-            str = unicode.truncateWidth(str, v - 1).trim() + "\u2026";
-            width = unicode.width(str);
+            str2 = unicode.truncateWidth(str2, v - 1).trim() + "\u2026";
+            width = unicode.width(str2);
           }
           if (width < v) {
-            str = " ".repeat(v - width) + str;
+            str2 = " ".repeat(v - width) + str2;
           }
         } else if (k === "R") {
-          let width = unicode.width(str);
+          let width = unicode.width(str2);
           v = +v || 1;
           if (width > v) {
-            str = unicode.truncateWidth(str, v - 1).trim() + "\u2026";
-            width = unicode.width(str);
+            str2 = unicode.truncateWidth(str2, v - 1).trim() + "\u2026";
+            width = unicode.width(str2);
           }
           if (width < v) {
-            str = str + " ".repeat(v - width);
+            str2 = str2 + " ".repeat(v - width);
           }
         }
       }
-      return str;
+      return str2;
     }
     var FLOAT_MODES = {
       leftPadding: 1,
@@ -2857,20 +2857,20 @@ var require_format = __commonJS({
 var require_misc = __commonJS({
   "node_modules/string-kit/lib/misc.js"(exports) {
     "use strict";
-    exports.resize = function(str, length) {
-      if (str.length === length) {
-        return str;
-      } else if (str.length > length) {
-        return str.slice(0, length);
+    exports.resize = function(str2, length) {
+      if (str2.length === length) {
+        return str2;
+      } else if (str2.length > length) {
+        return str2.slice(0, length);
       }
-      return str + " ".repeat(length - str.length);
+      return str2 + " ".repeat(length - str2.length);
     };
-    exports.occurrenceCount = function(str, subStr, overlap = false) {
-      if (!str || !subStr) {
+    exports.occurrenceCount = function(str2, subStr, overlap = false) {
+      if (!str2 || !subStr) {
         return 0;
       }
       var count = 0, index = 0, inc = overlap ? 1 : subStr.length;
-      while ((index = str.indexOf(subStr, index)) !== -1) {
+      while ((index = str2.indexOf(subStr, index)) !== -1) {
         count++;
         index += inc;
       }
@@ -2904,11 +2904,11 @@ var require_camel = __commonJS({
     "use strict";
     var camel = {};
     module.exports = camel;
-    camel.toCamelCase = function(str, preserveUpperCase = false, initialUpperCase = false) {
-      if (!str || typeof str !== "string") {
+    camel.toCamelCase = function(str2, preserveUpperCase = false, initialUpperCase = false) {
+      if (!str2 || typeof str2 !== "string") {
         return "";
       }
-      return str.replace(
+      return str2.replace(
         /(?:^[\s_-]*|([\s_-]+))(([^\s_-]?)([^\s_-]*))/g,
         (match, isNotFirstWord, word, firstLetter, endOfWord) => {
           if (preserveUpperCase) {
@@ -2930,26 +2930,26 @@ var require_camel = __commonJS({
         }
       );
     };
-    camel.camelCaseToSeparated = function(str, separator = " ", acronym = true) {
-      if (!str || typeof str !== "string") {
+    camel.camelCaseToSeparated = function(str2, separator = " ", acronym = true) {
+      if (!str2 || typeof str2 !== "string") {
         return "";
       }
       if (!acronym) {
-        return str.replace(/^([A-Z])|([A-Z])/g, (match, firstLetter, letter) => {
+        return str2.replace(/^([A-Z])|([A-Z])/g, (match, firstLetter, letter) => {
           if (firstLetter) {
             return firstLetter.toLowerCase();
           }
           return separator + letter.toLowerCase();
         });
       }
-      return str.replace(/(?:(^)|)([A-Z]+)(?:($)|(?=[a-z]))/g, (match, isStart, letters, isEnd) => {
+      return str2.replace(/(?:(^)|)([A-Z]+)(?:($)|(?=[a-z]))/g, (match, isStart, letters, isEnd) => {
         isStart = isStart === "";
         isEnd = isEnd === "";
         var prefix = isStart ? "" : separator;
         return letters.length === 1 ? prefix + letters.toLowerCase() : isEnd ? prefix + letters : letters.length === 2 ? prefix + letters[0].toLowerCase() + separator + letters[1].toLowerCase() : prefix + letters.slice(0, -1) + separator + letters.slice(-1).toLowerCase();
       });
     };
-    camel.camelCaseToDash = camel.camelCaseToDashed = (str) => camel.camelCaseToSeparated(str, "-", false);
+    camel.camelCaseToDash = camel.camelCaseToDashed = (str2) => camel.camelCaseToSeparated(str2, "-", false);
   }
 });
 
@@ -2965,8 +2965,8 @@ var require_latinize = __commonJS({
   "node_modules/string-kit/lib/latinize.js"(exports, module) {
     "use strict";
     var latinizeMap = require_latinize_map();
-    module.exports = function(str) {
-      return str.replace(/[^\u0000-\u007e]/g, (c) => {
+    module.exports = function(str2) {
+      return str2.replace(/[^\u0000-\u007e]/g, (c) => {
         return latinizeMap[c] || c;
       });
     };
@@ -3007,21 +3007,21 @@ var require_toTitleCase = __commonJS({
         "as"
       ])
     };
-    module.exports = (str, options = DEFAULT_OPTIONS) => {
-      if (!str || typeof str !== "string") {
+    module.exports = (str2, options = DEFAULT_OPTIONS) => {
+      if (!str2 || typeof str2 !== "string") {
         return "";
       }
       var dashToSpace = options.dashToSpace ?? DEFAULT_OPTIONS.dashToSpace, underscoreToSpace = options.underscoreToSpace ?? DEFAULT_OPTIONS.underscoreToSpace, zealous = options.zealous ?? DEFAULT_OPTIONS.zealous, preserveAllCaps = options.preserveAllCaps ?? DEFAULT_OPTIONS.preserveAllCaps, lowerCaseWords = options.lowerCaseWords ?? DEFAULT_OPTIONS.lowerCaseWords;
       lowerCaseWords = lowerCaseWords instanceof Set ? lowerCaseWords : Array.isArray(lowerCaseWords) ? new Set(lowerCaseWords) : null;
       if (dashToSpace) {
-        str = str.replace(/-+/g, " ");
+        str2 = str2.replace(/-+/g, " ");
       }
       if (underscoreToSpace) {
-        str = str.replace(/_+/g, " ");
+        str2 = str2.replace(/_+/g, " ");
       }
-      str = str.replace(/ +/g, " ").trim();
-      return str.replace(/[^\s_-]+/g, (part, position) => {
-        if (lowerCaseWords && position && position + part.length < str.length) {
+      str2 = str2.replace(/ +/g, " ").trim();
+      return str2.replace(/[^\s_-]+/g, (part, position) => {
+        if (lowerCaseWords && position && position + part.length < str2.length) {
           let lowerCased = part.toLowerCase();
           if (lowerCaseWords.has(lowerCased)) {
             return lowerCased;
@@ -3050,8 +3050,8 @@ var require_wordwrap = __commonJS({
       ":": true,
       ";": true
     };
-    module.exports = function wordwrap(str, options) {
-      var start = 0, end, skipEnd, lineWidth, currentLine, currentWidth, length, lastEnd, lastWidth, lastWasSpace, charWidthFn, explicitNewLine = true, strArray = unicode.toArray(str), trimNewLine = false, line, lines = [];
+    module.exports = function wordwrap(str2, options) {
+      var start = 0, end, skipEnd, lineWidth, currentLine, currentWidth, length, lastEnd, lastWidth, lastWasSpace, charWidthFn, explicitNewLine = true, strArray = unicode.toArray(str2), trimNewLine = false, line, lines = [];
       if (typeof options !== "object") {
         options = { width: options };
       }
@@ -3222,8 +3222,8 @@ var require_fuzzy = __commonJS({
       "our",
       "their"
     ]);
-    function tokenize(str, blackList = englishBlackList) {
-      return str.split(/[ '"/|,:_-]+/g).filter((s2) => s2 && !blackList.has(s2));
+    function tokenize(str2, blackList = englishBlackList) {
+      return str2.split(/[ '"/|,:_-]+/g).filter((s2) => s2 && !blackList.has(s2));
     }
     fuzzy.bestTokenMatch = (input, patterns, options = {}) => {
       var scoreLimit = options.scoreLimit || DEFAULT_SCORE_LIMIT, tokenDisparityPenalty = options.tokenDisparityPenalty || DEFAULT_TOKEN_DISPARITY_PENALTY, i, iMax, j, jMax, z, zMax, currentPattern, currentPatternTokens, currentPatternToken, currentPatternScore, bestPatternScore = scoreLimit, currentInputToken, currentScore, inputTokens = tokenize(input), bestScore, bestIndex = -1, bestPattern = null;
@@ -3594,19 +3594,19 @@ var require_misc2 = __commonJS({
     exports.color2index = exports.colorNameToIndex;
     exports.index2color = exports.indexToColorName;
     exports.hexToColor = exports.hexToRgba;
-    exports.stripControlChars = (str, newline) => {
+    exports.stripControlChars = (str2, newline) => {
       if (newline) {
-        return str.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, "");
+        return str2.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, "");
       }
-      return str.replace(/[\x00-\x1f\x7f]/g, "");
+      return str2.replace(/[\x00-\x1f\x7f]/g, "");
     };
     var escapeSequenceRegex = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
     var escapeSequenceParserRegex = /([\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><])|([^\u001b\u009b]+)/g;
-    exports.stripEscapeSequences = (str) => str.replace(escapeSequenceRegex, "");
-    exports.ansiWidth = exports.stringWidth = (str) => {
+    exports.stripEscapeSequences = (str2) => str2.replace(escapeSequenceRegex, "");
+    exports.ansiWidth = exports.stringWidth = (str2) => {
       var matches, width = 0;
       escapeSequenceParserRegex.lastIndex = 0;
-      while (matches = escapeSequenceParserRegex.exec(str)) {
+      while (matches = escapeSequenceParserRegex.exec(str2)) {
         if (matches[2]) {
           width += string.unicode.width(matches[2]);
         }
@@ -3615,34 +3615,34 @@ var require_misc2 = __commonJS({
     };
     var lastTruncateWidth = 0;
     exports.getLastTruncateWidth = () => lastTruncateWidth;
-    exports.truncateAnsiString = exports.truncateString = (str, maxWidth) => {
+    exports.truncateAnsiString = exports.truncateString = (str2, maxWidth) => {
       var matches, width = 0;
       lastTruncateWidth = 0;
       escapeSequenceParserRegex.lastIndex = 0;
-      while (matches = escapeSequenceParserRegex.exec(str)) {
+      while (matches = escapeSequenceParserRegex.exec(str2)) {
         if (matches[2]) {
           width += string.unicode.width(matches[2]);
           if (width >= maxWidth) {
             if (width === maxWidth) {
-              return str.slice(0, matches.index + matches[2].length);
+              return str2.slice(0, matches.index + matches[2].length);
             }
-            return str.slice(0, matches.index) + string.unicode.truncateWidth(matches[2], maxWidth - lastTruncateWidth);
+            return str2.slice(0, matches.index) + string.unicode.truncateWidth(matches[2], maxWidth - lastTruncateWidth);
           }
           lastTruncateWidth = width;
         }
       }
-      return str;
+      return str2;
     };
-    exports.markupWidth = (str) => {
-      return string.unicode.width(str.replace(/\^\[[^\]]*]?|\^(.)/g, (match, second) => {
+    exports.markupWidth = (str2) => {
+      return string.unicode.width(str2.replace(/\^\[[^\]]*]?|\^(.)/g, (match, second) => {
         if (second === " " || second === "^") {
           return second;
         }
         return "";
       }));
     };
-    exports.truncateMarkupString = (str, maxWidth) => {
-      var index = 0, charWidth, strArray = string.unicode.toArray(str);
+    exports.truncateMarkupString = (str2, maxWidth) => {
+      var index = 0, charWidth, strArray = string.unicode.toArray(str2);
       lastTruncateWidth = 0;
       while (index < strArray.length) {
         if (strArray[index] === "^") {
@@ -3667,7 +3667,7 @@ var require_misc2 = __commonJS({
         lastTruncateWidth += charWidth;
         index++;
       }
-      return str;
+      return str2;
     };
     exports.escapeSequenceSkipFn = (strArray, index) => {
       var code;
@@ -3688,7 +3688,7 @@ var require_misc2 = __commonJS({
       }
       return index;
     };
-    exports.wordWrapAnsi = (str, width) => string.wordwrap(str, {
+    exports.wordWrapAnsi = (str2, width) => string.wordwrap(str2, {
       width,
       noJoin: true,
       fill: true,
@@ -3728,7 +3728,7 @@ var require_misc2 = __commonJS({
       }
     });
     exports.wordwrapMarkup = // <-- DEPRECATED name (bad camel case)
-    exports.wordWrapMarkup = (str, width) => string.wordwrap(str, {
+    exports.wordWrapMarkup = (str2, width) => string.wordwrap(str2, {
       width,
       noJoin: true,
       fill: true,
@@ -3769,7 +3769,7 @@ var require_misc2 = __commonJS({
       }
     });
     exports.preserveMarkupFormat = string.createFormatter({
-      argumentSanitizer: (str) => str.replace(/[\x00-\x1f\x7f^]/g, (char) => char === "^" ? "^^" : ""),
+      argumentSanitizer: (str2) => str2.replace(/[\x00-\x1f\x7f^]/g, (char) => char === "^" ? "^^" : ""),
       noMarkup: true
     });
     var CATCH_ALL_KEYWORDS = {
@@ -9672,22 +9672,22 @@ var require_NextGenEvents = __commonJS({
       }
       return this;
     };
-    NextGenEvents.listenerWrapper = function(listener, event2, contextScope, serial, nice) {
+    NextGenEvents.listenerWrapper = function(listener, event2, contextScope, serial2, nice) {
       var returnValue, listenerCallback, eventMaster = event2.master || event2, interruptible = !!event2.master || event2.emitter.__ngev.interruptible;
       if (eventMaster.interrupt) {
         return;
       }
       if (listener.async) {
         if (contextScope) {
-          contextScope.ready = !serial;
+          contextScope.ready = !serial2;
         }
         if (nice < 0) {
           if (globalData.recursions >= -nice) {
-            event2.emitter.__ngev.desync(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial, NextGenEvents.SYNC));
+            event2.emitter.__ngev.desync(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial2, NextGenEvents.SYNC));
             return;
           }
         } else {
-          setTimeout(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial, NextGenEvents.SYNC), nice);
+          setTimeout(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial2, NextGenEvents.SYNC), nice);
           return;
         }
         listenerCallback = (arg) => {
@@ -9701,7 +9701,7 @@ var require_NextGenEvents = __commonJS({
           } else if (eventMaster.listenersDone >= eventMaster.listeners.length && eventMaster.callback) {
             NextGenEvents.emitCallback(event2);
           }
-          if (serial) {
+          if (serial2) {
             NextGenEvents.processScopeQueue(contextScope, true, true);
           }
         };
@@ -9713,11 +9713,11 @@ var require_NextGenEvents = __commonJS({
       } else {
         if (nice < 0) {
           if (globalData.recursions >= -nice) {
-            event2.emitter.__ngev.desync(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial, NextGenEvents.SYNC));
+            event2.emitter.__ngev.desync(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial2, NextGenEvents.SYNC));
             return;
           }
         } else {
-          setTimeout(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial, NextGenEvents.SYNC), nice);
+          setTimeout(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial2, NextGenEvents.SYNC), nice);
           return;
         }
         if (listener.eventObject) {
@@ -9904,13 +9904,13 @@ var require_NextGenEvents = __commonJS({
       master.sync = false;
     };
     NextGenEvents.emitToOneListener = function(event2, listener, removedListeners) {
-      var self2 = event2.emitter, eventMaster = event2.master || event2, context = event2.master ? event2.master.context : listener.context, contextScope, serial, currentNice, emitRemoveListener = false;
+      var self2 = event2.emitter, eventMaster = event2.master || event2, context = event2.master ? event2.master.context : listener.context, contextScope, serial2, currentNice, emitRemoveListener = false;
       if (context) {
         if (context.status === NextGenEvents.CONTEXT_DISABLED) {
           return;
         }
         currentNice = Math.max(eventMaster.nice, listener.nice, context.nice);
-        serial = context.serial;
+        serial2 = context.serial;
         contextScope = NextGenEvents.getContextScope(context, eventMaster.depth);
       } else {
         currentNice = Math.max(eventMaster.nice, listener.nice);
@@ -9928,7 +9928,7 @@ var require_NextGenEvents = __commonJS({
       if (context && (context.status === NextGenEvents.CONTEXT_QUEUED || !contextScope.ready)) {
         contextScope.queue.push({ event: event2, listener, nice: currentNice });
       } else {
-        NextGenEvents.listenerWrapper(listener, event2, contextScope, serial, currentNice);
+        NextGenEvents.listenerWrapper(listener, event2, contextScope, serial2, currentNice);
       }
       if (emitRemoveListener && self2.__ngev.listeners.removeListener.length) {
         self2.emit("removeListener", [listener]);
@@ -10372,7 +10372,7 @@ var require_NextGenEvents = __commonJS({
       }
       return this;
     };
-    NextGenEvents.processScopeQueue = function(contextScope, serial, isCompletionCallback) {
+    NextGenEvents.processScopeQueue = function(contextScope, serial2, isCompletionCallback) {
       var job, event2, eventMaster, emitter;
       if (isCompletionCallback) {
         contextScope.ready = true;
@@ -10386,7 +10386,7 @@ var require_NextGenEvents = __commonJS({
         if (eventMaster.interrupt) {
           continue;
         }
-        NextGenEvents.listenerWrapper(job.listener, event2, contextScope, serial, job.nice);
+        NextGenEvents.listenerWrapper(job.listener, event2, contextScope, serial2, job.nice);
       }
       globalData.recursions--;
     };
@@ -11922,7 +11922,7 @@ var require_inputField = __commonJS({
         autoCompleteHint: !!options.autoCompleteHint
       };
       if (Array.isArray(options.history)) {
-        inputs = options.history.map((str) => string.unicode.toArray(str).slice(0, options.maxLength));
+        inputs = options.history.map((str2) => string.unicode.toArray(str2).slice(0, options.maxLength));
       }
       if (options.default && typeof options.default === "string") {
         inputs.push(string.unicode.toArray(options.default).slice(0, options.maxLength));
@@ -13217,7 +13217,7 @@ var require_singleColumnMenu = __commonJS({
       if (!this.grabbing) {
         this.grabInput();
       }
-      var start = {}, end = {}, textWidth, outerWidth, paddingLength, menuItems, offsetY = 0, lineCount = 0, scrollLines = 0, controller, finished = false, alreadyCleanedUp = false;
+      var start = {}, end = {}, textWidth2, outerWidth, paddingLength, menuItems, offsetY = 0, lineCount = 0, scrollLines = 0, controller, finished = false, alreadyCleanedUp = false;
       var init = () => {
         computeItems(menuItemsArg);
         if (options.y !== void 0) {
@@ -13236,17 +13236,17 @@ var require_singleColumnMenu = __commonJS({
         }
       };
       var computeItems = (menuItems_) => {
-        textWidth = 0;
+        textWidth2 = 0;
         paddingLength = Math.max(stringWidth(options.leftPadding), stringWidth(options.selectedLeftPadding));
         menuItems_ = menuItems_.map((element) => {
           if (typeof element !== "string") {
             element = "" + element;
           }
-          textWidth = Math.max(textWidth, stringWidth(element));
+          textWidth2 = Math.max(textWidth2, stringWidth(element));
           return element;
         });
-        if (!options.oneLineItem && textWidth > options.itemMaxWidth - paddingLength) {
-          outerWidth = Math.min(textWidth + paddingLength, this.width);
+        if (!options.oneLineItem && textWidth2 > options.itemMaxWidth - paddingLength) {
+          outerWidth = Math.min(textWidth2 + paddingLength, this.width);
           menuItems = menuItems_.map((element, index) => {
             var item, lines, lineLength = options.itemMaxWidth - paddingLength;
             lines = string.wordwrap(element, {
@@ -13266,15 +13266,15 @@ var require_singleColumnMenu = __commonJS({
           });
           lineCount = offsetY;
         } else {
-          textWidth = Math.min(textWidth, options.itemMaxWidth - paddingLength);
-          outerWidth = Math.min(textWidth + paddingLength, this.width);
+          textWidth2 = Math.min(textWidth2, options.itemMaxWidth - paddingLength);
+          outerWidth = Math.min(textWidth2 + paddingLength, this.width);
           menuItems = menuItems_.map((element, index) => {
             var elementWidth = stringWidth(element);
             return {
               offsetY: index,
               index,
               text: element,
-              displayText: [elementWidth > textWidth ? element.slice(0, textWidth - 1) + "\u2026" : element + " ".repeat(textWidth - elementWidth)]
+              displayText: [elementWidth > textWidth2 ? element.slice(0, textWidth2 - 1) + "\u2026" : element + " ".repeat(textWidth2 - elementWidth)]
             };
           });
           lineCount = menuItems.length;
@@ -14650,7 +14650,7 @@ var require_bar = __commonJS({
     "use strict";
     var spChars = require_spChars();
     module.exports = function(value, options) {
-      var str = "", barString = "";
+      var str2 = "", barString = "";
       options = options || {};
       if (isNaN(value) || value < 0) {
         value = 0;
@@ -14667,10 +14667,10 @@ var require_bar = __commonJS({
         barString += " ".repeat(innerSize - fullBlocks - 1);
       }
       if (options.str) {
-        str += this.str.inverse("\u2589");
-        str += barStyle.str(barString);
-        str += this.str("\u258F");
-        return str;
+        str2 += this.str.inverse("\u2589");
+        str2 += barStyle.str(barString);
+        str2 += this.str("\u258F");
+        return str2;
       }
       this.inverse("\u2589");
       barStyle(barString);
@@ -14685,8 +14685,8 @@ var require_slowTyping = __commonJS({
   "node_modules/terminal-kit/lib/slowTyping.js"(exports, module) {
     "use strict";
     var Promise2 = require_seventh();
-    module.exports = function slowTyping(str, options, callback) {
-      if (typeof str !== "string") {
+    module.exports = function slowTyping(str2, options, callback) {
+      if (typeof str2 !== "string") {
         throw new TypeError("[terminal] slowTyping(): argument #0 should be a string");
       }
       if (typeof options === "function") {
@@ -14717,7 +14717,7 @@ var require_slowTyping = __commonJS({
         }
         if (index === void 0) {
           index = 0;
-        } else if (index >= str.length) {
+        } else if (index >= str2.length) {
           if (callback) {
             callback();
           } else {
@@ -14725,11 +14725,11 @@ var require_slowTyping = __commonJS({
           }
           return;
         } else {
-          if (options.flashStyle && str[index].match(/\S/)) {
-            options.flashStyle(str[index]);
+          if (options.flashStyle && str2[index].match(/\S/)) {
+            options.flashStyle(str2[index]);
             unflashTimer = setTimeout(unflash, options.flashDelay);
           } else {
-            options.style(str[index]);
+            options.style(str2[index]);
           }
           index++;
         }
@@ -14737,7 +14737,7 @@ var require_slowTyping = __commonJS({
       };
       var unflash = () => {
         this.left(1);
-        options.style(str[index - 1]);
+        options.style(str2[index - 1]);
         unflashTimer = null;
       };
       printChar();
@@ -14775,7 +14775,7 @@ var require_extClipboard = __commonJS({
         var arg = XCLIP_SELECTION_ARG[source[0]] || "clipboard";
         return await execFileAsync("xclip", ["-o", "-selection", arg]);
       };
-      exports.setClipboard = async (str, source) => {
+      exports.setClipboard = async (str2, source) => {
         var promise = new Promise2();
         var arg = XCLIP_SELECTION_ARG[source[0]] || "clipboard";
         var xclip = spawn("xclip", ["-i", "-selection", arg]);
@@ -14789,7 +14789,7 @@ var require_extClipboard = __commonJS({
             promise.resolve();
           }
         });
-        xclip.stdin.end(str);
+        xclip.stdin.end(str2);
         return promise;
       };
     } else {
@@ -15064,8 +15064,8 @@ var require_Terminal = __commonJS({
         });
       });
       term2.resetString = "";
-      term2.setResetString = function(str) {
-        term2.resetString = string.markupMethod.call(term2.formatConfig.rawMarkupConfig, str);
+      term2.setResetString = function(str2) {
+        term2.resetString = string.markupMethod.call(term2.formatConfig.rawMarkupConfig, str2);
       };
       var resetFn = (extra) => term2.str.styleReset() + term2.resetString + extra;
       term2.formatConfig = {
@@ -15129,7 +15129,7 @@ var require_Terminal = __commonJS({
         },
         dataMarkup: {
           fg: (markupStack, key, value) => {
-            var str;
+            var str2;
             if (typeof value === "string" && value[0] === "#") {
               let hex = value.slice(1);
               if (hex.length === 3) {
@@ -15138,15 +15138,15 @@ var require_Terminal = __commonJS({
               let r = parseInt(hex.slice(0, 2), 16) || 0;
               let g = parseInt(hex.slice(2, 4), 16) || 0;
               let b = parseInt(hex.slice(4, 6), 16) || 0;
-              str = term2.optimized.color24bits(r, g, b);
+              str2 = term2.optimized.color24bits(r, g, b);
             } else {
-              str = term2.str.color(value);
+              str2 = term2.str.color(value);
             }
-            markupStack.push(str);
-            return str;
+            markupStack.push(str2);
+            return str2;
           },
           bg: (markupStack, key, value) => {
-            var str;
+            var str2;
             if (typeof value === "string" && value[0] === "#") {
               let hex = value.slice(1);
               if (hex.length === 3) {
@@ -15155,17 +15155,17 @@ var require_Terminal = __commonJS({
               let r = parseInt(hex.slice(0, 2), 16) || 0;
               let g = parseInt(hex.slice(2, 4), 16) || 0;
               let b = parseInt(hex.slice(4, 6), 16) || 0;
-              str = term2.optimized.bgColor24bits(r, g, b);
+              str2 = term2.optimized.bgColor24bits(r, g, b);
             } else {
-              str = term2.str.bgColor(value);
+              str2 = term2.str.bgColor(value);
             }
-            markupStack.push(str);
-            return str;
+            markupStack.push(str2);
+            return str2;
           }
         },
         markupCatchAll: (markupStack, key, value) => {
           term2.optimized.bgColor24bits;
-          var str = "";
+          var str2 = "";
           if (value === void 0) {
             if (key[0] === "#") {
               return term2.formatConfig.dataMarkup.fg(markupStack, "fg", key);
@@ -15176,25 +15176,25 @@ var require_Terminal = __commonJS({
                 case "bgColor":
                   return term2.formatConfig.dataMarkup.bg(markupStack, "bg", termkit2.markupCatchAllKeywords[key][1]);
                 case "dim":
-                  str = term2.str.dim();
+                  str2 = term2.str.dim();
                   break;
                 case "bold":
-                  str = term2.str.bold();
+                  str2 = term2.str.bold();
                   break;
                 case "underline":
-                  str = term2.str.underline();
+                  str2 = term2.str.underline();
                   break;
                 case "italic":
-                  str = term2.str.italic();
+                  str2 = term2.str.italic();
                   break;
                 case "inverse":
-                  str = term2.str.inverse();
+                  str2 = term2.str.inverse();
                   break;
               }
             }
           }
-          markupStack.push(str);
-          return str;
+          markupStack.push(str2);
+          return str2;
         }
       };
       term2.formatConfig.dataMarkup.color = term2.formatConfig.dataMarkup.fgColor = term2.formatConfig.dataMarkup.c = term2.formatConfig.dataMarkup.fg;
@@ -15929,9 +15929,9 @@ var require_Terminal = __commonJS({
     notChainable.eraseArea = function(xMin, yMin, width = 1, height = 1) {
       xMin = Math.min(xMin, this.width);
       yMin = Math.min(yMin, this.height);
-      var y, xMax = Math.min(xMin + width, this.width + 1), yMax = Math.min(yMin + height, this.height + 1), str = " ".repeat(xMax - xMin);
+      var y, xMax = Math.min(xMin + width, this.width + 1), yMax = Math.min(yMin + height, this.height + 1), str2 = " ".repeat(xMax - xMin);
       for (y = yMin; y < yMax; y++) {
-        this.moveTo(xMin, y, str);
+        this.moveTo(xMin, y, str2);
       }
     };
     notChainable.getCursorLocation = function(callback) {
@@ -16227,13 +16227,13 @@ var require_Terminal = __commonJS({
       });
       return promise;
     };
-    notChainable.setClipboard = async function(str, source = "c") {
+    notChainable.setClipboard = async function(str2, source = "c") {
       var extClipboard;
       if (this.esc.setClipboardLL.na) {
         extClipboard = require_extClipboard();
-        return extClipboard.setClipboard(str, source).catch(() => void 0);
+        return extClipboard.setClipboard(str2, source).catch(() => void 0);
       }
-      var base64 = Buffer.from(str).toString("base64");
+      var base64 = Buffer.from(str2).toString("base64");
       this.setClipboardLL(source[0], base64);
       return Promise2.resolved;
     };
@@ -16383,7 +16383,7 @@ var require_Terminal = __commonJS({
     };
     notChainable.drawCursor = function() {
     };
-    notChainable.put = function(options, str, ...args2) {
+    notChainable.put = function(options, str2, ...args2) {
       var i, x, y, dx, dy, attr, wrap, characters, len, moveToNeeded, inline;
       if (!options) {
         options = {};
@@ -16440,18 +16440,18 @@ var require_Terminal = __commonJS({
       if (typeof attr !== "string") {
         attr = this.esc.styleReset.on;
       }
-      if (typeof str !== "string") {
-        if (str.toString) {
-          str = str.toString();
+      if (typeof str2 !== "string") {
+        if (str2.toString) {
+          str2 = str2.toString();
         } else {
           return;
         }
       }
       if (args2.length) {
-        str = string.format(str, ...args2);
+        str2 = string.format(str2, ...args2);
       }
-      str = termkit2.stripControlChars(str);
-      characters = string.unicode.toArray(str);
+      str2 = termkit2.stripControlChars(str2);
+      characters = string.unicode.toArray(str2);
       len = characters.length;
       moveToNeeded = true;
       this.stdout.write(attr);
@@ -16574,14 +16574,14 @@ var require_iota = __commonJS({
 // node_modules/is-buffer/index.js
 var require_is_buffer = __commonJS({
   "node_modules/is-buffer/index.js"(exports, module) {
-    module.exports = function(obj) {
-      return obj != null && (isBuffer(obj) || isSlowBuffer(obj) || !!obj._isBuffer);
+    module.exports = function(obj2) {
+      return obj2 != null && (isBuffer(obj2) || isSlowBuffer(obj2) || !!obj2._isBuffer);
     };
-    function isBuffer(obj) {
-      return !!obj.constructor && typeof obj.constructor.isBuffer === "function" && obj.constructor.isBuffer(obj);
+    function isBuffer(obj2) {
+      return !!obj2.constructor && typeof obj2.constructor.isBuffer === "function" && obj2.constructor.isBuffer(obj2);
     }
-    function isSlowBuffer(obj) {
-      return typeof obj.readFloatLE === "function" && typeof obj.slice === "function" && isBuffer(obj.slice(0, 0));
+    function isSlowBuffer(obj2) {
+      return typeof obj2.readFloatLE === "function" && typeof obj2.slice === "function" && isBuffer(obj2.slice(0, 0));
     }
   }
 });
@@ -23830,7 +23830,7 @@ var require_ScreenBuffer = __commonJS({
     ScreenBuffer.prototype.clear = ScreenBuffer.prototype.fill;
     ScreenBuffer.prototype.preserveMarkupFormat = misc.preserveMarkupFormat;
     ScreenBuffer.prototype.parseMarkup = string.markupMethod.bind(misc.markupOptions);
-    ScreenBuffer.prototype.put = function(options, str, ...args2) {
+    ScreenBuffer.prototype.put = function(options, str2, ...args2) {
       var startX, startY, x, y, dx, dy, baseAttr, attr, attrObject, wrap, lastValidOffset = -1, xmin = 0, ymin = 0, xmax = this.width - 1, ymax = this.height - 1;
       if (!options) {
         options = {};
@@ -23882,15 +23882,15 @@ var require_ScreenBuffer = __commonJS({
       if (options.resumeAttr !== void 0) {
         attr = options.resumeAttr;
       }
-      if (typeof str !== "string") {
-        if (str.toString) {
-          str = str.toString();
+      if (typeof str2 !== "string") {
+        if (str2.toString) {
+          str2 = str2.toString();
         } else {
           return;
         }
       }
       if (args2.length) {
-        str = options.markup === true ? this.preserveMarkupFormat(str, ...args2) : string.format(str, ...args2);
+        str2 = options.markup === true ? this.preserveMarkupFormat(str2, ...args2) : string.format(str2, ...args2);
       }
       var processRaw = (part) => {
         var characters = string.unicode.toArray(part), iMax = characters.length;
@@ -23976,7 +23976,7 @@ var require_ScreenBuffer = __commonJS({
         }
       };
       if (!options.markup) {
-        processRaw(str);
+        processRaw(str2);
       } else {
         const defaultAttrObject = this.attr2object(this.DEFAULT_ATTR);
         const baseAttrObject = this.attr2object(baseAttr);
@@ -23984,14 +23984,14 @@ var require_ScreenBuffer = __commonJS({
         let parts = null;
         switch (options.markup) {
           case "ansi":
-            parts = string.ansi.parse(str);
+            parts = string.ansi.parse(str2);
             break;
           case "legacyAnsi":
-            parts = string.ansi.parse(str);
+            parts = string.ansi.parse(str2);
             legacyColor = true;
             break;
           case true:
-            parts = this.parseMarkup(str);
+            parts = this.parseMarkup(str2);
             break;
         }
         for (let part of parts) {
@@ -24411,24 +24411,24 @@ var require_ScreenBuffer = __commonJS({
     };
     ScreenBuffer.loadImage = termkit2.image.load.bind(ScreenBuffer, ScreenBuffer.fromNdarrayImage);
     ScreenBuffer.prototype.dumpChars = function() {
-      var y, x, offset, str = "";
+      var y, x, offset, str2 = "";
       for (y = 0; y < this.height; y++) {
         for (x = 0; x < this.width; x++) {
           offset = (y * this.width + x) * this.ITEM_SIZE;
-          str += this.readChar(this.buffer, offset);
+          str2 += this.readChar(this.buffer, offset);
         }
-        str += "\n";
+        str2 += "\n";
       }
-      return str;
+      return str2;
     };
     ScreenBuffer.prototype.dump = function() {
-      var y, x, offset, str = "", char;
+      var y, x, offset, str2 = "", char;
       for (y = 0; y < this.height; y++) {
         for (x = 0; x < this.width; x++) {
           offset = (y * this.width + x) * this.ITEM_SIZE;
           char = this.readChar(this.buffer, offset);
-          str += char + (string.unicode.isFullWidth(char) ? " " : "  ");
-          str += string.format(
+          str2 += char + (string.unicode.isFullWidth(char) ? " " : "  ");
+          str2 += string.format(
             "%x%x%x%x ",
             this.buffer.readUInt8(offset),
             this.buffer.readUInt8(offset + 1),
@@ -24436,9 +24436,9 @@ var require_ScreenBuffer = __commonJS({
             this.buffer.readUInt8(offset + 3)
           );
         }
-        str += "\n";
+        str2 += "\n";
       }
-      return str;
+      return str2;
     };
     ScreenBuffer.prototype.readAttr = function(buffer, at) {
       return buffer.readInt32BE(at);
@@ -25452,13 +25452,13 @@ var require_ScreenBufferHD = __commonJS({
     };
     ScreenBufferHD.loadImage = termkit2.image.load.bind(ScreenBufferHD, ScreenBufferHD.fromNdarrayImage);
     ScreenBufferHD.prototype.dump = function() {
-      var y, x, offset, str = "", char;
+      var y, x, offset, str2 = "", char;
       for (y = 0; y < this.height; y++) {
         for (x = 0; x < this.width; x++) {
           offset = (y * this.width + x) * this.ITEM_SIZE;
           char = this.readChar(this.buffer, offset);
-          str += char + (string.unicode.isFullWidth(char) ? " " : "  ");
-          str += string.format(
+          str2 += char + (string.unicode.isFullWidth(char) ? " " : "  ");
+          str2 += string.format(
             "%x%x%x%x %x%x%x%x %x%x ",
             this.buffer.readUInt8(offset),
             this.buffer.readUInt8(offset + 1),
@@ -25472,9 +25472,9 @@ var require_ScreenBufferHD = __commonJS({
             this.buffer.readUInt8(offset + 9)
           );
         }
-        str += "\n";
+        str2 += "\n";
       }
-      return str;
+      return str2;
     };
     ScreenBufferHD.prototype.readAttr = function(buffer, at) {
       return buffer.slice(at, at + this.ATTR_SIZE);
@@ -26595,7 +26595,7 @@ var require_TextBuffer = __commonJS({
       return this.getRegionText(this.selectionRegion);
     };
     TextBuffer.prototype.getRegionText = function(region, structured = false) {
-      var x, y, xmin, xmax, ymax, cell, count = 0, str = "";
+      var x, y, xmin, xmax, ymax, cell, count = 0, str2 = "";
       if (!region || region.xmin === void 0 || region.ymin === void 0 || region.xmax === void 0 || region.ymax === void 0) {
         return;
       }
@@ -26609,15 +26609,15 @@ var require_TextBuffer = __commonJS({
         for (x = xmin; x <= xmax; x++) {
           cell = this.buffer[y][x];
           if (!cell.filler) {
-            str += cell.char;
+            str2 += cell.char;
             count++;
           }
         }
       }
       if (structured) {
-        return { string: str, count };
+        return { string: str2, count };
       }
-      return str;
+      return str2;
     };
     TextBuffer.prototype.deleteSelection = function(getDeleted = false) {
       if (!this.selectionRegion) {
@@ -29284,18 +29284,18 @@ var require_Element = __commonJS({
     var lastTruncateWidth = 0;
     Element.getLastTruncateWidth = () => lastTruncateWidth;
     Element.truncateContent = (content, maxWidth, hasMarkup) => {
-      var str;
+      var str2;
       if (hasMarkup === "ansi" || hasMarkup === "legacyAnsi") {
-        str = misc.truncateAnsiString(content, maxWidth);
+        str2 = misc.truncateAnsiString(content, maxWidth);
         lastTruncateWidth = misc.getLastTruncateWidth();
       } else if (hasMarkup) {
-        str = misc.truncateMarkupString(content, maxWidth);
+        str2 = misc.truncateMarkupString(content, maxWidth);
         lastTruncateWidth = misc.getLastTruncateWidth();
       } else {
-        str = string.unicode.truncateWidth(content, maxWidth);
+        str2 = string.unicode.truncateWidth(content, maxWidth);
         lastTruncateWidth = string.unicode.getLastTruncateWidth();
       }
-      return str;
+      return str2;
     };
     Element.wordwrapContent = // <-- DEPRECATED
     Element.wordWrapContent = (content, width, hasMarkup) => hasMarkup === "ansi" || hasMarkup === "legacyAnsi" ? misc.wordWrapAnsi(content, width) : hasMarkup ? misc.wordWrapMarkup(content, width) : string.wordwrap(content, { width, fill: true, noJoin: true });
@@ -29994,14 +29994,14 @@ var require_Document = __commonJS({
         }
         return this.outputDst.getClipboard(source);
       });
-      this.setSystemClipboard = Promise2.debounceUpdate(async (str, source) => {
+      this.setSystemClipboard = Promise2.debounceUpdate(async (str2, source) => {
         if (!this.outputDst.setClipboard) {
           return;
         }
-        await this.outputDst.setClipboard(str, source);
+        await this.outputDst.setClipboard(str2, source);
         await Promise2.resolveTimeout(500);
       });
-      this.clearSystemClipboard = Promise2.debounceUpdate(async (str, source) => {
+      this.clearSystemClipboard = Promise2.debounceUpdate(async (str2, source) => {
         if (!this.outputDst.setClipboard) {
           return;
         }
@@ -31805,9 +31805,9 @@ var require_EditableTextBox = __commonJS({
       ALT_D: "clearDocumentClipboard",
       META_D: "clearSystemClipboard"
     };
-    EditableTextBox.prototype.insert = function(str, selectIt = false, internal = false) {
+    EditableTextBox.prototype.insert = function(str2, selectIt = false, internal = false) {
       let x = this.textBuffer.cx, y = this.textBuffer.cy;
-      let count = this.textBuffer.insert(str, this.textAttr);
+      let count = this.textBuffer.insert(str2, this.textAttr);
       if (!internal) {
         if (selectIt) {
           this.textBuffer.setSelectionRegion({
@@ -31828,7 +31828,7 @@ var require_EditableTextBox = __commonJS({
       }
       this.emit("change", {
         type: "insert",
-        insertedString: str,
+        insertedString: str2,
         count,
         internal,
         startPosition: { x, y },
@@ -31922,9 +31922,9 @@ var require_EditableTextBox = __commonJS({
         this.document.giveFocusTo(this, "select");
       }
       if (this.document) {
-        this.document.getSystemClipboard("primary").then((str) => {
-          if (str) {
-            this.insert(str);
+        this.document.getSystemClipboard("primary").then((str2) => {
+          if (str2) {
+            this.insert(str2);
           }
         }).catch(() => void 0);
       }
@@ -32222,32 +32222,32 @@ var require_EditableTextBox = __commonJS({
       this.draw();
     };
     userActions.moveSelection = function() {
-      var str = this.textBuffer.getSelectionText();
-      if (!str) {
+      var str2 = this.textBuffer.getSelectionText();
+      if (!str2) {
         return;
       }
       this.deleteSelection(true);
-      this.insert(str, true);
+      this.insert(str2, true);
     };
     userActions.pasteSelection = function() {
-      var str = this.textBuffer.getSelectionText();
-      if (str) {
-        this.insert(str);
+      var str2 = this.textBuffer.getSelectionText();
+      if (str2) {
+        this.insert(str2);
       }
     };
     userActions.pasteDocumentClipboard = function() {
       if (this.document) {
-        let str = this.document.getDocumentClipboard();
-        if (str && typeof str === "string") {
-          this.insert(str);
+        let str2 = this.document.getDocumentClipboard();
+        if (str2 && typeof str2 === "string") {
+          this.insert(str2);
         }
       }
     };
     userActions.pasteSystemClipboard = function() {
       if (this.document) {
-        this.document.getSystemClipboard().then((str) => {
-          if (str && typeof str === "string") {
-            this.insert(str);
+        this.document.getSystemClipboard().then((str2) => {
+          if (str2 && typeof str2 === "string") {
+            this.insert(str2);
           }
         }).catch(() => void 0);
       }
@@ -34220,8 +34220,8 @@ var require_InlineInput = __commonJS({
       ALT_D: "clearDocumentClipboard",
       META_D: "clearSystemClipboard"
     };
-    InlineInput.prototype.insert = function(str) {
-      this.textBuffer.insert(str, this.textAttr);
+    InlineInput.prototype.insert = function(str2) {
+      this.textBuffer.insert(str2, this.textAttr);
       this.textBuffer.runStateMachine();
       if (this.useAutoCompleteHint) {
         this.runAutoCompleteHint(this.autoComplete);
@@ -36203,8 +36203,8 @@ var require_chroma = __commonJS({
         var name = list$1[i$1];
         classToType["[object " + name + "]"] = name.toLowerCase();
       }
-      function type(obj) {
-        return classToType[Object.prototype.toString.call(obj)] || "object";
+      function type(obj2) {
+        return classToType[Object.prototype.toString.call(obj2)] || "object";
       }
       function unpack(args2, keyOrder) {
         if (keyOrder === void 0) keyOrder = null;
@@ -36735,17 +36735,17 @@ var require_chroma = __commonJS({
         g = round$3(g);
         b = round$3(b);
         var u = r << 16 | g << 8 | b;
-        var str = "000000" + u.toString(16);
-        str = str.substr(str.length - 6);
+        var str2 = "000000" + u.toString(16);
+        str2 = str2.substr(str2.length - 6);
         var hxa = "0" + round$3(a * 255).toString(16);
         hxa = hxa.substr(hxa.length - 2);
         switch (mode.toLowerCase()) {
           case "rgba":
-            return "#" + str + hxa;
+            return "#" + str2 + hxa;
           case "argb":
-            return "#" + hxa + str;
+            return "#" + hxa + str2;
           default:
-            return "#" + str;
+            return "#" + str2;
         }
       };
       Color.prototype.hex = function(mode) {
@@ -39067,12 +39067,14 @@ var require_termkit_no_lazy_require = __commonJS({
 });
 
 // packages/tui/dist/main.js
-import { dirname as dirname8, join as join19 } from "node:path";
+import { appendFileSync, mkdirSync as mkdirSync10 } from "node:fs";
+import { dirname as dirname9, join as join20 } from "node:path";
+import { performance } from "node:perf_hooks";
 
 // packages/tui/dist/controller.js
-import { readFileSync as readFileSync12, writeFileSync as writeFileSync5, existsSync as existsSync8 } from "node:fs";
+import { readFileSync as readFileSync12, writeFileSync as writeFileSync5, existsSync as existsSync9 } from "node:fs";
 import { basename as basename2, dirname as dirname5, join as join16 } from "node:path";
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID5 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
 // packages/store/dist/index.js
@@ -39205,26 +39207,26 @@ var util;
   }
   util2.assertNever = assertNever;
   util2.arrayToEnum = (items) => {
-    const obj = {};
+    const obj2 = {};
     for (const item of items) {
-      obj[item] = item;
+      obj2[item] = item;
     }
-    return obj;
+    return obj2;
   };
-  util2.getValidEnumValues = (obj) => {
-    const validKeys = util2.objectKeys(obj).filter((k) => typeof obj[obj[k]] !== "number");
+  util2.getValidEnumValues = (obj2) => {
+    const validKeys = util2.objectKeys(obj2).filter((k) => typeof obj2[obj2[k]] !== "number");
     const filtered = {};
     for (const k of validKeys) {
-      filtered[k] = obj[k];
+      filtered[k] = obj2[k];
     }
     return util2.objectValues(filtered);
   };
-  util2.objectValues = (obj) => {
-    return util2.objectKeys(obj).map(function(e) {
-      return obj[e];
+  util2.objectValues = (obj2) => {
+    return util2.objectKeys(obj2).map(function(e) {
+      return obj2[e];
     });
   };
-  util2.objectKeys = typeof Object.keys === "function" ? (obj) => Object.keys(obj) : (object) => {
+  util2.objectKeys = typeof Object.keys === "function" ? (obj2) => Object.keys(obj2) : (object) => {
     const keys = [];
     for (const key in object) {
       if (Object.prototype.hasOwnProperty.call(object, key)) {
@@ -39345,8 +39347,8 @@ var ZodIssueCode = util.arrayToEnum([
   "not_multiple_of",
   "not_finite"
 ]);
-var quotelessJson = (obj) => {
-  const json = JSON.stringify(obj, null, 2);
+var quotelessJson = (obj2) => {
+  const json = JSON.stringify(obj2, null, 2);
   return json.replace(/"([^"]+)":/g, "$1:");
 };
 var ZodError = class _ZodError extends Error {
@@ -43966,10 +43968,13 @@ var modelPin = external_exports.object({
   model: external_exports.string(),
   effort: effortLevel.optional()
 }).strict();
+var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+var CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
 var agentModelEntry = external_exports.object({
-  model: external_exports.string(),
+  model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
   effort: effortLevel,
-  hard_task: modelPin.optional()
+  hard_task: modelPin.optional(),
+  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
 }).strict();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
@@ -44132,11 +44137,11 @@ var configSchema = external_exports.object({
     implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
     researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    classifiers: agentModelEntry.default({ model: "claude-haiku-4-5", effort: "low" }),
+    classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // librarian is mechanical clerking — cheap model, low effort (P8). The
     // roster is classless (decision agent-roster-is-classless-four-agents), and
     // the debugger role it rejected has no key here.
-    librarian: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    librarian: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
@@ -49990,22 +49995,166 @@ var BANNER_ROWS = [
   "\u2580\u2580\u2580  \u2580  \u2580\u2580\u2580 \u2580 \u2580 \u2580\u2580\u2580 \u2580\u2580\u2580 \u2580  \u2580 \u2580\u2580\u2580\u2580"
 ];
 var WORDMARK = "STERLING";
+var SPACED_WORDMARK = "S T E R L I N G";
 var ART_WIDTH = Math.max(...BANNER_ROWS.map((r) => r.length));
-function bannerLines(width, show) {
+var FULL_SCENE_ROWS = 8;
+var COMPACT_SCENE_ROWS = 4;
+var COMPACT_BELOW_HEIGHT = 24;
+function sceneRows(width, height = Infinity) {
+  if (!(width >= WORDMARK.length))
+    return 0;
+  if (width < ART_WIDTH || height < COMPACT_BELOW_HEIGHT)
+    return COMPACT_SCENE_ROWS;
+  return FULL_SCENE_ROWS;
+}
+function sceneLayout(rows) {
+  return rows >= FULL_SCENE_ROWS ? { sunRows: 4, horizon: 4, gridRows: 3 } : { sunRows: 2, horizon: 2, gridRows: 1 };
+}
+var textWidth = (width) => Number.isFinite(width) ? Math.floor(width) : ART_WIDTH;
+function bannerLines(width, show, height = Infinity) {
   if (!show)
     return [];
-  if (!Number.isFinite(width))
-    return [...BANNER_ROWS];
-  if (width >= ART_WIDTH)
-    return [...BANNER_ROWS];
-  if (width < 1)
+  const rows = sceneRows(width, height);
+  if (rows === 0)
     return [];
-  return [WORDMARK.slice(0, width)];
+  return sceneText(textWidth(width), rows, "").slice(0, rows - 1);
 }
-var RAMP = [231, 255, 253, 251, 249, 103, 66, 60];
-function bannerPaletteIndex(t) {
+function horizonLabel(width, name) {
+  if (!name)
+    return { x: 0, text: "" };
+  const label = ` ${name} `;
+  if ([...label].length >= width)
+    return { x: 0, text: [...name].slice(0, Math.max(0, width)).join("") };
+  return { x: Math.floor((width - [...label].length) / 2), text: label };
+}
+function wordmarkFor(width, rows) {
+  if (rows >= FULL_SCENE_ROWS)
+    return { row: 1, x: Math.floor((width - ART_WIDTH) / 2), lines: BANNER_ROWS };
+  const text = width >= SPACED_WORDMARK.length ? SPACED_WORDMARK : WORDMARK;
+  return { row: 1, x: Math.floor((width - text.length) / 2), lines: [text] };
+}
+var SUN_STOPS = ["#ffd319", "#ff901f", "#ff2975"];
+var SKY_STOPS = ["#00005f", "#3a0a6e", "#a0207e"];
+var CHROME = ["#ffffff", "#c8f4ff", "#6fd3ff", "#2a3fbf", "#9ee6ff", "#f0fbff"];
+var GROUND_STOPS = ["#2b0057", "#00005f"];
+var GRID = "#ff2bd6";
+var SUN_INK = "#2b0057";
+var HORIZON_LINE = "#00e5ff";
+var NAME_FG = "#ffffff";
+function rgbOf(hex) {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return [n >> 16 & 255, n >> 8 & 255, n & 255];
+}
+function lerpStops(stops, t) {
   const u = t <= 0 ? 0 : t >= 1 ? 1 : t;
-  return RAMP[Math.round(u * (RAMP.length - 1))];
+  const pos = u * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(pos));
+  const f = pos - i;
+  const [a, b] = [rgbOf(stops[i]), rgbOf(stops[i + 1])];
+  return `#${a.map((v, k) => Math.round(v + (b[k] - v) * f).toString(16).padStart(2, "0")).join("")}`;
+}
+var frac = (y, n) => n <= 1 ? 0 : y / (n - 1);
+function sunPixel(x, y, n, cx) {
+  const r = n + 1;
+  const dy = y + 0.5 - r;
+  const dx = (x - cx) / 1.5;
+  if (dx * dx + dy * dy > r * r)
+    return void 0;
+  if (y >= n / 2 && (y - n / 2) % 2 === 1)
+    return void 0;
+  return lerpStops(SUN_STOPS, frac(y, n));
+}
+function raySpacing(y, g) {
+  return 6 + y * 6 / g;
+}
+function gridLine(x, y, g, cx) {
+  const h = g >= 6 ? y === 2 || y === 5 : y === g - 1;
+  const s2 = raySpacing(y, g);
+  return { h, v: Math.round(cx + Math.round((x - cx) / s2) * s2) === x };
+}
+function pairCell(x, y, top, bottom) {
+  return top === bottom ? { x, y, ch: " ", bg: top } : { x, y, ch: "\u2580", fg: top, bg: bottom };
+}
+function scenePixels(width, rows, projectName) {
+  const w = textWidth(width);
+  if (rows <= 0 || w < 1)
+    return [];
+  const { sunRows, horizon, gridRows } = sceneLayout(rows);
+  const cx = Math.floor(w / 2);
+  const n = sunRows * 2;
+  const mark = wordmarkFor(w, rows);
+  const out = [];
+  const skyPixel = (x, y) => {
+    if (rows >= FULL_SCENE_ROWS) {
+      const artY = y - mark.row * 2;
+      const ch = mark.lines[Math.floor(artY / 2)]?.[x - mark.x];
+      if (artY >= 0 && ch !== void 0 && (artY % 2 === 0 ? "\u2580\u2588" : "\u2584\u2588").includes(ch))
+        return CHROME[artY];
+    }
+    return sunPixel(x, y, n, cx) ?? lerpStops(SKY_STOPS, frac(y, n));
+  };
+  for (let row = 0; row < sunRows; row++) {
+    for (let x = 0; x < w; x++)
+      out.push(pairCell(x, row, skyPixel(x, row * 2), skyPixel(x, row * 2 + 1)));
+  }
+  if (rows < FULL_SCENE_ROWS) {
+    const line = mark.lines[0];
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === " ")
+        continue;
+      const x = mark.x + i;
+      if (x < 0 || x >= w)
+        continue;
+      const bg = skyPixel(x, mark.row * 2);
+      const fg = sunPixel(x, mark.row * 2, n, cx) === void 0 ? CHROME[0] : SUN_INK;
+      out[mark.row * w + x] = { x, y: mark.row, ch: line[i], fg, bg };
+    }
+  }
+  const ground = GROUND_STOPS[0];
+  const label = horizonLabel(w, projectName);
+  const labelChars = [...label.text];
+  for (let x = 0; x < w; x++) {
+    const li = x - label.x;
+    const ch = li >= 0 && li < labelChars.length ? labelChars[li] : void 0;
+    out.push(ch === void 0 ? { x, y: horizon, ch: "\u2501", fg: HORIZON_LINE, bg: ground } : { x, y: horizon, ch, fg: NAME_FG, bg: ground });
+  }
+  const g = gridRows * 2;
+  const gridPixel = (x, y) => {
+    const { h, v } = gridLine(x, y, g, cx);
+    return h || v ? GRID : lerpStops(GROUND_STOPS, frac(y, g));
+  };
+  for (let row = 0; row < gridRows; row++) {
+    for (let x = 0; x < w; x++)
+      out.push(pairCell(x, horizon + 1 + row, gridPixel(x, row * 2), gridPixel(x, row * 2 + 1)));
+  }
+  return out;
+}
+function sceneText(width, rows, projectName) {
+  const w = textWidth(width);
+  if (rows <= 0 || w < 1)
+    return [];
+  const { horizon, gridRows } = sceneLayout(rows);
+  const grid = Array.from({ length: rows }, () => Array(w).fill(" "));
+  const mark = wordmarkFor(w, rows);
+  mark.lines.forEach((line, i) => [...line].forEach((ch, k) => {
+    const x = mark.x + k;
+    if (x >= 0 && x < w)
+      grid[mark.row + i][x] = ch;
+  }));
+  grid[horizon].fill("\u2500");
+  const label = horizonLabel(w, projectName);
+  [...label.text].forEach((ch, k) => grid[horizon][label.x + k] = ch);
+  const cx = Math.floor(w / 2);
+  const g = gridRows * 2;
+  for (let row = 0; row < gridRows; row++) {
+    const s2 = raySpacing(row * 2 + 1, g);
+    for (let k = -Math.ceil(cx / s2); k <= Math.ceil((w - cx) / s2); k++) {
+      const x = Math.round(cx + k * s2);
+      if (x >= 0 && x < w)
+        grid[horizon + 1 + row][x] = k < 0 ? "\u2571" : k > 0 ? "\u2572" : "\u2502";
+    }
+  }
+  return grid.map((cells2) => cells2.join("").trimEnd());
 }
 
 // packages/tui/dist/state.js
@@ -50022,14 +50171,18 @@ function defaultResolveHeadSha() {
     return void 0;
   }
 }
-var TABS = ["Tasks", "Knowledge", "Queue", "Agents", "System"];
+var TABS = ["Tasks", "Knowledge", "Queue", "Agents", "System", "GitHub"];
 var TASKS_TAB = TABS.indexOf("Tasks");
 var KNOWLEDGE_TAB = TABS.indexOf("Knowledge");
 var QUEUE_TAB = TABS.indexOf("Queue");
 var AGENTS_TAB = TABS.indexOf("Agents");
 var SYSTEM_TAB = TABS.indexOf("System");
+var GITHUB_TAB = TABS.indexOf("GitHub");
 var ARTICLE_STATE_FILTERS = ["all", "planned", "built", "wired_in", "active", "dormant", "deprecated"];
 var initialUi = { tab: 0, cursor: 0, expanded: [], searchQuery: "", scroll: 0 };
+function isOpenCodeOnlyEntry(entry) {
+  return entry.vendor !== void 0 && entry.vendor !== "anthropic";
+}
 var EMPTY_ROSTER = {
   agents: [],
   configModels: {},
@@ -50049,12 +50202,25 @@ function effortOptions(key) {
   return ["low", "medium", "high"];
 }
 var MODEL_VALUE_RE = /^claude-/;
-function visibleTabs(agents) {
-  return TABS.map((_, i) => i).filter((i) => i !== AGENTS_TAB || agents !== void 0);
+function modelOptions(entries, config) {
+  const opts = entries.map((entry) => ({ kind: "entry", entry }));
+  if (config?.opencode_model)
+    opts.push({ kind: "clear" });
+  return opts;
 }
-var STATE_COLUMN_WIDTH = Math.max(...ARTICLE_STATE_FILTERS.slice(1).map((n) => n.length)) + 2;
+function visibleTabs(agents, github2) {
+  return TABS.map((_, i) => i).filter((i) => (i !== AGENTS_TAB || agents !== void 0) && (i !== GITHUB_TAB || github2 !== void 0));
+}
+var STATE_GLYPHS = {
+  planned: "\u25CB",
+  built: "\u25D4",
+  wired_in: "\u25D1",
+  active: "\u25CF",
+  dormant: "\u25CC",
+  deprecated: "\xD7"
+};
 function stateColumn(card) {
-  return card.state ? `${`[${card.state}]`.padEnd(STATE_COLUMN_WIDTH)} ` : "";
+  return card.state ? `${STATE_GLYPHS[card.state] ?? "?"} ` : "";
 }
 function cardsFor(store, tab, expanded = []) {
   if (tab === 0)
@@ -50064,6 +50230,19 @@ function cardsFor(store, tab, expanded = []) {
 var catId = (type) => `cat:${type}`;
 var srcId = (type, source) => `src:${type}:${source}`;
 var subId = (type, source, key) => `sub:${type}:${source}:${key}`;
+function nodeId(node) {
+  if (node.kind === "category")
+    return catId(node.type);
+  if (node.kind === "source")
+    return srcId(node.catType, node.source);
+  if (node.kind === "subcategory")
+    return subId(node.catType, node.source, node.key);
+  return node.card.id;
+}
+function resolveCursor(ui, nodes2) {
+  const held = ui.selectedId === void 0 ? -1 : nodes2.findIndex((n) => nodeId(n) === ui.selectedId);
+  return Math.min(held >= 0 ? held : ui.cursor, Math.max(0, nodes2.length - 1));
+}
 function rankTermsOf(query) {
   const words = query.trim().split(/\s+/).filter((t) => t.length > 0 && t.length < 64).map((t) => `${t.replace(/\*+$/, "")}*`);
   const seen = /* @__PURE__ */ new Set();
@@ -50105,17 +50284,17 @@ function nodesFor(store, ui, knowledge) {
       return store.query({ types, rank_terms: terms, match_all: true, cap }).filter(inState).map((r) => ({ kind: "card", card: hydrateInbound({ ...toCard(r), source: "project" }, ui, store), depth: 0, knowledge: true }));
     }
   }
-  const nodes = [];
+  const nodes2 = [];
   for (const cat of KNOWLEDGE_CATEGORIES) {
     const sources = knowledge ? knowledgeCountBySource(knowledge, cat.type) : [{ source: "project", count: store.count({ types: [cat.type] }) }].filter((s2) => s2.count > 0);
     const total = sources.reduce((n, s2) => n + s2.count, 0);
     if (total === 0)
       continue;
-    nodes.push({ kind: "category", type: cat.type, label: cat.label, count: total });
+    nodes2.push({ kind: "category", type: cat.type, label: cat.label, count: total });
     if (!ui.expanded.includes(catId(cat.type)))
       continue;
     for (const sc of sources) {
-      nodes.push({ kind: "source", catType: cat.type, source: sc.source, count: sc.count });
+      nodes2.push({ kind: "source", catType: cat.type, source: sc.source, count: sc.count });
       if (!ui.expanded.includes(srcId(cat.type, sc.source)))
         continue;
       const records = knowledge ? knowledge.querySource(sc.source, { types: [cat.type], cap }) : store.query({ types: [cat.type], cap });
@@ -50123,25 +50302,25 @@ function nodesFor(store, ui, knowledge) {
       const reader = knowledge ?? store;
       if (groups.length <= 1) {
         for (const card of groups[0]?.cards ?? []) {
-          nodes.push({ kind: "card", card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 2, knowledge: true });
+          nodes2.push({ kind: "card", card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 2, knowledge: true });
         }
         continue;
       }
       for (const g of groups) {
-        nodes.push({ kind: "subcategory", catType: cat.type, source: sc.source, key: g.key, label: g.label, count: g.cards.length });
+        nodes2.push({ kind: "subcategory", catType: cat.type, source: sc.source, key: g.key, label: g.label, count: g.cards.length });
         if (!ui.expanded.includes(subId(cat.type, sc.source, g.key)))
           continue;
         for (const card of g.cards) {
-          nodes.push({ kind: "card", card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 3, knowledge: true });
+          nodes2.push({ kind: "card", card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 3, knowledge: true });
         }
       }
     }
   }
-  return nodes;
+  return nodes2;
 }
 var CHROME_BELOW_BANNER = 3;
-function visibleBodyLines(height, bannerHeight = 0) {
-  return Math.max(0, height - bannerHeight - CHROME_BELOW_BANNER - 2);
+function visibleBodyLines(height, bannerHeight = 0, stripRows = 0) {
+  return Math.max(0, height - bannerHeight - CHROME_BELOW_BANNER - 2 - stripRows);
 }
 function wrapText(text, width) {
   if (!Number.isFinite(width) || width < 1)
@@ -50192,11 +50371,14 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
     ];
     for (const name of agentNames)
       lines.push({ text: clip2(`    ${name}`), kind: "body" });
+    if (config.opencode_model)
+      lines.push({ text: clip2(`    OpenCode: ${config.opencode_model}`), kind: "body" });
     if (selector && selector.key === key) {
       if (selector.stage === "model") {
-        snap.catalog.entries.forEach((e, oi) => {
+        modelOptions(snap.catalog.entries, config).forEach((o, oi) => {
           const m = oi === selector.highlight ? "\u203A " : "  ";
-          lines.push({ text: clip2(`  ${m}${e.id} ${e.label}`), kind: "option", selected: oi === selector.highlight });
+          const text = o.kind === "clear" ? "OpenCode: use the Claude model" : isOpenCodeOnlyEntry(o.entry) ? `${o.entry.vendor}/${o.entry.id} ${o.entry.label} (OpenCode only)` : `${o.entry.id} ${o.entry.label}`;
+          lines.push({ text: clip2(`  ${m}${text}`), kind: "option", selected: oi === selector.highlight });
         });
       } else {
         effortOptions(key).forEach((eff, oi) => {
@@ -50278,27 +50460,197 @@ function storageRow(snap, width) {
   const shown = storage === null ? "UNKNOWN (config unreadable)" : storage === void 0 ? "SQLITE (not set)" : storage === "sqlite" ? "SQLITE" : storage === "postgres" ? "SERVED POSTGRES" : `UNRECOGNIZED (${storage})`;
   return { id: "sys:storage", lines: [{ text: clip2(`  Storage: ${shown} (read-only; switch with the move-store skill)`), kind: "title" }] };
 }
-function tabsFor(store, activeTab, agents) {
+function tabsFor(store, activeTab, agents, github2) {
   let taskCount = null;
   try {
     taskCount = store.count({ types: ["todo"], source: "user" });
   } catch {
     taskCount = null;
   }
-  return visibleTabs(agents).map((i) => {
+  return visibleTabs(agents, github2).map((i) => {
     const label = TABS[i];
     return {
-      label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label === "Agents" && agents ? `${label} (${agents.running})` : label,
+      label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label === "Agents" && agents ? `${label} (${agents.running} running${agents.quiet ? ` \xB7 ${agents.quiet} quiet` : ""})` : label,
       active: i === activeTab,
       index: i
     };
   });
 }
-function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents) {
+function fitTabs(tabs, width) {
+  if (!Number.isFinite(width))
+    return tabs;
+  const bare = (l) => l.replace(/ \(.*\)$/, "");
+  const steps = [
+    [(l) => l, (l) => l],
+    [(l) => l, bare],
+    [bare, bare],
+    [bare, (l) => bare(l).slice(0, 3)],
+    [bare, (l) => bare(l).slice(0, 1)]
+  ];
+  for (const [active, inactive] of steps) {
+    const labels = tabs.map((t) => t.active ? active(t.label) : inactive(t.label));
+    if (labels.reduce((n, l) => n + l.length + 2, 0) <= width)
+      return tabs.map((t, i) => ({ ...t, label: labels[i] }));
+  }
+  const room = width - 3 * tabs.filter((t) => !t.active).length - 2;
+  const activeName = bare(tabs.find((t) => t.active)?.label ?? "");
+  if (room >= Math.min(3, activeName.length))
+    return tabs.map((t) => ({ ...t, label: t.active ? clipEllipsis(bare(t.label), room) : bare(t.label).slice(0, 1) }));
+  const ai = Math.max(0, tabs.findIndex((t) => t.active));
+  const window2 = [{ ...tabs[ai], label: clipEllipsis(bare(tabs[ai].label), Math.max(1, width - 2)) }];
+  let used = window2[0].label.length + 2;
+  let lo = ai;
+  let hi = ai;
+  for (let grew = true; grew; ) {
+    grew = false;
+    if (hi + 1 < tabs.length && used + 3 <= width) {
+      hi += 1;
+      window2.push({ ...tabs[hi], label: bare(tabs[hi].label).slice(0, 1) });
+      used += 3;
+      grew = true;
+    }
+    if (lo > 0 && used + 3 <= width) {
+      lo -= 1;
+      window2.unshift({ ...tabs[lo], label: bare(tabs[lo].label).slice(0, 1) });
+      used += 3;
+      grew = true;
+    }
+  }
+  return window2;
+}
+function footerFor(ui, tabCount, width) {
+  const tabs = `1-${tabCount} tabs`;
+  let text;
+  if (ui.tab === TASKS_TAB)
+    text = ui.boardEdit ? "editing \xB7 enter save \xB7 esc cancel" : `${tabs} \xB7 \u2191\u2193 \xB7 enter expand \xB7 e edit \xB7 q quit`;
+  else if (ui.tab === KNOWLEDGE_TAB)
+    text = "type to search \xB7 esc clear \xB7 ^f state \xB7 \u2190\u2192 tabs";
+  else if (ui.tab === QUEUE_TAB)
+    text = `${tabs} \xB7 \u2191\u2193 pending \xB7 wheel scrolls \xB7 q quit`;
+  else if (ui.tab === AGENTS_TAB)
+    text = `\u2190/\u2192 or ${tabs} \xB7 q quit`;
+  else if (ui.tab === GITHUB_TAB)
+    text = `${tabs} \xB7 \u2191\u2193 scroll \xB7 r refresh \xB7 q quit`;
+  else
+    text = `${tabs} \xB7 enter change \xB7 esc cancel \xB7 q quit`;
+  return clipEllipsis(text, width);
+}
+var noticeFor = (ui, width) => ui.notice ? clipEllipsis(`\u26A0 ${ui.notice}`, width) : void 0;
+var clockOf = (ms) => new Date(ms).toTimeString().slice(0, 5);
+var CHECKS_WORD = { pass: "checks \u2713", fail: "checks \u2717", pending: "checks \u2026", none: "" };
+var MERGE_WORD = { CLEAN: "mergeable", HAS_HOOKS: "mergeable", UNSTABLE: "unstable", BLOCKED: "blocked", BEHIND: "behind", DIRTY: "conflicts" };
+function prParts(pr) {
+  return [
+    `#${pr.number}`,
+    pr.draft ? "draft" : "",
+    CHECKS_WORD[pr.checks],
+    pr.draft ? "" : MERGE_WORD[pr.merge] ?? "",
+    pr.copilot === "none" ? "" : `copilot ${pr.copilot}`,
+    pr.unresolved > 0 ? `${pr.unresolved} unresolved` : ""
+  ].filter(Boolean);
+}
+function githubStrip(github2, width = Infinity) {
+  if (!github2 || github2.state === "loading" || github2.state === "hidden")
+    return void 0;
+  const clip2 = (text) => clipEllipsis(text, width);
+  if (github2.loopError)
+    return { text: clip2(`\u26A0 pr-loop.json unreadable: ${github2.loopError}`), dim: false };
+  const data = github2.data;
+  if (github2.state === "failed" && !data)
+    return { text: clip2(github2.reason ?? "gh failed"), dim: true };
+  const open2 = data?.open ?? [];
+  const loop = github2.loop;
+  const owed = loop?.status === "owed" ? loop : void 0;
+  if (open2.length === 0 && !owed)
+    return void 0;
+  const parts = [];
+  if (github2.state === "failed" && github2.asOf !== void 0)
+    parts.push(`as of ${clockOf(github2.asOf)}`);
+  const lead = open2.find((p) => p.number === loop?.pr) ?? open2[0];
+  if (lead) {
+    parts.push(prParts(lead).join(" "));
+    if (loop && loop.pr === lead.number)
+      parts.push(`loop ${loop.status}`);
+  }
+  if (owed && owed.pr !== lead?.number)
+    parts.push(`loop owed #${owed.pr}${open2.some((p) => p.number === owed.pr) ? "" : " (not open)"}`);
+  if (open2.length > 1)
+    parts.push(`+${open2.length - 1} open`);
+  return { text: clip2(`PR ${parts.join(" \xB7 ")}`), dim: github2.state === "failed" };
+}
+function githubStripRows(github2) {
+  return githubStrip(github2) ? 1 : 0;
+}
+function githubTabLines(github2, width = Infinity) {
+  const clip2 = (text) => clipEllipsis(text, width);
+  const lines = [];
+  const meta = (text) => {
+    lines.push({ text: clip2(text), kind: "meta" });
+  };
+  if (github2.state === "loading") {
+    meta("checking GitHub\u2026");
+    return lines;
+  }
+  if (github2.state === "hidden") {
+    meta(`GitHub status off: ${github2.reason ?? "unavailable"}`);
+    return lines;
+  }
+  const data = github2.data;
+  meta(`${github2.repo ?? ""}${github2.asOf !== void 0 ? ` \xB7 as of ${clockOf(github2.asOf)}` : ""}`);
+  if (github2.state === "failed")
+    meta(`${github2.reason ?? "gh failed"}${data ? " (showing the last good poll)" : ""}`);
+  if (github2.loopError)
+    lines.push({ text: clip2(`\u26A0 pr-loop.json unreadable: ${github2.loopError}`), kind: "body" });
+  if (data) {
+    lines.push({ text: "", kind: "body" });
+    lines.push({ text: clip2(data.open.length ? `open pull requests (${data.open.length})` : "no open pull requests"), kind: "title" });
+    const wrapWidth = Number.isFinite(width) ? Math.max(1, width - 4) : width;
+    for (const pr of data.open) {
+      lines.push({ text: clip2(`  #${pr.number} ${pr.title}`), kind: "body" });
+      const detail = [
+        pr.branch,
+        pr.draft ? "draft" : "",
+        pr.checks === "none" ? "no checks" : `checks ${pr.checks}`,
+        pr.merge ? `merge ${pr.merge.toLowerCase()}` : "",
+        pr.review ? `review ${pr.review.toLowerCase().replace(/_/g, " ")}` : "",
+        `copilot ${pr.copilot}`,
+        `${pr.unresolved} unresolved`
+      ].filter(Boolean).join(" \xB7 ");
+      for (const text of wrapText(detail, wrapWidth))
+        lines.push({ text: `    ${text}`, kind: "meta" });
+    }
+  }
+  lines.push({ text: "", kind: "body" });
+  const loop = github2.loop;
+  lines.push({ text: clip2(loop ? `PR review loop: ${loop.status} for #${loop.pr}` : "PR review loop: none armed"), kind: "title" });
+  if (data) {
+    lines.push({ text: "", kind: "body" });
+    lines.push({ text: clip2(data.merged.length ? "recently merged" : "nothing merged yet"), kind: "title" });
+    for (const pr of data.merged)
+      lines.push({ text: clip2(`  #${pr.number} ${pr.title} \xB7 ${pr.mergedAt.slice(0, 10)}`), kind: "body" });
+  }
+  return lines;
+}
+function githubDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, github2, agents) {
+  const lines = githubTabLines(github2, width);
+  const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, lines.length - maxBodyLines) : 0;
+  return {
+    tabs,
+    rows: [{ id: "github", type: "github", selected: false, expanded: false, lines, screenRow: 0 }],
+    footer: footerFor(ui, visibleTabs(agents, github2).length, width),
+    notice: noticeFor(ui, width),
+    strip: githubStrip(github2, width),
+    banner,
+    projectName,
+    bodyTop: bodyTop2,
+    scroll: Math.max(0, Math.min(ui.scroll ?? 0, maxScroll))
+  };
+}
+function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents, github2) {
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows = [];
   let screenRow = 0;
-  for (const text of view.banner) {
+  for (const text of view.banner.slice(ui.notice ? 1 : 0)) {
     rows.push({ id: `sysbanner:${screenRow}`, type: "system-banner", selected: false, expanded: false, lines: [{ text, kind: "meta" }], screenRow });
     screenRow += 1;
   }
@@ -50333,25 +50685,32 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, ma
     tabs,
     rows,
     emptyMessage: view.rows.length ? void 0 : "(no configured models)",
-    footer: `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 rows \xB7 enter change model/effort \xB7 esc cancel \xB7 q quit`,
+    footer: footerFor(ui, visibleTabs(agents, github2).length, width),
+    notice: noticeFor(ui, width),
+    strip: githubStrip(github2, width),
     banner,
     projectName,
     bodyTop: bodyTop2,
     scroll
   };
 }
-function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster, agents) {
-  const banner = bannerLines(width, showBanner2);
+function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster, agents, height = Infinity, github2) {
+  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner2, knowledge, roster, agents, height, github2).state;
+}
+function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster, agents, height = Infinity, github2) {
+  const banner = bannerLines(width, showBanner2, height);
   const bodyTop2 = banner.length + CHROME_BELOW_BANNER;
-  const tabs = tabsFor(store, ui.tab, agents);
+  const tabs = fitTabs(tabsFor(store, ui.tab, agents, github2), width);
   if (ui.tab === SYSTEM_TAB)
-    return systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents);
-  const nodes = nodesFor(store, ui, knowledge);
-  const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
-  let rows = [];
+    return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents, github2), nodes: [], cursor: ui.cursor };
+  if (ui.tab === GITHUB_TAB && github2)
+    return { ui, state: githubDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, github2, agents), nodes: [], cursor: ui.cursor };
+  const nodes2 = nodesFor(store, ui, knowledge);
+  const cursor = resolveCursor(ui, nodes2);
+  const rows = [];
   let screenRow = 0;
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i];
+  for (let i = 0; i < nodes2.length; i++) {
+    const node = nodes2[i];
     const selected = i === cursor;
     const marker = selected ? "\u203A " : "  ";
     let lines;
@@ -50415,54 +50774,47 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
     rows.push({ id, type, selected, expanded, lines, screenRow });
     screenRow += lines.length;
   }
+  const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
   let queueCompleted;
   let queueActivity;
+  let scroll;
   if (ui.tab === QUEUE_TAB) {
-    const totalLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
-    const startRow = Number.isFinite(maxBodyLines) ? Math.max(1, Math.floor(maxBodyLines / 2)) : totalLines;
-    let overflow;
-    if (totalLines > startRow) {
-      const keep = [];
-      for (const r of rows) {
-        if (r.screenRow + r.lines.length <= startRow - 1)
-          keep.push(r);
-        else
-          break;
-      }
-      overflow = `\u2026 ${rows.length - keep.length} more pending`;
-      rows = keep;
-    }
+    const finite = Number.isFinite(maxBodyLines);
+    const startRow = finite ? Math.max(1, Math.floor(maxBodyLines / 2)) : totalBodyLines;
+    const pendingLines = totalBodyLines > startRow ? startRow - 1 : startRow;
+    scroll = Math.max(0, Math.min(ui.scroll ?? 0, totalBodyLines - pendingLines));
+    const hidden = rows.filter((r) => r.screenRow < scroll || r.screenRow + r.lines.length > scroll + pendingLines).length;
     const completed = completedQueueLines(store);
-    queueCompleted = {
-      startRow,
-      header: "\u2014 completed \u2014",
-      lines: completed.length ? completed : ["(nothing completed yet)"],
-      ...overflow ? { overflow } : {}
-    };
     const activity = activityLines(store);
     queueActivity = {
       header: "\u2014 activity \u2014",
       lines: activity.length ? activity : ["(no activity yet)"]
     };
+    const lines = completed.length ? completed : ["(nothing completed yet)"];
+    const historyTotal = lines.length + 1 + queueActivity.lines.length;
+    const historyLines = finite ? Math.max(0, maxBodyLines - startRow - 1) : historyTotal;
+    queueCompleted = {
+      startRow,
+      pendingLines,
+      scroll: Math.max(0, Math.min(ui.historyScroll ?? 0, historyTotal - historyLines)),
+      header: "\u2014 completed \u2014",
+      lines,
+      ...hidden > 0 ? { overflow: `\u2026 ${hidden} more pending` } : {}
+    };
+  } else {
+    const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
+    scroll = Math.max(0, Math.min(ui.scroll ?? 0, maxScroll));
   }
-  const scrollable = ui.tab !== QUEUE_TAB;
-  const totalBodyLines = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
-  const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
-  const scroll = scrollable ? Math.max(0, Math.min(ui.scroll ?? 0, maxScroll)) : 0;
   const searchActive = ui.tab === KNOWLEDGE_TAB;
-  return {
+  const state = {
     tabs,
     rows,
-    emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
-    footer: (
-      // Fix round (Opus review of 71c1f41): a Tasks-tab board_edit notice
-      // (lost-update refusal, vanished item, failed HEAD resolve) must be
-      // VISIBLE, not just carried in ui.notice — render.ts prints
-      // state.footer unconditionally, so this is the one line available to
-      // this scope's two files without touching render.ts. Mirrors the
-      // System tab's own '⚠ ' convention (buildSystemTab's banner).
-      ui.tab === TASKS_TAB && ui.notice ? `\u26A0 ${ui.notice}` : ui.tab === AGENTS_TAB ? `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 q quit` : `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears \xB7 ctrl-f article state" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
-    ),
+    emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes2.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
+    footer: footerFor(ui, visibleTabs(agents, github2).length, width),
+    // a board_edit refusal, a failed selection write or a degraded store read
+    // (ui.notice) is drawn on its own row in the warning colour
+    notice: noticeFor(ui, width),
+    strip: githubStrip(github2, width),
     searchLine: searchActive ? `search: ${ui.searchQuery}${ui.stateFilter ? `  state: ${ui.stateFilter}` : ""}` : void 0,
     queueCompleted,
     queueActivity,
@@ -50471,9 +50823,15 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
     bodyTop: bodyTop2,
     scroll
   };
+  return { ui, state, nodes: nodes2, cursor };
+}
+function bodyWindow(state, maxBodyLines) {
+  const qc = state.queueCompleted;
+  return qc ? Math.min(maxBodyLines, qc.pendingLines ?? qc.startRow) : maxBodyLines;
 }
 function screenLineToRow(state, line1, maxBodyLines = Infinity) {
   const scroll = state.scroll ?? 0;
+  maxBodyLines = bodyWindow(state, maxBodyLines);
   const abs = line1 - 1 - state.bodyTop + scroll;
   if (abs < scroll || abs >= scroll + maxBodyLines)
     return -1;
@@ -50484,22 +50842,43 @@ function screenLineToRow(state, line1, maxBodyLines = Infinity) {
   }
   return -1;
 }
-function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHeadSha = defaultResolveHeadSha) {
+function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHeadSha = defaultResolveHeadSha, frame) {
+  const drawn = frame !== void 0 && frame.ui === ui ? frame : void 0;
+  const nodes2 = drawn ? drawn.nodes : nodesFor(store, ui, knowledge);
+  const cursor = drawn ? drawn.cursor : ui.tab === SYSTEM_TAB ? ui.cursor : resolveCursor(ui, nodes2);
+  const base2 = cursor === ui.cursor ? ui : { ...ui, cursor };
+  const out = reduceNodes(store, base2, event2, viewport2, knowledge, roster, resolveHeadSha, nodes2, drawn);
+  if (out.ui === base2)
+    return { ui, effects: out.effects };
+  return { ui: holdSelection(base2, out.ui, nodes2), effects: out.effects };
+}
+function holdSelection(prev, next, nodes2) {
+  const fresh = next.tab !== prev.tab || next.searchQuery !== prev.searchQuery || next.stateFilter !== prev.stateFilter;
+  const cardTab = next.tab !== SYSTEM_TAB && next.tab !== AGENTS_TAB && next.tab !== GITHUB_TAB;
+  const node = !fresh && cardTab && nodes2.length ? nodes2[Math.min(next.cursor, nodes2.length - 1)] : void 0;
+  const selectedId = node ? nodeId(node) : void 0;
+  if (selectedId === next.selectedId)
+    return next;
+  if (selectedId !== void 0)
+    return { ...next, selectedId };
+  const { selectedId: _dropped, ...rest } = next;
+  return rest;
+}
+function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHeadSha, nodes2, drawn) {
   const maxBodyLines = viewport2.maxBodyLines ?? Infinity;
-  const nodes = nodesFor(store, ui, knowledge);
-  const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
+  const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes2.length - 1)));
   const effects = [];
-  const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
-  const reachable = visibleTabs(viewport2.agents);
+  const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: void 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
+  const reachable = visibleTabs(viewport2.agents, viewport2.github);
   const stepTab = (dir) => reachable[(reachable.indexOf(ui.tab) + dir + reachable.length) % reachable.length] ?? reachable[0];
-  const scrollable = ui.tab !== QUEUE_TAB;
-  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster, viewport2.agents);
+  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster, viewport2.agents, viewport2.height, viewport2.github);
   const revealAt = (cursor) => {
-    if (!scrollable || !Number.isFinite(maxBodyLines))
+    if (!Number.isFinite(maxBodyLines))
       return { ...ui, cursor };
-    const st = buildSelf({ ...ui, cursor });
+    const st = drawn && ui.tab !== SYSTEM_TAB ? drawn.state : buildSelf({ ...ui, cursor });
     const total = st.rows.length ? st.rows[st.rows.length - 1].screenRow + st.rows[st.rows.length - 1].lines.length : 0;
-    const max = Math.max(0, total - maxBodyLines);
+    const window2 = bodyWindow(st, maxBodyLines);
+    const max = Math.max(0, total - window2);
     let scroll = ui.scroll ?? 0;
     const bannerOffset = ui.tab === SYSTEM_TAB ? st.rows.filter((r) => r.type === "system-banner").length : 0;
     const row = st.rows[cursor + bannerOffset];
@@ -50508,15 +50887,15 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
       const bottom = row.screenRow + row.lines.length;
       if (top < scroll)
         scroll = top;
-      else if (bottom > scroll + maxBodyLines)
-        scroll = Math.min(top, bottom - maxBodyLines);
+      else if (bottom > scroll + window2)
+        scroll = Math.min(top, bottom - window2);
     }
     return { ...ui, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
   };
   const moveCursor = (delta) => revealAt(clamp(ui.cursor + delta));
   const toggle = (id) => ui.expanded.includes(id) ? ui.expanded.filter((x) => x !== id) : [...ui.expanded, id];
   const activate = (index) => {
-    const node = nodes[index];
+    const node = nodes2[index];
     if (!node)
       return ui;
     if (node.kind === "category") {
@@ -50604,7 +50983,7 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
             return { ui: revealAt(sysClamp(ui.cursor - 1)), effects };
           case "DOWN": {
             if (sel) {
-              const n = sel.stage === "model" ? roster.catalog.entries.length : effortOptions(sel.key).length;
+              const n = sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key]).length : effortOptions(sel.key).length;
               return { ui: { ...ui, selector: { ...sel, highlight: Math.min(Math.max(0, n - 1), sel.highlight + 1) } }, effects };
             }
             if (editing)
@@ -50659,7 +51038,21 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
               return { ui: { ...ui, cursor, selector: { key, stage: "model", highlight: 0 }, notice: void 0 }, effects };
             }
             if (sel.stage === "model") {
-              const entry = roster.catalog.entries[sel.highlight];
+              const keyConfig = roster.configModels[sel.key];
+              const option = modelOptions(roster.catalog.entries, keyConfig)[sel.highlight];
+              if (option && keyConfig && (option.kind === "clear" || isOpenCodeOnlyEntry(option.entry))) {
+                const agents = roster.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
+                const to = option.kind === "clear" ? void 0 : `${option.entry.vendor}/${option.entry.id}`;
+                if (to !== void 0 && !OPENCODE_MODEL_REF_RE.test(to)) {
+                  return { ui: { ...ui, selector: void 0, notice: `OpenCode model refused: '${to}' is not a <provider>/<model> id` }, effects };
+                }
+                if (to !== void 0 && agents.length === 0) {
+                  return { ui: { ...ui, selector: void 0, notice: `OpenCode model refused: '${sel.key}' has no agent, so an OpenCode model would govern nothing` }, effects };
+                }
+                effects.push({ type: "opencode_model", key: sel.key, from: keyConfig.opencode_model, to, model: keyConfig.model, effort: keyConfig.effort, agents });
+                return { ui: { ...ui, selector: void 0, notice: void 0 }, effects };
+              }
+              const entry = option?.kind === "entry" ? option.entry : void 0;
               return { ui: { ...ui, selector: { key: sel.key, stage: "effort", highlight: 0, model: entry ? entry.id : "" } }, effects };
             }
             const efforts = effortOptions(sel.key);
@@ -50712,9 +51105,16 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
         case "TAB":
           return { ui: switchTab(stepTab(1)), effects };
         case "UP":
-          return { ui: moveCursor(-1), effects };
-        case "DOWN":
-          return { ui: moveCursor(1), effects };
+        case "DOWN": {
+          if (ui.tab === GITHUB_TAB && viewport2.github) {
+            const st = drawn ? drawn.state : buildSelf(ui);
+            const total = st.rows[0]?.lines.length ?? 0;
+            const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - maxBodyLines) : 0;
+            const scroll = Math.max(0, Math.min((ui.scroll ?? 0) + (event2.name === "UP" ? -1 : 1), max));
+            return { ui: scroll === (ui.scroll ?? 0) ? ui : { ...ui, scroll }, effects };
+          }
+          return { ui: moveCursor(event2.name === "UP" ? -1 : 1), effects };
+        }
         case "ENTER":
           return { ui: activate(clamp(ui.cursor)), effects };
         case "SPACE":
@@ -50738,17 +51138,23 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
         effects.push({ type: "quit" });
         return { ui, effects };
       }
+      if (ch === "r" && viewport2.github) {
+        effects.push({ type: "github_refresh" });
+        return { ui, effects };
+      }
       if (ch === " " && ui.tab === SYSTEM_TAB) {
-        return reduce(store, ui, { kind: "key", name: "ENTER" }, viewport2, knowledge, roster, resolveHeadSha);
+        return reduceNodes(store, ui, { kind: "key", name: "ENTER" }, viewport2, knowledge, roster, resolveHeadSha, nodes2, drawn);
       }
       if (ch === " ")
         return { ui: activate(clamp(ui.cursor)), effects };
       if (ch === "e" && ui.tab === TASKS_TAB) {
-        const node = nodes[clamp(ui.cursor)];
+        const node = nodes2[clamp(ui.cursor)];
         if (node && node.kind === "card" && node.card.type !== "objective") {
           const rec = store.get(node.card.id);
-          const version = rec && typeof rec.version === "number" ? rec.version : 0;
-          return { ui: { ...ui, boardEdit: { id: node.card.id, text: node.card.body, version }, notice: void 0 }, effects };
+          if (!rec || typeof rec.text !== "string")
+            return { ui: { ...ui, notice: "board item no longer exists \u2014 nothing to edit" }, effects };
+          const version = typeof rec.version === "number" ? rec.version : 0;
+          return { ui: { ...ui, boardEdit: { id: node.card.id, text: rec.text, version }, notice: void 0 }, effects };
         }
         return { ui, effects };
       }
@@ -50764,14 +51170,25 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
         return { ui, effects };
       return { ui: switchTab(event2.index), effects };
     case "wheel": {
-      if (!scrollable)
-        return { ui: { ...ui, cursor: clamp(ui.cursor + (event2.dy > 0 ? 1 : -1)) }, effects };
-      const desired = (ui.scroll ?? 0) + (event2.dy > 0 ? 3 : -3);
-      const st = buildSelf({ ...ui, scroll: desired });
-      return { ui: { ...ui, scroll: st.scroll }, effects };
+      const step = event2.dy > 0 ? 3 : -3;
+      const st = drawn && ui.tab !== SYSTEM_TAB ? drawn.state : buildSelf(ui);
+      const qc = st.queueCompleted;
+      const off = qc && event2.y !== void 0 ? event2.y - 1 - st.bodyTop : void 0;
+      if (off !== void 0 && (off < 0 || off >= maxBodyLines))
+        return { ui, effects };
+      if (qc && off !== void 0 && off >= qc.startRow) {
+        const historyTotal = qc.lines.length + (st.queueActivity ? 1 + st.queueActivity.lines.length : 0);
+        const historyLines = Math.max(0, maxBodyLines - qc.startRow - 1);
+        const max2 = Number.isFinite(maxBodyLines) ? Math.max(0, historyTotal - historyLines) : 0;
+        return { ui: { ...ui, historyScroll: Math.max(0, Math.min((ui.historyScroll ?? 0) + step, max2)) }, effects };
+      }
+      const rows = st.rows;
+      const total = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
+      const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - bodyWindow(st, maxBodyLines)) : 0;
+      return { ui: { ...ui, scroll: Math.max(0, Math.min((ui.scroll ?? 0) + step, max)) }, effects };
     }
     case "click": {
-      const state = buildDashboardState(store, ui, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster, viewport2.agents);
+      const state = drawn ? drawn.state : buildSelf(ui);
       if (event2.y === state.bodyTop - 1) {
         let x = 1;
         for (let i = 0; i < state.tabs.length; i++) {
@@ -50788,7 +51205,7 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
       return { ui, effects };
     }
     case "rightclick":
-      return { ui: { ...ui, expanded: [], scroll: 0 }, effects };
+      return { ui: { ...ui, expanded: [], scroll: 0, historyScroll: void 0 }, effects };
   }
   return { ui, effects };
 }
@@ -50870,9 +51287,37 @@ function applyHandoffToggle(e, onError, path) {
   }
 }
 
+// packages/tui/dist/data-version.js
+import { existsSync as existsSync3 } from "node:fs";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+function openDataVersionProbe(paths) {
+  const conns = [];
+  try {
+    for (const path of paths) {
+      if (!existsSync3(path))
+        continue;
+      const db = new DatabaseSync3(path, { readOnly: true });
+      conns.push({ db, stmt: db.prepare("PRAGMA data_version") });
+    }
+  } catch (err) {
+    for (const c of conns)
+      c.db.close();
+    throw err;
+  }
+  return {
+    read() {
+      return conns.map((c) => String(c.stmt.get().data_version)).join(":");
+    },
+    close() {
+      for (const c of conns)
+        c.db.close();
+    }
+  };
+}
+
 // scripts/lib/agent-distribution.mjs
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync5, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync3, mkdirSync as mkdirSync3, statSync as statSync3, lstatSync as lstatSync3, unlinkSync, renameSync, linkSync } from "node:fs";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync4, mkdirSync as mkdirSync3, statSync as statSync3, lstatSync as lstatSync3, unlinkSync, renameSync, linkSync } from "node:fs";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -51087,7 +51532,7 @@ function userScopeCodexServer({ env = process.env, home = homedir4(), readFile =
 
 // scripts/lib/handoff-projection.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync4 } from "node:fs";
+import { existsSync as existsSync5 } from "node:fs";
 import { join as join11, resolve as resolve5 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
@@ -51289,10 +51734,10 @@ function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
     }
     return { stdout: r.stdout || "" };
   };
-  if (!existsSync4(root)) return { files: [], unknown: null };
+  if (!existsSync5(root)) return { files: [], unknown: null };
   const inside = run(["rev-parse", "--is-inside-work-tree"]);
   if (inside.failed) {
-    if (inside.notARepo && !existsSync4(join11(root, ".git"))) return { files: [], unknown: null };
+    if (inside.notARepo && !existsSync5(join11(root, ".git"))) return { files: [], unknown: null };
     return { files: [], unknown: inside.failed };
   }
   if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
@@ -51341,12 +51786,13 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync as readdirSync4, realpathSync as realpathSync4, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
+import { existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync as readdirSync4, realpathSync as realpathSync4, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname4, isAbsolute, join as join13, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync5, readFileSync as readFileSync8, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync8, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { join as join12, resolve as resolve6, sep as sep2 } from "node:path";
 var RESOLVER_IMPORTS = [
@@ -51492,7 +51938,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync5, readFileSync8, readdirSync3, join12, homedir5);
+)(existsSync6, readFileSync8, readdirSync3, join12, homedir5);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -51589,13 +52035,20 @@ function storeWriteTools(pluginRoot = sterlingRootFrom()) {
   return tools;
 }
 function opencodeModelRef(model) {
-  if (typeof model !== "string" || !model) throw new TypeError(`opencodeModelRef: model must be a non-empty string, got ${JSON.stringify(model)}`);
+  if (typeof model !== "string" || !CLAUDE_MODEL_ID_RE.test(model)) throw new TypeError(`opencodeModelRef: model must be a Claude model id, got ${JSON.stringify(model)}`);
   return `anthropic/${model}`;
+}
+function opencodeModelFor({ model, opencodeModel } = {}) {
+  if (opencodeModel === void 0) return opencodeModelRef(model);
+  if (typeof opencodeModel !== "string" || !OPENCODE_MODEL_REF_RE.test(opencodeModel)) {
+    throw new TypeError(`opencodeModelFor: opencode_model must be <provider>/<model>, got ${JSON.stringify(opencodeModel)}`);
+  }
+  return opencodeModel;
 }
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname4(fileURLToPath(moduleUrl));
   for (let dir = start; ; dir = dirname4(dir)) {
-    if (existsSync6(join13(dir, "agent-templates", "registry.json"))) return dir;
+    if (existsSync7(join13(dir, "agent-templates", "registry.json"))) return dir;
     if (dirname4(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
@@ -51626,6 +52079,18 @@ function frontmatterModel(content) {
   return fm?.[1].match(/^model: (\S+)$/m)?.[1];
 }
 function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
+  const { rows, writes } = stageFullAgents({ projectDir, pluginRoot, tracked, models });
+  writeFullAgentFiles(writes);
+  return rows;
+}
+function stageFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
+  const planned = planFullAgents({ projectDir, pluginRoot, tracked, models });
+  return {
+    rows: planned.map(({ path, content, previous, ...row }) => row),
+    writes: planned.filter((r) => r.content !== void 0).map(({ path, content, previous }) => ({ path, content, previous }))
+  };
+}
+function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   const registry = loadRegistry(join13(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const rows = [];
@@ -51638,7 +52103,8 @@ function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const disk = existsSync6(path) ? normalize3(readFileSync9(path, "utf8")) : null;
+    const raw = existsSync7(path) ? readFileSync9(path, "utf8") : null;
+    const disk = raw === null ? null : normalize3(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
       if (!m || m[1] !== name) {
@@ -51658,28 +52124,73 @@ function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       rows.push({ item: rel, status: "matches" });
       continue;
     }
-    mkdirSync5(dirname4(path), { recursive: true });
-    writeFileSync3(path, agent.content);
-    rows.push({ item: rel, status: disk === null ? "created" : "refreshed" });
+    rows.push({ item: rel, status: disk === null ? "created" : "refreshed", path, content: agent.content, previous: raw });
   }
   return rows;
 }
-function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
-  if (!existsSync6(join13(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
-  const ref = opencodeModelRef(model);
+function swapFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
+  if (!existsSync7(join13(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
   return { rows: ensureFullAgents({ projectDir, pluginRoot, tracked, models }) };
 }
+function stageFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
+  if (!existsSync7(join13(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  const ref = opencodeModelFor({ model, opencodeModel });
+  const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
+  const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
+  const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
+  return stageFullAgents({ projectDir, pluginRoot, tracked, models });
+}
+function writeFileAtomic(path, content, { writeFile = writeFileSync3, rename = renameSync2 } = {}) {
+  const tmp = `${path}.tmp-${randomUUID3()}`;
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync2(tmp, { force: true });
+    throw err;
+  }
+}
+function writeFullAgentFiles(writes, fs = {}) {
+  const done = [];
+  try {
+    for (const w of writes) {
+      mkdirSync5(dirname4(w.path), { recursive: true });
+      writeFileAtomic(w.path, w.content, fs);
+      done.push(w);
+    }
+  } catch (err) {
+    try {
+      restoreFullAgentFiles(done, fs);
+    } catch (restoreErr) {
+      throw new Error(`${err.message}; rollback: ${restoreErr.message}`, { cause: err });
+    }
+    throw err;
+  }
+}
+function restoreFullAgentFiles(writes, fs = {}) {
+  const failed = [];
+  for (const w of writes) {
+    try {
+      if (w.previous === null) rmSync2(w.path, { force: true });
+      else writeFileAtomic(w.path, w.previous, fs);
+    } catch (err) {
+      failed.push(`${fwd2(w.path)}: ${err.message}`);
+    }
+  }
+  if (failed.length) throw new Error(`could not restore ${failed.join("; ")}`);
+}
 
 // scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync7, readFileSync as readFileSync10 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync10 } from "node:fs";
 import { join as join14 } from "node:path";
 var CONFIG_REL3 = join14(".sterling", "config.json");
 var STORE_DB_REL = join14(".sterling", "sterling.db");
 function storeBackend(root) {
-  const dbExists = () => existsSync7(join14(root, STORE_DB_REL));
+  const dbExists = () => existsSync8(join14(root, STORE_DB_REL));
   let text;
   try {
     text = readFileSync10(join14(root, CONFIG_REL3), "utf8");
@@ -51697,10 +52208,10 @@ function storeBackend(root) {
 }
 
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync11, renameSync as renameSync2, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync11, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { hostname } from "node:os";
 import { join as join15 } from "node:path";
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 function selectionFilePath(root, host = hostname()) {
   const safeHost = String(host).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
   return join15(root, ".sterling", "transient", `selection.${safeHost}.json`);
@@ -51708,12 +52219,13 @@ function selectionFilePath(root, host = hostname()) {
 function writeSelectionFile(root, type, recordId, at) {
   const path = selectionFilePath(root);
   mkdirSync6(join15(root, ".sterling", "transient"), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${randomUUID3()}`;
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID4()}`;
   writeFileSync4(tmp, JSON.stringify({ type, record_id: recordId, at }));
-  renameSync2(tmp, path);
+  renameSync3(tmp, path);
 }
 
 // packages/tui/dist/controller.js
+var DASHBOARD_BUSY_TIMEOUT_MS = 250;
 function openDashboard(storePath2, options = {}) {
   const disabled = options.disabledEffects ?? {};
   const configPath2 = join16(dirname5(storePath2), "config.json");
@@ -51745,8 +52257,131 @@ function openDashboard(storePath2, options = {}) {
   }
   const stores = routed ? openRoutedStores(projectRoot, { mount: true }).stores : new MountedStores(storePath2, mounts, { skipMissing: true });
   const store = stores.project;
+  let writeStore;
+  try {
+    writeStore = routed ? store : new SterlingStore(storePath2, { busyTimeoutMs: DASHBOARD_BUSY_TIMEOUT_MS });
+  } catch (err) {
+    stores.close();
+    throw err;
+  }
   const projectName = basename2(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
   let ui = initialUi;
+  let probe;
+  let changeDetection = "data_version";
+  let degradeSaid = false;
+  function degrade(reason) {
+    changeDetection = `degraded: ${reason}`;
+    if (degradeSaid)
+      return;
+    degradeSaid = true;
+    ui = { ...ui, notice: `change detection degraded: ${reason}; the dashboard rebuilds on every redraw` };
+  }
+  if (routed)
+    changeDetection = "none: Postgres storage has no data_version";
+  else {
+    try {
+      probe = (options.dataVersionProbe ?? openDataVersionProbe)([storePath2, ...mounts.map((m) => m.dbPath)]);
+    } catch (err) {
+      degrade(`data_version probe failed to open \u2014 ${err.message}`);
+    }
+  }
+  let frame;
+  let builds = 0;
+  const vpKey = (vp) => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null, vp.github ? vp.github.version : null]);
+  const today = () => (/* @__PURE__ */ new Date()).toDateString();
+  function currentFrame(vp) {
+    let dataVersion;
+    if (probe) {
+      try {
+        dataVersion = probe.read();
+      } catch (err) {
+        degrade(`data_version read failed \u2014 ${err.message}`);
+      }
+    }
+    const key = vpKey(vp);
+    const day = today();
+    if (frame && dataVersion !== void 0 && frame.dataVersion === dataVersion && frame.ui === ui && frame.roster === roster && frame.vp === key && frame.day === day)
+      return frame.built;
+    builds++;
+    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height, vp.github);
+    frame = { vp: key, viewport: vp, day, ui, roster, dataVersion, built };
+    return built;
+  }
+  let storeCalls = 0;
+  const countCalls = (target) => {
+    const proto = Object.getPrototypeOf(target);
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      const fn = Object.getOwnPropertyDescriptor(proto, name)?.value;
+      if (name === "constructor" || typeof fn !== "function")
+        continue;
+      Object.defineProperty(target, name, {
+        configurable: true,
+        writable: true,
+        value: (...args2) => {
+          storeCalls++;
+          return fn.apply(target, args2);
+        }
+      });
+    }
+  };
+  if (options.profile) {
+    countCalls(store);
+    if (writeStore !== store)
+      countCalls(writeStore);
+  }
+  let pending = [];
+  let retryNotice;
+  const isBusy = (err) => {
+    const code = err?.errcode;
+    return code === 5 || code === 6 || /database is (locked|busy)|SQLITE_BUSY|SQLITE_LOCKED/i.test(err?.message ?? "");
+  };
+  function flush() {
+    if (!pending.length)
+      return false;
+    const batch = pending;
+    pending = [];
+    let failed = false;
+    for (const e of batch) {
+      try {
+        if (e.type === "select" && routed)
+          writeSelectionFile(projectRoot, e.recordType, e.id, (/* @__PURE__ */ new Date()).toISOString());
+        else
+          runEffects(writeStore, [e]);
+      } catch (err) {
+        failed = true;
+        const msg = err.message;
+        if (isBusy(err) && options.deferWrites) {
+          pending.push(e);
+          retryNotice = `${e.type === "select" ? "selection" : "board edit"} not saved yet: the store is busy (${msg}); retrying`;
+          ui = { ...ui, notice: retryNotice };
+        } else {
+          ui = { ...ui, notice: e.type === "select" ? `selection not handed to the next prompt \u2014 ${msg}` : `board edit not saved \u2014 ${msg}` };
+        }
+      }
+    }
+    if (!failed && retryNotice !== void 0) {
+      if (ui.notice === retryNotice) {
+        const { notice: _saved, ...rest } = ui;
+        ui = rest;
+      }
+      retryNotice = void 0;
+    }
+    return failed;
+  }
+  let quitArmed = false;
+  function requestQuit() {
+    if (quitArmed)
+      return true;
+    const failed = flush();
+    if (!failed && !pending.length)
+      return true;
+    quitArmed = true;
+    const notice = `${ui.notice ?? "writes not saved"} \u2014 press q again to quit and discard them`;
+    ui = { ...ui, notice };
+    if (pending.length)
+      retryNotice = notice;
+    return false;
+  }
   let roster;
   function readInstalledModelEffort(name) {
     try {
@@ -51821,7 +52456,7 @@ function openDashboard(storePath2, options = {}) {
     const mode = readRawMode();
     const handoff = readHandoff();
     const codexWired = probeCodexWired();
-    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync8(join16(agentsDir, `${name}.md`))).map((name) => {
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync9(join16(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
       return { name, installedModel: v.model, installedEffort: v.effort };
     });
@@ -51865,11 +52500,13 @@ function openDashboard(storePath2, options = {}) {
     try {
       const raw = JSON.parse(readFileSync12(configPath2, "utf8"));
       raw.models = raw.models ?? {};
-      raw.models[e.key] = { model: e.to.model, effort: e.to.effort };
+      const prev = raw.models[e.key] ?? {};
+      raw.models[e.key] = { ...prev, model: e.to.model, effort: e.to.effort };
       writeFileSync5(configPath2, JSON.stringify(raw, null, 2) + "\n");
+      const opencodeModel = typeof prev.opencode_model === "string" ? prev.opencode_model : void 0;
       for (const name of e.agents) {
         const p = join16(agentsDir, `${name}.md`);
-        if (!existsSync8(p))
+        if (!existsSync9(p))
           continue;
         const content = readFileSync12(p, "utf8");
         const hdr = parseInstalledHeader(content);
@@ -51881,7 +52518,7 @@ function openDashboard(storePath2, options = {}) {
         }));
       }
       try {
-        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model });
+        const oc = swapFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: e.to.model, opencodeModel });
         const refused = (oc.rows ?? []).filter((r) => r.status === "refused");
         if (refused.length)
           ui = { ...ui, notice: `model swap for '${e.key}': OpenCode agent file(s) not updated \u2014 ${refused.map((r) => r.detail).join("; ")}` };
@@ -51889,7 +52526,7 @@ function openDashboard(storePath2, options = {}) {
         ui = { ...ui, notice: `model swap for '${e.key}': config.models and the Claude agents were updated, but the OpenCode agent re-render failed \u2014 ${ocErr.message}` };
       }
       store.create({
-        id: randomUUID4(),
+        id: randomUUID5(),
         type: "decision",
         created_at: nowISO,
         updated_at: nowISO,
@@ -51903,14 +52540,100 @@ function openDashboard(storePath2, options = {}) {
         statement: `config.models['${e.key}'] set to ${e.to.model} / ${e.to.effort} (was ${e.from.model} / ${e.from.effort}); ${e.agents.length} installed agent file(s) re-stamped via the System tab.`,
         rationale: "Model/effort pin changed from the TUI System tab (config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL\u2194Windows machine boundary, d53dc92c).",
         alternatives_rejected: []
-      }, { operation_id: randomUUID4() });
+      }, { operation_id: randomUUID5() });
     } catch (err) {
       ui = { ...ui, notice: `model swap for '${e.key}' failed partway \u2014 ${err.message}` };
     }
   }
+  function applyOpenCodeModel(e) {
+    const nowISO = (/* @__PURE__ */ new Date()).toISOString();
+    const fail = (msg) => {
+      ui = { ...ui, notice: `OpenCode model for '${e.key}' not changed \u2014 ${msg}; config.json and the OpenCode agents are as they were` };
+    };
+    let configBefore;
+    let configAfter;
+    let claudeModel;
+    try {
+      if (e.to !== void 0 && !OPENCODE_MODEL_REF_RE.test(e.to))
+        throw new Error(`'${e.to}' is not a <provider>/<model> id`);
+      configBefore = readFileSync12(configPath2, "utf8");
+      const raw = JSON.parse(configBefore);
+      raw.models = raw.models ?? {};
+      const { opencode_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
+      raw.models[e.key] = e.to === void 0 ? rest : { ...rest, opencode_model: e.to };
+      configAfter = JSON.stringify(raw, null, 2) + "\n";
+      claudeModel = typeof rest.model === "string" ? rest.model : e.model;
+    } catch (err) {
+      fail(err.message);
+      return;
+    }
+    let writes;
+    try {
+      const staged = stageFullAgentModel({ projectDir: projectRoot, pluginRoot: sterlingRootFrom(), agents: e.agents, model: claudeModel, opencodeModel: e.to });
+      const refused = (staged.rows ?? []).filter((r) => r.status === "refused");
+      if (refused.length) {
+        fail(`OpenCode agent file(s) refused: ${refused.map((r) => r.detail).join("; ")}`);
+        return;
+      }
+      writes = staged.writes ?? [];
+    } catch (err) {
+      fail(`the OpenCode agent render failed: ${err.message}`);
+      return;
+    }
+    try {
+      writeFullAgentFiles(writes);
+    } catch (err) {
+      fail(`writing the OpenCode agents failed: ${err.message}`);
+      return;
+    }
+    try {
+      writeFileAtomic(configPath2, configAfter, options.configWriteFs);
+    } catch (err) {
+      const rollback = [];
+      try {
+        writeFileAtomic(configPath2, configBefore, options.configWriteFs);
+      } catch (restoreErr) {
+        rollback.push(`config.json not restored: ${restoreErr.message}`);
+      }
+      try {
+        restoreFullAgentFiles(writes);
+      } catch (restoreErr) {
+        rollback.push(`OpenCode agents not restored: ${restoreErr.message}`);
+      }
+      if (rollback.length) {
+        ui = { ...ui, notice: `OpenCode model for '${e.key}': writing config.json failed (${err.message}) and the rollback failed \u2014 ${rollback.join("; ")}` };
+        return;
+      }
+      fail(`writing config.json failed: ${err.message}`);
+      return;
+    }
+    const shown = (v) => v ?? `anthropic/${claudeModel}`;
+    try {
+      store.create({
+        id: randomUUID5(),
+        type: "decision",
+        created_at: nowISO,
+        updated_at: nowISO,
+        author: "conductor",
+        status: "active",
+        superseded_by: null,
+        links: [],
+        scope: "project",
+        stack_tags: [],
+        title: `OpenCode model: ${e.key} ${shown(e.from)}\u2192${shown(e.to)} (System tab)`,
+        statement: `config.models['${e.key}'].opencode_model ${e.to === void 0 ? "cleared" : `set to ${e.to}`} (was ${e.from ?? "unset"}); the OpenCode agents for this role now run ${shown(e.to)}, and Claude Code keeps ${claudeModel}.`,
+        rationale: "OpenCode model override changed from the TUI System tab (decision opencode-only-model-override-per-role-for-openai-picks: the Claude model stays for Claude Code, and only the OpenCode agent files are re-rendered).",
+        alternatives_rejected: []
+      }, { operation_id: randomUUID5() });
+    } catch (err) {
+      ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}, but recording the decision failed \u2014 ${err.message}` };
+      return;
+    }
+    ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}; Claude Code keeps ${claudeModel}.` };
+  }
   async function applyEffects(all) {
     const effects = all.filter((e) => {
-      if (e.type !== "model_swap" && e.type !== "select")
+      if (e.type !== "model_swap" && e.type !== "opencode_model" && e.type !== "select")
         return true;
       const off = disabled[e.type];
       if (off === void 0)
@@ -51922,6 +52645,9 @@ function openDashboard(storePath2, options = {}) {
     const swaps = effects.filter((e) => e.type === "model_swap");
     for (const e of swaps)
       await applySwap(e);
+    const overrides = effects.filter((e) => e.type === "opencode_model");
+    for (const e of overrides)
+      applyOpenCodeModel(e);
     const notice = (msg) => {
       ui = { ...ui, notice: msg };
     };
@@ -51968,134 +52694,555 @@ function openDashboard(storePath2, options = {}) {
     } else if (toggleWrote) {
       notice("config.json updated \u2014 hooks pick this up on their next invocation; restart the session to reload the MCP server.");
     }
-    if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length)
+    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length)
       roster = loadRoster();
-    if (routed) {
-      for (const e of effects) {
-        if (e.type !== "select")
-          continue;
-        try {
-          writeSelectionFile(projectRoot, e.recordType, e.id, (/* @__PURE__ */ new Date()).toISOString());
-        } catch (err) {
-          notice(`selection not handed to the next prompt \u2014 ${err.message}`);
-        }
-      }
-      return runEffects(store, effects.filter((e) => e.type !== "select"));
+    for (const e of effects) {
+      if (e.type === "select")
+        pending = [...pending.filter((p) => p.type !== "select"), e];
+      else if (e.type === "board_edit")
+        pending.push(e);
+      else if (e.type === "github_refresh")
+        options.onGithubRefresh?.();
     }
-    return runEffects(store, effects);
+    if (!options.deferWrites)
+      flush();
+    return effects.some((e) => e.type === "quit");
   }
   return {
     stores,
     store,
+    writeStore,
     projectName,
     configPath: configPath2,
     ui: () => ui,
     roster: () => roster,
-    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents),
+    state: (vp) => currentFrame(vp).state,
     async handle(event2, vp) {
       const prevTab = ui.tab;
-      const result = reduce(store, ui, event2, vp, stores, roster, resolveProjectHeadSha);
+      const pointer = event2.kind === "click" || event2.kind === "wheel";
+      const hitVp = pointer && frame && frame.ui === ui && frame.roster === roster ? frame.viewport : vp;
+      const drawn = frame && frame.ui === ui && frame.roster === roster && frame.vp === vpKey(hitVp) ? frame.built : void 0;
+      const result = reduce(store, ui, event2, hitVp, stores, roster, resolveProjectHeadSha, drawn);
       ui = result.ui;
+      if (!result.effects.some((e) => e.type === "quit"))
+        quitArmed = false;
       if (ui.tab === SYSTEM_TAB && (prevTab !== SYSTEM_TAB || !roster))
         roster = loadRoster();
       return applyEffects(result.effects);
     },
     applyEffects,
-    close: () => stores.close()
+    flush,
+    pending: () => pending.length,
+    requestQuit,
+    stats: () => ({ builds, storeCalls, changeDetection }),
+    close: () => {
+      try {
+        probe?.close();
+        if (writeStore !== store)
+          writeStore.close();
+      } finally {
+        stores.close();
+      }
+    }
   };
 }
 
-// packages/tui/dist/render.js
-function draw(screen2, state, opts = {}) {
-  const blockHeight = opts.block?.height ?? 0;
-  screen2.fill({ attr: {} });
-  const top = state.banner.length;
-  const bw = Math.max(1, ...state.banner.map((row) => row.length));
-  state.banner.forEach((row, by) => {
-    for (let cx = 0; cx < row.length; cx++) {
-      if (row[cx] === " ")
-        continue;
-      const t = bw <= 1 ? 0 : cx / (bw - 1);
-      screen2.put({ x: cx, y: by, attr: { color: bannerPaletteIndex(t) } }, row[cx]);
+// packages/tui/dist/github-status.js
+import { execFile as nodeExecFile } from "node:child_process";
+
+// scripts/lib/work-pr.mjs
+import { existsSync as existsSync10, mkdirSync as mkdirSync7, readFileSync as readFileSync13, renameSync as renameSync4, writeFileSync as writeFileSync6 } from "node:fs";
+import { delimiter, dirname as dirname6, join as join17 } from "node:path";
+function parseOriginRepo(url) {
+  const u = String(url ?? "").trim();
+  let host;
+  let path;
+  let m = u.match(/^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/);
+  if (m) [, host, path] = m;
+  else if (m = u.match(/^(?:[^@/:]+@)?([^/:]+):(?!\/)(.+)$/)) [, host, path] = m;
+  else return null;
+  const parts = path.replace(/\/+$/, "").replace(/\.git$/, "").split("/");
+  if (parts.length !== 2) return null;
+  const [owner2, name] = parts;
+  const seg = /^[A-Za-z0-9_.-]+$/;
+  if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(host) || !seg.test(owner2) || !seg.test(name) || [owner2, name].some((part) => part === "." || part === "..")) return null;
+  return { host, repo: `${host}/${owner2}/${name}` };
+}
+var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
+var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
+var prLoopPath = (root) => join17(root, PR_LOOP_REL);
+function readPrLoop(root) {
+  const file = prLoopPath(root);
+  if (!existsSync10(file)) return null;
+  let s2;
+  try {
+    s2 = JSON.parse(readFileSync13(file, "utf8"));
+  } catch (e) {
+    throw new Error(`${PR_LOOP_REL} is not valid JSON (${e.message})`);
+  }
+  const str2 = (v) => typeof v === "string" && v.length > 0;
+  if (!s2 || typeof s2 !== "object" || Array.isArray(s2) || !str2(s2.pr_url) || !Number.isInteger(s2.pr_number) || !str2(s2.repo) || !str2(s2.head_sha) || !str2(s2.armed_at)) {
+    throw new Error(`${PR_LOOP_REL} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s2)}`);
+  }
+  if (s2.status !== "owed" && !PR_LOOP_OUTCOMES.includes(s2.status)) {
+    throw new Error(`${PR_LOOP_REL} has status ${JSON.stringify(s2.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
+  }
+  if (s2.status !== "owed" && !str2(s2.settled_at)) throw new Error(`${PR_LOOP_REL} is settled '${s2.status}' without settled_at`);
+  return s2;
+}
+
+// packages/tui/dist/github-status.js
+var POLL_MS = 6e4;
+var FAST_POLL_MS = 2e4;
+var IDLE_POLL_MS = 3e5;
+var MAX_BACKOFF_MS = 9e5;
+var STALE_MS = 6e5;
+var GH_TIMEOUT_MS = 15e3;
+var COPILOT_LOGIN = /copilot/i;
+var MERGED_CANDIDATES = 20;
+var MERGED_SHOWN = 5;
+var GITHUB_QUERY = `query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    open: pullRequests(states: OPEN, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number title headRefName isDraft mergeStateStatus reviewDecision
+        commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
+        reviewThreads(first: 100) { nodes { isResolved } }
+        latestReviews(first: 20) { nodes { author { __typename login } commit { oid } } }
+        reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on Bot { login } ... on User { login } } } }
+      }
     }
+    merged: pullRequests(states: MERGED, first: ${MERGED_CANDIDATES}, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes { number title mergedAt }
+    }
+  }
+}`;
+var obj = (v) => v && typeof v === "object" && !Array.isArray(v) ? v : {};
+var nodes = (v) => {
+  const n = obj(v).nodes;
+  return Array.isArray(n) ? n.map(obj) : [];
+};
+var str = (v) => typeof v === "string" ? v : "";
+function checksOf(rollup) {
+  const state = str(obj(rollup).state);
+  if (!state)
+    return "none";
+  if (state === "SUCCESS")
+    return "pass";
+  if (state === "FAILURE" || state === "ERROR")
+    return "fail";
+  return "pending";
+}
+var isCopilot = (actor) => {
+  const a = obj(actor);
+  return a.__typename === "Bot" && COPILOT_LOGIN.test(str(a.login));
+};
+function copilotOf(pr, headOid) {
+  if (nodes(pr.reviewRequests).some((r) => isCopilot(r.requestedReviewer)))
+    return "requested";
+  const reviews = nodes(pr.latestReviews).filter((r) => isCopilot(r.author));
+  if (headOid && reviews.some((r) => str(obj(r.commit).oid) === headOid))
+    return "reviewed";
+  return reviews.length ? "stale" : "none";
+}
+function deriveGithub(response) {
+  const root = obj(response);
+  const repo = obj(root.data).repository;
+  if (!repo || typeof repo !== "object") {
+    const errors = Array.isArray(root.errors) ? root.errors.map((e) => str(obj(e).message)).filter(Boolean) : [];
+    throw new Error(errors[0] ?? "the response has no repository");
+  }
+  const open2 = nodes(obj(repo).open).map((pr) => {
+    const head = obj(nodes(pr.commits)[0]?.commit);
+    const headOid = str(head.oid);
+    return {
+      number: Number(pr.number),
+      title: str(pr.title),
+      branch: str(pr.headRefName),
+      draft: pr.isDraft === true,
+      merge: str(pr.mergeStateStatus),
+      review: str(pr.reviewDecision),
+      checks: checksOf(head.statusCheckRollup),
+      unresolved: nodes(pr.reviewThreads).filter((t) => t.isResolved !== true).length,
+      copilot: copilotOf(pr, headOid)
+    };
   });
-  screen2.put({ x: 0, y: top, attr: { bold: true } }, state.projectName);
+  const merged = nodes(obj(repo).merged).map((pr) => ({ number: Number(pr.number), title: str(pr.title), mergedAt: str(pr.mergedAt) })).sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt) || b.number - a.number).slice(0, MERGED_SHOWN);
+  return { open: open2, merged };
+}
+function classifyGhFailure(error, stderr, repo) {
+  const text = `${stderr}
+${error.message ?? ""}`;
+  if (/gh auth login|not logged in|authentication required|HTTP 401|bad credentials/i.test(text))
+    return { failure: "not-logged-in", reason: "gh not logged in" };
+  if (error.killed || /could not resolve host|dial tcp|i\/o timeout|network is unreachable|connection refused|ENOTFOUND|ETIMEDOUT|ECONNRESET|EAI_AGAIN/i.test(text))
+    return { failure: "offline", reason: "gh offline" };
+  if (/Could not resolve to a Repository|HTTP 403|HTTP 404|Resource not accessible|SAML/i.test(text))
+    return { failure: "no-access", reason: `gh: no access to ${repo}` };
+  const first = text.split("\n").map((l) => l.trim()).find(Boolean) ?? "unknown error";
+  return { failure: "error", reason: `gh failed: ${first}` };
+}
+function nextPollDelay(snapshot, failures) {
+  if (snapshot.state === "hidden")
+    return snapshot.reason === "gh not installed" ? MAX_BACKOFF_MS : IDLE_POLL_MS;
+  if (snapshot.state === "failed") {
+    if (snapshot.failure === "not-logged-in")
+      return MAX_BACKOFF_MS;
+    return Math.min(POLL_MS * 2 ** Math.max(1, failures), MAX_BACKOFF_MS);
+  }
+  const open2 = snapshot.data?.open ?? [];
+  if (open2.length === 0)
+    return IDLE_POLL_MS;
+  if (open2.some((p) => p.checks === "pending" || p.copilot === "requested"))
+    return FAST_POLL_MS;
+  return POLL_MS;
+}
+function loopOf(readLoop, root) {
+  try {
+    const s2 = obj(readLoop(root));
+    if (!Object.keys(s2).length)
+      return {};
+    return { loop: { status: s2.status, pr: Number(s2.pr_number) } };
+  } catch (err) {
+    return { loopError: err.message };
+  }
+}
+function createGithubPoller(options) {
+  const run = options.execFile ?? nodeExecFile;
+  const readLoop = options.readLoop ?? readPrLoop;
+  const clock = options.clock ?? Date.now;
+  const env = { ...options.env ?? process.env, GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" };
+  const execOpts = { cwd: options.root, timeout: GH_TIMEOUT_MS, env, maxBuffer: 4 * 1024 * 1024, windowsHide: true };
+  let current = { version: 0, state: "loading" };
+  let busy = false;
+  let nextAt = 0;
+  let failures = 0;
+  let lastGoodAt = 0;
+  let child;
+  let closed = false;
+  function spawn(file, args2, done) {
+    let answered = false;
+    const proc = run(file, args2, execOpts, (err, stdout, stderr) => {
+      answered = true;
+      child = void 0;
+      if (!closed)
+        done(err, stdout, stderr);
+    });
+    if (!answered && !closed && proc && typeof proc === "object")
+      child = proc;
+  }
+  function publish(next) {
+    const { version: _v, ...prev } = current;
+    if (JSON.stringify(prev) !== JSON.stringify(next))
+      current = { ...next, version: current.version + 1 };
+  }
+  function settle(next) {
+    failures = next.state === "failed" ? failures + 1 : 0;
+    publish(next);
+    nextAt = clock() + nextPollDelay(current, failures);
+    busy = false;
+  }
+  function poll() {
+    busy = true;
+    spawn("git", ["remote", "get-url", "origin"], (gitErr, gitOut) => {
+      const origin = gitErr ? null : parseOriginRepo(gitOut);
+      if (!origin)
+        return settle({ state: "hidden", reason: gitErr ? "no origin remote" : "origin is not a GitHub repository" });
+      if (origin.host !== "github.com")
+        return settle({ state: "hidden", reason: `origin is on ${origin.host}, not github.com` });
+      const [, owner2, name] = origin.repo.split("/");
+      const repo = `${owner2}/${name}`;
+      const args2 = ["api", "graphql", "-f", `query=${GITHUB_QUERY}`, "-f", `owner=${owner2}`, "-f", `name=${name}`];
+      spawn("gh", args2, (ghErr, ghOut, ghStderr) => {
+        const at = clock();
+        const loop = loopOf(readLoop, options.root);
+        if (ghErr && ghErr.code === "ENOENT")
+          return settle({ state: "hidden", reason: "gh not installed" });
+        const keep = current.data && at - lastGoodAt <= STALE_MS ? { data: current.data, asOf: lastGoodAt } : {};
+        if (ghErr)
+          return settle({ state: "failed", repo, ...classifyGhFailure(ghErr, String(ghStderr ?? ""), repo), ...keep, ...loop });
+        let derived;
+        try {
+          derived = deriveGithub(JSON.parse(String(ghOut)));
+        } catch (err) {
+          return settle({ state: "failed", repo, failure: "error", reason: `gh failed: ${err.message}`, ...keep, ...loop });
+        }
+        lastGoodAt = at;
+        settle({ state: "ok", repo, data: derived, ...loop });
+      });
+    });
+  }
+  return {
+    snapshot: () => current,
+    tick(now) {
+      if (closed)
+        return false;
+      if (current.state === "failed" && current.data && now - lastGoodAt > STALE_MS) {
+        const { version: _v, data: _d, asOf: _a, ...rest } = current;
+        publish(rest);
+      }
+      if (busy || now < nextAt)
+        return false;
+      poll();
+      return true;
+    },
+    refresh() {
+      if (closed || busy)
+        return false;
+      poll();
+      return true;
+    },
+    inFlight: () => busy,
+    close() {
+      if (closed)
+        return;
+      closed = true;
+      busy = false;
+      const proc = child;
+      child = void 0;
+      proc?.kill?.();
+    }
+  };
+}
+
+// packages/tui/dist/theme.js
+var THEME_LEVELS = ["truecolor", "256", "16", "plain"];
+var THEME_ENV = "STERLING_TUI_COLOR";
+var PALETTE = {
+  /** xterm 17: the colour the ScreenBuffer paints as background, so the overlay meets the body without a seam */
+  night: "#00005f",
+  text: "#f2ecff",
+  pink: "#ff2d95",
+  cyan: "#00e5ff",
+  muted: "#8787af",
+  /** xterm 215, the warning amber */
+  amber: "#ffaf5f"
+};
+var XTERM = {
+  /** #00005f; the 256 palette has no darker violet, and the cube's violets (53, 54, 55) are too bright for a page */
+  background: 17,
+  /** #d7d7ff */
+  text: 189,
+  /** #8787af */
+  muted: 103,
+  /** #ff5faf */
+  pink: 205,
+  /** #00ffff */
+  cyan: 51,
+  /** #ffaf5f */
+  amber: 215,
+  /** #ff5f5f */
+  error: 203,
+  /** #00ffaf */
+  success: 49,
+  /** #5f00af, the selection bar */
+  selection: 55,
+  /** #ffffff */
+  bright: 231
+};
+var NEON_EDGE = {
+  running: PALETTE.cyan,
+  resumable: PALETTE.pink,
+  /** amber, like the quiet status line's yellow: unknown, neither running nor done */
+  quiet: PALETTE.amber,
+  done: PALETTE.muted
+};
+function detectThemeLevel(env, support = {}) {
+  const forced = env[THEME_ENV];
+  if (forced !== void 0 && forced !== "") {
+    if (THEME_LEVELS.includes(forced))
+      return forced;
+    throw new Error(`${THEME_ENV}=${forced} is not one of ${THEME_LEVELS.join(", ")}`);
+  }
+  if (env.NO_COLOR !== void 0 && env.NO_COLOR !== "")
+    return "plain";
+  if (/^(truecolor|24bits?)$/.test(env.COLORTERM ?? "") || env.TERM_PROGRAM === "tmux" || support.trueColor === true)
+    return "truecolor";
+  if (support["256colors"] === true || /256color/.test(env.TERM ?? ""))
+    return "256";
+  return "16";
+}
+var PLAIN_THEME = {
+  level: "plain",
+  fill: {},
+  name: { bold: true },
+  tab: {},
+  tabActive: { inverse: true },
+  search: { dim: true },
+  text: {},
+  muted: { dim: true },
+  heading: { dim: true },
+  title: (selected, expanded) => ({ inverse: selected, bold: expanded }),
+  warn: (attr) => attr,
+  map: (attr) => attr,
+  fullWidthSelection: false,
+  bannerOverlay: false,
+  sceneArt: {},
+  sceneHorizon: {},
+  sceneGrid: {},
+  blankSgr: ""
+};
+function xtermTheme(level) {
+  const bg = XTERM.background;
+  const on = (attr) => ({ bgColor: bg, ...attr });
+  const muted = on({ color: XTERM.muted });
+  return {
+    level,
+    fill: { bgColor: bg },
+    name: on({ color: XTERM.pink, bold: true }),
+    tab: muted,
+    tabActive: { color: bg, bgColor: XTERM.pink, bold: true },
+    search: on({ color: XTERM.cyan }),
+    text: on({ color: XTERM.text }),
+    muted,
+    heading: on({ color: XTERM.pink, bold: true }),
+    title: (selected, expanded) => selected ? { color: XTERM.bright, bgColor: XTERM.selection, bold: expanded } : on({ color: XTERM.text, bold: expanded }),
+    warn: (attr) => ({ ...attr, color: XTERM.amber, bold: true }),
+    map: (attr) => {
+      const color = attr.color === "green" ? XTERM.success : attr.color === "red" ? XTERM.error : attr.dim ? XTERM.muted : XTERM.text;
+      return attr.bold ? on({ color, bold: true }) : on({ color });
+    },
+    fullWidthSelection: true,
+    bannerOverlay: true,
+    sceneArt: on({ color: XTERM.bright, bold: true }),
+    sceneHorizon: on({ color: XTERM.cyan }),
+    sceneGrid: on({ color: XTERM.pink }),
+    blankSgr: `\x1B[48;5;${bg}m`
+  };
+}
+var SIXTEEN = {
+  level: "16",
+  fill: {},
+  name: { color: "magenta", bold: true },
+  tab: { dim: true },
+  tabActive: { color: "brightWhite", bgColor: "magenta", bold: true },
+  search: { color: "cyan" },
+  text: {},
+  muted: { dim: true },
+  heading: { color: "magenta", bold: true },
+  title: (selected, expanded) => selected ? { color: "brightWhite", bgColor: "magenta", bold: expanded } : { bold: expanded },
+  warn: (attr) => ({ ...attr, dim: false, color: "yellow", bold: true }),
+  map: (attr) => attr,
+  fullWidthSelection: true,
+  bannerOverlay: false,
+  sceneArt: { color: "brightWhite", bold: true },
+  sceneHorizon: { color: "cyan" },
+  sceneGrid: { color: "magenta" },
+  blankSgr: ""
+};
+var TRUECOLOR = xtermTheme("truecolor");
+var XTERM256 = xtermTheme("256");
+function themeFor(level) {
+  if (level === "plain")
+    return PLAIN_THEME;
+  if (level === "16")
+    return SIXTEEN;
+  return level === "truecolor" ? TRUECOLOR : XTERM256;
+}
+
+// packages/tui/dist/render.js
+function drawSceneText(screen2, t, rows, projectName) {
+  const { horizon } = sceneLayout(rows);
+  sceneText(screen2.width, rows, "").forEach((text, y) => {
+    if (!text)
+      return;
+    const attr = y === horizon ? t.sceneHorizon : y > horizon ? t.sceneGrid : t.sceneArt;
+    screen2.put({ x: 0, y, attr }, text);
+  });
+  const label = horizonLabel(screen2.width, projectName);
+  if (label.text)
+    screen2.put({ x: label.x, y: horizon, attr: t.name }, label.text);
+}
+function draw(screen2, state, opts = {}) {
+  const t = opts.theme ?? PLAIN_THEME;
+  const blockHeight = opts.block?.height ?? 0;
+  screen2.fill({ attr: t.fill });
+  const top = state.banner.length;
+  if (top === 0)
+    screen2.put({ x: 0, y: 0, attr: t.name }, state.projectName);
+  else if (!t.bannerOverlay)
+    drawSceneText(screen2, t, top + 1, state.projectName);
   let x = 0;
   for (const tab of state.tabs) {
     const label = ` ${tab.label} `;
-    screen2.put({ x, y: top + 1, attr: tab.active ? { inverse: true } : {} }, label);
+    screen2.put({ x, y: top + 1, attr: tab.active ? t.tabActive : t.tab }, label);
     x += label.length;
   }
   if (state.searchLine) {
-    screen2.put({ x: 0, y: top + 2, attr: { dim: true } }, state.searchLine);
+    screen2.put({ x: 0, y: top + 2, attr: t.search }, state.searchLine);
   }
-  const lastBodyLine = screen2.height - 3;
+  const stripRows = state.strip ? 1 : 0;
+  const lastBodyLine = screen2.height - 3 - stripRows;
+  const qc = state.queueCompleted;
+  const lastRowLine = qc ? Math.min(lastBodyLine, state.bodyTop + (qc.pendingLines ?? qc.startRow) - 1) : lastBodyLine;
   let y = state.bodyTop;
   if (state.emptyMessage && y <= lastBodyLine) {
-    screen2.put({ x: 0, y, attr: { dim: true } }, state.emptyMessage);
+    screen2.put({ x: 0, y, attr: t.muted }, state.emptyMessage);
     y += 1;
   }
   let bodyIdx = 0;
   for (const row of state.rows) {
-    if (y > lastBodyLine)
+    if (y > lastRowLine)
       break;
     for (const line of row.lines) {
       if (bodyIdx++ < state.scroll)
         continue;
-      if (y > lastBodyLine)
+      if (y > lastRowLine)
         break;
-      const attr = line.kind === "title" ? { inverse: row.selected, bold: row.expanded } : line.kind === "meta" ? { dim: true } : {};
-      screen2.put({ x: 0, y, attr }, line.text);
+      const base2 = line.kind === "title" ? t.title(row.selected, row.expanded) : line.kind === "meta" ? t.muted : t.text;
+      const attr = line.text.startsWith("\u26A0") ? t.warn(base2) : base2;
+      const text = line.kind === "title" && row.selected && t.fullWidthSelection ? line.text.padEnd(screen2.width) : line.text;
+      screen2.put({ x: 0, y, attr }, text);
       y += 1;
     }
   }
-  if (state.queueCompleted) {
-    const qc = state.queueCompleted;
+  if (qc) {
     if (qc.overflow)
-      screen2.put({ x: 0, y: state.bodyTop + qc.startRow - 1, attr: { dim: true } }, qc.overflow);
+      screen2.put({ x: 0, y: state.bodyTop + qc.startRow - 1, attr: t.muted }, qc.overflow);
     let cy = state.bodyTop + qc.startRow;
     if (cy <= lastBodyLine) {
-      screen2.put({ x: 0, y: cy, attr: { dim: true } }, qc.header);
+      screen2.put({ x: 0, y: cy, attr: t.heading }, qc.header);
       cy += 1;
     }
-    for (const line of qc.lines) {
+    const history = qc.lines.map((text) => ({ text, attr: t.muted }));
+    if (state.queueActivity) {
+      history.push({ text: state.queueActivity.header, attr: t.heading });
+      for (const text of state.queueActivity.lines)
+        history.push({ text, attr: t.muted });
+    }
+    for (const line of history.slice(qc.scroll ?? 0)) {
       if (cy > lastBodyLine)
         break;
-      screen2.put({ x: 0, y: cy, attr: { dim: true } }, line);
+      screen2.put({ x: 0, y: cy, attr: line.attr }, line.text);
       cy += 1;
-    }
-    if (state.queueActivity) {
-      const qa = state.queueActivity;
-      if (cy <= lastBodyLine) {
-        screen2.put({ x: 0, y: cy, attr: { dim: true } }, qa.header);
-        cy += 1;
-      }
-      for (const line of qa.lines) {
-        if (cy > lastBodyLine)
-          break;
-        screen2.put({ x: 0, y: cy, attr: { dim: true } }, line);
-        cy += 1;
-      }
     }
   }
   if (opts.block && blockHeight > 0) {
     const top2 = state.bodyTop;
     for (const p of opts.block.puts)
-      screen2.put({ x: p.x, y: top2 + p.y, attr: p.attr }, p.text);
+      screen2.put({ x: p.x, y: top2 + p.y, attr: t.map(p.attr) }, p.text);
   }
-  const footerY = blockHeight > 0 ? screen2.height - 1 : Math.min(y + 1, screen2.height - 1);
-  screen2.put({ x: 0, y: footerY, attr: { dim: true } }, state.footer);
+  if (state.notice)
+    screen2.put({ x: 0, y: screen2.height - 2 - stripRows, attr: t.warn({ ...t.text, bold: true }) }, state.notice);
+  if (state.strip) {
+    const base2 = state.strip.dim ? t.muted : t.text;
+    screen2.put({ x: 0, y: screen2.height - 2, attr: state.strip.text.startsWith("\u26A0") ? t.warn(base2) : base2 }, state.strip.text);
+  }
+  screen2.put({ x: 0, y: screen2.height - 1, attr: t.muted }, state.footer);
   screen2.draw({ delta: true });
 }
-function clearPixels(term2, prev, next) {
+function clearPixels(term2, prev, next, blankSgr = "") {
   const keep = new Set(next.map((p) => `${p.x},${p.y}`));
   let wrote = false;
   for (const key of prev.keys()) {
     if (keep.has(key))
       continue;
     const [x, y] = key.split(",").map(Number);
-    if (!wrote)
+    if (!wrote) {
       term2.styleReset();
+      if (blankSgr)
+        term2.noFormat(blankSgr);
+    }
     term2.moveTo(x + 1, y + 1);
     term2.noFormat(" ");
     wrote = true;
@@ -52105,7 +53252,7 @@ function sgr24(hex, background) {
   const n = Number.parseInt(hex.slice(1), 16);
   return `\x1B[${background ? 48 : 38};2;${n >> 16 & 255};${n >> 8 & 255};${n & 255}m`;
 }
-function paintPixels(term2, pixels, prev, trueColor2 = false) {
+function paintPixels(term2, pixels, prev, trueColor2 = false, blankSgr = "") {
   const next = /* @__PURE__ */ new Map();
   let wrote = false;
   for (const p of pixels) {
@@ -52116,6 +53263,8 @@ function paintPixels(term2, pixels, prev, trueColor2 = false) {
       continue;
     term2.styleReset();
     term2.moveTo(p.x + 1, p.y + 1);
+    if (p.bg === void 0 && blankSgr)
+      term2.noFormat(blankSgr);
     if (p.fg !== void 0) {
       if (trueColor2)
         term2.noFormat(sgr24(p.fg, false));
@@ -52171,26 +53320,26 @@ function mouseToEvent(name, data) {
     case "MOUSE_RIGHT_BUTTON_PRESSED":
       return { kind: "rightclick" };
     case "MOUSE_WHEEL_UP":
-      return { kind: "wheel", dy: -1 };
+      return { kind: "wheel", dy: -1, y: data.y };
     case "MOUSE_WHEEL_DOWN":
-      return { kind: "wheel", dy: 1 };
+      return { kind: "wheel", dy: 1, y: data.y };
     default:
       return void 0;
   }
 }
 
 // packages/tui/dist/subagents.js
-import { existsSync as existsSync11, readFileSync as readFileSync14, readdirSync as readdirSync7, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync13, readFileSync as readFileSync15, readdirSync as readdirSync7, statSync as statSync6 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { join as join18 } from "node:path";
+import { join as join19 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync7, readFileSync as readFileSync13, writeFileSync as writeFileSync6, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync9, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync5, chmodSync } from "node:fs";
-import { join as join17, resolve as resolve8, dirname as dirname6, isAbsolute as isAbsolute2 } from "node:path";
-import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
-import { randomBytes, createHash as createHash2 } from "node:crypto";
+import { mkdirSync as mkdirSync8, readFileSync as readFileSync14, writeFileSync as writeFileSync7, rmSync as rmSync4, rmdirSync, renameSync as renameSync5, existsSync as existsSync11, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync5, chmodSync } from "node:fs";
+import { join as join18, resolve as resolve8, dirname as dirname7, isAbsolute as isAbsolute2 } from "node:path";
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
+import { randomBytes, createHash as createHash3 } from "node:crypto";
 function registerPath(root) {
-  return join17(root, ".sterling", "transient", "dispatch-register.json");
+  return join18(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -52212,10 +53361,10 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync9(p)) return { availability: "absent", arr: [] };
+  if (!existsSync11(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
-    raw = readFileSync13(p, "utf8");
+    raw = readFileSync14(p, "utf8");
   } catch {
     return { availability: "corrupt", arr: [] };
   }
@@ -52244,32 +53393,32 @@ var MAX_PROMPT_BYTES = 512 * 1024;
 var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 function dispatchStateDir(root) {
-  return join17(root, ".sterling", "transient", "dispatch-state");
+  return join18(root, ".sterling", "transient", "dispatch-state");
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
-  return `sha256-${createHash2("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+  return `sha256-${createHash3("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync10, statSync as statSync5, readdirSync as readdirSync6 } from "node:fs";
+import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync12, statSync as statSync5, readdirSync as readdirSync6 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
   const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
-  if (existsSync10(flat)) return flat;
+  if (existsSync12(flat)) return flat;
   const wfRoot = `${sessionDir}/subagents/workflows`;
   try {
     for (const d of readdirSync6(wfRoot)) {
       const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
-      if (existsSync10(candidate)) return candidate;
+      if (existsSync12(candidate)) return candidate;
     }
   } catch {
   }
   return flat;
 }
 function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync10(path)) return null;
+  if (!existsSync12(path)) return null;
   const fd = openSync3(path, "r");
   try {
     const size = fstatSync(fd).size;
@@ -52729,14 +53878,14 @@ var pool_default = {
         skin: 1,
         clothes: 1,
         acc: "feather",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "ccdeeeeeff..",
           "..eeeggggf..",
-          "..fgAeeAgf..",
-          "..ggeeeegg..",
+          "..fgAggAgf..",
+          "..gggggggg..",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -52744,15 +53893,15 @@ var pool_default = {
           "ccdeeeeeff..",
           "..eeeggggf..",
           "..fggggggf..",
-          "..ggeeeegg..",
+          "..gggggggg..",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
         [
           ".ccceeeeeef.",
           "..ceeeggggf.",
-          "..fgAeeAgf..",
-          "..ggeeeegg..",
+          "..fgAggAgf..",
+          "..gggggggg..",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -52760,7 +53909,7 @@ var pool_default = {
           ".ccceeeeeef.",
           "..ceeeggggf.",
           "....gAggAg..",
-          "...gggeeggg.",
+          "...gggggggg.",
           ".....UggU...",
           "iiUUUUjgUUii"
         ]
@@ -52909,14 +54058,14 @@ var pool_default = {
         skin: 1,
         clothes: 1,
         acc: "earrings",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "...gnnnng...",
           "..gggggggg..",
-          "..ggAppAgg..",
-          ".FggppppggF.",
+          "..ggAggAgg..",
+          ".FggggggggF.",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -52924,15 +54073,15 @@ var pool_default = {
           "...gnnnng...",
           "..gggggggg..",
           "..gggggggg..",
-          ".FggppppggF.",
+          ".FggggggggF.",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
         [
           "....nnnnnn..",
           "..gggggggg..",
-          "..ggAppAgg..",
-          ".FggppppggF.",
+          "..ggAggAgg..",
+          ".FggggggggF.",
           "....gggg....",
           "iiUUUUjgUUii"
         ],
@@ -52940,7 +54089,7 @@ var pool_default = {
           "....nnnnnn..",
           "...gggggggg.",
           "...ggAggAgg.",
-          "..ggggppgggg",
+          "..gggggggggg",
           ".....UggU...",
           "iiUUUUjgUUii"
         ]
@@ -53404,14 +54553,14 @@ var pool_default = {
         skin: 2,
         clothes: 2,
         acc: "earrings",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..pppppppp..",
           ".ppLLLLLLpp.",
-          ".FzLAppALzF.",
-          ".FzLppppLzF.",
+          ".FzLALLALzF.",
+          ".FzLLLLLLzF.",
           ".N..LLLL..N.",
           "NNOOOOPLOONN"
         ],
@@ -53419,15 +54568,15 @@ var pool_default = {
           "..pppppppp..",
           ".ppLLLLLLpp.",
           ".FzLLLLLLzF.",
-          ".FzLppppLzF.",
+          ".FzLLLLLLzF.",
           ".N..LLLL..N.",
           "NNOOOOPLOONN"
         ],
         [
           "...pppppppp.",
           "..ppLLLLLLpp",
-          ".FzLAppALzF.",
-          ".FzLppppLzF.",
+          ".FzLALLALzF.",
+          ".FzLLLLLLzF.",
           ".N..LLLL..N.",
           "NNOOOOPLOONN"
         ],
@@ -53435,7 +54584,7 @@ var pool_default = {
           "...pppppppp.",
           "..ppLLLLLLpp",
           "..ppLALLALpp",
-          "..FpLLppLLpF",
+          "..FpLLLLLLpF",
           "..pp.OLLO.pp",
           "NNOOOOPLOONN"
         ]
@@ -53494,14 +54643,14 @@ var pool_default = {
         skin: 2,
         clothes: 3,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..00000000..",
           "..LLLLLLLLY.",
-          "..LLAssALLZ.",
-          "..LLssssLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -53509,15 +54658,15 @@ var pool_default = {
           "..00000000..",
           "..LLLLLLLLY.",
           "..LLLLLLLLZ.",
-          "..LLssssLL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
         [
           "....000000..",
           "..LLLLLLLLY.",
-          "..LLAssALLZ.",
-          "..LLssssLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -53525,7 +54674,7 @@ var pool_default = {
           "....00000000",
           "...LLLLLLLLL",
           "...LLALLALLL",
-          "...LLLssLLL.",
+          "...LLLLLLLL.",
           ".....LLLH...",
           "GGHHLLILHHGG"
         ]
@@ -53584,14 +54733,14 @@ var pool_default = {
         skin: 2,
         clothes: 0,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..llllllll..",
           "..LLLLLLLLY.",
-          "..LLAaaALLZ.",
-          "..LLaaaaLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -53599,15 +54748,15 @@ var pool_default = {
           "..llllllll..",
           "..LLLLLLLLY.",
           "..LLLLLLLLZ.",
-          "..LLaaaaLL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
         [
           "....llllll..",
           "..LLLLLLLLY.",
-          "..LLAaaALLZ.",
-          "..LLaaaaLL..",
+          "..LLALLALLZ.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -53615,7 +54764,7 @@ var pool_default = {
           "....llllllll",
           "...LLLLLLLLL",
           "...LLALLALLL",
-          "...LLLaaLLL.",
+          "...LLLLLLLL.",
           ".....wLLw...",
           "vvwwwwxLwwvv"
         ]
@@ -53674,14 +54823,14 @@ var pool_default = {
         skin: 2,
         clothes: 3,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..2222223...",
           "..32LLLL33Y.",
-          "..3LA22AL3Z.",
-          "..LL2222LL..",
+          "..3LALLAL3Z.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -53689,15 +54838,15 @@ var pool_default = {
           "..2222223...",
           "..32LLLL33Y.",
           "..3LLLLLL3Z.",
-          "..LL2222LL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
         [
           "...22222L3..",
           "..22LLLLL3Y.",
-          "..3LA22AL3Z.",
-          "..LL2222LL..",
+          "..3LALLAL3Z.",
+          "..LLLLLLLL..",
           "....LLLL....",
           "GGHHLIILHHGG"
         ],
@@ -53705,7 +54854,7 @@ var pool_default = {
           "...22222L3..",
           "...2LLLLLLYY",
           "...LLALLAL33",
-          "...LLL22LL3.",
+          "...LLLLLLL3.",
           ".....LLLH...",
           "GGHHLLILHHGG"
         ]
@@ -53764,14 +54913,14 @@ var pool_default = {
         skin: 0,
         clothes: 0,
         acc: "earrings",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "....DDDD....",
           "..DDDDDDDD..",
-          "..DDA22ADD..",
-          ".FDD2222DDF.",
+          "..DDADDADD..",
+          ".FDDDDDDDDF.",
           "....DDDD....",
           "vvwwwwxDwwvv"
         ],
@@ -53779,15 +54928,15 @@ var pool_default = {
           "....DDDD....",
           "..DDDDDDDD..",
           "..DDDDDDDD..",
-          ".FDD2222DDF.",
+          ".FDDDDDDDDF.",
           "....DDDD....",
           "vvwwwwxDwwvv"
         ],
         [
           ".....DDDD...",
           "...DDDDDDDD.",
-          "..DDA22ADD..",
-          ".FDD2222DDF.",
+          "..DDADDADD..",
+          ".FDDDDDDDDF.",
           "....DDDD....",
           "vvwwwwxDwwvv"
         ],
@@ -53795,7 +54944,7 @@ var pool_default = {
           ".....DDDD...",
           "...DDDDDDDD.",
           "...DDADDADD.",
-          "..DDDD22DDDD",
+          "..DDDDDDDDDD",
           ".....wDDw...",
           "vvwwwwxDwwvv"
         ]
@@ -54214,14 +55363,14 @@ var pool_default = {
         skin: 2,
         clothes: 0,
         acc: "none",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..eeeeeeff..",
           "..eLLLLLLf..",
-          "..LLAeeALL..",
-          "..LLeeeeLL..",
+          "..LLALLALL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -54229,15 +55378,15 @@ var pool_default = {
           "..eeeeeeff..",
           "..eLLLLLLf..",
           "..LLLLLLLL..",
-          "..LLeeeeLL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
         [
           "....eeeeeef.",
           "...LLLLLLe..",
-          "..LLAeeALL..",
-          "..LLeeeeLL..",
+          "..LLALLALL..",
+          "..LLLLLLLL..",
           "....LLLL....",
           "vvwwwwxLwwvv"
         ],
@@ -54245,7 +55394,7 @@ var pool_default = {
           "...eeeeeeef.",
           "...eLLLLLLf.",
           "...LLALLALL.",
-          "...LLLeeLLL.",
+          "...LLLLLLLL.",
           ".....wLLw...",
           "vvwwwwxLwwvv"
         ]
@@ -54304,14 +55453,14 @@ var pool_default = {
         skin: 1,
         clothes: 0,
         acc: "feather",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "ccQQQQQQQQ..",
           "QQQggggggQQ.",
-          ".QRgAQQAgRQ.",
-          ".QRgQQQQgRQ.",
+          ".QRgAggAgRQ.",
+          ".QRggggggRQ.",
           "....gggg....",
           "vvwwwwxgwwvv"
         ],
@@ -54319,15 +55468,15 @@ var pool_default = {
           "ccQQQQQQQQ..",
           "QQQggggggQQ.",
           ".QRggggggRQ.",
-          ".QRgQQQQgRQ.",
+          ".QRggggggRQ.",
           "....gggg....",
           "vvwwwwxgwwvv"
         ],
         [
           "ccdQQQQQQQQ.",
           "..QQggggggQQ",
-          ".QRgAQQAgRQ.",
-          ".QRgQQQQgRQ.",
+          ".QRgAggAgRQ.",
+          ".QRggggggRQ.",
           "....gggg....",
           "vvwwwwxgwwvv"
         ],
@@ -54335,7 +55484,7 @@ var pool_default = {
           ".cdQQQQQQQQ.",
           "..QQggggggQQ",
           "..QQgAggAgQQ",
-          "..QRggQQggRQ",
+          "..QRggggggRQ",
           "..QQ.wggw.QQ",
           "vvwwwwxgwwvv"
         ]
@@ -54439,14 +55588,14 @@ var pool_default = {
         skin: 0,
         clothes: 4,
         acc: "pencil",
-        extra: "moustache"
+        extra: "none"
       },
       frames: [
         [
           "..QQQQQQRR..",
           "..QDDDDDDRY.",
-          "..DDAQQADDZ.",
-          "..DDQQQQDD..",
+          "..DDADDADDZ.",
+          "..DDDDDDDD..",
           "....DDDD....",
           "ttuuuDDuuutt"
         ],
@@ -54454,15 +55603,15 @@ var pool_default = {
           "..QQQQQQRR..",
           "..QDDDDDDRY.",
           "..DDDDDDDDZ.",
-          "..DDQQQQDD..",
+          "..DDDDDDDD..",
           "....DDDD....",
           "ttuuuDDuuutt"
         ],
         [
           "....QQQQQQ..",
           "...DDDDDDQY.",
-          "..DDAQQADDZ.",
-          "..DDQQQQDD..",
+          "..DDADDADDZ.",
+          "..DDDDDDDD..",
           "....DDDD....",
           "ttuuuDDuuutt"
         ],
@@ -54470,7 +55619,7 @@ var pool_default = {
           "...QQQQQQQRR",
           "...QDDDDDDRY",
           "...DDADDADDD",
-          "...DDDQQDDD.",
+          "...DDDDDDDD.",
           ".....UDDu...",
           "ttuuUUDuuutt"
         ]
@@ -54627,11 +55776,10 @@ function cells(avatarIndex, frame) {
   }
   return out;
 }
-function tileCells(avatarIndex, frame) {
-  return cells(avatarIndex, frame).map((row) => {
-    const pad = { ch: " ", bg: TILE_BG };
-    return [pad, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), pad];
-  });
+function tileCells(avatarIndex, frame, edge) {
+  const left = edge === void 0 ? { ch: " ", bg: TILE_BG } : { ch: "\u258C", fg: edge, bg: TILE_BG };
+  const right = edge === void 0 ? { ch: " ", bg: TILE_BG } : { ch: "\u2590", fg: edge, bg: TILE_BG };
+  return cells(avatarIndex, frame).map((row) => [left, ...row.map((c) => ({ ...c, bg: c.bg ?? TILE_BG })), right]);
 }
 var ANIMATION_MS = 333;
 var SEQUENCE = [
@@ -54672,19 +55820,21 @@ function frameAt(tick, phase, running) {
 
 // packages/tui/dist/subagents.js
 var TRANSCRIPT_RETRY_MS = 1e4;
+var TRANSCRIPT_ALIVE_MS = 10 * 6e4;
+var END_MARKER_TAIL_BYTES = 64 * 1024;
 var DONE_LINGER_MS = 5 * 6e4;
 function roundOf(e) {
   return typeof e.round === "number" ? e.round : 1;
 }
 function readCurrentSessionId(projectRoot) {
   try {
-    const parsed = JSON.parse(readFileSync14(join18(projectRoot, ".sterling", "transient", "session.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync15(join19(projectRoot, ".sterling", "transient", "session.json"), "utf8"));
     return typeof parsed?.session_id === "string" && parsed.session_id ? parsed.session_id : null;
   } catch {
     return null;
   }
 }
-function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
+function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS, claudeConfigDir = defaultClaudeConfigDir()) {
   const reg = readRegister(projectRoot);
   if (reg.availability !== "ok")
     return { availability: reg.availability, rows: [], foreignLive: 0 };
@@ -54700,14 +55850,14 @@ function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
   for (const [agentId, rounds] of byAgent) {
     rounds.sort((a, b) => roundOf(b) - roundOf(a) || Date.parse(b.at) - Date.parse(a.at));
     const latest = rounds[0];
-    const live = !latest.ended && !latest.residue_reported_at;
+    const transcript = !latest.ended && latest.residue_reported_at ? transcriptState(projectRoot, latest.session_id, latest.agent_id, now, claudeConfigDir) : null;
     const foreign = currentSession !== null && latest.session_id !== currentSession;
-    if (foreign && !live)
+    if (foreign && (latest.ended || transcript === "finished"))
       continue;
     const startedAt = Date.parse(latest.at);
     if (Number.isNaN(startedAt))
       continue;
-    const endStamp = latest.ended ? latest.ended.at : latest.residue_reported_at ? String(latest.residue_reported_at) : null;
+    const endStamp = latest.ended ? latest.ended.at : transcript === "finished" ? String(latest.residue_reported_at) : null;
     const endedAt = endStamp === null ? null : Date.parse(endStamp);
     const resumable = currentSession !== null && Boolean(latest.ended);
     if (endedAt !== null && (Number.isNaN(endedAt) || !resumable && now - endedAt > lingerMs))
@@ -54719,33 +55869,59 @@ function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS) {
       agentId,
       sessionId: latest.session_id,
       agentType: typeof latest.agent_type === "string" && latest.agent_type ? latest.agent_type : null,
-      status: endedAt === null ? "running" : resumable ? "resumable" : "done",
+      status: transcript === "quiet" ? "quiet" : endedAt === null ? "running" : resumable ? "resumable" : "done",
       startedAt,
       endedAt,
       elapsedMs: Math.max(0, (endedAt ?? now) - startedAt),
       toolUseId: withId?.tool_use_id ?? null
     });
   }
-  rows.sort((a, b) => {
-    const [aRun, bRun] = [a.status === "running", b.status === "running"];
-    if (aRun !== bRun)
-      return aRun ? -1 : 1;
-    return aRun ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0);
-  });
+  const rank = (r) => r.status === "running" ? 0 : r.status === "quiet" ? 1 : 2;
+  rows.sort((a, b) => rank(a) - rank(b) || (rank(a) < 2 ? a.startedAt - b.startedAt : (b.endedAt ?? 0) - (a.endedAt ?? 0)));
   return { availability: "ok", rows, foreignLive };
+}
+function transcriptState(projectRoot, sessionId, agentId, now, claudeConfigDir) {
+  const path = subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir);
+  if (!path)
+    return "quiet";
+  try {
+    if (endsOnHandback(path))
+      return "finished";
+    return now - statSync6(path).mtimeMs <= TRANSCRIPT_ALIVE_MS ? "fresh" : "quiet";
+  } catch {
+    return "quiet";
+  }
+}
+function endsOnHandback(path) {
+  const entry = lastTurnEntry(readTail(path, END_MARKER_TAIL_BYTES)) ?? lastTurnEntry(readTail(path));
+  return entry?.toolEndsTurn === true;
+}
+function lastTurnEntry(tail) {
+  const lines = (tail ?? "").split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let entry;
+    try {
+      entry = JSON.parse(lines[i]);
+    } catch {
+      continue;
+    }
+    if (entry?.type === "user" || entry?.type === "assistant")
+      return entry;
+  }
+  return void 0;
 }
 function readDispatchDescription(projectRoot, toolUseId) {
   const dir = dispatchStateDir(projectRoot);
   const key = dispatchStateKey(toolUseId);
-  let file = join18(dir, `live-${key}.json`);
+  let file = join19(dir, `live-${key}.json`);
   try {
-    if (!existsSync11(file)) {
+    if (!existsSync13(file)) {
       const done = readdirSync7(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
       if (!done)
         return null;
-      file = join18(dir, done);
+      file = join19(dir, done);
     }
-    const rec = JSON.parse(readFileSync14(file, "utf8"));
+    const rec = JSON.parse(readFileSync15(file, "utf8"));
     return rec.tool_use_id === toolUseId && typeof rec.description === "string" && rec.description ? rec.description : null;
   } catch {
     return null;
@@ -54753,7 +55929,7 @@ function readDispatchDescription(projectRoot, toolUseId) {
 }
 function readAgentModel(projectRoot, type) {
   try {
-    const content = readFileSync14(join18(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
+    const content = readFileSync15(join19(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
     const model = content.match(/^---\n([\s\S]*?)\n---\n/)?.[1]?.match(/^model:\s*(\S+)/m)?.[1];
     if (model)
       return model;
@@ -54763,7 +55939,7 @@ function readAgentModel(projectRoot, type) {
   if (!key)
     return null;
   try {
-    const raw = JSON.parse(readFileSync14(join18(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync15(join19(projectRoot, ".sterling", "config.json"), "utf8"));
     const model = raw.models?.[key]?.model;
     return typeof model === "string" && model ? model : null;
   } catch {
@@ -54771,9 +55947,9 @@ function readAgentModel(projectRoot, type) {
   }
 }
 function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir = defaultClaudeConfigDir()) {
-  const projects = join18(claudeConfigDir, "projects");
+  const projects = join19(claudeConfigDir, "projects");
   const slug = projectRoot.replace(/[^A-Za-z0-9]/g, "-");
-  const sessionUnder = (dir2) => existsSync11(join18(projects, dir2, sessionId));
+  const sessionUnder = (dir2) => existsSync13(join19(projects, dir2, sessionId));
   let dir = sessionUnder(slug) ? slug : void 0;
   if (!dir) {
     let all;
@@ -54784,10 +55960,10 @@ function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir
     }
     dir = all.find((d) => d !== slug && sessionUnder(d));
   }
-  return dir ? deriveAgentTranscript(join18(projects, dir, `${sessionId}.jsonl`), agentId) : null;
+  return dir ? deriveAgentTranscript(join19(projects, dir, `${sessionId}.jsonl`), agentId) : null;
 }
 function defaultClaudeConfigDir() {
-  return process.env.CLAUDE_CONFIG_DIR || join18(homedir6(), ".claude");
+  return process.env.CLAUDE_CONFIG_DIR || join19(homedir6(), ".claude");
 }
 function readContextUsage(path) {
   try {
@@ -54809,7 +55985,7 @@ function contextPercent(tokens, window2) {
 }
 function readSharedWindows() {
   try {
-    const raw = JSON.parse(readFileSync14(join18(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
+    const raw = JSON.parse(readFileSync15(join19(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
     return parseConfig({ context_watch: { windows: raw.windows } }).context_watch.windows;
   } catch {
     return null;
@@ -54817,7 +55993,7 @@ function readSharedWindows() {
 }
 function readProjectWindows(projectRoot) {
   try {
-    const raw = JSON.parse(readFileSync14(join18(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync15(join19(projectRoot, ".sterling", "config.json"), "utf8"));
     return parseConfig(raw).context_watch.windows;
   } catch {
     return {};
@@ -54869,7 +56045,7 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
   }
   function refresh(now) {
     lastRead = now;
-    source = readSubagents(projectRoot, now, lingerMs);
+    source = readSubagents(projectRoot, now, lingerMs, claudeConfigDir);
     if (source.availability === "corrupt")
       return;
     avatars = assign(source.rows.map((r) => r.agentId), avatars.current, rng, { poolSize: POOL_SIZE, freed: avatars.freed });
@@ -54912,12 +56088,18 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
         description: r.toolUseId ? descriptions.get(r.toolUseId) ?? null : null,
         model: context.get(r.agentId)?.model ?? (r.agentType ? models.get(r.agentType) ?? null : null),
         status: r.status,
-        elapsedMs: r.status === "running" ? Math.max(0, now - r.startedAt) : r.elapsedMs,
+        elapsedMs: r.endedAt === null ? Math.max(0, now - r.startedAt) : r.elapsedMs,
         contextPct: context.get(r.agentId)?.pct ?? null,
         contextTokens: context.get(r.agentId)?.tokens ?? null,
         idleMs: r.endedAt === null ? null : Math.max(0, now - r.endedAt)
       }));
-      return { availability: source.availability, active: agents.filter((a) => a.status === "running").length, agents, foreignLive: source.foreignLive };
+      return {
+        availability: source.availability,
+        active: agents.filter((a) => a.status === "running").length,
+        quiet: agents.filter((a) => a.status === "quiet").length,
+        agents,
+        foreignLive: source.foreignLive
+      };
     }
   };
 }
@@ -54955,8 +56137,8 @@ function clip(text, width) {
     return text;
   return width <= 1 ? chars.slice(0, width).join("") : chars.slice(0, width - 1).join("") + "\u2026";
 }
-function composeSubagentBlock(view, width, maxHeight, tick) {
-  const cards = composeCards(view, width, maxHeight, tick);
+function composeSubagentBlock(view, width, maxHeight, tick, opts = {}) {
+  const cards = composeCards(view, width, maxHeight, tick, opts.neonEdge === true);
   if (!view.foreignLive || cards.height + 1 > maxHeight)
     return cards;
   if (cards.height === 0 && width < 1)
@@ -54964,8 +56146,8 @@ function composeSubagentBlock(view, width, maxHeight, tick) {
   const put = { x: 0, y: cards.height, attr: { dim: true }, text: clip(FOREIGN_SESSION_NOTE, width) };
   return { ...cards, height: cards.height + 1, puts: [...cards.puts, put] };
 }
-var FOREIGN_SESSION_NOTE = "session.json names another session; live agents from the other one are listed";
-function composeCards(view, width, maxHeight, tick) {
+var FOREIGN_SESSION_NOTE = "session.json names another session; running and quiet agents from the other one are listed";
+function composeCards(view, width, maxHeight, tick, neonEdge) {
   const empty = { height: 0, puts: [], pixels: [] };
   if (maxHeight < 1 || width < 1)
     return empty;
@@ -55001,7 +56183,7 @@ function composeCards(view, width, maxHeight, tick) {
     const done = a.status !== "running";
     const x0 = i % perRow * (cardW + CARD_GAP);
     const y0 = bandY[Math.floor(i / perRow)];
-    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done)).forEach((line, r) => line.forEach((cell, c) => {
+    tileCells(a.avatar, frameAt(tick, phaseFor(a.avatar), !done), neonEdge ? NEON_EDGE[a.status] : void 0).forEach((line, r) => line.forEach((cell, c) => {
       const px = { x: x0 + c, y: y0 + r, ch: cell.ch };
       if (cell.fg !== void 0)
         px.fg = done ? fadeToTile(cell.fg, DONE_FADE) : cell.fg;
@@ -55013,7 +56195,7 @@ function composeCards(view, width, maxHeight, tick) {
     const ty = side ? y0 : y0 + TILE_H;
     puts.push({ x: tx, y: ty, attr: done ? { bold: true, dim: true } : { bold: true }, text: clip(a.type, textW) });
     const status = a.status === "resumable" ? resumableStatus(a, textW) : `${a.status} \xB7 ${a.contextPct === null ? "?" : `${a.contextPct}%`} ctx`;
-    puts.push({ x: tx, y: ty + 1, attr: done ? { dim: true } : { color: "green" }, text: clip(status, textW) });
+    puts.push({ x: tx, y: ty + 1, attr: a.status === "quiet" ? { color: "yellow" } : done ? { dim: true } : { color: "green" }, text: clip(status, textW) });
     puts.push({ x: tx, y: ty + 2, attr: { dim: true }, text: clip(a.model ?? "model unknown", textW) });
     if (a.description)
       puts.push({ x: tx, y: ty + 3, attr: { dim: true }, text: clip(a.description, textW) });
@@ -55027,8 +56209,8 @@ function composeCards(view, width, maxHeight, tick) {
 }
 
 // packages/tui/dist/lock.js
-import { mkdirSync as mkdirSync8, readFileSync as readFileSync15, rmSync as rmSync5, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname7 } from "node:path";
+import { mkdirSync as mkdirSync9, readFileSync as readFileSync16, rmSync as rmSync5, writeFileSync as writeFileSync8 } from "node:fs";
+import { dirname as dirname8 } from "node:path";
 function pidIsAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0)
     return false;
@@ -55041,7 +56223,7 @@ function pidIsAlive(pid) {
 }
 function procStartTime(pid) {
   try {
-    const stat = readFileSync15(`/proc/${pid}/stat`, "utf8");
+    const stat = readFileSync16(`/proc/${pid}/stat`, "utf8");
     const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
     return fields[19] ?? null;
   } catch {
@@ -55054,12 +56236,12 @@ function ownerStillHolds(storedToken, currentToken) {
   return storedToken === currentToken;
 }
 function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = procStartTime) {
-  mkdirSync8(dirname7(lockPath2), { recursive: true });
+  mkdirSync9(dirname8(lockPath2), { recursive: true });
   const token = startTimeOf(pid);
   const content = token ? `${pid} ${token}` : String(pid);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      writeFileSync7(lockPath2, content, { flag: "wx" });
+      writeFileSync8(lockPath2, content, { flag: "wx" });
       return null;
     } catch (e) {
       if (e.code !== "EEXIST")
@@ -55067,7 +56249,7 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = proc
     }
     let parts;
     try {
-      parts = readFileSync15(lockPath2, "utf8").trim().split(/\s+/);
+      parts = readFileSync16(lockPath2, "utf8").trim().split(/\s+/);
     } catch {
       continue;
     }
@@ -55078,19 +56260,19 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = proc
     if (isAlive(owner2) && ownerStillHolds(parts[1], startTimeOf(owner2)))
       return owner2;
     try {
-      const cur = readFileSync15(lockPath2, "utf8").trim().split(/\s+/)[0];
+      const cur = readFileSync16(lockPath2, "utf8").trim().split(/\s+/)[0];
       if (cur === ownerRaw)
         rmSync5(lockPath2, { force: true });
     } catch {
     }
   }
   try {
-    const owner2 = Number(readFileSync15(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    const owner2 = Number(readFileSync16(lockPath2, "utf8").trim().split(/\s+/)[0]);
     if (owner2 !== pid && isAlive(owner2))
       return owner2;
   } catch {
     try {
-      writeFileSync7(lockPath2, content, { flag: "wx" });
+      writeFileSync8(lockPath2, content, { flag: "wx" });
     } catch {
     }
   }
@@ -55098,7 +56280,7 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = proc
 }
 function releaseTuiLock(lockPath2, pid) {
   try {
-    const owner2 = Number(readFileSync15(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    const owner2 = Number(readFileSync16(lockPath2, "utf8").trim().split(/\s+/)[0]);
     if (owner2 === pid)
       rmSync5(lockPath2, { force: true });
   } catch {
@@ -55124,51 +56306,93 @@ if (smoke) {
   console.error(`sterling-tui smoke: terminal stack loaded (${term.width}x${term.height})`);
   process.exit(0);
 }
-var lockPath = join19(dirname8(storePath), "transient", "tui.lock");
+var theme;
+try {
+  theme = themeFor(detectThemeLevel(process.env, term.support ?? {}));
+} catch (err) {
+  console.error(`sterling-tui: ${err.message}`);
+  process.exit(2);
+}
+var lockPath = join20(dirname9(storePath), "transient", "tui.lock");
 var owner = acquireTuiLock(lockPath, process.pid);
 if (owner !== null) {
   console.error(`sterling-tui: already running (pid ${owner}) for this store \u2014 exiting politely (\xA711)`);
   process.exit(0);
 }
-var ctl = openDashboard(storePath);
+var profileEnv = process.env.STERLING_TUI_PROFILE;
+var profilePath = !profileEnv ? void 0 : profileEnv === "1" ? join20(dirname9(storePath), "transient", "tui-profile.log") : profileEnv;
+var github = createGithubPoller({ root: dirname9(dirname9(storePath)) });
+var ctl = openDashboard(storePath, { deferWrites: true, profile: profilePath !== void 0, onGithubRefresh: () => github.refresh() });
+if (profilePath) {
+  mkdirSync10(dirname9(profilePath), { recursive: true });
+  appendFileSync(profilePath, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), start: true, pid: process.pid, changeDetection: ctl.stats().changeDetection }) + "\n");
+}
+function profiled(kind, work, extra = () => ({})) {
+  if (!profilePath)
+    return work();
+  const s0 = ctl.stats();
+  const t0 = performance.now();
+  const out = work();
+  const ms = Math.round((performance.now() - t0) * 100) / 100;
+  const s1 = ctl.stats();
+  appendFileSync(profilePath, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), kind, ms, builds: s1.builds - s0.builds, storeCalls: s1.storeCalls - s0.storeCalls, ...extra() }) + "\n");
+  return out;
+}
 var showBanner = process.env.STERLING_NO_BANNER !== "1";
 var screen = new termkit.default.ScreenBuffer({ dst: term });
-var subagents = createSubagentTracker(dirname8(dirname8(storePath)));
+var subagents = createSubagentTracker(dirname9(dirname9(storePath)));
 var shownView = { availability: "absent", active: 0, agents: [] };
 var bodyTop = 0;
 function fullBodyLines() {
-  return visibleBodyLines(term.height, bannerLines(term.width, showBanner).length);
+  return visibleBodyLines(term.height, bannerLines(term.width, showBanner, term.height).length, githubStripRows(github.snapshot()));
 }
 function subagentBlock(tick) {
   if (ctl.ui().tab !== AGENTS_TAB)
     return { height: 0, puts: [], pixels: [] };
-  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2, tick);
+  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2 - githubStripRows(github.snapshot()), tick, { neonEdge: theme.level !== "plain" });
 }
 function viewport() {
-  return { width: term.width, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active } };
+  return { width: term.width, height: term.height, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active, quiet: shownView.quiet ?? 0 }, github: github.snapshot() };
 }
 var painted;
 var pixelLayout = "";
 var forceFull = true;
 var animation;
-var trueColor = /^(truecolor|24bits?)$/.test(process.env.COLORTERM ?? "") || process.env.TERM_PROGRAM === "tmux" || term.support?.trueColor === true;
+var trueColor = theme.level === "truecolor";
+var bannerKey = "";
+var bannerPx = [];
+function updateBannerPixels(state) {
+  const key = theme.bannerOverlay && state.banner.length > 0 ? `${term.width}|${state.banner.length}|${state.projectName}` : "";
+  if (key === bannerKey)
+    return;
+  bannerKey = key;
+  bannerPx = key ? scenePixels(term.width, state.banner.length + 1, state.projectName) : [];
+}
 function layoutKey(block) {
-  return `${term.width}x${term.height}|` + block.pixels.map((p) => `${p.x},${p.y}`).join(";");
+  return `${term.width}x${term.height}|${bannerKey}|` + block.pixels.map((p) => `${p.x},${p.y}`).join(";");
 }
 function screenPixels(block) {
-  return block.pixels.map((p) => ({ ...p, y: p.y + bodyTop }));
+  return [...bannerPx, ...block.pixels.map((p) => ({ ...p, y: p.y + bodyTop }))];
 }
 function animate() {
   const block = subagentBlock(Math.floor(Date.now() / ANIMATION_MS));
   if (layoutKey(block) !== pixelLayout)
     return;
-  painted = paintPixels(term, screenPixels(block), painted, trueColor);
+  painted = paintPixels(term, screenPixels(block), painted, trueColor, theme.blankSgr);
 }
-function redraw() {
+var drawnState;
+var drawnView = "";
+function redraw(onlyIfChanged = false) {
   const now = Date.now();
   shownView = subagents.view(now);
   const state = ctl.state(viewport());
+  const viewKey = ctl.ui().tab === AGENTS_TAB ? JSON.stringify(shownView) : String(shownView.active);
+  if (onlyIfChanged && !forceFull && state === drawnState && viewKey === drawnView)
+    return false;
+  drawnState = state;
+  drawnView = viewKey;
   bodyTop = state.bodyTop;
+  updateBannerPixels(state);
   const block = subagentBlock(Math.floor(now / ANIMATION_MS));
   const key = layoutKey(block);
   const full = forceFull || key !== pixelLayout;
@@ -55176,9 +56400,9 @@ function redraw() {
   forceFull = false;
   const pixels = screenPixels(block);
   if (full && painted)
-    clearPixels(term, painted, pixels);
-  draw(screen, state, { block });
-  painted = paintPixels(term, pixels, full ? void 0 : painted, trueColor);
+    clearPixels(term, painted, pixels, theme.blankSgr);
+  draw(screen, state, { block, theme });
+  painted = paintPixels(term, pixels, full ? void 0 : painted, trueColor, theme.blankSgr);
   const running = shownView.active > 0 && block.pixels.length > 0;
   if (running && !animation)
     animation = setInterval(animate, ANIMATION_MS);
@@ -55186,21 +56410,51 @@ function redraw() {
     clearInterval(animation);
     animation = void 0;
   }
+  return true;
+}
+var queue = Promise.resolve();
+function serial(job) {
+  queue = queue.then(job);
 }
 async function handle(event2) {
   if (!event2)
     return;
+  const s0 = profilePath ? ctl.stats() : void 0;
+  const t0 = performance.now();
   if (await ctl.handle(event2, viewport())) {
-    restoreTerminal();
-    process.exit(0);
+    if (ctl.requestQuit())
+      shutdown(0);
+    redraw();
+    return;
   }
-  redraw();
+  const t1 = performance.now();
+  profiled(`event:${event2.kind}`, () => redraw(), () => ({
+    handleMs: Math.round((t1 - t0) * 100) / 100,
+    builds: ctl.stats().builds - s0.builds,
+    storeCalls: ctl.stats().storeCalls - s0.storeCalls
+  }));
+  scheduleFlush();
+}
+var flushScheduled = false;
+function scheduleFlush() {
+  if (flushScheduled)
+    return;
+  flushScheduled = true;
+  setImmediate(() => serial(() => {
+    flushScheduled = false;
+    if (profiled("flush", () => ctl.flush()))
+      redraw();
+  }));
 }
 var terminalRestored = false;
 function restoreTerminal() {
   if (terminalRestored)
     return;
   terminalRestored = true;
+  try {
+    github.close();
+  } catch {
+  }
   try {
     term.grabInput(false);
   } catch {
@@ -55222,27 +56476,48 @@ function restoreTerminal() {
   } catch {
   }
 }
-process.on("uncaughtException", (err) => {
+var shuttingDown = false;
+function shutdown(code, message) {
+  let unsaved;
+  if (!shuttingDown) {
+    shuttingDown = true;
+    try {
+      if (ctl.flush() || ctl.pending() > 0)
+        unsaved = ctl.ui().notice ?? `${ctl.pending()} write(s) still queued`;
+    } catch (err) {
+      unsaved = err?.message ?? String(err);
+    }
+  }
   restoreTerminal();
-  console.error(`sterling-tui: fatal \u2014 ${err?.stack ?? err}`);
-  process.exit(1);
-});
-process.on("unhandledRejection", (err) => {
-  restoreTerminal();
-  console.error(`sterling-tui: fatal (unhandled rejection) \u2014 ${err?.stack ?? err}`);
-  process.exit(1);
-});
+  if (message)
+    console.error(message);
+  if (unsaved)
+    console.error(`sterling-tui: store writes not saved at exit \u2014 ${unsaved}`);
+  process.exit(code);
+}
+process.on("uncaughtException", (err) => shutdown(1, `sterling-tui: fatal \u2014 ${err?.stack ?? err}`));
+process.on("unhandledRejection", (err) => shutdown(1, `sterling-tui: fatal (unhandled rejection) \u2014 ${err?.stack ?? err}`));
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) {
+  process.on(signal, () => shutdown(code, `sterling-tui: ${signal} \u2014 exiting`));
+}
+process.on("exit", () => github.close());
 term.fullscreen(true);
 term.hideCursor();
 term.grabInput({ mouse: "button" });
-term.on("key", (name) => void handle(keyToEvent(name)));
-term.on("mouse", (name, data) => void handle(mouseToEvent(name, data)));
-term.on("resize", () => {
+term.on("key", (name) => serial(() => handle(keyToEvent(name))));
+term.on("mouse", (name, data) => serial(() => handle(mouseToEvent(name, data))));
+term.on("resize", () => serial(() => {
   screen = new termkit.default.ScreenBuffer({ dst: term });
   forceFull = true;
   redraw();
-});
-setInterval(redraw, 1e3);
+}));
+setInterval(() => serial(() => {
+  github.tick(Date.now());
+  profiled("tick", () => redraw(true));
+  if (ctl.pending() > 0)
+    scheduleFlush();
+}), 1e3);
+github.tick(Date.now());
 redraw();
 /*! Bundled license information:
 

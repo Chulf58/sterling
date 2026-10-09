@@ -3,14 +3,14 @@
 // Every test runs against a temp HOME and temp git projects, with OpenCode stubbed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, cpSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, copyFileSync, cpSync, symlinkSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   setupOpenCode, formatOpenCodeRows, opencodeConfigDir, mcpLauncherPath, STERLING_AGENTS_SUBDIR, CONDUCTOR_AGENT,
-  swapFullAgentModel, opencodeModelRef, sterlingRootFrom, storeWriteTools, materializeTui,
+  swapFullAgentModel, opencodeModelRef, opencodeModelFor, writeFullAgentFiles, stageFullAgentModel, sterlingRootFrom, storeWriteTools, materializeTui,
 } from '../lib/opencode-install.mjs';
 import { renderPortableText } from '../lib/agent-fences.mjs';
 
@@ -45,6 +45,14 @@ function project(mode, parent = tmpdir(), handoff) {
 
 function run(dir, home, extra = {}) {
   return setupOpenCode({ projectDir: dir, pluginRoot: repoRoot, env: { HOME: home }, home, installed: false, probe: OC2, ...extra });
+}
+
+/** A child-process env that owns every input the Sterling lookup reads: HOME is the temp one, and the real cache and config roots are dropped. */
+function isolatedEnv(home) {
+  const env = { ...process.env, HOME: home };
+  delete env.CLAUDE_CONFIG_DIR;
+  delete env.XDG_CACHE_HOME;
+  return env;
 }
 
 const fwdPath = (p) => p.replaceAll('\\', '/');
@@ -694,8 +702,9 @@ test('Sterling-full roster: conductor primary, Sterling lines kept, permissions 
   const read = (n) => readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8');
   assert.match(read('conductor'), /^---\ndescription: .+\nmode: primary\n---\n<!-- sterling-full /);
   assert.match(read('conductor'), /dispatch those names/);
-  // The implementor's only permissions are the store-write denies its Claude disallowedTools carry.
-  assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\npermission:\n( {2}sterling_\w+: deny\n)+---\n/);
+  // The implementor's only permissions are the store-write denies its Claude disallowedTools carry;
+  // its model is the config.models default the System tab shows (the fixture config has no models).
+  assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\nmodel: anthropic\/claude-sonnet-5-5\npermission:\n( {2}sterling_\w+: deny\n)+---\n/);
   assert.match(read('researcher'), /\npermission:\n {2}edit: deny\n/);
   assert.match(read('scout'), /\n {2}bash: deny\n/);
   // Sterling-only lines survive: the full body is longer than the portable render of the same template.
@@ -719,23 +728,102 @@ test('Sterling-full roster: a local edit or a foreign file is refused, never ove
   assert.equal(readFileSync(join(dir, STERLING_AGENTS_SUBDIR, 'scout.md'), 'utf8'), 'my scout\n');
 });
 
-test('model swap: the swapped roster agent is re-rendered with the matching OpenCode model; the rest carry none', () => {
+test('model swap: the swapped roster agent is re-rendered with the matching OpenCode model; the rest keep theirs', () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
   run(dir, home);
   const read = (n) => readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8');
-  assert.doesNotMatch(read('implementor'), /^model:/m, 'a fresh install pins no model');
+  assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5'], 'a fresh install pins the config.models default');
   const r = swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor', 'librarian'], model: 'claude-opus-5-5' });
   assert.equal(statusOf(r, '/implementor.md'), 'refreshed');
   assert.equal(statusOf(r, '/conductor.md'), 'matches');
   assert.match(read('implementor'), /^---\ndescription: .+\nmode: subagent\nmodel: anthropic\/claude-opus-5-5\n/);
-  for (const n of ['conductor', 'researcher', 'scout']) assert.doesNotMatch(read(n), /^model:/m, n);
-  // A later sync keeps the pin: the installed file is valid Sterling output, so it is matched, not reverted.
+  assert.doesNotMatch(read('conductor'), /^model:/m, 'conductor');
+  for (const n of ['researcher', 'scout']) assert.deepEqual(read(n).match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5'], n);
+  // A later sync keeps the pin once config.models says the same, as the System tab writes it before the swap.
+  writeConfig(dir, { implementor: { model: 'claude-opus-5-5', effort: 'high' }, librarian: { model: 'claude-opus-5-5', effort: 'low' } });
   assert.equal(statusOf(run(dir, home), '/implementor.md'), 'matches');
   assert.match(read('implementor'), /^model: anthropic\/claude-opus-5-5$/m);
   // Swapping again replaces the pin rather than adding a second line.
   swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5' });
   assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5']);
+});
+
+test('model swap: a role with an OpenCode override pins openai/<id>; a role without one pins anthropic/<id>', () => {
+  // decision opencode-only-model-override-per-role-for-openai-picks
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const read = (n) => readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8');
+  const swapped = swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-5.6-terra' });
+  // the rows are the public shape only: the staged path/content/previous stay internal
+  for (const row of swapped.rows) assert.deepEqual(Object.keys(row).filter((k) => ['path', 'content', 'previous'].includes(k)), [], row.item);
+  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['reviewer'], model: 'claude-opus-5-5' });
+  assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: openai/gpt-5.6-terra']);
+  assert.deepEqual(read('reviewer').match(/^model: .*$/gm), ['model: anthropic/claude-opus-5-5']);
+  // A later sync keeps the override pin once config.models carries it, as the System tab writes it.
+  writeConfig(dir, { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' } });
+  assert.equal(statusOf(run(dir, home), '/implementor.md'), 'matches');
+  // Clearing the override (no opencodeModel) goes back to the role's Claude model.
+  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5' });
+  assert.deepEqual(read('implementor').match(/^model: .*$/gm), ['model: anthropic/claude-sonnet-5-5']);
+  // A malformed override is refused before any file is written.
+  const before = read('implementor');
+  assert.throws(() => swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-sonnet-5-5', opencodeModel: 'gpt-5.6-terra\nhooks: x' }), /opencode_model/);
+  assert.equal(read('implementor'), before);
+});
+
+test('writeFullAgentFiles: a write that fails part-way leaves the target intact and restores the files already written', () => {
+  const dir = tmp('oc-atomic-');
+  const a = join(dir, 'a.md');
+  const b = join(dir, 'b.md');
+  writeFileSync(a, 'old a\n');
+  writeFileSync(b, 'old b\n');
+  const writes = [
+    { path: a, content: 'new a\n', previous: 'old a\n' },
+    { path: b, content: 'new b, long enough to be cut short\n', previous: 'old b\n' },
+    { path: join(dir, 'c.md'), content: 'new c\n', previous: null },
+  ];
+  // the write of b stops after a few bytes, as a full disk would
+  let calls = 0;
+  const writeFile = (p, c) => {
+    calls += 1;
+    if (calls === 2) { writeFileSync(p, c.slice(0, 5)); throw new Error('ENOSPC: no space left'); }
+    writeFileSync(p, c);
+  };
+  assert.throws(() => writeFullAgentFiles(writes, { writeFile }), /ENOSPC/);
+  assert.equal(readFileSync(b, 'utf8'), 'old b\n', 'the file whose write failed is untouched');
+  assert.equal(readFileSync(a, 'utf8'), 'old a\n', 'the file already written is restored');
+  assert.deepEqual(readdirSync(dir).sort(), ['a.md', 'b.md'], 'no temp file left and c.md never created');
+  // a clean run replaces each file whole and creates the new one
+  writeFullAgentFiles(writes);
+  assert.deepEqual(readdirSync(dir).sort().map((n) => readFileSync(join(dir, n), 'utf8')), ['new a\n', 'new b, long enough to be cut short\n', 'new c\n']);
+});
+
+test('stageFullAgentModel keeps the raw bytes as previous: a CRLF agent is restored byte-identical after a failed write', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  run(dir, home);
+  const impl = join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md');
+  const crlf = readFileSync(impl, 'utf8').replace(/\n/g, '\r\n');
+  writeFileSync(impl, crlf);
+  const staged = stageFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor', 'reviewer'], model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-5.6-terra' });
+  assert.equal(statusOf(staged, '/implementor.md'), 'refreshed', 'a CRLF Sterling file is not mistaken for a hand edit');
+  assert.equal(staged.writes.find((w) => w.path === impl).previous, crlf);
+  let calls = 0;
+  const writeFile = (p, c) => { calls += 1; if (calls === 2) throw new Error('ENOSPC: no space left'); writeFileSync(p, c); };
+  assert.throws(() => writeFullAgentFiles(staged.writes, { writeFile }), /ENOSPC/);
+  assert.equal(readFileSync(impl, 'utf8'), crlf, 'the CRLF file is back byte for byte');
+});
+
+test('opencodeModelFor: the override when set, else anthropic/<Claude model>', () => {
+  assert.equal(opencodeModelFor({ model: 'claude-sonnet-5-5' }), 'anthropic/claude-sonnet-5-5');
+  assert.equal(opencodeModelFor({ model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-6.1-sol' }), 'openai/gpt-6.1-sol');
+  assert.equal(opencodeModelFor({ model: 'claude-sonnet-5-5', opencodeModel: 'openai/gpt-6-astra' }), 'openai/gpt-6-astra');
+  for (const bad of ['gpt-6-astra', 'openai/', '', 'openai/gpt 6', 42]) {
+    assert.throws(() => opencodeModelFor({ model: 'claude-sonnet-5-5', opencodeModel: bad }), /opencode_model/, JSON.stringify(bad));
+  }
+  assert.throws(() => opencodeModelFor({}), /model/);
 });
 
 test('model swap: a hand-edited Sterling-full file is refused and left byte-identical', () => {
@@ -755,6 +843,180 @@ test('model swap: a project without the Sterling-full OpenCode set is skipped an
   const r = swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['implementor'], model: 'claude-opus-5-5' });
   assert.match(r.skipped, /no Sterling-full OpenCode agents/);
   assert.equal(existsSync(join(dir, '.opencode')), false);
+});
+
+// ---------- install and update pin each role from config.models -----------
+// (user-ruled 2026-10-09: install and /sterling:update write each role's model into the OpenCode agents)
+
+function writeConfig(dir, models) {
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby', ...(models === undefined ? {} : { models }) }));
+}
+const pinsOf = (dir) => Object.fromEntries(['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'librarian']
+  .map((n) => [n, readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8').match(/^model: (\S+)$/gm)?.join('|') ?? null]));
+const agentFiles = (dir) => Object.fromEntries(readdirSync(join(dir, STERLING_AGENTS_SUBDIR)).sort().map((n) => [n, readFileSync(join(dir, STERLING_AGENTS_SUBDIR, n), 'utf8')]));
+const configRow = (r) => r.rows.find((x) => x.item === '.sterling/config.json models');
+const ALL_ROLES = {
+  implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' },
+  researcher: { model: 'claude-sonnet-5-5', effort: 'medium' },
+  scout: { model: 'claude-haiku-4-5', effort: 'low' },
+  librarian: { model: 'claude-sonnet-5-5', effort: 'low' },
+  reviewer: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' },
+};
+
+test('install: every governed role pins its config.models model (the override when set), the conductor none, .claude/agents untouched', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  writeConfig(dir, ALL_ROLES);
+  mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
+  writeFileSync(join(dir, '.claude', 'agents', 'implementor.md'), 'claude agent\n');
+  const r = run(dir, home);
+  assert.equal(configRow(r), undefined, 'a valid config adds no row');
+  assert.deepEqual(pinsOf(dir), {
+    conductor: null,
+    implementor: 'model: openai/gpt-5.6-terra',
+    researcher: 'model: anthropic/claude-sonnet-5-5',
+    scout: 'model: anthropic/claude-haiku-4-5',
+    reviewer: 'model: openai/gpt-6.1-sol',
+    librarian: 'model: anthropic/claude-sonnet-5-5',
+  });
+  assert.match(readFileSync(join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md'), 'utf8'), /^---\ndescription: .+\nmode: subagent\nmodel: openai\/gpt-5\.6-terra\n/);
+  assert.deepEqual(readdirSync(join(dir, '.claude', 'agents')), ['implementor.md']);
+  assert.equal(readFileSync(join(dir, '.claude', 'agents', 'implementor.md'), 'utf8'), 'claude agent\n');
+  // a second run with the same config changes nothing
+  const again = run(dir, home);
+  for (const n of ['conductor', 'implementor', 'reviewer']) assert.equal(statusOf(again, `/${n}.md`), 'matches', n);
+});
+
+test('update: a changed config.models is re-applied, a cleared override goes back to anthropic/<model>', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  writeConfig(dir, ALL_ROLES);
+  run(dir, home);
+  writeConfig(dir, {
+    ...ALL_ROLES,
+    implementor: { model: 'claude-opus-5-5', effort: 'high' },
+    scout: { model: 'claude-haiku-4-5', effort: 'low', opencode_model: 'openai/gpt-5.6-terra' },
+    reviewer: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' },
+  });
+  const r = run(dir, home);
+  assert.equal(statusOf(r, '/implementor.md'), 'refreshed');
+  assert.equal(statusOf(r, '/scout.md'), 'refreshed');
+  assert.equal(statusOf(r, '/reviewer.md'), 'matches', 'only the Claude model changed, and the override still wins');
+  assert.equal(statusOf(r, '/researcher.md'), 'matches');
+  assert.deepEqual(pinsOf(dir), {
+    conductor: null,
+    implementor: 'model: anthropic/claude-opus-5-5',
+    researcher: 'model: anthropic/claude-sonnet-5-5',
+    scout: 'model: openai/gpt-5.6-terra',
+    reviewer: 'model: openai/gpt-6.1-sol',
+    librarian: 'model: anthropic/claude-sonnet-5-5',
+  });
+});
+
+test('a role config.json does not write pins the default the System tab shows; the conductor has no config entry and keeps the pin it has', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  writeConfig(dir, { reviewer: { model: 'claude-haiku-4-5', effort: 'high' } });
+  run(dir, home);
+  // the defaults are the config schema's (packages/schemas/src/config.ts, models)
+  assert.deepEqual(pinsOf(dir), {
+    conductor: null,
+    implementor: 'model: anthropic/claude-sonnet-5-5',
+    researcher: 'model: anthropic/claude-sonnet-5-5',
+    scout: 'model: anthropic/claude-sonnet-5-5',
+    reviewer: 'model: anthropic/claude-haiku-4-5',
+    // the librarian's schema default moved to claude-haiku-5-5 (haiku-5-5-classifiers)
+    librarian: 'model: anthropic/claude-haiku-5-5',
+  });
+  // a literal models.undefined entry is schema-valid (any agent name is a key) and must not reach the conductor
+  writeConfig(dir, { reviewer: { model: 'claude-haiku-4-5', effort: 'high' }, undefined: { model: 'claude-haiku-4-5', effort: 'low' } });
+  assert.equal(configRow(run(dir, home)), undefined, 'the config validates');
+  assert.equal(pinsOf(dir).conductor, null, 'models.undefined does not pin the conductor');
+  swapFullAgentModel({ projectDir: dir, pluginRoot: repoRoot, agents: ['conductor', 'scout'], model: 'claude-opus-5-5' });
+  const r = run(dir, home);
+  assert.equal(statusOf(r, '/conductor.md'), 'matches', 'no config entry: the pin on disk is kept');
+  assert.equal(pinsOf(dir).conductor, 'model: anthropic/claude-opus-5-5');
+  assert.equal(statusOf(r, '/scout.md'), 'refreshed', 'config.models is the authority for a governed role');
+  assert.equal(pinsOf(dir).scout, 'model: anthropic/claude-sonnet-5-5');
+});
+
+test('a hand-edited agent is refused and left byte-identical when config.models changes; the other roles are still applied', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  writeConfig(dir, ALL_ROLES);
+  run(dir, home);
+  const p = join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md');
+  writeFileSync(p, readFileSync(p, 'utf8') + '\nmine\n');
+  const before = readFileSync(p, 'utf8');
+  writeConfig(dir, { ...ALL_ROLES, implementor: { model: 'claude-opus-5-5', effort: 'high' }, researcher: { model: 'claude-opus-5-5', effort: 'medium' } });
+  const r = run(dir, home);
+  assert.equal(statusOf(r, '/implementor.md'), 'refused');
+  assert.equal(readFileSync(p, 'utf8'), before);
+  assert.equal(statusOf(r, '/researcher.md'), 'refreshed');
+  assert.equal(pinsOf(dir).researcher, 'model: anthropic/claude-opus-5-5');
+});
+
+test('a missing, unreadable or invalid config.json is refused loudly and every pin stays as it is', () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  writeConfig(dir, ALL_ROLES);
+  run(dir, home);
+  const before = agentFiles(dir);
+  const cfg = join(dir, '.sterling', 'config.json');
+  const cases = [
+    ['missing', () => rmSync(cfg), /config\.json does not exist/],
+    ['not JSON', () => writeFileSync(cfg, '{ "mode": '), /config\.json could not be read/],
+    ['a directory', () => mkdirSync(cfg), /config\.json could not be read/],
+    ['fails the schema', () => writeConfig(dir, { ...ALL_ROLES, implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'gpt-5.6-terra' } }), /config\.json does not validate/],
+    // a model with a newline would add its own frontmatter line to the agent file
+    ['a model with a newline', () => writeConfig(dir, { ...ALL_ROLES, scout: { model: 'claude-sonnet-5-5\nhooks: x', effort: 'low' } }), /config\.json does not validate .*Claude model id/],
+  ];
+  for (const [label, breakIt, why] of cases) {
+    breakIt();
+    const r = run(dir, home);
+    const row = configRow(r);
+    assert.equal(row?.status, 'refused', label);
+    assert.equal(row.refused, true, label);
+    assert.match(row.detail, why, label);
+    assert.match(row.instruction, /^REFUSED: .*no OpenCode agent file was written/, label);
+    assert.ok(formatOpenCodeRows(r).some((l) => l.startsWith('OpenCode refused: .sterling/config.json models')), label);
+    assert.deepEqual(agentFiles(dir), before, `${label}: no agent file changed`);
+    assert.ok(r.rows.filter((x) => x.item.startsWith(`${STERLING_AGENTS_SUBDIR}/`)).every((x) => x.status === 'matches'), `${label}: every agent is reported as it is`);
+    rmSync(cfg, { recursive: true, force: true });
+  }
+  // a project without a config.json gets no agent file at all, and no default_agent
+  const fresh = project('hobby');
+  rmSync(join(fresh, '.sterling', 'config.json'));
+  const r = run(fresh, home);
+  assert.equal(configRow(r)?.status, 'refused');
+  assert.equal(existsSync(join(fresh, STERLING_AGENTS_SUBDIR)), false);
+  assert.equal(statusOf(r, '/conductor.md'), 'skipped');
+  assert.equal(JSON.parse(readFileSync(join(fresh, '.opencode', 'opencode.json'), 'utf8')).default_agent, undefined);
+});
+
+test('install and update write the agents atomically: a write that cannot start changes no agent and leaves no temp file', { skip: process.getuid?.() === 0 && 'root ignores directory permissions' }, () => {
+  const home = tmp('oc-home-');
+  const dir = project('hobby');
+  writeConfig(dir, ALL_ROLES);
+  run(dir, home);
+  const before = agentFiles(dir);
+  writeConfig(dir, { ...ALL_ROLES, implementor: { model: 'claude-opus-5-5', effort: 'high' }, librarian: { model: 'claude-opus-5-5', effort: 'low' } });
+  // a directory that takes no new file: an in-place write would still succeed, a temp file and rename cannot
+  const agentsDir = join(dir, STERLING_AGENTS_SUBDIR);
+  chmodSync(agentsDir, 0o555);
+  try {
+    assert.throws(() => run(dir, home), /EACCES/);
+  } finally {
+    chmodSync(agentsDir, 0o755);
+  }
+  assert.deepEqual(agentFiles(dir), before);
+});
+
+test('opencodeModelRef refuses a model with a newline or YAML syntax; the config schema refuses it when written', async () => {
+  for (const bad of ['claude-sonnet-5-5\nhooks: x', 'claude sonnet', 'a: b', '']) assert.throws(() => opencodeModelRef(bad), /Claude model id/, JSON.stringify(bad));
+  const { parseConfig } = await import('@sterling/schemas');
+  assert.throws(() => parseConfig({ models: { scout: { model: 'claude-sonnet-5-5\nhooks: x', effort: 'low' } } }), /Claude model id/);
+  assert.equal(parseConfig({ models: { scout: { model: 'claude-opus-4-6[1m]', effort: 'low' } } }).models.scout.model, 'claude-opus-4-6[1m]');
 });
 
 test('opencodeModelRef maps a Claude model id to the anthropic provider; sterlingRootFrom finds the plugin root', () => {
@@ -796,7 +1058,7 @@ test('server and TUI shims delegate to the resolved Sterling; non-Sterling proje
   const plain = tui.setup({ location: { directory: tmp('oc-plain-') } });
   assert.equal(typeof plain, 'function', 'a no-op disposer');
   assert.equal(tui.setup({ location: { directory: dir } }), `clone:${dir}`);
-  const mcp = spawnSync(process.execPath, [mcpLauncherPath({ home }), '--store', '.sterling/sterling.db'], { encoding: 'utf8' });
+  const mcp = spawnSync(process.execPath, [mcpLauncherPath({ home }), '--store', '.sterling/sterling.db'], { encoding: 'utf8', env: isolatedEnv(home) });
   assert.equal(mcp.stdout.trim(), 'clone ["--store",".sterling/sterling.db"]');
 });
 
@@ -808,8 +1070,7 @@ test('no Sterling installed: the TUI shim imports cleanly and its setup logs ONE
   const plugins = join(opencodeConfigDir({ env: {}, home }), 'plugins');
   const tuiCopy = join(tmp('oc-tui-'), 'tui.mjs');
   copyFileSync(join(plugins, 'sterling-tui', 'tui.tsx'), tuiCopy);
-  const env = { ...process.env, HOME: home };
-  delete env.CLAUDE_CONFIG_DIR;
+  const env = isolatedEnv(home);
   const probe = (shim, label) => spawnSync(process.execPath, ['--input-type=module', '-e', `
     const p = (await import(${JSON.stringify(pathToFileURL(shim).href)})).default;
     const r = await p.setup({ location: { directory: ${JSON.stringify(dir)} } });
@@ -872,9 +1133,7 @@ test('installed-copy shims pick the highest installed version at run time, acros
   stubInstalledCopy(join(cache, 'sterling', '0.10.0'), '0.10.0');
   const dir = project('hobby');
   setupOpenCode({ projectDir: dir, pluginRoot: repoRoot, env: { HOME: home }, home, installed: true, probe: OC2 });
-  const env = { ...process.env, HOME: home };
-  delete env.CLAUDE_CONFIG_DIR;
-  delete env.XDG_CACHE_HOME;
+  const env = isolatedEnv(home);
   const runMcp = () => spawnSync(process.execPath, [mcpLauncherPath({ home }), '--store', 's.db'], { encoding: 'utf8', env });
   assert.equal(runMcp().stdout.trim(), 'v0.10.0 ["--store","s.db"]');
   stubInstalledCopy(join(npm, '1759500000000', 'node_modules', '@chulf58', 'sterling'), '0.11.0', 'package.json');

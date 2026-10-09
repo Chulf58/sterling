@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -8,11 +8,13 @@ import {
   contextPercent,
   contextWindowFor,
   createSubagentTracker,
+  endsOnHandback,
   formatElapsed,
   formatIdle,
   readContextUsage,
   readSubagents,
   subagentTranscriptPath,
+  TRANSCRIPT_ALIVE_MS,
   type SubagentView,
 } from '../subagents.js';
 import { QUADRANTS, SPRITE_ROWS, TILE_BG, TILE_COLS } from '../avatars/index.js';
@@ -102,17 +104,27 @@ test('register: a live row from another session is listed and counted as foreign
   }
 });
 
-test('register: a residue-stamped row from another session counts as ended, so it is not listed and not foreign-live; the foreign count is 0 when every live row is in the current session', () => {
+test('register: a residue-stamped row from another session whose transcript ends on the handback is not listed and not foreign-live; a quiet one is listed and counted foreign; the foreign count is 0 when every listed row is in the current session', () => {
   const root = project();
   try {
     writeSession(root, 's2');
+    const home = claudeHome(root, 's1', 'a1', HANDBACK_TRANSCRIPT);
     writeRegister(root, [
       row('a1', 'implementor', 600_000, { residue_reported_at: iso(30_000) }),
       row('a2', 'scout', 60_000, { session_id: 's2' }),
     ]);
-    const src = readSubagents(root, NOW);
+    const src = readSubagents(root, NOW, undefined, home);
     assert.deepEqual(src.rows.map((r) => r.agentId), ['a2']);
     assert.equal(src.foreignLive, 0);
+    // a3 in s1 has no transcript to say it ended: quiet, so it stays listed and is counted with the foreign rows
+    writeRegister(root, [
+      row('a1', 'implementor', 600_000, { residue_reported_at: iso(30_000) }),
+      row('a2', 'scout', 60_000, { session_id: 's2' }),
+      row('a3', 'implementor', 600_000, { residue_reported_at: iso(30_000) }),
+    ]);
+    const withQuiet = readSubagents(root, NOW, undefined, home);
+    assert.deepEqual(withQuiet.rows.map((r) => [r.agentId, r.status]), [['a2', 'running'], ['a3', 'quiet']]);
+    assert.equal(withQuiet.foreignLive, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -140,17 +152,19 @@ test('register: without a readable session.json the old rule holds: running rows
   }
 });
 
-test('register: a row H10 stamped residue_reported_at is ended at that stamp, never running, never resumable: done for the linger window, then dropped, even in the current session', () => {
+test('register: a row H10 stamped residue_reported_at whose transcript ends on the handback is ended at that stamp, never running, never resumable: done for the linger window, then dropped, even in the current session', () => {
   const root = project();
   try {
     writeSession(root, 's1');
+    const home = claudeHome(root, 's1', 'a1', HANDBACK_TRANSCRIPT);
+    claudeHome(root, 's1', 'a2', HANDBACK_TRANSCRIPT);
     writeRegister(root, [
       row('a1', 'implementor', 600_000, { residue_reported_at: iso(30_000) }),
       row('a2', 'implementor', 600_000, { residue_reported_at: iso(3_000_000) }),
       row('a3', 'implementor', 20_000),
       row('a4', 'reviewer', 600_000, { ended: { at: iso(100_000), event: 'subagent-stop' }, residue_reported_at: iso(20_000) }),
     ]);
-    const src = readSubagents(root, NOW);
+    const src = readSubagents(root, NOW, undefined, home);
     assert.deepEqual(src.rows.map((r) => [r.agentId, r.status]), [['a3', 'running'], ['a1', 'done'], ['a4', 'resumable']], 'a 30 s old residue row is done, a 3,000 s old one is not listed, a real ended stays resumable');
     const a1 = src.rows.find((r) => r.agentId === 'a1')!;
     assert.equal(a1.endedAt, NOW - 30_000);
@@ -158,9 +172,121 @@ test('register: a row H10 stamped residue_reported_at is ended at that stamp, ne
     assert.equal(src.rows.find((r) => r.agentId === 'a4')!.endedAt, NOW - 100_000, 'a real ended wins over the residue stamp');
     // only residue-stamped rows: nothing is active, so the animation timer (active > 0) stays off
     writeRegister(root, [row('a1', 'implementor', 600_000, { residue_reported_at: iso(30_000) })]);
-    const v = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: join(root, 'none') }).view(NOW);
+    const v = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: home }).view(NOW);
     assert.equal(v.active, 0);
     assert.equal(v.agents[0]!.status, 'done');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** Write the subagent's transcript under a claude home and set its mtime to msBefore NOW. */
+function transcriptAged(root: string, sessionId: string, agentId: string, msBefore: number): string {
+  const home = claudeHome(root, sessionId, agentId, [transcriptLine('user')]);
+  const file = join(home, 'projects', root.replace(/[^A-Za-z0-9]/g, '-'), sessionId, 'subagents', `agent-${agentId}.jsonl`);
+  utimesSync(file, (NOW - msBefore) / 1000, (NOW - msBefore) / 1000);
+  return home;
+}
+
+test('register: an H10 residue stamp is unconfirmed, a stamped agent whose transcript was written within TRANSCRIPT_ALIVE_MS is still running and counted, even past the 60 min H10 stamps at', () => {
+  const root = project();
+  try {
+    writeSession(root, 's1');
+    const home = transcriptAged(root, 's1', 'a1', 30_000);
+    writeRegister(root, [row('a1', 'researcher', 2 * 3_600_000, { residue_reported_at: iso(3_600_000) })]);
+    const src = readSubagents(root, NOW, undefined, home);
+    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status, r.endedAt]), [['a1', 'running', null]]);
+    assert.equal(src.rows[0]!.elapsedMs, 2 * 3_600_000);
+    assert.equal(createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: home }).view(NOW).active, 1, 'the tab count includes it');
+    // a stamped live row from another session is listed and counted foreign, like any live row
+    writeSession(root, 's2');
+    const foreign = readSubagents(root, NOW, undefined, home);
+    assert.equal(foreign.rows.length, 1);
+    assert.equal(foreign.foreignLive, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('register: a stamped agent whose transcript is stale or missing is quiet, not ended at the stamp, and a real ended is never revived by a fresh transcript', () => {
+  const root = project();
+  try {
+    writeSession(root, 's1');
+    const home = transcriptAged(root, 's1', 'a1', TRANSCRIPT_ALIVE_MS + 1_000);
+    transcriptAged(root, 's1', 'a3', 1_000);
+    writeRegister(root, [
+      row('a1', 'researcher', 7_200_000, { residue_reported_at: iso(30_000) }),
+      row('a2', 'researcher', 7_200_000, { residue_reported_at: iso(30_000) }),
+      row('a3', 'researcher', 7_200_000, { ended: { at: iso(100_000), event: 'subagent-stop' }, residue_reported_at: iso(20_000) }),
+    ]);
+    const src = readSubagents(root, NOW, undefined, home);
+    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status]), [['a1', 'quiet'], ['a2', 'quiet'], ['a3', 'resumable']], 'a1: stale transcript, a2: no transcript, a3: a real ended wins over a fresh transcript');
+    assert.equal(src.rows[0]!.endedAt, null, 'a stamp without an end marker is not the end');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('register (#34 regression): a live agent silent past TRANSCRIPT_ALIVE_MS inside one long tool call is listed and counted under quiet, not under running, never dropped as done, and counted running again once it writes', () => {
+  const root = project();
+  try {
+    writeSession(root, 's1');
+    // the last entry is the tool call it is still waiting on; nothing has been written for 11 minutes
+    const home = claudeHome(root, 's1', 'a1', [transcriptLine('user'), TOOL_USE_LINE]);
+    const file = join(home, 'projects', root.replace(/[^A-Za-z0-9]/g, '-'), 's1', 'subagents', 'agent-a1.jsonl');
+    utimesSync(file, (NOW - TRANSCRIPT_ALIVE_MS - 60_000) / 1000, (NOW - TRANSCRIPT_ALIVE_MS - 60_000) / 1000);
+    // stamped 50 min ago: as an ended row it would be past the 5 min linger and gone
+    writeRegister(root, [row('a1', 'researcher', 2 * 3_600_000, { residue_reported_at: iso(3_000_000) })]);
+    const src = readSubagents(root, NOW, undefined, home);
+    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status, r.endedAt]), [['a1', 'quiet', null]]);
+    assert.equal(src.rows[0]!.elapsedMs, 2 * 3_600_000, 'a quiet row keeps counting its run time');
+    const v = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: home }).view(NOW);
+    assert.deepEqual([v.active, v.quiet], [0, 1], 'counted under quiet, not under running: the live agent is not hidden from the count');
+    assert.deepEqual(v.agents.map((a) => [a.agentId, a.status, a.idleMs]), [['a1', 'quiet', null]], 'and not shown as done');
+    // the tool call returns and the transcript is written again
+    utimesSync(file, (NOW - 1_000) / 1000, (NOW - 1_000) / 1000);
+    const again = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: home }).view(NOW);
+    assert.deepEqual([again.active, again.quiet], [1, 0]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('register (#34 regression): an agent that finished without a stop event is done once its transcript ends on the handback, though the transcript is still fresh', () => {
+  const root = project();
+  try {
+    writeSession(root, 's1');
+    const home = claudeHome(root, 's1', 'a1', HANDBACK_TRANSCRIPT);
+    const file = join(home, 'projects', root.replace(/[^A-Za-z0-9]/g, '-'), 's1', 'subagents', 'agent-a1.jsonl');
+    utimesSync(file, (NOW - 30_000) / 1000, (NOW - 30_000) / 1000);
+    writeRegister(root, [row('a1', 'researcher', 2 * 3_600_000, { residue_reported_at: iso(20_000) })]);
+    const src = readSubagents(root, NOW, undefined, home);
+    assert.deepEqual(src.rows.map((r) => [r.agentId, r.status, r.endedAt]), [['a1', 'done', NOW - 20_000]]);
+    assert.equal(createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: home }).view(NOW).active, 0, 'not counted as running');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('transcript end marker: the last user or assistant entry decides, hook attachments after it do not, and a truncated first tail line is skipped', () => {
+  const root = project();
+  try {
+    const at = (lines: string[]) => {
+      const home = claudeHome(root, 's1', 'a1', lines);
+      return join(home, 'projects', root.replace(/[^A-Za-z0-9]/g, '-'), 's1', 'subagents', 'agent-a1.jsonl');
+    };
+    assert.equal(endsOnHandback(at(HANDBACK_TRANSCRIPT)), true, 'handback result, then a SubagentStop hook attachment');
+    assert.equal(endsOnHandback(at([...HANDBACK_TRANSCRIPT, transcriptLine('user')])), false, 'a resumed round wrote a new prompt after the marker');
+    assert.equal(endsOnHandback(at([transcriptLine('user'), TOOL_USE_LINE])), false, 'waiting on a tool call');
+    assert.equal(endsOnHandback(at([transcriptLine('user'), transcriptLine('assistant')])), false, 'a plain reply carries no marker');
+    // a line longer than the tail window: the window starts inside it, so that part does not parse
+    assert.equal(endsOnHandback(at([JSON.stringify({ type: 'user', message: { content: 'x'.repeat(70_000) } }), ...HANDBACK_TRANSCRIPT])), true);
+    // a hook attachment longer than the 64 KiB first window after the marker: the window holds no whole entry, so the 1 MiB tail is read
+    const bigAttachment = JSON.stringify({ type: 'attachment', attachment: { type: 'hook_success', hookEvent: 'SubagentStop', content: 'y'.repeat(200_000) } });
+    assert.equal(endsOnHandback(at([...HANDBACK_TRANSCRIPT, bigAttachment])), true, 'an oversized attachment after the handback does not hide it');
+    assert.equal(endsOnHandback(at([transcriptLine('user'), TOOL_USE_LINE, bigAttachment])), false, 'nor invents one');
+    assert.equal(endsOnHandback(at([])), false, 'an empty transcript');
+    assert.equal(endsOnHandback(join(root, 'no-such-file.jsonl')), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -257,7 +383,7 @@ function view(agents: SubagentView['agents'], availability: SubagentView['availa
   return { availability, active: agents.filter((a) => a.status === 'running').length, agents };
 }
 
-const AGENT = (agentId: string, avatar: number, status: 'running' | 'done' | 'resumable' = 'running') => ({
+const AGENT = (agentId: string, avatar: number, status: SubagentView['agents'][number]['status'] = 'running') => ({
   agentId, avatar, type: 'implementor', description: 'Build the reader', model: 'claude-sonnet-5-5' as string | null, status, elapsedMs: 65_000, contextPct: 42 as number | null,
   idleMs: null as number | null, contextTokens: null as number | null,
 });
@@ -376,6 +502,16 @@ test('block: a done card is dimmed, a running one is not; the same portrait is f
   assert.ok(done.pixels.every((p) => /^#[0-9a-f]{6}$/.test(p.bg ?? '')), 'faded colours stay valid hex');
 });
 
+test('block: a quiet card says quiet in yellow, rests faded like a done one, and is not counted as running', () => {
+  const v = view([AGENT('a1', 5, 'quiet')]);
+  assert.equal(v.active, 0);
+  const b = composeSubagentBlock(v, 160, 30, 0);
+  const status = b.puts.find((p) => p.y === 1)!;
+  assert.deepEqual([status.text, status.attr], ['quiet · 42% ctx', { color: 'yellow' }]);
+  assert.ok(!b.puts.some((p) => p.attr.color === 'green'));
+  assert.deepEqual(b.pixels, composeSubagentBlock(view([AGENT('a1', 5, 'done')]), 160, 30, 0).pixels, 'the portrait is the faded done portrait');
+});
+
 const RESUMABLE = (agentId: string, avatar: number, idleMs: number | null, contextTokens: number | null, contextPct: number | null = 39) => ({
   ...AGENT(agentId, avatar, 'resumable'), idleMs, contextTokens, contextPct,
 });
@@ -488,6 +624,18 @@ function transcriptLine(type: string, usage?: Record<string, number>, model = 'c
   return JSON.stringify(usage ? { type, message: { model, usage } } : { type, message: { content: 'x' } });
 }
 
+/** An assistant entry calling a tool (the shape Claude Code writes, cut down to the fields that matter). */
+const TOOL_USE_LINE = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_b', name: 'Bash', input: {} }], stop_reason: null } });
+
+/** How a subagent's transcript ends when it hands back: the SubagentHandback call, its
+ *  tool_result carrying toolEndsTurn: true, then a SubagentStop hook attachment. */
+const HANDBACK_TRANSCRIPT = [
+  transcriptLine('user'),
+  JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_h', name: 'SubagentHandback', input: { message: 'complete' } }], stop_reason: null } }),
+  JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_h', content: 'Report delivered to your caller.' }] }, toolEndsTurn: true }),
+  JSON.stringify({ type: 'attachment', attachment: { type: 'hook_success', hookEvent: 'SubagentStop' } }),
+];
+
 function claudeHome(root: string, sessionId: string, agentId: string, lines: string[], slug = root.replace(/[^A-Za-z0-9]/g, '-')): string {
   const home = join(root, 'claude-home');
   const dir = join(home, 'projects', slug, sessionId, 'subagents');
@@ -598,10 +746,13 @@ test('tracker: a resumable row with no dispatch-state record is read once, not o
   }
 });
 
-test('register: rows come out in one order whatever the register order: running by start, then done and resumable together by end, newest first', () => {
+test('register: rows come out in one order whatever the register order: running by start, then quiet by start, then done and resumable together by end, newest first', () => {
   const root = project();
   try {
     writeSession(root, 's1');
+    // d1 and d2 handed back; q1 and q2 have no transcript, so they are quiet
+    const home = claudeHome(root, 's1', 'd1', HANDBACK_TRANSCRIPT);
+    claudeHome(root, 's1', 'd2', HANDBACK_TRANSCRIPT);
     const rows = [
       row('r1', 'implementor', 50_000),
       row('r2', 'implementor', 90_000),
@@ -609,11 +760,13 @@ test('register: rows come out in one order whatever the register order: running 
       row('u1', 'reviewer', 600_000, { ended: { at: iso(100_000), event: 'subagent-stop' } }),
       row('u2', 'reviewer', 600_000, { ended: { at: iso(10_000), event: 'subagent-stop' } }),
       row('d2', 'scout', 600_000, { residue_reported_at: iso(200_000) }),
+      row('q1', 'scout', 4_000_000, { residue_reported_at: iso(30_000) }),
+      row('q2', 'scout', 5_000_000, { residue_reported_at: iso(30_000) }),
     ];
-    const expected = ['r2', 'r1', 'u2', 'd1', 'u1', 'd2'];
-    for (const order of [rows, [...rows].reverse(), [rows[3]!, rows[5]!, rows[0]!, rows[2]!, rows[4]!, rows[1]!]]) {
+    const expected = ['r2', 'r1', 'q2', 'q1', 'u2', 'd1', 'u1', 'd2'];
+    for (const order of [rows, [...rows].reverse(), [rows[6]!, rows[3]!, rows[5]!, rows[0]!, rows[7]!, rows[2]!, rows[4]!, rows[1]!]]) {
       writeRegister(root, order);
-      assert.deepEqual(readSubagents(root, NOW).rows.map((r) => r.agentId), expected);
+      assert.deepEqual(readSubagents(root, NOW, undefined, home).rows.map((r) => r.agentId), expected);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -655,7 +808,7 @@ test('tracker: a resumable agent carries its idle time and the tokens its transc
       row('a4', 'scout', 600_000, { session_id: 'older', ended: { at: iso(60_000), event: 'subagent-stop' } }),
     ]);
     const v = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: home }).view(NOW);
-    assert.equal(v.active, 1, 'active counts running agents only; it is the number in "Agents (N)"');
+    assert.equal(v.active, 1, 'active counts running agents only; it is the running number in "Agents (N running · M quiet)"');
     assert.deepEqual(v.agents.map((a) => [a.agentId, a.status]), [['a3', 'running'], ['a2', 'resumable'], ['a1', 'resumable']], 'running first, then resumable newest ended first; the other session is absent');
     const a2 = v.agents[1]!;
     assert.equal(a2.idleMs, 720_000);
@@ -714,7 +867,7 @@ test('block: live agents from another session add one dim line saying the sessio
   const b = composeSubagentBlock({ ...view(agents), foreignLive: 1 }, 160, 30, 0);
   assert.equal(b.height, plain.height + 1);
   const line = b.puts.find((p) => /another session/.test(p.text))!;
-  assert.equal(line.text, 'session.json names another session; live agents from the other one are listed');
+  assert.equal(line.text, 'session.json names another session; running and quiet agents from the other one are listed');
   assert.deepEqual([line.x, line.y, line.attr.dim], [0, plain.height, true]);
   assert.equal(composeSubagentBlock({ ...view(agents), foreignLive: 1 }, 160, plain.height, 0).height, plain.height, 'no room: the cards win');
   const none = composeSubagentBlock({ ...view(agents), foreignLive: 1 }, 0, 30, 0);

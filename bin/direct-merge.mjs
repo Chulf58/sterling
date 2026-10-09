@@ -5039,7 +5039,7 @@ function normalizeRawConfig(raw) {
 function parseConfig(raw) {
   return configSchema.parse(normalizeRawConfig(raw));
 }
-var effortLevel, modelPin, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -5049,10 +5049,13 @@ var init_config = __esm({
       model: external_exports.string(),
       effort: effortLevel.optional()
     }).strict();
+    OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+    CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
     agentModelEntry = external_exports.object({
-      model: external_exports.string(),
+      model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
       effort: effortLevel,
-      hard_task: modelPin.optional()
+      hard_task: modelPin.optional(),
+      opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
     }).strict();
     vendorPins = external_exports.object({
       openai: modelPin.optional(),
@@ -5215,11 +5218,11 @@ var init_config = __esm({
         implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
         researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
         scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-        classifiers: agentModelEntry.default({ model: "claude-haiku-4-5", effort: "low" }),
+        classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
         // librarian is mechanical clerking — cheap model, low effort (P8). The
         // roster is classless (decision agent-roster-is-classless-four-agents), and
         // the debugger role it rejected has no key here.
-        librarian: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
+        librarian: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
         // reviewer judges a diff (decision
         // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
         // dispatch pins its model explicitly; this is the install-time default.
@@ -11402,6 +11405,49 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 init_dist();
 var IGNORE_KEEP_IDENTITY = `!${PROJECT_IDENTITY_REL}`;
 
+// scripts/lib/launcher-tmux.mjs
+var INSTALLED_PATHS = [
+  "# installed copy: nothing below names a versioned install directory; the newest",
+  "# installed Sterling (Claude Code or OpenCode) is resolved when this runs",
+  'RESOLVER_NODE="${NODE_BIN:-$(command -v node || true)}"',
+  '[ -n "$RESOLVER_NODE" ] || RESOLVER_NODE="$(ls -d "$HOME"/.local/node-v*-linux-x64/bin/node 2>/dev/null | head -1)"',
+  'TUI_BUNDLE=""',
+  `[ -z "$RESOLVER_NODE" ] || TUI_BUNDLE="$("$RESOLVER_NODE" --input-type=module <<'STERLING_RESOLVER'`,
+  RESOLVER_IMPORTS,
+  RESOLVER_SOURCE.trim(),
+  "const found = newestInstalledSterling();",
+  "if (found) process.stdout.write(join(found.root, 'tui', 'sterling-tui.mjs'));",
+  "else console.error('sterling-launch: ' + sterlingNotFoundMessage('claude-code'));",
+  "STERLING_RESOLVER",
+  ')"'
+].join("\n");
+
+// scripts/lib/launcher-history.mjs
+var LAUNCHER_TEMPLATES = ["launcher-tmux.sh", "launcher-win.bat", "tui-win.bat"];
+var RETIRED_LAUNCHER_TEMPLATES = ["launcher-win-native.bat"];
+var ALL_TEMPLATES = [...LAUNCHER_TEMPLATES, ...RETIRED_LAUNCHER_TEMPLATES];
+
+// scripts/lib/launchers.mjs
+var ENGINE_NAME = "sterling-launch.sh";
+var OPENERS = {
+  windows: [
+    { file: "claude-code.bat", mode: "claude", tool: "claude", app: "Claude Code" },
+    { file: "opencode.bat", mode: "opencode", tool: "opencode", app: "OpenCode" }
+  ],
+  linux: [
+    { file: "claude-code.sh", mode: "claude", tool: "claude", app: "Claude Code" },
+    { file: "opencode.sh", mode: "opencode", tool: "opencode", app: "OpenCode" }
+  ]
+};
+var LAUNCHER_GITIGNORE_ENTRIES = [
+  "sterling.bat",
+  "sterling-windows.bat",
+  "tui.bat",
+  ENGINE_NAME,
+  ...OPENERS.windows.map((o) => o.file),
+  ...OPENERS.linux.map((o) => o.file)
+];
+
 // scripts/lib/update.mjs
 var STEP_TIMEOUT_MS = 9e5;
 function defaultExec(cmd, args, { cwd, timeout = STEP_TIMEOUT_MS } = {}) {
@@ -11981,6 +12027,11 @@ function parseOriginRepo(url) {
   if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(host) || !seg.test(owner) || !seg.test(name) || [owner, name].some((part) => part === "." || part === "..")) return null;
   return { host, repo: `${host}/${owner}/${name}` };
 }
+function noOriginRemote(cwd) {
+  const r = spawnSync7("git", ["remote"], { cwd, encoding: "utf8", timeout: 3e4 });
+  return r.status === 0 && !r.stdout.split("\n").map((l) => l.trim()).includes("origin");
+}
+var NO_ORIGIN_LOCAL_MERGE_NOTICE = "direct-merge: WORK mode, but this repository has no 'origin' remote \u2014 merging LOCALLY like hobby mode. NO pull request was opened and NO Copilot review happened; nothing was pushed.";
 function workPreflight(cwd) {
   const url = spawnSync7("git", ["remote", "get-url", "origin"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (url.status !== 0) {
@@ -12088,7 +12139,7 @@ function pushWithWindowsRetry(cwd, pushArgs, log) {
   }
   return push;
 }
-function installWorkResult() {
+function installWorkResult({ localFallback = false } = {}) {
   const state = { stage: "start", branch: null, pushed: false, pr_url: null, pr_number: null, created: false };
   const stderr = console.error.bind(console);
   let lastError = null;
@@ -12112,7 +12163,8 @@ function installWorkResult() {
     pushed: state.pushed,
     pr_url: state.pr_url,
     pr_number: state.pr_number,
-    created: state.created
+    created: state.created,
+    ...localFallback ? { work_mode_local_fallback: true } : {}
   });
   process.on("exit", (code) => {
     write(result(false, lastError ?? `exited with code ${code} during stage '${state.stage}' without a result`, code));
@@ -12134,6 +12186,13 @@ function installWorkResult() {
       state.stage = "done";
       write(result(true, null, 0));
       process.exit(0);
+    },
+    /** The local-merge fallback's exit: the envelope plus the merge's own report
+     * (merged_into, branch_merged, branches_swept, …), ok only on exit 0. */
+    finishLocal(report, code = 0) {
+      if (code === 0) state.stage = "done";
+      write({ ...result(code === 0, code === 0 ? null : lastError ?? `exited with code ${code} during stage '${state.stage}'`, code), ...report });
+      process.exit(code);
     }
   };
 }
@@ -12475,7 +12534,15 @@ try {
 } catch (e) {
   modeError = e;
 }
-var work = mode === "work" ? installWorkResult() : null;
+var noOriginFallback = mode === "work" && isGitRepo(target) && noOriginRemote(target);
+var shipsPr = mode === "work" && !noOriginFallback;
+if (noOriginFallback) console.error(NO_ORIGIN_LOCAL_MERGE_NOTICE);
+var work = mode === "work" ? installWorkResult({ localFallback: noOriginFallback }) : null;
+function emit(report, code = 0) {
+  if (work) work.finishLocal(report, code);
+  console.log(JSON.stringify(report, null, 2));
+  if (code) process.exit(code);
+}
 var stage = (name) => {
   if (work) work.state.stage = name;
 };
@@ -12503,7 +12570,7 @@ Run it from a checkout of the project.`,
     );
   }
 }
-if (linkedWorktree && !modeError && mode !== "work") {
+if (linkedWorktree && !modeError && !shipsPr) {
   const head = spawnSync8("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
   const wtBranch = head.status === 0 && head.stdout.trim() ? head.stdout.trim() : "<branch>";
   fail2(
@@ -12520,7 +12587,7 @@ stage("open-project");
 openProject(storeRoot).store.close();
 if (modeError) fail2(`direct-merge: ${modeError?.message ?? modeError} \u2014 refusing; nothing was run.`, 2);
 var workRepo;
-if (mode === "work") {
+if (shipsPr) {
   stage("work-preflight");
   if (process.argv.includes("--no-push")) {
     fail2(
@@ -12566,7 +12633,7 @@ check 'git log --oneline -3 ${into}' before merging anything again. A gate that 
 non-zero after a SUCCESSFUL merge (stale bundles / failed sweep) says so on its first line.`
   );
 }
-if (mode === "work") {
+if (shipsPr) {
   const notBranch = localBranchRefusal(target, branch);
   if (notBranch) fail2(notBranch, 2);
 }
@@ -12846,7 +12913,7 @@ var attestationDisclosure = (() => {
   }
 })();
 for (const line of attestationDisclosure) console.error(line);
-if (work) {
+if (shipsPr) {
   const shipped = shipAsPr({ cwd: target, repo: workRepo, branch, base: into, mergeBase, branchTip, state: work.state, log: (m) => console.error(m) });
   if (shipped) work.fail(shipped.error, shipped.exitCode);
   try {
@@ -12905,8 +12972,7 @@ try {
       `Sweep merged branches manually when convenient: git branch --merged ${into}`
     ].join("\n")
   );
-  console.log(JSON.stringify({ ...merged, branches_swept: null, sweep_failed: true }, null, 2));
-  process.exit(1);
+  emit({ ...merged, branches_swept: null, sweep_failed: true }, 1);
 }
 var bundleChecker = join17(target, "scripts", "check-bundles-fresh.mjs");
 if (existsSync8(bundleChecker)) {
@@ -12923,8 +12989,7 @@ if (existsSync8(bundleChecker)) {
         (rebuilt.stdout + rebuilt.stderr).trim()
       ].join("\n")
     );
-    console.log(JSON.stringify({ ...merged, branches_swept: swept, bundles_unverified: true }, null, 2));
-    process.exit(1);
+    emit({ ...merged, branches_swept: swept, bundles_unverified: true }, 1);
   }
   const bundles = spawnSync8(process.execPath, [bundleChecker], { cwd: target, encoding: "utf8", timeout: 3e5 });
   if (bundles.status !== 0) {
@@ -12940,8 +13005,7 @@ if (existsSync8(bundleChecker)) {
         (bundles.stdout + bundles.stderr).trim()
       ].join("\n")
     );
-    console.log(JSON.stringify({ ...merged, branches_swept: swept, bundles_stale: true }, null, 2));
-    process.exit(1);
+    emit({ ...merged, branches_swept: swept, bundles_stale: true }, 1);
   }
 }
 var parkedClosed = 0;
@@ -12965,7 +13029,9 @@ try {
   console.error(`direct-merge: the merge succeeded; the parked-file sweep did not run (${e?.message ?? e}). Harmless \u2014 /sterling:drain will close them.`);
 }
 var pushed = false;
-if (process.argv.includes("--no-push")) {
+if (noOriginFallback) {
+  console.error("direct-merge: no 'origin' remote at start \u2014 push skipped (loud).");
+} else if (process.argv.includes("--no-push")) {
   console.error("direct-merge: push to origin SKIPPED (--no-push) \u2014 consumers cannot see this merge until you push.");
 } else {
   const remotes = spawnSync8("git", ["remote"], { cwd: target, encoding: "utf8", timeout: 3e4 });
@@ -12988,8 +13054,7 @@ if (process.argv.includes("--no-push")) {
           (push.stderr || push.stdout || String(push.error?.message ?? "")).trim()
         ].join("\n")
       );
-      console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed: false, opencode_release: "skipped" }, null, 2));
-      process.exit(1);
+      emit({ ...merged, branches_swept: swept, pushed: false, opencode_release: "skipped" }, 1);
     }
   }
 }
@@ -13001,5 +13066,5 @@ if (mergedHead.status === 0) {
   console.error(`direct-merge: opencode release SKIPPED: could not resolve ${into} after the merge (${mergedHead.stderr.trim()}).`);
   opencodeRelease = { status: "skipped" };
 }
-console.log(JSON.stringify({ ...merged, branches_swept: swept, pushed, opencode_release: opencodeRelease.status, ...parkedClosed ? { parked_items_closed: parkedClosed } : {} }, null, 2));
-if (opencodeRelease.status === "failed") process.exit(1);
+if (noOriginFallback) console.error(NO_ORIGIN_LOCAL_MERGE_NOTICE);
+emit({ ...merged, branches_swept: swept, pushed, opencode_release: opencodeRelease.status, ...parkedClosed ? { parked_items_closed: parkedClosed } : {} }, opencodeRelease.status === "failed" ? 1 : 0);
