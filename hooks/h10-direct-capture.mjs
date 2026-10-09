@@ -12337,12 +12337,24 @@ import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
 var SERVER = "sterling";
-var OPENCODE_ALLOWED_TOOLS = ["execute", "mcp", "read", "grep", ...["maintenance_query", "knowledge_get", "maintenance_remove", "knowledge_line_ref_fix"].map((v) => `${SERVER}_${v}`)];
+var OPENCODE_ALLOWED_TOOLS = [
+  "execute",
+  "mcp",
+  "read",
+  "grep",
+  "webfetch",
+  "websearch",
+  ...["maintenance_query", "knowledge_get", "maintenance_remove", "knowledge_line_ref_fix", "knowledge_update", "knowledge_edit", "knowledge_append", "knowledge_array_remove", "knowledge_query", "knowledge_schema"].map((v) => `${SERVER}_${v}`)
+];
 
 // scripts/hooks/lib/maintenance-worker.mjs
-var WORKER_RUN_BUDGET_USD = 2;
+var WORKER_RUN_BUDGET_USD = 5;
+var WORKER_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+var RUN_BATCH_MAX = 12;
 var BATCH_MIN_ITEMS = 5;
 var BATCH_MAX_WAIT_MS = 30 * 6e4;
+var POLICY_VERSION = 1;
+var WORKER_CAPABILITY = "factual_refresh_v1";
 var DEBOUNCE_MS = 2 * 6e4;
 var BACKOFF_MS = 30 * 6e4;
 var WORKER_TIMEOUT_MS = 20 * 6e4;
@@ -12354,9 +12366,21 @@ var WORKER_DISABLE_ENV = "STERLING_MAINTENANCE_WORKER_DISABLE";
 var SERVER2 = "sterling";
 var mcp = (name) => `mcp__${SERVER2}__${name}`;
 var mcpPlugin = (name) => `mcp__plugin_sterling_sterling__${name}`;
-var WORKER_TOOLS = [mcp("maintenance_query"), mcp("knowledge_get"), mcp("maintenance_remove"), mcp("knowledge_line_ref_fix"), mcpPlugin("knowledge_line_ref_fix"), "Read", "Grep"];
+var WRITE_GRANT = ["knowledge_update", "knowledge_edit", "knowledge_append", "knowledge_array_remove"];
+var WORKER_TOOLS = [
+  mcp("maintenance_query"),
+  mcp("knowledge_get"),
+  mcp("maintenance_remove"),
+  mcp("knowledge_line_ref_fix"),
+  mcpPlugin("knowledge_line_ref_fix"),
+  ...[...WRITE_GRANT, "knowledge_query", "knowledge_schema"].flatMap((t) => [mcp(t), mcpPlugin(t)]),
+  "Read",
+  "Grep",
+  "WebSearch",
+  "WebFetch"
+];
 var WORKER_DISALLOWED_TOOLS = [
-  ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => mcp(`knowledge_${v}`)),
+  ...["create", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => mcp(`knowledge_${v}`)),
   ...["add", "remove", "update", "edit"].map((v) => mcp(`board_${v}`)),
   mcp("config_set"),
   mcp("domain_describe"),
@@ -12364,6 +12388,7 @@ var WORKER_DISALLOWED_TOOLS = [
   "Edit",
   "Bash"
 ];
+var KNOWLEDGE_WRITE_TOOLS = [...WRITE_GRANT, "knowledge_line_ref_fix", "knowledge_create", "knowledge_retire", "knowledge_supersede", "knowledge_split", "knowledge_extract", "knowledge_promote", "knowledge_link"];
 var WORKER_HOSTS = ["claude", "opencode"];
 var OPENCODE_MODEL_KEY = "opencode_model";
 var opencodeModelOf = (config) => config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
@@ -12404,10 +12429,10 @@ function rotateIfLarge(path, limit = ROTATE_BYTES) {
   }
 }
 var sortedKeys = (keys) => JSON.stringify([...keys ?? []].map(String).sort());
-function judgedVerdicts(root) {
+function journalLines(root, files = null) {
   const { journal } = workerPaths(root);
-  const map = /* @__PURE__ */ new Map();
-  for (const path of [`${journal}.1`, journal]) {
+  const out = [];
+  for (const path of files ?? [`${journal}.1`, journal]) {
     let text;
     try {
       text = readFileSync12(path, "utf8");
@@ -12417,32 +12442,56 @@ function judgedVerdicts(root) {
     }
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
-      let v;
       try {
-        v = JSON.parse(line);
+        out.push(JSON.parse(line));
       } catch {
-        continue;
       }
-      if (!v?.item_id || v.kind !== "verdict") continue;
-      if ((v.verdict === "owes_prose" || v.verdict === "refused") && v.evidence === true && Array.isArray(v.file_keys)) {
-        map.set(v.item_id, { verdict: v.verdict, keys: sortedKeys(v.file_keys), head: v.head ?? null });
-      } else if (v.verdict === "closed") map.delete(v.item_id);
     }
+  }
+  return out;
+}
+function judgedVerdicts(root) {
+  const map = /* @__PURE__ */ new Map();
+  for (const v of journalLines(root)) {
+    if (!v?.item_id || v.kind !== "verdict") continue;
+    const handoff = v.verdict === "needs_conductor" && v.capability === WORKER_CAPABILITY;
+    if ((handoff || v.verdict === "refused") && v.evidence === true && Array.isArray(v.file_keys)) {
+      map.set(v.item_id, {
+        verdict: v.verdict,
+        keys: sortedKeys(v.file_keys),
+        head: v.head ?? null,
+        reason: typeof v.reason === "string" ? v.reason : null,
+        lane: typeof v.lane === "string" ? v.lane : null,
+        capability: v.capability ?? null
+      });
+    } else if (v.verdict === "closed") map.delete(v.item_id);
   }
   return map;
 }
 function isJudged(item, verdicts, head) {
   const v = verdicts.get(item.id);
   if (!v || v.keys !== sortedKeys(item.file_keys)) return false;
-  return v.verdict === "owes_prose" || v.verdict === "refused" && Boolean(head) && v.head === head;
+  return v.verdict === "needs_conductor" || v.verdict === "refused" && Boolean(head) && v.head === head;
 }
 function articleSlug(item) {
-  return /^reconcile article '([^']+)'/.exec(String(item?.text ?? ""))?.[1] ?? null;
+  return /^(?:reconcile article|re-verify research finding) '([^']+)'/.exec(String(item?.text ?? ""))?.[1] ?? null;
 }
-function openReconcileItems(store2) {
+function openWorkerItems(store2) {
   const total = store2.count({ types: ["todo"], source: "system" });
   if (!total) return [];
-  return store2.query({ types: ["todo"], source: "system", cap: total }).filter((t) => t.system_reason === "reconcile_needed");
+  return store2.query({ types: ["todo"], source: "system", cap: total }).filter((t) => WORKER_LANES.includes(t.system_reason));
+}
+function selectBatch(items, max = RUN_BATCH_MAX) {
+  const age = (t) => {
+    const ms = Date.parse(t.created_at ?? "");
+    return Number.isFinite(ms) ? ms : -Infinity;
+  };
+  const byLane = WORKER_LANES.map((lane) => items.filter((t) => t.system_reason === lane).sort((a, b) => age(a) - age(b)));
+  const out = [];
+  for (let i = 0; out.length < max && byLane.some((q) => i < q.length); i++) {
+    for (const q of byLane) if (i < q.length && out.length < max) out.push(q[i]);
+  }
+  return out;
 }
 function gitState(root, spawnSync7 = nodeSpawnSync) {
   const r = spawnSync7("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
@@ -12519,7 +12568,10 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   }
   return readJson(paths.lock)?.token === token ? token : null;
 }
-function resolveMcpConfig(pluginRoot2, projectRoot2) {
+function resolveMcpConfig(pluginRoot2, projectRoot2, policy = null) {
+  if (policy && (typeof policy.token !== "string" || !policy.token || typeof policy.path !== "string" || !isAbsolute2(policy.path))) {
+    throw new Error(`the worker policy needs an absolute eligible.json path and a non-empty token (got path ${JSON.stringify(policy.path)})`);
+  }
   const path = join17(pluginRoot2, ".claude-plugin", "sterling-mcp.json");
   let parsed;
   try {
@@ -12532,7 +12584,8 @@ function resolveMcpConfig(pluginRoot2, projectRoot2) {
     throw new Error(`${path} has no mcpServers.${SERVER2} {command, args} entry`);
   }
   const bind = (s2) => String(s2).split("${CLAUDE_PLUGIN_ROOT}").join(pluginRoot2).split("${CLAUDE_PROJECT_DIR}").join(projectRoot2);
-  return JSON.stringify({ mcpServers: { [SERVER2]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
+  const policyArgs = policy ? ["--worker-policy", policy.path, "--worker-token", policy.token] : [];
+  return JSON.stringify({ mcpServers: { [SERVER2]: { ...entry, command: bind(entry.command), args: [...entry.args.map(bind), ...policyArgs] } } });
 }
 function readWorkerPrompt(pluginRoot2) {
   const path = join17(pluginRoot2, "templates", "maintenance-worker-prompt.md");
@@ -12559,7 +12612,7 @@ function logLauncherNote(root, reason, detail) {
 `);
 }
 function failDetail(reason) {
-  return `launch FAILED (${reason}) \u2014 reconcile items stay open; it retries after the 30-minute back-off, or drain by hand with /sterling:drain.`;
+  return `launch FAILED (${reason}) \u2014 the worker's items stay open; it retries after the 30-minute back-off, or drain by hand with /sterling:drain.`;
 }
 function maybeLaunchMaintenanceWorker(opts) {
   const result = launchWorker(opts);
@@ -12593,7 +12646,7 @@ function launchWorker(opts) {
     if (env[WORKER_DISABLE_ENV] === "1") return { launched: false, reason: "disabled_env" };
     if (opts.config?.maintenance_worker?.enabled === false) return { launched: false, reason: "disabled" };
     const verdicts = judgedVerdicts(opts.root);
-    const open2 = (opts.items ?? openReconcileItems(opts.store)).filter((t) => !isJudged(t, verdicts, null));
+    const open2 = (opts.items ?? openWorkerItems(opts.store)).filter((t) => WORKER_LANES.includes(t.system_reason) && !isJudged(t, verdicts, null));
     if (open2.length === 0) return { launched: false, reason: "queue_empty" };
     const nowMs = opts.now ?? Date.now();
     const paths = workerPaths(opts.root);
@@ -12612,7 +12665,7 @@ function launchWorker(opts) {
     const git = gitState(opts.root, opts.spawnSync);
     const dirty = git && dirtyPaths(opts.root, [...new Set(open2.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git.prefix);
     if (!dirty) {
-      return { launched: false, reason: "git_failed", detail: `git could not report HEAD or the working-tree state in ${opts.root}, so every reconcile item counts as dirty and no worker starts; drain with /sterling:drain.` };
+      return { launched: false, reason: "git_failed", detail: `git could not report HEAD or the working-tree state in ${opts.root}, so every queue item counts as dirty and no worker starts; drain with /sterling:drain.` };
     }
     const eligible = open2.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
     if (eligible.length === 0) return { launched: false, reason: "none_eligible" };
@@ -12625,7 +12678,7 @@ function launchWorker(opts) {
       return {
         launched: false,
         reason: "batching",
-        detail: `${eligible.length} of ${BATCH_MIN_ITEMS} eligible reconcile items, oldest waited ${ageText(new Date(nowMs - oldestWaitMs).toISOString(), nowMs)} of ${Math.round(BATCH_MAX_WAIT_MS / 6e4)}m \u2014 no worker until ${BATCH_MIN_ITEMS} are eligible or the oldest has waited that long`
+        detail: `${eligible.length} of ${BATCH_MIN_ITEMS} eligible items, oldest waited ${ageText(new Date(nowMs - oldestWaitMs).toISOString(), nowMs)} of ${Math.round(BATCH_MAX_WAIT_MS / 6e4)}m \u2014 no worker until ${BATCH_MIN_ITEMS} are eligible or the oldest has waited that long`
       };
     }
     const host = opts.host ?? "claude";
@@ -12648,7 +12701,20 @@ function launchWorker(opts) {
     if (!token) return { launched: false, reason: "already_running" };
     writeFileSync6(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
     const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
-    writeFileSync6(paths.eligible, JSON.stringify({ token, head: git.head, ...runnerHost, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
+    const batch = selectBatch(eligible);
+    writeFileSync6(
+      paths.eligible,
+      JSON.stringify({
+        token,
+        head: git.head,
+        ...runnerHost,
+        items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })),
+        policy_version: POLICY_VERSION,
+        run_id: randomUUID3(),
+        policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
+        queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? "" }))
+      })
+    );
     let logFd;
     try {
       rotateIfLarge(paths.log);
@@ -12661,7 +12727,7 @@ function launchWorker(opts) {
       child.on?.("error", () => releaseLock(paths, token));
       child.unref?.();
       writeFileSync6(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
-      return { launched: true, reason: "launched", pid: child.pid, items: eligible.length, host };
+      return { launched: true, reason: "launched", pid: child.pid, items: batch.length, eligible: eligible.length, host };
     } catch (e) {
       releaseLock(paths, token);
       return { launched: false, reason: "error", detail: failDetail(`spawn: ${e?.message ?? e}`) };

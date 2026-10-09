@@ -13,7 +13,7 @@ var __export = (target, all) => {
 // node_modules/zod/v3/helpers/util.js
 var util, objectUtil, ZodParsedType, getParsedType;
 var init_util = __esm({
-  "node_modules/zod/v3/helpers/util.js"() {
+  "../../../node_modules/zod/v3/helpers/util.js"() {
     (function(util2) {
       util2.assertEqual = (_) => {
       };
@@ -150,7 +150,7 @@ var init_util = __esm({
 // node_modules/zod/v3/ZodError.js
 var ZodIssueCode, quotelessJson, ZodError;
 var init_ZodError = __esm({
-  "node_modules/zod/v3/ZodError.js"() {
+  "../../../node_modules/zod/v3/ZodError.js"() {
     init_util();
     ZodIssueCode = util.arrayToEnum([
       "invalid_type",
@@ -274,7 +274,7 @@ var init_ZodError = __esm({
 // node_modules/zod/v3/locales/en.js
 var errorMap, en_default;
 var init_en = __esm({
-  "node_modules/zod/v3/locales/en.js"() {
+  "../../../node_modules/zod/v3/locales/en.js"() {
     init_ZodError();
     init_util();
     errorMap = (issue, _ctx) => {
@@ -390,7 +390,7 @@ function getErrorMap() {
 }
 var overrideErrorMap;
 var init_errors = __esm({
-  "node_modules/zod/v3/errors.js"() {
+  "../../../node_modules/zod/v3/errors.js"() {
     init_en();
     overrideErrorMap = en_default;
   }
@@ -418,7 +418,7 @@ function addIssueToContext(ctx, issueData) {
 }
 var makeIssue, EMPTY_PATH, ParseStatus, INVALID, DIRTY, OK, isAborted, isDirty, isValid, isAsync;
 var init_parseUtil = __esm({
-  "node_modules/zod/v3/helpers/parseUtil.js"() {
+  "../../../node_modules/zod/v3/helpers/parseUtil.js"() {
     init_errors();
     init_en();
     makeIssue = (params) => {
@@ -515,14 +515,14 @@ var init_parseUtil = __esm({
 
 // node_modules/zod/v3/helpers/typeAliases.js
 var init_typeAliases = __esm({
-  "node_modules/zod/v3/helpers/typeAliases.js"() {
+  "../../../node_modules/zod/v3/helpers/typeAliases.js"() {
   }
 });
 
 // node_modules/zod/v3/helpers/errorUtil.js
 var errorUtil;
 var init_errorUtil = __esm({
-  "node_modules/zod/v3/helpers/errorUtil.js"() {
+  "../../../node_modules/zod/v3/helpers/errorUtil.js"() {
     (function(errorUtil2) {
       errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
       errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
@@ -724,7 +724,7 @@ function custom(check, _params = {}, fatal) {
 }
 var ParseInputLazyPath, handleResult, ZodType, cuidRegex, cuid2Regex, ulidRegex, uuidRegex, nanoidRegex, jwtRegex, durationRegex, emailRegex, _emojiRegex, emojiRegex, ipv4Regex, ipv4CidrRegex, ipv6Regex, ipv6CidrRegex, base64Regex, base64urlRegex, dateRegexSource, dateRegex, ZodString, ZodNumber, ZodBigInt, ZodBoolean, ZodDate, ZodSymbol, ZodUndefined, ZodNull, ZodAny, ZodUnknown, ZodNever, ZodVoid, ZodArray, ZodObject, ZodUnion, getDiscriminator, ZodDiscriminatedUnion, ZodIntersection, ZodTuple, ZodRecord, ZodMap, ZodSet, ZodFunction, ZodLazy, ZodLiteral, ZodEnum, ZodNativeEnum, ZodPromise, ZodEffects, ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodNaN, BRAND, ZodBranded, ZodPipeline, ZodReadonly, late, ZodFirstPartyTypeKind, instanceOfType, stringType, numberType, nanType, bigIntType, booleanType, dateType, symbolType, undefinedType, nullType, anyType, unknownType, neverType, voidType, arrayType, objectType, strictObjectType, unionType, discriminatedUnionType, intersectionType, tupleType, recordType, mapType, setType, functionType, lazyType, literalType, enumType, nativeEnumType, promiseType, effectsType, optionalType, nullableType, preprocessType, pipelineType, ostring, onumber, oboolean, coerce, NEVER;
 var init_types = __esm({
-  "node_modules/zod/v3/types.js"() {
+  "../../../node_modules/zod/v3/types.js"() {
     init_ZodError();
     init_errors();
     init_errorUtil();
@@ -4098,7 +4098,7 @@ __export(external_exports, {
   void: () => voidType
 });
 var init_external = __esm({
-  "node_modules/zod/v3/external.js"() {
+  "../../../node_modules/zod/v3/external.js"() {
     init_errors();
     init_parseUtil();
     init_typeAliases();
@@ -4110,7 +4110,7 @@ var init_external = __esm({
 
 // node_modules/zod/index.js
 var init_zod = __esm({
-  "node_modules/zod/index.js"() {
+  "../../../node_modules/zod/index.js"() {
     init_external();
     init_external();
   }
@@ -16877,12 +16877,24 @@ import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
 var SERVER = "sterling";
-var OPENCODE_ALLOWED_TOOLS = ["execute", "mcp", "read", "grep", ...["maintenance_query", "knowledge_get", "maintenance_remove", "knowledge_line_ref_fix"].map((v) => `${SERVER}_${v}`)];
+var OPENCODE_ALLOWED_TOOLS = [
+  "execute",
+  "mcp",
+  "read",
+  "grep",
+  "webfetch",
+  "websearch",
+  ...["maintenance_query", "knowledge_get", "maintenance_remove", "knowledge_line_ref_fix", "knowledge_update", "knowledge_edit", "knowledge_append", "knowledge_array_remove", "knowledge_query", "knowledge_schema"].map((v) => `${SERVER}_${v}`)
+];
 
 // scripts/hooks/lib/maintenance-worker.mjs
-var WORKER_RUN_BUDGET_USD = 2;
+var WORKER_RUN_BUDGET_USD = 5;
+var WORKER_LANES = ["reconcile_needed", "state_review", "stale_research", "refresh_reference", "article_missing"];
+var RUN_BATCH_MAX = 12;
 var BATCH_MIN_ITEMS = 5;
 var BATCH_MAX_WAIT_MS = 30 * 6e4;
+var POLICY_VERSION = 1;
+var WORKER_CAPABILITY = "factual_refresh_v1";
 var DEBOUNCE_MS = 2 * 6e4;
 var BACKOFF_MS = 30 * 6e4;
 var WORKER_TIMEOUT_MS = 20 * 6e4;
@@ -16894,9 +16906,21 @@ var WORKER_DISABLE_ENV = "STERLING_MAINTENANCE_WORKER_DISABLE";
 var SERVER2 = "sterling";
 var mcp = (name) => `mcp__${SERVER2}__${name}`;
 var mcpPlugin = (name) => `mcp__plugin_sterling_sterling__${name}`;
-var WORKER_TOOLS = [mcp("maintenance_query"), mcp("knowledge_get"), mcp("maintenance_remove"), mcp("knowledge_line_ref_fix"), mcpPlugin("knowledge_line_ref_fix"), "Read", "Grep"];
+var WRITE_GRANT = ["knowledge_update", "knowledge_edit", "knowledge_append", "knowledge_array_remove"];
+var WORKER_TOOLS = [
+  mcp("maintenance_query"),
+  mcp("knowledge_get"),
+  mcp("maintenance_remove"),
+  mcp("knowledge_line_ref_fix"),
+  mcpPlugin("knowledge_line_ref_fix"),
+  ...[...WRITE_GRANT, "knowledge_query", "knowledge_schema"].flatMap((t) => [mcp(t), mcpPlugin(t)]),
+  "Read",
+  "Grep",
+  "WebSearch",
+  "WebFetch"
+];
 var WORKER_DISALLOWED_TOOLS = [
-  ...["create", "update", "append", "edit", "array_remove", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => mcp(`knowledge_${v}`)),
+  ...["create", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => mcp(`knowledge_${v}`)),
   ...["add", "remove", "update", "edit"].map((v) => mcp(`board_${v}`)),
   mcp("config_set"),
   mcp("domain_describe"),
@@ -16904,6 +16928,7 @@ var WORKER_DISALLOWED_TOOLS = [
   "Edit",
   "Bash"
 ];
+var KNOWLEDGE_WRITE_TOOLS = [...WRITE_GRANT, "knowledge_line_ref_fix", "knowledge_create", "knowledge_retire", "knowledge_supersede", "knowledge_split", "knowledge_extract", "knowledge_promote", "knowledge_link"];
 var WORKER_HOSTS = ["claude", "opencode"];
 var OPENCODE_MODEL_KEY = "opencode_model";
 var opencodeModelOf = (config) => config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
@@ -16944,10 +16969,10 @@ function rotateIfLarge(path, limit = ROTATE_BYTES) {
   }
 }
 var sortedKeys = (keys) => JSON.stringify([...keys ?? []].map(String).sort());
-function judgedVerdicts(root) {
+function journalLines(root, files = null) {
   const { journal } = workerPaths(root);
-  const map = /* @__PURE__ */ new Map();
-  for (const path of [`${journal}.1`, journal]) {
+  const out = [];
+  for (const path of files ?? [`${journal}.1`, journal]) {
     let text;
     try {
       text = readFileSync16(path, "utf8");
@@ -16957,40 +16982,75 @@ function judgedVerdicts(root) {
     }
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
-      let v;
       try {
-        v = JSON.parse(line);
+        out.push(JSON.parse(line));
       } catch {
-        continue;
       }
-      if (!v?.item_id || v.kind !== "verdict") continue;
-      if ((v.verdict === "owes_prose" || v.verdict === "refused") && v.evidence === true && Array.isArray(v.file_keys)) {
-        map.set(v.item_id, { verdict: v.verdict, keys: sortedKeys(v.file_keys), head: v.head ?? null });
-      } else if (v.verdict === "closed") map.delete(v.item_id);
     }
+  }
+  return out;
+}
+function judgedVerdicts(root) {
+  const map = /* @__PURE__ */ new Map();
+  for (const v of journalLines(root)) {
+    if (!v?.item_id || v.kind !== "verdict") continue;
+    const handoff = v.verdict === "needs_conductor" && v.capability === WORKER_CAPABILITY;
+    if ((handoff || v.verdict === "refused") && v.evidence === true && Array.isArray(v.file_keys)) {
+      map.set(v.item_id, {
+        verdict: v.verdict,
+        keys: sortedKeys(v.file_keys),
+        head: v.head ?? null,
+        reason: typeof v.reason === "string" ? v.reason : null,
+        lane: typeof v.lane === "string" ? v.lane : null,
+        capability: v.capability ?? null
+      });
+    } else if (v.verdict === "closed") map.delete(v.item_id);
   }
   return map;
 }
-function owesProseVerdicts(root) {
+function handoffVerdicts(root) {
   const out = /* @__PURE__ */ new Map();
-  for (const [id, v] of judgedVerdicts(root)) if (v.verdict === "owes_prose") out.set(id, v.keys);
+  for (const [id, v] of judgedVerdicts(root)) if (v.verdict === "needs_conductor") out.set(id, { keys: v.keys, reason: v.reason, lane: v.lane });
   return out;
 }
-function isJudgedOwesProse(item, verdicts) {
-  return verdicts.get(item.id) === sortedKeys(item.file_keys);
+function isHandedOff(item, handoffs) {
+  return handoffs.get(item.id)?.keys === sortedKeys(item.file_keys);
+}
+function workerWriteCount(root) {
+  return { count: countWrites(journalLines(root)), path: ".sterling/maintenance-worker.jsonl" };
+}
+function countWrites(lines) {
+  let count = 0;
+  for (const v of lines) {
+    if (v?.kind === "writes_carried" && Number.isFinite(v.count)) count += v.count;
+    else if (v?.kind === "tool_call" && v.is_error === false && KNOWLEDGE_WRITE_TOOLS.includes(v.tool)) count++;
+  }
+  return count;
 }
 function isJudged(item, verdicts, head) {
   const v = verdicts.get(item.id);
   if (!v || v.keys !== sortedKeys(item.file_keys)) return false;
-  return v.verdict === "owes_prose" || v.verdict === "refused" && Boolean(head) && v.head === head;
+  return v.verdict === "needs_conductor" || v.verdict === "refused" && Boolean(head) && v.head === head;
 }
 function articleSlug(item) {
-  return /^reconcile article '([^']+)'/.exec(String(item?.text ?? ""))?.[1] ?? null;
+  return /^(?:reconcile article|re-verify research finding) '([^']+)'/.exec(String(item?.text ?? ""))?.[1] ?? null;
 }
-function openReconcileItems(store) {
+function openWorkerItems(store) {
   const total = store.count({ types: ["todo"], source: "system" });
   if (!total) return [];
-  return store.query({ types: ["todo"], source: "system", cap: total }).filter((t) => t.system_reason === "reconcile_needed");
+  return store.query({ types: ["todo"], source: "system", cap: total }).filter((t) => WORKER_LANES.includes(t.system_reason));
+}
+function selectBatch(items, max = RUN_BATCH_MAX) {
+  const age = (t) => {
+    const ms = Date.parse(t.created_at ?? "");
+    return Number.isFinite(ms) ? ms : -Infinity;
+  };
+  const byLane = WORKER_LANES.map((lane) => items.filter((t) => t.system_reason === lane).sort((a, b) => age(a) - age(b)));
+  const out = [];
+  for (let i = 0; out.length < max && byLane.some((q) => i < q.length); i++) {
+    for (const q of byLane) if (i < q.length && out.length < max) out.push(q[i]);
+  }
+  return out;
 }
 function gitState(root, spawnSync10 = nodeSpawnSync) {
   const r = spawnSync10("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
@@ -17067,7 +17127,10 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   }
   return readJson(paths.lock)?.token === token ? token : null;
 }
-function resolveMcpConfig(pluginRoot, projectRoot2) {
+function resolveMcpConfig(pluginRoot, projectRoot2, policy = null) {
+  if (policy && (typeof policy.token !== "string" || !policy.token || typeof policy.path !== "string" || !isAbsolute5(policy.path))) {
+    throw new Error(`the worker policy needs an absolute eligible.json path and a non-empty token (got path ${JSON.stringify(policy.path)})`);
+  }
   const path = join27(pluginRoot, ".claude-plugin", "sterling-mcp.json");
   let parsed;
   try {
@@ -17080,7 +17143,8 @@ function resolveMcpConfig(pluginRoot, projectRoot2) {
     throw new Error(`${path} has no mcpServers.${SERVER2} {command, args} entry`);
   }
   const bind = (s2) => String(s2).split("${CLAUDE_PLUGIN_ROOT}").join(pluginRoot).split("${CLAUDE_PROJECT_DIR}").join(projectRoot2);
-  return JSON.stringify({ mcpServers: { [SERVER2]: { ...entry, command: bind(entry.command), args: entry.args.map(bind) } } });
+  const policyArgs = policy ? ["--worker-policy", policy.path, "--worker-token", policy.token] : [];
+  return JSON.stringify({ mcpServers: { [SERVER2]: { ...entry, command: bind(entry.command), args: [...entry.args.map(bind), ...policyArgs] } } });
 }
 function readWorkerPrompt(pluginRoot) {
   const path = join27(pluginRoot, "templates", "maintenance-worker-prompt.md");
@@ -17107,7 +17171,7 @@ function logLauncherNote(root, reason, detail) {
 `);
 }
 function failDetail(reason) {
-  return `launch FAILED (${reason}) \u2014 reconcile items stay open; it retries after the 30-minute back-off, or drain by hand with /sterling:drain.`;
+  return `launch FAILED (${reason}) \u2014 the worker's items stay open; it retries after the 30-minute back-off, or drain by hand with /sterling:drain.`;
 }
 function maybeLaunchMaintenanceWorker(opts) {
   const result = launchWorker(opts);
@@ -17141,7 +17205,7 @@ function launchWorker(opts) {
     if (env[WORKER_DISABLE_ENV] === "1") return { launched: false, reason: "disabled_env" };
     if (opts.config?.maintenance_worker?.enabled === false) return { launched: false, reason: "disabled" };
     const verdicts = judgedVerdicts(opts.root);
-    const open2 = (opts.items ?? openReconcileItems(opts.store)).filter((t) => !isJudged(t, verdicts, null));
+    const open2 = (opts.items ?? openWorkerItems(opts.store)).filter((t) => WORKER_LANES.includes(t.system_reason) && !isJudged(t, verdicts, null));
     if (open2.length === 0) return { launched: false, reason: "queue_empty" };
     const nowMs = opts.now ?? Date.now();
     const paths = workerPaths(opts.root);
@@ -17160,7 +17224,7 @@ function launchWorker(opts) {
     const git = gitState(opts.root, opts.spawnSync);
     const dirty = git && dirtyPaths(opts.root, [...new Set(open2.flatMap((t) => t.file_keys ?? []))], opts.spawnSync, git.prefix);
     if (!dirty) {
-      return { launched: false, reason: "git_failed", detail: `git could not report HEAD or the working-tree state in ${opts.root}, so every reconcile item counts as dirty and no worker starts; drain with /sterling:drain.` };
+      return { launched: false, reason: "git_failed", detail: `git could not report HEAD or the working-tree state in ${opts.root}, so every queue item counts as dirty and no worker starts; drain with /sterling:drain.` };
     }
     const eligible = open2.filter((t) => !isJudged(t, verdicts, git.head) && !(t.file_keys ?? []).some((k) => dirty.has(k)));
     if (eligible.length === 0) return { launched: false, reason: "none_eligible" };
@@ -17173,7 +17237,7 @@ function launchWorker(opts) {
       return {
         launched: false,
         reason: "batching",
-        detail: `${eligible.length} of ${BATCH_MIN_ITEMS} eligible reconcile items, oldest waited ${ageText(new Date(nowMs - oldestWaitMs).toISOString(), nowMs)} of ${Math.round(BATCH_MAX_WAIT_MS / 6e4)}m \u2014 no worker until ${BATCH_MIN_ITEMS} are eligible or the oldest has waited that long`
+        detail: `${eligible.length} of ${BATCH_MIN_ITEMS} eligible items, oldest waited ${ageText(new Date(nowMs - oldestWaitMs).toISOString(), nowMs)} of ${Math.round(BATCH_MAX_WAIT_MS / 6e4)}m \u2014 no worker until ${BATCH_MIN_ITEMS} are eligible or the oldest has waited that long`
       };
     }
     const host = opts.host ?? "claude";
@@ -17196,7 +17260,20 @@ function launchWorker(opts) {
     if (!token) return { launched: false, reason: "already_running" };
     writeFileSync7(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
     const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
-    writeFileSync7(paths.eligible, JSON.stringify({ token, head: git.head, ...runnerHost, items: eligible.map((t) => ({ id: t.id, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })) }));
+    const batch = selectBatch(eligible);
+    writeFileSync7(
+      paths.eligible,
+      JSON.stringify({
+        token,
+        head: git.head,
+        ...runnerHost,
+        items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })),
+        policy_version: POLICY_VERSION,
+        run_id: randomUUID4(),
+        policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
+        queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? "" }))
+      })
+    );
     let logFd;
     try {
       rotateIfLarge(paths.log);
@@ -17209,7 +17286,7 @@ function launchWorker(opts) {
       child.on?.("error", () => releaseLock(paths, token));
       child.unref?.();
       writeFileSync7(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
-      return { launched: true, reason: "launched", pid: child.pid, items: eligible.length, host };
+      return { launched: true, reason: "launched", pid: child.pid, items: batch.length, eligible: eligible.length, host };
     } catch (e) {
       releaseLock(paths, token);
       return { launched: false, reason: "error", detail: failDetail(`spawn: ${e?.message ?? e}`) };
@@ -17245,53 +17322,78 @@ function ageText(iso, nowMs = Date.now()) {
 }
 
 // scripts/hooks/lib/maintenance-state.mjs
-var WORKER_LANE = "reconcile_needed";
+var isWorkerLane = (r) => WORKER_LANES.includes(r);
+var REASONS_SHOWN = 3;
+var REASON_CLIP = 120;
+var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+var inLane = (n, r) => `${n} item${n === 1 ? "" : "s"} in lane ${r}`;
 function readMaintenanceState(store, cwd) {
-  const reconcile = { count: 0, owesProse: 0, oldest: null, unjudged: 0, oldestUnjudged: null };
+  const reconcile = { count: 0, lanes: [], handedOff: 0, handoffs: [], oldest: null, unjudged: 0, oldestUnjudged: null, writes: null };
   let queueReasonEntries = [];
   let queueReasons = [];
   let drainable = 0;
   let parked = 0;
   const systemTotal = store.count({ types: ["todo"], source: "system" });
   const system = systemTotal > 0 ? store.query({ types: ["todo"], source: "system", cap: systemTotal }) : [];
-  const reconcileItems = system.filter((t) => t.system_reason === WORKER_LANE);
-  reconcile.count = reconcileItems.length;
+  const workerItems = system.filter((t) => isWorkerLane(t.system_reason));
+  reconcile.count = workerItems.length;
+  reconcile.lanes = WORKER_LANES.map((r) => [r, workerItems.filter((t) => t.system_reason === r).length]).filter(([, n]) => n > 0);
+  const handedByLane = /* @__PURE__ */ new Map();
   try {
-    const verdicts = owesProseVerdicts(cwd);
-    const unjudged = reconcileItems.filter((t) => !isJudgedOwesProse(t, verdicts));
-    reconcile.owesProse = reconcileItems.length - unjudged.length;
+    const verdicts = handoffVerdicts(cwd);
+    const handed = workerItems.filter((t) => isHandedOff(t, verdicts));
+    const unjudged = workerItems.filter((t) => !isHandedOff(t, verdicts));
+    reconcile.handedOff = handed.length;
+    reconcile.handoffs = handed.map((t) => ({ id: t.id, lane: t.system_reason, reason: verdicts.get(t.id)?.reason ?? null }));
+    for (const t of handed) handedByLane.set(t.system_reason, (handedByLane.get(t.system_reason) ?? 0) + 1);
     reconcile.unjudged = unjudged.length;
     reconcile.oldestUnjudged = unjudged.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
+    reconcile.writes = workerWriteCount(cwd);
   } catch {
-    reconcile.owesProse = null;
+    reconcile.handedOff = null;
     reconcile.unjudged = null;
   }
-  reconcile.oldest = reconcileItems.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
+  reconcile.oldest = workerItems.map((t) => t.created_at).filter(Boolean).sort()[0] ?? null;
   const drainableItems = system.filter((t) => t.system_reason !== "file_parked");
   drainable = drainableItems.length;
   parked = system.length - drainable;
   const byReason = /* @__PURE__ */ new Map();
   for (const t of drainableItems) byReason.set(t.system_reason, (byReason.get(t.system_reason) ?? 0) + 1);
-  queueReasonEntries = [...byReason.entries()].sort((a, b) => b[1] - a[1]);
-  queueReasons = queueReasonEntries.map(([r, n]) => `${n} item${n === 1 ? "" : "s"} in lane ${r}`);
+  queueReasonEntries = [...byReason.entries()].sort((a, b) => b[1] - a[1]).map(([r, n]) => [r, n, handedByLane.get(r) ?? 0]);
+  queueReasons = queueReasonEntries.map(([r, n]) => inLane(n, r));
   return { total: systemTotal, reconcile, drainable, parked, queueReasonEntries, queueReasons };
 }
 function queueDepthLine({ drainable, parked, queueReasons, queueReasonEntries, deepThreshold: rawThreshold }) {
   const TOO_DEEP_MULTIPLIER = 10;
   let queueContext = "";
   const deepThreshold = Math.max(1, rawThreshold ?? 15);
-  const workerEntry = queueReasonEntries.find(([r]) => r === WORKER_LANE);
-  const workerCount = workerEntry ? workerEntry[1] : 0;
-  const conductorEntries = queueReasonEntries.filter(([r]) => r !== WORKER_LANE);
-  const conductorLanes = queueReasonEntries.length ? queueReasons.filter((_, i) => queueReasonEntries[i][0] !== WORKER_LANE) : queueReasons;
+  const reasonText = new Map(queueReasonEntries.map(([r], i) => [r, queueReasons[i]]));
+  const conductorEntries = [];
+  const conductorText = /* @__PURE__ */ new Map();
+  const workerEntries = [];
+  for (const [r, n, handed = 0] of queueReasonEntries) {
+    if (!isWorkerLane(r)) {
+      conductorEntries.push([r, n]);
+      conductorText.set(r, reasonText.get(r) ?? inLane(n, r));
+      continue;
+    }
+    if (handed > 0) {
+      conductorEntries.push([r, handed]);
+      conductorText.set(r, `${inLane(handed, r)} handed to you by the worker`);
+    }
+    if (n - handed > 0) workerEntries.push([r, n - handed]);
+  }
+  conductorEntries.sort((a, b) => b[1] - a[1]);
+  workerEntries.sort((a, b) => WORKER_LANES.indexOf(a[0]) - WORKER_LANES.indexOf(b[0]));
+  const conductorLanes = queueReasonEntries.length ? conductorEntries.map(([r]) => conductorText.get(r)) : queueReasons;
   const conductorCount = queueReasonEntries.length ? conductorEntries.reduce((s2, [, n]) => s2 + n, 0) : drainable;
-  const workerNote = workerCount ? `The ${workerCount} item${workerCount === 1 ? "" : "s"} in lane ${WORKER_LANE} ${workerCount === 1 ? "is" : "are"} drained by the background worker, not by you (its state is on the RECONCILE BACKLOG line). ` : "";
+  const be = (n) => n === 1 ? "is" : "are";
+  const workerNote = workerEntries.length ? `The ${inLane(workerEntries[0][1], workerEntries[0][0])} ${be(workerEntries[0][1])} drained by the background worker, not by you` + workerEntries.slice(1).map(([r, n]) => `, and so ${be(n)} ${inLane(n, r)}`).join("") + ` (its state is on the RECONCILE BACKLOG line). ` : "";
   if (conductorCount >= deepThreshold) {
     const parkedNote = parked > 0 ? ` plus ${parked} file_parked (close at branch merge, not by drain \u2014 excluded from this count)` : "";
     if (conductorCount >= deepThreshold * TOO_DEEP_MULTIPLIER && conductorEntries.length) {
       const topLanes = conductorLanes.slice(0, 3);
-      const [topReason, topCount] = conductorEntries[0];
-      const topPhrase = `${topCount} item${topCount === 1 ? "" : "s"} in lane ${topReason}`;
+      const topPhrase = conductorText.get(conductorEntries[0][0]);
       const laneLead = conductorEntries.length > topLanes.length ? `Too many lanes to name in full, and "drain it all before new work" is not a workable ask at this size. The biggest lanes: ${topLanes.join(", ")}. ` : `"Drain it all before new work" is not a workable ask at this size. The lane split: ${topLanes.join(", ")}. `;
       queueContext = `
 
@@ -17344,21 +17446,21 @@ function workerStateFileProblem(cwd) {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return `worker state file ${shown} unreadable: not a JSON object`;
   return null;
 }
-var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 function lastRunClause(last, nowMs) {
   if (!last) return ". No run recorded yet";
   if (last.ok === false) return "";
   const age = ageText(last.at, nowMs);
   const parts = [age === "unknown" ? "time unknown" : `${age} ago`];
   if (Number.isFinite(last.verdicts)) parts.push(plural(last.verdicts, "verdict"));
-  if (Number.isFinite(last.closes_ok)) parts.push(`${last.closes_ok} closed`);
+  if (Number.isFinite(last.closes_ok)) parts.push(`${last.closes_ok + (Number.isFinite(last.resolves_closed) ? last.resolves_closed : 0)} closed`);
+  if (Number.isFinite(last.writes_ok) && last.writes_ok > 0) parts.push(plural(last.writes_ok, "factual edit"));
   return `. Last run: ${parts.join(", ")}`;
 }
 function workerStateText({ ws, reconcile, cwd, config, nowMs, env }) {
   try {
     if (ws.running) return `worker running (pid ${ws.pid}, since ${ws.since})`;
     const cfg = config === void 0 ? readProjectConfig(cwd) : config;
-    const byHand = "reconcile items wait for /sterling:drain";
+    const byHand = "the worker's items wait for /sterling:drain";
     if (cfg?.maintenance_worker?.enabled === false) return `worker disabled by config (${byHand})`;
     if (env[WORKER_DISABLE_ENV] === "1") return `worker disabled by ${WORKER_DISABLE_ENV} (${byHand})`;
     const stateProblem = workerStateFileProblem(cwd);
@@ -17385,14 +17487,22 @@ function workerStateText({ ws, reconcile, cwd, config, nowMs, env }) {
     return `worker state unknown (${stateUnknownReason(e)})`;
   }
 }
-function owesProseSentence(owed, total) {
-  if (owed === 0) return "";
-  const drafts = owed === 1 ? "was judged" : "were judged";
-  const yours = owed === 1 ? "is yours" : "are yours";
-  if (owed === total) {
-    return `${total === 1 ? "The 1 item" : `All ${total} items`} ${drafts} 'owes prose' by the worker and ${yours} to draft. `;
-  }
-  return `${owed} of the ${total} items ${drafts} 'owes prose' by the worker and ${yours} to draft. The worker handles the other ${total - owed}. `;
+function handoffSentence(handed, total, handoffs = []) {
+  if (handed === 0) return "";
+  const were = handed === 1 ? "was handed" : "were handed";
+  const yours = handed === 1 ? "is yours" : "are yours";
+  const lead = handed === total ? `${total === 1 ? "The 1 item" : `All ${total} items`} ${were} to you by the worker (needs_conductor) and ${yours}. ` : `${handed} of the ${total} items ${were} to you by the worker (needs_conductor) and ${yours}. The worker handles the other ${total - handed}. `;
+  const shown = handoffs.slice(0, REASONS_SHOWN).map((h) => {
+    const reason = String(h.reason ?? "no reason recorded").replace(/\s+/g, " ").trim();
+    return `${String(h.id).slice(0, 8)} (${h.lane}): ${reason.length > REASON_CLIP ? `${reason.slice(0, REASON_CLIP - 1)}\u2026` : reason}`;
+  });
+  if (!shown.length) return lead;
+  const more = handoffs.length - shown.length;
+  return `${lead}Why: ${shown.join("; ")}${more > 0 ? ` (+${more} more in .sterling/maintenance-worker.jsonl)` : ""}. `;
+}
+function auditSentence(writes) {
+  if (!writes || !writes.count) return "";
+  return `Worker writes on record: ${writes.count} (spot-check a few in ${writes.path}). `;
 }
 function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), env = process.env }) {
   let reconcileBanner = "";
@@ -17409,11 +17519,12 @@ function reconcileBacklog({ reconcile, cwd, config, nowMs = Date.now(), env = pr
       worker = `worker state unknown (${stateUnknownReason(e)})`;
     }
     const age = ageText(reconcile.oldest, nowMs);
-    const inLane = (n) => `${n} item${n === 1 ? "" : "s"} in lane reconcile_needed`;
-    reconcileBanner = ` \xB7 ${inLane(reconcile.count)}, oldest ${age}, ${worker}${lastRunNote}`;
+    const lanes = reconcile.lanes?.length ? reconcile.lanes : [["reconcile_needed", reconcile.count]];
+    const lanesText2 = lanes.map(([r, n]) => inLane(n, r)).join(", ");
+    reconcileBanner = ` \xB7 ${lanesText2}, oldest ${age}, ${worker}${lastRunNote}`;
     reconcileContext = `
 
-RECONCILE BACKLOG: ${inLane(reconcile.count)}, the oldest of all items open since ${reconcile.oldest ?? "unknown"} (${age}). ` + (reconcile.owesProse === null ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items owe prose is unknown. ` : owesProseSentence(reconcile.owesProse, reconcile.count)) + `${worker}${lastRunNote}.`;
+RECONCILE BACKLOG: ${lanesText2}, the oldest of all items open since ${reconcile.oldest ?? "unknown"} (${age}). ` + (reconcile.handedOff === null ? `The worker's verdict journal (.sterling/maintenance-worker.jsonl) is unreadable, so which items it handed to you is unknown. ` : handoffSentence(reconcile.handedOff ?? 0, reconcile.count, reconcile.handoffs)) + auditSentence(reconcile.writes) + `${worker}${lastRunNote}.`;
   }
   return { banner: reconcileBanner, line: reconcileContext.replace(/^\n\n/, "") };
 }

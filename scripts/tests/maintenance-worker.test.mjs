@@ -21,12 +21,20 @@ import {
   buildWorkerArgs,
   dirtyPaths,
   maybeLaunchMaintenanceWorker,
-  owesProseVerdicts,
+  handoffVerdicts,
+  workerWriteCount,
+  findStamp,
+  selectBatch,
+  RUN_BATCH_MAX,
+  STAMP_KEY,
+  WORKER_CAPABILITY,
+  WORKER_LANES,
+  POLICY_VERSION,
   resolveMcpConfig,
   rotateIfLarge,
   runWorker,
   streamJournal,
-  unjudgedReconcileItems,
+  unjudgedWorkerItems,
   workerBreakage,
   workerPaths,
   workerPrompt,
@@ -122,20 +130,20 @@ test('skips when no open reconcile_needed item is unjudged, and never spawns', (
   }
 });
 
-test('[finding 3] an item judged owes_prose in the JSONL for its CURRENT file_keys is not launchable; a re-mint that adds a path makes it launchable again', () => {
+test('[finding 3] an item handed off (needs_conductor) in the JSONL for its CURRENT file_keys is not launchable; a re-mint that adds a path makes it launchable again', () => {
   const fx = fixture();
   try {
-    journalLine(fx, { kind: 'verdict', item_id: 'a', verdict: 'owes_prose', file_keys: ['src/x.mjs'], reason: 'new flag', evidence: true });
-    journalLine(fx, { kind: 'verdict', item_id: 'b', verdict: 'owes_prose', file_keys: ['src/y.mjs'], reason: 'r', evidence: true });
+    journalLine(fx, { kind: 'verdict', item_id: 'a', verdict: 'needs_conductor', file_keys: ['src/x.mjs'], reason: 'new flag', evidence: true, capability: WORKER_CAPABILITY });
+    journalLine(fx, { kind: 'verdict', item_id: 'b', verdict: 'needs_conductor', file_keys: ['src/y.mjs'], reason: 'r', evidence: true, capability: WORKER_CAPABILITY });
     appendFileSync(fx.paths.journal, '{"torn line\n');
     const items = [ITEM('a', ['src/x.mjs']), ITEM('b', ['src/z.mjs', 'src/y.mjs']), ITEM('c')];
     const seen = [];
     const store = { count: (f) => (seen.push(['count', f]), items.length), query: (f) => (seen.push(['query', f]), items) };
-    const out = unjudgedReconcileItems(store, fx.project).map((t) => t.id);
+    const out = unjudgedWorkerItems(store, fx.project).map((t) => t.id);
     assert.deepEqual(out, ['b', 'c'], "a is judged for its current keys; b's keys widened since its verdict; c was never judged");
     assert.deepEqual(seen[1], ['query', { types: ['todo'], source: 'system', cap: 3 }], 'the query cap IS the count, so it cannot truncate');
     assert.ok(workerPrompt(fx.plugin, fx.project).includes('ALREADY JUDGED (skip each'), 'the child is told which items to skip');
-    assert.ok(workerPrompt(fx.plugin, fx.project).includes('- a owes_prose file_keys ["src/x.mjs"]'));
+    assert.ok(workerPrompt(fx.plugin, fx.project).includes('- a needs_conductor file_keys ["src/x.mjs"]'));
   } finally {
     fx.cleanup();
   }
@@ -151,7 +159,7 @@ test('takes the lock, spawns ONE detached runner with log stdio, token and budge
     const call = sp.calls[0];
     const lock = JSON.parse(readFileSync(fx.paths.lock, 'utf8'));
     assert.equal(call.cmd, process.execPath);
-    assert.deepEqual(call.args, [join(fx.plugin, 'scripts', 'maintenance-worker-run.mjs'), '--project', fx.project, '--trigger', 'stop', '--token', lock.token, '--budget-usd', '2']);
+    assert.deepEqual(call.args, [join(fx.plugin, 'scripts', 'maintenance-worker-run.mjs'), '--project', fx.project, '--trigger', 'stop', '--token', lock.token, '--budget-usd', '5']);
     assert.equal(call.opts.detached, true);
     assert.equal(call.opts.stdio[0], 'ignore');
     assert.equal(typeof call.opts.stdio[1], 'number', 'stdout goes to the log fd');
@@ -260,7 +268,7 @@ test('builds the probed claude argv: Sonnet 5.5, low effort, librarian, dontAsk,
     const args = buildWorkerArgs({ prompt: 'P', mcpConfig });
     assert.deepEqual(args, [
       '-p', 'P',
-      '--model', 'claude-haiku-5-5',
+      '--model', 'claude-sonnet-5-5',
       '--effort', 'medium',
       '--agent', 'librarian',
       '--permission-mode', 'dontAsk',
@@ -270,11 +278,18 @@ test('builds the probed claude argv: Sonnet 5.5, low effort, librarian, dontAsk,
       '--strict-mcp-config',
       '--output-format', 'stream-json',
       '--verbose',
-      '--max-budget-usd', '2',
+      '--max-budget-usd', '5',
     ]);
-    // CHANGED (point 4, line references): the two mounted names of knowledge_line_ref_fix join the
-    // allowlist; every other entry, and the absence of board_update, is unchanged.
-    assert.deepEqual(WORKER_TOOLS, ['mcp__sterling__maintenance_query', 'mcp__sterling__knowledge_get', 'mcp__sterling__maintenance_remove', 'mcp__sterling__knowledge_line_ref_fix', 'mcp__plugin_sterling_sterling__knowledge_line_ref_fix', 'Read', 'Grep'], '[finding 3] no board_update');
+    // CHANGED (GitHub #56, decision maintenance-worker-drains-every-lane-and-writes-factual-refresh-on-sonnet,
+    // ruling (3) and design (c)): the update-shaped knowledge writes, knowledge_query and knowledge_schema
+    // join under both mounted names, plus WebSearch and WebFetch; still no board_update.
+    const both = (t) => [`mcp__sterling__${t}`, `mcp__plugin_sterling_sterling__${t}`];
+    assert.deepEqual(WORKER_TOOLS, [
+      'mcp__sterling__maintenance_query', 'mcp__sterling__knowledge_get', 'mcp__sterling__maintenance_remove',
+      ...both('knowledge_line_ref_fix'),
+      ...['knowledge_update', 'knowledge_edit', 'knowledge_append', 'knowledge_array_remove', 'knowledge_query', 'knowledge_schema'].flatMap(both),
+      'Read', 'Grep', 'WebSearch', 'WebFetch',
+    ], '[finding 3] no board_update');
     for (const banned of ['--bare', 'bypassPermissions', '--plugin-dir', '--dangerously-skip-permissions']) {
       assert.ok(!args.includes(banned), `${banned} is never passed`);
     }
@@ -317,9 +332,11 @@ test('a missing plugin wiring names the plugin tree as incomplete, never "run /s
   }
 });
 
-test('[finding 4] --disallowedTools names every store, board and config write plus Write, Edit and Bash, and none is also allowed', () => {
+test('[finding 4] --disallowedTools names every record-shaping store write, every board and config write plus Write, Edit and Bash, and none is also allowed', () => {
+  // CHANGED (GitHub #56, design (c)): update, append, edit and array_remove moved to the grant; the
+  // record-shaping writes stay denied.
   const expected = [
-    ...['create', 'update', 'append', 'edit', 'array_remove', 'retire', 'supersede', 'split', 'extract', 'promote', 'link'].map((v) => `mcp__sterling__knowledge_${v}`),
+    ...['create', 'retire', 'supersede', 'split', 'extract', 'promote', 'link'].map((v) => `mcp__sterling__knowledge_${v}`),
     ...['add', 'remove', 'update', 'edit'].map((v) => `mcp__sterling__board_${v}`),
     'mcp__sterling__config_set',
     'mcp__sterling__domain_describe',
@@ -357,7 +374,7 @@ test('[no daily cap] a large prior spend today (even the Dome Farmer 4.874 of 5,
       assert.equal(r.launched, true, `spend ${spend} does not block a launch`);
       assert.equal(sp.calls[0].args.at(-1), String(WORKER_RUN_BUDGET_USD), 'every launch gets the full per-run cap, never a remainder');
     }
-    assert.equal(WORKER_RUN_BUDGET_USD, 2);
+    assert.equal(WORKER_RUN_BUDGET_USD, 5, 'CHANGED (GitHub #56, design (g)): the per-run cap rose from $2 to $5');
   } finally {
     fx.cleanup();
   }
@@ -444,7 +461,7 @@ test('[finding 7] runWorker journals every maintenance_remove call and result fr
   try {
     const result = [
       '{"item_id":"11111111-1111-1111-1111-111111111111","article":"a","verdict":"closed","reason":"article already names the new flag"}',
-      '{"item_id":"22222222-2222-2222-2222-222222222222","article":"b","verdict":"owes_prose","file_keys":["src/b.mjs"],"reason":"new refusal not described"}',
+      '{"item_id":"22222222-2222-2222-2222-222222222222","article":"b","verdict":"needs_conductor","file_keys":["src/b.mjs"],"reason":"new refusal not described"}',
     ].join('\n');
     const sp = fakeClaude([
       { type: 'system', subtype: 'init' },
@@ -470,9 +487,10 @@ test('[finding 7] runWorker journals every maintenance_remove call and result fr
     assert.deepEqual([lines[0].item_id, lines[0].is_error, lines[0].result], ['11111111-1111-1111-1111-111111111111', false, 'Closed as ALREADY-PAID']);
     assert.equal(lines[1].is_error, true, 'a refused close is on record too');
     assert.deepEqual([lines[0].item_file_keys_at_launch, lines[1].item_file_keys_at_launch], [null, null], 'ids not in eligible.json journal null');
-    assert.equal(lines[3].verdict, 'owes_prose');
+    assert.equal(lines[3].verdict, 'needs_conductor');
+    assert.equal(lines[3].capability, WORKER_CAPABILITY, 'a handoff carries the capability marker');
     assert.equal(lines[4].remove_calls, 2);
-    assert.deepEqual([...owesProseVerdicts(fx.project).keys()], ['22222222-2222-2222-2222-222222222222']);
+    assert.deepEqual([...handoffVerdicts(fx.project).keys()], ['22222222-2222-2222-2222-222222222222']);
     const state = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
     assert.equal(state.spend, undefined, 'no per-day spend accounting: a legacy spend map is dropped, not carried');
     assert.equal(state.last_run.cost_usd, 0.25, 'the run keeps its own reported cost');
@@ -487,17 +505,17 @@ test('runWorker: a non-zero exit, an error_max_budget result or a permission den
   const fx = fixture();
   try {
     const denied = fakeClaude([resultEvent({ permission_denials: [{ tool_name: 'mcp__sterling__maintenance_remove' }] })]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: denied.fn, trigger: 'commit', ...quiet }), 1);
+    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: denied.fn, trigger: 'commit' }), 1);
     assert.match(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.error, /1 permission denial/);
 
     const budget = fakeClaude([resultEvent({ subtype: 'error_max_budget_usd', is_error: true, total_cost_usd: 2.01 })]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: budget.fn, trigger: 'stop', ...quiet }), 1);
+    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: budget.fn, trigger: 'stop' }), 1);
     const st = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
     assert.match(st.last_run.error, /error_max_budget_usd/);
     assert.equal(st.last_run.cost_usd, 2.01, 'a failed run still records its reported cost');
 
     const crashed = fakeClaude(['not json'], { code: 3 });
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: crashed.fn, trigger: 'stop', ...quiet }), 1);
+    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: crashed.fn, trigger: 'stop' }), 1);
     const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.match(last.error, /exit 3/);
     assert.match(last.error, /no stream-json result event/);
@@ -510,7 +528,7 @@ test('[finding 6] a hung child is killed after the timeout and recorded as a fai
   const fx = fixture();
   try {
     const hung = fakeClaude([removeCall('t1', 'aaaa'), removeResult('t1', 'Closed')], { hang: true });
-    const code = await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: hung.fn, trigger: 'stop', timeoutMs: 30, ...quiet });
+    const code = await runWorker({ ...eligibleRun(fx, []), spawn: hung.fn, trigger: 'stop', timeoutMs: 30 });
     assert.equal(code, 1);
     assert.equal(hung.calls[0].child.killed, 'SIGTERM');
     const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
@@ -539,13 +557,13 @@ test('[finding 5] the runner refuses to run when the lock token is not its own',
 test('[finding 9] the log and the JSONL rotate to a single .1 backup past ROTATE_BYTES; owes-prose verdicts in the backup still count', () => {
   const fx = fixture();
   try {
-    journalLine(fx, { kind: 'verdict', item_id: 'old', verdict: 'owes_prose', file_keys: ['k'], evidence: true });
+    journalLine(fx, { kind: 'verdict', item_id: 'old', verdict: 'needs_conductor', file_keys: ['k'], evidence: true, capability: WORKER_CAPABILITY });
     appendFileSync(fx.paths.journal, 'x'.repeat(ROTATE_BYTES));
     writeFileSync(`${fx.paths.journal}.1`, 'previous backup');
     rotateIfLarge(fx.paths.journal);
     assert.equal(existsSync(fx.paths.journal), false);
     assert.ok(statSync(`${fx.paths.journal}.1`).size > ROTATE_BYTES, 'the single backup is replaced');
-    assert.deepEqual([...owesProseVerdicts(fx.project).keys()], ['old']);
+    assert.deepEqual([...handoffVerdicts(fx.project).keys()], ['old']);
     writeFileSync(fx.paths.log, 'small');
     rotateIfLarge(fx.paths.log);
     assert.equal(readFileSync(fx.paths.log, 'utf8'), 'small', 'a small file is left alone');
@@ -586,7 +604,7 @@ test('runWorker --dry-run prints the argv and spawns nothing', async () => {
     const out = JSON.parse(printed[0]);
     assert.equal(out.dry_run, true);
     assert.equal(out.command, 'claude');
-    assert.deepEqual(out.argv.slice(2, 6), ['--model', 'claude-haiku-5-5', '--effort', 'medium']);
+    assert.deepEqual(out.argv.slice(2, 6), ['--model', 'claude-sonnet-5-5', '--effort', 'medium']);
     assert.equal(existsSync(fx.paths.lock), false);
   } finally {
     fx.cleanup();
@@ -599,20 +617,20 @@ test('[N1] a run with no result event (crashed, killed, hung) records an unknown
   const fx = fixture();
   try {
     const crashed = fakeClaude(['not json'], { code: 1 });
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: crashed.fn, budgetUsd: 1.5, now: () => NOW, ...quiet }), 1);
+    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: crashed.fn, budgetUsd: 1.5 }), 1);
     let st = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
     assert.equal(st.last_run.cost_usd, null, 'the reported cost stays unknown');
     assert.equal(st.last_run.charged_usd, undefined, 'nothing is charged against a cap that no longer exists');
     assert.equal(st.spend, undefined);
 
     const hung = fakeClaude([], { hang: true });
-    await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: hung.fn, budgetUsd: 2, timeoutMs: 20, now: () => NOW, ...quiet });
+    await runWorker({ ...eligibleRun(fx, []), spawn: hung.fn, timeoutMs: 20 });
     st = JSON.parse(readFileSync(fx.paths.state, 'utf8'));
     assert.equal(st.last_run.ok, false);
     assert.equal(st.last_run.cost_usd, null);
 
     const ok = fakeClaude([resultEvent({ total_cost_usd: 0.1 })]);
-    await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: ok.fn, budgetUsd: 2, now: () => NOW, ...quiet });
+    await runWorker({ ...eligibleRun(fx, []), spawn: ok.fn });
     assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.cost_usd, 0.1, 'a reported cost is recorded as reported');
   } finally {
     fx.cleanup();
@@ -659,7 +677,7 @@ test('[N3] the runner records a malformed or zero --budget-usd as a failed run w
     for (const bad of ['0', 'abc', '', 0.001]) {
       rmSync(fx.paths.state, { force: true });
       const child = fakeClaude([resultEvent({})]);
-      assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, budgetUsd: bad, ...quiet }), 1, `budget ${JSON.stringify(bad)}`);
+      assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: child.fn, budgetUsd: bad }), 1, `budget ${JSON.stringify(bad)}`);
       assert.equal(child.calls.length, 0, 'nothing runs');
       const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
       assert.equal(last.ok, false);
@@ -685,7 +703,7 @@ test('[N4] any git failure (E2BIG, no HEAD, non-zero exit) counts every item dir
       const r = launch(fx, { spawn: sp.fn, spawnSync: git });
       assert.equal(r.reason, 'git_failed');
       assert.equal(r.line, undefined);
-      assert.match(r.detail, /git could not report HEAD or the working-tree state .* every reconcile item counts as dirty and no worker starts/);
+      assert.match(r.detail, /git could not report HEAD or the working-tree state .* every queue item counts as dirty and no worker starts/);
       assert.match(readFileSync(fx.paths.log, 'utf8'), /git_failed: git could not report HEAD/);
       assert.equal(sp.calls.length, 0);
       assert.equal(existsSync(fx.paths.lock), false);
@@ -735,20 +753,20 @@ test('[N4] a project root in a subdirectory of the git top-level: porcelain path
 test('[PARTIAL 2] the child gets ONLY the eligible (clean, unjudged) item ids; the runner refuses an eligible list from another launch', async () => {
   const fx = fixture();
   try {
-    journalLine(fx, { kind: 'verdict', item_id: 'judged', verdict: 'owes_prose', file_keys: ['src/j.mjs'], evidence: true });
+    journalLine(fx, { kind: 'verdict', item_id: 'judged', verdict: 'needs_conductor', file_keys: ['src/j.mjs'], evidence: true, capability: WORKER_CAPABILITY });
     const items = [ITEM('clean', ['src/c.mjs']), ITEM('dirty', ['src/a.mjs']), ITEM('judged', ['src/j.mjs'])];
     assert.equal(launch(fx, { spawn: fakeSpawn().fn, items, spawnSync: fakeGit({ porcelain: ' M src/a.mjs\0' }) }).launched, true);
     const eligible = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
     const token = JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token;
     assert.equal(eligible.token, token);
     assert.equal(eligible.head, HEAD);
-    assert.deepEqual(eligible.items, [{ id: 'clean', file_keys: ['src/c.mjs'], feature_link: null, slug: 'clean' }], 'ids, keys and the article identity the evidence gate needs');
+    assert.deepEqual(eligible.items, [{ id: 'clean', lane: 'reconcile_needed', file_keys: ['src/c.mjs'], feature_link: null, slug: 'clean' }], 'ids, lane, keys and the article identity the evidence gate needs');
 
     const child = fakeClaude([resultEvent({})]);
     assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, token, budgetUsd: 2, ...quiet }), 0);
     const prompt = child.calls[0].args[1];
     const section = prompt.slice(prompt.indexOf('ELIGIBLE'), prompt.indexOf('ALREADY JUDGED'));
-    assert.match(section, /- clean file_keys/);
+    assert.match(section, /- clean lane reconcile_needed target none file_keys/);
     assert.doesNotMatch(section, /- dirty |- judged /, 'dirty and judged items are not offered');
 
     writeFileSync(fx.paths.lock, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString(), token: 'second' }));
@@ -769,7 +787,7 @@ test('[PARTIAL 9] one run writes at most the log cap to maintenance-worker.log, 
     events.push(resultEvent({}));
     const written = [];
     const child = fakeClaude(events);
-    await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, budgetUsd: 2, logCapBytes: 500, log: (t) => written.push(t) });
+    await runWorker({ ...eligibleRun(fx, []), spawn: child.fn, logCapBytes: 500, log: (t) => written.push(t) });
     const text = written.join('');
     const note = text.indexOf('[maintenance-worker-run: log truncated at 500 bytes');
     assert.ok(note > 0, 'the truncation is announced once');
@@ -780,12 +798,12 @@ test('[PARTIAL 9] one run writes at most the log cap to maintenance-worker.log, 
   }
 });
 
-test('[PARTIAL 9] rotating the JSONL carries standing owes_prose and refused verdicts forward, so a second rotation loses none', () => {
+test('[PARTIAL 9] rotating the JSONL carries standing needs_conductor and refused verdicts forward, so a second rotation loses none', () => {
   const fx = fixture();
   try {
-    journalLine(fx, { kind: 'verdict', item_id: 'o', verdict: 'owes_prose', file_keys: ['a'], evidence: true });
+    journalLine(fx, { kind: 'verdict', item_id: 'o', verdict: 'needs_conductor', file_keys: ['a'], evidence: true, capability: WORKER_CAPABILITY });
     journalLine(fx, { kind: 'verdict', item_id: 'r', verdict: 'refused', file_keys: ['b'], head: HEAD, evidence: true });
-    journalLine(fx, { kind: 'verdict', item_id: 'c', verdict: 'owes_prose', file_keys: ['c'], evidence: true });
+    journalLine(fx, { kind: 'verdict', item_id: 'c', verdict: 'needs_conductor', file_keys: ['c'], evidence: true, capability: WORKER_CAPABILITY });
     journalLine(fx, { kind: 'verdict', item_id: 'c', verdict: 'closed' });
     appendFileSync(fx.paths.journal, 'x'.repeat(300) + '\n');
     rotateJournal(fx.project, 200);
@@ -804,12 +822,13 @@ test('[PARTIAL 9] rotating the JSONL carries standing owes_prose and refused ver
 /** Lock + eligible list for a token-bound runWorker call. */
 function eligibleRun(fx, items, token = 'tok', head = HEAD) {
   writeFileSync(fx.paths.lock, JSON.stringify({ pid: process.pid, started_at: new Date(NOW).toISOString(), token }));
-  writeFileSync(fx.paths.eligible, JSON.stringify({ token, head, items }));
+  writeFileSync(fx.paths.eligible, JSON.stringify({ token, head, items, policy_version: 1, run_id: RUN_ID, policy_items: items.map((t) => ({ id: t.id, lane: t.lane ?? 'reconcile_needed', target_id: t.feature_link ?? null, file_keys: t.file_keys })) }));
   return { root: fx.project, pluginRoot: fx.plugin, token, budgetUsd: 2, now: () => NOW, ...quiet };
 }
-const owes = (id, slug) => JSON.stringify({ item_id: id, article: slug, verdict: 'owes_prose', file_keys: ['ignored-by-the-gate'], reason: 'the article does not name the new flag' });
+const RUN_ID = 'run-test-1';
+const owes = (id, slug) => JSON.stringify({ item_id: id, article: slug, verdict: 'needs_conductor', file_keys: ['ignored-by-the-gate'], reason: 'the article does not name the new flag' });
 
-test('[gate] an owes_prose verdict stands only when the stream shows a SUCCESSFUL knowledge_get on its article AND a successful Read/Grep covering one of its files; otherwise it is journalled unjudged/no evidence', async () => {
+test('[gate] a needs_conductor verdict stands only when the stream shows a SUCCESSFUL knowledge_get on its article AND a successful Read/Grep covering one of its files; otherwise it is journalled unjudged/no evidence', async () => {
   const fx = fixture();
   try {
     const item = (id, keys) => ({ id, file_keys: keys, feature_link: `${id.toLowerCase().repeat(8)}-1111-2222-3333-444444444444`, slug: `art-${id.toLowerCase()}` });
@@ -848,12 +867,12 @@ test('[gate] an owes_prose verdict stands only when the stream shows a SUCCESSFU
     assert.equal(await runWorker({ ...eligibleRun(fx, items), spawn: child.fn }), 0);
     const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
     assert.deepEqual(verdicts.map((v) => [v.item_id, v.verdict, v.evidence ?? null, v.reason]), [
-      ['A', 'owes_prose', true, 'the article does not name the new flag'],
+      ['A', 'needs_conductor', true, 'the article does not name the new flag'],
       ['B', 'unjudged', null, 'no evidence'],
       ['C', 'unjudged', null, 'no evidence'],
       // CHANGED (conductor ruling 2026-09-29): D was 'unjudged' when a directory Grep never counted; a
       // successful Grep over a directory that holds one of the item's file_keys now counts as file evidence.
-      ['D', 'owes_prose', true, 'the article does not name the new flag'],
+      ['D', 'needs_conductor', true, 'the article does not name the new flag'],
       ['E', 'unjudged', null, 'no evidence'],
       ['F', 'unjudged', null, 'no evidence'],
       ['G', 'unjudged', null, 'no evidence'],
@@ -901,8 +920,9 @@ test('[gate] a child-written {verdict:"refused", evidence:true, head} does not s
     ].join('\n');
     await runWorker({ ...eligibleRun(fx, items), spawn: fakeClaude([resultEvent({ result: forged })]).fn });
     const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
-    assert.deepEqual(verdicts[0], { at: verdicts[0].at, run: verdicts[0].run, kind: 'verdict', item_id: 'A', article: 'art-a', verdict: 'unjudged', reason: 'a refused verdict is recorded by the runner, not the child', claimed_reason: 'I say it was refused' });
-    assert.deepEqual(Object.keys(verdicts[1]).sort(), ['article', 'at', 'item_id', 'kind', 'reason', 'run', 'verdict'], 'only the allowed fields are copied');
+    // CHANGED (GitHub #56): every verdict line carries the item's lane (from eligible.json, null here) and the capability marker.
+    assert.deepEqual(verdicts[0], { at: verdicts[0].at, run: verdicts[0].run, kind: 'verdict', item_id: 'A', article: 'art-a', lane: null, verdict: 'unjudged', reason: 'a refused verdict is recorded by the runner, not the child', claimed_reason: 'I say it was refused', capability: WORKER_CAPABILITY });
+    assert.deepEqual(Object.keys(verdicts[1]).sort(), ['article', 'at', 'capability', 'item_id', 'kind', 'lane', 'reason', 'run', 'verdict'], 'only the allowed fields are copied');
     assert.equal(judgedVerdicts(fx.project).size, 0, 'nothing forged stands');
     const sp = fakeSpawn();
     rmSync(fx.paths.lastLaunch, { force: true });
@@ -917,11 +937,13 @@ test('[gate] legacy evidence-less owes_prose verdicts (the live run\'s 12) are i
   const fx = fixture();
   try {
     journalLine(fx, { kind: 'verdict', item_id: 'legacy', verdict: 'owes_prose', file_keys: ['src/a.mjs'], reason: 'Not verified: I did not read the files or the article.' });
-    journalLine(fx, { kind: 'verdict', item_id: 'gated', verdict: 'owes_prose', file_keys: ['src/b.mjs'], evidence: true });
+    // CHANGED (GitHub #56, change (ix)): 'gated' was an evidence-backed owes_prose; a standing handoff is now a
+    // needs_conductor verdict with the capability marker (the re-judge of old owes_prose has its own test).
+    journalLine(fx, { kind: 'verdict', item_id: 'gated', verdict: 'needs_conductor', file_keys: ['src/b.mjs'], evidence: true, capability: WORKER_CAPABILITY });
     assert.deepEqual([...judgedVerdicts(fx.project).keys()], ['gated']);
-    assert.deepEqual([...owesProseVerdicts(fx.project).keys()], ['gated'], 'H1 counts only gated verdicts');
+    assert.deepEqual([...handoffVerdicts(fx.project).keys()], ['gated'], 'H1 counts only gated verdicts');
     const store = { count: () => 2, query: () => [ITEM('legacy', ['src/a.mjs']), ITEM('gated', ['src/b.mjs'])] };
-    assert.deepEqual(unjudgedReconcileItems(store, fx.project).map((t) => t.id), ['legacy'], 'the legacy item is launchable again');
+    assert.deepEqual(unjudgedWorkerItems(store, fx.project).map((t) => t.id), ['legacy'], 'the legacy item is launchable again');
     const r = launch(fx, { spawn: fakeSpawn().fn, items: [ITEM('legacy', ['src/a.mjs'])] });
     assert.equal(r.launched, true);
     assert.doesNotMatch(workerPrompt(fx.plugin, fx.project), /- legacy /, 'nor listed as already judged');
@@ -965,13 +987,13 @@ test('[gate] JSONL rotation carries forward only evidence:true verdicts', () => 
   const fx = fixture();
   try {
     journalLine(fx, { kind: 'verdict', item_id: 'legacy', verdict: 'owes_prose', file_keys: ['a'] });
-    journalLine(fx, { kind: 'verdict', item_id: 'gated', verdict: 'owes_prose', file_keys: ['b'], evidence: true });
+    journalLine(fx, { kind: 'verdict', item_id: 'gated', verdict: 'needs_conductor', file_keys: ['b'], evidence: true, capability: WORKER_CAPABILITY });
     journalLine(fx, { kind: 'verdict', item_id: 'refused', verdict: 'refused', file_keys: ['c'], head: HEAD, evidence: true });
     journalLine(fx, { kind: 'verdict', item_id: 'unj', verdict: 'unjudged', reason: 'no evidence' });
     appendFileSync(fx.paths.journal, 'x'.repeat(300) + '\n');
     rotateJournal(fx.project, 200);
     const carried = readJournal(fx);
-    assert.deepEqual(carried.map((l) => [l.item_id, l.verdict, l.evidence]).sort(), [['gated', 'owes_prose', true], ['refused', 'refused', true]]);
+    assert.deepEqual(carried.map((l) => [l.item_id, l.verdict, l.evidence]).sort(), [['gated', 'needs_conductor', true], ['refused', 'refused', true]]);
     appendFileSync(fx.paths.journal, 'y'.repeat(300) + '\n');
     rotateJournal(fx.project, 200);
     assert.deepEqual([...judgedVerdicts(fx.project).keys()].sort(), ['gated', 'refused'], 'the legacy verdict is gone after the second rotation, the gated ones survive');
@@ -1006,7 +1028,7 @@ test('[breakage] the run summary records the MCP server status from the init eve
   const fx = fixture();
   try {
     const down = fakeClaude([{ type: 'system', subtype: 'init', mcp_servers: [{ name: 'sterling', status: 'failed' }] }, resultEvent({})]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: down.fn, ...quiet }), 1);
+    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: down.fn }), 1);
     let last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.equal(last.ok, false);
     assert.equal(last.mcp_status, 'failed');
@@ -1014,7 +1036,7 @@ test('[breakage] the run summary records the MCP server status from the init eve
     assert.equal(readJournal(fx).at(-1).mcp_status, 'failed', 'the journal summary carries it too');
 
     const up = fakeClaude([{ type: 'system', subtype: 'init', mcp_servers: [{ name: 'sterling', status: 'connected' }] }, resultEvent({})]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: up.fn, ...quiet }), 0);
+    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: up.fn }), 0);
     last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.deepEqual([last.ok, last.mcp_status], [true, 'connected']);
 
@@ -1022,25 +1044,25 @@ test('[breakage] the run summary records the MCP server status from the init eve
     // successful sterling tool call, is breakage. 'pending' is unknown when the stream shows the server worked.
     const initWith = (status) => ({ type: 'system', subtype: 'init', mcp_servers: [{ name: 'sterling', status }] });
     const pendingWorked = fakeClaude([initWith('pending'), toolUse('k1', 'mcp__sterling__knowledge_get', { id: 'x' }), toolOk('k1'), resultEvent({})]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: pendingWorked.fn, ...quiet }), 0, 'pending + a successful sterling call is not broken');
+    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: pendingWorked.fn }), 0, 'pending + a successful sterling call is not broken');
     last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.deepEqual([last.ok, last.error, last.mcp_status], [true, null, 'pending']);
 
     const pendingIdle = fakeClaude([initWith('pending'), resultEvent({})]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: pendingIdle.fn, ...quiet }), 1, 'pending and no successful sterling call is broken');
+    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: pendingIdle.fn }), 1, 'pending and no successful sterling call is broken');
     assert.match(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.error, /MCP server 'sterling' not connected \(pending/);
 
     const pendingErrored = fakeClaude([initWith('pending'), toolUse('k1', 'mcp__sterling__knowledge_get', { id: 'x' }), toolErr('k1'), resultEvent({})]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: pendingErrored.fn, ...quiet }), 1, 'an errored sterling call is not a success');
+    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: pendingErrored.fn }), 1, 'an errored sterling call is not a success');
 
     const disconnected = fakeClaude([initWith('disconnected'), toolUse('k1', 'mcp__sterling__knowledge_get', { id: 'x' }), toolOk('k1'), resultEvent({})]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: disconnected.fn, ...quiet }), 1, 'an explicit disconnected status is broken');
+    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: disconnected.fn }), 1, 'an explicit disconnected status is broken');
 
     const closedWhilePending = fakeClaude([initWith('pending'), removeCall('t1', 'A'), removeResult('t1', 'Closed'), resultEvent({})]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: closedWhilePending.fn, ...quiet }), 0, 'a successful maintenance_remove is a successful sterling call');
+    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: closedWhilePending.fn }), 0, 'a successful maintenance_remove is a successful sterling call');
 
     const silent = fakeClaude([{ type: 'system', subtype: 'init' }, resultEvent({})]);
-    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: silent.fn, ...quiet }), 0, 'no mcp_servers in the init event is unknown, not broken');
+    assert.equal(await runWorker({ ...eligibleRun(fx, []), spawn: silent.fn }), 0, 'no mcp_servers in the init event is unknown, not broken');
     assert.equal(JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run.mcp_status, null);
   } finally {
     fx.cleanup();
@@ -1166,7 +1188,7 @@ test('[batching] fewer than BATCH_MIN_ITEMS eligible items whose oldest is young
     assert.equal(existsSync(fx.paths.lock), false, 'no lock taken');
     assert.equal(existsSync(fx.paths.lastLaunch), false, 'no debounce armed');
     assert.equal(existsSync(fx.paths.state), false, 'not recorded as a run: no no_progress, no back-off');
-    assert.match(readFileSync(fx.paths.log, 'utf8'), /batching: 4 of 5 eligible reconcile items, oldest waited 4m of 30m/);
+    assert.match(readFileSync(fx.paths.log, 'utf8'), /batching: 4 of 5 eligible items, oldest waited 4m of 30m/);
     // the very next trigger is still not blocked by anything the batching outcome left behind
     const next = launch(fx, { spawn: sp.fn, items: [...items, aged('e', 2 * MIN)], now: NOW + 1000 });
     assert.equal(next.launched, true, JSON.stringify(next));
@@ -1210,15 +1232,15 @@ test('[batching] the wait is the OLDEST eligible item\'s; items dirty or judged 
     const dirtyGit = fakeGit({ porcelain: ' M src/old.mjs\0' });
     const r = launch(fx, { spawn: sp.fn, spawnSync: dirtyGit, items: [aged('old', 2 * BATCH_MAX_WAIT_MS), aged('young', MIN)] });
     assert.equal(r.reason, 'batching');
-    assert.match(readFileSync(fx.paths.log, 'utf8'), /batching: 1 of 5 eligible reconcile items, oldest waited 1m of 30m/);
+    assert.match(readFileSync(fx.paths.log, 'utf8'), /batching: 1 of 5 eligible items, oldest waited 1m of 30m/);
     assert.equal(sp.calls.length, 0);
 
-    // an old item already judged owes_prose (evidence-backed) for its CURRENT file_keys: it neither
+    // an old item already handed off (evidence-backed) for its CURRENT file_keys: it neither
     // makes the batch nor supplies the age, so the lone young item still batches
-    journalLine(fx, { kind: 'verdict', item_id: 'judged', verdict: 'owes_prose', file_keys: ['src/judged.mjs'], evidence: true });
+    journalLine(fx, { kind: 'verdict', item_id: 'judged', verdict: 'needs_conductor', file_keys: ['src/judged.mjs'], evidence: true, capability: WORKER_CAPABILITY });
     const judged = launch(fx, { spawn: sp.fn, items: [aged('judged', 2 * BATCH_MAX_WAIT_MS), aged('young', MIN)] });
     assert.equal(judged.reason, 'batching');
-    assert.equal(readFileSync(fx.paths.log, 'utf8').split('batching: 1 of 5 eligible reconcile items, oldest waited 1m of 30m').length - 1, 2, 'the judged item did not count: both launches logged 1 of 5');
+    assert.equal(readFileSync(fx.paths.log, 'utf8').split('batching: 1 of 5 eligible items, oldest waited 1m of 30m').length - 1, 2, 'the judged item did not count: both launches logged 1 of 5');
     // four young clean items plus the judged one is still 4 eligible, not 5
     const four = launch(fx, { spawn: sp.fn, items: [aged('judged', 2 * BATCH_MAX_WAIT_MS), ...['a', 'b', 'c', 'd'].map((id) => aged(id, MIN))] });
     assert.equal(four.reason, 'batching');
@@ -1271,7 +1293,7 @@ test('[busy] a maintenance_remove that fails with a locked database is retry-lat
     assert.deepEqual(verdicts.map((v) => [v.item_id, v.verdict]), [['A', 'busy'], ['A', 'busy']]);
     assert.equal(judgedVerdicts(fx.project).size, 0, 'judgedVerdicts ignores a busy verdict');
     const store = { count: () => 1, query: () => [ITEM('A')] };
-    assert.equal(unjudgedReconcileItems(store, fx.project, HEAD).length, 1, 'the item stays eligible');
+    assert.equal(unjudgedWorkerItems(store, fx.project, HEAD).length, 1, 'the item stays eligible');
     const last = JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
     assert.equal(last.ok, true, 'a locked database is not a failed run');
     assert.equal(last.refused_verdicts, 0);
@@ -1325,7 +1347,8 @@ test('[busy] a real refusal is still a refused verdict, and a locked-database re
 
 const LINK = 'aaaaaaaa-1111-2222-3333-444444444444';
 const lineFix = (id, input) => toolUse(id, 'mcp__sterling__knowledge_line_ref_fix', { id: LINK, field: 'what_it_does', find: 'src/a.mjs:10', replace: 'src/a.mjs:14', anchor: 'export const a', ...input });
-const fixOk = (id) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'updated what_it_does' }] } });
+const stampedText = (item = 'A', runId = RUN_ID, extra = {}) => JSON.stringify({ ok: true, ...extra, [STAMP_KEY]: { run_id: runId, item_id: item } });
+const fixOk = (id) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: stampedText() }] } });
 /** The evidence the gate wants for item A: a good knowledge_get on its article and a good Read of its file. */
 const evidenceForA = () => [toolUse('e1', 'mcp__sterling__knowledge_get', { id: LINK }), toolOk('e1'), toolUse('e2', 'Read', { file_path: 'src/a.mjs' }), toolOk('e2')];
 const ITEM_A = [{ id: 'A', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' }];
@@ -1457,19 +1480,381 @@ test('[line-ref] streamJournal counts successful fixes and answers them as sterl
   assert.equal(out.sterlingOk, 1);
 });
 
-test('[prompt] the shipped prompt no longer invites an early stop, keeps the evidence wording, and documents the busy retry and the line-reference tool', () => {
+test('[prompt] the shipped prompt works every lane, keeps the evidence and busy-retry rules, the line-reference tool, resolves only on the completing write, expected_version, the directory rule and the handoff report', () => {
   const prompt = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'templates', 'maintenance-worker-prompt.md'), 'utf8');
   assert.doesNotMatch(prompt, /short of budget/i);
   assert.doesNotMatch(prompt, /STOP and leave the remaining items/);
-  assert.match(prompt, /judge every listed item/i);
-  assert.match(prompt, /never stamped owes_prose without reading/i);
-  assert.match(prompt, /A verdict needs evidence\. Before you report owes_prose, you must have called knowledge_get on the item's article AND either Read one of the item's file_keys or run Grep/);
+  assert.match(prompt, /work every listed item/i);
   assert.match(prompt, /database is locked/i);
   assert.match(prompt, /retry that call once/i);
   assert.match(prompt, /mcp__sterling__knowledge_line_ref_fix/);
-  assert.match(prompt, /anchor/);
-  // CHANGED (review): the tool lost its resolves argument; the item is closed only with the attested maintenance_remove.
-  assert.doesNotMatch(prompt, /resolves/);
-  assert.match(prompt, /close it ONLY with maintenance_remove/);
   assert.match(prompt, /quotes right next to that reference/);
+  assert.match(prompt, /The fix tool closes nothing; after it, close the item with maintenance_remove/);
+  // CHANGED (GitHub #56): the worker writes the factual refresh and claims resolves, but only on the completing write.
+  for (const lane of WORKER_LANES) assert.match(prompt, new RegExp(`^- ${lane}\\. Read:`, 'm'), `${lane} has its evidence and completion rule`);
+  assert.match(prompt, /pass `resolves: \[<the item's full id>\]` on the ONE write that completes the repair, and only if the PAID standard holds after it/);
+  assert.match(prompt, /Never put `resolves` on an intermediate edit/);
+  assert.match(prompt, /Pass `expected_version`/);
+  assert.match(prompt, /SAME DIRECTORY/);
+  assert.match(prompt, /set BOTH `source_date` and `capture_date`/);
+  assert.match(prompt, /a web page never re-proves a measured local behaviour/);
+  assert.match(prompt, /domain-held target/);
+  assert.match(prompt, /"worker policy refused".*Hand the item off with the refusal text as the reason/s);
+  assert.match(prompt, /"verdict":"needs_conductor"/);
+  assert.match(prompt, /"verdict":"retry"/);
+  assert.doesNotMatch(prompt, /owes_prose/, 'the old verdict name is gone from the work order');
+});
+
+// ------------------------------------------------------------ GitHub #56: every lane, the factual refresh, the policy, chaining
+// (decision maintenance-worker-drains-every-lane-and-writes-factual-refresh-on-sonnet)
+
+const laneItem = (id, lane, ageMin, extra = {}) => ({ id, system_reason: lane, text: `item ${id}`, file_keys: [`src/${id}.mjs`], created_at: new Date(NOW - ageMin * 60_000).toISOString(), ...extra });
+
+test('[#56 batch] selectBatch is bounded, round-robin across the worker lanes in their order, and oldest first within a lane', () => {
+  const items = [
+    ...Array.from({ length: 20 }, (_, i) => laneItem(`r${i}`, 'reconcile_needed', 100 - i)),
+    laneItem('s-new', 'stale_research', 5),
+    laneItem('s-old', 'stale_research', 50),
+    laneItem('a1', 'article_missing', 10),
+    laneItem('x1', 'capture_owed', 999),
+  ];
+  const batch = selectBatch(items, 6);
+  assert.deepEqual(batch.map((t) => t.id), ['r0', 's-old', 'a1', 'r1', 's-new', 'r2'], 'one per lane per round; the deep lane cannot starve the others; capture_owed is not a worker lane');
+  assert.equal(selectBatch(items).length, RUN_BATCH_MAX, 'the default bound');
+  const undated = selectBatch([laneItem('dated', 'state_review', 60), { ...laneItem('undated', 'state_review', 0), created_at: undefined }], 1);
+  assert.deepEqual(undated.map((t) => t.id), ['undated'], 'an undated item counts as oldest, as the batching check does');
+});
+
+test('[#56 batch] the launcher offers the child only the bounded batch, but batches on every eligible item', () => {
+  const fx = fixture();
+  try {
+    const items = Array.from({ length: RUN_BATCH_MAX + 3 }, (_, i) => laneItem(`r${i}`, 'reconcile_needed', 1));
+    const r = launch(fx, { spawn: fakeSpawn().fn, items });
+    assert.deepEqual([r.launched, r.items, r.eligible], [true, RUN_BATCH_MAX, RUN_BATCH_MAX + 3]);
+    const eligible = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    assert.equal(eligible.items.length, RUN_BATCH_MAX);
+    assert.equal(eligible.policy_items.length, RUN_BATCH_MAX);
+    assert.equal(eligible.queue_snapshot.length, RUN_BATCH_MAX + 3);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[#56 policy] the launcher writes the batch policy into eligible.json (the shape of scripts/tests/fixtures/worker-policy.json) and the run hands it to the server as argv in the MCP config', async () => {
+  const fx = fixture();
+  try {
+    const items = [
+      laneItem('r1', 'reconcile_needed', 40, { feature_link: 'f-r1', text: "reconcile article 'art-r1' — changed" }),
+      laneItem('s1', 'stale_research', 40, { feature_link: 'f-s1', file_keys: [], text: "re-verify research finding 'find-s1' — source_date old" }),
+      laneItem('m1', 'article_missing', 40),
+      laneItem('c1', 'capture_owed', 40),
+    ];
+    assert.equal(launch(fx, { spawn: fakeSpawn().fn, items }).launched, true);
+    const eligible = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    const lockToken = JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token;
+    // The shared fixture's shape (slice A): the old fields stay, the policy sits beside them.
+    assert.equal(eligible.token, lockToken, 'the policy token is the lock token');
+    assert.equal(eligible.head, HEAD);
+    assert.equal(eligible.host, 'claude');
+    assert.equal(eligible.policy_version, POLICY_VERSION);
+    assert.equal(typeof eligible.run_id, 'string');
+    assert.ok(eligible.run_id.length > 0);
+    assert.deepEqual(eligible.policy_items, [
+      { id: 'r1', lane: 'reconcile_needed', target_id: 'f-r1', file_keys: ['src/r1.mjs'] },
+      { id: 's1', lane: 'stale_research', target_id: 'f-s1', file_keys: [] },
+      { id: 'm1', lane: 'article_missing', target_id: null, file_keys: ['src/m1.mjs'] },
+    ], "one policy item per batch item; capture_owed is not the worker's");
+    assert.deepEqual(eligible.items.map((t) => [t.id, t.lane, t.feature_link, t.slug]), [['r1', 'reconcile_needed', 'f-r1', 'art-r1'], ['s1', 'stale_research', 'f-s1', 'find-s1'], ['m1', 'article_missing', null, null]]);
+    assert.deepEqual(eligible.queue_snapshot.map((t) => t.id), ['r1', 's1', 'm1'], 'every eligible item, for the chained launch');
+
+    const child = fakeClaude([resultEvent({})]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, token: lockToken, budgetUsd: 2, now: () => NOW, ...quiet }), 0);
+    const args = child.calls[0].args;
+    const server = JSON.parse(args[args.indexOf('--mcp-config') + 1]).mcpServers.sterling;
+    assert.deepEqual(server.args.slice(-4), ['--worker-policy', fx.paths.eligible, '--worker-token', lockToken], 'policy path and token reach the server as argv');
+    assert.ok(server.args[server.args.length - 3].startsWith('/'), 'the policy path is absolute');
+    assert.ok(!Object.keys(child.calls[0].opts.env).some((k) => /POLICY/.test(k)), 'never as ambient env');
+    assert.match(args[1], /- s1 lane stale_research target f-s1 file_keys \[\]/);
+    assert.throws(() => resolveMcpConfig(fx.plugin, fx.project, { path: 'relative/eligible.json', token: 't' }), /absolute/);
+    assert.throws(() => resolveMcpConfig(fx.plugin, fx.project, { path: fx.paths.eligible, token: '' }), /token/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[#56 fail closed] a run without the launcher token is refused and recorded; nothing is spawned', async () => {
+  const fx = fixture();
+  try {
+    const child = fakeClaude([resultEvent({})]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: child.fn, budgetUsd: 2, now: () => NOW, ...quiet }), 1);
+    assert.equal(child.calls.length, 0);
+    assert.match(lastRun(fx).error, /no launch token/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+const writeCall = (id, tool, input) => toolUse(id, `mcp__sterling__${tool}`, input);
+const writeResult = (id, text, isError = false) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text }], is_error: isError }] } });
+
+test('[#56 stamp] a successful knowledge write without this run\'s stamp fails the run as "unpoliced write"; a stamped one is journalled and is progress; a refused write is neither', async () => {
+  const cases = [
+    ['no stamp', JSON.stringify({ ok: true, id: LINK, version: 4 }), false],
+    ['a stamp from another run', stampedText('A', 'run-other'), false],
+    ['a stamp for an item outside the batch', stampedText('Z'), false],
+    ["this run's stamp", stampedText('A', RUN_ID, { id: LINK, version: 4 }), true],
+  ];
+  for (const [name, text, policed] of cases) {
+    const fx = fixture();
+    try {
+      const child = fakeClaude([
+        ...evidenceForA(),
+        writeCall('w1', 'knowledge_edit', { id: LINK, field: 'files[path=src/a.mjs].role', find: 'old', replace: 'new' }),
+        writeResult('w1', text),
+        writeCall('w2', 'knowledge_update', { id: LINK, body: { state: 'built' }, expected_version: 3 }),
+        writeResult('w2', "worker policy refused knowledge_update: rule 'field_not_allowed' — state. Policy item(s): A. Nothing was written.", true),
+        resultEvent({}),
+      ]);
+      const code = await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: child.fn, relaunch: () => ({ launched: false, reason: 'test' }) });
+      const last = lastRun(fx);
+      const writes = readJournal(fx).filter((l) => l.kind === 'tool_call');
+      assert.deepEqual(writes.map((l) => [l.tool, l.is_error]), [['knowledge_edit', false], ['knowledge_update', true]], name);
+      assert.equal(writes[1].unpoliced, undefined, `${name}: a refused write is not checked for a stamp`);
+      if (policed) {
+        assert.equal(code, 0, name);
+        assert.equal(last.ok, true, name);
+        assert.deepEqual(writes[0].stamp, { run_id: RUN_ID, item_id: 'A' });
+        assert.equal(last.writes_ok, 1);
+        assert.equal(last.unpoliced_writes, 0);
+        assert.equal(last.no_progress, false, 'a landed factual edit is progress');
+      } else {
+        assert.equal(code, 1, name);
+        assert.equal(last.ok, false, name);
+        assert.match(last.error, /unpoliced write: 1 successful knowledge write\(s\) without this run's worker_stamp \(knowledge_edit on aaaaaaaa/, name);
+        assert.equal(writes[0].unpoliced, true, name);
+        assert.equal(last.writes_ok, 0, name);
+        assert.ok(workerBreakage(last), `${name}: H1 names the broken run`);
+      }
+    } finally {
+      fx.cleanup();
+    }
+  }
+  assert.equal(STAMP_KEY, 'worker_stamp');
+  assert.deepEqual(findStamp('prefix {"worker_stamp":{"run_id":"r","item_id":"i"}} suffix'), { run_id: 'r', item_id: 'i' }, 'a wrapped receipt (an OpenCode execute output) still yields its stamp');
+  assert.deepEqual(findStamp(JSON.stringify({ receipt: { worker_stamp: { run_id: 'r', item_id: 'i' } } })), { run_id: 'r', item_id: 'i' }, 'a nested stamp counts');
+  assert.equal(findStamp('updated what_it_does'), null);
+  assert.equal(findStamp(JSON.stringify({ worker_stamp: { run_id: 'r' } })), null, 'a stamp without an item is no stamp');
+});
+
+test('[#56 resolves] a stamped write that claims resolves on a batch item closes it: progress, counted as resolves_closed', async () => {
+  const fx = fixture();
+  try {
+    const child = fakeClaude([
+      ...evidenceForA(),
+      writeCall('w1', 'knowledge_append', { id: LINK, field: 'files', value: [{ path: 'src/a.mjs', role: 'x' }], resolves: ['A', 'not-in-batch'] }),
+      writeResult('w1', stampedText('A')),
+      resultEvent({ result: JSON.stringify({ item_id: 'A', lane: 'reconcile_needed', verdict: 'closed', reason: 'files[] role refreshed' }) }),
+    ]);
+    assert.equal(await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: child.fn, relaunch: () => ({ launched: false, reason: 'test' }) }), 0);
+    const last = lastRun(fx);
+    assert.deepEqual([last.ok, last.resolves_closed, last.writes_ok, last.no_progress], [true, 1, 1, false]);
+    assert.deepEqual(readJournal(fx).find((l) => l.tool === 'knowledge_append').resolves, ['A', 'not-in-batch']);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[#56 budget] a budget cap reached after progress is a normal end; without progress it is still a failure', async () => {
+  const fx = fixture();
+  try {
+    const capped = (events) => fakeClaude([...events, resultEvent({ subtype: 'error_max_budget_usd', is_error: true, total_cost_usd: 5.02 })], { code: 1 });
+    const progressed = capped([removeCall('c1', 'A'), removeResult('c1', 'Closed as ALREADY-PAID')]);
+    assert.equal(await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: progressed.fn, relaunch: () => ({ launched: false, reason: 'test' }) }), 0);
+    let last = lastRun(fx);
+    assert.deepEqual([last.ok, last.error, last.budget_capped, last.no_progress, last.cost_usd], [true, null, true, false, 5.02]);
+    assert.equal(workerBreakage(last), null, 'H1 shows no FAILED note for it');
+
+    const idle = capped([]);
+    assert.equal(await runWorker({ ...eligibleRun(fx, ITEM_A, 'tok2'), spawn: idle.fn }), 1);
+    last = lastRun(fx);
+    assert.equal(last.ok, false);
+    assert.match(last.error, /exit 1; error result \(error_max_budget_usd\)/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[#56 chain] a run that closed an item with eligible work left re-enters the launcher with what is left, after releasing the lock; no progress, nothing left or a failed run does not', async () => {
+  const fx = fixture();
+  try {
+    const armWithSnapshot = (token, snapshot) => {
+      const opts = eligibleRun(fx, ITEM_A, token);
+      const e = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+      writeFileSync(fx.paths.eligible, JSON.stringify({ ...e, queue_snapshot: snapshot }));
+      return opts;
+    };
+    const snapshot = [{ id: 'A', system_reason: 'reconcile_needed', file_keys: ['src/a.mjs'] }, { id: 'B', system_reason: 'state_review', file_keys: ['src/b.mjs'] }];
+    const calls = [];
+    const relaunch = (items) => {
+      calls.push({ items: items.map((t) => t.id), lockHeld: existsSync(fx.paths.lock) });
+      return { launched: true, reason: 'launched' };
+    };
+    const closing = fakeClaude([removeCall('c1', 'A'), removeResult('c1', 'Closed as ALREADY-PAID'), resultEvent({})]);
+    assert.equal(await runWorker({ ...armWithSnapshot('t1', snapshot), spawn: closing.fn, relaunch }), 0);
+    assert.deepEqual(calls, [{ items: ['B'], lockHeld: false }], 'the closed item is dropped, and the relaunch comes after the lock is released');
+    assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').map((l) => [l.launched, l.items_left]), [[true, 1]]);
+
+    const idle = fakeClaude([resultEvent({ result: owes('A', 'art-a') })]);
+    await runWorker({ ...armWithSnapshot('t2', snapshot), spawn: idle.fn, relaunch });
+    assert.equal(calls.length, 1, 'no progress: no chain (the back-off applies instead)');
+
+    const lastOne = fakeClaude([removeCall('c1', 'A'), removeResult('c1', 'Closed as ALREADY-PAID'), resultEvent({})]);
+    await runWorker({ ...armWithSnapshot('t3', [snapshot[0]]), spawn: lastOne.fn, relaunch });
+    assert.equal(calls.length, 1, 'nothing left: no chain');
+
+    const failed = fakeClaude([removeCall('c1', 'A'), removeResult('c1', 'Closed as ALREADY-PAID'), resultEvent({ permission_denials: [{ tool_name: 'Bash' }] })]);
+    await runWorker({ ...armWithSnapshot('t4', snapshot), spawn: failed.fn, relaunch });
+    assert.equal(calls.length, 1, 'a failed run does not chain');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[#56 chain] the default relaunch goes through the real launcher: debounce still applies, and past it the next runner is spawned for what is left, without the runner\'s inside-worker flag blocking it', async () => {
+  const fx = fixture();
+  const prevEnv = process.env.STERLING_MAINTENANCE_WORKER;
+  const prevDisable = process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
+  try {
+    const items = [laneItem('a1', 'reconcile_needed', 60), laneItem('a2', 'state_review', 60)];
+    assert.equal(launch(fx, { spawn: fakeSpawn().fn, items }).launched, true);
+    const token = JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token;
+    const eligible = readFileSync(fx.paths.eligible, 'utf8');
+    const runner = fakeSpawn({ pid: 5151 });
+    const spawn = (cmd, args, opts) => (cmd === process.execPath ? runner.fn(cmd, args, opts) : fakeClaude([removeCall('c1', 'a1'), removeResult('c1', 'Closed as ALREADY-PAID'), resultEvent({})]).fn(cmd, args, opts));
+    process.env.STERLING_MAINTENANCE_WORKER = '1'; // the runner's own environment carries the flag
+    // The npm test preload sets the test-run guard; this test injects every spawn, so it lifts it.
+    delete process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
+    const run = () => runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, now: () => NOW, spawnSync: CLEAN_GIT, ...quiet });
+
+    assert.equal(await run(), 0);
+    assert.equal(runner.calls.length, 0);
+    assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').map((l) => [l.launched, l.reason]), [[false, 'debounced']], 'inside the debounce window: no chained launch');
+
+    writeFileSync(fx.paths.lastLaunch, JSON.stringify({ at_ms: NOW - DEBOUNCE_MS - 1 }));
+    writeFileSync(fx.paths.lock, JSON.stringify({ pid: process.pid, started_at: new Date(NOW).toISOString(), token }));
+    writeFileSync(fx.paths.eligible, eligible);
+    assert.equal(await run(), 0);
+    assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').at(-1).launched, true);
+    assert.equal(runner.calls.length, 1);
+    assert.equal(runner.calls[0].args[4], 'chain', 'the chained run carries trigger chain');
+    assert.equal(runner.calls[0].opts.env.STERLING_MAINTENANCE_WORKER, '1', 'the launcher marks the new runner again');
+    const next = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    assert.deepEqual(next.policy_items.map((t) => t.id), ['a2'], 'the closed item is not offered again');
+  } finally {
+    if (prevEnv === undefined) delete process.env.STERLING_MAINTENANCE_WORKER;
+    else process.env.STERLING_MAINTENANCE_WORKER = prevEnv;
+    if (prevDisable === undefined) delete process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
+    else process.env.STERLING_MAINTENANCE_WORKER_DISABLE = prevDisable;
+    fx.cleanup();
+  }
+});
+
+test('[#56 handoff] a needs_conductor verdict needs a reason; a temporary failure is a retry, never a standing handoff; a worker-policy refusal is a handoff whatever it names', async () => {
+  const fx = fixture();
+  try {
+    const items = [
+      { id: 'A', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' },
+      { id: 'B', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' },
+      { id: 'C', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' },
+      { id: 'D', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' },
+      { id: 'E', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' },
+    ];
+    const v = (id, verdict, reason) => JSON.stringify({ item_id: id, verdict, ...(reason === undefined ? {} : { reason }) });
+    const child = fakeClaude([
+      ...evidenceForA(),
+      resultEvent({
+        result: [
+          v('A', 'needs_conductor', 'the article does not describe the new --dry-run flag'),
+          v('B', 'needs_conductor'),
+          v('C', 'needs_conductor', 'knowledge_update failed: version conflict (expected_version 3, found 4)'),
+          v('D', 'retry', 'SQLITE_BUSY: database is locked'),
+          v('E', 'needs_conductor', "worker policy refused knowledge_update: rule 'expected_version_required' — missing. Policy item(s): E. Nothing was written."),
+        ].join('\n'),
+      }),
+    ]);
+    await runWorker({ ...eligibleRun(fx, items), spawn: child.fn });
+    const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
+    assert.deepEqual(verdicts.map((l) => [l.item_id, l.verdict, l.evidence ?? null]), [
+      ['A', 'needs_conductor', true],
+      ['B', 'unjudged', null],
+      ['C', 'retry', null],
+      ['D', 'retry', null],
+      ['E', 'needs_conductor', true],
+    ]);
+    assert.ok(verdicts.every((l) => l.capability === WORKER_CAPABILITY));
+    assert.deepEqual([...handoffVerdicts(fx.project).keys()].sort(), ['A', 'E'], 'only the standing handoffs');
+    assert.equal(lastRun(fx).retry_verdicts, 2);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[#56 evidence] each lane needs its own reads: stale_research a re-check, refresh_reference its file, article_missing a file and an owner search', () => {
+  const root = '/p';
+  const files = new Set(['/p/src/a.mjs']);
+  const none = new Set();
+  const art = new Set(['f-1']);
+  const item = (lane, keys = ['src/a.mjs']) => ({ id: 'i', lane, file_keys: keys, feature_link: 'f-1' });
+  assert.equal(hasEvidence(item('stale_research', []), art, none, root, none, { web: true }), true, 'finding read and a web re-check');
+  assert.equal(hasEvidence(item('stale_research', []), art, files, root), true, 'finding read and a local re-check');
+  assert.equal(hasEvidence(item('stale_research', []), art, none, root), false, 'the finding alone re-checks nothing');
+  assert.equal(hasEvidence(item('refresh_reference'), art, files, root), true);
+  assert.equal(hasEvidence(item('refresh_reference'), art, none, root, none, { web: true }), false, 'a web page does not stand in for the reference\'s own file');
+  assert.equal(hasEvidence(item('refresh_reference', []), art, none, root, none, { web: true }), true, 'a reference with no file is re-checked on the web');
+  assert.equal(hasEvidence(item('article_missing'), none, files, root, none, { queried: true }), true);
+  assert.equal(hasEvidence(item('article_missing'), none, files, root), false, 'no owner search');
+  assert.equal(hasEvidence(item('state_review'), art, none, root), false, 'state_review needs the files too');
+  assert.equal(hasEvidence(item('state_review'), art, files, root), true);
+});
+
+test('[#56 rotation] a needs_conductor verdict keeps its reason, lane and capability through two rotations, and the write count survives as a carried count', () => {
+  const fx = fixture();
+  try {
+    journalLine(fx, { kind: 'verdict', item_id: 'h', lane: 'stale_research', verdict: 'needs_conductor', file_keys: [], reason: 'the measured latency changed: 40ms is now 90ms', evidence: true, capability: WORKER_CAPABILITY });
+    journalLine(fx, { kind: 'tool_call', tool: 'knowledge_update', is_error: false, stamp: { run_id: 'r', item_id: 'x' } });
+    journalLine(fx, { kind: 'tool_call', tool: 'knowledge_edit', is_error: false, stamp: { run_id: 'r', item_id: 'y' } });
+    journalLine(fx, { kind: 'tool_call', tool: 'knowledge_edit', is_error: true });
+    appendFileSync(fx.paths.journal, 'x'.repeat(300) + '\n');
+    rotateJournal(fx.project, 200);
+    appendFileSync(fx.paths.journal, 'y'.repeat(300) + '\n');
+    rotateJournal(fx.project, 200);
+    const h = handoffVerdicts(fx.project).get('h');
+    assert.deepEqual(h, { keys: '[]', reason: 'the measured latency changed: 40ms is now 90ms', lane: 'stale_research' });
+    assert.equal(judgedVerdicts(fx.project).get('h').capability, WORKER_CAPABILITY);
+    assert.deepEqual(workerWriteCount(fx.project), { count: 2, path: '.sterling/maintenance-worker.jsonl' });
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[#56 re-judge] an owes_prose verdict from the judge-only worker is judged once more: it does not stand, the item launches, and the new needs_conductor verdict then stands', async () => {
+  const fx = fixture();
+  try {
+    journalLine(fx, { kind: 'verdict', item_id: 'A', verdict: 'owes_prose', file_keys: ['src/a.mjs'], reason: 'old judge-only verdict', evidence: true });
+    assert.equal(judgedVerdicts(fx.project).size, 0, 'no capability marker: not a standing verdict');
+    const store = { count: () => 1, query: () => [ITEM('A', ['src/a.mjs'])] };
+    assert.deepEqual(unjudgedWorkerItems(store, fx.project).map((t) => t.id), ['A']);
+    const r = launch(fx, { spawn: fakeSpawn().fn, items: [{ ...ITEM('A', ['src/a.mjs']), created_at: new Date(NOW - BATCH_MAX_WAIT_MS).toISOString() }] });
+    assert.equal(r.launched, true, 'launchable again');
+    const token = JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token;
+    // the launcher's item carries the slug 'A' (from its text) and no feature_link: the evidence is by slug
+    const getBySlug = fakeClaude([toolUse('g', 'mcp__sterling__knowledge_get', { id: 'A' }), toolOk('g'), toolUse('r', 'Read', { file_path: 'src/a.mjs' }), toolOk('r'), resultEvent({ result: JSON.stringify({ item_id: 'A', verdict: 'needs_conductor', reason: 'a new refusal path the article does not describe' }) })]);
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn: getBySlug.fn, token, budgetUsd: 2, now: () => NOW, ...quiet }), 0);
+    const v = judgedVerdicts(fx.project).get('A');
+    assert.deepEqual([v.verdict, v.capability, v.reason], ['needs_conductor', WORKER_CAPABILITY, 'a new refusal path the article does not describe']);
+    rmSync(fx.paths.lastLaunch);
+    assert.equal(launch(fx, { spawn: fakeSpawn().fn, items: [ITEM('A', ['src/a.mjs'])] }).reason, 'queue_empty', 'judged once: the handoff now stands');
+  } finally {
+    fx.cleanup();
+  }
 });

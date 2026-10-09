@@ -1,5 +1,7 @@
 // H1's two maintenance lines name who drains what: the DEEP-queue line separates
-// the lanes the background worker drains (reconcile_needed) from the conductor's,
+// the lanes the background worker drains (WORKER_LANES; GitHub #56 widened them
+// from reconcile_needed to five) from the conductor's, counts a handed-off item as
+// the conductor's in any lane,
 // and the RECONCILE BACKLOG line names the worker's real state instead of a bare
 // "worker not running" (board 27c87783; the user asked on 2026-10-03 why the
 // conductor drained by hand when a worker exists). The lines are pure text over
@@ -10,6 +12,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { queueDepthLine, readMaintenanceState, reconcileBacklog } from '../hooks/lib/maintenance-state.mjs';
+import { WORKER_CAPABILITY } from '../hooks/lib/maintenance-worker.mjs';
 
 const MIN = 60_000;
 const inLane = (n, r) => `${n} item${n === 1 ? '' : 's'} in lane ${r}`;
@@ -44,12 +47,23 @@ test('DEEP line: no reconcile_needed lane means no worker clause', () => {
   assert.doesNotMatch(line, /background worker/);
 });
 
-test('VERY DEEP line: the biggest conductor lane is named and reconcile_needed is still the worker\'s', () => {
-  const line = depth([['reconcile_needed', 300], ['stale_research', 100], ['article_missing', 60]]);
+test('VERY DEEP line: the biggest conductor lane is named and the worker\'s lanes are still the worker\'s', () => {
+  // CHANGED (GitHub #56): stale_research and article_missing became worker lanes, so the conductor's lanes here are
+  // capture_owed and research_owed; the worker's lanes are named in one sentence, reconcile_needed first.
+  const line = depth([['reconcile_needed', 300], ['capture_owed', 100], ['research_owed', 60], ['stale_research', 7]]);
   assert.match(line, /^MAINTENANCE QUEUE IS VERY DEEP — 160 drainable items across 2 lane\(s\)/);
-  assert.match(line, /Drain the biggest lane now \(100 items in lane stale_research\)/);
-  assert.match(line, /300 items in lane reconcile_needed[^.]*drained by the background worker/);
-  assert.doesNotMatch(line, /biggest lanes?:.*reconcile_needed/, 'the worker lane is not offered as a lane to drain');
+  assert.match(line, /Drain the biggest lane now \(100 items in lane capture_owed\)/);
+  assert.match(line, /The 300 items in lane reconcile_needed are drained by the background worker, not by you, and so are 7 items in lane stale_research \(its state is on the RECONCILE BACKLOG line\)/);
+  assert.doesNotMatch(line, /biggest lanes?:.*(reconcile_needed|stale_research)/, 'a worker lane is not offered as a lane to drain');
+});
+
+test('DEEP line counts by responsibility: items the worker handed off are the conductor\'s, in any lane', () => {
+  const entries = [['reconcile_needed', 10, 4], ['stale_research', 9, 9], ['capture_owed', 3]];
+  const line = queueDepthLine({ drainable: 22, parked: 0, queueReasonEntries: entries, queueReasons: entries.map(([r, n]) => inLane(n, r)), deepThreshold: 15 });
+  assert.match(line, /^MAINTENANCE QUEUE IS DEEP — 16 drainable items \(9 items in lane stale_research handed to you by the worker, 4 items in lane reconcile_needed handed to you by the worker, 3 items in lane capture_owed\)/);
+  assert.match(line, /The 6 items in lane reconcile_needed are drained by the background worker, not by you \(/, 'only the part the worker still holds');
+  assert.doesNotMatch(line, /in lane stale_research are drained/, 'a lane fully handed off is not the worker\'s');
+  assert.equal(queueDepthLine({ drainable: 22, parked: 0, queueReasonEntries: [['reconcile_needed', 19, 0], ['capture_owed', 3]], queueReasons: [inLane(19, 'reconcile_needed'), inLane(3, 'capture_owed')], deepThreshold: 15 }), '', 'nothing handed off: below the threshold');
 });
 
 function makeDir(config = { toolchains: [] }) {
@@ -66,7 +80,7 @@ const iso = (ms) => new Date(ms).toISOString();
 // prose' for their current file_keys are not).
 function reconcile(now, { count = 1, unjudged = count, ageMin = 8 } = {}) {
   const oldest = iso(now - ageMin * MIN);
-  return { count, owesProse: count - unjudged, oldest, unjudged, oldestUnjudged: unjudged > 0 ? oldest : null };
+  return { count, handedOff: count - unjudged, oldest, unjudged, oldestUnjudged: unjudged > 0 ? oldest : null };
 }
 
 function backlog(dir, rec, now, extra = {}) {
@@ -120,7 +134,7 @@ test('BACKLOG worker state: disabled by config', () => {
   const now = Date.now();
   withDir({ maintenance_worker: { enabled: false } }, (dir) => {
     const b = backlog(dir, reconcile(now), now);
-    assert.match(b.banner, /worker disabled by config \(reconcile items wait for \/sterling:drain\)$/);
+    assert.match(b.banner, /worker disabled by config \(the worker's items wait for \/sterling:drain\)$/);
   });
 });
 
@@ -136,7 +150,7 @@ test('BACKLOG worker state: disabled by the environment switch', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const b = backlog(dir, reconcile(now), now, { env: { STERLING_MAINTENANCE_WORKER_DISABLE: '1' } });
-    assert.match(b.banner, /worker disabled by STERLING_MAINTENANCE_WORKER_DISABLE \(reconcile items wait for \/sterling:drain\)$/);
+    assert.match(b.banner, /worker disabled by STERLING_MAINTENANCE_WORKER_DISABLE \(the worker's items wait for \/sterling:drain\)$/);
   });
 });
 
@@ -251,32 +265,55 @@ test('BACKLOG worker state: a failed last run prints the FAILED note and no last
   });
 });
 
-test('BACKLOG line: the owes-prose sentence says N of the M items are the conductor\'s and the worker handles the rest', () => {
+// CHANGED (GitHub #56, design (f)): the worker hands items off as needs_conductor with a reason; the sentence
+// names the handoff, not 'owes prose', and a bounded selection of reasons follows.
+test('BACKLOG line: the handoff sentence says N of the M items are the conductor\'s and the worker handles the rest', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const b = backlog(dir, reconcile(now, { count: 5, unjudged: 3, ageMin: 90 }), now);
-    assert.match(b.line, /^RECONCILE BACKLOG: 5 items in lane reconcile_needed, the oldest of all items open since .* \(1h\)\. 2 of the 5 items were judged 'owes prose' by the worker and are yours to draft\. The worker handles the other 3\. worker /);
+    assert.match(b.line, /^RECONCILE BACKLOG: 5 items in lane reconcile_needed, the oldest of all items open since .* \(1h\)\. 2 of the 5 items were handed to you by the worker \(needs_conductor\) and are yours\. The worker handles the other 3\. worker /);
     const one = backlog(dir, reconcile(now, { count: 5, unjudged: 4, ageMin: 90 }), now);
-    assert.match(one.line, /1 of the 5 items was judged 'owes prose' by the worker and is yours to draft\. The worker handles the other 4\./);
+    assert.match(one.line, /1 of the 5 items was handed to you by the worker \(needs_conductor\) and is yours\. The worker handles the other 4\./);
   });
 });
 
-test('BACKLOG line: when every item owes prose there is no "other items" sentence', () => {
+test('BACKLOG line: when every item is handed off there is no "other items" sentence', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const b = backlog(dir, reconcile(now, { count: 4, unjudged: 0, ageMin: 90 }), now);
-    assert.match(b.line, /All 4 items were judged 'owes prose' by the worker and are yours to draft\. worker has nothing left to judge: all 4 items wait on you/);
+    assert.match(b.line, /All 4 items were handed to you by the worker \(needs_conductor\) and are yours\. worker has nothing left to judge: all 4 items wait on you/);
     assert.doesNotMatch(b.line, /The worker handles the other/);
     const single = backlog(dir, reconcile(now, { count: 1, unjudged: 0, ageMin: 90 }), now);
-    assert.match(single.line, /The 1 item was judged 'owes prose' by the worker and is yours to draft\. worker has nothing/);
+    assert.match(single.line, /The 1 item was handed to you by the worker \(needs_conductor\) and is yours\. worker has nothing/);
   });
 });
 
-test('BACKLOG line: nothing judged owes prose, so no owes-prose sentence', () => {
+test('BACKLOG line: nothing handed off, so no handoff sentence', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const b = backlog(dir, reconcile(now, { count: 2, ageMin: 8 }), now);
-    assert.doesNotMatch(b.line, /owes prose|yours to draft/);
+    assert.doesNotMatch(b.line, /handed to you|are yours|is yours/);
+  });
+});
+
+test('BACKLOG line: every worker lane is named, a bounded selection of handoff reasons is shown with short ids, and the write count points at the journal', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    const handoffs = [
+      { id: 'aaaaaaaa-1111-2222-3333-444444444444', lane: 'reconcile_needed', reason: 'the article does not describe the new --dry-run flag' },
+      { id: 'bbbbbbbb-1111-2222-3333-444444444444', lane: 'stale_research', reason: 'the measured cost changed: ' + 'x'.repeat(200) },
+      { id: 'cccccccc-1111-2222-3333-444444444444', lane: 'article_missing', reason: 'no article owns scripts/new/' },
+      { id: 'dddddddd-1111-2222-3333-444444444444', lane: 'state_review', reason: 'needs a ruling on built vs active' },
+    ];
+    const rec = { ...reconcile(now, { count: 7, unjudged: 3, ageMin: 90 }), lanes: [['reconcile_needed', 3], ['stale_research', 2], ['article_missing', 1], ['state_review', 1]], handedOff: 4, handoffs, writes: { count: 12, path: '.sterling/maintenance-worker.jsonl' } };
+    const b = backlog(dir, rec, now);
+    assert.match(b.banner, / · 3 items in lane reconcile_needed, 2 items in lane stale_research, 1 item in lane article_missing, 1 item in lane state_review, oldest 1h, /);
+    assert.match(b.line, /^RECONCILE BACKLOG: 3 items in lane reconcile_needed, 2 items in lane stale_research, 1 item in lane article_missing, 1 item in lane state_review, the oldest/);
+    assert.match(b.line, /4 of the 7 items were handed to you by the worker \(needs_conductor\) and are yours\. The worker handles the other 3\. Why: aaaaaaaa \(reconcile_needed\): the article does not describe the new --dry-run flag; bbbbbbbb \(stale_research\): the measured cost changed: x+…; cccccccc \(article_missing\): no article owns scripts\/new\/ \(\+1 more in \.sterling\/maintenance-worker\.jsonl\)\. /);
+    assert.doesNotMatch(b.line, /dddddddd/, 'at most three reasons');
+    assert.doesNotMatch(b.line, /x{120}/, 'a long reason is clipped');
+    assert.match(b.line, /Worker writes on record: 12 \(spot-check a few in \.sterling\/maintenance-worker\.jsonl\)\. /);
+    assert.doesNotMatch(b.banner, /Why:|Worker writes/, 'reasons and the audit pointer are for the conductor line only');
   });
 });
 
@@ -345,7 +382,7 @@ test('BACKLOG worker state: any other caught error says "internal error" plus it
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const boom = (err) => ({
-      count: 1, owesProse: 0, oldest: iso(now - 8 * MIN), oldestUnjudged: iso(now - 8 * MIN),
+      count: 1, handedOff: 0, oldest: iso(now - 8 * MIN), oldestUnjudged: iso(now - 8 * MIN),
       get unjudged() { throw err; },
     });
     const withCode = backlog(dir, boom(Object.assign(new Error('SECRET-MARKER-9c1e'), { code: 'EBOOM' })), now);
@@ -399,7 +436,7 @@ test('BACKLOG worker state: running keeps its pid and start time, and wins over 
 test('BACKLOG worker state: an unreadable verdict journal gives "state unknown", never a guess', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
-    const b = backlog(dir, { count: 1, owesProse: null, oldest: iso(now - 8 * MIN), unjudged: null, oldestUnjudged: null }, now);
+    const b = backlog(dir, { count: 1, handedOff: null, oldest: iso(now - 8 * MIN), unjudged: null, oldestUnjudged: null }, now);
     assert.match(b.banner, /worker state unknown \(verdict journal unreadable\)$/);
     assert.match(b.line, /worker state unknown \(verdict journal unreadable\)\.$/);
   });
@@ -416,20 +453,20 @@ test('BACKLOG worker state: an unparseable config.json gives "state unknown", ne
 test('BACKLOG: silent with no reconcile item', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
-    assert.deepEqual(backlog(dir, { count: 0, owesProse: 0, oldest: null, unjudged: 0, oldestUnjudged: null }, now), { banner: '', line: '' });
+    assert.deepEqual(backlog(dir, { count: 0, handedOff: 0, oldest: null, unjudged: 0, oldestUnjudged: null }, now), { banner: '', line: '' });
   });
 });
 
-test('readMaintenanceState: unjudged excludes items judged owes-prose for their current file_keys, and dates the oldest unjudged', () => {
+test('readMaintenanceState: unjudged excludes items handed off for their current file_keys, and dates the oldest unjudged', () => {
   const now = Date.now();
   withDir({ toolchains: [] }, (dir) => {
     const mk = (id, ageMin) => ({ id, system_reason: 'reconcile_needed', file_keys: ['src/a.mjs'], created_at: iso(now - ageMin * MIN) });
     const items = [mk('judged', 500), mk('new1', 20), mk('new2', 4)];
-    writeFileSync(join(dir, '.sterling', 'maintenance-worker.jsonl'), JSON.stringify({ kind: 'verdict', item_id: 'judged', verdict: 'owes_prose', file_keys: ['src/a.mjs'], evidence: true }) + '\n');
+    writeFileSync(join(dir, '.sterling', 'maintenance-worker.jsonl'), JSON.stringify({ kind: 'verdict', item_id: 'judged', verdict: 'needs_conductor', file_keys: ['src/a.mjs'], reason: 'r', evidence: true, capability: WORKER_CAPABILITY }) + '\n');
     const store = { count: () => items.length, query: () => items };
     const m = readMaintenanceState(store, dir);
     assert.equal(m.reconcile.count, 3);
-    assert.equal(m.reconcile.owesProse, 1);
+    assert.equal(m.reconcile.handedOff, 1);
     assert.equal(m.reconcile.unjudged, 2);
     assert.equal(m.reconcile.oldestUnjudged, items[1].created_at);
   });
@@ -441,7 +478,33 @@ test('readMaintenanceState: an unreadable verdict journal makes unjudged null', 
     mkdirSync(join(dir, '.sterling', 'maintenance-worker.jsonl'));
     const items = [{ id: 'a', system_reason: 'reconcile_needed', file_keys: [], created_at: iso(Date.now() - MIN) }];
     const m = readMaintenanceState({ count: () => 1, query: () => items }, dir);
-    assert.equal(m.reconcile.owesProse, null);
+    assert.equal(m.reconcile.handedOff, null);
     assert.equal(m.reconcile.unjudged, null);
+  });
+});
+
+test('readMaintenanceState counts by responsibility: every worker lane is the worker\'s backlog, a handed-off item is the conductor\'s in any lane, with its reason and lane, and the journal\'s write count rides along', () => {
+  const now = Date.now();
+  withDir({ toolchains: [] }, (dir) => {
+    const mk = (id, lane, ageMin, keys = ['src/a.mjs']) => ({ id, system_reason: lane, file_keys: keys, created_at: iso(now - ageMin * MIN) });
+    const items = [mk('r1', 'reconcile_needed', 30), mk('s1', 'stale_research', 90, []), mk('s2', 'stale_research', 10, []), mk('m1', 'article_missing', 5), mk('c1', 'capture_owed', 999), mk('p1', 'file_parked', 999)];
+    const lines = [
+      { kind: 'verdict', item_id: 's1', lane: 'stale_research', verdict: 'needs_conductor', file_keys: [], reason: 'the answer changed upstream', evidence: true, capability: WORKER_CAPABILITY },
+      { kind: 'verdict', item_id: 'm1', verdict: 'owes_prose', file_keys: ['src/a.mjs'], evidence: true },
+      { kind: 'tool_call', tool: 'knowledge_update', is_error: false, stamp: { run_id: 'r', item_id: 'r1' } },
+    ];
+    writeFileSync(join(dir, '.sterling', 'maintenance-worker.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    const m = readMaintenanceState({ count: () => items.length, query: () => items }, dir);
+    assert.equal(m.reconcile.count, 4, 'the five worker lanes, not capture_owed or file_parked');
+    assert.deepEqual(m.reconcile.lanes, [['reconcile_needed', 1], ['stale_research', 2], ['article_missing', 1]]);
+    assert.equal(m.reconcile.handedOff, 1, 'a legacy owes_prose is the worker\'s to re-judge, not a handoff');
+    assert.deepEqual(m.reconcile.handoffs, [{ id: 's1', lane: 'stale_research', reason: 'the answer changed upstream' }]);
+    assert.equal(m.reconcile.unjudged, 3);
+    assert.deepEqual(m.reconcile.writes, { count: 1, path: '.sterling/maintenance-worker.jsonl' });
+    assert.deepEqual(m.queueReasonEntries.find(([r]) => r === 'stale_research'), ['stale_research', 2, 1]);
+    assert.deepEqual(m.queueReasonEntries.find(([r]) => r === 'capture_owed'), ['capture_owed', 1, 0]);
+    const line = queueDepthLine({ ...m, deepThreshold: 2 });
+    assert.match(line, /^MAINTENANCE QUEUE IS DEEP — 2 drainable items \(1 item in lane stale_research handed to you by the worker, 1 item in lane capture_owed\)/);
+    assert.match(line, /The 1 item in lane reconcile_needed is drained by the background worker, not by you, and so is 1 item in lane stale_research, and so is 1 item in lane article_missing/);
   });
 });

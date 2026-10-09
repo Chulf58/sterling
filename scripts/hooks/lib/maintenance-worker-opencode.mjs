@@ -31,7 +31,10 @@
 // answer 403 FreeTierError, so a free-tier worker run fails loudly instead of
 // running with write tools.
 //
-// DEPENDENCY-FREE (node builtins only), like maintenance-worker.mjs.
+// DEPENDENCY-FREE (node builtins only), like maintenance-worker.mjs. The import
+// below is a cycle with that module; only functions are used, and only at call
+// time, so neither module reads the other's bindings while it loads.
+import { knowledgeWriteName, writeEntry } from './maintenance-worker.mjs';
 
 const SERVER = 'sterling';
 
@@ -46,10 +49,19 @@ export const OPENCODE_WORKER_AGENT = 'sterling-maintenance-worker';
 /** Everything the worker may call, as OpenCode permission keys: execute (the
  *  MCP code-mode tool), mcp (measured on 2.0.22: under '*' deny, no MCP tool
  *  reaches the code-mode catalog without it, even one allowed by its own key;
- *  it does not allow the tools themselves), read and grep, and the four
- *  sterling tools the claude host's --allowedTools grants (an MCP tool's key is
- *  <server>_<tool>). */
-export const OPENCODE_ALLOWED_TOOLS = ['execute', 'mcp', 'read', 'grep', ...['maintenance_query', 'knowledge_get', 'maintenance_remove', 'knowledge_line_ref_fix'].map((v) => `${SERVER}_${v}`)];
+ *  it does not allow the tools themselves), read and grep, webfetch and
+ *  websearch (OpenCode's own web tools: parity with the claude host's
+ *  WebFetch/WebSearch, decision change (vii)), and the sterling tools the
+ *  claude host's --allowedTools grants (an MCP tool's key is <server>_<tool>). */
+export const OPENCODE_ALLOWED_TOOLS = [
+  'execute',
+  'mcp',
+  'read',
+  'grep',
+  'webfetch',
+  'websearch',
+  ...['maintenance_query', 'knowledge_get', 'maintenance_remove', 'knowledge_line_ref_fix', 'knowledge_update', 'knowledge_edit', 'knowledge_append', 'knowledge_array_remove', 'knowledge_query', 'knowledge_schema'].map((v) => `${SERVER}_${v}`),
+];
 /** The allow-list: '*' denied first, then each allowed key (last match wins),
  *  so a tool OpenCode adds later is denied by default. */
 const workerPermission = () => ({ '*': 'deny', ...Object.fromEntries(OPENCODE_ALLOWED_TOOLS.map((k) => [k, 'allow'])) });
@@ -57,12 +69,12 @@ const workerPermission = () => ({ '*': 'deny', ...Object.fromEntries(OPENCODE_AL
 /** Appended to the shipped prompt on this host: the prompt names the claude
  *  tool names, and per-call result text needs one sterling call per execute. */
 export const OPENCODE_PROMPT_NOTE =
-  '\nHOST NOTE (OpenCode): the sterling tools named above are called inside the execute tool as tools.sterling.<name>, for example tools.sterling.knowledge_get({ id }). Make exactly ONE sterling call per execute call, so the runner can pair each call with its own result. Read is the read tool ({ path }) and Grep is the grep tool ({ pattern, path }).\n';
+  '\nHOST NOTE (OpenCode): the sterling tools named above are called inside the execute tool as tools.sterling.<name>, for example tools.sterling.knowledge_get({ id }). Make exactly ONE sterling call per execute call and return that call\'s result unchanged as the execute\'s value, so the runner can pair each call with its own result and see the write stamp on it. Read is the read tool ({ path }), Grep is the grep tool ({ pattern, path }), WebFetch is the webfetch tool and WebSearch is the websearch tool.\n';
 
 /** The tools sentence of templates/maintenance-worker-prompt.md, which the
  *  claude host sends unchanged. */
 export const CLAUDE_TOOLS_LINE =
-  'Tools you may use: mcp__sterling__maintenance_query, mcp__sterling__knowledge_get, mcp__sterling__maintenance_remove, mcp__sterling__knowledge_line_ref_fix, Read and Grep. Nothing else is granted, so do not try other tools.';
+  'Tools you may use: mcp__sterling__maintenance_query, mcp__sterling__knowledge_get, mcp__sterling__knowledge_query, mcp__sterling__knowledge_schema, mcp__sterling__maintenance_remove, mcp__sterling__knowledge_update, mcp__sterling__knowledge_edit, mcp__sterling__knowledge_append, mcp__sterling__knowledge_array_remove, mcp__sterling__knowledge_line_ref_fix, Read, Grep, WebSearch and WebFetch. Nothing else is granted, so do not try other tools.';
 /** Its OpenCode replacement. The model sees no mcp__sterling__* tool here, only
  *  `execute`: told "nothing else is granted" with the execute route mentioned
  *  only in the trailing note, openai/gpt-6-luna made no tool call in 2 of 2 live
@@ -72,7 +84,7 @@ export const CLAUDE_TOOLS_LINE =
  *  seconds later, with or without the worker agent; a model that trusts the
  *  first view reports the tools missing, so the line says to retry. */
 export const OPENCODE_TOOLS_LINE =
-  "Tools you may use: OpenCode's `execute` tool, which is the one permitted way to reach the Sterling tools. Inside execute, call them as tools.sterling.maintenance_query, tools.sterling.knowledge_get, tools.sterling.maintenance_remove and tools.sterling.knowledge_line_ref_fix, one Sterling call per execute call; the mcp__sterling__<name> names below are these same tools. The Sterling tools load a few seconds after the session starts, so if execute reports no Code Mode tools, read one of the item's file_keys first and then call execute again; never conclude they are unavailable before that. Read is the read tool ({ path }) and Grep is the grep tool ({ pattern, path }). Nothing else is granted, so do not try other tools.";
+  "Tools you may use: OpenCode's `execute` tool, which is the one permitted way to reach the Sterling tools. Inside execute, call them as tools.sterling.maintenance_query, tools.sterling.knowledge_get, tools.sterling.knowledge_query, tools.sterling.knowledge_schema, tools.sterling.maintenance_remove, tools.sterling.knowledge_update, tools.sterling.knowledge_edit, tools.sterling.knowledge_append, tools.sterling.knowledge_array_remove and tools.sterling.knowledge_line_ref_fix, one Sterling call per execute call; the mcp__sterling__<name> names below are these same tools. The Sterling tools load a few seconds after the session starts, so if execute reports no Code Mode tools, read one of the item's file_keys first and then call execute again; never conclude they are unavailable before that. Read is the read tool ({ path }), Grep is the grep tool ({ pattern, path }), WebFetch is the webfetch tool and WebSearch is the websearch tool. Nothing else is granted, so do not try other tools.";
 
 /** The OpenCode prompt: the shipped prompt with its tools line rewritten for
  *  this host, plus the host note. A prompt without the shipped tools line is
@@ -124,8 +136,6 @@ export function opencodeEnv({ root, config }) {
   return { PWD: root, OPENCODE_CONFIG_CONTENT: JSON.stringify(config), OPENCODE_DISABLE_PROJECT_CONFIG: '1' };
 }
 
-const fixEntry = (input, is_error, result) => ({ kind: 'tool_call', tool: 'knowledge_line_ref_fix', article_id: input.id ?? null, field: input.field ?? null, find: input.find ?? null, replace: input.replace ?? null, anchor: input.anchor ?? null, is_error, result });
-
 /**
  * The OpenCode counterpart of streamJournal: same feed()/end() interface and
  * the same `out` shape, so runWorker's gate, journal and run summary are
@@ -138,7 +148,7 @@ const fixEntry = (input, is_error, result) => ({ kind: 'tool_call', tool: 'knowl
 export function opencodeStreamJournal(journal, observe = () => {}, launchKeys = new Map()) {
   const keysAtLaunch = (id) => launchKeys.get(id) ?? null;
   let buf = '';
-  const out = { result: null, removes: 0, closedOk: 0, lineRefFixes: 0, lineRefFixesOk: 0, lines: 0, mcpStatus: null, sterlingOk: 0 };
+  const out = { result: null, removes: 0, closedOk: 0, lineRefFixes: 0, lineRefFixesOk: 0, writes: 0, writesOk: 0, lines: 0, mcpStatus: null, sterlingOk: 0 };
   const texts = [];
   let lastTextMessage = null;
   let cost = 0;
@@ -146,18 +156,19 @@ export function opencodeStreamJournal(journal, observe = () => {}, launchKeys = 
   let error = null;
   // `executeFailed`: the OUTER execute ended in error, so the model got the
   // execute's error text and never saw this call's output. A write it made
-  // (a remove, a line-ref fix) still happened server-side and counts; a read
-  // is never evidence (task-end review 2026-10-02).
+  // (a remove, a knowledge write) still happened server-side and counts; a
+  // read is never evidence (task-end review 2026-10-02). Every journal call
+  // passes the result text as a second argument for the runner's stamp check.
   const sterlingCall = (name, input, is_error, text, executeFailed) => {
     const ok = is_error === false;
     const resultText = executeFailed && ok ? `the execute failed after this call completed: ${text}` : text;
     const marked = executeFailed ? { execute_failed: true } : {};
     if (name === 'maintenance_remove') {
       if (is_error === null) {
-        journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error: null, result: 'no result before the run ended' });
+        journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error: null, result: 'no result before the run ended' }, '');
         return;
       }
-      journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error, result: resultText.slice(0, 400), ...marked });
+      journal({ kind: 'tool_call', tool: 'maintenance_remove', item_id: input.id ?? null, item_file_keys_at_launch: keysAtLaunch(input.id), is_error, result: resultText.slice(0, 400), ...marked }, text);
       out.removes++;
       if (ok) {
         out.closedOk++;
@@ -165,12 +176,16 @@ export function opencodeStreamJournal(journal, observe = () => {}, launchKeys = 
       }
       return;
     }
-    if (name === 'knowledge_line_ref_fix') {
-      journal({ ...fixEntry(input, is_error, is_error === null ? 'no result before the run ended' : resultText.slice(0, 400)), ...marked });
+    const write = knowledgeWriteName(name);
+    if (write) {
+      journal({ ...writeEntry(write, input, is_error, is_error === null ? 'no result before the run ended' : resultText.slice(0, 400)), ...marked }, is_error === null ? '' : text);
       if (is_error === null) return;
-      out.lineRefFixes++;
+      const fix = write === 'knowledge_line_ref_fix';
+      if (fix) out.lineRefFixes++;
+      else out.writes++;
       if (ok) {
-        out.lineRefFixesOk++;
+        if (fix) out.lineRefFixesOk++;
+        else out.writesOk++;
         out.sterlingOk++;
       }
       return;
@@ -206,6 +221,8 @@ export function opencodeStreamJournal(journal, observe = () => {}, launchKeys = 
       if (status !== 'completed') return;
       if (part.tool === 'read' && input.path) observe('Read', { file_path: String(input.path) });
       else if (part.tool === 'grep') observe('Grep', input.path ? { path: String(input.path) } : {});
+      else if (part.tool === 'webfetch') observe('WebFetch', input);
+      else if (part.tool === 'websearch') observe('WebSearch', input);
     } else if (e?.type === 'text' && typeof part?.text === 'string') {
       if (part.messageID !== lastTextMessage) texts.length = 0;
       lastTextMessage = part.messageID;
