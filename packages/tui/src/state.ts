@@ -5,7 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
-import { AGENT_MODEL_KEY } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 
@@ -145,6 +145,16 @@ export interface CatalogEntry {
   label: string;
   tier: string;
   status: string;
+  /** 'anthropic', 'openai', ... Absent on a catalog written before vendors
+   *  existed; such an entry takes the Claude path like an 'anthropic' one. */
+  vendor?: string;
+}
+
+/** True for a catalog entry Claude Code cannot run (any vendor but anthropic):
+ *  the picker offers it only as the role's OpenCode-only override (decision
+ *  opencode-only-model-override-per-role-for-openai-picks). */
+export function isOpenCodeOnlyEntry(entry: CatalogEntry): boolean {
+  return entry.vendor !== undefined && entry.vendor !== 'anthropic';
 }
 /** The catalog-status view computed at activation (present/stale/staleDate) plus
  *  the entries the selector offers. Precomputed so the projection has no clock. */
@@ -163,7 +173,8 @@ export interface SparringPartnerView {
 }
 export interface AgentRosterSnapshot {
   agents: RosterAgent[];
-  configModels: Record<string, { model: string; effort: string }>;
+  /** opencode_model is the role's OpenCode-only override (<provider>/<model>). */
+  configModels: Record<string, { model: string; effort: string; opencode_model?: string }>;
   catalog: CatalogStatusView;
   /** config.sparring_partner, read at the same activation-only cadence as the
    *  rest of the snapshot. Additive-optional (decision foreign_34d61f60's idiom, as
@@ -300,6 +311,15 @@ export function effortOptions(key: string): string[] {
  *  claude-* id or the commit is refused. */
 export const MODEL_VALUE_RE = /^claude-/;
 
+/** The model picker's options for one key: every catalog entry, then, when the
+ *  key carries an OpenCode override, one option that clears it. */
+type ModelOption = { kind: 'entry'; entry: CatalogEntry } | { kind: 'clear' };
+function modelOptions(entries: CatalogEntry[], config: { opencode_model?: string } | undefined): ModelOption[] {
+  const opts: ModelOption[] = entries.map((entry) => ({ kind: 'entry', entry }));
+  if (config?.opencode_model) opts.push({ kind: 'clear' });
+  return opts;
+}
+
 export interface RowLine {
   text: string;
   /** title: the card's first line (inverse when selected); body: wrapped
@@ -320,9 +340,13 @@ export interface Row {
 }
 
 /** Pane geometry threaded in from the renderer side; Infinity = unbounded. */
-/** Enables the Agents tab; `running` is the live agent count shown in its label. */
+/** Enables the Agents tab; its label shows `running` and, when there are any, `quiet`
+ *  (listed agents with no handback whose transcript has been silent past the
+ *  alive window: maybe live, so counted apart rather than hidden). */
 export interface AgentsTab {
   running: number;
+  /** unset reads as 0 */
+  quiet?: number;
 }
 
 /** The tab indices a host can reach: every tab, minus Agents unless the host enabled it. */
@@ -422,6 +446,21 @@ export interface ModelSwapEffect {
   agents: string[];
   decisionTitle: string;
 }
+/** The System-tab OpenCode override commit (decision
+ *  opencode-only-model-override-per-role-for-openai-picks): sets (`to`) or
+ *  clears (`to` absent) config.models[key].opencode_model and re-renders the
+ *  key's Sterling-full OpenCode agents. The Claude agent files are not touched.
+ *  model/effort are the key's current Claude values, for writing an entry the
+ *  config file does not yet carry. */
+export interface OpenCodeModelEffect {
+  type: 'opencode_model';
+  key: string;
+  from?: string;
+  to?: string;
+  model: string;
+  effort: string;
+  agents: string[];
+}
 /** System tab, sparring-partner toggle row (board a0714d0b): flips
  *  config.sparring_partner.enabled. Advisory-only (article interaction a) — the
  *  toggle only silences the automatic consult moments, it never gates. */
@@ -479,6 +518,7 @@ export type Effect =
   | SelectEffect
   | QuitEffect
   | ModelSwapEffect
+  | OpenCodeModelEffect
   | SparringToggleEffect
   | SparringModelEffect
   | TddToggleEffect
@@ -809,12 +849,18 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
       { text: clip(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? '  drift' : ''}`), kind: 'title', selected },
     ];
     for (const name of agentNames) lines.push({ text: clip(`    ${name}`), kind: 'body' });
+    if (config.opencode_model) lines.push({ text: clip(`    OpenCode: ${config.opencode_model}`), kind: 'body' });
 
     if (selector && selector.key === key) {
       if (selector.stage === 'model') {
-        snap.catalog.entries.forEach((e, oi) => {
+        // a non-anthropic entry is offered as the OpenCode override only, and
+        // says so; a set override adds a last option that clears it
+        modelOptions(snap.catalog.entries, config).forEach((o, oi) => {
           const m = oi === selector.highlight ? '› ' : '  ';
-          lines.push({ text: clip(`  ${m}${e.id} ${e.label}`), kind: 'option', selected: oi === selector.highlight });
+          const text = o.kind === 'clear'
+            ? 'OpenCode: use the Claude model'
+            : isOpenCodeOnlyEntry(o.entry) ? `${o.entry.vendor}/${o.entry.id} ${o.entry.label} (OpenCode only)` : `${o.entry.id} ${o.entry.label}`;
+          lines.push({ text: clip(`  ${m}${text}`), kind: 'option', selected: oi === selector.highlight });
         });
       } else {
         effortOptions(key).forEach((eff, oi) => {
@@ -1021,7 +1067,7 @@ function tabsFor(store: SterlingStore, activeTab: number, agents?: AgentsTab): {
   return visibleTabs(agents).map((i) => {
     const label: string = TABS[i]!;
     return {
-      label: label === 'Tasks' && taskCount !== null ? `${label} (${taskCount})` : label === 'Agents' && agents ? `${label} (${agents.running})` : label,
+      label: label === 'Tasks' && taskCount !== null ? `${label} (${taskCount})` : label === 'Agents' && agents ? `${label} (${agents.running} running${agents.quiet ? ` · ${agents.quiet} quiet` : ''})` : label,
       active: i === activeTab,
       index: i,
     };
@@ -1616,7 +1662,7 @@ function reduceNodes(
             return { ui: revealAt(sysClamp(ui.cursor - 1)), effects };
           case 'DOWN': {
             if (sel) {
-              const n = sel.stage === 'model' ? roster.catalog.entries.length : effortOptions(sel.key).length;
+              const n = sel.stage === 'model' ? modelOptions(roster.catalog.entries, roster.configModels[sel.key]).length : effortOptions(sel.key).length;
               return { ui: { ...ui, selector: { ...sel, highlight: Math.min(Math.max(0, n - 1), sel.highlight + 1) } }, effects };
             }
             if (editing) return { ui, effects };
@@ -1689,8 +1735,26 @@ function reduceNodes(
               return { ui: { ...ui, cursor, selector: { key, stage: 'model', highlight: 0 }, notice: undefined }, effects };
             }
             if (sel.stage === 'model') {
+              const keyConfig = roster.configModels[sel.key];
+              const option = modelOptions(roster.catalog.entries, keyConfig)[sel.highlight];
+              // an OpenCode-only pick or the clear option commits at once: the
+              // OpenCode agent file carries no effort, and the Claude model and
+              // effort are left as they are (decision
+              // opencode-only-model-override-per-role-for-openai-picks)
+              if (option && keyConfig && (option.kind === 'clear' || isOpenCodeOnlyEntry(option.entry))) {
+                const agents = roster.agents.filter((a) => AGENT_MODEL_KEY[a.name] === sel.key).map((a) => a.name);
+                const to = option.kind === 'clear' ? undefined : `${option.entry.vendor}/${option.entry.id}`;
+                if (to !== undefined && !OPENCODE_MODEL_REF_RE.test(to)) {
+                  return { ui: { ...ui, selector: undefined, notice: `OpenCode model refused: '${to}' is not a <provider>/<model> id` }, effects };
+                }
+                if (to !== undefined && agents.length === 0) {
+                  return { ui: { ...ui, selector: undefined, notice: `OpenCode model refused: '${sel.key}' has no agent, so an OpenCode model would govern nothing` }, effects };
+                }
+                effects.push({ type: 'opencode_model', key: sel.key, from: keyConfig.opencode_model, to, model: keyConfig.model, effort: keyConfig.effort, agents });
+                return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
+              }
               // confirm the highlighted model → advance to the EFFORT picker
-              const entry = roster.catalog.entries[sel.highlight];
+              const entry = option?.kind === 'entry' ? option.entry : undefined;
               return { ui: { ...ui, selector: { key: sel.key, stage: 'effort', highlight: 0, model: entry ? entry.id : '' } }, effects };
             }
             // effort stage → COMMIT: validate the model floor, then emit the swap

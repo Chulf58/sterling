@@ -18492,10 +18492,13 @@ var modelPin = external_exports.object({
   model: external_exports.string(),
   effort: effortLevel.optional()
 }).strict();
+var OPENCODE_MODEL_REF_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+var CLAUDE_MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9]+\])?$/;
 var agentModelEntry = external_exports.object({
-  model: external_exports.string(),
+  model: external_exports.string().regex(CLAUDE_MODEL_ID_RE, "model must be a Claude model id such as claude-sonnet-5-5, with no spaces or newlines"),
   effort: effortLevel,
-  hard_task: modelPin.optional()
+  hard_task: modelPin.optional(),
+  opencode_model: external_exports.string().regex(OPENCODE_MODEL_REF_RE, "opencode_model must be <provider>/<model>, for example openai/gpt-5.6-terra").optional()
 }).strict();
 var vendorPins = external_exports.object({
   openai: modelPin.optional(),
@@ -18658,11 +18661,11 @@ var configSchema = external_exports.object({
     implementor: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "high" }),
     researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    classifiers: agentModelEntry.default({ model: "claude-haiku-4-5", effort: "low" }),
+    classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // librarian is mechanical clerking — cheap model, low effort (P8). The
     // roster is classless (decision agent-roster-is-classless-four-agents), and
     // the debugger role it rejected has no key here.
-    librarian: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
+    librarian: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
@@ -31714,7 +31717,15 @@ var SterlingTools = class _SterlingTools {
           if (unreached.length)
             steps.push(`for ${unreached.map((v) => v.path).join(", ")}: wire it in, or knowledge_update the state to 'built'`);
           if (missingEntry) {
-            steps.push(`mark the file a registry reaches as the entry, one targeted call: knowledge_edit(id: '${a.id}', field: 'files[path=<entry path>].entry', find: 'false', replace: 'true') \u2014 a tool entry is server.ts or tools.ts with the tool name in its role`);
+            const checksReach = reachabilityFor(treeRoot).cloneStatus() === "clone";
+            const markEntry = `knowledge_edit(id: '${a.id}', field: 'files[path=<entry path>].entry', find: 'false', replace: 'true')`;
+            const addFiles = `add the files it owns first: knowledge_append(id: '${a.id}', field: 'files', entries: [{path, role}], resolves: [<this item's id>])`;
+            const markClone = `mark the file a registry reaches as the entry, one targeted call: ${markEntry} \u2014 a tool entry is server.ts or tools.ts with the tool name in its role`;
+            if (checksReach) {
+              steps.push(files.length === 0 ? `${addFiles}; then ${markClone}` : markClone);
+            } else {
+              steps.push(files.length === 0 ? `${addFiles}; reachability is not checked in this tree, so mark an entry (${markEntry}) only if you want one recorded` : `reachability is not checked in this tree, so marking an entry is optional: ${markEntry}`);
+            }
           }
           const flagged = [.../* @__PURE__ */ new Set([...unverifiedPaths, ...unreached.map((v) => v.path), ...looksWired.map((v) => v.path)])];
           this.maintenanceEnqueue({

@@ -292,7 +292,7 @@ test('tileCells with an edge: thin neon bars in the padding columns; without one
   assert.deepEqual(plain[0]![0], { ch: ' ', bg: TILE_BG });
 });
 
-function agentView(status: 'running' | 'resumable' | 'done'): SubagentView {
+function agentView(status: 'running' | 'quiet' | 'resumable' | 'done'): SubagentView {
   return {
     availability: 'ok',
     active: status === 'running' ? 1 : 0,
@@ -300,12 +300,14 @@ function agentView(status: 'running' | 'resumable' | 'done'): SubagentView {
   };
 }
 
-test('composeSubagentBlock neonEdge: the tile edge is the status colour (cyan running, pink resumable, faded muted done); off by default', () => {
-  const edge = (status: 'running' | 'resumable' | 'done', neonEdge?: boolean) =>
+test('composeSubagentBlock neonEdge: the tile edge is the status colour (cyan running, amber quiet, pink resumable, faded muted done); off by default', () => {
+  const edge = (status: 'running' | 'quiet' | 'resumable' | 'done', neonEdge?: boolean) =>
     composeSubagentBlock(agentView(status), 80, 20, 0, neonEdge === undefined ? undefined : { neonEdge }).pixels.find((p) => p.x === 0 && p.y === 0)!;
   assert.deepEqual(edge('running', true), { x: 0, y: 0, ch: '▌', fg: NEON_EDGE.running, bg: TILE_BG });
   assert.equal(edge('resumable', true).fg, fadeToTile(NEON_EDGE.resumable, DONE_FADE), 'a resumable agent is not running, so its tile is faded');
   assert.equal(edge('done', true).fg, fadeToTile(NEON_EDGE.done, DONE_FADE));
+  assert.equal(NEON_EDGE.quiet, PALETTE.amber);
+  assert.equal(edge('quiet', true).fg, fadeToTile(NEON_EDGE.quiet, DONE_FADE), 'a quiet agent has its own edge colour');
   assert.deepEqual(edge('running'), { x: 0, y: 0, ch: ' ', bg: TILE_BG }, 'no edge unless asked (the OpenCode host and the plain level)');
 });
 
