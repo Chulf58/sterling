@@ -293,7 +293,9 @@ process.stdout.write(
       : 'commits_ahead: unavailable (no origin/HEAD, main, or master to diff against — pass --into to a future version if this recurs)\n') +
     // Silent when the set is a confirmed zero (P1 — nothing to check).
     (liveDispatches === null
-      ? `live_dispatches: UNKNOWN — the dispatch register exists but could not be read; any subagent from this session cannot be resumed after ${boundary} — re-dispatch fresh if still needed\n`
+      ? classified.availability === 'absent'
+        ? 'live_dispatches: none recorded — no dispatch register on this host\n'
+        : `live_dispatches: UNKNOWN — the dispatch register is ${classified.availability} (it exists but could not be read or parsed); any subagent from this session cannot be resumed after ${boundary} — re-dispatch fresh if still needed\n`
       : liveDispatches.length
         ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — still running across ${boundary} but cannot be resumed from the new session: re-dispatch fresh if still needed (pass a --lane hand-off for each worth continuing)\n`
         : '') +

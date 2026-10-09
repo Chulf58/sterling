@@ -53208,8 +53208,6 @@ var XTERM = {
   error: 203,
   /** #00ffaf */
   success: 49,
-  /** #5f00af, the selection bar */
-  selection: 55,
   /** #ffffff */
   bright: 231
 };
@@ -53270,13 +53268,14 @@ function xtermTheme(level) {
     text: on({ color: XTERM.text }),
     muted,
     heading: on({ color: XTERM.pink, bold: true }),
-    title: (selected, expanded) => selected ? { color: XTERM.bright, bgColor: XTERM.selection, bold: expanded } : on({ color: XTERM.text, bold: expanded }),
+    // the selected title is bold cyan on the page black; no coloured bar
+    title: (selected, expanded) => selected ? on({ color: XTERM.cyan, bold: true }) : on({ color: XTERM.text, bold: expanded }),
     warn: (attr) => ({ ...attr, color: XTERM.amber, bold: true }),
     map: (attr) => {
       const color = attr.color === "green" ? XTERM.success : attr.color === "red" ? XTERM.error : attr.dim ? XTERM.muted : XTERM.text;
       return attr.bold ? on({ color, bold: true }) : on({ color });
     },
-    fullWidthSelection: true,
+    fullWidthSelection: false,
     bannerOverlay: true,
     sceneArt: on({ color: XTERM.bright, bold: true }),
     sceneHorizon: on({ color: XTERM.cyan }),

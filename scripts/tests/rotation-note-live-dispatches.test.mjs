@@ -321,6 +321,54 @@ test('R1-A77: an ABSENT register is unavailable too — the note carries the unk
 });
 
 // --------------------------------------------------------------------------
+// Issue #54: the printed live_dispatches line tells an ABSENT register from a
+// CORRUPT one. A missing file is "no register on this host", never the
+// "exists but could not be read" UNKNOWN; only a corrupt register is UNKNOWN,
+// and that line names the reason. The note JSON stays null for absent (R1-A77).
+// SABOTAGE: print UNKNOWN for every non-ok availability -> the absent test goes red.
+// --------------------------------------------------------------------------
+test('#54: an ABSENT register prints "no dispatch register on this host", never UNKNOWN', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    const r = runRotationNote(dir, ['--next-slice', 'next thing']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^live_dispatches: none recorded — no dispatch register on this host$/m);
+    assert.doesNotMatch(r.stdout, /UNKNOWN|exists but could not be read/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('#54: a CORRUPT register prints UNKNOWN with the reason (corrupt)', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    writeRegister(dir, '{not valid json,,,\n');
+    const r = runRotationNote(dir, ['--next-slice', 'next thing']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^live_dispatches: UNKNOWN — the dispatch register is corrupt \(it exists but could not be read or parsed\)[^\n]*re-dispatch fresh/m);
+    assert.doesNotMatch(r.stdout, /no dispatch register on this host/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('#54: an OK register is unchanged — empty prints no live_dispatches line, a live entry prints its count', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    writeRegister(dir, []);
+    const empty = runRotationNote(dir, ['--next-slice', 'next thing']);
+    assert.equal(empty.status, 0, empty.stderr);
+    assert.doesNotMatch(empty.stdout, /live_dispatches:/);
+    writeRegister(dir, [registerEntry('agent-live', 'coder', ['base.mjs'], 1_000)]);
+    const live = runRotationNote(dir, ['--next-slice', 'next thing']);
+    assert.equal(live.status, 0, live.stderr);
+    assert.match(live.stdout, /^live_dispatches: 1 \(coder:agent-live\)[^\n]*re-dispatch fresh/m);
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------------------------------------------------------
 // R1-A78: H1 discloses the unavailability with [register_unavailable] and never
 // fabricates a count for a set it could not read.
 // SABOTAGE: H1 treats `live_dispatches === null` identically to [] (prints
