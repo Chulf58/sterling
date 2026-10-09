@@ -123,24 +123,31 @@ test('[gate] an OpenCode run with knowledge_get on the article and a read of its
     assert.equal(call.opts.env.OPENCODE_DISABLE_PROJECT_CONFIG, '1');
     const config = JSON.parse(call.opts.env.OPENCODE_CONFIG_CONTENT);
     assert.equal(config.model, 'anthropic/claude-sonnet-5-5');
-    assert.deepEqual(config.mcp.sterling, { type: 'local', command: ['node', join(fx.plugin, 'mcp', 'sterling-mcp.mjs'), '--store', join(fx.project, '.sterling', 'sterling.db')], enabled: true });
+    // CHANGED (GitHub #56, change (i)): the batch policy reaches the server as argv on this host too.
+    assert.deepEqual(config.mcp.sterling, { type: 'local', command: ['node', join(fx.plugin, 'mcp', 'sterling-mcp.mjs'), '--store', join(fx.project, '.sterling', 'sterling.db'), '--worker-policy', fx.paths.eligible, '--worker-token', 'tok'], enabled: true });
     // board item d1149d0e, measured on 2.0.22: a top-level deny is overridden by the
     // default agent's own rules (last match wins), so the child runs as its own
     // agent whose permission is an allow-list: '*' denied FIRST, then the
     // worker's tools allowed, as the claude host's --allowedTools.
-    const allowList = { '*': 'deny', execute: 'allow', mcp: 'allow', read: 'allow', grep: 'allow', sterling_maintenance_query: 'allow', sterling_knowledge_get: 'allow', sterling_maintenance_remove: 'allow', sterling_knowledge_line_ref_fix: 'allow' };
+    // CHANGED (GitHub #56, change (vii)): web tools and the factual-refresh grant, as on the claude host.
+    const allowList = {
+      '*': 'deny', execute: 'allow', mcp: 'allow', read: 'allow', grep: 'allow', webfetch: 'allow', websearch: 'allow',
+      sterling_maintenance_query: 'allow', sterling_knowledge_get: 'allow', sterling_maintenance_remove: 'allow', sterling_knowledge_line_ref_fix: 'allow',
+      sterling_knowledge_update: 'allow', sterling_knowledge_edit: 'allow', sterling_knowledge_append: 'allow', sterling_knowledge_array_remove: 'allow', sterling_knowledge_query: 'allow', sterling_knowledge_schema: 'allow',
+    };
     const agent = config.agent[OPENCODE_WORKER_AGENT];
     assert.deepEqual(Object.entries(agent.permission), Object.entries(allowList), 'the agent allow-list, in this order');
     assert.deepEqual(Object.entries(config.permission), Object.entries(allowList), 'the top-level permission is the same allow-list');
     assert.equal(agent.mode, 'primary');
     assert.equal(agent.model, 'anthropic/claude-sonnet-5-5');
     assert.deepEqual(OPENCODE_ALLOWED_TOOLS, Object.keys(allowList).slice(1));
-    for (const k of ['shell', 'bash', 'edit', 'write', 'patch', 'subagent', 'task', 'glob', 'webfetch', 'sterling_no_capture', 'sterling_capture_pending', 'sterling_concept_designed', 'sterling_knowledge_update', 'sterling_domain_describe', 'codex_codex']) {
+    for (const k of ['shell', 'bash', 'edit', 'write', 'patch', 'subagent', 'task', 'glob', 'sterling_no_capture', 'sterling_capture_pending', 'sterling_concept_designed', 'sterling_knowledge_create', 'sterling_knowledge_retire', 'sterling_knowledge_supersede', 'sterling_board_add', 'sterling_config_set', 'sterling_domain_describe', 'codex_codex']) {
       assert.equal(agent.permission[k], undefined, `${k} falls to the '*' deny`);
     }
 
     const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
-    assert.deepEqual(verdicts.map((v) => [v.item_id, v.verdict, v.evidence ?? null]), [['item-a', 'owes_prose', true]]);
+    // CHANGED (GitHub #56): the child's legacy 'owes_prose' is the old name of a handoff; it stands as needs_conductor.
+    assert.deepEqual(verdicts.map((v) => [v.item_id, v.verdict, v.evidence ?? null]), [['item-a', 'needs_conductor', true]]);
     assert.deepEqual(verdicts[0].file_keys, ['src/a.mjs'], 'file_keys are the runner\'s, never the child\'s');
     assert.deepEqual([...judgedVerdicts(fx.project).keys()], ['item-a']);
     const run = lastRun(fx);
@@ -479,4 +486,46 @@ test('[d1149d0e] the claude host prompt is byte-identical to the shipped prompt 
   } finally {
     fx.cleanup();
   }
+});
+
+// ------------------------------------------------------------ GitHub #56 on the OpenCode host
+
+test('[#56 opencode] a knowledge write inside execute is journalled with its stamp; an unstamped one fails the run; webfetch counts as a web re-check', async () => {
+  for (const [name, output, policed] of [
+    ['stamped', JSON.stringify({ ok: true, worker_stamp: { run_id: 'run-oc', item_id: ITEM.id } }), true],
+    ['unstamped', JSON.stringify({ ok: true }), false],
+  ]) {
+    const fx = fixture();
+    try {
+      const opts = opencodeRun(fx, [ITEM]);
+      const e = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+      writeFileSync(fx.paths.eligible, JSON.stringify({ ...e, run_id: 'run-oc' }));
+      const child = fakeOpencode([
+        sterling('knowledge_get', { id: FIXTURE_FEATURE_ID }),
+        read('src/a.mjs'),
+        sterling('knowledge_edit', { id: FIXTURE_FEATURE_ID, field: 'files[path=src/a.mjs].role', find: 'a', replace: 'b' }, 'completed', output),
+        part('webfetch', { status: 'completed', input: { url: 'https://example.com' }, output: 'page' }),
+        text(JSON.stringify({ item_id: ITEM.id, verdict: 'closed', reason: 'role refreshed' })),
+      ]);
+      const code = await runWorker({ ...opts, spawn: child.fn });
+      const write = readJournal(fx).find((l) => l.tool === 'knowledge_edit');
+      assert.equal(write.is_error, false, name);
+      assert.equal(write.field, 'files[path=src/a.mjs].role', name);
+      if (policed) {
+        assert.equal(code, 0, name);
+        assert.deepEqual(write.stamp, { run_id: 'run-oc', item_id: ITEM.id });
+        assert.equal(lastRun(fx).writes_ok, 1);
+      } else {
+        assert.equal(code, 1, name);
+        assert.match(lastRun(fx).error, /unpoliced write/);
+      }
+    } finally {
+      fx.cleanup();
+    }
+  }
+  const observed = [];
+  const s = opencodeStreamJournal(() => {}, (n, i) => observed.push([n, i]));
+  s.feed(JSON.stringify(part('webfetch', { status: 'completed', input: { url: 'u' }, output: 'x' })) + '\n' + JSON.stringify(part('websearch', { status: 'completed', input: { query: 'q' }, output: 'x' })) + '\n');
+  s.end();
+  assert.deepEqual(observed.map(([n]) => n), ['WebFetch', 'WebSearch']);
 });
