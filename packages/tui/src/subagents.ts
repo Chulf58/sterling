@@ -559,7 +559,7 @@ function clip(text: string, width: number): string {
 /** The cards, then, when running or quiet agents come from a session other than the one
  *  session.json names, one dim line under them saying so (dropped when there
  *  is no room: the cards win). neonEdge draws each tile's status edge
- *  (theme.ts NEON_EDGE: running cyan, resumable pink, done muted). */
+ *  (theme.ts NEON_EDGE: running cyan, quiet amber, resumable pink, done muted). */
 export function composeSubagentBlock(view: SubagentView, width: number, maxHeight: number, tick: number, opts: { neonEdge?: boolean } = {}): SubagentBlock {
   const cards = composeCards(view, width, maxHeight, tick, opts.neonEdge === true);
   if (!view.foreignLive || cards.height + 1 > maxHeight) return cards;

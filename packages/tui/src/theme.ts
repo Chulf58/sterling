@@ -30,6 +30,8 @@ export const PALETTE = {
   pink: '#ff2d95',
   cyan: '#00e5ff',
   muted: '#8787af',
+  /** xterm 215, the warning amber */
+  amber: '#ffaf5f',
 } as const;
 
 /** The 256-palette indexes the ScreenBuffer draws the body with (truecolour and 256 levels). */
@@ -60,6 +62,8 @@ export const XTERM = {
 export const NEON_EDGE = {
   running: PALETTE.cyan,
   resumable: PALETTE.pink,
+  /** amber, like the quiet status line's yellow: unknown, neither running nor done */
+  quiet: PALETTE.amber,
   done: PALETTE.muted,
 } as const;
 
