@@ -28,3 +28,7 @@ NUL
 
 # Local secret: Served Sterling-db password (machine-local, never committed)
 Served sterling DB password.txt
+claude-code.bat
+opencode.bat
+claude-code.sh
+opencode.sh
