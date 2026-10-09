@@ -28,11 +28,11 @@ export const PALETTE = {
   /** xterm 16: the colour the ScreenBuffer paints as background, so the overlay meets the body without a seam */
   night: '#000000',
   text: '#ffffff',
-  pink: '#ff2d95',
+  pink: '#ff2bd6',
   cyan: '#00e5ff',
   muted: '#8787af',
-  /** xterm 215, the warning amber */
-  amber: '#ffaf5f',
+  /** xterm 220, the warning amber */
+  amber: '#ffd319',
 } as const;
 
 /** The 256-palette indexes the ScreenBuffer draws the body with (truecolour and 256 levels). */
@@ -43,12 +43,12 @@ export const XTERM = {
   text: 231,
   /** #8787af */
   muted: 103,
-  /** #ff5faf */
-  pink: 205,
-  /** #00ffff */
-  cyan: 51,
-  /** #ffaf5f */
-  amber: 215,
+  /** #ff00d7 */
+  pink: 200,
+  /** #00d7ff */
+  cyan: 45,
+  /** #ffd700 */
+  amber: 220,
   /** #ff5f5f */
   error: 203,
   /** #00ffaf */
