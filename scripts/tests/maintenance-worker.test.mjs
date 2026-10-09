@@ -1764,7 +1764,7 @@ test('[#56 chain] a run that closed an item with eligible work left re-enters th
   }
 });
 
-test('[#56 chain] multi-run: an edit that does not close its item, an evidence-backed handoff and a close each let the chain go on, and every item an earlier run was offered stays out of it', async () => {
+test('[#56 chain] multi-run: an edit that does not close its item, an evidence-backed handoff and a close each let the chain go on, and only the items an earlier run acted on stay out of it', async () => {
   const fx = fixture();
   try {
     const item = (id) => ({ id, file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' });
@@ -1784,7 +1784,7 @@ test('[#56 chain] multi-run: an edit that does not close its item, an evidence-b
     const edit = [...evidenceForA(), writeCall('w1', 'knowledge_update', { id: LINK, body: { what_it_does: 'x.' }, expected_version: 2 }), writeResult('w1', stampedText('A'))];
     await runWorker({ ...arm('t1', ['A'], ['A', 'B', 'C'], []), spawn: fakeClaude([...edit, resultEvent({})]).fn, relaunch });
     assert.equal(lastRun(fx).resolves_closed, 0);
-    assert.deepEqual(calls.at(-1), { items: ['B', 'C'], attempted: ['A'] }, 'the edited, unclosed item is not offered again in this chain');
+    assert.deepEqual(calls.at(-1), { items: ['B', 'C'], attempted: ['A'] }, 'the edited, unclosed item (one the run acted on) is not offered again in this chain');
 
     // Run 2: only an evidence-backed handoff. The snapshot still names A; the carried attempts keep it out.
     await runWorker({ ...arm('t2', ['B'], ['A', 'B', 'C'], ['A']), spawn: fakeClaude([...evidenceForA(), resultEvent({ result: owes('B', 'art-a') })]).fn, relaunch });
@@ -1792,7 +1792,7 @@ test('[#56 chain] multi-run: an edit that does not close its item, an evidence-b
     assert.equal(lastRun(fx).no_progress, false, 'an evidence-backed handoff is progress');
     assert.deepEqual(calls.at(-1), { items: ['C'], attempted: ['A', 'B'] });
 
-    // Run 3: a close with nothing left that this chain has not been offered: the chain ends.
+    // Run 3: a close with nothing left that this chain has not acted on: the chain ends.
     await runWorker({ ...arm('t3', ['C'], ['A', 'B', 'C'], ['A', 'B']), spawn: fakeClaude([removeCall('c1', 'C'), removeResult('c1', removedText('C')), resultEvent({})]).fn, relaunch });
     assert.equal(lastRun(fx).closes_ok, 1);
     assert.equal(calls.length, 2, 'nothing left: no third relaunch');
@@ -1801,7 +1801,7 @@ test('[#56 chain] multi-run: an edit that does not close its item, an evidence-b
   }
 });
 
-test('[#56 chain] the default relaunch goes through the real launcher inside the debounce window, spawns the next runner for the items no run of the chain was offered, and carries the attempted ids in eligible.json; the runner\'s inside-worker flag does not block it', async () => {
+test('[#56 chain] the default relaunch goes through the real launcher inside the debounce window, spawns the next runner for the items no run of the chain acted on, and carries the acted-on ids in eligible.json; the runner\'s inside-worker flag does not block it', async () => {
   const fx = fixture();
   const prevEnv = process.env.STERLING_MAINTENANCE_WORKER;
   const prevDisable = process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
@@ -1821,13 +1821,14 @@ test('[#56 chain] the default relaunch goes through the real launcher inside the
     delete process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
     // The launch above wrote last-launch at NOW, so the chained launch below is inside the debounce window.
     assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, now: () => NOW, spawnSync: CLEAN_GIT, ...quiet }), 0);
-    assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').map((l) => [l.launched, l.reason, l.items_left]), [[true, 'launched', 1]], 'a chained launch is not debounced');
+    assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').map((l) => [l.launched, l.reason, l.items_left]), [[true, 'launched', 12]], 'a chained launch is not debounced');
     assert.equal(runner.calls.length, 1);
     assert.equal(runner.calls[0].args[4], 'chain', 'the chained run carries trigger chain');
     assert.equal(runner.calls[0].opts.env.STERLING_MAINTENANCE_WORKER, '1', 'the launcher marks the new runner again');
     const next = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
-    assert.deepEqual(next.policy_items.map((t) => t.id), ['a13'], 'only the item no run of this chain was offered');
-    assert.deepEqual([...next.chain_attempted].sort(), first.policy_items.map((t) => t.id).sort(), 'the attempted ids travel with the chain');
+    // The child touched only a1: the 11 offered items it never reached stay eligible for the chain.
+    assert.deepEqual(next.policy_items.map((t) => t.id), items.slice(1).map((t) => t.id), 'every item no run of this chain acted on');
+    assert.deepEqual(next.chain_attempted, ['a1'], 'the acted-on ids travel with the chain');
 
     // An external trigger past the debounce starts over: no carried attempts.
     rmSync(fx.paths.lock, { force: true });
@@ -1841,6 +1842,68 @@ test('[#56 chain] the default relaunch goes through the real launcher inside the
     else process.env.STERLING_MAINTENANCE_WORKER_DISABLE = prevDisable;
     fx.cleanup();
   }
+});
+
+// The runner's own environment carries the worker flag and the npm test preload the
+// test-run guard; these tests inject every spawn, so they set and restore both.
+async function withRealChain(fn) {
+  const fx = fixture();
+  const prevEnv = process.env.STERLING_MAINTENANCE_WORKER;
+  const prevDisable = process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
+  try {
+    process.env.STERLING_MAINTENANCE_WORKER = '1';
+    delete process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
+    await fn(fx);
+  } finally {
+    if (prevEnv === undefined) delete process.env.STERLING_MAINTENANCE_WORKER;
+    else process.env.STERLING_MAINTENANCE_WORKER = prevEnv;
+    if (prevDisable === undefined) delete process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
+    else process.env.STERLING_MAINTENANCE_WORKER_DISABLE = prevDisable;
+    fx.cleanup();
+  }
+}
+
+test('[#56 chain] a young one-item tail after a full 12-item run is launched by the chain: the batching gate applies to external triggers only', async () => {
+  await withRealChain(async (fx) => {
+    // 13 young items (1-13 minutes old): the external launch passes the gate on count (>= BATCH_MIN_ITEMS), and the batch takes the 12 oldest, leaving the youngest, y1.
+    const items = Array.from({ length: 13 }, (_, i) => laneItem(`y${i + 1}`, 'reconcile_needed', i + 1));
+    assert.equal(launch(fx, { spawn: fakeSpawn().fn, items }).launched, true);
+    const first = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    assert.equal(first.policy_items.length, RUN_BATCH_MAX);
+    const offered = first.policy_items.map((t) => t.id);
+    const token = JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token;
+    const runner = fakeSpawn({ pid: 5152 });
+    const events = offered.flatMap((id, i) => [removeCall(`c${i}`, id), removeResult(`c${i}`, removedText(id, first.run_id))]);
+    const spawn = (cmd, args, opts) => (cmd === process.execPath ? runner.fn(cmd, args, opts) : fakeClaude([...events, resultEvent({})]).fn(cmd, args, opts));
+    assert.equal(await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, now: () => NOW, spawnSync: CLEAN_GIT, ...quiet }), 0);
+    assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').map((l) => [l.launched, l.reason, l.items_left]), [[true, 'launched', 1]], 'one young item is below BATCH_MIN_ITEMS and BATCH_MAX_WAIT_MS, and the chain still launches it');
+    assert.equal(runner.calls.length, 1);
+    const next = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    assert.deepEqual(next.policy_items.map((t) => t.id), ['y1']);
+    // The same one item from an external trigger still waits.
+    rmSync(fx.paths.lock, { force: true });
+    assert.equal(launch(fx, { spawn: fakeSpawn().fn, items: [items[0]], now: NOW + DEBOUNCE_MS + 1 }).reason, 'batching');
+  });
+});
+
+test('[#56 chain] a budget-capped run that touched 1 of 5 offered items leaves the 4 untouched ones in the next chained eligible set', async () => {
+  await withRealChain(async (fx) => {
+    const items = Array.from({ length: 5 }, (_, i) => laneItem(`b${i + 1}`, 'reconcile_needed', i + 1));
+    assert.equal(launch(fx, { spawn: fakeSpawn().fn, items }).launched, true);
+    const first = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    assert.equal(first.policy_items.length, 5);
+    const token = JSON.parse(readFileSync(fx.paths.lock, 'utf8')).token;
+    const runner = fakeSpawn({ pid: 5153 });
+    // The child closes b1, then the budget cap ends the run before it reaches the other four.
+    const capped = [removeCall('c1', 'b1'), removeResult('c1', removedText('b1', first.run_id)), resultEvent({ subtype: 'error_max_budget_usd', is_error: true, total_cost_usd: 2.01 })];
+    const spawn = (cmd, args, opts) => (cmd === process.execPath ? runner.fn(cmd, args, opts) : fakeClaude(capped).fn(cmd, args, opts));
+    await runWorker({ root: fx.project, pluginRoot: fx.plugin, spawn, token, budgetUsd: 2, now: () => NOW, spawnSync: CLEAN_GIT, ...quiet });
+    assert.equal(lastRun(fx).budget_capped, true);
+    assert.deepEqual(readJournal(fx).filter((l) => l.kind === 'chain').map((l) => [l.launched, l.reason, l.items_left]), [[true, 'launched', 4]]);
+    const next = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    assert.deepEqual(next.policy_items.map((t) => t.id).sort(), ['b2', 'b3', 'b4', 'b5'], 'the four untouched items are eligible again');
+    assert.deepEqual(next.chain_attempted, ['b1']);
+  });
 });
 
 test('[#56 lock] a failure after the lock is taken (writing eligible.json) releases the lock and is logged; the spawn never happens', () => {

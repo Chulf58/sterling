@@ -12687,7 +12687,7 @@ function launchWorker(opts) {
       return Number.isFinite(created) ? nowMs - created : Infinity;
     };
     const oldestWaitMs = Math.max(...eligible.map(waited));
-    if (eligible.length < BATCH_MIN_ITEMS && oldestWaitMs < BATCH_MAX_WAIT_MS) {
+    if (opts.trigger !== "chain" && eligible.length < BATCH_MIN_ITEMS && oldestWaitMs < BATCH_MAX_WAIT_MS) {
       return {
         launched: false,
         reason: "batching",

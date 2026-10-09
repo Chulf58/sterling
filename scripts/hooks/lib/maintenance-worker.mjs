@@ -727,7 +727,10 @@ function launchWorker(opts) {
       return Number.isFinite(created) ? nowMs - created : Infinity;
     };
     const oldestWaitMs = Math.max(...eligible.map(waited));
-    if (eligible.length < BATCH_MIN_ITEMS && oldestWaitMs < BATCH_MAX_WAIT_MS) {
+    // A chained launch is the continuation of a run that made progress (ruling
+    // (5): it goes on until the eligible queue is empty), so a short young tail
+    // is not made to wait for the next external trigger.
+    if (opts.trigger !== 'chain' && eligible.length < BATCH_MIN_ITEMS && oldestWaitMs < BATCH_MAX_WAIT_MS) {
       return {
         launched: false,
         reason: 'batching',
@@ -774,8 +777,8 @@ function launchWorker(opts) {
       // reads it there because `items` already had another shape).
       // `queue_snapshot` is every eligible item, so a run that made progress can
       // re-enter this launcher with what is left (ruling (5), chaining).
-      // `chain_attempted` is every item an earlier run of this chain was
-      // offered; the runner leaves them out of the next chained launch, and
+      // `chain_attempted` is every item an earlier run of this chain acted on;
+      // the runner leaves them out of the next chained launch, and
       // an external trigger (stop, commit) starts with none.
       const batch = selectBatch(eligible);
       const chainAttempted = opts.trigger === 'chain' && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
@@ -1223,7 +1226,13 @@ export async function runWorker(opts) {
       const unpoliced = [];
       const closedIds = new Set();
       const resolvedIds = new Set();
+      // Items this run actually acted on (a stamped mutation, a remove attempt, an
+      // evidence-backed handoff, a retry or a refusal). Only these are kept out of
+      // the next chained launch: an offered item the child never touched (a budget
+      // cap ended the run first) stays eligible for it.
+      const actedIds = new Set();
       const journalCall = (entry, raw = '') => {
+        if (entry.kind === 'tool_call' && entry.tool === 'maintenance_remove' && byId.has(entry.item_id)) actedIds.add(entry.item_id);
         // Every successful mutation, a remove included, must carry this run's
         // stamp. A remove's stamp must name the removed item itself.
         const mutation = entry.kind === 'tool_call' && entry.is_error === false && (entry.tool === 'maintenance_remove' || KNOWLEDGE_WRITE_TOOLS.includes(entry.tool));
@@ -1237,6 +1246,7 @@ export async function runWorker(opts) {
             return;
           }
           journal(entry);
+          actedIds.add(stamp.item_id);
           if (remove) {
             closedIds.add(entry.item_id);
             return;
@@ -1245,7 +1255,11 @@ export async function runWorker(opts) {
           writesStamped++;
           // A closure comes from the server's receipt, never from the request:
           // a partial article_missing join keeps its item open.
-          for (const id of stamp.resolved) if (byId.has(id)) resolvedIds.add(id);
+          for (const id of stamp.resolved) {
+            if (!byId.has(id)) continue;
+            resolvedIds.add(id);
+            actedIds.add(id);
+          }
           return;
         }
         journal(entry);
@@ -1261,6 +1275,7 @@ export async function runWorker(opts) {
           if (byId.has(entry.item_id)) journal({ kind: 'verdict', item_id: entry.item_id, verdict: 'busy', reason: String(entry.result ?? '').slice(0, 200) });
         } else if (entry.kind === 'tool_call' && entry.is_error === true && byId.has(entry.item_id) && !/permission/i.test(entry.result ?? '')) {
           // The server's refusal IS the evidence for this verdict.
+          actedIds.add(entry.item_id);
           journal({ kind: 'verdict', item_id: entry.item_id, lane: byId.get(entry.item_id).lane ?? null, verdict: 'refused', file_keys: byId.get(entry.item_id).file_keys, head: eligible.head, evidence: true, reason: String(entry.result ?? '').slice(0, 200) });
           refusedVerdicts++;
           if (!repeatRefusal(entry.item_id)) newRefusals++;
@@ -1344,7 +1359,10 @@ export async function runWorker(opts) {
         }
         // A legacy 'owes_prose' from the child is the old name of a handoff.
         if (v.verdict !== 'needs_conductor' && v.verdict !== 'owes_prose') {
-          if (v.verdict === 'retry') retries++;
+          if (v.verdict === 'retry') {
+            retries++;
+            if (byId.has(v.item_id)) actedIds.add(v.item_id);
+          }
           journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, lane, verdict: v.verdict, reason: v.reason ?? null, ...marker });
           continue;
         }
@@ -1359,6 +1377,7 @@ export async function runWorker(opts) {
         // names: the write is outside the policy, so retrying cannot help.
         if (!POLICY_REFUSAL_RE.test(reason) && TEMPORARY_RE.test(reason)) {
           retries++;
+          if (item) actedIds.add(v.item_id);
           journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, lane, verdict: 'retry', reason: reason.slice(0, 300), claimed: 'needs_conductor', ...marker });
           continue;
         }
@@ -1367,6 +1386,7 @@ export async function runWorker(opts) {
         if (item && hasEvidence(item, seenArticles, seenFiles, opts.root, seenGrepPaths, runReads)) {
           journal({ kind: 'verdict', item_id: v.item_id, article: v.article ?? null, lane, verdict: 'needs_conductor', reason: reason.slice(0, 300), file_keys: item.file_keys, evidence: true, ...marker });
           evidenced++;
+          actedIds.add(v.item_id);
         } else {
           journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, lane, verdict: 'unjudged', reason: 'no evidence', claimed_reason: reason.slice(0, 300), ...marker });
         }
@@ -1430,13 +1450,15 @@ export async function runWorker(opts) {
       });
       // CHAINING (ruling (5)): a run that closed or fixed an item, handed one
       // off with evidence, or met a new refusal starts the next one when
-      // eligible work is left. Every item this chain has already been offered
-      // is left out, so an item a run edited but did not close is not picked
-      // again until an external trigger; that also bounds the chain. The
+      // eligible work is left. Every item this chain has already acted on is
+      // left out, so an item a run edited but did not close is not picked again
+      // until an external trigger; that also bounds the chain (each link must
+      // act on a new item to go on). An offered item the child never touched
+      // stays in. The
       // launcher re-checks every item (judged, dirty, batching) and applies
       // lock and back-off (not the debounce, which is for external triggers).
       if (ok && chainProgress) {
-        const attempted = new Set([...(Array.isArray(eligible.chain_attempted) ? eligible.chain_attempted.map(String) : []), ...eligible.items.map((t) => t.id)]);
+        const attempted = new Set([...(Array.isArray(eligible.chain_attempted) ? eligible.chain_attempted.map(String) : []), ...actedIds]);
         const snapshot = Array.isArray(eligible.queue_snapshot) ? eligible.queue_snapshot : [];
         const left = snapshot.filter((t) => t && !closedIds.has(t.id) && !attempted.has(t.id));
         if (left.length) chain = { items: left, attempted: [...attempted], host: eligible.host, opencodeBin: eligible.opencode_bin };
