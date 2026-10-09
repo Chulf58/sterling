@@ -9672,22 +9672,22 @@ var require_NextGenEvents = __commonJS({
       }
       return this;
     };
-    NextGenEvents.listenerWrapper = function(listener, event2, contextScope, serial, nice) {
+    NextGenEvents.listenerWrapper = function(listener, event2, contextScope, serial2, nice) {
       var returnValue, listenerCallback, eventMaster = event2.master || event2, interruptible = !!event2.master || event2.emitter.__ngev.interruptible;
       if (eventMaster.interrupt) {
         return;
       }
       if (listener.async) {
         if (contextScope) {
-          contextScope.ready = !serial;
+          contextScope.ready = !serial2;
         }
         if (nice < 0) {
           if (globalData.recursions >= -nice) {
-            event2.emitter.__ngev.desync(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial, NextGenEvents.SYNC));
+            event2.emitter.__ngev.desync(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial2, NextGenEvents.SYNC));
             return;
           }
         } else {
-          setTimeout(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial, NextGenEvents.SYNC), nice);
+          setTimeout(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial2, NextGenEvents.SYNC), nice);
           return;
         }
         listenerCallback = (arg) => {
@@ -9701,7 +9701,7 @@ var require_NextGenEvents = __commonJS({
           } else if (eventMaster.listenersDone >= eventMaster.listeners.length && eventMaster.callback) {
             NextGenEvents.emitCallback(event2);
           }
-          if (serial) {
+          if (serial2) {
             NextGenEvents.processScopeQueue(contextScope, true, true);
           }
         };
@@ -9713,11 +9713,11 @@ var require_NextGenEvents = __commonJS({
       } else {
         if (nice < 0) {
           if (globalData.recursions >= -nice) {
-            event2.emitter.__ngev.desync(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial, NextGenEvents.SYNC));
+            event2.emitter.__ngev.desync(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial2, NextGenEvents.SYNC));
             return;
           }
         } else {
-          setTimeout(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial, NextGenEvents.SYNC), nice);
+          setTimeout(NextGenEvents.listenerWrapper.bind(void 0, listener, event2, contextScope, serial2, NextGenEvents.SYNC), nice);
           return;
         }
         if (listener.eventObject) {
@@ -9904,13 +9904,13 @@ var require_NextGenEvents = __commonJS({
       master.sync = false;
     };
     NextGenEvents.emitToOneListener = function(event2, listener, removedListeners) {
-      var self2 = event2.emitter, eventMaster = event2.master || event2, context = event2.master ? event2.master.context : listener.context, contextScope, serial, currentNice, emitRemoveListener = false;
+      var self2 = event2.emitter, eventMaster = event2.master || event2, context = event2.master ? event2.master.context : listener.context, contextScope, serial2, currentNice, emitRemoveListener = false;
       if (context) {
         if (context.status === NextGenEvents.CONTEXT_DISABLED) {
           return;
         }
         currentNice = Math.max(eventMaster.nice, listener.nice, context.nice);
-        serial = context.serial;
+        serial2 = context.serial;
         contextScope = NextGenEvents.getContextScope(context, eventMaster.depth);
       } else {
         currentNice = Math.max(eventMaster.nice, listener.nice);
@@ -9928,7 +9928,7 @@ var require_NextGenEvents = __commonJS({
       if (context && (context.status === NextGenEvents.CONTEXT_QUEUED || !contextScope.ready)) {
         contextScope.queue.push({ event: event2, listener, nice: currentNice });
       } else {
-        NextGenEvents.listenerWrapper(listener, event2, contextScope, serial, currentNice);
+        NextGenEvents.listenerWrapper(listener, event2, contextScope, serial2, currentNice);
       }
       if (emitRemoveListener && self2.__ngev.listeners.removeListener.length) {
         self2.emit("removeListener", [listener]);
@@ -10372,7 +10372,7 @@ var require_NextGenEvents = __commonJS({
       }
       return this;
     };
-    NextGenEvents.processScopeQueue = function(contextScope, serial, isCompletionCallback) {
+    NextGenEvents.processScopeQueue = function(contextScope, serial2, isCompletionCallback) {
       var job, event2, eventMaster, emitter;
       if (isCompletionCallback) {
         contextScope.ready = true;
@@ -10386,7 +10386,7 @@ var require_NextGenEvents = __commonJS({
         if (eventMaster.interrupt) {
           continue;
         }
-        NextGenEvents.listenerWrapper(job.listener, event2, contextScope, serial, job.nice);
+        NextGenEvents.listenerWrapper(job.listener, event2, contextScope, serial2, job.nice);
       }
       globalData.recursions--;
     };
@@ -39067,10 +39067,12 @@ var require_termkit_no_lazy_require = __commonJS({
 });
 
 // packages/tui/dist/main.js
+import { appendFileSync, mkdirSync as mkdirSync9 } from "node:fs";
 import { dirname as dirname8, join as join19 } from "node:path";
+import { performance } from "node:perf_hooks";
 
 // packages/tui/dist/controller.js
-import { readFileSync as readFileSync12, writeFileSync as writeFileSync5, existsSync as existsSync8 } from "node:fs";
+import { readFileSync as readFileSync12, writeFileSync as writeFileSync5, existsSync as existsSync9 } from "node:fs";
 import { basename as basename2, dirname as dirname5, join as join16 } from "node:path";
 import { randomUUID as randomUUID4 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
@@ -50064,6 +50066,19 @@ function cardsFor(store, tab, expanded = []) {
 var catId = (type) => `cat:${type}`;
 var srcId = (type, source) => `src:${type}:${source}`;
 var subId = (type, source, key) => `sub:${type}:${source}:${key}`;
+function nodeId(node) {
+  if (node.kind === "category")
+    return catId(node.type);
+  if (node.kind === "source")
+    return srcId(node.catType, node.source);
+  if (node.kind === "subcategory")
+    return subId(node.catType, node.source, node.key);
+  return node.card.id;
+}
+function resolveCursor(ui, nodes) {
+  const held = ui.selectedId === void 0 ? -1 : nodes.findIndex((n) => nodeId(n) === ui.selectedId);
+  return Math.min(held >= 0 ? held : ui.cursor, Math.max(0, nodes.length - 1));
+}
 function rankTermsOf(query) {
   const words = query.trim().split(/\s+/).filter((t) => t.length > 0 && t.length < 64).map((t) => `${t.replace(/\*+$/, "")}*`);
   const seen = /* @__PURE__ */ new Set();
@@ -50341,13 +50356,16 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, ma
   };
 }
 function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster, agents) {
+  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner2, knowledge, roster, agents).state;
+}
+function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster, agents) {
   const banner = bannerLines(width, showBanner2);
   const bodyTop2 = banner.length + CHROME_BELOW_BANNER;
   const tabs = tabsFor(store, ui.tab, agents);
   if (ui.tab === SYSTEM_TAB)
-    return systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents);
+    return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents), nodes: [], cursor: ui.cursor };
   const nodes = nodesFor(store, ui, knowledge);
-  const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
+  const cursor = resolveCursor(ui, nodes);
   let rows = [];
   let screenRow = 0;
   for (let i = 0; i < nodes.length; i++) {
@@ -50450,7 +50468,7 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
   const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, totalBodyLines - maxBodyLines) : 0;
   const scroll = scrollable ? Math.max(0, Math.min(ui.scroll ?? 0, maxScroll)) : 0;
   const searchActive = ui.tab === KNOWLEDGE_TAB;
-  return {
+  const state = {
     tabs,
     rows,
     emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
@@ -50461,7 +50479,9 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
       // state.footer unconditionally, so this is the one line available to
       // this scope's two files without touching render.ts. Mirrors the
       // System tab's own '⚠ ' convention (buildSystemTab's banner).
-      ui.tab === TASKS_TAB && ui.notice ? `\u26A0 ${ui.notice}` : ui.tab === AGENTS_TAB ? `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 q quit` : `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears \xB7 ctrl-f article state" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
+      // A notice on the Knowledge and Queue tabs is shown the same way: a
+      // failed selection write from a click there reports here.
+      ui.notice && (ui.tab === TASKS_TAB || ui.tab === KNOWLEDGE_TAB || ui.tab === QUEUE_TAB) ? `\u26A0 ${ui.notice}` : ui.tab === AGENTS_TAB ? `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 q quit` : `\u2190/\u2192 or 1-${visibleTabs(agents).length} tabs \xB7 \u2191/\u2193 or wheel \xB7 enter/click select+expand \xB7 right-click collapse \xB7 q quit` + (ui.tab === KNOWLEDGE_TAB ? " \xB7 type to search \xB7 esc clears \xB7 ctrl-f article state" : "") + (ui.tab === TASKS_TAB ? ui.boardEdit ? " \xB7 enter save \xB7 esc cancel" : " \xB7 e edit" : "")
     ),
     searchLine: searchActive ? `search: ${ui.searchQuery}${ui.stateFilter ? `  state: ${ui.stateFilter}` : ""}` : void 0,
     queueCompleted,
@@ -50471,6 +50491,7 @@ function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinit
     bodyTop: bodyTop2,
     scroll
   };
+  return { ui, state, nodes, cursor };
 }
 function screenLineToRow(state, line1, maxBodyLines = Infinity) {
   const scroll = state.scroll ?? 0;
@@ -50484,9 +50505,30 @@ function screenLineToRow(state, line1, maxBodyLines = Infinity) {
   }
   return -1;
 }
-function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHeadSha = defaultResolveHeadSha) {
+function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHeadSha = defaultResolveHeadSha, frame) {
+  const drawn = frame !== void 0 && frame.ui === ui ? frame : void 0;
+  const nodes = drawn ? drawn.nodes : nodesFor(store, ui, knowledge);
+  const cursor = drawn ? drawn.cursor : ui.tab === SYSTEM_TAB ? ui.cursor : resolveCursor(ui, nodes);
+  const base2 = cursor === ui.cursor ? ui : { ...ui, cursor };
+  const out = reduceNodes(store, base2, event2, viewport2, knowledge, roster, resolveHeadSha, nodes, drawn);
+  if (out.ui === base2)
+    return { ui, effects: out.effects };
+  return { ui: holdSelection(base2, out.ui, nodes), effects: out.effects };
+}
+function holdSelection(prev, next, nodes) {
+  const fresh = next.tab !== prev.tab || next.searchQuery !== prev.searchQuery || next.stateFilter !== prev.stateFilter;
+  const cardTab = next.tab !== SYSTEM_TAB && next.tab !== AGENTS_TAB;
+  const node = !fresh && cardTab && nodes.length ? nodes[Math.min(next.cursor, nodes.length - 1)] : void 0;
+  const selectedId = node ? nodeId(node) : void 0;
+  if (selectedId === next.selectedId)
+    return next;
+  if (selectedId !== void 0)
+    return { ...next, selectedId };
+  const { selectedId: _dropped, ...rest } = next;
+  return rest;
+}
+function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHeadSha, nodes, drawn) {
   const maxBodyLines = viewport2.maxBodyLines ?? Infinity;
-  const nodes = nodesFor(store, ui, knowledge);
   const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects = [];
   const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
@@ -50497,7 +50539,7 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
   const revealAt = (cursor) => {
     if (!scrollable || !Number.isFinite(maxBodyLines))
       return { ...ui, cursor };
-    const st = buildSelf({ ...ui, cursor });
+    const st = drawn && ui.tab !== SYSTEM_TAB ? drawn.state : buildSelf({ ...ui, cursor });
     const total = st.rows.length ? st.rows[st.rows.length - 1].screenRow + st.rows[st.rows.length - 1].lines.length : 0;
     const max = Math.max(0, total - maxBodyLines);
     let scroll = ui.scroll ?? 0;
@@ -50739,7 +50781,7 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
         return { ui, effects };
       }
       if (ch === " " && ui.tab === SYSTEM_TAB) {
-        return reduce(store, ui, { kind: "key", name: "ENTER" }, viewport2, knowledge, roster, resolveHeadSha);
+        return reduceNodes(store, ui, { kind: "key", name: "ENTER" }, viewport2, knowledge, roster, resolveHeadSha, nodes, drawn);
       }
       if (ch === " ")
         return { ui: activate(clamp(ui.cursor)), effects };
@@ -50747,8 +50789,10 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
         const node = nodes[clamp(ui.cursor)];
         if (node && node.kind === "card" && node.card.type !== "objective") {
           const rec = store.get(node.card.id);
-          const version = rec && typeof rec.version === "number" ? rec.version : 0;
-          return { ui: { ...ui, boardEdit: { id: node.card.id, text: node.card.body, version }, notice: void 0 }, effects };
+          if (!rec || typeof rec.text !== "string")
+            return { ui: { ...ui, notice: "board item no longer exists \u2014 nothing to edit" }, effects };
+          const version = typeof rec.version === "number" ? rec.version : 0;
+          return { ui: { ...ui, boardEdit: { id: node.card.id, text: rec.text, version }, notice: void 0 }, effects };
         }
         return { ui, effects };
       }
@@ -50767,11 +50811,17 @@ function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHea
       if (!scrollable)
         return { ui: { ...ui, cursor: clamp(ui.cursor + (event2.dy > 0 ? 1 : -1)) }, effects };
       const desired = (ui.scroll ?? 0) + (event2.dy > 0 ? 3 : -3);
+      if (drawn && ui.tab !== SYSTEM_TAB) {
+        const rows = drawn.state.rows;
+        const total = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
+        const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - maxBodyLines) : 0;
+        return { ui: { ...ui, scroll: Math.max(0, Math.min(desired, max)) }, effects };
+      }
       const st = buildSelf({ ...ui, scroll: desired });
       return { ui: { ...ui, scroll: st.scroll }, effects };
     }
     case "click": {
-      const state = buildDashboardState(store, ui, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster, viewport2.agents);
+      const state = drawn ? drawn.state : buildDashboardState(store, ui, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster, viewport2.agents);
       if (event2.y === state.bodyTop - 1) {
         let x = 1;
         for (let i = 0; i < state.tabs.length; i++) {
@@ -50870,9 +50920,37 @@ function applyHandoffToggle(e, onError, path) {
   }
 }
 
+// packages/tui/dist/data-version.js
+import { existsSync as existsSync3 } from "node:fs";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+function openDataVersionProbe(paths) {
+  const conns = [];
+  try {
+    for (const path of paths) {
+      if (!existsSync3(path))
+        continue;
+      const db = new DatabaseSync3(path, { readOnly: true });
+      conns.push({ db, stmt: db.prepare("PRAGMA data_version") });
+    }
+  } catch (err) {
+    for (const c of conns)
+      c.db.close();
+    throw err;
+  }
+  return {
+    read() {
+      return conns.map((c) => String(c.stmt.get().data_version)).join(":");
+    },
+    close() {
+      for (const c of conns)
+        c.db.close();
+    }
+  };
+}
+
 // scripts/lib/agent-distribution.mjs
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync5, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync3, mkdirSync as mkdirSync3, statSync as statSync3, lstatSync as lstatSync3, unlinkSync, renameSync, linkSync } from "node:fs";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync4, mkdirSync as mkdirSync3, statSync as statSync3, lstatSync as lstatSync3, unlinkSync, renameSync, linkSync } from "node:fs";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -51087,7 +51165,7 @@ function userScopeCodexServer({ env = process.env, home = homedir4(), readFile =
 
 // scripts/lib/handoff-projection.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync4 } from "node:fs";
+import { existsSync as existsSync5 } from "node:fs";
 import { join as join11, resolve as resolve5 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
@@ -51289,10 +51367,10 @@ function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
     }
     return { stdout: r.stdout || "" };
   };
-  if (!existsSync4(root)) return { files: [], unknown: null };
+  if (!existsSync5(root)) return { files: [], unknown: null };
   const inside = run(["rev-parse", "--is-inside-work-tree"]);
   if (inside.failed) {
-    if (inside.notARepo && !existsSync4(join11(root, ".git"))) return { files: [], unknown: null };
+    if (inside.notARepo && !existsSync5(join11(root, ".git"))) return { files: [], unknown: null };
     return { files: [], unknown: inside.failed };
   }
   if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
@@ -51341,12 +51419,12 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync as readdirSync4, realpathSync as realpathSync4, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync as readdirSync4, realpathSync as realpathSync4, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname4, isAbsolute, join as join13, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync5, readFileSync as readFileSync8, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync8, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { join as join12, resolve as resolve6, sep as sep2 } from "node:path";
 var RESOLVER_IMPORTS = [
@@ -51492,7 +51570,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync5, readFileSync8, readdirSync3, join12, homedir5);
+)(existsSync6, readFileSync8, readdirSync3, join12, homedir5);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -51595,7 +51673,7 @@ function opencodeModelRef(model) {
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
   const start = dirname4(fileURLToPath(moduleUrl));
   for (let dir = start; ; dir = dirname4(dir)) {
-    if (existsSync6(join13(dir, "agent-templates", "registry.json"))) return dir;
+    if (existsSync7(join13(dir, "agent-templates", "registry.json"))) return dir;
     if (dirname4(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
@@ -51638,7 +51716,7 @@ function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const disk = existsSync6(path) ? normalize3(readFileSync9(path, "utf8")) : null;
+    const disk = existsSync7(path) ? normalize3(readFileSync9(path, "utf8")) : null;
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
       if (!m || m[1] !== name) {
@@ -51665,7 +51743,7 @@ function ensureFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   return rows;
 }
 function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
-  if (!existsSync6(join13(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync7(join13(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelRef(model);
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
@@ -51674,12 +51752,12 @@ function swapFullAgentModel({ projectDir, pluginRoot, agents, model }) {
 }
 
 // scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync7, readFileSync as readFileSync10 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync10 } from "node:fs";
 import { join as join14 } from "node:path";
 var CONFIG_REL3 = join14(".sterling", "config.json");
 var STORE_DB_REL = join14(".sterling", "sterling.db");
 function storeBackend(root) {
-  const dbExists = () => existsSync7(join14(root, STORE_DB_REL));
+  const dbExists = () => existsSync8(join14(root, STORE_DB_REL));
   let text;
   try {
     text = readFileSync10(join14(root, CONFIG_REL3), "utf8");
@@ -51714,6 +51792,7 @@ function writeSelectionFile(root, type, recordId, at) {
 }
 
 // packages/tui/dist/controller.js
+var DASHBOARD_BUSY_TIMEOUT_MS = 250;
 function openDashboard(storePath2, options = {}) {
   const disabled = options.disabledEffects ?? {};
   const configPath2 = join16(dirname5(storePath2), "config.json");
@@ -51745,8 +51824,131 @@ function openDashboard(storePath2, options = {}) {
   }
   const stores = routed ? openRoutedStores(projectRoot, { mount: true }).stores : new MountedStores(storePath2, mounts, { skipMissing: true });
   const store = stores.project;
+  let writeStore;
+  try {
+    writeStore = routed ? store : new SterlingStore(storePath2, { busyTimeoutMs: DASHBOARD_BUSY_TIMEOUT_MS });
+  } catch (err) {
+    stores.close();
+    throw err;
+  }
   const projectName = basename2(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
   let ui = initialUi;
+  let probe;
+  let changeDetection = "data_version";
+  let degradeSaid = false;
+  function degrade(reason) {
+    changeDetection = `degraded: ${reason}`;
+    if (degradeSaid)
+      return;
+    degradeSaid = true;
+    ui = { ...ui, notice: `change detection degraded: ${reason}; the dashboard rebuilds on every redraw` };
+  }
+  if (routed)
+    changeDetection = "none: Postgres storage has no data_version";
+  else {
+    try {
+      probe = (options.dataVersionProbe ?? openDataVersionProbe)([storePath2, ...mounts.map((m) => m.dbPath)]);
+    } catch (err) {
+      degrade(`data_version probe failed to open \u2014 ${err.message}`);
+    }
+  }
+  let frame;
+  let builds = 0;
+  const vpKey = (vp) => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null]);
+  const today = () => (/* @__PURE__ */ new Date()).toDateString();
+  function currentFrame(vp) {
+    let dataVersion;
+    if (probe) {
+      try {
+        dataVersion = probe.read();
+      } catch (err) {
+        degrade(`data_version read failed \u2014 ${err.message}`);
+      }
+    }
+    const key = vpKey(vp);
+    const day = today();
+    if (frame && dataVersion !== void 0 && frame.dataVersion === dataVersion && frame.ui === ui && frame.roster === roster && frame.vp === key && frame.day === day)
+      return frame.built;
+    builds++;
+    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents);
+    frame = { vp: key, day, ui, roster, dataVersion, built };
+    return built;
+  }
+  let storeCalls = 0;
+  const countCalls = (target) => {
+    const proto = Object.getPrototypeOf(target);
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      const fn = Object.getOwnPropertyDescriptor(proto, name)?.value;
+      if (name === "constructor" || typeof fn !== "function")
+        continue;
+      Object.defineProperty(target, name, {
+        configurable: true,
+        writable: true,
+        value: (...args2) => {
+          storeCalls++;
+          return fn.apply(target, args2);
+        }
+      });
+    }
+  };
+  if (options.profile) {
+    countCalls(store);
+    if (writeStore !== store)
+      countCalls(writeStore);
+  }
+  let pending = [];
+  let retryNotice;
+  const isBusy = (err) => {
+    const code = err?.errcode;
+    return code === 5 || code === 6 || /database is (locked|busy)|SQLITE_BUSY|SQLITE_LOCKED/i.test(err?.message ?? "");
+  };
+  function flush() {
+    if (!pending.length)
+      return false;
+    const batch = pending;
+    pending = [];
+    let failed = false;
+    for (const e of batch) {
+      try {
+        if (e.type === "select" && routed)
+          writeSelectionFile(projectRoot, e.recordType, e.id, (/* @__PURE__ */ new Date()).toISOString());
+        else
+          runEffects(writeStore, [e]);
+      } catch (err) {
+        failed = true;
+        const msg = err.message;
+        if (isBusy(err) && options.deferWrites) {
+          pending.push(e);
+          retryNotice = `${e.type === "select" ? "selection" : "board edit"} not saved yet: the store is busy (${msg}); retrying`;
+          ui = { ...ui, notice: retryNotice };
+        } else {
+          ui = { ...ui, notice: e.type === "select" ? `selection not handed to the next prompt \u2014 ${msg}` : `board edit not saved \u2014 ${msg}` };
+        }
+      }
+    }
+    if (!failed && retryNotice !== void 0) {
+      if (ui.notice === retryNotice) {
+        const { notice: _saved, ...rest } = ui;
+        ui = rest;
+      }
+      retryNotice = void 0;
+    }
+    return failed;
+  }
+  let quitArmed = false;
+  function requestQuit() {
+    if (quitArmed)
+      return true;
+    const failed = flush();
+    if (!failed && !pending.length)
+      return true;
+    quitArmed = true;
+    const notice = `${ui.notice ?? "writes not saved"} \u2014 press q again to quit and discard them`;
+    ui = { ...ui, notice };
+    if (pending.length)
+      retryNotice = notice;
+    return false;
+  }
   let roster;
   function readInstalledModelEffort(name) {
     try {
@@ -51821,7 +52023,7 @@ function openDashboard(storePath2, options = {}) {
     const mode = readRawMode();
     const handoff = readHandoff();
     const codexWired = probeCodexWired();
-    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync8(join16(agentsDir, `${name}.md`))).map((name) => {
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync9(join16(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
       return { name, installedModel: v.model, installedEffort: v.effort };
     });
@@ -51869,7 +52071,7 @@ function openDashboard(storePath2, options = {}) {
       writeFileSync5(configPath2, JSON.stringify(raw, null, 2) + "\n");
       for (const name of e.agents) {
         const p = join16(agentsDir, `${name}.md`);
-        if (!existsSync8(p))
+        if (!existsSync9(p))
           continue;
         const content = readFileSync12(p, "utf8");
         const hdr = parseInstalledHeader(content);
@@ -51970,38 +52172,50 @@ function openDashboard(storePath2, options = {}) {
     }
     if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length)
       roster = loadRoster();
-    if (routed) {
-      for (const e of effects) {
-        if (e.type !== "select")
-          continue;
-        try {
-          writeSelectionFile(projectRoot, e.recordType, e.id, (/* @__PURE__ */ new Date()).toISOString());
-        } catch (err) {
-          notice(`selection not handed to the next prompt \u2014 ${err.message}`);
-        }
-      }
-      return runEffects(store, effects.filter((e) => e.type !== "select"));
+    for (const e of effects) {
+      if (e.type === "select")
+        pending = [...pending.filter((p) => p.type !== "select"), e];
+      else if (e.type === "board_edit")
+        pending.push(e);
     }
-    return runEffects(store, effects);
+    if (!options.deferWrites)
+      flush();
+    return effects.some((e) => e.type === "quit");
   }
   return {
     stores,
     store,
+    writeStore,
     projectName,
     configPath: configPath2,
     ui: () => ui,
     roster: () => roster,
-    state: (vp) => buildDashboardState(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents),
+    state: (vp) => currentFrame(vp).state,
     async handle(event2, vp) {
       const prevTab = ui.tab;
-      const result = reduce(store, ui, event2, vp, stores, roster, resolveProjectHeadSha);
+      const drawn = frame && frame.ui === ui && frame.roster === roster && frame.vp === vpKey(vp) ? frame.built : void 0;
+      const result = reduce(store, ui, event2, vp, stores, roster, resolveProjectHeadSha, drawn);
       ui = result.ui;
+      if (!result.effects.some((e) => e.type === "quit"))
+        quitArmed = false;
       if (ui.tab === SYSTEM_TAB && (prevTab !== SYSTEM_TAB || !roster))
         roster = loadRoster();
       return applyEffects(result.effects);
     },
     applyEffects,
-    close: () => stores.close()
+    flush,
+    pending: () => pending.length,
+    requestQuit,
+    stats: () => ({ builds, storeCalls, changeDetection }),
+    close: () => {
+      try {
+        probe?.close();
+        if (writeStore !== store)
+          writeStore.close();
+      } finally {
+        stores.close();
+      }
+    }
   };
 }
 
@@ -52180,14 +52394,14 @@ function mouseToEvent(name, data) {
 }
 
 // packages/tui/dist/subagents.js
-import { existsSync as existsSync11, readFileSync as readFileSync14, readdirSync as readdirSync7, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync12, readFileSync as readFileSync14, readdirSync as readdirSync7, statSync as statSync6 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { join as join18 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync7, readFileSync as readFileSync13, writeFileSync as writeFileSync6, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync9, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync5, chmodSync } from "node:fs";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync13, writeFileSync as writeFileSync6, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync10, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync5, chmodSync } from "node:fs";
 import { join as join17, resolve as resolve8, dirname as dirname6, isAbsolute as isAbsolute2 } from "node:path";
-import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash2 } from "node:crypto";
 function registerPath(root) {
   return join17(root, ".sterling", "transient", "dispatch-register.json");
@@ -52212,7 +52426,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync9(p)) return { availability: "absent", arr: [] };
+  if (!existsSync10(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync13(p, "utf8");
@@ -52252,24 +52466,24 @@ function dispatchStateKey(toolUseId) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync10, statSync as statSync5, readdirSync as readdirSync6 } from "node:fs";
+import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync11, statSync as statSync5, readdirSync as readdirSync6 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
   const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
-  if (existsSync10(flat)) return flat;
+  if (existsSync11(flat)) return flat;
   const wfRoot = `${sessionDir}/subagents/workflows`;
   try {
     for (const d of readdirSync6(wfRoot)) {
       const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
-      if (existsSync10(candidate)) return candidate;
+      if (existsSync11(candidate)) return candidate;
     }
   } catch {
   }
   return flat;
 }
 function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync10(path)) return null;
+  if (!existsSync11(path)) return null;
   const fd = openSync3(path, "r");
   try {
     const size = fstatSync(fd).size;
@@ -54767,7 +54981,7 @@ function readDispatchDescription(projectRoot, toolUseId) {
   const key = dispatchStateKey(toolUseId);
   let file = join18(dir, `live-${key}.json`);
   try {
-    if (!existsSync11(file)) {
+    if (!existsSync12(file)) {
       const done = readdirSync7(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
       if (!done)
         return null;
@@ -54801,7 +55015,7 @@ function readAgentModel(projectRoot, type) {
 function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir = defaultClaudeConfigDir()) {
   const projects = join18(claudeConfigDir, "projects");
   const slug = projectRoot.replace(/[^A-Za-z0-9]/g, "-");
-  const sessionUnder = (dir2) => existsSync11(join18(projects, dir2, sessionId));
+  const sessionUnder = (dir2) => existsSync12(join18(projects, dir2, sessionId));
   let dir = sessionUnder(slug) ? slug : void 0;
   if (!dir) {
     let all;
@@ -55164,7 +55378,24 @@ if (owner !== null) {
   console.error(`sterling-tui: already running (pid ${owner}) for this store \u2014 exiting politely (\xA711)`);
   process.exit(0);
 }
-var ctl = openDashboard(storePath);
+var profileEnv = process.env.STERLING_TUI_PROFILE;
+var profilePath = !profileEnv ? void 0 : profileEnv === "1" ? join19(dirname8(storePath), "transient", "tui-profile.log") : profileEnv;
+var ctl = openDashboard(storePath, { deferWrites: true, profile: profilePath !== void 0 });
+if (profilePath) {
+  mkdirSync9(dirname8(profilePath), { recursive: true });
+  appendFileSync(profilePath, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), start: true, pid: process.pid, changeDetection: ctl.stats().changeDetection }) + "\n");
+}
+function profiled(kind, work, extra = () => ({})) {
+  if (!profilePath)
+    return work();
+  const s0 = ctl.stats();
+  const t0 = performance.now();
+  const out = work();
+  const ms = Math.round((performance.now() - t0) * 100) / 100;
+  const s1 = ctl.stats();
+  appendFileSync(profilePath, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), kind, ms, builds: s1.builds - s0.builds, storeCalls: s1.storeCalls - s0.storeCalls, ...extra() }) + "\n");
+  return out;
+}
 var showBanner = process.env.STERLING_NO_BANNER !== "1";
 var screen = new termkit.default.ScreenBuffer({ dst: term });
 var subagents = createSubagentTracker(dirname8(dirname8(storePath)));
@@ -55198,10 +55429,17 @@ function animate() {
     return;
   painted = paintPixels(term, screenPixels(block), painted, trueColor);
 }
-function redraw() {
+var drawnState;
+var drawnView = "";
+function redraw(onlyIfChanged = false) {
   const now = Date.now();
   shownView = subagents.view(now);
   const state = ctl.state(viewport());
+  const viewKey = ctl.ui().tab === AGENTS_TAB ? JSON.stringify(shownView) : String(shownView.active);
+  if (onlyIfChanged && !forceFull && state === drawnState && viewKey === drawnView)
+    return false;
+  drawnState = state;
+  drawnView = viewKey;
   bodyTop = state.bodyTop;
   const block = subagentBlock(Math.floor(now / ANIMATION_MS));
   const key = layoutKey(block);
@@ -55220,15 +55458,41 @@ function redraw() {
     clearInterval(animation);
     animation = void 0;
   }
+  return true;
+}
+var queue = Promise.resolve();
+function serial(job) {
+  queue = queue.then(job);
 }
 async function handle(event2) {
   if (!event2)
     return;
+  const s0 = profilePath ? ctl.stats() : void 0;
+  const t0 = performance.now();
   if (await ctl.handle(event2, viewport())) {
-    restoreTerminal();
-    process.exit(0);
+    if (ctl.requestQuit())
+      shutdown(0);
+    redraw();
+    return;
   }
-  redraw();
+  const t1 = performance.now();
+  profiled(`event:${event2.kind}`, () => redraw(), () => ({
+    handleMs: Math.round((t1 - t0) * 100) / 100,
+    builds: ctl.stats().builds - s0.builds,
+    storeCalls: ctl.stats().storeCalls - s0.storeCalls
+  }));
+  scheduleFlush();
+}
+var flushScheduled = false;
+function scheduleFlush() {
+  if (flushScheduled)
+    return;
+  flushScheduled = true;
+  setImmediate(() => serial(() => {
+    flushScheduled = false;
+    if (profiled("flush", () => ctl.flush()))
+      redraw();
+  }));
 }
 var terminalRestored = false;
 function restoreTerminal() {
@@ -55256,27 +55520,45 @@ function restoreTerminal() {
   } catch {
   }
 }
-process.on("uncaughtException", (err) => {
+var shuttingDown = false;
+function shutdown(code, message) {
+  let unsaved;
+  if (!shuttingDown) {
+    shuttingDown = true;
+    try {
+      if (ctl.flush() || ctl.pending() > 0)
+        unsaved = ctl.ui().notice ?? `${ctl.pending()} write(s) still queued`;
+    } catch (err) {
+      unsaved = err?.message ?? String(err);
+    }
+  }
   restoreTerminal();
-  console.error(`sterling-tui: fatal \u2014 ${err?.stack ?? err}`);
-  process.exit(1);
-});
-process.on("unhandledRejection", (err) => {
-  restoreTerminal();
-  console.error(`sterling-tui: fatal (unhandled rejection) \u2014 ${err?.stack ?? err}`);
-  process.exit(1);
-});
+  if (message)
+    console.error(message);
+  if (unsaved)
+    console.error(`sterling-tui: store writes not saved at exit \u2014 ${unsaved}`);
+  process.exit(code);
+}
+process.on("uncaughtException", (err) => shutdown(1, `sterling-tui: fatal \u2014 ${err?.stack ?? err}`));
+process.on("unhandledRejection", (err) => shutdown(1, `sterling-tui: fatal (unhandled rejection) \u2014 ${err?.stack ?? err}`));
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) {
+  process.on(signal, () => shutdown(code, `sterling-tui: ${signal} \u2014 exiting`));
+}
 term.fullscreen(true);
 term.hideCursor();
 term.grabInput({ mouse: "button" });
-term.on("key", (name) => void handle(keyToEvent(name)));
-term.on("mouse", (name, data) => void handle(mouseToEvent(name, data)));
-term.on("resize", () => {
+term.on("key", (name) => serial(() => handle(keyToEvent(name))));
+term.on("mouse", (name, data) => serial(() => handle(mouseToEvent(name, data))));
+term.on("resize", () => serial(() => {
   screen = new termkit.default.ScreenBuffer({ dst: term });
   forceFull = true;
   redraw();
-});
-setInterval(redraw, 1e3);
+}));
+setInterval(() => serial(() => {
+  profiled("tick", () => redraw(true));
+  if (ctl.pending() > 0)
+    scheduleFlush();
+}), 1e3);
 redraw();
 /*! Bundled license information:
 

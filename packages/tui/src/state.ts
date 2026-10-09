@@ -62,6 +62,10 @@ export const SYSTEM_TAB = TABS.indexOf('System');
 export const ARTICLE_STATE_FILTERS = ['all', 'planned', 'built', 'wired_in', 'active', 'dormant', 'deprecated'] as const;
 
 export interface UiState {
+  /** the selected row's id (record id, or the cat:/src:/sub: id of a tree
+   *  node). It wins over `cursor` while the row is still listed, so a record
+   *  added or removed above the selection does not move it to another record. */
+  selectedId?: string;
   tab: number;
   cursor: number;
   expanded: string[];
@@ -509,6 +513,21 @@ export type Node =
 const catId = (type: string) => `cat:${type}`;
 const srcId = (type: string, source: string) => `src:${type}:${source}`;
 const subId = (type: string, source: string, key: string) => `sub:${type}:${source}:${key}`;
+
+/** The row id buildDashboardState gives a node. */
+function nodeId(node: Node): string {
+  if (node.kind === 'category') return catId(node.type);
+  if (node.kind === 'source') return srcId(node.catType, node.source);
+  if (node.kind === 'subcategory') return subId(node.catType, node.source, node.key);
+  return node.card.id;
+}
+
+/** The cursor the dashboard draws: the row holding ui.selectedId while it is
+ *  still listed, else ui.cursor; clamped to the list. */
+function resolveCursor(ui: UiState, nodes: Node[]): number {
+  const held = ui.selectedId === undefined ? -1 : nodes.findIndex((n) => nodeId(n) === ui.selectedId);
+  return Math.min(held >= 0 ? held : ui.cursor, Math.max(0, nodes.length - 1));
+}
 
 /** Prefix-star a query into AND-joinable rank terms (mid-word matching).
  *  Dedupe (via the store's OWN rankTermDedupeKey — one definition, not two)
@@ -1056,16 +1075,31 @@ function systemDashboardState(
   };
 }
 
+/** A drawn frame: the state the renderer painted, the nodes it was built from
+ *  and the cursor it drew, plus the UiState it was built from. The reducer
+ *  hit-tests a click against the frame, so the click selects the record that
+ *  was on screen even when the store changed after the draw. */
+export interface DashboardFrame {
+  ui: UiState;
+  state: DashboardState;
+  nodes: Node[];
+  cursor: number;
+}
+
 export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab): DashboardState {
+  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents).state;
+}
+
+export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab): DashboardFrame {
   const banner = bannerLines(width, showBanner);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
   // Computed ONCE here and threaded into every projection, so the Tasks count
   // and the widths the hit-test measures can never come from two places.
   const tabs = tabsFor(store, ui.tab, agents);
   // System tab (run r-f9a7): its own projection, not a card/knowledge list.
-  if (ui.tab === SYSTEM_TAB) return systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents);
+  if (ui.tab === SYSTEM_TAB) return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents), nodes: [], cursor: ui.cursor };
   const nodes = nodesFor(store, ui, knowledge);
-  const cursor = Math.min(ui.cursor, Math.max(0, nodes.length - 1));
+  const cursor = resolveCursor(ui, nodes);
   let rows: Row[] = [];
   let screenRow = 0;
   for (let i = 0; i < nodes.length; i++) {
@@ -1181,7 +1215,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
   // the Knowledge search field is ALWAYS visible (no '/' toggle) — its line
   // shows on the spacer row on the Knowledge tab regardless of the query.
   const searchActive = ui.tab === KNOWLEDGE_TAB;
-  return {
+  const state: DashboardState = {
     tabs,
     rows,
     emptyMessage:
@@ -1201,7 +1235,9 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
       // state.footer unconditionally, so this is the one line available to
       // this scope's two files without touching render.ts. Mirrors the
       // System tab's own '⚠ ' convention (buildSystemTab's banner).
-      ui.tab === TASKS_TAB && ui.notice
+      // A notice on the Knowledge and Queue tabs is shown the same way: a
+      // failed selection write from a click there reports here.
+      ui.notice && (ui.tab === TASKS_TAB || ui.tab === KNOWLEDGE_TAB || ui.tab === QUEUE_TAB)
         ? `⚠ ${ui.notice}`
         : ui.tab === AGENTS_TAB
           ? `←/→ or 1-${visibleTabs(agents).length} tabs · q quit`
@@ -1216,6 +1252,7 @@ export function buildDashboardState(store: SterlingStore, ui: UiState, width = I
     bodyTop,
     scroll,
   };
+  return { ui, state, nodes, cursor };
 }
 
 /** Map an absolute screen line (1-based, terminal convention) to a row index, or -1.
@@ -1245,10 +1282,50 @@ export function reduce(
   // resolution without shelling out to real git or depending on this
   // worktree's own repo state. Defaults to the real `git rev-parse HEAD`
   // resolver, so every existing/main.ts call site needs no change.
-  resolveHeadSha: () => string | undefined = defaultResolveHeadSha
+  resolveHeadSha: () => string | undefined = defaultResolveHeadSha,
+  // The last drawn frame, when the host has one built from this same `ui` and
+  // viewport: a click hit-tests what is on screen and nothing is re-read from
+  // the store. Without one (or with a frame built from another ui) the reducer
+  // reads the nodes itself.
+  frame?: DashboardFrame
+): { ui: UiState; effects: Effect[] } {
+  const drawn = frame !== undefined && frame.ui === ui ? frame : undefined;
+  const nodes = drawn ? drawn.nodes : nodesFor(store, ui, knowledge);
+  const cursor = drawn ? drawn.cursor : ui.tab === SYSTEM_TAB ? ui.cursor : resolveCursor(ui, nodes);
+  const base = cursor === ui.cursor ? ui : { ...ui, cursor };
+  const out = reduceNodes(store, base, event, viewport, knowledge, roster, resolveHeadSha, nodes, drawn);
+  // a no-op event hands back the caller's own UiState, so its frame stays current
+  if (out.ui === base) return { ui, effects: out.effects };
+  return { ui: holdSelection(base, out.ui, nodes), effects: out.effects };
+}
+
+/** Keep the selection by id: after an event on a card tab, ui.selectedId names
+ *  the node under the new cursor. A tab switch or a new search or filter starts
+ *  a fresh list, where the cursor index rules. Returns `next` itself when
+ *  nothing changes, so a no-op event leaves the UiState identical. */
+function holdSelection(prev: UiState, next: UiState, nodes: Node[]): UiState {
+  const fresh = next.tab !== prev.tab || next.searchQuery !== prev.searchQuery || next.stateFilter !== prev.stateFilter;
+  const cardTab = next.tab !== SYSTEM_TAB && next.tab !== AGENTS_TAB;
+  const node = !fresh && cardTab && nodes.length ? nodes[Math.min(next.cursor, nodes.length - 1)] : undefined;
+  const selectedId = node ? nodeId(node) : undefined;
+  if (selectedId === next.selectedId) return next;
+  if (selectedId !== undefined) return { ...next, selectedId };
+  const { selectedId: _dropped, ...rest } = next;
+  return rest;
+}
+
+function reduceNodes(
+  store: SterlingStore,
+  ui: UiState,
+  event: UiEvent,
+  viewport: Viewport,
+  knowledge: MountedStores | undefined,
+  roster: AgentRosterSnapshot | undefined,
+  resolveHeadSha: () => string | undefined,
+  nodes: Node[],
+  drawn: DashboardFrame | undefined
 ): { ui: UiState; effects: Effect[] } {
   const maxBodyLines = viewport.maxBodyLines ?? Infinity;
-  const nodes = nodesFor(store, ui, knowledge);
   const clamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects: Effect[] = [];
 
@@ -1273,7 +1350,9 @@ export function reduce(
    *  config.models keys and would otherwise leave the edit caret below the fold). */
   const revealAt = (cursor: number): UiState => {
     if (!scrollable || !Number.isFinite(maxBodyLines)) return { ...ui, cursor };
-    const st = buildSelf({ ...ui, cursor });
+    // row heights do not depend on the cursor, so on the card tabs the drawn
+    // frame's geometry serves (the System tab's picker rows follow the cursor)
+    const st = drawn && ui.tab !== SYSTEM_TAB ? drawn.state : buildSelf({ ...ui, cursor });
     const total = st.rows.length ? st.rows[st.rows.length - 1].screenRow + st.rows[st.rows.length - 1].lines.length : 0;
     const max = Math.max(0, total - maxBodyLines);
     let scroll = ui.scroll ?? 0;
@@ -1613,7 +1692,7 @@ export function reduce(
       // route space to the same selector logic as ENTER — otherwise the picker's
       // SPACE handling was reachable only by tests (audit finding 39/43).
       if (ch === ' ' && ui.tab === SYSTEM_TAB) {
-        return reduce(store, ui, { kind: 'key', name: 'ENTER' }, viewport, knowledge, roster, resolveHeadSha);
+        return reduceNodes(store, ui, { kind: 'key', name: 'ENTER' }, viewport, knowledge, roster, resolveHeadSha, nodes, drawn);
       }
       if (ch === ' ') return { ui: activate(clamp(ui.cursor)), effects };
       // Tasks tab board-item edit (user-ruled 2026-09-28, board f25e5547 lane
@@ -1628,10 +1707,14 @@ export function reduce(
           // Fix 2 (Opus review of 71c1f41): read the CURRENT version fresh
           // via store.get — the projected Card carries no version field, and
           // a snapshot taken anywhere earlier than this keypress would widen
-          // the lost-update guard's blind spot.
-          const rec = store.get(node.card.id) as { version?: number } | undefined;
-          const version = rec && typeof rec.version === 'number' ? rec.version : 0;
-          return { ui: { ...ui, boardEdit: { id: node.card.id, text: node.card.body, version }, notice: undefined }, effects };
+          // the lost-update guard's blind spot. The TEXT comes from the same
+          // read: the node can come from the drawn frame, whose body may
+          // predate another connection's change, and saving that body at the
+          // new version would pass the guard and overwrite the change.
+          const rec = store.get(node.card.id) as { version?: number; text?: unknown } | undefined;
+          if (!rec || typeof rec.text !== 'string') return { ui: { ...ui, notice: 'board item no longer exists — nothing to edit' }, effects };
+          const version = typeof rec.version === 'number' ? rec.version : 0;
+          return { ui: { ...ui, boardEdit: { id: node.card.id, text: rec.text, version }, notice: undefined }, effects };
         }
         return { ui, effects };
       }
@@ -1649,14 +1732,22 @@ export function reduce(
       // record); on the fixed queue tab it keeps moving the cursor.
       if (!scrollable) return { ui: { ...ui, cursor: clamp(ui.cursor + (event.dy > 0 ? 1 : -1)) }, effects };
       const desired = (ui.scroll ?? 0) + (event.dy > 0 ? 3 : -3);
+      if (drawn && ui.tab !== SYSTEM_TAB) {
+        // the clamp needs only the drawn content height, which a scroll does not change
+        const rows = drawn.state.rows;
+        const total = rows.length ? rows[rows.length - 1].screenRow + rows[rows.length - 1].lines.length : 0;
+        const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - maxBodyLines) : 0;
+        return { ui: { ...ui, scroll: Math.max(0, Math.min(desired, max)) }, effects };
+      }
       const st = buildSelf({ ...ui, scroll: desired });
       return { ui: { ...ui, scroll: st.scroll }, effects };
     }
     case 'click': {
-      // build the same geometry the renderer drew with — wrapped heights, the
+      // hit-test the frame on screen when the host passed it; otherwise build
+      // the same geometry the renderer drew with — wrapped heights, the
       // queue tab's pending truncation, AND the banner-driven bodyTop must all
       // match the screen, so the tab-bar row and body hit-test track the banner
-      const state = buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster, viewport.agents);
+      const state = drawn ? drawn.state : buildDashboardState(store, ui, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster, viewport.agents);
       // tab bar sits one line above the body block (its own header row is just
       // above the body); terminal line = bodyTop - 1. Pick the tab by x extent.
       if (event.y === state.bodyTop - 1) {
@@ -1706,10 +1797,9 @@ export function runEffects(store: SterlingStore, effects: Effect[], now: () => s
       // backstop against the (vanishingly small, but real for a store shared
       // by another process) window between that check and this write: the
       // store's own optimistic-concurrency guard (applyInPlace) then throws
-      // rather than silently applying a stale-based write, and that throw
-      // propagates to main.ts's uncaughtException handler the same way every
-      // other effect's write does (P5) — a race this rare is loud, not
-      // swallowed, but it is no longer the expected path a normal edit takes.
+      // rather than silently applying a stale-based write. The controller's
+      // flush() turns that throw into a visible notice, as it does for every
+      // store write (P5): loud, never swallowed, and never an exit.
       const old = store.get(e.id);
       const candidate: Record<string, unknown> = { ...(old as unknown as Record<string, unknown>), text: e.text, updated_at: now() };
       if (e.measuredAtHead) candidate.measured_at_head = e.measuredAtHead;
