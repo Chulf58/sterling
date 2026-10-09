@@ -48,6 +48,20 @@ test('empty config gets full defaults; malformed config fails loud', () => {
   assert.throws(() => parseConfig({ models: { implementor: { model: 'sonnet', effort: 'max' } } }), /invalid/i);
 });
 
+// decision opencode-only-model-override-per-role-for-openai-picks
+test('models.<role>.opencode_model: an optional <provider>/<model> override beside the Claude model', () => {
+  const set = parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' } } });
+  assert.equal(set.models.implementor.opencode_model, 'openai/gpt-5.6-terra');
+  assert.equal(set.models.implementor.model, 'claude-sonnet-5-5', 'the Claude model is kept beside the override');
+  // a catchall role (any installed agent's name) takes the override too
+  assert.equal(parseConfig({ models: { conductor: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' } } }).models.conductor.opencode_model, 'openai/gpt-6.1-sol');
+  assert.equal(parseConfig({}).models.implementor.opencode_model, undefined, 'absent by default');
+  assert.deepEqual(unreadConfigKeys({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: 'openai/gpt-5.6-terra' } } }), [], 'the override is a read key');
+  for (const bad of ['gpt-5.6-terra', 'openai/', '/gpt-5.6-terra', 'openai/gpt 5', 'openai/gpt-5\nhooks: x', '']) {
+    assert.throws(() => parseConfig({ models: { implementor: { model: 'claude-sonnet-5-5', effort: 'high', opencode_model: bad } } }), /opencode_model/, JSON.stringify(bad));
+  }
+});
+
 // ------------------- session_events config (run r-0501, AC7 / interface slice 3) -------------------
 
 // session_events is a new config block; access it through a cast so referencing it here
@@ -125,6 +139,7 @@ test('conductor pressure: the shared context-window table carries verified per-m
   assert.equal(sharedWindows['claude-opus-5'], 1_000_000);
   assert.equal(sharedWindows['claude-sonnet-5'], 1_000_000);
   assert.equal(sharedWindows['claude-haiku-4-5'], 200_000);
+  assert.equal(sharedWindows['claude-haiku-5-5'], 1_000_000);
   const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));
   // Reversed by decision context-window-default-is-a-real-fallback (user-ruled
   // 2026-09-22, "Make it real: fall back to 1M"): a model with no per-model

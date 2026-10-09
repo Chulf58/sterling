@@ -111,9 +111,9 @@ function subagentBlock(tick: number): SubagentBlock {
 // One viewport snapshot for both the draw and the click hit-test (the sync
 // constraint: reduce must see the same width/visibleBodyLines the renderer drew
 // with). bodyTop follows the banner height, so it is threaded as showBanner.
-// The Agents tab is enabled here, and its label carries the running count.
+// The Agents tab is enabled here, and its label carries the running and quiet counts.
 function viewport() {
-  return { width: term.width, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active } };
+  return { width: term.width, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active, quiet: shownView.quiet ?? 0 } };
 }
 
 // Portrait and banner-scene pixels are painted outside the ScreenBuffer
