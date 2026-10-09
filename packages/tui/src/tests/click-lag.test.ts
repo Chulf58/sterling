@@ -348,7 +348,7 @@ test('busy timeout without deferWrites (the OpenCode host, which never flushes a
     locker.exec('BEGIN IMMEDIATE');
     await ctl.handle({ kind: 'click', x: 5, y: lineOf(0) }, VP);
     assert.equal(ctl.pending(), 0, 'nothing is left queued that no one would retry');
-    assert.match(ctl.ui().notice ?? '', /^selection not handed to the next prompt — database is locked/);
+    assert.match(ctl.ui().notice ?? '', /^selection not handed to the next prompt — the store was locked by another connection for longer than 250 ms; .*\(SQLITE_BUSY, database is locked\)/);
   } finally {
     locker.exec('ROLLBACK');
     locker.close();

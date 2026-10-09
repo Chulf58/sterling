@@ -225,7 +225,7 @@ export class SqliteDriver implements StoreDriver {
   private readonly dbPath: string;
 
   /** PRAGMA busy_timeout of this connection, which switchFreshFileToWal also waits by. */
-  private readonly busyTimeoutMs: number;
+  readonly busyTimeoutMs: number;
 
   /** The path the journal-mode policy classifies: dbPath with its directory's symlinks resolved. */
   private readonly classifiedPath: string;
