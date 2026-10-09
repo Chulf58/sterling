@@ -6,7 +6,8 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { openDashboard } from './controller.js';
-import { visibleBodyLines, AGENTS_TAB, type DashboardState } from './state.js';
+import { githubStripRows, visibleBodyLines, AGENTS_TAB, type DashboardState } from './state.js';
+import { createGithubPoller } from './github-status.js';
 import { bannerLines, scenePixels } from './banner.js';
 import { detectThemeLevel, themeFor, type Theme } from './theme.js';
 import { clearPixels, draw, keyToEvent, mouseToEvent, paintPixels } from './render.js';
@@ -63,8 +64,13 @@ if (owner !== null) {
 // dashboard builds and project-store method calls.
 const profileEnv = process.env.STERLING_TUI_PROFILE;
 const profilePath = !profileEnv ? undefined : profileEnv === '1' ? join(dirname(storePath), 'transient', 'tui-profile.log') : profileEnv;
+// GitHub status (board 87bca3f8): open PRs, checks, Copilot and the PR loop
+// for the strip row and the GitHub tab. gh runs through an async execFile,
+// one poll at a time, started from the 1 s tick; `r` polls now. Nothing here
+// waits on it: the tick hands the latest snapshot to the state layer.
+const github = createGithubPoller({ root: dirname(dirname(storePath)) });
 // Store writes are deferred: the frame is drawn first, then the write runs.
-const ctl = openDashboard(storePath, { deferWrites: true, profile: profilePath !== undefined });
+const ctl = openDashboard(storePath, { deferWrites: true, profile: profilePath !== undefined, onGithubRefresh: () => github.refresh() });
 if (profilePath) {
   mkdirSync(dirname(profilePath), { recursive: true });
   appendFileSync(profilePath, JSON.stringify({ at: new Date().toISOString(), start: true, pid: process.pid, changeDetection: ctl.stats().changeDetection }) + '\n');
@@ -101,13 +107,14 @@ let bodyTop = 0;
 
 // the pane height picks the banner scene (4 rows under COMPACT_BELOW_HEIGHT),
 // the same height viewport() hands the state layer, so draw and clicks agree
+// The GitHub strip, while it shows, takes one more row above the footer.
 function fullBodyLines(): number {
-  return visibleBodyLines(term.height, bannerLines(term.width, showBanner, term.height).length);
+  return visibleBodyLines(term.height, bannerLines(term.width, showBanner, term.height).length, githubStripRows(github.snapshot()));
 }
 
 function subagentBlock(tick: number): SubagentBlock {
   if (ctl.ui().tab !== AGENTS_TAB) return { height: 0, puts: [], pixels: [] };
-  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2, tick, { neonEdge: theme.level !== 'plain' });
+  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2 - githubStripRows(github.snapshot()), tick, { neonEdge: theme.level !== 'plain' });
 }
 
 // One viewport snapshot for both the draw and the click hit-test (the sync
@@ -115,7 +122,7 @@ function subagentBlock(tick: number): SubagentBlock {
 // with). bodyTop follows the banner height, so it is threaded as showBanner.
 // The Agents tab is enabled here, and its label carries the running and quiet counts.
 function viewport() {
-  return { width: term.width, height: term.height, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active, quiet: shownView.quiet ?? 0 } };
+  return { width: term.width, height: term.height, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active, quiet: shownView.quiet ?? 0 }, github: github.snapshot() };
 }
 
 // Portrait and banner-scene pixels are painted outside the ScreenBuffer
@@ -244,6 +251,8 @@ let terminalRestored = false;
 function restoreTerminal(): void {
   if (terminalRestored) return;
   terminalRestored = true;
+  // a running git or gh would outlive the dashboard: kill it first
+  try { github.close(); } catch { /* best effort */ }
   try { term.grabInput(false); } catch { /* best effort */ }
   try { term.hideCursor(false); } catch { /* best effort */ }
   try { term.fullscreen(false); } catch { /* best effort */ } // leave the alternate screen, restoring the shell
@@ -281,6 +290,9 @@ process.on('unhandledRejection', (err) => shutdown(1, `sterling-tui: fatal (unha
 for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]] as const) {
   process.on(signal, () => shutdown(code, `sterling-tui: ${signal} — exiting`));
 }
+// every path above goes through restoreTerminal; this covers a process.exit
+// that does not, so no git or gh poll is ever orphaned
+process.on('exit', () => github.close());
 
 // Alternate screen buffer (§11 dashboard): no scrollback, so the 1 Hz redraw
 // can never grow the scrollbar or push the view down. The cursor stays hidden
@@ -300,13 +312,16 @@ term.on('resize', () =>
 );
 // live view over the durable store: the tick rebuilds only when the store's
 // data_version, the ui or the viewport moved, and draws only when that or the agent view changed
-// A write still queued (it met a busy lock) is retried on each tick.
+// A write still queued (it met a busy lock) is retried on each tick. A GitHub
+// poll that is due starts here; one that finished shows on this redraw.
 setInterval(
   () =>
     serial(() => {
+      github.tick(Date.now());
       profiled('tick', () => redraw(true));
       if (ctl.pending() > 0) scheduleFlush();
     }),
   1000
 );
+github.tick(Date.now());
 redraw();

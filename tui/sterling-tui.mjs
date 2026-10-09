@@ -256,19 +256,19 @@ var require_tty = __commonJS({
 var require_escape = __commonJS({
   "node_modules/string-kit/lib/escape.js"(exports) {
     "use strict";
-    exports.regExp = exports.regExpPattern = (str) => str.replace(/([.*+?^${}()|[\]/\\])/g, "\\$1");
-    exports.regExpReplacement = (str) => str.replace(/\$/g, "$$$$");
-    exports.format = (str) => str.replace(/%/g, "%%");
-    exports.jsSingleQuote = (str) => exports.control(str).replace(/'/g, "\\'");
-    exports.jsDoubleQuote = (str) => exports.control(str).replace(/"/g, '\\"');
-    exports.shellArg = (str) => "'" + str.replace(/'/g, "'\\''") + "'";
+    exports.regExp = exports.regExpPattern = (str2) => str2.replace(/([.*+?^${}()|[\]/\\])/g, "\\$1");
+    exports.regExpReplacement = (str2) => str2.replace(/\$/g, "$$$$");
+    exports.format = (str2) => str2.replace(/%/g, "%%");
+    exports.jsSingleQuote = (str2) => exports.control(str2).replace(/'/g, "\\'");
+    exports.jsDoubleQuote = (str2) => exports.control(str2).replace(/"/g, '\\"');
+    exports.shellArg = (str2) => "'" + str2.replace(/'/g, "'\\''") + "'";
     var escapeControlMap = {
       "\r": "\\r",
       "\n": "\\n",
       "	": "\\t",
       "\x7F": "\\x7f"
     };
-    exports.control = (str, keepNewLineAndTab = false) => str.replace(/[\x00-\x1f\x7f]/g, (match) => {
+    exports.control = (str2, keepNewLineAndTab = false) => str2.replace(/[\x00-\x1f\x7f]/g, (match) => {
       if (keepNewLineAndTab && (match === "\n" || match === "	")) {
         return match;
       }
@@ -288,17 +288,17 @@ var require_escape = __commonJS({
       '"': "&quot;",
       "'": "&#039;"
     };
-    exports.html = (str) => str.replace(/[&<>]/g, (match) => escapeHtmlMap[match]);
-    exports.htmlAttr = (str) => str.replace(/[&<>"]/g, (match) => escapeHtmlMap[match]);
-    exports.htmlSpecialChars = (str) => str.replace(/[&<>"']/g, (match) => escapeHtmlMap[match]);
-    exports.unicodePercentEncode = (str) => str.replace(/[\x00-\x1f\u0100-\uffff\x7f%]/g, (match) => {
+    exports.html = (str2) => str2.replace(/[&<>]/g, (match) => escapeHtmlMap[match]);
+    exports.htmlAttr = (str2) => str2.replace(/[&<>"]/g, (match) => escapeHtmlMap[match]);
+    exports.htmlSpecialChars = (str2) => str2.replace(/[&<>"']/g, (match) => escapeHtmlMap[match]);
+    exports.unicodePercentEncode = (str2) => str2.replace(/[\x00-\x1f\u0100-\uffff\x7f%]/g, (match) => {
       try {
         return encodeURI(match);
       } catch (error) {
         return "";
       }
     });
-    exports.httpHeaderValue = (str) => exports.unicodePercentEncode(str);
+    exports.httpHeaderValue = (str2) => exports.unicodePercentEncode(str2);
   }
 });
 
@@ -479,9 +479,9 @@ var require_ansi = __commonJS({
       "106": { bgColor: 14 },
       "107": { bgColor: 15 }
     };
-    ansi.parse = (str) => {
+    ansi.parse = (str2) => {
       var ansiCodes, raw, part, style, output = [];
-      for ([, ansiCodes, raw] of str.matchAll(/\x1b\[([0-9;]+)m|(.[^\x1b]*)/g)) {
+      for ([, ansiCodes, raw] of str2.matchAll(/\x1b\[([0-9;]+)m|(.[^\x1b]*)/g)) {
         if (raw) {
           if (output.length) {
             output[output.length - 1].text += raw;
@@ -531,13 +531,13 @@ var require_unicode = __commonJS({
     var unicode = {};
     module.exports = unicode;
     unicode.encode = (array) => String.fromCodePoint(...array);
-    unicode.decode = (str) => Array.from(str, (c) => c.codePointAt(0));
-    unicode.firstCodePoint = (str) => str.codePointAt(0);
-    unicode.firstChar = (str) => str.length ? String.fromCodePoint(str.codePointAt(0)) : void 0;
-    unicode.toArray = (str) => Array.from(str);
-    unicode.toCells = (Cell, str, tabWidth = 4, linePosition = 0, ...extraCellArgs) => {
+    unicode.decode = (str2) => Array.from(str2, (c) => c.codePointAt(0));
+    unicode.firstCodePoint = (str2) => str2.codePointAt(0);
+    unicode.firstChar = (str2) => str2.length ? String.fromCodePoint(str2.codePointAt(0)) : void 0;
+    unicode.toArray = (str2) => Array.from(str2);
+    unicode.toCells = (Cell, str2, tabWidth = 4, linePosition = 0, ...extraCellArgs) => {
       var char, code, fillSize, width, output = [];
-      for (char of str) {
+      for (char of str2) {
         code = char.codePointAt(0);
         if (code === 10) {
           linePosition = 0;
@@ -559,35 +559,35 @@ var require_unicode = __commonJS({
       return output;
     };
     unicode.fromCells = (cells2) => {
-      var cell, str = "";
+      var cell, str2 = "";
       for (cell of cells2) {
         if (!cell.filler) {
-          str += cell.char;
+          str2 += cell.char;
         }
       }
-      return str;
+      return str2;
     };
-    unicode.length = (str) => {
+    unicode.length = (str2) => {
       var char, length = 0;
-      for (char of str) {
+      for (char of str2) {
         length++;
       }
       return length;
     };
-    unicode.truncateLength = unicode.truncate = (str, limit) => {
+    unicode.truncateLength = unicode.truncate = (str2, limit) => {
       var position = 0, length = 0;
-      for (let char of str) {
+      for (let char of str2) {
         if (length === limit) {
-          return str.slice(0, position);
+          return str2.slice(0, position);
         }
         length++;
         position += char.length;
       }
-      return str;
+      return str2;
     };
-    unicode.width = (str) => {
+    unicode.width = (str2) => {
       var char, count = 0;
-      for (char of str) {
+      for (char of str2) {
         count += unicode.codePointWidth(char.codePointAt(0));
       }
       return count;
@@ -605,18 +605,18 @@ var require_unicode = __commonJS({
     var lastTruncateWidth = 0;
     unicode.getLastTruncateWidth = () => lastTruncateWidth;
     unicode.widthLimit = // DEPRECATED
-    unicode.truncateWidth = (str, limit) => {
+    unicode.truncateWidth = (str2, limit) => {
       var char, charWidth, position = 0;
       lastTruncateWidth = 0;
-      for (char of str) {
+      for (char of str2) {
         charWidth = unicode.codePointWidth(char.codePointAt(0));
         if (lastTruncateWidth + charWidth > limit) {
-          return str.slice(0, position);
+          return str2.slice(0, position);
         }
         lastTruncateWidth += charWidth;
         position += char.length;
       }
-      return str;
+      return str2;
     };
     unicode.surrogatePair = (char) => {
       var code = char.charCodeAt(0);
@@ -666,8 +666,8 @@ var require_unicode = __commonJS({
       return 1;
     };
     unicode.isFullWidthCodePoint = (code) => unicode.codePointWidth(code) === 2;
-    unicode.toFullWidth = (str) => {
-      return String.fromCodePoint(...Array.from(str, (char) => {
+    unicode.toFullWidth = (str2) => {
+      return String.fromCodePoint(...Array.from(str2, (char) => {
         var code = char.codePointAt(0);
         return code >= 33 && code <= 126 ? 65280 + code - 32 : code;
       }));
@@ -748,15 +748,15 @@ var require_inspect = __commonJS({
         options.proto = false;
         options.funcDetails = false;
       }
-      var str = inspect_(runtime, options, variable);
-      if (str.length > options.outputMaxLength) {
-        str = options.style.truncate(str, options.outputMaxLength);
+      var str2 = inspect_(runtime, options, variable);
+      if (str2.length > options.outputMaxLength) {
+        str2 = options.style.truncate(str2, options.outputMaxLength);
       }
-      return str;
+      return str2;
     }
     exports.inspect = inspect;
     function inspect_(runtime, options, variable) {
-      var i, funcName, length, proto, propertyList, isTrivialConstructor, constructor, keyIsProperty, type, pre, isArray, isFunc, specialObject, str = "", key = "", descriptorStr = "", indent = "", descriptor, nextAncestors;
+      var i, funcName, length, proto, propertyList, isTrivialConstructor, constructor, keyIsProperty, type, pre, isArray, isFunc, specialObject, str2 = "", key = "", descriptorStr = "", indent = "", descriptor, nextAncestors;
       type = typeof variable;
       if (runtime.depth) {
         indent = (options.tab ?? options.style.tab).repeat(options.noMarkup ? runtime.depth - 1 : runtime.depth);
@@ -803,25 +803,25 @@ var require_inspect = __commonJS({
       }
       pre = runtime.noPre ? "" : indent + key;
       if (variable === void 0) {
-        str += pre + options.style.constant("undefined") + descriptorStr + options.style.newline;
+        str2 += pre + options.style.constant("undefined") + descriptorStr + options.style.newline;
       } else if (variable === EMPTY) {
-        str += pre + options.style.constant("[empty]") + descriptorStr + options.style.newline;
+        str2 += pre + options.style.constant("[empty]") + descriptorStr + options.style.newline;
       } else if (variable === null) {
-        str += pre + options.style.constant("null") + descriptorStr + options.style.newline;
+        str2 += pre + options.style.constant("null") + descriptorStr + options.style.newline;
       } else if (variable === false) {
-        str += pre + options.style.constant("false") + descriptorStr + options.style.newline;
+        str2 += pre + options.style.constant("false") + descriptorStr + options.style.newline;
       } else if (variable === true) {
-        str += pre + options.style.constant("true") + descriptorStr + options.style.newline;
+        str2 += pre + options.style.constant("true") + descriptorStr + options.style.newline;
       } else if (type === "number") {
-        str += pre + options.style.number(variable.toString()) + (options.noType || options.noTypeButConstructor ? "" : " " + options.style.type("number")) + descriptorStr + options.style.newline;
+        str2 += pre + options.style.number(variable.toString()) + (options.noType || options.noTypeButConstructor ? "" : " " + options.style.type("number")) + descriptorStr + options.style.newline;
       } else if (type === "string") {
         if (variable.length > options.maxLength) {
-          str += pre + (options.noMarkup ? "" : '"') + options.style.string(escape.control(variable.slice(0, options.maxLength - 1))) + "\u2026" + (options.noMarkup ? "" : '"') + (options.noType || options.noTypeButConstructor ? "" : " " + options.style.type("string") + options.style.length("(" + variable.length + " - TRUNCATED)")) + descriptorStr + options.style.newline;
+          str2 += pre + (options.noMarkup ? "" : '"') + options.style.string(escape.control(variable.slice(0, options.maxLength - 1))) + "\u2026" + (options.noMarkup ? "" : '"') + (options.noType || options.noTypeButConstructor ? "" : " " + options.style.type("string") + options.style.length("(" + variable.length + " - TRUNCATED)")) + descriptorStr + options.style.newline;
         } else {
-          str += pre + (options.noMarkup ? "" : '"') + options.style.string(escape.control(variable)) + (options.noMarkup ? "" : '"') + (options.noType || options.noTypeButConstructor ? "" : " " + options.style.type("string") + options.style.length("(" + variable.length + ")")) + descriptorStr + options.style.newline;
+          str2 += pre + (options.noMarkup ? "" : '"') + options.style.string(escape.control(variable)) + (options.noMarkup ? "" : '"') + (options.noType || options.noTypeButConstructor ? "" : " " + options.style.type("string") + options.style.length("(" + variable.length + ")")) + descriptorStr + options.style.newline;
         }
       } else if (Buffer.isBuffer(variable)) {
-        str += pre + options.style.inspect(variable.inspect()) + (options.noType ? "" : " " + options.style.type("Buffer") + options.style.length("(" + variable.length + ")")) + descriptorStr + options.style.newline;
+        str2 += pre + options.style.inspect(variable.inspect()) + (options.noType ? "" : " " + options.style.type("Buffer") + options.style.length("(" + variable.length + ")")) + descriptorStr + options.style.newline;
       } else if (type === "object" || type === "function") {
         funcName = length = "";
         isFunc = false;
@@ -845,17 +845,17 @@ var require_inspect = __commonJS({
         isTrivialConstructor = !variable.constructor || TRIVIAL_CONSTRUCTOR.has(variable.constructor);
         constructor = options.style.constructorName(constructor);
         proto = Object.getPrototypeOf(variable);
-        str += pre;
+        str2 += pre;
         if (!options.noType && (!options.noTypeButConstructor || !isTrivialConstructor)) {
           if (runtime.forceType && !options.noType && !options.noTypeButConstructor) {
-            str += options.style.type(runtime.forceType);
+            str2 += options.style.type(runtime.forceType);
           } else if (options.noTypeButConstructor) {
-            str += constructor;
+            str2 += constructor;
           } else {
-            str += constructor + funcName + length + " " + options.style.type(type) + descriptorStr;
+            str2 += constructor + funcName + length + " " + options.style.type(type) + descriptorStr;
           }
           if (!isFunc || options.funcDetails) {
-            str += " ";
+            str2 += " ";
           }
         }
         if (isArray && options.noArrayProperty) {
@@ -868,12 +868,12 @@ var require_inspect = __commonJS({
         }
         specialObject = specialObjectSubstitution(variable, runtime, options);
         if (options.protoBlackList && options.protoBlackList.has(proto)) {
-          str += options.style.limit("[skip]") + options.style.newline;
+          str2 += options.style.limit("[skip]") + options.style.newline;
         } else if (specialObject !== void 0) {
           if (typeof specialObject === "string") {
-            str += "=> " + specialObject + options.style.newline;
+            str2 += "=> " + specialObject + options.style.newline;
           } else {
-            str += "=> " + inspect_(
+            str2 += "=> " + inspect_(
               {
                 depth: runtime.depth,
                 ancestors: runtime.ancestors,
@@ -884,23 +884,23 @@ var require_inspect = __commonJS({
             );
           }
         } else if (isFunc && !options.funcDetails) {
-          str += options.style.newline;
+          str2 += options.style.newline;
         } else if (!propertyList.length && !options.proto) {
-          str += (options.noMarkup ? "" : isArray ? "[]" : "{}") + options.style.newline;
+          str2 += (options.noMarkup ? "" : isArray ? "[]" : "{}") + options.style.newline;
         } else if (runtime.depth >= options.depth) {
-          str += options.style.limit("[depth limit]") + options.style.newline;
+          str2 += options.style.limit("[depth limit]") + options.style.newline;
         } else if (runtime.ancestors.indexOf(variable) !== -1) {
-          str += options.style.limit("[circular]") + options.style.newline;
+          str2 += options.style.limit("[circular]") + options.style.newline;
         } else {
-          str += (options.noMarkup ? "" : isArray ? "[" : "{") + options.style.newline;
+          str2 += (options.noMarkup ? "" : isArray ? "[" : "{") + options.style.newline;
           nextAncestors = runtime.ancestors.slice();
           nextAncestors.push(variable);
-          for (i = 0; i < propertyList.length && str.length < options.outputMaxLength; i++) {
+          for (i = 0; i < propertyList.length && str2.length < options.outputMaxLength; i++) {
             if (!isArray && (options.propertyBlackList && options.propertyBlackList.has(propertyList[i]) || options.useInspectPropertyBlackList && variable.inspectPropertyBlackList instanceof Set && variable.inspectPropertyBlackList.has(propertyList[i]))) {
               continue;
             }
             if (isArray && options.noArrayProperty && !(propertyList[i] in variable)) {
-              str += inspect_(
+              str2 += inspect_(
                 {
                   depth: runtime.depth + 1,
                   ancestors: nextAncestors,
@@ -918,7 +918,7 @@ var require_inspect = __commonJS({
                 }
                 keyIsProperty = !isArray || !descriptor.enumerable || isNaN(propertyList[i]);
                 if (!options.noDescriptor && descriptor && (descriptor.get || descriptor.set)) {
-                  str += inspect_(
+                  str2 += inspect_(
                     {
                       depth: runtime.depth + 1,
                       ancestors: nextAncestors,
@@ -931,7 +931,7 @@ var require_inspect = __commonJS({
                     { get: descriptor.get, set: descriptor.set }
                   );
                 } else {
-                  str += inspect_(
+                  str2 += inspect_(
                     {
                       depth: runtime.depth + 1,
                       ancestors: nextAncestors,
@@ -944,7 +944,7 @@ var require_inspect = __commonJS({
                   );
                 }
               } catch (error) {
-                str += inspect_(
+                str2 += inspect_(
                   {
                     depth: runtime.depth + 1,
                     ancestors: nextAncestors,
@@ -958,11 +958,11 @@ var require_inspect = __commonJS({
               }
             }
             if (i < propertyList.length - 1) {
-              str += options.style.comma;
+              str2 += options.style.comma;
             }
           }
           if (options.proto) {
-            str += inspect_(
+            str2 += inspect_(
               {
                 depth: runtime.depth + 1,
                 ancestors: nextAncestors,
@@ -973,18 +973,18 @@ var require_inspect = __commonJS({
               proto
             );
           }
-          str += options.noMarkup ? "" : indent + (isArray ? "]" : "}") + options.style.newline;
+          str2 += options.noMarkup ? "" : indent + (isArray ? "]" : "}") + options.style.newline;
         }
       }
       if (runtime.depth === 0) {
         if (options.style.trim) {
-          str = str.trim();
+          str2 = str2.trim();
         }
         if (options.style === "html") {
-          str = escape.html(str);
+          str2 = escape.html(str2);
         }
       }
-      return str;
+      return str2;
     }
     function keyNeedingQuotes(key) {
       if (!key.length) {
@@ -1016,9 +1016,9 @@ var require_inspect = __commonJS({
         if (process && process.binding && process.binding("util") && process.binding("util").getPromiseDetails) {
           let details = process.binding("util").getPromiseDetails(object);
           let state = promiseStates[details[0]];
-          let str = "Promise <" + state + ">";
+          let str2 = "Promise <" + state + ">";
           if (state === "fulfilled") {
-            str += " " + inspect_(
+            str2 += " " + inspect_(
               {
                 depth: runtime.depth,
                 ancestors: runtime.ancestors,
@@ -1029,7 +1029,7 @@ var require_inspect = __commonJS({
             );
           } else if (state === "rejected") {
             if (details[1] instanceof Error) {
-              str += " " + inspectError(
+              str2 += " " + inspectError(
                 {
                   style: options.style,
                   noErrorStack: true
@@ -1037,7 +1037,7 @@ var require_inspect = __commonJS({
                 details[1]
               );
             } else {
-              str += " " + inspect_(
+              str2 += " " + inspect_(
                 {
                   depth: runtime.depth,
                   ancestors: runtime.ancestors,
@@ -1048,7 +1048,7 @@ var require_inspect = __commonJS({
               );
             }
           }
-          return str;
+          return str2;
         }
       }
       if (object._bsontype) {
@@ -1060,7 +1060,7 @@ var require_inspect = __commonJS({
       return;
     }
     function inspectError(options, error) {
-      var str = "", stack, type, code;
+      var str2 = "", stack, type, code;
       if (arguments.length < 2) {
         error = options;
         options = {};
@@ -1073,18 +1073,18 @@ var require_inspect = __commonJS({
         options.style = inspectStyle[options.style];
       }
       if (!(error instanceof Error)) {
-        str += "[not an Error] ";
+        str2 += "[not an Error] ";
         if (typeof error === "string") {
           let maxLength = 5e3;
           if (error.length > maxLength) {
-            str += options.style.errorMessage(escape.control(error.slice(0, maxLength - 1), true)) + "\u2026" + options.style.length("(" + error.length + " - TRUNCATED)") + options.style.newline;
+            str2 += options.style.errorMessage(escape.control(error.slice(0, maxLength - 1), true)) + "\u2026" + options.style.length("(" + error.length + " - TRUNCATED)") + options.style.newline;
           } else {
-            str += options.style.errorMessage(escape.control(error, true)) + options.style.newline;
+            str2 += options.style.errorMessage(escape.control(error, true)) + options.style.newline;
           }
-          return str;
+          return str2;
         } else if (!error || typeof error !== "object" || !error.name || typeof error.name !== "string" || !error.message || typeof error.message !== "string") {
-          str += inspect(options, error);
-          return str;
+          str2 += inspect(options, error);
+          return str2;
         }
       }
       if (error.stack && !options.noErrorStack) {
@@ -1092,15 +1092,15 @@ var require_inspect = __commonJS({
       }
       type = error.type || error.constructor.name;
       code = error.code || error.name || error.errno || error.number;
-      str += options.style.errorType(type) + (code ? " [" + options.style.errorType(code) + "]" : "") + ": ";
-      str += options.style.errorMessage(error.message) + "\n";
+      str2 += options.style.errorType(type) + (code ? " [" + options.style.errorType(code) + "]" : "") + ": ";
+      str2 += options.style.errorMessage(error.message) + "\n";
       if (stack) {
-        str += options.style.errorStack(stack) + "\n";
+        str2 += options.style.errorStack(stack) + "\n";
       }
       if (error.from) {
-        str += options.style.newline + options.style.errorFromMessage("From error:") + options.style.newline + inspectError(options, error.from);
+        str2 += options.style.newline + options.style.errorFromMessage("From error:") + options.style.newline + inspectError(options, error.from);
       }
-      return str;
+      return str2;
     }
     exports.inspectError = inspectError;
     function inspectStack(options, stack) {
@@ -1138,20 +1138,20 @@ var require_inspect = __commonJS({
     }
     exports.inspectStack = inspectStack;
     var inspectStyle = {};
-    var inspectStyleNoop = (str) => str;
+    var inspectStyleNoop = (str2) => str2;
     inspectStyle.none = {
       trim: false,
       tab: "    ",
       newline: "\n",
       comma: "",
       limit: inspectStyleNoop,
-      type: (str) => "<" + str + ">",
+      type: (str2) => "<" + str2 + ">",
       constant: inspectStyleNoop,
       funcName: inspectStyleNoop,
-      constructorName: (str) => "<" + str + ">",
+      constructorName: (str2) => "<" + str2 + ">",
       length: inspectStyleNoop,
       key: inspectStyleNoop,
-      index: (str) => "[" + str + "] ",
+      index: (str2) => "[" + str2 + "] ",
       number: inspectStyleNoop,
       inspect: inspectStyleNoop,
       string: inspectStyleNoop,
@@ -1165,7 +1165,7 @@ var require_inspect = __commonJS({
       errorStackLine: inspectStyleNoop,
       errorStackColumn: inspectStyleNoop,
       errorFromMessage: inspectStyleNoop,
-      truncate: (str, maxLength) => str.slice(0, maxLength - 1) + "\u2026"
+      truncate: (str2, maxLength) => str2.slice(0, maxLength - 1) + "\u2026"
     };
     inspectStyle.inline = Object.assign({}, inspectStyle.none, {
       trim: true,
@@ -1177,61 +1177,61 @@ var require_inspect = __commonJS({
       //type: () => '' ,
     });
     inspectStyle.color = Object.assign({}, inspectStyle.none, {
-      limit: (str) => ansi.bold + ansi.brightRed + str + ansi.reset,
-      type: (str) => ansi.italic + ansi.brightBlack + str + ansi.reset,
-      constant: (str) => ansi.cyan + str + ansi.reset,
-      funcName: (str) => ansi.italic + ansi.magenta + str + ansi.reset,
-      constructorName: (str) => ansi.magenta + str + ansi.reset,
-      length: (str) => ansi.italic + ansi.brightBlack + str + ansi.reset,
-      key: (str) => ansi.green + str + ansi.reset,
-      index: (str) => ansi.blue + "[" + str + "]" + ansi.reset + " ",
-      number: (str) => ansi.cyan + str + ansi.reset,
-      inspect: (str) => ansi.cyan + str + ansi.reset,
-      string: (str) => ansi.blue + str + ansi.reset,
-      errorType: (str) => ansi.red + ansi.bold + str + ansi.reset,
-      errorMessage: (str) => ansi.red + ansi.italic + str + ansi.reset,
-      errorStack: (str) => ansi.brightBlack + str + ansi.reset,
-      errorStackKeyword: (str) => ansi.italic + ansi.bold + str + ansi.reset,
-      errorStackMethod: (str) => ansi.brightYellow + str + ansi.reset,
-      errorStackMethodAs: (str) => ansi.yellow + str + ansi.reset,
-      errorStackFile: (str) => ansi.brightCyan + str + ansi.reset,
-      errorStackLine: (str) => ansi.blue + str + ansi.reset,
-      errorStackColumn: (str) => ansi.magenta + str + ansi.reset,
-      errorFromMessage: (str) => ansi.yellow + ansi.underline + str + ansi.reset,
-      truncate: (str, maxLength) => {
+      limit: (str2) => ansi.bold + ansi.brightRed + str2 + ansi.reset,
+      type: (str2) => ansi.italic + ansi.brightBlack + str2 + ansi.reset,
+      constant: (str2) => ansi.cyan + str2 + ansi.reset,
+      funcName: (str2) => ansi.italic + ansi.magenta + str2 + ansi.reset,
+      constructorName: (str2) => ansi.magenta + str2 + ansi.reset,
+      length: (str2) => ansi.italic + ansi.brightBlack + str2 + ansi.reset,
+      key: (str2) => ansi.green + str2 + ansi.reset,
+      index: (str2) => ansi.blue + "[" + str2 + "]" + ansi.reset + " ",
+      number: (str2) => ansi.cyan + str2 + ansi.reset,
+      inspect: (str2) => ansi.cyan + str2 + ansi.reset,
+      string: (str2) => ansi.blue + str2 + ansi.reset,
+      errorType: (str2) => ansi.red + ansi.bold + str2 + ansi.reset,
+      errorMessage: (str2) => ansi.red + ansi.italic + str2 + ansi.reset,
+      errorStack: (str2) => ansi.brightBlack + str2 + ansi.reset,
+      errorStackKeyword: (str2) => ansi.italic + ansi.bold + str2 + ansi.reset,
+      errorStackMethod: (str2) => ansi.brightYellow + str2 + ansi.reset,
+      errorStackMethodAs: (str2) => ansi.yellow + str2 + ansi.reset,
+      errorStackFile: (str2) => ansi.brightCyan + str2 + ansi.reset,
+      errorStackLine: (str2) => ansi.blue + str2 + ansi.reset,
+      errorStackColumn: (str2) => ansi.magenta + str2 + ansi.reset,
+      errorFromMessage: (str2) => ansi.yellow + ansi.underline + str2 + ansi.reset,
+      truncate: (str2, maxLength) => {
         var trail = ansi.gray + "\u2026" + ansi.reset;
-        str = str.slice(0, maxLength - trail.length);
-        var lastEscape = str.lastIndexOf("\x1B");
-        if (lastEscape >= str.length - 6) {
-          str = str.slice(0, lastEscape);
+        str2 = str2.slice(0, maxLength - trail.length);
+        var lastEscape = str2.lastIndexOf("\x1B");
+        if (lastEscape >= str2.length - 6) {
+          str2 = str2.slice(0, lastEscape);
         }
-        return str + trail;
+        return str2 + trail;
       }
     });
     inspectStyle.html = Object.assign({}, inspectStyle.none, {
       tab: "&nbsp;&nbsp;&nbsp;&nbsp;",
       newline: "<br />",
-      limit: (str) => '<span style="color:red">' + str + "</span>",
-      type: (str) => '<i style="color:gray">' + str + "</i>",
-      constant: (str) => '<span style="color:cyan">' + str + "</span>",
-      funcName: (str) => '<i style="color:magenta">' + str + "</i>",
-      constructorName: (str) => '<span style="color:magenta">' + str + "</span>",
-      length: (str) => '<i style="color:gray">' + str + "</i>",
-      key: (str) => '<span style="color:green">' + str + "</span>",
-      index: (str) => '<span style="color:blue">[' + str + "]</span> ",
-      number: (str) => '<span style="color:cyan">' + str + "</span>",
-      inspect: (str) => '<span style="color:cyan">' + str + "</span>",
-      string: (str) => '<span style="color:blue">' + str + "</span>",
-      errorType: (str) => '<span style="color:red">' + str + "</span>",
-      errorMessage: (str) => '<span style="color:red">' + str + "</span>",
-      errorStack: (str) => '<span style="color:gray">' + str + "</span>",
-      errorStackKeyword: (str) => "<i>" + str + "</i>",
-      errorStackMethod: (str) => '<span style="color:yellow">' + str + "</span>",
-      errorStackMethodAs: (str) => '<span style="color:yellow">' + str + "</span>",
-      errorStackFile: (str) => '<span style="color:cyan">' + str + "</span>",
-      errorStackLine: (str) => '<span style="color:blue">' + str + "</span>",
-      errorStackColumn: (str) => '<span style="color:gray">' + str + "</span>",
-      errorFromMessage: (str) => '<span style="color:yellow">' + str + "</span>"
+      limit: (str2) => '<span style="color:red">' + str2 + "</span>",
+      type: (str2) => '<i style="color:gray">' + str2 + "</i>",
+      constant: (str2) => '<span style="color:cyan">' + str2 + "</span>",
+      funcName: (str2) => '<i style="color:magenta">' + str2 + "</i>",
+      constructorName: (str2) => '<span style="color:magenta">' + str2 + "</span>",
+      length: (str2) => '<i style="color:gray">' + str2 + "</i>",
+      key: (str2) => '<span style="color:green">' + str2 + "</span>",
+      index: (str2) => '<span style="color:blue">[' + str2 + "]</span> ",
+      number: (str2) => '<span style="color:cyan">' + str2 + "</span>",
+      inspect: (str2) => '<span style="color:cyan">' + str2 + "</span>",
+      string: (str2) => '<span style="color:blue">' + str2 + "</span>",
+      errorType: (str2) => '<span style="color:red">' + str2 + "</span>",
+      errorMessage: (str2) => '<span style="color:red">' + str2 + "</span>",
+      errorStack: (str2) => '<span style="color:gray">' + str2 + "</span>",
+      errorStackKeyword: (str2) => "<i>" + str2 + "</i>",
+      errorStackMethod: (str2) => '<span style="color:yellow">' + str2 + "</span>",
+      errorStackMethodAs: (str2) => '<span style="color:yellow">' + str2 + "</span>",
+      errorStackFile: (str2) => '<span style="color:cyan">' + str2 + "</span>",
+      errorStackLine: (str2) => '<span style="color:blue">' + str2 + "</span>",
+      errorStackColumn: (str2) => '<span style="color:gray">' + str2 + "</span>",
+      errorFromMessage: (str2) => '<span style="color:yellow">' + str2 + "</span>"
     });
   }
 });
@@ -1476,16 +1476,16 @@ var require_StringNumber = __commonJS({
       if (this.special !== null) {
         return "" + this.special;
       }
-      var str = this.sign < 0 ? "-" : "";
+      var str2 = this.sign < 0 ? "-" : "";
       if (!this.digits.length) {
-        return str + "0";
+        return str2 + "0";
       }
-      str += this.digits[0];
+      str2 += this.digits[0];
       if (this.digits.length > 1) {
-        str += this.decimalSeparator + this.digits.join("").slice(1);
+        str2 += this.decimalSeparator + this.digits.join("").slice(1);
       }
-      str += "e" + (this.exposant > 0 ? "+" : "") + (this.exposant - 1);
-      return str;
+      str2 += "e" + (this.exposant > 0 ? "+" : "") + (this.exposant - 1);
+      return str2;
     };
     var SUPER_NUMBER = ["\u2070", "\xB9", "\xB2", "\xB3", "\u2074", "\u2075", "\u2076", "\u2077", "\u2078", "\u2079"];
     var SUPER_MINUS = "\u207B";
@@ -1494,23 +1494,23 @@ var require_StringNumber = __commonJS({
       if (this.special !== null) {
         return "" + this.special;
       }
-      var str = this.sign < 0 ? "-" : "";
+      var str2 = this.sign < 0 ? "-" : "";
       if (!this.digits.length) {
-        return str + "0";
+        return str2 + "0";
       }
-      str += this.digits[0];
+      str2 += this.digits[0];
       if (this.digits.length > 1) {
-        str += this.decimalSeparator + this.digits.join("").slice(1);
+        str2 += this.decimalSeparator + this.digits.join("").slice(1);
       }
       var exposantStr = (this.exposant <= 0 ? SUPER_MINUS : "") + ("" + Math.abs(this.exposant - 1)).split("").map((c) => SUPER_NUMBER[c.charCodeAt(0) - ZERO_CHAR_CODE]).join("");
-      str += " \xD7 10" + exposantStr;
-      return str;
+      str2 += " \xD7 10" + exposantStr;
+      return str2;
     };
     StringNumber.prototype.toNoExp = StringNumber.prototype.toNoExpString = function(leadingZero = 1, trailingZero = 0, onlyIfDecimal = false, forcePlusSign = false, exposant = this.exposant) {
       if (this.special !== null) {
         return "" + this.special;
       }
-      var integerDigits = [], decimalDigits = [], str = this.sign < 0 ? "-" : forcePlusSign ? "+" : "";
+      var integerDigits = [], decimalDigits = [], str2 = this.sign < 0 ? "-" : forcePlusSign ? "+" : "";
       if (!this.digits.length) {
         if (leadingZero > 1) {
           this.fillZeroes(integerDigits, leadingZero - 1, leadingZero);
@@ -1545,13 +1545,13 @@ var require_StringNumber = __commonJS({
           this.fillZeroes(decimalDigits, trailingZero - this.digits.length + exposant);
         }
       }
-      str += this.groupSeparator ? this.groupDigits(integerDigits, this.groupSeparator) : integerDigits.join("");
+      str2 += this.groupSeparator ? this.groupDigits(integerDigits, this.groupSeparator) : integerDigits.join("");
       if (decimalDigits.length) {
-        str += this.decimalSeparator + (this.decimalGroupSeparator ? this.groupDigits(decimalDigits, this.decimalGroupSeparator) : decimalDigits.join(""));
+        str2 += this.decimalSeparator + (this.decimalGroupSeparator ? this.groupDigits(decimalDigits, this.decimalGroupSeparator) : decimalDigits.join(""));
       } else if (this.forceDecimalSeparator) {
-        str += this.decimalSeparator;
+        str2 += this.decimalSeparator;
       }
-      return str;
+      return str2;
     };
     var MUL_PREFIX = ["", "k", "M", "G", "T", "P", "E", "Z", "Y"];
     var SUB_MUL_PREFIX = ["", "m", "\xB5", "n", "p", "f", "a", "z", "y"];
@@ -1640,11 +1640,11 @@ var require_StringNumber = __commonJS({
     };
     var GROUP_SIZE = 3;
     StringNumber.prototype.groupDigits = function(digits, separator, inverseOrder = false) {
-      var str = "", offset = inverseOrder ? 0 : GROUP_SIZE - digits.length % GROUP_SIZE, i = 0, iMax = digits.length;
+      var str2 = "", offset = inverseOrder ? 0 : GROUP_SIZE - digits.length % GROUP_SIZE, i = 0, iMax = digits.length;
       for (; i < iMax; i++) {
-        str += i && (i + offset) % GROUP_SIZE === 0 ? separator + digits[i] : digits[i];
+        str2 += i && (i + offset) % GROUP_SIZE === 0 ? separator + digits[i] : digits[i];
       }
-      return str;
+      return str2;
     };
     StringNumber.prototype.appendNumerals = function(intoArray, sourceArray, start = 0, end = sourceArray.length, leftPlace = end) {
       for (let i = start, place = leftPlace; i < end; i++, place--) {
@@ -1701,14 +1701,14 @@ var require_format = __commonJS({
     var naturalSort = require_naturalSort();
     var StringNumber = require_StringNumber();
     exports.formatMethod = function(...args2) {
-      var arg, str = args2[0], autoIndex = 1, length = args2.length;
-      if (typeof str !== "string") {
-        if (!str) {
-          str = "";
-        } else if (typeof str.toString === "function") {
-          str = str.toString();
+      var arg, str2 = args2[0], autoIndex = 1, length = args2.length;
+      if (typeof str2 !== "string") {
+        if (!str2) {
+          str2 = "";
+        } else if (typeof str2.toString === "function") {
+          str2 = str2.toString();
         } else {
-          str = "";
+          str2 = "";
         }
       }
       var runtime = {
@@ -1717,9 +1717,9 @@ var require_format = __commonJS({
         markupStack: []
       };
       if (this.markupReset && this.startingMarkupReset) {
-        str = (typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset) + str;
+        str2 = (typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset) + str2;
       }
-      str = str.replace(
+      str2 = str2.replace(
         /\^\[([^\]]*)]?|\^(.)|(%%)|%([+-]?)([0-9]*)(?:\[([^\]]*)\])?([a-zA-Z])/g,
         (match, complexMarkup, markup, doublePercent, relative, index, modeArg, mode) => {
           var replacement, i, tmp, fn, fnArgString, argMatches, argList = [];
@@ -1810,7 +1810,7 @@ var require_format = __commonJS({
         }
       );
       if (runtime.hasMarkup && this.markupReset && this.endingMarkupReset) {
-        str += typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset;
+        str2 += typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset;
       }
       if (this.extraArguments) {
         for (; autoIndex < length; autoIndex++) {
@@ -1818,24 +1818,24 @@ var require_format = __commonJS({
           if (arg === null || arg === void 0) {
             continue;
           } else if (typeof arg === "string") {
-            str += arg;
+            str2 += arg;
           } else if (typeof arg === "number") {
-            str += arg;
+            str2 += arg;
           } else if (typeof arg.toString === "function") {
-            str += arg.toString();
+            str2 += arg.toString();
           }
         }
       }
-      return str;
+      return str2;
     };
-    exports.markupMethod = function(str) {
-      if (typeof str !== "string") {
-        if (!str) {
-          str = "";
-        } else if (typeof str.toString === "function") {
-          str = str.toString();
+    exports.markupMethod = function(str2) {
+      if (typeof str2 !== "string") {
+        if (!str2) {
+          str2 = "";
+        } else if (typeof str2.toString === "function") {
+          str2 = str2.toString();
         } else {
-          str = "";
+          str2 = "";
         }
       }
       var runtime = {
@@ -1845,7 +1845,7 @@ var require_format = __commonJS({
       };
       if (this.parse) {
         let markupObjects, markupObject, match, complexMarkup, markup, raw, lastChunk, output = [];
-        for ([match, complexMarkup, markup, raw] of str.matchAll(/\^\[([^\]]*)]?|\^(.)|([^^]+)/g)) {
+        for ([match, complexMarkup, markup, raw] of str2.matchAll(/\^\[([^\]]*)]?|\^(.)|([^^]+)/g)) {
           if (raw) {
             if (output.length) {
               output[output.length - 1].text += raw;
@@ -1889,13 +1889,13 @@ var require_format = __commonJS({
         return output;
       }
       if (this.markupReset && this.startingMarkupReset) {
-        str = (typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset) + str;
+        str2 = (typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset) + str2;
       }
-      str = str.replace(/\^\[([^\]]*)]?|\^(.)/g, (match, complexMarkup, markup) => markupReplace.call(this, runtime, match, complexMarkup || markup));
+      str2 = str2.replace(/\^\[([^\]]*)]?|\^(.)/g, (match, complexMarkup, markup) => markupReplace.call(this, runtime, match, complexMarkup || markup));
       if (runtime.hasMarkup && this.markupReset && this.endingMarkupReset) {
-        str += typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset;
+        str2 += typeof this.markupReset === "function" ? this.markupReset(runtime.markupStack) : this.markupReset;
       }
-      return str;
+      return str2;
     };
     function markupReplace(runtime, match, markup) {
       var markupTarget, key, value, replacement, colonIndex;
@@ -1963,13 +1963,13 @@ var require_format = __commonJS({
         }
       }
     }
-    exports.stripMarkup = (str) => str.replace(
+    exports.stripMarkup = (str2) => str2.replace(
       /\^\[[^\]]*]?|\^./g,
       (match) => match === "^^" ? "^" : match === "^ " ? " " : ""
     );
-    exports.escapeMarkup = (str) => str.replace(/\^/g, "^^");
+    exports.escapeMarkup = (str2) => str2.replace(/\^/g, "^^");
     var DEFAULT_FORMATTER = {
-      argumentSanitizer: (str) => escape.control(str, true),
+      argumentSanitizer: (str2) => escape.control(str2, true),
       extraArguments: true,
       color: false,
       noMarkup: false,
@@ -2029,27 +2029,27 @@ var require_format = __commonJS({
       },
       dataMarkup: {
         fg: (markupStack, key, value) => {
-          var str = ansi.fgColor[value] || ansi.trueColor(value);
-          markupStack.push(str);
-          return str;
+          var str2 = ansi.fgColor[value] || ansi.trueColor(value);
+          markupStack.push(str2);
+          return str2;
         },
         bg: (markupStack, key, value) => {
-          var str = ansi.bgColor[value] || ansi.bgTrueColor(value);
-          markupStack.push(str);
-          return str;
+          var str2 = ansi.bgColor[value] || ansi.bgTrueColor(value);
+          markupStack.push(str2);
+          return str2;
         }
       },
       markupCatchAll: (markupStack, key, value) => {
-        var str = "";
+        var str2 = "";
         if (value === void 0) {
           if (key[0] === "#") {
-            str = ansi.trueColor(key);
+            str2 = ansi.trueColor(key);
           } else if (typeof ansi[key] === "string") {
-            str = ansi[key];
+            str2 = ansi[key];
           }
         }
-        markupStack.push(str);
-        return str;
+        markupStack.push(str2);
+        return str2;
       }
     };
     DEFAULT_FORMATTER.dataMarkup.color = DEFAULT_FORMATTER.dataMarkup.c = DEFAULT_FORMATTER.dataMarkup.fgColor = DEFAULT_FORMATTER.dataMarkup.fg;
@@ -2061,13 +2061,13 @@ var require_format = __commonJS({
     exports.formatThirdPartyMarkup = exports.formatMethod.bind(Object.assign({}, DEFAULT_FORMATTER, { noMarkup: true, escapeMarkup: true }));
     exports.createMarkup = (options) => exports.markupMethod.bind(Object.assign({}, DEFAULT_FORMATTER, options));
     exports.markup = exports.markupMethod.bind(DEFAULT_FORMATTER);
-    exports.format.count = function(str, noMarkup = false) {
+    exports.format.count = function(str2, noMarkup = false) {
       var markup, index, relative, autoIndex = 1, maxIndex = 0;
-      if (typeof str !== "string") {
+      if (typeof str2 !== "string") {
         return 0;
       }
       var regexp = noMarkup ? /%([+-]?)([0-9]*)(?:\[[^\]]*\])?[a-zA-EG-Z]/g : /%([+-]?)([0-9]*)(?:\[[^\]]*\])?[a-zA-EG-Z]|(\^\[[^\]]*]?|\^.)/g;
-      for ([, relative, index, markup] of str.matchAll(regexp)) {
+      for ([, relative, index, markup] of str2.matchAll(regexp)) {
         if (markup) {
           continue;
         }
@@ -2090,8 +2090,8 @@ var require_format = __commonJS({
       }
       return maxIndex;
     };
-    exports.format.hasFormatting = function(str) {
-      if (str.search(/\^(.?)|(%%)|%([+-]?)([0-9]*)(?:\[([^\]]*)\])?([a-zA-Z])/) !== -1) {
+    exports.format.hasFormatting = function(str2) {
+      if (str2.search(/\^(.?)|(%%)|%([+-]?)([0-9]*)(?:\[([^\]]*)\])?([a-zA-Z])/) !== -1) {
         return true;
       }
       return false;
@@ -2121,7 +2121,7 @@ var require_format = __commonJS({
     modes.r.noSanitize = true;
     modes.S = (arg, modeArg, options) => {
       var subModes = stringModeArg(modeArg);
-      var interpret = options.escapeMarkup ? (str) => options.argumentSanitizer ? options.argumentSanitizer(str) : str : (str) => exports.markupMethod.call(options, options.argumentSanitizer ? options.argumentSanitizer(str) : str);
+      var interpret = options.escapeMarkup ? (str2) => options.argumentSanitizer ? options.argumentSanitizer(str2) : str2 : (str2) => exports.markupMethod.call(options, options.argumentSanitizer ? options.argumentSanitizer(str2) : str2);
       if (typeof arg === "string") {
         return interpret(arg);
       }
@@ -2344,7 +2344,7 @@ var require_format = __commonJS({
       if (Number.isNaN(arg.getTime())) {
         return "(invalid)";
       }
-      var datePart = "", timePart = "", str = "", subModes = dateTimeModeArg(modeArg), roundingType = subModes.roundingType, forceDecimalSeparator = subModes.useAbbreviation;
+      var datePart = "", timePart = "", str2 = "", subModes = dateTimeModeArg(modeArg), roundingType = subModes.roundingType, forceDecimalSeparator = subModes.useAbbreviation;
       if (subModes.years) {
         if (datePart) {
           datePart += "-";
@@ -2391,18 +2391,18 @@ var require_format = __commonJS({
         }
       }
       if (datePart) {
-        if (str) {
-          str += " ";
+        if (str2) {
+          str2 += " ";
         }
-        str += datePart;
+        str2 += datePart;
       }
       if (timePart) {
-        if (str) {
-          str += " ";
+        if (str2) {
+          str2 += " ";
         }
-        str += timePart;
+        str2 += timePart;
       }
-      return str;
+      return str2;
     };
     modes.T.noSanitize = true;
     modes.t = (arg, modeArg) => {
@@ -2540,31 +2540,31 @@ var require_format = __commonJS({
     modes.D.noSanitize = true;
     var COMMON_MODE_ARG_FORMAT_REGEX = /([a-zA-Z])(.[^a-zA-Z]*)/g;
     var MODE_ARG_FORMAT_REGEX = /([a-zA-Z]|^)([^a-zA-Z]*)/g;
-    function commonModeArg(str, modeArg) {
+    function commonModeArg(str2, modeArg) {
       for (let [, k, v] of modeArg.matchAll(COMMON_MODE_ARG_FORMAT_REGEX)) {
         if (k === "L") {
-          let width = unicode.width(str);
+          let width = unicode.width(str2);
           v = +v || 1;
           if (width > v) {
-            str = unicode.truncateWidth(str, v - 1).trim() + "\u2026";
-            width = unicode.width(str);
+            str2 = unicode.truncateWidth(str2, v - 1).trim() + "\u2026";
+            width = unicode.width(str2);
           }
           if (width < v) {
-            str = " ".repeat(v - width) + str;
+            str2 = " ".repeat(v - width) + str2;
           }
         } else if (k === "R") {
-          let width = unicode.width(str);
+          let width = unicode.width(str2);
           v = +v || 1;
           if (width > v) {
-            str = unicode.truncateWidth(str, v - 1).trim() + "\u2026";
-            width = unicode.width(str);
+            str2 = unicode.truncateWidth(str2, v - 1).trim() + "\u2026";
+            width = unicode.width(str2);
           }
           if (width < v) {
-            str = str + " ".repeat(v - width);
+            str2 = str2 + " ".repeat(v - width);
           }
         }
       }
-      return str;
+      return str2;
     }
     var FLOAT_MODES = {
       leftPadding: 1,
@@ -2857,20 +2857,20 @@ var require_format = __commonJS({
 var require_misc = __commonJS({
   "node_modules/string-kit/lib/misc.js"(exports) {
     "use strict";
-    exports.resize = function(str, length) {
-      if (str.length === length) {
-        return str;
-      } else if (str.length > length) {
-        return str.slice(0, length);
+    exports.resize = function(str2, length) {
+      if (str2.length === length) {
+        return str2;
+      } else if (str2.length > length) {
+        return str2.slice(0, length);
       }
-      return str + " ".repeat(length - str.length);
+      return str2 + " ".repeat(length - str2.length);
     };
-    exports.occurrenceCount = function(str, subStr, overlap = false) {
-      if (!str || !subStr) {
+    exports.occurrenceCount = function(str2, subStr, overlap = false) {
+      if (!str2 || !subStr) {
         return 0;
       }
       var count = 0, index = 0, inc = overlap ? 1 : subStr.length;
-      while ((index = str.indexOf(subStr, index)) !== -1) {
+      while ((index = str2.indexOf(subStr, index)) !== -1) {
         count++;
         index += inc;
       }
@@ -2904,11 +2904,11 @@ var require_camel = __commonJS({
     "use strict";
     var camel = {};
     module.exports = camel;
-    camel.toCamelCase = function(str, preserveUpperCase = false, initialUpperCase = false) {
-      if (!str || typeof str !== "string") {
+    camel.toCamelCase = function(str2, preserveUpperCase = false, initialUpperCase = false) {
+      if (!str2 || typeof str2 !== "string") {
         return "";
       }
-      return str.replace(
+      return str2.replace(
         /(?:^[\s_-]*|([\s_-]+))(([^\s_-]?)([^\s_-]*))/g,
         (match, isNotFirstWord, word, firstLetter, endOfWord) => {
           if (preserveUpperCase) {
@@ -2930,26 +2930,26 @@ var require_camel = __commonJS({
         }
       );
     };
-    camel.camelCaseToSeparated = function(str, separator = " ", acronym = true) {
-      if (!str || typeof str !== "string") {
+    camel.camelCaseToSeparated = function(str2, separator = " ", acronym = true) {
+      if (!str2 || typeof str2 !== "string") {
         return "";
       }
       if (!acronym) {
-        return str.replace(/^([A-Z])|([A-Z])/g, (match, firstLetter, letter) => {
+        return str2.replace(/^([A-Z])|([A-Z])/g, (match, firstLetter, letter) => {
           if (firstLetter) {
             return firstLetter.toLowerCase();
           }
           return separator + letter.toLowerCase();
         });
       }
-      return str.replace(/(?:(^)|)([A-Z]+)(?:($)|(?=[a-z]))/g, (match, isStart, letters, isEnd) => {
+      return str2.replace(/(?:(^)|)([A-Z]+)(?:($)|(?=[a-z]))/g, (match, isStart, letters, isEnd) => {
         isStart = isStart === "";
         isEnd = isEnd === "";
         var prefix = isStart ? "" : separator;
         return letters.length === 1 ? prefix + letters.toLowerCase() : isEnd ? prefix + letters : letters.length === 2 ? prefix + letters[0].toLowerCase() + separator + letters[1].toLowerCase() : prefix + letters.slice(0, -1) + separator + letters.slice(-1).toLowerCase();
       });
     };
-    camel.camelCaseToDash = camel.camelCaseToDashed = (str) => camel.camelCaseToSeparated(str, "-", false);
+    camel.camelCaseToDash = camel.camelCaseToDashed = (str2) => camel.camelCaseToSeparated(str2, "-", false);
   }
 });
 
@@ -2965,8 +2965,8 @@ var require_latinize = __commonJS({
   "node_modules/string-kit/lib/latinize.js"(exports, module) {
     "use strict";
     var latinizeMap = require_latinize_map();
-    module.exports = function(str) {
-      return str.replace(/[^\u0000-\u007e]/g, (c) => {
+    module.exports = function(str2) {
+      return str2.replace(/[^\u0000-\u007e]/g, (c) => {
         return latinizeMap[c] || c;
       });
     };
@@ -3007,21 +3007,21 @@ var require_toTitleCase = __commonJS({
         "as"
       ])
     };
-    module.exports = (str, options = DEFAULT_OPTIONS) => {
-      if (!str || typeof str !== "string") {
+    module.exports = (str2, options = DEFAULT_OPTIONS) => {
+      if (!str2 || typeof str2 !== "string") {
         return "";
       }
       var dashToSpace = options.dashToSpace ?? DEFAULT_OPTIONS.dashToSpace, underscoreToSpace = options.underscoreToSpace ?? DEFAULT_OPTIONS.underscoreToSpace, zealous = options.zealous ?? DEFAULT_OPTIONS.zealous, preserveAllCaps = options.preserveAllCaps ?? DEFAULT_OPTIONS.preserveAllCaps, lowerCaseWords = options.lowerCaseWords ?? DEFAULT_OPTIONS.lowerCaseWords;
       lowerCaseWords = lowerCaseWords instanceof Set ? lowerCaseWords : Array.isArray(lowerCaseWords) ? new Set(lowerCaseWords) : null;
       if (dashToSpace) {
-        str = str.replace(/-+/g, " ");
+        str2 = str2.replace(/-+/g, " ");
       }
       if (underscoreToSpace) {
-        str = str.replace(/_+/g, " ");
+        str2 = str2.replace(/_+/g, " ");
       }
-      str = str.replace(/ +/g, " ").trim();
-      return str.replace(/[^\s_-]+/g, (part, position) => {
-        if (lowerCaseWords && position && position + part.length < str.length) {
+      str2 = str2.replace(/ +/g, " ").trim();
+      return str2.replace(/[^\s_-]+/g, (part, position) => {
+        if (lowerCaseWords && position && position + part.length < str2.length) {
           let lowerCased = part.toLowerCase();
           if (lowerCaseWords.has(lowerCased)) {
             return lowerCased;
@@ -3050,8 +3050,8 @@ var require_wordwrap = __commonJS({
       ":": true,
       ";": true
     };
-    module.exports = function wordwrap(str, options) {
-      var start = 0, end, skipEnd, lineWidth, currentLine, currentWidth, length, lastEnd, lastWidth, lastWasSpace, charWidthFn, explicitNewLine = true, strArray = unicode.toArray(str), trimNewLine = false, line, lines = [];
+    module.exports = function wordwrap(str2, options) {
+      var start = 0, end, skipEnd, lineWidth, currentLine, currentWidth, length, lastEnd, lastWidth, lastWasSpace, charWidthFn, explicitNewLine = true, strArray = unicode.toArray(str2), trimNewLine = false, line, lines = [];
       if (typeof options !== "object") {
         options = { width: options };
       }
@@ -3222,8 +3222,8 @@ var require_fuzzy = __commonJS({
       "our",
       "their"
     ]);
-    function tokenize(str, blackList = englishBlackList) {
-      return str.split(/[ '"/|,:_-]+/g).filter((s2) => s2 && !blackList.has(s2));
+    function tokenize(str2, blackList = englishBlackList) {
+      return str2.split(/[ '"/|,:_-]+/g).filter((s2) => s2 && !blackList.has(s2));
     }
     fuzzy.bestTokenMatch = (input, patterns, options = {}) => {
       var scoreLimit = options.scoreLimit || DEFAULT_SCORE_LIMIT, tokenDisparityPenalty = options.tokenDisparityPenalty || DEFAULT_TOKEN_DISPARITY_PENALTY, i, iMax, j, jMax, z, zMax, currentPattern, currentPatternTokens, currentPatternToken, currentPatternScore, bestPatternScore = scoreLimit, currentInputToken, currentScore, inputTokens = tokenize(input), bestScore, bestIndex = -1, bestPattern = null;
@@ -3594,19 +3594,19 @@ var require_misc2 = __commonJS({
     exports.color2index = exports.colorNameToIndex;
     exports.index2color = exports.indexToColorName;
     exports.hexToColor = exports.hexToRgba;
-    exports.stripControlChars = (str, newline) => {
+    exports.stripControlChars = (str2, newline) => {
       if (newline) {
-        return str.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, "");
+        return str2.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, "");
       }
-      return str.replace(/[\x00-\x1f\x7f]/g, "");
+      return str2.replace(/[\x00-\x1f\x7f]/g, "");
     };
     var escapeSequenceRegex = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
     var escapeSequenceParserRegex = /([\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><])|([^\u001b\u009b]+)/g;
-    exports.stripEscapeSequences = (str) => str.replace(escapeSequenceRegex, "");
-    exports.ansiWidth = exports.stringWidth = (str) => {
+    exports.stripEscapeSequences = (str2) => str2.replace(escapeSequenceRegex, "");
+    exports.ansiWidth = exports.stringWidth = (str2) => {
       var matches, width = 0;
       escapeSequenceParserRegex.lastIndex = 0;
-      while (matches = escapeSequenceParserRegex.exec(str)) {
+      while (matches = escapeSequenceParserRegex.exec(str2)) {
         if (matches[2]) {
           width += string.unicode.width(matches[2]);
         }
@@ -3615,34 +3615,34 @@ var require_misc2 = __commonJS({
     };
     var lastTruncateWidth = 0;
     exports.getLastTruncateWidth = () => lastTruncateWidth;
-    exports.truncateAnsiString = exports.truncateString = (str, maxWidth) => {
+    exports.truncateAnsiString = exports.truncateString = (str2, maxWidth) => {
       var matches, width = 0;
       lastTruncateWidth = 0;
       escapeSequenceParserRegex.lastIndex = 0;
-      while (matches = escapeSequenceParserRegex.exec(str)) {
+      while (matches = escapeSequenceParserRegex.exec(str2)) {
         if (matches[2]) {
           width += string.unicode.width(matches[2]);
           if (width >= maxWidth) {
             if (width === maxWidth) {
-              return str.slice(0, matches.index + matches[2].length);
+              return str2.slice(0, matches.index + matches[2].length);
             }
-            return str.slice(0, matches.index) + string.unicode.truncateWidth(matches[2], maxWidth - lastTruncateWidth);
+            return str2.slice(0, matches.index) + string.unicode.truncateWidth(matches[2], maxWidth - lastTruncateWidth);
           }
           lastTruncateWidth = width;
         }
       }
-      return str;
+      return str2;
     };
-    exports.markupWidth = (str) => {
-      return string.unicode.width(str.replace(/\^\[[^\]]*]?|\^(.)/g, (match, second) => {
+    exports.markupWidth = (str2) => {
+      return string.unicode.width(str2.replace(/\^\[[^\]]*]?|\^(.)/g, (match, second) => {
         if (second === " " || second === "^") {
           return second;
         }
         return "";
       }));
     };
-    exports.truncateMarkupString = (str, maxWidth) => {
-      var index = 0, charWidth, strArray = string.unicode.toArray(str);
+    exports.truncateMarkupString = (str2, maxWidth) => {
+      var index = 0, charWidth, strArray = string.unicode.toArray(str2);
       lastTruncateWidth = 0;
       while (index < strArray.length) {
         if (strArray[index] === "^") {
@@ -3667,7 +3667,7 @@ var require_misc2 = __commonJS({
         lastTruncateWidth += charWidth;
         index++;
       }
-      return str;
+      return str2;
     };
     exports.escapeSequenceSkipFn = (strArray, index) => {
       var code;
@@ -3688,7 +3688,7 @@ var require_misc2 = __commonJS({
       }
       return index;
     };
-    exports.wordWrapAnsi = (str, width) => string.wordwrap(str, {
+    exports.wordWrapAnsi = (str2, width) => string.wordwrap(str2, {
       width,
       noJoin: true,
       fill: true,
@@ -3728,7 +3728,7 @@ var require_misc2 = __commonJS({
       }
     });
     exports.wordwrapMarkup = // <-- DEPRECATED name (bad camel case)
-    exports.wordWrapMarkup = (str, width) => string.wordwrap(str, {
+    exports.wordWrapMarkup = (str2, width) => string.wordwrap(str2, {
       width,
       noJoin: true,
       fill: true,
@@ -3769,7 +3769,7 @@ var require_misc2 = __commonJS({
       }
     });
     exports.preserveMarkupFormat = string.createFormatter({
-      argumentSanitizer: (str) => str.replace(/[\x00-\x1f\x7f^]/g, (char) => char === "^" ? "^^" : ""),
+      argumentSanitizer: (str2) => str2.replace(/[\x00-\x1f\x7f^]/g, (char) => char === "^" ? "^^" : ""),
       noMarkup: true
     });
     var CATCH_ALL_KEYWORDS = {
@@ -11922,7 +11922,7 @@ var require_inputField = __commonJS({
         autoCompleteHint: !!options.autoCompleteHint
       };
       if (Array.isArray(options.history)) {
-        inputs = options.history.map((str) => string.unicode.toArray(str).slice(0, options.maxLength));
+        inputs = options.history.map((str2) => string.unicode.toArray(str2).slice(0, options.maxLength));
       }
       if (options.default && typeof options.default === "string") {
         inputs.push(string.unicode.toArray(options.default).slice(0, options.maxLength));
@@ -14650,7 +14650,7 @@ var require_bar = __commonJS({
     "use strict";
     var spChars = require_spChars();
     module.exports = function(value, options) {
-      var str = "", barString = "";
+      var str2 = "", barString = "";
       options = options || {};
       if (isNaN(value) || value < 0) {
         value = 0;
@@ -14667,10 +14667,10 @@ var require_bar = __commonJS({
         barString += " ".repeat(innerSize - fullBlocks - 1);
       }
       if (options.str) {
-        str += this.str.inverse("\u2589");
-        str += barStyle.str(barString);
-        str += this.str("\u258F");
-        return str;
+        str2 += this.str.inverse("\u2589");
+        str2 += barStyle.str(barString);
+        str2 += this.str("\u258F");
+        return str2;
       }
       this.inverse("\u2589");
       barStyle(barString);
@@ -14685,8 +14685,8 @@ var require_slowTyping = __commonJS({
   "node_modules/terminal-kit/lib/slowTyping.js"(exports, module) {
     "use strict";
     var Promise2 = require_seventh();
-    module.exports = function slowTyping(str, options, callback) {
-      if (typeof str !== "string") {
+    module.exports = function slowTyping(str2, options, callback) {
+      if (typeof str2 !== "string") {
         throw new TypeError("[terminal] slowTyping(): argument #0 should be a string");
       }
       if (typeof options === "function") {
@@ -14717,7 +14717,7 @@ var require_slowTyping = __commonJS({
         }
         if (index === void 0) {
           index = 0;
-        } else if (index >= str.length) {
+        } else if (index >= str2.length) {
           if (callback) {
             callback();
           } else {
@@ -14725,11 +14725,11 @@ var require_slowTyping = __commonJS({
           }
           return;
         } else {
-          if (options.flashStyle && str[index].match(/\S/)) {
-            options.flashStyle(str[index]);
+          if (options.flashStyle && str2[index].match(/\S/)) {
+            options.flashStyle(str2[index]);
             unflashTimer = setTimeout(unflash, options.flashDelay);
           } else {
-            options.style(str[index]);
+            options.style(str2[index]);
           }
           index++;
         }
@@ -14737,7 +14737,7 @@ var require_slowTyping = __commonJS({
       };
       var unflash = () => {
         this.left(1);
-        options.style(str[index - 1]);
+        options.style(str2[index - 1]);
         unflashTimer = null;
       };
       printChar();
@@ -14775,7 +14775,7 @@ var require_extClipboard = __commonJS({
         var arg = XCLIP_SELECTION_ARG[source[0]] || "clipboard";
         return await execFileAsync("xclip", ["-o", "-selection", arg]);
       };
-      exports.setClipboard = async (str, source) => {
+      exports.setClipboard = async (str2, source) => {
         var promise = new Promise2();
         var arg = XCLIP_SELECTION_ARG[source[0]] || "clipboard";
         var xclip = spawn("xclip", ["-i", "-selection", arg]);
@@ -14789,7 +14789,7 @@ var require_extClipboard = __commonJS({
             promise.resolve();
           }
         });
-        xclip.stdin.end(str);
+        xclip.stdin.end(str2);
         return promise;
       };
     } else {
@@ -15064,8 +15064,8 @@ var require_Terminal = __commonJS({
         });
       });
       term2.resetString = "";
-      term2.setResetString = function(str) {
-        term2.resetString = string.markupMethod.call(term2.formatConfig.rawMarkupConfig, str);
+      term2.setResetString = function(str2) {
+        term2.resetString = string.markupMethod.call(term2.formatConfig.rawMarkupConfig, str2);
       };
       var resetFn = (extra) => term2.str.styleReset() + term2.resetString + extra;
       term2.formatConfig = {
@@ -15129,7 +15129,7 @@ var require_Terminal = __commonJS({
         },
         dataMarkup: {
           fg: (markupStack, key, value) => {
-            var str;
+            var str2;
             if (typeof value === "string" && value[0] === "#") {
               let hex = value.slice(1);
               if (hex.length === 3) {
@@ -15138,15 +15138,15 @@ var require_Terminal = __commonJS({
               let r = parseInt(hex.slice(0, 2), 16) || 0;
               let g = parseInt(hex.slice(2, 4), 16) || 0;
               let b = parseInt(hex.slice(4, 6), 16) || 0;
-              str = term2.optimized.color24bits(r, g, b);
+              str2 = term2.optimized.color24bits(r, g, b);
             } else {
-              str = term2.str.color(value);
+              str2 = term2.str.color(value);
             }
-            markupStack.push(str);
-            return str;
+            markupStack.push(str2);
+            return str2;
           },
           bg: (markupStack, key, value) => {
-            var str;
+            var str2;
             if (typeof value === "string" && value[0] === "#") {
               let hex = value.slice(1);
               if (hex.length === 3) {
@@ -15155,17 +15155,17 @@ var require_Terminal = __commonJS({
               let r = parseInt(hex.slice(0, 2), 16) || 0;
               let g = parseInt(hex.slice(2, 4), 16) || 0;
               let b = parseInt(hex.slice(4, 6), 16) || 0;
-              str = term2.optimized.bgColor24bits(r, g, b);
+              str2 = term2.optimized.bgColor24bits(r, g, b);
             } else {
-              str = term2.str.bgColor(value);
+              str2 = term2.str.bgColor(value);
             }
-            markupStack.push(str);
-            return str;
+            markupStack.push(str2);
+            return str2;
           }
         },
         markupCatchAll: (markupStack, key, value) => {
           term2.optimized.bgColor24bits;
-          var str = "";
+          var str2 = "";
           if (value === void 0) {
             if (key[0] === "#") {
               return term2.formatConfig.dataMarkup.fg(markupStack, "fg", key);
@@ -15176,25 +15176,25 @@ var require_Terminal = __commonJS({
                 case "bgColor":
                   return term2.formatConfig.dataMarkup.bg(markupStack, "bg", termkit2.markupCatchAllKeywords[key][1]);
                 case "dim":
-                  str = term2.str.dim();
+                  str2 = term2.str.dim();
                   break;
                 case "bold":
-                  str = term2.str.bold();
+                  str2 = term2.str.bold();
                   break;
                 case "underline":
-                  str = term2.str.underline();
+                  str2 = term2.str.underline();
                   break;
                 case "italic":
-                  str = term2.str.italic();
+                  str2 = term2.str.italic();
                   break;
                 case "inverse":
-                  str = term2.str.inverse();
+                  str2 = term2.str.inverse();
                   break;
               }
             }
           }
-          markupStack.push(str);
-          return str;
+          markupStack.push(str2);
+          return str2;
         }
       };
       term2.formatConfig.dataMarkup.color = term2.formatConfig.dataMarkup.fgColor = term2.formatConfig.dataMarkup.c = term2.formatConfig.dataMarkup.fg;
@@ -15929,9 +15929,9 @@ var require_Terminal = __commonJS({
     notChainable.eraseArea = function(xMin, yMin, width = 1, height = 1) {
       xMin = Math.min(xMin, this.width);
       yMin = Math.min(yMin, this.height);
-      var y, xMax = Math.min(xMin + width, this.width + 1), yMax = Math.min(yMin + height, this.height + 1), str = " ".repeat(xMax - xMin);
+      var y, xMax = Math.min(xMin + width, this.width + 1), yMax = Math.min(yMin + height, this.height + 1), str2 = " ".repeat(xMax - xMin);
       for (y = yMin; y < yMax; y++) {
-        this.moveTo(xMin, y, str);
+        this.moveTo(xMin, y, str2);
       }
     };
     notChainable.getCursorLocation = function(callback) {
@@ -16227,13 +16227,13 @@ var require_Terminal = __commonJS({
       });
       return promise;
     };
-    notChainable.setClipboard = async function(str, source = "c") {
+    notChainable.setClipboard = async function(str2, source = "c") {
       var extClipboard;
       if (this.esc.setClipboardLL.na) {
         extClipboard = require_extClipboard();
-        return extClipboard.setClipboard(str, source).catch(() => void 0);
+        return extClipboard.setClipboard(str2, source).catch(() => void 0);
       }
-      var base64 = Buffer.from(str).toString("base64");
+      var base64 = Buffer.from(str2).toString("base64");
       this.setClipboardLL(source[0], base64);
       return Promise2.resolved;
     };
@@ -16383,7 +16383,7 @@ var require_Terminal = __commonJS({
     };
     notChainable.drawCursor = function() {
     };
-    notChainable.put = function(options, str, ...args2) {
+    notChainable.put = function(options, str2, ...args2) {
       var i, x, y, dx, dy, attr, wrap, characters, len, moveToNeeded, inline;
       if (!options) {
         options = {};
@@ -16440,18 +16440,18 @@ var require_Terminal = __commonJS({
       if (typeof attr !== "string") {
         attr = this.esc.styleReset.on;
       }
-      if (typeof str !== "string") {
-        if (str.toString) {
-          str = str.toString();
+      if (typeof str2 !== "string") {
+        if (str2.toString) {
+          str2 = str2.toString();
         } else {
           return;
         }
       }
       if (args2.length) {
-        str = string.format(str, ...args2);
+        str2 = string.format(str2, ...args2);
       }
-      str = termkit2.stripControlChars(str);
-      characters = string.unicode.toArray(str);
+      str2 = termkit2.stripControlChars(str2);
+      characters = string.unicode.toArray(str2);
       len = characters.length;
       moveToNeeded = true;
       this.stdout.write(attr);
@@ -16574,14 +16574,14 @@ var require_iota = __commonJS({
 // node_modules/is-buffer/index.js
 var require_is_buffer = __commonJS({
   "node_modules/is-buffer/index.js"(exports, module) {
-    module.exports = function(obj) {
-      return obj != null && (isBuffer(obj) || isSlowBuffer(obj) || !!obj._isBuffer);
+    module.exports = function(obj2) {
+      return obj2 != null && (isBuffer(obj2) || isSlowBuffer(obj2) || !!obj2._isBuffer);
     };
-    function isBuffer(obj) {
-      return !!obj.constructor && typeof obj.constructor.isBuffer === "function" && obj.constructor.isBuffer(obj);
+    function isBuffer(obj2) {
+      return !!obj2.constructor && typeof obj2.constructor.isBuffer === "function" && obj2.constructor.isBuffer(obj2);
     }
-    function isSlowBuffer(obj) {
-      return typeof obj.readFloatLE === "function" && typeof obj.slice === "function" && isBuffer(obj.slice(0, 0));
+    function isSlowBuffer(obj2) {
+      return typeof obj2.readFloatLE === "function" && typeof obj2.slice === "function" && isBuffer(obj2.slice(0, 0));
     }
   }
 });
@@ -23830,7 +23830,7 @@ var require_ScreenBuffer = __commonJS({
     ScreenBuffer.prototype.clear = ScreenBuffer.prototype.fill;
     ScreenBuffer.prototype.preserveMarkupFormat = misc.preserveMarkupFormat;
     ScreenBuffer.prototype.parseMarkup = string.markupMethod.bind(misc.markupOptions);
-    ScreenBuffer.prototype.put = function(options, str, ...args2) {
+    ScreenBuffer.prototype.put = function(options, str2, ...args2) {
       var startX, startY, x, y, dx, dy, baseAttr, attr, attrObject, wrap, lastValidOffset = -1, xmin = 0, ymin = 0, xmax = this.width - 1, ymax = this.height - 1;
       if (!options) {
         options = {};
@@ -23882,15 +23882,15 @@ var require_ScreenBuffer = __commonJS({
       if (options.resumeAttr !== void 0) {
         attr = options.resumeAttr;
       }
-      if (typeof str !== "string") {
-        if (str.toString) {
-          str = str.toString();
+      if (typeof str2 !== "string") {
+        if (str2.toString) {
+          str2 = str2.toString();
         } else {
           return;
         }
       }
       if (args2.length) {
-        str = options.markup === true ? this.preserveMarkupFormat(str, ...args2) : string.format(str, ...args2);
+        str2 = options.markup === true ? this.preserveMarkupFormat(str2, ...args2) : string.format(str2, ...args2);
       }
       var processRaw = (part) => {
         var characters = string.unicode.toArray(part), iMax = characters.length;
@@ -23976,7 +23976,7 @@ var require_ScreenBuffer = __commonJS({
         }
       };
       if (!options.markup) {
-        processRaw(str);
+        processRaw(str2);
       } else {
         const defaultAttrObject = this.attr2object(this.DEFAULT_ATTR);
         const baseAttrObject = this.attr2object(baseAttr);
@@ -23984,14 +23984,14 @@ var require_ScreenBuffer = __commonJS({
         let parts = null;
         switch (options.markup) {
           case "ansi":
-            parts = string.ansi.parse(str);
+            parts = string.ansi.parse(str2);
             break;
           case "legacyAnsi":
-            parts = string.ansi.parse(str);
+            parts = string.ansi.parse(str2);
             legacyColor = true;
             break;
           case true:
-            parts = this.parseMarkup(str);
+            parts = this.parseMarkup(str2);
             break;
         }
         for (let part of parts) {
@@ -24411,24 +24411,24 @@ var require_ScreenBuffer = __commonJS({
     };
     ScreenBuffer.loadImage = termkit2.image.load.bind(ScreenBuffer, ScreenBuffer.fromNdarrayImage);
     ScreenBuffer.prototype.dumpChars = function() {
-      var y, x, offset, str = "";
+      var y, x, offset, str2 = "";
       for (y = 0; y < this.height; y++) {
         for (x = 0; x < this.width; x++) {
           offset = (y * this.width + x) * this.ITEM_SIZE;
-          str += this.readChar(this.buffer, offset);
+          str2 += this.readChar(this.buffer, offset);
         }
-        str += "\n";
+        str2 += "\n";
       }
-      return str;
+      return str2;
     };
     ScreenBuffer.prototype.dump = function() {
-      var y, x, offset, str = "", char;
+      var y, x, offset, str2 = "", char;
       for (y = 0; y < this.height; y++) {
         for (x = 0; x < this.width; x++) {
           offset = (y * this.width + x) * this.ITEM_SIZE;
           char = this.readChar(this.buffer, offset);
-          str += char + (string.unicode.isFullWidth(char) ? " " : "  ");
-          str += string.format(
+          str2 += char + (string.unicode.isFullWidth(char) ? " " : "  ");
+          str2 += string.format(
             "%x%x%x%x ",
             this.buffer.readUInt8(offset),
             this.buffer.readUInt8(offset + 1),
@@ -24436,9 +24436,9 @@ var require_ScreenBuffer = __commonJS({
             this.buffer.readUInt8(offset + 3)
           );
         }
-        str += "\n";
+        str2 += "\n";
       }
-      return str;
+      return str2;
     };
     ScreenBuffer.prototype.readAttr = function(buffer, at) {
       return buffer.readInt32BE(at);
@@ -25452,13 +25452,13 @@ var require_ScreenBufferHD = __commonJS({
     };
     ScreenBufferHD.loadImage = termkit2.image.load.bind(ScreenBufferHD, ScreenBufferHD.fromNdarrayImage);
     ScreenBufferHD.prototype.dump = function() {
-      var y, x, offset, str = "", char;
+      var y, x, offset, str2 = "", char;
       for (y = 0; y < this.height; y++) {
         for (x = 0; x < this.width; x++) {
           offset = (y * this.width + x) * this.ITEM_SIZE;
           char = this.readChar(this.buffer, offset);
-          str += char + (string.unicode.isFullWidth(char) ? " " : "  ");
-          str += string.format(
+          str2 += char + (string.unicode.isFullWidth(char) ? " " : "  ");
+          str2 += string.format(
             "%x%x%x%x %x%x%x%x %x%x ",
             this.buffer.readUInt8(offset),
             this.buffer.readUInt8(offset + 1),
@@ -25472,9 +25472,9 @@ var require_ScreenBufferHD = __commonJS({
             this.buffer.readUInt8(offset + 9)
           );
         }
-        str += "\n";
+        str2 += "\n";
       }
-      return str;
+      return str2;
     };
     ScreenBufferHD.prototype.readAttr = function(buffer, at) {
       return buffer.slice(at, at + this.ATTR_SIZE);
@@ -26595,7 +26595,7 @@ var require_TextBuffer = __commonJS({
       return this.getRegionText(this.selectionRegion);
     };
     TextBuffer.prototype.getRegionText = function(region, structured = false) {
-      var x, y, xmin, xmax, ymax, cell, count = 0, str = "";
+      var x, y, xmin, xmax, ymax, cell, count = 0, str2 = "";
       if (!region || region.xmin === void 0 || region.ymin === void 0 || region.xmax === void 0 || region.ymax === void 0) {
         return;
       }
@@ -26609,15 +26609,15 @@ var require_TextBuffer = __commonJS({
         for (x = xmin; x <= xmax; x++) {
           cell = this.buffer[y][x];
           if (!cell.filler) {
-            str += cell.char;
+            str2 += cell.char;
             count++;
           }
         }
       }
       if (structured) {
-        return { string: str, count };
+        return { string: str2, count };
       }
-      return str;
+      return str2;
     };
     TextBuffer.prototype.deleteSelection = function(getDeleted = false) {
       if (!this.selectionRegion) {
@@ -29284,18 +29284,18 @@ var require_Element = __commonJS({
     var lastTruncateWidth = 0;
     Element.getLastTruncateWidth = () => lastTruncateWidth;
     Element.truncateContent = (content, maxWidth, hasMarkup) => {
-      var str;
+      var str2;
       if (hasMarkup === "ansi" || hasMarkup === "legacyAnsi") {
-        str = misc.truncateAnsiString(content, maxWidth);
+        str2 = misc.truncateAnsiString(content, maxWidth);
         lastTruncateWidth = misc.getLastTruncateWidth();
       } else if (hasMarkup) {
-        str = misc.truncateMarkupString(content, maxWidth);
+        str2 = misc.truncateMarkupString(content, maxWidth);
         lastTruncateWidth = misc.getLastTruncateWidth();
       } else {
-        str = string.unicode.truncateWidth(content, maxWidth);
+        str2 = string.unicode.truncateWidth(content, maxWidth);
         lastTruncateWidth = string.unicode.getLastTruncateWidth();
       }
-      return str;
+      return str2;
     };
     Element.wordwrapContent = // <-- DEPRECATED
     Element.wordWrapContent = (content, width, hasMarkup) => hasMarkup === "ansi" || hasMarkup === "legacyAnsi" ? misc.wordWrapAnsi(content, width) : hasMarkup ? misc.wordWrapMarkup(content, width) : string.wordwrap(content, { width, fill: true, noJoin: true });
@@ -29994,14 +29994,14 @@ var require_Document = __commonJS({
         }
         return this.outputDst.getClipboard(source);
       });
-      this.setSystemClipboard = Promise2.debounceUpdate(async (str, source) => {
+      this.setSystemClipboard = Promise2.debounceUpdate(async (str2, source) => {
         if (!this.outputDst.setClipboard) {
           return;
         }
-        await this.outputDst.setClipboard(str, source);
+        await this.outputDst.setClipboard(str2, source);
         await Promise2.resolveTimeout(500);
       });
-      this.clearSystemClipboard = Promise2.debounceUpdate(async (str, source) => {
+      this.clearSystemClipboard = Promise2.debounceUpdate(async (str2, source) => {
         if (!this.outputDst.setClipboard) {
           return;
         }
@@ -31805,9 +31805,9 @@ var require_EditableTextBox = __commonJS({
       ALT_D: "clearDocumentClipboard",
       META_D: "clearSystemClipboard"
     };
-    EditableTextBox.prototype.insert = function(str, selectIt = false, internal = false) {
+    EditableTextBox.prototype.insert = function(str2, selectIt = false, internal = false) {
       let x = this.textBuffer.cx, y = this.textBuffer.cy;
-      let count = this.textBuffer.insert(str, this.textAttr);
+      let count = this.textBuffer.insert(str2, this.textAttr);
       if (!internal) {
         if (selectIt) {
           this.textBuffer.setSelectionRegion({
@@ -31828,7 +31828,7 @@ var require_EditableTextBox = __commonJS({
       }
       this.emit("change", {
         type: "insert",
-        insertedString: str,
+        insertedString: str2,
         count,
         internal,
         startPosition: { x, y },
@@ -31922,9 +31922,9 @@ var require_EditableTextBox = __commonJS({
         this.document.giveFocusTo(this, "select");
       }
       if (this.document) {
-        this.document.getSystemClipboard("primary").then((str) => {
-          if (str) {
-            this.insert(str);
+        this.document.getSystemClipboard("primary").then((str2) => {
+          if (str2) {
+            this.insert(str2);
           }
         }).catch(() => void 0);
       }
@@ -32222,32 +32222,32 @@ var require_EditableTextBox = __commonJS({
       this.draw();
     };
     userActions.moveSelection = function() {
-      var str = this.textBuffer.getSelectionText();
-      if (!str) {
+      var str2 = this.textBuffer.getSelectionText();
+      if (!str2) {
         return;
       }
       this.deleteSelection(true);
-      this.insert(str, true);
+      this.insert(str2, true);
     };
     userActions.pasteSelection = function() {
-      var str = this.textBuffer.getSelectionText();
-      if (str) {
-        this.insert(str);
+      var str2 = this.textBuffer.getSelectionText();
+      if (str2) {
+        this.insert(str2);
       }
     };
     userActions.pasteDocumentClipboard = function() {
       if (this.document) {
-        let str = this.document.getDocumentClipboard();
-        if (str && typeof str === "string") {
-          this.insert(str);
+        let str2 = this.document.getDocumentClipboard();
+        if (str2 && typeof str2 === "string") {
+          this.insert(str2);
         }
       }
     };
     userActions.pasteSystemClipboard = function() {
       if (this.document) {
-        this.document.getSystemClipboard().then((str) => {
-          if (str && typeof str === "string") {
-            this.insert(str);
+        this.document.getSystemClipboard().then((str2) => {
+          if (str2 && typeof str2 === "string") {
+            this.insert(str2);
           }
         }).catch(() => void 0);
       }
@@ -34220,8 +34220,8 @@ var require_InlineInput = __commonJS({
       ALT_D: "clearDocumentClipboard",
       META_D: "clearSystemClipboard"
     };
-    InlineInput.prototype.insert = function(str) {
-      this.textBuffer.insert(str, this.textAttr);
+    InlineInput.prototype.insert = function(str2) {
+      this.textBuffer.insert(str2, this.textAttr);
       this.textBuffer.runStateMachine();
       if (this.useAutoCompleteHint) {
         this.runAutoCompleteHint(this.autoComplete);
@@ -36203,8 +36203,8 @@ var require_chroma = __commonJS({
         var name = list$1[i$1];
         classToType["[object " + name + "]"] = name.toLowerCase();
       }
-      function type(obj) {
-        return classToType[Object.prototype.toString.call(obj)] || "object";
+      function type(obj2) {
+        return classToType[Object.prototype.toString.call(obj2)] || "object";
       }
       function unpack(args2, keyOrder) {
         if (keyOrder === void 0) keyOrder = null;
@@ -36735,17 +36735,17 @@ var require_chroma = __commonJS({
         g = round$3(g);
         b = round$3(b);
         var u = r << 16 | g << 8 | b;
-        var str = "000000" + u.toString(16);
-        str = str.substr(str.length - 6);
+        var str2 = "000000" + u.toString(16);
+        str2 = str2.substr(str2.length - 6);
         var hxa = "0" + round$3(a * 255).toString(16);
         hxa = hxa.substr(hxa.length - 2);
         switch (mode.toLowerCase()) {
           case "rgba":
-            return "#" + str + hxa;
+            return "#" + str2 + hxa;
           case "argb":
-            return "#" + hxa + str;
+            return "#" + hxa + str2;
           default:
-            return "#" + str;
+            return "#" + str2;
         }
       };
       Color.prototype.hex = function(mode) {
@@ -39067,8 +39067,8 @@ var require_termkit_no_lazy_require = __commonJS({
 });
 
 // packages/tui/dist/main.js
-import { appendFileSync, mkdirSync as mkdirSync9 } from "node:fs";
-import { dirname as dirname8, join as join19 } from "node:path";
+import { appendFileSync, mkdirSync as mkdirSync10 } from "node:fs";
+import { dirname as dirname9, join as join20 } from "node:path";
 import { performance } from "node:perf_hooks";
 
 // packages/tui/dist/controller.js
@@ -39207,26 +39207,26 @@ var util;
   }
   util2.assertNever = assertNever;
   util2.arrayToEnum = (items) => {
-    const obj = {};
+    const obj2 = {};
     for (const item of items) {
-      obj[item] = item;
+      obj2[item] = item;
     }
-    return obj;
+    return obj2;
   };
-  util2.getValidEnumValues = (obj) => {
-    const validKeys = util2.objectKeys(obj).filter((k) => typeof obj[obj[k]] !== "number");
+  util2.getValidEnumValues = (obj2) => {
+    const validKeys = util2.objectKeys(obj2).filter((k) => typeof obj2[obj2[k]] !== "number");
     const filtered = {};
     for (const k of validKeys) {
-      filtered[k] = obj[k];
+      filtered[k] = obj2[k];
     }
     return util2.objectValues(filtered);
   };
-  util2.objectValues = (obj) => {
-    return util2.objectKeys(obj).map(function(e) {
-      return obj[e];
+  util2.objectValues = (obj2) => {
+    return util2.objectKeys(obj2).map(function(e) {
+      return obj2[e];
     });
   };
-  util2.objectKeys = typeof Object.keys === "function" ? (obj) => Object.keys(obj) : (object) => {
+  util2.objectKeys = typeof Object.keys === "function" ? (obj2) => Object.keys(obj2) : (object) => {
     const keys = [];
     for (const key in object) {
       if (Object.prototype.hasOwnProperty.call(object, key)) {
@@ -39347,8 +39347,8 @@ var ZodIssueCode = util.arrayToEnum([
   "not_multiple_of",
   "not_finite"
 ]);
-var quotelessJson = (obj) => {
-  const json = JSON.stringify(obj, null, 2);
+var quotelessJson = (obj2) => {
+  const json = JSON.stringify(obj2, null, 2);
   return json.replace(/"([^"]+)":/g, "$1:");
 };
 var ZodError = class _ZodError extends Error {
@@ -50171,12 +50171,13 @@ function defaultResolveHeadSha() {
     return void 0;
   }
 }
-var TABS = ["Tasks", "Knowledge", "Queue", "Agents", "System"];
+var TABS = ["Tasks", "Knowledge", "Queue", "Agents", "System", "GitHub"];
 var TASKS_TAB = TABS.indexOf("Tasks");
 var KNOWLEDGE_TAB = TABS.indexOf("Knowledge");
 var QUEUE_TAB = TABS.indexOf("Queue");
 var AGENTS_TAB = TABS.indexOf("Agents");
 var SYSTEM_TAB = TABS.indexOf("System");
+var GITHUB_TAB = TABS.indexOf("GitHub");
 var ARTICLE_STATE_FILTERS = ["all", "planned", "built", "wired_in", "active", "dormant", "deprecated"];
 var initialUi = { tab: 0, cursor: 0, expanded: [], searchQuery: "", scroll: 0 };
 function isOpenCodeOnlyEntry(entry) {
@@ -50207,8 +50208,8 @@ function modelOptions(entries, config) {
     opts.push({ kind: "clear" });
   return opts;
 }
-function visibleTabs(agents) {
-  return TABS.map((_, i) => i).filter((i) => i !== AGENTS_TAB || agents !== void 0);
+function visibleTabs(agents, github2) {
+  return TABS.map((_, i) => i).filter((i) => (i !== AGENTS_TAB || agents !== void 0) && (i !== GITHUB_TAB || github2 !== void 0));
 }
 var STATE_GLYPHS = {
   planned: "\u25CB",
@@ -50238,9 +50239,9 @@ function nodeId(node) {
     return subId(node.catType, node.source, node.key);
   return node.card.id;
 }
-function resolveCursor(ui, nodes) {
-  const held = ui.selectedId === void 0 ? -1 : nodes.findIndex((n) => nodeId(n) === ui.selectedId);
-  return Math.min(held >= 0 ? held : ui.cursor, Math.max(0, nodes.length - 1));
+function resolveCursor(ui, nodes2) {
+  const held = ui.selectedId === void 0 ? -1 : nodes2.findIndex((n) => nodeId(n) === ui.selectedId);
+  return Math.min(held >= 0 ? held : ui.cursor, Math.max(0, nodes2.length - 1));
 }
 function rankTermsOf(query) {
   const words = query.trim().split(/\s+/).filter((t) => t.length > 0 && t.length < 64).map((t) => `${t.replace(/\*+$/, "")}*`);
@@ -50283,17 +50284,17 @@ function nodesFor(store, ui, knowledge) {
       return store.query({ types, rank_terms: terms, match_all: true, cap }).filter(inState).map((r) => ({ kind: "card", card: hydrateInbound({ ...toCard(r), source: "project" }, ui, store), depth: 0, knowledge: true }));
     }
   }
-  const nodes = [];
+  const nodes2 = [];
   for (const cat of KNOWLEDGE_CATEGORIES) {
     const sources = knowledge ? knowledgeCountBySource(knowledge, cat.type) : [{ source: "project", count: store.count({ types: [cat.type] }) }].filter((s2) => s2.count > 0);
     const total = sources.reduce((n, s2) => n + s2.count, 0);
     if (total === 0)
       continue;
-    nodes.push({ kind: "category", type: cat.type, label: cat.label, count: total });
+    nodes2.push({ kind: "category", type: cat.type, label: cat.label, count: total });
     if (!ui.expanded.includes(catId(cat.type)))
       continue;
     for (const sc of sources) {
-      nodes.push({ kind: "source", catType: cat.type, source: sc.source, count: sc.count });
+      nodes2.push({ kind: "source", catType: cat.type, source: sc.source, count: sc.count });
       if (!ui.expanded.includes(srcId(cat.type, sc.source)))
         continue;
       const records = knowledge ? knowledge.querySource(sc.source, { types: [cat.type], cap }) : store.query({ types: [cat.type], cap });
@@ -50301,25 +50302,25 @@ function nodesFor(store, ui, knowledge) {
       const reader = knowledge ?? store;
       if (groups.length <= 1) {
         for (const card of groups[0]?.cards ?? []) {
-          nodes.push({ kind: "card", card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 2, knowledge: true });
+          nodes2.push({ kind: "card", card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 2, knowledge: true });
         }
         continue;
       }
       for (const g of groups) {
-        nodes.push({ kind: "subcategory", catType: cat.type, source: sc.source, key: g.key, label: g.label, count: g.cards.length });
+        nodes2.push({ kind: "subcategory", catType: cat.type, source: sc.source, key: g.key, label: g.label, count: g.cards.length });
         if (!ui.expanded.includes(subId(cat.type, sc.source, g.key)))
           continue;
         for (const card of g.cards) {
-          nodes.push({ kind: "card", card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 3, knowledge: true });
+          nodes2.push({ kind: "card", card: hydrateInbound({ ...card, source: sc.source }, ui, reader), depth: 3, knowledge: true });
         }
       }
     }
   }
-  return nodes;
+  return nodes2;
 }
 var CHROME_BELOW_BANNER = 3;
-function visibleBodyLines(height, bannerHeight = 0) {
-  return Math.max(0, height - bannerHeight - CHROME_BELOW_BANNER - 2);
+function visibleBodyLines(height, bannerHeight = 0, stripRows = 0) {
+  return Math.max(0, height - bannerHeight - CHROME_BELOW_BANNER - 2 - stripRows);
 }
 function wrapText(text, width) {
   if (!Number.isFinite(width) || width < 1)
@@ -50459,14 +50460,14 @@ function storageRow(snap, width) {
   const shown = storage === null ? "UNKNOWN (config unreadable)" : storage === void 0 ? "SQLITE (not set)" : storage === "sqlite" ? "SQLITE" : storage === "postgres" ? "SERVED POSTGRES" : `UNRECOGNIZED (${storage})`;
   return { id: "sys:storage", lines: [{ text: clip2(`  Storage: ${shown} (read-only; switch with the move-store skill)`), kind: "title" }] };
 }
-function tabsFor(store, activeTab, agents) {
+function tabsFor(store, activeTab, agents, github2) {
   let taskCount = null;
   try {
     taskCount = store.count({ types: ["todo"], source: "user" });
   } catch {
     taskCount = null;
   }
-  return visibleTabs(agents).map((i) => {
+  return visibleTabs(agents, github2).map((i) => {
     const label = TABS[i];
     return {
       label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label === "Agents" && agents ? `${label} (${agents.running} running${agents.quiet ? ` \xB7 ${agents.quiet} quiet` : ""})` : label,
@@ -50528,12 +50529,124 @@ function footerFor(ui, tabCount, width) {
     text = `${tabs} \xB7 \u2191\u2193 pending \xB7 wheel scrolls \xB7 q quit`;
   else if (ui.tab === AGENTS_TAB)
     text = `\u2190/\u2192 or ${tabs} \xB7 q quit`;
+  else if (ui.tab === GITHUB_TAB)
+    text = `${tabs} \xB7 \u2191\u2193 scroll \xB7 r refresh \xB7 q quit`;
   else
     text = `${tabs} \xB7 enter change \xB7 esc cancel \xB7 q quit`;
   return clipEllipsis(text, width);
 }
 var noticeFor = (ui, width) => ui.notice ? clipEllipsis(`\u26A0 ${ui.notice}`, width) : void 0;
-function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents) {
+var clockOf = (ms) => new Date(ms).toTimeString().slice(0, 5);
+var CHECKS_WORD = { pass: "checks \u2713", fail: "checks \u2717", pending: "checks \u2026", none: "" };
+var MERGE_WORD = { CLEAN: "mergeable", HAS_HOOKS: "mergeable", UNSTABLE: "unstable", BLOCKED: "blocked", BEHIND: "behind", DIRTY: "conflicts" };
+function prParts(pr) {
+  return [
+    `#${pr.number}`,
+    pr.draft ? "draft" : "",
+    CHECKS_WORD[pr.checks],
+    pr.draft ? "" : MERGE_WORD[pr.merge] ?? "",
+    pr.copilot === "none" ? "" : `copilot ${pr.copilot}`,
+    pr.unresolved > 0 ? `${pr.unresolved} unresolved` : ""
+  ].filter(Boolean);
+}
+function githubStrip(github2, width = Infinity) {
+  if (!github2 || github2.state === "loading" || github2.state === "hidden")
+    return void 0;
+  const clip2 = (text) => clipEllipsis(text, width);
+  if (github2.loopError)
+    return { text: clip2(`\u26A0 pr-loop.json unreadable: ${github2.loopError}`), dim: false };
+  const data = github2.data;
+  if (github2.state === "failed" && !data)
+    return { text: clip2(github2.reason ?? "gh failed"), dim: true };
+  const open2 = data?.open ?? [];
+  const loop = github2.loop;
+  const owed = loop?.status === "owed" ? loop : void 0;
+  if (open2.length === 0 && !owed)
+    return void 0;
+  const parts = [];
+  if (github2.state === "failed" && github2.asOf !== void 0)
+    parts.push(`as of ${clockOf(github2.asOf)}`);
+  const lead = open2.find((p) => p.number === loop?.pr) ?? open2[0];
+  if (lead) {
+    parts.push(prParts(lead).join(" "));
+    if (loop && loop.pr === lead.number)
+      parts.push(`loop ${loop.status}`);
+  }
+  if (owed && owed.pr !== lead?.number)
+    parts.push(`loop owed #${owed.pr}${open2.some((p) => p.number === owed.pr) ? "" : " (not open)"}`);
+  if (open2.length > 1)
+    parts.push(`+${open2.length - 1} open`);
+  return { text: clip2(`PR ${parts.join(" \xB7 ")}`), dim: github2.state === "failed" };
+}
+function githubStripRows(github2) {
+  return githubStrip(github2) ? 1 : 0;
+}
+function githubTabLines(github2, width = Infinity) {
+  const clip2 = (text) => clipEllipsis(text, width);
+  const lines = [];
+  const meta = (text) => {
+    lines.push({ text: clip2(text), kind: "meta" });
+  };
+  if (github2.state === "loading") {
+    meta("checking GitHub\u2026");
+    return lines;
+  }
+  if (github2.state === "hidden") {
+    meta(`GitHub status off: ${github2.reason ?? "unavailable"}`);
+    return lines;
+  }
+  const data = github2.data;
+  meta(`${github2.repo ?? ""}${github2.asOf !== void 0 ? ` \xB7 as of ${clockOf(github2.asOf)}` : ""}`);
+  if (github2.state === "failed")
+    meta(`${github2.reason ?? "gh failed"}${data ? " (showing the last good poll)" : ""}`);
+  if (github2.loopError)
+    lines.push({ text: clip2(`\u26A0 pr-loop.json unreadable: ${github2.loopError}`), kind: "body" });
+  if (data) {
+    lines.push({ text: "", kind: "body" });
+    lines.push({ text: clip2(data.open.length ? `open pull requests (${data.open.length})` : "no open pull requests"), kind: "title" });
+    const wrapWidth = Number.isFinite(width) ? Math.max(1, width - 4) : width;
+    for (const pr of data.open) {
+      lines.push({ text: clip2(`  #${pr.number} ${pr.title}`), kind: "body" });
+      const detail = [
+        pr.branch,
+        pr.draft ? "draft" : "",
+        pr.checks === "none" ? "no checks" : `checks ${pr.checks}`,
+        pr.merge ? `merge ${pr.merge.toLowerCase()}` : "",
+        pr.review ? `review ${pr.review.toLowerCase().replace(/_/g, " ")}` : "",
+        `copilot ${pr.copilot}`,
+        `${pr.unresolved} unresolved`
+      ].filter(Boolean).join(" \xB7 ");
+      for (const text of wrapText(detail, wrapWidth))
+        lines.push({ text: `    ${text}`, kind: "meta" });
+    }
+  }
+  lines.push({ text: "", kind: "body" });
+  const loop = github2.loop;
+  lines.push({ text: clip2(loop ? `PR review loop: ${loop.status} for #${loop.pr}` : "PR review loop: none armed"), kind: "title" });
+  if (data) {
+    lines.push({ text: "", kind: "body" });
+    lines.push({ text: clip2(data.merged.length ? "recently merged" : "nothing merged yet"), kind: "title" });
+    for (const pr of data.merged)
+      lines.push({ text: clip2(`  #${pr.number} ${pr.title} \xB7 ${pr.mergedAt.slice(0, 10)}`), kind: "body" });
+  }
+  return lines;
+}
+function githubDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, github2, agents) {
+  const lines = githubTabLines(github2, width);
+  const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, lines.length - maxBodyLines) : 0;
+  return {
+    tabs,
+    rows: [{ id: "github", type: "github", selected: false, expanded: false, lines, screenRow: 0 }],
+    footer: footerFor(ui, visibleTabs(agents, github2).length, width),
+    notice: noticeFor(ui, width),
+    strip: githubStrip(github2, width),
+    banner,
+    projectName,
+    bodyTop: bodyTop2,
+    scroll: Math.max(0, Math.min(ui.scroll ?? 0, maxScroll))
+  };
+}
+function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents, github2) {
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows = [];
   let screenRow = 0;
@@ -50572,29 +50685,32 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, ma
     tabs,
     rows,
     emptyMessage: view.rows.length ? void 0 : "(no configured models)",
-    footer: footerFor(ui, visibleTabs(agents).length, width),
+    footer: footerFor(ui, visibleTabs(agents, github2).length, width),
     notice: noticeFor(ui, width),
+    strip: githubStrip(github2, width),
     banner,
     projectName,
     bodyTop: bodyTop2,
     scroll
   };
 }
-function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster, agents, height = Infinity) {
-  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner2, knowledge, roster, agents, height).state;
+function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster, agents, height = Infinity, github2) {
+  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner2, knowledge, roster, agents, height, github2).state;
 }
-function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster, agents, height = Infinity) {
+function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner2 = false, knowledge, roster, agents, height = Infinity, github2) {
   const banner = bannerLines(width, showBanner2, height);
   const bodyTop2 = banner.length + CHROME_BELOW_BANNER;
-  const tabs = fitTabs(tabsFor(store, ui.tab, agents), width);
+  const tabs = fitTabs(tabsFor(store, ui.tab, agents, github2), width);
   if (ui.tab === SYSTEM_TAB)
-    return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents), nodes: [], cursor: ui.cursor };
-  const nodes = nodesFor(store, ui, knowledge);
-  const cursor = resolveCursor(ui, nodes);
+    return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, roster, agents, github2), nodes: [], cursor: ui.cursor };
+  if (ui.tab === GITHUB_TAB && github2)
+    return { ui, state: githubDashboardState(ui, width, banner, projectName, bodyTop2, tabs, maxBodyLines, github2, agents), nodes: [], cursor: ui.cursor };
+  const nodes2 = nodesFor(store, ui, knowledge);
+  const cursor = resolveCursor(ui, nodes2);
   const rows = [];
   let screenRow = 0;
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i];
+  for (let i = 0; i < nodes2.length; i++) {
+    const node = nodes2[i];
     const selected = i === cursor;
     const marker = selected ? "\u203A " : "  ";
     let lines;
@@ -50693,11 +50809,12 @@ function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinit
   const state = {
     tabs,
     rows,
-    emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
-    footer: footerFor(ui, visibleTabs(agents).length, width),
+    emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes2.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
+    footer: footerFor(ui, visibleTabs(agents, github2).length, width),
     // a board_edit refusal, a failed selection write or a degraded store read
     // (ui.notice) is drawn on its own row in the warning colour
     notice: noticeFor(ui, width),
+    strip: githubStrip(github2, width),
     searchLine: searchActive ? `search: ${ui.searchQuery}${ui.stateFilter ? `  state: ${ui.stateFilter}` : ""}` : void 0,
     queueCompleted,
     queueActivity,
@@ -50706,7 +50823,7 @@ function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinit
     bodyTop: bodyTop2,
     scroll
   };
-  return { ui, state, nodes, cursor };
+  return { ui, state, nodes: nodes2, cursor };
 }
 function bodyWindow(state, maxBodyLines) {
   const qc = state.queueCompleted;
@@ -50727,18 +50844,18 @@ function screenLineToRow(state, line1, maxBodyLines = Infinity) {
 }
 function reduce(store, ui, event2, viewport2 = {}, knowledge, roster, resolveHeadSha = defaultResolveHeadSha, frame) {
   const drawn = frame !== void 0 && frame.ui === ui ? frame : void 0;
-  const nodes = drawn ? drawn.nodes : nodesFor(store, ui, knowledge);
-  const cursor = drawn ? drawn.cursor : ui.tab === SYSTEM_TAB ? ui.cursor : resolveCursor(ui, nodes);
+  const nodes2 = drawn ? drawn.nodes : nodesFor(store, ui, knowledge);
+  const cursor = drawn ? drawn.cursor : ui.tab === SYSTEM_TAB ? ui.cursor : resolveCursor(ui, nodes2);
   const base2 = cursor === ui.cursor ? ui : { ...ui, cursor };
-  const out = reduceNodes(store, base2, event2, viewport2, knowledge, roster, resolveHeadSha, nodes, drawn);
+  const out = reduceNodes(store, base2, event2, viewport2, knowledge, roster, resolveHeadSha, nodes2, drawn);
   if (out.ui === base2)
     return { ui, effects: out.effects };
-  return { ui: holdSelection(base2, out.ui, nodes), effects: out.effects };
+  return { ui: holdSelection(base2, out.ui, nodes2), effects: out.effects };
 }
-function holdSelection(prev, next, nodes) {
+function holdSelection(prev, next, nodes2) {
   const fresh = next.tab !== prev.tab || next.searchQuery !== prev.searchQuery || next.stateFilter !== prev.stateFilter;
-  const cardTab = next.tab !== SYSTEM_TAB && next.tab !== AGENTS_TAB;
-  const node = !fresh && cardTab && nodes.length ? nodes[Math.min(next.cursor, nodes.length - 1)] : void 0;
+  const cardTab = next.tab !== SYSTEM_TAB && next.tab !== AGENTS_TAB && next.tab !== GITHUB_TAB;
+  const node = !fresh && cardTab && nodes2.length ? nodes2[Math.min(next.cursor, nodes2.length - 1)] : void 0;
   const selectedId = node ? nodeId(node) : void 0;
   if (selectedId === next.selectedId)
     return next;
@@ -50747,14 +50864,14 @@ function holdSelection(prev, next, nodes) {
   const { selectedId: _dropped, ...rest } = next;
   return rest;
 }
-function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHeadSha, nodes, drawn) {
+function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHeadSha, nodes2, drawn) {
   const maxBodyLines = viewport2.maxBodyLines ?? Infinity;
-  const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
+  const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes2.length - 1)));
   const effects = [];
   const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: void 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
-  const reachable = visibleTabs(viewport2.agents);
+  const reachable = visibleTabs(viewport2.agents, viewport2.github);
   const stepTab = (dir) => reachable[(reachable.indexOf(ui.tab) + dir + reachable.length) % reachable.length] ?? reachable[0];
-  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster, viewport2.agents, viewport2.height);
+  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster, viewport2.agents, viewport2.height, viewport2.github);
   const revealAt = (cursor) => {
     if (!Number.isFinite(maxBodyLines))
       return { ...ui, cursor };
@@ -50778,7 +50895,7 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
   const moveCursor = (delta) => revealAt(clamp(ui.cursor + delta));
   const toggle = (id) => ui.expanded.includes(id) ? ui.expanded.filter((x) => x !== id) : [...ui.expanded, id];
   const activate = (index) => {
-    const node = nodes[index];
+    const node = nodes2[index];
     if (!node)
       return ui;
     if (node.kind === "category") {
@@ -50988,9 +51105,16 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
         case "TAB":
           return { ui: switchTab(stepTab(1)), effects };
         case "UP":
-          return { ui: moveCursor(-1), effects };
-        case "DOWN":
-          return { ui: moveCursor(1), effects };
+        case "DOWN": {
+          if (ui.tab === GITHUB_TAB && viewport2.github) {
+            const st = drawn ? drawn.state : buildSelf(ui);
+            const total = st.rows[0]?.lines.length ?? 0;
+            const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - maxBodyLines) : 0;
+            const scroll = Math.max(0, Math.min((ui.scroll ?? 0) + (event2.name === "UP" ? -1 : 1), max));
+            return { ui: scroll === (ui.scroll ?? 0) ? ui : { ...ui, scroll }, effects };
+          }
+          return { ui: moveCursor(event2.name === "UP" ? -1 : 1), effects };
+        }
         case "ENTER":
           return { ui: activate(clamp(ui.cursor)), effects };
         case "SPACE":
@@ -51014,13 +51138,17 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
         effects.push({ type: "quit" });
         return { ui, effects };
       }
+      if (ch === "r" && viewport2.github) {
+        effects.push({ type: "github_refresh" });
+        return { ui, effects };
+      }
       if (ch === " " && ui.tab === SYSTEM_TAB) {
-        return reduceNodes(store, ui, { kind: "key", name: "ENTER" }, viewport2, knowledge, roster, resolveHeadSha, nodes, drawn);
+        return reduceNodes(store, ui, { kind: "key", name: "ENTER" }, viewport2, knowledge, roster, resolveHeadSha, nodes2, drawn);
       }
       if (ch === " ")
         return { ui: activate(clamp(ui.cursor)), effects };
       if (ch === "e" && ui.tab === TASKS_TAB) {
-        const node = nodes[clamp(ui.cursor)];
+        const node = nodes2[clamp(ui.cursor)];
         if (node && node.kind === "card" && node.card.type !== "objective") {
           const rec = store.get(node.card.id);
           if (!rec || typeof rec.text !== "string")
@@ -52159,7 +52287,7 @@ function openDashboard(storePath2, options = {}) {
   }
   let frame;
   let builds = 0;
-  const vpKey = (vp) => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null]);
+  const vpKey = (vp) => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null, vp.github ? vp.github.version : null]);
   const today = () => (/* @__PURE__ */ new Date()).toDateString();
   function currentFrame(vp) {
     let dataVersion;
@@ -52175,8 +52303,8 @@ function openDashboard(storePath2, options = {}) {
     if (frame && dataVersion !== void 0 && frame.dataVersion === dataVersion && frame.ui === ui && frame.roster === roster && frame.vp === key && frame.day === day)
       return frame.built;
     builds++;
-    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height);
-    frame = { vp: key, day, ui, roster, dataVersion, built };
+    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height, vp.github);
+    frame = { vp: key, viewport: vp, day, ui, roster, dataVersion, built };
     return built;
   }
   let storeCalls = 0;
@@ -52573,6 +52701,8 @@ function openDashboard(storePath2, options = {}) {
         pending = [...pending.filter((p) => p.type !== "select"), e];
       else if (e.type === "board_edit")
         pending.push(e);
+      else if (e.type === "github_refresh")
+        options.onGithubRefresh?.();
     }
     if (!options.deferWrites)
       flush();
@@ -52589,8 +52719,10 @@ function openDashboard(storePath2, options = {}) {
     state: (vp) => currentFrame(vp).state,
     async handle(event2, vp) {
       const prevTab = ui.tab;
-      const drawn = frame && frame.ui === ui && frame.roster === roster && frame.vp === vpKey(vp) ? frame.built : void 0;
-      const result = reduce(store, ui, event2, vp, stores, roster, resolveProjectHeadSha, drawn);
+      const pointer = event2.kind === "click" || event2.kind === "wheel";
+      const hitVp = pointer && frame && frame.ui === ui && frame.roster === roster ? frame.viewport : vp;
+      const drawn = frame && frame.ui === ui && frame.roster === roster && frame.vp === vpKey(hitVp) ? frame.built : void 0;
+      const result = reduce(store, ui, event2, hitVp, stores, roster, resolveProjectHeadSha, drawn);
       ui = result.ui;
       if (!result.effects.some((e) => e.type === "quit"))
         quitArmed = false;
@@ -52611,6 +52743,264 @@ function openDashboard(storePath2, options = {}) {
       } finally {
         stores.close();
       }
+    }
+  };
+}
+
+// packages/tui/dist/github-status.js
+import { execFile as nodeExecFile } from "node:child_process";
+
+// scripts/lib/work-pr.mjs
+import { existsSync as existsSync10, mkdirSync as mkdirSync7, readFileSync as readFileSync13, renameSync as renameSync4, writeFileSync as writeFileSync6 } from "node:fs";
+import { delimiter, dirname as dirname6, join as join17 } from "node:path";
+function parseOriginRepo(url) {
+  const u = String(url ?? "").trim();
+  let host;
+  let path;
+  let m = u.match(/^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/);
+  if (m) [, host, path] = m;
+  else if (m = u.match(/^(?:[^@/:]+@)?([^/:]+):(?!\/)(.+)$/)) [, host, path] = m;
+  else return null;
+  const parts = path.replace(/\/+$/, "").replace(/\.git$/, "").split("/");
+  if (parts.length !== 2) return null;
+  const [owner2, name] = parts;
+  const seg = /^[A-Za-z0-9_.-]+$/;
+  if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(host) || !seg.test(owner2) || !seg.test(name) || [owner2, name].some((part) => part === "." || part === "..")) return null;
+  return { host, repo: `${host}/${owner2}/${name}` };
+}
+var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
+var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
+var prLoopPath = (root) => join17(root, PR_LOOP_REL);
+function readPrLoop(root) {
+  const file = prLoopPath(root);
+  if (!existsSync10(file)) return null;
+  let s2;
+  try {
+    s2 = JSON.parse(readFileSync13(file, "utf8"));
+  } catch (e) {
+    throw new Error(`${PR_LOOP_REL} is not valid JSON (${e.message})`);
+  }
+  const str2 = (v) => typeof v === "string" && v.length > 0;
+  if (!s2 || typeof s2 !== "object" || Array.isArray(s2) || !str2(s2.pr_url) || !Number.isInteger(s2.pr_number) || !str2(s2.repo) || !str2(s2.head_sha) || !str2(s2.armed_at)) {
+    throw new Error(`${PR_LOOP_REL} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s2)}`);
+  }
+  if (s2.status !== "owed" && !PR_LOOP_OUTCOMES.includes(s2.status)) {
+    throw new Error(`${PR_LOOP_REL} has status ${JSON.stringify(s2.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
+  }
+  if (s2.status !== "owed" && !str2(s2.settled_at)) throw new Error(`${PR_LOOP_REL} is settled '${s2.status}' without settled_at`);
+  return s2;
+}
+
+// packages/tui/dist/github-status.js
+var POLL_MS = 6e4;
+var FAST_POLL_MS = 2e4;
+var IDLE_POLL_MS = 3e5;
+var MAX_BACKOFF_MS = 9e5;
+var STALE_MS = 6e5;
+var GH_TIMEOUT_MS = 15e3;
+var COPILOT_LOGIN = /copilot/i;
+var MERGED_CANDIDATES = 20;
+var MERGED_SHOWN = 5;
+var GITHUB_QUERY = `query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    open: pullRequests(states: OPEN, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number title headRefName isDraft mergeStateStatus reviewDecision
+        commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
+        reviewThreads(first: 100) { nodes { isResolved } }
+        latestReviews(first: 20) { nodes { author { __typename login } commit { oid } } }
+        reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on Bot { login } ... on User { login } } } }
+      }
+    }
+    merged: pullRequests(states: MERGED, first: ${MERGED_CANDIDATES}, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes { number title mergedAt }
+    }
+  }
+}`;
+var obj = (v) => v && typeof v === "object" && !Array.isArray(v) ? v : {};
+var nodes = (v) => {
+  const n = obj(v).nodes;
+  return Array.isArray(n) ? n.map(obj) : [];
+};
+var str = (v) => typeof v === "string" ? v : "";
+function checksOf(rollup) {
+  const state = str(obj(rollup).state);
+  if (!state)
+    return "none";
+  if (state === "SUCCESS")
+    return "pass";
+  if (state === "FAILURE" || state === "ERROR")
+    return "fail";
+  return "pending";
+}
+var isCopilot = (actor) => {
+  const a = obj(actor);
+  return a.__typename === "Bot" && COPILOT_LOGIN.test(str(a.login));
+};
+function copilotOf(pr, headOid) {
+  if (nodes(pr.reviewRequests).some((r) => isCopilot(r.requestedReviewer)))
+    return "requested";
+  const reviews = nodes(pr.latestReviews).filter((r) => isCopilot(r.author));
+  if (headOid && reviews.some((r) => str(obj(r.commit).oid) === headOid))
+    return "reviewed";
+  return reviews.length ? "stale" : "none";
+}
+function deriveGithub(response) {
+  const root = obj(response);
+  const repo = obj(root.data).repository;
+  if (!repo || typeof repo !== "object") {
+    const errors = Array.isArray(root.errors) ? root.errors.map((e) => str(obj(e).message)).filter(Boolean) : [];
+    throw new Error(errors[0] ?? "the response has no repository");
+  }
+  const open2 = nodes(obj(repo).open).map((pr) => {
+    const head = obj(nodes(pr.commits)[0]?.commit);
+    const headOid = str(head.oid);
+    return {
+      number: Number(pr.number),
+      title: str(pr.title),
+      branch: str(pr.headRefName),
+      draft: pr.isDraft === true,
+      merge: str(pr.mergeStateStatus),
+      review: str(pr.reviewDecision),
+      checks: checksOf(head.statusCheckRollup),
+      unresolved: nodes(pr.reviewThreads).filter((t) => t.isResolved !== true).length,
+      copilot: copilotOf(pr, headOid)
+    };
+  });
+  const merged = nodes(obj(repo).merged).map((pr) => ({ number: Number(pr.number), title: str(pr.title), mergedAt: str(pr.mergedAt) })).sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt) || b.number - a.number).slice(0, MERGED_SHOWN);
+  return { open: open2, merged };
+}
+function classifyGhFailure(error, stderr, repo) {
+  const text = `${stderr}
+${error.message ?? ""}`;
+  if (/gh auth login|not logged in|authentication required|HTTP 401|bad credentials/i.test(text))
+    return { failure: "not-logged-in", reason: "gh not logged in" };
+  if (error.killed || /could not resolve host|dial tcp|i\/o timeout|network is unreachable|connection refused|ENOTFOUND|ETIMEDOUT|ECONNRESET|EAI_AGAIN/i.test(text))
+    return { failure: "offline", reason: "gh offline" };
+  if (/Could not resolve to a Repository|HTTP 403|HTTP 404|Resource not accessible|SAML/i.test(text))
+    return { failure: "no-access", reason: `gh: no access to ${repo}` };
+  const first = text.split("\n").map((l) => l.trim()).find(Boolean) ?? "unknown error";
+  return { failure: "error", reason: `gh failed: ${first}` };
+}
+function nextPollDelay(snapshot, failures) {
+  if (snapshot.state === "hidden")
+    return snapshot.reason === "gh not installed" ? MAX_BACKOFF_MS : IDLE_POLL_MS;
+  if (snapshot.state === "failed") {
+    if (snapshot.failure === "not-logged-in")
+      return MAX_BACKOFF_MS;
+    return Math.min(POLL_MS * 2 ** Math.max(1, failures), MAX_BACKOFF_MS);
+  }
+  const open2 = snapshot.data?.open ?? [];
+  if (open2.length === 0)
+    return IDLE_POLL_MS;
+  if (open2.some((p) => p.checks === "pending" || p.copilot === "requested"))
+    return FAST_POLL_MS;
+  return POLL_MS;
+}
+function loopOf(readLoop, root) {
+  try {
+    const s2 = obj(readLoop(root));
+    if (!Object.keys(s2).length)
+      return {};
+    return { loop: { status: s2.status, pr: Number(s2.pr_number) } };
+  } catch (err) {
+    return { loopError: err.message };
+  }
+}
+function createGithubPoller(options) {
+  const run = options.execFile ?? nodeExecFile;
+  const readLoop = options.readLoop ?? readPrLoop;
+  const clock = options.clock ?? Date.now;
+  const env = { ...options.env ?? process.env, GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" };
+  const execOpts = { cwd: options.root, timeout: GH_TIMEOUT_MS, env, maxBuffer: 4 * 1024 * 1024, windowsHide: true };
+  let current = { version: 0, state: "loading" };
+  let busy = false;
+  let nextAt = 0;
+  let failures = 0;
+  let lastGoodAt = 0;
+  let child;
+  let closed = false;
+  function spawn(file, args2, done) {
+    let answered = false;
+    const proc = run(file, args2, execOpts, (err, stdout, stderr) => {
+      answered = true;
+      child = void 0;
+      if (!closed)
+        done(err, stdout, stderr);
+    });
+    if (!answered && !closed && proc && typeof proc === "object")
+      child = proc;
+  }
+  function publish(next) {
+    const { version: _v, ...prev } = current;
+    if (JSON.stringify(prev) !== JSON.stringify(next))
+      current = { ...next, version: current.version + 1 };
+  }
+  function settle(next) {
+    failures = next.state === "failed" ? failures + 1 : 0;
+    publish(next);
+    nextAt = clock() + nextPollDelay(current, failures);
+    busy = false;
+  }
+  function poll() {
+    busy = true;
+    spawn("git", ["remote", "get-url", "origin"], (gitErr, gitOut) => {
+      const origin = gitErr ? null : parseOriginRepo(gitOut);
+      if (!origin)
+        return settle({ state: "hidden", reason: gitErr ? "no origin remote" : "origin is not a GitHub repository" });
+      if (origin.host !== "github.com")
+        return settle({ state: "hidden", reason: `origin is on ${origin.host}, not github.com` });
+      const [, owner2, name] = origin.repo.split("/");
+      const repo = `${owner2}/${name}`;
+      const args2 = ["api", "graphql", "-f", `query=${GITHUB_QUERY}`, "-f", `owner=${owner2}`, "-f", `name=${name}`];
+      spawn("gh", args2, (ghErr, ghOut, ghStderr) => {
+        const at = clock();
+        const loop = loopOf(readLoop, options.root);
+        if (ghErr && ghErr.code === "ENOENT")
+          return settle({ state: "hidden", reason: "gh not installed" });
+        const keep = current.data && at - lastGoodAt <= STALE_MS ? { data: current.data, asOf: lastGoodAt } : {};
+        if (ghErr)
+          return settle({ state: "failed", repo, ...classifyGhFailure(ghErr, String(ghStderr ?? ""), repo), ...keep, ...loop });
+        let derived;
+        try {
+          derived = deriveGithub(JSON.parse(String(ghOut)));
+        } catch (err) {
+          return settle({ state: "failed", repo, failure: "error", reason: `gh failed: ${err.message}`, ...keep, ...loop });
+        }
+        lastGoodAt = at;
+        settle({ state: "ok", repo, data: derived, ...loop });
+      });
+    });
+  }
+  return {
+    snapshot: () => current,
+    tick(now) {
+      if (closed)
+        return false;
+      if (current.state === "failed" && current.data && now - lastGoodAt > STALE_MS) {
+        const { version: _v, data: _d, asOf: _a, ...rest } = current;
+        publish(rest);
+      }
+      if (busy || now < nextAt)
+        return false;
+      poll();
+      return true;
+    },
+    refresh() {
+      if (closed || busy)
+        return false;
+      poll();
+      return true;
+    },
+    inFlight: () => busy,
+    close() {
+      if (closed)
+        return;
+      closed = true;
+      busy = false;
+      const proc = child;
+      child = void 0;
+      proc?.kill?.();
     }
   };
 }
@@ -52781,7 +53171,8 @@ function draw(screen2, state, opts = {}) {
   if (state.searchLine) {
     screen2.put({ x: 0, y: top + 2, attr: t.search }, state.searchLine);
   }
-  const lastBodyLine = screen2.height - 3;
+  const stripRows = state.strip ? 1 : 0;
+  const lastBodyLine = screen2.height - 3 - stripRows;
   const qc = state.queueCompleted;
   const lastRowLine = qc ? Math.min(lastBodyLine, state.bodyTop + (qc.pendingLines ?? qc.startRow) - 1) : lastBodyLine;
   let y = state.bodyTop;
@@ -52832,7 +53223,11 @@ function draw(screen2, state, opts = {}) {
       screen2.put({ x: p.x, y: top2 + p.y, attr: t.map(p.attr) }, p.text);
   }
   if (state.notice)
-    screen2.put({ x: 0, y: screen2.height - 2, attr: t.warn({ ...t.text, bold: true }) }, state.notice);
+    screen2.put({ x: 0, y: screen2.height - 2 - stripRows, attr: t.warn({ ...t.text, bold: true }) }, state.notice);
+  if (state.strip) {
+    const base2 = state.strip.dim ? t.muted : t.text;
+    screen2.put({ x: 0, y: screen2.height - 2, attr: state.strip.text.startsWith("\u26A0") ? t.warn(base2) : base2 }, state.strip.text);
+  }
   screen2.put({ x: 0, y: screen2.height - 1, attr: t.muted }, state.footer);
   screen2.draw({ delta: true });
 }
@@ -52934,17 +53329,17 @@ function mouseToEvent(name, data) {
 }
 
 // packages/tui/dist/subagents.js
-import { existsSync as existsSync12, readFileSync as readFileSync14, readdirSync as readdirSync7, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync13, readFileSync as readFileSync15, readdirSync as readdirSync7, statSync as statSync6 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { join as join18 } from "node:path";
+import { join as join19 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync7, readFileSync as readFileSync13, writeFileSync as writeFileSync6, rmSync as rmSync4, rmdirSync, renameSync as renameSync4, existsSync as existsSync10, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync5, chmodSync } from "node:fs";
-import { join as join17, resolve as resolve8, dirname as dirname6, isAbsolute as isAbsolute2 } from "node:path";
+import { mkdirSync as mkdirSync8, readFileSync as readFileSync14, writeFileSync as writeFileSync7, rmSync as rmSync4, rmdirSync, renameSync as renameSync5, existsSync as existsSync11, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync5, chmodSync } from "node:fs";
+import { join as join18, resolve as resolve8, dirname as dirname7, isAbsolute as isAbsolute2 } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash3 } from "node:crypto";
 function registerPath(root) {
-  return join17(root, ".sterling", "transient", "dispatch-register.json");
+  return join18(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -52966,10 +53361,10 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync10(p)) return { availability: "absent", arr: [] };
+  if (!existsSync11(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
-    raw = readFileSync13(p, "utf8");
+    raw = readFileSync14(p, "utf8");
   } catch {
     return { availability: "corrupt", arr: [] };
   }
@@ -52998,7 +53393,7 @@ var MAX_PROMPT_BYTES = 512 * 1024;
 var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 function dispatchStateDir(root) {
-  return join17(root, ".sterling", "transient", "dispatch-state");
+  return join18(root, ".sterling", "transient", "dispatch-state");
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
@@ -53006,24 +53401,24 @@ function dispatchStateKey(toolUseId) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync11, statSync as statSync5, readdirSync as readdirSync6 } from "node:fs";
+import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync12, statSync as statSync5, readdirSync as readdirSync6 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
   const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
-  if (existsSync11(flat)) return flat;
+  if (existsSync12(flat)) return flat;
   const wfRoot = `${sessionDir}/subagents/workflows`;
   try {
     for (const d of readdirSync6(wfRoot)) {
       const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
-      if (existsSync11(candidate)) return candidate;
+      if (existsSync12(candidate)) return candidate;
     }
   } catch {
   }
   return flat;
 }
 function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync11(path)) return null;
+  if (!existsSync12(path)) return null;
   const fd = openSync3(path, "r");
   try {
     const size = fstatSync(fd).size;
@@ -55433,7 +55828,7 @@ function roundOf(e) {
 }
 function readCurrentSessionId(projectRoot) {
   try {
-    const parsed = JSON.parse(readFileSync14(join18(projectRoot, ".sterling", "transient", "session.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync15(join19(projectRoot, ".sterling", "transient", "session.json"), "utf8"));
     return typeof parsed?.session_id === "string" && parsed.session_id ? parsed.session_id : null;
   } catch {
     return null;
@@ -55518,15 +55913,15 @@ function lastTurnEntry(tail) {
 function readDispatchDescription(projectRoot, toolUseId) {
   const dir = dispatchStateDir(projectRoot);
   const key = dispatchStateKey(toolUseId);
-  let file = join18(dir, `live-${key}.json`);
+  let file = join19(dir, `live-${key}.json`);
   try {
-    if (!existsSync12(file)) {
+    if (!existsSync13(file)) {
       const done = readdirSync7(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
       if (!done)
         return null;
-      file = join18(dir, done);
+      file = join19(dir, done);
     }
-    const rec = JSON.parse(readFileSync14(file, "utf8"));
+    const rec = JSON.parse(readFileSync15(file, "utf8"));
     return rec.tool_use_id === toolUseId && typeof rec.description === "string" && rec.description ? rec.description : null;
   } catch {
     return null;
@@ -55534,7 +55929,7 @@ function readDispatchDescription(projectRoot, toolUseId) {
 }
 function readAgentModel(projectRoot, type) {
   try {
-    const content = readFileSync14(join18(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
+    const content = readFileSync15(join19(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
     const model = content.match(/^---\n([\s\S]*?)\n---\n/)?.[1]?.match(/^model:\s*(\S+)/m)?.[1];
     if (model)
       return model;
@@ -55544,7 +55939,7 @@ function readAgentModel(projectRoot, type) {
   if (!key)
     return null;
   try {
-    const raw = JSON.parse(readFileSync14(join18(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync15(join19(projectRoot, ".sterling", "config.json"), "utf8"));
     const model = raw.models?.[key]?.model;
     return typeof model === "string" && model ? model : null;
   } catch {
@@ -55552,9 +55947,9 @@ function readAgentModel(projectRoot, type) {
   }
 }
 function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir = defaultClaudeConfigDir()) {
-  const projects = join18(claudeConfigDir, "projects");
+  const projects = join19(claudeConfigDir, "projects");
   const slug = projectRoot.replace(/[^A-Za-z0-9]/g, "-");
-  const sessionUnder = (dir2) => existsSync12(join18(projects, dir2, sessionId));
+  const sessionUnder = (dir2) => existsSync13(join19(projects, dir2, sessionId));
   let dir = sessionUnder(slug) ? slug : void 0;
   if (!dir) {
     let all;
@@ -55565,10 +55960,10 @@ function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir
     }
     dir = all.find((d) => d !== slug && sessionUnder(d));
   }
-  return dir ? deriveAgentTranscript(join18(projects, dir, `${sessionId}.jsonl`), agentId) : null;
+  return dir ? deriveAgentTranscript(join19(projects, dir, `${sessionId}.jsonl`), agentId) : null;
 }
 function defaultClaudeConfigDir() {
-  return process.env.CLAUDE_CONFIG_DIR || join18(homedir6(), ".claude");
+  return process.env.CLAUDE_CONFIG_DIR || join19(homedir6(), ".claude");
 }
 function readContextUsage(path) {
   try {
@@ -55590,7 +55985,7 @@ function contextPercent(tokens, window2) {
 }
 function readSharedWindows() {
   try {
-    const raw = JSON.parse(readFileSync14(join18(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
+    const raw = JSON.parse(readFileSync15(join19(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
     return parseConfig({ context_watch: { windows: raw.windows } }).context_watch.windows;
   } catch {
     return null;
@@ -55598,7 +55993,7 @@ function readSharedWindows() {
 }
 function readProjectWindows(projectRoot) {
   try {
-    const raw = JSON.parse(readFileSync14(join18(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync15(join19(projectRoot, ".sterling", "config.json"), "utf8"));
     return parseConfig(raw).context_watch.windows;
   } catch {
     return {};
@@ -55814,8 +56209,8 @@ function composeCards(view, width, maxHeight, tick, neonEdge) {
 }
 
 // packages/tui/dist/lock.js
-import { mkdirSync as mkdirSync8, readFileSync as readFileSync15, rmSync as rmSync5, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname7 } from "node:path";
+import { mkdirSync as mkdirSync9, readFileSync as readFileSync16, rmSync as rmSync5, writeFileSync as writeFileSync8 } from "node:fs";
+import { dirname as dirname8 } from "node:path";
 function pidIsAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0)
     return false;
@@ -55828,7 +56223,7 @@ function pidIsAlive(pid) {
 }
 function procStartTime(pid) {
   try {
-    const stat = readFileSync15(`/proc/${pid}/stat`, "utf8");
+    const stat = readFileSync16(`/proc/${pid}/stat`, "utf8");
     const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
     return fields[19] ?? null;
   } catch {
@@ -55841,12 +56236,12 @@ function ownerStillHolds(storedToken, currentToken) {
   return storedToken === currentToken;
 }
 function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = procStartTime) {
-  mkdirSync8(dirname7(lockPath2), { recursive: true });
+  mkdirSync9(dirname8(lockPath2), { recursive: true });
   const token = startTimeOf(pid);
   const content = token ? `${pid} ${token}` : String(pid);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      writeFileSync7(lockPath2, content, { flag: "wx" });
+      writeFileSync8(lockPath2, content, { flag: "wx" });
       return null;
     } catch (e) {
       if (e.code !== "EEXIST")
@@ -55854,7 +56249,7 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = proc
     }
     let parts;
     try {
-      parts = readFileSync15(lockPath2, "utf8").trim().split(/\s+/);
+      parts = readFileSync16(lockPath2, "utf8").trim().split(/\s+/);
     } catch {
       continue;
     }
@@ -55865,19 +56260,19 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = proc
     if (isAlive(owner2) && ownerStillHolds(parts[1], startTimeOf(owner2)))
       return owner2;
     try {
-      const cur = readFileSync15(lockPath2, "utf8").trim().split(/\s+/)[0];
+      const cur = readFileSync16(lockPath2, "utf8").trim().split(/\s+/)[0];
       if (cur === ownerRaw)
         rmSync5(lockPath2, { force: true });
     } catch {
     }
   }
   try {
-    const owner2 = Number(readFileSync15(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    const owner2 = Number(readFileSync16(lockPath2, "utf8").trim().split(/\s+/)[0]);
     if (owner2 !== pid && isAlive(owner2))
       return owner2;
   } catch {
     try {
-      writeFileSync7(lockPath2, content, { flag: "wx" });
+      writeFileSync8(lockPath2, content, { flag: "wx" });
     } catch {
     }
   }
@@ -55885,7 +56280,7 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive, startTimeOf = proc
 }
 function releaseTuiLock(lockPath2, pid) {
   try {
-    const owner2 = Number(readFileSync15(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    const owner2 = Number(readFileSync16(lockPath2, "utf8").trim().split(/\s+/)[0]);
     if (owner2 === pid)
       rmSync5(lockPath2, { force: true });
   } catch {
@@ -55918,17 +56313,18 @@ try {
   console.error(`sterling-tui: ${err.message}`);
   process.exit(2);
 }
-var lockPath = join19(dirname8(storePath), "transient", "tui.lock");
+var lockPath = join20(dirname9(storePath), "transient", "tui.lock");
 var owner = acquireTuiLock(lockPath, process.pid);
 if (owner !== null) {
   console.error(`sterling-tui: already running (pid ${owner}) for this store \u2014 exiting politely (\xA711)`);
   process.exit(0);
 }
 var profileEnv = process.env.STERLING_TUI_PROFILE;
-var profilePath = !profileEnv ? void 0 : profileEnv === "1" ? join19(dirname8(storePath), "transient", "tui-profile.log") : profileEnv;
-var ctl = openDashboard(storePath, { deferWrites: true, profile: profilePath !== void 0 });
+var profilePath = !profileEnv ? void 0 : profileEnv === "1" ? join20(dirname9(storePath), "transient", "tui-profile.log") : profileEnv;
+var github = createGithubPoller({ root: dirname9(dirname9(storePath)) });
+var ctl = openDashboard(storePath, { deferWrites: true, profile: profilePath !== void 0, onGithubRefresh: () => github.refresh() });
 if (profilePath) {
-  mkdirSync9(dirname8(profilePath), { recursive: true });
+  mkdirSync10(dirname9(profilePath), { recursive: true });
   appendFileSync(profilePath, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), start: true, pid: process.pid, changeDetection: ctl.stats().changeDetection }) + "\n");
 }
 function profiled(kind, work, extra = () => ({})) {
@@ -55944,19 +56340,19 @@ function profiled(kind, work, extra = () => ({})) {
 }
 var showBanner = process.env.STERLING_NO_BANNER !== "1";
 var screen = new termkit.default.ScreenBuffer({ dst: term });
-var subagents = createSubagentTracker(dirname8(dirname8(storePath)));
+var subagents = createSubagentTracker(dirname9(dirname9(storePath)));
 var shownView = { availability: "absent", active: 0, agents: [] };
 var bodyTop = 0;
 function fullBodyLines() {
-  return visibleBodyLines(term.height, bannerLines(term.width, showBanner, term.height).length);
+  return visibleBodyLines(term.height, bannerLines(term.width, showBanner, term.height).length, githubStripRows(github.snapshot()));
 }
 function subagentBlock(tick) {
   if (ctl.ui().tab !== AGENTS_TAB)
     return { height: 0, puts: [], pixels: [] };
-  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2, tick, { neonEdge: theme.level !== "plain" });
+  return composeSubagentBlock(shownView, term.width, term.height - bodyTop - 2 - githubStripRows(github.snapshot()), tick, { neonEdge: theme.level !== "plain" });
 }
 function viewport() {
-  return { width: term.width, height: term.height, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active, quiet: shownView.quiet ?? 0 } };
+  return { width: term.width, height: term.height, maxBodyLines: fullBodyLines(), showBanner, agents: { running: shownView.active, quiet: shownView.quiet ?? 0 }, github: github.snapshot() };
 }
 var painted;
 var pixelLayout = "";
@@ -56056,6 +56452,10 @@ function restoreTerminal() {
     return;
   terminalRestored = true;
   try {
+    github.close();
+  } catch {
+  }
+  try {
     term.grabInput(false);
   } catch {
   }
@@ -56100,6 +56500,7 @@ process.on("unhandledRejection", (err) => shutdown(1, `sterling-tui: fatal (unha
 for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) {
   process.on(signal, () => shutdown(code, `sterling-tui: ${signal} \u2014 exiting`));
 }
+process.on("exit", () => github.close());
 term.fullscreen(true);
 term.hideCursor();
 term.grabInput({ mouse: "button" });
@@ -56111,10 +56512,12 @@ term.on("resize", () => serial(() => {
   redraw();
 }));
 setInterval(() => serial(() => {
+  github.tick(Date.now());
   profiled("tick", () => redraw(true));
   if (ctl.pending() > 0)
     scheduleFlush();
 }), 1e3);
+github.tick(Date.now());
 redraw();
 /*! Bundled license information:
 

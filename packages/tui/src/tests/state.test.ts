@@ -9,8 +9,8 @@ import { todoCards } from '../viewmodel.js';
 import * as viewmodel from '../viewmodel.js';
 import { buildDashboardState, initialUi, reduce, screenLineToRow, visibleBodyLines, wrapText, AGENTS_TAB, QUEUE_TAB, SYSTEM_TAB, TABS, type UiState, type DashboardState } from '../state.js';
 
-/** The tabs a host that does not paint the Agents cards reaches (the default viewport). */
-const HOST_TABS = TABS.filter((t) => t !== 'Agents');
+/** The tabs a host that neither paints the Agents cards nor polls GitHub reaches (the default viewport). */
+const HOST_TABS = TABS.filter((t) => t !== 'Agents' && t !== 'GitHub');
 import * as stateMod from '../state.js';
 import { bannerLines, ART_WIDTH, WORDMARK, BANNER_ROWS, FULL_SCENE_ROWS, COMPACT_SCENE_ROWS, COMPACT_BELOW_HEIGHT } from '../banner.js';
 import { keyToEvent, mouseToEvent, draw } from '../render.js';

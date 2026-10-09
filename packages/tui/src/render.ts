@@ -74,7 +74,10 @@ export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOption
     // the spacer line (row top+2) doubles as the search bar while a query/input is live
     screen.put({ x: 0, y: top + 2, attr: t.search }, state.searchLine);
   }
-  const lastBodyLine = screen.height - 3; // reserve the notice row + footer
+  // reserve the notice row + footer, and the GitHub strip row while it shows
+  // (visibleBodyLines takes the same stripRows, so clicks match)
+  const stripRows = state.strip ? 1 : 0;
+  const lastBodyLine = screen.height - 3 - stripRows;
   // the Queue tab's pending list stops at its window above the divider;
   // screenLineToRow stops at the same line
   const qc = state.queueCompleted;
@@ -127,8 +130,13 @@ export function draw(screen: ScreenLike, state: DashboardState, opts: DrawOption
     const top = state.bodyTop;
     for (const p of opts.block.puts) screen.put({ x: p.x, y: top + p.y, attr: t.map(p.attr) }, p.text);
   }
-  // the notice and the footer are pinned to the last two rows, below every list
-  if (state.notice) screen.put({ x: 0, y: screen.height - 2, attr: t.warn({ ...t.text, bold: true }) }, state.notice);
+  // the notice, the GitHub strip and the footer are pinned to the last rows,
+  // below every list: notice, then strip, then footer
+  if (state.notice) screen.put({ x: 0, y: screen.height - 2 - stripRows, attr: t.warn({ ...t.text, bold: true }) }, state.notice);
+  if (state.strip) {
+    const base = state.strip.dim ? t.muted : t.text;
+    screen.put({ x: 0, y: screen.height - 2, attr: state.strip.text.startsWith('⚠') ? t.warn(base) : base }, state.strip.text);
+  }
   screen.put({ x: 0, y: screen.height - 1, attr: t.muted }, state.footer);
   screen.draw({ delta: true });
 }

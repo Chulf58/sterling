@@ -8,6 +8,7 @@ import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
 import { AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
+import type { GithubPr, GithubSnapshot } from './github-status.js';
 
 /** 40-hex commit sha — mirrors mcp-server's MEASURED_AT_HEAD_RE
  *  (packages/mcp-server/src/tools.ts:1008, decision
@@ -41,7 +42,7 @@ function defaultResolveHeadSha(): string | undefined {
   }
 }
 
-export const TABS = ['Tasks', 'Knowledge', 'Queue', 'Agents', 'System'] as const;
+export const TABS = ['Tasks', 'Knowledge', 'Queue', 'Agents', 'System', 'GitHub'] as const;
 /** the board (user-source todos) — the tab boardEdit's 'e' key operates on */
 export const TASKS_TAB = TABS.indexOf('Tasks');
 /** the knowledge explorer (formerly 'Articles'): a category→source→record tree */
@@ -55,6 +56,11 @@ export const AGENTS_TAB = TABS.indexOf('Agents');
 /** the System tab (run r-f9a7): the agent roster with drift + catalog status,
  *  and the inline model/effort swap selector — the TUI's first write surface */
 export const SYSTEM_TAB = TABS.indexOf('System');
+/** the GitHub tab (board 87bca3f8): open PRs, the PR loop and recent merges,
+ *  from the host's GitHub poller snapshot (Viewport.github). A host without a
+ *  poller (the OpenCode dashboard) leaves it unset, and the tab is neither
+ *  shown nor reachable. */
+export const GITHUB_TAB = TABS.indexOf('GitHub');
 
 /** The Knowledge tab's feature-article state filter, in cycle order. 'all' is the
  *  unfiltered position (UiState.stateFilter absent); the rest mirror the state
@@ -349,9 +355,9 @@ export interface AgentsTab {
   quiet?: number;
 }
 
-/** The tab indices a host can reach: every tab, minus Agents unless the host enabled it. */
-export function visibleTabs(agents?: AgentsTab): number[] {
-  return TABS.map((_, i) => i).filter((i) => i !== AGENTS_TAB || agents !== undefined);
+/** The tab indices a host can reach: every tab, minus Agents and GitHub unless the host enabled them. */
+export function visibleTabs(agents?: AgentsTab, github?: GithubSnapshot): number[] {
+  return TABS.map((_, i) => i).filter((i) => (i !== AGENTS_TAB || agents !== undefined) && (i !== GITHUB_TAB || github !== undefined));
 }
 
 export interface Viewport {
@@ -367,6 +373,10 @@ export interface Viewport {
   /** pane rows: under COMPACT_BELOW_HEIGHT the banner is the 4-row scene, so
    *  bodyTop and the tab-bar click row move with it. Absent → unbounded. */
   height?: number;
+  /** set by a host that polls GitHub (github-status.ts): the poller's latest
+   *  snapshot. It enables the GitHub tab and the strip row; the state layer
+   *  only reads it and never runs gh. */
+  github?: GithubSnapshot;
 }
 
 export interface DashboardState {
@@ -378,8 +388,13 @@ export interface DashboardState {
    *  renderer pins it to the last row */
   footer: string;
   /** a warning ('⚠ …', clipped to the pane) drawn on its own row just above
-   *  the footer in the warning colour; absent when there is none */
+   *  the footer (above the strip when there is one) in the warning colour;
+   *  absent when there is none */
   notice?: string;
+  /** the GitHub strip row (githubStrip), pinned just above the footer; dim for
+   *  a failure or stale data. Absent when there is nothing to show, and then
+   *  the row is not reserved. */
+  strip?: { text: string; dim: boolean };
   /** Knowledge-tab search bar (always-visible field), shown on the spacer line */
   searchLine?: string;
   /** queue tab only: the completed (drain log) section in the lower half —
@@ -434,6 +449,10 @@ export interface SelectEffect {
 }
 export interface QuitEffect {
   type: 'quit';
+}
+/** The `r` key on a host with a GitHub poller: poll now. */
+export interface GithubRefreshEffect {
+  type: 'github_refresh';
 }
 /** The System-tab commit effect (run r-f9a7): a VALUE the impure main.ts loop
  *  executes (config.models write → setInstalledModelEffort projection → swap
@@ -524,7 +543,8 @@ export type Effect =
   | TddToggleEffect
   | ModeToggleEffect
   | HandoffToggleEffect
-  | BoardEditEffect;
+  | BoardEditEffect
+  | GithubRefreshEffect;
 
 export type UiEvent =
   | { kind: 'key'; name: 'LEFT' | 'RIGHT' | 'TAB' | 'UP' | 'DOWN' | 'ENTER' | 'SPACE' | 'QUIT' | 'ESCAPE' | 'BACKSPACE' | 'STATE_FILTER' }
@@ -767,13 +787,14 @@ const CHROME_BELOW_BANNER = 3;
 
 /**
  * Body lines visible at a given terminal height: the body spans screen lines
- * bodyTop+1 .. height-2 (bottom two reserved for the blank spacer + footer).
- * bannerHeight shrinks the body region by the banner's rows. Must stay in sync
- * with the draw() clamp in render.ts — rows the renderer clips must not be
- * clickable.
+ * bodyTop+1 .. height-2 (bottom two reserved for the notice row + footer).
+ * bannerHeight shrinks the body region by the banner's rows, and stripRows
+ * (githubStripRows: 1 while the GitHub strip shows) by the strip's row above
+ * the footer. Must stay in sync with the draw() clamp in render.ts — rows the
+ * renderer clips must not be clickable.
  */
-export function visibleBodyLines(height: number, bannerHeight = 0): number {
-  return Math.max(0, height - bannerHeight - CHROME_BELOW_BANNER - 2);
+export function visibleBodyLines(height: number, bannerHeight = 0, stripRows = 0): number {
+  return Math.max(0, height - bannerHeight - CHROME_BELOW_BANNER - 2 - stripRows);
 }
 
 /** Word-wrap to width columns, preserving explicit newlines; words longer
@@ -1051,7 +1072,7 @@ function storageRow(snap: AgentRosterSnapshot, width: number): SystemRow {
  * widths from the bare TABS constant would drift the moment a count appears —
  * which is why this returns labels rather than just a number.
  */
-function tabsFor(store: SterlingStore, activeTab: number, agents?: AgentsTab): { label: string; active: boolean; index: number }[] {
+function tabsFor(store: SterlingStore, activeTab: number, agents?: AgentsTab, github?: GithubSnapshot): { label: string; active: boolean; index: number }[] {
   let taskCount: number | null = null;
   try {
     taskCount = store.count({ types: ['todo'], source: 'user' });
@@ -1064,7 +1085,7 @@ function tabsFor(store: SterlingStore, activeTab: number, agents?: AgentsTab): {
     // store in the same buildDashboardState call and would throw first.
     taskCount = null;
   }
-  return visibleTabs(agents).map((i) => {
+  return visibleTabs(agents, github).map((i) => {
     const label: string = TABS[i]!;
     return {
       label: label === 'Tasks' && taskCount !== null ? `${label} (${taskCount})` : label === 'Agents' && agents ? `${label} (${agents.running} running${agents.quiet ? ` · ${agents.quiet} quiet` : ''})` : label,
@@ -1138,12 +1159,140 @@ function footerFor(ui: UiState, tabCount: number, width: number): string {
   else if (ui.tab === KNOWLEDGE_TAB) text = 'type to search · esc clear · ^f state · ←→ tabs';
   else if (ui.tab === QUEUE_TAB) text = `${tabs} · ↑↓ pending · wheel scrolls · q quit`;
   else if (ui.tab === AGENTS_TAB) text = `←/→ or ${tabs} · q quit`;
+  else if (ui.tab === GITHUB_TAB) text = `${tabs} · ↑↓ scroll · r refresh · q quit`;
   else text = `${tabs} · enter change · esc cancel · q quit`;
   return clipEllipsis(text, width);
 }
 
 /** The one notice row: the transient ui.notice as a '⚠ ' warning, clipped. */
 const noticeFor = (ui: UiState, width: number): string | undefined => (ui.notice ? clipEllipsis(`⚠ ${ui.notice}`, width) : undefined);
+
+// ---------------------------------------------------------------------------
+// GitHub status (board 87bca3f8): the strip row and the GitHub tab, derived
+// from the host poller's snapshot (github-status.ts). Nothing here runs gh.
+// ---------------------------------------------------------------------------
+
+/** HH:MM of a poll, for "as of" labels. */
+const clockOf = (ms: number): string => new Date(ms).toTimeString().slice(0, 5);
+
+const CHECKS_WORD: Readonly<Record<GithubPr['checks'], string>> = { pass: 'checks ✓', fail: 'checks ✗', pending: 'checks …', none: '' };
+const MERGE_WORD: Readonly<Record<string, string>> = { CLEAN: 'mergeable', HAS_HOOKS: 'mergeable', UNSTABLE: 'unstable', BLOCKED: 'blocked', BEHIND: 'behind', DIRTY: 'conflicts' };
+
+/** One PR as short strip parts: number, draft, checks, merge, Copilot, threads. */
+function prParts(pr: GithubPr): string[] {
+  return [
+    `#${pr.number}`,
+    pr.draft ? 'draft' : '',
+    CHECKS_WORD[pr.checks],
+    pr.draft ? '' : MERGE_WORD[pr.merge] ?? '',
+    pr.copilot === 'none' ? '' : `copilot ${pr.copilot}`,
+    pr.unresolved > 0 ? `${pr.unresolved} unresolved` : '',
+  ].filter(Boolean);
+}
+
+/**
+ * The strip row, or undefined when there is nothing to show: no host poller,
+ * still loading, hidden (no gh, no origin, not on github.com), or a project
+ * with no open PR and no owed review loop (a hobby project). A failed poll
+ * shows its one dim reason ('gh not logged in'); within STALE_MS of the last
+ * good poll it shows that poll's data instead, dim, marked "as of HH:MM". The
+ * PR named first is the loop's PR when it is open, else the most recently
+ * updated one.
+ */
+export function githubStrip(github: GithubSnapshot | undefined, width = Infinity): { text: string; dim: boolean } | undefined {
+  if (!github || github.state === 'loading' || github.state === 'hidden') return undefined;
+  const clip = (text: string): string => clipEllipsis(text, width);
+  if (github.loopError) return { text: clip(`⚠ pr-loop.json unreadable: ${github.loopError}`), dim: false };
+  const data = github.data;
+  if (github.state === 'failed' && !data) return { text: clip(github.reason ?? 'gh failed'), dim: true };
+  const open = data?.open ?? [];
+  const loop = github.loop;
+  const owed = loop?.status === 'owed' ? loop : undefined;
+  if (open.length === 0 && !owed) return undefined;
+  const parts: string[] = [];
+  if (github.state === 'failed' && github.asOf !== undefined) parts.push(`as of ${clockOf(github.asOf)}`);
+  const lead = open.find((p) => p.number === loop?.pr) ?? open[0];
+  if (lead) {
+    parts.push(prParts(lead).join(' '));
+    if (loop && loop.pr === lead.number) parts.push(`loop ${loop.status}`);
+  }
+  if (owed && owed.pr !== lead?.number) parts.push(`loop owed #${owed.pr}${open.some((p) => p.number === owed.pr) ? '' : ' (not open)'}`);
+  if (open.length > 1) parts.push(`+${open.length - 1} open`);
+  return { text: clip(`PR ${parts.join(' · ')}`), dim: github.state === 'failed' };
+}
+
+/** Rows the strip takes above the footer: 1 while it shows, else 0. The host
+ *  passes this to visibleBodyLines so its hit-test matches the drawn body. */
+export function githubStripRows(github: GithubSnapshot | undefined): number {
+  return githubStrip(github) ? 1 : 0;
+}
+
+/** The GitHub tab's body lines: status, open PRs with their detail, the PR
+ *  review loop, and the last merged PRs. Display only: nothing is selectable. */
+export function githubTabLines(github: GithubSnapshot, width = Infinity): RowLine[] {
+  const clip = (text: string): string => clipEllipsis(text, width);
+  const lines: RowLine[] = [];
+  const meta = (text: string): void => {
+    lines.push({ text: clip(text), kind: 'meta' });
+  };
+  if (github.state === 'loading') {
+    meta('checking GitHub…');
+    return lines;
+  }
+  if (github.state === 'hidden') {
+    meta(`GitHub status off: ${github.reason ?? 'unavailable'}`);
+    return lines;
+  }
+  const data = github.data;
+  meta(`${github.repo ?? ''}${github.asOf !== undefined ? ` · as of ${clockOf(github.asOf)}` : ''}`);
+  if (github.state === 'failed') meta(`${github.reason ?? 'gh failed'}${data ? ' (showing the last good poll)' : ''}`);
+  if (github.loopError) lines.push({ text: clip(`⚠ pr-loop.json unreadable: ${github.loopError}`), kind: 'body' });
+  if (data) {
+    lines.push({ text: '', kind: 'body' });
+    lines.push({ text: clip(data.open.length ? `open pull requests (${data.open.length})` : 'no open pull requests'), kind: 'title' });
+    const wrapWidth = Number.isFinite(width) ? Math.max(1, width - 4) : width;
+    for (const pr of data.open) {
+      lines.push({ text: clip(`  #${pr.number} ${pr.title}`), kind: 'body' });
+      const detail = [
+        pr.branch,
+        pr.draft ? 'draft' : '',
+        pr.checks === 'none' ? 'no checks' : `checks ${pr.checks}`,
+        pr.merge ? `merge ${pr.merge.toLowerCase()}` : '',
+        pr.review ? `review ${pr.review.toLowerCase().replace(/_/g, ' ')}` : '',
+        `copilot ${pr.copilot}`,
+        `${pr.unresolved} unresolved`,
+      ].filter(Boolean).join(' · ');
+      for (const text of wrapText(detail, wrapWidth)) lines.push({ text: `    ${text}`, kind: 'meta' });
+    }
+  }
+  lines.push({ text: '', kind: 'body' });
+  const loop = github.loop;
+  lines.push({ text: clip(loop ? `PR review loop: ${loop.status} for #${loop.pr}` : 'PR review loop: none armed'), kind: 'title' });
+  if (data) {
+    lines.push({ text: '', kind: 'body' });
+    lines.push({ text: clip(data.merged.length ? 'recently merged' : 'nothing merged yet'), kind: 'title' });
+    for (const pr of data.merged) lines.push({ text: clip(`  #${pr.number} ${pr.title} · ${pr.mergedAt.slice(0, 10)}`), kind: 'body' });
+  }
+  return lines;
+}
+
+/** The GitHub tab's state: one display-only row of githubTabLines, scrolled
+ *  by ui.scroll with the same clamp as the other tabs. */
+function githubDashboardState(ui: UiState, width: number, banner: string[], projectName: string, bodyTop: number, tabs: TabCell[], maxBodyLines: number, github: GithubSnapshot, agents?: AgentsTab): DashboardState {
+  const lines = githubTabLines(github, width);
+  const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, lines.length - maxBodyLines) : 0;
+  return {
+    tabs,
+    rows: [{ id: 'github', type: 'github', selected: false, expanded: false, lines, screenRow: 0 }],
+    footer: footerFor(ui, visibleTabs(agents, github).length, width),
+    notice: noticeFor(ui, width),
+    strip: githubStrip(github, width),
+    banner,
+    projectName,
+    bodyTop,
+    scroll: Math.max(0, Math.min(ui.scroll ?? 0, maxScroll)),
+  };
+}
 
 function systemDashboardState(
   ui: UiState,
@@ -1154,7 +1303,8 @@ function systemDashboardState(
   tabs: { label: string; active: boolean; index: number }[],
   maxBodyLines: number,
   roster?: AgentRosterSnapshot,
-  agents?: AgentsTab
+  agents?: AgentsTab,
+  github?: GithubSnapshot
 ): DashboardState {
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows: Row[] = [];
@@ -1208,8 +1358,9 @@ function systemDashboardState(
     tabs,
     rows,
     emptyMessage: view.rows.length ? undefined : '(no configured models)',
-    footer: footerFor(ui, visibleTabs(agents).length, width),
+    footer: footerFor(ui, visibleTabs(agents, github).length, width),
     notice: noticeFor(ui, width),
+    strip: githubStrip(github, width),
     banner,
     projectName,
     bodyTop,
@@ -1228,20 +1379,22 @@ export interface DashboardFrame {
   cursor: number;
 }
 
-export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab, height = Infinity): DashboardState {
-  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents, height).state;
+export function buildDashboardState(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab, height = Infinity, github?: GithubSnapshot): DashboardState {
+  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents, height, github).state;
 }
 
-export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab, height = Infinity): DashboardFrame {
+export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = Infinity, maxBodyLines = Infinity, projectName = '', showBanner = false, knowledge?: MountedStores, roster?: AgentRosterSnapshot, agents?: AgentsTab, height = Infinity, github?: GithubSnapshot): DashboardFrame {
   // the pane height picks the compact scene under COMPACT_BELOW_HEIGHT rows;
   // the host passes the same height to visibleBodyLines, so draw and clicks agree
   const banner = bannerLines(width, showBanner, height);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
   // Computed ONCE here and threaded into every projection, so the Tasks count
   // and the widths the hit-test measures can never come from two places.
-  const tabs = fitTabs(tabsFor(store, ui.tab, agents), width);
+  const tabs = fitTabs(tabsFor(store, ui.tab, agents, github), width);
   // System tab (run r-f9a7): its own projection, not a card/knowledge list.
-  if (ui.tab === SYSTEM_TAB) return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents), nodes: [], cursor: ui.cursor };
+  if (ui.tab === SYSTEM_TAB) return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents, github), nodes: [], cursor: ui.cursor };
+  // GitHub tab: the poller snapshot's display lines; the store is not read for its body.
+  if (ui.tab === GITHUB_TAB && github) return { ui, state: githubDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, github, agents), nodes: [], cursor: ui.cursor };
   const nodes = nodesFor(store, ui, knowledge);
   const cursor = resolveCursor(ui, nodes);
   const rows: Row[] = [];
@@ -1373,10 +1526,11 @@ export function buildDashboardFrame(store: SterlingStore, ui: UiState, width = I
             ? '(queue empty)'
             : '(empty)'
         : undefined,
-    footer: footerFor(ui, visibleTabs(agents).length, width),
+    footer: footerFor(ui, visibleTabs(agents, github).length, width),
     // a board_edit refusal, a failed selection write or a degraded store read
     // (ui.notice) is drawn on its own row in the warning colour
     notice: noticeFor(ui, width),
+    strip: githubStrip(github, width),
     searchLine: searchActive ? `search: ${ui.searchQuery}${ui.stateFilter ? `  state: ${ui.stateFilter}` : ''}` : undefined,
     queueCompleted,
     queueActivity,
@@ -1446,7 +1600,7 @@ export function reduce(
  *  nothing changes, so a no-op event leaves the UiState identical. */
 function holdSelection(prev: UiState, next: UiState, nodes: Node[]): UiState {
   const fresh = next.tab !== prev.tab || next.searchQuery !== prev.searchQuery || next.stateFilter !== prev.stateFilter;
-  const cardTab = next.tab !== SYSTEM_TAB && next.tab !== AGENTS_TAB;
+  const cardTab = next.tab !== SYSTEM_TAB && next.tab !== AGENTS_TAB && next.tab !== GITHUB_TAB;
   const node = !fresh && cardTab && nodes.length ? nodes[Math.min(next.cursor, nodes.length - 1)] : undefined;
   const selectedId = node ? nodeId(node) : undefined;
   if (selectedId === next.selectedId) return next;
@@ -1475,11 +1629,11 @@ function reduceNodes(
   const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: undefined, selector: undefined, notice: undefined, sparringModelEdit: undefined, boardEdit: undefined });
 
   // the tabs this host can reach, in bar order: a digit picks the n-th, left/right step through them
-  const reachable = visibleTabs(viewport.agents);
+  const reachable = visibleTabs(viewport.agents, viewport.github);
   const stepTab = (dir: number): number => reachable[(reachable.indexOf(ui.tab) + dir + reachable.length) % reachable.length] ?? reachable[0]!;
 
   const buildSelf = (uiNext: UiState): DashboardState =>
-    buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster, viewport.agents, viewport.height);
+    buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, '', viewport.showBanner ?? false, knowledge, roster, viewport.agents, viewport.height, viewport.github);
 
   // move the selection by `delta` and keep it inside the scroll window so the
   // viewport follows the cursor. An unbounded viewport or a non-scrolling tab
@@ -1810,9 +1964,17 @@ function reduceNodes(
         case 'TAB':
           return { ui: switchTab(stepTab(1)), effects };
         case 'UP':
-          return { ui: moveCursor(-1), effects };
-        case 'DOWN':
-          return { ui: moveCursor(1), effects };
+        case 'DOWN': {
+          // the GitHub tab has nothing to select: the arrows scroll its lines
+          if (ui.tab === GITHUB_TAB && viewport.github) {
+            const st = drawn ? drawn.state : buildSelf(ui);
+            const total = st.rows[0]?.lines.length ?? 0;
+            const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - maxBodyLines) : 0;
+            const scroll = Math.max(0, Math.min((ui.scroll ?? 0) + (event.name === 'UP' ? -1 : 1), max));
+            return { ui: scroll === (ui.scroll ?? 0) ? ui : { ...ui, scroll }, effects };
+          }
+          return { ui: moveCursor(event.name === 'UP' ? -1 : 1), effects };
+        }
         case 'ENTER':
           return { ui: activate(clamp(ui.cursor)), effects };
         case 'SPACE':
@@ -1843,6 +2005,12 @@ function reduceNodes(
       }
       if (ch === 'q') {
         effects.push({ type: 'quit' });
+        return { ui, effects };
+      }
+      // 'r' polls GitHub now, on a host that runs the poller; the edit buffers
+      // and the Knowledge search field above keep the letter as text
+      if (ch === 'r' && viewport.github) {
+        effects.push({ type: 'github_refresh' });
         return { ui, effects };
       }
       // A real space key arrives as a CHAR (terminal-kit names printable keys by

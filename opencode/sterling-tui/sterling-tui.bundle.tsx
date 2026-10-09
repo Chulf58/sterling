@@ -11018,12 +11018,13 @@ function defaultResolveHeadSha() {
     return void 0;
   }
 }
-var TABS = ["Tasks", "Knowledge", "Queue", "Agents", "System"];
+var TABS = ["Tasks", "Knowledge", "Queue", "Agents", "System", "GitHub"];
 var TASKS_TAB = TABS.indexOf("Tasks");
 var KNOWLEDGE_TAB = TABS.indexOf("Knowledge");
 var QUEUE_TAB = TABS.indexOf("Queue");
 var AGENTS_TAB = TABS.indexOf("Agents");
 var SYSTEM_TAB = TABS.indexOf("System");
+var GITHUB_TAB = TABS.indexOf("GitHub");
 var ARTICLE_STATE_FILTERS = ["all", "planned", "built", "wired_in", "active", "dormant", "deprecated"];
 var initialUi = { tab: 0, cursor: 0, expanded: [], searchQuery: "", scroll: 0 };
 function isOpenCodeOnlyEntry(entry) {
@@ -11054,8 +11055,8 @@ function modelOptions(entries, config) {
     opts.push({ kind: "clear" });
   return opts;
 }
-function visibleTabs(agents) {
-  return TABS.map((_, i) => i).filter((i) => i !== AGENTS_TAB || agents !== void 0);
+function visibleTabs(agents, github) {
+  return TABS.map((_, i) => i).filter((i) => (i !== AGENTS_TAB || agents !== void 0) && (i !== GITHUB_TAB || github !== void 0));
 }
 var STATE_GLYPHS = {
   planned: "\u25CB",
@@ -11303,14 +11304,14 @@ function storageRow(snap, width) {
   const shown = storage === null ? "UNKNOWN (config unreadable)" : storage === void 0 ? "SQLITE (not set)" : storage === "sqlite" ? "SQLITE" : storage === "postgres" ? "SERVED POSTGRES" : `UNRECOGNIZED (${storage})`;
   return { id: "sys:storage", lines: [{ text: clip3(`  Storage: ${shown} (read-only; switch with the move-store skill)`), kind: "title" }] };
 }
-function tabsFor(store, activeTab, agents) {
+function tabsFor(store, activeTab, agents, github) {
   let taskCount = null;
   try {
     taskCount = store.count({ types: ["todo"], source: "user" });
   } catch {
     taskCount = null;
   }
-  return visibleTabs(agents).map((i) => {
+  return visibleTabs(agents, github).map((i) => {
     const label = TABS[i];
     return {
       label: label === "Tasks" && taskCount !== null ? `${label} (${taskCount})` : label === "Agents" && agents ? `${label} (${agents.running} running${agents.quiet ? ` \xB7 ${agents.quiet} quiet` : ""})` : label,
@@ -11372,12 +11373,121 @@ function footerFor(ui, tabCount, width) {
     text = `${tabs} \xB7 \u2191\u2193 pending \xB7 wheel scrolls \xB7 q quit`;
   else if (ui.tab === AGENTS_TAB)
     text = `\u2190/\u2192 or ${tabs} \xB7 q quit`;
+  else if (ui.tab === GITHUB_TAB)
+    text = `${tabs} \xB7 \u2191\u2193 scroll \xB7 r refresh \xB7 q quit`;
   else
     text = `${tabs} \xB7 enter change \xB7 esc cancel \xB7 q quit`;
   return clipEllipsis(text, width);
 }
 var noticeFor = (ui, width) => ui.notice ? clipEllipsis(`\u26A0 ${ui.notice}`, width) : void 0;
-function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents) {
+var clockOf = (ms) => new Date(ms).toTimeString().slice(0, 5);
+var CHECKS_WORD = { pass: "checks \u2713", fail: "checks \u2717", pending: "checks \u2026", none: "" };
+var MERGE_WORD = { CLEAN: "mergeable", HAS_HOOKS: "mergeable", UNSTABLE: "unstable", BLOCKED: "blocked", BEHIND: "behind", DIRTY: "conflicts" };
+function prParts(pr) {
+  return [
+    `#${pr.number}`,
+    pr.draft ? "draft" : "",
+    CHECKS_WORD[pr.checks],
+    pr.draft ? "" : MERGE_WORD[pr.merge] ?? "",
+    pr.copilot === "none" ? "" : `copilot ${pr.copilot}`,
+    pr.unresolved > 0 ? `${pr.unresolved} unresolved` : ""
+  ].filter(Boolean);
+}
+function githubStrip(github, width = Infinity) {
+  if (!github || github.state === "loading" || github.state === "hidden")
+    return void 0;
+  const clip3 = (text) => clipEllipsis(text, width);
+  if (github.loopError)
+    return { text: clip3(`\u26A0 pr-loop.json unreadable: ${github.loopError}`), dim: false };
+  const data = github.data;
+  if (github.state === "failed" && !data)
+    return { text: clip3(github.reason ?? "gh failed"), dim: true };
+  const open2 = data?.open ?? [];
+  const loop = github.loop;
+  const owed = loop?.status === "owed" ? loop : void 0;
+  if (open2.length === 0 && !owed)
+    return void 0;
+  const parts = [];
+  if (github.state === "failed" && github.asOf !== void 0)
+    parts.push(`as of ${clockOf(github.asOf)}`);
+  const lead = open2.find((p) => p.number === loop?.pr) ?? open2[0];
+  if (lead) {
+    parts.push(prParts(lead).join(" "));
+    if (loop && loop.pr === lead.number)
+      parts.push(`loop ${loop.status}`);
+  }
+  if (owed && owed.pr !== lead?.number)
+    parts.push(`loop owed #${owed.pr}${open2.some((p) => p.number === owed.pr) ? "" : " (not open)"}`);
+  if (open2.length > 1)
+    parts.push(`+${open2.length - 1} open`);
+  return { text: clip3(`PR ${parts.join(" \xB7 ")}`), dim: github.state === "failed" };
+}
+function githubTabLines(github, width = Infinity) {
+  const clip3 = (text) => clipEllipsis(text, width);
+  const lines = [];
+  const meta = (text) => {
+    lines.push({ text: clip3(text), kind: "meta" });
+  };
+  if (github.state === "loading") {
+    meta("checking GitHub\u2026");
+    return lines;
+  }
+  if (github.state === "hidden") {
+    meta(`GitHub status off: ${github.reason ?? "unavailable"}`);
+    return lines;
+  }
+  const data = github.data;
+  meta(`${github.repo ?? ""}${github.asOf !== void 0 ? ` \xB7 as of ${clockOf(github.asOf)}` : ""}`);
+  if (github.state === "failed")
+    meta(`${github.reason ?? "gh failed"}${data ? " (showing the last good poll)" : ""}`);
+  if (github.loopError)
+    lines.push({ text: clip3(`\u26A0 pr-loop.json unreadable: ${github.loopError}`), kind: "body" });
+  if (data) {
+    lines.push({ text: "", kind: "body" });
+    lines.push({ text: clip3(data.open.length ? `open pull requests (${data.open.length})` : "no open pull requests"), kind: "title" });
+    const wrapWidth = Number.isFinite(width) ? Math.max(1, width - 4) : width;
+    for (const pr of data.open) {
+      lines.push({ text: clip3(`  #${pr.number} ${pr.title}`), kind: "body" });
+      const detail = [
+        pr.branch,
+        pr.draft ? "draft" : "",
+        pr.checks === "none" ? "no checks" : `checks ${pr.checks}`,
+        pr.merge ? `merge ${pr.merge.toLowerCase()}` : "",
+        pr.review ? `review ${pr.review.toLowerCase().replace(/_/g, " ")}` : "",
+        `copilot ${pr.copilot}`,
+        `${pr.unresolved} unresolved`
+      ].filter(Boolean).join(" \xB7 ");
+      for (const text of wrapText(detail, wrapWidth))
+        lines.push({ text: `    ${text}`, kind: "meta" });
+    }
+  }
+  lines.push({ text: "", kind: "body" });
+  const loop = github.loop;
+  lines.push({ text: clip3(loop ? `PR review loop: ${loop.status} for #${loop.pr}` : "PR review loop: none armed"), kind: "title" });
+  if (data) {
+    lines.push({ text: "", kind: "body" });
+    lines.push({ text: clip3(data.merged.length ? "recently merged" : "nothing merged yet"), kind: "title" });
+    for (const pr of data.merged)
+      lines.push({ text: clip3(`  #${pr.number} ${pr.title} \xB7 ${pr.mergedAt.slice(0, 10)}`), kind: "body" });
+  }
+  return lines;
+}
+function githubDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, github, agents) {
+  const lines = githubTabLines(github, width);
+  const maxScroll = Number.isFinite(maxBodyLines) ? Math.max(0, lines.length - maxBodyLines) : 0;
+  return {
+    tabs,
+    rows: [{ id: "github", type: "github", selected: false, expanded: false, lines, screenRow: 0 }],
+    footer: footerFor(ui, visibleTabs(agents, github).length, width),
+    notice: noticeFor(ui, width),
+    strip: githubStrip(github, width),
+    banner,
+    projectName,
+    bodyTop,
+    scroll: Math.max(0, Math.min(ui.scroll ?? 0, maxScroll))
+  };
+}
+function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents, github) {
   const view = buildSystemTab(roster ?? EMPTY_ROSTER, ui, width);
   const rows = [];
   let screenRow = 0;
@@ -11416,23 +11526,26 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, max
     tabs,
     rows,
     emptyMessage: view.rows.length ? void 0 : "(no configured models)",
-    footer: footerFor(ui, visibleTabs(agents).length, width),
+    footer: footerFor(ui, visibleTabs(agents, github).length, width),
     notice: noticeFor(ui, width),
+    strip: githubStrip(github, width),
     banner,
     projectName,
     bodyTop,
     scroll
   };
 }
-function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents, height = Infinity) {
-  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents, height).state;
+function buildDashboardState(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents, height = Infinity, github) {
+  return buildDashboardFrame(store, ui, width, maxBodyLines, projectName, showBanner, knowledge, roster, agents, height, github).state;
 }
-function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents, height = Infinity) {
+function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinity, projectName = "", showBanner = false, knowledge, roster, agents, height = Infinity, github) {
   const banner = bannerLines(width, showBanner, height);
   const bodyTop = banner.length + CHROME_BELOW_BANNER;
-  const tabs = fitTabs(tabsFor(store, ui.tab, agents), width);
+  const tabs = fitTabs(tabsFor(store, ui.tab, agents, github), width);
   if (ui.tab === SYSTEM_TAB)
-    return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents), nodes: [], cursor: ui.cursor };
+    return { ui, state: systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, roster, agents, github), nodes: [], cursor: ui.cursor };
+  if (ui.tab === GITHUB_TAB && github)
+    return { ui, state: githubDashboardState(ui, width, banner, projectName, bodyTop, tabs, maxBodyLines, github, agents), nodes: [], cursor: ui.cursor };
   const nodes = nodesFor(store, ui, knowledge);
   const cursor = resolveCursor(ui, nodes);
   const rows = [];
@@ -11538,10 +11651,11 @@ function buildDashboardFrame(store, ui, width = Infinity, maxBodyLines = Infinit
     tabs,
     rows,
     emptyMessage: ui.tab === AGENTS_TAB ? void 0 : nodes.length === 0 ? ui.tab === KNOWLEDGE_TAB && ui.searchQuery ? "(no matches)" : ui.tab === QUEUE_TAB ? "(queue empty)" : "(empty)" : void 0,
-    footer: footerFor(ui, visibleTabs(agents).length, width),
+    footer: footerFor(ui, visibleTabs(agents, github).length, width),
     // a board_edit refusal, a failed selection write or a degraded store read
     // (ui.notice) is drawn on its own row in the warning colour
     notice: noticeFor(ui, width),
+    strip: githubStrip(github, width),
     searchLine: searchActive ? `search: ${ui.searchQuery}${ui.stateFilter ? `  state: ${ui.stateFilter}` : ""}` : void 0,
     queueCompleted,
     queueActivity,
@@ -11581,7 +11695,7 @@ function reduce(store, ui, event, viewport = {}, knowledge, roster, resolveHeadS
 }
 function holdSelection(prev, next, nodes) {
   const fresh = next.tab !== prev.tab || next.searchQuery !== prev.searchQuery || next.stateFilter !== prev.stateFilter;
-  const cardTab = next.tab !== SYSTEM_TAB && next.tab !== AGENTS_TAB;
+  const cardTab = next.tab !== SYSTEM_TAB && next.tab !== AGENTS_TAB && next.tab !== GITHUB_TAB;
   const node = !fresh && cardTab && nodes.length ? nodes[Math.min(next.cursor, nodes.length - 1)] : void 0;
   const selectedId = node ? nodeId(node) : void 0;
   if (selectedId === next.selectedId)
@@ -11596,9 +11710,9 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
   const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes.length - 1)));
   const effects = [];
   const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: void 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
-  const reachable = visibleTabs(viewport.agents);
+  const reachable = visibleTabs(viewport.agents, viewport.github);
   const stepTab = (dir) => reachable[(reachable.indexOf(ui.tab) + dir + reachable.length) % reachable.length] ?? reachable[0];
-  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster, viewport.agents, viewport.height);
+  const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport.width ?? Infinity, maxBodyLines, "", viewport.showBanner ?? false, knowledge, roster, viewport.agents, viewport.height, viewport.github);
   const revealAt = (cursor) => {
     if (!Number.isFinite(maxBodyLines))
       return { ...ui, cursor };
@@ -11832,9 +11946,16 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
         case "TAB":
           return { ui: switchTab(stepTab(1)), effects };
         case "UP":
-          return { ui: moveCursor(-1), effects };
-        case "DOWN":
-          return { ui: moveCursor(1), effects };
+        case "DOWN": {
+          if (ui.tab === GITHUB_TAB && viewport.github) {
+            const st = drawn ? drawn.state : buildSelf(ui);
+            const total = st.rows[0]?.lines.length ?? 0;
+            const max = Number.isFinite(maxBodyLines) ? Math.max(0, total - maxBodyLines) : 0;
+            const scroll = Math.max(0, Math.min((ui.scroll ?? 0) + (event.name === "UP" ? -1 : 1), max));
+            return { ui: scroll === (ui.scroll ?? 0) ? ui : { ...ui, scroll }, effects };
+          }
+          return { ui: moveCursor(event.name === "UP" ? -1 : 1), effects };
+        }
         case "ENTER":
           return { ui: activate(clamp(ui.cursor)), effects };
         case "SPACE":
@@ -11856,6 +11977,10 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
       }
       if (ch === "q") {
         effects.push({ type: "quit" });
+        return { ui, effects };
+      }
+      if (ch === "r" && viewport.github) {
+        effects.push({ type: "github_refresh" });
         return { ui, effects };
       }
       if (ch === " " && ui.tab === SYSTEM_TAB) {
@@ -13003,7 +13128,7 @@ function openDashboard(storePath, options = {}) {
   }
   let frame2;
   let builds = 0;
-  const vpKey = (vp) => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null]);
+  const vpKey = (vp) => JSON.stringify([vp.width, vp.maxBodyLines, vp.showBanner, vp.agents ? vp.agents.running : null, vp.height ?? null, vp.github ? vp.github.version : null]);
   const today = () => (/* @__PURE__ */ new Date()).toDateString();
   function currentFrame(vp) {
     let dataVersion;
@@ -13019,8 +13144,8 @@ function openDashboard(storePath, options = {}) {
     if (frame2 && dataVersion !== void 0 && frame2.dataVersion === dataVersion && frame2.ui === ui && frame2.roster === roster && frame2.vp === key && frame2.day === day)
       return frame2.built;
     builds++;
-    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height);
-    frame2 = { vp: key, day, ui, roster, dataVersion, built };
+    const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height, vp.github);
+    frame2 = { vp: key, viewport: vp, day, ui, roster, dataVersion, built };
     return built;
   }
   let storeCalls = 0;
@@ -13417,6 +13542,8 @@ function openDashboard(storePath, options = {}) {
         pending = [...pending.filter((p) => p.type !== "select"), e];
       else if (e.type === "board_edit")
         pending.push(e);
+      else if (e.type === "github_refresh")
+        options.onGithubRefresh?.();
     }
     if (!options.deferWrites)
       flush();
@@ -13433,8 +13560,10 @@ function openDashboard(storePath, options = {}) {
     state: (vp) => currentFrame(vp).state,
     async handle(event, vp) {
       const prevTab = ui.tab;
-      const drawn = frame2 && frame2.ui === ui && frame2.roster === roster && frame2.vp === vpKey(vp) ? frame2.built : void 0;
-      const result = reduce(store, ui, event, vp, stores, roster, resolveProjectHeadSha, drawn);
+      const pointer = event.kind === "click" || event.kind === "wheel";
+      const hitVp = pointer && frame2 && frame2.ui === ui && frame2.roster === roster ? frame2.viewport : vp;
+      const drawn = frame2 && frame2.ui === ui && frame2.roster === roster && frame2.vp === vpKey(hitVp) ? frame2.built : void 0;
+      const result = reduce(store, ui, event, hitVp, stores, roster, resolveProjectHeadSha, drawn);
       ui = result.ui;
       if (!result.effects.some((e) => e.type === "quit"))
         quitArmed = false;
