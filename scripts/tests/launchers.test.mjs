@@ -221,16 +221,18 @@ test('engine: no argument is claude mode — a fresh sterling-<proj>-claude sess
   const split = first(calls, 'split-window');
   assert.ok(split.startsWith('split-window -h -d -t =sterling-demo-1a2b-claude: '), `-d keeps the keyboard on the left pane: ${split}`);
   assert.ok(split.endsWith(`${root}/tui/sterling-tui.mjs --store ${work}/.sterling/sterling.db`), split);
+  assert.ok(!split.includes('--host'), `the Claude Code TUI takes the default host: ${split}`);
   assert.ok(calls.includes('set-option -t =sterling-demo-1a2b-claude: mouse on'), 'mouse on, session-scoped');
   assert.equal(calls.at(-1), 'attach-session -t =sterling-demo-1a2b-claude');
   assert.equal(all(calls, 'set-option').filter((c) => / -g /.test(c)).length, 0, 'never a global option');
 });
 
 test('engine: opencode mode runs a separate sterling-<proj>-opencode session with opencode and no --plugin-dir', { skip: LINUX }, () => {
-  const { r, calls, work } = runEngine(['opencode'], { extraEnv: { OPENCODE_BIN: '/opt/oc/opencode' } });
+  const { r, calls, root, work } = runEngine(['opencode'], { extraEnv: { OPENCODE_BIN: '/opt/oc/opencode' } });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(first(calls, 'new-session'), `new-session -d -s sterling-demo-1a2b-opencode -c ${work} /opt/oc/opencode`);
   assert.ok(first(calls, 'split-window').includes('-t =sterling-demo-1a2b-opencode:'));
+  assert.ok(first(calls, 'split-window').endsWith(`${root}/tui/sterling-tui.mjs --store ${work}/.sterling/sterling.db --host opencode`), `the OpenCode TUI reads subagent context from OpenCode: ${first(calls, 'split-window')}`);
   assert.equal(calls.at(-1), 'attach-session -t =sterling-demo-1a2b-opencode');
 });
 
@@ -311,12 +313,15 @@ test('engine tui mode: the caller\'s own session inside tmux; outside, -claude, 
   assert.equal(inside.r.status, 0, inside.r.stderr);
   assert.ok(first(inside.calls, 'split-window').includes('-t =sterling-demo-1a2b-opencode:'), first(inside.calls, 'split-window'));
   assert.equal(all(inside.calls, 'has-session').length, 0, 'inside tmux nothing is looked up by name');
+  assert.ok(first(inside.calls, 'split-window').endsWith('--host opencode'), 'the OpenCode session gets the OpenCode TUI');
 
   const claude = runEngine(['tui'], { running: 'sterling-demo-1a2b-opencode sterling-demo-1a2b-claude' });
   assert.ok(first(claude.calls, 'split-window').includes('-t =sterling-demo-1a2b-claude:'));
+  assert.ok(!first(claude.calls, 'split-window').includes('--host'), 'the Claude Code session gets the default host');
 
   const oc = runEngine(['tui'], { running: 'sterling-demo-1a2b-opencode' });
   assert.ok(first(oc.calls, 'split-window').includes('-t =sterling-demo-1a2b-opencode:'));
+  assert.ok(first(oc.calls, 'split-window').endsWith('--host opencode'));
 
   const none = runEngine(['tui']);
   assert.equal(none.r.status, 1);
