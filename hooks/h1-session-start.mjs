@@ -14086,7 +14086,7 @@ function isInstalledCopy(root, { env = process.env, home = homedir8() } = {}) {
 
 // scripts/lib/post-update-sync.mjs
 import { spawn, spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync14, readFileSync as readFileSync15, statSync as statSync6, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync14, readFileSync as readFileSync15, realpathSync as realpathSync7, statSync as statSync6, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
 import { join as join25, resolve as resolve9 } from "node:path";
 var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
@@ -14121,6 +14121,16 @@ function samePath2(a, b) {
   const norm = (p) => String(p).replace(/\\/g, "/").replace(/\/+$/, "");
   return norm(a) === norm(b);
 }
+function sameRealPath(a, b) {
+  const real = (p) => {
+    try {
+      return realpathSync7(p);
+    } catch {
+      return resolve9(p);
+    }
+  };
+  return real(a) === real(b);
+}
 function pluginScript(root, name) {
   const bundled = join25(root, "bin", name);
   return existsSync14(bundled) ? bundled : join25(root, "scripts", name);
@@ -14152,6 +14162,7 @@ async function runPostUpdateSteps(root, project, runStep) {
   if (sync.status === 2) return { ok: false, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
   if (sync.status !== 0) return { ok: false, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
+  if (sameRealPath(project, root)) return { ok: true, restart, drift: false, driftOut: "", inserted: [] };
   const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
   if (contract.error) return { ok: false, restart, detail: `stamp-contract did not run (${contract.error})` };
   if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
