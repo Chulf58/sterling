@@ -3,7 +3,7 @@
 // a compact JSON array, one object per event, keys in kind/detail/at/agent_id order.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -121,62 +121,120 @@ test('appendSessionEvent: a reader looping during 50 appends never sees an empty
   }
 });
 
-function registerWithLock(lockBody) {
+// Sol re-check of 2a7f66fc: with a dead holder's lock file and a dead reclaim gate seeded, a waiter
+// could unlink a REPLACEMENT gate and several reclaimers reached the lock delete together
+// (maxConcurrent 2 with 20 contenders). The seeded files are inert for the kernel-held lock, which
+// uses <path>.lock.db; they stay so this test still measures that scenario on the old code.
+const CONTENDER = `
+const { withSessionEventsLock, appendSessionEvent } = await import(process.argv[1]);
+const { appendFileSync, readdirSync, writeFileSync, unlinkSync } = await import('node:fs');
+const { join } = await import('node:path');
+const [dir, eventsPath, inside, log, id, startAt] = process.argv.slice(2);
+while (Date.now() < Number(startAt));
+withSessionEventsLock(eventsPath, () => {
+  const others = readdirSync(inside).length;
+  writeFileSync(join(inside, id), '');
+  appendFileSync(log, String(others + 1) + '\\n');
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  unlinkSync(join(inside, id));
+});
+appendSessionEvent(dir, { kind: 'agent_dispatch', detail: id, at: '${AT}' });
+`;
+
+test('withSessionEventsLock: 20 contenders, seeded with a dead holder and a dead reclaim gate, never overlap inside fn and keep every event', async () => {
+  const deadPid = spawnSync(process.execPath, ['-e', '']).pid;
+  for (let round = 0; round < 6; round++) {
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-events-20-'));
+    try {
+      const eventsPath = join(dir, SESSION_EVENTS_REL);
+      const inside = join(dir, 'inside');
+      const log = join(dir, 'log');
+      mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+      mkdirSync(inside);
+      writeFileSync(`${eventsPath}.lock`, `${deadPid} crashed-holder`);
+      writeFileSync(`${eventsPath}.lock.reclaim`, `${deadPid}`);
+      const startAt = String(Date.now() + 500);
+      const ids = Array.from({ length: 20 }, (_, i) => `c${i}`);
+      const results = await Promise.all(ids.map((id) => runChild(CONTENDER, [LIB_URL, dir, eventsPath, inside, log, id, startAt])));
+      for (const r of results) assert.equal(r.code, 0, `a contender exited ${r.code}: ${JSON.stringify(r.stderr.slice(0, 300))}`);
+      const seen = readFileSync(log, 'utf8').trim().split('\n').map(Number);
+      assert.equal(seen.length, 20, `round ${round}: every contender entered fn once`);
+      assert.equal(Math.max(...seen), 1, `round ${round}: maxConcurrent inside fn`);
+      assert.deepEqual(JSON.parse(readFileSync(eventsPath, 'utf8')).map((e) => e.detail).sort(), [...ids].sort(), `round ${round}: lost events`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+// A child that takes the lock, signals that it holds it, then sleeps inside fn for holdMs.
+const SIGNALLING_HOLDER = `
+const { withSessionEventsLock } = await import(process.argv[1]);
+const { writeFileSync } = await import('node:fs');
+const [path, signal, holdMs] = [process.argv[2], process.argv[3], Number(process.argv[4])];
+withSessionEventsLock(path, () => {
+  writeFileSync(signal, 'held');
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, holdMs);
+});
+`;
+
+async function startHolder(path, holdMs) {
+  const signal = `${path}.held-signal`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', SIGNALLING_HOLDER, LIB_URL, path, signal, String(holdMs)], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => (stderr += chunk));
+  const done = new Promise((resolve) => child.on('close', (code, sig) => resolve({ code, sig, stderr })));
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(signal)) {
+    if (Date.now() > deadline) throw new Error(`the holder never took the lock: ${JSON.stringify(stderr.slice(0, 300))}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return { child, done };
+}
+
+function seededRegister() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-events-lock-'));
   const eventsPath = join(dir, SESSION_EVENTS_REL);
   mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
   writeFileSync(eventsPath, '[{"kind":"research_tool","detail":"before","at":"x"}]');
-  writeFileSync(`${eventsPath}.lock`, lockBody);
   return { dir, eventsPath };
 }
 
-test('withSessionEventsLock: a lock held by a live process times out with session_events_lock_held and the register is unchanged', () => {
-  const { dir, eventsPath } = registerWithLock(`${process.pid} held-by-test`);
+test('withSessionEventsLock: while a live holder is inside fn past the contender\'s timeout, the contender throws session_events_lock_held and the register is unchanged', async () => {
+  const { dir, eventsPath } = seededRegister();
   try {
+    const holder = await startHolder(eventsPath, 1500);
     assert.throws(
-      () => appendSessionEvent(dir, researchToolEvent('q', { at: AT }), { timeoutMs: 150 }),
-      (e) => e.code === SESSION_EVENTS_LOCK_HELD && /nothing was written/.test(e.message),
+      () => appendSessionEvent(dir, researchToolEvent('q', { at: AT }), { timeoutMs: 200 }),
+      (e) => e.code === SESSION_EVENTS_LOCK_HELD && e.message.includes(`${eventsPath}.lock.db`) && /nothing was written/.test(e.message),
     );
     assert.equal(readFileSync(eventsPath, 'utf8'), '[{"kind":"research_tool","detail":"before","at":"x"}]');
-    assert.equal(readFileSync(`${eventsPath}.lock`, 'utf8'), `${process.pid} held-by-test`, 'a live holder\'s lock is never removed');
+    assert.equal((await holder.done).code, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('withSessionEventsLock: a lock whose pid is dead is reclaimed, and the append lands', () => {
-  const deadPid = spawnSync(process.execPath, ['-e', '']).pid;
-  const { dir, eventsPath } = registerWithLock(`${deadPid} crashed-holder`);
+test('withSessionEventsLock: a holder killed (SIGKILL) while holding releases the lock, and the next append succeeds at once', async () => {
+  const { dir, eventsPath } = seededRegister();
   try {
-    appendSessionEvent(dir, researchToolEvent('after', { at: AT }), { timeoutMs: 150 });
+    const holder = await startHolder(eventsPath, 60_000);
+    holder.child.kill('SIGKILL');
+    assert.equal((await holder.done).sig, 'SIGKILL');
+    const t = Date.now();
+    appendSessionEvent(dir, researchToolEvent('after', { at: AT }), { timeoutMs: 200 });
+    assert.ok(Date.now() - t < 200, 'no wait on a dead holder');
     assert.deepEqual(JSON.parse(readFileSync(eventsPath, 'utf8')).map((e) => e.detail), ['before', 'after']);
-    assert.equal(existsSync(`${eventsPath}.lock`), false, 'the lock is released after the append');
-    assert.equal(existsSync(`${eventsPath}.lock.reclaim`), false, 'the reclaim gate is released');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('withSessionEventsLock: an old lock whose pid is alive is NOT reclaimed, whatever its age; the refusal names the lock and its pid', () => {
-  const { dir, eventsPath } = registerWithLock(`${process.pid} overran`);
-  try {
-    const old = new Date(Date.now() - 3_600_000);
-    utimesSync(`${eventsPath}.lock`, old, old);
-    assert.throws(
-      () => appendSessionEvent(dir, researchToolEvent('after', { at: AT }), { timeoutMs: 150, staleMs: 100 }),
-      (e) => e.code === SESSION_EVENTS_LOCK_HELD && e.message.includes(`${eventsPath}.lock`) && e.message.includes(`pid ${process.pid}`),
-    );
-    assert.equal(readFileSync(eventsPath, 'utf8'), '[{"kind":"research_tool","detail":"before","at":"x"}]');
-    assert.equal(readFileSync(`${eventsPath}.lock`, 'utf8'), `${process.pid} overran`, 'a live holder\'s lock is never removed, however old');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// Sol review of 07452638: a holder that stays inside fn past the old 30 s staleness bound had its
-// lock removed by age, and a contender entered beside it. Holder A sleeps inside fn for 600 ms;
-// contender B starts 150 ms later and passes staleMs: 100 (the bound the old code reclaimed on).
-// B must not enter before A has left.
+// Sol review of 07452638: a holder that stayed inside fn past the file lock's 30 s staleness bound
+// had its lock removed by age, and a contender entered beside it. Holder A sleeps inside fn for
+// 600 ms; contender B starts 150 ms later and passes staleMs: 100, the option the file lock
+// reclaimed on (the kernel-held lock has no such option and ignores it). B must not enter before
+// A has left.
 const HOLDER = `
 const { withSessionEventsLock } = await import(process.argv[1]);
 const { appendFileSync } = await import('node:fs');
@@ -209,14 +267,13 @@ test('withSessionEventsLock: a contender never enters while a live holder is sti
   }
 });
 
-test('withSessionEventsLock: releases only its own lock, and releases it when fn throws', () => {
+test('withSessionEventsLock: releases the lock when fn throws, and leaves no journal beside the lock database', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-events-lock-'));
   const path = join(dir, 'register.json');
   try {
     assert.throws(() => withSessionEventsLock(path, () => { throw new Error('boom'); }), /boom/);
-    assert.equal(existsSync(`${path}.lock`), false, 'the lock is released when fn throws');
-    withSessionEventsLock(path, () => writeFileSync(`${path}.lock`, `${process.pid} someone-else`));
-    assert.equal(readFileSync(`${path}.lock`, 'utf8'), `${process.pid} someone-else`, 'a lock that no longer holds this holder\'s token is left alone');
+    assert.equal(withSessionEventsLock(path, () => 'again', { timeoutMs: 50 }), 'again', 'the lock is free after fn threw');
+    assert.deepEqual(readdirSync(dir).sort(), ['register.json.lock.db'], 'no -journal or -wal is left');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -229,7 +286,6 @@ test('appendSessionEvent: an empty register is unparsable, throws, and is left a
     writeFileSync(join(dir, SESSION_EVENTS_REL), '');
     assert.throws(() => appendSessionEvent(dir, researchToolEvent('q', { at: AT })), SyntaxError);
     assert.equal(readFileSync(join(dir, SESSION_EVENTS_REL), 'utf8'), '');
-    assert.equal(existsSync(join(dir, `${SESSION_EVENTS_REL}.lock`)), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -238,15 +294,18 @@ test('appendSessionEvent: an empty register is unparsable, throws, and is left a
 test('H16: a held register lock skips the event with one named non-blocking line, and the register is unchanged', async () => {
   const root = fileURLToPath(new URL('../..', import.meta.url));
   const { SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href);
-  const { dir, eventsPath } = registerWithLock(`${process.pid} held-by-test`);
+  const { dir, eventsPath } = seededRegister();
   const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
   try {
+    const holder = await startHolder(eventsPath, 7000);
     const input = { session_id: 's1', cwd: dir, hook_event_name: 'PostToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'researcher' }, tool_use_id: 'tu1', tool_response: { agentId: 'ag1' } };
     const r = spawnSync(process.execPath, [join(root, 'scripts', 'hooks', 'h16-event-register.mjs')], { input: JSON.stringify(input), encoding: 'utf8', cwd: dir });
     assert.equal(r.status, 1, 'the same non-blocking exit H16 uses for every registration failure');
     assert.match(r.stderr, /H16: session event NOT registered \(session_events_lock_held\): agent_dispatch 'researcher' agent_id ag1;/);
     assert.doesNotMatch(r.stderr, /registration failed/, 'one line, not two');
     assert.equal(readFileSync(eventsPath, 'utf8'), '[{"kind":"research_tool","detail":"before","at":"x"}]');
+    holder.child.kill('SIGKILL');
+    await holder.done;
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

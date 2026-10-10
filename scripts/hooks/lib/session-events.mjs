@@ -3,8 +3,9 @@
 // Code and the OpenCode plugin's research recorder (packages/opencode-plugin/src/
 // research.mjs) write research_tool events through this one writer, so both hosts
 // record the same shape and H10 and the plugin's settlement read one format.
-// Builtins only: hooks and the OpenCode server bundle vendor this module.
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+// Builtins only (node:fs, node:path, node:sqlite): hooks and the OpenCode server bundle vendor this module.
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { dirname, join } from 'node:path';
 
 export const SESSION_EVENTS_REL = join('.sterling', 'transient', 'session-events.json');
@@ -39,7 +40,7 @@ export function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
     () => {
       const events = existsSync(eventsPath) ? JSON.parse(readFileSync(eventsPath, 'utf8')) : [];
       events.push(...newEvents);
-      const tmp = `${eventsPath}.${process.pid}.${uniqueToken()}.tmp`;
+      const tmp = `${eventsPath}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
       writeFileSync(tmp, JSON.stringify(events), { flag: 'wx' });
       try {
         renameSync(tmp, eventsPath);
@@ -58,131 +59,47 @@ export function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
 
 export const SESSION_EVENTS_LOCK_HELD = 'session_events_lock_held';
 
+const SQLITE_BUSY = 5;
+
 /**
- * Run fn while holding `<path>.lock`, a file created with 'wx' (exclusive create) that holds
- * "<pid> <token>". Contention retries every ~retryMs (with jitter) until timeoutMs, then throws
- * an Error with code SESSION_EVENTS_LOCK_HELD naming the lock path and its holder's pid, and runs
- * nothing: callers skip the write and say so, never write unlocked (decision
- * register-writers-cooperating-lock).
+ * Run fn while holding a kernel-held lock: a `BEGIN IMMEDIATE` transaction on the small SQLite
+ * database `<path>.lock.db`, opened with node:sqlite (which also runs under OpenCode's Bun,
+ * packages/opencode-plugin/src/store.mjs). A contender waits up to timeoutMs through SQLite's
+ * busy handler, then throws an Error with code SESSION_EVENTS_LOCK_HELD and runs nothing: callers
+ * skip the write and say so, never write unlocked (decision register-writers-cooperating-lock).
  *
- * A lock is reclaimed only when its holder's pid is verified dead (process.kill(pid, 0) fails
- * with ESRCH), never on age: a live holder keeps its lock however long fn runs, so two writers
- * are never inside fn together. Removing a dead holder's lock happens only while holding
- * `<path>.lock.reclaim` (also 'wx'), and the holder is checked again under it, so two waiters
- * that both saw the same dead lock cannot each remove a lock the other then created. Release
- * removes the lock only when it still holds this holder's token.
- * Residuals: a dead holder's pid reused by a live process, or a lock with no readable pid (a
- * crash between create and write), is never reclaimed; every append then times out naming the
- * lock, which a human removes. A holder in another pid namespace (another WSL distro or machine
- * sharing the tree) can look dead. A reclaim gate left by a dead process is removed by a check
- * that two waiters can race.
+ * The lock is released by COMMIT, by closing the connection, or by the OS when the holding
+ * process dies, so there is no pid, age or reclaim logic and no crash leaves a stale lock.
+ * Nothing is ever written to the lock database and it stays in rollback-journal mode, so no
+ * -journal or -wal file is left; the .lock.db file itself persists. Not reentrant: calling it
+ * from inside fn waits on itself until timeoutMs. Not guaranteed: exclusion between machines or
+ * WSL distros sharing one tree, or on a filesystem whose byte-range locks do not work.
  */
-export function withSessionEventsLock(path, fn, { timeoutMs = 5000, retryMs = 10 } = {}) {
-  const lockPath = `${path}.lock`;
-  const token = `${process.pid} ${uniqueToken()}`;
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (tryCreate(lockPath, token)) break;
-    const holder = readLock(lockPath);
-    if (holder === null) continue; // released between the create and the read: try again now
-    if (holderIsDead(holder)) {
-      reclaimDead(lockPath);
-      continue;
-    }
-    if (Date.now() >= deadline) {
-      const pid = holderPid(holder);
-      const who = pid === null ? `a writer whose pid cannot be read (lock content ${JSON.stringify(holder)})` : `live pid ${pid}`;
-      const err = new Error(
-        `${lockPath} is held by ${who}; gave up after ${timeoutMs}ms and nothing was written. If no Sterling writer with that pid is running (a reused pid), remove ${lockPath} by hand`,
-      );
+export function withSessionEventsLock(path, fn, { timeoutMs = 5000 } = {}) {
+  const lockPath = `${path}.lock.db`;
+  const db = new DatabaseSync(lockPath);
+  try {
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timeoutMs))}`);
+    try {
+      db.exec('PRAGMA journal_mode = DELETE');
+      db.exec('BEGIN IMMEDIATE');
+    } catch (e) {
+      if ((e?.errcode & 0xff) !== SQLITE_BUSY) throw e;
+      const err = new Error(`${lockPath} is held by another writer that is still running; gave up after ${timeoutMs}ms and nothing was written`);
       err.code = SESSION_EVENTS_LOCK_HELD;
       throw err;
     }
-    sleepMs(retryMs + Math.floor(Math.random() * retryMs));
-  }
-  try {
-    return fn();
-  } finally {
-    if (readLock(lockPath) === token) unlinkIfPresent(lockPath);
-  }
-}
-
-function uniqueToken() {
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-}
-
-/** Synchronous wait: hooks and the scripts that share this writer have no event loop to yield to. */
-function sleepMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-function tryCreate(lockPath, content) {
-  let fd;
-  try {
-    fd = openSync(lockPath, 'wx');
-  } catch (e) {
-    if (e.code === 'EEXIST') return false;
-    throw e;
-  }
-  try {
-    writeSync(fd, content);
-  } finally {
-    closeSync(fd);
-  }
-  return true;
-}
-
-function readLock(lockPath) {
-  try {
-    return readFileSync(lockPath, 'utf8');
-  } catch (e) {
-    if (e.code === 'ENOENT') return null;
-    throw e;
-  }
-}
-
-function holderPid(content) {
-  const pid = Number(content.split(' ')[0]);
-  return Number.isInteger(pid) && pid > 0 ? pid : null;
-}
-
-/** True only when the holder's pid is readable and the OS says no such process exists. */
-function holderIsDead(content) {
-  const pid = holderPid(content);
-  if (pid === null) return false;
-  try {
-    process.kill(pid, 0);
-    return false;
-  } catch (e) {
-    return e.code === 'ESRCH';
-  }
-}
-
-function reclaimDead(lockPath) {
-  const gatePath = `${lockPath}.reclaim`;
-  if (!tryCreate(gatePath, `${process.pid}`)) {
-    const gate = readLock(gatePath);
-    if (gate !== null && holderIsDead(gate)) {
-      console.error(`session-events: removing reclaim gate ${gatePath} left by dead pid ${holderPid(gate)}`);
-      unlinkIfPresent(gatePath);
-    }
-    return;
-  }
-  try {
-    const holder = readLock(lockPath);
-    if (holder !== null && holderIsDead(holder)) {
-      console.error(`session-events: removing lock ${lockPath} left by dead pid ${holderPid(holder)}`);
-      unlinkIfPresent(lockPath);
+    try {
+      return fn();
+    } finally {
+      try {
+        db.exec('COMMIT');
+      } catch (e) {
+        // Not rethrown, so fn's own result or error is kept; closing the connection below releases the lock.
+        console.error(`session-events: COMMIT of the lock at ${lockPath} failed (${e?.message ?? e}); the lock is released by closing the connection`);
+      }
     }
   } finally {
-    unlinkIfPresent(gatePath);
-  }
-}
-
-function unlinkIfPresent(path) {
-  try {
-    unlinkSync(path);
-  } catch (e) {
-    if (e.code !== 'ENOENT') throw e;
+    db.close();
   }
 }
