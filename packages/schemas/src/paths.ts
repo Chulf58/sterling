@@ -206,7 +206,7 @@ const SCHEME_LOCATION = /^[a-z][a-z0-9+.-]+:(\S|$)/i;
  * single-slash forms, not damage.
  */
 const COLLAPSED_URL_LOCATION = /^(https?|ftp):\/[^/]/i;
-/** With whitespace, a path has a separator and ends in a file extension. */
+/** A path has a separator or ends in a file extension (a bare word is a name, not a path). */
 const HAS_SEPARATOR = /[\\/]/;
 const ENDS_IN_EXTENSION = /\.[A-Za-z0-9]{1,8}$/;
 
@@ -222,21 +222,24 @@ export function isCollapsedUrlLocation(location: string): boolean {
  * text alone (no filesystem, no network), first match wins:
  *   1. 'url'   — it starts with a scheme of two or more characters and ':'
  *                (SCHEME_LOCATION); a collapsed 'https:/host' is one too.
- *   2. 'path'  — it has no whitespace; or it has whitespace, contains '/' or
- *                '\', ends in a file extension and mentions no '://'
- *                ('docs/Design Notes/spec.md').
- *   3. 'prose' — everything else with whitespace ("See the vendor portal,
- *                section 4").
- * Two limits, both accepted: a sentence that ends in a file path ("see
- * docs/foo.md") reads as a path, and one prose word with no whitespace
- * ("Confluence") reads as a path. A file whose own name starts 'word:'
- * reads as a url. 'path' does NOT mean repo-relative — an absolute or
+ *   2. 'path'  — it has no whitespace and either contains '/' or '\' or ends
+ *                in a file extension ('docs/spec.md', 'README.md'); or it has
+ *                whitespace, contains '/' or '\', ends in a file extension and
+ *                mentions no '://' ('docs/Design Notes/spec.md').
+ *   3. 'prose' — everything else: text with whitespace ("See the vendor portal,
+ *                section 4") and a bare word with neither separator nor
+ *                extension (a skill name such as 'sterling-init', 'Confluence').
+ * Limits, all accepted: a sentence that ends in a file path ("see
+ * docs/foo.md") reads as a path; an extensionless file at the repo root
+ * ('Makefile', 'LICENSE') reads as prose, so it is never stat-checked or
+ * keyed; a file whose own name starts 'word:' reads as a url.
+ * 'path' does NOT mean repo-relative — an absolute or
  * parent-escaping one is still a path; repoPathOfLocation answers that.
  */
 export function classifyLocation(location: string): LocationKind {
   const text = location.trim();
   if (SCHEME_LOCATION.test(text)) return 'url';
-  if (!/\s/.test(text)) return 'path';
+  if (!/\s/.test(text)) return HAS_SEPARATOR.test(text) || ENDS_IN_EXTENSION.test(text) ? 'path' : 'prose';
   return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes('://') ? 'path' : 'prose';
 }
 
