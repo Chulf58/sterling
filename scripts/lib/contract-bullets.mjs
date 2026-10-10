@@ -78,17 +78,20 @@ export const TARGET_LEADS = [
   // 2026-09-30: the plain-writing pair (decision write-plainly-everywhere-de-ai-pass-on-prose-deliverables).
   // Both are NEW to every sibling, so both arrive through INSERT_AFTER; the plain-writing bullet
   // is AGENTS.md-homed, the de-ai-writing pass bullet is CLAUDE.md-homed.
+  //
+  // The AGENTS.md conduct bullets are listed in TEMPLATE ORDER (lint, plain-writing, background
+  // subagents), because leads are processed in this order and each anchors on the one before it
+  // (see INSERT_AFTER in scripts/stamp-contract.mjs): a sibling missing any combination of them
+  // gets them back in template order.
+  // 2026-10-05: lint and tests before a code change is reported done (user-ruled through the
+  // question form). NEW to every sibling, anchored on the two bullets above it in the template,
+  // which were already tracked.
+  '- **Lint and tests before done.**',
   '- **Write plainly; no AI tells.**',
   // 2026-10-10: every subagent starts in the background (user-ruled 2026-10-09 and restated
   // 2026-10-10). NEW to every sibling, so it arrives through INSERT_AFTER, anchored on the
   // plain-writing bullet it follows in the template.
   '- **Start every subagent in the background.**',
-  // 2026-10-05: lint and tests before a code change is reported done (user-ruled through the
-  // question form). NEW to every sibling, so it arrives through INSERT_AFTER, anchored on the
-  // two bullets above it in the template, which were already tracked. It stays AFTER the
-  // plain-writing lead here: both anchor on "No false action claims", so a sibling missing
-  // both gets them back in template order.
-  '- **Lint and tests before done.**',
   '- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**',
   // 2026-10-01: board every user ask at intake (decision
   // every-user-ask-is-boarded-at-intake-with-slim-blocked-by). Both bullets already exist in

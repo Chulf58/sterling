@@ -789,6 +789,41 @@ test('stamp-contract --apply-inserts: a project missing both the plain-writing a
   }
 });
 
+test('stamp-contract --apply-inserts: a project that keeps the lint bullet but lacks plain-writing and background-subagents gets them in template order (lint, plain-writing, background), and a second run writes nothing', () => {
+  const f = sectionFixture('lint-kept', (agents) => dropBlock(dropBlock(agents, WRITE_PLAINLY_LEAD), BACKGROUND_LEAD));
+  try {
+    assert.ok(f.read().agents.includes(LINT_LEAD), 'the fixture keeps the lint bullet');
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    const lines = f.read().agents.split('\n');
+    const at = (lead) => lines.findIndex((l) => l.startsWith(lead));
+    assert.ok(at(LINT_LEAD) < at(WRITE_PLAINLY_LEAD) && at(WRITE_PLAINLY_LEAD) < at(BACKGROUND_LEAD), 'template order: lint, plain-writing, background');
+    assert.deepEqual(f.read(), f.complete, 'byte-identical to the template render');
+
+    const again = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+    assert.ok(!/inserted/.test(again.stdout), `nothing left to insert:\n${again.stdout}`);
+    assert.deepEqual(f.read(), f.complete, 'a second run writes nothing');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract --apply-inserts: every partial absence of lint, plain-writing and background-subagents lands back in template order', () => {
+  const leads = [LINT_LEAD, WRITE_PLAINLY_LEAD, BACKGROUND_LEAD];
+  for (let mask = 1; mask < 8; mask++) {
+    const dropped = leads.filter((_, i) => mask & (1 << i));
+    const f = sectionFixture(`partial-${mask}`, (agents) => dropped.reduce((text, lead) => dropBlock(text, lead), agents));
+    try {
+      const r = runStampContract(f.regDb, ['--apply-inserts']);
+      assert.equal(r.status, 0, `${dropped.join(' + ')}: ${r.stdout}\n${r.stderr}`);
+      assert.deepEqual(f.read(), f.complete, `dropping ${dropped.join(' + ')} comes back in template order`);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
 test('stamp-contract: a hand-tuned "No false action claims" bullet is not an anchor, so the lint bullet falls back to "Anti-speculation"', () => {
   const tuned = '- **No false action claims:** our own wording.';
   const f = sectionFixture('lint-fallback', (agents) => dropBlock(agents, LINT_LEAD).replace(/^- \*\*No false action claims:\*\*.*$/m, tuned));
