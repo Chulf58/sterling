@@ -4210,7 +4210,7 @@ function classifyLocation(location) {
   if (SCHEME_LOCATION.test(text))
     return "url";
   if (!/\s/.test(text))
-    return "path";
+    return HAS_SEPARATOR.test(text) || ENDS_IN_EXTENSION.test(text) ? "path" : "prose";
   return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
 }
 function repoPathOfLocation(location) {
@@ -18651,6 +18651,8 @@ async function registerRound(root, input, child) {
       attribution: attributed ? "block" : "none",
       attribution_case: res.case,
       tool_use_id: typeof res.tool_use_id === "string" && res.tool_use_id ? res.tool_use_id : null,
+      // the call's own model ref (provider/model, maybe #variant), stored raw; the dashboard labels the row with it
+      model: typeof input.input?.model === "string" && input.input.model ? input.input.model : null,
       at: (/* @__PURE__ */ new Date()).toISOString()
     };
   });
