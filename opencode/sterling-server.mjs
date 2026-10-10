@@ -17992,7 +17992,7 @@ function mountedDomainLines({ config, configUnreadable, opener, root }) {
 
 // scripts/lib/post-update-sync.mjs
 import { spawn, spawnSync as spawnSync4 } from "node:child_process";
-import { existsSync as existsSync19, readFileSync as readFileSync19, statSync as statSync6, writeFileSync as writeFileSync8 } from "node:fs";
+import { existsSync as existsSync19, readFileSync as readFileSync19, realpathSync as realpathSync8, statSync as statSync6, writeFileSync as writeFileSync8 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
 import { join as join30, resolve as resolve13 } from "node:path";
 var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
@@ -18026,6 +18026,16 @@ function hostText(host) {
 function samePath2(a, b) {
   const norm = (p) => String(p).replace(/\\/g, "/").replace(/\/+$/, "");
   return norm(a) === norm(b);
+}
+function sameRealPath(a, b) {
+  const real = (p) => {
+    try {
+      return realpathSync8(p);
+    } catch {
+      return resolve13(p);
+    }
+  };
+  return real(a) === real(b);
 }
 function pluginScript(root, name) {
   const bundled = join30(root, "bin", name);
@@ -18085,6 +18095,7 @@ async function runPostUpdateSteps(root, project, runStep) {
   if (sync.status === 2) return { ok: false, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
   if (sync.status !== 0) return { ok: false, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
+  if (sameRealPath(project, root)) return { ok: true, restart, drift: false, driftOut: "", inserted: [] };
   const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
   if (contract.error) return { ok: false, restart, detail: `stamp-contract did not run (${contract.error})` };
   if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
@@ -20836,7 +20847,7 @@ function createSessionSync(deps = {}) {
 }
 
 // packages/opencode-plugin/src/server.mjs
-import { realpathSync as realpathSync8 } from "node:fs";
+import { realpathSync as realpathSync9 } from "node:fs";
 import { resolve as resolve14 } from "node:path";
 var PLUGIN_ID = "sterling.server";
 var EXECUTION_END_EVENTS = /* @__PURE__ */ new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"]);
@@ -20845,7 +20856,7 @@ function sameDirectory(a, b) {
   let unresolved = "";
   const real = (p) => {
     try {
-      return realpathSync8(p);
+      return realpathSync9(p);
     } catch (e) {
       unresolved ||= `${p}: ${errText(e)}`;
       return resolve14(p);

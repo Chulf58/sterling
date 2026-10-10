@@ -22,7 +22,7 @@
 //
 // Builtins only: hooks and the OpenCode server bundle vendor this module.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { isInstalledCopy } from './installed-copy.mjs';
@@ -73,6 +73,18 @@ function hostText(host) {
 export function samePath(a, b) {
   const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '');
   return norm(a) === norm(b);
+}
+
+/** Path equality after symlink resolution; a path that cannot be resolved falls back to resolve(). */
+function sameRealPath(a, b) {
+  const real = (p) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  return real(a) === real(b);
 }
 
 /** The bundled bin/ entry when the plugin ships one, else the clone's scripts/ source. */
@@ -151,7 +163,9 @@ export function runStepAsync(root, name, args, { nodeBin = process.execPath } = 
  * non-zero a failure; stamp-contract exit 2 is tolerated drift, but any
  * "0 project(s) processed" (exit 0 or a refusal-only exit 2) checked nothing, which is a failure (P5).
  * Returns { ok, detail } or { ok, restart, drift, driftOut, inserted }; `inserted` is one
- * 'action lead' string per section or bullet stamp-contract wrote.
+ * 'action lead' string per section or bullet stamp-contract wrote. When the project is the
+ * plugin root itself (compared by realpath), stamp-contract is skipped, because it never
+ * stamps the clone running it and would report 0 projects processed.
  */
 export async function runPostUpdateSteps(root, project, runStep) {
   const sync = await runStep(root, 'sync-agents.mjs', ['--target', project]);
@@ -161,6 +175,7 @@ export async function runPostUpdateSteps(root, project, runStep) {
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
   // From here sync-agents has already run: a later failure still carries `restart`,
   // so the user is told agents changed even though the step as a whole failed.
+  if (sameRealPath(project, root)) return { ok: true, restart, drift: false, driftOut: '', inserted: [] };
   const contract = await runStep(root, 'stamp-contract.mjs', ['--apply-inserts', '--project', project]);
   if (contract.error) return { ok: false, restart, detail: `stamp-contract did not run (${contract.error})` };
   if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };

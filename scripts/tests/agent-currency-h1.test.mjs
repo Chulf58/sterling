@@ -1036,7 +1036,8 @@ test('CLONE: the plugin root as its own project syncs too', () => {
     const r = h1Logged(clone.dir, clone);
     assert.equal(r.code, 0, r.stderr);
     assert.ok(r.out, `H1 must emit parseable JSON: ${r.stdout}${r.stderr}`);
-    assert.deepEqual(r.calls, [`sync-agents --target ${clone.dir}`, `stamp-contract --apply-inserts --project ${clone.dir}`]);
+    // stamp-contract is skipped for the clone itself: its contract files are hand-maintained (stamp-contract.mjs:224).
+    assert.deepEqual(r.calls, [`sync-agents --target ${clone.dir}`]);
     assert.match(installedBytes(agentsDir, 'coder.md'), /Fixture body v2 for coder\./);
     assert.ok(messageOf(r).includes(RESTART_SHORT), messageOf(r));
   } finally {
