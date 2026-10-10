@@ -72,6 +72,40 @@ export function gitFrom(exec, cwd) {
   };
 }
 
+const LS_REMOTE_TIMEOUT_MS = 30_000;
+
+/**
+ * Authoring machine only: say so when origin's default branch has commits this clone's HEAD lacks,
+ * because the update does not pull there (issue #61). The question is containment, not equality:
+ * a clone on a feature branch, or ahead of origin, already holds origin's tip and stays silent.
+ * Read-only: `ls-remote` and `merge-base` write no refs. A failed check is stated, never silent
+ * (P5), and never changes the exit code.
+ */
+export function logOriginDrift({ exec, cwd, log }) {
+  const notChecked = (reason) => log(`  ! origin not checked (${reason})`);
+  const remote = exec('git', ['ls-remote', 'origin', 'HEAD'], { cwd, timeout: LS_REMOTE_TIMEOUT_MS });
+  const remoteSha = (remote.stdout ?? '').trim().split(/\s+/)[0] ?? '';
+  if (remote.status !== 0 || !/^[0-9a-f]{40}$/.test(remoteSha)) {
+    notChecked(remote.status !== 0 ? (remote.stderr || remote.stdout || `exit ${remote.status}`).trim() : 'ls-remote returned no HEAD');
+    return;
+  }
+  const local = exec('git', ['rev-parse', 'HEAD'], { cwd });
+  const localSha = (local.stdout ?? '').trim();
+  if (local.status !== 0 || !localSha) {
+    notChecked(`could not read this clone's HEAD: ${(local.stderr || `exit ${local.status}`).trim()}`);
+    return;
+  }
+  // exit 0: origin's tip is already in HEAD. exit 1: it is not. exit 128: the object was never
+  // fetched here, so this clone cannot contain it. Anything else is an unknown failure.
+  const contained = exec('git', ['merge-base', '--is-ancestor', remoteSha, 'HEAD'], { cwd });
+  if (contained.status === 0) return;
+  if (contained.status !== 1 && contained.status !== 128) {
+    notChecked((contained.stderr || contained.stdout || `exit ${contained.status}`).trim());
+    return;
+  }
+  log(`  ! origin's default branch is at ${remoteSha.slice(0, 7)}, this clone's HEAD is at ${localSha.slice(0, 7)}. This update does not pull on the authoring machine; pull deliberately if that work should be here.`);
+}
+
 /**
  * Everything the refusal matrix and the currency report need, in one read.
  * Reads only — safe to call before deciding anything.
@@ -922,12 +956,12 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     }
     const invokedFrom = projectDir || invokingProject;
     if (opts.check) {
-      log(`\nAUTHORING clone — nothing to pull; syncing ${invokedFrom} only`);
+      log(`\nAUTHORING clone — no pull on the authoring machine; syncing ${invokedFrom} only`);
       log('  (--check: nothing fetched, nothing synced, no currency line — there is nothing to pull)');
       return report;
     }
     if (opts.projects === false) {
-      log(`\nAUTHORING clone — nothing to pull; syncing ${invokedFrom} only`);
+      log(`\nAUTHORING clone — no pull on the authoring machine; syncing ${invokedFrom} only`);
       log('  (--no-projects: nothing synced — on the authoring machine the project sync is the whole update, so this run did nothing)');
       return report;
     }
@@ -943,7 +977,8 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       report.exit = 2;
       return report;
     }
-    log(`\nAUTHORING clone — nothing to pull; syncing ${project.repo_path} only`);
+    log(`\nAUTHORING clone — no pull on the authoring machine; syncing ${project.repo_path} only`);
+    logOriginDrift({ exec, cwd, log });
     if (opts.force) log('  (--force has no meaning on the authoring machine: there is no rebuild to force)');
     refreshProjects([project], { launchers: false, handoff: false });
     log(`\n▸ launchers in every registered project (${registered.length})`);
