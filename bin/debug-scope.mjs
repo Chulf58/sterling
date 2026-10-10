@@ -7,8 +7,7 @@ var __export = (target2, all) => {
 };
 
 // scripts/debug-scope.mjs
-import { readFileSync as readFileSync2, writeFileSync as writeFileSync2, mkdirSync as mkdirSync2, existsSync as existsSync2 } from "node:fs";
-import { join as join3, dirname as dirname2 } from "node:path";
+import { join as join4 } from "node:path";
 
 // scripts/lib/project.mjs
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
@@ -5493,6 +5492,131 @@ function clearDebugScope(cwd) {
   rmSync(debugScopePath(cwd), { force: true });
 }
 
+// scripts/hooks/lib/session-events.mjs
+import { closeSync, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, renameSync, statSync, unlinkSync, writeFileSync as writeFileSync2, writeSync } from "node:fs";
+import { dirname as dirname2, join as join3 } from "node:path";
+var SESSION_EVENTS_REL = join3(".sterling", "transient", "session-events.json");
+function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
+  mkdirSync2(dirname2(eventsPath), { recursive: true });
+  withSessionEventsLock(
+    eventsPath,
+    () => {
+      const events = existsSync2(eventsPath) ? JSON.parse(readFileSync2(eventsPath, "utf8")) : [];
+      events.push(...newEvents);
+      const tmp = `${eventsPath}.${process.pid}.${uniqueToken()}.tmp`;
+      writeFileSync2(tmp, JSON.stringify(events), { flag: "wx" });
+      try {
+        renameSync(tmp, eventsPath);
+      } catch (e) {
+        try {
+          unlinkSync(tmp);
+        } catch {
+        }
+        throw e;
+      }
+    },
+    lockOptions
+  );
+}
+var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
+function withSessionEventsLock(path, fn, { timeoutMs = 5e3, retryMs = 10, staleMs = 3e4 } = {}) {
+  const lockPath = `${path}.lock`;
+  const token = `${process.pid} ${uniqueToken()}`;
+  const deadline = Date.now() + timeoutMs;
+  for (; ; ) {
+    if (tryCreate(lockPath, token)) break;
+    if (isStale(lockPath, staleMs)) {
+      reclaimStale(lockPath, staleMs);
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      const err = new Error(`${lockPath} is held by another writer (${readLock(lockPath) ?? "holder unknown"}) after ${timeoutMs}ms; nothing was written`);
+      err.code = SESSION_EVENTS_LOCK_HELD;
+      throw err;
+    }
+    sleepMs(retryMs + Math.floor(Math.random() * retryMs));
+  }
+  try {
+    return fn();
+  } finally {
+    if (readLock(lockPath) === token) unlinkIfPresent(lockPath);
+  }
+}
+function uniqueToken() {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function tryCreate(lockPath, content) {
+  let fd;
+  try {
+    fd = openSync(lockPath, "wx");
+  } catch (e) {
+    if (e.code === "EEXIST") return false;
+    throw e;
+  }
+  try {
+    writeSync(fd, content);
+  } finally {
+    closeSync(fd);
+  }
+  return true;
+}
+function readLock(lockPath) {
+  try {
+    return readFileSync2(lockPath, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  }
+}
+function pidIsDead(pid) {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return e.code === "ESRCH";
+  }
+}
+function isStale(lockPath, staleMs) {
+  let mtimeMs;
+  try {
+    mtimeMs = statSync(lockPath).mtimeMs;
+  } catch (e) {
+    if (e.code === "ENOENT") return false;
+    throw e;
+  }
+  if (Date.now() - mtimeMs > staleMs) return true;
+  const pid = Number((readLock(lockPath) ?? "").split(" ")[0]);
+  return Number.isInteger(pid) && pid > 0 && pidIsDead(pid);
+}
+function reclaimStale(lockPath, staleMs) {
+  const gatePath = `${lockPath}.reclaim`;
+  if (!tryCreate(gatePath, `${process.pid}`)) {
+    if (isStale(gatePath, staleMs)) {
+      console.error(`session-events: removing reclaim gate ${gatePath}, older than ${staleMs}ms (a crashed holder's leftover)`);
+      unlinkIfPresent(gatePath);
+    }
+    return;
+  }
+  try {
+    if (isStale(lockPath, staleMs)) {
+      console.error(`session-events: removing stale lock ${lockPath} (${readLock(lockPath) ?? "empty"}): its pid is dead or it is older than ${staleMs}ms`);
+      unlinkIfPresent(lockPath);
+    }
+  } finally {
+    unlinkIfPresent(gatePath);
+  }
+}
+function unlinkIfPresent(path) {
+  try {
+    unlinkSync(path);
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
+}
+
 // scripts/debug-scope.mjs
 var action = process.argv[2];
 var target = arg("--target") ?? process.cwd();
@@ -5500,11 +5624,13 @@ if (action === "register") {
   const paths = argAll("--path");
   if (!paths.length) fail("debug-scope register: at least one --path required (the explorer map)");
   registerDebugScope(target, paths);
-  const eventsPath = join3(target, ".sterling", "transient", "session-events.json");
-  mkdirSync2(dirname2(eventsPath), { recursive: true });
-  const events = existsSync2(eventsPath) ? JSON.parse(readFileSync2(eventsPath, "utf8")) : [];
-  events.push({ kind: "debug_scope", detail: paths.join(", "), at: (/* @__PURE__ */ new Date()).toISOString() });
-  writeFileSync2(eventsPath, JSON.stringify(events));
+  const eventsPath = join4(target, ".sterling", "transient", "session-events.json");
+  try {
+    appendSessionEventsAt(eventsPath, [{ kind: "debug_scope", detail: paths.join(", "), at: (/* @__PURE__ */ new Date()).toISOString() }]);
+  } catch (e) {
+    if (e.code === SESSION_EVENTS_LOCK_HELD) fail(`debug-scope register: the scope was registered but its debug_scope session event was NOT: ${e.message}`);
+    throw e;
+  }
   console.log(JSON.stringify({ registered: paths.length }));
 } else if (action === "clear") {
   clearDebugScope(target);

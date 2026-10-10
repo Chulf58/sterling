@@ -13889,7 +13889,7 @@ async function withRegisterLock(root, fn, opts = {}) {
             `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
           );
         }
-        await sleepAsync(retryMs);
+        await sleepAsync(retryMs + Math.random() * retryMs * 0.5);
         continue;
       }
       const held = legacyLockHolder(root);
@@ -13997,6 +13997,7 @@ var DERIVE_RETRY_INTERVAL_MS = 10;
 var DERIVE_PER_ATTEMPT_LOCK_MS = 30;
 var DERIVE_SIBLINGS_BUDGET_MS = 3e3;
 var DERIVE_LOCK_HELD_BUDGET_MS = 150;
+var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function retryBudgetFor(verdict) {
   return verdict === "siblings-retry" ? DERIVE_SIBLINGS_BUDGET_MS : DERIVE_LOCK_HELD_BUDGET_MS;
 }
@@ -14452,7 +14453,7 @@ function recordDispatchPre(root, stdin) {
       disclosures: [render(disclosure("dispatch_state_collision", { tool_use_id: toolUseId }, `Pre for tool_use_id '${toolUseId}' disagrees with the existing dispatch-state record \u2014 never overwritten`))],
       record: r
     };
-  }));
+  }), RECORDER_LOCK_OPTS);
 }
 function fillUnattributableRowLocked(root, { sessionId, agentId, agentType, toolUseId, prompt }, territoryFor) {
   if (typeof territoryFor !== "function") return [];
@@ -14641,7 +14642,7 @@ function recordDispatchPost(root, stdin, opts = {}) {
       ],
       record: updated
     };
-  }));
+  }), RECORDER_LOCK_OPTS);
 }
 function recordDispatchFailure(root, stdin) {
   return withRegisterLock(root, () => catchContainmentRefusal(() => {
@@ -14685,7 +14686,7 @@ function recordDispatchFailure(root, stdin) {
     const updated = { ...r, prompt: null, terminal: { at, reason: "tool-failure" } };
     terminalizeLiveRecord(root, key, updated);
     return { ok: true, action: "terminated", disclosures: [], record: updated };
-  }));
+  }), RECORDER_LOCK_OPTS);
 }
 function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) {
   if (typeof agent_id !== "string" || agent_id === "") {
@@ -14778,7 +14779,7 @@ async function resolveAndRegisterStart(root, startStdin, entryBuilder) {
           if (e?.kind === "refusal") return { resolution, entry: null, refusal: e };
           throw e;
         }
-      });
+      }, RECORDER_LOCK_OPTS);
     } catch (e) {
       if (e?.kind === "refusal") return { resolution: fallback, entry: null, refusal: e };
       throw e;
@@ -17107,7 +17108,7 @@ function lockState(lock, nowMs, isAlive = pidAlive) {
 function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   const token = randomUUID4();
   const body = JSON.stringify({ ...content, token });
-  const tryCreate = () => {
+  const tryCreate2 = () => {
     try {
       writeFileSync7(paths.lock, body, { flag: "wx" });
       return true;
@@ -17116,7 +17117,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
       throw e;
     }
   };
-  if (!tryCreate()) {
+  if (!tryCreate2()) {
     if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
     try {
       mkdirSync13(paths.takeover);
@@ -17133,7 +17134,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
     try {
       if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
       rmSync7(paths.lock, { force: true });
-      if (!tryCreate()) return null;
+      if (!tryCreate2()) return null;
     } finally {
       rmdirSync2(paths.takeover);
     }
@@ -19276,7 +19277,7 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
 }
 
 // scripts/hooks/lib/session-events.mjs
-import { existsSync as existsSync25, mkdirSync as mkdirSync17, readFileSync as readFileSync22, writeFileSync as writeFileSync11 } from "node:fs";
+import { closeSync as closeSync8, existsSync as existsSync25, mkdirSync as mkdirSync17, openSync as openSync8, readFileSync as readFileSync22, renameSync as renameSync9, statSync as statSync9, unlinkSync as unlinkSync4, writeFileSync as writeFileSync11, writeSync as writeSync2 } from "node:fs";
 import { dirname as dirname15, join as join40 } from "node:path";
 var SESSION_EVENTS_REL = join40(".sterling", "transient", "session-events.json");
 function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
@@ -19284,12 +19285,128 @@ function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOStri
   if (typeof agentId === "string" && agentId !== "") event.agent_id = agentId;
   return event;
 }
-function appendSessionEvent(projectDir, event) {
-  const eventsPath = join40(projectDir, SESSION_EVENTS_REL);
+function appendSessionEvent(projectDir, event, lockOptions) {
+  appendSessionEventsAt(join40(projectDir, SESSION_EVENTS_REL), [event], lockOptions);
+}
+function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
   mkdirSync17(dirname15(eventsPath), { recursive: true });
-  const events = existsSync25(eventsPath) ? JSON.parse(readFileSync22(eventsPath, "utf8")) : [];
-  events.push(event);
-  writeFileSync11(eventsPath, JSON.stringify(events));
+  withSessionEventsLock(
+    eventsPath,
+    () => {
+      const events = existsSync25(eventsPath) ? JSON.parse(readFileSync22(eventsPath, "utf8")) : [];
+      events.push(...newEvents);
+      const tmp = `${eventsPath}.${process.pid}.${uniqueToken()}.tmp`;
+      writeFileSync11(tmp, JSON.stringify(events), { flag: "wx" });
+      try {
+        renameSync9(tmp, eventsPath);
+      } catch (e) {
+        try {
+          unlinkSync4(tmp);
+        } catch {
+        }
+        throw e;
+      }
+    },
+    lockOptions
+  );
+}
+var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
+function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3, retryMs = 10, staleMs = 3e4 } = {}) {
+  const lockPath = `${path}.lock`;
+  const token = `${process.pid} ${uniqueToken()}`;
+  const deadline = Date.now() + timeoutMs2;
+  for (; ; ) {
+    if (tryCreate(lockPath, token)) break;
+    if (isStale(lockPath, staleMs)) {
+      reclaimStale(lockPath, staleMs);
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      const err = new Error(`${lockPath} is held by another writer (${readLock2(lockPath) ?? "holder unknown"}) after ${timeoutMs2}ms; nothing was written`);
+      err.code = SESSION_EVENTS_LOCK_HELD;
+      throw err;
+    }
+    sleepMs(retryMs + Math.floor(Math.random() * retryMs));
+  }
+  try {
+    return fn();
+  } finally {
+    if (readLock2(lockPath) === token) unlinkIfPresent(lockPath);
+  }
+}
+function uniqueToken() {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function tryCreate(lockPath, content) {
+  let fd;
+  try {
+    fd = openSync8(lockPath, "wx");
+  } catch (e) {
+    if (e.code === "EEXIST") return false;
+    throw e;
+  }
+  try {
+    writeSync2(fd, content);
+  } finally {
+    closeSync8(fd);
+  }
+  return true;
+}
+function readLock2(lockPath) {
+  try {
+    return readFileSync22(lockPath, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  }
+}
+function pidIsDead(pid) {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return e.code === "ESRCH";
+  }
+}
+function isStale(lockPath, staleMs) {
+  let mtimeMs;
+  try {
+    mtimeMs = statSync9(lockPath).mtimeMs;
+  } catch (e) {
+    if (e.code === "ENOENT") return false;
+    throw e;
+  }
+  if (Date.now() - mtimeMs > staleMs) return true;
+  const pid = Number((readLock2(lockPath) ?? "").split(" ")[0]);
+  return Number.isInteger(pid) && pid > 0 && pidIsDead(pid);
+}
+function reclaimStale(lockPath, staleMs) {
+  const gatePath = `${lockPath}.reclaim`;
+  if (!tryCreate(gatePath, `${process.pid}`)) {
+    if (isStale(gatePath, staleMs)) {
+      console.error(`session-events: removing reclaim gate ${gatePath}, older than ${staleMs}ms (a crashed holder's leftover)`);
+      unlinkIfPresent(gatePath);
+    }
+    return;
+  }
+  try {
+    if (isStale(lockPath, staleMs)) {
+      console.error(`session-events: removing stale lock ${lockPath} (${readLock2(lockPath) ?? "empty"}): its pid is dead or it is older than ${staleMs}ms`);
+      unlinkIfPresent(lockPath);
+    }
+  } finally {
+    unlinkIfPresent(gatePath);
+  }
+}
+function unlinkIfPresent(path) {
+  try {
+    unlinkSync4(path);
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
 }
 
 // packages/opencode-plugin/src/research.mjs
@@ -19321,7 +19438,7 @@ function createResearchRecorder({ rootOf, fenced, now }) {
 import { join as join42 } from "node:path";
 
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync18, readFileSync as readFileSync23, renameSync as renameSync9, rmSync as rmSync10, writeFileSync as writeFileSync12 } from "node:fs";
+import { mkdirSync as mkdirSync18, readFileSync as readFileSync23, renameSync as renameSync10, rmSync as rmSync10, writeFileSync as writeFileSync12 } from "node:fs";
 import { hostname as hostname2 } from "node:os";
 import { join as join41 } from "node:path";
 import { randomUUID as randomUUID5 } from "node:crypto";
@@ -19333,7 +19450,7 @@ function takeSelectionFile(root) {
   const path = selectionFilePath(root);
   const claimed = `${path}.taken-${process.pid}-${randomUUID5()}`;
   try {
-    renameSync9(path, claimed);
+    renameSync10(path, claimed);
   } catch (e) {
     if (e?.code === "ENOENT") return void 0;
     throw e;
@@ -19382,7 +19499,7 @@ TUI selection (one-shot): the user has selected ${selection.type} '${selection.r
 init_dist();
 import { spawnSync as spawnSync8 } from "node:child_process";
 import { randomUUID as randomUUID8 } from "node:crypto";
-import { existsSync as existsSync27, mkdirSync as mkdirSync20, readFileSync as readFileSync26, renameSync as renameSync11, rmSync as rmSync12, writeFileSync as writeFileSync14 } from "node:fs";
+import { existsSync as existsSync27, mkdirSync as mkdirSync20, readFileSync as readFileSync26, renameSync as renameSync12, rmSync as rmSync12, writeFileSync as writeFileSync14 } from "node:fs";
 import { dirname as dirname17, join as join45 } from "node:path";
 
 // scripts/hooks/lib/session-duties.mjs
@@ -19632,7 +19749,7 @@ var hasOpenSystemTodo = (store, reason) => store.query({ types: ["todo"], cap: 1
 // scripts/hooks/lib/settlement.mjs
 init_dist2();
 import { createHash as createHash4, randomUUID as randomUUID7 } from "node:crypto";
-import { readFileSync as readFileSync25, writeFileSync as writeFileSync13, mkdirSync as mkdirSync19, rmSync as rmSync11, statSync as statSync9, renameSync as renameSync10 } from "node:fs";
+import { readFileSync as readFileSync25, writeFileSync as writeFileSync13, mkdirSync as mkdirSync19, rmSync as rmSync11, statSync as statSync10, renameSync as renameSync11 } from "node:fs";
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { join as join44, dirname as dirname16 } from "node:path";
 function hashFile(root, rel) {
@@ -19757,7 +19874,7 @@ function gitTouches(root, now) {
     const candidates = [...changed].map((path) => {
       let at = settled.at;
       try {
-        at = statSync9(join44(root, path)).mtime.toISOString();
+        at = statSync10(join44(root, path)).mtime.toISOString();
       } catch {
       }
       return { path, at: typeof at === "string" ? at : now };
@@ -19782,7 +19899,7 @@ function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
   const tmp = `${p}.${process.pid}.${randomUUID7()}.tmp`;
   try {
     writeFileSync13(tmp, JSON.stringify(snapshot));
-    renameSync10(tmp, p);
+    renameSync11(tmp, p);
   } catch (e) {
     rmSync11(tmp, { force: true });
     throw e;
@@ -19940,7 +20057,7 @@ function writeJsonAtomic2(path, value) {
   const tmp = `${path}.${process.pid}.${randomUUID8()}.tmp`;
   try {
     writeFileSync14(tmp, JSON.stringify(value));
-    renameSync11(tmp, path);
+    renameSync12(tmp, path);
   } catch (e) {
     rmSync12(tmp, { force: true });
     throw e;

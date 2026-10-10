@@ -11398,6 +11398,7 @@ function readRegister(root) {
 }
 var MAX_PROMPT_BYTES = 512 * 1024;
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 
 // scripts/hooks/lib/hazard-lane-mode.mjs
 var READ_ONLY_TOOLS = /* @__PURE__ */ new Set(["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "ToolSearch"]);

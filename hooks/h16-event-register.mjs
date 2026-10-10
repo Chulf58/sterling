@@ -11263,30 +11263,146 @@ function openStoreOrDegrade(cwd, who, open2 = openStore) {
 }
 
 // scripts/hooks/lib/session-events.mjs
-import { existsSync as existsSync5, mkdirSync as mkdirSync4, readFileSync as readFileSync6, writeFileSync as writeFileSync2 } from "node:fs";
+import { closeSync as closeSync3, existsSync as existsSync5, mkdirSync as mkdirSync4, openSync as openSync3, readFileSync as readFileSync6, renameSync as renameSync2, statSync as statSync3, unlinkSync, writeFileSync as writeFileSync2, writeSync } from "node:fs";
 import { dirname as dirname5, join as join10 } from "node:path";
 var SESSION_EVENTS_REL = join10(".sterling", "transient", "session-events.json");
 function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
-  const event = { kind: "research_tool", detail: String(detail ?? ""), at };
-  if (typeof agentId === "string" && agentId !== "") event.agent_id = agentId;
-  return event;
+  const event2 = { kind: "research_tool", detail: String(detail ?? ""), at };
+  if (typeof agentId === "string" && agentId !== "") event2.agent_id = agentId;
+  return event2;
 }
-function appendSessionEvent(projectDir, event) {
-  const eventsPath = join10(projectDir, SESSION_EVENTS_REL);
+function appendSessionEvent(projectDir, event2, lockOptions) {
+  appendSessionEventsAt(join10(projectDir, SESSION_EVENTS_REL), [event2], lockOptions);
+}
+function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
   mkdirSync4(dirname5(eventsPath), { recursive: true });
-  const events = existsSync5(eventsPath) ? JSON.parse(readFileSync6(eventsPath, "utf8")) : [];
-  events.push(event);
-  writeFileSync2(eventsPath, JSON.stringify(events));
+  withSessionEventsLock(
+    eventsPath,
+    () => {
+      const events = existsSync5(eventsPath) ? JSON.parse(readFileSync6(eventsPath, "utf8")) : [];
+      events.push(...newEvents);
+      const tmp = `${eventsPath}.${process.pid}.${uniqueToken()}.tmp`;
+      writeFileSync2(tmp, JSON.stringify(events), { flag: "wx" });
+      try {
+        renameSync2(tmp, eventsPath);
+      } catch (e) {
+        try {
+          unlinkSync(tmp);
+        } catch {
+        }
+        throw e;
+      }
+    },
+    lockOptions
+  );
+}
+var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
+function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3, retryMs = 10, staleMs = 3e4 } = {}) {
+  const lockPath = `${path}.lock`;
+  const token = `${process.pid} ${uniqueToken()}`;
+  const deadline = Date.now() + timeoutMs2;
+  for (; ; ) {
+    if (tryCreate(lockPath, token)) break;
+    if (isStale(lockPath, staleMs)) {
+      reclaimStale(lockPath, staleMs);
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      const err = new Error(`${lockPath} is held by another writer (${readLock(lockPath) ?? "holder unknown"}) after ${timeoutMs2}ms; nothing was written`);
+      err.code = SESSION_EVENTS_LOCK_HELD;
+      throw err;
+    }
+    sleepMs(retryMs + Math.floor(Math.random() * retryMs));
+  }
+  try {
+    return fn();
+  } finally {
+    if (readLock(lockPath) === token) unlinkIfPresent(lockPath);
+  }
+}
+function uniqueToken() {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function tryCreate(lockPath, content) {
+  let fd;
+  try {
+    fd = openSync3(lockPath, "wx");
+  } catch (e) {
+    if (e.code === "EEXIST") return false;
+    throw e;
+  }
+  try {
+    writeSync(fd, content);
+  } finally {
+    closeSync3(fd);
+  }
+  return true;
+}
+function readLock(lockPath) {
+  try {
+    return readFileSync6(lockPath, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  }
+}
+function pidIsDead(pid) {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return e.code === "ESRCH";
+  }
+}
+function isStale(lockPath, staleMs) {
+  let mtimeMs;
+  try {
+    mtimeMs = statSync3(lockPath).mtimeMs;
+  } catch (e) {
+    if (e.code === "ENOENT") return false;
+    throw e;
+  }
+  if (Date.now() - mtimeMs > staleMs) return true;
+  const pid = Number((readLock(lockPath) ?? "").split(" ")[0]);
+  return Number.isInteger(pid) && pid > 0 && pidIsDead(pid);
+}
+function reclaimStale(lockPath, staleMs) {
+  const gatePath = `${lockPath}.reclaim`;
+  if (!tryCreate(gatePath, `${process.pid}`)) {
+    if (isStale(gatePath, staleMs)) {
+      console.error(`session-events: removing reclaim gate ${gatePath}, older than ${staleMs}ms (a crashed holder's leftover)`);
+      unlinkIfPresent(gatePath);
+    }
+    return;
+  }
+  try {
+    if (isStale(lockPath, staleMs)) {
+      console.error(`session-events: removing stale lock ${lockPath} (${readLock(lockPath) ?? "empty"}): its pid is dead or it is older than ${staleMs}ms`);
+      unlinkIfPresent(lockPath);
+    }
+  } finally {
+    unlinkIfPresent(gatePath);
+  }
+}
+function unlinkIfPresent(path) {
+  try {
+    unlinkSync(path);
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
 }
 
 // scripts/hooks/h16-event-register.mjs
 var input = readStdin();
 var store = openStoreOrDegrade(input.cwd, "H16");
 if (!store) allow();
+var event;
 try {
   const tool = input.tool_name;
   const at = (/* @__PURE__ */ new Date()).toISOString();
-  let event;
   if (tool === "WebSearch" || tool === "WebFetch") {
     event = researchToolEvent(tool === "WebSearch" ? input.tool_input?.query : input.tool_input?.url, { at, agentId: input.agent_id });
   } else {
@@ -11300,5 +11416,9 @@ try {
   appendSessionEvent(input.cwd, event);
   allow();
 } catch (e) {
-  warnNonBlocking(`H16: session-event registration failed: ${e.message}`);
+  if (e.code === SESSION_EVENTS_LOCK_HELD) {
+    warnNonBlocking(`H16: session event NOT registered (${SESSION_EVENTS_LOCK_HELD}): ${event.kind} '${event.detail}'${event.agent_id ? ` agent_id ${event.agent_id}` : ""}; ${e.message}`);
+  } else {
+    warnNonBlocking(`H16: session-event registration failed: ${e.message}`);
+  }
 }

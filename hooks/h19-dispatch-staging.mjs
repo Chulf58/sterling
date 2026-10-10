@@ -12870,7 +12870,7 @@ async function withRegisterLock(root, fn, opts = {}) {
             `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
           );
         }
-        await sleepAsync(retryMs);
+        await sleepAsync(retryMs + Math.random() * retryMs * 0.5);
         continue;
       }
       const held = legacyLockHolder(root);
@@ -12911,6 +12911,7 @@ var DERIVE_RETRY_INTERVAL_MS = 10;
 var DERIVE_PER_ATTEMPT_LOCK_MS = 30;
 var DERIVE_SIBLINGS_BUDGET_MS = 3e3;
 var DERIVE_LOCK_HELD_BUDGET_MS = 150;
+var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function retryBudgetFor(verdict) {
   return verdict === "siblings-retry" ? DERIVE_SIBLINGS_BUDGET_MS : DERIVE_LOCK_HELD_BUDGET_MS;
 }

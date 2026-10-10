@@ -37616,7 +37616,8 @@ function createSterlingServer(target, opts = {}) {
     guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store));
     toolWrappers.push("worker_policy");
   }
-  const mapBusy = (name, e) => e instanceof StoreBusyError ? busyRefusal(name, e, false) : e;
+  const SINGLE_WRITE_BOARD_TOOLS = /* @__PURE__ */ new Set(["board_update", "board_edit"]);
+  const mapBusy = (name, e) => e instanceof StoreBusyError ? busyRefusal(name, e, SINGLE_WRITE_BOARD_TOOLS.has(name)) : e;
   const registerTool = server.registerTool.bind(server);
   server.registerTool = ((name, config3, handler) => registerTool(name, config3, ((...args2) => {
     try {

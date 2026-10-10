@@ -6,10 +6,6 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// scripts/no-capture.mjs
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { dirname } from "node:path";
-
 // scripts/lib/project.mjs
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
@@ -5613,6 +5609,131 @@ function fail(message, code = 1) {
   process.exit(code);
 }
 
+// scripts/hooks/lib/session-events.mjs
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { dirname, join as join3 } from "node:path";
+var SESSION_EVENTS_REL = join3(".sterling", "transient", "session-events.json");
+function appendSessionEventsAt(eventsPath2, newEvents, lockOptions) {
+  mkdirSync(dirname(eventsPath2), { recursive: true });
+  withSessionEventsLock(
+    eventsPath2,
+    () => {
+      const events = existsSync(eventsPath2) ? JSON.parse(readFileSync(eventsPath2, "utf8")) : [];
+      events.push(...newEvents);
+      const tmp = `${eventsPath2}.${process.pid}.${uniqueToken()}.tmp`;
+      writeFileSync(tmp, JSON.stringify(events), { flag: "wx" });
+      try {
+        renameSync(tmp, eventsPath2);
+      } catch (e) {
+        try {
+          unlinkSync(tmp);
+        } catch {
+        }
+        throw e;
+      }
+    },
+    lockOptions
+  );
+}
+var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
+function withSessionEventsLock(path, fn, { timeoutMs = 5e3, retryMs = 10, staleMs = 3e4 } = {}) {
+  const lockPath = `${path}.lock`;
+  const token = `${process.pid} ${uniqueToken()}`;
+  const deadline = Date.now() + timeoutMs;
+  for (; ; ) {
+    if (tryCreate(lockPath, token)) break;
+    if (isStale(lockPath, staleMs)) {
+      reclaimStale(lockPath, staleMs);
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      const err = new Error(`${lockPath} is held by another writer (${readLock(lockPath) ?? "holder unknown"}) after ${timeoutMs}ms; nothing was written`);
+      err.code = SESSION_EVENTS_LOCK_HELD;
+      throw err;
+    }
+    sleepMs(retryMs + Math.floor(Math.random() * retryMs));
+  }
+  try {
+    return fn();
+  } finally {
+    if (readLock(lockPath) === token) unlinkIfPresent(lockPath);
+  }
+}
+function uniqueToken() {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function tryCreate(lockPath, content) {
+  let fd;
+  try {
+    fd = openSync(lockPath, "wx");
+  } catch (e) {
+    if (e.code === "EEXIST") return false;
+    throw e;
+  }
+  try {
+    writeSync(fd, content);
+  } finally {
+    closeSync(fd);
+  }
+  return true;
+}
+function readLock(lockPath) {
+  try {
+    return readFileSync(lockPath, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  }
+}
+function pidIsDead(pid) {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return e.code === "ESRCH";
+  }
+}
+function isStale(lockPath, staleMs) {
+  let mtimeMs;
+  try {
+    mtimeMs = statSync(lockPath).mtimeMs;
+  } catch (e) {
+    if (e.code === "ENOENT") return false;
+    throw e;
+  }
+  if (Date.now() - mtimeMs > staleMs) return true;
+  const pid = Number((readLock(lockPath) ?? "").split(" ")[0]);
+  return Number.isInteger(pid) && pid > 0 && pidIsDead(pid);
+}
+function reclaimStale(lockPath, staleMs) {
+  const gatePath = `${lockPath}.reclaim`;
+  if (!tryCreate(gatePath, `${process.pid}`)) {
+    if (isStale(gatePath, staleMs)) {
+      console.error(`session-events: removing reclaim gate ${gatePath}, older than ${staleMs}ms (a crashed holder's leftover)`);
+      unlinkIfPresent(gatePath);
+    }
+    return;
+  }
+  try {
+    if (isStale(lockPath, staleMs)) {
+      console.error(`session-events: removing stale lock ${lockPath} (${readLock(lockPath) ?? "empty"}): its pid is dead or it is older than ${staleMs}ms`);
+      unlinkIfPresent(lockPath);
+    }
+  } finally {
+    unlinkIfPresent(gatePath);
+  }
+}
+function unlinkIfPresent(path) {
+  try {
+    unlinkSync(path);
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
+}
+
 // scripts/no-capture.mjs
 var reason;
 var laneGiven;
@@ -5642,9 +5763,12 @@ try {
 } catch (e) {
   fail(`no-capture: ${e.message}`);
 }
-mkdirSync(dirname(eventsPath), { recursive: true });
-var events = existsSync(eventsPath) ? JSON.parse(readFileSync(eventsPath, "utf8")) : [];
 var at = (/* @__PURE__ */ new Date()).toISOString();
-events.push(lane ? { kind: "no_capture", detail: reason, at, lane } : { kind: "no_capture", detail: reason, at });
-writeFileSync(eventsPath, JSON.stringify(events));
+var event = lane ? { kind: "no_capture", detail: reason, at, lane } : { kind: "no_capture", detail: reason, at };
+try {
+  appendSessionEventsAt(eventsPath, [event]);
+} catch (e) {
+  if (e.code === SESSION_EVENTS_LOCK_HELD) fail(`no-capture: no_capture declaration NOT registered: ${e.message}`);
+  throw e;
+}
 console.log(JSON.stringify({ declared: reason, at, lane: lane ?? "capture (bare declaration)" }));

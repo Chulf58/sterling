@@ -11655,7 +11655,7 @@ async function withRegisterLock(root, fn, opts = {}) {
             `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
           );
         }
-        await sleepAsync(retryMs);
+        await sleepAsync(retryMs + Math.random() * retryMs * 0.5);
         continue;
       }
       const held = legacyLockHolder(root);
@@ -11729,6 +11729,7 @@ function formatDispatchRef(row) {
 }
 var MAX_PROMPT_BYTES = 512 * 1024;
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";

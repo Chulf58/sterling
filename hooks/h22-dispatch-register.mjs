@@ -6156,7 +6156,7 @@ async function withRegisterLock(root, fn, opts = {}) {
             `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
           );
         }
-        await sleepAsync(retryMs);
+        await sleepAsync(retryMs + Math.random() * retryMs * 0.5);
         continue;
       }
       const held = legacyLockHolder(root);
@@ -6229,6 +6229,7 @@ var DERIVE_RETRY_INTERVAL_MS = 10;
 var DERIVE_PER_ATTEMPT_LOCK_MS = 30;
 var DERIVE_SIBLINGS_BUDGET_MS = 3e3;
 var DERIVE_LOCK_HELD_BUDGET_MS = 150;
+var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function retryBudgetFor(verdict) {
   return verdict === "siblings-retry" ? DERIVE_SIBLINGS_BUDGET_MS : DERIVE_LOCK_HELD_BUDGET_MS;
 }
@@ -6681,7 +6682,7 @@ function recordDispatchPre(root, stdin) {
       disclosures: [render(disclosure("dispatch_state_collision", { tool_use_id: toolUseId }, `Pre for tool_use_id '${toolUseId}' disagrees with the existing dispatch-state record \u2014 never overwritten`))],
       record: r
     };
-  }));
+  }), RECORDER_LOCK_OPTS);
 }
 function fillUnattributableRowLocked(root, { sessionId, agentId, agentType, toolUseId, prompt }, territoryFor) {
   if (typeof territoryFor !== "function") return [];
@@ -6870,7 +6871,7 @@ function recordDispatchPost(root, stdin, opts = {}) {
       ],
       record: updated
     };
-  }));
+  }), RECORDER_LOCK_OPTS);
 }
 function recordDispatchFailure(root, stdin) {
   return withRegisterLock(root, () => catchContainmentRefusal(() => {
@@ -6914,7 +6915,7 @@ function recordDispatchFailure(root, stdin) {
     const updated = { ...r, prompt: null, terminal: { at, reason: "tool-failure" } };
     terminalizeLiveRecord(root, key, updated);
     return { ok: true, action: "terminated", disclosures: [], record: updated };
-  }));
+  }), RECORDER_LOCK_OPTS);
 }
 function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) {
   if (typeof agent_id !== "string" || agent_id === "") {
@@ -7007,7 +7008,7 @@ async function resolveAndRegisterStart(root, startStdin, entryBuilder) {
           if (e?.kind === "refusal") return { resolution, entry: null, refusal: e };
           throw e;
         }
-      });
+      }, RECORDER_LOCK_OPTS);
     } catch (e) {
       if (e?.kind === "refusal") return { resolution: fallback, entry: null, refusal: e };
       throw e;
@@ -7262,8 +7263,24 @@ try {
       warnNonBlocking(`H22: unexpected ${event} tool_name '${input.tool_name}' on the Task|Agent matcher \u2014 allowing, nothing tracked`);
     } else {
       const recorder = event === "PreToolUse" ? recordDispatchPre : event === "PostToolUse" ? recordDispatchPost : recordDispatchFailure;
-      const result = await recorder(input.cwd, input, event === "PostToolUse" ? { territoryFor: (prompt) => postTerritory(prompt, input.cwd) } : void 0);
-      if (result.disclosures?.length) lines.push(...result.disclosures);
+      try {
+        const result = await recorder(input.cwd, input, event === "PostToolUse" ? { territoryFor: (prompt) => postTerritory(prompt, input.cwd) } : void 0);
+        if (result.disclosures?.length) lines.push(...result.disclosures);
+      } catch (e) {
+        if (e?.code !== "register_lock_held") throw e;
+        const toolUseId = input.tool_use_id ?? "(none)";
+        const subagentType = input.tool_input?.subagent_type ?? "(unknown)";
+        const lost = event === "PreToolUse" ? "no dispatch-state record was written, so this lane's SubagentStart has no prompt to derive its territory from (its PostToolUse can still bind it)" : event === "PostToolUse" ? "no agent binding was recorded and no unattributable register row was filled with this lane's territory" : "the dispatch-state record was not marked failed, so it is not terminal";
+        lines.push(
+          render(
+            disclosure(
+              "register_lock_held",
+              { ...e.facts ?? {}, event, tool_use_id: toolUseId, subagent_type: subagentType },
+              `H22: ${event} for tool_use_id ${toolUseId} (${subagentType}) wrote nothing \u2014 the register lock at ${e.facts?.lock_path ?? "(unknown)"} stayed held by another live writer for ${e.facts?.waited_ms ?? "?"}ms (kernel-held: released when that writer finishes or dies, so there is nothing to remove by hand); ${lost}.`
+            )
+          )
+        );
+      }
     }
     if (lines.length) process.stderr.write(lines.join("\n") + "\n");
     allow();
