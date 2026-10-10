@@ -17108,7 +17108,7 @@ function lockState(lock, nowMs, isAlive = pidAlive) {
 function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   const token = randomUUID4();
   const body = JSON.stringify({ ...content, token });
-  const tryCreate2 = () => {
+  const tryCreate = () => {
     try {
       writeFileSync7(paths.lock, body, { flag: "wx" });
       return true;
@@ -17117,7 +17117,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
       throw e;
     }
   };
-  if (!tryCreate2()) {
+  if (!tryCreate()) {
     if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
     try {
       mkdirSync13(paths.takeover);
@@ -17134,7 +17134,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
     try {
       if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
       rmSync7(paths.lock, { force: true });
-      if (!tryCreate2()) return null;
+      if (!tryCreate()) return null;
     } finally {
       rmdirSync2(paths.takeover);
     }
@@ -19279,7 +19279,8 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
 }
 
 // scripts/hooks/lib/session-events.mjs
-import { closeSync as closeSync8, existsSync as existsSync25, mkdirSync as mkdirSync17, openSync as openSync8, readFileSync as readFileSync22, renameSync as renameSync9, unlinkSync as unlinkSync4, writeFileSync as writeFileSync11, writeSync as writeSync2 } from "node:fs";
+import { existsSync as existsSync25, mkdirSync as mkdirSync17, readFileSync as readFileSync22, renameSync as renameSync9, unlinkSync as unlinkSync4, writeFileSync as writeFileSync11 } from "node:fs";
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { dirname as dirname15, join as join40 } from "node:path";
 var SESSION_EVENTS_REL = join40(".sterling", "transient", "session-events.json");
 function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
@@ -19297,7 +19298,7 @@ function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
     () => {
       const events = existsSync25(eventsPath) ? JSON.parse(readFileSync22(eventsPath, "utf8")) : [];
       events.push(...newEvents);
-      const tmp = `${eventsPath}.${process.pid}.${uniqueToken()}.tmp`;
+      const tmp = `${eventsPath}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
       writeFileSync11(tmp, JSON.stringify(events), { flag: "wx" });
       try {
         renameSync9(tmp, eventsPath);
@@ -19313,103 +19314,32 @@ function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
   );
 }
 var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
-function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3, retryMs = 10 } = {}) {
-  const lockPath = `${path}.lock`;
-  const token = `${process.pid} ${uniqueToken()}`;
-  const deadline = Date.now() + timeoutMs2;
-  for (; ; ) {
-    if (tryCreate(lockPath, token)) break;
-    const holder = readLock2(lockPath);
-    if (holder === null) continue;
-    if (holderIsDead(holder)) {
-      reclaimDead(lockPath);
-      continue;
-    }
-    if (Date.now() >= deadline) {
-      const pid = holderPid(holder);
-      const who = pid === null ? `a writer whose pid cannot be read (lock content ${JSON.stringify(holder)})` : `live pid ${pid}`;
-      const err = new Error(
-        `${lockPath} is held by ${who}; gave up after ${timeoutMs2}ms and nothing was written. If no Sterling writer with that pid is running (a reused pid), remove ${lockPath} by hand`
-      );
+var SQLITE_BUSY2 = 5;
+function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
+  const lockPath = `${path}.lock.db`;
+  const db = new DatabaseSync4(lockPath);
+  try {
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timeoutMs2))}`);
+    try {
+      db.exec("PRAGMA journal_mode = DELETE");
+      db.exec("BEGIN IMMEDIATE");
+    } catch (e) {
+      if ((e?.errcode & 255) !== SQLITE_BUSY2) throw e;
+      const err = new Error(`${lockPath} is held by another writer that is still running; gave up after ${timeoutMs2}ms and nothing was written`);
       err.code = SESSION_EVENTS_LOCK_HELD;
       throw err;
     }
-    sleepMs(retryMs + Math.floor(Math.random() * retryMs));
-  }
-  try {
-    return fn();
-  } finally {
-    if (readLock2(lockPath) === token) unlinkIfPresent(lockPath);
-  }
-}
-function uniqueToken() {
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-}
-function sleepMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-function tryCreate(lockPath, content) {
-  let fd;
-  try {
-    fd = openSync8(lockPath, "wx");
-  } catch (e) {
-    if (e.code === "EEXIST") return false;
-    throw e;
-  }
-  try {
-    writeSync2(fd, content);
-  } finally {
-    closeSync8(fd);
-  }
-  return true;
-}
-function readLock2(lockPath) {
-  try {
-    return readFileSync22(lockPath, "utf8");
-  } catch (e) {
-    if (e.code === "ENOENT") return null;
-    throw e;
-  }
-}
-function holderPid(content) {
-  const pid = Number(content.split(" ")[0]);
-  return Number.isInteger(pid) && pid > 0 ? pid : null;
-}
-function holderIsDead(content) {
-  const pid = holderPid(content);
-  if (pid === null) return false;
-  try {
-    process.kill(pid, 0);
-    return false;
-  } catch (e) {
-    return e.code === "ESRCH";
-  }
-}
-function reclaimDead(lockPath) {
-  const gatePath = `${lockPath}.reclaim`;
-  if (!tryCreate(gatePath, `${process.pid}`)) {
-    const gate = readLock2(gatePath);
-    if (gate !== null && holderIsDead(gate)) {
-      console.error(`session-events: removing reclaim gate ${gatePath} left by dead pid ${holderPid(gate)}`);
-      unlinkIfPresent(gatePath);
-    }
-    return;
-  }
-  try {
-    const holder = readLock2(lockPath);
-    if (holder !== null && holderIsDead(holder)) {
-      console.error(`session-events: removing lock ${lockPath} left by dead pid ${holderPid(holder)}`);
-      unlinkIfPresent(lockPath);
+    try {
+      return fn();
+    } finally {
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        console.error(`session-events: COMMIT of the lock at ${lockPath} failed (${e?.message ?? e}); the lock is released by closing the connection`);
+      }
     }
   } finally {
-    unlinkIfPresent(gatePath);
-  }
-}
-function unlinkIfPresent(path) {
-  try {
-    unlinkSync4(path);
-  } catch (e) {
-    if (e.code !== "ENOENT") throw e;
+    db.close();
   }
 }
 

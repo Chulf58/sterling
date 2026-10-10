@@ -5493,7 +5493,8 @@ function clearDebugScope(cwd) {
 }
 
 // scripts/hooks/lib/session-events.mjs
-import { closeSync, existsSync as existsSync2, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, renameSync, unlinkSync, writeFileSync as writeFileSync2, writeSync } from "node:fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { dirname as dirname2, join as join3 } from "node:path";
 var SESSION_EVENTS_REL = join3(".sterling", "transient", "session-events.json");
 function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
@@ -5503,7 +5504,7 @@ function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
     () => {
       const events = existsSync2(eventsPath) ? JSON.parse(readFileSync2(eventsPath, "utf8")) : [];
       events.push(...newEvents);
-      const tmp = `${eventsPath}.${process.pid}.${uniqueToken()}.tmp`;
+      const tmp = `${eventsPath}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
       writeFileSync2(tmp, JSON.stringify(events), { flag: "wx" });
       try {
         renameSync(tmp, eventsPath);
@@ -5519,103 +5520,32 @@ function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
   );
 }
 var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
-function withSessionEventsLock(path, fn, { timeoutMs = 5e3, retryMs = 10 } = {}) {
-  const lockPath = `${path}.lock`;
-  const token = `${process.pid} ${uniqueToken()}`;
-  const deadline = Date.now() + timeoutMs;
-  for (; ; ) {
-    if (tryCreate(lockPath, token)) break;
-    const holder = readLock(lockPath);
-    if (holder === null) continue;
-    if (holderIsDead(holder)) {
-      reclaimDead(lockPath);
-      continue;
-    }
-    if (Date.now() >= deadline) {
-      const pid = holderPid(holder);
-      const who = pid === null ? `a writer whose pid cannot be read (lock content ${JSON.stringify(holder)})` : `live pid ${pid}`;
-      const err = new Error(
-        `${lockPath} is held by ${who}; gave up after ${timeoutMs}ms and nothing was written. If no Sterling writer with that pid is running (a reused pid), remove ${lockPath} by hand`
-      );
+var SQLITE_BUSY = 5;
+function withSessionEventsLock(path, fn, { timeoutMs = 5e3 } = {}) {
+  const lockPath = `${path}.lock.db`;
+  const db = new DatabaseSync4(lockPath);
+  try {
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timeoutMs))}`);
+    try {
+      db.exec("PRAGMA journal_mode = DELETE");
+      db.exec("BEGIN IMMEDIATE");
+    } catch (e) {
+      if ((e?.errcode & 255) !== SQLITE_BUSY) throw e;
+      const err = new Error(`${lockPath} is held by another writer that is still running; gave up after ${timeoutMs}ms and nothing was written`);
       err.code = SESSION_EVENTS_LOCK_HELD;
       throw err;
     }
-    sleepMs(retryMs + Math.floor(Math.random() * retryMs));
-  }
-  try {
-    return fn();
-  } finally {
-    if (readLock(lockPath) === token) unlinkIfPresent(lockPath);
-  }
-}
-function uniqueToken() {
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-}
-function sleepMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-function tryCreate(lockPath, content) {
-  let fd;
-  try {
-    fd = openSync(lockPath, "wx");
-  } catch (e) {
-    if (e.code === "EEXIST") return false;
-    throw e;
-  }
-  try {
-    writeSync(fd, content);
-  } finally {
-    closeSync(fd);
-  }
-  return true;
-}
-function readLock(lockPath) {
-  try {
-    return readFileSync2(lockPath, "utf8");
-  } catch (e) {
-    if (e.code === "ENOENT") return null;
-    throw e;
-  }
-}
-function holderPid(content) {
-  const pid = Number(content.split(" ")[0]);
-  return Number.isInteger(pid) && pid > 0 ? pid : null;
-}
-function holderIsDead(content) {
-  const pid = holderPid(content);
-  if (pid === null) return false;
-  try {
-    process.kill(pid, 0);
-    return false;
-  } catch (e) {
-    return e.code === "ESRCH";
-  }
-}
-function reclaimDead(lockPath) {
-  const gatePath = `${lockPath}.reclaim`;
-  if (!tryCreate(gatePath, `${process.pid}`)) {
-    const gate = readLock(gatePath);
-    if (gate !== null && holderIsDead(gate)) {
-      console.error(`session-events: removing reclaim gate ${gatePath} left by dead pid ${holderPid(gate)}`);
-      unlinkIfPresent(gatePath);
-    }
-    return;
-  }
-  try {
-    const holder = readLock(lockPath);
-    if (holder !== null && holderIsDead(holder)) {
-      console.error(`session-events: removing lock ${lockPath} left by dead pid ${holderPid(holder)}`);
-      unlinkIfPresent(lockPath);
+    try {
+      return fn();
+    } finally {
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        console.error(`session-events: COMMIT of the lock at ${lockPath} failed (${e?.message ?? e}); the lock is released by closing the connection`);
+      }
     }
   } finally {
-    unlinkIfPresent(gatePath);
-  }
-}
-function unlinkIfPresent(path) {
-  try {
-    unlinkSync(path);
-  } catch (e) {
-    if (e.code !== "ENOENT") throw e;
+    db.close();
   }
 }
 
