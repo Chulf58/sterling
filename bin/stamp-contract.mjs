@@ -5920,6 +5920,10 @@ var TARGET_LEADS = [
   // Both are NEW to every sibling, so both arrive through INSERT_AFTER; the plain-writing bullet
   // is AGENTS.md-homed, the de-ai-writing pass bullet is CLAUDE.md-homed.
   "- **Write plainly; no AI tells.**",
+  // 2026-10-10: every subagent starts in the background (user-ruled 2026-10-09 and restated
+  // 2026-10-10). NEW to every sibling, so it arrives through INSERT_AFTER, anchored on the
+  // plain-writing bullet it follows in the template.
+  "- **Start every subagent in the background.**",
   // 2026-10-05: lint and tests before a code change is reported done (user-ruled through the
   // question form). NEW to every sibling, so it arrives through INSERT_AFTER, anchored on the
   // two bullets above it in the template, which were already tracked. It stays AFTER the
@@ -5937,7 +5941,9 @@ var TARGET_LEADS = [
   // 2026-10-02: Sterling defects are filed as scrubbed GitHub issues through report-issue.mjs
   // (decision projects-file-sterling-issues-as-scrubbed-github-issues-automatically). The bullet
   // already exists in every sibling under this lead, so the REPLACE path carries the new wording.
-  "- **Stamp Sterling's version when reporting on Sterling.**",
+  // 2026-10-10: renamed from "- **Stamp Sterling's version when reporting on Sterling.**" so the
+  // auto-report rule is findable by its lead; RENAMED_LEADS below carries the old lead.
+  "- **Report Sterling defects to its GitHub issues without asking.**",
   // 2026-10-04: the Domains section of AGENTS.md (decision
   // consumers-learn-domain-mounting-from-agents-md-and-a-domain-check-command). A project
   // initialized before the section existed has none of these and no heading for them, so the
@@ -5953,7 +5959,9 @@ var RENAMED_LEADS = /* @__PURE__ */ new Map([
   // old wording is refused (or replaced, if it ever matches a template variant) instead
   // of getting a second copy through INSERT_AFTER.
   ["- **Solve, don't board.**", ["- **Solve, don't board**"]],
-  ["- **Close-on-commit: a commit that fulfils a board item pays it**", ["- **Close-on-commit:**"]]
+  ["- **Close-on-commit: a commit that fulfils a board item pays it**", ["- **Close-on-commit:**"]],
+  // 2026-10-10: the auto-report bullet's lead said "stamp the version" while the rule is to file the issue.
+  ["- **Report Sterling defects to its GitHub issues without asking.**", ["- **Stamp Sterling's version when reporting on Sterling.**"]]
 ]);
 var HISTORY_LEADS = [...TARGET_LEADS, ...[...RENAMED_LEADS.values()].flat()];
 var FENCE = /^\s*(```|~~~)/;
@@ -6022,6 +6030,7 @@ var INSERT_AFTER = /* @__PURE__ */ new Map([
   ["- **Instruction-file proposals replace memory.**", ["- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
   ["- **Write plainly; no AI tells.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Lint and tests before done.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Start every subagent in the background.**", ["- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", ["- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
   ["- **Solve, don't board.**", ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", "- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
   ["- **Close-on-commit: a commit that fulfils a board item pays it**", ["- **Solve, don't board.**"]]

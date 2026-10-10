@@ -504,6 +504,40 @@ test('stamp-contract: Solve and Close-on-commit bullets under their OLD leads ar
   }
 });
 
+const REPORT_LEAD = '- **Report Sterling defects to its GitHub issues without asking.**';
+const OLD_REPORT_LEAD = "- **Stamp Sterling's version when reporting on Sterling.**";
+
+test('stamp-contract: a CLAUDE.md with the report bullet under its OLD lead is reported would_rename by --apply-inserts (untouched, no duplicate), and --apply replaces it in place exactly once; a second --apply writes nothing', () => {
+  const f = stampFixture('old-report-lead', (complete) => {
+    const lines = complete.split('\n');
+    const at = lines.findIndex((l) => l.startsWith(REPORT_LEAD));
+    assert.ok(at >= 0, 'fixture sanity: the render carries the new lead');
+    // The body is unchanged by the rename, so the old-lead variant is the same text under the old lead.
+    lines[at] = lines[at].replace(REPORT_LEAD, OLD_REPORT_LEAD);
+    return { planted: lines.join('\n'), expected: complete };
+  });
+  try {
+    const inserts = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(inserts.status, 0, `${inserts.stdout}\n${inserts.stderr}`);
+    assert.match(inserts.stdout, /would_rename {2}- \*\*Report Sterling defects to its GitHub issues/);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), f.planted, '/sterling:update\'s mode reports the rename and does not touch the old bullet');
+
+    const r = runStampContract(f.regDb, ['--apply']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /renamed {2}- \*\*Report Sterling defects to its GitHub issues/);
+    const after = readFileSync(f.claudePath, 'utf8');
+    assert.equal(after, f.expected, 'the old-lead bullet became the current bullet, in place, and nothing else changed');
+    assert.equal(after.split('\n').filter((l) => l.startsWith(REPORT_LEAD)).length, 1, 'one bullet under the new lead');
+    assert.ok(!after.includes(OLD_REPORT_LEAD), 'no bullet under the old lead');
+
+    const again = runStampContract(f.regDb, ['--apply']);
+    assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+    assert.equal(readFileSync(f.claudePath, 'utf8'), after, 'a second run writes nothing');
+  } finally {
+    f.cleanup();
+  }
+});
+
 // ---- the Domains section (TARGET_SECTIONS in scripts/lib/contract-bullets.mjs) ----
 // An AGENTS.md written before the section existed gets the whole section, heading included,
 // ahead of its Conventions heading; after that its bullets are ordinary tracked leads.
@@ -659,8 +693,18 @@ test('stamp-contract --apply-inserts: a missing tracked bullet is inserted too',
 
 const LINT_LEAD = '- **Lint and tests before done.**';
 const WRITE_PLAINLY_LEAD = '- **Write plainly; no AI tells.**';
+const BACKGROUND_LEAD = '- **Start every subagent in the background.**';
 const OLD_NAMING = '- **Canonical naming:** one name per concept, from the registries; no dead terms.';
 const OLD_EXIT_CODE = "- **A toolchain-invoked process's exit code can read as a crash when the real cause is a missing required flag.** Some test/build runners exit with an unfamiliar non-zero code when a required headless/CI-mode flag is omitted, rather than failing informatively — check the runner's own headless/CI documentation before treating a red run as a real regression.";
+
+test('the AGENTS.md template and this repo\'s AGENTS.md both tell agents to start every subagent in the background', () => {
+  for (const file of [join('templates', 'target-agents-md.md'), 'AGENTS.md']) {
+    const text = readFileSync(join(root, file), 'utf8');
+    const bullet = text.split('\n').find((l) => l.startsWith('- **Start every subagent in the background.**'));
+    assert.ok(bullet, `${file} carries the background-subagents bullet`);
+    assert.ok(bullet.includes('`background: true`'), `${file} names the OpenCode flag`);
+  }
+});
 
 test('the AGENTS.md template carries the lint/format fact line and the lint bullet, and neither removed bullet', () => {
   const template = readFileSync(join(root, 'templates', 'target-agents-md.md'), 'utf8');
@@ -702,6 +746,28 @@ test('stamp-contract --apply-inserts: a project without the lint bullet gets it 
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
     assert.match(r.stdout, /inserted {2}- \*\*Lint and tests before done\.\*\*/);
     assert.deepEqual(f.read(), f.complete, 'the bullet is in its template position and nothing else changed');
+
+    const again = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+    assert.ok(!/inserted/.test(again.stdout), `nothing left to insert:\n${again.stdout}`);
+    assert.deepEqual(f.read(), f.complete, 'a second run writes nothing');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract --apply-inserts: a project without the background-subagents bullet gets it once, right after the plain-writing bullet, and a second run writes nothing', () => {
+  const f = sectionFixture('background-bullet', (agents) => dropBlock(agents, BACKGROUND_LEAD));
+  try {
+    assert.ok(!f.read().agents.includes(BACKGROUND_LEAD), 'the fixture lacks the bullet');
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /inserted {2}- \*\*Start every subagent in the background\.\*\*/);
+    assert.deepEqual(f.read(), f.complete, 'the bullet is in its template position and nothing else changed');
+    const lines = f.read().agents.split('\n');
+    assert.equal(lines.filter((l) => l.startsWith(BACKGROUND_LEAD)).length, 1, 'inserted once');
+    const at = lines.findIndex((l) => l.startsWith(BACKGROUND_LEAD));
+    assert.ok(lines[at - 1].startsWith(WRITE_PLAINLY_LEAD), 'right after the plain-writing bullet');
 
     const again = runStampContract(f.regDb, ['--apply-inserts']);
     assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
