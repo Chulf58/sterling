@@ -6,7 +6,9 @@
       "mcp__plugin_sterling_sterling__knowledge_promote",
       "mcp__sterling__knowledge_promote",
       "Edit(/.claude/worktrees/**)",
-      "Write(/.claude/worktrees/**)"
+      "Write(/.claude/worktrees/**)",
+      "Edit(/scripts/domain-doctor.mjs)",
+      "Edit(/scripts/tests/**)"
     ]
   }
 }

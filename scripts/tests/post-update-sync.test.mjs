@@ -18,12 +18,12 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative as relativePath } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildSeamHook } from './lib/seam-hook.mjs';
-import { cloneAgentSync, compareVersions, parseVersion, postUpdateSync, runStepAsync } from '../lib/post-update-sync.mjs';
+import { cloneAgentSync, compareVersions, parseVersion, postUpdateSync, runPostUpdateSteps, runStepAsync } from '../lib/post-update-sync.mjs';
 import { sterlingRootLine } from '../hooks/lib/operating-state.mjs';
 import { renderClaudeText } from '../lib/agent-fences.mjs';
 
@@ -389,15 +389,32 @@ test('cloneAgentSync: a clone runs both steps for the project and never writes o
   }
 });
 
-test('cloneAgentSync: the clone as its own project is synced (the project is the plugin root)', async () => {
+test('cloneAgentSync: the clone as its own project gets sync-agents only, since stamp-contract never stamps the clone running it (the project is the plugin root)', async () => {
   const plugin = makePluginRoot({ clone: true });
   mkdirSync(join(plugin, '.sterling'), { recursive: true });
   writeFileSync(join(plugin, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby' }));
   const { calls, runStep } = recordingSteps();
   const r = await cloneAgentSync({ root: plugin, project: plugin, behind: [], runStep });
   assert.equal(r.outcome, 'synced');
-  assert.deepEqual(calls, [`sync-agents.mjs --target ${plugin}`, `stamp-contract.mjs --apply-inserts --project ${plugin}`]);
+  assert.deepEqual(calls, [`sync-agents.mjs --target ${plugin}`]);
   assert.equal(markerOf(plugin), 'ENOENT');
+});
+
+test('runPostUpdateSteps: a project that is the plugin root, directly or through a symlink, skips stamp-contract and succeeds instead of reporting an unregistered project', async () => {
+  const plugin = makePluginRoot({ clone: true });
+  const link = join(tmp('sterling-pus-link-'), 'clone-link');
+  symlinkSync(plugin, link, 'dir');
+  for (const [project, root] of [[plugin, plugin], [link, plugin], [plugin, link]]) {
+    const { calls, runStep } = recordingSteps();
+    const r = await runPostUpdateSteps(root, project, runStep);
+    assert.deepEqual(r, { ok: true, restart: true, drift: false, driftOut: '', inserted: [] }, `project ${project}, root ${root}`);
+    assert.deepEqual(calls, [`sync-agents.mjs --target ${project}`], 'stamp-contract is never invoked');
+  }
+  // A different directory still goes through stamp-contract.
+  const other = makeProject({ store: false });
+  const { calls, runStep } = recordingSteps();
+  assert.equal((await runPostUpdateSteps(plugin, other, runStep)).ok, true);
+  assert.deepEqual(calls, [`sync-agents.mjs --target ${other}`, `stamp-contract.mjs --apply-inserts --project ${other}`]);
 });
 
 test('cloneAgentSync: a clone older than the marker refuses and runs nothing; a clone version that cannot be ordered against a marker is a loud SKIP', async () => {
