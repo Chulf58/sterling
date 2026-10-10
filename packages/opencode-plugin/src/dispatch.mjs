@@ -225,6 +225,8 @@ async function registerRound(root, input, child) {
       attribution: attributed ? 'block' : 'none',
       attribution_case: res.case,
       tool_use_id: typeof res.tool_use_id === 'string' && res.tool_use_id ? res.tool_use_id : null,
+      // the call's own model ref (provider/model, maybe #variant), stored raw; the dashboard labels the row with it
+      model: typeof input.input?.model === 'string' && input.input.model ? input.input.model : null,
       at: new Date().toISOString(),
     };
   });

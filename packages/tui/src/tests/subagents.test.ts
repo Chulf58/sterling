@@ -1,17 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import {
   composeSubagentBlock,
   contextPercent,
   contextWindowFor,
   createSubagentTracker,
+  defaultOpenCodeDbPath,
+  displayModel,
   endsOnHandback,
   formatElapsed,
   formatIdle,
   readContextUsage,
+  readOpenCodeContext,
   readSubagents,
   subagentTranscriptPath,
   TRANSCRIPT_ALIVE_MS,
@@ -911,4 +915,132 @@ test('paintPixels: 24-bit cells at 1-based positions, and only changed cells on 
   calls.length = 0;
   paintPixels(term, [{ x: 2, y: 3, ch: '▀', fg: '#112233', bg: '#ff0080' }], undefined, true);
   assert.deepEqual(calls, ['reset', 'move 3,4', 'put \x1b[38;2;17;34;51m', 'put \x1b[48;2;255;0;128m', 'put ▀', 'reset']);
+});
+
+// OpenCode: a register row's agent_id is the child session's id, and the context
+// is read from OpenCode's own database (a fixture here, built with the same
+// node:sqlite the reader uses), never from a Claude transcript.
+
+function openCodeDb(root: string, opts: { messages?: [string, number, string, unknown][]; catalog?: unknown; tables?: boolean } = {}): string {
+  const path = join(root, 'opencode-data', 'opencode', 'opencode.db');
+  mkdirSync(join(root, 'opencode-data', 'opencode'), { recursive: true });
+  const db = new DatabaseSync(path);
+  db.exec('PRAGMA journal_mode = WAL');
+  if (opts.tables !== false) {
+    db.exec('CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)');
+    db.exec('CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)');
+    const insert = db.prepare('INSERT INTO session_message VALUES (?, ?, ?, ?, 0, 0, ?)');
+    (opts.messages ?? []).forEach(([session, seq, type, data], i) => insert.run(`msg_${i}`, session, type, seq, JSON.stringify(data)));
+    if (opts.catalog !== undefined) db.prepare('INSERT INTO kv VALUES (?, ?, 0, 7)').run('models-dev:catalog', JSON.stringify({ updatedAt: 1, digest: 'd', body: JSON.stringify(opts.catalog) }));
+  } else {
+    db.exec('CREATE TABLE unrelated (x)');
+  }
+  db.close();
+  return path;
+}
+
+const turn = (input: number, read: number, write: number, id = 'gpt-6.1-sol', providerID = 'openai') => ({
+  time: {}, agent: 'sterling/reviewer', model: { id, providerID, variant: 'high' }, content: [], tokens: { input, output: 999, reasoning: 500, cache: { read, write } },
+});
+const CATALOG = { openai: { id: 'openai', models: { 'gpt-6.1-sol': { id: 'gpt-6.1-sol', limit: { context: 1_000_000, output: 128_000 } } } } };
+
+test('opencode: the tracker reads the child session\'s latest assistant turn with tokens (input plus both cache fields, output left out) over the catalog\'s context limit', () => {
+  const root = project();
+  try {
+    const db = openCodeDb(root, {
+      messages: [
+        ['ses_kid', 1, 'user', { text: 'brief' }],
+        ['ses_kid', 2, 'assistant', turn(10, 10, 10)],
+        ['ses_kid', 4, 'assistant', turn(2_000, 150_000, 98_000)],
+        ['ses_kid', 5, 'assistant', turn(0, 0, 0)], // still streaming: reports 0 and is skipped
+        ['ses_other', 9, 'assistant', turn(900_000, 0, 0)],
+      ],
+      catalog: CATALOG,
+    });
+    writeRegister(root, [row('ses_kid', 'reviewer', 10_000, { session_id: 'ses_root', model: 'openai/gpt-6.1-sol#high' }), row('ses_new', 'scout', 5_000, { session_id: 'ses_root' })]);
+    const v = createSubagentTracker(root, { readIntervalMs: 0, host: 'opencode', opencodeDb: db, claudeConfigDir: join(root, 'none') }).view(NOW);
+    const kid = v.agents.find((a) => a.agentId === 'ses_kid')!;
+    assert.deepEqual([kid.contextTokens, kid.contextPct, kid.model], [250_000, 25, 'gpt-6.1-sol']);
+    const fresh = v.agents.find((a) => a.agentId === 'ses_new')!;
+    assert.deepEqual([fresh.contextTokens, fresh.contextPct], [null, null], 'a child with no assistant turn yet is unknown, not zero');
+    assert.equal(v.contextNote, undefined, 'nothing is wrong, so no note');
+    const text = composeSubagentBlock(v, 160, 30, 0).puts.map((p) => p.text);
+    assert.ok(text.includes('running · 25% ctx') && text.includes('running · ? ctx'), JSON.stringify(text));
+    assert.deepEqual(readdirSync(join(root, 'opencode-data', 'opencode')), ['opencode.db'], 'a read with no OpenCode running leaves no -wal or -shm');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('opencode: a model the catalog lacks takes context_watch.windows, and with no window at all the tokens show, the % is unknown and a note names the model', () => {
+  const root = project();
+  try {
+    const db = openCodeDb(root, { messages: [['ses_a', 1, 'assistant', turn(100_000, 0, 0, 'gpt-9-new')], ['ses_b', 1, 'assistant', turn(50_000, 0, 0, 'mystery-1', 'acme')]], catalog: CATALOG });
+    writeFileSync(join(root, '.sterling', 'config.json'), JSON.stringify({ context_watch: { windows: { 'gpt-9-new': 400_000 } } }));
+    writeRegister(root, [row('ses_a', 'implementor', 10_000), row('ses_b', 'implementor', 9_000)]);
+    const v = createSubagentTracker(root, { readIntervalMs: 0, host: 'opencode', opencodeDb: db }).view(NOW);
+    assert.deepEqual(v.agents.map((a) => [a.agentId, a.contextTokens, a.contextPct]), [['ses_a', 100_000, 25], ['ses_b', 50_000, null]]);
+    assert.match(v.contextNote ?? '', /no context window for acme\/mystery-1/);
+    assert.ok(composeSubagentBlock(v, 160, 30, 0).puts.some((p) => p.attr.dim && /no context window for acme\/mystery-1/.test(p.text)), 'the note is drawn under the cards');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('opencode: a missing database or tables of another shape leave the context "? ctx" and say why; nothing throws', () => {
+  const root = project();
+  try {
+    writeRegister(root, [row('ses_a', 'implementor', 10_000)]);
+    const missing = createSubagentTracker(root, { readIntervalMs: 0, host: 'opencode', opencodeDb: join(root, 'nowhere', 'opencode.db') }).view(NOW);
+    assert.equal(missing.agents[0]!.contextPct, null);
+    assert.match(missing.contextNote ?? '', /context unknown: no OpenCode database at /);
+    assert.ok(composeSubagentBlock(missing, 160, 30, 0).puts.some((p) => p.text === 'running · ? ctx'));
+    const other = openCodeDb(root, { tables: false });
+    const mismatch = createSubagentTracker(root, { readIntervalMs: 0, host: 'opencode', opencodeDb: other }).view(NOW);
+    assert.equal(mismatch.agents[0]!.contextPct, null);
+    assert.match(mismatch.contextNote ?? '', /context unknown: .*session_message/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('opencode: while OpenCode holds its database open, a read leaves the main file and the -wal byte-identical and creates nothing', () => {
+  const root = project();
+  const path = openCodeDb(root, { messages: [['ses_a', 1, 'assistant', turn(100_000, 0, 0)]], catalog: CATALOG });
+  const writer = new DatabaseSync(path);
+  try {
+    writer.exec('PRAGMA wal_autocheckpoint = 0');
+    writer.prepare('INSERT INTO session_message VALUES (?, ?, ?, ?, 0, 0, ?)').run('msg_hot', 'ses_a', 'assistant', 2, JSON.stringify(turn(200_000, 0, 0)));
+    const before = { main: readFileSync(path), wal: readFileSync(`${path}-wal`), files: readdirSync(dirname(path)).sort() };
+    assert.ok(before.wal.length > 0, 'the fixture is hot: the committed turn is only in the -wal');
+    const read = readOpenCodeContext(path, ['ses_a'], null);
+    assert.equal(read.usage.get('ses_a')?.tokens, 200_000, 'the reader sees the turn committed to the -wal');
+    assert.equal(read.catalog?.limits.get('openai/gpt-6.1-sol'), 1_000_000);
+    assert.equal(readOpenCodeContext(path, ['ses_a'], read.catalog!.stamp).catalog, undefined, 'an unchanged catalog is not parsed again');
+    assert.ok(readFileSync(path).equals(before.main) && readFileSync(`${path}-wal`).equals(before.wal));
+    assert.deepEqual(readdirSync(dirname(path)).sort(), before.files);
+  } finally {
+    writer.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('opencode: the database path follows XDG_DATA_HOME, else ~/.local/share', () => {
+  assert.equal(defaultOpenCodeDbPath({ XDG_DATA_HOME: '/x/data' }), join('/x/data', 'opencode', 'opencode.db'));
+  assert.ok(defaultOpenCodeDbPath({}).endsWith(join('.local', 'share', 'opencode', 'opencode.db')));
+});
+
+test('model label (#66): the register row\'s own model ref beats the agent type\'s Claude pin, shown without provider or variant', () => {
+  const root = project();
+  try {
+    mkdirSync(join(root, '.claude', 'agents'), { recursive: true });
+    writeFileSync(join(root, '.claude', 'agents', 'reviewer.md'), '---\nname: reviewer\nmodel: claude-opus-5-5\n---\nbody\n');
+    writeRegister(root, [row('a1', 'reviewer', 10_000, { model: 'openai/gpt-6.1-sol#high' }), row('a2', 'reviewer', 9_000)]);
+    const v = createSubagentTracker(root, { readIntervalMs: 0, claudeConfigDir: join(root, 'none') }).view(NOW);
+    assert.deepEqual(v.agents.map((a) => [a.agentId, a.model]), [['a1', 'gpt-6.1-sol'], ['a2', 'claude-opus-5-5']]);
+    assert.equal(displayModel('openai/gpt-6.1-sol#high'), 'gpt-6.1-sol');
+    assert.equal(displayModel('claude-opus-5-5'), 'claude-opus-5-5');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
