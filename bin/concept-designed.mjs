@@ -5474,7 +5474,7 @@ function fail(message, code = 1) {
 }
 
 // scripts/hooks/lib/session-events.mjs
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join as join2 } from "node:path";
 var SESSION_EVENTS_REL = join2(".sterling", "transient", "session-events.json");
 function appendSessionEventsAt(eventsPath2, newEvents, lockOptions) {
@@ -5500,18 +5500,24 @@ function appendSessionEventsAt(eventsPath2, newEvents, lockOptions) {
   );
 }
 var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
-function withSessionEventsLock(path, fn, { timeoutMs = 5e3, retryMs = 10, staleMs = 3e4 } = {}) {
+function withSessionEventsLock(path, fn, { timeoutMs = 5e3, retryMs = 10 } = {}) {
   const lockPath = `${path}.lock`;
   const token = `${process.pid} ${uniqueToken()}`;
   const deadline = Date.now() + timeoutMs;
   for (; ; ) {
     if (tryCreate(lockPath, token)) break;
-    if (isStale(lockPath, staleMs)) {
-      reclaimStale(lockPath, staleMs);
+    const holder = readLock(lockPath);
+    if (holder === null) continue;
+    if (holderIsDead(holder)) {
+      reclaimDead(lockPath);
       continue;
     }
     if (Date.now() >= deadline) {
-      const err = new Error(`${lockPath} is held by another writer (${readLock(lockPath) ?? "holder unknown"}) after ${timeoutMs}ms; nothing was written`);
+      const pid = holderPid(holder);
+      const who = pid === null ? `a writer whose pid cannot be read (lock content ${JSON.stringify(holder)})` : `live pid ${pid}`;
+      const err = new Error(
+        `${lockPath} is held by ${who}; gave up after ${timeoutMs}ms and nothing was written. If no Sterling writer with that pid is running (a reused pid), remove ${lockPath} by hand`
+      );
       err.code = SESSION_EVENTS_LOCK_HELD;
       throw err;
     }
@@ -5552,7 +5558,13 @@ function readLock(lockPath) {
     throw e;
   }
 }
-function pidIsDead(pid) {
+function holderPid(content) {
+  const pid = Number(content.split(" ")[0]);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+function holderIsDead(content) {
+  const pid = holderPid(content);
+  if (pid === null) return false;
   try {
     process.kill(pid, 0);
     return false;
@@ -5560,30 +5572,20 @@ function pidIsDead(pid) {
     return e.code === "ESRCH";
   }
 }
-function isStale(lockPath, staleMs) {
-  let mtimeMs;
-  try {
-    mtimeMs = statSync(lockPath).mtimeMs;
-  } catch (e) {
-    if (e.code === "ENOENT") return false;
-    throw e;
-  }
-  if (Date.now() - mtimeMs > staleMs) return true;
-  const pid = Number((readLock(lockPath) ?? "").split(" ")[0]);
-  return Number.isInteger(pid) && pid > 0 && pidIsDead(pid);
-}
-function reclaimStale(lockPath, staleMs) {
+function reclaimDead(lockPath) {
   const gatePath = `${lockPath}.reclaim`;
   if (!tryCreate(gatePath, `${process.pid}`)) {
-    if (isStale(gatePath, staleMs)) {
-      console.error(`session-events: removing reclaim gate ${gatePath}, older than ${staleMs}ms (a crashed holder's leftover)`);
+    const gate = readLock(gatePath);
+    if (gate !== null && holderIsDead(gate)) {
+      console.error(`session-events: removing reclaim gate ${gatePath} left by dead pid ${holderPid(gate)}`);
       unlinkIfPresent(gatePath);
     }
     return;
   }
   try {
-    if (isStale(lockPath, staleMs)) {
-      console.error(`session-events: removing stale lock ${lockPath} (${readLock(lockPath) ?? "empty"}): its pid is dead or it is older than ${staleMs}ms`);
+    const holder = readLock(lockPath);
+    if (holder !== null && holderIsDead(holder)) {
+      console.error(`session-events: removing lock ${lockPath} left by dead pid ${holderPid(holder)}`);
       unlinkIfPresent(lockPath);
     }
   } finally {

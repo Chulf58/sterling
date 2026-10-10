@@ -19279,7 +19279,7 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
 }
 
 // scripts/hooks/lib/session-events.mjs
-import { closeSync as closeSync8, existsSync as existsSync25, mkdirSync as mkdirSync17, openSync as openSync8, readFileSync as readFileSync22, renameSync as renameSync9, statSync as statSync9, unlinkSync as unlinkSync4, writeFileSync as writeFileSync11, writeSync as writeSync2 } from "node:fs";
+import { closeSync as closeSync8, existsSync as existsSync25, mkdirSync as mkdirSync17, openSync as openSync8, readFileSync as readFileSync22, renameSync as renameSync9, unlinkSync as unlinkSync4, writeFileSync as writeFileSync11, writeSync as writeSync2 } from "node:fs";
 import { dirname as dirname15, join as join40 } from "node:path";
 var SESSION_EVENTS_REL = join40(".sterling", "transient", "session-events.json");
 function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
@@ -19313,18 +19313,24 @@ function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
   );
 }
 var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
-function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3, retryMs = 10, staleMs = 3e4 } = {}) {
+function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3, retryMs = 10 } = {}) {
   const lockPath = `${path}.lock`;
   const token = `${process.pid} ${uniqueToken()}`;
   const deadline = Date.now() + timeoutMs2;
   for (; ; ) {
     if (tryCreate(lockPath, token)) break;
-    if (isStale(lockPath, staleMs)) {
-      reclaimStale(lockPath, staleMs);
+    const holder = readLock2(lockPath);
+    if (holder === null) continue;
+    if (holderIsDead(holder)) {
+      reclaimDead(lockPath);
       continue;
     }
     if (Date.now() >= deadline) {
-      const err = new Error(`${lockPath} is held by another writer (${readLock2(lockPath) ?? "holder unknown"}) after ${timeoutMs2}ms; nothing was written`);
+      const pid = holderPid(holder);
+      const who = pid === null ? `a writer whose pid cannot be read (lock content ${JSON.stringify(holder)})` : `live pid ${pid}`;
+      const err = new Error(
+        `${lockPath} is held by ${who}; gave up after ${timeoutMs2}ms and nothing was written. If no Sterling writer with that pid is running (a reused pid), remove ${lockPath} by hand`
+      );
       err.code = SESSION_EVENTS_LOCK_HELD;
       throw err;
     }
@@ -19365,7 +19371,13 @@ function readLock2(lockPath) {
     throw e;
   }
 }
-function pidIsDead(pid) {
+function holderPid(content) {
+  const pid = Number(content.split(" ")[0]);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+function holderIsDead(content) {
+  const pid = holderPid(content);
+  if (pid === null) return false;
   try {
     process.kill(pid, 0);
     return false;
@@ -19373,30 +19385,20 @@ function pidIsDead(pid) {
     return e.code === "ESRCH";
   }
 }
-function isStale(lockPath, staleMs) {
-  let mtimeMs;
-  try {
-    mtimeMs = statSync9(lockPath).mtimeMs;
-  } catch (e) {
-    if (e.code === "ENOENT") return false;
-    throw e;
-  }
-  if (Date.now() - mtimeMs > staleMs) return true;
-  const pid = Number((readLock2(lockPath) ?? "").split(" ")[0]);
-  return Number.isInteger(pid) && pid > 0 && pidIsDead(pid);
-}
-function reclaimStale(lockPath, staleMs) {
+function reclaimDead(lockPath) {
   const gatePath = `${lockPath}.reclaim`;
   if (!tryCreate(gatePath, `${process.pid}`)) {
-    if (isStale(gatePath, staleMs)) {
-      console.error(`session-events: removing reclaim gate ${gatePath}, older than ${staleMs}ms (a crashed holder's leftover)`);
+    const gate = readLock2(gatePath);
+    if (gate !== null && holderIsDead(gate)) {
+      console.error(`session-events: removing reclaim gate ${gatePath} left by dead pid ${holderPid(gate)}`);
       unlinkIfPresent(gatePath);
     }
     return;
   }
   try {
-    if (isStale(lockPath, staleMs)) {
-      console.error(`session-events: removing stale lock ${lockPath} (${readLock2(lockPath) ?? "empty"}): its pid is dead or it is older than ${staleMs}ms`);
+    const holder = readLock2(lockPath);
+    if (holder !== null && holderIsDead(holder)) {
+      console.error(`session-events: removing lock ${lockPath} left by dead pid ${holderPid(holder)}`);
       unlinkIfPresent(lockPath);
     }
   } finally {
@@ -19751,7 +19753,7 @@ var hasOpenSystemTodo = (store, reason) => store.query({ types: ["todo"], cap: 1
 // scripts/hooks/lib/settlement.mjs
 init_dist2();
 import { createHash as createHash4, randomUUID as randomUUID7 } from "node:crypto";
-import { readFileSync as readFileSync25, writeFileSync as writeFileSync13, mkdirSync as mkdirSync19, rmSync as rmSync11, statSync as statSync10, renameSync as renameSync11 } from "node:fs";
+import { readFileSync as readFileSync25, writeFileSync as writeFileSync13, mkdirSync as mkdirSync19, rmSync as rmSync11, statSync as statSync9, renameSync as renameSync11 } from "node:fs";
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { join as join44, dirname as dirname16 } from "node:path";
 function hashFile(root, rel) {
@@ -19876,7 +19878,7 @@ function gitTouches(root, now) {
     const candidates = [...changed].map((path) => {
       let at = settled.at;
       try {
-        at = statSync10(join44(root, path)).mtime.toISOString();
+        at = statSync9(join44(root, path)).mtime.toISOString();
       } catch {
       }
       return { path, at: typeof at === "string" ? at : now };
