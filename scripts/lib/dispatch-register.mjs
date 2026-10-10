@@ -208,7 +208,8 @@ export function readRegister(root) {
 // COMMIT/close or by the kernel on that holder's death — there is no
 // reclaim, rename, owner file or tombstone, so no process can displace
 // another's lock and no crash can leave a stale one. A contender retries a
-// busy lock every retryMs up to timeoutMs (at least one attempt; sleeping
+// busy lock every retryMs, plus up to half a retryMs of jitter, up to
+// timeoutMs (at least one attempt; sleeping
 // OUTSIDE the lock, never blocking the event loop), then REJECTS with the
 // register_lock_held refusal — fn never runs unlocked (P5).
 //
@@ -398,7 +399,9 @@ export async function withRegisterLock(root, fn, opts = {}) {
             `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) — gave up after ${waited}ms`
           );
         }
-        await sleepAsync(retryMs);
+        // Jitter (up to half a retry) so contenders that collided once do not
+        // keep waking in lockstep behind a holder that re-takes the lock.
+        await sleepAsync(retryMs + Math.random() * retryMs * 0.5);
         continue;
       }
       const held = legacyLockHolder(root);
@@ -626,6 +629,17 @@ const DERIVE_PER_ATTEMPT_LOCK_MS = 30;
 // expired budget is unattributable.
 const DERIVE_SIBLINGS_BUDGET_MS = 3000;
 const DERIVE_LOCK_HELD_BUDGET_MS = 150;
+
+// RECORDER LOCK BOUND (GitHub issues #62 and #63): the Pre/Post/Failure
+// recorders and SubagentStart's unattributable fallback wait up to 5000 ms,
+// polling every 10 ms. A burst of parallel SubagentStarts re-takes the lock
+// every DERIVE_RETRY_INTERVAL_MS for up to DERIVE_SIBLINGS_BUDGET_MS, so the
+// module default (50 ms polls, 1000 ms bound) starved these writers: the hook
+// skipped the Post binding and the Start wrote no register row. The bound
+// stays finite, and a timeout still SKIPS the mutation with the
+// register_lock_held refusal, never writes unlocked (decision
+// register-writers-cooperating-lock).
+const RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5000, retryMs: 10 });
 
 function retryBudgetFor(verdict) {
   return verdict === 'siblings-retry' ? DERIVE_SIBLINGS_BUDGET_MS : DERIVE_LOCK_HELD_BUDGET_MS;
@@ -1261,7 +1275,7 @@ export function recordDispatchPre(root, stdin) {
       disclosures: [render(disclosure('dispatch_state_collision', { tool_use_id: toolUseId }, `Pre for tool_use_id '${toolUseId}' disagrees with the existing dispatch-state record — never overwritten`))],
       record: r,
     };
-  }));
+  }), RECORDER_LOCK_OPTS);
 }
 
 // fillUnattributableRowLocked — a Post that binds a lane fills that lane's
@@ -1511,7 +1525,7 @@ export function recordDispatchPost(root, stdin, opts = {}) {
       ],
       record: updated,
     };
-  }));
+  }), RECORDER_LOCK_OPTS);
 }
 
 export function recordDispatchFailure(root, stdin) {
@@ -1560,7 +1574,7 @@ export function recordDispatchFailure(root, stdin) {
     const updated = { ...r, prompt: null, terminal: { at, reason: 'tool-failure' } };
     terminalizeLiveRecord(root, key, updated);
     return { ok: true, action: 'terminated', disclosures: [], record: updated };
-  }));
+  }), RECORDER_LOCK_OPTS);
 }
 
 // ---------------------------------------------------------------------------
@@ -1766,7 +1780,7 @@ export async function resolveAndRegisterStart(root, startStdin, entryBuilder) {
           if (e?.kind === 'refusal') return { resolution, entry: null, refusal: e };
           throw e;
         }
-      });
+      }, RECORDER_LOCK_OPTS);
     } catch (e) {
       if (e?.kind === 'refusal') return { resolution: fallback, entry: null, refusal: e };
       throw e;
