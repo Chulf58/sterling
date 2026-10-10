@@ -30,11 +30,11 @@
 // path (no --append) is untouched.
 //   node scripts/test-repair.mjs --path <repo-relative test path> --evidence "<why the test was wrong>"
 //   node scripts/test-repair.mjs --append --path <repo-relative test path> --evidence "<what new behavior this case pins, and why it is additive>"
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { readFileSync, existsSync } from 'node:fs';
 import { matchesGlob, normalizeRepoPath } from '@sterling/schemas';
 import { arg, hasFlag, fail } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
+import { appendSessionEventsAt, SESSION_EVENTS_LOCK_HELD } from './hooks/lib/session-events.mjs';
 
 let isAppend, rawPath, evidence;
 try {
@@ -118,10 +118,13 @@ try {
 } catch (e) {
   fail(`test-repair: ${e.message}`);
 }
-mkdirSync(dirname(eventsPath), { recursive: true });
-const events = existsSync(eventsPath) ? JSON.parse(readFileSync(eventsPath, 'utf8')) : [];
 const at = new Date().toISOString();
 const detail = `${path} — ${evidence}`;
-events.push({ kind: isAppend ? 'test_append' : 'test_repair', detail, at });
-writeFileSync(eventsPath, JSON.stringify(events));
+try {
+  appendSessionEventsAt(eventsPath, [{ kind: isAppend ? 'test_append' : 'test_repair', detail, at }]);
+} catch (e) {
+  // Issue #64: a held lock skips the write, named, and never writes unlocked.
+  if (e.code === SESSION_EVENTS_LOCK_HELD) fail(`test-repair: ${isAppend ? 'test_append' : 'test_repair'} event for ${path} NOT registered: ${e.message}`);
+  throw e;
+}
 console.log(JSON.stringify(isAppend ? { appended: path, evidence, at } : { repaired: path, evidence, at }));
