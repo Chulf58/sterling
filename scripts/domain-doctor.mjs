@@ -1806,67 +1806,56 @@ process.on('exit', () => {
  * after the read snapshot begins are simply ABSENT from it. It also refuses if
  * its output file already exists, which is why the output name is unique.
  *
- * THE SOURCE'S SIDECARS ARE CLEANED UP CONDITIONALLY — the same shape
- * readOnlyProbe and idsIn use (anti_pattern foreign_8616e72d), and for the same reason:
- * a read-only open of a WAL store MATERIALIZES an empty -wal and -shm that a
- * read-only connection cannot unlink, so an open that removes nothing leaves
- * litter beside the USER'S store on every invocation — including the ones that
- * go on to REFUSE, since this runs before the publication gate. So: remember
- * which of -wal/-shm existed BEFORE the open and remove ONLY the ones this open
- * created. A sidecar observed present beforehand is left EXACTLY as found —
- * deleting a live -wal destroys committed, uncheckpointed frames belonging to
- * someone else, which is why the removal is never unconditional.
+ * THE SOURCE IS READ THROUGH readOnlyProbe, so its sidecars are cleaned up by
+ * the probe's rule (anti_pattern foreign_8616e72d): a read-only open of a WAL
+ * store MATERIALIZES an empty -wal and -shm that a read-only connection cannot
+ * unlink, and leaving them would litter beside the USER'S store on every
+ * invocation, including the ones that go on to REFUSE. The probe removes them
+ * only when neither existed before the open AND, at removal time, the -wal is
+ * still the same zero-length file its own read created, with mtime and ctime
+ * unchanged. A sidecar that existed beforehand is left exactly as found.
  *
- * RESIDUAL RACE, STATED RATHER THAN PAPERED OVER: `existsSync` answers about a
- * moment that has passed. A writer can create a sidecar AFTER the check and
- * before the close, and this function would then remove a file it did not
- * create. It cannot PROVE ownership, only observe absence — the same limitation
- * readOnlyProbe carries (already boarded; not solved here). Narrowing that
- * window is a separate ruling; what is guaranteed here is only the weaker,
- * honest property: nothing is removed that was not observed ABSENT first.
- * A sidecar that survives is DISCLOSED by the caller (P5).
- * (readOnlyProbe is still used on the SNAPSHOT below — that file's name is
- * unique to this process, so ownership there is provable rather than assumed.)
+ * WHY THE CHECK HAPPENS AT REMOVAL TIME: a session can open an idle store and
+ * commit while VACUUM INTO is still reading. Its frames land in the very -wal
+ * this open created, so "absent before the open" no longer means "ours". The
+ * earlier existence-only cleanup unlinked that non-empty -wal, destroying the
+ * session's committed, uncheckpointed frames (pinned by PIN5-RACE in
+ * scripts/tests/domain-doctor-adopt-create-only.test.mjs). The probe's
+ * remaining disclosed limit applies here too: a connection that attaches and
+ * has not yet written a frame changes nothing the check can see. A sidecar
+ * that survives is DISCLOSED by the caller (P5).
+ *
+ * A close error on the source now refuses instead of being swallowed: it
+ * reaches the "VACUUM INTO failed" refusal below, the probe's sidecar cleanup
+ * is skipped, and the temporary snapshot is removed on exit, so nothing is
+ * published.
+ *
+ * EXPORTED AS A TEST SEAM, for the same reason readOnlyProbe is: the commit
+ * has to land inside one synchronous VACUUM INTO call, which a test can only
+ * arrange in-process (a worker-thread writer). Nothing else imports it.
  */
-function vacuumIntoSnapshot(from, snapshot) {
-  const walPath = `${from}-wal`;
-  const shmPath = `${from}-shm`;
-  const hadWal = existsSync(walPath);
-  const hadShm = existsSync(shmPath);
-  /** Remove ONLY what was observed ABSENT above — never unconditionally. Runs
-   *  on the failure paths too: fail() calls process.exit, which skips a
-   *  finally, so a refusal that skipped this would still litter and the
-   *  "nothing was written" it prints would be false. */
-  const dropSidecarsThisOpenCreated = () => {
-    if (!hadWal) rmSync(walPath, { force: true });
-    if (!hadShm) rmSync(shmPath, { force: true });
-  };
-  let db;
-  try {
-    db = new DatabaseSync(from, { readOnly: true });
-  } catch (e) {
-    dropSidecarsThisOpenCreated();
-    fail(
-      `refusing: the source store '${from}' could not be opened read-only to snapshot it (${e.message}). Nothing was published and ` +
-        `no destination was created.`
-    );
-  }
+export function vacuumIntoSnapshot(from, snapshot) {
+  let opened = false;
   let err = null;
+  // readOnlyProbe closes the connection and runs its sidecar cleanup in its own
+  // finally, so both are done before the refusals below: fail() exits the
+  // process and would skip a finally of ours.
   try {
-    // A single-quote-escaped SQL string literal: VACUUM INTO takes an
-    // expression, and the destination directory is caller-supplied text.
-    db.exec(`VACUUM INTO '${snapshot.replace(/'/g, "''")}'`);
+    readOnlyProbe(from, (db) => {
+      opened = true;
+      // A single-quote-escaped SQL string literal: VACUUM INTO takes an
+      // expression, and the destination directory is caller-supplied text.
+      db.exec(`VACUUM INTO '${snapshot.replace(/'/g, "''")}'`);
+    });
   } catch (e) {
     err = e;
   }
-  // Closed BEFORE any refusal is raised: fail() exits the process and would
-  // skip a finally, so the close cannot be left to one.
-  try {
-    db.close();
-  } catch { /* the snapshot is already taken or already failed; a close error changes neither */ }
-  // AFTER the close, and BEFORE the refusal below for the same reason the close
-  // is: fail() exits the process.
-  dropSidecarsThisOpenCreated();
+  if (err && !opened) {
+    fail(
+      `refusing: the source store '${from}' could not be opened read-only to snapshot it (${err.message}). Nothing was published and ` +
+        `no destination was created.`
+    );
+  }
   if (err) {
     fail(
       `refusing: could not take a point-in-time snapshot of the source store '${from}' — VACUUM INTO '${snapshot}' failed ` +
@@ -1948,9 +1937,9 @@ function adoptCreateOnly(from, to) {
   if (existsSync(`${from}-wal`) || existsSync(`${from}-shm`)) {
     console.log(
       `  note: a -wal/-shm sidecar sits beside the source '${from}' and was LEFT EXACTLY AS FOUND — the snapshot's read-only open ` +
-        `removes only a sidecar it observed ABSENT beforehand, and deleting another process's WAL would destroy its uncommitted ` +
-        `frames. (Observation is not proof of ownership: a writer that created a sidecar AFTER that check is a window this path ` +
-        `does not close.)`
+        `removes only an empty -wal its own read created and nothing has written to since, and deleting another process's WAL ` +
+        `would destroy its uncheckpointed frames. (This is not proof of ownership: a connection that attached but had not yet ` +
+        `written a frame is a window this path does not close.)`
     );
   }
 

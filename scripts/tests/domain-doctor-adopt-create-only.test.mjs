@@ -601,12 +601,12 @@ test('PIN4: a refusal raised BEFORE the snapshot is taken (missing --from) leave
 });
 
 // ---------------------------------------------------------------------------
-// PIN 5 — SOURCE SIDECARS SURVIVE. Background: readOnlyProbe records sidecar
-// existence and then DELETES those paths, and a writer can create a sidecar
-// AFTER that check, so the cleanup cannot prove it owns what it removes.
-// adoptCreateOnly deliberately does not take that route: it opens the source
-// read-only and only DISCLOSES sidecars. Deleting a non-empty -wal is
-// destroying committed-but-uncheckpointed user knowledge.
+// PIN 5 — SOURCE SIDECARS SURVIVE. The snapshot reads the source through
+// readOnlyProbe, which removes only an empty -wal its own read created and
+// leaves a sidecar that existed beforehand alone; a surviving sidecar is
+// DISCLOSED. Deleting a non-empty -wal is destroying committed-but-
+// uncheckpointed user knowledge. (PIN5-RACE below covers a -wal that a
+// session writes to during the snapshot.)
 //
 // THE FIXTURE IS THE CRASHED-WRITER SHAPE, and the reason is mutation-verified
 // history (v2-guard round 7): with a live writer connection kept open, the
@@ -698,8 +698,9 @@ test('PIN5: a successful create-only apply leaves the SOURCE main file and -wal 
   // (`new DatabaseSync(path)` instead of `{ readOnly: true }`). With no other
   // connection on bPath, the doctor's is LAST OUT, so its close checkpoints the
   // WAL into the main file and BOTH hashes change.
-  // SABOTAGE B: route the create-only apply through readOnlyProbe's
-  // record-then-delete sidecar cleanup — the -wal is unlinked and these redden.
+  // SABOTAGE B: make the source cleanup remove the -wal unconditionally
+  // (`rmSync(\`${from}-wal\`)` after the close) — the -wal is unlinked and
+  // these redden.
   assert.equal(hashFile(bPath), mainBefore, 'the source main .db is byte-identical after a successful apply');
   assert.equal(existsSync(`${bPath}-wal`), true, 'the source -wal STILL EXISTS — deleting it destroys committed, uncheckpointed records');
   assert.equal(hashFile(`${bPath}-wal`), walBefore, 'and is byte-identical — not checkpointed, not truncated, not rewritten');
@@ -714,4 +715,95 @@ test('PIN5: a successful create-only apply leaves the SOURCE main file and -wal 
   // SABOTAGE: snapshot the main file by byte-copy instead of VACUUM INTO — the
   // WAL-resident row never crosses and this reddens.
   assert.ok(listIds(to).includes(freshId), 'the committed-but-uncheckpointed record is present in the published destination');
+});
+
+// ---------------------------------------------------------------------------
+// PIN5-RACE — A SESSION THAT COMMITS DURING THE SNAPSHOT KEEPS ITS -wal (board
+// domain-doctor-s-snapshot-path-can-delete-a-live-session-s-ne). The source is
+// IDLE when the snapshot starts: no -wal, no -shm, no connection. The snapshot's
+// own read-only open materializes an empty -wal; a session then opens the store
+// and commits while VACUUM INTO is still reading, so that same -wal now holds
+// the session's committed, uncheckpointed frames. A cleanup that removes "what
+// was absent before the open" without re-checking at removal time unlinks it.
+//
+// HOW THE INTERLEAVING IS BUILT. VACUUM INTO is one synchronous call, so the
+// writer runs in a worker thread and fires when the snapshot's output file
+// appears (VACUUM INTO creates it as it starts). The source is padded with
+// ~32 MB so the read lasts long enough for the commit to land inside it.
+// WHETHER IT LANDED INSIDE IS MEASURED, NOT ASSUMED: right after its commit the
+// writer runs a PASSIVE checkpoint. While the snapshot's read transaction is
+// open it holds WAL read-lock 0, so the checkpoint cannot backfill
+// (checkpointed < log). If the snapshot had already finished, every frame is
+// backfilled and the precondition below fails loudly instead of the pin going
+// green on a commit that happened after the cleanup.
+// ---------------------------------------------------------------------------
+
+const RACE_WRITER = `
+const { parentPort, workerData } = require('node:worker_threads');
+const { existsSync } = require('node:fs');
+const { DatabaseSync } = require('node:sqlite');
+const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+(() => {
+  const { dbPath, snapshot } = workerData;
+  parentPort.postMessage({ kind: 'ready' });
+  const deadline = Date.now() + 30000;
+  while (!existsSync(snapshot)) {
+    if (Date.now() > deadline) { parentPort.postMessage({ kind: 'error', message: 'the snapshot file never appeared' }); return; }
+    nap(1);
+  }
+  const db = new DatabaseSync(dbPath);
+  db.prepare('INSERT INTO live (v) VALUES (?)').run('committed while the snapshot was being taken');
+  const ck = { ...db.prepare('PRAGMA wal_checkpoint(PASSIVE)').get() };
+  parentPort.postMessage({ kind: 'committed', ck });
+  parentPort.once('message', () => { db.close(); parentPort.postMessage({ kind: 'closed' }); });
+})();
+`;
+
+test('PIN5-RACE: a session that opens an idle source and commits DURING the snapshot keeps its non-empty -wal — the cleanup re-checks at removal time', async (t) => {
+  if (!sqliteAvailable) { t.skip('node:sqlite unavailable in this runtime'); return; }
+  const { Worker } = await import('node:worker_threads');
+  const { vacuumIntoSnapshot } = await import(pathToFileURL(join(root, 'scripts', 'domain-doctor.mjs')).href);
+  const dir = tmp('doctor-createonly-race-');
+  const src = join(dir, 'src.db');
+  const snapshot = join(dir, `.adopt-snapshot-race-${randomUUID()}.tmp`);
+
+  const setup = openRW(src);
+  setup.exec('PRAGMA journal_mode=WAL');
+  setup.exec('CREATE TABLE live (v TEXT)');
+  setup.exec('CREATE TABLE padding (b BLOB)');
+  setup.exec('WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 4000) INSERT INTO padding SELECT randomblob(8192) FROM n');
+  setup.close();
+  assert.equal(existsSync(`${src}-wal`), false, 'fixture precondition: the source is idle — no -wal before the snapshot');
+  assert.equal(existsSync(`${src}-shm`), false, 'fixture precondition: the source is idle — no -shm before the snapshot');
+
+  const worker = new Worker(RACE_WRITER, { eval: true, workerData: { dbPath: src, snapshot } });
+  const inbox = [];
+  const waiters = [];
+  worker.on('message', (m) => { const w = waiters.shift(); if (w) w(m); else inbox.push(m); });
+  const next = () => new Promise((resolve) => { const m = inbox.shift(); if (m) resolve(m); else waiters.push(resolve); });
+  try {
+    assert.equal((await next()).kind, 'ready');
+    vacuumIntoSnapshot(src, snapshot);
+    const committed = await next();
+    assert.equal(committed.kind, 'committed', `the writer did not commit: ${JSON.stringify(committed)}`);
+    assert.ok(
+      committed.ck.log > 0 && committed.ck.checkpointed < committed.ck.log,
+      `fixture precondition: the commit must land while the snapshot's read was still open (checkpoint ${JSON.stringify(committed.ck)})`
+    );
+
+    // SABOTAGE: restore the old cleanup (`if (!hadWal) rmSync(walPath)` keyed
+    // only on existence before the open) and the -wal is unlinked here.
+    assert.equal(existsSync(`${src}-wal`), true, "the live session's -wal still exists after the snapshot");
+    assert.ok(statSync(`${src}-wal`).size > 0, "and it is still non-empty: the session's committed frames were not deleted");
+    assert.equal(existsSync(`${src}-shm`), true, "the live session's -shm was left alongside its -wal");
+
+    const reader = openRO(src);
+    const rows = reader.prepare('SELECT v FROM live').all().map((r) => r.v);
+    reader.close();
+    assert.deepEqual(rows, ['committed while the snapshot was being taken'], 'a fresh connection still reads the committed row');
+  } finally {
+    worker.postMessage('close');
+    await Promise.race([next(), new Promise((resolve) => setTimeout(resolve, 5000))]);
+    await worker.terminate();
+  }
 });
