@@ -8,7 +8,9 @@
       "Edit(/.claude/worktrees/**)",
       "Write(/.claude/worktrees/**)",
       "Edit(/scripts/domain-doctor.mjs)",
-      "Edit(/scripts/tests/**)"
+      "Edit(/scripts/tests/**)",
+      "Edit(/packages/**/src/**)",
+      "Edit(/scripts/**)"
     ]
   }
 }
