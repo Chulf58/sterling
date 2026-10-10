@@ -10,7 +10,9 @@
       "Edit(/scripts/domain-doctor.mjs)",
       "Edit(/scripts/tests/**)",
       "Edit(/packages/**/src/**)",
-      "Edit(/scripts/**)"
+      "Edit(/scripts/**)",
+      "Read(~/code/*/.sterling/transient/**)",
+      "Read(~/code/*/.sterling/opencode-plugin.log)"
     ]
   }
 }
