@@ -4,7 +4,7 @@
 // research.mjs) write research_tool events through this one writer, so both hosts
 // record the same shape and H10 and the plugin's settlement read one format.
 // Builtins only: hooks and the OpenCode server bundle vendor this module.
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 export const SESSION_EVENTS_REL = join('.sterling', 'transient', 'session-events.json');
@@ -61,29 +61,40 @@ export const SESSION_EVENTS_LOCK_HELD = 'session_events_lock_held';
 /**
  * Run fn while holding `<path>.lock`, a file created with 'wx' (exclusive create) that holds
  * "<pid> <token>". Contention retries every ~retryMs (with jitter) until timeoutMs, then throws
- * an Error with code SESSION_EVENTS_LOCK_HELD and runs nothing: callers skip the write and say
- * so, never write unlocked (decision register-writers-cooperating-lock).
+ * an Error with code SESSION_EVENTS_LOCK_HELD naming the lock path and its holder's pid, and runs
+ * nothing: callers skip the write and say so, never write unlocked (decision
+ * register-writers-cooperating-lock).
  *
- * A lock is stale when its pid is dead or the file is older than staleMs. Removing a stale lock
- * happens only while holding `<path>.lock.reclaim` (also 'wx'), and the lock is judged again
- * under it, so two waiters that both saw the same stale lock cannot each remove a lock the other
- * then created. Release removes the lock only when it still holds this holder's token.
- * Residuals: a holder that runs past staleMs can be reclaimed while alive; a recycled pid makes
- * a crashed holder's lock last until staleMs (anti_pattern 8e603e23); a crash inside the
- * microseconds a reclaim gate is held leaves the gate until it is staleMs old.
+ * A lock is reclaimed only when its holder's pid is verified dead (process.kill(pid, 0) fails
+ * with ESRCH), never on age: a live holder keeps its lock however long fn runs, so two writers
+ * are never inside fn together. Removing a dead holder's lock happens only while holding
+ * `<path>.lock.reclaim` (also 'wx'), and the holder is checked again under it, so two waiters
+ * that both saw the same dead lock cannot each remove a lock the other then created. Release
+ * removes the lock only when it still holds this holder's token.
+ * Residuals: a dead holder's pid reused by a live process, or a lock with no readable pid (a
+ * crash between create and write), is never reclaimed; every append then times out naming the
+ * lock, which a human removes. A holder in another pid namespace (another WSL distro or machine
+ * sharing the tree) can look dead. A reclaim gate left by a dead process is removed by a check
+ * that two waiters can race.
  */
-export function withSessionEventsLock(path, fn, { timeoutMs = 5000, retryMs = 10, staleMs = 30000 } = {}) {
+export function withSessionEventsLock(path, fn, { timeoutMs = 5000, retryMs = 10 } = {}) {
   const lockPath = `${path}.lock`;
   const token = `${process.pid} ${uniqueToken()}`;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     if (tryCreate(lockPath, token)) break;
-    if (isStale(lockPath, staleMs)) {
-      reclaimStale(lockPath, staleMs);
+    const holder = readLock(lockPath);
+    if (holder === null) continue; // released between the create and the read: try again now
+    if (holderIsDead(holder)) {
+      reclaimDead(lockPath);
       continue;
     }
     if (Date.now() >= deadline) {
-      const err = new Error(`${lockPath} is held by another writer (${readLock(lockPath) ?? 'holder unknown'}) after ${timeoutMs}ms; nothing was written`);
+      const pid = holderPid(holder);
+      const who = pid === null ? `a writer whose pid cannot be read (lock content ${JSON.stringify(holder)})` : `live pid ${pid}`;
+      const err = new Error(
+        `${lockPath} is held by ${who}; gave up after ${timeoutMs}ms and nothing was written. If no Sterling writer with that pid is running (a reused pid), remove ${lockPath} by hand`,
+      );
       err.code = SESSION_EVENTS_LOCK_HELD;
       throw err;
     }
@@ -130,7 +141,15 @@ function readLock(lockPath) {
   }
 }
 
-function pidIsDead(pid) {
+function holderPid(content) {
+  const pid = Number(content.split(' ')[0]);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+/** True only when the holder's pid is readable and the OS says no such process exists. */
+function holderIsDead(content) {
+  const pid = holderPid(content);
+  if (pid === null) return false;
   try {
     process.kill(pid, 0);
     return false;
@@ -139,32 +158,20 @@ function pidIsDead(pid) {
   }
 }
 
-/** Stale: the recorded pid is dead, or the lock file is older than staleMs. A just-created lock with no content yet is judged by age only. */
-function isStale(lockPath, staleMs) {
-  let mtimeMs;
-  try {
-    mtimeMs = statSync(lockPath).mtimeMs;
-  } catch (e) {
-    if (e.code === 'ENOENT') return false;
-    throw e;
-  }
-  if (Date.now() - mtimeMs > staleMs) return true;
-  const pid = Number((readLock(lockPath) ?? '').split(' ')[0]);
-  return Number.isInteger(pid) && pid > 0 && pidIsDead(pid);
-}
-
-function reclaimStale(lockPath, staleMs) {
+function reclaimDead(lockPath) {
   const gatePath = `${lockPath}.reclaim`;
   if (!tryCreate(gatePath, `${process.pid}`)) {
-    if (isStale(gatePath, staleMs)) {
-      console.error(`session-events: removing reclaim gate ${gatePath}, older than ${staleMs}ms (a crashed holder's leftover)`);
+    const gate = readLock(gatePath);
+    if (gate !== null && holderIsDead(gate)) {
+      console.error(`session-events: removing reclaim gate ${gatePath} left by dead pid ${holderPid(gate)}`);
       unlinkIfPresent(gatePath);
     }
     return;
   }
   try {
-    if (isStale(lockPath, staleMs)) {
-      console.error(`session-events: removing stale lock ${lockPath} (${readLock(lockPath) ?? 'empty'}): its pid is dead or it is older than ${staleMs}ms`);
+    const holder = readLock(lockPath);
+    if (holder !== null && holderIsDead(holder)) {
+      console.error(`session-events: removing lock ${lockPath} left by dead pid ${holderPid(holder)}`);
       unlinkIfPresent(lockPath);
     }
   } finally {

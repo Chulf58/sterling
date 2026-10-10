@@ -157,14 +157,53 @@ test('withSessionEventsLock: a lock whose pid is dead is reclaimed, and the appe
   }
 });
 
-test('withSessionEventsLock: a lock older than staleMs is reclaimed even when its pid is alive', () => {
+test('withSessionEventsLock: an old lock whose pid is alive is NOT reclaimed, whatever its age; the refusal names the lock and its pid', () => {
   const { dir, eventsPath } = registerWithLock(`${process.pid} overran`);
   try {
-    const old = new Date(Date.now() - 60_000);
+    const old = new Date(Date.now() - 3_600_000);
     utimesSync(`${eventsPath}.lock`, old, old);
-    appendSessionEvent(dir, researchToolEvent('after', { at: AT }), { timeoutMs: 150 });
-    assert.deepEqual(JSON.parse(readFileSync(eventsPath, 'utf8')).map((e) => e.detail), ['before', 'after']);
-    assert.equal(existsSync(`${eventsPath}.lock`), false);
+    assert.throws(
+      () => appendSessionEvent(dir, researchToolEvent('after', { at: AT }), { timeoutMs: 150, staleMs: 100 }),
+      (e) => e.code === SESSION_EVENTS_LOCK_HELD && e.message.includes(`${eventsPath}.lock`) && e.message.includes(`pid ${process.pid}`),
+    );
+    assert.equal(readFileSync(eventsPath, 'utf8'), '[{"kind":"research_tool","detail":"before","at":"x"}]');
+    assert.equal(readFileSync(`${eventsPath}.lock`, 'utf8'), `${process.pid} overran`, 'a live holder\'s lock is never removed, however old');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Sol review of 07452638: a holder that stays inside fn past the old 30 s staleness bound had its
+// lock removed by age, and a contender entered beside it. Holder A sleeps inside fn for 600 ms;
+// contender B starts 150 ms later and passes staleMs: 100 (the bound the old code reclaimed on).
+// B must not enter before A has left.
+const HOLDER = `
+const { withSessionEventsLock } = await import(process.argv[1]);
+const { appendFileSync } = await import('node:fs');
+const [path, log, name, startAt, holdMs] = [process.argv[2], process.argv[3], process.argv[4], Number(process.argv[5]), Number(process.argv[6])];
+while (Date.now() < startAt);
+withSessionEventsLock(path, () => {
+  appendFileSync(log, name + ' enter ' + Date.now() + '\\n');
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, holdMs);
+  appendFileSync(log, name + ' exit ' + Date.now() + '\\n');
+}, { staleMs: 100, timeoutMs: 5000 });
+`;
+
+test('withSessionEventsLock: a contender never enters while a live holder is still inside fn, even past staleMs', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-events-mutex-'));
+  try {
+    const path = join(dir, 'register.json');
+    const log = join(dir, 'log');
+    const t0 = Date.now() + 400;
+    const [a, b] = await Promise.all([
+      runChild(HOLDER, [LIB_URL, path, log, 'A', String(t0), '600']),
+      runChild(HOLDER, [LIB_URL, path, log, 'B', String(t0 + 150), '0']),
+    ]);
+    assert.equal(a.code, 0, `holder A exited ${a.code}: ${JSON.stringify(a.stderr.slice(0, 300))}`);
+    assert.equal(b.code, 0, `contender B exited ${b.code}: ${JSON.stringify(b.stderr.slice(0, 300))}`);
+    const at = Object.fromEntries(readFileSync(log, 'utf8').trim().split('\n').map((l) => { const [n, what, ms] = l.split(' '); return [`${n} ${what}`, Number(ms)]; }));
+    assert.ok(at['A enter'] < at['B enter'], 'A entered first');
+    assert.ok(at['B enter'] >= at['A exit'], `B entered at +${at['B enter'] - at['A enter']}ms while A held until +${at['A exit'] - at['A enter']}ms`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
