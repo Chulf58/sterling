@@ -4222,7 +4222,7 @@ function classifyLocation(location) {
   if (SCHEME_LOCATION.test(text))
     return "url";
   if (!/\s/.test(text))
-    return "path";
+    return HAS_SEPARATOR.test(text) || ENDS_IN_EXTENSION.test(text) ? "path" : "prose";
   return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
 }
 function repoPathOfLocation(location) {
@@ -13654,6 +13654,29 @@ function gitFrom(exec, cwd) {
     return (r.stdout ?? "").trim();
   };
 }
+var LS_REMOTE_TIMEOUT_MS = 3e4;
+function logOriginDrift({ exec, cwd, log }) {
+  const notChecked = (reason) => log(`  ! origin not checked (${reason})`);
+  const remote = exec("git", ["ls-remote", "origin", "HEAD"], { cwd, timeout: LS_REMOTE_TIMEOUT_MS });
+  const remoteSha = (remote.stdout ?? "").trim().split(/\s+/)[0] ?? "";
+  if (remote.status !== 0 || !/^[0-9a-f]{40}$/.test(remoteSha)) {
+    notChecked(remote.status !== 0 ? (remote.stderr || remote.stdout || `exit ${remote.status}`).trim() : "ls-remote returned no HEAD");
+    return;
+  }
+  const local = exec("git", ["rev-parse", "HEAD"], { cwd });
+  const localSha = (local.stdout ?? "").trim();
+  if (local.status !== 0 || !localSha) {
+    notChecked(`could not read this clone's HEAD: ${(local.stderr || `exit ${local.status}`).trim()}`);
+    return;
+  }
+  const contained = exec("git", ["merge-base", "--is-ancestor", remoteSha, "HEAD"], { cwd });
+  if (contained.status === 0) return;
+  if (contained.status !== 1 && contained.status !== 128) {
+    notChecked((contained.stderr || contained.stdout || `exit ${contained.status}`).trim());
+    return;
+  }
+  log(`  ! origin's default branch is at ${remoteSha.slice(0, 7)}, this clone's HEAD is at ${localSha.slice(0, 7)}. This update does not pull on the authoring machine; pull deliberately if that work should be here.`);
+}
 function readCurrency({ git }) {
   if (git(["rev-parse", "--git-dir"], { allowFail: true }) === "") return { is_repo: false };
   const branch = git(["rev-parse", "--abbrev-ref", "HEAD"], { allowFail: true });
@@ -14160,13 +14183,13 @@ ${handoffOut.split("\n").map((l) => `          ${l}`).join("\n")}`);
     const invokedFrom = projectDir || invokingProject;
     if (opts2.check) {
       log(`
-AUTHORING clone \u2014 nothing to pull; syncing ${invokedFrom} only`);
+AUTHORING clone \u2014 no pull on the authoring machine; syncing ${invokedFrom} only`);
       log("  (--check: nothing fetched, nothing synced, no currency line \u2014 there is nothing to pull)");
       return report2;
     }
     if (opts2.projects === false) {
       log(`
-AUTHORING clone \u2014 nothing to pull; syncing ${invokedFrom} only`);
+AUTHORING clone \u2014 no pull on the authoring machine; syncing ${invokedFrom} only`);
       log("  (--no-projects: nothing synced \u2014 on the authoring machine the project sync is the whole update, so this run did nothing)");
       return report2;
     }
@@ -14184,7 +14207,8 @@ AUTHORING clone \u2014 nothing to pull; syncing ${invokedFrom} only`);
       return report2;
     }
     log(`
-AUTHORING clone \u2014 nothing to pull; syncing ${project.repo_path} only`);
+AUTHORING clone \u2014 no pull on the authoring machine; syncing ${project.repo_path} only`);
+    logOriginDrift({ exec, cwd, log });
     if (opts2.force) log("  (--force has no meaning on the authoring machine: there is no rebuild to force)");
     refreshProjects([project], { launchers: false, handoff: false });
     log(`

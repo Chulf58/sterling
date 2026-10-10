@@ -39,9 +39,20 @@ test('classifyLocation: a location with whitespace and no scheme is prose', () =
   }
 });
 
-test('classifyLocation: one whitespace-free token with no scheme is a path, repo-relative or not', () => {
-  for (const p of ['docs/spec.md', '.\\docs\\spec.md', 'README', '/abs/spec.md', 'C:\\docs\\spec.md', 'c:/docs/spec.md', '../sibling/spec.md']) {
+test('classifyLocation: a whitespace-free token with a separator or an extension is a path, repo-relative or not', () => {
+  for (const p of ['docs/spec.md', '.\\docs\\spec.md', 'README.md', '.npmrc', '/abs/spec.md', 'C:\\docs\\spec.md', 'c:/docs/spec.md', '../sibling/spec.md']) {
     assert.equal(classifyLocation(p), 'path', p);
+  }
+});
+
+// GitHub issue #67: a skill name or a one-word label has no separator and no
+// extension, so it is not a file the read-time refresh_reference check can stat.
+test('classifyLocation: a bare word (skill name, label) with no separator and no extension is prose, never a file key', () => {
+  for (const p of ['sterling-init', 'Confluence', 'README', 'models-catalog']) {
+    assert.equal(classifyLocation(p), 'prose', p);
+    assert.equal(repoPathOfLocation(p), undefined, p);
+    assert.equal(normalizeLocation(p), p);
+    assert.deepEqual(RECORD_TYPES.reference_material.fileKeys(ref({ location: p })), [], p);
   }
 });
 

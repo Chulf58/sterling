@@ -397,3 +397,29 @@ test('#57 boundary: a reference with a catalog whose location is a missing repo 
     cleanup();
   }
 });
+
+// GitHub issue #67: a reference_material whose location is a skill name or a
+// one-word label (no separator, no extension) was read as a repo path and
+// minted "<word> no longer exists on disk". The seeded catalog (#57), prose
+// with whitespace and URLs (#13) already minted nothing.
+test('#67 a bare-word location (skill name, label) mints nothing; seeded catalog, prose and URL stay silent; a missing repo file still mints', () => {
+  const { store, tools, cleanup } = fixture();
+  try {
+    store.bootstrapCatalogIfAbsent({ models: { reviewer: { model: 'claude-opus-4-8' } } }, '2026-09-06T00:00:00.000Z');
+    const silent = ['sterling-init', 'Confluence', 'defined in this record', URL].map((location) => mkRef(tools, location));
+    const gone = mkRef(tools, 'docs/gone.md');
+    readRefs(tools);
+    readRefs(tools);
+    const items = refreshItems(tools);
+    assert.deepEqual(
+      items.map((i) => i.feature_link),
+      [gone.id],
+      'only the missing repo file mints'
+    );
+    const read = readRefs(tools);
+    for (const ref of silent) assert.equal(read.find((r) => r.id === ref.id)?.verify_before_use, undefined, String(ref.location));
+    assert.equal(read.find((r) => r.title === 'Models catalog')?.verify_before_use, undefined);
+  } finally {
+    cleanup();
+  }
+});

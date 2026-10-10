@@ -94,6 +94,7 @@ function classifyRegister(root, ctx) {
 }
 var MAX_PROMPT_BYTES = 512 * 1024;
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 
 // scripts/hooks/lib/plan-lock.mjs
 import { closeSync, constants as FS, fstatSync, mkdirSync as mkdirSync2, openSync, readSync, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
@@ -4278,7 +4279,7 @@ function classifyLocation(location) {
   if (SCHEME_LOCATION.test(text))
     return "url";
   if (!/\s/.test(text))
-    return "path";
+    return HAS_SEPARATOR.test(text) || ENDS_IN_EXTENSION.test(text) ? "path" : "prose";
   return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
 }
 function repoPathOfLocation(location) {

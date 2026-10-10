@@ -7,8 +7,7 @@ var __export = (target2, all) => {
 };
 
 // scripts/debug-scope.mjs
-import { readFileSync as readFileSync2, writeFileSync as writeFileSync2, mkdirSync as mkdirSync2, existsSync as existsSync2 } from "node:fs";
-import { join as join3, dirname as dirname2 } from "node:path";
+import { join as join4 } from "node:path";
 
 // scripts/lib/project.mjs
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
@@ -4093,7 +4092,7 @@ function classifyLocation(location) {
   if (SCHEME_LOCATION.test(text))
     return "url";
   if (!/\s/.test(text))
-    return "path";
+    return HAS_SEPARATOR.test(text) || ENDS_IN_EXTENSION.test(text) ? "path" : "prose";
   return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
 }
 function repoPathOfLocation(location) {
@@ -5493,6 +5492,63 @@ function clearDebugScope(cwd) {
   rmSync(debugScopePath(cwd), { force: true });
 }
 
+// scripts/hooks/lib/session-events.mjs
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
+import { dirname as dirname2, join as join3 } from "node:path";
+var SESSION_EVENTS_REL = join3(".sterling", "transient", "session-events.json");
+function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
+  mkdirSync2(dirname2(eventsPath), { recursive: true });
+  withSessionEventsLock(
+    eventsPath,
+    () => {
+      const events = existsSync2(eventsPath) ? JSON.parse(readFileSync2(eventsPath, "utf8")) : [];
+      events.push(...newEvents);
+      const tmp = `${eventsPath}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
+      writeFileSync2(tmp, JSON.stringify(events), { flag: "wx" });
+      try {
+        renameSync(tmp, eventsPath);
+      } catch (e) {
+        try {
+          unlinkSync(tmp);
+        } catch {
+        }
+        throw e;
+      }
+    },
+    lockOptions
+  );
+}
+var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
+var SQLITE_BUSY = 5;
+function withSessionEventsLock(path, fn, { timeoutMs = 5e3 } = {}) {
+  const lockPath = `${path}.lock.db`;
+  const db = new DatabaseSync4(lockPath);
+  try {
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timeoutMs))}`);
+    try {
+      db.exec("PRAGMA journal_mode = DELETE");
+      db.exec("BEGIN IMMEDIATE");
+    } catch (e) {
+      if ((e?.errcode & 255) !== SQLITE_BUSY) throw e;
+      const err = new Error(`${lockPath} is held by another writer that is still running; gave up after ${timeoutMs}ms and nothing was written`);
+      err.code = SESSION_EVENTS_LOCK_HELD;
+      throw err;
+    }
+    try {
+      return fn();
+    } finally {
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        console.error(`session-events: COMMIT of the lock at ${lockPath} failed (${e?.message ?? e}); the lock is released by closing the connection`);
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
+
 // scripts/debug-scope.mjs
 var action = process.argv[2];
 var target = arg("--target") ?? process.cwd();
@@ -5500,11 +5556,13 @@ if (action === "register") {
   const paths = argAll("--path");
   if (!paths.length) fail("debug-scope register: at least one --path required (the explorer map)");
   registerDebugScope(target, paths);
-  const eventsPath = join3(target, ".sterling", "transient", "session-events.json");
-  mkdirSync2(dirname2(eventsPath), { recursive: true });
-  const events = existsSync2(eventsPath) ? JSON.parse(readFileSync2(eventsPath, "utf8")) : [];
-  events.push({ kind: "debug_scope", detail: paths.join(", "), at: (/* @__PURE__ */ new Date()).toISOString() });
-  writeFileSync2(eventsPath, JSON.stringify(events));
+  const eventsPath = join4(target, ".sterling", "transient", "session-events.json");
+  try {
+    appendSessionEventsAt(eventsPath, [{ kind: "debug_scope", detail: paths.join(", "), at: (/* @__PURE__ */ new Date()).toISOString() }]);
+  } catch (e) {
+    if (e.code === SESSION_EVENTS_LOCK_HELD) fail(`debug-scope register: the scope was registered but its debug_scope session event was NOT: ${e.message}`);
+    throw e;
+  }
   console.log(JSON.stringify({ registered: paths.length }));
 } else if (action === "clear") {
   clearDebugScope(target);

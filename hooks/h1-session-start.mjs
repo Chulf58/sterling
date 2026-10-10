@@ -4196,7 +4196,7 @@ function classifyLocation(location) {
   if (SCHEME_LOCATION.test(text))
     return "url";
   if (!/\s/.test(text))
-    return "path";
+    return HAS_SEPARATOR.test(text) || ENDS_IN_EXTENSION.test(text) ? "path" : "prose";
   return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
 }
 function repoPathOfLocation(location) {
@@ -12372,7 +12372,7 @@ async function withRegisterLock(root, fn, opts = {}) {
             `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
           );
         }
-        await sleepAsync(retryMs);
+        await sleepAsync(retryMs + Math.random() * retryMs * 0.5);
         continue;
       }
       const held = legacyLockHolder(root);
@@ -12444,6 +12444,7 @@ var MAX_PROMPT_BYTES = 512 * 1024;
 var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
 var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function dispatchStateDir(root) {
   return join16(root, ".sterling", "transient", "dispatch-state");
 }

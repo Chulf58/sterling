@@ -17123,7 +17123,7 @@ function classifyLocation(location) {
   if (SCHEME_LOCATION.test(text))
     return "url";
   if (!/\s/.test(text))
-    return "path";
+    return HAS_SEPARATOR.test(text) || ENDS_IN_EXTENSION.test(text) ? "path" : "prose";
   return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
 }
 function repoPathOfLocation(location) {
@@ -37616,7 +37616,8 @@ function createSterlingServer(target, opts = {}) {
     guardWorkerTools(server, new WorkerGuard(opts.workerPolicy, store));
     toolWrappers.push("worker_policy");
   }
-  const mapBusy = (name, e) => e instanceof StoreBusyError ? busyRefusal(name, e, false) : e;
+  const SINGLE_WRITE_BOARD_TOOLS = /* @__PURE__ */ new Set(["board_update", "board_edit"]);
+  const mapBusy = (name, e) => e instanceof StoreBusyError ? busyRefusal(name, e, SINGLE_WRITE_BOARD_TOOLS.has(name)) : e;
   const registerTool = server.registerTool.bind(server);
   server.registerTool = ((name, config3, handler) => registerTool(name, config3, ((...args2) => {
     try {

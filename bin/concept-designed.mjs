@@ -7,8 +7,7 @@ var __export = (target2, all) => {
 };
 
 // scripts/concept-designed.mjs
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { join as join2, dirname } from "node:path";
+import { join as join3 } from "node:path";
 
 // scripts/lib/project.mjs
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
@@ -4093,7 +4092,7 @@ function classifyLocation(location) {
   if (SCHEME_LOCATION.test(text))
     return "url";
   if (!/\s/.test(text))
-    return "path";
+    return HAS_SEPARATOR.test(text) || ENDS_IN_EXTENSION.test(text) ? "path" : "prose";
   return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
 }
 function repoPathOfLocation(location) {
@@ -5474,14 +5473,73 @@ function fail(message, code = 1) {
   process.exit(code);
 }
 
+// scripts/hooks/lib/session-events.mjs
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
+import { dirname, join as join2 } from "node:path";
+var SESSION_EVENTS_REL = join2(".sterling", "transient", "session-events.json");
+function appendSessionEventsAt(eventsPath2, newEvents, lockOptions) {
+  mkdirSync(dirname(eventsPath2), { recursive: true });
+  withSessionEventsLock(
+    eventsPath2,
+    () => {
+      const events = existsSync(eventsPath2) ? JSON.parse(readFileSync(eventsPath2, "utf8")) : [];
+      events.push(...newEvents);
+      const tmp = `${eventsPath2}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
+      writeFileSync(tmp, JSON.stringify(events), { flag: "wx" });
+      try {
+        renameSync(tmp, eventsPath2);
+      } catch (e) {
+        try {
+          unlinkSync(tmp);
+        } catch {
+        }
+        throw e;
+      }
+    },
+    lockOptions
+  );
+}
+var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
+var SQLITE_BUSY = 5;
+function withSessionEventsLock(path, fn, { timeoutMs = 5e3 } = {}) {
+  const lockPath = `${path}.lock.db`;
+  const db = new DatabaseSync4(lockPath);
+  try {
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timeoutMs))}`);
+    try {
+      db.exec("PRAGMA journal_mode = DELETE");
+      db.exec("BEGIN IMMEDIATE");
+    } catch (e) {
+      if ((e?.errcode & 255) !== SQLITE_BUSY) throw e;
+      const err = new Error(`${lockPath} is held by another writer that is still running; gave up after ${timeoutMs}ms and nothing was written`);
+      err.code = SESSION_EVENTS_LOCK_HELD;
+      throw err;
+    }
+    try {
+      return fn();
+    } finally {
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        console.error(`session-events: COMMIT of the lock at ${lockPath} failed (${e?.message ?? e}); the lock is released by closing the connection`);
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
+
 // scripts/concept-designed.mjs
 var families = argAll("--family");
 var target = arg("--target") ?? process.cwd();
 if (!families.length) fail("concept-designed: at least one --family required (the concept family slug, e.g. weapons)");
-var eventsPath = join2(target, ".sterling", "transient", "session-events.json");
-mkdirSync(dirname(eventsPath), { recursive: true });
-var events = existsSync(eventsPath) ? JSON.parse(readFileSync(eventsPath, "utf8")) : [];
+var eventsPath = join3(target, ".sterling", "transient", "session-events.json");
 var at = (/* @__PURE__ */ new Date()).toISOString();
-for (const family of families) events.push({ kind: "concept_designed", detail: family, at });
-writeFileSync(eventsPath, JSON.stringify(events));
+try {
+  appendSessionEventsAt(eventsPath, families.map((family) => ({ kind: "concept_designed", detail: family, at })));
+} catch (e) {
+  if (e.code === SESSION_EVENTS_LOCK_HELD) fail(`concept-designed: concept_designed event(s) for ${families.join(", ")} NOT registered: ${e.message}`);
+  throw e;
+}
 console.log(JSON.stringify({ registered: families }));

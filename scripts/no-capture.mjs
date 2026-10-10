@@ -28,10 +28,9 @@
 // cross-project capture-duty forgery H15's project-scoped seal does not
 // cover. H10's printed remedy only ever used the bare form, so nothing
 // documented relied on it. The event is written to the invoking project only.
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { arg, hasFlag, fail } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
+import { appendSessionEventsAt, SESSION_EVENTS_LOCK_HELD } from './hooks/lib/session-events.mjs';
 import { NO_CAPTURE_LANES } from '@sterling/schemas';
 
 let reason, laneGiven, laneArg;
@@ -81,11 +80,15 @@ try {
 } catch (e) {
   fail(`no-capture: ${e.message}`);
 }
-mkdirSync(dirname(eventsPath), { recursive: true });
-const events = existsSync(eventsPath) ? JSON.parse(readFileSync(eventsPath, 'utf8')) : [];
 const at = new Date().toISOString();
 // `lane` is omitted entirely on a bare declaration, so a bare event is
 // byte-identical to a legacy pre-ruling one — one shape, one reading (capture).
-events.push(lane ? { kind: 'no_capture', detail: reason, at, lane } : { kind: 'no_capture', detail: reason, at });
-writeFileSync(eventsPath, JSON.stringify(events));
+const event = lane ? { kind: 'no_capture', detail: reason, at, lane } : { kind: 'no_capture', detail: reason, at };
+try {
+  appendSessionEventsAt(eventsPath, [event]);
+} catch (e) {
+  // Issue #64: a held lock skips the write, named, and never writes unlocked.
+  if (e.code === SESSION_EVENTS_LOCK_HELD) fail(`no-capture: no_capture declaration NOT registered: ${e.message}`);
+  throw e;
+}
 console.log(JSON.stringify({ declared: reason, at, lane: lane ?? 'capture (bare declaration)' }));

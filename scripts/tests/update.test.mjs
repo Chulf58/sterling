@@ -199,7 +199,7 @@ test('describe surfaces an annotated tag as the human-legible version; no tags s
 const HEAD_A = 'a'.repeat(40);
 const HEAD_B = 'b'.repeat(40);
 
-function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = null, syncStatus = () => 0, syncStdout = null, contractStatus = 0, head = HEAD_A } = {}) {
+function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = null, syncStatus = () => 0, syncStdout = null, contractStatus = 0, head = HEAD_A, remoteHead = head, lsRemote = null, mergeBase = null } = {}) {
   const calls = [];
   let merged = false;
   const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
@@ -214,6 +214,10 @@ function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = n
       if (a === 'rev-parse HEAD') return ok(merged ? HEAD_B : head);
       if (a.startsWith('describe')) return ok('v0.2.0');
       if (a === 'remote') return ok('origin');
+      if (a === 'ls-remote origin HEAD') return lsRemote ? lsRemote() : ok(`${remoteHead}\tHEAD`);
+      // `merge-base --is-ancestor <origin tip> HEAD`: exit 0 when HEAD already contains it; default is
+      // contained only when the shas are equal, so a test names `mergeBase` for the ahead/missing cases.
+      if (a.startsWith('merge-base --is-ancestor')) return mergeBase ? mergeBase() : { status: remoteHead === head ? 0 : 1, stdout: '', stderr: '' };
       if (a.startsWith('symbolic-ref')) return ok('origin/main');
       if (a.startsWith('rev-parse --verify --quiet')) return ok(HEAD_B);
       if (a.startsWith('rev-list --left-right --count')) return ok(merged ? '0\t0' : `${behind}\t${ahead}`);
@@ -722,16 +726,18 @@ test('authoring role: no fetch/merge/build/check/test/migrate, syncs ONLY the in
     const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: fanOut, invokingProject: '/tmp/dome-farmer', opts: {} });
 
     assert.equal(report.exit, 0);
-    for (const forbidden of ['git', 'npm', 'migrate-stores', 'init.mjs', 'handoff-projection']) {
+    for (const forbidden of ['npm', 'migrate-stores', 'init.mjs', 'handoff-projection']) {
       assert.deepEqual(calls.filter((c) => c.startsWith(forbidden) || c.includes(forbidden)), [], `no ${forbidden} call on the authoring machine`);
     }
+    // git: exactly the three read-only calls of the origin-drift check (issue #61) — never a fetch, merge or ref write.
+    assert.deepEqual(calls.filter((c) => c.startsWith('git') || c.includes('git ')), ['git ls-remote origin HEAD', 'git rev-parse HEAD', `git merge-base --is-ancestor ${HEAD_A} HEAD`], 'git runs only the read-only drift check on the authoring machine');
     assert.deepEqual(calls.filter((c) => c.includes('sync-agents')).map((c) => c.split(' ').pop()), ['/tmp/dome-farmer'], 'sync-agents gets the invoking project only — no fan-out');
     const contract = calls.filter((c) => c.includes('stamp-contract.mjs'));
     assert.equal(contract.length, 1);
     assert.match(contract[0], /--project \/tmp\/dome-farmer$/, 'stamp-contract is scoped to the invoking project');
     assert.match(contract[0], /stamp-contract\.mjs --apply-inserts --project /, 'inserts only, never a full --apply');
     assert.doesNotMatch(contract[0], /--apply( |$)/, 'existing wording is never replaced by an update: no full --apply');
-    assert.ok(lines.some((l) => l.includes('AUTHORING clone — nothing to pull; syncing /tmp/dome-farmer only')), 'the loud line names the project');
+    assert.ok(lines.some((l) => l.includes('AUTHORING clone — no pull on the authoring machine; syncing /tmp/dome-farmer only')), 'the loud line names the project');
     assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false, 'the marker attests the full sequence, which did not run — never written');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
@@ -759,6 +765,74 @@ test('authoring role: a stale marker does not matter, and a refused sync is exit
   }
 });
 
+test('authoring role: origin has commits this clone lacks (tip not contained in HEAD) prints one warning naming both shas, exit 0, no fetch or merge', async () => {
+  const cwd = authoringCwd();
+  try {
+    const { exec, calls } = fakeExec({ head: HEAD_A, remoteHead: HEAD_B });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {} });
+    assert.equal(report.exit, 0);
+    const warn = lines.filter((l) => l.includes("origin's default branch is at"));
+    assert.deepEqual(warn, ["  ! origin's default branch is at bbbbbbb, this clone's HEAD is at aaaaaaa. This update does not pull on the authoring machine; pull deliberately if that work should be here."]);
+    assert.deepEqual(calls.filter((c) => /^git (fetch|merge|pull|checkout|reset)( |$)/.test(c)), [], 'the drift check never fetches or merges');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: origin tip contained in HEAD (equal shas, or HEAD ahead of origin e.g. a feature branch) prints nothing extra', async () => {
+  const cwd = authoringCwd();
+  try {
+    const cases = [
+      ['equal shas', fakeExec({ head: HEAD_A, remoteHead: HEAD_A })],
+      ['HEAD ahead of origin', fakeExec({ head: HEAD_A, remoteHead: HEAD_B, mergeBase: () => ({ status: 0, stdout: '', stderr: '' }) })],
+    ];
+    for (const [label, { exec }] of cases) {
+      const lines = [];
+      const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {} });
+      assert.equal(report.exit, 0, label);
+      assert.doesNotMatch(lines.join('\n'), /origin's default branch is at|origin not checked/, label);
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: origin tip object missing locally (merge-base exit 128) still warns; any other merge-base failure is "not checked"', async () => {
+  const cwd = authoringCwd();
+  try {
+    const missing = fakeExec({ head: HEAD_A, remoteHead: HEAD_B, mergeBase: () => ({ status: 128, stdout: '', stderr: 'fatal: Not a valid commit name' }) });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec: missing.exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {} });
+    assert.equal(report.exit, 0);
+    assert.match(lines.join('\n'), /origin's default branch is at bbbbbbb, this clone's HEAD is at aaaaaaa/);
+
+    const odd = fakeExec({ head: HEAD_A, remoteHead: HEAD_B, mergeBase: () => ({ status: 2, stdout: '', stderr: 'usage error' }) });
+    const lines2 = [];
+    const r2 = await runUpdate({ cwd, exec: odd.exec, log: (l) => lines2.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {} });
+    assert.equal(r2.exit, 0);
+    assert.ok(lines2.some((l) => l === '  ! origin not checked (usage error)'));
+    assert.doesNotMatch(lines2.join('\n'), /origin's default branch is at/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('authoring role: a failing ls-remote says origin was not checked, still exit 0, and the sync still runs', async () => {
+  const cwd = authoringCwd();
+  try {
+    const { exec, calls } = fakeExec({ lsRemote: () => ({ status: 128, stdout: '', stderr: 'fatal: unable to access origin' }) });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: REG_P, invokingProject: '/tmp/p', opts: {} });
+    assert.equal(report.exit, 0);
+    assert.ok(lines.some((l) => l === '  ! origin not checked (fatal: unable to access origin)'), 'the failure is stated with its reason');
+    assert.doesNotMatch(lines.join('\n'), /origin's default branch is at/);
+    assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 1, 'the project sync still ran');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test('authoring role: --check changes nothing (no sync); a missing invoking project is a loud failure', async () => {
   const cwd = authoringCwd();
   try {
@@ -767,7 +841,7 @@ test('authoring role: --check changes nothing (no sync); a missing invoking proj
     const report = await runUpdate({ cwd, exec: checked.exec, log: (l) => lines.push(l), projects: [], invokingProject: '/tmp/p', opts: { check: true } });
     assert.equal(report.exit, 0);
     assert.deepEqual(checked.calls, [], '--check on the authoring machine runs nothing at all');
-    assert.ok(lines.some((l) => l.includes('AUTHORING clone — nothing to pull')));
+    assert.ok(lines.some((l) => l.includes('AUTHORING clone — no pull on the authoring machine')));
 
     const none = fakeExec();
     const r2 = await runUpdate({ cwd, exec: none.exec, log: () => {}, projects: [], opts: {} });
