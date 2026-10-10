@@ -959,6 +959,7 @@ test('opencode: the tracker reads the child session\'s latest assistant turn wit
     });
     writeRegister(root, [row('ses_kid', 'reviewer', 10_000, { session_id: 'ses_root', model: 'openai/gpt-6.1-sol#high' }), row('ses_new', 'scout', 5_000, { session_id: 'ses_root' })]);
     const main = readFileSync(db);
+    assert.deepEqual(readdirSync(dirname(db)), ['opencode.db'], 'no OpenCode running: no -wal, no -shm');
     const v = createSubagentTracker(root, { readIntervalMs: 0, host: 'opencode', opencodeDb: db, claudeConfigDir: join(root, 'none') }).view(NOW);
     const kid = v.agents.find((a) => a.agentId === 'ses_kid')!;
     assert.deepEqual([kid.contextTokens, kid.contextPct, kid.model], [250_000, 25, 'gpt-6.1-sol']);
@@ -967,9 +968,8 @@ test('opencode: the tracker reads the child session\'s latest assistant turn wit
     assert.equal(v.contextNote, undefined, 'nothing is wrong, so no note');
     const text = composeSubagentBlock(v, 160, 30, 0).puts.map((p) => p.text);
     assert.ok(text.includes('running · 25% ctx') && text.includes('running · ? ctx'), JSON.stringify(text));
-    // with no OpenCode running a read-only open may leave an empty -wal and a -shm; they are never deleted
     assert.ok(readFileSync(db).equals(main), 'the main database is byte-identical after the read');
-    assert.ok(readdirSync(dirname(db)).includes('opencode.db'), 'nothing is deleted');
+    assert.deepEqual(readdirSync(dirname(db)), ['opencode.db'], 'a read with no -wal creates no -wal or -shm');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

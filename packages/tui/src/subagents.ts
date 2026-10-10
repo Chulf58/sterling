@@ -52,6 +52,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { AGENT_MODEL_KEY, parseConfig } from '@sterling/schemas';
 import { readRegister, dispatchStateDir, dispatchStateKey, type RegisterEntry } from '../../../scripts/lib/dispatch-register.mjs';
@@ -373,17 +374,22 @@ export interface OpenCodeContextRead {
 
 const CATALOG_KEY = 'models-dev:catalog';
 
-/** Open OpenCode's database read-only and WAL-aware, so a turn OpenCode has
- *  committed to its -wal but not yet checkpointed is seen. Missing sidecars
- *  prove nothing (an idle OpenCode connection may not have created them yet),
- *  so there is no immutable open. When OpenCode is not running, the open may
- *  leave an empty -wal and a -shm; they are left in place, since OpenCode
- *  reuses them on its next open and deleting a file beside another program's
- *  live database can remove a -wal it has just started writing (anti-pattern
- *  a-writable-sqlite-open-on-a-wal-database-mutates-the-main-fi). */
+/** Open OpenCode's database without writing to it or beside it, and delete
+ *  nothing. With no -wal, every committed frame is in the main file, so an
+ *  immutable open reads it complete as of that instant and creates no -wal or
+ *  -shm. With a -wal (OpenCode running, or a writer that crashed, -shm or
+ *  not), a plain read-only open is WAL-aware and sees the turns committed to
+ *  it. The one gap: a commit that lands between the -wal check and the query
+ *  is missed, so the card shows the previous turn until the next tick.
+ *  Nothing beside the database is ever removed: deleting a file beside
+ *  another program's live database can remove a -wal it has just started
+ *  writing (anti-pattern a-writable-sqlite-open-on-a-wal-database-mutates-the-main-fi). */
 function openOpenCodeDb(path: string): DatabaseSync {
   if (!existsSync(path)) throw new Error(`no OpenCode database at ${path}`);
-  return new DatabaseSync(path, { readOnly: true });
+  if (existsSync(`${path}-wal`)) return new DatabaseSync(path, { readOnly: true });
+  const url = pathToFileURL(path);
+  url.searchParams.set('immutable', '1');
+  return new DatabaseSync(url, { readOnly: true });
 }
 
 /** Read each session's latest assistant turn that carries tokens (input plus
