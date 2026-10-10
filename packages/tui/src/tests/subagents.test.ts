@@ -958,6 +958,7 @@ test('opencode: the tracker reads the child session\'s latest assistant turn wit
       catalog: CATALOG,
     });
     writeRegister(root, [row('ses_kid', 'reviewer', 10_000, { session_id: 'ses_root', model: 'openai/gpt-6.1-sol#high' }), row('ses_new', 'scout', 5_000, { session_id: 'ses_root' })]);
+    const main = readFileSync(db);
     const v = createSubagentTracker(root, { readIntervalMs: 0, host: 'opencode', opencodeDb: db, claudeConfigDir: join(root, 'none') }).view(NOW);
     const kid = v.agents.find((a) => a.agentId === 'ses_kid')!;
     assert.deepEqual([kid.contextTokens, kid.contextPct, kid.model], [250_000, 25, 'gpt-6.1-sol']);
@@ -966,7 +967,9 @@ test('opencode: the tracker reads the child session\'s latest assistant turn wit
     assert.equal(v.contextNote, undefined, 'nothing is wrong, so no note');
     const text = composeSubagentBlock(v, 160, 30, 0).puts.map((p) => p.text);
     assert.ok(text.includes('running · 25% ctx') && text.includes('running · ? ctx'), JSON.stringify(text));
-    assert.deepEqual(readdirSync(join(root, 'opencode-data', 'opencode')), ['opencode.db'], 'a read with no OpenCode running leaves no -wal or -shm');
+    // with no OpenCode running a read-only open may leave an empty -wal and a -shm; they are never deleted
+    assert.ok(readFileSync(db).equals(main), 'the main database is byte-identical after the read');
+    assert.ok(readdirSync(dirname(db)).includes('opencode.db'), 'nothing is deleted');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1019,6 +1022,42 @@ test('opencode: while OpenCode holds its database open, a read leaves the main f
     assert.equal(readOpenCodeContext(path, ['ses_a'], read.catalog!.stamp).catalog, undefined, 'an unchanged catalog is not parsed again');
     assert.ok(readFileSync(path).equals(before.main) && readFileSync(`${path}-wal`).equals(before.wal));
     assert.deepEqual(readdirSync(dirname(path)).sort(), before.files);
+  } finally {
+    writer.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('opencode: with OpenCode connected but idle (no -wal or -shm yet), a turn it commits after the first read is seen on the next tick', () => {
+  const root = project();
+  const path = openCodeDb(root, { messages: [['ses_a', 1, 'assistant', turn(100_000, 0, 0)]], catalog: CATALOG });
+  const writer = new DatabaseSync(path);
+  try {
+    writeRegister(root, [row('ses_a', 'implementor', 10_000)]);
+    const tracker = createSubagentTracker(root, { readIntervalMs: 0, host: 'opencode', opencodeDb: path });
+    assert.equal(tracker.view(NOW).agents[0]!.contextTokens, 100_000);
+    writer.prepare('INSERT INTO session_message VALUES (?, ?, ?, ?, 0, 0, ?)').run('msg_new', 'ses_a', 'assistant', 2, JSON.stringify(turn(300_000, 0, 0)));
+    assert.equal(tracker.view(NOW + 1000).agents[0]!.contextTokens, 300_000);
+  } finally {
+    writer.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('opencode: a turn committed only to the -wal is read even when the -shm is missing (a writer that crashed), and the -wal is left as it was', () => {
+  const root = project();
+  const path = openCodeDb(root, { messages: [['ses_a', 1, 'assistant', turn(100_000, 0, 0)]], catalog: CATALOG });
+  const writer = new DatabaseSync(path);
+  const crashed = join(root, 'crashed');
+  try {
+    writer.exec('PRAGMA wal_autocheckpoint = 0');
+    writer.prepare('INSERT INTO session_message VALUES (?, ?, ?, ?, 0, 0, ?)').run('msg_wal', 'ses_a', 'assistant', 2, JSON.stringify(turn(400_000, 0, 0)));
+    mkdirSync(crashed);
+    writeFileSync(join(crashed, 'opencode.db'), readFileSync(path));
+    writeFileSync(join(crashed, 'opencode.db-wal'), readFileSync(`${path}-wal`));
+    const wal = readFileSync(join(crashed, 'opencode.db-wal'));
+    assert.equal(readOpenCodeContext(join(crashed, 'opencode.db'), ['ses_a'], null).usage.get('ses_a')?.tokens, 400_000);
+    assert.ok(readFileSync(join(crashed, 'opencode.db-wal')).equals(wal), 'the -wal is not checkpointed or truncated');
   } finally {
     writer.close();
     rmSync(root, { recursive: true, force: true });
