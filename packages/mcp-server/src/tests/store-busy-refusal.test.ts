@@ -114,3 +114,60 @@ test('a write tool not cleared as single-transaction refuses with the may-have-l
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Issue #60: board_update and board_edit make one store write (one updateTodo
+// transaction), so the server says nothing was written and the call is safe to
+// re-send. Each refusal waits the default 5000 ms busy timeout, so this takes
+// about ten seconds.
+test('board_update and board_edit under a held lock refuse with the safe-to-re-send text over the wire, write nothing, and succeed after release', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-busy-refusal-board-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const path = join(dir, '.sterling', 'sterling.db');
+  const { server, store, tools } = createSterlingServer(path);
+  const client = new Client({ name: 'busy-refusal-board-test-client', version: '0.0.1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  let holder: DatabaseSync | undefined;
+  const textOf = (result: unknown): string => (result as { content: Array<{ text: string }> }).content[0].text;
+  try {
+    const { record } = tools.boardAdd({ text: 'locked board item', source: 'user', objective: 'standalone' });
+    const id = record.id;
+    holder = holdWriteLock(path);
+
+    const attempts: Array<[string, Record<string, unknown>]> = [
+      ['board_update', { id, priority: 'high' }],
+      ['board_edit', { id, find: 'locked', replace: 'edited' }],
+    ];
+    for (const [name, args] of attempts) {
+      const result = await client.callTool({ name, arguments: args });
+      assert.equal(result.isError, true, name);
+      const text = textOf(result);
+      assert.ok(text.startsWith(`${name}: `), `names the tool: ${text}`);
+      assert.match(text, /nothing from it was written/);
+      assert.match(text, /database is locked/);
+      assert.match(text, /safe to re-send/);
+      assert.doesNotMatch(text, /may have landed/);
+    }
+
+    release(holder);
+    holder = undefined;
+    const unchanged = JSON.parse(textOf(await client.callTool({ name: 'board_get', arguments: { id } }))) as { text: string; priority?: string; version: number };
+    assert.equal(unchanged.text, 'locked board item', 'the refused edit wrote nothing');
+    assert.notEqual(unchanged.priority, 'high', 'the refused update wrote nothing');
+
+    // Re-sending each refused call succeeds once the lock is released, as the text promises.
+    for (const [name, args] of attempts) {
+      const result = await client.callTool({ name, arguments: args });
+      assert.notEqual(result.isError, true, `${name} succeeds once the lock is released: ${textOf(result)}`);
+    }
+    const after = JSON.parse(textOf(await client.callTool({ name: 'board_get', arguments: { id } }))) as { text: string; priority: string };
+    assert.equal(after.text, 'edited board item');
+    assert.equal(after.priority, 'high');
+  } finally {
+    if (holder) release(holder);
+    await client.close();
+    await server.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

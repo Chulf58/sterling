@@ -350,10 +350,17 @@ export function createSterlingServer(
     toolWrappers.push('worker_policy');
   }
   // A StoreBusyError that reaches the wire still raw came from a tool whose
-  // write has not been cleared as one transaction (tools.ts maps the cleared
+  // write has not been cleared as one transaction (tools.ts maps the knowledge_*
   // ones itself and throws a plain Error), so it says an earlier write may have
   // landed instead of claiming a clean refusal (issue #59).
-  const mapBusy = (name: string, e: unknown): unknown => (e instanceof StoreBusyError ? busyRefusal(name, e, false) : e);
+  // board_update and board_edit are cleared here, at the tool boundary, and not
+  // inside SterlingTools.boardUpdate: that method also runs after a committed
+  // knowledge_* write (the article-oversize warning), where a busy error must
+  // not be labelled safe to re-send. Both tools read, then make one updateTodo,
+  // which is one BEGIN IMMEDIATE transaction (issue #60).
+  const SINGLE_WRITE_BOARD_TOOLS: ReadonlySet<string> = new Set(['board_update', 'board_edit']);
+  const mapBusy = (name: string, e: unknown): unknown =>
+    e instanceof StoreBusyError ? busyRefusal(name, e, SINGLE_WRITE_BOARD_TOOLS.has(name)) : e;
   const registerTool = server.registerTool.bind(server);
   server.registerTool = ((name: string, config: never, handler: (...args: unknown[]) => unknown) =>
     registerTool(
