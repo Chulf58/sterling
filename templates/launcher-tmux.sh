@@ -89,34 +89,41 @@ take_tui() {
   echo "sterling-launch: the TUI (pid $pid) has not exited after 2s; the new pane may exit at once" >&2
 }
 
-# Split the TUI in as a right pane of the session's active window, unless the
-# session already shows it. -d: create the pane WITHOUT focusing it, so the
-# keyboard stays on the left pane (terminal-kit otherwise grabs all input).
+# add_tui_pane <session> <host>: split the TUI in as a right pane of the
+# session's active window, unless the session already shows it. -d: create the
+# pane WITHOUT focusing it, so the keyboard stays on the left pane (terminal-kit
+# otherwise grabs all input). An OpenCode session's TUI gets --host opencode, so
+# its Agents tab reads subagent context from OpenCode's database.
 add_tui_pane() {
   if has_tui_pane "$1"; then
     echo "sterling-launch: tmux session $1 already shows the TUI"
     return 0
   fi
   take_tui "$1"
-  tmux split-window -h -d -t "=$1:" -c "$WORKDIR" -l "${SPLIT_RATIO}%" \
-    "$NODE_BIN" "$TUI_BUNDLE" --store "$STORE"
+  if [ "$2" = opencode ]; then
+    tmux split-window -h -d -t "=$1:" -c "$WORKDIR" -l "${SPLIT_RATIO}%" \
+      "$NODE_BIN" "$TUI_BUNDLE" --store "$STORE" --host opencode
+  else
+    tmux split-window -h -d -t "=$1:" -c "$WORKDIR" -l "${SPLIT_RATIO}%" \
+      "$NODE_BIN" "$TUI_BUNDLE" --store "$STORE"
+  fi
 }
 
-# open_session <session> <command...>: attach when it runs (re-adding a missing
-# TUI pane), else create it with the command on the left and the TUI on the right.
+# open_session <session> <host> <command...>: attach when it runs (re-adding a
+# missing TUI pane), else create it with the command on the left and the TUI on the right.
 open_session() {
-  local S="$1"
-  shift
+  local S="$1" HOST="$2"
+  shift 2
   if running "$S"; then
     # Session-scoped (not -g): click-to-focus a pane; Shift+drag still selects
     # plain terminal text. Set again here so an older session picks it up.
     tmux set-option -t "=$S:" mouse on
-    add_tui_pane "$S"
+    add_tui_pane "$S" "$HOST"
     exec tmux attach-session -t "=$S"
   fi
   tmux new-session -d -s "$S" -c "$WORKDIR" "$@"
   tmux set-option -t "=$S:" mouse on
-  add_tui_pane "$S"
+  add_tui_pane "$S" "$HOST"
   tmux select-pane -t "=$S:.0"
   exec tmux attach-session -t "=$S"
 }
@@ -126,13 +133,13 @@ case "$MODE" in
     [ -n "$CLAUDE_BIN" ] || { echo "sterling-launch: 'claude' not found on PATH (set CLAUDE_BIN)" >&2; exit 1; }
     # A session from the launcher before the per-checkout names is attached to, never duplicated.
     if ! running "$SESSION-claude" && legacy_running; then
-      open_session "$LEGACY_SESSION"
+      open_session "$LEGACY_SESSION" claude
     fi
-    open_session "$SESSION-claude" "$CLAUDE_BIN"{{CLAUDE_PLUGIN_FLAG}}
+    open_session "$SESSION-claude" claude "$CLAUDE_BIN"{{CLAUDE_PLUGIN_FLAG}}
     ;;
   opencode)
     [ -n "$OPENCODE_BIN" ] || { echo "sterling-launch: 'opencode' not found on PATH or in ~/.opencode/bin (set OPENCODE_BIN)" >&2; exit 1; }
-    open_session "$SESSION-opencode" "$OPENCODE_BIN"
+    open_session "$SESSION-opencode" opencode "$OPENCODE_BIN"
     ;;
   tui)
     # Inside tmux: the caller's own session. Outside: the Claude Code session,
@@ -148,7 +155,8 @@ case "$MODE" in
     fi
     [ -n "$S" ] || { echo "sterling-launch: no session of this project is running ($SESSION-claude, $SESSION-opencode) - start one with: ./sterling-launch.sh claude" >&2; exit 1; }
     tmux set-option -t "=$S:" mouse on
-    add_tui_pane "$S"
+    # this script names the OpenCode session, so that one gets the OpenCode TUI and any other the Claude one
+    if [ "$S" = "$SESSION-opencode" ]; then add_tui_pane "$S" opencode; else add_tui_pane "$S" claude; fi
     ;;
   *)
     echo "sterling-launch: unknown mode '$MODE' (use claude, opencode or tui)" >&2

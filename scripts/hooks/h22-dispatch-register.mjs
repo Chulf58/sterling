@@ -347,8 +347,32 @@ try {
       warnNonBlocking(`H22: unexpected ${event} tool_name '${input.tool_name}' on the Task|Agent matcher — allowing, nothing tracked`);
     } else {
       const recorder = event === 'PreToolUse' ? recordDispatchPre : event === 'PostToolUse' ? recordDispatchPost : recordDispatchFailure;
-      const result = await recorder(input.cwd, input, event === 'PostToolUse' ? { territoryFor: (prompt) => postTerritory(prompt, input.cwd) } : undefined);
-      if (result.disclosures?.length) lines.push(...result.disclosures);
+      try {
+        const result = await recorder(input.cwd, input, event === 'PostToolUse' ? { territoryFor: (prompt) => postTerritory(prompt, input.cwd) } : undefined);
+        if (result.disclosures?.length) lines.push(...result.disclosures);
+      } catch (e) {
+        if (e?.code !== 'register_lock_held') throw e;
+        // The recorder waited out its bound and skipped its write (decision
+        // register-writers-cooperating-lock): disclose what is lost, never
+        // write unlocked, never deny the tool call.
+        const toolUseId = input.tool_use_id ?? '(none)';
+        const subagentType = input.tool_input?.subagent_type ?? '(unknown)';
+        const lost =
+          event === 'PreToolUse'
+            ? 'no dispatch-state record was written, so this lane\'s SubagentStart has no prompt to derive its territory from (its PostToolUse can still bind it)'
+            : event === 'PostToolUse'
+              ? 'no agent binding was recorded and no unattributable register row was filled with this lane\'s territory'
+              : 'the dispatch-state record was not marked failed, so it is not terminal';
+        lines.push(
+          render(
+            disclosure(
+              'register_lock_held',
+              { ...(e.facts ?? {}), event, tool_use_id: toolUseId, subagent_type: subagentType },
+              `H22: ${event} for tool_use_id ${toolUseId} (${subagentType}) wrote nothing — the register lock at ${e.facts?.lock_path ?? '(unknown)'} stayed held by another live writer for ${e.facts?.waited_ms ?? '?'}ms (kernel-held: released when that writer finishes or dies, so there is nothing to remove by hand); ${lost}.`
+            )
+          )
+        );
+      }
     }
     if (lines.length) process.stderr.write(lines.join('\n') + '\n');
     allow();

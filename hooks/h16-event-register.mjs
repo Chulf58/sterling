@@ -4093,7 +4093,7 @@ function classifyLocation(location) {
   if (SCHEME_LOCATION.test(text))
     return "url";
   if (!/\s/.test(text))
-    return "path";
+    return HAS_SEPARATOR.test(text) || ENDS_IN_EXTENSION.test(text) ? "path" : "prose";
   return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
 }
 function repoPathOfLocation(location) {
@@ -11263,30 +11263,78 @@ function openStoreOrDegrade(cwd, who, open2 = openStore) {
 }
 
 // scripts/hooks/lib/session-events.mjs
-import { existsSync as existsSync5, mkdirSync as mkdirSync4, readFileSync as readFileSync6, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync5, mkdirSync as mkdirSync4, readFileSync as readFileSync6, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { dirname as dirname5, join as join10 } from "node:path";
 var SESSION_EVENTS_REL = join10(".sterling", "transient", "session-events.json");
 function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
-  const event = { kind: "research_tool", detail: String(detail ?? ""), at };
-  if (typeof agentId === "string" && agentId !== "") event.agent_id = agentId;
-  return event;
+  const event2 = { kind: "research_tool", detail: String(detail ?? ""), at };
+  if (typeof agentId === "string" && agentId !== "") event2.agent_id = agentId;
+  return event2;
 }
-function appendSessionEvent(projectDir, event) {
-  const eventsPath = join10(projectDir, SESSION_EVENTS_REL);
+function appendSessionEvent(projectDir, event2, lockOptions) {
+  appendSessionEventsAt(join10(projectDir, SESSION_EVENTS_REL), [event2], lockOptions);
+}
+function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
   mkdirSync4(dirname5(eventsPath), { recursive: true });
-  const events = existsSync5(eventsPath) ? JSON.parse(readFileSync6(eventsPath, "utf8")) : [];
-  events.push(event);
-  writeFileSync2(eventsPath, JSON.stringify(events));
+  withSessionEventsLock(
+    eventsPath,
+    () => {
+      const events = existsSync5(eventsPath) ? JSON.parse(readFileSync6(eventsPath, "utf8")) : [];
+      events.push(...newEvents);
+      const tmp = `${eventsPath}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
+      writeFileSync2(tmp, JSON.stringify(events), { flag: "wx" });
+      try {
+        renameSync2(tmp, eventsPath);
+      } catch (e) {
+        try {
+          unlinkSync(tmp);
+        } catch {
+        }
+        throw e;
+      }
+    },
+    lockOptions
+  );
+}
+var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
+var SQLITE_BUSY = 5;
+function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
+  const lockPath = `${path}.lock.db`;
+  const db = new DatabaseSync3(lockPath);
+  try {
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timeoutMs2))}`);
+    try {
+      db.exec("PRAGMA journal_mode = DELETE");
+      db.exec("BEGIN IMMEDIATE");
+    } catch (e) {
+      if ((e?.errcode & 255) !== SQLITE_BUSY) throw e;
+      const err = new Error(`${lockPath} is held by another writer that is still running; gave up after ${timeoutMs2}ms and nothing was written`);
+      err.code = SESSION_EVENTS_LOCK_HELD;
+      throw err;
+    }
+    try {
+      return fn();
+    } finally {
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        console.error(`session-events: COMMIT of the lock at ${lockPath} failed (${e?.message ?? e}); the lock is released by closing the connection`);
+      }
+    }
+  } finally {
+    db.close();
+  }
 }
 
 // scripts/hooks/h16-event-register.mjs
 var input = readStdin();
 var store = openStoreOrDegrade(input.cwd, "H16");
 if (!store) allow();
+var event;
 try {
   const tool = input.tool_name;
   const at = (/* @__PURE__ */ new Date()).toISOString();
-  let event;
   if (tool === "WebSearch" || tool === "WebFetch") {
     event = researchToolEvent(tool === "WebSearch" ? input.tool_input?.query : input.tool_input?.url, { at, agentId: input.agent_id });
   } else {
@@ -11300,5 +11348,9 @@ try {
   appendSessionEvent(input.cwd, event);
   allow();
 } catch (e) {
-  warnNonBlocking(`H16: session-event registration failed: ${e.message}`);
+  if (e.code === SESSION_EVENTS_LOCK_HELD) {
+    warnNonBlocking(`H16: session event NOT registered (${SESSION_EVENTS_LOCK_HELD}): ${event.kind} '${event.detail}'${event.agent_id ? ` agent_id ${event.agent_id}` : ""}; ${e.message}`);
+  } else {
+    warnNonBlocking(`H16: session-event registration failed: ${e.message}`);
+  }
 }

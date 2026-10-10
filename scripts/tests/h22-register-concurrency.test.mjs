@@ -191,7 +191,7 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join, dirname } from 'node:path';
@@ -857,6 +857,171 @@ test('R1-A98 CONTROL: a SECOND round for the same agent_id (its own Start, its o
     assert.equal(reg.length, 2, 'both rounds survive on disk');
     assert.equal(reg[0].ended.at, '2026-08-28T00:05:00.000Z', "round 1's terminal instant is never refreshed");
     assert.equal(reg[1].ended?.event, 'subagent-stop', 'round 2 is the round that was marked');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===========================================================================
+// RECORDER LOCK BOUND — GitHub issues #63 and #62, 2026-10-10.
+// Under many parallel Agent dispatches, SubagentStart's sibling derivation
+// re-takes the register lock every ~10 ms for up to 3000 ms. The Pre/Post/
+// Failure recorders and the Start's unattributable fallback polled every 50 ms
+// for at most 1000 ms, so they starved: the Pre/Post branch let the
+// register_lock_held refusal reach the hook's outer catch ("H22: internal
+// failure"), and the Start fallback wrote no register row at all. The fix
+// keeps decision register-writers-cooperating-lock (a timeout SKIPS the
+// mutation with one loud line, never writes unlocked) and only raises the
+// bound above the sibling budget.
+//   L1/L2 — a lock held for the WHOLE run: Pre and Post still exit 0 with
+//           exactly one [register_lock_held] line naming the tool_use_id and
+//           subagent_type, no internal failure, dispatch state unchanged.
+//   L3    — a lock released after ~1500 ms: the Post's binding lands.
+//   L4    — the Start fallback with the lock released after ~2500 ms writes
+//           its register row.
+// SABOTAGE: drop the h22 catch -> L1/L2 go red on "internal failure"; restore
+// the 1000 ms recorder bound -> L3 goes red; restore the default bound on
+// finalizeUnattributable -> L4 goes red with entry null.
+// ===========================================================================
+
+const LANE_PROMPT = 'Lane L: touch src/lane.mjs';
+
+function agentToolInput(dir, event, toolUseId, over = {}) {
+  return {
+    session_id: 's1',
+    transcript_path: join(dir, 't', 'parent.jsonl'),
+    cwd: dir,
+    prompt_id: 'pr-1',
+    hook_event_name: event,
+    tool_name: 'Agent',
+    tool_use_id: toolUseId,
+    tool_input: { subagent_type: 'coder', prompt: LANE_PROMPT, description: 'a lane' },
+    ...over,
+  };
+}
+const agentPostInput = (dir, toolUseId, agentId) =>
+  agentToolInput(dir, 'PostToolUse', toolUseId, { tool_response: { agentId, prompt: LANE_PROMPT, description: 'a lane' } });
+
+function dispatchStateSnapshot(dir) {
+  const d = join(dir, '.sterling', 'transient', 'dispatch-state');
+  if (!existsSync(d)) return {};
+  return Object.fromEntries(readdirSync(d).sort().map((f) => [f, readFileSync(join(d, f), 'utf8')]));
+}
+
+function assertOneNamedSkip(r, toolUseId) {
+  const text = `${r.stdout}\n${r.stderr}`;
+  assert.equal(r.code, 0, 'a held lock is disclosed, never denies the tool call');
+  assert.doesNotMatch(text, /internal failure/, 'a held lock is a named skip, not an internal failure');
+  const skipLines = registerSkipLines(text);
+  assert.equal(skipLines.length, 1, `exactly one [register_lock_held] line, found ${skipLines.length}`);
+  assert.ok(skipLines[0].includes(toolUseId), 'the line names the tool_use_id');
+  assert.ok(skipLines[0].includes('coder'), 'the line names the subagent_type');
+}
+
+test('L1: PreToolUse under a register lock held for the whole run exits 0 with one named [register_lock_held] line and writes no dispatch state', async () => {
+  if (!lockLib) {
+    assert.fail(missingLockLibMessage());
+    return;
+  }
+  const dir = makeProject();
+  try {
+    const before_ = dispatchStateSnapshot(dir);
+    const release = holdRegisterLock(dir);
+    let r;
+    try {
+      r = await runHookAsync(HOOK_SCRIPT, agentToolInput(dir, 'PreToolUse', 'toolu_held_pre'), dir);
+    } finally {
+      release();
+    }
+    assertOneNamedSkip(r, 'toolu_held_pre');
+    assert.deepEqual(dispatchStateSnapshot(dir), before_, 'dispatch state is unchanged — the mutation was skipped, never written unlocked');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('L2: PostToolUse under a register lock held for the whole run exits 0 with one named [register_lock_held] line and leaves the Pre record unbound', async () => {
+  if (!lockLib) {
+    assert.fail(missingLockLibMessage());
+    return;
+  }
+  const dir = makeProject();
+  try {
+    const pre = runHookSync(HOOK_SCRIPT, agentToolInput(dir, 'PreToolUse', 'toolu_held_post'), dir);
+    assert.equal(pre.code, 0, pre.stderr);
+    const before_ = dispatchStateSnapshot(dir);
+    assert.equal(Object.keys(before_).length, 1, 'harness: the unlocked Pre wrote one record');
+
+    const release = holdRegisterLock(dir);
+    let r;
+    try {
+      r = await runHookAsync(HOOK_SCRIPT, agentPostInput(dir, 'toolu_held_post', 'agentheld1'), dir);
+    } finally {
+      release();
+    }
+    assertOneNamedSkip(r, 'toolu_held_post');
+    assert.deepEqual(dispatchStateSnapshot(dir), before_, 'the Pre record is byte-identical — no binding was written unlocked');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('L3: a PostToolUse whose register lock is released after ~1500 ms still records its agent binding', async () => {
+  if (!lockLib) {
+    assert.fail(missingLockLibMessage());
+    return;
+  }
+  const dir = makeProject();
+  try {
+    const pre = runHookSync(HOOK_SCRIPT, agentToolInput(dir, 'PreToolUse', 'toolu_late'), dir);
+    assert.equal(pre.code, 0, pre.stderr);
+
+    const release = holdRegisterLock(dir);
+    const timer = setTimeout(release, 1500);
+    let r;
+    try {
+      r = await runHookAsync(HOOK_SCRIPT, agentPostInput(dir, 'toolu_late', 'agentlate1'), dir);
+    } finally {
+      clearTimeout(timer);
+    }
+    assert.equal(r.code, 0);
+    assert.deepEqual(registerSkipLines(`${r.stdout}\n${r.stderr}`), [], 'the Post waited out the hold instead of skipping');
+    const records = Object.values(dispatchStateSnapshot(dir)).map((s) => JSON.parse(s));
+    assert.equal(records.length, 1);
+    assert.equal(records[0].post_binding?.agent_id, 'agentlate1', 'the binding landed once the lock was released');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('L4: a SubagentStart that falls back to unattributable writes its register row when the lock is released after ~2500 ms', async () => {
+  if (!lockLib) {
+    assert.fail(missingLockLibMessage());
+    return;
+  }
+  const dir = makeProject();
+  try {
+    const release = holdRegisterLock(dir);
+    const timer = setTimeout(release, 2500);
+    let result;
+    try {
+      result = await lockLib.resolveAndRegisterStart(dir, { session_id: 's1', agent_id: 'agentstarved1', agent_type: 'coder' }, (res) => ({
+        agent_id: 'agentstarved1',
+        agent_type: 'coder',
+        session_id: 's1',
+        files: [],
+        files_source: 'unattributable',
+        attribution_case: res.case,
+        at: new Date().toISOString(),
+      }));
+    } finally {
+      clearTimeout(timer);
+    }
+    assert.equal(result.refusal?.code, undefined, `no refusal: ${result.refusal?.message}`);
+    assert.ok(result.entry, 'the fallback hold waited out the lock and wrote the row');
+    const rows = readRegister(dir).filter((e) => e.agent_id === 'agentstarved1');
+    assert.equal(rows.length, 1, 'the register holds the row, so the Agents tab can show the lane');
+    assert.equal(rows[0].attribution_case, 'lock-held', 'the row keeps the reason the determining hold gave up');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

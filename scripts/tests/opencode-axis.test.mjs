@@ -462,6 +462,23 @@ const bgCall = (id, child, prompt = 'edit src/a.mjs', agent = 'sterling/implemen
   result: { content: 'started', metadata: { sessionID: child, status: 'running' } },
 });
 
+test('a registered round stores the subagent call\'s model argument raw, variant suffix included', async () => {
+  const p = makeProject({ records: [] });
+  try {
+    const { ctx, cleanup } = await setup(p.dir, { ses_root: {}, ses_rev: { parentID: 'ses_root' } });
+    const { before, result } = bgCall('call_rev', 'ses_rev', 'Review src/a.mjs.', 'sterling/reviewer');
+    before.input.model = 'openai/gpt-6.1-sol#high';
+    await ctx.hooks.tool['execute.before'](before);
+    await ctx.hooks.tool['execute.after']({ ...before, status: 'completed', result });
+    const row = registerRows(p.dir).find((r) => r.agent_id === 'ses_rev');
+    assert.equal(row?.agent_type, 'reviewer');
+    assert.equal(row?.model, 'openai/gpt-6.1-sol#high');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('a background child dispatch also ends when its execution fails or is interrupted', async () => {
   const p = makeProject({ records: [] });
   try {
@@ -566,6 +583,7 @@ test('a live background implementor registers a round from its brief, and a seco
     assert.deepEqual(row?.files, ['src/a.mjs']);
     assert.equal(row?.agent_type, 'implementor', 'the register holds the role, not the sterling/ name');
     assert.equal(row?.session_id, 'ses_root');
+    assert.equal(row?.model, null, 'a call with no model argument stores null');
     assert.ok(!row.ended);
 
     const { after } = await call(ctx, { tool: 'subagent', input: { agent: 'sterling/implementor', description: 'second', prompt: 'Refactor src/a.mjs.' }, metadata: { sessionID: 'ses_impl2', status: 'completed' } });

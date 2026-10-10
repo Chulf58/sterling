@@ -43166,7 +43166,7 @@ function classifyLocation(location) {
   if (SCHEME_LOCATION.test(text))
     return "url";
   if (!/\s/.test(text))
-    return "path";
+    return HAS_SEPARATOR.test(text) || ENDS_IN_EXTENSION.test(text) ? "path" : "prose";
   return HAS_SEPARATOR.test(text) && ENDS_IN_EXTENSION.test(text) && !text.includes("://") ? "path" : "prose";
 }
 function repoPathOfLocation(location) {
@@ -52473,8 +52473,8 @@ import { mkdirSync as mkdirSync6, readFileSync as readFileSync11, renameSync as 
 import { hostname } from "node:os";
 import { join as join15 } from "node:path";
 import { randomUUID as randomUUID4 } from "node:crypto";
-function selectionFilePath(root, host = hostname()) {
-  const safeHost = String(host).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
+function selectionFilePath(root, host2 = hostname()) {
+  const safeHost = String(host2).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
   return join15(root, ".sterling", "transient", `selection.${safeHost}.json`);
 }
 function writeSelectionFile(root, type, recordId, at) {
@@ -53020,18 +53020,18 @@ import { existsSync as existsSync10, mkdirSync as mkdirSync7, readFileSync as re
 import { delimiter, dirname as dirname6, join as join17 } from "node:path";
 function parseOriginRepo(url) {
   const u = String(url ?? "").trim();
-  let host;
+  let host2;
   let path;
   let m = u.match(/^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/);
-  if (m) [, host, path] = m;
-  else if (m = u.match(/^(?:[^@/:]+@)?([^/:]+):(?!\/)(.+)$/)) [, host, path] = m;
+  if (m) [, host2, path] = m;
+  else if (m = u.match(/^(?:[^@/:]+@)?([^/:]+):(?!\/)(.+)$/)) [, host2, path] = m;
   else return null;
   const parts = path.replace(/\/+$/, "").replace(/\.git$/, "").split("/");
   if (parts.length !== 2) return null;
   const [owner2, name] = parts;
   const seg = /^[A-Za-z0-9_.-]+$/;
-  if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(host) || !seg.test(owner2) || !seg.test(name) || [owner2, name].some((part) => part === "." || part === "..")) return null;
-  return { host, repo: `${host}/${owner2}/${name}` };
+  if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(host2) || !seg.test(owner2) || !seg.test(name) || [owner2, name].some((part) => part === "." || part === "..")) return null;
+  return { host: host2, repo: `${host2}/${owner2}/${name}` };
 }
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
@@ -53653,6 +53653,8 @@ function mouseToEvent(name, data) {
 import { existsSync as existsSync13, readFileSync as readFileSync15, readdirSync as readdirSync7, statSync as statSync6 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { join as join19 } from "node:path";
+import { pathToFileURL } from "node:url";
+import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync8, readFileSync as readFileSync14, writeFileSync as writeFileSync7, rmSync as rmSync4, rmdirSync, renameSync as renameSync5, existsSync as existsSync11, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync5, chmodSync } from "node:fs";
@@ -53713,6 +53715,7 @@ function readRegister(root) {
 var MAX_PROMPT_BYTES = 512 * 1024;
 var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function dispatchStateDir(root) {
   return join18(root, ".sterling", "transient", "dispatch-state");
 }
@@ -56194,7 +56197,8 @@ function readSubagents(projectRoot, now, lingerMs = DONE_LINGER_MS, claudeConfig
       startedAt,
       endedAt,
       elapsedMs: Math.max(0, (endedAt ?? now) - startedAt),
-      toolUseId: withId?.tool_use_id ?? null
+      toolUseId: withId?.tool_use_id ?? null,
+      model: typeof latest.model === "string" && latest.model ? latest.model : null
     });
   }
   const rank = (r) => r.status === "running" ? 0 : r.status === "quiet" ? 1 : 2;
@@ -56304,6 +56308,9 @@ function contextPercent(tokens, window2) {
   const pct = 100 * tokens / window2;
   return pct > 100 ? null : Math.round(pct);
 }
+function displayModel(ref) {
+  return ref.replace(/#.*$/, "").replace(/^.*\//, "");
+}
 function readSharedWindows() {
   try {
     const raw = JSON.parse(readFileSync15(join19(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
@@ -56320,7 +56327,68 @@ function readProjectWindows(projectRoot) {
     return {};
   }
 }
-function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs = 1e3, lingerMs = DONE_LINGER_MS, claudeConfigDir = defaultClaudeConfigDir() } = {}) {
+function defaultOpenCodeDbPath(env = process.env) {
+  return join19(env.XDG_DATA_HOME || join19(homedir6(), ".local", "share"), "opencode", "opencode.db");
+}
+var CATALOG_KEY = "models-dev:catalog";
+function openOpenCodeDb(path) {
+  if (!existsSync13(path))
+    throw new Error(`no OpenCode database at ${path}`);
+  if (existsSync13(`${path}-wal`))
+    return new DatabaseSync5(path, { readOnly: true });
+  const url = pathToFileURL(path);
+  url.searchParams.set("immutable", "1");
+  return new DatabaseSync5(url, { readOnly: true });
+}
+function readOpenCodeContext(dbPath, sessionIds, catalogStamp) {
+  const db = openOpenCodeDb(dbPath);
+  try {
+    const turns = db.prepare("SELECT json_extract(data, '$.tokens') AS tokens, json_extract(data, '$.model') AS model FROM session_message WHERE session_id = ? AND type = 'assistant' AND json_extract(data, '$.tokens') IS NOT NULL ORDER BY seq DESC LIMIT 20");
+    const usage = /* @__PURE__ */ new Map();
+    for (const id of sessionIds) {
+      let found = null;
+      for (const row of turns.all(id)) {
+        const t = JSON.parse(String(row.tokens));
+        const m = typeof row.model === "string" ? JSON.parse(row.model) : null;
+        const parts = [t?.input, t?.cache?.read, t?.cache?.write];
+        if (!parts.every((n) => typeof n === "number") || typeof m?.id !== "string" || typeof m.providerID !== "string") {
+          throw new Error(`an assistant message of session ${id} has no tokens {input, cache {read, write}} and model {id, providerID} in the shape this reads`);
+        }
+        const tokens = parts.reduce((a, b) => a + b, 0);
+        if (tokens > 0) {
+          found = { tokens, model: m.id, providerID: m.providerID };
+          break;
+        }
+      }
+      usage.set(id, found);
+    }
+    const stampRow = db.prepare("SELECT time_updated FROM kv WHERE key = ?").get(CATALOG_KEY);
+    if (!stampRow)
+      return { usage, catalog: null };
+    if (stampRow.time_updated === catalogStamp)
+      return { usage };
+    const value = db.prepare("SELECT value FROM kv WHERE key = ?").get(CATALOG_KEY).value;
+    return { usage, catalog: { stamp: stampRow.time_updated, limits: catalogLimits(value) } };
+  } finally {
+    db.close();
+  }
+}
+function catalogLimits(value) {
+  const outer = JSON.parse(value);
+  const body = typeof outer.body === "string" ? JSON.parse(outer.body) : outer.body;
+  if (!body || typeof body !== "object")
+    throw new Error(`OpenCode's ${CATALOG_KEY} has no body`);
+  const limits = /* @__PURE__ */ new Map();
+  for (const [provider, p] of Object.entries(body)) {
+    for (const [model, m] of Object.entries(p?.models ?? {})) {
+      const context = m?.limit?.context;
+      if (typeof context === "number" && context > 0)
+        limits.set(`${provider}/${model}`, context);
+    }
+  }
+  return limits;
+}
+function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs = 1e3, lingerMs = DONE_LINGER_MS, claudeConfigDir = defaultClaudeConfigDir(), host: host2 = "claude", opencodeDb = defaultOpenCodeDbPath() } = {}) {
   let avatars = { current: /* @__PURE__ */ new Map(), freed: [] };
   const descriptions = /* @__PURE__ */ new Map();
   let lastRead = -Infinity;
@@ -56331,6 +56399,8 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
   const missing = /* @__PURE__ */ new Map();
   const usage = /* @__PURE__ */ new Map();
   let context = /* @__PURE__ */ new Map();
+  let catalog = null;
+  let contextNote = null;
   const keyOf = (r) => `${r.sessionId}\0${r.agentId}`;
   function contextOf(r, windows, now) {
     const key = keyOf(r);
@@ -56360,9 +56430,37 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
     const u = cached.value;
     if (!u)
       return { model: null, pct: null, tokens: null };
-    const model = u.model ?? (r.agentType ? models.get(r.agentType) ?? null : null);
+    const model = u.model ?? (r.model ? displayModel(r.model) : null) ?? (r.agentType ? models.get(r.agentType) ?? null : null);
     const window2 = model ? contextWindowFor(model, windows, sharedWindows) : null;
     return { model: u.model, pct: window2 ? contextPercent(u.tokens, window2) : null, tokens: u.tokens };
+  }
+  function openCodeContexts(rows, windows) {
+    const out = /* @__PURE__ */ new Map();
+    contextNote = null;
+    if (!rows.length)
+      return out;
+    let read;
+    try {
+      read = readOpenCodeContext(opencodeDb, rows.map((r) => r.agentId), catalog?.stamp ?? null);
+    } catch (err) {
+      contextNote = `context unknown: ${err?.message ?? String(err)}`;
+      return out;
+    }
+    if (read.catalog !== void 0)
+      catalog = read.catalog;
+    const unresolved = /* @__PURE__ */ new Set();
+    for (const r of rows) {
+      const u = read.usage.get(r.agentId) ?? null;
+      if (!u)
+        continue;
+      const window2 = catalog?.limits.get(`${u.providerID}/${u.model}`) ?? contextWindowFor(u.model, windows, sharedWindows);
+      if (!window2)
+        unresolved.add(`${u.providerID}/${u.model}`);
+      out.set(r.agentId, { model: u.model, pct: window2 ? contextPercent(u.tokens, window2) : null, tokens: u.tokens });
+    }
+    if (unresolved.size)
+      contextNote = `context % unknown: no context window for ${[...unresolved].join(", ")} in OpenCode's model catalog or context_watch.windows`;
+    return out;
   }
   function refresh(now) {
     lastRead = now;
@@ -56381,7 +56479,7 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
         models.set(r.agentType, readAgentModel(projectRoot, r.agentType));
     }
     const windows = source.rows.length ? readProjectWindows(projectRoot) : {};
-    context = new Map(source.rows.map((r) => [r.agentId, contextOf(r, windows, now)]));
+    context = host2 === "opencode" ? openCodeContexts(source.rows, windows) : new Map(source.rows.map((r) => [r.agentId, contextOf(r, windows, now)]));
     const keys = new Set(source.rows.map(keyOf));
     for (const k of [...transcripts.keys()])
       if (!keys.has(k))
@@ -56407,7 +56505,7 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
         avatar: avatars.current.get(r.agentId) ?? 0,
         type: r.agentType ?? "agent",
         description: r.toolUseId ? descriptions.get(r.toolUseId) ?? null : null,
-        model: context.get(r.agentId)?.model ?? (r.agentType ? models.get(r.agentType) ?? null : null),
+        model: context.get(r.agentId)?.model ?? (r.model ? displayModel(r.model) : null) ?? (r.agentType ? models.get(r.agentType) ?? null : null),
         status: r.status,
         elapsedMs: r.endedAt === null ? Math.max(0, now - r.startedAt) : r.elapsedMs,
         contextPct: context.get(r.agentId)?.pct ?? null,
@@ -56419,7 +56517,8 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
         active: agents.filter((a) => a.status === "running").length,
         quiet: agents.filter((a) => a.status === "quiet").length,
         agents,
-        foreignLive: source.foreignLive
+        foreignLive: source.foreignLive,
+        ...contextNote ? { contextNote } : {}
       };
     }
   };
@@ -56459,13 +56558,14 @@ function clip(text, width) {
   return width <= 1 ? chars.slice(0, width).join("") : chars.slice(0, width - 1).join("") + "\u2026";
 }
 function composeSubagentBlock(view, width, maxHeight, tick, opts = {}) {
-  const cards = composeCards(view, width, maxHeight, tick, opts.neonEdge === true);
-  if (!view.foreignLive || cards.height + 1 > maxHeight)
-    return cards;
-  if (cards.height === 0 && width < 1)
-    return cards;
-  const put = { x: 0, y: cards.height, attr: { dim: true }, text: clip(FOREIGN_SESSION_NOTE, width) };
-  return { ...cards, height: cards.height + 1, puts: [...cards.puts, put] };
+  let block = composeCards(view, width, maxHeight, tick, opts.neonEdge === true);
+  for (const text of [view.foreignLive ? FOREIGN_SESSION_NOTE : null, view.contextNote ?? null]) {
+    if (!text || block.height + 1 > maxHeight || block.height === 0 && width < 1)
+      continue;
+    const put = { x: 0, y: block.height, attr: { dim: true }, text: clip(text, width) };
+    block = { ...block, height: block.height + 1, puts: [...block.puts, put] };
+  }
+  return block;
 }
 var FOREIGN_SESSION_NOTE = "session.json names another session; running and quiet agents from the other one are listed";
 function composeCards(view, width, maxHeight, tick, neonEdge) {
@@ -56616,8 +56716,10 @@ if (!process.stdout.isTTY && !smoke) {
 }
 var args = process.argv.slice(2);
 var storeIdx = args.indexOf("--store");
-if (storeIdx === -1 || !args[storeIdx + 1]) {
-  console.error("usage: sterling-tui --store <path-to-sterling.db>");
+var hostIdx = args.indexOf("--host");
+var host = hostIdx === -1 ? "claude" : args[hostIdx + 1];
+if (storeIdx === -1 || !args[storeIdx + 1] || host !== "claude" && host !== "opencode") {
+  console.error("usage: sterling-tui --store <path-to-sterling.db> [--host claude|opencode]");
   process.exit(2);
 }
 var storePath = args[storeIdx + 1];
@@ -56661,7 +56763,7 @@ function profiled(kind, work, extra = () => ({})) {
 }
 var showBanner = process.env.STERLING_NO_BANNER !== "1";
 var screen = new termkit.default.ScreenBuffer({ dst: term });
-var subagents = createSubagentTracker(dirname9(dirname9(storePath)));
+var subagents = createSubagentTracker(dirname9(dirname9(storePath)), { host });
 var shownView = { availability: "absent", active: 0, agents: [] };
 var bodyTop = 0;
 function fullBodyLines() {

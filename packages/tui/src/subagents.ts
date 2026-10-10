@@ -42,9 +42,18 @@
 // usage in the subagent's own transcript (latestUsage, a bounded tail read)
 // over the model's window from the shared table templates/context-windows.json
 // with the project's context_watch.windows as override.
+//
+// On OpenCode (host 'opencode', passed by the entry point) there is no such
+// transcript: a register row's agent_id is the child session's id, and the
+// fill is read from OpenCode's own database (readOpenCodeContext): the latest
+// assistant turn's input plus both cache fields, over the model's context
+// limit from the models.dev catalog OpenCode keeps in that database, else the
+// window table above.
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 import { AGENT_MODEL_KEY, parseConfig } from '@sterling/schemas';
 import { readRegister, dispatchStateDir, dispatchStateKey, type RegisterEntry } from '../../../scripts/lib/dispatch-register.mjs';
 import { deriveAgentTranscript, fillPct, latestUsage, readTail } from '../../../scripts/hooks/lib/transcript.mjs';
@@ -86,6 +95,8 @@ export interface SubagentRow {
   elapsedMs: number;
   /** the tool_use_id of the latest round that has one; a resumed round has none */
   toolUseId: string | null;
+  /** the latest round's own model ref as the host recorded it (OpenCode: 'openai/gpt-6.1-sol#high'), or null */
+  model: string | null;
 }
 
 export interface SubagentSource {
@@ -161,6 +172,7 @@ export function readSubagents(projectRoot: string, now: number, lingerMs = DONE_
       endedAt,
       elapsedMs: Math.max(0, (endedAt ?? now) - startedAt),
       toolUseId: (withId?.tool_use_id as string | undefined) ?? null,
+      model: typeof latest.model === 'string' && latest.model ? latest.model : null,
     });
   }
   // running, then quiet (both oldest start first), then ended rows, newest ended first
@@ -307,6 +319,13 @@ export function contextPercent(tokens: number, window: number): number | null {
   return pct > 100 ? null : Math.round(pct);
 }
 
+/** A host model ref as the card shows it and the window table keys it: the
+ *  provider prefix and a '#variant' suffix dropped ('openai/gpt-6.1-sol#high'
+ *  is 'gpt-6.1-sol'). A plain model id is returned as it is. */
+export function displayModel(ref: string): string {
+  return ref.replace(/#.*$/, '').replace(/^.*\//, '');
+}
+
 function readSharedWindows(): Record<string, number> | null {
   try {
     const raw = JSON.parse(readFileSync(join(sterlingRootFrom(import.meta.url), 'templates', 'context-windows.json'), 'utf8')) as { windows?: unknown };
@@ -323,6 +342,110 @@ function readProjectWindows(projectRoot: string): Record<string, number> {
   } catch {
     return {};
   }
+}
+
+export type SubagentHost = 'claude' | 'opencode';
+
+/** OpenCode 2's database: $XDG_DATA_HOME/opencode/opencode.db, else ~/.local/share/opencode/opencode.db. */
+export function defaultOpenCodeDbPath(env: Readonly<Record<string, string | undefined>> = process.env): string {
+  return join(env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), 'opencode', 'opencode.db');
+}
+
+/** Tokens in context at a child session's latest assistant turn, and the model that turn ran on. */
+export interface OpenCodeContextUsage {
+  tokens: number;
+  model: string;
+  providerID: string;
+}
+
+/** Context limits from the models.dev catalog OpenCode caches in its kv table, keyed `<providerID>/<model id>`. */
+export interface OpenCodeCatalog {
+  /** the kv row's time_updated, so an unchanged catalog (several MB of JSON) is not parsed again */
+  stamp: number;
+  limits: Map<string, number>;
+}
+
+export interface OpenCodeContextRead {
+  /** per session id asked for: its latest assistant turn with tokens, or null when it has none yet */
+  usage: Map<string, OpenCodeContextUsage | null>;
+  /** the catalog, null when OpenCode holds none; left out when its stamp equals the one passed in */
+  catalog?: OpenCodeCatalog | null;
+}
+
+const CATALOG_KEY = 'models-dev:catalog';
+
+/** Open OpenCode's database without writing to it or beside it, and delete
+ *  nothing. With no -wal, every committed frame is in the main file, so an
+ *  immutable open reads it complete as of that instant and creates no -wal or
+ *  -shm. With a -wal (OpenCode running, or a writer that crashed, -shm or
+ *  not), a plain read-only open is WAL-aware and sees the turns committed to
+ *  it. The one gap: a commit that lands between the -wal check and the query
+ *  is missed, so the card shows the previous turn until the next tick.
+ *  Nothing beside the database is ever removed: deleting a file beside
+ *  another program's live database can remove a -wal it has just started
+ *  writing (anti-pattern a-writable-sqlite-open-on-a-wal-database-mutates-the-main-fi). */
+function openOpenCodeDb(path: string): DatabaseSync {
+  if (!existsSync(path)) throw new Error(`no OpenCode database at ${path}`);
+  if (existsSync(`${path}-wal`)) return new DatabaseSync(path, { readOnly: true });
+  const url = pathToFileURL(path);
+  url.searchParams.set('immutable', '1');
+  return new DatabaseSync(url, { readOnly: true });
+}
+
+/** Read each session's latest assistant turn that carries tokens (input plus
+ *  both cache fields, the sum H10's fillPct takes; a turn still streaming
+ *  reports 0 and is skipped), and the catalog when its stamp changed. Throws
+ *  when the database is missing or its tables or message data are not in the
+ *  shape this reads: the caller shows the context as unknown and says why. */
+export function readOpenCodeContext(dbPath: string, sessionIds: readonly string[], catalogStamp: number | null): OpenCodeContextRead {
+  const db = openOpenCodeDb(dbPath);
+  try {
+    const turns = db.prepare(
+      "SELECT json_extract(data, '$.tokens') AS tokens, json_extract(data, '$.model') AS model FROM session_message WHERE session_id = ? AND type = 'assistant' AND json_extract(data, '$.tokens') IS NOT NULL ORDER BY seq DESC LIMIT 20",
+    );
+    const usage = new Map<string, OpenCodeContextUsage | null>();
+    for (const id of sessionIds) {
+      let found: OpenCodeContextUsage | null = null;
+      for (const row of turns.all(id) as { tokens: unknown; model: unknown }[]) {
+        const t = JSON.parse(String(row.tokens)) as { input?: unknown; cache?: { read?: unknown; write?: unknown } };
+        const m = typeof row.model === 'string' ? (JSON.parse(row.model) as { id?: unknown; providerID?: unknown }) : null;
+        const parts = [t?.input, t?.cache?.read, t?.cache?.write];
+        if (!parts.every((n) => typeof n === 'number') || typeof m?.id !== 'string' || typeof m.providerID !== 'string') {
+          throw new Error(`an assistant message of session ${id} has no tokens {input, cache {read, write}} and model {id, providerID} in the shape this reads`);
+        }
+        const tokens = (parts as number[]).reduce((a, b) => a + b, 0);
+        if (tokens > 0) {
+          found = { tokens, model: m.id, providerID: m.providerID };
+          break;
+        }
+      }
+      usage.set(id, found);
+    }
+    const stampRow = db.prepare('SELECT time_updated FROM kv WHERE key = ?').get(CATALOG_KEY) as { time_updated: number } | undefined;
+    if (!stampRow) return { usage, catalog: null };
+    if (stampRow.time_updated === catalogStamp) return { usage };
+    const value = (db.prepare('SELECT value FROM kv WHERE key = ?').get(CATALOG_KEY) as { value: string }).value;
+    return { usage, catalog: { stamp: stampRow.time_updated, limits: catalogLimits(value) } };
+  } finally {
+    db.close();
+  }
+}
+
+/** The context limit of every model in the cached catalog: `{body}` holds the
+ *  models.dev JSON (as a string or an object) of providers, each with models
+ *  carrying limit.context. A model without a positive limit is left out. */
+function catalogLimits(value: string): Map<string, number> {
+  const outer = JSON.parse(value) as { body?: unknown };
+  const body = (typeof outer.body === 'string' ? JSON.parse(outer.body) : outer.body) as Record<string, { models?: Record<string, { limit?: { context?: unknown } }> }> | undefined;
+  if (!body || typeof body !== 'object') throw new Error(`OpenCode's ${CATALOG_KEY} has no body`);
+  const limits = new Map<string, number>();
+  for (const [provider, p] of Object.entries(body)) {
+    for (const [model, m] of Object.entries(p?.models ?? {})) {
+      const context = m?.limit?.context;
+      if (typeof context === 'number' && context > 0) limits.set(`${provider}/${model}`, context);
+    }
+  }
+  return limits;
 }
 
 export interface SubagentAgentView {
@@ -350,6 +473,8 @@ export interface SubagentView {
   agents: SubagentAgentView[];
   /** listed live agents from a session other than the one session.json names; unset reads as 0 */
   foreignLive?: number;
+  /** why a context figure is unknown when the host's source failed or lacks a window; unset when nothing is wrong */
+  contextNote?: string;
 }
 
 export interface SubagentTracker {
@@ -367,7 +492,9 @@ export function createSubagentTracker(
     readIntervalMs = 1000,
     lingerMs = DONE_LINGER_MS,
     claudeConfigDir = defaultClaudeConfigDir(),
-  }: { rng?: () => number; readIntervalMs?: number; lingerMs?: number; claudeConfigDir?: string } = {},
+    host = 'claude',
+    opencodeDb = defaultOpenCodeDbPath(),
+  }: { rng?: () => number; readIntervalMs?: number; lingerMs?: number; claudeConfigDir?: string; host?: SubagentHost; opencodeDb?: string } = {},
 ): SubagentTracker {
   let avatars: AssignState = { current: new Map(), freed: [] };
   const descriptions = new Map<string, string | null>();
@@ -384,6 +511,9 @@ export function createSubagentTracker(
   // unchanged transcript is not read again
   const usage = new Map<string, { stamp: string; value: { tokens: number; model: string | null } | null }>();
   let context = new Map<string, { model: string | null; pct: number | null; tokens: number | null }>();
+  // OpenCode: the cached model catalog (re-read only when its kv stamp changes) and the reason a figure is unknown
+  let catalog: OpenCodeCatalog | null = null;
+  let contextNote: string | null = null;
 
   const keyOf = (r: SubagentRow): string => `${r.sessionId}\0${r.agentId}`;
 
@@ -412,9 +542,37 @@ export function createSubagentTracker(
     }
     const u = cached.value;
     if (!u) return { model: null, pct: null, tokens: null };
-    const model = u.model ?? (r.agentType ? models.get(r.agentType) ?? null : null);
+    const model = u.model ?? (r.model ? displayModel(r.model) : null) ?? (r.agentType ? models.get(r.agentType) ?? null : null);
     const window = model ? contextWindowFor(model, windows, sharedWindows) : null;
     return { model: u.model, pct: window ? contextPercent(u.tokens, window) : null, tokens: u.tokens };
+  }
+
+  /** Every row's context from OpenCode's database in one read-only open: the
+   *  row's agent_id is the child session's id. The window is the catalog's
+   *  limit for the turn's provider and model, else the window table. A failed
+   *  read leaves every figure unknown and says why in contextNote. */
+  function openCodeContexts(rows: readonly SubagentRow[], windows: Record<string, number>): Map<string, { model: string | null; pct: number | null; tokens: number | null }> {
+    const out = new Map<string, { model: string | null; pct: number | null; tokens: number | null }>();
+    contextNote = null;
+    if (!rows.length) return out;
+    let read: OpenCodeContextRead;
+    try {
+      read = readOpenCodeContext(opencodeDb, rows.map((r) => r.agentId), catalog?.stamp ?? null);
+    } catch (err) {
+      contextNote = `context unknown: ${(err as Error)?.message ?? String(err)}`;
+      return out;
+    }
+    if (read.catalog !== undefined) catalog = read.catalog;
+    const unresolved = new Set<string>();
+    for (const r of rows) {
+      const u = read.usage.get(r.agentId) ?? null;
+      if (!u) continue;
+      const window = catalog?.limits.get(`${u.providerID}/${u.model}`) ?? contextWindowFor(u.model, windows, sharedWindows);
+      if (!window) unresolved.add(`${u.providerID}/${u.model}`);
+      out.set(r.agentId, { model: u.model, pct: window ? contextPercent(u.tokens, window) : null, tokens: u.tokens });
+    }
+    if (unresolved.size) contextNote = `context % unknown: no context window for ${[...unresolved].join(', ')} in OpenCode's model catalog or context_watch.windows`;
+    return out;
   }
 
   function refresh(now: number): void {
@@ -434,7 +592,7 @@ export function createSubagentTracker(
       if (r.agentType && !models.has(r.agentType)) models.set(r.agentType, readAgentModel(projectRoot, r.agentType));
     }
     const windows = source.rows.length ? readProjectWindows(projectRoot) : {};
-    context = new Map(source.rows.map((r) => [r.agentId, contextOf(r, windows, now)]));
+    context = host === 'opencode' ? openCodeContexts(source.rows, windows) : new Map(source.rows.map((r) => [r.agentId, contextOf(r, windows, now)]));
     // forget what belongs to agents that left the register
     const keys = new Set(source.rows.map(keyOf));
     for (const k of [...transcripts.keys()]) if (!keys.has(k)) transcripts.delete(k);
@@ -453,7 +611,7 @@ export function createSubagentTracker(
         avatar: avatars.current.get(r.agentId) ?? 0,
         type: r.agentType ?? 'agent',
         description: r.toolUseId ? descriptions.get(r.toolUseId) ?? null : null,
-        model: context.get(r.agentId)?.model ?? (r.agentType ? models.get(r.agentType) ?? null : null),
+        model: context.get(r.agentId)?.model ?? (r.model ? displayModel(r.model) : null) ?? (r.agentType ? models.get(r.agentType) ?? null : null),
         status: r.status,
         elapsedMs: r.endedAt === null ? Math.max(0, now - r.startedAt) : r.elapsedMs,
         contextPct: context.get(r.agentId)?.pct ?? null,
@@ -466,6 +624,7 @@ export function createSubagentTracker(
         quiet: agents.filter((a) => a.status === 'quiet').length,
         agents,
         foreignLive: source.foreignLive,
+        ...(contextNote ? { contextNote } : {}),
       };
     },
   };
@@ -557,15 +716,18 @@ function clip(text: string, width: number): string {
 }
 
 /** The cards, then, when running or quiet agents come from a session other than the one
- *  session.json names, one dim line under them saying so (dropped when there
- *  is no room: the cards win). neonEdge draws each tile's status edge
+ *  session.json names, one dim line under them saying so, and when the
+ *  context source failed or lacks a window, one dim line saying why (each
+ *  dropped when there is no room: the cards win). neonEdge draws each tile's status edge
  *  (theme.ts NEON_EDGE: running cyan, quiet amber, resumable pink, done muted). */
 export function composeSubagentBlock(view: SubagentView, width: number, maxHeight: number, tick: number, opts: { neonEdge?: boolean } = {}): SubagentBlock {
-  const cards = composeCards(view, width, maxHeight, tick, opts.neonEdge === true);
-  if (!view.foreignLive || cards.height + 1 > maxHeight) return cards;
-  if (cards.height === 0 && width < 1) return cards;
-  const put: BlockPut = { x: 0, y: cards.height, attr: { dim: true }, text: clip(FOREIGN_SESSION_NOTE, width) };
-  return { ...cards, height: cards.height + 1, puts: [...cards.puts, put] };
+  let block = composeCards(view, width, maxHeight, tick, opts.neonEdge === true);
+  for (const text of [view.foreignLive ? FOREIGN_SESSION_NOTE : null, view.contextNote ?? null]) {
+    if (!text || block.height + 1 > maxHeight || (block.height === 0 && width < 1)) continue;
+    const put: BlockPut = { x: 0, y: block.height, attr: { dim: true }, text: clip(text, width) };
+    block = { ...block, height: block.height + 1, puts: [...block.puts, put] };
+  }
+  return block;
 }
 
 const FOREIGN_SESSION_NOTE = 'session.json names another session; running and quiet agents from the other one are listed';

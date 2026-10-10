@@ -4,17 +4,17 @@
 // Missing store: allow, no recording (fail-open, mirrors H7).
 // Never deduplicates: the register is a pure append log.
 import { readStdin, allow, warnNonBlocking, openStoreOrDegrade } from './lib/common.mjs';
-import { appendSessionEvent, researchToolEvent } from './lib/session-events.mjs';
+import { appendSessionEvent, researchToolEvent, SESSION_EVENTS_LOCK_HELD } from './lib/session-events.mjs';
 
 const input = readStdin();
 const store = openStoreOrDegrade(input.cwd, 'H16');
 if (!store) allow();
 
+let event;
 try {
   // direct mode: derive kind + detail from the tool call, then append
   const tool = input.tool_name;
   const at = new Date().toISOString();
-  let event;
   if (tool === 'WebSearch' || tool === 'WebFetch') {
     event = researchToolEvent(tool === 'WebSearch' ? input.tool_input?.query : input.tool_input?.url, { at, agentId: input.agent_id });
   } else {
@@ -55,6 +55,13 @@ try {
   appendSessionEvent(input.cwd, event);
   allow();
 } catch (e) {
-  warnNonBlocking(`H16: session-event registration failed: ${e.message}`);
+  // Issue #64: a lock still held after the timeout skips this one event, named, and never
+  // writes unlocked (decision register-writers-cooperating-lock). Same non-blocking exit as
+  // every other failure here.
+  if (e.code === SESSION_EVENTS_LOCK_HELD) {
+    warnNonBlocking(`H16: session event NOT registered (${SESSION_EVENTS_LOCK_HELD}): ${event.kind} '${event.detail}'${event.agent_id ? ` agent_id ${event.agent_id}` : ''}; ${e.message}`);
+  } else {
+    warnNonBlocking(`H16: session-event registration failed: ${e.message}`);
+  }
 }
 // no close: every path above exits the process, which releases the handle (board f81b1987)

@@ -1,4 +1,6 @@
-// Entry point: sterling-tui --store <path-to-sterling.db>
+// Entry point: sterling-tui --store <path-to-sterling.db> [--host claude|opencode]
+// --host names the host whose subagents the Agents tab shows (default claude):
+// it decides where a subagent's context fill is read (subagents.ts).
 // Exits politely on non-TTY stdout (§11). terminal-kit loads only after the
 // guard. STERLING_TUI_SMOKE=1 initializes the terminal stack and exits —
 // the bundle test uses it to prove runtime resolution works.
@@ -23,8 +25,10 @@ if (!process.stdout.isTTY && !smoke) {
 
 const args = process.argv.slice(2);
 const storeIdx = args.indexOf('--store');
-if (storeIdx === -1 || !args[storeIdx + 1]) {
-  console.error('usage: sterling-tui --store <path-to-sterling.db>');
+const hostIdx = args.indexOf('--host');
+const host = hostIdx === -1 ? 'claude' : args[hostIdx + 1];
+if (storeIdx === -1 || !args[storeIdx + 1] || (host !== 'claude' && host !== 'opencode')) {
+  console.error('usage: sterling-tui --store <path-to-sterling.db> [--host claude|opencode]');
   process.exit(2);
 }
 const storePath = args[storeIdx + 1];
@@ -98,7 +102,7 @@ let screen = new termkit.default.ScreenBuffer({ dst: term });
 // Agents tab: live subagents from H22's dispatch register, one card each with
 // an animated portrait. The tracker holds the portrait assignment for
 // the TUI's lifetime and reads the register at most once a second.
-const subagents = createSubagentTracker(dirname(dirname(storePath)));
+const subagents = createSubagentTracker(dirname(dirname(storePath)), { host });
 // the view the last redraw drew; the hit-test and the animation reuse it, so
 // they always agree with what is on screen
 let shownView: SubagentView = { availability: 'absent', active: 0, agents: [] };

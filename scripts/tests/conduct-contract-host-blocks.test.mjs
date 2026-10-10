@@ -49,7 +49,9 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // pinned Codex 0.153.4 MCP server is the one supported route and that an absent `codex` tool is
 // reported and its lane skipped (decision codex-route-stays-the-pinned-0-153-4-mcp-server; GitHub
 // issue #18). The OpenCode bullet already said so.
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = '000cd9b3e1d09d5d3a92e64eb74f5abec85090e4d1229f84a02a25e6e91a697d';
+// Moved 2026-10-10 (from 000cd9b3…): the auto-report bullet's lead is renamed from "Stamp Sterling's
+// version when reporting on Sterling" to "Report Sterling defects to its GitHub issues without asking".
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = '97aab1a673bc32544b32065e4626cb3fc75acbd72d2f3e2140b85e088d1d25f0';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);
