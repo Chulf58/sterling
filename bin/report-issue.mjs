@@ -373,7 +373,10 @@ var UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 var CREDENTIAL = "<credential>";
 var EMAIL = "<email>";
 var SECRET_ASSIGN_RE = /((?<![A-Za-z0-9])(?:[A-Za-z0-9]+[_-])*(?:api_key|key|token|secret|password|passwd)["']?\s*[=:]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s"'`,;()<>]+)/gi;
+var AUTH_HEADER_RE = /((?<![A-Za-z0-9])Authorization["']?\s*[=:]\s*)(?:"[^"\n]*"|'[^'\n]*'|(?:(?:Bearer|Basic|Digest|Token)\s+)?[^\s"'`,;()<>]+)/gi;
 var CREDENTIAL_RES = [
+  /(?<![A-Za-z0-9])Bearer\s+[A-Za-z0-9._~+\/=-]{8,}/gi,
+  /(?<![A-Za-z0-9])Basic\s+(?=[A-Za-z0-9+\/._~=-]*(?:[0-9=+\/]|[a-z][A-Z]))[A-Za-z0-9+\/._~=-]{8,}/g,
   /(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g,
   /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}/g,
   /(?<![A-Za-z0-9])xox[a-z]-[A-Za-z0-9-]{10,}/g,
@@ -421,6 +424,7 @@ function scrub(text, { projectRoot: projectRoot2, home, sterlingPathExists }) {
     out = out.replace(re, PLACEHOLDER);
   }
   out = out.replace(UUID_RE, "<id>");
+  out = out.replace(AUTH_HEADER_RE, `$1${CREDENTIAL}`);
   out = out.replace(SECRET_ASSIGN_RE, `$1${CREDENTIAL}`);
   for (const re of CREDENTIAL_RES) out = out.replace(re, CREDENTIAL);
   out = out.replace(TOKEN_RE, (tok, at, whole) => {
@@ -853,6 +857,7 @@ function flush(gh2) {
 var { mode, values, yes } = parseArgs(process.argv.slice(2));
 var SEARCH_PAGE_SIZE = 100;
 var SEARCH_MAX_PAGES = 5;
+var LISTING_MAX_PAGES = 20;
 function openReports(gh2) {
   const items = [];
   let matched = 0;
@@ -869,7 +874,8 @@ function openReports(gh2) {
   const reports = items.filter(isReport);
   const seen = new Set(reports.map((i) => i.number));
   let unindexed = 0;
-  for (let page = 1; page <= SEARCH_MAX_PAGES; page++) {
+  let listingTruncated = false;
+  for (let page = 1; page <= LISTING_MAX_PAGES; page++) {
     const listed = gh2.api("GET", `repos/${STERLING_ISSUE_REPO}/issues`, [["state", "open"], ["sort", "created"], ["direction", "desc"], ["per_page", String(SEARCH_PAGE_SIZE)], ["page", String(page)]]);
     if (!Array.isArray(listed)) throw new TransportError(`gh at ${gh2.path}: the open issues listing returned no array`);
     for (const i of listed.filter(isReport)) {
@@ -879,13 +885,15 @@ function openReports(gh2) {
       unindexed++;
     }
     if (listed.length < SEARCH_PAGE_SIZE) break;
+    if (page === LISTING_MAX_PAGES) listingTruncated = true;
   }
-  return { reports: reports.sort((a, b) => a.number - b.number), matched, read: items.length + unindexed, incomplete, unindexed };
+  return { reports: reports.sort((a, b) => a.number - b.number), matched, read: items.length + unindexed, incomplete, unindexed, listingTruncated };
 }
 function printSearchNotes(found) {
   if (found.matched > found.read) {
-    console.log(`report-issue: ${found.matched} reports match but only ${found.read} were read (search and the open-issue listing, ${SEARCH_MAX_PAGES} pages of ${SEARCH_PAGE_SIZE} each); ${found.matched - found.read} were not reached.`);
+    console.log(`report-issue: ${found.matched} reports match but only ${found.read} were read (search up to ${SEARCH_MAX_PAGES} pages and the open-issue listing up to ${LISTING_MAX_PAGES}, ${SEARCH_PAGE_SIZE} each); ${found.matched - found.read} were not reached.`);
   }
+  if (found.listingTruncated) console.log(`report-issue: the open-issue listing stopped after ${LISTING_MAX_PAGES} pages of ${SEARCH_PAGE_SIZE}; older open issues were not read, so reports among them may be missing from this list.`);
   if (found.unindexed > 0) console.log(`report-issue: ${found.unindexed} report(s) above came only from the open-issue listing: GitHub's search had not returned them (its index lags a new issue, or its page limit was reached).`);
   if (found.incomplete) console.log("report-issue: GitHub marked the search results incomplete; some reports may be missing from this list.");
 }

@@ -43,6 +43,8 @@ import {
   WORKER_AGENT_TOOLS,
   WORKER_DISALLOWED_TOOLS,
   TOOLS_MISSING_RE,
+  SOURCE_FAILURE_RE,
+  isToolsMissing,
   TEMPORARY_RE,
   workerAgentDefinition,
   BACKOFF_MS,
@@ -2074,6 +2076,15 @@ test('[#70 web tools] the shipped librarian template yields a worker agent body 
   assert.throws(() => buildWorkerArgs({ prompt: 'P', mcpConfig: '{}' }), /needs the worker agent definition/);
 });
 
+const ISSUE_70_REASON = 'source unreachable: WebFetch and WebSearch are not available in this run, so the outside-source claims could not be re-checked; nothing written';
+/** Reasons that name the tool AND an outage of the source: temporary, never a missing tool. */
+const SOURCE_OUTAGES = [
+  'WebFetch was unavailable because the vendor returned HTTP 503',
+  'WebFetch is unavailable: the request timed out after 60s',
+  'WebSearch was unavailable: rate limit reached, try later',
+  'WebFetch is not available for this URL: connection refused',
+];
+
 test('[#70 handoff] TOOLS_MISSING_RE matches a missing web tool as the subject, never a source that is down', () => {
   for (const r of [
     'source unreachable: WebFetch and WebSearch are not available in this run, so the outside-source claims could not be re-checked; nothing written',
@@ -2085,6 +2096,14 @@ test('[#70 handoff] TOOLS_MISSING_RE matches a missing web tool as the subject, 
     assert.doesNotMatch(r, TOOLS_MISSING_RE, r);
   }
   assert.match('WebFetch returned 503, server unavailable', TEMPORARY_RE, 'a down source stays temporary');
+  // Review finding (Sol, 5a3e0f46): both classifiers matched "unavailable"; a named source failure wins.
+  for (const r of SOURCE_OUTAGES) {
+    assert.match(r, SOURCE_FAILURE_RE, r);
+    assert.equal(isToolsMissing(r), false, r);
+    assert.match(r, TEMPORARY_RE, `${r} stays temporary`);
+  }
+  assert.equal(isToolsMissing(ISSUE_70_REASON), true, "the issue's own reason is a missing tool");
+  assert.doesNotMatch(ISSUE_70_REASON, SOURCE_FAILURE_RE);
 });
 
 test('[#70 handoff] a web-lane verdict that says the web tools are missing is handed off once as needs_conductor; a down source stays a retry; another lane keeps the retry rule', async () => {
@@ -2095,8 +2114,9 @@ test('[#70 handoff] a web-lane verdict that says the web tools are missing is ha
       { id: 'S2', lane: 'refresh_reference', file_keys: [], feature_link: LINK, slug: 'find-a' },
       { id: 'S3', lane: 'stale_research', file_keys: [], feature_link: LINK, slug: 'find-a' },
       { id: 'R1', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' },
+      ...SOURCE_OUTAGES.map((_, i) => ({ id: `O${i}`, lane: i % 2 ? 'refresh_reference' : 'stale_research', file_keys: [], feature_link: LINK, slug: 'find-a' })),
     ];
-    const missing = 'source unreachable: WebFetch and WebSearch are not available in this run, so the outside-source claims could not be re-checked; nothing written';
+    const missing = ISSUE_70_REASON;
     const v = (id, verdict, reason) => JSON.stringify({ item_id: id, verdict, reason });
     const child = fakeClaude([
       toolUse('e1', 'mcp__sterling__knowledge_get', { id: LINK }),
@@ -2107,6 +2127,7 @@ test('[#70 handoff] a web-lane verdict that says the web tools are missing is ha
           v('S2', 'needs_conductor', 'web tools missing: WebFetch not available in this run'),
           v('S3', 'retry', 'WebFetch returned 503, server unavailable'),
           v('R1', 'retry', missing),
+          ...SOURCE_OUTAGES.map((r, i) => v(`O${i}`, i % 2 ? 'needs_conductor' : 'retry', r)),
         ].join('\n'),
       }),
     ]);
@@ -2117,12 +2138,13 @@ test('[#70 handoff] a web-lane verdict that says the web tools are missing is ha
       ['S2', 'needs_conductor', true],
       ['S3', 'retry', null],
       ['R1', 'retry', null],
+      ...SOURCE_OUTAGES.map((_, i) => [`O${i}`, 'retry', null]),
     ]);
     assert.equal(verdicts[0].reason, missing, 'the reason is carried to the conductor');
     assert.equal(verdicts[0].claimed, 'retry');
     const handoffs = handoffVerdicts(fx.project);
     assert.deepEqual([...handoffs.keys()].sort(), ['S1', 'S2'], 'standing handoffs, so the next batch leaves them out');
-    assert.equal(lastRun(fx).retry_verdicts, 2);
+    assert.equal(lastRun(fx).retry_verdicts, 2 + SOURCE_OUTAGES.length, 'every source outage stays a retry, whichever verdict the child gave');
   } finally {
     fx.cleanup();
   }

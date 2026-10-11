@@ -76,8 +76,14 @@ const EMAIL = '<email>';
 /** The value after key=, token=, secret=, password=, passwd= or api_key= (also key: value, any case, and a name that ends
  * in one of these such as access_token). Group 1 keeps the name and separator; the value is a quoted string or one run. */
 const SECRET_ASSIGN_RE = /((?<![A-Za-z0-9])(?:[A-Za-z0-9]+[_-])*(?:api_key|key|token|secret|password|passwd)["']?\s*[=:]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s"'`,;()<>]+)/gi;
-/** Credentials that carry no name: GitHub tokens, sk- API keys, Slack xox tokens and JWTs. */
+/** An Authorization header or assignment: the whole value after it, including a Bearer, Basic, Digest or Token scheme word. */
+const AUTH_HEADER_RE = /((?<![A-Za-z0-9])Authorization["']?\s*[=:]\s*)(?:"[^"\n]*"|'[^'\n]*'|(?:(?:Bearer|Basic|Digest|Token)\s+)?[^\s"'`,;()<>]+)/gi;
+/** Credentials that carry no name: GitHub tokens, sk- API keys, Slack xox tokens, JWTs, and a bare Bearer or Basic scheme
+ * followed by its value. A Bearer value is any run of 8 or more token characters ("Bearer authentication" is a false
+ * positive); a Basic value must also look encoded (a digit, = + / or a lower-to-upper step), so "Basic Authentication" stays. */
 const CREDENTIAL_RES = [
+  /(?<![A-Za-z0-9])Bearer\s+[A-Za-z0-9._~+\/=-]{8,}/gi,
+  /(?<![A-Za-z0-9])Basic\s+(?=[A-Za-z0-9+\/._~=-]*(?:[0-9=+\/]|[a-z][A-Z]))[A-Za-z0-9+\/._~=-]{8,}/g,
   /(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g,
   /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}/g,
   /(?<![A-Za-z0-9])xox[a-z]-[A-Za-z0-9-]{10,}/g,
@@ -156,6 +162,7 @@ export function scrub(text, { projectRoot, home, sterlingPathExists }) {
     out = out.replace(re, PLACEHOLDER);
   }
   out = out.replace(UUID_RE, '<id>');
+  out = out.replace(AUTH_HEADER_RE, `$1${CREDENTIAL}`);
   out = out.replace(SECRET_ASSIGN_RE, `$1${CREDENTIAL}`);
   for (const re of CREDENTIAL_RES) out = out.replace(re, CREDENTIAL);
   out = out.replace(TOKEN_RE, (tok, at, whole) => {

@@ -409,6 +409,8 @@ const { mode, values, yes } = parseArgs(process.argv.slice(2));
 
 const SEARCH_PAGE_SIZE = 100;
 const SEARCH_MAX_PAGES = 5;
+/** The open-issue listing is paged to a short page, bounded by this hard cap; hitting it is said aloud. */
+const LISTING_MAX_PAGES = 20;
 
 /** The open reports on the repo, found by the fingerprint marker in the body and
  * not by label (an account that cannot set labels files reports with none). The
@@ -433,7 +435,8 @@ function openReports(gh) {
   // is merged in. A report only the listing found is counted as unindexed.
   const seen = new Set(reports.map((i) => i.number));
   let unindexed = 0;
-  for (let page = 1; page <= SEARCH_MAX_PAGES; page++) {
+  let listingTruncated = false;
+  for (let page = 1; page <= LISTING_MAX_PAGES; page++) {
     const listed = gh.api('GET', `repos/${STERLING_ISSUE_REPO}/issues`, [['state', 'open'], ['sort', 'created'], ['direction', 'desc'], ['per_page', String(SEARCH_PAGE_SIZE)], ['page', String(page)]]);
     if (!Array.isArray(listed)) throw new TransportError(`gh at ${gh.path}: the open issues listing returned no array`);
     for (const i of listed.filter(isReport)) {
@@ -443,15 +446,17 @@ function openReports(gh) {
       unindexed++;
     }
     if (listed.length < SEARCH_PAGE_SIZE) break;
+    if (page === LISTING_MAX_PAGES) listingTruncated = true;
   }
-  return { reports: reports.sort((a, b) => a.number - b.number), matched, read: items.length + unindexed, incomplete, unindexed };
+  return { reports: reports.sort((a, b) => a.number - b.number), matched, read: items.length + unindexed, incomplete, unindexed, listingTruncated };
 }
 
 /** Say plainly what a search did not cover. */
 function printSearchNotes(found) {
   if (found.matched > found.read) {
-    console.log(`report-issue: ${found.matched} reports match but only ${found.read} were read (search and the open-issue listing, ${SEARCH_MAX_PAGES} pages of ${SEARCH_PAGE_SIZE} each); ${found.matched - found.read} were not reached.`);
+    console.log(`report-issue: ${found.matched} reports match but only ${found.read} were read (search up to ${SEARCH_MAX_PAGES} pages and the open-issue listing up to ${LISTING_MAX_PAGES}, ${SEARCH_PAGE_SIZE} each); ${found.matched - found.read} were not reached.`);
   }
+  if (found.listingTruncated) console.log(`report-issue: the open-issue listing stopped after ${LISTING_MAX_PAGES} pages of ${SEARCH_PAGE_SIZE}; older open issues were not read, so reports among them may be missing from this list.`);
   if (found.unindexed > 0) console.log(`report-issue: ${found.unindexed} report(s) above came only from the open-issue listing: GitHub's search had not returned them (its index lags a new issue, or its page limit was reached).`);
   if (found.incomplete) console.log('report-issue: GitHub marked the search results incomplete; some reports may be missing from this list.');
 }
