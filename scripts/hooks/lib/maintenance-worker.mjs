@@ -471,14 +471,17 @@ export function dirtyPaths(root, paths, spawnSync = nodeSpawnSync, prefix = '') 
 // measured_at_head). When no commit matches, the item says so ("no diff
 // available") instead of falling back to a guessed base. Only the item's own
 // file_keys are diffed, each as a literal pathspec; each item's text is
-// capped at DIFF_ITEM_MAX_CHARS and the run at DIFF_RUN_MAX_CHARS, git stops
-// once the budget is spent, and a cut says so and names the paths left out.
+// capped at DIFF_ITEM_MAX_CHARS and the run at DIFF_RUN_MAX_CHARS, headers and
+// notes included; git stops once the budget is spent, and a cut says so and
+// names the paths left out (a bounded list).
 // The launcher records each item's baselines in eligible.json, queue_snapshot
 // included, so a chained launch (which has no store) still has them.
 export const DIFF_LANES = ['reconcile_needed', 'state_review'];
 export const DIFF_ITEM_MAX_CHARS = 4_000;
 export const DIFF_RUN_MAX_CHARS = 24_000;
 export const DIFF_BASE_WALK = 50;
+/** A note naming paths or items lists at most this many chars of names. */
+export const DIFF_NOTE_LIST_CHARS = 160;
 
 /** The target's baselines for the item's own file_keys, read at launch (the
  *  runner has no store), or undefined when the item gets no diff from it. */
@@ -550,31 +553,66 @@ function pathDiffText(root, path, baseline, prefix, spawnSync) {
   return `--- ${path}: base ${base.slice(0, 12)} (the commit matching the target's baseline)\n${body || 'unchanged since that base'}`;
 }
 
+/** `list` joined with ', ' in at most DIFF_NOTE_LIST_CHARS chars, then
+ *  ", and N more" for the rest, so a note naming paths or ids stays bounded. */
+function boundedList(list) {
+  const shown = [];
+  let len = 0;
+  for (const x of list) {
+    const add = (shown.length ? 2 : 0) + x.length;
+    if (len + add > DIFF_NOTE_LIST_CHARS) break;
+    shown.push(x);
+    len += add;
+  }
+  const rest = list.length - shown.length;
+  if (!shown.length) return `${rest} not listed (names too long)`;
+  return rest ? `${shown.join(', ')}, and ${rest} more` : shown.join(', ');
+}
+/** The longest boundedList(list) can be for a list of `n`. */
+const boundedListMax = (n) => DIFF_NOTE_LIST_CHARS + `, and ${n} more`.length;
+
 /** The DIFFS prompt section for the batch's reconcile_needed and state_review
- *  items, or '' when the batch has none. Each item's text is cut at
- *  `itemMax` chars and the whole section at `runMax`; git stops once the
- *  budget is spent, and a cut says so and names the paths not diffed. */
+ *  items, or '' when the batch has none. Everything rendered counts against
+ *  the caps: an item's block (its header, diff and notes) is at most
+ *  `itemMax` chars and the whole section at most `runMax`, with room kept for
+ *  the line naming the items left out. git stops once the budget is spent, and
+ *  a cut says so and names the paths not diffed. A `runMax` smaller than the
+ *  section's fixed text gives only that text and the omitted line. */
 export function itemDiffSection(root, items, { spawnSync = nodeSpawnSync, itemMax = DIFF_ITEM_MAX_CHARS, runMax = DIFF_RUN_MAX_CHARS } = {}) {
   const diffItems = (items ?? []).filter((t) => DIFF_LANES.includes(t.lane ?? 'reconcile_needed'));
   if (!diffItems.length) return '';
   const needsGit = diffItems.some((t) => t.baselines && Object.keys(t.baselines).length);
   const git = needsGit ? gitState(root, spawnSync) : { prefix: '' };
-  let left = runMax;
-  const blocks = diffItems.map((t) => {
-    if (left <= 0) return `### ${t.id}\n[diff omitted: this run's diff budget of ${runMax} chars is used up]`;
-    const cap = Math.min(itemMax, left);
-    const { text, notDiffed } = git ? itemDiffText(root, t, git.prefix, spawnSync, cap) : { text: 'no diff available: git could not report HEAD', notDiffed: [] };
-    left -= Math.min(text.length, cap);
-    if (text.length <= cap && !notDiffed.length) return `### ${t.id}\n${text}`;
-    const shown = Math.min(text.length, cap);
-    const skipped = notDiffed.length ? `; not diffed, budget spent: ${notDiffed.join(', ')}` : '';
-    return `### ${t.id}\n${text.slice(0, cap)}\n[diff truncated: ${shown} of ${text.length} chars shown${skipped}]`;
-  });
-  return (
-    `\nDIFFS (from the runner: for each reconcile_needed and state_review item, the git diff of the item's own file_keys from the commit whose copy of each file matches the target's file_baselines, to HEAD; "no diff available" says why there is none):\n` +
-    blocks.join('\n') +
-    '\n'
-  );
+  const head = `\nDIFFS (from the runner: for each reconcile_needed and state_review item, the git diff of the item's own file_keys from the commit whose copy of each file matches the target's file_baselines, to HEAD; "no diff available" says why there is none):\n`;
+  const omittedPrefix = (n) => `[diff omitted for ${n} item(s): the diff budget (${itemMax} chars per item, ${runMax} per run) has no room for them: `;
+  const omittedLine = (ids) => `${omittedPrefix(ids.length)}${boundedList(ids)}]`;
+  // Each block costs its length plus one newline; keep room for the longest
+  // omitted line, so the section never passes runMax.
+  let left = runMax - head.length - (omittedPrefix(diffItems.length).length + boundedListMax(diffItems.length) + 2);
+  const render = (t, cap) => {
+    const header = `### ${t.id}\n`;
+    const room = cap - header.length;
+    if (room <= 0) return null;
+    const { text, notDiffed } = git ? itemDiffText(root, t, git.prefix, spawnSync, room) : { text: 'no diff available: git could not report HEAD', notDiffed: [] };
+    if (text.length <= room && !notDiffed.length) return header + text;
+    const skipped = notDiffed.length ? `; not diffed, budget spent: ${boundedList(notDiffed)}` : '';
+    const note = (shown) => `[diff truncated: ${shown} of ${text.length} chars shown${skipped}]`;
+    const shown = Math.min(text.length, room - 1 - note(room).length);
+    return shown < 0 ? null : `${header}${text.slice(0, shown)}\n${note(shown)}`;
+  };
+  const blocks = [];
+  const omitted = [];
+  for (const t of diffItems) {
+    const block = render(t, Math.min(itemMax, left - 1));
+    if (!block) {
+      omitted.push(t.id);
+      continue;
+    }
+    blocks.push(block);
+    left -= block.length + 1;
+  }
+  if (omitted.length) blocks.push(omittedLine(omitted));
+  return head + blocks.join('\n') + '\n';
 }
 
 /** Is `pid` a live process? signal 0 probes without delivering: EPERM means it

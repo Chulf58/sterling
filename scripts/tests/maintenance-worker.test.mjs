@@ -2251,16 +2251,27 @@ test('[diffs] the section diffs only the paths the item names, with a loud no-di
   }
 });
 
-test('[diffs] an item over its cap is cut and says so, and items past the run budget are omitted and say so', () => {
+/** The DIFFS section's `### <id>` blocks, each with its header, by id. */
+const diffBlocks = (section) => Object.fromEntries(section.split('\n### ').slice(1).map((b) => [b.split('\n')[0], `### ${b.split('\n[diff omitted for ')[0].replace(/\n$/, '')}`]));
+
+test('[diffs] an item over its cap is cut and says so, items past the run budget are omitted and say so, and nothing rendered passes either cap', () => {
   const repo = diffRepo();
   try {
     const item = (id) => ({ id, lane: 'reconcile_needed', file_keys: ['src/a.mjs'], baselines: { 'src/a.mjs': sha(repo.v1) } });
     const full = itemDiffText(repo.root, item('x'), 'proj/', realSpawnSync).text;
-    assert.ok(full.length > 100 && full.length < DIFF_ITEM_MAX_CHARS, 'fixture: a short diff under the default cap');
-    const section = itemDiffSection(repo.root, [item('one'), item('two'), item('three')], { spawnSync: realSpawnSync, itemMax: 100, runMax: 150 });
-    assert.match(section, new RegExp(`### one\\n[\\s\\S]{100}\\n\\[diff truncated: 100 of ${full.length} chars shown\\]`));
-    assert.match(section, new RegExp(`### two\\n[\\s\\S]{50}\\n\\[diff truncated: 50 of ${full.length} chars shown\\]`), 'the second item gets what is left of the run budget');
-    assert.match(section, /### three\n\[diff omitted: this run's diff budget of 150 chars is used up\]/);
+    assert.ok(full.length > 200 && full.length < DIFF_ITEM_MAX_CHARS, 'fixture: a short diff under the default cap');
+    const itemMax = 200;
+    const runMax = 900;
+    const section = itemDiffSection(repo.root, [item('one'), item('two'), item('three')], { spawnSync: realSpawnSync, itemMax, runMax });
+    assert.ok(section.length <= runMax, `the section (${section.length} chars) stays within runMax ${runMax}`);
+    const blocks = diffBlocks(section);
+    for (const [id, block] of Object.entries(blocks)) assert.ok(block.length <= itemMax, `${id}'s block (${block.length} chars) stays within itemMax ${itemMax}`);
+    assert.match(blocks.one, new RegExp(`\\n\\[diff truncated: \\d+ of ${full.length} chars shown\\]$`));
+    assert.equal(blocks.one.length, itemMax, 'the first item uses its whole cap');
+    assert.match(blocks.two, new RegExp(`\\n\\[diff truncated: \\d+ of ${full.length} chars shown\\]$`), 'the second item gets what is left of the run budget');
+    assert.ok(blocks.two.length < itemMax);
+    assert.equal(blocks.three, undefined);
+    assert.match(section, /\n\[diff omitted for 1 item\(s\): the diff budget \(200 chars per item, 900 per run\) has no room for them: three\]\n$/);
     assert.doesNotMatch(itemDiffSection(repo.root, [item('whole')], { spawnSync: realSpawnSync }), /truncated|omitted/, 'under the caps nothing is cut');
   } finally {
     repo.cleanup();
@@ -2369,7 +2380,7 @@ test('[diffs] paths are literal pathspecs: an item for src/foo[1].ts never diffs
   }
 });
 
-test('[diffs] git stops once the budget is spent: a 100-path item with a 100-char cap diffs one path and names the rest as not diffed', () => {
+test('[diffs] git stops once the budget is spent: a 100-path item diffs one path, names the rest in a bounded note, and stays within both caps', () => {
   const calls = [];
   const blob = 'x';
   const fake = (cmd, args, opts) => {
@@ -2377,13 +2388,24 @@ test('[diffs] git stops once the budget is spent: a 100-path item with a 100-cha
     if (args.includes('rev-parse')) return { status: 0, stdout: `${HEAD}\n\n` };
     if (args.includes('log')) return { status: 0, stdout: `${'b'.repeat(40)}\n` };
     if (args.includes('cat-file')) return { status: 0, stdout: Buffer.from(`${'c'.repeat(40)} blob ${blob.length}\n${blob}\n`) };
-    if (args.includes('diff')) return { status: 0, stdout: `diff --git a/f b/f\n${'+line\n'.repeat(40)}` };
+    if (args.includes('diff')) return { status: 0, stdout: `diff --git a/f b/f\n${'+line\n'.repeat(100)}` };
     return { status: 1, stdout: '' };
   };
   const keys = Array.from({ length: 100 }, (_, i) => `src/p${String(i).padStart(3, '0')}.mjs`);
   const item = { id: 'many', lane: 'reconcile_needed', file_keys: keys, baselines: Object.fromEntries(keys.map((k) => [k, sha(blob)])) };
-  const section = itemDiffSection('/repo', [item], { spawnSync: fake, itemMax: 100, runMax: 1000 });
+  const section = itemDiffSection('/repo', [item], { spawnSync: fake, itemMax: 400, runMax: 1000 });
   assert.equal(calls.length, 4, 'one HEAD probe, then log, cat-file and diff for the first path only');
-  assert.match(section, /\[diff truncated: 100 of \d+ chars shown; not diffed, budget spent: src\/p001\.mjs, src\/p002\.mjs, [^\]]*src\/p099\.mjs\]/);
+  assert.match(section, /\[diff truncated: \d+ of \d+ chars shown; not diffed, budget spent: src\/p001\.mjs, src\/p002\.mjs, [^\]]*, and \d+ more\]/);
   assert.ok(calls.filter((a) => a.includes('log') || a.includes('diff')).every((a) => a.at(-1) === ':(literal)src/p000.mjs'), 'only the first path reached git, as a literal pathspec');
+  assert.ok(section.length <= 1000, `the section (${section.length} chars) stays within runMax`);
+  assert.ok(diffBlocks(section).many.length <= 400, `the item block (${diffBlocks(section).many.length} chars) stays within itemMax`);
+  // The reviewer's case: 100 paths, runMax 1000, the default item cap.
+  const wide = itemDiffSection('/repo', [item], { spawnSync: fake, runMax: 1000 });
+  assert.ok(wide.length <= 1000, `with the default item cap the section (${wide.length} chars) still stays within runMax`);
+  // Many items each naming many paths: the omitted line stays bounded too.
+  const items = Array.from({ length: 12 }, (_, i) => ({ ...item, id: `${String(i).padStart(2, '0')}-${'i'.repeat(34)}` }));
+  const crowded = itemDiffSection('/repo', items, { spawnSync: fake, itemMax: 400, runMax: 1200 });
+  assert.ok(crowded.length <= 1200, `a crowded section (${crowded.length} chars) stays within runMax`);
+  assert.match(crowded, /\[diff omitted for \d+ item\(s\)[^\]]*, and \d+ more\]\n$/);
+  for (const [id, block] of Object.entries(diffBlocks(crowded))) assert.ok(block.length <= 400, `${id}'s block stays within itemMax`);
 });
