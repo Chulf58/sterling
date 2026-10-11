@@ -148,6 +148,27 @@ if (verbs.length !== 1) {
 }
 const verb = verbs[0];
 
+// EVERY TOKEN BELONGS TO THE VERB. OpenCode's Plan agent may run exactly
+// `node <root>/bin/plan-lock.mjs --plan *`, and an OpenCode shell pattern's `*`
+// matches the whole rest of the line (finding
+// how-does-opencode-v2-override-its-built-in-plan-agent-and-ho). So `--plan`
+// must refuse whatever else that `*` could carry: another verb (refused above),
+// a flag of another verb (`--reason`), an unknown flag, or a stray argument.
+// A refusal here writes nothing.
+const VERB_FLAGS = { plan: ['--plan', '--force'], observe: ['--observe'], release: ['--release', '--reason'], show: ['--show'] };
+const VALUE_FLAGS = ['--plan', '--reason'];
+for (let i = 0; i < argv.length; i++) {
+  const token = argv[i];
+  const flag = token.startsWith('--') ? token.split('=')[0] : null;
+  if (flag === null) refuse(`unexpected argument ${JSON.stringify(token)} — --${verb} takes ${VERB_FLAGS[verb].join(', ')} only. Nothing was changed`);
+  if (!VERB_FLAGS[verb].includes(flag)) refuse(`${flag} does not go with --${verb} (it takes ${VERB_FLAGS[verb].join(', ')} only). Nothing was changed`);
+  if (!VALUE_FLAGS.includes(flag)) {
+    if (token !== flag) refuse(`${flag} takes no value, got ${JSON.stringify(token)}. Nothing was changed`);
+  } else if (token === flag && argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) {
+    i++;
+  }
+}
+
 if (verb === 'show') {
   const read = readLock(sterlingDir);
   if (read.malformed) {

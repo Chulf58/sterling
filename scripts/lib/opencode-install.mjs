@@ -46,6 +46,12 @@
 //    prefix). Bare names would collide with the committed portable copies, and a
 //    project .opencode/agents/<name>.md wins over every other same-named definition
 //    (global agents/, project agent/, the config `agents` key), all measured.
+//    A registry entry with an opencode_full block goes to its own path instead: the
+//    plan agent to .opencode/agents/plan.md, which MERGES onto OpenCode's built-in
+//    plan (id `plan`, mode primary; its body, description and permission rules win,
+//    finding how-does-opencode-v2-override-its-built-in-plan-agent-and-ho). Its
+//    permissions name this project's and this Sterling copy's absolute paths, so it
+//    is per-user and excluded from git like the sterling/ directory.
 //
 // OpenCode not installed, or not 2.x: one loud skip line, nothing written.
 
@@ -60,7 +66,7 @@ import { RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, STERLING_NPM_PACKAGE, inst
 import { parseJsonc } from './jsonc.mjs';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
 import { AGENT_MODEL_KEY, CLAUDE_MODEL_ID_RE, OPENCODE_MODEL_REF_RE, parseConfig } from '@sterling/schemas';
-import { sha256, loadRegistry } from './agent-distribution.mjs';
+import { sha256, loadRegistry, agentHosts } from './agent-distribution.mjs';
 import { renderOpenCodeFullText } from './agent-fences.mjs';
 import { renderOpenCodeAgent, parseOpenCodeHeader } from './opencode-agents.mjs';
 import { ignoredPaths } from './git-ignore-check.mjs';
@@ -734,6 +740,13 @@ function agentFileLoosensGuard(text) {
   });
 }
 
+/** True when `text` carries a Sterling-full header whose content hash still matches. */
+function isUneditedSterlingFull(text) {
+  const disk = normalize(text);
+  const m = disk.match(FULL_HEADER_RE);
+  return m !== null && sha256(disk.replace(`${m[0]}\n`, '')) === m[3];
+}
+
 // The first OpenCode with the plugin permission evaluate hook the server plugin's store
 // guard uses (store-guard.mjs; measured on 2.0.22). Below it, a project agent file's own
 // edit rules override the config guard, and no shell command is guarded at all.
@@ -803,7 +816,9 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir(),
           unreadable(fwd(path), err);
           continue;
         }
-        if (agentFileLoosensGuard(text)) {
+        // An unedited file Sterling rendered (the plan agent's edit rules deny "*" and
+        // allow only .sterling/plans/*) never allows the store, so it gets no row.
+        if (!isUneditedSterlingFull(text) && agentFileLoosensGuard(text)) {
           problems.push({ item: fwd(path), status: 'skipped', detail: `its permission rules can allow edit, and OpenCode reads them after ${PROJECT_CONFIG_REL}, so the store guard does NOT hold for agent "${name}" on this OpenCode (the plugin store guard needs ${EVALUATE_HOOK_MIN_VERSION} or later); upgrade OpenCode, or move its edit, write, patch and "*" rules into agent.${JSON.stringify(name)}.permission in ${PROJECT_CONFIG_REL}, then rerun /sterling:update` });
         }
       }
@@ -956,8 +971,15 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
   return [{ item: rel, status: before === null ? 'created' : 'refreshed', detail: ['store-guard edit deny, default_agent', ...notes].join('; ') }, ...extraRows];
 }
 
-function excludeLines(wholeDir) {
-  return wholeDir ? ['/.opencode/'] : [`/${PROJECT_CONFIG_REL}`, `/${STERLING_AGENTS_SUBDIR}/`];
+function excludeLines(wholeDir, ownAgentPaths) {
+  return wholeDir ? ['/.opencode/'] : [`/${PROJECT_CONFIG_REL}`, `/${STERLING_AGENTS_SUBDIR}/`, ...ownAgentPaths.map((rel) => `/${rel}`)];
+}
+
+/** The per-user agent files Sterling writes outside .opencode/agents/sterling/: the
+ *  registry's opencode_full paths (the plan agent's .opencode/agents/plan.md). They
+ *  carry absolute paths of this machine, so they are kept out of git like the rest. */
+export function opencodeOwnAgentPaths(pluginRoot = sterlingRootFrom()) {
+  return loadRegistry(join(pluginRoot, 'agent-templates', 'registry.json')).agents.filter((a) => a.opencode_full).map((a) => a.opencode_full.path);
 }
 
 /** Keep Sterling's .opencode files out of git via a managed block in .git/info/exclude.
@@ -966,10 +988,11 @@ function excludeLines(wholeDir) {
  *  only Sterling's own paths, so portable agents stay visible to git. `unmaintained` is
  *  the portable agents on disk of a project with no handoff key: while any exist the
  *  block stays narrow, so the files Sterling stopped maintaining still show in git status. */
-export function ensureExcluded({ projectDir, handoff, tracked, unmaintained = [] }) {
+export function ensureExcluded({ projectDir, handoff, tracked, unmaintained = [], ownAgentPaths = opencodeOwnAgentPaths() }) {
   const label = '.git/info/exclude';
   const wholeDir = handoff === false && tracked.length === 0 && unmaintained.length === 0;
-  const want = [EXCLUDE_BEGIN, ...excludeLines(wholeDir), EXCLUDE_END].join('\n');
+  const lines = excludeLines(wholeDir, ownAgentPaths);
+  const want = [EXCLUDE_BEGIN, ...lines, EXCLUDE_END].join('\n');
   const gp = git(projectDir, ['rev-parse', '--git-path', 'info/exclude']);
   if (gp.status !== 0) return { item: label, status: 'skipped', detail: `not a git work tree (${(gp.stderr || '').trim().split('\n')[0]}) — nothing to keep untracked` };
   const excludePath = resolve(projectDir, gp.stdout.trim());
@@ -978,18 +1001,19 @@ export function ensureExcluded({ projectDir, handoff, tracked, unmaintained = []
   const end = current.indexOf(EXCLUDE_END);
   if (begin !== -1 && end > begin) {
     const block = current.slice(begin, end + EXCLUDE_END.length);
-    if (block === want) return { item: label, status: 'matches', detail: excludeLines(wholeDir).join(' ') };
+    if (block === want) return { item: label, status: 'matches', detail: lines.join(' ') };
     writeFileSync(excludePath, current.slice(0, begin) + want + current.slice(end + EXCLUDE_END.length));
-    return { item: label, status: 'refreshed', detail: excludeLines(wholeDir).join(' ') };
+    return { item: label, status: 'refreshed', detail: lines.join(' ') };
   }
-  const probe = ignoredPaths(projectDir, [PROJECT_CONFIG_REL, `${STERLING_AGENTS_SUBDIR}/conductor.md`]);
-  if (probe.checked && probe.ignored.length === 2) {
+  const probePaths = [PROJECT_CONFIG_REL, `${STERLING_AGENTS_SUBDIR}/conductor.md`, ...ownAgentPaths];
+  const probe = ignoredPaths(projectDir, probePaths);
+  if (probe.checked && probe.ignored.length === probePaths.length) {
     return { item: label, status: 'matches', detail: `already ignored (${[...new Set(probe.ignored.map((i) => i.rule))].join('; ')})` };
   }
   mkdirSync(dirname(excludePath), { recursive: true });
   const sep = current === '' || current.endsWith('\n') ? '' : '\n';
   writeFileSync(excludePath, `${current}${sep}${want}\n`);
-  return { item: label, status: 'created', detail: excludeLines(wholeDir).join(' ') };
+  return { item: label, status: 'created', detail: lines.join(' ') };
 }
 
 // The conductor's OpenCode description: its template line names .claude/settings.json.
@@ -1109,13 +1133,13 @@ export function sterlingRootFrom(moduleUrl = import.meta.url) {
  * kept, OpenCode frontmatter, the role's permissions (store-write tools denied to
  * every role that may not write the store), and the OpenCode model when one is pinned.
  */
-export function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, model, writeTools } = {}) {
-  const hostText = renderOpenCodeFullText(templateContent, label);
-  const permission = FULL_PERMISSIONS[entry.name] ?? entry.opencode?.permission;
+export function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, mode, model, writeTools, vars = {} } = {}) {
+  const hostText = substituteInstallVars(renderOpenCodeFullText(templateContent, label), vars);
+  const permission = substitutePermissionVars(FULL_PERMISSIONS[entry.name] ?? entry.opencode_full?.permission ?? entry.opencode?.permission, vars, label);
   const out = renderOpenCodeAgent(hostText, label, { permission, description: primary ? CONDUCTOR_OPENCODE_DESCRIPTION : undefined });
   const header = parseOpenCodeHeader(out.content);
   let content = normalize(out.content).replace(`${header.headerLine}\n`, '');
-  if (primary) content = content.replace(/^mode: subagent$/m, 'mode: primary');
+  if (primary || mode === 'primary') content = content.replace(/^mode: subagent$/m, 'mode: primary');
   if (!STORE_WRITERS.has(entry.name)) {
     const denies = (writeTools ?? storeWriteTools()).map((t) => `  ${t}: deny`);
     const close = content.indexOf('\n---\n', 4);
@@ -1126,6 +1150,42 @@ export function renderFullOpenCodeAgent(templateContent, label, entry, { primary
   const fmEnd = content.indexOf('\n---\n', 4) + 5;
   const fullHeader = `<!-- sterling-full renderer=opencode-full/1 template=${out.name} template_hash=${sha256(templateContent)} content_hash=${sha256(content)} -->`;
   return { name: out.name, content: `${content.slice(0, fmEnd)}${fullHeader}\n${content.slice(fmEnd)}` };
+}
+
+// Install-time tokens: the plan agent's permission patterns and body name this
+// project's and this Sterling copy's absolute paths, because an OpenCode shell or
+// edit rule matches the literal command or path. Only these two are replaced.
+const INSTALL_VARS = ['PROJECT_DIR', 'STERLING_ROOT'];
+const INSTALL_VAR_RE = /\{\{(PROJECT_DIR|STERLING_ROOT)\}\}/g;
+// A path that lands in a shell permission pattern and in the command the agent runs
+// must read the same in both without quoting, and must not hold a glob character.
+const SHELL_SAFE_PATH_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+function substituteInstallVars(text, vars) {
+  return text.replace(INSTALL_VAR_RE, (token, name) => vars[name] ?? token);
+}
+
+function substitutePermissionVars(permission, vars, label) {
+  if (permission === undefined) return undefined;
+  const out = {};
+  for (const [key, value] of Object.entries(permission)) {
+    if (typeof value === 'string') {
+      out[key] = value;
+      continue;
+    }
+    out[key] = {};
+    for (const [pattern, verdict] of Object.entries(value)) {
+      const rendered = substituteInstallVars(pattern, vars);
+      if (/\{\{[A-Z_]+\}\}/.test(rendered)) throw new Error(`opencode permission for ${label}: '${rendered}' keeps an install token no value was given for (P5)`);
+      out[key][rendered] = verdict;
+    }
+  }
+  return out;
+}
+
+/** True when a template or its permission map uses an install-time token. */
+function usesInstallVars(templateContent, permission) {
+  return new RegExp(INSTALL_VAR_RE.source).test(`${templateContent}\n${JSON.stringify(permission ?? {})}`);
 }
 
 /** The `model:` line of a Sterling-full file's frontmatter, or undefined. */
@@ -1162,15 +1222,42 @@ function stageFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
  * that would be created or refreshed its `path`, the new `content` and the
  * `previous` content (null when the file does not exist yet).
  */
+/**
+ * Every Sterling-full OpenCode agent file, in write order: the ROSTER under
+ * .opencode/agents/sterling/ (the conductor primary), then each registry entry with
+ * an opencode_full block at its own path and mode (the plan agent, which merges onto
+ * OpenCode's built-in plan from .opencode/agents/plan.md).
+ */
+function fullAgentTargets(registry) {
+  const targets = ROSTER.map((name) => {
+    const entry = registry.agents.find((a) => a.name === name);
+    if (!entry) throw new Error(`opencode roster: '${name}' is not in agent-templates/registry.json (P5)`);
+    if (!agentHosts(entry).includes('opencode')) throw new Error(`opencode roster: '${name}' is in the roster but its registry hosts leave out opencode (P5)`);
+    return { name, entry, rel: `${STERLING_AGENTS_SUBDIR}/${name}.md`, primary: name === 'conductor' };
+  });
+  for (const entry of registry.agents) {
+    if (entry.opencode_full === undefined) continue;
+    if (ROSTER.includes(entry.name)) throw new Error(`opencode roster: '${entry.name}' is in the roster and also has opencode_full; it would be written twice (P5)`);
+    targets.push({ name: entry.name, entry, rel: entry.opencode_full.path, primary: false, mode: entry.opencode_full.mode });
+  }
+  return targets;
+}
+
 function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   const registry = loadRegistry(join(pluginRoot, 'agent-templates', 'registry.json'));
   const writeTools = storeWriteTools(pluginRoot);
+  const vars = { PROJECT_DIR: fwd(projectDir), STERLING_ROOT: fwd(pluginRoot) };
   const rows = [];
-  for (const name of ROSTER) {
-    const entry = registry.agents.find((a) => a.name === name);
-    if (!entry) throw new Error(`opencode roster: '${name}' is not in agent-templates/registry.json (P5)`);
-    const rel = `${STERLING_AGENTS_SUBDIR}/${name}.md`;
+  for (const { name, entry, rel, primary, mode } of fullAgentTargets(registry)) {
     const path = join(projectDir, rel);
+    const templateContent = readFileSync(join(pluginRoot, 'agent-templates', entry.file), 'utf8');
+    if (usesInstallVars(templateContent, entry.opencode_full?.permission)) {
+      const unsafe = INSTALL_VARS.filter((v) => !SHELL_SAFE_PATH_RE.test(vars[v]));
+      if (unsafe.length) {
+        rows.push(refusal(rel, `${rel} needs ${unsafe.map((v) => `${v === 'PROJECT_DIR' ? 'the project path' : 'the Sterling path'} (${vars[v]})`).join(' and ')} in shell permission rules, and a space, quote or glob character there cannot be matched reliably`, 'use a project and Sterling path made of letters, digits and _@%+=:,./- only, then rerun /sterling:update'));
+        continue;
+      }
+    }
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
@@ -1190,7 +1277,7 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       }
     }
     const model = models[name] ?? (disk === null ? undefined : frontmatterModel(disk));
-    const agent = renderFullOpenCodeAgent(readFileSync(join(pluginRoot, 'agent-templates', entry.file), 'utf8'), entry.file, entry, { primary: name === 'conductor', model, writeTools });
+    const agent = renderFullOpenCodeAgent(templateContent, entry.file, entry, { primary, mode, model, writeTools, vars });
     if (agent.name !== name) throw new Error(`opencode roster: '${entry.file}' renders as '${agent.name}', not '${name}' (P5)`);
     if (disk === agent.content) {
       rows.push({ item: rel, status: 'matches' });
@@ -1314,7 +1401,7 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
     handoff = null;
     rows.push({ item: '.sterling/config.json handoff', status: 'skipped', detail: `${err.message} — excluding only Sterling's own .opencode paths` });
   }
-  rows.push(ensureExcluded({ projectDir, handoff, tracked, unmaintained }));
+  rows.push(ensureExcluded({ projectDir, handoff, tracked, unmaintained, ownAgentPaths: opencodeOwnAgentPaths(pluginRoot) }));
   // Each governed role pins the model config.models names for it (decision
   // opencode-only-model-override-per-role-for-openai-picks).
   // A config.json that cannot be read refuses the whole agent set: every render and

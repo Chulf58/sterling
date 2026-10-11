@@ -5826,6 +5826,19 @@ if (verbs.length !== 1) {
   );
 }
 var verb = verbs[0];
+var VERB_FLAGS = { plan: ["--plan", "--force"], observe: ["--observe"], release: ["--release", "--reason"], show: ["--show"] };
+var VALUE_FLAGS = ["--plan", "--reason"];
+for (let i = 0; i < argv.length; i++) {
+  const token = argv[i];
+  const flag = token.startsWith("--") ? token.split("=")[0] : null;
+  if (flag === null) refuse(`unexpected argument ${JSON.stringify(token)} \u2014 --${verb} takes ${VERB_FLAGS[verb].join(", ")} only. Nothing was changed`);
+  if (!VERB_FLAGS[verb].includes(flag)) refuse(`${flag} does not go with --${verb} (it takes ${VERB_FLAGS[verb].join(", ")} only). Nothing was changed`);
+  if (!VALUE_FLAGS.includes(flag)) {
+    if (token !== flag) refuse(`${flag} takes no value, got ${JSON.stringify(token)}. Nothing was changed`);
+  } else if (token === flag && argv[i + 1] !== void 0 && !argv[i + 1].startsWith("--")) {
+    i++;
+  }
+}
 if (verb === "show") {
   const read = readLock(sterlingDir);
   if (read.malformed) {

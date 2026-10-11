@@ -13,7 +13,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseConfig } from '@sterling/schemas';
 import { validateFences, renderClaudeText, renderPortableText, findPortableVocabulary } from '../lib/agent-fences.mjs';
-import { renderInstalledAgent, loadRegistry, parseInstalledHeader } from '../lib/agent-distribution.mjs';
+import { renderInstalledAgent, loadRegistry, parseInstalledHeader, claudeAgentEntries } from '../lib/agent-distribution.mjs';
 import {
   renderOpenCodeAgent,
   syncOpenCodeAgents,
@@ -145,7 +145,8 @@ const renderConfig = parseConfig(JSON.parse(readFileSync(join(root, 'templates',
 const renderOpts = { pluginVersion: '0.0.0-test', now: '2026-01-01T00:00:00.000Z', vars: { NODE: '"/usr/bin/node"', HOOKS_DIR: '/x/hooks', GIT_RO: '/x/git-ro.mjs' }, config: renderConfig };
 const withoutHeader = (content) => content.replace(parseInstalledHeader(content).headerLine + '\n', '');
 
-for (const entry of loadRegistry(registryPath).agents) {
+// Only the entries Claude Code installs: an OpenCode-only template (plan.md) has no Claude render.
+for (const entry of claudeAgentEntries(loadRegistry(registryPath))) {
   const baseline = BASELINE_OVERRIDES[entry.file] ?? FENCE_BASELINE;
   test(`Claude render of ${entry.file} is byte-identical to the ${baseline} render (header aside)`, () => {
     const shown = spawnSync('git', ['show', `${baseline}:agent-templates/${entry.file}`], { cwd: root, encoding: 'utf8' });

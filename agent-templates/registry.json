@@ -6,6 +6,11 @@
     { "name": "scout", "file": "scout.md", "opencode": { "permission": { "edit": "deny", "bash": "deny", "webfetch": "deny", "task": "deny" } } },
     { "name": "librarian", "file": "librarian.md" },
     { "name": "reviewer", "file": "reviewer.md" },
-    { "name": "conductor", "file": "conductor.md" }
+    { "name": "conductor", "file": "conductor.md" },
+    { "name": "plan", "file": "plan.md", "hosts": ["opencode"], "opencode_full": { "path": ".opencode/agents/plan.md", "mode": "primary", "permission": {
+      "edit": { "*": "deny", "{{PROJECT_DIR}}/.sterling/plans/*": "allow" },
+      "task": { "*": "deny", "sterling/scout": "allow", "sterling/researcher": "allow", "sterling/reviewer": "allow", "sterling/implementor": "deny" },
+      "bash": { "*": "deny", "node {{STERLING_ROOT}}/bin/plan-lock.mjs --plan *": "allow", "node {{STERLING_ROOT}}/bin/plan-lock.mjs --show": "allow", "mkdir -p {{PROJECT_DIR}}/.sterling/plans": "allow", "git status": "allow", "git diff --stat": "allow", "git log --oneline -20": "allow" }
+    } } }
   ]
 }

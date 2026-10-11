@@ -339,6 +339,30 @@ export function setInstalledModelEffort(installedContent, { model, effort, plugi
 export const OPENCODE_PERMISSION_KEYS = ['edit', 'bash', 'webfetch', 'task'];
 export const OPENCODE_PERMISSION_VALUES = ['allow', 'ask', 'deny'];
 
+// One permission map, for the portable block and the Sterling-full one alike: each
+// key is a known permission and each value either one verdict (`edit: deny`) or an
+// ordered map of pattern -> verdict (`bash: {"*": deny, "git status": allow}`).
+// OpenCode reads a map in key order and the last matching rule wins (finding
+// how-does-opencode-v2-override-its-built-in-plan-agent-and-ho), so the order
+// written here is the order rendered.
+function validatePermissionMap(permission, where) {
+  if (!permission || typeof permission !== 'object' || Array.isArray(permission)) throw new Error(`${where} must be an object`);
+  for (const [key, value] of Object.entries(permission)) {
+    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw new Error(`${where}: unknown key '${key}' (known: ${OPENCODE_PERMISSION_KEYS.join(', ')})`);
+    if (typeof value === 'string') {
+      if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw new Error(`${where}.${key}: '${value}' is not one of ${OPENCODE_PERMISSION_VALUES.join(', ')}`);
+      continue;
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.keys(value).length) {
+      throw new Error(`${where}.${key} must be one of ${OPENCODE_PERMISSION_VALUES.join(', ')} or a non-empty map of pattern to verdict`);
+    }
+    for (const [pattern, verdict] of Object.entries(value)) {
+      if (!pattern.trim() || /[\r\n]/.test(pattern)) throw new Error(`${where}.${key}: a pattern must be one non-empty line, got ${JSON.stringify(pattern)}`);
+      if (!OPENCODE_PERMISSION_VALUES.includes(verdict)) throw new Error(`${where}.${key}[${JSON.stringify(pattern)}]: '${verdict}' is not one of ${OPENCODE_PERMISSION_VALUES.join(', ')}`);
+    }
+  }
+}
+
 function validateOpenCodeEntry(entry, where) {
   const block = entry.opencode;
   if (!block || typeof block !== 'object' || Array.isArray(block)) throw new Error(`${where} must be an object`);
@@ -350,10 +374,56 @@ function validateOpenCodeEntry(entry, where) {
     throw new Error(`${where}.description must be one non-empty line of text`);
   }
   if (block.permission === undefined) return;
-  if (!block.permission || typeof block.permission !== 'object' || Array.isArray(block.permission)) throw new Error(`${where}.permission must be an object`);
-  for (const [key, value] of Object.entries(block.permission)) {
-    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw new Error(`${where}.permission: unknown key '${key}' (known: ${OPENCODE_PERMISSION_KEYS.join(', ')})`);
-    if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw new Error(`${where}.permission.${key}: '${value}' is not one of ${OPENCODE_PERMISSION_VALUES.join(', ')}`);
+  validatePermissionMap(block.permission, `${where}.permission`);
+}
+
+// Which hosts install an agent. An entry without `hosts` installs on both: Claude
+// Code (.claude/agents/<name>.md) and OpenCode (the Sterling-full set). An entry
+// limited to OpenCode never reaches the Claude install, sync or visibility check,
+// and must name where OpenCode gets it (`opencode_full.path`), so a host-limited
+// entry can never be registered and installed nowhere.
+export const AGENT_HOSTS = ['claude', 'opencode'];
+export const OPENCODE_FULL_MODES = ['primary', 'subagent'];
+
+export function agentHosts(entry) {
+  return entry.hosts ?? AGENT_HOSTS;
+}
+
+/** The registry entries Claude Code installs: every entry whose hosts include claude. */
+export function claudeAgentEntries(registry) {
+  return registry.agents.filter((entry) => agentHosts(entry).includes('claude'));
+}
+
+// opencode_full: an OpenCode agent installed at a project path of its own instead
+// of .opencode/agents/sterling/<name>.md. The plan agent uses it to MERGE onto
+// OpenCode's built-in `plan` (a project .opencode/agents/plan.md keeps the id
+// `plan`; a file under sterling/ would be a separate sterling/plan). `path` is
+// directly under .opencode/agents/ and named after the agent; `mode` is the
+// frontmatter mode; `permission` may carry {{PROJECT_DIR}} and {{STERLING_ROOT}},
+// which the installer replaces with absolute paths.
+function validateHosts(entry, where) {
+  if (entry.hosts !== undefined) {
+    const hosts = entry.hosts;
+    if (!Array.isArray(hosts) || !hosts.length || hosts.some((h) => !AGENT_HOSTS.includes(h)) || new Set(hosts).size !== hosts.length) {
+      throw new Error(`${where}.hosts must be a non-empty list of distinct hosts from ${AGENT_HOSTS.join(', ')}`);
+    }
+  }
+  const full = entry.opencode_full;
+  if (full !== undefined) {
+    if (!full || typeof full !== 'object' || Array.isArray(full)) throw new Error(`${where}.opencode_full must be an object`);
+    const unknown = Object.keys(full).find((key) => !['path', 'mode', 'permission'].includes(key));
+    if (unknown !== undefined) throw new Error(`${where}.opencode_full: unknown key '${unknown}' — the keys are path, mode and permission`);
+    if (full.path !== `.opencode/agents/${entry.name}.md`) {
+      throw new Error(`${where}.opencode_full.path must be '.opencode/agents/${entry.name}.md' (directly under .opencode/agents/, named after the agent), got ${JSON.stringify(full.path)}`);
+    }
+    if (!OPENCODE_FULL_MODES.includes(full.mode)) throw new Error(`${where}.opencode_full.mode must be one of ${OPENCODE_FULL_MODES.join(', ')}`);
+    if (full.permission !== undefined) validatePermissionMap(full.permission, `${where}.opencode_full.permission`);
+    if (!agentHosts(entry).includes('opencode')) throw new Error(`${where}: opencode_full needs hosts to include opencode`);
+    // The portable copy is written to the same .opencode/agents/<name>.md.
+    if (entry.opencode !== undefined) throw new Error(`${where}: opencode (the portable copy) and opencode_full both write .opencode/agents/${entry.name}.md — keep one`);
+  }
+  if (!agentHosts(entry).includes('claude') && full === undefined) {
+    throw new Error(`${where}: an agent not installed on claude must declare opencode_full (where OpenCode installs it)`);
   }
 }
 
@@ -375,6 +445,7 @@ export function loadRegistry(registryPath) {
       throw new Error(`agent registry ${registryPath}: agents[${index}].file must be a template filename ending in .md`);
     }
     if (entry.opencode !== undefined) validateOpenCodeEntry(entry, `agent registry ${registryPath}: agents[${index}].opencode`);
+    validateHosts(entry, `agent registry ${registryPath}: agents[${index}]`);
     if (names.has(entry.name) || files.has(entry.file)) {
       throw new Error(`agent registry ${registryPath}: duplicate agent name or template file at agents[${index}]`);
     }
@@ -398,10 +469,12 @@ export function agentChangesRequireRestart(report) {
 }
 
 function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config }) {
-  const registry = loadRegistry(registryPath);
+  // Only the entries Claude Code installs (agentHosts): an OpenCode-only agent is
+  // never written to .claude/agents/.
+  const entries = claudeAgentEntries(loadRegistry(registryPath));
   // config.agents keys name registered agents (587472e3): a typo would otherwise
   // grant nothing, silently.
-  const registered = new Set(registry.agents.map((entry) => entry.name));
+  const registered = new Set(entries.map((entry) => entry.name));
   for (const key of Object.keys(config?.agents ?? {})) {
     if (!registered.has(key)) {
       throw new Error(`config.agents: '${key}' is not a registered agent (registered: ${[...registered].join(', ')}) — fix or remove it in .sterling/config.json`);
@@ -409,7 +482,7 @@ function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, no
   }
   // Render every replacement before modifying or retiring anything. In particular,
   // a bad template/config may not turn a registry typo into an irreversible prune.
-  return registry.agents.map((entry) => {
+  return entries.map((entry) => {
     const templateContent = readFileSync(join(templatesDir, entry.file), 'utf8');
     const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars, config });
     if (name !== entry.name) {
@@ -703,7 +776,7 @@ export function checkAgentsVisible({ registryPath, targetAgentsDir, sessionStart
   if (Number.isNaN(sessionStart)) {
     throw new Error(`checkAgentsVisible: unparseable sessionStartedAt '${sessionStartedAt}'`);
   }
-  for (const entry of registry.agents) {
+  for (const entry of claudeAgentEntries(registry)) {
     const installedPath = join(targetAgentsDir, `${entry.name}.md`);
     // DEGRADE LOUD, NEVER SILENT (board 4fa477f2) — the same repair the H1
     // machine-activation guard carries, not a second idiom. This read used to sit
