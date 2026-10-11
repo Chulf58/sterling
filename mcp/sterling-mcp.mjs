@@ -28916,7 +28916,7 @@ import { posix } from "node:path";
 var WORKER_STAMP_KEY = "worker_stamp";
 var WORKER_FIELD_ALLOW_LIST = {
   reconcile_needed: {
-    feature_article: ["files", "history", "live_test_refs", "what_it_does", "intended_behavior"],
+    feature_article: ["files", "history", "live_test_refs", "what_it_does", "intended_behavior", "current_ac"],
     reference_material: ["summary", "source_date", "capture_date"]
   },
   state_review: {
@@ -28931,6 +28931,9 @@ var WORKER_FIELD_ALLOW_LIST = {
   article_missing: {
     feature_article: ["files"]
   }
+};
+var WORKER_FIELD_EDIT_SELECTORS = {
+  current_ac: { pattern: /^current_ac\[ac_id=[^\]]+\]\.text$/, shape: "current_ac[ac_id=<id>].text" }
 };
 var WORKER_READ_TOOLS = /* @__PURE__ */ new Set([
   "knowledge_query",
@@ -29088,6 +29091,12 @@ var WorkerGuard = class {
     const disallowed = fields.filter((f) => !allowed.includes(f));
     if (disallowed.length)
       return { rule: "field_not_allowed", text: `field(s) ${disallowed.join(", ")} not in lane ${item.lane}'s allow-list for ${record2.type} (${allowed.join(", ")})` };
+    for (const f of fields) {
+      const only = WORKER_FIELD_EDIT_SELECTORS[f];
+      if (only && !(tool === "knowledge_edit" && only.pattern.test(String(input.field)))) {
+        return { rule: "field_not_allowed", text: `field ${f} is written only by knowledge_edit of ${only.shape}` };
+      }
+    }
     if (item.lane === "article_missing")
       return appendJoinFault(tool, item, record2, input);
     return null;

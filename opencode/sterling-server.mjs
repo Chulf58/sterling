@@ -16883,7 +16883,7 @@ import { readFileSync as readFileSync17 } from "node:fs";
 import { join as join28 } from "node:path";
 
 // scripts/hooks/lib/maintenance-worker.mjs
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync6, existsSync as existsSync17, mkdirSync as mkdirSync13, openSync as openSync6, readFileSync as readFileSync16, renameSync as renameSync6, rmSync as rmSync7, rmdirSync as rmdirSync2, statSync as statSync5, writeFileSync as writeFileSync7, appendFileSync as appendFileSync3 } from "node:fs";
 import { dirname as dirname12, isAbsolute as isAbsolute5, join as join27, resolve as resolve12, sep as sep3 } from "node:path";
@@ -16908,7 +16908,7 @@ var RUN_BATCH_MAX = 12;
 var BATCH_MIN_ITEMS = 5;
 var BATCH_MAX_WAIT_MS = 30 * 6e4;
 var POLICY_VERSION = 1;
-var WORKER_CAPABILITY = "factual_refresh_v1";
+var WORKER_CAPABILITY = "diff_and_prose_v2";
 var DEBOUNCE_MS = 2 * 6e4;
 var BACKOFF_MS = 30 * 6e4;
 var WORKER_TIMEOUT_MS = 20 * 6e4;
@@ -17089,6 +17089,13 @@ function dirtyPaths(root, paths, spawnSync10 = nodeSpawnSync, prefix = "") {
     if (entry[0] === "R" || entry[0] === "C") add(parts[++i]);
   }
   return dirty;
+}
+var DIFF_LANES = ["reconcile_needed", "state_review"];
+function itemBaselines(store, t) {
+  if (!store || !DIFF_LANES.includes(t.system_reason) || !t.feature_link) return void 0;
+  const all = store.get(t.feature_link)?.file_baselines;
+  const own = (t.file_keys ?? []).filter((k) => typeof all?.[k] === "string");
+  return Object.fromEntries(own.map((k) => [k, all[k]]));
 }
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -17280,6 +17287,11 @@ function launchWorker(opts) {
       writeFileSync7(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
       const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
       const batch = selectBatch(eligible);
+      const baselinesById = new Map(eligible.map((t) => [t.id, opts.store ? itemBaselines(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.baselines : void 0]));
+      const withBaselines = (t) => {
+        const baselines = baselinesById.get(t.id);
+        return baselines && typeof baselines === "object" ? { baselines } : {};
+      };
       const chainAttempted = opts.trigger === "chain" && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
       writeFileSync7(
         paths.eligible,
@@ -17287,11 +17299,11 @@ function launchWorker(opts) {
           token,
           head: git.head,
           ...runnerHost,
-          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })),
+          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t), ...withBaselines(t) })),
           policy_version: POLICY_VERSION,
           run_id: randomUUID4(),
           policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
-          queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? "" })),
+          queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? "", ...withBaselines(t) })),
           chain_attempted: chainAttempted
         })
       );
@@ -19688,13 +19700,13 @@ var hasOpenSystemTodo = (store, reason) => store.query({ types: ["todo"], cap: 1
 
 // scripts/hooks/lib/settlement.mjs
 init_dist2();
-import { createHash as createHash4, randomUUID as randomUUID7 } from "node:crypto";
+import { createHash as createHash5, randomUUID as randomUUID7 } from "node:crypto";
 import { readFileSync as readFileSync25, writeFileSync as writeFileSync13, mkdirSync as mkdirSync19, rmSync as rmSync11, statSync as statSync9, renameSync as renameSync11 } from "node:fs";
 import { spawnSync as spawnSync7 } from "node:child_process";
 import { join as join44, dirname as dirname16 } from "node:path";
 function hashFile(root, rel) {
   try {
-    return createHash4("sha256").update(readFileSync25(join44(root, rel))).digest("hex");
+    return createHash5("sha256").update(readFileSync25(join44(root, rel))).digest("hex");
   } catch {
     return void 0;
   }

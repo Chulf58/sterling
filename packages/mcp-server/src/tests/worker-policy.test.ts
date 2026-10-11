@@ -23,14 +23,14 @@ const TOKEN = 'lock-token-1';
 const RUN_ID = 'run-1';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-function mkArticle(tools: SterlingTools, slug: string, files: string[], state = 'active'): string {
+function mkArticle(tools: SterlingTools, slug: string, files: string[], state = 'active', current_ac: unknown[] = []): string {
   const fields = {
     slug,
     title: slug,
     what_it_does: 'does the thing.',
     intended_behavior: 'intends the thing.',
     files: files.map((path) => ({ path, role: 'a file' })),
-    current_ac: [],
+    current_ac,
     dependencies: { relies_on: [], relied_by: [] },
     state,
     history: [{ date: '2026-10-09T00:00:00.000Z', event: 'seed' }],
@@ -47,7 +47,7 @@ async function harness(opts: { worker?: boolean } = { worker: true }) {
     opts.worker === false ? {} : { workerPolicy: { path: policyPath, token: TOKEN } }
   );
   // Seeded through SterlingTools directly: the guard sits on the MCP surface only.
-  const recon = mkArticle(tools, 'recon-article', ['src/a/one.ts']);
+  const recon = mkArticle(tools, 'recon-article', ['src/a/one.ts'], 'active', [{ ac_id: 'AC1', text: 'The runner does the thing.', verifiable_at: 'final' }]);
   const state = mkArticle(tools, 'state-article', ['src/b/one.ts']);
   const join_ = mkArticle(tools, 'join-article', ['src/c/one.ts']);
   const finding = (
@@ -203,6 +203,28 @@ test('reconcile_needed: a factual field on the batch target is allowed and stamp
     await h.refused('knowledge_update', { id: 'recon-article', body: { what_it_does: 'x.' }, expected_version: before }, 'target_not_in_batch');
     await h.refused('knowledge_update', { id: h.ids.recon, body: { what_it_does: 'x.' } }, 'expected_version_required', h.ids.reconItem);
     assert.equal(h.version(h.ids.recon), before);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('reconcile_needed: current_ac text changes only through knowledge_edit of current_ac[ac_id=<id>].text; every other write shape is refused', async () => {
+  const h = await harness();
+  try {
+    const ac = (h.get(h.ids.recon).current_ac as Array<Record<string, unknown>>)[0];
+    const before = h.version(h.ids.recon);
+    await h.refused('knowledge_update', { id: h.ids.recon, body: { current_ac: [] }, expected_version: before }, 'field_not_allowed', h.ids.reconItem);
+    await h.refused('knowledge_update', { id: h.ids.recon, body: { current_ac: [{ ...ac, ac_id: 'AC9' }] }, expected_version: before }, 'field_not_allowed', h.ids.reconItem);
+    await h.refused('knowledge_update', { id: h.ids.recon, body: { current_ac: [{ ...ac, verifiable_at: 'phase:2' }] }, expected_version: before }, 'field_not_allowed', h.ids.reconItem);
+    await h.refused('knowledge_array_remove', { id: h.ids.recon, selector: 'current_ac[ac_id=AC1]', expected_version: before }, 'field_not_allowed', h.ids.reconItem);
+    await h.refused('knowledge_append', { id: h.ids.recon, field: 'current_ac', entries: [{ ac_id: 'AC2', text: 'x', verifiable_at: 'final' }] }, 'field_not_allowed', h.ids.reconItem);
+    await h.refused('knowledge_edit', { id: h.ids.recon, field: 'current_ac[ac_id=AC1].ac_id', find: 'AC1', replace: 'AC9' }, 'field_not_allowed', h.ids.reconItem);
+    assert.equal(h.version(h.ids.recon), before, 'nothing was written by the refused shapes');
+
+    const receipt = await h.ok('knowledge_edit', { id: h.ids.recon, field: 'current_ac[ac_id=AC1].text', find: 'does the thing', replace: 'puts each item diff in the prompt' });
+    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.reconItem, resolved: [] });
+    assert.deepEqual(h.get(h.ids.recon).current_ac, [{ ...ac, text: 'The runner puts each item diff in the prompt.' }]);
+    await h.refused('knowledge_edit', { id: h.ids.state, field: 'current_ac[ac_id=AC1].text', find: 'a', replace: 'b' }, 'field_not_allowed', h.ids.stateItem);
   } finally {
     await h.cleanup();
   }
