@@ -1112,8 +1112,11 @@ type TabCell = { label: string; active: boolean; index: number };
 
 /**
  * Fit the tab bar into `width` columns (each cell is ' label '). Steps, first
- * fit wins: full labels; inactive tabs drop their '(…)' count; the active tab
- * drops its count too; inactive tabs shorten to 3 letters, then to 1; the
+ * fit wins: full labels; inactive counts shrink to the number alone
+ * ('Agents (2 running · 3 quiet)' becomes 'Agents (2)'); the active tab's too;
+ * tabs with no count shorten to 3 letters, then 1, while the counted tabs
+ * keep their number; only then inactive tabs drop their '(…)' count, the
+ * active tab drops its count too, and inactive tabs shorten to 3 letters, then 1; the
  * active name is clipped with an ellipsis. When even 1-letter cells for every
  * tab do not fit, the bar becomes a window: the active tab (clipped to the
  * pane) plus as many 1-letter neighbours as fit, nearest first. Works from the
@@ -1125,8 +1128,16 @@ type TabCell = { label: string; active: boolean; index: number };
 export function fitTabs(tabs: TabCell[], width: number): TabCell[] {
   if (!Number.isFinite(width)) return tabs;
   const bare = (l: string): string => l.replace(/ \(.*\)$/, '');
+  // the count alone: 'Agents (2 running · 3 quiet)' -> 'Agents (2)'. A tab with no count is unchanged.
+  const compact = (l: string): string => l.replace(/ \((\d+)[^)]*\)$/, ' ($1)');
+  // names shorten before a count is dropped, so Tasks and Agents keep theirs on a narrow pane
+  const keepCount = (n: number) => (l: string): string => (l === bare(l) ? l.slice(0, n) : compact(l));
   const steps: [(l: string) => string, (l: string) => string][] = [
     [(l) => l, (l) => l],
+    [(l) => l, compact],
+    [compact, compact],
+    [compact, keepCount(3)],
+    [compact, keepCount(1)],
     [(l) => l, bare],
     [bare, bare],
     [bare, (l) => bare(l).slice(0, 3)],

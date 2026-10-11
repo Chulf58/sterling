@@ -89,9 +89,9 @@ test('narrow tabs: a long Agents label is shortened from its text; the active ta
     assert.match(fitted[3]!.label, /^Agents/, `width ${width}: the active tab keeps its name`);
   }
   assert.equal(fitTabs(tabs, 68)[3]!.label, 'Agents (2 running · 3 quiet)', 'room for everything → nothing shortened');
-  assert.deepEqual(fitTabs(tabs, 63).map((t) => t.label), ['Tasks', 'Knowledge', 'Queue', 'Agents (2 running · 3 quiet)', 'System'], 'inactive counts go first');
-  assert.deepEqual(fitTabs(tabs, 49).map((t) => t.label), ['Tasks', 'Knowledge', 'Queue', 'Agents', 'System']);
-  assert.deepEqual(fitTabs(tabs, 33).map((t) => t.label), ['Tas', 'Kno', 'Que', 'Agents', 'Sys']);
+  assert.deepEqual(fitTabs(tabs, 63).map((t) => t.label), ['Tasks (13)', 'Knowledge', 'Queue', 'Agents (2)', 'System'], 'counts shrink to the number alone before any is dropped');
+  assert.deepEqual(fitTabs(tabs, 49).map((t) => t.label), ['Tasks (13)', 'Kno', 'Que', 'Agents (2)', 'Sys'], 'names without a count shorten before a count goes');
+  assert.deepEqual(fitTabs(tabs, 33).map((t) => t.label), ['Tasks (13)', 'K', 'Q', 'Agents (2)', 'S']);
   assert.deepEqual(fitTabs(tabs, 25).map((t) => t.label), ['T', 'K', 'Q', 'Agents', 'S']);
   assert.deepEqual(fitTabs(tabs, 18).map((t) => t.label), ['T', 'K', 'Q', 'Age…', 'S'], 'below every step the active name is clipped, never dropped');
 });
