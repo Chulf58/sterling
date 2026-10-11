@@ -17,6 +17,7 @@ import { remember } from './bounded.mjs';
 import { sessionKind } from './dispatch.mjs';
 import { inWorkerChild } from './worker.mjs';
 import { refreshRegistryRow } from '../../../scripts/hooks/lib/registry-refresh.mjs';
+import { planLockSection } from '../../../scripts/hooks/lib/plan-lock-section.mjs';
 
 const STATUS_TTL_MS = 10_000;
 // The undeclared-source scan spawns git twice, so a process reuses its answer for this long.
@@ -189,6 +190,21 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         logLine(root, `context: child staging skipped for ${input.sessionID}, session lookup failed: ${kind.why}`);
         blocks.push(notStagedLine('session-lookup-failed'));
       } else if (kind.kind === 'root') {
+        // H1's PLAN LOCK section (scripts/hooks/lib/plan-lock-section.mjs), on every
+        // root request while a lock exists: the plan is the surface carrying ORDER and
+        // the user's written rulings, and delivery never gates (decision
+        // plan-lock-approved-plan-bound-at-exit-plan-mode-delivered-at-every-reentry).
+        // Not in the worker child: the section claims the one-shot markers, which the
+        // conductor's own session must see.
+        if (!inWorkerChild(env)) {
+          try {
+            const planLock = planLockSection({ cwd: root, source: 'opencode' }).context.trim();
+            if (planLock) blocks.push(planLock);
+          } catch (e) {
+            logLine(root, `context: plan lock section failed: ${errText(e)}`);
+            blocks.push(`PLAN LOCK UNAVAILABLE (${errText(e)}): the plan lock section is not stated this turn; check it with plan-lock.mjs --show.`);
+          }
+        }
         // Never inside the maintenance worker's own `opencode run` child: its root
         // context is not a new process boundary for the project, and a sweep there
         // would end the parent's live background dispatches (settle.mjs skips it too).

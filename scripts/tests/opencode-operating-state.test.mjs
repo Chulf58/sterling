@@ -651,3 +651,90 @@ test("a root session refreshes this project's registry row (last-seen and stack 
     rmSync(scratch, { recursive: true, force: true });
   }
 });
+
+// ---- the PLAN LOCK section (board 6766ec3e, GitHub #76 part 1) -------------
+
+function writePlanLock(dir, body) {
+  writeFileSync(join(dir, '.sterling', 'plan-lock.json'), typeof body === 'string' ? body : JSON.stringify(body));
+}
+
+const planLockBody = (planPath) => ({
+  schema_version: 1,
+  plan_path: planPath,
+  title: 'Fixture Plan',
+  approved_at: '2026-10-01T09:00:00.000Z',
+  approved_sha256: 'a'.repeat(64),
+  file_sha256_at_approval: 'a'.repeat(64),
+  approved_session_id: 's0',
+  approved_branch: 'main',
+  approved_head: 'deadbeef',
+  source: 'manual',
+});
+
+test('a root request carries the PLAN LOCK section H1 renders, on every request while the lock exists', async () => {
+  const { planLockSection } = await import(pathToFileURL(join(repo, 'scripts', 'hooks', 'lib', 'plan-lock-section.mjs')).href);
+  const dir = makeProject();
+  try {
+    writePlanLock(dir, planLockBody(join(dir, 'missing-plan.md')));
+    const expected = planLockSection({ cwd: dir, source: 'startup' }).context.trim();
+    assert.match(expected, /^PLAN LOCK: Fixture Plan — /, 'the lib renders the lock line');
+    assert.match(expected, /THE APPROVED PLAN GOVERNS THIS OBJECTIVE'S SCOPE/);
+    const h = handler(dir, { sessions: { ses_a: {} } });
+    for (const sessionID of ['ses_a', 'ses_a']) {
+      const i = input(sessionID);
+      await h.onContext(i);
+      assert.ok(textOf(i).includes(expected), 'the root context holds H1\'s PLAN LOCK text verbatim');
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a root request without a plan lock has no PLAN LOCK section; a malformed lock is stated, not silent', async () => {
+  const dir = makeProject();
+  try {
+    const none = input('ses_none');
+    await handler(dir, { sessions: { ses_none: {} } }).onContext(none);
+    assert.doesNotMatch(textOf(none), /PLAN LOCK/);
+    writePlanLock(dir, '{not json');
+    const bad = input('ses_bad');
+    await handler(dir, { sessions: { ses_bad: {} } }).onContext(bad);
+    assert.match(textOf(bad), /PLAN LOCK MALFORMED: \.sterling\/plan-lock\.json exists/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a child session and the maintenance worker child get no PLAN LOCK section, and the worker leaves the one-shot markers unclaimed', async () => {
+  const dir = makeProject();
+  try {
+    writePlanLock(dir, planLockBody(join(dir, 'missing-plan.md')));
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    const marker = join(dir, '.sterling', 'transient', 'plan-lock-released.json');
+    writeFileSync(marker, JSON.stringify({ reason: 'fixture release' }));
+    const make = (env) =>
+      contextMod.createContextHandler({
+        openStore: (p) => new SterlingStore(p),
+        now: () => NOW,
+        rootOf: () => dir,
+        fenced: async (_name, _root, fn) => fn(),
+        rotationRestore: async () => '',
+        sessionSync: async () => {},
+        pluginRoot: join(dir, 'no-such-plugin-root'),
+        getSession: () => ({ get: async ({ sessionID }) => (sessionID === 'ses_child' ? { id: sessionID, parentID: 'ses_root' } : { id: sessionID }) }),
+        env,
+      });
+    const child = input('ses_child', [userMsg('do the thing')]);
+    await make({ ...process.env, STERLING_MAINTENANCE_WORKER: '' }).onContext(child);
+    assert.doesNotMatch(textOf(child), /PLAN LOCK/);
+    const worker = input('ses_worker');
+    await make({ ...process.env, STERLING_MAINTENANCE_WORKER: '1' }).onContext(worker);
+    assert.doesNotMatch(textOf(worker), /PLAN LOCK/);
+    assert.equal(readFileSync(marker, 'utf8').includes('fixture release'), true, 'the worker did not claim the marker');
+    const root = input('ses_root');
+    await make({ ...process.env, STERLING_MAINTENANCE_WORKER: '' }).onContext(root);
+    assert.match(textOf(root), /PLAN LOCK RELEASED \(one-shot\): the plan lock was released — fixture release/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
