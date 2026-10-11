@@ -11,7 +11,7 @@ import { openDashboard } from './controller.js';
 import { githubStripRows, visibleBodyLines, AGENTS_TAB, type DashboardState } from './state.js';
 import { createGithubPoller } from './github-status.js';
 import { bannerLines, scenePixels } from './banner.js';
-import { detectThemeLevel, themeFor, type Theme } from './theme.js';
+import { detectThemeLevel, overlayBlankSgr, themeFor, type Theme } from './theme.js';
 import { clearPixels, draw, keyToEvent, mouseToEvent, paintPixels, windowBlock } from './render.js';
 import { composeSubagentBlock, createSubagentTracker, type BlockPixel, type SubagentBlock, type SubagentView } from './subagents.js';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
@@ -44,9 +44,14 @@ if (smoke) {
 
 // the colour level (theme.ts): STERLING_TUI_COLOR, else NO_COLOR, else what the
 // terminal supports. An unknown STERLING_TUI_COLOR value stops here, loud.
+// The overlay blanks a cell with the page background the ScreenBuffer writes
+// on this terminal, so a cleared avatar tile matches the page (issue #75). It is
+// read before the first draw: terminal-kit's fill writes its defaults into theme.fill.
 let theme: Theme;
+let blankSgr: string;
 try {
   theme = themeFor(detectThemeLevel(process.env, term.support ?? {}));
+  blankSgr = overlayBlankSgr(theme, term.palette.bgEscape);
 } catch (err) {
   console.error(`sterling-tui: ${(err as Error).message}`);
   process.exit(2);
@@ -171,7 +176,7 @@ function animate(): void {
   const block = subagentBlock(Math.floor(Date.now() / ANIMATION_MS), drawnState?.scroll ?? 0);
   // the layout moved since the last redraw: that redraw's successor repaints it
   if (layoutKey(block) !== pixelLayout) return;
-  painted = paintPixels(term, screenPixels(block), painted, trueColor, theme.blankSgr);
+  painted = paintPixels(term, screenPixels(block), painted, trueColor, blankSgr);
 }
 
 // what the last redraw drew: the 1 Hz tick skips a redraw that would draw the same
@@ -196,10 +201,10 @@ function redraw(onlyIfChanged = false): boolean {
   pixelLayout = key;
   forceFull = false;
   const pixels = screenPixels(block);
-  if (full && painted) clearPixels(term, painted, pixels, theme.blankSgr);
+  if (full && painted) clearPixels(term, painted, pixels, blankSgr);
   // the roster is the cached activation snapshot — the 1 Hz redraw never re-reads it
   draw(screen, state, { block, theme });
-  painted = paintPixels(term, pixels, full ? undefined : painted, trueColor, theme.blankSgr);
+  painted = paintPixels(term, pixels, full ? undefined : painted, trueColor, blankSgr);
   const running = shownView.active > 0 && block.pixels.length > 0;
   if (running && !animation) animation = setInterval(animate, ANIMATION_MS);
   else if (!running && animation) {

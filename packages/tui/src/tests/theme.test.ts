@@ -4,12 +4,14 @@
 // name on its horizon, and the overlay's page background.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectThemeLevel, themeFor, PLAIN_THEME, THEME_ENV, XTERM, PALETTE, NEON_EDGE, type Theme } from '../theme.js';
+import { detectThemeLevel, themeFor, overlayBlankSgr, PLAIN_THEME, THEME_ENV, XTERM, PALETTE, NEON_EDGE, type Theme } from '../theme.js';
 import { scenePixels, lerpStops, sceneText, sceneLayout, horizonLabel, bannerLines, FULL_SCENE_ROWS, COMPACT_SCENE_ROWS, ART_WIDTH, BANNER_ROWS } from '../banner.js';
 import { draw, paintPixels, clearPixels, type AttrLike } from '../render.js';
 import { composeSubagentBlock, type SubagentView } from '../subagents.js';
 import { tileCells, TILE_BG, TILE_COLS, fadeToTile, DONE_FADE } from '../avatars/index.js';
 import type { DashboardState } from '../state.js';
+import termkit from 'terminal-kit';
+import { PassThrough, Writable } from 'node:stream';
 
 test('detectThemeLevel: the env override wins, then NO_COLOR, then truecolour signals, then 256, else 16', () => {
   assert.equal(detectThemeLevel({ NO_COLOR: '1', COLORTERM: 'truecolor' }), 'plain', 'NO_COLOR beats truecolour support');
@@ -413,4 +415,37 @@ test('scene meets the page: the sky starts on the page black, and the body and t
   const px = scenePixels(60, FULL_SCENE_ROWS, 'x');
   assert.equal(px.find((p) => p.x === 0 && p.y === 0)!.fg, PALETTE.night, 'the top pixel of the corner is the page colour');
   assert.equal(themeFor('truecolor').blankSgr, `\x1b[48;5;${XTERM.background}m`);
+});
+
+// Issue #75: inside tmux and VS Code terminal-kit reports 16 colours and draws the
+// page's index 16 as ESC[40m (the palette black, dark grey in many terminal
+// themes), while the theme level is truecolor. A blank written as the raw
+// ESC[48;5;16m is #000000, and the delta draw never rewrites a cell blank on both
+// frames, so a cleared avatar tile stayed as a black rectangle.
+test('clearPixels blanks a tile with the page background the ScreenBuffer wrote, on every terminal kind (issue #75)', () => {
+  for (const generic of ['tmux', 'vscode', 'xterm-256color', 'linux']) {
+    let out = '';
+    // a Writable records each write as it happens (a PassThrough emits its data a tick later)
+    const sink = new Writable({ write: (chunk: Buffer, _enc, done) => { out += chunk.toString(); done(); } });
+    const stdout = Object.assign(sink, { isTTY: true, columns: 20, rows: 12 });
+    const term = termkit.createTerminal({ stdout, stdin: new PassThrough(), generic, appId: generic });
+    for (const theme of [themeFor('truecolor'), themeFor('256'), themeFor('16'), PLAIN_THEME]) {
+      const blank = overlayBlankSgr(theme, term.palette.bgEscape);
+      // the page as render.draw lays it: the theme's fill, delta-drawn by a real ScreenBuffer
+      const screen = new termkit.ScreenBuffer({ dst: term, width: 4, height: 1 });
+      // a copy: terminal-kit's fill writes its defaults into the attr object it is given
+      screen.fill({ attr: { ...theme.fill } });
+      out = '';
+      screen.draw({ delta: true });
+      const page = out.match(/^\x1b\[1;1H((?:\x1b\[[0-9;]*m)+) {4}$/)?.[1];
+      assert.ok(page !== undefined, `${generic}/${theme.level}: the buffer wrote one SGR and the blank page, got ${JSON.stringify(out)}`);
+      const painted = paintPixels(term, [{ x: 2, y: 9, ch: '▀', fg: '#ffffff', bg: TILE_BG }], undefined, false, blank);
+      out = '';
+      clearPixels(term, painted, [], blank);
+      assert.equal(out, `\x1b[0m${blank}\x1b[10;3H `, `${generic}/${theme.level}: a reset, the page SGR, the space`);
+      // the background each one leaves active; after the reset, none is the default
+      const bgOf = (sgr: string): string => sgr.match(/\x1b\[(?:4\d|10\d|48;5;\d+)m/g)?.at(-1) ?? '\x1b[49m';
+      assert.equal(bgOf(blank), bgOf(page), `${generic}/${theme.level}: the blank's bg is the page's bg`);
+    }
+  }
 });
