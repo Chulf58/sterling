@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1074,6 +1074,81 @@ test('session-event writers (no_capture / concept_designed / capture_pending) ap
       () => rootless.conceptDesigned(['x']),
       (e: Error) => e.message.includes('bin/no-capture.mjs / bin/concept-designed.mjs in the Sterling install root') && !e.message.includes('in the plugin clone')
     );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Board 86faf740: appendSessionEvents read, changed and rewrote session-events.json
+// with no lock, so an H16 append in flight was overwritten (the GitHub #64 class).
+// The holder below is a slow H16-style writer: it takes the shared kernel-held lock,
+// reads the register, waits, then writes its event. An unlocked no_capture written
+// during that wait is lost when the holder writes its stale copy.
+const SESSION_EVENTS_LIB = new URL('../../../../scripts/hooks/lib/session-events.mjs', import.meta.url).href;
+const SLOW_HOLDER = `
+const { withSessionEventsLock } = await import(process.argv[1]);
+const { existsSync, readFileSync, writeFileSync } = await import('node:fs');
+const [eventsPath, signal, holdMs] = [process.argv[2], process.argv[3], Number(process.argv[4])];
+withSessionEventsLock(eventsPath, () => {
+  const events = existsSync(eventsPath) ? JSON.parse(readFileSync(eventsPath, 'utf8')) : [];
+  writeFileSync(signal, 'held');
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, holdMs);
+  events.push({ kind: 'research_tool', detail: 'h16-in-flight', at: 'x' });
+  writeFileSync(eventsPath, JSON.stringify(events));
+});
+`;
+
+function startSlowHolder(eventsPath: string, holdMs: number): Promise<{ code: number | null; stderr: string }> {
+  const signal = `${eventsPath}.held-signal`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', SLOW_HOLDER, SESSION_EVENTS_LIB, eventsPath, signal, String(holdMs)], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => (stderr += chunk));
+  const done = new Promise<{ code: number | null; stderr: string }>((resolve) => child.on('close', (code) => resolve({ code, stderr })));
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(signal)) {
+    if (Date.now() > deadline) throw new Error(`the holder never took the lock: ${JSON.stringify(stderr.slice(0, 300))}`);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  }
+  return done;
+}
+
+test('session-event writers wait on the kernel-held session-events lock: a no_capture made while an H16 append holds it lands after that append, and neither is lost (board 86faf740)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-events-lock-'));
+  const store = new SterlingStore(join(dir, 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  const eventsPath = join(dir, '.sterling', 'transient', 'session-events.json');
+  try {
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(eventsPath, '[{"kind":"research_tool","detail":"before","at":"x"}]');
+    const holder = startSlowHolder(eventsPath, 600);
+    const t = Date.now();
+    tools.noCapture('declared while H16 held the lock');
+    assert.ok(Date.now() - t >= 300, 'no_capture waited for the holder instead of writing beside it');
+    const result = await holder;
+    assert.equal(result.code, 0, result.stderr);
+    const events = JSON.parse(readFileSync(eventsPath, 'utf8')) as { kind: string; detail: string }[];
+    assert.deepEqual(
+      events.map((e) => e.detail),
+      ['before', 'h16-in-flight', 'declared while H16 held the lock'],
+      'the H16 append and the no_capture both survive, in lock order'
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('session-event writers: an unparsable register throws, is left as it is, and nothing is written (board 86faf740)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-events-bad-'));
+  const store = new SterlingStore(join(dir, 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
+  const eventsPath = join(dir, '.sterling', 'transient', 'session-events.json');
+  try {
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(eventsPath, '[{"kind":"research_tool"');
+    assert.throws(() => tools.conceptDesigned(['weapons']), SyntaxError);
+    assert.equal(readFileSync(eventsPath, 'utf8'), '[{"kind":"research_tool"', 'the register is not replaced by the new events alone');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

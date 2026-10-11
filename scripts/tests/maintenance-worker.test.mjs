@@ -39,7 +39,14 @@ import {
   workerPaths,
   workerPrompt,
   WORKER_TOOLS,
+  WORKER_AGENT,
+  WORKER_AGENT_TOOLS,
   WORKER_DISALLOWED_TOOLS,
+  TOOLS_MISSING_RE,
+  SOURCE_FAILURE_RE,
+  isToolsMissing,
+  TEMPORARY_RE,
+  workerAgentDefinition,
   BACKOFF_MS,
   BATCH_MIN_ITEMS,
   BATCH_MAX_WAIT_MS,
@@ -72,7 +79,9 @@ function fixture() {
   mkdirSync(join(plugin, '.claude-plugin'), { recursive: true });
   mkdirSync(join(plugin, 'templates'), { recursive: true });
   mkdirSync(join(plugin, 'scripts'), { recursive: true });
+  mkdirSync(join(plugin, 'agent-templates'), { recursive: true });
   writeFileSync(join(plugin, '.claude-plugin', 'plugin.json'), '{"name":"sterling"}');
+  writeFileSync(join(plugin, 'agent-templates', 'librarian.md'), '---\nname: librarian\ntools: Read, Grep\n---\n\nLIBRARIAN BODY\n');
   writeFileSync(
     join(plugin, '.claude-plugin', 'sterling-mcp.json'),
     JSON.stringify({ mcpServers: { sterling: { command: '/usr/bin/node', args: ['/clone/packages/mcp-server/dist/main.js', '--store', '${CLAUDE_PROJECT_DIR}/.sterling/sterling.db'] } } })
@@ -258,19 +267,21 @@ test('[finding 2a] an item with an uncommitted change to any file_key is not lau
   }
 });
 
-test('builds the probed claude argv: Sonnet 5.5, medium effort, librarian, dontAsk, every tool named, every write denied, strict MCP, stream-json + verbose, budget cap', () => {
+test('builds the probed claude argv: Sonnet 5.5, medium effort, the worker agent, dontAsk, every tool named, every write denied, strict MCP, stream-json + verbose, budget cap', () => {
   const fx = fixture();
   try {
     const mcpConfig = resolveMcpConfig(fx.plugin, fx.project);
     assert.deepEqual(JSON.parse(mcpConfig), {
       mcpServers: { sterling: { command: '/usr/bin/node', args: ['/clone/packages/mcp-server/dist/main.js', '--store', `${fx.project}/.sterling/sterling.db`] } },
     }, "the plugin's own wiring, with ${CLAUDE_PROJECT_DIR} bound to THIS project's store");
-    const args = buildWorkerArgs({ prompt: 'P', mcpConfig });
+    const agentDefinition = workerAgentDefinition(fx.plugin);
+    const args = buildWorkerArgs({ prompt: 'P', mcpConfig, agentDefinition });
     assert.deepEqual(args, [
       '-p', 'P',
       '--model', 'claude-sonnet-5-5',
       '--effort', 'medium',
-      '--agent', 'librarian',
+      '--agents', agentDefinition,
+      '--agent', 'sterling-maintenance-worker',
       '--permission-mode', 'dontAsk',
       '--allowedTools', WORKER_TOOLS.join(','),
       '--disallowedTools', WORKER_DISALLOWED_TOOLS.join(','),
@@ -1369,7 +1380,7 @@ const ITEM_A = [{ id: 'A', file_keys: ['src/a.mjs'], feature_link: LINK, slug: '
 const lastRun = (fx) => JSON.parse(readFileSync(fx.paths.state, 'utf8')).last_run;
 
 test('[line-ref] the argv allows knowledge_line_ref_fix under both mounted names and neither is denied', () => {
-  const args = buildWorkerArgs({ prompt: 'P', mcpConfig: '{}' });
+  const args = buildWorkerArgs({ prompt: 'P', mcpConfig: '{}', agentDefinition: '{}' });
   const allowed = args[args.indexOf('--allowedTools') + 1].split(',');
   const denied = args[args.indexOf('--disallowedTools') + 1].split(',');
   for (const name of ['mcp__sterling__knowledge_line_ref_fix', 'mcp__plugin_sterling_sterling__knowledge_line_ref_fix']) {
@@ -2017,6 +2028,150 @@ test('[#56 re-judge] an owes_prose verdict from the judge-only worker is judged 
     assert.deepEqual([v.verdict, v.capability, v.reason], ['needs_conductor', WORKER_CAPABILITY, 'a new refusal path the article does not describe']);
     rmSync(fx.paths.lastLaunch);
     assert.equal(launch(fx, { spawn: fakeSpawn().fn, items: [ITEM('A', ['src/a.mjs'])] }).reason, 'queue_empty', 'judged once: the handoff now stands');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// GitHub #70: an agent's `tools` line caps the child's tools (measured on Claude
+// Code 2.1.296: --allowedTools and --tools add nothing outside it), so the
+// launch defines the worker's own agent with the worker's tools.
+test('[#70 web tools] the launch argv defines the worker agent through --agents with WebSearch and WebFetch in its tools, and runs as that agent', async () => {
+  const fx = fixture();
+  try {
+    const child = fakeClaude([resultEvent({ result: '' })]);
+    await runWorker({ ...eligibleRun(fx, ITEM_A), spawn: child.fn, spawnSync: CLEAN_GIT });
+    assert.equal(child.calls.length, 1);
+    const args = child.calls[0].args;
+    assert.equal(args[args.indexOf('--agent') + 1], WORKER_AGENT);
+    const agents = JSON.parse(args[args.indexOf('--agents') + 1]);
+    assert.deepEqual(Object.keys(agents), [WORKER_AGENT], 'the agent --agent names is the one --agents defines');
+    const def = agents[WORKER_AGENT];
+    assert.ok(def.tools.includes('WebSearch') && def.tools.includes('WebFetch'), 'the web tools are in the agent tools line');
+    assert.deepEqual(def.tools, WORKER_AGENT_TOOLS);
+    const allowed = args[args.indexOf('--allowedTools') + 1].split(',');
+    for (const t of allowed) assert.ok(def.tools.includes(t), `${t} is allowed and reachable through the agent's tools`);
+    assert.equal(def.prompt, 'LIBRARIAN BODY', "the librarian template's body, frontmatter dropped");
+    assert.equal(typeof def.description, 'string');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[#70 web tools] the shipped librarian template yields a worker agent body without frontmatter; a missing template or a missing definition is refused', () => {
+  const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const def = JSON.parse(workerAgentDefinition(repo))[WORKER_AGENT];
+  assert.ok(def.prompt.length > 100);
+  assert.doesNotMatch(def.prompt, /^---|\{\{MODEL\}\}|^tools:/m, 'no frontmatter reaches the prompt');
+  const fx = fixture();
+  try {
+    rmSync(join(fx.plugin, 'agent-templates'), { recursive: true });
+    assert.throws(() => workerAgentDefinition(fx.plugin), /cannot read the worker agent template/);
+    mkdirSync(join(fx.plugin, 'agent-templates'));
+    writeFileSync(join(fx.plugin, 'agent-templates', 'librarian.md'), 'no frontmatter here');
+    assert.throws(() => workerAgentDefinition(fx.plugin), /no frontmatter-delimited body/);
+  } finally {
+    fx.cleanup();
+  }
+  assert.throws(() => buildWorkerArgs({ prompt: 'P', mcpConfig: '{}' }), /needs the worker agent definition/);
+});
+
+const ISSUE_70_REASON = 'source unreachable: WebFetch and WebSearch are not available in this run, so the outside-source claims could not be re-checked; nothing written';
+/** Sol re-check (a): bare words ("server", "returned") are not a source failure; this is a missing tool. */
+const TOOL_SERVER_NOT_GRANTED = 'WebFetch is unavailable because the tool server returned not granted';
+/** Sol re-check (b): on a reconcile lane, HTTP 503 in a handoff names behaviour, not an outage. */
+const RECONCILE_HTTP_503 = 'the article does not describe how HTTP 503 responses are handled';
+/** Reasons that name the tool AND an outage of the source: temporary, never a missing tool. */
+const SOURCE_OUTAGES = [
+  'WebFetch was unavailable because the vendor returned HTTP 503',
+  'WebFetch is unavailable: the request timed out after 60s',
+  'WebSearch was unavailable: rate limit reached, try later',
+  'WebFetch is not available for this URL: connection refused',
+];
+
+test('[#70 handoff] TOOLS_MISSING_RE matches a missing web tool as the subject, never a source that is down', () => {
+  for (const r of [
+    'source unreachable: WebFetch and WebSearch are not available in this run, so the outside-source claims could not be re-checked; nothing written',
+    'web tools missing: WebFetch not available in this run',
+    'WebFetch is not granted in this session',
+    'the web tools were unavailable',
+  ]) assert.match(r, TOOLS_MISSING_RE, r);
+  for (const r of ['WebFetch returned 503, server unavailable', 'source unreachable: the docs site timed out', 'WebSearch found nothing; the vendor page is missing']) {
+    assert.doesNotMatch(r, TOOLS_MISSING_RE, r);
+  }
+  assert.match('WebFetch returned 503, server unavailable', TEMPORARY_RE, 'a down source stays temporary');
+  // Review finding (Sol, 5a3e0f46): both classifiers matched "unavailable"; a named source failure wins.
+  for (const r of SOURCE_OUTAGES) {
+    assert.match(r, SOURCE_FAILURE_RE, r);
+    assert.equal(isToolsMissing(r), false, r);
+  }
+  // Re-check finding (a): bare words are not evidence of an outage.
+  assert.doesNotMatch(TOOL_SERVER_NOT_GRANTED, SOURCE_FAILURE_RE);
+  assert.equal(isToolsMissing(TOOL_SERVER_NOT_GRANTED), true);
+  // Re-check finding (b): TEMPORARY_RE is unchanged, so behaviour prose about HTTP 503 is not temporary.
+  assert.doesNotMatch(RECONCILE_HTTP_503, TEMPORARY_RE);
+  assert.equal(isToolsMissing(ISSUE_70_REASON), true, "the issue's own reason is a missing tool");
+  assert.doesNotMatch(ISSUE_70_REASON, SOURCE_FAILURE_RE);
+});
+
+test('[#70 handoff] a web-lane verdict that says the web tools are missing is handed off once as needs_conductor; a down source stays a retry; another lane keeps the retry rule', async () => {
+  const fx = fixture();
+  try {
+    const items = [
+      { id: 'S1', lane: 'stale_research', file_keys: [], feature_link: LINK, slug: 'find-a' },
+      { id: 'S2', lane: 'refresh_reference', file_keys: [], feature_link: LINK, slug: 'find-a' },
+      { id: 'S3', lane: 'stale_research', file_keys: [], feature_link: LINK, slug: 'find-a' },
+      { id: 'R1', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' },
+      ...SOURCE_OUTAGES.map((_, i) => ({ id: `O${i}`, lane: i % 2 ? 'refresh_reference' : 'stale_research', file_keys: [], feature_link: LINK, slug: 'find-a' })),
+      { id: 'T1', lane: 'refresh_reference', file_keys: [], feature_link: LINK, slug: 'find-a' },
+      { id: 'R2', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' },
+    ];
+    const missing = ISSUE_70_REASON;
+    const v = (id, verdict, reason) => JSON.stringify({ item_id: id, verdict, reason });
+    const child = fakeClaude([
+      ...evidenceForA(),
+      resultEvent({
+        result: [
+          v('S1', 'retry', missing),
+          v('S2', 'needs_conductor', 'web tools missing: WebFetch not available in this run'),
+          v('S3', 'retry', 'WebFetch returned 503, server unavailable'),
+          v('R1', 'retry', missing),
+          ...SOURCE_OUTAGES.map((r, i) => v(`O${i}`, i % 2 ? 'needs_conductor' : 'retry', r)),
+          v('T1', 'retry', TOOL_SERVER_NOT_GRANTED),
+          v('R2', 'needs_conductor', RECONCILE_HTTP_503),
+        ].join('\n'),
+      }),
+    ]);
+    await runWorker({ ...eligibleRun(fx, items), spawn: child.fn, spawnSync: CLEAN_GIT });
+    const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
+    assert.deepEqual(verdicts.map((l) => [l.item_id, l.verdict, l.evidence ?? null]), [
+      ['S1', 'needs_conductor', true],
+      ['S2', 'needs_conductor', true],
+      ['S3', 'retry', null],
+      ['R1', 'retry', null],
+      ...SOURCE_OUTAGES.map((_, i) => [`O${i}`, 'retry', null]),
+      ['T1', 'needs_conductor', true],
+      ['R2', 'needs_conductor', true],
+    ]);
+    assert.equal(verdicts[0].reason, missing, 'the reason is carried to the conductor');
+    assert.equal(verdicts[0].claimed, 'retry');
+    const handoffs = handoffVerdicts(fx.project);
+    assert.deepEqual([...handoffs.keys()].sort(), ['R2', 'S1', 'S2', 'T1'], 'standing handoffs, so the next batch leaves them out');
+    assert.equal(lastRun(fx).retry_verdicts, 2 + SOURCE_OUTAGES.length, 'every source outage stays a retry, whichever verdict the child gave');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[#70 handoff] a tools-missing verdict without a read of the target record is unjudged and suppresses nothing', async () => {
+  const fx = fixture();
+  try {
+    const items = [{ id: 'S1', lane: 'stale_research', file_keys: [], feature_link: LINK, slug: 'find-a' }];
+    const child = fakeClaude([resultEvent({ result: JSON.stringify({ item_id: 'S1', verdict: 'retry', reason: 'WebSearch is not available in this run' }) })]);
+    await runWorker({ ...eligibleRun(fx, items), spawn: child.fn, spawnSync: CLEAN_GIT });
+    const verdicts = readJournal(fx).filter((l) => l.kind === 'verdict');
+    assert.deepEqual(verdicts.map((l) => [l.item_id, l.verdict, l.reason]), [['S1', 'unjudged', 'no evidence']]);
+    assert.equal(handoffVerdicts(fx.project).size, 0);
   } finally {
     fx.cleanup();
   }

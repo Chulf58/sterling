@@ -11,6 +11,7 @@
       "Edit(/scripts/tests/**)",
       "Edit(/packages/**/src/**)",
       "Edit(/scripts/**)",
+      "Write(/scripts/**)",
       "Read(~/code/*/.sterling/transient/**)",
       "Read(~/code/*/.sterling/opencode-plugin.log)"
     ]

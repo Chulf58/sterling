@@ -370,6 +370,19 @@ var ReportRefusal = class extends Error {
 };
 var PLACEHOLDER = "<project-path>";
 var UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+var CREDENTIAL = "<credential>";
+var EMAIL = "<email>";
+var SECRET_ASSIGN_RE = /((?<![A-Za-z0-9])(?:[A-Za-z0-9]+[_-])*(?:api_key|key|token|secret|password|passwd)["']?\s*[=:]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s"'`,;()<>]+)/gi;
+var AUTH_HEADER_RE = /((?<![A-Za-z0-9])Authorization["']?\s*[=:]\s*)(?:"[^"\n]*"|'[^'\n]*'|(?:(?:Bearer|Basic|Digest|Token)\s+)?[^\s"'`,;()<>]+)/gi;
+var CREDENTIAL_RES = [
+  /(?<![A-Za-z0-9])Bearer\s+[A-Za-z0-9._~+\/=-]{8,}/gi,
+  /(?<![A-Za-z0-9])Basic\s+(?=[A-Za-z0-9+\/._~=-]*(?:[0-9=+\/]|[a-z][A-Z]))[A-Za-z0-9+\/._~=-]{8,}/g,
+  /(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g,
+  /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}/g,
+  /(?<![A-Za-z0-9])xox[a-z]-[A-Za-z0-9-]{10,}/g,
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g
+];
+var EMAIL_RE = /[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}/g;
 var DELIMS = `\\s"'\`<>()\\[\\]{},;|`;
 var TOKEN_RE = new RegExp(`[^${DELIMS}]+`, "g");
 var escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -394,6 +407,11 @@ function isSterlingPath(token, sterlingPathExists) {
 function isSlashCommand(token) {
   return /^\/[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?$/.test(token.replace(/[.,:;!?]+$/, ""));
 }
+var TOOL_NAMES = ["WebSearch", "WebFetch", "Read", "Edit", "Write", "Bash", "Grep", "Glob", "Agent", "NotebookEdit"];
+function isToolNameList(token) {
+  const parts = token.replace(/[.,:;!?]+$/, "").split("/");
+  return parts.length > 1 && parts.every((p) => TOOL_NAMES.includes(p));
+}
 function standsAlone(text, at) {
   const atBoundary = (i) => i === 0 || /\s/.test(text[i - 1]);
   return atBoundary(at) || /["'`(]/.test(text[at - 1]) && atBoundary(at - 1);
@@ -406,10 +424,14 @@ function scrub(text, { projectRoot: projectRoot2, home, sterlingPathExists }) {
     out = out.replace(re, PLACEHOLDER);
   }
   out = out.replace(UUID_RE, "<id>");
-  return out.replace(TOKEN_RE, (tok, at, whole) => {
+  out = out.replace(AUTH_HEADER_RE, `$1${CREDENTIAL}`);
+  out = out.replace(SECRET_ASSIGN_RE, `$1${CREDENTIAL}`);
+  for (const re of CREDENTIAL_RES) out = out.replace(re, CREDENTIAL);
+  out = out.replace(TOKEN_RE, (tok, at, whole) => {
     if (!/[\\/]/.test(tok) || isSterlingPath(tok, sterlingPathExists)) return tok;
-    return isSlashCommand(tok) && standsAlone(whole, at) ? tok : PLACEHOLDER;
+    return (isSlashCommand(tok) || isToolNameList(tok)) && standsAlone(whole, at) ? tok : PLACEHOLDER;
   });
+  return out.replace(EMAIL_RE, EMAIL);
 }
 var EVIDENCE_HELP = `Each --evidence line is either a Sterling repo-relative path:line under ${STERLING_PREFIXES.join(" ")} that Sterling ships (e.g. scripts/lib/work-pr.mjs:99 or scripts/lib/work-pr.mjs:99-109), or a "double-quoted message" Sterling printed.`;
 function checkEvidenceLine(line, n, ctx) {
@@ -809,6 +831,8 @@ ${body}`);
     if (!entry2.labels.every((l) => kept.has(l.toLowerCase()))) {
       console.log(`report-issue: filed without labels: GitHub did not accept the labels (${entry2.labels.join(", ")}); they are in the issue body as the Labels line. A maintainer can apply them with report-issue --apply-labels.`);
     }
+  } else if (entry2.labels.length > 0) {
+    console.log(`report-issue: GitHub's response did not say which labels were applied (${entry2.labels.join(", ")}); check the issue, and a maintainer can apply them with report-issue --apply-labels.`);
   }
 }
 function removeSent(sent) {
@@ -845,13 +869,28 @@ function openReports(gh2) {
     incomplete = incomplete || found.incomplete_results === true;
     if (found.items.length < SEARCH_PAGE_SIZE) break;
   }
-  const reports = items.filter((i) => !i?.pull_request && Number.isInteger(i?.number) && typeof i?.body === "string" && lastFingerprint(i.body) !== null);
-  return { reports: reports.sort((a, b) => a.number - b.number), matched, read: items.length, incomplete };
+  const isReport = (i) => !i?.pull_request && Number.isInteger(i?.number) && typeof i?.body === "string" && lastFingerprint(i.body) !== null;
+  const reports = items.filter(isReport);
+  const seen = new Set(reports.map((i) => i.number));
+  let unindexed = 0;
+  for (let page = 1; ; page++) {
+    const listed = gh2.api("GET", `repos/${STERLING_ISSUE_REPO}/issues`, [["state", "open"], ["sort", "created"], ["direction", "desc"], ["per_page", String(SEARCH_PAGE_SIZE)], ["page", String(page)]]);
+    if (!Array.isArray(listed)) throw new TransportError(`gh at ${gh2.path}: the open issues listing returned no array`);
+    for (const i of listed.filter(isReport)) {
+      if (seen.has(i.number)) continue;
+      seen.add(i.number);
+      reports.push(i);
+      unindexed++;
+    }
+    if (listed.length < SEARCH_PAGE_SIZE) break;
+  }
+  return { reports: reports.sort((a, b) => a.number - b.number), matched, read: items.length + unindexed, incomplete, unindexed };
 }
 function printSearchNotes(found) {
   if (found.matched > found.read) {
-    console.log(`report-issue: ${found.matched} reports match but only the first ${found.read} were read (${SEARCH_MAX_PAGES} pages of ${SEARCH_PAGE_SIZE}); ${found.matched - found.read} were not reached.`);
+    console.log(`report-issue: ${found.matched} reports match but only ${found.read} were read (search up to ${SEARCH_MAX_PAGES} pages of ${SEARCH_PAGE_SIZE}, then the open-issue listing to its last page); ${found.matched - found.read} were not reached.`);
   }
+  if (found.unindexed > 0) console.log(`report-issue: ${found.unindexed} report(s) above came only from the open-issue listing: GitHub's search had not returned them (its index lags a new issue, or its page limit was reached).`);
   if (found.incomplete) console.log("report-issue: GitHub marked the search results incomplete; some reports may be missing from this list.");
 }
 var labelNames = (issue) => (issue.labels ?? []).map((l) => String(l?.name ?? l));
@@ -1021,6 +1060,9 @@ try {
 } catch (e) {
   if (e instanceof ReportRefusal) refuse(e.message);
   throw e;
+}
+if (report.title !== values.title.trim()) {
+  console.error(`report-issue: warning: the title changed in the scrub, so it will be sent as '${report.title}'. Reword the title if that no longer says what you meant.`);
 }
 var stamped = { ...st, project: projectSlug(scrub(st.projectName, scrubCtx)) };
 var entry = {
