@@ -4,7 +4,7 @@
 // name on its horizon, and the overlay's page background.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectThemeLevel, themeFor, overlayBlankSgr, PLAIN_THEME, THEME_ENV, XTERM, PALETTE, NEON_EDGE, type Theme } from '../theme.js';
+import { colorGenericFor, detectThemeLevel, themeFor, overlayBlankSgr, PLAIN_THEME, THEME_ENV, XTERM, PALETTE, NEON_EDGE, type Theme } from '../theme.js';
 import { scenePixels, lerpStops, sceneText, sceneLayout, horizonLabel, bannerLines, FULL_SCENE_ROWS, COMPACT_SCENE_ROWS, ART_WIDTH, BANNER_ROWS } from '../banner.js';
 import { draw, paintPixels, clearPixels, type AttrLike } from '../render.js';
 import { composeSubagentBlock, type SubagentView } from '../subagents.js';
@@ -448,4 +448,51 @@ test('clearPixels blanks a tile with the page background the ScreenBuffer wrote,
       assert.equal(bgOf(blank), bgOf(page), `${generic}/${theme.level}: the blank's bg is the page's bg`);
     }
   }
+});
+
+// Board a961af27: terminal-kit names the terminal from TERM_PROGRAM first and has
+// no config for tmux or vscode, so it reported 16 colours there and the ScreenBuffer
+// drew the page's index 16 as ESC[40m even with TERM=tmux-256color. main.ts now
+// rebuilds the terminal on the generic colorGenericFor names.
+test('under tmux and vscode with a 256-colour or truecolour env the page background is index 16, not ESC[40m (board a961af27)', () => {
+  type Rig = { term: ReturnType<typeof termkit.createTerminal>; written: { out: string } };
+  const build = (generic: string): Rig => {
+    const written = { out: '' };
+    const sink = new Writable({ write: (chunk: Buffer, _enc, done) => { written.out += chunk.toString(); done(); } });
+    const stdout = Object.assign(sink, { isTTY: true, columns: 20, rows: 12 });
+    return { term: termkit.createTerminal({ stdout, stdin: new PassThrough(), generic }), written };
+  };
+  const pageSgr = ({ term, written }: Rig): string => {
+    const screen = new termkit.ScreenBuffer({ dst: term, width: 4, height: 1 });
+    screen.fill({ attr: { ...themeFor('truecolor').fill } });
+    written.out = '';
+    screen.draw({ delta: true });
+    return written.out;
+  };
+  const cases: Array<[string, Record<string, string>, string]> = [
+    ['tmux', { TERM_PROGRAM: 'tmux', TERM: 'tmux-256color', COLORTERM: 'truecolor' }, 'xterm-truecolor'],
+    ['tmux', { TERM_PROGRAM: 'tmux', TERM: 'tmux-256color' }, 'xterm-256color'],
+    ['vscode', { TERM_PROGRAM: 'vscode', TERM: 'xterm-256color', COLORTERM: 'truecolor' }, 'xterm-truecolor'],
+  ];
+  for (const [guessed, env, want] of cases) {
+    const stock = build(guessed);
+    assert.equal(stock.term.support?.['256colors'], false, `${guessed}: terminal-kit's own guess is 16 colours`);
+    assert.ok(pageSgr(stock).includes('\x1b[40m'), `${guessed}: the stock terminal draws the page black as ESC[40m`);
+    const generic = colorGenericFor(env, stock.term.support);
+    assert.equal(generic, want, `${guessed} ${JSON.stringify(env)}`);
+    const rig = build(generic ?? guessed);
+    const page = pageSgr(rig);
+    assert.ok(!page.includes('\x1b[40m'), `${guessed}/${generic}: the page background is not ESC[40m, got ${JSON.stringify(page)}`);
+    assert.ok(page.includes(`\x1b[48;5;${XTERM.background}m`), `${guessed}/${generic}: the page background is palette index ${XTERM.background}, got ${JSON.stringify(page)}`);
+    assert.equal(overlayBlankSgr(themeFor('truecolor'), rig.term.palette.bgEscape), `\x1b[48;5;${XTERM.background}m`);
+  }
+});
+
+test('colorGenericFor leaves a genuine 16-colour terminal and an already-capable terminal-kit alone (board a961af27)', () => {
+  assert.equal(colorGenericFor({ TERM_PROGRAM: 'tmux', TERM: 'screen' }, {}), undefined, 'TERM=screen advertises no 256 colours');
+  assert.equal(colorGenericFor({ TERM: 'linux' }, {}), undefined);
+  assert.equal(colorGenericFor({ TERM: 'xterm-256color' }, { '256colors': true }), undefined, 'terminal-kit already reports 256');
+  assert.equal(colorGenericFor({ COLORTERM: 'truecolor' }, { trueColor: true }), undefined, 'terminal-kit already reports truecolour');
+  assert.equal(colorGenericFor({ COLORTERM: '24bit', TERM: 'screen' }, {}), 'xterm-truecolor');
+  assert.equal(colorGenericFor({ COLORTERM: 'rxvt-256color' }, {}), 'xterm-256color');
 });

@@ -53445,6 +53445,15 @@ function detectThemeLevel(env, support = {}) {
     return "256";
   return "16";
 }
+function colorGenericFor(env, support = {}) {
+  if (support["256colors"] === true || support.trueColor === true)
+    return void 0;
+  if (/^(truecolor|24bits?)$/.test(env.COLORTERM ?? ""))
+    return "xterm-truecolor";
+  if (/256/.test(env.TERM ?? "") || /256/.test(env.COLORTERM ?? ""))
+    return "xterm-256color";
+  return void 0;
+}
 var footerPlain = { dim: true };
 var PLAIN_THEME = {
   level: "plain",
@@ -56871,6 +56880,10 @@ if (storeIdx === -1 || !args[storeIdx + 1] || host !== "claude" && host !== "ope
 var storePath = args[storeIdx + 1];
 var termkit = await Promise.resolve().then(() => __toESM(require_termkit_no_lazy_require(), 1));
 var term = termkit.default.terminal;
+var colorGeneric = colorGenericFor(process.env, term.support ?? {});
+if (colorGeneric) {
+  term = termkit.default.createTerminal({ stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, generic: colorGeneric, isTTY: !!process.stdout.isTTY, processSigwinch: true });
+}
 if (smoke) {
   console.error(`sterling-tui smoke: terminal stack loaded (${term.width}x${term.height})`);
   process.exit(0);

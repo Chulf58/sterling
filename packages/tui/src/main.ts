@@ -11,7 +11,7 @@ import { openDashboard } from './controller.js';
 import { githubStripRows, visibleBodyLines, AGENTS_TAB, type DashboardState } from './state.js';
 import { createGithubPoller } from './github-status.js';
 import { bannerLines, scenePixels } from './banner.js';
-import { detectThemeLevel, overlayBlankSgr, themeFor, type Theme } from './theme.js';
+import { colorGenericFor, detectThemeLevel, overlayBlankSgr, themeFor, type Theme } from './theme.js';
 import { clearPixels, draw, keyToEvent, mouseToEvent, paintPixels, windowBlock } from './render.js';
 import { composeSubagentBlock, createSubagentTracker, type BlockPixel, type SubagentBlock, type SubagentView } from './subagents.js';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
@@ -34,7 +34,14 @@ if (storeIdx === -1 || !args[storeIdx + 1] || (host !== 'claude' && host !== 'op
 const storePath = args[storeIdx + 1];
 
 const termkit = await import('terminal-kit');
-const term = termkit.default.terminal;
+let term = termkit.default.terminal;
+// terminal-kit reads TERM_PROGRAM before TERM and maps tmux and VS Code to 16
+// colours; where the env advertises 256 or truecolour, build the terminal on
+// the matching generic so the body's palette colours are drawn, not approximated
+const colorGeneric = colorGenericFor(process.env, term.support ?? {});
+if (colorGeneric) {
+  term = termkit.default.createTerminal({ stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, generic: colorGeneric, isTTY: !!process.stdout.isTTY, processSigwinch: true });
+}
 
 if (smoke) {
   // prove the bundled terminal stack resolves (termconfig etc.) without a TTY

@@ -143,6 +143,23 @@ export function detectThemeLevel(env: Readonly<Record<string, string | undefined
   return '16';
 }
 
+/**
+ * The terminal-kit generic to build the terminal with when its own guess
+ * under-reports the colours the environment advertises, else undefined.
+ * terminal-kit names the terminal from TERM_PROGRAM before TERM, and has no
+ * config for 'tmux' or 'vscode', so it falls back to the 16-colour xterm
+ * generic even with TERM=tmux-256color or COLORTERM=truecolor; the ScreenBuffer
+ * then draws the page's palette index 16 as ESC[40m and approximates every
+ * other 256-palette colour. A real 16-colour terminal (TERM=screen, linux)
+ * advertises nothing here and keeps what terminal-kit chose.
+ */
+export function colorGenericFor(env: Readonly<Record<string, string | undefined>>, support: { trueColor?: boolean; '256colors'?: boolean } = {}): 'xterm-truecolor' | 'xterm-256color' | undefined {
+  if (support['256colors'] === true || support.trueColor === true) return undefined;
+  if (/^(truecolor|24bits?)$/.test(env.COLORTERM ?? '')) return 'xterm-truecolor';
+  if (/256/.test(env.TERM ?? '') || /256/.test(env.COLORTERM ?? '')) return 'xterm-256color';
+  return undefined;
+}
+
 // one object for both footer roles: render draws a run of identical attr objects as one put
 const footerPlain: AttrLike = { dim: true };
 
