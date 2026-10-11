@@ -1,8 +1,9 @@
-// scripts/plan-lock.mjs refuses any token that does not belong to its verb.
-// Why: OpenCode's Plan agent may run exactly `node <root>/bin/plan-lock.mjs --plan *`,
-// and an OpenCode shell pattern's `*` matches the whole rest of the command line
-// (finding how-does-opencode-v2-override-its-built-in-plan-agent-and-ho), so the
-// script, not the rule, has to refuse `--plan x --release` and its kin.
+// scripts/plan-lock.mjs refuses any token that does not belong to its verb, so a
+// mistyped or pasted command never mixes verbs or carries a flag that is silently
+// ignored. This is argument hygiene, not a shell boundary: OpenCode's Plan agent
+// runs only exact literal commands (--bind-pending, see
+// plan-lock-bind-pending.test.mjs), because the shell has already run any
+// $(...), redirect or separator before argv reaches this script.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';

@@ -67,6 +67,9 @@ test('the registry declares plan as OpenCode-only with its destination, and the 
   assert.equal(plan.opencode_full.path, PLAN_REL);
   assert.equal(plan.opencode_full.mode, 'primary');
   assert.equal(plan.opencode, undefined, 'no portable copy: it would be written to the same path');
+  const bashKeys = Object.keys(plan.opencode_full.permission.bash);
+  assert.equal(bashKeys[0], '*');
+  assert.deepEqual(bashKeys.slice(1).filter((k) => k.includes('*')), [], 'every allowed plan command is an exact literal');
   assert.ok(!claudeAgentEntries(registry).some((a) => a.name === 'plan'));
   assert.deepEqual(checkRegistryConsistency({ templatesDir: join(repoRoot, 'agent-templates'), registryPath: join(repoRoot, 'agent-templates', 'registry.json') }), []);
   const target = mkdtempSync(join(tmpdir(), 'claude-agents-'));
@@ -113,7 +116,7 @@ test('install writes .opencode/agents/plan.md: primary, read-only permissions wi
   const S = fwd(repoRoot);
   const fm = text.match(/^---\n([\s\S]*?)\n---\n/)[1].split('\n');
   assert.match(fm[0], /^description: Sterling's planning agent for OpenCode\. Plans only, never implements\./);
-  assert.deepEqual(fm.slice(1, 22), [
+  assert.deepEqual(fm.slice(1, 23), [
     'mode: primary',
     'permission:',
     '  edit:',
@@ -127,7 +130,8 @@ test('install writes .opencode/agents/plan.md: primary, read-only permissions wi
     '    "sterling/implementor": deny',
     '  bash:',
     '    "*": deny',
-    `    "node ${S}/bin/plan-lock.mjs --plan *": allow`,
+    `    "node ${S}/bin/plan-lock.mjs --bind-pending": allow`,
+    `    "node ${S}/bin/plan-lock.mjs --bind-pending --force": allow`,
     `    "node ${S}/bin/plan-lock.mjs --show": allow`,
     `    "mkdir -p ${P}/.sterling/plans": allow`,
     '    "git status": allow',
@@ -139,7 +143,9 @@ test('install writes .opencode/agents/plan.md: primary, read-only permissions wi
   assert.ok(fm.includes('  sterling_board_add: deny'));
   assert.ok(!fm.some((l) => /^model:/.test(l)), 'no model pin: the plan agent runs on the model the user picks');
   // the body runs exactly the commands the rules allow
-  assert.ok(text.includes(`node ${S}/bin/plan-lock.mjs --plan ${P}/.sterling/plans/<slug>.md`));
+  assert.ok(text.includes(`node ${S}/bin/plan-lock.mjs --bind-pending\``));
+  assert.ok(text.includes(`node ${S}/bin/plan-lock.mjs --bind-pending --force\``));
+  assert.doesNotMatch(text, /plan-lock\.mjs --plan /, 'the body never tells the agent to pass a path');
   assert.ok(text.includes(`node ${S}/bin/plan-lock.mjs --show`));
   assert.ok(text.includes(`mkdir -p ${P}/.sterling/plans`));
   assert.doesNotMatch(text, /\{\{[A-Z_]+\}\}/, 'no install token survives');
@@ -149,6 +155,17 @@ test('install writes .opencode/agents/plan.md: primary, read-only permissions wi
   assert.deepEqual(git(dir, ['status', '--porcelain', '--untracked-files=all']).split('\n').filter(Boolean), []);
   // the per-agent store guard covers the overridden built-in too
   assert.ok(JSON.parse(readFileSync(join(dir, '.opencode', 'opencode.json'), 'utf8')).agent.plan);
+  // EXACT LITERALS ONLY (anti-pattern
+  // an-opencode-bash-permission-with-a-trailing-cannot-be-made-s): the shell runs
+  // $(...), redirects and separators before a script sees argv, so a `*` in an
+  // allow rule admits side effects no argument check can refuse. The leading
+  // deny-all is the one wildcard.
+  const bashStart = fm.indexOf('  bash:');
+  const bashRules = [];
+  for (let i = bashStart + 1; i < fm.length && fm[i].startsWith('    '); i++) bashRules.push(fm[i]);
+  assert.equal(bashRules[0], '    "*": deny');
+  assert.ok(bashRules.length > 1);
+  for (const rule of bashRules.slice(1)) assert.ok(!rule.includes('*'), `bash rule carries a wildcard: ${rule}`);
   const again = run(dir, home);
   assert.equal(rowOf(again, PLAN_REL)?.status, 'matches');
   assert.equal(readFileSync(join(dir, PLAN_REL), 'utf8'), text);
