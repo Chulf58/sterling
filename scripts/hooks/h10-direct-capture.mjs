@@ -698,9 +698,11 @@ try {
   // release rename-back both take the SAME lock H7's append now takes
   // (withFileLock, scripts/hooks/lib/settlement.mjs) — "H7's append AND
   // H10's claim/union writes" share ONE lock around touches.json, so an H7
-  // appending mid-claim serializes instead of racing the rename. A lock that
-  // cannot be acquired within its short deadline degrades to the pre-lock
-  // unlocked behavior (never hangs the Stop, P1) and records check_skipped.
+  // appending mid-claim serializes instead of racing the rename. The lock is
+  // the kernel-held one from withSessionEventsLock; a lock still held after
+  // 5 s records check_skipped (h10-touches-lock) and throws touches_lock_held
+  // to the outer catch, which skips this Stop's duties loudly and leaves
+  // touches.json (or the claim) for the next Stop. Nothing is written unlocked.
   const touchesClaimPath = `${touchesPath}.claim`;
   let touches = [];
   withFileLock(

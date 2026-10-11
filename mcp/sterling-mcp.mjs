@@ -28916,7 +28916,7 @@ import { posix } from "node:path";
 var WORKER_STAMP_KEY = "worker_stamp";
 var WORKER_FIELD_ALLOW_LIST = {
   reconcile_needed: {
-    feature_article: ["files", "history", "live_test_refs", "what_it_does", "intended_behavior"],
+    feature_article: ["files", "history", "live_test_refs", "what_it_does", "intended_behavior", "current_ac"],
     reference_material: ["summary", "source_date", "capture_date"]
   },
   state_review: {

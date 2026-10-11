@@ -51,87 +51,49 @@ import { join, dirname } from 'node:path';
 // is already a workspace dependency hooks bundle at build time).
 import { buildReconcileText } from '@sterling/store';
 import { isForeignTree } from './working-tree.mjs';
+import { SESSION_EVENTS_LOCK_HELD, withSessionEventsLock } from './session-events.mjs';
 
-// MUTUAL EXCLUSION around touches.json's read-modify-write (R3 round-4
-// fixer, board c198866d): the earlier attempt to close the H7-vs-H7 race by
-// changing the ON-DISK SHAPE (JSONL / one-file-per-touch) broke multiple
-// already-green frozen tests that spawn the real H7 hook and then
-// `JSON.parse` touches.json expecting a top-level array — so the shape stays
-// exactly what it always was, and the race is closed with a LOCK around the
-// existing RMW instead. Same lock-dir idiom already used elsewhere in this
-// codebase (scripts/hooks/lib/delivery.mjs's withFileLock): mkdirSync on a sibling `<path>.lock` DIRECTORY is
-// atomic (EEXIST on contention) on every platform Node supports, so it
-// doubles as a lock with no extra dependency — chosen over a `wx`-flag
-// lockFILE only because it is the codebase's existing precedent for exactly
-// this class of transient-register RMW, and reusing it keeps one idiom
-// instead of two. Age-based staleness ONLY, never PID-liveness (anti_pattern
-// 8e603e23: a recycled PID gives a false lock identity) — hooks are
-// short-lived, so a lock older than LOCK_STALE_MS is a crashed holder's
-// leftover, broken loud (console.error) and reclaimed. Contention retries
-// briefly (LOCK_DEADLINE_MS, polling every LOCK_POLL_MS — a handful of
-// attempts, tens of milliseconds total): a Stop/PostToolUse hook must never
-// hang the session waiting on a lock (P1). On final failure this DEGRADES TO
-// THE UNLOCKED RMW (today's pre-fix behavior) rather than blocking or
-// erroring — a rarely-lost touch under pathological contention is exactly
-// the pre-fix world, and it is netted by Arm 2 (read-time drift) and the
-// pre-merge backstop; a silent lock-wait-forever would be worse. `onTimeout`
-// lets the caller record a loud, non-fatal check_skipped naming the timeout
-// (never required — a caller with no store handle simply omits it).
-const LOCK_DEADLINE_MS = 150;
-const LOCK_STALE_MS = 3000;
-const LOCK_POLL_MS = 20;
-
-/** Synchronous, non-busy wait — no async available in a hook body. */
-function sleepMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
+// MUTUAL EXCLUSION around touches.json's read-modify-write (board c198866d
+// R3 round-4 fixer kept the on-disk shape a whole JSON array and closed the
+// H7-vs-H7 race with a lock instead). The lock is the kernel-held one from
+// session-events.mjs (decision
+// session-events-and-register-locks-are-kernel-held-never-reclaimed-by-age):
+// a BEGIN IMMEDIATE on `<touches.json>.lock.db`, released by COMMIT, by
+// closing the connection or by the OS when the holder dies, so a live holder
+// is never displaced by age and a dead one leaves nothing to reclaim. A
+// contender waits up to TOUCHES_LOCK_TIMEOUT_MS (user-ruled 2026-10-11, "Wait
+// 5 s, then warn", board 86faf740); if the lock is still held it runs NOTHING
+// and throws TOUCHES_LOCK_HELD, so the caller skips that one write and says
+// so loudly. There is no unlocked fallback: the age-based mkdir lock this
+// replaces stole a lock older than 3 s and ran fn() unlocked after 150 ms.
+export const TOUCHES_LOCK_HELD = 'touches_lock_held';
+const TOUCHES_LOCK_TIMEOUT_MS = 5000;
 
 /**
- * Runs `fn` (a synchronous read-modify-write of `targetPath`) holding a
- * sibling `<targetPath>.lock` directory as a mutual-exclusion lock. Shared by
- * H7 (the append) and H10 (the claim/union/release) so touches.json only
- * ever has ONE writer at a time — see the module header for the design.
+ * Runs `fn` (a synchronous read-modify-write of `targetPath`) holding the
+ * kernel-held lock on `<targetPath>.lock.db`. Shared by H7 (the append) and
+ * H10 (the claim/union/release) so touches.json only ever has ONE writer at a
+ * time. On timeout, `onTimeout` (optional, best-effort: a caller records its
+ * check_skipped row there) runs, then an Error with code TOUCHES_LOCK_HELD is
+ * thrown and fn never runs.
  */
-export function withFileLock(targetPath, fn, { onTimeout } = {}) {
-  const lockPath = `${targetPath}.lock`;
-  const deadline = Date.now() + LOCK_DEADLINE_MS;
-  let acquired = false;
-  while (Date.now() < deadline) {
-    try {
-      mkdirSync(lockPath);
-      acquired = true;
-      break;
-    } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      try {
-        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
-          console.error(`settlement: touches lock '${lockPath}' is stale (>${LOCK_STALE_MS}ms) — breaking it (a crashed holder's leftover)`);
-          rmSync(lockPath, { recursive: true, force: true });
-          continue; // retake immediately — no need to sleep first
-        }
-      } catch {
-        continue; // lock vanished between the EEXIST and the stat — retry now
-      }
-      sleepMs(LOCK_POLL_MS);
-    }
-  }
-  if (!acquired && onTimeout) {
-    try {
-      onTimeout();
-    } catch {
-      // recording the timeout is itself best-effort — see each caller
-    }
-  }
+export function withFileLock(targetPath, fn, { onTimeout, timeoutMs = TOUCHES_LOCK_TIMEOUT_MS } = {}) {
   try {
-    return fn();
-  } finally {
-    if (acquired) {
+    return withSessionEventsLock(targetPath, fn, { timeoutMs });
+  } catch (e) {
+    if (e?.code !== SESSION_EVENTS_LOCK_HELD) throw e;
+    if (onTimeout) {
       try {
-        rmSync(lockPath, { recursive: true, force: true });
-      } catch {
-        // best-effort release; a leftover lock self-heals via the staleness check
+        onTimeout();
+      } catch (recordErr) {
+        console.error(`settlement: recording the touches lock timeout failed (${recordErr?.message ?? recordErr})`);
       }
     }
+    const err = new Error(
+      `touches register lock ${targetPath}.lock.db is held by another writer that is still running; waited ${timeoutMs}ms, skipped this write and wrote nothing`
+    );
+    err.code = TOUCHES_LOCK_HELD;
+    throw err;
   }
 }
 

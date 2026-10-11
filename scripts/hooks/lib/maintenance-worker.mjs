@@ -9,10 +9,13 @@
 // That starts ONE detached node runner (scripts/maintenance-worker-run.mjs),
 // which runs a headless `claude -p` librarian on Claude Sonnet 5.5 at MEDIUM
 // effort over a bounded, lane-fair batch. The child closes already-paid items
-// (maintenance_remove, or resolves on its completing write), writes the small
+// (maintenance_remove, or resolves on its completing write), writes the
 // factual refresh itself (files[], entry marks, state, source_date, one
-// corrected sentence) and hands every item that needs a ruling or new prose to
-// the conductor as a 'needs_conductor' verdict with a reason. The runner
+// corrected sentence, and on reconcile_needed the new behaviour prose the
+// item's diff shows) and hands every item that needs a ruling to the
+// conductor as a 'needs_conductor' verdict with a reason. The runner puts
+// each reconcile_needed and state_review item's git diff in the prompt
+// (ITEM DIFFS below), since the child has no shell. The runner
 // streams the child's output, journals every write and close and every
 // verdict to a JSONL file, records the run's outcome and cost in its state
 // file, releases the lock when the child exits (or is killed after
@@ -49,15 +52,15 @@
 // journal, stamp check and evidence gate.
 //
 // WHAT IT DOES NOT DO: create, retire, supersede, split or link records, write
-// behaviour prose beyond one corrected sentence, or retry a close the server
-// refused. It does not guarantee an edit is right: every write is stamped and
+// behaviour prose outside a reconcile_needed item's own target or beyond what
+// the diff and the code show, or retry a close the server refused. It does not guarantee an edit is right: every write is stamped and
 // journalled, and H1 shows the journal count for a sample spot check
 // (decision point (4)).
 //
 // DEPENDENCY-FREE (node builtins only): bundled into H1/H10/H19 and imported
 // directly by the runner script, so it must not import a workspace package.
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
@@ -106,8 +109,11 @@ export const POLICY_VERSION = 1;
 /** Capability marker on every verdict line this worker writes. A
  *  needs_conductor verdict stands only with it, so an owes_prose verdict from
  *  the judge-only worker is judged once more under the write grant (change
- *  (ix)); rotation carries the marker forward. */
-export const WORKER_CAPABILITY = 'factual_refresh_v1';
+ *  (ix)); rotation carries the marker forward. v2 (decision
+ *  maintenance-worker-gets-item-diffs-and-writes-new-behaviour-prose): a
+ *  factual_refresh_v1 handoff was made without the item's diff or the prose
+ *  grant, so it is judged once more too. */
+export const WORKER_CAPABILITY = 'diff_and_prose_v2';
 /** A burst of commits/Stops inside this window starts one worker, not many. */
 export const DEBOUNCE_MS = 2 * 60_000;
 /** No relaunch this long after a run that failed (error_max_budget included). */
@@ -143,8 +149,9 @@ const mcpPlugin = (name) => `mcp__plugin_sterling_sterling__${name}`;
 /** Every tool the child may call. dontAsk alone denies MCP calls (probe (B)),
  *  so each is named. Read/Grep are the librarian's own read-only tools and
  *  WebSearch/WebFetch re-check stale_research and refresh_reference claims
- *  (user ruling (3)); no Bash, so the child judges from the item, the record
- *  and the committed files rather than from git diffs. The update-shaped
+ *  (user ruling (3)); no Bash, so the child judges from the item, the record,
+ *  the committed files and the diffs the runner puts in the prompt
+ *  (itemDiffSection). The update-shaped
  *  knowledge writes are granted for the small factual refresh (ruling (1),
  *  design (c)); the worker's own Sterling server limits each one to the batch
  *  policy before it runs. knowledge_line_ref_fix can only move a path:line
@@ -450,6 +457,108 @@ export function dirtyPaths(root, paths, spawnSync = nodeSpawnSync, prefix = '') 
   return dirty;
 }
 
+// ITEM DIFFS (decision maintenance-worker-gets-item-diffs-and-writes-new-behaviour-prose).
+// The child has no Bash, so the runner puts the git diff behind each
+// reconcile_needed and state_review item in the prompt. THE BASE: a target's
+// file_baselines are sha256 hashes of each owned file's bytes when the record
+// was last settled, so the base for a path is the newest commit (walking back
+// at most DIFF_BASE_WALK commits that touch it) whose copy of the file hashes
+// to that baseline. It is the exact content the record was written against.
+// A timestamp base (the commit before the record's updated_at, or the item's
+// created_at) is only a guess: a record is often settled before its files are
+// committed, and folded items keep the oldest created_at. The queue item
+// carries no commit of its own (settlement mints reconcile_needed without a
+// measured_at_head). When no commit matches, the item says so ("no diff
+// available") instead of falling back to a guessed base. Only the item's own
+// file_keys are diffed; each item's text is capped at DIFF_ITEM_MAX_CHARS and
+// the run at DIFF_RUN_MAX_CHARS, and a cut says so in the prompt.
+export const DIFF_LANES = ['reconcile_needed', 'state_review'];
+export const DIFF_ITEM_MAX_CHARS = 4_000;
+export const DIFF_RUN_MAX_CHARS = 24_000;
+export const DIFF_BASE_WALK = 50;
+
+/** The target's baselines for the item's own file_keys, read at launch (the
+ *  runner has no store), or undefined when the item gets no diff from it. */
+function itemBaselines(store, t) {
+  if (!store || !DIFF_LANES.includes(t.system_reason) || !t.feature_link) return undefined;
+  const all = store.get(t.feature_link)?.file_baselines;
+  const own = (t.file_keys ?? []).filter((k) => typeof all?.[k] === 'string');
+  return Object.fromEntries(own.map((k) => [k, all[k]]));
+}
+
+const gitFail = (r) => (r.error ? r.error.code ?? r.error.message : `exit ${r.status}: ${String(r.stderr ?? '').trim().slice(0, 120)}`);
+
+/** The newest commit (of at most DIFF_BASE_WALK touching `path`) whose copy of
+ *  `path` hashes to `baseline`, as {base}, or {base: null, why}. `prefix` is
+ *  the root's place in the git top-level (gitState), since a `<commit>:<path>`
+ *  name is read from the top-level. */
+export function resolveDiffBase(root, path, baseline, prefix = '', spawnSync = nodeSpawnSync) {
+  const log = spawnSync('git', ['-C', root, 'log', '-n', String(DIFF_BASE_WALK), '--format=%H', 'HEAD', '--', path], { encoding: 'utf8', timeout: 30_000 });
+  if (log.error || log.status !== 0) return { base: null, why: `git log failed (${gitFail(log)})` };
+  const commits = String(log.stdout ?? '').split('\n').filter((c) => /^[0-9a-f]{40,64}$/.test(c));
+  if (!commits.length) return { base: null, why: 'no commit touches it' };
+  const cat = spawnSync('git', ['-C', root, 'cat-file', '--batch'], { input: commits.map((c) => `${c}:${prefix}${path}`).join('\n') + '\n', timeout: 30_000, maxBuffer: 256 * 1024 * 1024 });
+  if (cat.error || cat.status !== 0) return { base: null, why: `git cat-file failed (${gitFail(cat)})` };
+  const out = Buffer.isBuffer(cat.stdout) ? cat.stdout : Buffer.from(String(cat.stdout ?? ''));
+  let at = 0;
+  for (const commit of commits) {
+    const nl = out.indexOf(0x0a, at);
+    if (nl < 0) break;
+    const header = out.subarray(at, nl).toString('utf8').split(' ');
+    at = nl + 1;
+    if (header[1] !== 'blob') continue; // "<name> missing": the path does not exist in that commit
+    const size = Number(header[2]);
+    const hash = createHash('sha256').update(out.subarray(at, at + size)).digest('hex');
+    at += size + 1;
+    if (hash === baseline) return { base: commit };
+  }
+  return { base: null, why: `none of the last ${commits.length} commits touching it holds the content the target was settled against` };
+}
+
+/** One item's diff text: per path, the diff from its resolved base to HEAD,
+ *  or a "no diff available" line saying why. Uncapped; itemDiffSection caps. */
+export function itemDiffText(root, item, prefix = '', spawnSync = nodeSpawnSync) {
+  const keys = [...(item.file_keys ?? [])].map(String).sort();
+  if (!keys.length) return 'no diff available: the item names no files';
+  if (!item.baselines || typeof item.baselines !== 'object') return 'no diff available: no settled baseline was recorded for this item at launch';
+  return keys
+    .map((path) => {
+      const baseline = item.baselines[path];
+      if (typeof baseline !== 'string') return `--- ${path}: no diff available: the target holds no baseline for this path`;
+      const { base, why } = resolveDiffBase(root, path, baseline, prefix, spawnSync);
+      if (!base) return `--- ${path}: no diff available: ${why}`;
+      const d = spawnSync('git', ['-C', root, 'diff', '--no-color', '--no-ext-diff', base, 'HEAD', '--', path], { encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
+      if (d.error || d.status !== 0) return `--- ${path}: no diff available: git diff failed (${gitFail(d)})`;
+      const body = String(d.stdout ?? '').trimEnd();
+      return `--- ${path}: base ${base.slice(0, 12)} (the commit matching the target's baseline)\n${body || 'unchanged since that base'}`;
+    })
+    .join('\n');
+}
+
+/** The DIFFS prompt section for the batch's reconcile_needed and state_review
+ *  items, or '' when the batch has none. Each item's text is cut at
+ *  `itemMax` chars and the whole section at `runMax`; a cut says so. */
+export function itemDiffSection(root, items, { spawnSync = nodeSpawnSync, itemMax = DIFF_ITEM_MAX_CHARS, runMax = DIFF_RUN_MAX_CHARS } = {}) {
+  const diffItems = (items ?? []).filter((t) => DIFF_LANES.includes(t.lane ?? 'reconcile_needed'));
+  if (!diffItems.length) return '';
+  const needsGit = diffItems.some((t) => t.baselines && Object.keys(t.baselines).length);
+  const git = needsGit ? gitState(root, spawnSync) : { prefix: '' };
+  let left = runMax;
+  const blocks = diffItems.map((t) => {
+    if (left <= 0) return `### ${t.id}\n[diff omitted: this run's diff budget of ${runMax} chars is used up]`;
+    const full = git ? itemDiffText(root, t, git.prefix, spawnSync) : 'no diff available: git could not report HEAD';
+    const cap = Math.min(itemMax, left);
+    const shown = full.length > cap ? `${full.slice(0, cap)}\n[diff truncated: ${cap} of ${full.length} chars shown]` : full;
+    left -= Math.min(full.length, cap);
+    return `### ${t.id}\n${shown}`;
+  });
+  return (
+    `\nDIFFS (from the runner: for each reconcile_needed and state_review item, the git diff of the item's own file_keys from the commit whose copy of each file matches the target's file_baselines, to HEAD; "no diff available" says why there is none):\n` +
+    blocks.join('\n') +
+    '\n'
+  );
+}
+
 /** Is `pid` a live process? signal 0 probes without delivering: EPERM means it
  *  exists but is not ours to signal. */
 export function pidAlive(pid) {
@@ -584,14 +693,16 @@ export function workerAgentDefinition(pluginRoot) {
 /** The shipped prompt, plus the ELIGIBLE batch the launcher chose (clean,
  *  unjudged, lane-fair) when it passed one, with each item's lane and target,
  *  plus every standing judged verdict (needs_conductor, refused) so the child
- *  skips those unless they changed. */
-export function workerPrompt(pluginRoot, root, eligible = null) {
+ *  skips those unless they changed. `diffs` is the runner's DIFFS section
+ *  (itemDiffSection), placed after the batch. */
+export function workerPrompt(pluginRoot, root, eligible = null, diffs = '') {
   let prompt = readWorkerPrompt(pluginRoot);
   if (eligible) {
     prompt +=
       `\nELIGIBLE (work ONLY these items; every other open item is dirty against HEAD, already judged or left for a later run, so leave it alone):\n` +
       eligible.items.map((t) => `- ${t.id} lane ${t.lane ?? 'reconcile_needed'} target ${t.feature_link ?? 'none'} file_keys ${sortedKeys(t.file_keys)}`).join('\n') +
-      '\n';
+      '\n' +
+      diffs;
   }
   const judged = [...judgedVerdicts(root)].map(([id, v]) => `- ${id} ${v.verdict} file_keys ${v.keys}${v.verdict === 'refused' ? ` at HEAD ${v.head}` : ''}`);
   if (judged.length) prompt += `\nALREADY JUDGED (skip each unless its current file_keys differ from the ones listed):\n${judged.join('\n')}\n`;
@@ -825,7 +936,10 @@ function launchWorker(opts) {
           token,
           head: git.head,
           ...runnerHost,
-          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })),
+          items: batch.map((t) => {
+            const baselines = itemBaselines(opts.store, t);
+            return { id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t), ...(baselines ? { baselines } : {}) };
+          }),
           policy_version: POLICY_VERSION,
           run_id: randomUUID(),
           policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
@@ -1202,7 +1316,7 @@ export async function runWorker(opts) {
    *  (change (vii)); the OpenCode runner has no per-run budget flag, so only
    *  the timeout bounds it. */
   const buildRun = (eligible) => {
-    const prompt = workerPrompt(opts.pluginRoot, opts.root, eligible);
+    const prompt = workerPrompt(opts.pluginRoot, opts.root, eligible, eligible ? itemDiffSection(opts.root, eligible.items, { spawnSync: opts.spawnSync ?? nodeSpawnSync }) : '');
     const mcpConfig = resolveMcpConfig(opts.pluginRoot, opts.root, eligible ? { path: resolve(paths.eligible), token: eligible.token } : null);
     const host = hostOf(eligible);
     if (host === 'opencode') {

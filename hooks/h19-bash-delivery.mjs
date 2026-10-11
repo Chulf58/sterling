@@ -11437,7 +11437,7 @@ import { statSync as statSync4 } from "node:fs";
 import { spawn } from "node:child_process";
 
 // scripts/hooks/lib/maintenance-worker.mjs
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync3, existsSync as existsSync6, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync8, renameSync as renameSync3, rmSync as rmSync4, rmdirSync as rmdirSync2, statSync as statSync3, writeFileSync as writeFileSync3, appendFileSync } from "node:fs";
 import { dirname as dirname6, isAbsolute as isAbsolute2, join as join12, resolve as resolve5, sep } from "node:path";
@@ -11462,7 +11462,7 @@ var RUN_BATCH_MAX = 12;
 var BATCH_MIN_ITEMS = 5;
 var BATCH_MAX_WAIT_MS = 30 * 6e4;
 var POLICY_VERSION = 1;
-var WORKER_CAPABILITY = "factual_refresh_v1";
+var WORKER_CAPABILITY = "diff_and_prose_v2";
 var DEBOUNCE_MS = 2 * 6e4;
 var BACKOFF_MS = 30 * 6e4;
 var WORKER_TIMEOUT_MS = 20 * 6e4;
@@ -11624,6 +11624,13 @@ function dirtyPaths(root, paths, spawnSync = nodeSpawnSync, prefix = "") {
     if (entry[0] === "R" || entry[0] === "C") add(parts[++i]);
   }
   return dirty;
+}
+var DIFF_LANES = ["reconcile_needed", "state_review"];
+function itemBaselines(store, t) {
+  if (!store || !DIFF_LANES.includes(t.system_reason) || !t.feature_link) return void 0;
+  const all = store.get(t.feature_link)?.file_baselines;
+  const own = (t.file_keys ?? []).filter((k) => typeof all?.[k] === "string");
+  return Object.fromEntries(own.map((k) => [k, all[k]]));
 }
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -11822,7 +11829,10 @@ function launchWorker(opts) {
           token,
           head: git.head,
           ...runnerHost,
-          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t) })),
+          items: batch.map((t) => {
+            const baselines = itemBaselines(opts.store, t);
+            return { id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t), ...baselines ? { baselines } : {} };
+          }),
           policy_version: POLICY_VERSION,
           run_id: randomUUID2(),
           policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),

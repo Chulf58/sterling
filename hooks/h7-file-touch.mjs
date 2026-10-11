@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h7-file-touch.mjs
-import { writeFileSync as writeFileSync3, mkdirSync as mkdirSync5, existsSync as existsSync5, readFileSync as readFileSync7 } from "node:fs";
-import { join as join10, dirname as dirname5 } from "node:path";
+import { writeFileSync as writeFileSync2, mkdirSync as mkdirSync4, existsSync as existsSync5, readFileSync as readFileSync6 } from "node:fs";
+import { join as join11, dirname as dirname6 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync as readFileSync5, existsSync as existsSync4 } from "node:fs";
@@ -11290,52 +11290,60 @@ function repoRel(toolPath, cwd) {
   }
 }
 
-// scripts/hooks/lib/settlement.mjs
-import { readFileSync as readFileSync6, writeFileSync as writeFileSync2, mkdirSync as mkdirSync4, rmSync as rmSync3, statSync as statSync3, renameSync as renameSync2 } from "node:fs";
-var LOCK_DEADLINE_MS = 150;
-var LOCK_STALE_MS = 3e3;
-var LOCK_POLL_MS = 20;
-function sleepMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-function withFileLock(targetPath, fn, { onTimeout } = {}) {
-  const lockPath = `${targetPath}.lock`;
-  const deadline = Date.now() + LOCK_DEADLINE_MS;
-  let acquired = false;
-  while (Date.now() < deadline) {
-    try {
-      mkdirSync4(lockPath);
-      acquired = true;
-      break;
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      try {
-        if (Date.now() - statSync3(lockPath).mtimeMs > LOCK_STALE_MS) {
-          console.error(`settlement: touches lock '${lockPath}' is stale (>${LOCK_STALE_MS}ms) \u2014 breaking it (a crashed holder's leftover)`);
-          rmSync3(lockPath, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      sleepMs(LOCK_POLL_MS);
-    }
-  }
-  if (!acquired && onTimeout) {
-    try {
-      onTimeout();
-    } catch {
-    }
-  }
+// scripts/hooks/lib/session-events.mjs
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+import { dirname as dirname5, join as join10 } from "node:path";
+var SESSION_EVENTS_REL = join10(".sterling", "transient", "session-events.json");
+var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
+var SQLITE_BUSY = 5;
+function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
+  const lockPath = `${path}.lock.db`;
+  const db = new DatabaseSync3(lockPath);
   try {
-    return fn();
-  } finally {
-    if (acquired) {
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timeoutMs2))}`);
+    try {
+      db.exec("PRAGMA journal_mode = DELETE");
+      db.exec("BEGIN IMMEDIATE");
+    } catch (e) {
+      if ((e?.errcode & 255) !== SQLITE_BUSY) throw e;
+      const err = new Error(`${lockPath} is held by another writer that is still running; gave up after ${timeoutMs2}ms and nothing was written`);
+      err.code = SESSION_EVENTS_LOCK_HELD;
+      throw err;
+    }
+    try {
+      return fn();
+    } finally {
       try {
-        rmSync3(lockPath, { recursive: true, force: true });
-      } catch {
+        db.exec("COMMIT");
+      } catch (e) {
+        console.error(`session-events: COMMIT of the lock at ${lockPath} failed (${e?.message ?? e}); the lock is released by closing the connection`);
       }
     }
+  } finally {
+    db.close();
+  }
+}
+
+// scripts/hooks/lib/settlement.mjs
+var TOUCHES_LOCK_HELD = "touches_lock_held";
+var TOUCHES_LOCK_TIMEOUT_MS = 5e3;
+function withFileLock(targetPath, fn, { onTimeout, timeoutMs: timeoutMs2 = TOUCHES_LOCK_TIMEOUT_MS } = {}) {
+  try {
+    return withSessionEventsLock(targetPath, fn, { timeoutMs: timeoutMs2 });
+  } catch (e) {
+    if (e?.code !== SESSION_EVENTS_LOCK_HELD) throw e;
+    if (onTimeout) {
+      try {
+        onTimeout();
+      } catch (recordErr) {
+        console.error(`settlement: recording the touches lock timeout failed (${recordErr?.message ?? recordErr})`);
+      }
+    }
+    const err = new Error(
+      `touches register lock ${targetPath}.lock.db is held by another writer that is still running; waited ${timeoutMs2}ms, skipped this write and wrote nothing`
+    );
+    err.code = TOUCHES_LOCK_HELD;
+    throw err;
   }
 }
 function parseTouchesContent(raw) {
@@ -11370,16 +11378,16 @@ var store = openStoreOrDegrade(input.cwd, "H7");
 if (!store) allow();
 try {
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const touchesPath = join10(input.cwd, ".sterling", "transient", "touches.json");
-  mkdirSync5(dirname5(touchesPath), { recursive: true });
+  const touchesPath = join11(input.cwd, ".sterling", "transient", "touches.json");
+  mkdirSync4(dirname6(touchesPath), { recursive: true });
   withFileLock(
     touchesPath,
     () => {
-      const touches = existsSync5(touchesPath) ? parseTouchesContent(readFileSync7(touchesPath, "utf8")) : [];
+      const touches = existsSync5(touchesPath) ? parseTouchesContent(readFileSync6(touchesPath, "utf8")) : [];
       const touch = { path: rel, at: now };
       if (typeof input.agent_id === "string" && input.agent_id !== "") touch.agent_id = input.agent_id;
       touches.push(touch);
-      writeFileSync3(touchesPath, JSON.stringify(touches));
+      writeFileSync2(touchesPath, JSON.stringify(touches));
     },
     { onTimeout: () => store.recordCheckSkipped("h7-touches-lock", "lock_timeout", void 0, now) }
   );

@@ -208,6 +208,19 @@ test('reconcile_needed: a factual field on the batch target is allowed and stamp
   }
 });
 
+test('reconcile_needed: new acceptance text (current_ac) on the batch target is allowed and stamped; state_review still refuses it', async () => {
+  const h = await harness();
+  try {
+    const ac = [{ ac_id: 'AC1', text: 'The runner puts each item diff in the prompt.', verifiable_at: 'final' }];
+    const receipt = await h.ok('knowledge_update', { id: h.ids.recon, body: { current_ac: ac }, expected_version: h.version(h.ids.recon) });
+    assert.deepEqual(receipt[WORKER_STAMP_KEY], { run_id: RUN_ID, item_id: h.ids.reconItem, resolved: [] });
+    assert.equal((h.get(h.ids.recon).current_ac as Array<{ text: string }>)[0].text, ac[0].text);
+    await h.refused('knowledge_update', { id: h.ids.state, body: { current_ac: ac }, expected_version: h.version(h.ids.state) }, 'field_not_allowed', h.ids.stateItem);
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test('state_review: state_reason is allowed and stamped; a prose edit is refused', async () => {
   const h = await harness();
   try {

@@ -44,7 +44,9 @@ type Authorized = { run_id: string; item_id: string; closes: string[] };
  * writable, and title and slug appear nowhere. The entries are the factual
  * refresh the decision allows: files[] (roles and entry marks included),
  * history, test references, state, the dates, and the prose fields where one
- * corrected sentence lands.
+ * corrected sentence lands. On reconcile_needed the prose fields also take new
+ * behaviour prose, current_ac included (decision
+ * maintenance-worker-gets-item-diffs-and-writes-new-behaviour-prose).
  * - article_missing allows only a knowledge_append to `files`, under the
  *   directory rule in appendJoinFault (change iv).
  * - knowledge_line_ref_fix is not keyed by this list: its own checks fix
@@ -53,7 +55,7 @@ type Authorized = { run_id: string; item_id: string; closes: string[] };
  */
 export const WORKER_FIELD_ALLOW_LIST: Readonly<Record<WorkerPolicyLane, Readonly<Record<string, readonly string[]>>>> = {
   reconcile_needed: {
-    feature_article: ['files', 'history', 'live_test_refs', 'what_it_does', 'intended_behavior'],
+    feature_article: ['files', 'history', 'live_test_refs', 'what_it_does', 'intended_behavior', 'current_ac'],
     reference_material: ['summary', 'source_date', 'capture_date'],
   },
   state_review: {
