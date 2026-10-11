@@ -151,6 +151,20 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'A background worker closes already-paid `reconcile_needed` items by itself, in batches of 5 or after 30 minutes, so \"worker not running\" at session start is normal. Every other lane (`state_review`, `promotion_review`, `refresh_reference`, `stale_research`, the capture and article lanes) and every `reconcile_needed` item the worker judged \"owes prose\" is yours. When H1 says the queue is deep, read the lane split before draining: only the reconcile lane has a worker.',
     after: 'A background worker drains `reconcile_needed`, `state_review`, `stale_research`, `refresh_reference` and `article_missing` by itself, once 5 items are eligible or the oldest has waited 30 minutes, so \"worker not running\" at session start is normal. It closes already-paid items and writes small factual refreshes, and hands the rest to you as `needs_conductor` with a reason. Every other lane, such as `promotion_review`, `deletion_candidate` and `capture_owed`, and every handed-off item is yours. When H1 says the queue is deep, read the lane split before draining: only the five worker lanes have a worker.',
   },
+  {
+    commit: 'GitHub #68',
+    date: '2026-10-11',
+    reason: 'a closing summary never lists askable questions as owed, open or pending; each goes through the question form first, and only a question whose evidence does not exist yet waits, on its board item (user-reported in GitHub issue #68, 2026-10-11)',
+    before: 'after a closing offer went out in prose).\n',
+    after: 'after a closing offer went out in prose). The same holds for a closing summary: it never lists questions as owed, open or pending. Each askable question goes through the question form, one at a time, before the summary is written. Only a question whose evidence does not exist yet may wait, and it waits on its board item (`needs: user`), never in prose (user-reported in GitHub issue #68, 2026-10-11: a reply listed three design questions as owed and ended on its ready line; asked through the form, all three were ruled within minutes).\n',
+  },
+  {
+    commit: 'GitHub #68',
+    date: '2026-10-11',
+    reason: 'an askable question that has not gone through the question form blocks the ready line (user-reported in GitHub issue #68, 2026-10-11)',
+    before: 'the user is the one who runs the clear. If something is still in flight, name it instead and do not print the line.',
+    after: 'the user is the one who runs the clear. If something is still in flight, name it instead and do not print the line. An askable question that has not gone through the question form counts as in flight.',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

@@ -9,9 +9,13 @@
 // The repo is public, so the scrub is fail-closed for what it can see: the
 // project root and the home dir (replaced whole even when the root itself
 // holds spaces, with the path below it up to the first space or delimiter),
-// UUIDs, and every delimiter-free token holding a / or \ that is not a file
-// Sterling ships, a Sterling-owned .sterling/ name or a slash command standing
-// alone. That blanks harmless tokens such as "and/or" too, and a slash command
+// UUIDs, email addresses (<email>), credentials (<credential>: GitHub, sk-, Slack
+// and JWT tokens, and the value after key=, token=, secret=, password=, passwd=
+// or api_key=, which also blanks the word after "token:" in ordinary prose),
+// and every delimiter-free token holding a / or \ that is not a file
+// Sterling ships, a Sterling-owned .sterling/ name, a slash command standing
+// alone or a slash-joined list of public Claude Code tool names (WebSearch/WebFetch,
+// from a fixed allowlist). That blanks harmless tokens such as "and/or" too, and a slash command
 // directly after a bracket, comma, semicolon or pipe. What it does NOT
 // guarantee: a path that contains spaces, below the root and home or anywhere
 // else, is cut at each space, so the words between them stay
@@ -67,6 +71,20 @@ export class ReportRefusal extends Error {}
 
 const PLACEHOLDER = '<project-path>';
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+const CREDENTIAL = '<credential>';
+const EMAIL = '<email>';
+/** The value after key=, token=, secret=, password=, passwd= or api_key= (also key: value, any case, and a name that ends
+ * in one of these such as access_token). Group 1 keeps the name and separator; the value is a quoted string or one run. */
+const SECRET_ASSIGN_RE = /((?<![A-Za-z0-9])(?:[A-Za-z0-9]+[_-])*(?:api_key|key|token|secret|password|passwd)["']?\s*[=:]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s"'`,;()<>]+)/gi;
+/** Credentials that carry no name: GitHub tokens, sk- API keys, Slack xox tokens and JWTs. */
+const CREDENTIAL_RES = [
+  /(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g,
+  /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}/g,
+  /(?<![A-Za-z0-9])xox[a-z]-[A-Za-z0-9-]{10,}/g,
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
+];
+/** An email address: a local part, an @, and a domain ending in a letter TLD, so pkg@1.2.3 and a bare @mention stay. */
+const EMAIL_RE = /[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}/g;
 const DELIMS = `\\s"'\`<>()\\[\\]{},;|`;
 const TOKEN_RE = new RegExp(`[^${DELIMS}]+`, 'g');
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -102,6 +120,18 @@ function isSlashCommand(token) {
   return /^\/[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?$/.test(token.replace(/[.,:;!?]+$/, ''));
 }
 
+/** Public Claude Code tool names. A title such as "WebSearch/WebFetch: missing"
+ * names tools, not a path (GitHub issue #71). A fixed list, not a name shape:
+ * AcmeCorp/BillingApp has the same shape and is a customer path. */
+const TOOL_NAMES = ['WebSearch', 'WebFetch', 'Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob', 'Agent', 'NotebookEdit'];
+
+/** Two or more slash-joined tool names, every part on the list. Sentence
+ * punctuation after the token is ignored. */
+function isToolNameList(token) {
+  const parts = token.replace(/[.,:;!?]+$/, '').split('/');
+  return parts.length > 1 && parts.every((p) => TOOL_NAMES.includes(p));
+}
+
 /** Whether the token starting at `at` in `text` stands alone: it starts the
  * text or follows whitespace, or follows exactly one opening " ' ` or ( that
  * itself starts the text or follows whitespace. A token directly after any
@@ -115,7 +145,7 @@ function standsAlone(text, at) {
 /** Scrub one field. In order: the project root and the home dir (with any
  * path below them, in POSIX and WSL-Windows spellings) become <project-path>;
  * UUIDs become <id>; then every remaining token holding a / or \ that is
- * neither a Sterling path nor a slash command standing alone becomes
+ * neither a Sterling path, a slash command nor a list of tool names standing alone becomes
  * <project-path> (absolute POSIX, Windows, UNC, URLs and project-relative
  * paths alike). */
 export function scrub(text, { projectRoot, home, sterlingPathExists }) {
@@ -126,10 +156,14 @@ export function scrub(text, { projectRoot, home, sterlingPathExists }) {
     out = out.replace(re, PLACEHOLDER);
   }
   out = out.replace(UUID_RE, '<id>');
-  return out.replace(TOKEN_RE, (tok, at, whole) => {
+  out = out.replace(SECRET_ASSIGN_RE, `$1${CREDENTIAL}`);
+  for (const re of CREDENTIAL_RES) out = out.replace(re, CREDENTIAL);
+  out = out.replace(TOKEN_RE, (tok, at, whole) => {
     if (!/[\\/]/.test(tok) || isSterlingPath(tok, sterlingPathExists)) return tok;
-    return isSlashCommand(tok) && standsAlone(whole, at) ? tok : PLACEHOLDER;
+    return (isSlashCommand(tok) || isToolNameList(tok)) && standsAlone(whole, at) ? tok : PLACEHOLDER;
   });
+  // After the path pass, so a URL with user@host in it is one <project-path> and not split around an <email>.
+  return out.replace(EMAIL_RE, EMAIL);
 }
 
 const EVIDENCE_HELP =

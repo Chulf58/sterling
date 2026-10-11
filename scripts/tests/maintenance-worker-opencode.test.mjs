@@ -34,6 +34,9 @@ function fixture() {
   // The shipped tools line is in the stub: the OpenCode runner rewrites it and refuses a prompt without it.
   writeFileSync(join(plugin, 'templates', 'maintenance-worker-prompt.md'), `PROMPT BODY\n${CLAUDE_TOOLS_LINE}\n`);
   writeFileSync(join(plugin, 'scripts', 'maintenance-worker-run.mjs'), '// runner stub, never executed by these tests\n');
+  // The claude host defines its worker agent from this template (GitHub #70).
+  mkdirSync(join(plugin, 'agent-templates'), { recursive: true });
+  writeFileSync(join(plugin, 'agent-templates', 'librarian.md'), '---\nname: librarian\n---\n\nLIBRARIAN BODY\n');
   mkdirSync(join(project, '.sterling', 'transient'), { recursive: true });
   return { base, plugin, project, paths: workerPaths(project), cleanup: () => rmSync(base, { recursive: true, force: true }) };
 }

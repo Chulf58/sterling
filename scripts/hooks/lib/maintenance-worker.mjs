@@ -70,7 +70,16 @@ import { buildOpencodeArgs, buildOpencodeConfig, opencodeEnv, opencodePrompt, op
  *  user ruling (2)). */
 export const WORKER_MODEL = 'claude-sonnet-5-5';
 export const WORKER_EFFORT = 'medium';
-export const WORKER_AGENT = 'librarian';
+/** The child's agent, defined at launch through --agents (GitHub #70). MEASURED
+ *  on Claude Code 2.1.296: an agent's `tools` list caps the session's tools,
+ *  and neither --allowedTools nor --tools adds a tool the list leaves out. Run
+ *  as `librarian`, the child got that template's tools line (no WebSearch or
+ *  WebFetch), so stale_research and refresh_reference items could not be
+ *  re-checked. This agent carries the librarian template's instructions with
+ *  the worker's own tool list, so the conductor's store clerk keeps its grant. */
+export const WORKER_AGENT = 'sterling-maintenance-worker';
+/** The template whose instructions the worker agent carries. */
+export const WORKER_AGENT_TEMPLATE = 'librarian';
 /** Per-run runaway guard passed to --max-budget-usd on every launch. There is
  *  no daily cap: the worker runs whenever the queue has eligible work (same
  *  decision, design (g) and ruling (5)). A run that reaches it after making
@@ -153,6 +162,9 @@ export const WORKER_TOOLS = [
   'WebSearch',
   'WebFetch',
 ];
+/** The worker agent's `tools` list: the allow list plus ToolSearch, which the
+ *  librarian's own list carries for loading deferred MCP tools. */
+export const WORKER_AGENT_TOOLS = [...WORKER_TOOLS, 'ToolSearch'];
 /** Denied explicitly, so a project's permissions.allow cannot widen the worker
  *  (ruling (3), design (c)): every record-shaping write, every board write,
  *  config and domain writes, and shell and file writes. */
@@ -549,6 +561,26 @@ export function readWorkerPrompt(pluginRoot) {
   }
 }
 
+/** The --agents JSON that defines WORKER_AGENT: the shipped librarian
+ *  template's body (frontmatter dropped; --model and --effort set those) with
+ *  WORKER_AGENT_TOOLS as its tools. A missing or frontmatter-less template is
+ *  refused, never replaced by an empty prompt. */
+export function workerAgentDefinition(pluginRoot) {
+  const path = join(pluginRoot, 'agent-templates', `${WORKER_AGENT_TEMPLATE}.md`);
+  let text;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (e) {
+    throw new Error(`cannot read the worker agent template ${path} (${e?.code ?? e?.message ?? e})`);
+  }
+  const m = /^---\r?\n[\s\S]*?\r?\n---\r?\n([\s\S]*)$/.exec(text);
+  const body = m ? m[1].trim() : '';
+  if (!body) throw new Error(`the worker agent template ${path} has no frontmatter-delimited body`);
+  return JSON.stringify({
+    [WORKER_AGENT]: { description: 'Sterling background maintenance worker (unattended, allow-listed tools)', prompt: body, tools: WORKER_AGENT_TOOLS },
+  });
+}
+
 /** The shipped prompt, plus the ELIGIBLE batch the launcher chose (clean,
  *  unjudged, lane-fair) when it passed one, with each item's lane and target,
  *  plus every standing judged verdict (needs_conductor, refused) so the child
@@ -569,8 +601,11 @@ export function workerPrompt(pluginRoot, root, eligible = null) {
 /** The probed invocation (finding 611f044b), with stream-json output (the CLI
  *  refuses stream-json under -p without --verbose) and an explicit deny list.
  *  No --bare (it ignores OAuth), no bypassPermissions, no --plugin-dir (so no
- *  Sterling hook runs in the child and it cannot recurse). */
-export function buildWorkerArgs({ prompt, mcpConfig, budgetUsd = WORKER_RUN_BUDGET_USD }) {
+ *  Sterling hook runs in the child and it cannot recurse). --agents defines
+ *  WORKER_AGENT (workerAgentDefinition); its tools list is what makes the web
+ *  tools reachable. */
+export function buildWorkerArgs({ prompt, mcpConfig, agentDefinition, budgetUsd = WORKER_RUN_BUDGET_USD }) {
+  if (typeof agentDefinition !== 'string' || !agentDefinition) throw new Error('buildWorkerArgs needs the worker agent definition (workerAgentDefinition)');
   return [
     '-p',
     prompt,
@@ -578,6 +613,8 @@ export function buildWorkerArgs({ prompt, mcpConfig, budgetUsd = WORKER_RUN_BUDG
     WORKER_MODEL,
     '--effort',
     WORKER_EFFORT,
+    '--agents',
+    agentDefinition,
     '--agent',
     WORKER_AGENT,
     '--permission-mode',
@@ -1057,9 +1094,14 @@ export function streamJournal(journal, observe = () => {}, launchKeys = new Map(
  *  searched the project root) — conductor ruling 2026-09-29. `run` carries
  *  the run-wide reads {web, queried}: the stream does not tie a web call or a
  *  query to one item, so those two count per run, not per item. */
-export function hasEvidence(item, seenArticles, seenFiles, root, seenGrepPaths = new Set(), run = {}) {
+/** Did the stream show a good knowledge_get of the item's target record? */
+export function readTarget(item, seenArticles) {
   const link = String(item.feature_link ?? '');
-  const target = [...seenArticles].some((id) => (link && (id === link || (id.length >= 8 && link.startsWith(id)))) || (item.slug && id === item.slug));
+  return [...seenArticles].some((id) => (link && (id === link || (id.length >= 8 && link.startsWith(id)))) || (item.slug && id === item.slug));
+}
+
+export function hasEvidence(item, seenArticles, seenFiles, root, seenGrepPaths = new Set(), run = {}) {
+  const target = readTarget(item, seenArticles);
   const keys = item.file_keys ?? [];
   const file = keys.some((k) => {
     const t = resolve(root, k);
@@ -1080,9 +1122,23 @@ export function hasEvidence(item, seenArticles, seenFiles, root, seenGrepPaths =
   }
 }
 
+/** A reason that says the run lacked a web tool (GitHub #70): "web tools
+ *  missing: …", or the tool itself as the subject ("WebFetch and WebSearch
+ *  are not available", "WebFetch is not granted"). "WebFetch returned 503,
+ *  server unavailable" names a source that is down, so it does not match. A
+ *  later run has the same tools, so on the web lanes a match is a standing
+ *  handoff, checked before TEMPORARY_RE. */
+const WEB_TOOL = '(?:WebSearch|WebFetch|web tools?)';
+export const TOOLS_MISSING_RE = new RegExp(
+  `web tools? missing|\\b${WEB_TOOL}(?:\\s*(?:,|and|or)\\s*${WEB_TOOL})*\\s+(?:is|are|was|were)\\s+(?:not available|unavailable|missing|not granted|not allowed)\\b`,
+  'i'
+);
+/** The lanes whose re-check can need the web. */
+const WEB_LANES = new Set(['stale_research', 'refresh_reference']);
 /** A reason that names a temporary failure: a busy store, a version (CAS)
  *  conflict, the budget, a timeout or an unavailable source. Such an item is
- *  retried by a later run, never handed off (changes (f) and (v)). */
+ *  retried by a later run, never handed off (changes (f) and (v)). On the web
+ *  lanes a reason that matches TOOLS_MISSING_RE is not temporary. */
 export const TEMPORARY_RE = /database is locked|SQLITE_BUSY|version conflict|expected_version|stale version|\bCAS\b|budget|timed out|timeout|rate.?limit|unavailable|unreachable|fetch failed|could not (?:fetch|reach|load)/i;
 /** The server's refusal of a write outside the batch policy ("worker policy
  *  refused <tool>: rule '<rule>' — …"): a handoff, never temporary. */
@@ -1142,7 +1198,7 @@ export async function runWorker(opts) {
       return { host, bin: ocBin, args: buildOpencodeArgs({ prompt: opencodePrompt(prompt), model }), env: opencodeEnv({ root: opts.root, config }) };
     }
     if (host !== 'claude') throw new Error(`unknown runner host '${host}'`);
-    return { host, bin, args: buildWorkerArgs({ prompt, mcpConfig, budgetUsd: budgetOk ? budgetUsd : rawBudget }), env: {} };
+    return { host, bin, args: buildWorkerArgs({ prompt, mcpConfig, agentDefinition: workerAgentDefinition(opts.pluginRoot), budgetUsd: budgetOk ? budgetUsd : rawBudget }), env: {} };
   };
   if (opts.dryRun) {
     let run;
@@ -1355,6 +1411,21 @@ export async function runWorker(opts) {
         // from the runner's own stream observation, never from the child.
         if (v.verdict === 'refused') {
           journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, lane, verdict: 'unjudged', reason: 'a refused verdict is recorded by the runner, not the child', claimed_reason: v.reason ?? null, ...marker });
+          continue;
+        }
+        // A web-lane item the run could not re-check for lack of a web tool is
+        // handed off once (GitHub #70): a retry would come back with the same
+        // tools on every run. It stands on a read of the target record, since
+        // the web re-check it would need is the thing that was missing.
+        const claimed = typeof v.reason === 'string' ? v.reason.trim() : '';
+        if ((v.verdict === 'retry' || v.verdict === 'needs_conductor') && WEB_LANES.has(lane) && TOOLS_MISSING_RE.test(claimed)) {
+          if (item && readTarget(item, seenArticles)) {
+            journal({ kind: 'verdict', item_id: v.item_id, article: v.article ?? null, lane, verdict: 'needs_conductor', reason: claimed.slice(0, 300), file_keys: item.file_keys, evidence: true, ...(v.verdict === 'retry' ? { claimed: 'retry' } : {}), ...marker });
+            evidenced++;
+            actedIds.add(v.item_id);
+          } else {
+            journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, lane, verdict: 'unjudged', reason: 'no evidence', claimed_reason: claimed.slice(0, 300), ...marker });
+          }
           continue;
         }
         // A legacy 'owes_prose' from the child is the old name of a handoff.

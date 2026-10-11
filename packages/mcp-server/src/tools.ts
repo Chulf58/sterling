@@ -31,6 +31,10 @@ import {
 } from '@sterling/store';
 import { AttestationRefusal, collectAttestationEvidence, readHeadFile, type AttestationEvidence } from './attestation-proof.js';
 import { EntryReachability, type EntryVerdict } from './entry-reachability.js';
+// The one session-events writer (decision
+// session-events-and-register-locks-are-kernel-held-never-reclaimed-by-age):
+// esbuild inlines it into mcp/sterling-mcp.mjs, as packages/tui does for scripts/lib.
+import { appendSessionEventsAt } from '../../../scripts/hooks/lib/session-events.mjs';
 
 export interface SkippedCheck {
   check: string;
@@ -10102,23 +10106,14 @@ export class SterlingTools {
       );
     }
     const eventsPath = join(this.repoRoot, '.sterling', 'transient', 'session-events.json');
-    mkdirSync(dirname(eventsPath), { recursive: true });
-    let events: unknown[] = [];
-    if (existsSync(eventsPath)) {
-      try {
-        const parsed = JSON.parse(readFileSync(eventsPath, 'utf8'));
-        if (Array.isArray(parsed)) events = parsed;
-      } catch {
-        // tolerate a malformed register exactly as H10 does — degrade to empty
-        // rather than refusing the write (the register is transient state)
-      }
-    }
     const at = this.now();
     // `lane` rides through only when present: an entry without it is written
     // byte-identical to a pre-lane (legacy) event, which H10 reads as the
     // capture lane (decision no-capture-discharge-is-lane-scoped).
-    for (const e of entries) events.push({ ...e, at });
-    writeFileSync(eventsPath, JSON.stringify(events));
+    // The shared writer holds the kernel lock H16 and the scripts take, so a
+    // concurrent append is never lost. A held lock or an unparsable register
+    // throws and nothing is written; the tool call fails with that message.
+    appendSessionEventsAt(eventsPath, entries.map((e) => ({ ...e, at })));
     return { at };
   }
 

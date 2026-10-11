@@ -1425,7 +1425,17 @@ test('ensureConductorActivation: malformed and array JSON — autoMemory skipped
 // it), so /sterling:update printed the refusal as a change and could stamp
 // update-complete.json while the agent stayed stale. The CLI contract is exit 2.
 const SYNC_CLI = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'sync-agents.mjs');
-const runSyncCli = (target) => spawnSync(process.execPath, [SYNC_CLI, '--target', target], { encoding: 'utf8' });
+// Commit f4915ef7 made sync-agents refuse (exit 2) a project with no
+// .sterling/config.json, so the fixture supplies an empty one when the test has
+// not written its own.
+const runSyncCli = (target) => {
+  const configPath = join(target, '.sterling', 'config.json');
+  if (!existsSync(configPath)) {
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(configPath, '{}\n');
+  }
+  return spawnSync(process.execPath, [SYNC_CLI, '--target', target], { encoding: 'utf8' });
+};
 
 test('sync-agents CLI: reports the autoMemoryEnabled write, and an explicit true is a notice with exit 0', () => {
   const dir = tmpdtemp();
