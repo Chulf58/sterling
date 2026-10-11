@@ -20,12 +20,13 @@
 // and then `JSON.parse` touches.json expecting a top-level ARRAY — the
 // ON-DISK SHAPE stays exactly what it always was (a JSON array, read/written
 // whole). The race is closed instead with MUTUAL EXCLUSION around this same
-// read-modify-write: withFileLock (scripts/hooks/lib/settlement.mjs, the
-// same lock-dir idiom lib/delivery.mjs uses) holds a sibling touches.json.lock directory for the
-// whole read+push+write below, so two concurrent H7s serialize instead of
-// racing. A lock that cannot be acquired within its short deadline degrades
-// to today's unlocked RMW (a Stop/PostToolUse hook must never hang the
-// session, P1) and records check_skipped so the degrade is never silent.
+// read-modify-write: withFileLock (scripts/hooks/lib/settlement.mjs) holds
+// the kernel-held lock from withSessionEventsLock (a BEGIN IMMEDIATE on
+// touches.json.lock.db) for the whole read+push+write below, so two
+// concurrent H7s serialize instead of racing. A lock still held after 5 s
+// records check_skipped (h7-touches-lock, lock_timeout) and throws
+// touches_lock_held: this touch is skipped, the catch below warns naming its
+// path, and nothing is ever written unlocked.
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { readStdin, allow, warnNonBlocking, openStoreOrDegrade, repoRel } from './lib/common.mjs';
