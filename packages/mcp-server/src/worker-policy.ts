@@ -45,7 +45,8 @@ type Authorized = { run_id: string; item_id: string; closes: string[] };
  * refresh the decision allows: files[] (roles and entry marks included),
  * history, test references, state, the dates, and the prose fields where one
  * corrected sentence lands. On reconcile_needed the prose fields also take new
- * behaviour prose, current_ac included (decision
+ * behaviour prose, and current_ac its entries' text through the one selector
+ * WORKER_FIELD_EDIT_SELECTORS allows (decision
  * maintenance-worker-gets-item-diffs-and-writes-new-behaviour-prose).
  * - article_missing allows only a knowledge_append to `files`, under the
  *   directory rule in appendJoinFault (change iv).
@@ -70,6 +71,18 @@ export const WORKER_FIELD_ALLOW_LIST: Readonly<Record<WorkerPolicyLane, Readonly
   article_missing: {
     feature_article: ['files'],
   },
+};
+
+/**
+ * Fields on the allow-list that a worker may write only through one
+ * knowledge_edit selector, never by knowledge_update, knowledge_append or
+ * knowledge_array_remove. current_ac: only an existing entry's text, so a
+ * worker cannot empty the array, drop an entry, rename an ac_id or change
+ * verifiable_at (decision
+ * maintenance-worker-gets-item-diffs-and-writes-new-behaviour-prose).
+ */
+export const WORKER_FIELD_EDIT_SELECTORS: Readonly<Record<string, { pattern: RegExp; shape: string }>> = {
+  current_ac: { pattern: /^current_ac\[ac_id=[^\]]+\]\.text$/, shape: 'current_ac[ac_id=<id>].text' },
 };
 
 /** Tools that never write the store; worker mode leaves them alone. */
@@ -259,6 +272,12 @@ export class WorkerGuard {
     if (!allowed) return { rule: 'field_not_allowed', text: `lane ${item.lane} does not write a ${record.type}` };
     const disallowed = fields.filter((f) => !allowed.includes(f));
     if (disallowed.length) return { rule: 'field_not_allowed', text: `field(s) ${disallowed.join(', ')} not in lane ${item.lane}'s allow-list for ${record.type} (${allowed.join(', ')})` };
+    for (const f of fields) {
+      const only = WORKER_FIELD_EDIT_SELECTORS[f];
+      if (only && !(tool === 'knowledge_edit' && only.pattern.test(String(input.field)))) {
+        return { rule: 'field_not_allowed', text: `field ${f} is written only by knowledge_edit of ${only.shape}` };
+      }
+    }
     if (item.lane === 'article_missing') return appendJoinFault(tool, item, record, input);
     return null;
   }

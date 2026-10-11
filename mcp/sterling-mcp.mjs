@@ -28932,6 +28932,9 @@ var WORKER_FIELD_ALLOW_LIST = {
     feature_article: ["files"]
   }
 };
+var WORKER_FIELD_EDIT_SELECTORS = {
+  current_ac: { pattern: /^current_ac\[ac_id=[^\]]+\]\.text$/, shape: "current_ac[ac_id=<id>].text" }
+};
 var WORKER_READ_TOOLS = /* @__PURE__ */ new Set([
   "knowledge_query",
   "knowledge_get",
@@ -29088,6 +29091,12 @@ var WorkerGuard = class {
     const disallowed = fields.filter((f) => !allowed.includes(f));
     if (disallowed.length)
       return { rule: "field_not_allowed", text: `field(s) ${disallowed.join(", ")} not in lane ${item.lane}'s allow-list for ${record2.type} (${allowed.join(", ")})` };
+    for (const f of fields) {
+      const only = WORKER_FIELD_EDIT_SELECTORS[f];
+      if (only && !(tool === "knowledge_edit" && only.pattern.test(String(input.field)))) {
+        return { rule: "field_not_allowed", text: `field ${f} is written only by knowledge_edit of ${only.shape}` };
+      }
+    }
     if (item.lane === "article_missing")
       return appendJoinFault(tool, item, record2, input);
     return null;

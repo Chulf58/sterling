@@ -2216,7 +2216,8 @@ test('[diffs] the base is the commit whose copy of the file hashes to the baseli
   const repo = diffRepo();
   try {
     assert.deepEqual(resolveDiffBase(repo.root, 'src/a.mjs', sha(repo.v1), 'proj/', realSpawnSync), { base: repo.base });
-    const text = itemDiffText(repo.root, { id: 'i', file_keys: ['src/a.mjs'], baselines: { 'src/a.mjs': sha(repo.v1) } }, 'proj/', realSpawnSync);
+    const { text, notDiffed } = itemDiffText(repo.root, { id: 'i', file_keys: ['src/a.mjs'], baselines: { 'src/a.mjs': sha(repo.v1) } }, 'proj/', realSpawnSync);
+    assert.deepEqual(notDiffed, []);
     assert.match(text, new RegExp(`^--- src/a\\.mjs: base ${repo.base.slice(0, 12)} `));
     assert.match(text, /^-export const a = 1;$/m, 'the diff starts at the settled content, not at the previous commit');
     assert.match(text, /^\+export const NEW_FLAG = true;$/m);
@@ -2254,7 +2255,7 @@ test('[diffs] an item over its cap is cut and says so, and items past the run bu
   const repo = diffRepo();
   try {
     const item = (id) => ({ id, lane: 'reconcile_needed', file_keys: ['src/a.mjs'], baselines: { 'src/a.mjs': sha(repo.v1) } });
-    const full = itemDiffText(repo.root, item('x'), 'proj/', realSpawnSync);
+    const full = itemDiffText(repo.root, item('x'), 'proj/', realSpawnSync).text;
     assert.ok(full.length > 100 && full.length < DIFF_ITEM_MAX_CHARS, 'fixture: a short diff under the default cap');
     const section = itemDiffSection(repo.root, [item('one'), item('two'), item('three')], { spawnSync: realSpawnSync, itemMax: 100, runMax: 150 });
     assert.match(section, new RegExp(`### one\\n[\\s\\S]{100}\\n\\[diff truncated: 100 of ${full.length} chars shown\\]`));
@@ -2292,7 +2293,8 @@ test('[diffs] the launcher records the target baselines for the item own file_ke
 
 test('[prompt] the worker may write new behaviour prose on reconcile_needed from the diff, and the create, delete, promote, split and shell bans stand', () => {
   const prompt = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'templates', 'maintenance-worker-prompt.md'), 'utf8');
-  assert.match(prompt, /reconcile_needed, on a feature_article:.*NEW BEHAVIOUR PROSE: you may add or rewrite sentences in `what_it_does` and `intended_behavior` and the `text` of a `current_ac` entry/);
+  assert.match(prompt, /reconcile_needed, on a feature_article:.*NEW BEHAVIOUR PROSE: you may add or rewrite sentences in `what_it_does` and `intended_behavior`, and rewrite the `text` of an existing `current_ac` entry \(only with knowledge_edit of `current_ac\[ac_id=<id>\]\.text`; never add, remove or renumber an entry/);
+  assert.match(prompt, /knowledge_update, knowledge_append and knowledge_array_remove on `current_ac` are refused/);
   assert.match(prompt, /Write only what the diff or the code you Read shows; never invent a fact/);
   assert.match(prompt, /is new prose: write it yourself from the diff and the code/);
   assert.match(prompt, /The DIFFS section after the ELIGIBLE list/);
@@ -2313,4 +2315,75 @@ test('[diffs] runWorker computes the DIFFS section from eligible.json and hands 
   } finally {
     fx.cleanup();
   }
+});
+
+test('[diffs] a chained launch, which gets only queue_snapshot items and no store, still gives the later batch its baselines and its diff', () => {
+  const fx = fixture();
+  try {
+    const n = RUN_BATCH_MAX + 2;
+    const items = Array.from({ length: n }, (_, i) => ({ ...laneItem(`r${i}`, 'reconcile_needed', n - i), feature_link: `art-${i}` }));
+    const store = { get: (id) => ({ id, file_baselines: { [`src/r${id.slice(4)}.mjs`]: `h-${id}` } }) };
+    assert.equal(launch(fx, { spawn: fakeSpawn().fn, items, store }).launched, true);
+    const first = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    const offered = new Set(first.items.map((t) => t.id));
+    const left = first.queue_snapshot.filter((t) => !offered.has(t.id));
+    assert.equal(left.length, 2, 'fixture: two items wait for the second batch');
+    // relaunchAfterRun passes exactly this: the snapshot's items, trigger chain, no store.
+    assert.equal(launch(fx, { spawn: fakeSpawn().fn, items: left, trigger: 'chain' }).launched, true);
+    const second = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    assert.deepEqual(second.items.map((t) => [t.id, t.baselines]), left.map((t) => [t.id, { [`src/${t.id}.mjs`]: `h-art-${t.id.slice(1)}` }]));
+    assert.deepEqual(second.queue_snapshot.map((t) => t.baselines), second.items.map((t) => t.baselines), 'and carries them on for a third batch');
+    const section = itemDiffSection(fx.project, second.items, { spawnSync: CLEAN_GIT });
+    assert.doesNotMatch(section, /no settled baseline was recorded/);
+    assert.match(section, /--- src\/r\d+\.mjs: no diff available: no commit touches it/, 'the diff is attempted from the carried baseline');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[diffs] paths are literal pathspecs: an item for src/foo[1].ts never diffs the look-alike src/foo1.ts', () => {
+  const top = mkdtempSync(join(tmpdir(), 'sterling-mworker-literal-'));
+  try {
+    mkdirSync(join(top, 'src'));
+    const git = (...args) => {
+      const r = realSpawnSync('git', ['-C', top, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8' });
+      assert.equal(r.status, 0, `fixture setup: git ${args[0]} failed`);
+      return r.stdout.trim();
+    };
+    git('init', '-q');
+    const commit = (files, msg) => {
+      for (const [p, text] of Object.entries(files)) writeFileSync(join(top, p), text);
+      git('add', '-A');
+      git('commit', '-q', '-m', msg);
+      return git('rev-parse', 'HEAD');
+    };
+    const base = commit({ 'src/foo[1].ts': 'export const bracket = 1;\n', 'src/foo1.ts': 'export const lookalike = 1;\n' }, 'c1');
+    commit({ 'src/foo[1].ts': 'export const bracket = 2;\n' }, 'c2');
+    commit({ 'src/foo1.ts': 'export const lookalike = 2;\n' }, 'c3');
+    assert.deepEqual(resolveDiffBase(top, 'src/foo[1].ts', sha('export const bracket = 1;\n'), '', realSpawnSync), { base });
+    const { text } = itemDiffText(top, { id: 'b', file_keys: ['src/foo[1].ts'], baselines: { 'src/foo[1].ts': sha('export const bracket = 1;\n') } }, '', realSpawnSync);
+    assert.match(text, /^\+export const bracket = 2;$/m);
+    assert.doesNotMatch(text, /lookalike|foo1\.ts/, 'the look-alike file is not in the diff');
+  } finally {
+    rmSync(top, { recursive: true, force: true });
+  }
+});
+
+test('[diffs] git stops once the budget is spent: a 100-path item with a 100-char cap diffs one path and names the rest as not diffed', () => {
+  const calls = [];
+  const blob = 'x';
+  const fake = (cmd, args, opts) => {
+    calls.push(args);
+    if (args.includes('rev-parse')) return { status: 0, stdout: `${HEAD}\n\n` };
+    if (args.includes('log')) return { status: 0, stdout: `${'b'.repeat(40)}\n` };
+    if (args.includes('cat-file')) return { status: 0, stdout: Buffer.from(`${'c'.repeat(40)} blob ${blob.length}\n${blob}\n`) };
+    if (args.includes('diff')) return { status: 0, stdout: `diff --git a/f b/f\n${'+line\n'.repeat(40)}` };
+    return { status: 1, stdout: '' };
+  };
+  const keys = Array.from({ length: 100 }, (_, i) => `src/p${String(i).padStart(3, '0')}.mjs`);
+  const item = { id: 'many', lane: 'reconcile_needed', file_keys: keys, baselines: Object.fromEntries(keys.map((k) => [k, sha(blob)])) };
+  const section = itemDiffSection('/repo', [item], { spawnSync: fake, itemMax: 100, runMax: 1000 });
+  assert.equal(calls.length, 4, 'one HEAD probe, then log, cat-file and diff for the first path only');
+  assert.match(section, /\[diff truncated: 100 of \d+ chars shown; not diffed, budget spent: src\/p001\.mjs, src\/p002\.mjs, [^\]]*src\/p099\.mjs\]/);
+  assert.ok(calls.filter((a) => a.includes('log') || a.includes('diff')).every((a) => a.at(-1) === ':(literal)src/p000.mjs'), 'only the first path reached git, as a literal pathspec');
 });

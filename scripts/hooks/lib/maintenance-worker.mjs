@@ -470,8 +470,11 @@ export function dirtyPaths(root, paths, spawnSync = nodeSpawnSync, prefix = '') 
 // carries no commit of its own (settlement mints reconcile_needed without a
 // measured_at_head). When no commit matches, the item says so ("no diff
 // available") instead of falling back to a guessed base. Only the item's own
-// file_keys are diffed; each item's text is capped at DIFF_ITEM_MAX_CHARS and
-// the run at DIFF_RUN_MAX_CHARS, and a cut says so in the prompt.
+// file_keys are diffed, each as a literal pathspec; each item's text is
+// capped at DIFF_ITEM_MAX_CHARS and the run at DIFF_RUN_MAX_CHARS, git stops
+// once the budget is spent, and a cut says so and names the paths left out.
+// The launcher records each item's baselines in eligible.json, queue_snapshot
+// included, so a chained launch (which has no store) still has them.
 export const DIFF_LANES = ['reconcile_needed', 'state_review'];
 export const DIFF_ITEM_MAX_CHARS = 4_000;
 export const DIFF_RUN_MAX_CHARS = 24_000;
@@ -493,7 +496,7 @@ const gitFail = (r) => (r.error ? r.error.code ?? r.error.message : `exit ${r.st
  *  the root's place in the git top-level (gitState), since a `<commit>:<path>`
  *  name is read from the top-level. */
 export function resolveDiffBase(root, path, baseline, prefix = '', spawnSync = nodeSpawnSync) {
-  const log = spawnSync('git', ['-C', root, 'log', '-n', String(DIFF_BASE_WALK), '--format=%H', 'HEAD', '--', path], { encoding: 'utf8', timeout: 30_000 });
+  const log = spawnSync('git', ['-C', root, 'log', '-n', String(DIFF_BASE_WALK), '--format=%H', 'HEAD', '--', literalPathspec(path)], { encoding: 'utf8', timeout: 30_000 });
   if (log.error || log.status !== 0) return { base: null, why: `git log failed (${gitFail(log)})` };
   const commits = String(log.stdout ?? '').split('\n').filter((c) => /^[0-9a-f]{40,64}$/.test(c));
   if (!commits.length) return { base: null, why: 'no commit touches it' };
@@ -515,29 +518,42 @@ export function resolveDiffBase(root, path, baseline, prefix = '', spawnSync = n
   return { base: null, why: `none of the last ${commits.length} commits touching it holds the content the target was settled against` };
 }
 
-/** One item's diff text: per path, the diff from its resolved base to HEAD,
- *  or a "no diff available" line saying why. Uncapped; itemDiffSection caps. */
-export function itemDiffText(root, item, prefix = '', spawnSync = nodeSpawnSync) {
+/** A path as a literal git pathspec, so `foo[1].ts` never matches `foo1.ts`. */
+const literalPathspec = (path) => `:(literal)${path}`;
+
+/** One item's diff: per path, the diff from its resolved base to HEAD, or a
+ *  "no diff available" line saying why, as {text, notDiffed}. It stops calling
+ *  git once `text` reaches `budget` chars, and `notDiffed` names the paths it
+ *  left out for that reason. */
+export function itemDiffText(root, item, prefix = '', spawnSync = nodeSpawnSync, budget = Infinity) {
   const keys = [...(item.file_keys ?? [])].map(String).sort();
-  if (!keys.length) return 'no diff available: the item names no files';
-  if (!item.baselines || typeof item.baselines !== 'object') return 'no diff available: no settled baseline was recorded for this item at launch';
-  return keys
-    .map((path) => {
-      const baseline = item.baselines[path];
-      if (typeof baseline !== 'string') return `--- ${path}: no diff available: the target holds no baseline for this path`;
-      const { base, why } = resolveDiffBase(root, path, baseline, prefix, spawnSync);
-      if (!base) return `--- ${path}: no diff available: ${why}`;
-      const d = spawnSync('git', ['-C', root, 'diff', '--no-color', '--no-ext-diff', base, 'HEAD', '--', path], { encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
-      if (d.error || d.status !== 0) return `--- ${path}: no diff available: git diff failed (${gitFail(d)})`;
-      const body = String(d.stdout ?? '').trimEnd();
-      return `--- ${path}: base ${base.slice(0, 12)} (the commit matching the target's baseline)\n${body || 'unchanged since that base'}`;
-    })
-    .join('\n');
+  if (!keys.length) return { text: 'no diff available: the item names no files', notDiffed: [] };
+  if (!item.baselines || typeof item.baselines !== 'object') return { text: 'no diff available: no settled baseline was recorded for this item at launch', notDiffed: [] };
+  const parts = [];
+  let length = 0;
+  for (let i = 0; i < keys.length; i++) {
+    if (length >= budget) return { text: parts.join('\n'), notDiffed: keys.slice(i) };
+    const part = pathDiffText(root, keys[i], item.baselines[keys[i]], prefix, spawnSync);
+    length += part.length + (parts.length ? 1 : 0);
+    parts.push(part);
+  }
+  return { text: parts.join('\n'), notDiffed: [] };
+}
+
+function pathDiffText(root, path, baseline, prefix, spawnSync) {
+  if (typeof baseline !== 'string') return `--- ${path}: no diff available: the target holds no baseline for this path`;
+  const { base, why } = resolveDiffBase(root, path, baseline, prefix, spawnSync);
+  if (!base) return `--- ${path}: no diff available: ${why}`;
+  const d = spawnSync('git', ['-C', root, 'diff', '--no-color', '--no-ext-diff', base, 'HEAD', '--', literalPathspec(path)], { encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
+  if (d.error || d.status !== 0) return `--- ${path}: no diff available: git diff failed (${gitFail(d)})`;
+  const body = String(d.stdout ?? '').trimEnd();
+  return `--- ${path}: base ${base.slice(0, 12)} (the commit matching the target's baseline)\n${body || 'unchanged since that base'}`;
 }
 
 /** The DIFFS prompt section for the batch's reconcile_needed and state_review
  *  items, or '' when the batch has none. Each item's text is cut at
- *  `itemMax` chars and the whole section at `runMax`; a cut says so. */
+ *  `itemMax` chars and the whole section at `runMax`; git stops once the
+ *  budget is spent, and a cut says so and names the paths not diffed. */
 export function itemDiffSection(root, items, { spawnSync = nodeSpawnSync, itemMax = DIFF_ITEM_MAX_CHARS, runMax = DIFF_RUN_MAX_CHARS } = {}) {
   const diffItems = (items ?? []).filter((t) => DIFF_LANES.includes(t.lane ?? 'reconcile_needed'));
   if (!diffItems.length) return '';
@@ -546,11 +562,13 @@ export function itemDiffSection(root, items, { spawnSync = nodeSpawnSync, itemMa
   let left = runMax;
   const blocks = diffItems.map((t) => {
     if (left <= 0) return `### ${t.id}\n[diff omitted: this run's diff budget of ${runMax} chars is used up]`;
-    const full = git ? itemDiffText(root, t, git.prefix, spawnSync) : 'no diff available: git could not report HEAD';
     const cap = Math.min(itemMax, left);
-    const shown = full.length > cap ? `${full.slice(0, cap)}\n[diff truncated: ${cap} of ${full.length} chars shown]` : full;
-    left -= Math.min(full.length, cap);
-    return `### ${t.id}\n${shown}`;
+    const { text, notDiffed } = git ? itemDiffText(root, t, git.prefix, spawnSync, cap) : { text: 'no diff available: git could not report HEAD', notDiffed: [] };
+    left -= Math.min(text.length, cap);
+    if (text.length <= cap && !notDiffed.length) return `### ${t.id}\n${text}`;
+    const shown = Math.min(text.length, cap);
+    const skipped = notDiffed.length ? `; not diffed, budget spent: ${notDiffed.join(', ')}` : '';
+    return `### ${t.id}\n${text.slice(0, cap)}\n[diff truncated: ${shown} of ${text.length} chars shown${skipped}]`;
   });
   return (
     `\nDIFFS (from the runner: for each reconcile_needed and state_review item, the git diff of the item's own file_keys from the commit whose copy of each file matches the target's file_baselines, to HEAD; "no diff available" says why there is none):\n` +
@@ -929,6 +947,14 @@ function launchWorker(opts) {
       // the runner leaves them out of the next chained launch, and
       // an external trigger (stop, commit) starts with none.
       const batch = selectBatch(eligible);
+      // Each diff-lane item's baselines, read from the store when the launcher
+      // has one, else carried on the item itself: a chained launch gets only
+      // queue_snapshot items, which carry them forward for the later batches.
+      const baselinesById = new Map(eligible.map((t) => [t.id, opts.store ? itemBaselines(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.baselines : undefined]));
+      const withBaselines = (t) => {
+        const baselines = baselinesById.get(t.id);
+        return baselines && typeof baselines === 'object' ? { baselines } : {};
+      };
       const chainAttempted = opts.trigger === 'chain' && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
       writeFileSync(
         paths.eligible,
@@ -936,14 +962,11 @@ function launchWorker(opts) {
           token,
           head: git.head,
           ...runnerHost,
-          items: batch.map((t) => {
-            const baselines = itemBaselines(opts.store, t);
-            return { id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t), ...(baselines ? { baselines } : {}) };
-          }),
+          items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t), ...withBaselines(t) })),
           policy_version: POLICY_VERSION,
           run_id: randomUUID(),
           policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
-          queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? '' })),
+          queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? '', ...withBaselines(t) })),
           chain_attempted: chainAttempted,
         })
       );
