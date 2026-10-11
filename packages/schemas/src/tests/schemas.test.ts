@@ -692,6 +692,27 @@ test('feature_article.concept_family: optional marker round-trips; legacy articl
 // packages/schemas/src/tests -> src -> schemas -> packages -> repo root
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
+type RegistryAgent = { name: string; file: string; hosts?: string[]; opencode_full?: { mode?: string } };
+
+// The declared main-session set, shared by the totality test and its predicate test.
+// The conductor has no registry marker, so it is mirrored here by FILE NAME rather
+// than cross-imported (packages/schemas is a separate TS project from scripts/, a
+// plain-.mjs tree — invariant 4); keep it in sync with MAIN_SESSION_AGENTS in
+// scripts/lib/checks.mjs. A primary opencode_full entry is exempt only when its
+// hosts exclude claude (an omitted `hosts` installs on both).
+const MAIN_SESSION_AGENT_FILES = ['conductor.md'];
+const isMainSessionAgent = (a: RegistryAgent): boolean =>
+  MAIN_SESSION_AGENT_FILES.includes(a.file) || (a.opencode_full?.mode === 'primary' && !(a.hosts ?? ['claude', 'opencode']).includes('claude'));
+
+test('main-session exemption: a primary opencode_full entry is exempt only when OpenCode-only; one Claude also installs stays dispatched', () => {
+  const full = { mode: 'primary' };
+  assert.equal(isMainSessionAgent({ name: 'plan', file: 'plan.md', hosts: ['opencode'], opencode_full: full }), true);
+  assert.equal(isMainSessionAgent({ name: 'conductor', file: 'conductor.md' }), true);
+  assert.equal(isMainSessionAgent({ name: 'x', file: 'x.md', opencode_full: full }), false, 'hosts omitted installs on claude too');
+  assert.equal(isMainSessionAgent({ name: 'x', file: 'x.md', hosts: ['claude', 'opencode'], opencode_full: full }), false);
+  assert.equal(isMainSessionAgent({ name: 'x', file: 'x.md', hosts: ['opencode'], opencode_full: { mode: 'subagent' } }), false);
+});
+
 test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DISPATCHED registered agent (registry minus the declared main-session set) is tokenized and maps to a config.models key (AC7, interface slice 2)', async () => {
   // dynamic import + cast: AGENT_MODEL_KEY does not exist until this phase ships, so a missing
   // export must fail an ASSERTION below — never a compile-time reference (a crash-red proves nothing).
@@ -701,7 +722,7 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DIS
 
   // the totality oracle: read the registry the map must be total over
   const registry = JSON.parse(readFileSync(join(REPO_ROOT, 'agent-templates', 'registry.json'), 'utf8')) as {
-    agents: { name: string; file: string }[];
+    agents: RegistryAgent[];
   };
 
   // EXEMPTION IS THE DECLARED SET, NOT A TOKEN SNIFF (Sol review LOW finding): the
@@ -709,13 +730,22 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DIS
   // pass a DISPATCHED agent that simply forgot its tokens — a real defect, not a
   // main-session agent. The declared exemption set lives in
   // scripts/lib/checks.mjs's `MAIN_SESSION_AGENTS` (guarding the §7.3/§7.4/
-  // tool-grant linters there); mirrored here by FILE
-  // NAME rather than cross-imported (packages/schemas is a separate TS project from
-  // scripts/, a plain-.mjs tree — invariant 4) — keep this list in sync with that one.
-  const MAIN_SESSION_AGENT_FILES = ['conductor.md'];
+  // tool-grant linters there). Two halves:
+  // - the conductor has no registry marker, so it is mirrored here by FILE NAME
+  //   rather than cross-imported (packages/schemas is a separate TS project from
+  //   scripts/, a plain-.mjs tree — invariant 4); keep it in sync with that list;
+  // - an OpenCode-only agent the registry installs as `opencode_full` with mode
+  //   primary (the plan agent) is one the user Tabs to and nothing dispatches, so
+  //   the registry itself declares it main-session and no second hand-kept entry
+  //   is needed. The exemption needs `hosts` to exclude claude: an entry Claude also
+  //   installs is dispatched there, so loadRegistry refuses that combination and
+  //   this predicate never exempts it. opencode_full mode subagent stays in the
+  //   dispatched set and must carry its tokens.
+  const isMainSession = isMainSessionAgent;
 
-  const exemptNames = registry.agents.filter((a) => MAIN_SESSION_AGENT_FILES.includes(a.file)).map((a) => a.name);
-  const dispatchedAgents = registry.agents.filter((a) => !MAIN_SESSION_AGENT_FILES.includes(a.file));
+  const exemptNames = registry.agents.filter(isMainSession).map((a) => a.name);
+  const dispatchedAgents = registry.agents.filter((a) => !isMainSession(a));
+  assert.ok(exemptNames.includes('conductor') && exemptNames.includes('plan'), `main-session set is conductor and plan, got ${exemptNames.join(', ')}`);
 
   // Every DISPATCHED (non-exempt) registered agent must be BOTH tokenized (its
   // template resolves {{MODEL}}/{{EFFORT}} at install time) AND mapped — a
@@ -726,7 +756,7 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DIS
     assert.match(
       content,
       /\{\{MODEL\}\}|\{\{EFFORT\}\}/,
-      `dispatched agent '${a.name}' carries no {{MODEL}}/{{EFFORT}} token — either it is a main-session agent missing from MAIN_SESSION_AGENT_FILES, or its template lost the token`
+      `dispatched agent '${a.name}' carries no {{MODEL}}/{{EFFORT}} token — either it is a main-session agent missing from MAIN_SESSION_AGENT_FILES (or an OpenCode primary without opencode_full mode primary), or its template lost the token`
     );
     assert.equal(typeof map![a.name], 'string', `dispatched agent '${a.name}' has no AGENT_MODEL_KEY entry`);
     assert.ok(map![a.name].length > 0, `AGENT_MODEL_KEY['${a.name}'] must not be blank`);
@@ -735,7 +765,7 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DIS
   assert.deepEqual(
     Object.keys(map!).sort(),
     dispatchedNames,
-    'AGENT_MODEL_KEY keys are exactly the DISPATCHED registered agents (registry minus MAIN_SESSION_AGENT_FILES) — none missing, none orphaned'
+    'AGENT_MODEL_KEY keys are exactly the DISPATCHED registered agents (registry minus the main-session set) — none missing, none orphaned'
   );
 
   // A declared main-session agent (conductor) must NOT carry an AGENT_MODEL_KEY

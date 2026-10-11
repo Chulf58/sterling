@@ -11411,8 +11411,14 @@ function fitTabs(tabs, width) {
   if (!Number.isFinite(width))
     return tabs;
   const bare = (l) => l.replace(/ \(.*\)$/, "");
+  const compact = (l) => l.replace(/ \((\d+)[^)]*\)$/, " ($1)");
+  const keepCount = (n) => (l) => l === bare(l) ? l.slice(0, n) : compact(l);
   const steps = [
     [(l) => l, (l) => l],
+    [(l) => l, compact],
+    [compact, compact],
+    [compact, keepCount(3)],
+    [compact, keepCount(1)],
     [(l) => l, bare],
     [bare, bare],
     [bare, (l) => bare(l).slice(0, 3)],
@@ -12560,6 +12566,23 @@ ${body}`;
 }
 var OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];
 var OPENCODE_PERMISSION_VALUES = ["allow", "ask", "deny"];
+function validatePermissionMap(permission, where) {
+  if (!permission || typeof permission !== "object" || Array.isArray(permission)) throw new Error(`${where} must be an object`);
+  for (const [key, value] of Object.entries(permission)) {
+    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw new Error(`${where}: unknown key '${key}' (known: ${OPENCODE_PERMISSION_KEYS.join(", ")})`);
+    if (typeof value === "string") {
+      if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw new Error(`${where}.${key}: '${value}' is not one of ${OPENCODE_PERMISSION_VALUES.join(", ")}`);
+      continue;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value) || !Object.keys(value).length) {
+      throw new Error(`${where}.${key} must be one of ${OPENCODE_PERMISSION_VALUES.join(", ")} or a non-empty map of pattern to verdict`);
+    }
+    for (const [pattern, verdict] of Object.entries(value)) {
+      if (!pattern.trim() || /[\r\n]/.test(pattern)) throw new Error(`${where}.${key}: a pattern must be one non-empty line, got ${JSON.stringify(pattern)}`);
+      if (!OPENCODE_PERMISSION_VALUES.includes(verdict)) throw new Error(`${where}.${key}[${JSON.stringify(pattern)}]: '${verdict}' is not one of ${OPENCODE_PERMISSION_VALUES.join(", ")}`);
+    }
+  }
+}
 function validateOpenCodeEntry(entry, where) {
   const block = entry.opencode;
   if (!block || typeof block !== "object" || Array.isArray(block)) throw new Error(`${where} must be an object`);
@@ -12569,10 +12592,38 @@ function validateOpenCodeEntry(entry, where) {
     throw new Error(`${where}.description must be one non-empty line of text`);
   }
   if (block.permission === void 0) return;
-  if (!block.permission || typeof block.permission !== "object" || Array.isArray(block.permission)) throw new Error(`${where}.permission must be an object`);
-  for (const [key, value] of Object.entries(block.permission)) {
-    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw new Error(`${where}.permission: unknown key '${key}' (known: ${OPENCODE_PERMISSION_KEYS.join(", ")})`);
-    if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw new Error(`${where}.permission.${key}: '${value}' is not one of ${OPENCODE_PERMISSION_VALUES.join(", ")}`);
+  validatePermissionMap(block.permission, `${where}.permission`);
+}
+var AGENT_HOSTS = ["claude", "opencode"];
+var OPENCODE_FULL_MODES = ["primary", "subagent"];
+function agentHosts(entry) {
+  return entry.hosts ?? AGENT_HOSTS;
+}
+function validateHosts(entry, where) {
+  if (entry.hosts !== void 0) {
+    const hosts = entry.hosts;
+    if (!Array.isArray(hosts) || !hosts.length || hosts.some((h) => !AGENT_HOSTS.includes(h)) || new Set(hosts).size !== hosts.length) {
+      throw new Error(`${where}.hosts must be a non-empty list of distinct hosts from ${AGENT_HOSTS.join(", ")}`);
+    }
+  }
+  const full = entry.opencode_full;
+  if (full !== void 0) {
+    if (!full || typeof full !== "object" || Array.isArray(full)) throw new Error(`${where}.opencode_full must be an object`);
+    const unknown = Object.keys(full).find((key) => !["path", "mode", "permission"].includes(key));
+    if (unknown !== void 0) throw new Error(`${where}.opencode_full: unknown key '${unknown}' \u2014 the keys are path, mode and permission`);
+    if (full.path !== `.opencode/agents/${entry.name}.md`) {
+      throw new Error(`${where}.opencode_full.path must be '.opencode/agents/${entry.name}.md' (directly under .opencode/agents/, named after the agent), got ${JSON.stringify(full.path)}`);
+    }
+    if (!OPENCODE_FULL_MODES.includes(full.mode)) throw new Error(`${where}.opencode_full.mode must be one of ${OPENCODE_FULL_MODES.join(", ")}`);
+    if (full.permission !== void 0) validatePermissionMap(full.permission, `${where}.opencode_full.permission`);
+    if (!agentHosts(entry).includes("opencode")) throw new Error(`${where}: opencode_full needs hosts to include opencode`);
+    if (full.mode === "primary" && agentHosts(entry).includes("claude")) {
+      throw new Error(`${where}: opencode_full.mode primary is for an OpenCode-only agent \u2014 set hosts to ["opencode"], or use mode subagent for an agent Claude also installs`);
+    }
+    if (entry.opencode !== void 0) throw new Error(`${where}: opencode (the portable copy) and opencode_full both write .opencode/agents/${entry.name}.md \u2014 keep one`);
+  }
+  if (!agentHosts(entry).includes("claude") && full === void 0) {
+    throw new Error(`${where}: an agent not installed on claude must declare opencode_full (where OpenCode installs it)`);
   }
 }
 function loadRegistry(registryPath2) {
@@ -12593,6 +12644,7 @@ function loadRegistry(registryPath2) {
       throw new Error(`agent registry ${registryPath2}: agents[${index}].file must be a template filename ending in .md`);
     }
     if (entry.opencode !== void 0) validateOpenCodeEntry(entry, `agent registry ${registryPath2}: agents[${index}].opencode`);
+    validateHosts(entry, `agent registry ${registryPath2}: agents[${index}]`);
     if (names.has(entry.name) || files.has(entry.file)) {
       throw new Error(`agent registry ${registryPath2}: duplicate agent name or template file at agents[${index}]`);
     }
@@ -13056,12 +13108,21 @@ var OPENCODE_HEADER_RE = /^<!-- sterling-portable renderer=(\S+) template=(\S+) 
 var normalize2 = (s2) => s2.replace(/\r\n/g, "\n");
 function permissionLines(permission, label) {
   if (permission === void 0) return [];
+  const bad = (key, value) => new Error(`opencode permission for ${label}: '${key}: ${JSON.stringify(value)}' \u2014 keys are ${OPENCODE_PERMISSION_KEYS.join("/")}, values ${OPENCODE_PERMISSION_VALUES.join("/")} or a map of pattern to one of them (P5)`);
   const lines = ["permission:"];
   for (const [key, value] of Object.entries(permission)) {
-    if (!OPENCODE_PERMISSION_KEYS.includes(key) || !OPENCODE_PERMISSION_VALUES.includes(value)) {
-      throw new Error(`opencode permission for ${label}: '${key}: ${value}' \u2014 keys are ${OPENCODE_PERMISSION_KEYS.join("/")}, values ${OPENCODE_PERMISSION_VALUES.join("/")} (P5)`);
+    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw bad(key, value);
+    if (typeof value === "string") {
+      if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw bad(key, value);
+      lines.push(`  ${key}: ${value}`);
+      continue;
     }
-    lines.push(`  ${key}: ${value}`);
+    if (!value || typeof value !== "object" || Array.isArray(value) || !Object.keys(value).length) throw bad(key, value);
+    lines.push(`  ${key}:`);
+    for (const [pattern, verdict] of Object.entries(value)) {
+      if (!pattern.trim() || /[\r\n]/.test(pattern) || !OPENCODE_PERMISSION_VALUES.includes(verdict)) throw bad(`${key}.${pattern}`, verdict);
+      lines.push(`    ${JSON.stringify(pattern)}: ${verdict}`);
+    }
   }
   return lines;
 }
@@ -13154,14 +13215,14 @@ function sterlingRootFrom(moduleUrl = new URL("../../scripts/lib/opencode-instal
     if (dirname4(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
-function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, model, writeTools } = {}) {
-  const hostText = renderOpenCodeFullText(templateContent, label);
-  const permission = FULL_PERMISSIONS[entry.name] ?? entry.opencode?.permission;
+function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, mode, model, writeTools, vars = {} } = {}) {
+  const hostText = substituteInstallVars(renderOpenCodeFullText(templateContent, label), vars);
+  const permission = substitutePermissionVars(FULL_PERMISSIONS[entry.name] ?? entry.opencode_full?.permission ?? entry.opencode?.permission, vars, label);
   const out = renderOpenCodeAgent(hostText, label, { permission, description: primary ? CONDUCTOR_OPENCODE_DESCRIPTION : void 0 });
   const header = parseOpenCodeHeader(out.content);
   let content = normalize3(out.content).replace(`${header.headerLine}
 `, "");
-  if (primary) content = content.replace(/^mode: subagent$/m, "mode: primary");
+  if (primary || mode === "primary") content = content.replace(/^mode: subagent$/m, "mode: primary");
   if (!STORE_WRITERS.has(entry.name)) {
     const denies = (writeTools ?? storeWriteTools()).map((t) => `  ${t}: deny`);
     const close = content.indexOf("\n---\n", 4);
@@ -13175,6 +13236,33 @@ model: ${model}`);
   const fullHeader = `<!-- sterling-full renderer=opencode-full/1 template=${out.name} template_hash=${sha256(templateContent)} content_hash=${sha256(content)} -->`;
   return { name: out.name, content: `${content.slice(0, fmEnd)}${fullHeader}
 ${content.slice(fmEnd)}` };
+}
+var INSTALL_VARS = ["PROJECT_DIR", "STERLING_ROOT"];
+var INSTALL_VAR_RE = /\{\{(PROJECT_DIR|STERLING_ROOT)\}\}/g;
+var SHELL_SAFE_PATH_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+function substituteInstallVars(text, vars) {
+  return text.replace(INSTALL_VAR_RE, (token, name) => vars[name] ?? token);
+}
+function substitutePermissionVars(permission, vars, label) {
+  if (permission === void 0) return void 0;
+  const out = {};
+  for (const [key, value] of Object.entries(permission)) {
+    if (typeof value === "string") {
+      out[key] = value;
+      continue;
+    }
+    out[key] = {};
+    for (const [pattern, verdict] of Object.entries(value)) {
+      const rendered = substituteInstallVars(pattern, vars);
+      if (/\{\{[A-Z_]+\}\}/.test(rendered)) throw new Error(`opencode permission for ${label}: '${rendered}' keeps an install token no value was given for (P5)`);
+      out[key][rendered] = verdict;
+    }
+  }
+  return out;
+}
+function usesInstallVars(templateContent, permission) {
+  return new RegExp(INSTALL_VAR_RE.source).test(`${templateContent}
+${JSON.stringify(permission ?? {})}`);
 }
 function frontmatterModel(content) {
   const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
@@ -13192,15 +13280,35 @@ function stageFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models 
     writes: planned.filter((r) => r.content !== void 0).map(({ path, content, previous }) => ({ path, content, previous }))
   };
 }
+function fullAgentTargets(registry) {
+  const targets = ROSTER.map((name) => {
+    const entry = registry.agents.find((a) => a.name === name);
+    if (!entry) throw new Error(`opencode roster: '${name}' is not in agent-templates/registry.json (P5)`);
+    if (!agentHosts(entry).includes("opencode")) throw new Error(`opencode roster: '${name}' is in the roster but its registry hosts leave out opencode (P5)`);
+    return { name, entry, rel: `${STERLING_AGENTS_SUBDIR}/${name}.md`, primary: name === "conductor" };
+  });
+  for (const entry of registry.agents) {
+    if (entry.opencode_full === void 0) continue;
+    if (ROSTER.includes(entry.name)) throw new Error(`opencode roster: '${entry.name}' is in the roster and also has opencode_full; it would be written twice (P5)`);
+    targets.push({ name: entry.name, entry, rel: entry.opencode_full.path, primary: false, mode: entry.opencode_full.mode });
+  }
+  return targets;
+}
 function planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models = {} }) {
   const registry = loadRegistry(join13(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
+  const vars = { PROJECT_DIR: fwd2(projectDir2), STERLING_ROOT: fwd2(pluginRoot) };
   const rows = [];
-  for (const name of ROSTER) {
-    const entry = registry.agents.find((a) => a.name === name);
-    if (!entry) throw new Error(`opencode roster: '${name}' is not in agent-templates/registry.json (P5)`);
-    const rel = `${STERLING_AGENTS_SUBDIR}/${name}.md`;
+  for (const { name, entry, rel, primary, mode } of fullAgentTargets(registry)) {
     const path = join13(projectDir2, rel);
+    const templateContent = readFileSync9(join13(pluginRoot, "agent-templates", entry.file), "utf8");
+    if (usesInstallVars(templateContent, entry.opencode_full?.permission)) {
+      const unsafe = INSTALL_VARS.filter((v) => !SHELL_SAFE_PATH_RE.test(vars[v]));
+      if (unsafe.length) {
+        rows.push(refusal(rel, `${rel} needs ${unsafe.map((v) => `${v === "PROJECT_DIR" ? "the project path" : "the Sterling path"} (${vars[v]})`).join(" and ")} in shell permission rules, and a space, quote or glob character there cannot be matched reliably`, "use a project and Sterling path made of letters, digits and _@%+=:,./- only, then rerun /sterling:update"));
+        continue;
+      }
+    }
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
@@ -13220,7 +13328,7 @@ function planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models =
       }
     }
     const model = models[name] ?? (disk === null ? void 0 : frontmatterModel(disk));
-    const agent = renderFullOpenCodeAgent(readFileSync9(join13(pluginRoot, "agent-templates", entry.file), "utf8"), entry.file, entry, { primary: name === "conductor", model, writeTools });
+    const agent = renderFullOpenCodeAgent(templateContent, entry.file, entry, { primary, mode, model, writeTools, vars });
     if (agent.name !== name) throw new Error(`opencode roster: '${entry.file}' renders as '${agent.name}', not '${name}' (P5)`);
     if (disk === agent.content) {
       rows.push({ item: rel, status: "matches" });

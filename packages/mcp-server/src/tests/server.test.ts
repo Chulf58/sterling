@@ -1025,6 +1025,38 @@ test('knowledge_create takes type ONCE (GitHub issue #55): top level only, field
   }
 });
 
+test('knowledge_create serves capture_date and source_date inline as date strings, with no cross-branch $ref (GitHub #73)', async () => {
+  const { client, tools, cleanup } = await harness();
+  try {
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'knowledge_create')!;
+    // A reused zod field was served as {"$ref":"#/properties/fields/anyOf/<n>/..."},
+    // a pointer into another branch that clients such as OpenCode type as unknown.
+    assert.doesNotMatch(JSON.stringify(tool.inputSchema), /"\$ref"/, 'the served schema inlines every property');
+
+    type Variant = { properties?: Record<string, { type?: string; pattern?: string }>; required?: string[] };
+    const variants = (tool.inputSchema.properties as { fields: { anyOf: Variant[] } }).fields.anyOf;
+    const dated = new Set(['research_finding', 'reference_material']);
+    let checked = 0;
+    for (const variant of variants) {
+      const typeConst = (variant.properties!.type as unknown as { const: string }).const;
+      const described = tools.knowledgeSchema(typeConst);
+      for (const name of ['capture_date', 'source_date']) {
+        const hasField = described.fields.some((f: { name: string }) => f.name === name);
+        assert.equal(name in (variant.properties ?? {}), hasField, `${typeConst}.${name} is served exactly when the type has it`);
+        if (!hasField) continue;
+        const prop = variant.properties![name];
+        assert.equal(prop.type, 'string', `${typeConst}.${name} is advertised as a string`);
+        assert.ok(new RegExp(prop.pattern ?? '(?!)').test('2026-10-11'), `${typeConst}.${name} carries a YYYY-MM-DD pattern`);
+        assert.ok(variant.required!.includes(name), `${typeConst}.${name} is required`);
+        checked++;
+      }
+    }
+    assert.ok(dated.size > 0 && checked === dated.size * 2, `capture_date and source_date checked on both dated types (checked ${checked})`);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('knowledge_create is typed per-type (decision foreign_7c7f6db1, probe research_finding foreign_15c8e6b5): served anyOf, discriminator-hint description, server-owned absence, size guard', async () => {
   const { client, tools, cleanup } = await harness();
   try {

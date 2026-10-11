@@ -37561,6 +37561,23 @@ Extend fields to carry the surviving ruling(s) forward, or re-call with orphans_
 
 // packages/mcp-server/dist/server.js
 var passthrough = external_exports.object({}).passthrough();
+function cloneZod(node) {
+  if (Array.isArray(node))
+    return node.map(cloneZod);
+  if (typeof node === "function")
+    return ((...args2) => cloneZod(node(...args2)));
+  if (node === null || typeof node !== "object")
+    return node;
+  const obj = node;
+  if (obj._def && typeof obj.constructor === "function" && obj.constructor !== Object) {
+    const Ctor = obj.constructor;
+    return new Ctor(cloneZod(obj._def));
+  }
+  if (Object.getPrototypeOf(node) === Object.prototype) {
+    return Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, cloneZod(v)]));
+  }
+  return node;
+}
 var buildCreateFieldVariants = (discriminatorOptional) => Object.keys(RECORD_TYPES).map((type) => {
   const rawShape = objectShapeFor(type);
   if (!rawShape)
@@ -37570,7 +37587,8 @@ var buildCreateFieldVariants = (discriminatorOptional) => Object.keys(RECORD_TYP
   for (const [key, node] of Object.entries(rawShape)) {
     if (SERVER_OWNED_FIELDS.includes(key))
       continue;
-    fieldsShape[key] = defaulted.has(key) ? node.optional() : node;
+    const field = discriminatorOptional ? cloneZod(node) : node;
+    fieldsShape[key] = defaulted.has(key) ? field.optional() : field;
   }
   fieldsShape.type = discriminatorOptional ? external_exports.literal(type).optional() : external_exports.literal(type);
   fieldsShape[DEDUP_OVERRIDE_FIELD] = external_exports.boolean().optional();

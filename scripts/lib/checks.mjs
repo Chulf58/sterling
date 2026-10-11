@@ -44,8 +44,10 @@ export function lintAgentFences(content, label, portableBlocks = shippedPortable
 // prompt-contract sections, the §7.4 spawn contract and the tool-grant
 // linter's tools: requirement are all properties of a DISPATCHED role (a
 // brief, a required-inputs manifest, a restricted tool set) — none apply to
-// the one agent that IS the session. Currently just conductor.md.
-export const MAIN_SESSION_AGENTS = ['conductor.md'];
+// the one agent that IS the session. conductor.md, plus plan.md: OpenCode's
+// primary Plan agent (registry hosts ["opencode"]), which the user Tabs to and
+// which is never dispatched either.
+export const MAIN_SESSION_AGENTS = ['conductor.md', 'plan.md'];
 
 // Inherit-all agents (decision
 // implementor-inherits-all-tools-read-only-agents-keep-allowlists, bc1894e5):

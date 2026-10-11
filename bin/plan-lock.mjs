@@ -7,8 +7,8 @@ var __export = (target, all) => {
 };
 
 // scripts/plan-lock.mjs
-import { existsSync as existsSync2, rmSync } from "node:fs";
-import { basename, resolve as resolve2 } from "node:path";
+import { existsSync as existsSync2, lstatSync as lstatSync2, readdirSync, realpathSync as realpathSync2, rmSync } from "node:fs";
+import { basename, isAbsolute, join as join5, relative, resolve as resolve2, sep as sep2 } from "node:path";
 
 // scripts/hooks/lib/plan-lock.mjs
 import { createHash, randomUUID } from "node:crypto";
@@ -5819,13 +5819,32 @@ function requireUnchanged(before2) {
     refuse("the plan lock changed underneath this command (another approval or writer landed while it ran) \u2014 nothing was written; re-run and re-check the new lock first");
   }
 }
-var verbs = ["plan", "observe", "release", "show"].filter(has);
+var verbs = ["plan", "bind-pending", "observe", "release", "show"].filter(has);
 if (verbs.length !== 1) {
   refuse(
-    verbs.length ? `exactly one verb at a time \u2014 got: ${verbs.map((v) => `--${v}`).join(", ")}` : 'no verb given \u2014 one of --plan <path> | --observe | --release --reason "<why>" | --show'
+    verbs.length ? `exactly one verb at a time \u2014 got: ${verbs.map((v) => `--${v}`).join(", ")}` : 'no verb given \u2014 one of --plan <path> | --bind-pending | --observe | --release --reason "<why>" | --show'
   );
 }
 var verb = verbs[0];
+var VERB_FLAGS = {
+  plan: ["--plan", "--force"],
+  "bind-pending": ["--bind-pending", "--force"],
+  observe: ["--observe"],
+  release: ["--release", "--reason"],
+  show: ["--show"]
+};
+var VALUE_FLAGS = ["--plan", "--reason"];
+for (let i = 0; i < argv.length; i++) {
+  const token = argv[i];
+  const flag = token.startsWith("--") ? token.split("=")[0] : null;
+  if (flag === null) refuse(`unexpected argument ${JSON.stringify(token)} \u2014 --${verb} takes ${VERB_FLAGS[verb].join(", ")} only. Nothing was changed`);
+  if (!VERB_FLAGS[verb].includes(flag)) refuse(`${flag} does not go with --${verb} (it takes ${VERB_FLAGS[verb].join(", ")} only). Nothing was changed`);
+  if (!VALUE_FLAGS.includes(flag)) {
+    if (token !== flag) refuse(`${flag} takes no value, got ${JSON.stringify(token)}. Nothing was changed`);
+  } else if (token === flag && argv[i + 1] !== void 0 && !argv[i + 1].startsWith("--")) {
+    i++;
+  }
+}
 if (verb === "show") {
   const read = readLock(sterlingDir);
   if (read.malformed) {
@@ -5904,9 +5923,60 @@ if (verb === "observe") {
   process.stdout.write(JSON.stringify({ observed_status: next.observed_status, observed_sha256: next.observed_sha256, status: live.status }, null, 2) + "\n");
   process.exit(0);
 }
-var planArg = arg2("plan");
-if (!planArg) refuse("--plan requires a path to the plan file");
-var planPath = resolve2(cwd, planArg);
+var PENDING_NAME = /^[a-z0-9][a-z0-9-]*\.md$/;
+function inside(parent, child) {
+  const rel = relative(parent, child);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep2}`) && !isAbsolute(rel);
+}
+function pendingPlanPath() {
+  const plansDir = join5(cwd, ".sterling", "plans");
+  let realProject;
+  let realPlans;
+  try {
+    realProject = realpathSync2(cwd);
+    realPlans = realpathSync2(plansDir);
+  } catch (e) {
+    refuse(`no plans directory at ${plansDir} (${e && e.code || e}) \u2014 write the plan there first. Nothing was changed`);
+  }
+  if (!inside(realProject, realPlans)) refuse(`${plansDir} resolves to ${realPlans}, outside the project \u2014 refusing to bind a plan from there. Nothing was changed`);
+  let entries;
+  try {
+    entries = readdirSync(realPlans, { withFileTypes: true }).filter((d) => d.name.endsWith(".md"));
+  } catch (e) {
+    refuse(`could not list ${plansDir} (${e && e.message || e}). Nothing was changed`);
+  }
+  if (entries.length === 0) refuse(`no *.md plan in ${plansDir} \u2014 write the plan there first. Nothing was changed`);
+  let dated;
+  try {
+    dated = entries.map((d) => ({ name: d.name, mtime: lstatSync2(join5(realPlans, d.name)).mtimeMs }));
+  } catch (e) {
+    refuse(`could not read the modification times in ${plansDir} (${e && e.message || e}). Nothing was changed`);
+  }
+  dated.sort((a, b) => b.mtime - a.mtime);
+  const [newest, second] = dated;
+  if (second && second.mtime === newest.mtime) {
+    refuse(`${newest.name} and ${second.name} in ${plansDir} have the same modification time, so the newest plan is ambiguous. Nothing was changed`);
+  }
+  if (!PENDING_NAME.test(newest.name)) {
+    refuse(`the newest plan file ${JSON.stringify(newest.name)} in ${plansDir} is not named <slug>.md (lowercase letters, digits and hyphens) \u2014 rename it and re-run. Nothing was changed`);
+  }
+  let real;
+  try {
+    real = realpathSync2(join5(realPlans, newest.name));
+  } catch (e) {
+    refuse(`${join5(plansDir, newest.name)} could not be resolved (${e && e.code || e}) \u2014 a dangling link is not a plan. Nothing was changed`);
+  }
+  if (!inside(realPlans, real)) refuse(`${join5(plansDir, newest.name)} resolves to ${real}, outside ${plansDir} \u2014 refusing to bind it. Nothing was changed`);
+  return real;
+}
+var planPath;
+if (verb === "bind-pending") {
+  planPath = pendingPlanPath();
+} else {
+  const planArg = arg2("plan");
+  if (!planArg) refuse("--plan requires a path to the plan file");
+  planPath = resolve2(cwd, planArg);
+}
 if (!existsSync2(planPath)) refuse(`no plan file at ${planPath}`);
 var planRead = readPlanFileBounded(planPath);
 if (planRead.unreadable) refuse(`the plan file at ${planPath} ${planRead.unreadable} \u2014 nothing was changed`);
@@ -5964,5 +6034,6 @@ if (replaced) {
     );
   }
 }
-process.stdout.write(JSON.stringify({ ...lock, replaced }, null, 2) + "\n");
+var report = verb === "bind-pending" ? { bound_file: planPath, ...lock, replaced } : { ...lock, replaced };
+process.stdout.write(JSON.stringify(report, null, 2) + "\n");
 process.exit(0);
