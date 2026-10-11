@@ -368,6 +368,9 @@ export interface OpenCodeCatalog {
 export interface OpenCodeContextRead {
   /** per session id asked for: its latest assistant turn with tokens, or null when it has none yet */
   usage: Map<string, OpenCodeContextUsage | null>;
+  /** per session id asked for: the per-call model its session_v2 row holds from creation, as the card shows it
+   *  ('gpt-6.1-sol#high'), or null when the row, the table, the column or the model is absent or unreadable */
+  sessionModels: Map<string, string | null>;
   /** the catalog, null when OpenCode holds none; left out when its stamp equals the one passed in */
   catalog?: OpenCodeCatalog | null;
 }
@@ -421,14 +424,45 @@ export function readOpenCodeContext(dbPath: string, sessionIds: readonly string[
       }
       usage.set(id, found);
     }
+    const sessionModels = readSessionModels(db, sessionIds);
     const stampRow = db.prepare('SELECT time_updated FROM kv WHERE key = ?').get(CATALOG_KEY) as { time_updated: number } | undefined;
-    if (!stampRow) return { usage, catalog: null };
-    if (stampRow.time_updated === catalogStamp) return { usage };
+    if (!stampRow) return { usage, sessionModels, catalog: null };
+    if (stampRow.time_updated === catalogStamp) return { usage, sessionModels };
     const value = (db.prepare('SELECT value FROM kv WHERE key = ?').get(CATALOG_KEY) as { value: string }).value;
-    return { usage, catalog: { stamp: stampRow.time_updated, limits: catalogLimits(value) } };
+    return { usage, sessionModels, catalog: { stamp: stampRow.time_updated, limits: catalogLimits(value) } };
   } finally {
     db.close();
   }
+}
+
+/** The per-call model each session started with, from session_v2.model (JSON
+ *  {id, providerID, variant?}): a child session has it from creation, before
+ *  any assistant turn. Older OpenCode versions may lack the table or the
+ *  column, and a row's model may be null or not JSON; each of those leaves the
+ *  session at null so the card falls down its chain, and nothing throws. The
+ *  variant shows as '#<variant>' unless it is absent or 'default'. */
+function readSessionModels(db: DatabaseSync, sessionIds: readonly string[]): Map<string, string | null> {
+  const out = new Map<string, string | null>();
+  let stmt;
+  try {
+    stmt = db.prepare('SELECT model FROM session_v2 WHERE id = ?');
+  } catch {
+    return out;
+  }
+  for (const id of sessionIds) {
+    try {
+      const row = stmt.get(id) as { model: unknown } | undefined;
+      const m = typeof row?.model === 'string' ? (JSON.parse(row.model) as { id?: unknown; variant?: unknown } | null) : null;
+      if (typeof m?.id !== 'string' || !m.id) {
+        out.set(id, null);
+        continue;
+      }
+      out.set(id, typeof m.variant === 'string' && m.variant && m.variant !== 'default' ? `${m.id}#${m.variant}` : m.id);
+    } catch {
+      out.set(id, null);
+    }
+  }
+  return out;
 }
 
 /** The context limit of every model in the cached catalog: `{body}` holds the
@@ -566,10 +600,18 @@ export function createSubagentTracker(
     const unresolved = new Set<string>();
     for (const r of rows) {
       const u = read.usage.get(r.agentId) ?? null;
-      if (!u) continue;
+      if (!u) {
+        // no assistant turn yet: the session's own per-call model, tokens unknown
+        const sessionModel = read.sessionModels.get(r.agentId) ?? null;
+        if (sessionModel) out.set(r.agentId, { model: sessionModel, pct: null, tokens: null });
+        continue;
+      }
       const window = catalog?.limits.get(`${u.providerID}/${u.model}`) ?? contextWindowFor(u.model, windows, sharedWindows);
       if (!window) unresolved.add(`${u.providerID}/${u.model}`);
-      out.set(r.agentId, { model: u.model, pct: window ? contextPercent(u.tokens, window) : null, tokens: u.tokens });
+      // the same model as the session's: keep the session's '#variant' so it does not vanish when the first turn lands
+      const sessionModel = read.sessionModels.get(r.agentId) ?? null;
+      const label = sessionModel !== null && sessionModel.replace(/#.*$/, '') === u.model ? sessionModel : u.model;
+      out.set(r.agentId, { model: label, pct: window ? contextPercent(u.tokens, window) : null, tokens: u.tokens });
     }
     if (unresolved.size) contextNote = `context % unknown: no context window for ${[...unresolved].join(', ')} in OpenCode's model catalog or context_watch.windows`;
     return out;
