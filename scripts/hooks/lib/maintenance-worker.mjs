@@ -1133,12 +1133,16 @@ export const TOOLS_MISSING_RE = new RegExp(
   `web tools? missing|\\b${WEB_TOOL}(?:\\s*(?:,|and|or)\\s*${WEB_TOOL})*\\s+(?:is|are|was|were)\\s+(?:not available|unavailable|missing|not granted|not allowed)\\b`,
   'i'
 );
-/** A reason that names a failure of the SOURCE, not of the run's tools: an
- *  HTTP 4xx/5xx status, a timeout, DNS, a refused or reset connection, a rate
- *  limit, or the server, site or vendor answering ("returned"). Checked first,
- *  so such a reason is temporary and never tools-missing ("WebFetch was
- *  unavailable because the vendor returned HTTP 503" is an outage). */
-export const SOURCE_FAILURE_RE = /\b[45]\d\d\b|timed? ?out|\bDNS\b|ENOTFOUND|ECONNREFUSED|ECONNRESET|connection (?:was )?(?:refused|reset)|rate.?limit|\bserver\b|\bsite\b|\bvendor\b|\breturned\b/i;
+/** A reason that gives real evidence of a failure of the SOURCE, not of the
+ *  run's tools: an HTTP status code (a 4xx/5xx number, 429 included, or
+ *  "HTTP 5xx"), a timeout, ENOTFOUND, ECONNREFUSED, ECONNRESET, a refused or
+ *  reset connection, DNS, or a rate limit. Bare words such as "server" or
+ *  "returned" are not evidence. Checked before TOOLS_MISSING_RE, and only on
+ *  the web lanes: such a reason is a retry there, never a missing tool
+ *  ("WebFetch was unavailable because the vendor returned HTTP 503" is an
+ *  outage). TEMPORARY_RE stays without these terms because it also reads
+ *  reconcile handoffs, where "HTTP 503" names behaviour, not an outage. */
+export const SOURCE_FAILURE_RE = /\b[45]\d\d\b|HTTP 5xx|timed out|timeout|ENOTFOUND|ECONNREFUSED|ECONNRESET|connection (?:was )?(?:refused|reset)|\bDNS\b|rate.?limit/i;
 /** Did the child say a web tool was missing from the run (and nothing about
  *  the source failing)? */
 export function isToolsMissing(reason) {
@@ -1150,9 +1154,8 @@ const WEB_LANES = new Set(['stale_research', 'refresh_reference']);
  *  conflict, the budget, a timeout or an unavailable source. Such an item is
  *  retried by a later run, never handed off (changes (f) and (v)). On the web
  *  lanes a reason that matches TOOLS_MISSING_RE and names no source failure
- *  (SOURCE_FAILURE_RE) is not temporary. The network-failure terms are
- *  narrow on purpose: this pattern also reads reconcile handoff reasons. */
-export const TEMPORARY_RE = /database is locked|SQLITE_BUSY|version conflict|expected_version|stale version|\bCAS\b|budget|timed out|timeout|rate.?limit|unavailable|unreachable|fetch failed|could not (?:fetch|reach|load)|connection (?:was )?(?:refused|reset)|ECONNREFUSED|ECONNRESET|ENOTFOUND|DNS (?:lookup|resolution|error|failure)|HTTP 5\d\d/i;
+ *  (SOURCE_FAILURE_RE) is not temporary, and a SOURCE_FAILURE_RE match is. */
+export const TEMPORARY_RE = /database is locked|SQLITE_BUSY|version conflict|expected_version|stale version|\bCAS\b|budget|timed out|timeout|rate.?limit|unavailable|unreachable|fetch failed|could not (?:fetch|reach|load)/i;
 /** The server's refusal of a write outside the batch policy ("worker policy
  *  refused <tool>: rule '<rule>' — …"): a handoff, never temporary. */
 export const POLICY_REFUSAL_RE = /worker policy refused/i;
@@ -1459,7 +1462,9 @@ export async function runWorker(opts) {
         // worker's and a later run retries it.
         // A worker-policy refusal is a standing handoff whatever its detail
         // names: the write is outside the policy, so retrying cannot help.
-        if (!POLICY_REFUSAL_RE.test(reason) && TEMPORARY_RE.test(reason)) {
+        // On the web lanes a named source failure (SOURCE_FAILURE_RE) is
+        // temporary too; on the other lanes such words describe behaviour.
+        if (!POLICY_REFUSAL_RE.test(reason) && (TEMPORARY_RE.test(reason) || (WEB_LANES.has(lane) && SOURCE_FAILURE_RE.test(reason)))) {
           retries++;
           if (item) actedIds.add(v.item_id);
           journal({ kind: 'verdict', item_id: v.item_id ?? null, article: v.article ?? null, lane, verdict: 'retry', reason: reason.slice(0, 300), claimed: 'needs_conductor', ...marker });

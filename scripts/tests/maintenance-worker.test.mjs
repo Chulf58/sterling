@@ -2077,6 +2077,10 @@ test('[#70 web tools] the shipped librarian template yields a worker agent body 
 });
 
 const ISSUE_70_REASON = 'source unreachable: WebFetch and WebSearch are not available in this run, so the outside-source claims could not be re-checked; nothing written';
+/** Sol re-check (a): bare words ("server", "returned") are not a source failure; this is a missing tool. */
+const TOOL_SERVER_NOT_GRANTED = 'WebFetch is unavailable because the tool server returned not granted';
+/** Sol re-check (b): on a reconcile lane, HTTP 503 in a handoff names behaviour, not an outage. */
+const RECONCILE_HTTP_503 = 'the article does not describe how HTTP 503 responses are handled';
 /** Reasons that name the tool AND an outage of the source: temporary, never a missing tool. */
 const SOURCE_OUTAGES = [
   'WebFetch was unavailable because the vendor returned HTTP 503',
@@ -2100,8 +2104,12 @@ test('[#70 handoff] TOOLS_MISSING_RE matches a missing web tool as the subject, 
   for (const r of SOURCE_OUTAGES) {
     assert.match(r, SOURCE_FAILURE_RE, r);
     assert.equal(isToolsMissing(r), false, r);
-    assert.match(r, TEMPORARY_RE, `${r} stays temporary`);
   }
+  // Re-check finding (a): bare words are not evidence of an outage.
+  assert.doesNotMatch(TOOL_SERVER_NOT_GRANTED, SOURCE_FAILURE_RE);
+  assert.equal(isToolsMissing(TOOL_SERVER_NOT_GRANTED), true);
+  // Re-check finding (b): TEMPORARY_RE is unchanged, so behaviour prose about HTTP 503 is not temporary.
+  assert.doesNotMatch(RECONCILE_HTTP_503, TEMPORARY_RE);
   assert.equal(isToolsMissing(ISSUE_70_REASON), true, "the issue's own reason is a missing tool");
   assert.doesNotMatch(ISSUE_70_REASON, SOURCE_FAILURE_RE);
 });
@@ -2115,12 +2123,13 @@ test('[#70 handoff] a web-lane verdict that says the web tools are missing is ha
       { id: 'S3', lane: 'stale_research', file_keys: [], feature_link: LINK, slug: 'find-a' },
       { id: 'R1', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' },
       ...SOURCE_OUTAGES.map((_, i) => ({ id: `O${i}`, lane: i % 2 ? 'refresh_reference' : 'stale_research', file_keys: [], feature_link: LINK, slug: 'find-a' })),
+      { id: 'T1', lane: 'refresh_reference', file_keys: [], feature_link: LINK, slug: 'find-a' },
+      { id: 'R2', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], feature_link: LINK, slug: 'art-a' },
     ];
     const missing = ISSUE_70_REASON;
     const v = (id, verdict, reason) => JSON.stringify({ item_id: id, verdict, reason });
     const child = fakeClaude([
-      toolUse('e1', 'mcp__sterling__knowledge_get', { id: LINK }),
-      toolOk('e1'),
+      ...evidenceForA(),
       resultEvent({
         result: [
           v('S1', 'retry', missing),
@@ -2128,6 +2137,8 @@ test('[#70 handoff] a web-lane verdict that says the web tools are missing is ha
           v('S3', 'retry', 'WebFetch returned 503, server unavailable'),
           v('R1', 'retry', missing),
           ...SOURCE_OUTAGES.map((r, i) => v(`O${i}`, i % 2 ? 'needs_conductor' : 'retry', r)),
+          v('T1', 'retry', TOOL_SERVER_NOT_GRANTED),
+          v('R2', 'needs_conductor', RECONCILE_HTTP_503),
         ].join('\n'),
       }),
     ]);
@@ -2139,11 +2150,13 @@ test('[#70 handoff] a web-lane verdict that says the web tools are missing is ha
       ['S3', 'retry', null],
       ['R1', 'retry', null],
       ...SOURCE_OUTAGES.map((_, i) => [`O${i}`, 'retry', null]),
+      ['T1', 'needs_conductor', true],
+      ['R2', 'needs_conductor', true],
     ]);
     assert.equal(verdicts[0].reason, missing, 'the reason is carried to the conductor');
     assert.equal(verdicts[0].claimed, 'retry');
     const handoffs = handoffVerdicts(fx.project);
-    assert.deepEqual([...handoffs.keys()].sort(), ['S1', 'S2'], 'standing handoffs, so the next batch leaves them out');
+    assert.deepEqual([...handoffs.keys()].sort(), ['R2', 'S1', 'S2', 'T1'], 'standing handoffs, so the next batch leaves them out');
     assert.equal(lastRun(fx).retry_verdicts, 2 + SOURCE_OUTAGES.length, 'every source outage stays a retry, whichever verdict the child gave');
   } finally {
     fx.cleanup();

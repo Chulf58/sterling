@@ -1250,17 +1250,18 @@ test('cli --apply-labels: takes no report fields and does not combine with anoth
 
 const manyReports = (count) => Array.from({ length: count }, (_, i) => ({ number: i + 1, state: 'open', title: `R${i + 1}`, body: `Fingerprint: sterling-fp-${(i + 1).toString(16).padStart(12, '0')}`, labels: ['sterling-report'], comments: [] }));
 
-test('cli --list: reads at most 5 pages of 100 from search and from the listing and says plainly how many reports it did not reach', () =>
+test('cli --list: search stops at 5 pages of 100 and the open-issue listing pages on to its last page, so every report is listed with no skipped count', () =>
   withSetup((p) => {
     seed(p, manyReports(2600));
     const r = run(p, ['--list']);
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(r.stdout.split('\n').filter((l) => /^#\d+ /.test(l)).length, 2500);
-    assert.match(r.stdout, /report-issue: 2600 reports match but only 2500 were read \(search up to 5 pages and the open-issue listing up to 20, 100 each\); 100 were not reached\./);
-    assert.match(r.stdout, /the open-issue listing stopped after 20 pages of 100; older open issues were not read, so reports among them may be missing from this list\./);
+    assert.equal(r.stdout.split('\n').filter((l) => /^#\d+ /.test(l)).length, 2600);
+    assert.match(r.stdout, /2600 open sterling-report issue\(s\)/);
+    assert.ok(!/not reached|stopped after/.test(r.stdout), r.stdout);
+    assert.match(r.stdout, /2100 report\(s\) above came only from the open-issue listing/);
     const pages = (what) => ghLog(p).filter((c) => c.includes(what)).map((c) => c.find((x) => x.startsWith('page=')));
     assert.deepEqual(pages('search/issues'), ['page=1', 'page=2', 'page=3', 'page=4', 'page=5']);
-    assert.equal(pages('repos/Chulf58/sterling/issues').length, 20);
+    assert.equal(pages('repos/Chulf58/sterling/issues').length, 27);
   }));
 
 test('cli --list: more than 500 newer non-report issues do not hide an unindexed report; the listing pages to a short page (GitHub issue #69 review)', () =>
@@ -1272,20 +1273,23 @@ test('cli --list: more than 500 newer non-report issues do not hide an unindexed
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /1 open sterling-report issue\(s\)/);
     assert.match(r.stdout, /#1 .*Old unindexed report/);
-    assert.ok(!r.stdout.includes('stopped after'), r.stdout);
     const pages = ghLog(p).filter((c) => c.includes('repos/Chulf58/sterling/issues')).map((c) => c.find((x) => x.startsWith('page=')));
     assert.deepEqual(pages, ['page=1', 'page=2', 'page=3', 'page=4', 'page=5', 'page=6']);
   }));
 
-test('cli --list: when the listing hits its page cap with only non-report issues, it says so loudly instead of listing nothing silently', () =>
+test('cli --list: 2001 newer non-report issues do not hide an unindexed report; the listing has no page cap and reads 21 pages', () =>
   withSetup((p) => {
     const noise = Array.from({ length: 2001 }, (_, i) => ({ number: 100 + i, state: 'open', title: `Noise ${i}`, body: 'no fingerprint', labels: [], comments: [] }));
     seed(p, [{ number: 1, state: 'open', title: 'Very old unindexed report', body: 'x\nFingerprint: sterling-fp-0123456789ab', labels: [], comments: [] }, ...noise]);
     writeFileSync(join(p.state, 'search_lag'), '1');
     const r = run(p, ['--list']);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /0 open sterling-report issue\(s\)/);
-    assert.match(r.stdout, /the open-issue listing stopped after 20 pages of 100; older open issues were not read/);
+    assert.match(r.stdout, /1 open sterling-report issue\(s\)/);
+    assert.match(r.stdout, /#1 .*Very old unindexed report/);
+    assert.ok(!/stopped after|not reached/.test(r.stdout), r.stdout);
+    const pages = ghLog(p).filter((c) => c.includes('repos/Chulf58/sterling/issues')).map((c) => c.find((x) => x.startsWith('page=')));
+    assert.equal(pages.length, 21);
+    assert.equal(pages.at(-1), 'page=21');
   }));
 
 test('cli --list: the open-issue listing reaches reports past the search page limit, and says they came only from it', () =>
