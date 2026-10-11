@@ -692,6 +692,27 @@ test('feature_article.concept_family: optional marker round-trips; legacy articl
 // packages/schemas/src/tests -> src -> schemas -> packages -> repo root
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
+type RegistryAgent = { name: string; file: string; hosts?: string[]; opencode_full?: { mode?: string } };
+
+// The declared main-session set, shared by the totality test and its predicate test.
+// The conductor has no registry marker, so it is mirrored here by FILE NAME rather
+// than cross-imported (packages/schemas is a separate TS project from scripts/, a
+// plain-.mjs tree — invariant 4); keep it in sync with MAIN_SESSION_AGENTS in
+// scripts/lib/checks.mjs. A primary opencode_full entry is exempt only when its
+// hosts exclude claude (an omitted `hosts` installs on both).
+const MAIN_SESSION_AGENT_FILES = ['conductor.md'];
+const isMainSessionAgent = (a: RegistryAgent): boolean =>
+  MAIN_SESSION_AGENT_FILES.includes(a.file) || (a.opencode_full?.mode === 'primary' && !(a.hosts ?? ['claude', 'opencode']).includes('claude'));
+
+test('main-session exemption: a primary opencode_full entry is exempt only when OpenCode-only; one Claude also installs stays dispatched', () => {
+  const full = { mode: 'primary' };
+  assert.equal(isMainSessionAgent({ name: 'plan', file: 'plan.md', hosts: ['opencode'], opencode_full: full }), true);
+  assert.equal(isMainSessionAgent({ name: 'conductor', file: 'conductor.md' }), true);
+  assert.equal(isMainSessionAgent({ name: 'x', file: 'x.md', opencode_full: full }), false, 'hosts omitted installs on claude too');
+  assert.equal(isMainSessionAgent({ name: 'x', file: 'x.md', hosts: ['claude', 'opencode'], opencode_full: full }), false);
+  assert.equal(isMainSessionAgent({ name: 'x', file: 'x.md', hosts: ['opencode'], opencode_full: { mode: 'subagent' } }), false);
+});
+
 test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DISPATCHED registered agent (registry minus the declared main-session set) is tokenized and maps to a config.models key (AC7, interface slice 2)', async () => {
   // dynamic import + cast: AGENT_MODEL_KEY does not exist until this phase ships, so a missing
   // export must fail an ASSERTION below — never a compile-time reference (a crash-red proves nothing).
@@ -701,7 +722,7 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DIS
 
   // the totality oracle: read the registry the map must be total over
   const registry = JSON.parse(readFileSync(join(REPO_ROOT, 'agent-templates', 'registry.json'), 'utf8')) as {
-    agents: { name: string; file: string; opencode_full?: { mode?: string } }[];
+    agents: RegistryAgent[];
   };
 
   // EXEMPTION IS THE DECLARED SET, NOT A TOKEN SNIFF (Sol review LOW finding): the
@@ -716,11 +737,11 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DIS
   // - an OpenCode-only agent the registry installs as `opencode_full` with mode
   //   primary (the plan agent) is one the user Tabs to and nothing dispatches, so
   //   the registry itself declares it main-session and no second hand-kept entry
-  //   is needed. A dispatched agent never has that block: opencode_full mode
-  //   subagent stays in the dispatched set and must carry its tokens.
-  const MAIN_SESSION_AGENT_FILES = ['conductor.md'];
-  const isMainSession = (a: (typeof registry.agents)[number]) =>
-    MAIN_SESSION_AGENT_FILES.includes(a.file) || a.opencode_full?.mode === 'primary';
+  //   is needed. The exemption needs `hosts` to exclude claude: an entry Claude also
+  //   installs is dispatched there, so loadRegistry refuses that combination and
+  //   this predicate never exempts it. opencode_full mode subagent stays in the
+  //   dispatched set and must carry its tokens.
+  const isMainSession = isMainSessionAgent;
 
   const exemptNames = registry.agents.filter(isMainSession).map((a) => a.name);
   const dispatchedAgents = registry.agents.filter((a) => !isMainSession(a));

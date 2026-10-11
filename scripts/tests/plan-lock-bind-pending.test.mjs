@@ -25,11 +25,15 @@ function project({ plans = true } = {}) {
   return dir;
 }
 
-/** Writes a plan with an explicit mtime (seconds ago), so "newest" never depends on write speed. */
-function plan(dir, name, ageSeconds, body = `# ${name}\n\nsteps\n`) {
+/**
+ * Writes a plan with an explicit mtime (seconds ago), so "newest" never depends on
+ * write speed. `nowSeconds` pins the clock: a test that needs two plans to share a
+ * modification time passes one value to both, since each Date.now() read can differ.
+ */
+function plan(dir, name, ageSeconds, body = `# ${name}\n\nsteps\n`, nowSeconds = Date.now() / 1000) {
   const p = join(dir, '.sterling', 'plans', name);
   writeFileSync(p, body);
-  const t = Date.now() / 1000 - ageSeconds;
+  const t = nowSeconds - ageSeconds;
   utimesSync(p, t, t);
   return p;
 }
@@ -107,8 +111,9 @@ for (const [which, cli] of Object.entries(CLIS)) {
   test(`${which}: --bind-pending refuses two plans with the same newest modification time`, () => {
     const dir = project();
     try {
-      plan(dir, 'one.md', 10);
-      plan(dir, 'two.md', 10);
+      const now = Date.now() / 1000;
+      plan(dir, 'one.md', 10, undefined, now);
+      plan(dir, 'two.md', 10, undefined, now);
       assertRefused(dir, ['--bind-pending'], /same modification time/);
     } finally {
       rmSync(dir, { recursive: true, force: true });

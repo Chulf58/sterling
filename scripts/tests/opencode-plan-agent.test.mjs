@@ -98,11 +98,14 @@ test('loadRegistry refuses a host-limited entry with no destination, a misplaced
     [{ hosts: ['opencode'], opencode_full: { ...full, mode: 'all' } }, /opencode_full\.mode must be one of primary, subagent/],
     [{ hosts: ['opencode'], opencode_full: { ...full, model: 'x' } }, /unknown key 'model'/],
     [{ hosts: ['claude'], opencode_full: full }, /opencode_full needs hosts to include opencode/],
+    [{ opencode_full: full }, /opencode_full\.mode primary is for an OpenCode-only agent/],
+    [{ hosts: ['claude', 'opencode'], opencode_full: full }, /opencode_full\.mode primary is for an OpenCode-only agent/],
     [{ hosts: ['opencode'], opencode_full: full, opencode: {} }, /both write \.opencode\/agents\/plan\.md/],
     [{ hosts: ['opencode'], opencode_full: { ...full, permission: { bash: { '*': 'sometimes' } } } }, /'sometimes' is not one of allow, ask, deny/],
   ];
   for (const [entry, re] of cases) assert.throws(() => loadRegistry(write(entry)), re, JSON.stringify(entry));
   assert.doesNotThrow(() => loadRegistry(write({ hosts: ['opencode'], opencode_full: full })));
+  assert.doesNotThrow(() => loadRegistry(write({ opencode_full: { ...full, mode: 'subagent' } })));
   rmSync(dir, { recursive: true, force: true });
 });
 

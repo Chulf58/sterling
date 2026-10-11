@@ -419,6 +419,12 @@ function validateHosts(entry, where) {
     if (!OPENCODE_FULL_MODES.includes(full.mode)) throw new Error(`${where}.opencode_full.mode must be one of ${OPENCODE_FULL_MODES.join(', ')}`);
     if (full.permission !== undefined) validatePermissionMap(full.permission, `${where}.opencode_full.permission`);
     if (!agentHosts(entry).includes('opencode')) throw new Error(`${where}: opencode_full needs hosts to include opencode`);
+    // A primary agent is one the user Tabs to and nothing dispatches, so the Claude
+    // install (a dispatched roster whose agents carry {{MODEL}}/{{EFFORT}}) must never
+    // receive one: the model-key totality check exempts primary opencode_full entries.
+    if (full.mode === 'primary' && agentHosts(entry).includes('claude')) {
+      throw new Error(`${where}: opencode_full.mode primary is for an OpenCode-only agent — set hosts to ["opencode"], or use mode subagent for an agent Claude also installs`);
+    }
     // The portable copy is written to the same .opencode/agents/<name>.md.
     if (entry.opencode !== undefined) throw new Error(`${where}: opencode (the portable copy) and opencode_full both write .opencode/agents/${entry.name}.md — keep one`);
   }

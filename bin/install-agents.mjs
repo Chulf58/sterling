@@ -5615,6 +5615,9 @@ function validateHosts(entry, where) {
     if (!OPENCODE_FULL_MODES.includes(full.mode)) throw new Error(`${where}.opencode_full.mode must be one of ${OPENCODE_FULL_MODES.join(", ")}`);
     if (full.permission !== void 0) validatePermissionMap(full.permission, `${where}.opencode_full.permission`);
     if (!agentHosts(entry).includes("opencode")) throw new Error(`${where}: opencode_full needs hosts to include opencode`);
+    if (full.mode === "primary" && agentHosts(entry).includes("claude")) {
+      throw new Error(`${where}: opencode_full.mode primary is for an OpenCode-only agent \u2014 set hosts to ["opencode"], or use mode subagent for an agent Claude also installs`);
+    }
     if (entry.opencode !== void 0) throw new Error(`${where}: opencode (the portable copy) and opencode_full both write .opencode/agents/${entry.name}.md \u2014 keep one`);
   }
   if (!agentHosts(entry).includes("claude") && full === void 0) {
