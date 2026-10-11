@@ -97,6 +97,33 @@ const passthrough = z.object({}).passthrough();
  * a wrong-variant body is refused naming exactly that variant's missing/extra
  * fields, never a generic union failure.
  */
+/**
+ * A structural copy of a zod type, sharing no `_def` object with the original.
+ * The record schemas build several fields once (isoDate, author, links, scope,
+ * stack_tags, repoPath) and reuse the SAME zod instance across record types.
+ * zod-to-json-schema keys its seen-cache on the instance, so a reused field is
+ * served as `{"$ref":"#/properties/fields/anyOf/<n>/properties/<field>"}` —
+ * a cross-branch JSON pointer that clients such as OpenCode do not resolve, so
+ * they type the field `unknown` (GitHub #73: capture_date, source_date).
+ * Cloning per variant makes every served property inline. Functions (object
+ * shape thunks, lazy getters) are wrapped so a recursive schema is cloned on
+ * demand, never eagerly; refinement callbacks and RegExps are kept as-is.
+ */
+function cloneZod<T>(node: T): T {
+  if (Array.isArray(node)) return node.map(cloneZod) as unknown as T;
+  if (typeof node === 'function') return ((...args: unknown[]) => cloneZod((node as (...a: unknown[]) => unknown)(...args))) as unknown as T;
+  if (node === null || typeof node !== 'object') return node;
+  const obj = node as Record<string, unknown>;
+  if (obj._def && typeof obj.constructor === 'function' && obj.constructor !== Object) {
+    const Ctor = obj.constructor as new (def: unknown) => unknown;
+    return new Ctor(cloneZod(obj._def)) as T;
+  }
+  if (Object.getPrototypeOf(node) === Object.prototype) {
+    return Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, cloneZod(v)])) as T;
+  }
+  return node;
+}
+
 const buildCreateFieldVariants = (discriminatorOptional: boolean) => Object.keys(RECORD_TYPES).map((type) => {
   const rawShape = objectShapeFor(type);
   if (!rawShape) throw new Error(`knowledge_create input schema: '${type}' is registered but has no unwrappable object shape`);
@@ -104,7 +131,10 @@ const buildCreateFieldVariants = (discriminatorOptional: boolean) => Object.keys
   const fieldsShape: z.ZodRawShape = {};
   for (const [key, node] of Object.entries(rawShape)) {
     if (SERVER_OWNED_FIELDS.includes(key)) continue; // dropped entirely — server-assigned, never caller-supplied
-    fieldsShape[key] = defaulted.has(key) ? (node as z.ZodTypeAny).optional() : (node as z.ZodTypeAny);
+    // the advertised variants (discriminatorOptional) are cloned so no field is
+    // served as a cross-branch $ref; the enforced variants never reach JSON Schema.
+    const field = discriminatorOptional ? cloneZod(node as z.ZodTypeAny) : (node as z.ZodTypeAny);
+    fieldsShape[key] = defaulted.has(key) ? field.optional() : field;
   }
   // the per-variant discriminator the decision names — re-added after the
   // SERVER_OWNED_FIELDS strip above (which also matches bare 'type').
