@@ -16933,6 +16933,7 @@ var WORKER_TOOLS = [
   "WebSearch",
   "WebFetch"
 ];
+var WORKER_AGENT_TOOLS = [...WORKER_TOOLS, "ToolSearch"];
 var WORKER_DISALLOWED_TOOLS = [
   ...["create", "retire", "supersede", "split", "extract", "promote", "link"].map((v) => mcp(`knowledge_${v}`)),
   ...["add", "remove", "update", "edit"].map((v) => mcp(`board_${v}`)),
@@ -17341,6 +17342,11 @@ function ageText(iso, nowMs = Date.now()) {
   if (days > 0) return `${days}d ${hours}h`;
   return hours > 0 ? `${hours}h` : `${mins}m`;
 }
+var WEB_TOOL = "(?:WebSearch|WebFetch|web tools?)";
+var TOOLS_MISSING_RE = new RegExp(
+  `web tools? missing|\\b${WEB_TOOL}(?:\\s*(?:,|and|or)\\s*${WEB_TOOL})*\\s+(?:is|are|was|were)\\s+(?:not available|unavailable|missing|not granted|not allowed)\\b`,
+  "i"
+);
 
 // scripts/hooks/lib/maintenance-state.mjs
 var isWorkerLane = (r) => WORKER_LANES.includes(r);

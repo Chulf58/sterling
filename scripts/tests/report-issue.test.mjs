@@ -202,6 +202,118 @@ test('fingerprint: a slash command in the title does not change it', () => {
   assert.equal(normalizeTitle('/sterling:update fails'), normalizeTitle('<project-path> fails'));
 });
 
+test('scrub: slash-joined public tool names survive (GitHub issue #71)', () => {
+  assert.equal(scrub('WebSearch/WebFetch: missing in the worker', ctx), 'WebSearch/WebFetch: missing in the worker');
+  assert.equal(scrub('Read/Edit/Bash, Grep/Glob. NotebookEdit/Write! Agent/Read?', ctx), 'Read/Edit/Bash, Grep/Glob. NotebookEdit/Write! Agent/Read?');
+  assert.equal(scrub('(WebSearch/WebFetch) and "Read/Edit"', ctx), '(WebSearch/WebFetch) and "Read/Edit"');
+});
+
+test('scrub: a slash pair that is not wholly public tool names is still a path', () => {
+  for (const tok of ['AcmeCorp/BillingApp', 'WebSearch/AcmeCorp', 'AcmeCorp/WebFetch', 'Clients/Acme', 'lib/x', 'websearch/webfetch', 'WebSearch/WebFetch/', '/WebSearch/WebFetch', 'x/WebFetch', 'WebSearch\\WebFetch', 'WebSearch/WebFetch.ts', '~/Read']) {
+    assert.equal(scrub(`saw ${tok} here`, ctx), 'saw <project-path> here', tok);
+  }
+  assert.equal(scrub('AcmeCorp/BillingApp: broke', ctx), '<project-path> broke');
+});
+
+test('scrub: real paths, a credential-bearing URL and the project root stay scrubbed beside tool names', () => {
+  assert.equal(
+    scrub('WebSearch/WebFetch failed on /home/alice/work/acme-secret/x.ts, /var/lib/db and https://user:pw@acme.example/x', ctx),
+    'WebSearch/WebFetch failed on <project-path>, <project-path> and <project-path>',
+  );
+  assert.equal(scrub('see /home/alice/.ssh/id_rsa', ctx), 'see <project-path>');
+});
+
+test('scrub: an email address becomes <email>', () => {
+  assert.equal(scrub('mail bob.smith+x@acme-corp.co.uk now', ctx), 'mail <email> now');
+  assert.equal(scrub('from <bob@acme.com>, cc "al@x.io".', ctx), 'from <<email>>, cc "<email>".');
+});
+
+test('scrub: GitHub tokens, sk- keys, Slack tokens and JWTs become <credential>', () => {
+  for (const secret of [
+    'ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+    'gho_abcdefghijklmnopqrstuvwxyz0123456789',
+    'ghu_abcdefghijklmnopqrstuvwxyz0123456789',
+    'ghs_abcdefghijklmnopqrstuvwxyz0123456789',
+    'ghr_abcdefghijklmnopqrstuvwxyz0123456789',
+    'github_pat_11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz0123456789',
+    'sk-abc123def456ghi789jkl',
+    'sk-ant-api03-abcDEF123_456-ghi',
+    'xoxb-123456789012-abcdefghijkl',
+    'xoxp-123456789012-abcdefghijkl',
+    'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk',
+  ]) {
+    assert.equal(scrub(`saw ${secret} here`, ctx), 'saw <credential> here', secret);
+  }
+});
+
+test('scrub: the value after key=, token=, secret=, password=, passwd= or api_key= becomes <credential>, in = and : forms and any case', () => {
+  for (const [input, expected] of [
+    ['key=abc123', 'key=<credential>'],
+    ['TOKEN=abc123', 'TOKEN=<credential>'],
+    ['Secret: hunter2', 'Secret: <credential>'],
+    ['password = hunter2 done', 'password = <credential> done'],
+    ['passwd:hunter2', 'passwd:<credential>'],
+    ['api_key=abc/def+ghi==', 'api_key=<credential>'],
+    ['access_token=abc123', 'access_token=<credential>'],
+    ['password="two words"', 'password=<credential>'],
+    ['"token": "abc123"', '"token": <credential>'],
+    ['cfg {token=abc123, other=1}', 'cfg {token=<credential>, other=1}'],
+  ]) {
+    assert.equal(scrub(input, ctx), expected, input);
+  }
+});
+
+test('scrub: an Authorization header and a Bearer or Basic scheme value become <credential>', () => {
+  for (const [input, expected] of [
+    ['Authorization: Bearer abc123SYNTH.etic-value', 'Authorization: <credential>'],
+    ['authorization=Basic dXNlcjpwYXNz here', 'authorization=<credential> here'],
+    ['"Authorization": "Bearer abc123SYNTHETIC"', '"Authorization": <credential>'],
+    ['Authorization: Token abc123SYNTHETIC', 'Authorization: <credential>'],
+    ['sent Bearer abc123SYNTHETICvalue to it', 'sent <credential> to it'],
+    ['sent bearer abc123SYNTHETICvalue to it', 'sent <credential> to it'],
+    ['sent Basic dXNlcjpwYXNz now', 'sent <credential> now'],
+    ['sent Basic dXNlcjpwYXNzMQ== now', 'sent <credential> now'],
+  ]) {
+    assert.equal(scrub(input, ctx), expected, input);
+  }
+  for (const kept of ['Basic Authentication is off', 'a basic configuration', 'Bearer short', 'the Authorization header is missing']) {
+    assert.equal(scrub(kept, ctx), kept, kept);
+  }
+});
+
+test('validate and render: a synthetic Bearer, Basic or Authorization value is absent from the rendered body', () => {
+  const secrets = ['SYNTHbearer9Zq4TokenValue', 'dXN5bnRoOnNlY3JldA==', 'SYNTHauth7Xk2Value'];
+  const r = validateReport({
+    ...good(),
+    title: 'Retry sends Bearer SYNTHbearer9Zq4TokenValue upstream',
+    observed: 'request had Authorization: Basic dXN5bnRoOnNlY3JldA== and authorization=SYNTHauth7Xk2Value',
+    evidence: ['"curl -H Authorization: Bearer SYNTHbearer9Zq4TokenValue failed"'],
+  }, ctx);
+  const body = renderBody(r, { version: '0.19.45', head: null, host: 'claude-code', project: 'acme' });
+  for (const s of secrets) assert.ok(!body.includes(s), `${s} leaked into the body`);
+  assert.match(body, /<credential>/);
+});
+
+test('scrub: @-mentions, version strings, commit shas, a monkey: word and fingerprint lines survive', () => {
+  for (const kept of [
+    'ping @alice and @sterling-team',
+    'version 0.19.45 and pkg@1.2.3',
+    'commit 8ac3aef7 and 26572ed5d0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a5',
+    'monkey: patched and turkey=2',
+    'Fingerprint: sterling-fp-9fdab6181f67',
+    'the ghp_ prefix and the sk- prefix and eyJ alone',
+  ]) {
+    assert.equal(scrub(kept, ctx), kept, kept);
+  }
+});
+
+test('validate: an email or token in any report field is scrubbed, and a Sterling fingerprint-shaped title word is not', () => {
+  const r = validateReport({ ...good(), title: 'Mail bob@acme.com about sterling-fp-9fdab6181f67', observed: 'failed with token=ghp_abcdefghijklmnopqrstuvwxyz0123456789', evidence: ['"user bob@acme.com password: hunter2"'] }, ctx);
+  assert.equal(r.title, 'Mail <email> about sterling-fp-9fdab6181f67');
+  assert.equal(r.observed, 'failed with token=<credential>');
+  assert.deepEqual(r.evidence, ['"user <email> password: <credential>"']);
+});
+
 test('scrub: a UUID becomes <id>', () => {
   assert.equal(scrub('record 630e54e6-8c61-4b73-beee-de569a5ec852 missing', ctx), 'record <id> missing');
 });
@@ -355,11 +467,22 @@ if (method === 'GET' && path === 'search/issues') {
   const fp = (q.match(/sterling-fp-[0-9a-f]{12}/) ?? [])[0];
   if (!fp && !q.includes('"sterling-fp-"')) { console.error('fake gh: bad search ' + q); process.exit(3); }
   const items = issues
+    .filter((i) => !(existsSync(join(state, 'search_lag')) && readFileSync(join(state, 'search_lag'), 'utf8').split(',').map(Number).includes(i.number)))
     .filter((i) => i.body.includes(fp ?? 'sterling-fp-') && (!/\\bis:open\\b/.test(q) || i.state === 'open'))
     .map((i) => ({ number: i.number, state: i.state, title: i.title, html_url: url(i.number), body: i.body, labels: i.labels.map((name) => ({ name })) }));
   const perPage = Number(flagField('per_page') ?? 100);
   const page = Number(flagField('page') ?? 1);
   console.log(JSON.stringify({ total_count: items.length, incomplete_results: existsSync(join(state, 'incomplete_results')), items: items.slice((page - 1) * perPage, page * perPage) })); process.exit(0);
+}
+if (method === 'GET' && path === 'repos/Chulf58/sterling/issues') {
+  if (existsSync(join(state, 'listing_fail'))) { console.error('gh: Server Error (HTTP 500)'); process.exit(1); }
+  const listed = issues
+    .filter((i) => i.state === (one('state') ?? 'open'))
+    .sort((x, y) => y.number - x.number)
+    .map((i) => ({ number: i.number, state: i.state, title: i.title, html_url: url(i.number), body: i.body, labels: i.labels.map((name) => ({ name })) }));
+  const perPage = Number(flagField('per_page') ?? 100);
+  const page = Number(flagField('page') ?? 1);
+  console.log(JSON.stringify(listed.slice((page - 1) * perPage, page * perPage))); process.exit(0);
 }
 // A refusal spec is 'STATUS [message words]'. gh prints the message and '(HTTP STATUS)' on stderr and the body on stdout;
 // status_in_json_only drops the '(HTTP n)' text so only the JSON status says it.
@@ -381,7 +504,7 @@ if (method === 'POST' && path === 'repos/Chulf58/sterling/issues') {
   writeFileSync(file, JSON.stringify(issues));
   const append = join(state, 'append_on_create');
   if (existsSync(append)) { appendFileSync(process.env.FAKE_GH_QUEUE, readFileSync(append, 'utf8')); rmSync(append); }
-  console.log(JSON.stringify({ number, html_url: url(number), labels: labels.map((name) => ({ name })) })); process.exit(0);
+  console.log(JSON.stringify(existsSync(join(state, 'omit_labels')) ? { number, html_url: url(number) } : { number, html_url: url(number), labels: labels.map((name) => ({ name })) })); process.exit(0);
 }
 const lab = (path ?? '').match(/^repos\\/Chulf58\\/sterling\\/labels\\/(.+)$/);
 if (method === 'GET' && lab) {
@@ -868,6 +991,60 @@ test('cli --list: finds reports by the fingerprint marker, labelled or not, and 
     assert.ok(!search.some((x) => x.includes('labels')), 'the list does not filter by label');
   }));
 
+test('cli --list: a report missing from the search index is found through the open-issue listing and the lag is named (GitHub issue #69)', () =>
+  withSetup((p) => {
+    seed(p, [
+      { number: 1, state: 'open', title: 'Indexed', body: 'x\nFingerprint: sterling-fp-0123456789ab', labels: ['sterling-report'], comments: [] },
+      { number: 2, state: 'open', title: 'Fresh unlabelled', body: `x\n${LABELS}\nFingerprint: sterling-fp-0123456789ac`, labels: [], comments: [] },
+      { number: 3, state: 'open', title: 'Not a report', body: 'no fingerprint line', labels: [], comments: [] },
+      { number: 4, state: 'closed', title: 'Closed fresh', body: 'Fingerprint: sterling-fp-0123456789ad', labels: [], comments: [] },
+    ]);
+    writeFileSync(join(p.state, 'search_lag'), '2,4');
+    const r = run(p, ['--list']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /2 open sterling-report issue\(s\)/);
+    assert.match(r.stdout, /#1 .*Indexed/);
+    assert.match(r.stdout, /#2 \[labels in body, not applied: .*\] Fresh unlabelled/);
+    assert.ok(!r.stdout.includes('Not a report') && !r.stdout.includes('Closed fresh'));
+    assert.match(r.stdout, /1 report\(s\) above came only from the open-issue listing: GitHub's search had not returned them/);
+  }));
+
+test('cli --list: no lag note when search and the listing agree', () =>
+  withSetup((p) => {
+    seed(p, [{ number: 1, state: 'open', title: 'Indexed', body: 'x\nFingerprint: sterling-fp-0123456789ab', labels: [], comments: [] }]);
+    const r = run(p, ['--list']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!r.stdout.includes('open-issue listing'));
+  }));
+
+test('cli --list: a failing open-issue listing is a loud failure, not a shorter list', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.state, 'listing_fail'), '');
+    const failed = run(p, ['--list']);
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /cannot list: .*repos\/Chulf58\/sterling\/issues failed/);
+  }));
+
+test('cli: a create response that does not say which labels were applied is reported, not assumed fine', () =>
+  withSetup((p) => {
+    writeFileSync(join(p.state, 'omit_labels'), '');
+    const r = run(p, reportArgs());
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /filed #\d+/);
+    assert.match(r.stdout, /GitHub's response did not say which labels were applied \(sterling-report, severity:friction, project:acme\)/);
+  }));
+
+test('cli: a title that changed in the scrub is warned about on stderr before it is sent; an unchanged title is not', () =>
+  withSetup((p) => {
+    const changed = run(p, [...reportArgs({ title: 'Worker has no AcmeCorp/BillingApp: retries' }), '--dry-run']);
+    assert.equal(changed.status, 0, changed.stderr);
+    assert.match(changed.stderr, /warning: the title changed in the scrub, so it will be sent as 'Worker has no <project-path> retries'/);
+    const same = run(p, [...reportArgs({ title: 'WebSearch/WebFetch: missing in the worker' }), '--dry-run']);
+    assert.equal(same.status, 0, same.stderr);
+    assert.ok(!same.stderr.includes('title changed'), same.stderr);
+    assert.match(same.stdout, /WebSearch\/WebFetch: missing in the worker/);
+  }));
+
 // ---------- --apply-labels (maintainer mode) ----------
 
 const unlabelled = (n, labelsLine = LABELS) => ({ number: n, state: 'open', title: `Report ${n}`, body: `x\n${labelsLine}\nFingerprint: sterling-fp-${n.toString(16).padStart(12, '0')}`, labels: [], comments: [] });
@@ -1073,15 +1250,56 @@ test('cli --apply-labels: takes no report fields and does not combine with anoth
 
 const manyReports = (count) => Array.from({ length: count }, (_, i) => ({ number: i + 1, state: 'open', title: `R${i + 1}`, body: `Fingerprint: sterling-fp-${(i + 1).toString(16).padStart(12, '0')}`, labels: ['sterling-report'], comments: [] }));
 
-test('cli --list: reads at most 5 pages of 100 and says plainly how many reports it did not reach', () =>
+test('cli --list: search stops at 5 pages of 100 and the open-issue listing pages on to its last page, so every report is listed with no skipped count', () =>
+  withSetup((p) => {
+    seed(p, manyReports(2600));
+    const r = run(p, ['--list']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.split('\n').filter((l) => /^#\d+ /.test(l)).length, 2600);
+    assert.match(r.stdout, /2600 open sterling-report issue\(s\)/);
+    assert.ok(!/not reached|stopped after/.test(r.stdout), r.stdout);
+    assert.match(r.stdout, /2100 report\(s\) above came only from the open-issue listing/);
+    const pages = (what) => ghLog(p).filter((c) => c.includes(what)).map((c) => c.find((x) => x.startsWith('page=')));
+    assert.deepEqual(pages('search/issues'), ['page=1', 'page=2', 'page=3', 'page=4', 'page=5']);
+    assert.equal(pages('repos/Chulf58/sterling/issues').length, 27);
+  }));
+
+test('cli --list: more than 500 newer non-report issues do not hide an unindexed report; the listing pages to a short page (GitHub issue #69 review)', () =>
+  withSetup((p) => {
+    const noise = Array.from({ length: 501 }, (_, i) => ({ number: 100 + i, state: 'open', title: `Noise ${i}`, body: 'no fingerprint', labels: [], comments: [] }));
+    seed(p, [{ number: 1, state: 'open', title: 'Old unindexed report', body: 'x\nFingerprint: sterling-fp-0123456789ab', labels: [], comments: [] }, ...noise]);
+    writeFileSync(join(p.state, 'search_lag'), '1');
+    const r = run(p, ['--list']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /1 open sterling-report issue\(s\)/);
+    assert.match(r.stdout, /#1 .*Old unindexed report/);
+    const pages = ghLog(p).filter((c) => c.includes('repos/Chulf58/sterling/issues')).map((c) => c.find((x) => x.startsWith('page=')));
+    assert.deepEqual(pages, ['page=1', 'page=2', 'page=3', 'page=4', 'page=5', 'page=6']);
+  }));
+
+test('cli --list: 2001 newer non-report issues do not hide an unindexed report; the listing has no page cap and reads 21 pages', () =>
+  withSetup((p) => {
+    const noise = Array.from({ length: 2001 }, (_, i) => ({ number: 100 + i, state: 'open', title: `Noise ${i}`, body: 'no fingerprint', labels: [], comments: [] }));
+    seed(p, [{ number: 1, state: 'open', title: 'Very old unindexed report', body: 'x\nFingerprint: sterling-fp-0123456789ab', labels: [], comments: [] }, ...noise]);
+    writeFileSync(join(p.state, 'search_lag'), '1');
+    const r = run(p, ['--list']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /1 open sterling-report issue\(s\)/);
+    assert.match(r.stdout, /#1 .*Very old unindexed report/);
+    assert.ok(!/stopped after|not reached/.test(r.stdout), r.stdout);
+    const pages = ghLog(p).filter((c) => c.includes('repos/Chulf58/sterling/issues')).map((c) => c.find((x) => x.startsWith('page=')));
+    assert.equal(pages.length, 21);
+    assert.equal(pages.at(-1), 'page=21');
+  }));
+
+test('cli --list: the open-issue listing reaches reports past the search page limit, and says they came only from it', () =>
   withSetup((p) => {
     seed(p, manyReports(520));
     const r = run(p, ['--list']);
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(r.stdout.split('\n').filter((l) => /^#\d+ /.test(l)).length, 500);
-    assert.match(r.stdout, /report-issue: 520 reports match but only the first 500 were read \(5 pages of 100\); 20 were not reached\./);
-    const pages = ghLog(p).filter((c) => c.includes('search/issues')).map((c) => c.find((x) => x.startsWith('page=')));
-    assert.deepEqual(pages, ['page=1', 'page=2', 'page=3', 'page=4', 'page=5']);
+    assert.equal(r.stdout.split('\n').filter((l) => /^#\d+ /.test(l)).length, 520);
+    assert.ok(!/not reached/.test(r.stdout));
+    assert.match(r.stdout, /20 report\(s\) above came only from the open-issue listing/);
   }));
 
 test('cli --list: a result set that fits on one page is one search call and no note', () =>

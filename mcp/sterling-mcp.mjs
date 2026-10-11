@@ -6887,7 +6887,7 @@ var require_dist = __commonJS({
 });
 
 // packages/mcp-server/dist/main.js
-import { dirname as dirname8, isAbsolute as isAbsolute2, join as join12, resolve as resolve4 } from "node:path";
+import { dirname as dirname9, isAbsolute as isAbsolute2, join as join13, resolve as resolve4 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
@@ -28859,8 +28859,8 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // packages/mcp-server/dist/server.js
-import { readFileSync as readFileSync7, existsSync as existsSync5 } from "node:fs";
-import { join as join11, dirname as dirname6 } from "node:path";
+import { readFileSync as readFileSync8, existsSync as existsSync6 } from "node:fs";
+import { join as join12, dirname as dirname7 } from "node:path";
 
 // packages/mcp-server/dist/held-stores.js
 function holdRoutedStores(opened, reopen, announce) {
@@ -29140,8 +29140,8 @@ function guardWorkerTools(server, guard) {
 // packages/mcp-server/dist/tools.js
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync as existsSync4, lstatSync as lstatSync5, mkdirSync as mkdirSync4, readFileSync as readFileSync6, readdirSync as readdirSync3, realpathSync as realpathSync3, renameSync as renameSync2, statSync as statSync3, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { basename as basename2, dirname as dirname5, isAbsolute, join as join10, relative, sep } from "node:path";
+import { appendFileSync, chmodSync, existsSync as existsSync5, lstatSync as lstatSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync7, readdirSync as readdirSync3, realpathSync as realpathSync3, renameSync as renameSync3, statSync as statSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { basename as basename2, dirname as dirname6, isAbsolute, join as join11, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 // packages/mcp-server/dist/attestation-proof.js
@@ -29648,6 +29648,63 @@ var EntryReachability = class {
   }
 };
 
+// scripts/hooks/lib/session-events.mjs
+import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync6, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+import { dirname as dirname5, join as join10 } from "node:path";
+var SESSION_EVENTS_REL = join10(".sterling", "transient", "session-events.json");
+function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
+  mkdirSync4(dirname5(eventsPath), { recursive: true });
+  withSessionEventsLock(
+    eventsPath,
+    () => {
+      const events = existsSync4(eventsPath) ? JSON.parse(readFileSync6(eventsPath, "utf8")) : [];
+      events.push(...newEvents);
+      const tmp = `${eventsPath}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
+      writeFileSync2(tmp, JSON.stringify(events), { flag: "wx" });
+      try {
+        renameSync2(tmp, eventsPath);
+      } catch (e) {
+        try {
+          unlinkSync(tmp);
+        } catch {
+        }
+        throw e;
+      }
+    },
+    lockOptions
+  );
+}
+var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
+var SQLITE_BUSY = 5;
+function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
+  const lockPath = `${path}.lock.db`;
+  const db = new DatabaseSync3(lockPath);
+  try {
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timeoutMs2))}`);
+    try {
+      db.exec("PRAGMA journal_mode = DELETE");
+      db.exec("BEGIN IMMEDIATE");
+    } catch (e) {
+      if ((e?.errcode & 255) !== SQLITE_BUSY) throw e;
+      const err = new Error(`${lockPath} is held by another writer that is still running; gave up after ${timeoutMs2}ms and nothing was written`);
+      err.code = SESSION_EVENTS_LOCK_HELD;
+      throw err;
+    }
+    try {
+      return fn();
+    } finally {
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        console.error(`session-events: COMMIT of the lock at ${lockPath} failed (${e?.message ?? e}); the lock is released by closing the connection`);
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
+
 // packages/mcp-server/dist/tools.js
 var BOARD_TEXT_CLIP = 240;
 var BOARD_TEXT_FIELDS = ["id", "slug", "objective", "source", "system_reason", "status", "priority", "feature_link", "blocked_by", "needs", "updated_at"];
@@ -29835,8 +29892,8 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
   }
   if (path === "storage" || path.startsWith("storage."))
     throw new StorageTransitionRequiredError(path);
-  const configDir = join10(repoRoot, ".sterling");
-  const configPath = join10(configDir, "config.json");
+  const configDir = join11(repoRoot, ".sterling");
+  const configPath = join11(configDir, "config.json");
   let dirLst;
   try {
     dirLst = lstatSync5(configDir);
@@ -29875,7 +29932,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (!fileLst.isFile()) {
       throw new Error(`config_set: .sterling/config.json is not a regular file \u2014 refusing. Nothing was written.`);
     }
-    currentBytes = readFileSync6(configPath);
+    currentBytes = readFileSync7(configPath);
   } else {
     currentBytes = Buffer.alloc(0);
   }
@@ -29939,8 +29996,8 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 ${issues}. Nothing was written.`);
   }
   const serialized = JSON.stringify(mutated, null, 2) + "\n";
-  const tmpPath = join10(configDir, `config.json.tmp-${randomUUID2()}`);
-  writeFileSync2(tmpPath, serialized);
+  const tmpPath = join11(configDir, `config.json.tmp-${randomUUID2()}`);
+  writeFileSync3(tmpPath, serialized);
   let renamed = false;
   try {
     if (fileLst) {
@@ -29951,7 +30008,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     }
     let raceBytes;
     try {
-      raceBytes = readFileSync6(configPath);
+      raceBytes = readFileSync7(configPath);
     } catch {
       raceBytes = Buffer.alloc(0);
     }
@@ -29959,12 +30016,12 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (raceDigest !== currentDigest) {
       throw new Error(`config_set: config.json changed on disk while this write was in flight (a concurrent writer) \u2014 read digest ${currentDigest}, now ${raceDigest}. Nothing was written; re-read and retry.`);
     }
-    renameSync2(tmpPath, configPath);
+    renameSync3(tmpPath, configPath);
     renamed = true;
   } finally {
     if (!renamed) {
       try {
-        unlinkSync(tmpPath);
+        unlinkSync2(tmpPath);
       } catch {
       }
     }
@@ -30144,7 +30201,7 @@ var SterlingTools = class _SterlingTools {
     for (const rel of _SterlingTools.baselineablePaths(record2)) {
       if (only && !only.has(rel))
         continue;
-      const shape = lstatSync5(join10(root, rel), { throwIfNoEntry: false });
+      const shape = lstatSync5(join11(root, rel), { throwIfNoEntry: false });
       if (!shape || !shape.isFile())
         continue;
       const hash = this.hashFile(rel, root);
@@ -30277,7 +30334,7 @@ var SterlingTools = class _SterlingTools {
       return { root: mapped, unresolved: false };
     if (!this.repoRoot)
       return { root: void 0, unresolved: true };
-    return { root: join10(this.repoRoot, mapped), unresolved: false };
+    return { root: join11(this.repoRoot, mapped), unresolved: false };
   }
   /**
    * Does a record's working_tree name a tree OTHER than this project? A
@@ -30886,7 +30943,7 @@ var SterlingTools = class _SterlingTools {
     if (!root)
       return void 0;
     try {
-      return createHash3("sha256").update(readFileSync6(join10(root, rel))).digest("hex");
+      return createHash3("sha256").update(readFileSync7(join11(root, rel))).digest("hex");
     } catch {
       return void 0;
     }
@@ -30950,7 +31007,7 @@ var SterlingTools = class _SterlingTools {
     const baseline = ctx.baselines?.[rel];
     let stat;
     try {
-      stat = statSync3(join10(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
+      stat = statSync3(join11(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
     } catch (err) {
       const code = err?.code;
       return { verdict: { kind: "unavailable", reason: `stat_failed_${String(code ?? "unknown").toLowerCase()}` } };
@@ -31903,7 +31960,7 @@ var SterlingTools = class _SterlingTools {
         if (tree?.unresolved)
           return { ...record2, verify_before_use: true };
         if (rel && tree?.root) {
-          const stat = statSync3(join10(tree.root, rel), { throwIfNoEntry: false });
+          const stat = statSync3(join11(tree.root, rel), { throwIfNoEntry: false });
           if (!stat && this.parkedOnRef(rel, tree.root).status !== "parked") {
             const mintFailed = this.mintAtRead({
               reason: "refresh_reference",
@@ -35386,10 +35443,10 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     try {
       if (!this.repoRoot)
         throw new Error("no project root is known to this server");
-      if (!existsSync4(join10(this.repoRoot, ".sterling")))
+      if (!existsSync5(join11(this.repoRoot, ".sterling")))
         throw new Error(`${this.repoRoot} has no .sterling directory`);
-      ledgerPath = join10(this.repoRoot, PROCESS_KNOWLEDGE_WRITES_REL);
-      mkdirSync4(dirname5(ledgerPath), { recursive: true });
+      ledgerPath = join11(this.repoRoot, PROCESS_KNOWLEDGE_WRITES_REL);
+      mkdirSync5(dirname6(ledgerPath), { recursive: true });
       const entry = knowledgeWriteSchema.parse({ id: record2.id, type: record2.type, at: this.now() });
       appendFileSync(ledgerPath, `
 ${JSON.stringify(entry)}
@@ -35425,7 +35482,7 @@ ${JSON.stringify(entry)}
     const MIN_LINE_BYTES = 30;
     if (statSync3(ledgerPath).size <= KNOWLEDGE_WRITES_COMPACT_LINES * MIN_LINE_BYTES)
       return;
-    const lines = readFileSync6(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
+    const lines = readFileSync7(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
     if (lines.length <= KNOWLEDGE_WRITES_COMPACT_LINES)
       return;
     const latest = /* @__PURE__ */ new Map();
@@ -35443,14 +35500,14 @@ ${JSON.stringify(entry)}
       latest.set(ok.data.id, ok.data);
     }
     const kept = [...latest.values()].slice(-KNOWLEDGE_WRITES_KEEP_IDS);
-    const tmp = join10(dirname5(ledgerPath), knowledgeWritesTempFile(basename2(ledgerPath), process.pid, randomUUID2()));
+    const tmp = join11(dirname6(ledgerPath), knowledgeWritesTempFile(basename2(ledgerPath), process.pid, randomUUID2()));
     try {
-      writeFileSync2(tmp, kept.map((e) => `${JSON.stringify(e)}
+      writeFileSync3(tmp, kept.map((e) => `${JSON.stringify(e)}
 `).join(""));
-      renameSync2(tmp, ledgerPath);
+      renameSync3(tmp, ledgerPath);
     } catch (err) {
       try {
-        unlinkSync(tmp);
+        unlinkSync2(tmp);
       } catch {
       }
       throw err;
@@ -35491,7 +35548,7 @@ ${JSON.stringify(entry)}
   removeExpiredDomainWriteLedgers() {
     if (!this.repoRoot)
       return void 0;
-    const dir = join10(this.repoRoot, KNOWLEDGE_WRITES_DIR_REL);
+    const dir = join11(this.repoRoot, KNOWLEDGE_WRITES_DIR_REL);
     const gone = (err) => err?.code === "ENOENT";
     const text = (err) => err instanceof Error ? err.message : String(err);
     let names;
@@ -35512,7 +35569,7 @@ ${JSON.stringify(entry)}
       const ownerPid = name === legacy ? null : knowledgeWritesOwnerPid(name) ?? knowledgeWritesTempOwnerPid(name);
       if (name !== legacy && ownerPid === null)
         continue;
-      const path = join10(dir, name);
+      const path = join11(dir, name);
       let mtimeMs;
       try {
         mtimeMs = statSync3(path).mtimeMs;
@@ -35526,7 +35583,7 @@ ${JSON.stringify(entry)}
       if (ownerPid !== null && !pidIsGone(ownerPid))
         continue;
       try {
-        unlinkSync(path);
+        unlinkSync2(path);
       } catch (err) {
         if (!gone(err))
           failed.push(`${name}: ${text(err)}`);
@@ -35552,21 +35609,9 @@ ${JSON.stringify(entry)}
     if (!this.repoRoot) {
       throw new Error("session-event write: no project root is known to this server, so the transient register location cannot be resolved \u2014 use the script fallback (bin/no-capture.mjs / bin/concept-designed.mjs in the Sterling install root)");
     }
-    const eventsPath = join10(this.repoRoot, ".sterling", "transient", "session-events.json");
-    mkdirSync4(dirname5(eventsPath), { recursive: true });
-    let events = [];
-    if (existsSync4(eventsPath)) {
-      try {
-        const parsed = JSON.parse(readFileSync6(eventsPath, "utf8"));
-        if (Array.isArray(parsed))
-          events = parsed;
-      } catch {
-      }
-    }
+    const eventsPath = join11(this.repoRoot, ".sterling", "transient", "session-events.json");
     const at = this.now();
-    for (const e of entries)
-      events.push({ ...e, at });
-    writeFileSync2(eventsPath, JSON.stringify(events));
+    appendSessionEventsAt(eventsPath, entries.map((e) => ({ ...e, at })));
     return { at };
   }
   /**
@@ -37573,13 +37618,13 @@ var StoreArgInPostgresStorageError = class extends Error {
   }
 };
 function openStoreArg(storePath2) {
-  const configPath = join11(dirname6(storePath2), "config.json");
-  const raw = existsSync5(configPath) ? JSON.parse(readFileSync7(configPath, "utf8")) : {};
+  const configPath = join12(dirname7(storePath2), "config.json");
+  const raw = existsSync6(configPath) ? JSON.parse(readFileSync8(configPath, "utf8")) : {};
   const config2 = parseConfig(raw);
   if (raw.storage === "postgres")
     throw new StoreArgInPostgresStorageError(configPath);
   const store = new MountedStores(storePath2, resolveDomainMounts(config2), { skipMissing: true });
-  return { store, config: config2, repoRoot: dirname6(dirname6(storePath2)) };
+  return { store, config: config2, repoRoot: dirname7(dirname7(storePath2)) };
 }
 function createSterlingServer(target, opts = {}) {
   let opened;
@@ -37890,21 +37935,21 @@ function createSterlingServer(target, opts = {}) {
 }
 
 // packages/mcp-server/dist/runtime.js
-import { readFileSync as readFileSync8, mkdirSync as mkdirSync5, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname7 } from "node:path";
+import { readFileSync as readFileSync9, mkdirSync as mkdirSync6, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname8 } from "node:path";
 function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */ new Date()).toISOString()) {
   try {
     let buildId = "unknown";
     try {
-      const raw = readFileSync8(buildIdPath(serverDir), "utf8").trim();
+      const raw = readFileSync9(buildIdPath(serverDir), "utf8").trim();
       if (raw)
         buildId = raw;
     } catch {
     }
     const marker = runtimeMarkerSchema.parse({ build_id: buildId, pid: process.pid, booted_at: now() });
     const markerPath = runtimeMarkerPath(storePath2);
-    mkdirSync5(dirname7(markerPath), { recursive: true });
-    writeFileSync3(markerPath, JSON.stringify(marker));
+    mkdirSync6(dirname8(markerPath), { recursive: true });
+    writeFileSync4(markerPath, JSON.stringify(marker));
     return marker;
   } catch {
     return null;
@@ -37914,10 +37959,10 @@ function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */
 // packages/mcp-server/dist/broker.js
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { chmodSync as chmodSync2, readFileSync as readFileSync9, realpathSync as realpathSync4 } from "node:fs";
+import { chmodSync as chmodSync2, readFileSync as readFileSync10, realpathSync as realpathSync4 } from "node:fs";
 function buildIdOf(serverDir) {
   try {
-    return readFileSync9(buildIdPath(serverDir), "utf8").trim() || "unknown";
+    return readFileSync10(buildIdPath(serverDir), "utf8").trim() || "unknown";
   } catch {
     return "unknown";
   }
@@ -38105,7 +38150,7 @@ if (pathArg.includes("${")) {
   process.exit(2);
 }
 var projectRoot = projectArg !== void 0 ? resolve4(projectArg) : void 0;
-var storePath = projectRoot !== void 0 ? join12(projectRoot, ".sterling", "sterling.db") : resolve4(pathArg);
+var storePath = projectRoot !== void 0 ? join13(projectRoot, ".sterling", "sterling.db") : resolve4(pathArg);
 var created;
 try {
   created = createSterlingServer(projectRoot !== void 0 ? { projectRoot } : storePath, { workerPolicy });
@@ -38114,13 +38159,13 @@ try {
   console.error(`sterling-mcp: ${err?.constructor?.name ?? err?.name ?? "Error"}: ${err?.message ?? String(e)}`);
   process.exit(1);
 }
-recordRuntimeMarker(storePath, dirname8(fileURLToPath(import.meta.url)));
+recordRuntimeMarker(storePath, dirname9(fileURLToPath(import.meta.url)));
 await created.server.connect(new StdioServerTransport());
 if (projectRoot !== void 0) {
   const route = resolveStoreRoute(projectRoot);
   if (route?.storage === "postgres") {
     try {
-      const broker = await startHookBroker({ stores: created.store, route, serverDir: dirname8(fileURLToPath(import.meta.url)) });
+      const broker = await startHookBroker({ stores: created.store, route, serverDir: dirname9(fileURLToPath(import.meta.url)) });
       if (broker === null) {
         console.error("sterling-mcp: the hook store broker is not available on this platform (no Unix sockets with uids); hooks connect to Postgres directly.");
       } else {

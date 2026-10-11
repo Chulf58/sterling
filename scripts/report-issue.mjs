@@ -372,6 +372,8 @@ function send(gh, queued, { printBefore = true } = {}) {
     if (!entry.labels.every((l) => kept.has(l.toLowerCase()))) {
       console.log(`report-issue: filed without labels: GitHub did not accept the labels (${entry.labels.join(', ')}); they are in the issue body as the Labels line. A maintainer can apply them with report-issue --apply-labels.`);
     }
+  } else if (entry.labels.length > 0) {
+    console.log(`report-issue: GitHub's response did not say which labels were applied (${entry.labels.join(', ')}); check the issue, and a maintainer can apply them with report-issue --apply-labels.`);
   }
 }
 
@@ -425,15 +427,33 @@ function openReports(gh) {
     incomplete = incomplete || found.incomplete_results === true;
     if (found.items.length < SEARCH_PAGE_SIZE) break;
   }
-  const reports = items.filter((i) => !i?.pull_request && Number.isInteger(i?.number) && typeof i?.body === 'string' && lastFingerprint(i.body) !== null);
-  return { reports: reports.sort((a, b) => a.number - b.number), matched, read: items.length, incomplete };
+  const isReport = (i) => !i?.pull_request && Number.isInteger(i?.number) && typeof i?.body === 'string' && lastFingerprint(i.body) !== null;
+  const reports = items.filter(isReport);
+  // GitHub's search index lags behind a new issue (GitHub issue #69), so the open-issue listing, which reads the database,
+  // is merged in. A report only the listing found is counted as unindexed.
+  const seen = new Set(reports.map((i) => i.number));
+  let unindexed = 0;
+  // The listing is read to a short page with no page cap: a cap would leave older reports unlisted (GitHub issue #69).
+  for (let page = 1; ; page++) {
+    const listed = gh.api('GET', `repos/${STERLING_ISSUE_REPO}/issues`, [['state', 'open'], ['sort', 'created'], ['direction', 'desc'], ['per_page', String(SEARCH_PAGE_SIZE)], ['page', String(page)]]);
+    if (!Array.isArray(listed)) throw new TransportError(`gh at ${gh.path}: the open issues listing returned no array`);
+    for (const i of listed.filter(isReport)) {
+      if (seen.has(i.number)) continue;
+      seen.add(i.number);
+      reports.push(i);
+      unindexed++;
+    }
+    if (listed.length < SEARCH_PAGE_SIZE) break;
+  }
+  return { reports: reports.sort((a, b) => a.number - b.number), matched, read: items.length + unindexed, incomplete, unindexed };
 }
 
 /** Say plainly what a search did not cover. */
 function printSearchNotes(found) {
   if (found.matched > found.read) {
-    console.log(`report-issue: ${found.matched} reports match but only the first ${found.read} were read (${SEARCH_MAX_PAGES} pages of ${SEARCH_PAGE_SIZE}); ${found.matched - found.read} were not reached.`);
+    console.log(`report-issue: ${found.matched} reports match but only ${found.read} were read (search up to ${SEARCH_MAX_PAGES} pages of ${SEARCH_PAGE_SIZE}, then the open-issue listing to its last page); ${found.matched - found.read} were not reached.`);
   }
+  if (found.unindexed > 0) console.log(`report-issue: ${found.unindexed} report(s) above came only from the open-issue listing: GitHub's search had not returned them (its index lags a new issue, or its page limit was reached).`);
   if (found.incomplete) console.log('report-issue: GitHub marked the search results incomplete; some reports may be missing from this list.');
 }
 
@@ -614,6 +634,9 @@ try {
 } catch (e) {
   if (e instanceof ReportRefusal) refuse(e.message);
   throw e;
+}
+if (report.title !== values.title.trim()) {
+  console.error(`report-issue: warning: the title changed in the scrub, so it will be sent as '${report.title}'. Reword the title if that no longer says what you meant.`);
 }
 // The project name feeds the Project line and the project label. It takes the same scrub as the report fields BEFORE it is
 // slugged: slugging first would turn a path into words and cut a UUID short enough to escape the scrub.
