@@ -921,7 +921,7 @@ test('paintPixels: 24-bit cells at 1-based positions, and only changed cells on 
 // is read from OpenCode's own database (a fixture here, built with the same
 // node:sqlite the reader uses), never from a Claude transcript.
 
-function openCodeDb(root: string, opts: { messages?: [string, number, string, unknown][]; catalog?: unknown; tables?: boolean } = {}): string {
+function openCodeDb(root: string, opts: { messages?: [string, number, string, unknown][]; catalog?: unknown; tables?: boolean; sessions?: [string, string | null][]; sessionModelColumn?: boolean } = {}): string {
   const path = join(root, 'opencode-data', 'opencode', 'opencode.db');
   mkdirSync(join(root, 'opencode-data', 'opencode'), { recursive: true });
   const db = new DatabaseSync(path);
@@ -931,6 +931,15 @@ function openCodeDb(root: string, opts: { messages?: [string, number, string, un
     db.exec('CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)');
     const insert = db.prepare('INSERT INTO session_message VALUES (?, ?, ?, ?, 0, 0, ?)');
     (opts.messages ?? []).forEach(([session, seq, type, data], i) => insert.run(`msg_${i}`, session, type, seq, JSON.stringify(data)));
+    if (opts.sessions) {
+      if (opts.sessionModelColumn === false) {
+        db.exec('CREATE TABLE session_v2 (id TEXT PRIMARY KEY, agent TEXT)');
+        for (const [id] of opts.sessions) db.prepare('INSERT INTO session_v2 VALUES (?, ?)').run(id, 'sterling/reviewer');
+      } else {
+        db.exec('CREATE TABLE session_v2 (id TEXT PRIMARY KEY, agent TEXT, model TEXT)');
+        for (const [id, model] of opts.sessions) db.prepare('INSERT INTO session_v2 VALUES (?, ?, ?)').run(id, 'sterling/reviewer', model);
+      }
+    }
     if (opts.catalog !== undefined) db.prepare('INSERT INTO kv VALUES (?, ?, 0, 7)').run('models-dev:catalog', JSON.stringify({ updatedAt: 1, digest: 'd', body: JSON.stringify(opts.catalog) }));
   } else {
     db.exec('CREATE TABLE unrelated (x)');
@@ -970,6 +979,103 @@ test('opencode: the tracker reads the child session\'s latest assistant turn wit
     assert.ok(text.includes('running · 25% ctx') && text.includes('running · ? ctx'), JSON.stringify(text));
     assert.ok(readFileSync(db).equals(main), 'the main database is byte-identical after the read');
     assert.deepEqual(readdirSync(dirname(db)), ['opencode.db'], 'a read with no -wal creates no -wal or -shm');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const sessionModel = (id: string, providerID: string, variant?: string) => JSON.stringify({ id, providerID, ...(variant === undefined ? {} : { variant }) });
+
+test('opencode: a child with no assistant turn shows its session_v2 per-call model with its #variant, not the agent file\'s model', () => {
+  const root = project();
+  try {
+    mkdirSync(join(root, '.claude', 'agents'), { recursive: true });
+    writeFileSync(join(root, '.claude', 'agents', 'reviewer.md'), '---\nname: reviewer\nmodel: opus\n---\nbody\n');
+    const db = openCodeDb(root, {
+      sessions: [
+        ['ses_new', sessionModel('gpt-6.1-sol', 'openai', 'high')],
+        ['ses_plain', sessionModel('claude-sonnet-5-5', 'anthropic')],
+        ['ses_default', sessionModel('gpt-6-astra', 'openai', 'default')],
+        ['ses_null', null],
+        ['ses_junk', 'not json'],
+      ],
+    });
+    writeRegister(root, [
+      row('ses_new', 'reviewer', 10_000),
+      row('ses_plain', 'reviewer', 9_000),
+      row('ses_default', 'reviewer', 8_000),
+      row('ses_null', 'reviewer', 7_000),
+      row('ses_junk', 'reviewer', 6_000, { model: 'openai/gpt-5.6-terra#low' }),
+      row('ses_absent', 'reviewer', 5_000),
+    ]);
+    const v = createSubagentTracker(root, { readIntervalMs: 0, host: 'opencode', opencodeDb: db, claudeConfigDir: join(root, 'none') }).view(NOW);
+    const models = Object.fromEntries(v.agents.map((a) => [a.agentId, a.model]));
+    assert.equal(models.ses_new, 'gpt-6.1-sol#high');
+    assert.equal(models.ses_plain, 'claude-sonnet-5-5');
+    assert.equal(models.ses_default, 'gpt-6-astra', 'variant "default" is not shown');
+    assert.equal(models.ses_null, 'opus', 'a null session model falls to the agent file');
+    assert.equal(models.ses_junk, 'gpt-5.6-terra', 'an unreadable session model falls to the dispatch register\'s model');
+    assert.equal(models.ses_absent, 'opus', 'no session_v2 row falls to the agent file');
+    const fresh = v.agents.find((a) => a.agentId === 'ses_new')!;
+    assert.deepEqual([fresh.contextTokens, fresh.contextPct], [null, null]);
+    assert.equal(v.contextNote, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('opencode: the session_v2 model beats the dispatch register\'s model, and a turn\'s own model beats both', () => {
+  const root = project();
+  try {
+    const db = openCodeDb(root, {
+      messages: [['ses_turned', 1, 'assistant', turn(100_000, 0, 0, 'gpt-6.1-sol')]],
+      sessions: [['ses_turned', sessionModel('session-model', 'openai', 'high')], ['ses_fresh', sessionModel('session-model', 'openai', 'high')]],
+      catalog: CATALOG,
+    });
+    writeRegister(root, [
+      row('ses_turned', 'reviewer', 10_000, { model: 'openai/register-model#low' }),
+      row('ses_fresh', 'reviewer', 9_000, { model: 'openai/register-model#low' }),
+    ]);
+    const v = createSubagentTracker(root, { readIntervalMs: 0, host: 'opencode', opencodeDb: db, claudeConfigDir: join(root, 'none') }).view(NOW);
+    assert.deepEqual(v.agents.map((a) => [a.agentId, a.model]), [['ses_turned', 'gpt-6.1-sol'], ['ses_fresh', 'session-model#high']]);
+    assert.equal(v.agents.find((a) => a.agentId === 'ses_turned')!.contextPct, 10);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('opencode: a turn on the same model as session_v2 keeps the #variant; a turn on a different model shows its own', () => {
+  const root = project();
+  try {
+    const db = openCodeDb(root, {
+      messages: [
+        ['ses_same', 1, 'assistant', turn(100_000, 0, 0, 'gpt-6.1-sol')],
+        ['ses_diff', 1, 'assistant', turn(100_000, 0, 0, 'gpt-6.1-sol')],
+      ],
+      sessions: [['ses_same', sessionModel('gpt-6.1-sol', 'openai', 'high')], ['ses_diff', sessionModel('gpt-6-astra', 'openai', 'high')]],
+      catalog: CATALOG,
+    });
+    writeRegister(root, [row('ses_same', 'reviewer', 10_000), row('ses_diff', 'reviewer', 9_000)]);
+    const v = createSubagentTracker(root, { readIntervalMs: 0, host: 'opencode', opencodeDb: db, claudeConfigDir: join(root, 'none') }).view(NOW);
+    assert.deepEqual(v.agents.map((a) => [a.agentId, a.model, a.contextPct]), [['ses_same', 'gpt-6.1-sol#high', 10], ['ses_diff', 'gpt-6.1-sol', 10]]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('opencode: a session_v2 without a model column, or no session_v2 at all, falls down the chain and leaves the context readable', () => {
+  const root = project();
+  try {
+    writeRegister(root, [row('ses_a', 'implementor', 10_000, { model: 'openai/gpt-5.6-terra#high' })]);
+    for (const opts of [{ sessions: [['ses_a', null]] as [string, string | null][], sessionModelColumn: false }, {}]) {
+      const db = openCodeDb(root, { ...opts, messages: [['ses_a', 1, 'assistant', turn(50_000, 0, 0, 'gpt-5.6-terra')]], catalog: { openai: { models: { 'gpt-5.6-terra': { limit: { context: 500_000 } } } } } });
+      const v = createSubagentTracker(root, { readIntervalMs: 0, host: 'opencode', opencodeDb: db, claudeConfigDir: join(root, 'none') }).view(NOW);
+      assert.deepEqual([v.agents[0]!.model, v.agents[0]!.contextPct, v.contextNote], ['gpt-5.6-terra', 10, undefined]);
+      rmSync(join(root, 'opencode-data'), { recursive: true, force: true });
+    }
+    const noTurn = openCodeDb(root, {});
+    const v = createSubagentTracker(root, { readIntervalMs: 0, host: 'opencode', opencodeDb: noTurn, claudeConfigDir: join(root, 'none') }).view(NOW);
+    assert.equal(v.agents[0]!.model, 'gpt-5.6-terra', 'no session model and no turn: the register\'s model, variant dropped');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

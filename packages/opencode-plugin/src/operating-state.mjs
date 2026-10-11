@@ -8,8 +8,10 @@
 // Left to Claude Code, with the reason: agent currency and the conductor-activation
 // diagnostic (both read .claude/agents and .claude/settings.json), the INSTALLED
 // PLUGIN role text (it names /plugin's Installed tab), the clone-behind probe (it
-// fetches and tells the user to relaunch the Claude Code CLI) and the plan-lock,
-// rotation, dispatch-residue and registry sections (their writers are Claude hooks).
+// fetches and tells the user to relaunch the Claude Code CLI) and the rotation,
+// dispatch-residue and registry sections (their writers are Claude hooks).
+// The PLAN LOCK section is not here: context.mjs adds it on root requests from
+// scripts/hooks/lib/plan-lock-section.mjs, shared with H1.
 import { computeUndeclaredSourceDisclosure } from '../../../scripts/hooks/lib/undeclared-source-scan.mjs';
 import { renderUnavailable } from '../../../scripts/hooks/lib/undeclared-source.mjs';
 import { queueDepthLine, reconcileBacklog } from '../../../scripts/hooks/lib/maintenance-state.mjs';

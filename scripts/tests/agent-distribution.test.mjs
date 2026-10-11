@@ -25,6 +25,7 @@ import {
   ensureConductorActivation,
   describeConfigDrift,
   CONFIG_DRIFT_FIX,
+  loadRegistry,
 } from '../lib/agent-distribution.mjs';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
 
@@ -1762,11 +1763,19 @@ test('extra_tools: the Sterling-prefix ban is case-insensitive', () => {
 // design point C: no agent template bakes a machine path, so init/sync/install pass no
 // {{NODE}}/{{HOOKS_DIR}}/{{GIT_RO}} vars. The only substitution tokens left are the
 // config-resolved {{MODEL}}/{{EFFORT}}; a new token here would ship as a literal.
+// The one exception is an OpenCode-only template (registry hosts ["opencode"], the
+// plan agent): the OpenCode installer replaces {{PROJECT_DIR}} and {{STERLING_ROOT}}
+// with absolute paths, because its shell and edit permission rules match literally.
+// It never reaches the Claude render.
 test('agent templates carry only the {{MODEL}}/{{EFFORT}} tokens — no baked machine-path variables', () => {
   const dir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'agent-templates');
+  const opencodeOnly = new Set(loadRegistry(join(dir, 'registry.json')).agents.filter((a) => a.hosts && !a.hosts.includes('claude')).map((a) => a.file));
+  assert.deepEqual([...opencodeOnly], ['plan.md']);
   const tokens = new Set();
+  const opencodeTokens = new Set();
   for (const f of readdirSync(dir).filter((n) => n.endsWith('.md'))) {
-    for (const m of readFileSync(join(dir, f), 'utf8').matchAll(/\{\{([A-Z_]+)\}\}/g)) tokens.add(m[1]);
+    for (const m of readFileSync(join(dir, f), 'utf8').matchAll(/\{\{([A-Z_]+)\}\}/g)) (opencodeOnly.has(f) ? opencodeTokens : tokens).add(m[1]);
   }
   assert.deepEqual([...tokens].sort(), ['EFFORT', 'MODEL']);
+  assert.deepEqual([...opencodeTokens].sort(), ['PROJECT_DIR', 'STERLING_ROOT']);
 });

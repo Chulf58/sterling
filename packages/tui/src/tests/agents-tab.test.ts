@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -88,6 +89,25 @@ test('agents tab: keys, digits and clicks reach it only when the host enables it
     // disabled: right from Queue skips Agents, digit 5 is nothing
     assert.equal(reduce(store, st({ tab: 2 }), { kind: 'key', name: 'RIGHT' }).ui.tab, SYSTEM_TAB);
     assert.equal(reduce(store, st(), { kind: 'char', ch: '5' }).ui.tab, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('agents tab: the Agents and Tasks counts stay in the bar when another tab is active, on the 48-column pane too (#74)', () => {
+  const { store, cleanup } = fixture();
+  try {
+    for (let i = 0; i < 25; i += 1) {
+      const at = new Date().toISOString();
+      store.create({ id: randomUUID(), type: 'todo', created_at: at, updated_at: at, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [], text: `task ${i}`, source: 'user' });
+    }
+    for (const width of [120, 80, 48]) {
+      for (const tab of [1, 2, 4]) {
+        const bar = labels(buildDashboardState(store, st({ tab }), width, 20, '', false, undefined, undefined, { running: 4, quiet: 2 }));
+        assert.ok(bar.some((l) => /^Tasks \(25\)$/.test(l)), `width ${width}, tab ${tab}: Tasks count in ${JSON.stringify(bar)}`);
+        assert.ok(bar.some((l) => /^Agents \(4( running.*)?\)$/.test(l)), `width ${width}, tab ${tab}: Agents count in ${JSON.stringify(bar)}`);
+      }
+    }
   } finally {
     cleanup();
   }

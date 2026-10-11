@@ -5,15 +5,23 @@
 // this CLI and the hook must never disagree about what a lock is.
 //
 //   node scripts/plan-lock.mjs --plan <path> [--force]
+//   node scripts/plan-lock.mjs --bind-pending [--force]
 //   node scripts/plan-lock.mjs --observe
 //   node scripts/plan-lock.mjs --release --reason "<why>"
 //   node scripts/plan-lock.mjs --show
 //
-// FOUR VERBS, ONE REFUSAL CODE (exit 2). A refusal never writes.
+// FIVE VERBS, ONE REFUSAL CODE (exit 2). A refusal never writes.
 //   --plan     binds a plan by hand: source 'manual', approved_sha256 = the
 //              FILE's hash, provenance NULL. Replacing a lock that an
 //              ExitPlanMode approval wrote requires --force regardless of age —
 //              age never weakens approval provenance.
+//   --bind-pending  binds exactly as --plan does, but takes no path: it picks
+//              the newest direct-child *.md in <project>/.sterling/plans/ itself.
+//              It exists for OpenCode's Plan agent, whose shell rules must be
+//              exact literals (anti-pattern
+//              an-opencode-bash-permission-with-a-trailing-cannot-be-made-s): a
+//              `--plan *` rule lets the shell expand $(...), redirects and
+//              separators before this script ever sees argv.
 //   --observe  records observed_* ONLY. There is deliberately no --restamp:
 //              re-stamping approval by hand would launder an unapproved edit
 //              into approval, so a modified plan is RECORDED, never re-approved.
@@ -39,8 +47,8 @@
 // approved (source 'manual' is disclosed by H1 as the operator's word); that
 // the plan file still says what it said at approval (that is exactly what
 // MODIFIED discloses).
-import { existsSync, rmSync } from 'node:fs';
-import { basename, resolve } from 'node:path';
+import { existsSync, lstatSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   LOCK_FILE,
   PATH_MAX,
@@ -138,15 +146,42 @@ function requireUnchanged(before) {
   }
 }
 
-const verbs = ['plan', 'observe', 'release', 'show'].filter(has);
+const verbs = ['plan', 'bind-pending', 'observe', 'release', 'show'].filter(has);
 if (verbs.length !== 1) {
   refuse(
     verbs.length
       ? `exactly one verb at a time — got: ${verbs.map((v) => `--${v}`).join(', ')}`
-      : 'no verb given — one of --plan <path> | --observe | --release --reason "<why>" | --show'
+      : 'no verb given — one of --plan <path> | --bind-pending | --observe | --release --reason "<why>" | --show'
   );
 }
 const verb = verbs[0];
+
+// EVERY TOKEN BELONGS TO THE VERB: another verb (refused above), a flag of
+// another verb (`--reason`), an unknown flag or a stray argument is refused,
+// and a refusal here writes nothing. This is argument hygiene, not a shell
+// boundary: by the time argv reaches this script the shell has already run any
+// $(...), redirect or separator, which is why OpenCode's Plan agent is allowed
+// only exact literal commands (finding
+// how-does-opencode-v2-override-its-built-in-plan-agent-and-ho).
+const VERB_FLAGS = {
+  plan: ['--plan', '--force'],
+  'bind-pending': ['--bind-pending', '--force'],
+  observe: ['--observe'],
+  release: ['--release', '--reason'],
+  show: ['--show'],
+};
+const VALUE_FLAGS = ['--plan', '--reason'];
+for (let i = 0; i < argv.length; i++) {
+  const token = argv[i];
+  const flag = token.startsWith('--') ? token.split('=')[0] : null;
+  if (flag === null) refuse(`unexpected argument ${JSON.stringify(token)} — --${verb} takes ${VERB_FLAGS[verb].join(', ')} only. Nothing was changed`);
+  if (!VERB_FLAGS[verb].includes(flag)) refuse(`${flag} does not go with --${verb} (it takes ${VERB_FLAGS[verb].join(', ')} only). Nothing was changed`);
+  if (!VALUE_FLAGS.includes(flag)) {
+    if (token !== flag) refuse(`${flag} takes no value, got ${JSON.stringify(token)}. Nothing was changed`);
+  } else if (token === flag && argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) {
+    i++;
+  }
+}
 
 if (verb === 'show') {
   const read = readLock(sterlingDir);
@@ -247,10 +282,78 @@ if (verb === 'observe') {
   process.exit(0);
 }
 
-// verb === 'plan'
-const planArg = arg('plan');
-if (!planArg) refuse('--plan requires a path to the plan file');
-const planPath = resolve(cwd, planArg);
+// A plan name --bind-pending accepts: a lowercase slug and nothing else, so the
+// file it picks is one the Plan agent was told to write, never a stray editor
+// backup, a dotfile or a name that needs quoting.
+const PENDING_NAME = /^[a-z0-9][a-z0-9-]*\.md$/;
+
+/** `child` lies strictly inside `parent`, comparing canonical paths. */
+function inside(parent, child) {
+  const rel = relative(parent, child);
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+/**
+ * The plan --bind-pending binds: the most recently modified direct-child *.md
+ * of <project>/.sterling/plans/, canonicalised. It REFUSES rather than falling
+ * back to an older file — a missing or empty directory, a newest .md whose name
+ * is not a slug, two .md files with the same newest mtime, and a symlink whose
+ * target leaves the plans directory — because binding a plan other than the one
+ * the agent just wrote would put the conductor under the wrong plan silently.
+ * The caller still reads the file through readPlanFileBounded (O_NOFOLLOW,
+ * regular files only), so a symlink is opened only by its resolved path.
+ */
+function pendingPlanPath() {
+  const plansDir = join(cwd, '.sterling', 'plans');
+  let realProject;
+  let realPlans;
+  try {
+    realProject = realpathSync(cwd);
+    realPlans = realpathSync(plansDir);
+  } catch (e) {
+    refuse(`no plans directory at ${plansDir} (${(e && e.code) || e}) — write the plan there first. Nothing was changed`);
+  }
+  if (!inside(realProject, realPlans)) refuse(`${plansDir} resolves to ${realPlans}, outside the project — refusing to bind a plan from there. Nothing was changed`);
+  let entries;
+  try {
+    entries = readdirSync(realPlans, { withFileTypes: true }).filter((d) => d.name.endsWith('.md'));
+  } catch (e) {
+    refuse(`could not list ${plansDir} (${(e && e.message) || e}). Nothing was changed`);
+  }
+  if (entries.length === 0) refuse(`no *.md plan in ${plansDir} — write the plan there first. Nothing was changed`);
+  let dated;
+  try {
+    dated = entries.map((d) => ({ name: d.name, mtime: lstatSync(join(realPlans, d.name)).mtimeMs }));
+  } catch (e) {
+    refuse(`could not read the modification times in ${plansDir} (${(e && e.message) || e}). Nothing was changed`);
+  }
+  dated.sort((a, b) => b.mtime - a.mtime);
+  const [newest, second] = dated;
+  if (second && second.mtime === newest.mtime) {
+    refuse(`${newest.name} and ${second.name} in ${plansDir} have the same modification time, so the newest plan is ambiguous. Nothing was changed`);
+  }
+  if (!PENDING_NAME.test(newest.name)) {
+    refuse(`the newest plan file ${JSON.stringify(newest.name)} in ${plansDir} is not named <slug>.md (lowercase letters, digits and hyphens) — rename it and re-run. Nothing was changed`);
+  }
+  let real;
+  try {
+    real = realpathSync(join(realPlans, newest.name));
+  } catch (e) {
+    refuse(`${join(plansDir, newest.name)} could not be resolved (${(e && e.code) || e}) — a dangling link is not a plan. Nothing was changed`);
+  }
+  if (!inside(realPlans, real)) refuse(`${join(plansDir, newest.name)} resolves to ${real}, outside ${plansDir} — refusing to bind it. Nothing was changed`);
+  return real;
+}
+
+// verb === 'plan' or 'bind-pending'
+let planPath;
+if (verb === 'bind-pending') {
+  planPath = pendingPlanPath();
+} else {
+  const planArg = arg('plan');
+  if (!planArg) refuse('--plan requires a path to the plan file');
+  planPath = resolve(cwd, planArg);
+}
 if (!existsSync(planPath)) refuse(`no plan file at ${planPath}`);
 const planRead = readPlanFileBounded(planPath);
 if (planRead.unreadable) refuse(`the plan file at ${planPath} ${planRead.unreadable} — nothing was changed`);
@@ -320,5 +423,8 @@ if (replaced) {
     );
   }
 }
-process.stdout.write(JSON.stringify({ ...lock, replaced }, null, 2) + '\n');
+// --bind-pending chose the file itself, so it names it: the Plan agent checks
+// bound_file against the file it just wrote before it reports the plan bound.
+const report = verb === 'bind-pending' ? { bound_file: planPath, ...lock, replaced } : { ...lock, replaced };
+process.stdout.write(JSON.stringify(report, null, 2) + '\n');
 process.exit(0);

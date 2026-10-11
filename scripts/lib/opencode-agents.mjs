@@ -36,14 +36,30 @@ export function portableAgentEntries(registry) {
   return registry.agents.filter((entry) => entry.opencode !== undefined);
 }
 
-function permissionLines(permission, label) {
+// A permission value is one verdict (`  edit: deny`) or an ordered map of pattern to
+// verdict, rendered as a nested YAML block in the map's key order, each pattern a
+// JSON string (a valid YAML double-quoted scalar whatever it holds):
+//   bash:
+//     "*": deny
+//     "git status": allow
+// OpenCode keeps that order and the last matching rule wins.
+export function permissionLines(permission, label) {
   if (permission === undefined) return [];
+  const bad = (key, value) => new Error(`opencode permission for ${label}: '${key}: ${JSON.stringify(value)}' — keys are ${OPENCODE_PERMISSION_KEYS.join('/')}, values ${OPENCODE_PERMISSION_VALUES.join('/')} or a map of pattern to one of them (P5)`);
   const lines = ['permission:'];
   for (const [key, value] of Object.entries(permission)) {
-    if (!OPENCODE_PERMISSION_KEYS.includes(key) || !OPENCODE_PERMISSION_VALUES.includes(value)) {
-      throw new Error(`opencode permission for ${label}: '${key}: ${value}' — keys are ${OPENCODE_PERMISSION_KEYS.join('/')}, values ${OPENCODE_PERMISSION_VALUES.join('/')} (P5)`);
+    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw bad(key, value);
+    if (typeof value === 'string') {
+      if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw bad(key, value);
+      lines.push(`  ${key}: ${value}`);
+      continue;
     }
-    lines.push(`  ${key}: ${value}`);
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.keys(value).length) throw bad(key, value);
+    lines.push(`  ${key}:`);
+    for (const [pattern, verdict] of Object.entries(value)) {
+      if (!pattern.trim() || /[\r\n]/.test(pattern) || !OPENCODE_PERMISSION_VALUES.includes(verdict)) throw bad(`${key}.${pattern}`, verdict);
+      lines.push(`    ${JSON.stringify(pattern)}: ${verdict}`);
+    }
   }
   return lines;
 }

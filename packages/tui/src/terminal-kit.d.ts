@@ -9,7 +9,10 @@ declare module 'terminal-kit' {
     on(event: 'key', cb: (name: string) => void): void;
     on(event: 'mouse', cb: (name: string, data: { x: number; y: number }) => void): void;
     on(event: 'resize', cb: (width: number, height: number) => void): void;
-    support?: { trueColor?: boolean };
+    support?: { trueColor?: boolean; '256colors'?: boolean };
+    /** the escapes terminal-kit writes for each 256-palette colour on this terminal,
+     *  mapped down where it reports fewer colours; the ScreenBuffer draws with them */
+    palette: { bgEscape: readonly string[] };
     /** 1-based cell coordinates */
     moveTo(x: number, y: number): Terminal;
     /** 24-bit colour; terminal-kit falls back to the nearest palette colour
@@ -35,6 +38,10 @@ declare module 'terminal-kit' {
     put(options: { x: number; y: number; attr: ScreenBufferAttr }, str: string): void;
     draw(options: { delta: boolean }): void;
   }
-  const termkit: { terminal: Terminal; ScreenBuffer: typeof ScreenBuffer };
+  const termkit: {
+    terminal: Terminal;
+    ScreenBuffer: typeof ScreenBuffer;
+    createTerminal(options: { stdout: NodeJS.WritableStream; stdin: NodeJS.ReadableStream; stderr?: NodeJS.WritableStream; generic: string; appId?: string; isTTY?: boolean; processSigwinch?: boolean }): Terminal;
+  };
   export default termkit;
 }

@@ -50567,8 +50567,14 @@ function fitTabs(tabs, width) {
   if (!Number.isFinite(width))
     return tabs;
   const bare = (l) => l.replace(/ \(.*\)$/, "");
+  const compact = (l) => l.replace(/ \((\d+)[^)]*\)$/, " ($1)");
+  const keepCount = (n) => (l) => l === bare(l) ? l.slice(0, n) : compact(l);
   const steps = [
     [(l) => l, (l) => l],
+    [(l) => l, compact],
+    [compact, compact],
+    [compact, keepCount(3)],
+    [compact, keepCount(1)],
     [(l) => l, bare],
     [bare, bare],
     [bare, (l) => bare(l).slice(0, 3)],
@@ -51719,6 +51725,23 @@ ${body}`;
 }
 var OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];
 var OPENCODE_PERMISSION_VALUES = ["allow", "ask", "deny"];
+function validatePermissionMap(permission, where) {
+  if (!permission || typeof permission !== "object" || Array.isArray(permission)) throw new Error(`${where} must be an object`);
+  for (const [key, value] of Object.entries(permission)) {
+    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw new Error(`${where}: unknown key '${key}' (known: ${OPENCODE_PERMISSION_KEYS.join(", ")})`);
+    if (typeof value === "string") {
+      if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw new Error(`${where}.${key}: '${value}' is not one of ${OPENCODE_PERMISSION_VALUES.join(", ")}`);
+      continue;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value) || !Object.keys(value).length) {
+      throw new Error(`${where}.${key} must be one of ${OPENCODE_PERMISSION_VALUES.join(", ")} or a non-empty map of pattern to verdict`);
+    }
+    for (const [pattern, verdict] of Object.entries(value)) {
+      if (!pattern.trim() || /[\r\n]/.test(pattern)) throw new Error(`${where}.${key}: a pattern must be one non-empty line, got ${JSON.stringify(pattern)}`);
+      if (!OPENCODE_PERMISSION_VALUES.includes(verdict)) throw new Error(`${where}.${key}[${JSON.stringify(pattern)}]: '${verdict}' is not one of ${OPENCODE_PERMISSION_VALUES.join(", ")}`);
+    }
+  }
+}
 function validateOpenCodeEntry(entry, where) {
   const block = entry.opencode;
   if (!block || typeof block !== "object" || Array.isArray(block)) throw new Error(`${where} must be an object`);
@@ -51728,10 +51751,38 @@ function validateOpenCodeEntry(entry, where) {
     throw new Error(`${where}.description must be one non-empty line of text`);
   }
   if (block.permission === void 0) return;
-  if (!block.permission || typeof block.permission !== "object" || Array.isArray(block.permission)) throw new Error(`${where}.permission must be an object`);
-  for (const [key, value] of Object.entries(block.permission)) {
-    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw new Error(`${where}.permission: unknown key '${key}' (known: ${OPENCODE_PERMISSION_KEYS.join(", ")})`);
-    if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw new Error(`${where}.permission.${key}: '${value}' is not one of ${OPENCODE_PERMISSION_VALUES.join(", ")}`);
+  validatePermissionMap(block.permission, `${where}.permission`);
+}
+var AGENT_HOSTS = ["claude", "opencode"];
+var OPENCODE_FULL_MODES = ["primary", "subagent"];
+function agentHosts(entry) {
+  return entry.hosts ?? AGENT_HOSTS;
+}
+function validateHosts(entry, where) {
+  if (entry.hosts !== void 0) {
+    const hosts = entry.hosts;
+    if (!Array.isArray(hosts) || !hosts.length || hosts.some((h) => !AGENT_HOSTS.includes(h)) || new Set(hosts).size !== hosts.length) {
+      throw new Error(`${where}.hosts must be a non-empty list of distinct hosts from ${AGENT_HOSTS.join(", ")}`);
+    }
+  }
+  const full = entry.opencode_full;
+  if (full !== void 0) {
+    if (!full || typeof full !== "object" || Array.isArray(full)) throw new Error(`${where}.opencode_full must be an object`);
+    const unknown = Object.keys(full).find((key) => !["path", "mode", "permission"].includes(key));
+    if (unknown !== void 0) throw new Error(`${where}.opencode_full: unknown key '${unknown}' \u2014 the keys are path, mode and permission`);
+    if (full.path !== `.opencode/agents/${entry.name}.md`) {
+      throw new Error(`${where}.opencode_full.path must be '.opencode/agents/${entry.name}.md' (directly under .opencode/agents/, named after the agent), got ${JSON.stringify(full.path)}`);
+    }
+    if (!OPENCODE_FULL_MODES.includes(full.mode)) throw new Error(`${where}.opencode_full.mode must be one of ${OPENCODE_FULL_MODES.join(", ")}`);
+    if (full.permission !== void 0) validatePermissionMap(full.permission, `${where}.opencode_full.permission`);
+    if (!agentHosts(entry).includes("opencode")) throw new Error(`${where}: opencode_full needs hosts to include opencode`);
+    if (full.mode === "primary" && agentHosts(entry).includes("claude")) {
+      throw new Error(`${where}: opencode_full.mode primary is for an OpenCode-only agent \u2014 set hosts to ["opencode"], or use mode subagent for an agent Claude also installs`);
+    }
+    if (entry.opencode !== void 0) throw new Error(`${where}: opencode (the portable copy) and opencode_full both write .opencode/agents/${entry.name}.md \u2014 keep one`);
+  }
+  if (!agentHosts(entry).includes("claude") && full === void 0) {
+    throw new Error(`${where}: an agent not installed on claude must declare opencode_full (where OpenCode installs it)`);
   }
 }
 function loadRegistry(registryPath2) {
@@ -51752,6 +51803,7 @@ function loadRegistry(registryPath2) {
       throw new Error(`agent registry ${registryPath2}: agents[${index}].file must be a template filename ending in .md`);
     }
     if (entry.opencode !== void 0) validateOpenCodeEntry(entry, `agent registry ${registryPath2}: agents[${index}].opencode`);
+    validateHosts(entry, `agent registry ${registryPath2}: agents[${index}]`);
     if (names.has(entry.name) || files.has(entry.file)) {
       throw new Error(`agent registry ${registryPath2}: duplicate agent name or template file at agents[${index}]`);
     }
@@ -52215,12 +52267,21 @@ var OPENCODE_HEADER_RE = /^<!-- sterling-portable renderer=(\S+) template=(\S+) 
 var normalize2 = (s2) => s2.replace(/\r\n/g, "\n");
 function permissionLines(permission, label) {
   if (permission === void 0) return [];
+  const bad = (key, value) => new Error(`opencode permission for ${label}: '${key}: ${JSON.stringify(value)}' \u2014 keys are ${OPENCODE_PERMISSION_KEYS.join("/")}, values ${OPENCODE_PERMISSION_VALUES.join("/")} or a map of pattern to one of them (P5)`);
   const lines = ["permission:"];
   for (const [key, value] of Object.entries(permission)) {
-    if (!OPENCODE_PERMISSION_KEYS.includes(key) || !OPENCODE_PERMISSION_VALUES.includes(value)) {
-      throw new Error(`opencode permission for ${label}: '${key}: ${value}' \u2014 keys are ${OPENCODE_PERMISSION_KEYS.join("/")}, values ${OPENCODE_PERMISSION_VALUES.join("/")} (P5)`);
+    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw bad(key, value);
+    if (typeof value === "string") {
+      if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw bad(key, value);
+      lines.push(`  ${key}: ${value}`);
+      continue;
     }
-    lines.push(`  ${key}: ${value}`);
+    if (!value || typeof value !== "object" || Array.isArray(value) || !Object.keys(value).length) throw bad(key, value);
+    lines.push(`  ${key}:`);
+    for (const [pattern, verdict] of Object.entries(value)) {
+      if (!pattern.trim() || /[\r\n]/.test(pattern) || !OPENCODE_PERMISSION_VALUES.includes(verdict)) throw bad(`${key}.${pattern}`, verdict);
+      lines.push(`    ${JSON.stringify(pattern)}: ${verdict}`);
+    }
   }
   return lines;
 }
@@ -52313,14 +52374,14 @@ function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.m
     if (dirname4(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
-function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, model, writeTools } = {}) {
-  const hostText = renderOpenCodeFullText(templateContent, label);
-  const permission = FULL_PERMISSIONS[entry.name] ?? entry.opencode?.permission;
+function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, mode, model, writeTools, vars = {} } = {}) {
+  const hostText = substituteInstallVars(renderOpenCodeFullText(templateContent, label), vars);
+  const permission = substitutePermissionVars(FULL_PERMISSIONS[entry.name] ?? entry.opencode_full?.permission ?? entry.opencode?.permission, vars, label);
   const out = renderOpenCodeAgent(hostText, label, { permission, description: primary ? CONDUCTOR_OPENCODE_DESCRIPTION : void 0 });
   const header = parseOpenCodeHeader(out.content);
   let content = normalize3(out.content).replace(`${header.headerLine}
 `, "");
-  if (primary) content = content.replace(/^mode: subagent$/m, "mode: primary");
+  if (primary || mode === "primary") content = content.replace(/^mode: subagent$/m, "mode: primary");
   if (!STORE_WRITERS.has(entry.name)) {
     const denies = (writeTools ?? storeWriteTools()).map((t) => `  ${t}: deny`);
     const close = content.indexOf("\n---\n", 4);
@@ -52334,6 +52395,33 @@ model: ${model}`);
   const fullHeader = `<!-- sterling-full renderer=opencode-full/1 template=${out.name} template_hash=${sha256(templateContent)} content_hash=${sha256(content)} -->`;
   return { name: out.name, content: `${content.slice(0, fmEnd)}${fullHeader}
 ${content.slice(fmEnd)}` };
+}
+var INSTALL_VARS = ["PROJECT_DIR", "STERLING_ROOT"];
+var INSTALL_VAR_RE = /\{\{(PROJECT_DIR|STERLING_ROOT)\}\}/g;
+var SHELL_SAFE_PATH_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+function substituteInstallVars(text, vars) {
+  return text.replace(INSTALL_VAR_RE, (token, name) => vars[name] ?? token);
+}
+function substitutePermissionVars(permission, vars, label) {
+  if (permission === void 0) return void 0;
+  const out = {};
+  for (const [key, value] of Object.entries(permission)) {
+    if (typeof value === "string") {
+      out[key] = value;
+      continue;
+    }
+    out[key] = {};
+    for (const [pattern, verdict] of Object.entries(value)) {
+      const rendered = substituteInstallVars(pattern, vars);
+      if (/\{\{[A-Z_]+\}\}/.test(rendered)) throw new Error(`opencode permission for ${label}: '${rendered}' keeps an install token no value was given for (P5)`);
+      out[key][rendered] = verdict;
+    }
+  }
+  return out;
+}
+function usesInstallVars(templateContent, permission) {
+  return new RegExp(INSTALL_VAR_RE.source).test(`${templateContent}
+${JSON.stringify(permission ?? {})}`);
 }
 function frontmatterModel(content) {
   const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
@@ -52351,15 +52439,35 @@ function stageFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
     writes: planned.filter((r) => r.content !== void 0).map(({ path, content, previous }) => ({ path, content, previous }))
   };
 }
+function fullAgentTargets(registry) {
+  const targets = ROSTER.map((name) => {
+    const entry = registry.agents.find((a) => a.name === name);
+    if (!entry) throw new Error(`opencode roster: '${name}' is not in agent-templates/registry.json (P5)`);
+    if (!agentHosts(entry).includes("opencode")) throw new Error(`opencode roster: '${name}' is in the roster but its registry hosts leave out opencode (P5)`);
+    return { name, entry, rel: `${STERLING_AGENTS_SUBDIR}/${name}.md`, primary: name === "conductor" };
+  });
+  for (const entry of registry.agents) {
+    if (entry.opencode_full === void 0) continue;
+    if (ROSTER.includes(entry.name)) throw new Error(`opencode roster: '${entry.name}' is in the roster and also has opencode_full; it would be written twice (P5)`);
+    targets.push({ name: entry.name, entry, rel: entry.opencode_full.path, primary: false, mode: entry.opencode_full.mode });
+  }
+  return targets;
+}
 function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   const registry = loadRegistry(join13(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
+  const vars = { PROJECT_DIR: fwd2(projectDir), STERLING_ROOT: fwd2(pluginRoot) };
   const rows = [];
-  for (const name of ROSTER) {
-    const entry = registry.agents.find((a) => a.name === name);
-    if (!entry) throw new Error(`opencode roster: '${name}' is not in agent-templates/registry.json (P5)`);
-    const rel = `${STERLING_AGENTS_SUBDIR}/${name}.md`;
+  for (const { name, entry, rel, primary, mode } of fullAgentTargets(registry)) {
     const path = join13(projectDir, rel);
+    const templateContent = readFileSync9(join13(pluginRoot, "agent-templates", entry.file), "utf8");
+    if (usesInstallVars(templateContent, entry.opencode_full?.permission)) {
+      const unsafe = INSTALL_VARS.filter((v) => !SHELL_SAFE_PATH_RE.test(vars[v]));
+      if (unsafe.length) {
+        rows.push(refusal(rel, `${rel} needs ${unsafe.map((v) => `${v === "PROJECT_DIR" ? "the project path" : "the Sterling path"} (${vars[v]})`).join(" and ")} in shell permission rules, and a space, quote or glob character there cannot be matched reliably`, "use a project and Sterling path made of letters, digits and _@%+=:,./- only, then rerun /sterling:update"));
+        continue;
+      }
+    }
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
@@ -52379,7 +52487,7 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
       }
     }
     const model = models[name] ?? (disk === null ? void 0 : frontmatterModel(disk));
-    const agent = renderFullOpenCodeAgent(readFileSync9(join13(pluginRoot, "agent-templates", entry.file), "utf8"), entry.file, entry, { primary: name === "conductor", model, writeTools });
+    const agent = renderFullOpenCodeAgent(templateContent, entry.file, entry, { primary, mode, model, writeTools, vars });
     if (agent.name !== name) throw new Error(`opencode roster: '${entry.file}' renders as '${agent.name}', not '${name}' (P5)`);
     if (disk === agent.content) {
       rows.push({ item: rel, status: "matches" });
@@ -53314,6 +53422,17 @@ var NEON_EDGE = {
   quiet: PALETTE.amber,
   done: PALETTE.muted
 };
+function overlayBlankSgr(theme2, bgEscape) {
+  const bg = theme2.fill.bgColor;
+  if (bg === void 0)
+    return "";
+  if (typeof bg !== "number")
+    throw new Error(`the ${theme2.level} page background must be a 256-palette index, not ${bg}`);
+  const sgr = bgEscape[bg];
+  if (sgr === void 0)
+    throw new Error(`the terminal palette has no background escape for colour ${bg}`);
+  return sgr;
+}
 function detectThemeLevel(env, support = {}) {
   const forced = env[THEME_ENV];
   if (forced !== void 0 && forced !== "") {
@@ -53328,6 +53447,15 @@ function detectThemeLevel(env, support = {}) {
   if (support["256colors"] === true || /256color/.test(env.TERM ?? ""))
     return "256";
   return "16";
+}
+function colorGenericFor(env, support = {}) {
+  if (support["256colors"] === true || support.trueColor === true)
+    return void 0;
+  if (/^(truecolor|24bits?)$/.test(env.COLORTERM ?? ""))
+    return "xterm-truecolor";
+  if (/256/.test(env.TERM ?? "") || /256/.test(env.COLORTERM ?? ""))
+    return "xterm-256color";
+  return void 0;
 }
 var footerPlain = { dim: true };
 var PLAIN_THEME = {
@@ -53537,7 +53665,7 @@ function drawFooter(screen2, t, state) {
   if (x < state.footer.length)
     screen2.put({ x, y, attr: t.footerDesc }, state.footer.slice(x));
 }
-function clearPixels(term2, prev, next, blankSgr = "") {
+function clearPixels(term2, prev, next, blankSgr2 = "") {
   const keep = new Set(next.map((p) => `${p.x},${p.y}`));
   let wrote = false;
   for (const key of prev.keys()) {
@@ -53546,8 +53674,8 @@ function clearPixels(term2, prev, next, blankSgr = "") {
     const [x, y] = key.split(",").map(Number);
     if (!wrote) {
       term2.styleReset();
-      if (blankSgr)
-        term2.noFormat(blankSgr);
+      if (blankSgr2)
+        term2.noFormat(blankSgr2);
     }
     term2.moveTo(x + 1, y + 1);
     term2.noFormat(" ");
@@ -53558,7 +53686,7 @@ function sgr24(hex, background) {
   const n = Number.parseInt(hex.slice(1), 16);
   return `\x1B[${background ? 48 : 38};2;${n >> 16 & 255};${n >> 8 & 255};${n & 255}m`;
 }
-function paintPixels(term2, pixels, prev, trueColor2 = false, blankSgr = "") {
+function paintPixels(term2, pixels, prev, trueColor2 = false, blankSgr2 = "") {
   const next = /* @__PURE__ */ new Map();
   let wrote = false;
   for (const p of pixels) {
@@ -53569,8 +53697,8 @@ function paintPixels(term2, pixels, prev, trueColor2 = false, blankSgr = "") {
       continue;
     term2.styleReset();
     term2.moveTo(p.x + 1, p.y + 1);
-    if (p.bg === void 0 && blankSgr)
-      term2.noFormat(blankSgr);
+    if (p.bg === void 0 && blankSgr2)
+      term2.noFormat(blankSgr2);
     if (p.fg !== void 0) {
       if (trueColor2)
         term2.noFormat(sgr24(p.fg, false));
@@ -56362,16 +56490,40 @@ function readOpenCodeContext(dbPath, sessionIds, catalogStamp) {
       }
       usage.set(id, found);
     }
+    const sessionModels = readSessionModels(db, sessionIds);
     const stampRow = db.prepare("SELECT time_updated FROM kv WHERE key = ?").get(CATALOG_KEY);
     if (!stampRow)
-      return { usage, catalog: null };
+      return { usage, sessionModels, catalog: null };
     if (stampRow.time_updated === catalogStamp)
-      return { usage };
+      return { usage, sessionModels };
     const value = db.prepare("SELECT value FROM kv WHERE key = ?").get(CATALOG_KEY).value;
-    return { usage, catalog: { stamp: stampRow.time_updated, limits: catalogLimits(value) } };
+    return { usage, sessionModels, catalog: { stamp: stampRow.time_updated, limits: catalogLimits(value) } };
   } finally {
     db.close();
   }
+}
+function readSessionModels(db, sessionIds) {
+  const out = /* @__PURE__ */ new Map();
+  let stmt;
+  try {
+    stmt = db.prepare("SELECT model FROM session_v2 WHERE id = ?");
+  } catch {
+    return out;
+  }
+  for (const id of sessionIds) {
+    try {
+      const row = stmt.get(id);
+      const m = typeof row?.model === "string" ? JSON.parse(row.model) : null;
+      if (typeof m?.id !== "string" || !m.id) {
+        out.set(id, null);
+        continue;
+      }
+      out.set(id, typeof m.variant === "string" && m.variant && m.variant !== "default" ? `${m.id}#${m.variant}` : m.id);
+    } catch {
+      out.set(id, null);
+    }
+  }
+  return out;
 }
 function catalogLimits(value) {
   const outer = JSON.parse(value);
@@ -56451,12 +56603,18 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
     const unresolved = /* @__PURE__ */ new Set();
     for (const r of rows) {
       const u = read.usage.get(r.agentId) ?? null;
-      if (!u)
+      if (!u) {
+        const sessionModel2 = read.sessionModels.get(r.agentId) ?? null;
+        if (sessionModel2)
+          out.set(r.agentId, { model: sessionModel2, pct: null, tokens: null });
         continue;
+      }
       const window2 = catalog?.limits.get(`${u.providerID}/${u.model}`) ?? contextWindowFor(u.model, windows, sharedWindows);
       if (!window2)
         unresolved.add(`${u.providerID}/${u.model}`);
-      out.set(r.agentId, { model: u.model, pct: window2 ? contextPercent(u.tokens, window2) : null, tokens: u.tokens });
+      const sessionModel = read.sessionModels.get(r.agentId) ?? null;
+      const label = sessionModel !== null && sessionModel.replace(/#.*$/, "") === u.model ? sessionModel : u.model;
+      out.set(r.agentId, { model: label, pct: window2 ? contextPercent(u.tokens, window2) : null, tokens: u.tokens });
     }
     if (unresolved.size)
       contextNote = `context % unknown: no context window for ${[...unresolved].join(", ")} in OpenCode's model catalog or context_watch.windows`;
@@ -56725,13 +56883,19 @@ if (storeIdx === -1 || !args[storeIdx + 1] || host !== "claude" && host !== "ope
 var storePath = args[storeIdx + 1];
 var termkit = await Promise.resolve().then(() => __toESM(require_termkit_no_lazy_require(), 1));
 var term = termkit.default.terminal;
+var colorGeneric = colorGenericFor(process.env, term.support ?? {});
+if (colorGeneric) {
+  term = termkit.default.createTerminal({ stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, generic: colorGeneric, isTTY: !!process.stdout.isTTY, processSigwinch: true });
+}
 if (smoke) {
   console.error(`sterling-tui smoke: terminal stack loaded (${term.width}x${term.height})`);
   process.exit(0);
 }
 var theme;
+var blankSgr;
 try {
   theme = themeFor(detectThemeLevel(process.env, term.support ?? {}));
+  blankSgr = overlayBlankSgr(theme, term.palette.bgEscape);
 } catch (err) {
   console.error(`sterling-tui: ${err.message}`);
   process.exit(2);
@@ -56806,7 +56970,7 @@ function animate() {
   const block = subagentBlock(Math.floor(Date.now() / ANIMATION_MS), drawnState?.scroll ?? 0);
   if (layoutKey(block) !== pixelLayout)
     return;
-  painted = paintPixels(term, screenPixels(block), painted, trueColor, theme.blankSgr);
+  painted = paintPixels(term, screenPixels(block), painted, trueColor, blankSgr);
 }
 var drawnState;
 var drawnView = "";
@@ -56828,9 +56992,9 @@ function redraw(onlyIfChanged = false) {
   forceFull = false;
   const pixels = screenPixels(block);
   if (full && painted)
-    clearPixels(term, painted, pixels, theme.blankSgr);
+    clearPixels(term, painted, pixels, blankSgr);
   draw(screen, state, { block, theme });
-  painted = paintPixels(term, pixels, full ? void 0 : painted, trueColor, theme.blankSgr);
+  painted = paintPixels(term, pixels, full ? void 0 : painted, trueColor, blankSgr);
   const running = shownView.active > 0 && block.pixels.length > 0;
   if (running && !animation)
     animation = setInterval(animate, ANIMATION_MS);

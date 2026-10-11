@@ -45,8 +45,12 @@ const CFG = { config: { models: MODELS }, models: MODELS };
 // runs it through each linter and expects an empty (vacuous) result. Decision
 // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex (2026-09-30)
 // then added reviewer, a fifth subagent. The roster is now
-// implementor/researcher/scout/librarian/reviewer/conductor.
-const ROSTER = ['implementor', 'researcher', 'scout', 'librarian', 'reviewer', 'conductor'];
+// implementor/researcher/scout/librarian/reviewer/conductor, plus plan: the
+// OpenCode-only Plan agent (registry hosts ["opencode"], GitHub #76), a primary
+// agent the user Tabs to, so it is in MAIN_SESSION_AGENTS like the conductor.
+const ROSTER = ['implementor', 'researcher', 'scout', 'librarian', 'reviewer', 'conductor', 'plan'];
+// What Claude Code installs to .claude/agents/: every agent but the OpenCode-only plan.
+const CLAUDE_ROSTER = ROSTER.filter((n) => n !== 'plan');
 
 test('the §7.1 roster is registered, linter-complete, and spawn-contracted', () => {
   const registry = loadRegistry(join(TPL, 'registry.json'));
@@ -138,7 +142,7 @@ test('full roster installs end-to-end through the CLI with detected vars; model/
     });
     assert.equal(r.status, 0, r.stderr);
     const installed = readdirSync(join(dir, '.claude', 'agents')).sort();
-    assert.deepEqual(installed, ROSTER.map((n) => `${n}.md`).sort());
+    assert.deepEqual(installed, CLAUDE_ROSTER.map((n) => `${n}.md`).sort(), 'every Claude agent, and never the OpenCode-only plan.md');
     assert.match(r.stdout, /RESTART REQUIRED/);
     const librarian = readFileSync(join(dir, '.claude', 'agents', 'librarian.md'), 'utf8');
     assert.match(librarian, /sterling-generated v=/);

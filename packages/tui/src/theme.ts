@@ -103,8 +103,27 @@ export interface Theme {
   sceneArt: AttrLike;
   sceneHorizon: AttrLike;
   sceneGrid: AttrLike;
-  /** the SGR the overlay writes before a cell with no background; '' leaves the terminal's own */
+  /** the page background as a 256-colour SGR; '' leaves the terminal's own. The overlay
+   *  writes overlayBlankSgr instead, which is what the ScreenBuffer writes on this terminal */
   blankSgr: string;
+}
+
+/** The SGR the pixel overlay writes before a cell with no background and before
+ *  a blanked cell: the escape the ScreenBuffer itself writes for the page fill on
+ *  this terminal, from terminal-kit's palette (bgEscape, indexed by the 256-palette
+ *  colour). It differs from theme.blankSgr where terminal-kit reports fewer than
+ *  256 colours: inside tmux and VS Code it maps the page's index 16 to the palette
+ *  black ESC[40m, which a terminal theme may show as dark grey, while a raw
+ *  ESC[48;5;16m is #000000. Blanked avatar tiles then stayed on screen as black
+ *  rectangles the delta draw never rewrites (issue #75). '' when the page keeps the
+ *  terminal's own background. */
+export function overlayBlankSgr(theme: Theme, bgEscape: readonly string[]): string {
+  const bg = theme.fill.bgColor;
+  if (bg === undefined) return '';
+  if (typeof bg !== 'number') throw new Error(`the ${theme.level} page background must be a 256-palette index, not ${bg}`);
+  const sgr = bgEscape[bg];
+  if (sgr === undefined) throw new Error(`the terminal palette has no background escape for colour ${bg}`);
+  return sgr;
 }
 
 /** The level for this env and terminal. THEME_ENV wins, then NO_COLOR, then the
@@ -122,6 +141,23 @@ export function detectThemeLevel(env: Readonly<Record<string, string | undefined
   if (/^(truecolor|24bits?)$/.test(env.COLORTERM ?? '') || env.TERM_PROGRAM === 'tmux' || support.trueColor === true) return 'truecolor';
   if (support['256colors'] === true || /256color/.test(env.TERM ?? '')) return '256';
   return '16';
+}
+
+/**
+ * The terminal-kit generic to build the terminal with when its own guess
+ * under-reports the colours the environment advertises, else undefined.
+ * terminal-kit names the terminal from TERM_PROGRAM before TERM, and has no
+ * config for 'tmux' or 'vscode', so it falls back to the 16-colour xterm
+ * generic even with TERM=tmux-256color or COLORTERM=truecolor; the ScreenBuffer
+ * then draws the page's palette index 16 as ESC[40m and approximates every
+ * other 256-palette colour. A real 16-colour terminal (TERM=screen, linux)
+ * advertises nothing here and keeps what terminal-kit chose.
+ */
+export function colorGenericFor(env: Readonly<Record<string, string | undefined>>, support: { trueColor?: boolean; '256colors'?: boolean } = {}): 'xterm-truecolor' | 'xterm-256color' | undefined {
+  if (support['256colors'] === true || support.trueColor === true) return undefined;
+  if (/^(truecolor|24bits?)$/.test(env.COLORTERM ?? '')) return 'xterm-truecolor';
+  if (/256/.test(env.TERM ?? '') || /256/.test(env.COLORTERM ?? '')) return 'xterm-256color';
+  return undefined;
 }
 
 // one object for both footer roles: render draws a run of identical attr objects as one put

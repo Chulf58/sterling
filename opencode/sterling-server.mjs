@@ -16782,7 +16782,7 @@ function createConfigHandler(deps = {}) {
 
 // packages/opencode-plugin/src/context.mjs
 init_dist2();
-import { join as join35 } from "node:path";
+import { join as join36 } from "node:path";
 
 // scripts/lib/update.mjs
 import { closeSync as closeSync5, existsSync as existsSync16, mkdirSync as mkdirSync12, openSync as openSync5, readFileSync as readFileSync15, readdirSync as readdirSync7, readSync as readSync2, writeFileSync as writeFileSync6 } from "node:fs";
@@ -17067,15 +17067,15 @@ function selectBatch(items, max = RUN_BATCH_MAX) {
   }
   return out;
 }
-function gitState(root, spawnSync10 = nodeSpawnSync) {
-  const r = spawnSync10("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
+function gitState(root, spawnSync11 = nodeSpawnSync) {
+  const r = spawnSync11("git", ["-C", root, "rev-parse", "HEAD", "--show-prefix"], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const [head, prefix = ""] = String(r.stdout ?? "").split("\n");
   return /^[0-9a-f]{40,64}$/.test(head) ? { head, prefix: prefix.trim() } : null;
 }
-function dirtyPaths(root, paths, spawnSync10 = nodeSpawnSync, prefix = "") {
+function dirtyPaths(root, paths, spawnSync11 = nodeSpawnSync, prefix = "") {
   if (!paths.length) return /* @__PURE__ */ new Set();
-  const r = spawnSync10("git", ["-C", root, "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync11("git", ["-C", root, "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const dirty = /* @__PURE__ */ new Set();
   const add = (p) => {
@@ -18257,12 +18257,15 @@ function maintenanceLines(state, config, root) {
 init_dist2();
 
 // scripts/hooks/lib/plan-lock.mjs
+import { createHash as createHash5, randomUUID as randomUUID5 } from "node:crypto";
 import { closeSync as closeSync7, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync15, openSync as openSync7, readSync as readSync3, renameSync as renameSync8, unlinkSync as unlinkSync3, writeFileSync as writeFileSync10 } from "node:fs";
 import { join as join32 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
 var MARKER_MAX_BYTES = 64 * 1024;
+var TITLE_MAX = 200;
 var PATH_MAX = 512;
+var REASON_MAX = 400;
 var LOCK_FILE = "plan-lock.json";
 var HEX64 = /^[0-9a-f]{64}$/i;
 function isAbsolutePlanPath(p) {
@@ -18325,6 +18328,9 @@ function readStoreFileBounded(path, maxBytes) {
   if (read.unreadable) return read;
   return { text: read.bytes.toString("utf8") };
 }
+function sha256Of(data) {
+  return createHash5("sha256").update(data).digest("hex");
+}
 function invalidReason(l) {
   if (l.schema_version !== 1) return `schema_version is ${JSON.stringify(l.schema_version)}, not 1`;
   if (!isAbsolutePlanPath(l.plan_path)) return "plan_path is not an absolute path string";
@@ -18362,6 +18368,28 @@ function readLock(sterlingDir) {
   const reason = invalidReason(parsed);
   if (reason) return { malformed: reason, raw };
   return { lock: parsed, raw };
+}
+function computeStatus(lock) {
+  const read = readBounded2(lock?.plan_path, PLAN_MAX_BYTES, "plan");
+  if (read.unreadable) {
+    return { status: read.code === "ENOENT" ? "MISSING" : "UNREADABLE", sha256: null, reason: read.unreadable };
+  }
+  const sha = sha256Of(read.bytes);
+  return { status: sha === lock.file_sha256_at_approval ? "UNCHANGED" : "MODIFIED", sha256: sha };
+}
+function claimMarker(path) {
+  const claimed = `${path}.claimed-${randomUUID5()}`;
+  try {
+    renameSync8(path, claimed);
+  } catch {
+    return null;
+  }
+  const read = readStoreFileBounded(claimed, MARKER_MAX_BYTES);
+  try {
+    unlinkSync3(claimed);
+  } catch {
+  }
+  return read.unreadable ? { unreadable: read.unreadable } : read.text;
 }
 
 // scripts/hooks/lib/stage-brief.mjs
@@ -18828,6 +18856,113 @@ function refreshRegistryRow(cwd, { config, configUnreadable = false, at = (/* @_
   }
 }
 
+// scripts/hooks/lib/plan-lock-section.mjs
+import { spawnSync as spawnSync6 } from "node:child_process";
+import { join as join35 } from "node:path";
+function planLockSection(ctx) {
+  const TITLE_MAX2 = TITLE_MAX;
+  const PATH_MAX2 = PATH_MAX;
+  const REASON_MAX2 = REASON_MAX;
+  const STALE_DAYS = 14;
+  const DAY_MS = 24 * 60 * 60 * 1e3;
+  const clean = sanitizeForContext;
+  const sterlingDir = join35(ctx.cwd, ".sterling");
+  const transientDir = join35(sterlingDir, "transient");
+  const blocks = [];
+  const MARKERS = [
+    {
+      file: "plan-lock-unresolved.json",
+      render: (body) => `PLAN LOCK NOT BOUND (one-shot): an ExitPlanMode approval could not be bound to a plan file \u2014 ${clean(body?.reason, REASON_MAX2) || "no reason recorded"}. Any earlier lock was preserved unchanged. Re-bind by hand with plan-lock.mjs --plan <absolute path> if this objective still has an approved plan.`
+    },
+    {
+      file: "plan-lock-released.json",
+      render: (body) => `PLAN LOCK RELEASED (one-shot): the plan lock was released \u2014 ${clean(body?.reason, REASON_MAX2) || "no reason recorded"}. No plan governs this objective's scope and ordering until a new plan is approved.`
+    },
+    {
+      file: "plan-lock-previous.json",
+      render: (body) => `PLAN LOCK SUPERSEDED (one-shot): the previous plan was "${clean(body?.title, TITLE_MAX2) || "untitled"}" (${clean(body?.plan_path, PATH_MAX2) || "no path recorded"}). The lock above replaced it \u2014 work planned under the old plan is no longer governed by it.`
+    }
+  ];
+  const markerLines = [];
+  for (const marker of MARKERS) {
+    let raw = null;
+    try {
+      raw = claimMarker(join35(transientDir, marker.file));
+    } catch {
+      raw = null;
+    }
+    if (raw === null) continue;
+    let body = null;
+    if (typeof raw === "string") {
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        body = null;
+      }
+    }
+    markerLines.push(marker.render(body && typeof body === "object" ? body : null));
+  }
+  let read = { absent: true };
+  try {
+    read = readLock(sterlingDir);
+  } catch (e) {
+    read = { malformed: `could not be read (${e && e.message || e})` };
+  }
+  const lock = read.lock ?? null;
+  const malformed = Boolean(read.malformed);
+  if (malformed) {
+    blocks.push(
+      `PLAN LOCK MALFORMED: .sterling/plan-lock.json exists but ${clean(read.malformed, REASON_MAX2)}, so it is not a usable lock record. Inspect it with \`plan-lock.mjs --show\`, or clear it with \`plan-lock.mjs --release --reason "<why>"\`. Nothing else in this session start is affected.`
+    );
+  } else if (lock) {
+    const planPath = clean(lock.plan_path, PATH_MAX2);
+    let status = "MISSING";
+    try {
+      const live = computeStatus(lock);
+      status = live.status === "MODIFIED" ? "MODIFIED since approval" : live.status;
+    } catch {
+      status = "UNREADABLE";
+    }
+    let branchNow = "unknown";
+    try {
+      const r = spawnSync6("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.cwd, encoding: "utf8", timeout: 5e3 });
+      const current = r.status === 0 ? (r.stdout ?? "").trim() : "";
+      const approved = clean(lock.approved_branch, 120);
+      if (current && approved) branchNow = current === approved ? "same" : `DIFFERENT (now ${current}, approved on ${approved})`;
+    } catch {
+      branchNow = "unknown";
+    }
+    const source = lock.source === "manual" ? "manual" : "exit_plan_mode";
+    blocks.push(
+      `PLAN LOCK: ${clean(lock.title, TITLE_MAX2) || "(untitled plan)"} \u2014 ${planPath || "(no path recorded)"} (approved ${clean(lock.approved_at, 40).slice(0, 10) || "unknown date"} on ${clean(lock.approved_branch, 120) || "no branch recorded"}, ${source}) \xB7 plan file ${status} \xB7 branch now ${branchNow}`
+    );
+    blocks.push(
+      `THE APPROVED PLAN GOVERNS THIS OBJECTIVE'S SCOPE, ORDERING AND SLICES; STANDING STORE DECISIONS STILL GOVERN MECHANISMS UNLESS THE PLAN RECORDS A LATER USER RULING; THE BOARD IS INVENTORY; READ THE PLAN BEFORE THE FIRST DISPATCH. (The plan is the only surface carrying ORDER and the user's written rulings \u2014 the board holds inventory, the store holds design.)`
+    );
+    if (source === "manual") {
+      blocks.push(`This lock was written by hand (plan-lock.mjs --plan) \u2014 approval provenance is the operator's word, not an ExitPlanMode approval.`);
+    }
+    if (lock.text_file_mismatch === true) {
+      blocks.push(
+        `At approval the approved text and the file on disk already differed (text_file_mismatch) \u2014 the live status above is judged against the FILE's bytes at that moment, which is the only honest baseline.`
+      );
+    }
+    if (status === "MODIFIED since approval") {
+      blocks.push(
+        `The plan file has changed since it was approved. Approval provenance is never re-stamped: record the change with plan-lock.mjs --observe, or have the user approve a new plan.`
+      );
+    }
+    const ageMs = Date.now() - Date.parse(clean(lock.approved_at, 40));
+    if (Number.isFinite(ageMs) && ageMs > STALE_DAYS * DAY_MS) {
+      blocks.push(
+        `STALE: approved ~${Math.round(ageMs / DAY_MS)} days ago. Staleness is a DISCLOSURE, never a clear \u2014 only a later approval or plan-lock.mjs --release clears a lock.`
+      );
+    }
+  }
+  blocks.push(...markerLines);
+  return { context: blocks.length ? blocks.join("\n") + "\n\n" : "", lock: malformed ? null : lock, malformed };
+}
+
 // packages/opencode-plugin/src/context.mjs
 var STATUS_TTL_MS = 1e4;
 var UNDECLARED_TTL_MS = 5 * 6e4;
@@ -18841,7 +18976,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   function statusLine(root) {
     const hit = statusCache.get(root);
     if (hit && Date.now() - hit.at < STATUS_TTL_MS) return hit.text;
-    const dbPath = join35(root, ".sterling", "sterling.db");
+    const dbPath = join36(root, ".sterling", "sterling.db");
     let schema;
     try {
       const found = probeSchemaVersion(dbPath);
@@ -18869,7 +19004,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     if (cached) return cached;
     const brief = briefOf(input.messages);
     try {
-      const store = openStore(join35(root, ".sterling", "sterling.db"));
+      const store = openStore(join36(root, ".sterling", "sterling.db"));
       try {
         const out = stageChild({ store, root, sessionID: input.sessionID, agent: input.agent, brief, disclosure: brief ? "" : notStagedLine("brief-unavailable") });
         if (out.staged) remember(stagedCache, input.sessionID, out.text);
@@ -18896,7 +19031,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       let state = null;
       let error = null;
       try {
-        const store = openStore(join35(root, ".sterling", "sterling.db"));
+        const store = openStore(join36(root, ".sterling", "sterling.db"));
         try {
           state = readMaintenanceState(store, root);
         } finally {
@@ -18916,7 +19051,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     let hit = boardCache.get(root);
     if (!hit || Date.now() - hit.at >= STATUS_TTL_MS) {
       try {
-        const store = openStore(join35(root, ".sterling", "sterling.db"));
+        const store = openStore(join36(root, ".sterling", "sterling.db"));
         let readiness;
         try {
           readiness = store.boardReadiness();
@@ -18967,6 +19102,15 @@ ${opencodeHostTail(pluginRoot)}`;
         logLine(root, `context: child staging skipped for ${input.sessionID}, session lookup failed: ${kind.why}`);
         blocks.push(notStagedLine("session-lookup-failed"));
       } else if (kind.kind === "root") {
+        if (!inWorkerChild(env)) {
+          try {
+            const planLock = planLockSection({ cwd: root, source: "opencode" }).context.trim();
+            if (planLock) blocks.push(planLock);
+          } catch (e) {
+            logLine(root, `context: plan lock section failed: ${errText(e)}`);
+            blocks.push(`PLAN LOCK UNAVAILABLE (${errText(e)}): the plan lock section is not stated this turn; check it with plan-lock.mjs --show.`);
+          }
+        }
         if (sweepStale && !inWorkerChild(env) && !swept.has(root)) {
           swept.add(root);
           let line;
@@ -19010,18 +19154,18 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
 }
 
 // packages/opencode-plugin/src/pr-loop.mjs
-import { join as join37 } from "node:path";
+import { join as join38 } from "node:path";
 
 // scripts/hooks/lib/pr-loop-duty.mjs
 import { existsSync as existsSync23 } from "node:fs";
-import { join as join36 } from "node:path";
+import { join as join37 } from "node:path";
 var errMessage = (e) => String(e && e.message || e);
 function evaluatePrLoop(root) {
   let mode;
   try {
     mode = readProjectMode(root);
   } catch (e) {
-    if (existsSync23(join36(root, PR_LOOP_REL))) {
+    if (existsSync23(join37(root, PR_LOOP_REL))) {
       return {
         state: null,
         degraded: `\u2022 PR review loop: the project mode is unreadable (${errMessage(e)}) \u2014 ${PR_LOOP_REL} exists but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
@@ -19059,18 +19203,18 @@ function createPrLoopNotice({ now, pluginRoot } = {}) {
       return;
     }
     announced.add(state.armed_at);
-    addNotice(root, prLoopOwedText(state, prLoopNext(state, join37(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"))), at);
+    addNotice(root, prLoopOwedText(state, prLoopNext(state, join38(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"))), at);
   };
 }
 
 // packages/opencode-plugin/src/restore.mjs
 import { statSync as statSync8 } from "node:fs";
-import { join as join39 } from "node:path";
+import { join as join40 } from "node:path";
 
 // scripts/hooks/lib/rotation-restore.mjs
-import { spawnSync as spawnSync6 } from "node:child_process";
+import { spawnSync as spawnSync7 } from "node:child_process";
 import { existsSync as existsSync24, readFileSync as readFileSync21, rmSync as rmSync9 } from "node:fs";
-import { join as join38 } from "node:path";
+import { join as join39 } from "node:path";
 var NOTE_PROSE_MAX = 2e3;
 var LIVE_DISPATCH_MAX = 20;
 var LIVE_TERRITORY_MAX = 40;
@@ -19087,7 +19231,7 @@ var NOTE_FIELD_MAX = {
 };
 var LANE_HANDOFF_MAX = 1e3;
 function rotationNotePath(cwd) {
-  return join38(cwd, ".sterling", "transient", "rotation-note.json");
+  return join39(cwd, ".sterling", "transient", "rotation-note.json");
 }
 function readRotationNote(cwd) {
   const notePath = rotationNotePath(cwd);
@@ -19103,7 +19247,7 @@ function renderRotationRestore(note, { cwd, source, host = "claude", planLock = 
   if (host !== "claude" && host !== "opencode") throw new Error(`renderRotationRestore: unknown host '${host}'`);
   const head = (() => {
     try {
-      const r = spawnSync6("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", timeout: 5e3 });
+      const r = spawnSync7("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", timeout: 5e3 });
       return r.status === 0 ? (r.stdout ?? "").trim() : null;
     } catch {
       return null;
@@ -19120,7 +19264,7 @@ function renderRotationRestore(note, { cwd, source, host = "claude", planLock = 
       commitsAheadUnverified = true;
     } else {
       try {
-        const countR = spawnSync6("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd, encoding: "utf8", timeout: 5e3 });
+        const countR = spawnSync7("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd, encoding: "utf8", timeout: 5e3 });
         const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
         if (Number.isFinite(actual)) {
           if (actual !== note.commits_ahead) {
@@ -19278,7 +19422,7 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
     let planLock = null;
     let planLockMalformed = false;
     try {
-      const read = readLock(join39(root, ".sterling"));
+      const read = readLock(join40(root, ".sterling"));
       planLock = read.lock ?? null;
       planLockMalformed = Boolean(read.malformed);
     } catch (e) {
@@ -19299,15 +19443,15 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
 // scripts/hooks/lib/session-events.mjs
 import { existsSync as existsSync25, mkdirSync as mkdirSync17, readFileSync as readFileSync22, renameSync as renameSync9, unlinkSync as unlinkSync4, writeFileSync as writeFileSync11 } from "node:fs";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
-import { dirname as dirname15, join as join40 } from "node:path";
-var SESSION_EVENTS_REL = join40(".sterling", "transient", "session-events.json");
+import { dirname as dirname15, join as join41 } from "node:path";
+var SESSION_EVENTS_REL = join41(".sterling", "transient", "session-events.json");
 function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
   const event = { kind: "research_tool", detail: String(detail ?? ""), at };
   if (typeof agentId === "string" && agentId !== "") event.agent_id = agentId;
   return event;
 }
 function appendSessionEvent(projectDir, event, lockOptions) {
-  appendSessionEventsAt(join40(projectDir, SESSION_EVENTS_REL), [event], lockOptions);
+  appendSessionEventsAt(join41(projectDir, SESSION_EVENTS_REL), [event], lockOptions);
 }
 function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
   mkdirSync17(dirname15(eventsPath), { recursive: true });
@@ -19387,20 +19531,20 @@ function createResearchRecorder({ rootOf, fenced, now }) {
 }
 
 // packages/opencode-plugin/src/selection.mjs
-import { join as join42 } from "node:path";
+import { join as join43 } from "node:path";
 
 // scripts/hooks/lib/selection-file.mjs
 import { mkdirSync as mkdirSync18, readFileSync as readFileSync23, renameSync as renameSync10, rmSync as rmSync10, writeFileSync as writeFileSync12 } from "node:fs";
 import { hostname as hostname2 } from "node:os";
-import { join as join41 } from "node:path";
-import { randomUUID as randomUUID5 } from "node:crypto";
+import { join as join42 } from "node:path";
+import { randomUUID as randomUUID6 } from "node:crypto";
 function selectionFilePath(root, host = hostname2()) {
   const safeHost = String(host).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
-  return join41(root, ".sterling", "transient", `selection.${safeHost}.json`);
+  return join42(root, ".sterling", "transient", `selection.${safeHost}.json`);
 }
 function takeSelectionFile(root) {
   const path = selectionFilePath(root);
-  const claimed = `${path}.taken-${process.pid}-${randomUUID5()}`;
+  const claimed = `${path}.taken-${process.pid}-${randomUUID6()}`;
   try {
     renameSync10(path, claimed);
   } catch (e) {
@@ -19432,7 +19576,7 @@ function createPromptHandler({ openStore, rootOf, fenced, env = process.env }) {
       if (storeBackend(root) === "routed") {
         selection = takeSelectionFile(root);
       } else {
-        const store = openStore(join42(root, ".sterling", "sterling.db"));
+        const store = openStore(join43(root, ".sterling", "sterling.db"));
         try {
           selection = store.takeSelection();
         } finally {
@@ -19449,17 +19593,17 @@ TUI selection (one-shot): the user has selected ${selection.type} '${selection.r
 
 // packages/opencode-plugin/src/settle.mjs
 init_dist();
-import { spawnSync as spawnSync8 } from "node:child_process";
-import { randomUUID as randomUUID8 } from "node:crypto";
+import { spawnSync as spawnSync9 } from "node:child_process";
+import { randomUUID as randomUUID9 } from "node:crypto";
 import { existsSync as existsSync27, mkdirSync as mkdirSync20, readFileSync as readFileSync26, renameSync as renameSync12, rmSync as rmSync12, writeFileSync as writeFileSync14 } from "node:fs";
-import { dirname as dirname17, join as join45 } from "node:path";
+import { dirname as dirname17, join as join46 } from "node:path";
 
 // scripts/hooks/lib/session-duties.mjs
 init_dist();
 init_dist2();
-import { randomUUID as randomUUID6 } from "node:crypto";
+import { randomUUID as randomUUID7 } from "node:crypto";
 import { existsSync as existsSync26, readFileSync as readFileSync24, readdirSync as readdirSync9 } from "node:fs";
-import { join as join43 } from "node:path";
+import { join as join44 } from "node:path";
 var ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 var isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
 var IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
@@ -19592,7 +19736,7 @@ function readKnowledgeWrites(root) {
   const errorText3 = (e) => e && typeof e.code === "string" && e.code || "unknown error";
   let names;
   try {
-    names = readdirSync9(join43(root, KNOWLEDGE_WRITES_DIR_REL));
+    names = readdirSync9(join44(root, KNOWLEDGE_WRITES_DIR_REL));
   } catch (e) {
     if (e && e.code === "ENOENT") return { latestAt, unreadable };
     unreadable.push({ file: KNOWLEDGE_WRITES_DIR_REL, error: errorText3(e) });
@@ -19603,7 +19747,7 @@ function readKnowledgeWrites(root) {
     const file = `${KNOWLEDGE_WRITES_DIR_REL}/${name}`;
     let text;
     try {
-      text = readFileSync24(join43(root, file), "utf8");
+      text = readFileSync24(join44(root, file), "utf8");
     } catch (e) {
       if (!(e && e.code === "ENOENT")) unreadable.push({ file, error: errorText3(e) });
       continue;
@@ -19680,7 +19824,7 @@ var researchOwedText = (queryTexts) => `research owed: session research not capt
 var captureOwedText = (count, clipped) => `capture owed: direct-mode session touched ${count} file(s) and ended without capture${clipped}`;
 function systemTodo(now, fields) {
   return {
-    id: randomUUID6(),
+    id: randomUUID7(),
     type: "todo",
     created_at: now,
     updated_at: now,
@@ -19700,13 +19844,13 @@ var hasOpenSystemTodo = (store, reason) => store.query({ types: ["todo"], cap: 1
 
 // scripts/hooks/lib/settlement.mjs
 init_dist2();
-import { createHash as createHash5, randomUUID as randomUUID7 } from "node:crypto";
+import { createHash as createHash6, randomUUID as randomUUID8 } from "node:crypto";
 import { readFileSync as readFileSync25, writeFileSync as writeFileSync13, mkdirSync as mkdirSync19, rmSync as rmSync11, statSync as statSync9, renameSync as renameSync11 } from "node:fs";
-import { spawnSync as spawnSync7 } from "node:child_process";
-import { join as join44, dirname as dirname16 } from "node:path";
+import { spawnSync as spawnSync8 } from "node:child_process";
+import { join as join45, dirname as dirname16 } from "node:path";
 function hashFile(root, rel) {
   try {
-    return createHash5("sha256").update(readFileSync25(join44(root, rel))).digest("hex");
+    return createHash6("sha256").update(readFileSync25(join45(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -19720,7 +19864,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync25(join44(root, ".sterling", "config.json"), "utf8");
+    const raw = readFileSync25(join45(root, ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);
@@ -19730,7 +19874,7 @@ function loadGeneratedProjections(root) {
 }
 function buildReconcileItem(article, fileKeys, now) {
   return {
-    id: randomUUID7(),
+    id: randomUUID8(),
     type: "todo",
     created_at: now,
     updated_at: now,
@@ -19764,7 +19908,7 @@ function mintSettlementReconcile(store, root, candidatePaths, now = (/* @__PURE_
     const drifted = [...freshPaths].filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
     if (!drifted.length) continue;
     const fileKeys = drifted.sort();
-    const { record } = store.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now), { operation_id: randomUUID7() });
+    const { record } = store.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now), { operation_id: randomUUID8() });
     minted.push({ article_id: article.id, paths: record.file_keys ?? fileKeys });
   }
   return minted;
@@ -19772,7 +19916,7 @@ function mintSettlementReconcile(store, root, candidatePaths, now = (/* @__PURE_
 var GIT_SETTLED_REL = ".sterling/transient/git-settled.json";
 var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 function gitZ(root, args) {
-  const r = spawnSync7("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync8("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.error?.message || "").trim()}`);
   return r.stdout.split("\0").filter(Boolean);
 }
@@ -19787,7 +19931,7 @@ function changedSince(root, base2) {
 var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
 function readGitSettled(root) {
   try {
-    const s2 = JSON.parse(readFileSync25(join44(root, GIT_SETTLED_REL), "utf8"));
+    const s2 = JSON.parse(readFileSync25(join45(root, GIT_SETTLED_REL), "utf8"));
     return typeof s2?.sha === "string" && s2.dirty && typeof s2.dirty === "object" ? s2 : null;
   } catch {
     return null;
@@ -19796,17 +19940,17 @@ function readGitSettled(root) {
 function gitTouches(root, now) {
   let head;
   try {
-    const r = spawnSync7("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
+    const r = spawnSync8("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
     if (r.status === 0) head = r.stdout.trim();
-    else if (spawnSync7("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
+    else if (spawnSync8("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
     else return { ok: false, reason: "no_git" };
     const settled = readGitSettled(root);
     let base2 = settled?.sha;
     let mergeBase = null;
     if (base2 && base2 !== EMPTY_TREE) {
-      if (spawnSync7("git", ["cat-file", "-e", `${base2}^{commit}`], { cwd: root, timeout: 3e4 }).status !== 0) base2 = null;
-      else if (spawnSync7("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0) {
-        const mb = spawnSync7("git", ["merge-base", base2, head], { cwd: root, encoding: "utf8", timeout: 3e4 });
+      if (spawnSync8("git", ["cat-file", "-e", `${base2}^{commit}`], { cwd: root, timeout: 3e4 }).status !== 0) base2 = null;
+      else if (spawnSync8("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0) {
+        const mb = spawnSync8("git", ["merge-base", base2, head], { cwd: root, encoding: "utf8", timeout: 3e4 });
         mergeBase = mb.status === 0 ? mb.stdout.trim() || null : null;
         if (!mergeBase) base2 = null;
       }
@@ -19826,7 +19970,7 @@ function gitTouches(root, now) {
     const candidates = [...changed].map((path) => {
       let at = settled.at;
       try {
-        at = statSync9(join44(root, path)).mtime.toISOString();
+        at = statSync9(join45(root, path)).mtime.toISOString();
       } catch {
       }
       return { path, at: typeof at === "string" ? at : now };
@@ -19837,7 +19981,7 @@ function gitTouches(root, now) {
   }
 }
 function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
-  const p = join44(root, GIT_SETTLED_REL);
+  const p = join45(root, GIT_SETTLED_REL);
   mkdirSync19(dirname16(p), { recursive: true });
   if (ifAbsent) {
     try {
@@ -19848,7 +19992,7 @@ function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
       throw e;
     }
   }
-  const tmp = `${p}.${process.pid}.${randomUUID7()}.tmp`;
+  const tmp = `${p}.${process.pid}.${randomUUID8()}.tmp`;
   try {
     writeFileSync13(tmp, JSON.stringify(snapshot));
     renameSync11(tmp, p);
@@ -19868,14 +20012,14 @@ var EVENTS_REL = ".sterling/transient/session-events.json";
 var WEIGHED_KINDS = /* @__PURE__ */ new Set(["concept_designed", "research_tool", "agent_dispatch"]);
 var eventKey = (e) => `${e.kind}|${e.detail ?? ""}|${e.at ?? ""}`;
 function readDutyState(root) {
-  const p = join45(root, DUTIES_REL);
+  const p = join46(root, DUTIES_REL);
   if (!existsSync27(p)) return { owed: [], weighed: [] };
   const parsed = JSON.parse(readFileSync26(p, "utf8"));
   if (!parsed || !Array.isArray(parsed.owed) || !Array.isArray(parsed.weighed)) throw new Error(`${DUTIES_REL} is not a {owed, weighed} object`);
   return parsed;
 }
 function readSessionEvents(root) {
-  const p = join45(root, EVENTS_REL);
+  const p = join46(root, EVENTS_REL);
   if (!existsSync27(p)) return { events: [] };
   try {
     const parsed = JSON.parse(readFileSync26(p, "utf8"));
@@ -19887,7 +20031,7 @@ function readSessionEvents(root) {
 }
 function newSince(root, base2, paths) {
   if (!paths.length) return [];
-  const r = spawnSync8("git", ["ls-tree", "-r", base2, "--name-only", "--", ...paths], { cwd: root, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync9("git", ["ls-tree", "-r", base2, "--name-only", "--", ...paths], { cwd: root, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) return null;
   const inBase = new Set(r.stdout.split("\n").filter(Boolean));
   return paths.filter((p) => !inBase.has(p));
@@ -19895,7 +20039,7 @@ function newSince(root, base2, paths) {
 function articleDemand(store, root, config, paths, base2, degraded) {
   const exempt = demandExemption(config, loadGeneratedProjections(root));
   const { isUnowned } = ownershipJoin(store, root);
-  let unowned = paths.filter((p) => existsSync27(join45(root, p)) && !exempt(p) && isUnowned(p));
+  let unowned = paths.filter((p) => existsSync27(join46(root, p)) && !exempt(p) && isUnowned(p));
   if (unowned.length) {
     const ignored = gitIgnored(unowned, root);
     if (ignored === null) degraded.push("git check-ignore failed, so ignored files may be named");
@@ -19973,7 +20117,7 @@ function weighDuties(store, records, config, root, at, git) {
   if (queued.length) notices.push(`Sterling settlement: duties the previous turn left unpaid are now queued as maintenance items: ${queued.join(", ")}. Pay them, or drain them with /sterling:drain.`);
   const owed = [];
   const windowStart = isValidAt(git.settled.at) ? git.settled.at : at;
-  const changed = git.candidates.filter((c) => existsSync27(join45(root, c.path)));
+  const changed = git.candidates.filter((c) => existsSync27(join46(root, c.path)));
   const generated = loadGeneratedProjections(root);
   const touched = changed.filter((c) => !IMAGE_BINARY_EXT.test(c.path) && !generated.has(c.path) && !dischargedByCutoff(c.at, cutoffs.capture));
   if (touched.length && !capturedSince(records, windowStart)) {
@@ -20001,12 +20145,12 @@ ${owed.map((d) => `- ${describe(d)}`).join("\n")}`);
   if (degraded.length) notices.push(`Sterling settlement: the article demand was checked with a degraded probe: ${degraded.join("; ")}.`);
   const present = new Set(events.map(eventKey));
   const nextWeighed = [.../* @__PURE__ */ new Set([...state.weighed.filter((k) => present.has(k)), ...fresh.map(eventKey)])];
-  writeJsonAtomic2(join45(root, DUTIES_REL), { owed, weighed: nextWeighed });
+  writeJsonAtomic2(join46(root, DUTIES_REL), { owed, weighed: nextWeighed });
   return { notices };
 }
 function writeJsonAtomic2(path, value) {
   mkdirSync20(dirname17(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${randomUUID8()}.tmp`;
+  const tmp = `${path}.${process.pid}.${randomUUID9()}.tmp`;
   try {
     writeFileSync14(tmp, JSON.stringify(value));
     renameSync12(tmp, path);
@@ -20046,7 +20190,7 @@ function createSettle({ openStore, now, launchWorkerFor }) {
     const dispatch = liveDispatch(root);
     let store;
     try {
-      store = openStore(join45(root, ".sterling", "sterling.db"));
+      store = openStore(join46(root, ".sterling", "sterling.db"));
       const minted = mintSettlementReconcile(store, root, git.candidates.map((c) => c.path), at);
       const duties = settleDuties(store, root, git, at, { opener: openStore });
       if (!dispatch.live) writeGitSettled(root, git.next);
@@ -20721,22 +20865,22 @@ function createProjectStores({ openRouted = (root) => openRoutedStores(root).sto
 // packages/opencode-plugin/src/sync.mjs
 import { rmSync as rmSync13 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { join as join47 } from "node:path";
+import { join as join48 } from "node:path";
 
 // scripts/hooks/lib/domain-notice.mjs
-import { spawn as spawn3, spawnSync as spawnSync9 } from "node:child_process";
+import { spawn as spawn3, spawnSync as spawnSync10 } from "node:child_process";
 import { existsSync as existsSync28, readFileSync as readFileSync27 } from "node:fs";
-import { join as join46 } from "node:path";
+import { join as join47 } from "node:path";
 var DOMAIN_MAP_TIMEOUT_MS = 3e4;
 function domainMapDue(root, project, env = process.env) {
   if (env[WORKER_ENV_FLAG] === "1") return null;
-  if (existsSync28(join46(project, DOMAIN_MAP_PENDING_REL))) return "marker";
+  if (existsSync28(join47(project, DOMAIN_MAP_PENDING_REL))) return "marker";
   if (!postUpdateApplies(root, project)) return null;
   const current = readPluginVersion(root);
   if (!current || !parseVersion(current)) return null;
   let previous = null;
   try {
-    previous = readFileSync27(join46(project, SYNC_MARKER_REL), "utf8").trim() || null;
+    previous = readFileSync27(join47(project, SYNC_MARKER_REL), "utf8").trim() || null;
   } catch {
   }
   return previous === null || (compareVersions(current, previous) ?? 1) > 0 ? "sync" : null;
@@ -20843,9 +20987,9 @@ function createSessionSync(deps = {}) {
     }
     if (map && due === "marker") {
       try {
-        rmSync13(join47(root, DOMAIN_MAP_PENDING_REL), { force: true });
+        rmSync13(join48(root, DOMAIN_MAP_PENDING_REL), { force: true });
       } catch (e) {
-        unremoved = pendingFileNote(join47(root, DOMAIN_MAP_PENDING_REL), e);
+        unremoved = pendingFileNote(join48(root, DOMAIN_MAP_PENDING_REL), e);
         started.add(root);
       }
     }
