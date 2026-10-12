@@ -45,6 +45,7 @@ import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy, fileEntriesO
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
 import { publishNotice } from './lib/delivery.mjs';
+import { isForeignTree } from './lib/working-tree.mjs';
 import { evaluatePrLoop, prLoopNext, prLoopOwedText, prLoopReminderText } from './lib/pr-loop-duty.mjs';
 import { maybeLaunchMaintenanceWorker } from './lib/maintenance-worker.mjs';
 import {
@@ -1924,14 +1925,19 @@ try {
   const { ownerRows, isUnowned } = ownershipJoin(store, input.cwd);
   // What the join actually SAW for one demanded path — so a false demand is
   // diagnosable from the deny text alone instead of by re-running the query by
-  // hand. "none" is the ordinary case; a row listed here was matched and then
-  // EXCLUDED (its working_tree names another tree, whose copy of this path it
-  // owns), which is precisely the shape that looks like a hook defect.
+  // hand. "none" is the ordinary case; a row the count EXCLUDED (its
+  // working_tree names another tree, whose copy of this path it owns) is tagged
+  // EXCLUDED, using the same isForeignTree(row, input.cwd) test ownershipJoin's
+  // isUnowned applies, so the note never lists a non-counting row as an owner
+  // (GitHub issue #83).
   const ownerRowsNote = (p) => {
     const rows = ownerRows(p);
     if (!rows.length) return 'none';
     return rows
-      .map((r) => `${r.slug ?? r.title ?? r.type} (${String(r.id).slice(0, 8)}${r.working_tree ? `, working_tree=${r.working_tree}` : ''})`)
+      .map((r) => {
+        const excluded = isForeignTree(r, input.cwd) ? ', EXCLUDED: working_tree names another tree' : '';
+        return `${r.slug ?? r.title ?? r.type} (${String(r.id).slice(0, 8)}${r.working_tree ? `, working_tree=${r.working_tree}` : ''}${excluded})`;
+      })
       .join('; ');
   };
   /** Which of `list` git KNOWS RIGHT NOW — present in the INDEX (ls-files) or
