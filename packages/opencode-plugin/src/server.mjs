@@ -22,7 +22,9 @@
 //      execution end (succeeded, failed or interrupted) settles nothing; it
 //      ends a background subagent's dispatch;
 //   4. the prompt hook: a record selected in the dashboard is taken once from
-//      the store and appended to the next prompt, as H2 does on Claude Code;
+//      the store and appended to the next prompt, as H2 does on Claude Code; and
+//      H10's context-pressure lines for a root session, measured from the
+//      session.step.* events, each appended once (pressure.mjs);
 //   5. the compaction hook: the session's delivery receipts are removed, so
 //      delivery fires again after compaction drops context.
 //   6. the store guard: a permission evaluate hook that denies edit, write and patch
@@ -44,6 +46,7 @@
 //   settle.mjs (settlement)                   worker.mjs (maintenance worker)
 //   selection.mjs (prompt hook)               compaction.mjs (receipt reset)
 //   research.mjs (research_tool and agent_dispatch events)  pr-loop.mjs (the PR review loop owed notice)
+//   pressure.mjs (H10's context-pressure lines, appended to the root session's next prompt)
 //   axis.mjs (H20 and H23)                    dispatch.mjs (H22 and the root-session gate)
 //   config.mjs (registration), sync.mjs (post-update sync), store-guard.mjs (the store guard)
 //   notices.mjs, log.mjs, store.mjs (shared plumbing)
@@ -59,6 +62,7 @@ import { createPrLoopNotice } from './pr-loop.mjs';
 import { createRotationRestore } from './restore.mjs';
 import { createResearchRecorder } from './research.mjs';
 import { createPromptHandler } from './selection.mjs';
+import { createPressureWatch } from './pressure.mjs';
 import { remember } from './bounded.mjs';
 import { createSettle, liveDispatch } from './settle.mjs';
 import { onEvaluate as storeGuard } from './store-guard.mjs';
@@ -167,6 +171,7 @@ export function createSterlingServer(deps = {}) {
   /** The handlers of one location: each resolves the project root from `directory`, the location's own. */
   function createLocation(directory) {
     let session = null;
+    let models = null;
     let chain = Promise.resolve();
     // Each session's parentID, shared by the context handler and the settlement gate (bounded, bounded.mjs).
     const parents = new Map();
@@ -215,10 +220,17 @@ export function createSterlingServer(deps = {}) {
       await dispatch.onAfter(input);
       await recordResearch(input);
     }
-    const onPrompt = createPromptHandler({ openStore, rootOf, fenced, env });
+    const onSelection = createPromptHandler({ openStore, rootOf, fenced, env });
+    const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels: () => models?.list?.(), env });
+    async function onPrompt(input) {
+      await onSelection(input);
+      await pressure.onPrompt(input);
+    }
     const onCompaction = createCompactionHandler({ rootOf, fenced });
 
     async function onEvent(ev) {
+      // Step and execution events feed the context-pressure reading (pressure.mjs), keyed by session.
+      if (rootOf()) pressure.onEvent(ev);
       if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
       // An event that names another location's directory is that location's to handle.
       const evDir = ev.location?.directory;
@@ -294,6 +306,7 @@ export function createSterlingServer(deps = {}) {
     /** Registers this location's hooks on its ctx and starts its event subscription; returns the cleanup. */
     async function bind(ctx, guarded) {
       session = ctx.session;
+      models = ctx.model;
       const root = rootOf();
       if (!guarded) {
         const why = `this OpenCode has no ctx.permission.hook (it needs 2.0.22 or later), so the Sterling store guard (deny on .sterling/sterling.db) is NOT registered at ${directory}; shell commands are NOT guarded at all, only the edit, write and patch deny in .opencode/opencode.json holds, and project agent files in .opencode/agents/ with their own edit rules are unguarded`;
