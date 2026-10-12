@@ -51,6 +51,7 @@ import { isInstalledCopy } from './lib/installed-copy.mjs';
 import { cloneLauncherTarget, enableMarketplaceAutoUpdate, cloneCleanupLines } from './lib/consumer-cutover.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
 import { setupOpenCode } from './lib/opencode-install.mjs';
+import { describeShellUnsafePath } from './lib/shell-safe-path.mjs';
 import { probeClaude } from './lib/claude-probe.mjs';
 import { renderClaudeText } from './lib/agent-fences.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
@@ -138,6 +139,20 @@ const canonical = (v) =>
 
 // ---- verify pass: every refusal happens BEFORE any write ----
 if (!existsSync(target)) fail(`init REFUSED: target '${target}' does not exist`, 2);
+// THE FOLDER NAMING RULE (user-ruled 2026-10-12, "Refuse with a rename hint"): the
+// project path and the Sterling path go into the OpenCode Plan agent's shell
+// permission rules, so both must pass the one shell-safe rule (shell-safe-path.mjs,
+// the same predicate opencode-install.mjs refuses plan.md on). Init refuses before
+// any write and names the safe folder and the mv command. The update ensure pass on
+// an existing project is exempt: other machines still hold projects at such paths,
+// and /sterling:update keeps its own plan.md refusal for them.
+if (!(hasFlag('--update-ensure') && existsSync(join(target, '.sterling', 'config.json')))) {
+  const problems = [
+    describeShellUnsafePath(fwd(target), { label: 'the project path', rerun: 're-run /sterling:init' }),
+    describeShellUnsafePath(fwd(pluginRoot), { label: 'the Sterling path', rerun: 're-run /sterling:init' }),
+  ].filter(Boolean);
+  if (problems.length) fail(`init REFUSED: ${problems.join('\n')}\nNothing was written.`, 2);
+}
 if (modeFlagGiven && !PROJECT_MODES.includes(modeFlag)) {
   fail(`init REFUSED: --mode must be 'hobby' or 'work' — got ${JSON.stringify(modeFlag ?? '')}`, 2);
 }

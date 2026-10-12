@@ -52314,6 +52314,14 @@ function parseOpenCodeHeader(content) {
   return { headerLine, renderer, template, templateHash, contentHash };
 }
 
+// scripts/lib/shell-safe-path.mjs
+var SAFE_CHAR_CLASS = "[A-Za-z0-9_@%+=:,./-]";
+var SHELL_SAFE_PATH_RE = new RegExp(`^${SAFE_CHAR_CLASS}+$`);
+var SAFE_CHAR_RE = new RegExp(`^${SAFE_CHAR_CLASS}$`);
+function isShellSafePath(path) {
+  return SHELL_SAFE_PATH_RE.test(path);
+}
+
 // scripts/lib/opencode-install.mjs
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
 var ROSTER = ["conductor", "implementor", "researcher", "scout", "reviewer", "librarian"];
@@ -52398,7 +52406,6 @@ ${content.slice(fmEnd)}` };
 }
 var INSTALL_VARS = ["PROJECT_DIR", "STERLING_ROOT"];
 var INSTALL_VAR_RE = /\{\{(PROJECT_DIR|STERLING_ROOT)\}\}/g;
-var SHELL_SAFE_PATH_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
 function substituteInstallVars(text, vars) {
   return text.replace(INSTALL_VAR_RE, (token, name) => vars[name] ?? token);
 }
@@ -52462,7 +52469,7 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
     const path = join13(projectDir, rel);
     const templateContent = readFileSync9(join13(pluginRoot, "agent-templates", entry.file), "utf8");
     if (usesInstallVars(templateContent, entry.opencode_full?.permission)) {
-      const unsafe = INSTALL_VARS.filter((v) => !SHELL_SAFE_PATH_RE.test(vars[v]));
+      const unsafe = INSTALL_VARS.filter((v) => !isShellSafePath(vars[v]));
       if (unsafe.length) {
         rows.push(refusal(rel, `${rel} needs ${unsafe.map((v) => `${v === "PROJECT_DIR" ? "the project path" : "the Sterling path"} (${vars[v]})`).join(" and ")} in shell permission rules, and a space, quote or glob character there cannot be matched reliably`, "use a project and Sterling path made of letters, digits and _@%+=:,./- only, then rerun /sterling:update"));
         continue;
