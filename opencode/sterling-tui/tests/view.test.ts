@@ -175,6 +175,32 @@ test('subagents: the session model is used when no turn has a model yet; a blank
   assert.equal(rows[0].model, 'gpt-x');
 });
 
+test('subagents: the label is id#variant from the session model, kept when the turn runs on the same model id', () => {
+  const sessions = [{ id: ROOT }, { id: kid(1), parentID: ROOT, model: { id: 'gpt-x', providerID: 'p', variant: 'high' } }];
+  const noTurn = readSubagents(source({ sessions, lastTurn: () => undefined }));
+  assert.equal(noTurn[0].model, 'gpt-x#high');
+  const sameTurn = readSubagents(source({ sessions, lastTurn: () => ({ tokens: tokens(10), model: { id: 'gpt-x', providerID: 'p' } }) }));
+  assert.equal(sameTurn[0].model, 'gpt-x#high', "the turn's model has no variant, so the session's survives");
+});
+
+test("subagents: a turn on a different model id shows the turn's own model, with its own variant if it has one", () => {
+  const sessions = [{ id: ROOT }, { id: kid(1), parentID: ROOT, model: { id: 'gpt-x', providerID: 'p', variant: 'high' } }];
+  const plainTurn = readSubagents(source({ sessions, lastTurn: () => ({ tokens: tokens(10), model: { id: 'other', providerID: 'p' } }) }));
+  assert.equal(plainTurn[0].model, 'other');
+  const variantTurn = readSubagents(source({ sessions, lastTurn: () => ({ tokens: tokens(10), model: { id: 'other', providerID: 'p', variant: 'low' } }) }));
+  assert.equal(variantTurn[0].model, 'other#low');
+});
+
+test('subagents: no variant anywhere shows the plain model id', () => {
+  const sessions = [{ id: ROOT }, { id: kid(1), parentID: ROOT, model: { id: 'gpt-x', providerID: 'p' } }];
+  assert.equal(readSubagents(source({ sessions, lastTurn: () => undefined }))[0].model, 'gpt-x');
+  const sentinel = [{ id: ROOT }, { id: kid(1), parentID: ROOT, model: { id: 'gpt-x', providerID: 'p', variant: 'default' } }];
+  assert.equal(readSubagents(source({ sessions: sentinel, lastTurn: () => undefined }))[0].model, 'gpt-x', "the 'default' variant is no variant");
+  assert.equal(readSubagents(source({ sessions: sentinel, lastTurn: () => ({ tokens: tokens(10), model: { id: 'gpt-x', providerID: 'p' } }) }))[0].model, 'gpt-x');
+  assert.equal(readSubagents(source({ sessions, lastTurn: () => ({ tokens: tokens(10), model: { id: 'other', providerID: 'p', variant: 'default' } }) }))[0].model, 'other');
+  assert.equal(readSubagents(source({ sessions, lastTurn: () => ({ tokens: tokens(10), model: { id: 'gpt-x', providerID: 'p' } }) }))[0].model, 'gpt-x');
+});
+
 // ---- animated portraits (board animated-avatars-for-each-subagent-in-sterling-s-opencode-2) ----
 
 const plain = (line: SpanLine) => line.map((sp) => sp.text).join('');

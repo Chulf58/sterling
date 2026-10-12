@@ -16387,10 +16387,17 @@ function descendants(sessions, rootID) {
   }
   return out;
 }
+function modelLabel(m) {
+  return m.variant && m.variant !== "default" ? `${m.id}#${m.variant}` : m.id;
+}
+function rowModel(turn, session) {
+  if (!turn) return session;
+  return session?.variant && session.id === turn.id ? { ...turn, variant: session.variant } : turn;
+}
 function readSubagents(src) {
   const rows = descendants(src.sessions, src.rootID).map((s2) => {
     const turn = src.lastTurn(s2.id);
-    const model = turn?.model ?? s2.model;
+    const model = rowModel(turn?.model, s2.model);
     const t = turn?.tokens;
     const limit = model ? src.contextLimit(model) : void 0;
     const used = t ? t.input + t.output + t.reasoning + t.cache.read + t.cache.write : void 0;
@@ -16400,7 +16407,7 @@ function readSubagents(src) {
       title: title ? title : shortId(s2.id),
       status: src.isRunning(s2.id) ? "active" : "idle",
       context: used !== void 0 && limit && limit > 0 ? `${Math.round(used / limit * 100)}%` : "?",
-      model: model?.id ?? "-"
+      model: model ? modelLabel(model) : "-"
     };
   });
   return rows.sort((a, b) => Number(b.status === "active") - Number(a.status === "active"));
