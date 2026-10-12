@@ -5933,6 +5933,13 @@ var TARGET_LEADS = [
   // 2026-10-10). NEW to every sibling, so it arrives through INSERT_AFTER, anchored on the
   // plain-writing bullet it follows in the template.
   "- **Start every subagent in the background.**",
+  // 2026-10-12: finish a started task before ending a turn (GitHub issue #79), and resolve a
+  // review thread once its finding is handled (GitHub issues #42 and #78; user-ruled through the
+  // question form, "AGENTS.md + conductor"). Both are NEW to every sibling, so they arrive through
+  // INSERT_AFTER, Finish anchored on the background bullet and Resolve on Finish; listed in
+  // template order so a sibling missing all three gets them back in that order.
+  "- **Finish what you start.**",
+  "- **Resolve a review thread once its finding is handled.**",
   "- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**",
   // 2026-10-01: board every user ask at intake (decision
   // every-user-ask-is-boarded-at-intake-with-slim-blocked-by). Both bullets already exist in
@@ -6034,6 +6041,8 @@ var INSERT_AFTER = /* @__PURE__ */ new Map([
   ["- **Lint and tests before done.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Write plainly; no AI tells.**", ["- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Start every subagent in the background.**", ["- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Finish what you start.**", ["- **Start every subagent in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Resolve a review thread once its finding is handled.**", ["- **Finish what you start.**", "- **Start every subagent in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
   ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", ["- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
   ["- **Solve, don't board.**", ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", "- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
   ["- **Close-on-commit: a commit that fulfils a board item pays it**", ["- **Solve, don't board.**"]]

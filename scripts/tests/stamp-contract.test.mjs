@@ -824,6 +824,72 @@ test('stamp-contract --apply-inserts: every partial absence of lint, plain-writi
   }
 });
 
+// GitHub issues #79 (finish what you start) and #42/#78 (resolve review threads): two bullets new
+// to every sibling, inserted after the background-subagents bullet in template order.
+const FINISH_LEAD = '- **Finish what you start.**';
+const RESOLVE_LEAD = '- **Resolve a review thread once its finding is handled.**';
+
+test('stamp-contract --apply-inserts: a project without the finish and resolve bullets gets both once, after the background bullet in template order, and a second run writes nothing', () => {
+  const f = sectionFixture('finish-resolve', (agents) => dropBlock(dropBlock(agents, FINISH_LEAD), RESOLVE_LEAD));
+  try {
+    assert.ok(!f.read().agents.includes(FINISH_LEAD) && !f.read().agents.includes(RESOLVE_LEAD), 'the fixture lacks both bullets');
+    const dry = runStampContract(f.regDb, []);
+    assert.equal(dry.status, 0, `${dry.stdout}\n${dry.stderr}`);
+    assert.match(dry.stdout, /would_insert {2}- \*\*Finish what you start\.\*\*/);
+    assert.match(dry.stdout, /would_insert {2}- \*\*Resolve a review thread once its finding is handled\.\*\*/);
+
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /inserted {2}- \*\*Finish what you start\.\*\*/);
+    assert.match(r.stdout, /inserted {2}- \*\*Resolve a review thread once its finding is handled\.\*\*/);
+    const lines = f.read().agents.split('\n');
+    const at = (lead) => lines.findIndex((l) => l.startsWith(lead));
+    assert.equal(lines.filter((l) => l.startsWith(FINISH_LEAD)).length, 1, 'finish inserted once');
+    assert.equal(lines.filter((l) => l.startsWith(RESOLVE_LEAD)).length, 1, 'resolve inserted once');
+    assert.equal(at(FINISH_LEAD), at(BACKGROUND_LEAD) + 1, 'finish right after the background bullet');
+    assert.equal(at(RESOLVE_LEAD), at(FINISH_LEAD) + 1, 'resolve right after finish');
+    assert.deepEqual(f.read(), f.complete, 'byte-identical to the template render');
+
+    const again = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+    assert.ok(!/inserted/.test(again.stdout), `nothing left to insert:\n${again.stdout}`);
+    assert.deepEqual(f.read(), f.complete, 'a second run writes nothing');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract --apply-inserts: a project missing the background, finish and resolve bullets gets all three back in template order from one run', () => {
+  const f = sectionFixture('background-finish-resolve', (agents) => [BACKGROUND_LEAD, FINISH_LEAD, RESOLVE_LEAD].reduce((text, lead) => dropBlock(text, lead), agents));
+  try {
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    const lines = f.read().agents.split('\n');
+    const at = (lead) => lines.findIndex((l) => l.startsWith(lead));
+    assert.ok(at(WRITE_PLAINLY_LEAD) < at(BACKGROUND_LEAD) && at(BACKGROUND_LEAD) < at(FINISH_LEAD) && at(FINISH_LEAD) < at(RESOLVE_LEAD), 'template order: plain-writing, background, finish, resolve');
+    assert.deepEqual(f.read(), f.complete, 'byte-identical to the template render');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('stamp-contract: a hand-tuned finish bullet is refused and left alone, and the resolve bullet falls back to the background bullet as its anchor', () => {
+  const tuned = '- **Finish what you start.** Our own wording.';
+  const f = sectionFixture('finish-tuned', (agents) => dropBlock(agents, RESOLVE_LEAD).replace(/^- \*\*Finish what you start\.\*\*.*$/m, tuned));
+  try {
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 2, 'the hand-tuned bullet is a refusal');
+    assert.match(r.stdout, /HAND_TUNED_REFUSED {2}- \*\*Finish what you start\.\*\*/);
+    assert.match(r.stdout, /inserted {2}- \*\*Resolve a review thread once its finding is handled\.\*\*/);
+    const lines = f.read().agents.split('\n');
+    assert.ok(lines.includes(tuned), 'the hand-tuned bullet is untouched');
+    const at = lines.findIndex((l) => l.startsWith(RESOLVE_LEAD));
+    assert.ok(lines[at - 1].startsWith(BACKGROUND_LEAD), 'resolve lands right after the fallback anchor');
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('stamp-contract: a hand-tuned "No false action claims" bullet is not an anchor, so the lint bullet falls back to "Anti-speculation"', () => {
   const tuned = '- **No false action claims:** our own wording.';
   const f = sectionFixture('lint-fallback', (agents) => dropBlock(agents, LINT_LEAD).replace(/^- \*\*No false action claims:\*\*.*$/m, tuned));
