@@ -42,7 +42,7 @@ function addTodo(dir, text) {
 }
 
 /** A context handler for `dir` whose sessions are ses_root (a root) and ses_child (its child). */
-function handler(dir) {
+function handler(dir, extra = {}) {
   const sessions = { ses_root: {}, ses_other: {}, ses_child: { parentID: 'ses_root' } };
   return contextMod.createContextHandler({
     openStore: (p) => new SterlingStore(p),
@@ -53,6 +53,7 @@ function handler(dir) {
     sessionSync: async () => {},
     pluginRoot: repo,
     getSession: () => ({ get: async ({ sessionID }) => ({ id: sessionID, ...sessions[sessionID] }) }),
+    ...extra,
   });
 }
 
@@ -331,6 +332,105 @@ test('an unreadable notices file is said in-band and logged, and the other lines
     assert.match(fixed, /TDD posture/);
     assert.match(fixed, /NOTICE-AFTER-FIX/);
     assert.equal(await appended(h, 'ses_root'), '', 'and delivered once');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a dispatch-sweep line held back by an unreadable notices file is delivered once the file reads again, then not repeated', async () => {
+  const dir = makeProject();
+  try {
+    let sweeps = 0;
+    const h = handler(dir, { sweepStale: async () => (++sweeps === 1 ? 'SWEEP-LINE-ONE-SHOT' : '') });
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(dir, notices.NOTICES_REL), '{ not json');
+    assert.doesNotMatch(await appended(h, 'ses_root'), /SWEEP-LINE-ONE-SHOT/, 'held back while the notices file is unreadable');
+    writeFileSync(join(dir, notices.NOTICES_REL), '[]');
+    assert.match(await appended(h, 'ses_root'), /SWEEP-LINE-ONE-SHOT/, 'the sweep line is not lost with the failed append');
+    assert.doesNotMatch(await appended(h, 'ses_other'), /SWEEP-LINE-ONE-SHOT/, 'and it is delivered once');
+    assert.equal(sweeps, 1, 'the sweep ran once: its line was held, not produced again');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a registry refresh failure line held back by an unreadable notices file is delivered once the file reads again', async () => {
+  const dir = makeProject();
+  const registryDb = join(dir, 'registry.db');
+  const prior = process.env.STERLING_REGISTRY_DB;
+  try {
+    writeFileSync(registryDb, 'this is not a sqlite database, so opening the registry throws');
+    process.env.STERLING_REGISTRY_DB = registryDb;
+    const h = handler(dir);
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(dir, notices.NOTICES_REL), '{ not json');
+    assert.doesNotMatch(await appended(h, 'ses_root'), /PROJECT REGISTRY REFRESH FAILED/, 'held back while the notices file is unreadable');
+    writeFileSync(join(dir, notices.NOTICES_REL), '[]');
+    assert.match(await appended(h, 'ses_root'), /PROJECT REGISTRY REFRESH FAILED/, 'the failure line is not lost with the failed append');
+    assert.doesNotMatch(await appended(h, 'ses_root'), /PROJECT REGISTRY REFRESH FAILED/, 'and it is delivered once');
+  } finally {
+    if (prior === undefined) delete process.env.STERLING_REGISTRY_DB;
+    else process.env.STERLING_REGISTRY_DB = prior;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a held one-shot line is delivered exactly once when two prompts overlap, and is put back when its append fails', async () => {
+  const dir = makeProject();
+  try {
+    let sweeps = 0;
+    let pause = null;
+    const h = handler(dir, {
+      sweepStale: async () => (++sweeps === 1 ? 'SWEEP-LINE-OVERLAP' : ''),
+      rotationRestore: async () => {
+        if (pause) await pause.gate;
+        return '';
+      },
+    });
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(dir, notices.NOTICES_REL), '{ not json');
+    await appended(h, 'ses_root');
+    writeFileSync(join(dir, notices.NOTICES_REL), '[]');
+    // The first prompt is paused mid-computation (as a slow rotation restore would), the second runs to the end, then the first resumes.
+    let resume;
+    pause = { gate: new Promise((r) => { resume = r; }) };
+    const first = appended(h, 'ses_root');
+    await new Promise((r) => setTimeout(r, 20));
+    pause = null;
+    const second = await appended(h, 'ses_other');
+    resume();
+    const both = [await first, second].filter((t) => t.includes('SWEEP-LINE-OVERLAP'));
+    assert.equal(both.length, 1, 'the held line is delivered exactly once across both prompts');
+
+    // A failed append puts a claimed line back: the next prompt gets it.
+    const h2 = handler(dir, { sweepStale: async () => 'SWEEP-LINE-RETRY' });
+    const failing = { sessionID: 'ses_root', messageID: 'msg_u', delivery: 'immediate', prompt: {} };
+    let writes = 0;
+    Object.defineProperty(failing.prompt, 'text', { get: () => 'go', set: () => { if (writes++ === 0) throw new Error('append failed'); }, enumerable: true });
+    await assert.doesNotReject(h2.onPrompt(failing).catch(() => {}));
+    assert.match(await appended(h2, 'ses_other'), /SWEEP-LINE-RETRY/, 'the line survives a failed append');
+    assert.doesNotMatch(await appended(h2, 'ses_root'), /SWEEP-LINE-RETRY/, 'and is delivered once');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a claimed one-shot line is restored even when the log write that reports an unreadable notices file throws', async () => {
+  const dir = makeProject();
+  try {
+    let sweeps = 0;
+    const h = handler(dir, { sweepStale: async () => (++sweeps === 1 ? 'SWEEP-LINE-LOGFAIL' : '') });
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(dir, notices.NOTICES_REL), '{ not json');
+    await appended(h, 'ses_root'); // the sweep line is produced and held while the notices cannot be read
+    const log = join(dir, '.sterling', 'transient', 'opencode-plugin.log');
+    rmSync(log, { force: true });
+    mkdirSync(log); // appending to a directory throws, so logLine throws
+    await assert.rejects(appended(h, 'ses_root'), 'the failing log write surfaces');
+    rmSync(log, { recursive: true });
+    writeFileSync(join(dir, notices.NOTICES_REL), '[]');
+    const fixed = [await appended(h, 'ses_root'), await appended(h, 'ses_other')].filter((t) => t.includes('SWEEP-LINE-LOGFAIL'));
+    assert.equal(fixed.length, 1, 'the claimed line was not lost with the failed log write, and is delivered once');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

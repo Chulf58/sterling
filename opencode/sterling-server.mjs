@@ -19061,6 +19061,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   const boardCache = /* @__PURE__ */ new Map();
   const delivered = /* @__PURE__ */ new Map();
   const registrySeen = /* @__PURE__ */ new Map();
+  const heldLines = /* @__PURE__ */ new Map();
   function statusLine(root) {
     const hit = statusCache.get(root);
     if (hit && Date.now() - hit.at < STATUS_TTL_MS) return hit.text;
@@ -19229,8 +19230,8 @@ ${opencodeHostTail(pluginRoot)}`;
           line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
         }
         if (line) {
+          heldLines.set(`${root}\0sweep`, line);
           logLine(root, `context: ${line}`);
-          out.push({ text: line });
         }
       }
       if (!inWorkerChild(env) && registrySeen.get(root) !== sessionID) {
@@ -19238,14 +19239,23 @@ ${opencodeHostTail(pluginRoot)}`;
         try {
           refreshRegistryRow(root, { config: state.config, at: now() });
         } catch (e) {
+          heldLines.set(`${root}\0registry`, `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
           logLine(root, `context: project registry refresh failed: ${errText(e)}`);
-          out.push({ text: `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.` });
         }
       }
       out.push({ key: "undeclared", text: undeclaredBlock(root, state.config), cleared: "UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies." });
       if (!inWorkerChild(env)) out.push({ key: "board", text: boardBlock(root, state.config, sessionID), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
     }
     out.push({ key: "restore", text: await rotationRestore(root, sessionID) });
+    if (kind === "root" && !inWorkerChild(env)) {
+      for (const [key, text] of [...heldLines]) {
+        if (!key.startsWith(`${root}\0`)) continue;
+        heldLines.delete(key);
+        out.push({ text, restore: () => {
+          if (!heldLines.has(key)) heldLines.set(key, text);
+        } });
+      }
+    }
     return out;
   }
   async function dueText(root, sessionID, where) {
@@ -19255,9 +19265,16 @@ ${opencodeHostTail(pluginRoot)}`;
     const seen = delivered.get(sessionID) ?? /* @__PURE__ */ new Map();
     const marks = /* @__PURE__ */ new Map();
     const due = [];
+    const claimed = [];
+    const release = () => {
+      for (const fn of claimed) fn();
+    };
     for (const b of blocks) {
       if (!b.key) {
-        if (b.text) due.push(b.text);
+        if (b.text) {
+          due.push(b.text);
+          if (b.restore) claimed.push(b.restore);
+        }
         continue;
       }
       const last = seen.get(b.key) ?? "";
@@ -19271,12 +19288,15 @@ ${opencodeHostTail(pluginRoot)}`;
       try {
         notices = takeNotices(root, now());
       } catch (e) {
+        release();
         logLine(root, `context: pending notices unreadable at the ${where}: ${errText(e)}`);
         return {
           text: `${VOLATILE_HEADER}
 
 STERLING NOTICES UNREADABLE (${errText(e)}): the pending notices in ${NOTICES_REL} could not be read, so Sterling's other session lines are held back until they can; fix or delete that file.`,
           commit: () => {
+          },
+          release: () => {
           }
         };
       }
@@ -19287,7 +19307,9 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
       text: due.length ? `${VOLATILE_HEADER}
 
 ${due.join("\n\n")}` : "",
+      release,
       commit: () => {
+        claimed.length = 0;
         if (!marks.size) return;
         const record = delivered.get(sessionID) ?? remember(delivered, sessionID, /* @__PURE__ */ new Map());
         for (const [key, text] of marks) record.set(key, text);
@@ -19300,9 +19322,14 @@ ${due.join("\n\n")}` : "",
     await fenced("context", root, async () => {
       if (typeof input?.prompt?.text !== "string") throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
       const due = await dueText(root, input.sessionID, "prompt");
-      if (due.text) input.prompt.text = `${input.prompt.text}
+      try {
+        if (due.text) input.prompt.text = `${input.prompt.text}
 
 ${due.text}`;
+      } catch (e) {
+        due.release();
+        throw e;
+      }
       due.commit();
     });
   }
@@ -19314,7 +19341,12 @@ ${due.text}`;
       const content = input.result?.content;
       if (!Array.isArray(content) && typeof content !== "string") throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
       const due = await dueText(root, input.sessionID, "tool call");
-      if (due.text) appendToResult(input.result, due.text);
+      try {
+        if (due.text) appendToResult(input.result, due.text);
+      } catch (e) {
+        due.release();
+        throw e;
+      }
       due.commit();
     });
   }
