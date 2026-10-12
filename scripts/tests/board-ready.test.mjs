@@ -309,10 +309,15 @@ async function ocHandler(p, { parentID, env = {} } = {}) {
   });
 }
 
+// One turn as the model sees it: the prompt hook appends the session lines that changed
+// (board readiness among them) to the prompt text, then the context hook builds the stable
+// system part. Both are returned, so a block that moved between them is still found.
 async function ocText(handler, sessionID = 'ses_board') {
+  const prompt = { sessionID, messageID: 'msg_turn', prompt: { text: '' }, delivery: 'immediate' };
+  await handler.onPrompt(prompt);
   const i = { sessionID, agent: 'sterling/conductor', system: [{ type: 'text', text: 'base' }], messages: [], tools: {} };
   await handler.onContext(i);
-  return i.system.map((s) => s.text).join('\n');
+  return [...i.system.map((s) => s.text), prompt.prompt.text].join('\n');
 }
 
 async function ocContext(p, opts) {
@@ -351,7 +356,9 @@ test('OpenCode: the readiness cache is per root but the live-lane count is per s
     const handler = await ocHandler(p);
     assert.match(await ocText(handler, 'ses_b'), /live lanes 0\/4/, 'a session with no lanes');
     assert.match(await ocText(handler, 'ses_a'), /live lanes 1\/4/, 'inside the cache window another session still sees its own lane');
-    assert.match(await ocText(handler, 'ses_b'), /live lanes 0\/4/, 'and the first session does not inherit it');
+    // ses_b already has 0/4 in its conversation, so an unchanged block is not appended again;
+    // had it inherited ses_a's lane, the changed block (1/4) would be appended here.
+    assert.doesNotMatch(await ocText(handler, 'ses_b'), /live lanes [1-9]/, 'and the first session does not inherit it');
   } finally {
     p.cleanup();
   }

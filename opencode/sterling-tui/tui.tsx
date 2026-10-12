@@ -18,7 +18,7 @@ import { useKeyboard, useTerminalDimensions } from '@opentui/solid';
 import { openDashboard, type DashboardController } from '@sterling/tui/dist/controller.js';
 import { TASKS_TAB, type DashboardState } from '@sterling/tui/dist/state.js';
 import { ANIMATION_MS } from '@sterling/tui/dist/avatars/index.js';
-import { SIDEBAR_WIDTH, bodyLinesFor, emptyAvatars, escapeLeavesView, findStorePath, footerLines, guarded, keyToUiEvent, paintedFg, readSidebarSummary, readSubagents, sidebarLines, stepAvatars, subagentSpanLines, type AvatarState, type Guarded, type KeyLike, type ModelRefLike, type Span, type SpanLine, type SubagentRow, type SubagentSession, type TokenUsageLike, type Painted } from './view.ts';
+import { SIDEBAR_WIDTH, bodyLinesFor, contextFill, emptyAvatars, escapeLeavesView, findStorePath, footerLines, guarded, keyToUiEvent, modelLimit, paintedFg, readSidebarSummary, readSubagents, sidebarLines, stepAvatars, subagentSpanLines, type AvatarState, type Guarded, type KeyLike, type ModelInfoLike, type ModelRefLike, type Span, type SpanLine, type SubagentRow, type SubagentSession, type TokenUsageLike, type Painted } from './view.ts';
 
 const ROUTE = 'sterling';
 /** OpenCode events that change a sub-agent row: a child appears, starts or ends a run, finishes a step. */
@@ -55,7 +55,8 @@ interface Api {
         sync(sessionID: string): Promise<void>;
       };
     };
-    location: { model: { list(): { providerID: string; modelID: string; limit: { context: number } }[] } };
+    /** list() is undefined until the location's models are loaded (OpenCode 2 LocationCollection) */
+    location: { model: { list(): ModelInfoLike[] | undefined; sync(): Promise<void> } };
   };
 }
 
@@ -66,6 +67,8 @@ let anyRunning = false;
 const [syncFailure, setSyncFailure] = createSignal<string | undefined>();
 /** sub-agent sessions whose messages were requested; a failed request is retried on the next read */
 const synced = new Set<string>();
+/** whether the location's model list was requested; a failed request is retried on the next read */
+let modelsRequested = false;
 let dashboard: Guarded<DashboardController> | undefined;
 /** The project directory setup() resolved: api.location.directory, else process.cwd(). */
 let projectDir = process.cwd();
@@ -116,10 +119,24 @@ function subagentData(api: Api, sessionID: string): Guarded<{ rows: SubagentRow[
             },
           );
         }
-        const turn = d.session.message.list(id).findLast((m) => m.type === 'assistant' && m.tokens);
+        // a turn still streaming has no tokens, or 0, so the last finished turn counts
+        const turn = d.session.message.list(id).findLast((m) => m.type === 'assistant' && m.tokens !== undefined && contextFill(m.tokens) > 0);
         return turn && { tokens: turn.tokens, model: turn.model };
       },
-      contextLimit: (m) => d.location.model.list().find((x) => x.providerID === m.providerID && x.modelID === m.id)?.limit.context,
+      contextLimit: (m) => {
+        const models = d.location.model.list();
+        if (!models && !modelsRequested) {
+          modelsRequested = true;
+          d.location.model.sync().then(
+            () => setSyncFailure(undefined),
+            (err: unknown) => {
+              modelsRequested = false;
+              setSyncFailure(`models unavailable — ${(err as Error)?.message ?? String(err)}`);
+            },
+          );
+        }
+        return modelLimit(models, m);
+      },
     });
     const avatars = stepAvatars(avatarStates.get(rootID) ?? emptyAvatars(), rows.map((r) => r.id), Math.random);
     avatarStates.set(rootID, avatars);

@@ -148,6 +148,20 @@ const settledPath = (dir) => join(dir, '.sterling', 'transient', 'git-settled.js
 
 // --- H20 -------------------------------------------------------------------
 
+
+/**
+ * One turn as the model sees it: the prompt hook (which appends the volatile Sterling
+ * lines to the prompt text) and then the context hook (the stable system part). The
+ * prompt is kept on the input as `prompt`, so seenText reads both.
+ */
+async function seeTurn(ctx, ci) {
+  const p = { sessionID: ci.sessionID, messageID: 'msg_turn', prompt: { text: '' }, delivery: 'immediate' };
+  await ctx.hooks.session.prompt(p);
+  await ctx.hooks.session.context(ci);
+  ci.prompt = p.prompt;
+  return ci;
+}
+
 test('H20 on the subagent tool: a brief matching a stored hazard gets the mechanism-axis delivery on its result, once per session', async () => {
   const p = makeProject();
   try {
@@ -558,12 +572,12 @@ test('the first root context of a process sweeps dispatch records a dead process
 
     // A new process: its child context does not sweep, its first root context does.
     const second = await setup(p.dir, { ses_root2: {}, ses_kid: { parentID: 'ses_root2' } });
-    await second.ctx.hooks.session.context({ sessionID: 'ses_kid', agent: 'sterling/scout', system: [], messages: [], tools: {} });
+    await seeTurn(second.ctx, { sessionID: 'ses_kid', agent: 'sterling/scout', system: [], messages: [], tools: {} });
     assert.ok(stateRecords(p.dir).some((r) => r.tool_use_id === 'call_dead' && !r.terminal), 'a child context does not sweep');
     const root2 = { sessionID: 'ses_root2', agent: 'build', system: [], messages: [], tools: {} };
-    await second.ctx.hooks.session.context(root2);
+    await seeTurn(second.ctx, root2);
     assert.ok(stateRecords(p.dir).every((r) => r.terminal), 'the stale record is terminal after the sweep');
-    assert.match(root2.system.map((x) => x.text).join('\n'), /DEAD-DISPATCH RESIDUE \(OpenCode process start\): 1 dispatch record/, 'the sweep says how many records it ended');
+    assert.match([...root2.system.map((x) => x.text), root2.prompt.text].join('\n'), /DEAD-DISPATCH RESIDUE \(OpenCode process start\): 1 dispatch record/, 'the sweep says how many records it ended');
     assert.equal(existsSync(join(p.dir, '.sterling', 'transient', 'dispatch-register.json')), false, 'the register is cleared, as H1 clears it');
     assert.equal(server.liveDispatch(p.dir).live, false);
     await second.cleanup?.();
@@ -825,7 +839,7 @@ test('the maintenance worker child never sweeps: a parent\'s live background imp
     await parent.ctx.hooks.tool['execute.after']({ ...before, status: 'completed', result });
     const worker = await setup(p.dir, { ses_worker: {} }, { env: { STERLING_MAINTENANCE_WORKER: '1' } });
     const ci = { sessionID: 'ses_worker', agent: 'build', system: [], messages: [], tools: {} };
-    await worker.ctx.hooks.session.context(ci);
+    await seeTurn(worker.ctx, ci);
     assert.ok(ci.system.length, 'the worker child still gets its context');
     assert.ok(stateRecords(p.dir).some((r) => r.tool_use_id === 'call_live_impl' && !r.terminal), "the parent's dispatch is still live");
     assert.ok(registerRows(p.dir).some((r) => r.agent_id === 'ses_impl' && !r.ended), 'and its register round');

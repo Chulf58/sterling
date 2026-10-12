@@ -60,7 +60,8 @@ test('the OpenCode conductor discloses what OpenCode cannot run, each with its e
   const conductor = agentBodies().find((a) => a.label === 'agent-templates/conductor.md').body;
   assert.doesNotMatch(conductor, /48903a6f|sterling-on-opencode-2-is-the-knowledge-loop-in-one-small-plugin/, 'the superseded gauge ruling is not cited');
   assert.match(conductor, /sterling-is-fully-standalone-on-opencode-2-full-parity-with-claude-code/, 'cites the ruling that supersedes it');
-  assert.match(conductor, /no context-pressure gauge/i);
+  assert.match(conductor, /notes pressure at 35% and warns at 50%[^\n]*OpenCode's step token counts/, 'context pressure: measured by the plugin from step token counts');
+  assert.match(conductor, /When the fill cannot be measured, the plugin says so once per session/, 'context pressure: an unmeasurable fill is said, not silent');
   assert.match(conductor, /no stop block[\s\S]*STERLING NOTICE/i, 'H10 stop block: notices and queue items instead');
   assert.match(conductor, /ExitPlanMode[\s\S]*bin\/plan-lock\.mjs[\s\S]*--plan/, 'H31 plan lock: the manual script');
   assert.match(conductor, /TaskStop[\s\S]*no OpenCode equivalent/i, 'TaskStop has none, said plainly');

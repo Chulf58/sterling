@@ -5,7 +5,7 @@
 //
 //   node scripts/pr-review-wait.mjs <pr-url|number> [--repo host/owner/repo]
 //        [--since-review <id>] [--head <sha>] [--timeout <s>] [--interval <s>]
-//        [--request-copilot] [--target <dir>]
+//        [--request-copilot] [--recheck-delay <s>] [--target <dir>]
 //   node scripts/pr-review-wait.mjs --resolve-threads <comment-id,...> --pr <n|pr-url> [--target <dir>]
 //   node scripts/pr-review-wait.mjs --settle <clean|capped|escalated> --pr <n|pr-url> [--unknown-retry-delay <s>] [--target <dir>]
 //
@@ -14,16 +14,35 @@
 // other repo is an error before any gh call. Every call is `gh api --hostname
 // <host> repos/<owner>/<repo>/...` — `gh api` takes no --repo flag, so the repo
 // is named in the path and the host explicitly, and gh's default-repo guessing
-// never applies. Each poll fetches the PR head SHA, then the reviews and the
-// review comments with --paginate. It returns as soon as a COPILOT review
-// (author login matching /copilot/i) that is completed, newer than
-// --since-review and of the current head exists — the OLDEST such review
-// first, so none is ever skipped; otherwise it sleeps with
-// backoff and polls again until --timeout. One call never runs forever: the
-// deadline is checked before every gh call and caps each call's own timeout.
-// A review is returned only when the head read AFTER fetching it is still the
-// reviewed SHA. --head takes 7-40 hex characters and matches the PR head by
-// prefix (a short sha is accepted; anything else is refused naming the value).
+// never applies. Each poll fetches the PR head SHA, the PR's pending review
+// requests (GraphQL reviewRequests), then the reviews and the review comments
+// with --paginate. It returns as soon as a COPILOT review (author login
+// matching /copilot/i) that is completed and newer than --since-review exists,
+// on ANY head — the OLDEST such review first, so none is ever skipped (GitHub
+// issue #80: a review of the previous head that lands after a push used to be
+// dropped). stale_review is true when the returned review is not of the
+// current head (or the PR head is not yet --head): its findings are
+// dispositioned like any other, but it is never a clean review of the head.
+// A current-head review is returned only when the head read AFTER fetching it
+// is still the reviewed SHA; otherwise the next poll returns it as stale.
+// With nothing unconsumed, it sleeps with backoff and polls again until
+// --timeout — but only while a Copilot review request is pending: with no
+// request pending and no unconsumed review, nothing will arrive, so the call
+// ends with status no_review_requested (exit 3) naming the remedy, instead of
+// timing out quietly. An absent request is read ONCE more after
+// --recheck-delay seconds (default 10, within the --timeout budget) before
+// that exit, on every call (Sol review): a request accepted by this call's
+// --request-copilot, by the previous call or by hand seconds ago may not show
+// in reviewRequests yet (the review_requested event was measured within 10s,
+// finding request-copilot-review-programmatically-requestreviewsbylogin).
+// Pending on the recheck means wait on; a review that landed meanwhile is
+// returned. The requests are read BEFORE the reviews:
+// GitHub clears the request when the review is submitted, so a request seen
+// cleared means its review is already visible to the reviews read. One call
+// never runs forever: the deadline is checked before every gh call and caps
+// each call's own timeout. --head takes 7-40 hex characters and matches the
+// PR head by prefix (a short sha is accepted; anything else is refused naming
+// the value).
 //
 // --request-copilot (opt-in): before the first poll, ask GitHub to review the
 // head again — a fix push is not re-reviewed until Copilot is re-requested, and
@@ -37,21 +56,29 @@
 // login (a Bot matched by /copilot/i until pinned in pr_review.copilot_logins,
 // reported verbatim as observed_copilot_login, identity_confirmed only when
 // pinned), that review ids grow monotonically (the
-// --since-review comparison), and that a review's commit_id is the head it
-// reviewed. The skill asks for the observed facts to be reported back so they
+// --since-review comparison), that a review's commit_id is the head it
+// reviewed, and that a Copilot request stays in reviewRequests while Copilot
+// is still reviewing (measured 2026-10-01, finding
+// request-copilot-review-programmatically-requestreviewsbylogin: the request
+// shows as Bot 'copilot-pull-request-reviewer' and is empty after a review).
+// A pending request is any Bot reviewer whose login matches /copilot/i; the
+// pinned copilot_logins are review-author logins and do not apply to it. The skill asks for the observed facts to be reported back so they
 // can be pinned as fixtures.
 //
 // Stdout is ONE JSON object:
-//   {status:'review'|'timeout'|'error', head_sha, review:{id, commit_id,
-//    author, state, body}|null, comments:[{id, path, line, body, in_reply_to}],
+//   {status:'review'|'timeout'|'no_review_requested'|'error', head_sha,
+//    review:{id, commit_id, author, state, body}|null,
+//    comments:[{id, path, line, body, in_reply_to}],
 //    previously_missed:[string], body_findings_without_comments,
-//    copilot_request:null|{requested, error?},
-//    observed_copilot_login, stale_review_ignored, identity_confirmed[, error]}
+//    copilot_request:null|{requested, error?}, copilot_review_pending,
+//    observed_copilot_login, stale_review, identity_confirmed[, error]}
 // previously_missed is the list items under a "Previously missed" heading of the
 // review body ([] when absent). body_findings_without_comments is true for any
 // non-blank body with no inline comments, because the body format is Copilot's
 // and may change: such a review is not clean until the body has been read.
-// Exit 0 = review, 2 = timeout, 1 = error. Timeout and error are never clean.
+// copilot_review_pending is what the last poll read (null before any poll).
+// Exit 0 = review, 2 = timeout, 3 = no_review_requested, 1 = error. None but
+// a review of the current head (stale_review false) is ever clean.
 //
 // RESOLVE-THREADS: replying to a finding never resolves its review thread, and
 // an org ruleset (required_review_thread_resolution) blocks the merge until it
@@ -96,12 +123,13 @@ const GH_CALL_TIMEOUT_MS = 60_000;
 const DEFAULT_TIMEOUT_S = 540; // under a 10-minute background Bash window
 const DEFAULT_INTERVAL_S = 30;
 const MAX_INTERVAL_S = 120;
+const DEFAULT_RECHECK_DELAY_S = 10; // the review_requested event showed within 10s (finding in the header)
 
-const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review_ignored: false, identity_confirmed: false, previously_missed: [], body_findings_without_comments: false, copilot_request: null };
+const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, identity_confirmed: false, previously_missed: [], body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
   process.stdout.write(JSON.stringify(out) + '\n');
-  process.exit(status === 'review' ? 0 : status === 'timeout' ? 2 : 1);
+  process.exit(status === 'review' ? 0 : status === 'timeout' ? 2 : status === 'no_review_requested' ? 3 : 1);
 }
 const error = (message) => finish('error', { review: null, comments: [], error: message });
 
@@ -204,7 +232,7 @@ if (argv.includes('--settle')) {
 }
 
 // -------------------------------------------------------------------- args
-const valued = new Set(['--repo', '--since-review', '--head', '--timeout', '--interval', '--target']);
+const valued = new Set(['--repo', '--since-review', '--head', '--timeout', '--interval', '--recheck-delay', '--target']);
 const positional = argv.filter((a, i) => !a.startsWith('--') && !valued.has(argv[i - 1]));
 if (positional.length !== 1) error('usage: pr-review-wait.mjs <pr-url|number> [--repo host/owner/repo] [--since-review <id>] [--head <sha>] [--timeout <s>] [--request-copilot]');
 const seconds = (name, dflt) => {
@@ -223,6 +251,9 @@ const headRaw = flag('--head');
 if (headRaw !== undefined && !/^[0-9a-f]{7,40}$/i.test(headRaw)) error(`--head must be 7-40 hex characters of a commit sha, got '${headRaw}'`);
 const expectedHead = headRaw === undefined ? null : headRaw.toLowerCase();
 const requestCopilot = argv.includes('--request-copilot');
+const recheckRaw = flag('--recheck-delay');
+const recheckDelayS = recheckRaw === undefined ? DEFAULT_RECHECK_DELAY_S : Number(recheckRaw);
+if (recheckRaw !== undefined && (recheckRaw.trim() === '' || !Number.isFinite(recheckDelayS) || recheckDelayS < 0)) error(`--recheck-delay must be a number of seconds >= 0, got '${recheckRaw}'`);
 const pinnedLogins = readPinnedLogins();
 result.identity_confirmed = pinnedLogins.length > 0;
 
@@ -331,38 +362,68 @@ function parsePages(text) {
   return values.flatMap((v) => (Array.isArray(v) ? v : [v]));
 }
 
-function poll() {
+/** Is a Copilot review request pending on the PR? GraphQL reviewRequests is
+ * the view that names the Copilot bot (finding
+ * request-copilot-review-programmatically-requestreviewsbylogin). */
+const REVIEW_REQUESTS_QUERY = 'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewRequests(first:100){nodes{requestedReviewer{__typename ... on Bot{login} ... on User{login}}}}}}}';
+function copilotReviewPending() {
+  const reply = JSON.parse(ghApi('graphql', { extra: ['-f', `query=${REVIEW_REQUESTS_QUERY}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${prNumber}`] }));
+  if (Array.isArray(reply?.errors) && reply.errors.length) throw new Error(`reviewRequests query returned errors: ${reply.errors.map((e) => e?.message ?? JSON.stringify(e)).join('; ')}`);
+  const nodes = reply?.data?.repository?.pullRequest?.reviewRequests?.nodes;
+  if (!Array.isArray(nodes)) throw new Error(`reviewRequests query returned no pull request #${prNumber} in ${origin.repo}`);
+  return nodes.some((n) => n?.requestedReviewer?.__typename === 'Bot' && COPILOT_LOGIN.test(n.requestedReviewer.login ?? ''));
+}
+
+class NoReviewRequested extends Error {}
+function poll(recheckAbsent = true) {
   const [pull] = parsePages(ghApi(base));
   const head = pull?.head?.sha;
   if (typeof head !== 'string') throw new Error(`gh api ${base} returned no head.sha`);
   result.head_sha = head;
+  // Requests BEFORE reviews: a request cleared by a submitted review means the
+  // review is already there for the reviews read below.
+  const pending = copilotReviewPending();
+  result.copilot_review_pending = pending;
   const reviews = parsePages(ghApi(`${base}/reviews`, { paginate: true }));
   const copilot = reviews.filter((r) => isCopilot(r, pinnedLogins));
   if (copilot.length) result.observed_copilot_login = copilot.reduce((a, b) => (b.id > a.id ? b : a)).user.login;
   const fresh = copilot.filter((r) => COMPLETED_STATES.has(r.state) && (sinceReview === null || r.id > sinceReview));
-  const current = expectedHead === null || head.toLowerCase().startsWith(expectedHead) ? fresh.filter((r) => r.commit_id === head) : [];
-  result.stale_review_ignored = result.stale_review_ignored || fresh.some((r) => r.commit_id !== head);
-  if (!current.length) return null;
-  // The LOWEST fresh id first (Sol review, HIGH): a later review never hides an
-  // earlier one's findings. The skill advances --since-review only after each
-  // returned review is fully dispositioned, so the next call yields the next.
-  const review = current.reduce((a, b) => (b.id < a.id ? b : a));
+  if (!fresh.length) {
+    if (pending) return null;
+    if (!recheckAbsent) throw new NoReviewRequested();
+    // One bounded recheck before the loud exit: a request accepted seconds ago
+    // may not show yet. The deadline still bounds it (the next gh call throws
+    // DeadlineReached once the budget is spent).
+    sleep(Math.max(0, Math.min(recheckDelayS * 1000, deadline - Date.now())));
+    return poll(false);
+  }
+  // The LOWEST fresh id first, on ANY head (Sol review, HIGH; GitHub issue
+  // #80): a later review never hides an earlier one's findings, and a review
+  // of an older head is returned, never dropped. The skill advances
+  // --since-review only after each returned review is fully dispositioned, so
+  // the next call yields the next.
+  const review = fresh.reduce((a, b) => (b.id < a.id ? b : a));
+  const headExpected = expectedHead === null || head.toLowerCase().startsWith(expectedHead);
+  const stale = !(headExpected && review.commit_id === head);
   const comments = parsePages(ghApi(`${base}/comments`, { paginate: true }))
     .filter((c) => c?.pull_request_review_id === review.id)
     .map((c) => ({ id: c.id, path: c.path ?? null, line: c.line ?? c.original_line ?? null, body: c.body ?? '', in_reply_to: c.in_reply_to_id ?? null }));
-  // HEAD RACE (Sol review): a push between the first head read and here would
-  // make this a review of a superseded head. Re-read the head; return the
-  // review only if both reads equal the reviewed SHA (and --head, checked
-  // above), otherwise poll again — the next poll sees it as stale.
-  const [again] = parsePages(ghApi(base));
-  if (again?.head?.sha !== head) {
-    result.head_sha = typeof again?.head?.sha === 'string' ? again.head.sha : head;
-    return null;
+  if (!stale) {
+    // HEAD RACE (Sol review): a push between the first head read and here
+    // would make this a review of a superseded head. Re-read the head; return
+    // it as current only if both reads equal the reviewed SHA (and --head,
+    // checked above), otherwise poll again: the next poll returns it stale.
+    const [again] = parsePages(ghApi(base));
+    if (again?.head?.sha !== head) {
+      result.head_sha = typeof again?.head?.sha === 'string' ? again.head.sha : head;
+      return null;
+    }
   }
   const body = review.body ?? '';
   return {
     review: { id: review.id, commit_id: review.commit_id, author: review.user.login, state: review.state, body },
     comments,
+    stale_review: stale,
     previously_missed: parsePreviouslyMissed(body),
     body_findings_without_comments: body.trim() !== '' && comments.length === 0,
   };
@@ -377,6 +438,11 @@ for (;;) {
     found = poll();
   } catch (e) {
     if (e instanceof DeadlineReached) finish('timeout', { review: null, comments: [] });
+    if (e instanceof NoReviewRequested) {
+      const message = `no Copilot review is requested on PR #${prNumber} and no unconsumed Copilot review exists${sinceReview === null ? '' : ` after --since-review ${sinceReview}`}, so nothing will arrive: run the wait again with --request-copilot (always after a push)`;
+      process.stderr.write(`pr-review-wait: ${message}\n`);
+      finish('no_review_requested', { review: null, comments: [], error: message });
+    }
     error(e.message);
   }
   if (found) finish('review', found);
