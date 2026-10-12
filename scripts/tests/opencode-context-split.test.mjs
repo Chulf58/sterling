@@ -435,3 +435,65 @@ test('a claimed one-shot line is restored even when the log write that reports a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a failed older delivery does not restore a registry failure line after a newer failure line was claimed and delivered', async () => {
+  const dir = makeProject();
+  const registryDb = join(dir, 'registry.db');
+  const prior = process.env.STERLING_REGISTRY_DB;
+  try {
+    process.env.STERLING_REGISTRY_DB = registryDb;
+    // Failure A: the registry file is not a database. Failure B: a directory sits at its path. Their error texts differ, so each line is told apart.
+    writeFileSync(registryDb, 'this is not a sqlite database, so opening the registry throws');
+    let releaseRestoreA;
+    let releaseKindB;
+    const gateRestoreA = new Promise((r) => { releaseRestoreA = r; });
+    const gateKindB = new Promise((r) => { releaseKindB = r; });
+    let restores = 0;
+    const h = handler(dir, {
+      rotationRestore: async () => {
+        if (restores++ === 0) await gateRestoreA; // call A is paused after it held line A and before it claims it
+        return '';
+      },
+      getSession: () => ({ get: async ({ sessionID }) => {
+        if (sessionID === 'ses_other') await gateKindB; // call B is paused before it holds line B
+        return { id: sessionID };
+      } }),
+    });
+    const lineA = /REGISTRY REFRESH FAILED \(.*not a database/;
+    const lineB = /REGISTRY REFRESH FAILED \((?!.*not a database)/;
+
+    // Call A (ses_root) holds line A, then claims it once its restore step resumes; its append fails after B has been delivered.
+    const attemptsA = [];
+    const promptA = { sessionID: 'ses_root', messageID: 'msg_a', delivery: 'immediate', prompt: {} };
+    Object.defineProperty(promptA.prompt, 'text', { get: () => 'go', set: (v) => { attemptsA.push(v); throw new Error('append failed late'); }, enumerable: true });
+    const callA = h.onPrompt(promptA).catch(() => {});
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Call B (ses_other) is another root session: its registry refresh fails again, so it holds a newer line B.
+    rmSync(registryDb);
+    mkdirSync(registryDb);
+    const callB = appended(h, 'ses_other');
+    await new Promise((r) => setTimeout(r, 20));
+
+    // A claims line A, then B holds, claims and delivers line B, all before A's failed append is released: the calls run in microtask lockstep.
+    // B is released first because its path to the hold is longer than A's path to the claim; released back to back they interleave as
+    // claim A, hold B, claim B, release A (the preconditions below fail if that order ever changes).
+    releaseKindB();
+    releaseRestoreA();
+    const deliveredB = await callB;
+    await callA;
+    assert.equal(attemptsA.length, 1);
+    assert.match(attemptsA[0], lineA, 'call A claimed line A');
+    assert.match(deliveredB, lineB, 'call B delivered the newer line B');
+    assert.doesNotMatch(deliveredB, lineA);
+
+    // Only ses_other prompts follow: a prompt of ses_root would refresh the registry again (the last root session seen was ses_other) and hold a fresh line.
+    const later = [await appended(h, 'ses_other'), await appended(h, 'ses_other'), await appended(h, 'ses_other')];
+    assert.ok(!later.some((t) => lineA.test(t)), 'the older line A is not redelivered after the newer line B');
+    assert.ok(!later.some((t) => lineB.test(t)), 'the newer line B is delivered exactly once');
+  } finally {
+    if (prior === undefined) delete process.env.STERLING_REGISTRY_DB;
+    else process.env.STERLING_REGISTRY_DB = prior;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
