@@ -65,7 +65,7 @@ function assertNoRawZodLeak(message: string, label: string) {
 
 // PIN 1/2/3 (handoff_write/handoff_read validation shaping + the valid-write
 // control) were removed with the staged-pipeline run/handoff protocol
-// (decision sterling-claude-code-scale-down-boundary, 2ad87dd1) —
+// (decision sterling-claude-code-scale-down-boundary, d3e63e16) —
 // handoffWrite/handoffRead no longer exist. PIN 4/5/6a (knowledge_promote)
 // below are unaffected and stay.
 

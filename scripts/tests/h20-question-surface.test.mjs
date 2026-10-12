@@ -229,13 +229,13 @@ test('question surface: a hazard with no slug is named by its title', () => {
 
 // UPDATED 2026-09-30. This test used to pin that a question-surface pointer
 // never suppresses a later WHOLE rendering on the dispatch surface. Decision
-// h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines (a4912f91,
+// the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store),
 // point 4) now judges dispatch hazards by isKnownDelivered, and its NOT
 // GUARANTEED clause accepts that a hazard shown as a line is not shown whole
 // later in the session. The consult surface still renders hazards whole and
 // still judges them by the substance ledger, so that half of the original pin
 // survives and is kept below.
-test('same-session guard: a hazard shown as a question pointer is not re-shown on a later dispatch (decision a4912f91)', () => {
+test('same-session guard: a hazard shown as a question pointer is not re-shown on a later dispatch (the former ruling h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines (not in the current store))', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     const ap = store.create(antiPattern(HAZARD_TITLE, HAZARD_TRIGGER, 'breach-countdown-hud-reload'));
@@ -252,7 +252,7 @@ test('same-session guard: a hazard shown as a question pointer is not re-shown o
   }
 });
 
-test('same-session guard: a hazard shown as a question pointer must still render WHOLE on a later consult (decision 6300c1e8)', () => {
+test('same-session guard: a hazard shown as a question pointer must still render WHOLE on a later consult (the former ruling question-surface-gets-hazards-as-pointers (not in the current store))', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(antiPattern(HAZARD_TITLE, HAZARD_TRIGGER, 'breach-countdown-hud-reload'));
@@ -325,7 +325,7 @@ test('dispatch surface is unchanged: prior answers keep the RE-DERIVE wording, d
     assert.ok(ctx.includes(`knowledge_get ${f.id}`), 'prior answer keeps the full-id read');
     assert.ok(ctx.includes(`knowledge_get ${d.id}`), 'decision keeps the full-id read');
     assert.match(ctx, /ALREADY REJECTED/);
-    // 301d8a0a still governs the dispatch surface: hazards render WHOLE there,
+    // the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store) still governs the dispatch surface: hazards render WHOLE there,
     // never as the question surface's one-line pointer.
     assert.match(ctx, /⚠ ANTI-PATTERN \[WARN\] for this subject — '.*Breach countdown widget re-triggers/);
     assert.match(ctx, /TRIGGER: Any breach countdown widget that shows countdown seconds/);

@@ -248,7 +248,7 @@ export const IMPLEMENTOR_WORDING_EDITS = [
   {
     commit: 'board efd77feb',
     date: '2026-10-05',
-    reason: 'new rubric item 3: stop at the first that holds before writing new code (not needed, repo helper, standard library, installed dependency); never add a dependency for a few lines; never shortens the tests or the report (user-ruled, board efd77feb, finding a7138a10)',
+    reason: 'new rubric item 3: stop at the first that holds before writing new code (not needed, repo helper, standard library, installed dependency); never add a dependency for a few lines; never shortens the tests or the report (user-ruled, board efd77feb, the former finding implementor rubric: stop at the first that holds (not in the current store))',
     before: '\n3. Match the surrounding code',
     after: '\n3. Before writing new code, stop at the first that holds: it is not needed (say so in one line); a helper, type or pattern already in this repo does it; the standard library or a platform feature does it; an installed dependency does it. Never add a dependency for what a few lines can do. This never shortens the tests or the report.\n4. Match the surrounding code',
   },

@@ -1,4 +1,4 @@
-// OpenCode context parity with H1 and H19 (board cbee2b3d, audit f2ba68c2 rows 2 and 24).
+// OpenCode context parity with H1 and H19 (board cbee2b3d, audit the former finding 'OpenCode parity audit' (not in the current store) rows 2 and 24).
 // The host-neutral H1 operating-state lines (MACHINE ROLE, Project mode, TDD posture,
 // the undeclared-source scan) reach the OpenCode conductor's context, and a child
 // (subagent) session gets H19's dispatch staging from its own brief. Staging follows

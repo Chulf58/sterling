@@ -223,7 +223,7 @@ export function codexModelPin(root, { opener, toolInput }) {
 
 /** True when the outgoing brief already cites this record by full id, id8 or
  *  slug. On the dispatch surface such a hazard is dropped before selection
- *  and spends no mark (a4912f91 point 1): the brief already carries it.
+ *  and spends no mark (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) point 1): the brief already carries it.
  *  Bounded on both sides so a longer slug or a longer hex run is not a
  *  citation; an id8 followed by '-' is the start of a full id and counts. */
 function citedInBrief(record, text) {
@@ -358,15 +358,15 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
   // (either ledger) is dropped from consideration here — the per-type
   // render below (hazard=substance, everything else=discovery) is what
   // actually earns the mark, but re-showing something already fully known
-  // is noise this stage need not risk (decision 92088a62's split still
+  // is noise this stage need not risk (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)'s split still
   // holds: an owner shown here as a mere article POINTER is untouched by
   // this check's effect on H19, which guards SUBSTANCE independently).
   //
   // EXCEPTION, the CONSULT surface only: an anti_pattern there is judged by
   // `isSubstanceDelivered` alone, because a consult still renders hazards
   // whole and a pointer shown elsewhere must not suppress that (fix round on
-  // decision 6300c1e8). The DISPATCH surface judges hazards by
-  // `isKnownDelivered` (decision a4912f91 point 4): ranks 2-3 go out as
+  // the former ruling 'question-surface-gets-hazards-as-pointers' (not in the current store)). The DISPATCH surface judges hazards by
+  // `isKnownDelivered` (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) point 4): ranks 2-3 go out as
   // one-line pointers credited as discovery, and the substance ledger alone
   // would re-show them on every dispatch. Accepted cost, stated in that
   // ruling's NOT GUARANTEED: a hazard shown as a line (here or on the
@@ -385,7 +385,7 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
   // already applies the SAME cap internally (cappedHazards) and, crucially,
   // DISCLOSES the omitted count — an early slice here would hand it an
   // already-≤3 list and the "N more hazard(s) NOT shown" line would never
-  // fire even when the true match count was higher (decision 92088a62:
+  // fire even when the true match count was higher (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store):
   // "at most 3 per package... with the omitted count stated").
   const hazards = fresh.filter((x) => x.record.type === 'anti_pattern');
   // The hazards that take the HAZARD_CAP slots, by read share. Each store's
@@ -452,7 +452,7 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
       `Path-scoped delivery cannot find these. Check them BEFORE the consult goes out — a bad premise sent to an external model is still a bad premise.`
     : // PreToolUse context arrives WITH the dispatch (timing note at the top
       // of this file), so the brief has already gone out: the act this
-      // prompts is a correction (decision a4912f91 point 5).
+      // prompts is a correction (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) point 5).
       `STERLING MECHANISM-AXIS DELIVERY (H20) — you have just dispatched '${subagentType ?? 'an agent'}'; the brief has already gone out. ` +
       `The store holds records matching its SUBJECT (${matchedClause}), which no file you touched would surface. ` +
       `If one changes the brief's premise, correct the agent now ${HOST_TEXT[host].correction} — a fan-out multiplies a bad premise by N.`;
@@ -513,13 +513,13 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
   };
   const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
   // Hazards render WHOLE on the consult surface — a whole hazard IS
-  // substance there (decision 92088a62 item 4). On the dispatch surface the
+  // substance there (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) item 4). On the dispatch surface the
   // rank-1 hazard is whole and ranks 2-3 are one-line trigger pointers
-  // ('lead' mode, decision a4912f91 — the third narrowing). On the
+  // ('lead' mode, the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) — the third narrowing). On the
   // AskUserQuestion surface only, they
   // render as ONE-LINE POINTERS (decision question-surface-gets-hazards-
-  // as-pointers, 6300c1e8 — the second narrowing of 301d8a0a's hazards-whole
-  // rule, after 21e3637e's read-only-lane pointer): no edit happens while
+  // as-pointers, the former ruling 'question-surface-gets-hazards-as-pointers' (not in the current store) — the second narrowing of the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)'s hazards-whole
+  // rule, after the former ruling 'read-only-subagent-lanes-get-hazards-as-pointers' (not in the current store)'s read-only-lane pointer): no edit happens while
   // the user answers a question, so the whole right-way text is not needed
   // there. `hazardParts`' 'question' mode is the SAME cap-and-disclose
   // renderer as 'whole'/'pointer' mode, never a second one built here.
@@ -533,7 +533,7 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
       remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
       // Matched on the prompt's SUBJECT, not a file path (the H19 label).
       matchLabel: 'for this subject',
-      // Dispatch: rank 1 whole, ranks 2-3 as trigger lines (a4912f91).
+      // Dispatch: rank 1 whole, ranks 2-3 as trigger lines (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store)).
       mode: isQuestion ? 'question' : isDispatch ? 'lead' : 'whole',
     }),
   ];
@@ -636,7 +636,7 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
     )
   );
   // PER-DELIVERY TOTAL CAP (scale-down Slice 3c, assembleDelivery — decision
-  // 92088a62's ONE ASSEMBLER): hazards are complete unbudgeted substance;
+  // the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)'s ONE ASSEMBLER): hazards are complete unbudgeted substance;
   // header, decisions, prior answers and article pointers are ordinary and
   // degrade under the cap. The codex model pin (if this is a consult) is
   // folded in as a LEADING, PINNED-but-CHARGED chrome part (item 6) so it
@@ -766,7 +766,7 @@ export function composeOutputAxis(store, { content, guardFor }) {
   const terms = extractAxisTerms(clipped, MAX_RANK_TERMS);
   if (terms.length < AXIS_MIN_HITS) return null; // too little vocabulary to match on
 
-  // STAGE 1 — narrow in the store. anti_pattern ONLY (ruling 5564361d v2):
+  // STAGE 1 — narrow in the store. anti_pattern ONLY (the former ruling 'h23-output-axis-hazards-only-skip-listings-advisory-label' (not in the current store), v2):
   // decisions reach the model through H20 and explicit store lookups.
   const candidates = store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 });
   if (!candidates.length) return null;

@@ -3,7 +3,7 @@
 // A user board item may carry `blocked_by: string[]` (board slugs). The card shows
 // ONE line, `blocked by: <name (id8)>, ...`, listing only the blockers still OPEN (a
 // blocker that was removed counts as closed). Names, never bare slugs (decision
-// 11b8b08c; decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start
+// the former ruling 'board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address' (not in the current store); decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start
 // item 7). When every blocker is closed, or the item has none, the card shows no
 // such line. An item other live items wait on shows `unblocks: <name (id8)>, ...`,
 // and an item with `needs` shows it in the detail line.

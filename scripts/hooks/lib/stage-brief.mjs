@@ -2,7 +2,7 @@
 // territory a DISPATCH BRIEF names, plus the per-dispatch chrome (active plan,
 // TDD posture, the default return contract). Extracted from
 // h19-dispatch-staging.mjs so the OpenCode context hook stages a child session
-// from the same code (board cbee2b3d, audit f2ba68c2 row 24). What stays in each
+// from the same code (board cbee2b3d, audit the former finding 'OpenCode parity audit' (not in the current store) row 24). What stays in each
 // host is only how the brief is obtained: Claude resolves it through the
 // dispatch-state machine at SubagentStart, OpenCode reads the child session's
 // first user message. Attribution is the caller's, per decision
@@ -226,7 +226,7 @@ export function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingCh
   const subjectDecisions = freshSubject.filter((x) => x.record.type === 'decision').map((x) => x.record);
 
   // PER-DELIVERY TOTAL CAP (scale-down Slice 3c, assembleDelivery in
-  // lib/delivery.mjs — decision 92088a62's ONE ASSEMBLER). Hazards are complete
+  // lib/delivery.mjs — the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)'s ONE ASSEMBLER). Hazards are complete
   // unbudgeted substance; article bodies, decisions and every other ordinary line
   // share the cap and degrade to `knowledge_get <id>` pointers. CHROME IS CHARGED
   // TOO: leading and trailing chrome are folded in as pinned-but-charged parts in
@@ -235,11 +235,11 @@ export function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingCh
   const totalCap = resolveTotalCap(cwd);
   const leadingChromeParts = leadingChrome.map(chromePart);
   const trailingChromeParts = trailingChrome.map(chromePart);
-  // ONE HAZARD CAP PER PACKAGE (decision 92088a62: "HAZARDS: at most 3 per
+  // ONE HAZARD CAP PER PACKAGE (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store): "HAZARDS: at most 3 per
   // package"). The union is ranked ONCE by cappedHazards (severity first; the path
   // channel is listed first, so it wins ties) and the top HAZARD_CAP are split
   // back into the two labelled channels. Read-only lanes keep per-channel pointer
-  // caps (decision 21e3637e): a pointer line is not a whole hazard.
+  // caps (the former ruling 'read-only-subagent-lanes-get-hazards-as-pointers' (not in the current store)): a pointer line is not a whole hazard.
   const packageHazards = hazardMode === 'whole' ? cappedHazards([...freshHazards, ...subjectHazards]) : null;
   const channelCap = (list) => (packageHazards ? packageHazards.filter((r) => list.includes(r)).length : HAZARD_CAP);
   const channelCapLabel = (cap) => (cap < HAZARD_CAP ? `cap ${HAZARD_CAP} per package, shared across the path and subject channels` : undefined);
@@ -292,7 +292,7 @@ export function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingCh
   return {
     text: assembled.text,
     // Guard only what the assembler says it actually emitted — never a re-scan
-    // of the composed text (decision 92088a62's ONE ASSEMBLER CONTRACT).
+    // of the composed text (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)'s ONE ASSEMBLER CONTRACT).
     record: () => {
       markSubstanceDelivered(guard, assembled.emittedSubstance);
       markDiscoveryDelivered(guard, assembled.emittedDiscovery);

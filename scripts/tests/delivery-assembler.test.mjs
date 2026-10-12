@@ -1,5 +1,5 @@
 // THE ONE ASSEMBLER — contract pins (decision knowledge-delivery-target-
-// design-no-delayed-delivery, 92088a62, delivery-migration step 3).
+// design-no-delayed-delivery, the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store), delivery-migration step 3).
 //
 // A record marked "substance delivered" only when the assembler ACTUALLY
 // emitted its substance into the final composed context — never because its
@@ -178,7 +178,7 @@ test('guard: a record shown only as discovery still qualifies for substance late
   assert.ok(isSubstanceDelivered(guard, record), 'the SAME record now qualifies for substance too');
 
   // Forward-fix: the record's content changes (updated_at bumps) without a
-  // new id — decision 92088a62's STATE clause says it qualifies again.
+  // new id — the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)'s STATE clause says it qualifies again.
   const revised = { id: record.id, updated_at: '2026-09-21T00:00:00.000Z' };
   assert.ok(!isSubstanceDelivered(guard, revised), 're-versioned content is not the same (id, revision) pair — it is fresh again');
 });
@@ -263,7 +263,7 @@ test('assembler: chrome never earns a delivery mark, even when it carries identi
 // the fix round names — pinned chrome was NEVER clipped or dropped, so an
 // oversized pinned part could blow both the configured cap and the hard
 // transport ceiling while reporting `degraded: false`. Hazards stay exempt
-// from the CONFIGURED cap (`capBytes`, decision 301d8a0a) — that part of the
+// from the CONFIGURED cap (`capBytes`, the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)) — that part of the
 // old assertion survives — but pinned chrome is now bounded like any other
 // content when it does not fit, and both are still bound by the separate,
 // unwaivable transport ceiling (see the transport-overflow tests below).
@@ -279,7 +279,7 @@ test('assembler: a tiny capBytes leaves a hazard whole (exempt from the CONFIGUR
 });
 
 // ---------------------------------------------------------------------------
-// fix-round HIGH 1 / HIGH 4 — the hard transport ceiling (decision 92088a62
+// fix-round HIGH 1 / HIGH 4 — the hard transport ceiling (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)
 // NOT GUARANTEED clause: "Claude Code persists hook output over 10,000 chars
 // ... oversized hidden substance is a degraded notice and is not marked
 // delivered"), independent of any CONFIGURED cap.
@@ -552,7 +552,7 @@ test('MEDIUM 5: H20 subject-matched hazards beyond HAZARD_CAP (4) state the omit
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     // UPDATED 2026-09-30 for decision h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines
-    // (a4912f91): the dispatch surface renders rank 1 whole and ranks 2-3 as
+    // (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store)): the dispatch surface renders rank 1 whole and ranks 2-3 as
     // `name (id8)` lines, so "selected" is counted by id8, not by full id.
     // The subject of this test (the 4th is disclosed, never silently dropped)
     // is unchanged.

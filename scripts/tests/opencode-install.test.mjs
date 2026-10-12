@@ -1202,7 +1202,7 @@ test('project config: an mcp.sterling entry that differs from what Sterling wrot
   assert.deepEqual(JSON.parse(readFileSync(cfg, 'utf8')).mcp.sterling, mine);
 });
 
-// Finding 789147ca: OpenCode gives a TUI bundle its own solid-js only when the bundle
+// the former finding 'opencode plugin installs land under node_modules' (not in the current store): OpenCode gives a TUI bundle its own solid-js only when the bundle
 // lives outside any node_modules path, so for the npm-installed copy the dashboard is
 // copied ("materialized") to ~/.sterling/opencode/tui/<version>/ and the normal TUI
 // shim loads the newest copy there. No cli.json entry is needed.

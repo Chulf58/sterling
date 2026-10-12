@@ -100,7 +100,7 @@ test('escapeLeavesView: Esc leaves only when no help, edit, picker or search is 
   assert.equal(escapeLeavesView({ ...initialUi, tab: 3, selector: { key: 'k', stage: 'model', highlight: 0 } }), false);
 });
 
-test('both dashboard functions are on in OpenCode: no flag gate is left (decision 48903a6f, DASHBOARD FUNCTIONS)', () => {
+test('both dashboard functions are on in OpenCode: no flag gate is left (the former ruling sterling-on-opencode-2-is-the-knowledge-loop-in-one-small-plugin (not in the current store), DASHBOARD FUNCTIONS)', () => {
   assert.equal('readFlags' in view, false);
   assert.equal('disabledEffectsFor' in view, false);
 });

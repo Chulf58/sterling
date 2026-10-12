@@ -2105,7 +2105,7 @@ test('[#70 handoff] TOOLS_MISSING_RE matches a missing web tool as the subject, 
     assert.doesNotMatch(r, TOOLS_MISSING_RE, r);
   }
   assert.match('WebFetch returned 503, server unavailable', TEMPORARY_RE, 'a down source stays temporary');
-  // Review finding (Sol, 5a3e0f46): both classifiers matched "unavailable"; a named source failure wins.
+  // Review finding (Sol review of the worker classifiers): both classifiers matched "unavailable"; a named source failure wins.
   for (const r of SOURCE_OUTAGES) {
     assert.match(r, SOURCE_FAILURE_RE, r);
     assert.equal(isToolsMissing(r), false, r);

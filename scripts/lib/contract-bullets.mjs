@@ -11,7 +11,7 @@ import { contractHistorySnapshot } from './contract-history.mjs';
 import { renderClaudeText } from './agent-fences.mjs';
 
 // AGENTS.md/CLAUDE.md split (decision agents-md-is-the-instructions-file-claude-md-is-a-one-line-import,
-// 161e2972): each TARGET_LEADS bullet lives in whichever template currently contains it, and
+// the former ruling 'agents-md-is-the-instructions-file-claude-md-is-a-one-line-import' (not in the current store)): each TARGET_LEADS bullet lives in whichever template currently contains it, and
 // propagates into the SAME layer file in a sibling. TEMPLATE_RELS is searched in this order to
 // find a lead's home; historical ancestry is searched across BOTH files (a bullet may have moved
 // from target-claude-md.md to target-agents-md.md at the split commit and keeps its ancestry).

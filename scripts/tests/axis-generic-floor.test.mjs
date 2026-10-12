@@ -236,7 +236,7 @@ test('H20: the injection stays within the configured delivery total cap, and a s
     // Hazards are exempt from the cap; everything else fits what remains.
     // Hazard text on the dispatch surface is the lead block plus the trigger
     // lines, their one-line header and the '+N more' line (decision
-    // h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines, a4912f91).
+    // the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store).
     // All are hazard parts, exempt from the configured cap like the block.
     const hazardBytes = [
       ...ctx.matchAll(/⚠ ANTI-PATTERN[\s\S]*?RIGHT WAY: [^\n]*/g),
@@ -281,7 +281,7 @@ test('H23 CONTROL: tool output naming a specific record subject still delivers a
   const { dir, store, cleanup } = makeProject();
   try {
     // anti_pattern, not decision: H23 points at hazards only since ruling
-    // h23-output-axis-hazards-only-skip-listings-advisory-label (5564361d v2).
+    // the former ruling 'h23-output-axis-hazards-only-skip-listings-advisory-label' (not in the current store) v2).
     const d = store.create(antiPattern(SPECIFIC_TITLE, SPECIFIC_STATEMENT));
     const r = runHook('h23-output-axis.mjs', postBash(dir, SPECIFIC_PROMPT), dir);
     const payload = JSON.parse(r.stdout).hookSpecificOutput.additionalContext; // 2026-09-19: direct PostToolUse transport.

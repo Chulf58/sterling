@@ -1,5 +1,5 @@
 // Child-session dispatch staging: H19's SubagentStart delivery for OpenCode
-// (board cbee2b3d, audit f2ba68c2 row 24). A subagent's brief is the first user
+// (board cbee2b3d, audit the former finding 'OpenCode parity audit' (not in the current store) row 24). A subagent's brief is the first user
 // message of its own session, so attribution is exact by construction: no
 // pending-dispatch register, no sidecar file, no guess between same-type
 // siblings (decision h22-start-staging-only-when-attribution-is-unambiguous-no-sidecar).

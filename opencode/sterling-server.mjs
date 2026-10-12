@@ -5150,7 +5150,7 @@ var init_config = __esm({
       // scripts are launcher and console glue, never a toolchain's source, and
       // flagging them was banner noise answered the same way every session. The
       // default lives in THREE places that must agree: here, templates/default-
-      // config.json (anti-pattern 85d15143), and the raw-config ladder in
+      // config.json (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)), and the raw-config ladder in
       // scripts/hooks/lib/undeclared-source-scan.mjs, which imports this constant.
       // An explicit [] still opts back in.
       undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default(() => [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]),
@@ -5192,7 +5192,7 @@ var init_config = __esm({
       tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
       // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
       // H6-only (agent-scoped context enforcement) and DELETED with H6 under
-      // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+      // decision `sterling-claude-code-scale-down-boundary` (d3e63e16); windows
       // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
       // denominator and the direct-mode pressure thresholds). `windows.default`
       // is a REAL fallback (decision context-window-default-is-a-real-fallback,
@@ -5257,7 +5257,7 @@ var init_config = __esm({
         reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
       }).catchall(agentModelEntry).default({}),
       // Per-project agent tool extension (decision
-      // per-project-agent-extra-tools-config-appended-at-render, 587472e3):
+      // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
       // agents.<registered-agent-name>.extra_tools is appended to that agent's
       // rendered tools: line at install. It must live in the schema — this top-level
       // object strips unknown keys silently. Each entry is one tool name with an
@@ -5514,7 +5514,7 @@ var init_config = __esm({
       // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
       // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
       // Consumers of the PARSED config must narrow this field themselves.
-      // The default lives twice (anti_pattern 85d15143): here and in
+      // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
       // templates/default-config.json; config.test.ts pins that they agree.
       mode: external_exports.unknown().default("hobby"),
       // Where the project's stores live (decision
@@ -5539,7 +5539,7 @@ var init_config = __esm({
       // reads a config with NO key as on when portable agents are already tracked
       // in git, which this default cannot express: read the setting through it,
       // never from the parsed config.
-      // The default lives twice (anti_pattern 85d15143): here and in
+      // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
       // templates/default-config.json; config.test.ts pins that they agree.
       handoff: external_exports.unknown().default({ enabled: false }),
       // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
@@ -10646,7 +10646,7 @@ var init_dist2 = __esm({
       // getPendingExit, writeHandoff/readHandoffs, updateRunOptimistic and its
       // dependents appendRunEscalation/appendRunReconcileNeeded/
       // appendRunScopeAmendment/setRunReviewMandatory/incrementDispatchCount) was
-      // removed per decision sterling-claude-code-scale-down-boundary (2ad87dd1).
+      // removed per decision sterling-claude-code-scale-down-boundary (d3e63e16).
       // The `runs`/`handoffs` SQLite tables are left in place, unused — no FK
       // references them and no startup validation scans them, so leaving them is
       // safe; a DROP TABLE migration is optional cleanup, not a correctness
@@ -12531,7 +12531,7 @@ function wholeHazardPart(ap, text, matchLabel) {
     revision: recordRevision(ap),
     name: ap.slug || ap.title,
     text,
-    // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
+    // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)
     // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
     // the hard transport ceiling degrades to this bare notice — never a
     // partial trigger/right_way (the HAZARDS clause: "each whole") —
@@ -13249,7 +13249,7 @@ function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subag
   const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask${HOST_TEXT[host].timing}. Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : isConsult ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to CONSULT the sparring partner (codex). The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the consult goes out \u2014 a bad premise sent to an external model is still a bad premise.` : (
     // PreToolUse context arrives WITH the dispatch (timing note at the top
     // of this file), so the brief has already gone out: the act this
-    // prompts is a correction (decision a4912f91 point 5).
+    // prompts is a correction (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) point 5).
     `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just dispatched '${subagentType ?? "an agent"}'; the brief has already gone out. The store holds records matching its SUBJECT (${matchedClause}), which no file you touched would surface. If one changes the brief's premise, correct the agent now ${HOST_TEXT[host].correction} \u2014 a fan-out multiplies a bad premise by N.`
   );
   const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
@@ -13292,7 +13292,7 @@ function composeMechanismAxis(store, { root, outgoing, toolInput, surface, subag
       remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
       // Matched on the prompt's SUBJECT, not a file path (the H19 label).
       matchLabel: "for this subject",
-      // Dispatch: rank 1 whole, ranks 2-3 as trigger lines (a4912f91).
+      // Dispatch: rank 1 whole, ranks 2-3 as trigger lines (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store)).
       mode: isQuestion ? "question" : isDispatch ? "lead" : "whole"
     })
   ];
@@ -18597,7 +18597,7 @@ function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = 
   return {
     text: assembled.text,
     // Guard only what the assembler says it actually emitted — never a re-scan
-    // of the composed text (decision 92088a62's ONE ASSEMBLER CONTRACT).
+    // of the composed text (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)'s ONE ASSEMBLER CONTRACT).
     record: () => {
       markSubstanceDelivered(guard, assembled.emittedSubstance);
       markDiscoveryDelivered(guard, assembled.emittedDiscovery);

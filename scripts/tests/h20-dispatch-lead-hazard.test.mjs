@@ -1,8 +1,8 @@
 // H20 dispatch surface: the lead hazard stays whole, the rest become one-line
 // trigger pointers, and hazards the brief already cites are dropped (user
 // ruling h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines,
-// a4912f91). Measured basis: finding 8d488eb5 (rank 3 acted on 0 of 77 times;
-// knowledge_get on a hazard never ran) and finding 0a1e3af8 (~55k tokens per
+// the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store)). Measured basis: the former finding 'rank 3 hazard acted on 0 of 77 times' (not in the current store) (rank 3 acted on 0 of 77 times;
+// knowledge_get on a hazard never ran) and the former finding 'about 55k tokens per session for three whole hazards' (not in the current store) (~55k tokens per
 // session for three whole hazards).
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';

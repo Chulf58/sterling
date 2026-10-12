@@ -218,7 +218,7 @@ test('REGRESSION: a Task dispatch still renders the unchanged literal dispatch p
     assert.equal(r.code, 0);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     // UPDATED 2026-09-30: decision h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines
-    // (a4912f91, point 5) retired "you are about to dispatch": PreToolUse
+    // (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store), point 5) retired "you are about to dispatch": PreToolUse
     // context arrives WITH the dispatch. The pin keeps its purpose — the
     // dispatch header still interpolates subagent_type and never takes the
     // consult framing.

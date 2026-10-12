@@ -131,7 +131,7 @@ export function scorePull(response, labels, negative = false) {
 // unbounded char cap; the decision's alternatives_rejected names "clipping
 // content to fit" explicitly). Consequently the wholeHazard threshold read as
 // "100% whole selected hazards" (decision `knowledge-quality-replay-benchmark`
-// 0bcada92) is unreachable by construction whenever a selected hazard exceeds
+// the former ruling 'knowledge-quality-replay-benchmark' (not in the current store)) is unreachable by construction whenever a selected hazard exceeds
 // DELIVERY_TRANSPORT_VISIBLE_BYTES (10000) — it must not be read as a release gate.
 const HAZARD_OVERSIZE_MARKER = 'TOO LARGE to show in full (exceeds the transport limit)';
 

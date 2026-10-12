@@ -1,5 +1,5 @@
 // Command-class skip predicate for H23 (ruling h23-output-axis-hazards-only-skip-
-// listings-advisory-label, knowledge_get 5564361d v2). Its own module because
+// listings-advisory-label, knowledge_get the former ruling 'h23-output-axis-hazards-only-skip-listings-advisory-label' (not in the current store) v2). Its own module because
 // the hook body reads stdin and exits at import time, so nothing can import a
 // function from the hook file itself; the tests import this one.
 

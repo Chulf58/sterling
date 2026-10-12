@@ -238,7 +238,7 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
     // implementor=0, researcher=1, scout=2, librarian=3, classifiers=4, reviewer=5.
     // LOW-3 (second Opus re-check round): the System tab now filters
     // config.models to exactly this 6-key set (the classless four-agent
-    // roster, decision agent-roster-is-classless-four-agents f0893161, plus
+    // roster, the former ruling 'agent-roster-is-classless-four-agents' (not in the current store), plus
     // classifiers and reviewer) — the fixture previously also carried an orphan 'coder'
     // key + agent (a relic of the pre-rename roster) at index 0 specifically
     // to exercise "an unmapped key/agent renders inertly"; that behavior no
@@ -746,7 +746,7 @@ test('33-col floor: an OPEN selector still renders within the 33-column pane', (
 // LOW-3 (second Opus re-check round, on top of commit 22e20f9): the System
 // tab used to render/edit whatever key the caller's configModels handed it,
 // trusting it blindly — including a relic like 'coder_hard' that no agent
-// has EVER read (decision agent-roster-is-classless-four-agents f0893161).
+// has EVER read (the former ruling 'agent-roster-is-classless-four-agents' (not in the current store).
 // Now filtered to exactly the classless roster + classifiers
 // (SYSTEM_TAB_MODEL_KEYS), regardless of what a stray key in the snapshot
 // carries — a defensive floor, not just fixture hygiene, since an old

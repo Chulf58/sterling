@@ -249,7 +249,7 @@ test('prompt names a governed file: payload contains the article, the guard is w
     const guard = guardOf(dir, 'agent-1');
     assert.ok(guard, 'guard file written for the spawned agent');
     const alpha = store.query({ types: ['feature_article'], rank_terms: ['alpha'], cap: 5 }).find((a) => a.slug === 'alpha');
-    // Guard schema v2 (decision 92088a62): an owner renders as SUBSTANCE (the
+    // Guard schema v2 (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)): an owner renders as SUBSTANCE (the
     // full article body), so it lands in `guard.substance`, not a flat
     // `guard.records` array — keyed on the FULL (id, revision) pair, not id
     // alone (fix-round test-integrity requirement: asserting on id alone
@@ -932,7 +932,7 @@ test('rank: a standing-authority decision stages among a coder dispatch\'s point
 
 // ---------------------------------------------------------------------------
 // CAPPED-OUT DECISIONS STAY DELIVERABLE (board 6c0c848f item 1, decision
-// 92088a62 ONE ASSEMBLER CONTRACT: a false 'delivered' mark is forbidden). The
+// the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) ONE ASSEMBLER CONTRACT: a false 'delivered' mark is forbidden). The
 // decision block renders only DECISION_POINTER_CAP (8) pointers and discloses
 // the rest as NOT shown, so only those 8 may earn a discovery mark; the ninth
 // must stage on the next dispatch instead of being suppressed for the session.

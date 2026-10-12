@@ -1,6 +1,6 @@
 // OUTSIDE-COMMIT NEWNESS BASE FIX (board 4e624c1a; finding
 // outside-commit-drift-detection-owned-detected-new-unowned-silent-september-2026,
-// 6d1b3c99). A plain `git commit` made OUTSIDE Claude Code (no hooks, no MCP)
+// the former finding 'newness base for a brand-new unowned file' (not in the current store)). A plain `git commit` made OUTSIDE Claude Code (no hooks, no MCP)
 // between two sessions can add a brand-new UNOWNED file. By the time the next
 // Stop runs, that file is already committed into HEAD, so H10's "any NEW
 // unowned file" fast path — which tested newness against `git ls-tree HEAD`

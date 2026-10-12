@@ -530,7 +530,7 @@ const assertNoDeadTerms = (label, content) => {
 };
 
 // AGENTS.md/CLAUDE.md split (decision agents-md-is-the-instructions-file-claude-md-is-a-one-line-import,
-// 161e2972): AGENTS.md is the tool-agnostic layer (read natively by Codex/OpenCode); CLAUDE.md is
+// the former ruling 'agents-md-is-the-instructions-file-claude-md-is-a-one-line-import' (not in the current store)): AGENTS.md is the tool-agnostic layer (read natively by Codex/OpenCode); CLAUDE.md is
 // `@AGENTS.md` plus the Sterling-bound layer. Project facts/conventions placeholders now render into
 // AGENTS.md only — CLAUDE.md's template carries just {{PROJECT_NAME}}.
 //

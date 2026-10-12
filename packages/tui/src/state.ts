@@ -302,7 +302,7 @@ export function driftOf(installed: string, config: string): boolean {
 /** System tab, LOW-3 (second Opus re-check round, feat/gap-hunt-round-1
  *  22e20f9): the ONLY config.models keys the System tab may render/edit —
  *  every governed agent key from AGENT_MODEL_KEY (the classless four-agent
- *  roster, decision agent-roster-is-classless-four-agents f0893161) plus
+ *  roster, the former ruling 'agent-roster-is-classless-four-agents' (not in the current store) plus
  *  'classifiers', the schema's one legitimate config-only key
  *  (packages/schemas/src/config.ts's `models` object — the only 5 keys it
  *  actually defines). A relic/legacy key such as 'coder_hard' — no agent has

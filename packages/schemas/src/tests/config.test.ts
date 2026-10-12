@@ -317,7 +317,7 @@ test('templates/default-config.json still parses and carries tdd.enabled true', 
 });
 
 // Per-project agent tool extension (decision
-// per-project-agent-extra-tools-config-appended-at-render, 587472e3): the block
+// the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store): the block
 // MUST be in the schema — the top-level object strips unknown keys silently, so
 // an unschema'd `agents` would vanish and the grant would never render.
 test('agents: absent block defaults to {} (config stays optional)', () => {
@@ -358,7 +358,7 @@ test('agents: a non-array extra_tools (e.g. a string) still parses — refused a
 
 // ------------------- project mode (decision project-mode-hobby-work-toggle-decides-flow, slice S1) -------------------
 
-// The default lives TWICE (anti_pattern 85d15143): the zod default and
+// The default lives TWICE (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): the zod default and
 // templates/default-config.json. A missing key means hobby; the two copies must agree.
 type CfgWithMode = { mode?: string };
 
@@ -386,7 +386,7 @@ test('mode: parseConfig is PERMISSIVE — hobby/work pass, any other value is pr
 
 // The handoff setting (decision
 // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting):
-// off by default, in both copies of the default (anti_pattern 85d15143).
+// off by default, in both copies of the default (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)).
 test('handoff: an empty config defaults to { enabled: false }, and the shipped template carries the same default', () => {
   const empty = parseConfig({}) as unknown as { handoff?: unknown };
   assert.deepEqual(empty.handoff, { enabled: false }, 'a missing handoff key means off');
@@ -422,7 +422,7 @@ test('pr_review (PR review loop identity pin): permissive, defaults to copilot_l
 
 // Undeclared-source default (decision gap-hunt-2026-09-28-rulings item 6): shell
 // scripts are excluded by default. The default lives in BOTH the zod schema and
-// the shipped template, and the two must agree (anti-pattern 85d15143).
+// the shipped template, and the two must agree (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)).
 test('undeclared_source_exclude_globs defaults to ["**/*.sh"] in the schema AND the shipped template', () => {
   const shippedRaw = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
   assert.deepEqual(DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, ['**/*.sh']);
@@ -473,7 +473,7 @@ test('unreadConfigKeys: the Dome Farmer pre-rename models keys are each named, w
 
 // ------------------- maintenance_worker (decision maintenance-queue-background-haiku-worker-simple-redesign) -------------------
 // The kill switch for the hook-started background worker. Its default lives in
-// TWO places (anti_pattern 85d15143: a template-only default is ignored by
+// TWO places (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store): a template-only default is ignored by
 // install/sync, which fill omitted keys from the zod default), so both are pinned.
 
 test('maintenance_worker.enabled: an absent block parses to enabled true, and the shipped template agrees', () => {

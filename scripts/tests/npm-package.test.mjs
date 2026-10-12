@@ -2,16 +2,16 @@
 // sterling-on-opencode-distributes-as-npm-package-via-opencode-plugin-add) is
 // what `opencode plugin add` installs: a registry tarball, no lifecycle
 // scripts, the server entry resolved through exports ./server (finding
-// 3b0d9ea0), running from OpenCode's npm cache dir (finding f3adf829).
+// the former finding 'opencode plugin add installs under the npm cache' (not in the current store)), running from OpenCode's npm cache dir (the former finding 'running from the OpenCode npm cache dir' (not in the current store)).
 // There is no ./tui export and no peers: the dashboard gets the host's solid
 // only from a bundle outside node_modules, and solid copies beside it freeze
-// it (finding 789147ca). The TUI bundle still ships, for the installer to copy
+// it (the former finding 'opencode plugin installs land under node_modules' (not in the current store)). The TUI bundle still ships, for the installer to copy
 // out of node_modules.
 //
 // This packs the TRACKED files (working-tree content, nothing untracked), as
 // the publish step does from `git archive`, installs the tarball into a temp
 // dir far from the repo's node_modules, and loads ./server from there
-// (anti-pattern 437e47d5: prove the shipped entry loads with no node_modules
+// (the former ruling 'shipping-a-plugin-entry-as-source-that-imports-workspace-build-output' (not in the current store): prove the shipped entry loads with no node_modules
 // and no dist).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -54,8 +54,8 @@ test('the package is the public @chulf58/sterling with only the ./server export 
   assert.equal(pkg.name, '@chulf58/sterling');
   assert.equal(pkg.private, undefined);
   assert.equal(pkg.publishConfig?.access, 'public');
-  assert.deepEqual(pkg.exports, { './server': './opencode/sterling-server.mjs' }, 'no ./tui export: a TUI loaded from the cache path gets no host solid (finding 789147ca)');
-  assert.equal(pkg.peerDependencies, undefined, 'solid peers beside the bundle freeze the dashboard (finding 789147ca)');
+  assert.deepEqual(pkg.exports, { './server': './opencode/sterling-server.mjs' }, 'no ./tui export: a TUI loaded from the cache path gets no host solid (the former finding opencode plugin installs land under node_modules (not in the current store))');
+  assert.equal(pkg.peerDependencies, undefined, 'solid peers beside the bundle freeze the dashboard (the former finding opencode plugin installs land under node_modules (not in the current store))');
   assert.equal(pkg.dependencies, undefined, 'the package installs with no dependencies of its own');
 });
 

@@ -268,7 +268,7 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     assert.match(r.stdout, /^CLAUDE\.md\s+created\b/m);
     assert.match(r.stdout, /^\.sterling\/config\.json\s+created\b/m);
     // AGENTS.md/CLAUDE.md split (decision agents-md-is-the-instructions-file-claude-md-is-a-one-line-import,
-    // 161e2972): CLAUDE.md is exactly the one-line import plus the Sterling layer; the
+    // the former ruling 'agents-md-is-the-instructions-file-claude-md-is-a-one-line-import' (not in the current store)): CLAUDE.md is exactly the one-line import plus the Sterling layer; the
     // tool-agnostic content (project facts, conventions) renders into AGENTS.md instead.
     const agentsMd = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
     const claudeMd = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
@@ -1079,7 +1079,7 @@ test('init notes the project in the shared registry (decision foreign_8f9e6db2)'
 // shipped-default coder model — proving config.models is authoritative at install.
 // =============================================================================
 
-// config_drift through init's re-run (decision 256d1059): init shares syncAgents,
+// config_drift through init's re-run (the former ruling 'sync-agents-reports-config-models-drift-loudly-without-rewriting' (not in the current store)): init shares syncAgents,
 // so a config.models bump the installed agent does not carry is reported as a
 // differs row naming both values and the fix — never a crash on an unmapped
 // status, never a rewrite.

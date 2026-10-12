@@ -25,7 +25,7 @@
 //    so a dual-host machine gets the same answer whichever host runs init.
 //    The npm copy's dashboard is copied to <home>/.sterling/opencode/tui/<version>/
 //    (materializeTui), because OpenCode gives a TUI bundle its own solid-js only outside
-//    node_modules (finding 789147ca), and the TUI shim loads the newest copy there.
+//    node_modules (the former finding 'opencode plugin installs land under node_modules' (not in the current store)), and the TUI shim loads the newest copy there.
 //    Also once per machine: a `codex` entry under mcp.servers in <config dir>/opencode.json,
 //    written only for a Codex whose `mcp-server --help` prints mcp-server help.
 // 2. PER PROJECT: <project>/.opencode/opencode.json gets the store-guard edit and shell deny rules
@@ -177,7 +177,7 @@ export function renderTuiShim(pluginRoot, installed, shimDir, { materializedRoot
   const materialized = materializedRoot
     ? `
 // The npm-installed Sterling's dashboard, copied out of the npm cache because OpenCode
-// gives a TUI bundle its own solid-js only outside node_modules (finding 789147ca).
+// gives a TUI bundle its own solid-js only outside node_modules (the former finding 'opencode plugin installs land under node_modules' (not in the current store)).
 // The newest copied version is taken when this loads, so an update needs no new shim.
 function newestMaterializedTui() {
   const base = ${JSON.stringify(fwd(materializedRoot))};
@@ -242,7 +242,7 @@ export default {
     const dir = (api && api.location && api.location.directory) || process.cwd();
     if (!inSterlingProject(dir)) return () => {};
     // A Sterling that was found but whose dashboard does not import is thrown, not logged:
-    // a logged line is invisible in the TUI (finding 789147ca saw it swallowed).
+    // a logged line is invisible in the TUI (the former finding 'opencode plugin installs land under node_modules' (not in the current store) saw it swallowed).
     if (loadError) {
       throw new Error(String((loadError && loadError.message) || loadError) + ' — the Sterling dashboard is off. Fix the cause above, or remove ' + ${JSON.stringify(fwd(shimDir))} + '.', { cause: loadError });
     }
@@ -332,7 +332,7 @@ function retireServerShim(path) {
 }
 
 // ---------- materialized TUI (npm copy) --------------------------------------
-// Finding 789147ca: OpenCode gives a TUI bundle the host's solid-js only when the bundle
+// the former finding 'opencode plugin installs land under node_modules' (not in the current store): OpenCode gives a TUI bundle the host's solid-js only when the bundle
 // lives outside any node_modules path; imported from the npm cache it fails ('Cannot find
 // package @opentui/solid'). So the npm copy's dashboard files are copied to
 // <home>/.sterling/opencode/tui/<version>/ and the TUI shim loads the newest version
@@ -507,7 +507,7 @@ export function installGlobal({ pluginRoot, installed, npmCopy = false, env = pr
 }
 
 // ---------- codex MCP (user scope) -------------------------------------------
-// Board item parity-p4-codex-mcp-lanes-on-opencode-2-decision-7f83f57e-au. The entry
+// Board item parity-p4-codex-mcp-lanes-on-opencode-2. The entry
 // shape is the one measured on 2.0.21 (finding
 // codex-mcp-server-runs-under-opencode-2-0-21-servers-shape-october-2026): it lives
 // under mcp.servers, because a legacy mcp.<name> entry carrying a timeout was dropped
