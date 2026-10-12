@@ -239,3 +239,99 @@ test('mid-turn lines ride only the tools delivery.mjs appends to: never the suba
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+const PLAN_LOCK = {
+  schema_version: 1,
+  plan_path: 'plans/fixture.md',
+  title: 'Fixture Plan',
+  approved_at: '2026-10-01T09:00:00.000Z',
+  approved_sha256: 'a'.repeat(64),
+  file_sha256_at_approval: 'a'.repeat(64),
+  approved_session_id: 's0',
+  approved_branch: 'main',
+  approved_head: 'deadbeef',
+  source: 'manual',
+};
+
+test('the system block is frozen at a session\'s first request: an unstaged child and a root keep the same bytes while the plan lock and config change', async () => {
+  const dir = makeProject();
+  try {
+    const h = handler(dir);
+    const childInput = () => ({ sessionID: 'ses_child', agent: 'sterling/implementor', system: [], messages: [{ role: 'user', content: [{ type: 'text', text: 'do the thing' }] }], tools: {} });
+    const child1 = childInput();
+    await h.onContext(child1);
+    assert.match(systemOf(child1), /STERLING DEFAULT RETURN CONTRACT/, 'the child got its dispatch chrome');
+    assert.match(systemOf(child1), /TDD posture: tests-first ON/, 'the implementor chrome carries the TDD posture read now');
+    const root1 = contextInput('ses_root');
+    await h.onContext(root1);
+    assert.match(systemOf(root1), /fixture-proj/);
+
+    writeFileSync(join(dir, '.sterling', 'plan-lock.json'), JSON.stringify(PLAN_LOCK));
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'renamed-proj', tdd: { enabled: false } }));
+    const child2 = childInput();
+    await h.onContext(child2);
+    assert.equal(systemOf(child2), systemOf(child1), 'the unstaged child keeps its first block, byte for byte');
+    const root2 = contextInput('ses_root');
+    await h.onContext(root2);
+    assert.equal(systemOf(root2), systemOf(root1), 'the root keeps its first layer, byte for byte');
+
+    // A session that starts now renders the current state, and a compaction renders again.
+    const other = contextInput('ses_other');
+    await h.onContext(other);
+    assert.match(systemOf(other), /renamed-proj/);
+    h.resetSession('ses_child');
+    const child3 = childInput();
+    await h.onContext(child3);
+    assert.match(systemOf(child3), /TDD posture: tests-first OFF/, 'after a compaction the child block is rendered again from the current config');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a notice added by another process while a prune is between its read and its write survives the prune', async () => {
+  const { spawn } = await import('node:child_process');
+  const dir = makeProject();
+  try {
+    notices.addNotice(dir, 'NOTICE-SHOWN', NOW);
+    notices.takeNotices(dir, NOW);
+    let child;
+    notices.pruneShownNotices(dir, {
+      afterRead: () => {
+        // Another process adds a notice while this prune holds its snapshot of the file.
+        const script = `import(${JSON.stringify(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'notices.mjs')).href)}).then((m) => m.addNotice(${JSON.stringify(dir)}, 'NOTICE-FRESH', ${JSON.stringify(NOW)}))`;
+        child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'ignore', 'pipe'] });
+        // Hold the snapshot long enough for an unlocked writer to land inside the window.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 700);
+      },
+    });
+    let stderr = '';
+    child.stderr.on('data', (d) => (stderr += d));
+    const code = await new Promise((r) => child.on('close', r));
+    assert.equal(code, 0, `the other process added its notice: ${stderr}`);
+    const left = JSON.parse(readFileSync(join(dir, notices.NOTICES_REL), 'utf8')).map((n) => n.text);
+    assert.deepEqual(left, ['NOTICE-FRESH'], 'the shown notice is pruned and the fresh one is kept');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable notices file is said in-band and logged, and the other lines stay due for the next prompt', async () => {
+  const dir = makeProject();
+  try {
+    const h = handler(dir);
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(dir, notices.NOTICES_REL), '{ not json');
+    const broken = await appended(h, 'ses_root');
+    assert.match(broken, /STERLING NOTICES UNREADABLE/);
+    assert.doesNotMatch(broken, /STERLING STATUS/, 'the other lines are held back');
+    assert.match(readFileSync(join(dir, '.sterling', 'transient', 'opencode-plugin.log'), 'utf8'), /pending notices unreadable/);
+    writeFileSync(join(dir, notices.NOTICES_REL), JSON.stringify([{ id: 'n1', at: NOW, text: 'NOTICE-AFTER-FIX' }]));
+    const fixed = await appended(h, 'ses_root');
+    assert.match(fixed, /STERLING STATUS: board 0 open/, 'still due: nothing was marked delivered');
+    assert.match(fixed, /TDD posture/);
+    assert.match(fixed, /NOTICE-AFTER-FIX/);
+    assert.equal(await appended(h, 'ses_root'), '', 'and delivered once');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
