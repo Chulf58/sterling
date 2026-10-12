@@ -374,3 +374,43 @@ test('a registry refresh failure line held back by an unreadable notices file is
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a held one-shot line is delivered exactly once when two prompts overlap, and is put back when its append fails', async () => {
+  const dir = makeProject();
+  try {
+    let sweeps = 0;
+    let pause = null;
+    const h = handler(dir, {
+      sweepStale: async () => (++sweeps === 1 ? 'SWEEP-LINE-OVERLAP' : ''),
+      rotationRestore: async () => {
+        if (pause) await pause.gate;
+        return '';
+      },
+    });
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(dir, notices.NOTICES_REL), '{ not json');
+    await appended(h, 'ses_root');
+    writeFileSync(join(dir, notices.NOTICES_REL), '[]');
+    // The first prompt is paused mid-computation (as a slow rotation restore would), the second runs to the end, then the first resumes.
+    let resume;
+    pause = { gate: new Promise((r) => { resume = r; }) };
+    const first = appended(h, 'ses_root');
+    await new Promise((r) => setTimeout(r, 20));
+    pause = null;
+    const second = await appended(h, 'ses_other');
+    resume();
+    const both = [await first, second].filter((t) => t.includes('SWEEP-LINE-OVERLAP'));
+    assert.equal(both.length, 1, 'the held line is delivered exactly once across both prompts');
+
+    // A failed append puts a claimed line back: the next prompt gets it.
+    const h2 = handler(dir, { sweepStale: async () => 'SWEEP-LINE-RETRY' });
+    const failing = { sessionID: 'ses_root', messageID: 'msg_u', delivery: 'immediate', prompt: {} };
+    let writes = 0;
+    Object.defineProperty(failing.prompt, 'text', { get: () => 'go', set: () => { if (writes++ === 0) throw new Error('append failed'); }, enumerable: true });
+    await assert.doesNotReject(h2.onPrompt(failing).catch(() => {}));
+    assert.match(await appended(h2, 'ses_other'), /SWEEP-LINE-RETRY/, 'the line survives a failed append');
+    assert.doesNotMatch(await appended(h2, 'ses_root'), /SWEEP-LINE-RETRY/, 'and is delivered once');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
