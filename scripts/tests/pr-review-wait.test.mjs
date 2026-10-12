@@ -1,10 +1,12 @@
 // pr-review-wait.mjs — the ONE bounded gh helper of the PR review loop
 // (decision project-mode-hobby-work-toggle-decides-flow, slice S3; skill
 // skills/pr-review-loop/SKILL.md). It resolves the repo from origin, fetches
-// the PR head, its reviews and review comments (paginated), and waits until a
-// Copilot review NEWER than --since-review exists for the CURRENT head, or
-// until the timeout. Stdout is ONE JSON object; timeout and error are never
-// 'review'. Also carries the deliberate settle act for the H10 duty
+// the PR head, its pending review requests, its reviews and review comments
+// (paginated), and waits until a Copilot review NEWER than --since-review
+// exists on any head (stale_review when not the current head), or until the
+// timeout; with no Copilot request pending and nothing unconsumed it ends at
+// once with no_review_requested. Stdout is ONE JSON object; timeout, error
+// and no_review_requested are never 'review'. Also carries the deliberate settle act for the H10 duty
 // (`--settle <clean|capped|escalated> --pr <n>`).
 //
 // Harness: a git repo whose origin is a GitHub-shaped URL (nothing is ever
@@ -41,6 +43,10 @@ function oneLine(s) {
 //   array endpoints); without it, only the first page.
 //   `gh api graphql ...` answers graphql.json (default: a success payload) or
 //   exits 1 when fail_graphql exists; `--jq .node_id` prints the pull's node_id.
+//   A graphql query mentioning reviewRequests (the pending-request read of
+//   each poll) answers the nodes in review_requests.<k>.json, picked like an
+//   endpoint file (default: one pending Copilot Bot request, so a wait with
+//   no review keeps waiting), and exits 1 when fail_review_requests exists.
 //   A graphql query mentioning reviewThreads (the merge-state query) answers
 //   {data:{repository:{pullRequest:<page>}}} from merge_pages.json (an array of
 //   pullRequest pages, one per call; default: CLEAN, no threads) and exits 1 when
@@ -71,6 +77,16 @@ if (path === 'graphql') {
     const id = q.match(/threadId:"([^"]*)"/)[1];
     appendFileSync(join(state, 'resolved.log'), id + '\\n');
     process.stdout.write(JSON.stringify({ data: { resolveReviewThread: { thread: { id, isResolved: true } } } }));
+    process.exit(0);
+  }
+  if (q.includes('reviewRequests')) {
+    if (existsSync(join(state, 'fail_review_requests'))) { console.error('gh: GraphQL: Server Error (reviewRequests)'); process.exit(1); }
+    const countFile = join(state, 'count_review_requests');
+    const count = existsSync(countFile) ? Number(readFileSync(countFile, 'utf8')) : 0;
+    writeFileSync(countFile, String(count + 1));
+    let nodes = [{ requestedReviewer: { __typename: 'Bot', login: 'copilot-pull-request-reviewer' } }];
+    for (let k = 0; k <= count; k++) if (existsSync(join(state, 'review_requests.' + k + '.json'))) nodes = JSON.parse(readFileSync(join(state, 'review_requests.' + k + '.json'), 'utf8'));
+    process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: { reviewRequests: { nodes } } } } }));
     process.exit(0);
   }
   if (q.includes('reviewThreads')) {
@@ -180,11 +196,12 @@ test('a NEW Copilot review on the CURRENT head is returned with its comments (pa
         { id: 3, path: 'src/a.mjs', line: 9, body: 'comment 3', in_reply_to: 1 },
       ],
       observed_copilot_login: COPILOT,
-      stale_review_ignored: false,
+      stale_review: false,
       identity_confirmed: false,
       previously_missed: [],
       body_findings_without_comments: false,
       copilot_request: null,
+      copilot_review_pending: true,
     });
   } finally {
     f.cleanup();
@@ -208,19 +225,166 @@ test('pagination: reviews and comments are fetched with --paginate, and a review
   }
 });
 
-test('an OLD-head Copilot review is ignored (stale_review_ignored), and without a current-head review the call ends in timeout, exit 2, never clean', () => {
+test('an OLD-head Copilot review is RETURNED with its comments and stale_review true, never dropped (GitHub issue #80)', () => {
   const f = makeFixture();
   try {
     f.put('reviews', 0, [[review(200, { commit: OLD_HEAD })]]);
     f.put('comments', 0, [[comment(9, 200)]]);
     const r = run(f, ['7', ...FAST]);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'review');
+    assert.equal(r.out.review.id, 200);
+    assert.equal(r.out.review.commit_id, OLD_HEAD);
+    assert.deepEqual(r.out.comments.map((c) => c.id), [9]);
+    assert.equal(r.out.stale_review, true, 'a review of an earlier head is flagged, so it is never read as clean');
+    assert.equal(r.out.observed_copilot_login, COPILOT);
+    assert.equal(r.out.head_sha, HEAD);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('issue #80: after a push, a review of the PREVIOUS head that lands late is returned before the new head is waited on; the new-head review comes once it is consumed', () => {
+  const f = makeFixture();
+  try {
+    // 100 was consumed on OLD_HEAD; the fix pushed HEAD; 101 (started before
+    // the push) lands on OLD_HEAD with findings; 102 later reviews HEAD.
+    f.put('reviews', 0, [[review(100, { commit: OLD_HEAD }), review(101, { commit: OLD_HEAD }), review(102)]]);
+    f.put('comments', 0, [[comment(1, 100), comment(2, 101), comment(3, 101), comment(4, 102)]]);
+    const late = run(f, ['7', '--since-review', '100', '--head', HEAD, ...FAST]);
+    assert.equal(late.code, 0, oneLine(late.stdout + late.stderr));
+    assert.equal(late.out.review.id, 101, 'the older-head review comes first, never skipped');
+    assert.equal(late.out.stale_review, true);
+    assert.deepEqual(late.out.comments.map((c) => c.id), [2, 3]);
+    const next = run(f, ['7', '--since-review', '101', '--head', HEAD, ...FAST]);
+    assert.equal(next.out.review.id, 102);
+    assert.equal(next.out.stale_review, false, 'a review of the current, expected head');
+    assert.deepEqual(next.out.comments.map((c) => c.id), [4]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+const requestReads = (f) => calls(f).filter((c) => c.some((x) => x.startsWith('query=') && x.includes('reviewRequests'))).length;
+const reviewReads = (f) => calls(f).filter((c) => c[c.length - 1].endsWith('/reviews')).length;
+
+test('no_review_requested: no Copilot request on the first read AND on exactly one recheck after --recheck-delay exits 3, naming --request-copilot, instead of timing out', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'review_requests.0.json'), '[]');
+    const r = run(f, ['7', '--interval', '0.05', '--timeout', '60', '--recheck-delay', '0.3']);
+    assert.equal(r.code, 3, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'no_review_requested');
+    assert.equal(r.out.review, null);
+    assert.equal(r.out.copilot_review_pending, false);
+    assert.match(r.out.error, /--request-copilot/);
+    assert.match(r.stderr, /no Copilot review is requested/);
+    assert.ok(r.ms >= 300, `the recheck waits --recheck-delay first: took ${r.ms}ms`);
+    assert.ok(r.ms < 10_000, `not the 60s timeout: took ${r.ms}ms`);
+    assert.equal(requestReads(f), 2, 'the first read plus exactly one recheck');
+    assert.equal(reviewReads(f), 2, 'the recheck reads the reviews again too');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('recheck (Sol): a request that is absent on the first read but pending on the recheck keeps the wait going, with or without --request-copilot, and a review that lands is returned', () => {
+  for (const extra of [['--request-copilot'], []]) {
+    const f = makeFixture();
+    try {
+      f.put('pull', 0, [{ number: 7, node_id: 'PR_node_7', head: { sha: HEAD } }]);
+      writeFileSync(join(f.state, 'review_requests.0.json'), '[]');
+      writeFileSync(join(f.state, 'review_requests.1.json'), JSON.stringify([{ requestedReviewer: { __typename: 'Bot', login: 'copilot-pull-request-reviewer' } }]));
+      const waiting = run(f, ['7', '--recheck-delay', '0.05', ...extra, ...FAST]);
+      assert.equal(waiting.code, 2, `${extra}: ${oneLine(waiting.stdout + waiting.stderr)}`);
+      assert.equal(waiting.out.status, 'timeout', 'the wait continued, never no_review_requested');
+      assert.equal(waiting.out.copilot_review_pending, true);
+      if (extra.length) assert.deepEqual(waiting.out.copilot_request, { requested: true });
+      for (const name of ['count_reviews', 'count_review_requests']) rmSync(join(f.state, name), { force: true });
+      f.put('reviews', 2, [[review(530)]]);
+      const landed = run(f, ['7', '--recheck-delay', '0.05', ...extra, ...FAST]);
+      assert.equal(landed.out?.status, 'review', `${extra}: ${oneLine(landed.stdout + landed.stderr)}`);
+      assert.equal(landed.out.review.id, 530);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('recheck: the default 10s recheck stays inside the --timeout budget (a 1s budget ends in timeout, bounded), and a bad --recheck-delay is refused with no gh call', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'review_requests.0.json'), '[]');
+    const r = run(f, ['7', '--interval', '0.05', '--timeout', '1']);
     assert.equal(r.code, 2, oneLine(r.stdout + r.stderr));
     assert.equal(r.out.status, 'timeout');
-    assert.equal(r.out.review, null);
-    assert.deepEqual(r.out.comments, []);
-    assert.equal(r.out.stale_review_ignored, true);
-    assert.equal(r.out.observed_copilot_login, COPILOT, 'the login is reported even from a stale review');
-    assert.equal(r.out.head_sha, HEAD);
+    assert.ok(r.ms < 4000, `bounded by --timeout, took ${r.ms}ms`);
+    rmSync(join(f.state, 'log.jsonl'));
+    for (const bad of ['-1', 'soon', '']) {
+      const e = run(f, ['7', '--recheck-delay', bad, ...FAST]);
+      assert.equal(e.code, 1, JSON.stringify(bad));
+      assert.match(e.out.error, /--recheck-delay/);
+    }
+    assert.equal(calls(f).length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('no_review_requested: a consumed current-head review with no request pending, a non-Copilot requested reviewer, or a failed --request-copilot all exit 3', () => {
+  const f = makeFixture();
+  try {
+    f.put('pull', 0, [{ number: 7, node_id: 'PR_node_7', head: { sha: HEAD } }]);
+    f.put('reviews', 0, [[review(500)]]);
+    writeFileSync(join(f.state, 'review_requests.0.json'), JSON.stringify([
+      { requestedReviewer: { __typename: 'User', login: 'copilot-fan' } },
+      { requestedReviewer: { __typename: 'Bot', login: 'github-actions' } },
+    ]));
+    const consumed = run(f, ['7', '--since-review', '500', '--head', HEAD, '--recheck-delay', '0', ...FAST]);
+    assert.equal(consumed.code, 3, oneLine(consumed.stdout + consumed.stderr));
+    assert.equal(consumed.out.status, 'no_review_requested');
+    assert.match(consumed.out.error, /--since-review 500/);
+    writeFileSync(join(f.state, 'fail_graphql'), '');
+    const failed = run(f, ['7', '--since-review', '500', '--request-copilot', '--recheck-delay', '0', ...FAST]);
+    assert.equal(failed.code, 3, oneLine(failed.stdout + failed.stderr));
+    assert.equal(failed.out.copilot_request.requested, false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('no_review_requested never hides a review: with no request pending, an unconsumed review is still returned', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'review_requests.0.json'), '[]');
+    f.put('reviews', 0, [[review(510)]]);
+    const r = run(f, ['7', ...FAST]);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.review.id, 510);
+    assert.equal(r.out.copilot_review_pending, false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('the request is read BEFORE the reviews on every poll; a request that clears while the review lands returns the review, and a failing request read is an error', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[]]);
+    f.put('reviews', 2, [[review(520)]]);
+    writeFileSync(join(f.state, 'review_requests.2.json'), '[]');
+    const r = run(f, ['7', ...FAST]);
+    assert.equal(r.out?.status, 'review', oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.review.id, 520);
+    const all = calls(f);
+    const firstRequest = all.findIndex((c) => c.some((x) => x.startsWith('query=') && x.includes('reviewRequests')));
+    const firstReviews = all.findIndex((c) => c[c.length - 1].endsWith('/reviews'));
+    assert.ok(firstRequest >= 0 && firstRequest < firstReviews, 'requests first');
+    writeFileSync(join(f.state, 'fail_review_requests'), '');
+    const bad = run(f, ['7', ...FAST]);
+    assert.equal(bad.code, 1);
+    assert.equal(bad.out.status, 'error');
+    assert.match(bad.out.error, /reviewRequests/);
   } finally {
     f.cleanup();
   }
@@ -282,12 +446,14 @@ test('--since-review: a Copilot review at or below the consumed id is not new; t
   }
 });
 
-test('--head: a review of the PR head is not taken while the PR head is not yet the expected pushed SHA', () => {
+test('--head: a review of the PR head is not taken as CURRENT while the PR head is not yet the expected pushed SHA; it comes back stale', () => {
   const f = makeFixture();
   try {
     f.put('reviews', 0, [[review(600)]]);
     const r = run(f, ['7', '--head', OLD_HEAD, ...FAST]);
-    assert.equal(r.out.status, 'timeout');
+    assert.equal(r.out.status, 'review', oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.review.id, 600);
+    assert.equal(r.out.stale_review, true, 'not a review of the expected head');
     assert.equal(r.out.head_sha, HEAD, 'head_sha reports what GitHub says the head is');
   } finally {
     f.cleanup();
@@ -305,7 +471,9 @@ test('the repo is BOUND to origin: every gh call names repos/acme/widget and --h
     for (const c of all) {
       assert.equal(c[0], 'api');
       assert.equal(c[c.indexOf('--hostname') + 1], 'github.com', `--hostname on every call: ${JSON.stringify(c)}`);
-      assert.match(c[c.length - 1], /^repos\/acme\/widget\/pulls\/7(\/|$)/);
+      if (c[c.length - 1] === 'graphql') {
+        for (const v of ['owner=acme', 'name=widget', 'number=7']) assert.ok(c.includes(v), `the reviewRequests query names ${v}: ${JSON.stringify(c)}`);
+      } else assert.match(c[c.length - 1], /^repos\/acme\/widget\/pulls\/7(\/|$)/);
     }
     rmSync(join(f.state, 'log.jsonl'));
     for (const args of [['https://github.com/other/thing/pull/7'], ['7', '--repo', 'github.com/other/thing']]) {
@@ -413,16 +581,18 @@ test('identity: a malformed pr_review.copilot_logins is an error, never silently
 
 const NEW_HEAD = 'c'.repeat(40);
 
-test('head race (Sol): the head moves while the review is fetched — the review is NOT returned; it polls again and the old-head review is stale', () => {
+test('head race (Sol): the head moves while the review is fetched — the review is NOT returned as current; the next poll returns it stale', () => {
   const f = makeFixture();
   try {
     f.put('pull', 1, [{ number: 7, head: { sha: NEW_HEAD } }]);
     f.put('reviews', 0, [[review(1000)]]);
     f.put('comments', 0, [[comment(1, 1000)]]);
     const r = run(f, ['7', ...FAST]);
-    assert.equal(r.out.status, 'timeout', `a review of a head that moved is never returned: ${oneLine(r.stdout)}`);
+    assert.equal(r.out.status, 'review', oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.review.id, 1000);
     assert.equal(r.out.head_sha, NEW_HEAD);
-    assert.equal(r.out.stale_review_ignored, true);
+    assert.equal(r.out.stale_review, true, 'a review of a head that moved is never returned as current');
+    assert.equal(calls(f).filter((c) => c[c.length - 1].endsWith('/reviews')).length, 2, 'it polled again after the head moved');
   } finally {
     f.cleanup();
   }
@@ -579,14 +749,15 @@ test('--settle refuses to RE-settle: only an owed loop can be settled', () => {
 });
 
 // ------------------------------------------------- --head accepts a short sha
-test('--head: a 7-char prefix of the PR head matches (upper case too); a short sha that is not a prefix does not', () => {
-  for (const [head, status] of [[HEAD.slice(0, 7), 'review'], [HEAD.slice(0, 12).toUpperCase(), 'review'], [HEAD, 'review'], ['aaaaaab', 'timeout']]) {
+test('--head: a 7-char prefix of the PR head matches (upper case too); a short sha that is not a prefix does not, so the review comes back stale', () => {
+  for (const [head, stale] of [[HEAD.slice(0, 7), false], [HEAD.slice(0, 12).toUpperCase(), false], [HEAD, false], ['aaaaaab', true]]) {
     const f = makeFixture();
     try {
       f.put('reviews', 0, [[review(600)]]);
       f.put('comments', 0, [[comment(1, 600)]]);
       const r = run(f, ['7', '--head', head, ...FAST]);
-      assert.equal(r.out.status, status, `${head}: ${oneLine(r.stdout)}`);
+      assert.equal(r.out.status, 'review', `${head}: ${oneLine(r.stdout)}`);
+      assert.equal(r.out.stale_review, stale, `${head}: ${oneLine(r.stdout)}`);
     } finally {
       f.cleanup();
     }
@@ -673,7 +844,7 @@ test('previously_missed is [] when the section is absent; body_findings_without_
 });
 
 // ----------------------------------------------------------- --request-copilot
-const mutationCalls = (f) => calls(f).filter((a) => a.includes('graphql'));
+const mutationCalls = (f) => calls(f).filter((a) => a.includes('graphql') && a.some((x) => x.startsWith('query=') && x.includes('requestReviewsByLogin')));
 
 test('--request-copilot: fires requestReviewsByLogin ONCE before polling, using the PR node id, and records success', () => {
   const f = makeFixture();

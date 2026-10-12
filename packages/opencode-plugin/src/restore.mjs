@@ -16,9 +16,9 @@ import { inWorkerChild } from './worker.mjs';
  * worker's root session is not the session the user opens next.
  */
 export function createRotationRestore({ getSession, now, renderRestore = renderRotationRestore, env = process.env }) {
-  // Restore text per session that consumed a rotation note: OpenCode builds the
-  // system prompt per request, so the restore is re-sent on that session's
-  // later turns. Process-lifetime only; a relaunched OpenCode does not re-send it.
+  // Restore text per session that consumed a rotation note, returned again on that
+  // session's later prompts; context.mjs appends it only when it changed, so the
+  // session sees it once. Process-lifetime only; a relaunched OpenCode does not re-send it.
   const restored = new Map();
   // Malformed rotation notes already announced, keyed by path and mtime: a note
   // that stays malformed is noticed once, not on every request.

@@ -194,11 +194,12 @@ var GH_CALL_TIMEOUT_MS = 6e4;
 var DEFAULT_TIMEOUT_S = 540;
 var DEFAULT_INTERVAL_S = 30;
 var MAX_INTERVAL_S = 120;
-var result = { status: "error", head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review_ignored: false, identity_confirmed: false, previously_missed: [], body_findings_without_comments: false, copilot_request: null };
+var DEFAULT_RECHECK_DELAY_S = 10;
+var result = { status: "error", head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, identity_confirmed: false, previously_missed: [], body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
   process.stdout.write(JSON.stringify(out) + "\n");
-  process.exit(status === "review" ? 0 : status === "timeout" ? 2 : 1);
+  process.exit(status === "review" ? 0 : status === "timeout" ? 2 : status === "no_review_requested" ? 3 : 1);
 }
 var error = (message) => finish("error", { review: null, comments: [], error: message });
 function readPinnedLogins() {
@@ -283,7 +284,7 @@ if (argv.includes("--settle")) {
     refuse("settle refused", e);
   }
 }
-var valued = /* @__PURE__ */ new Set(["--repo", "--since-review", "--head", "--timeout", "--interval", "--target"]);
+var valued = /* @__PURE__ */ new Set(["--repo", "--since-review", "--head", "--timeout", "--interval", "--recheck-delay", "--target"]);
 var positional = argv.filter((a, i) => !a.startsWith("--") && !valued.has(argv[i - 1]));
 if (positional.length !== 1) error("usage: pr-review-wait.mjs <pr-url|number> [--repo host/owner/repo] [--since-review <id>] [--head <sha>] [--timeout <s>] [--request-copilot]");
 var seconds = (name2, dflt) => {
@@ -302,6 +303,9 @@ var headRaw = flag("--head");
 if (headRaw !== void 0 && !/^[0-9a-f]{7,40}$/i.test(headRaw)) error(`--head must be 7-40 hex characters of a commit sha, got '${headRaw}'`);
 var expectedHead = headRaw === void 0 ? null : headRaw.toLowerCase();
 var requestCopilot = argv.includes("--request-copilot");
+var recheckRaw = flag("--recheck-delay");
+var recheckDelayS = recheckRaw === void 0 ? DEFAULT_RECHECK_DELAY_S : Number(recheckRaw);
+if (recheckRaw !== void 0 && (recheckRaw.trim() === "" || !Number.isFinite(recheckDelayS) || recheckDelayS < 0)) error(`--recheck-delay must be a number of seconds >= 0, got '${recheckRaw}'`);
 var pinnedLogins = readPinnedLogins();
 result.identity_confirmed = pinnedLogins.length > 0;
 var originUrl = spawnSync2("git", ["remote", "get-url", "origin"], { cwd: target, encoding: "utf8", timeout: 3e4 });
@@ -394,29 +398,49 @@ function parsePages(text) {
   if (depth !== 0 || inString) throw new Error("gh returned truncated JSON");
   return values.flatMap((v) => Array.isArray(v) ? v : [v]);
 }
-function poll() {
+var REVIEW_REQUESTS_QUERY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewRequests(first:100){nodes{requestedReviewer{__typename ... on Bot{login} ... on User{login}}}}}}}";
+function copilotReviewPending() {
+  const reply = JSON.parse(ghApi("graphql", { extra: ["-f", `query=${REVIEW_REQUESTS_QUERY}`, "-f", `owner=${owner}`, "-f", `name=${name}`, "-F", `number=${prNumber}`] }));
+  if (Array.isArray(reply?.errors) && reply.errors.length) throw new Error(`reviewRequests query returned errors: ${reply.errors.map((e) => e?.message ?? JSON.stringify(e)).join("; ")}`);
+  const nodes = reply?.data?.repository?.pullRequest?.reviewRequests?.nodes;
+  if (!Array.isArray(nodes)) throw new Error(`reviewRequests query returned no pull request #${prNumber} in ${origin.repo}`);
+  return nodes.some((n) => n?.requestedReviewer?.__typename === "Bot" && COPILOT_LOGIN.test(n.requestedReviewer.login ?? ""));
+}
+var NoReviewRequested = class extends Error {
+};
+function poll(recheckAbsent = true) {
   const [pull] = parsePages(ghApi(base));
   const head = pull?.head?.sha;
   if (typeof head !== "string") throw new Error(`gh api ${base} returned no head.sha`);
   result.head_sha = head;
+  const pending = copilotReviewPending();
+  result.copilot_review_pending = pending;
   const reviews = parsePages(ghApi(`${base}/reviews`, { paginate: true }));
   const copilot = reviews.filter((r) => isCopilot(r, pinnedLogins));
   if (copilot.length) result.observed_copilot_login = copilot.reduce((a, b) => b.id > a.id ? b : a).user.login;
   const fresh = copilot.filter((r) => COMPLETED_STATES.has(r.state) && (sinceReview === null || r.id > sinceReview));
-  const current = expectedHead === null || head.toLowerCase().startsWith(expectedHead) ? fresh.filter((r) => r.commit_id === head) : [];
-  result.stale_review_ignored = result.stale_review_ignored || fresh.some((r) => r.commit_id !== head);
-  if (!current.length) return null;
-  const review = current.reduce((a, b) => b.id < a.id ? b : a);
+  if (!fresh.length) {
+    if (pending) return null;
+    if (!recheckAbsent) throw new NoReviewRequested();
+    sleep(Math.max(0, Math.min(recheckDelayS * 1e3, deadline - Date.now())));
+    return poll(false);
+  }
+  const review = fresh.reduce((a, b) => b.id < a.id ? b : a);
+  const headExpected = expectedHead === null || head.toLowerCase().startsWith(expectedHead);
+  const stale = !(headExpected && review.commit_id === head);
   const comments = parsePages(ghApi(`${base}/comments`, { paginate: true })).filter((c) => c?.pull_request_review_id === review.id).map((c) => ({ id: c.id, path: c.path ?? null, line: c.line ?? c.original_line ?? null, body: c.body ?? "", in_reply_to: c.in_reply_to_id ?? null }));
-  const [again] = parsePages(ghApi(base));
-  if (again?.head?.sha !== head) {
-    result.head_sha = typeof again?.head?.sha === "string" ? again.head.sha : head;
-    return null;
+  if (!stale) {
+    const [again] = parsePages(ghApi(base));
+    if (again?.head?.sha !== head) {
+      result.head_sha = typeof again?.head?.sha === "string" ? again.head.sha : head;
+      return null;
+    }
   }
   const body = review.body ?? "";
   return {
     review: { id: review.id, commit_id: review.commit_id, author: review.user.login, state: review.state, body },
     comments,
+    stale_review: stale,
     previously_missed: parsePreviouslyMissed(body),
     body_findings_without_comments: body.trim() !== "" && comments.length === 0
   };
@@ -429,6 +453,12 @@ for (; ; ) {
     found = poll();
   } catch (e) {
     if (e instanceof DeadlineReached) finish("timeout", { review: null, comments: [] });
+    if (e instanceof NoReviewRequested) {
+      const message = `no Copilot review is requested on PR #${prNumber} and no unconsumed Copilot review exists${sinceReview === null ? "" : ` after --since-review ${sinceReview}`}, so nothing will arrive: run the wait again with --request-copilot (always after a push)`;
+      process.stderr.write(`pr-review-wait: ${message}
+`);
+      finish("no_review_requested", { review: null, comments: [], error: message });
+    }
     error(e.message);
   }
   if (found) finish("review", found);
