@@ -142,7 +142,7 @@ test('a notice reaches the conductor once: a child does not take it, a shown one
     const h = handler(dir);
     notices.addNotice(dir, 'NOTICE-A', NOW);
     assert.doesNotMatch(await appended(h, 'ses_child'), /NOTICE-A/, 'a child session never takes the conductor\'s notices');
-    assert.match(await appended(h, 'ses_root'), /STERLING NOTICES \(from the end of the last turn\):\n- NOTICE-A/);
+    assert.match(await appended(h, 'ses_root'), /STERLING NOTICES \(new since the last ones you were shown\):\n- NOTICE-A/);
     assert.doesNotMatch(await appended(h, 'ses_root'), /NOTICE-A/, 'shown once');
     notices.addNotice(dir, 'NOTICE-B', NOW);
     // Settlement at the end of the execution prunes the shown notices only (settle.mjs).
@@ -182,6 +182,59 @@ test('after an OpenCode restart or a compaction, the next prompt gets the whole 
     const restarted = handler(dir);
     assert.match(await appended(restarted, 'ses_root'), /STERLING STATUS: board 0 open/, 'a resumed session in a new process');
     assert.equal(await appended(restarted, 'ses_root'), '');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A completed `tool` call of `sessionID` after onToolResult ran; returns what was appended ('' when nothing). */
+async function toolAppended(h, sessionID, tool = 'read') {
+  const input = { tool, sessionID, id: `call_${randomUUID()}`, input: { path: 'x' }, status: 'completed', result: { content: [{ type: 'text', text: 'tool output' }] } };
+  await h.onToolResult(input);
+  return input.result.content.slice(1).map((p) => p.text).join('\n');
+}
+
+test('mid-turn: a change between two tool calls is appended once to the next tool result, and the next prompt does not repeat it', async () => {
+  const dir = makeProject();
+  try {
+    const h = handler(dir);
+    const first = contextInput('ses_root');
+    await h.onContext(first);
+    assert.match(await appended(h, 'ses_root'), /STERLING STATUS: board 0 open/, 'the turn starts with the current set');
+    assert.equal(await toolAppended(h, 'ses_root'), '', 'an unchanged state adds nothing to a tool result');
+
+    addTodo(dir, 'raised mid-turn');
+    notices.addNotice(dir, 'NOTICE-MID', NOW);
+    h.resetStatus(dir);
+    const mid = await toolAppended(h, 'ses_root', 'shell');
+    assert.ok(mid.startsWith(`${staging.VOLATILE_HEADER}\n\n`), 'the STERLING CONTEXT header is kept');
+    assert.match(mid, /STERLING STATUS: board 1 open/);
+    assert.match(mid, /READY \(1\):\n- raised mid-turn/);
+    assert.match(mid, /NOTICE-MID/);
+    assert.doesNotMatch(mid, /TDD posture/, 'only what changed');
+    assert.equal(await toolAppended(h, 'ses_root', 'edit'), '', 'once: the next tool result does not repeat it');
+    assert.equal(await appended(h, 'ses_root'), '', 'and neither does the next prompt');
+
+    const second = contextInput('ses_root');
+    await h.onContext(second);
+    assert.equal(systemOf(second), systemOf(first), 'the system prompt is untouched by either route');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('mid-turn lines ride only the tools delivery.mjs appends to: never the subagent tool, never a failed call', async () => {
+  const dir = makeProject();
+  try {
+    const h = handler(dir);
+    await appended(h, 'ses_root');
+    addTodo(dir, 'another ask');
+    h.resetStatus(dir);
+    for (const tool of ['subagent', 'question', 'webfetch']) assert.equal(await toolAppended(h, 'ses_root', tool), '', tool);
+    const failed = { tool: 'read', sessionID: 'ses_root', id: 'call_failed', input: { path: 'x' }, status: 'error', error: new Error('nope') };
+    await h.onToolResult(failed);
+    assert.equal(failed.result, undefined);
+    assert.match(await toolAppended(h, 'ses_root', 'write'), /STERLING STATUS: board 1 open/, 'the change waits for a delivery tool');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

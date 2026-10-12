@@ -125,6 +125,13 @@ async function setupPlugin(dir, deps = {}, sessions = { ses_1: {} }) {
 }
 
 const contextInput = () => ({ sessionID: 'ses_1', agent: 'build', system: [{ type: 'text', text: 'base system' }], messages: [], tools: {} });
+/**
+ * A tool result's parts other than the session-lines part (context.mjs onToolResult appends
+ * the STERLING CONTEXT block to read, edit, write, patch and shell results when it changed):
+ * the tests of H19 delivery count only their own parts.
+ */
+const knowledgeParts = (content) => content.filter((part) => !String(part?.text ?? '').startsWith('STERLING CONTEXT (added by the Sterling plugin'));
+
 const systemText = (i) => [...i.system.map((p) => p.text), i.prompt?.text ?? ''].join('\n');
 /**
  * One turn as the model sees it: the prompt hook (which appends the volatile Sterling
@@ -151,7 +158,7 @@ test('outside a Sterling project every handler is silent', async () => {
     await ctx.hooks.tool['execute.before'](call);
     const after = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'ok' }] } };
     await ctx.hooks.tool['execute.after'](after);
-    assert.deepEqual(after.result.content, [{ type: 'text', text: 'ok' }]);
+    assert.deepEqual(knowledgeParts(after.result.content), [{ type: 'text', text: 'ok' }]);
     await plugin.handlers.event({ type: 'session.execution.succeeded', data: { sessionID: 'ses_1' } });
     assert.equal(existsSync(join(dir, '.sterling')), false, 'nothing written outside a Sterling project');
     await cleanup?.();
@@ -525,7 +532,7 @@ test('an internal error in a tool hook is swallowed, logged and surfaced as a no
     await ctx.hooks.tool['execute.before'](call);
     const after = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'edited' }] } };
     await ctx.hooks.tool['execute.after'](after);
-    assert.deepEqual(after.result.content, [{ type: 'text', text: 'edited' }], 'the tool result is untouched');
+    assert.deepEqual(knowledgeParts(after.result.content), [{ type: 'text', text: 'edited' }], 'the tool result is untouched');
     assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /delivery.*boom in delivery/);
     const notices = JSON.parse(readFileSync(join(p.dir, server.NOTICES_REL), 'utf8'));
     assert.ok(notices.some((n) => /boom in delivery/.test(n.text)), 'the failure becomes a notice the next context shows');
@@ -707,7 +714,7 @@ test('compaction resets that session\'s delivery receipts, so delivery fires aga
       await ctx.hooks.tool['execute.before'](call);
       const after = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'read' }] } };
       await ctx.hooks.tool['execute.after'](after);
-      return after.result.content.length === 2;
+      return knowledgeParts(after.result.content).length === 2;
     };
     assert.equal(await deliver('ses_1', 'k1'), true);
     assert.equal(await deliver('ses_2', 'k2'), true);
@@ -731,15 +738,15 @@ test('edit, write and read deliver the owning knowledge onto the tool result onc
     await ctx.hooks.tool['execute.before'](call);
     const after = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'edited' }] } };
     await ctx.hooks.tool['execute.after'](after);
-    assert.equal(after.result.content.length, 2);
-    assert.match(after.result.content[1].text, /STERLING KNOWLEDGE DELIVERY/);
-    assert.match(after.result.content[1].text, /alpha-feature/);
+    assert.equal(knowledgeParts(after.result.content).length, 2);
+    assert.match(knowledgeParts(after.result.content)[1].text, /STERLING KNOWLEDGE DELIVERY/);
+    assert.match(knowledgeParts(after.result.content)[1].text, /alpha-feature/);
 
     const again = { tool: 'read', sessionID: 'ses_1', id: 'c2', input: { path: 'src/a.mjs' } };
     await ctx.hooks.tool['execute.before'](again);
     const after2 = { ...again, status: 'completed', result: { content: [{ type: 'text', text: 'read' }] } };
     await ctx.hooks.tool['execute.after'](after2);
-    assert.equal(after2.result.content.length, 1, 'an article already delivered this session is not repeated');
+    assert.equal(knowledgeParts(after2.result.content).length, 1, 'an article already delivered this session is not repeated');
 
     const other = { tool: 'write', sessionID: 'ses_2', id: 'c3', input: { path: join(p.dir, 'src', 'a.mjs') } };
     await ctx.hooks.tool['execute.before'](other);
@@ -751,7 +758,7 @@ test('edit, write and read deliver the owning knowledge onto the tool result onc
     await ctx.hooks.tool['execute.before'](glob);
     const after4 = { ...glob, status: 'completed', result: { content: [{ type: 'text', text: 'x' }] } };
     await ctx.hooks.tool['execute.after'](after4);
-    assert.equal(after4.result.content.length, 1, 'other tools get no delivery');
+    assert.equal(knowledgeParts(after4.result.content).length, 1, 'other tools get no delivery');
     await cleanup?.();
   } finally {
     p.cleanup();
@@ -769,7 +776,7 @@ test('a failed tool call delivers nothing and does not spend the once-per-sessio
     await ctx.hooks.tool['execute.before'](retry);
     const after = { ...retry, status: 'completed', result: { content: [{ type: 'text', text: 'edited' }] } };
     await ctx.hooks.tool['execute.after'](after);
-    assert.match(after.result.content[1]?.text ?? '', /alpha-feature/);
+    assert.match(knowledgeParts(after.result.content)[1]?.text ?? '', /alpha-feature/);
     await cleanup?.();
   } finally {
     p.cleanup();
@@ -1210,21 +1217,21 @@ test('shell delivery: paths a command names get H19 pointers on the result, once
     await ctx.hooks.tool['execute.before'](call);
     const after = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'out' }] } };
     await ctx.hooks.tool['execute.after'](after);
-    assert.equal(after.result.content.length, 2);
-    assert.match(after.result.content[1].text, /STERLING KNOWLEDGE POINTERS \(H19\)/);
-    assert.match(after.result.content[1].text, /src\/a\.mjs — article 'alpha-feature title \[alpha-feature\]'/);
+    assert.equal(knowledgeParts(after.result.content).length, 2);
+    assert.match(knowledgeParts(after.result.content)[1].text, /STERLING KNOWLEDGE POINTERS \(H19\)/);
+    assert.match(knowledgeParts(after.result.content)[1].text, /src\/a\.mjs — article 'alpha-feature title \[alpha-feature\]'/);
 
     const again = { tool: 'shell', sessionID: 'ses_1', id: 's2', input: { command: `wc -l ${join(p.dir, 'src', 'a.mjs')}` } };
     await ctx.hooks.tool['execute.before'](again);
     const after2 = { ...again, status: 'completed', result: { content: [{ type: 'text', text: 'out' }] } };
     await ctx.hooks.tool['execute.after'](after2);
-    assert.equal(after2.result.content.length, 1, 'a path pointed at once this session is not repeated');
+    assert.equal(knowledgeParts(after2.result.content).length, 1, 'a path pointed at once this session is not repeated');
 
     const none = { tool: 'shell', sessionID: 'ses_1', id: 's3', input: { command: 'echo hello' } };
     await ctx.hooks.tool['execute.before'](none);
     const after3 = { ...none, status: 'completed', result: { content: [{ type: 'text', text: 'hello' }] } };
     await ctx.hooks.tool['execute.after'](after3);
-    assert.equal(after3.result.content.length, 1, 'a command naming no governed path gets nothing');
+    assert.equal(knowledgeParts(after3.result.content).length, 1, 'a command naming no governed path gets nothing');
     await cleanup?.();
   } finally {
     p.cleanup();
@@ -1240,8 +1247,8 @@ test('patch delivery: every file a patch adds, updates, deletes or moves to gets
     await ctx.hooks.tool['execute.before'](call);
     const after = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'patched' }] } };
     await ctx.hooks.tool['execute.after'](after);
-    assert.equal(after.result.content.length, 2);
-    const text = after.result.content[1].text;
+    assert.equal(knowledgeParts(after.result.content).length, 2);
+    const text = knowledgeParts(after.result.content)[1].text;
     assert.match(text, /STERLING KNOWLEDGE DELIVERY/);
     assert.match(text, /alpha-feature/);
     assert.match(text, /src\/new\.mjs/, 'the added file gets the unowned-territory notice');
@@ -1250,7 +1257,7 @@ test('patch delivery: every file a patch adds, updates, deletes or moves to gets
     await ctx.hooks.tool['execute.before'](failed);
     const afterFail = { ...failed, status: 'error', result: { content: [{ type: 'text', text: 'bad' }] } };
     await ctx.hooks.tool['execute.after'](afterFail);
-    assert.equal(afterFail.result.content.length, 1, 'a failed patch delivers nothing');
+    assert.equal(knowledgeParts(afterFail.result.content).length, 1, 'a failed patch delivers nothing');
     await cleanup?.();
   } finally {
     p.cleanup();

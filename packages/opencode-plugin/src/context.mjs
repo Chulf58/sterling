@@ -2,8 +2,9 @@
 // staging for a child (subagent) session, pushed into the system prompt of every request
 // and the same bytes on each. VOLATILE: the status line, H1's operating-state and
 // maintenance lines, the plan lock, the dispatch sweep, board readiness, the rotation
-// restore and pending notices, appended to the session's next prompt text when they
-// changed since they were last delivered there (user-ruled 2026-10-12, "Move live lines
+// restore and pending notices, appended to the session's next prompt text, or to the
+// next read/edit/write/patch/shell result mid-turn, when they changed since they were
+// last delivered there (user-ruled 2026-10-12, "Move live lines
 // out": a system prompt that changed every turn re-wrote the whole conversation to the
 // provider's prompt cache; finding why-is-the-prompt-cache-hit-rate-lower-on-opencode-codeburn).
 import { join } from 'node:path';
@@ -17,6 +18,7 @@ import { laneCeiling, liveLanes, renderBoardReadiness } from '../../../scripts/h
 import { maintenanceLines, operatingStateLines, undeclaredSourceBlock } from './operating-state.mjs';
 import { composeContext, dispatchChrome } from '../../../scripts/hooks/lib/stage-brief.mjs';
 import { VOLATILE_HEADER, briefOf, notStagedLine, stageChild } from './staging.mjs';
+import { appendToResult, isDeliveryTool } from './delivery.mjs';
 import { agentRole } from './agent-name.mjs';
 import { remember } from './bounded.mjs';
 import { sessionKind } from './dispatch.mjs';
@@ -290,49 +292,78 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   }
 
   /**
-   * The prompt hook: appends to the session's next prompt text the volatile blocks that
-   * changed since they were last delivered in that session and, in a root session, the
-   * notices not shown yet (each taken once, notices.mjs). The first prompt a session has
-   * in this process (a new or resumed session, or any session after an OpenCode restart
-   * or a compaction) gets the whole current set once.
+   * The text to append for `sessionID` now: the STERLING CONTEXT header and the volatile
+   * blocks that changed since they were last delivered in that session, plus, in a root
+   * session, the notices not shown yet (each taken once, notices.mjs); '' when nothing
+   * changed. One record per session serves the prompt and the tool-result routes, so a
+   * line goes out once by whichever route comes first. A session this process has not
+   * delivered to (a new or resumed session, any session after an OpenCode restart or a
+   * compaction) gets the whole current set once.
    */
+  async function dueText(root, sessionID, where) {
+    const kind = await sessionKind(getSession?.(), sessionID, parents);
+    if (kind.why) logLine(root, `context: session ${sessionID} could not be told root or child at its ${where} (${kind.why}); only the lines every session gets are delivered`);
+    const blocks = await volatileBlocks(root, sessionID, kind.why ? 'unknown' : kind.kind);
+    const seen = delivered.get(sessionID) ?? remember(delivered, sessionID, new Map());
+    const due = [];
+    for (const b of blocks) {
+      if (!b.key) {
+        if (b.text) due.push(b.text);
+        continue;
+      }
+      const last = seen.get(b.key) ?? '';
+      if (b.text === last) continue;
+      if (b.text) due.push(b.text);
+      else if (b.cleared) due.push(b.cleared);
+      seen.set(b.key, b.text);
+    }
+    // Notices go to the conductor's (root) session only: a child that took them would
+    // leave the conductor never seeing them. The worker child must not stamp the user's
+    // notices shown, or settlement would prune them unseen. Both callers check their
+    // target's shape before calling, so nothing after this take can fail and lose them.
+    if (!kind.why && kind.kind === 'root' && !inWorkerChild(env)) {
+      const notices = takeNotices(root, now());
+      if (notices.length) due.push(`STERLING NOTICES (new since the last ones you were shown):\n${notices.map((n) => `- ${n.text}`).join('\n')}`);
+    }
+    return due.length ? `${VOLATILE_HEADER}\n\n${due.join('\n\n')}` : '';
+  }
+
+  /** The prompt hook: the due lines are appended to the session's next prompt text. */
   async function onPrompt(input) {
     const root = rootOf();
     if (!root) return;
     await fenced('context', root, async () => {
       if (typeof input?.prompt?.text !== 'string') throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
-      const sessionID = input.sessionID;
-      const kind = await sessionKind(getSession?.(), sessionID, parents);
-      if (kind.why) logLine(root, `context: session ${sessionID} could not be told root or child at its prompt (${kind.why}); only the lines every session gets are delivered`);
-      const blocks = await volatileBlocks(root, sessionID, kind.why ? 'unknown' : kind.kind);
-      const seen = delivered.get(sessionID) ?? remember(delivered, sessionID, new Map());
-      const due = [];
-      for (const b of blocks) {
-        if (!b.key) {
-          if (b.text) due.push(b.text);
-          continue;
-        }
-        const last = seen.get(b.key) ?? '';
-        if (b.text === last) continue;
-        if (b.text) due.push(b.text);
-        else if (b.cleared) due.push(b.cleared);
-        seen.set(b.key, b.text);
-      }
-      // Notices go to the conductor's (root) session only: a child that took them would
-      // leave the conductor never seeing them. The worker child must not stamp the user's
-      // notices shown, or settlement would prune them unseen. The take is the last step
-      // before the append, so nothing after it can fail and lose them.
-      if (!kind.why && kind.kind === 'root' && !inWorkerChild(env)) {
-        const notices = takeNotices(root, now());
-        if (notices.length) due.push(`STERLING NOTICES (from the end of the last turn):\n${notices.map((n) => `- ${n.text}`).join('\n')}`);
-      }
-      if (due.length) input.prompt.text = `${input.prompt.text}\n\n${VOLATILE_HEADER}\n\n${due.join('\n\n')}`;
+      const text = await dueText(root, input.sessionID, 'prompt');
+      if (text) input.prompt.text = `${input.prompt.text}\n\n${text}`;
+    });
+  }
+
+  /**
+   * execute.after: lines that changed mid-turn are appended once to the result of a
+   * completed read, edit, write, patch or shell call, the tools delivery.mjs appends to
+   * (never the subagent tool, whose call carries a lane's brief), so the conductor sees
+   * board, status and notice changes during a long turn without a new prompt
+   * (user-ruled 2026-10-12, "Also deliver via tool results"). Computed once per call;
+   * the store reads behind it are the status, maintenance and board caches (10 s).
+   */
+  async function onToolResult(input) {
+    if (!isDeliveryTool(input?.tool) || input.status !== 'completed') return;
+    const root = rootOf();
+    if (!root) return;
+    await fenced('context', root, async () => {
+      // Checked before anything is marked delivered or a notice taken, so an unknown shape loses nothing.
+      const content = input.result?.content;
+      if (!Array.isArray(content) && typeof content !== 'string') throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
+      const text = await dueText(root, input.sessionID, 'tool call');
+      if (text) appendToResult(input.result, text);
     });
   }
 
   return {
     onContext,
     onPrompt,
+    onToolResult,
     resetStatus: (root) => (statusCache.delete(root), maintenanceCache.delete(root), boardCache.delete(root)),
     // Compaction can summarize away what was delivered: the session's next prompt gets the whole set again.
     resetSession: (sessionID) => void delivered.delete(sessionID),

@@ -15360,6 +15360,9 @@ function buildPatchDelivery(store, root, rels, sessionID) {
     }
   };
 }
+function isDeliveryTool(tool) {
+  return PATH_TOOLS.has(tool) || tool === "patch" || tool === "shell";
+}
 function appendToResult(result, text) {
   if (Array.isArray(result?.content)) result.content.push({ type: "text", text });
   else if (typeof result?.content === "string") result.content = `${result.content}
@@ -15386,7 +15389,7 @@ function createDeliveryHandlers({ openStore, rootOf, directory, fenced }) {
     return null;
   }
   async function onBefore(input) {
-    if (!PATH_TOOLS.has(input?.tool) && input?.tool !== "patch" && input?.tool !== "shell") return;
+    if (!isDeliveryTool(input?.tool)) return;
     const root = rootOf();
     if (!root) return;
     await fenced("delivery", root, () => {
@@ -19163,43 +19166,58 @@ ${opencodeHostTail(pluginRoot)}`;
     out.push({ key: "restore", text: await rotationRestore(root, sessionID) });
     return out;
   }
+  async function dueText(root, sessionID, where) {
+    const kind = await sessionKind(getSession?.(), sessionID, parents);
+    if (kind.why) logLine(root, `context: session ${sessionID} could not be told root or child at its ${where} (${kind.why}); only the lines every session gets are delivered`);
+    const blocks = await volatileBlocks(root, sessionID, kind.why ? "unknown" : kind.kind);
+    const seen = delivered.get(sessionID) ?? remember(delivered, sessionID, /* @__PURE__ */ new Map());
+    const due = [];
+    for (const b of blocks) {
+      if (!b.key) {
+        if (b.text) due.push(b.text);
+        continue;
+      }
+      const last = seen.get(b.key) ?? "";
+      if (b.text === last) continue;
+      if (b.text) due.push(b.text);
+      else if (b.cleared) due.push(b.cleared);
+      seen.set(b.key, b.text);
+    }
+    if (!kind.why && kind.kind === "root" && !inWorkerChild(env)) {
+      const notices = takeNotices(root, now());
+      if (notices.length) due.push(`STERLING NOTICES (new since the last ones you were shown):
+${notices.map((n) => `- ${n.text}`).join("\n")}`);
+    }
+    return due.length ? `${VOLATILE_HEADER}
+
+${due.join("\n\n")}` : "";
+  }
   async function onPrompt(input) {
     const root = rootOf();
     if (!root) return;
     await fenced("context", root, async () => {
       if (typeof input?.prompt?.text !== "string") throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
-      const sessionID = input.sessionID;
-      const kind = await sessionKind(getSession?.(), sessionID, parents);
-      if (kind.why) logLine(root, `context: session ${sessionID} could not be told root or child at its prompt (${kind.why}); only the lines every session gets are delivered`);
-      const blocks = await volatileBlocks(root, sessionID, kind.why ? "unknown" : kind.kind);
-      const seen = delivered.get(sessionID) ?? remember(delivered, sessionID, /* @__PURE__ */ new Map());
-      const due = [];
-      for (const b of blocks) {
-        if (!b.key) {
-          if (b.text) due.push(b.text);
-          continue;
-        }
-        const last = seen.get(b.key) ?? "";
-        if (b.text === last) continue;
-        if (b.text) due.push(b.text);
-        else if (b.cleared) due.push(b.cleared);
-        seen.set(b.key, b.text);
-      }
-      if (!kind.why && kind.kind === "root" && !inWorkerChild(env)) {
-        const notices = takeNotices(root, now());
-        if (notices.length) due.push(`STERLING NOTICES (from the end of the last turn):
-${notices.map((n) => `- ${n.text}`).join("\n")}`);
-      }
-      if (due.length) input.prompt.text = `${input.prompt.text}
+      const text = await dueText(root, input.sessionID, "prompt");
+      if (text) input.prompt.text = `${input.prompt.text}
 
-${VOLATILE_HEADER}
-
-${due.join("\n\n")}`;
+${text}`;
+    });
+  }
+  async function onToolResult(input) {
+    if (!isDeliveryTool(input?.tool) || input.status !== "completed") return;
+    const root = rootOf();
+    if (!root) return;
+    await fenced("context", root, async () => {
+      const content = input.result?.content;
+      if (!Array.isArray(content) && typeof content !== "string") throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
+      const text = await dueText(root, input.sessionID, "tool call");
+      if (text) appendToResult(input.result, text);
     });
   }
   return {
     onContext,
     onPrompt,
+    onToolResult,
     resetStatus: (root) => (statusCache.delete(root), maintenanceCache.delete(root), boardCache.delete(root)),
     // Compaction can summarize away what was delivered: the session's next prompt gets the whole set again.
     resetSession: (sessionID) => void delivered.delete(sessionID)
@@ -21309,7 +21327,7 @@ function createSterlingServer(deps = {}) {
     }
     const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env });
     const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
-    const { onContext, onPrompt: onVolatile, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
+    const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
     const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
     const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
     const dispatch = createDispatchHandlers({ rootOf, fenced });
@@ -21326,6 +21344,7 @@ function createSterlingServer(deps = {}) {
       await axis.onAfter(input);
       await dispatch.onAfter(input);
       await recordResearch(input);
+      await onVolatileResult(input);
     }
     const onSelection = createPromptHandler({ openStore, rootOf, fenced, env });
     const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels: () => models?.list?.(), env });

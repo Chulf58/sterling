@@ -17,7 +17,9 @@
 //      the subagent, question and codex tools, H20's mechanism-axis delivery
 //      (and the codex model pin); on the subagent tool, H22's dispatch register
 //      arms and H16's agent_dispatch event; after read and shell, H23's
-//      output-axis pointer;
+//      output-axis pointer; last, on a completed read, edit, write, patch or
+//      shell result, the session context lines that changed since that session
+//      last got them (context.mjs onToolResult);
 //   3. session.execution.succeeded of a ROOT session: settlement (mint
 //      reconcile duties, then advance the settled snapshot), the maintenance
 //      worker, and a notice the model sees at the next turn. A child session's
@@ -204,7 +206,7 @@ export function createSterlingServer(deps = {}) {
 
     const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env });
     const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
-    const { onContext, onPrompt: onVolatile, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
+    const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
     const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
     const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
     const dispatch = createDispatchHandlers({ rootOf, fenced });
@@ -224,6 +226,8 @@ export function createSterlingServer(deps = {}) {
       await axis.onAfter(input);
       await dispatch.onAfter(input);
       await recordResearch(input);
+      // Last, so the session lines that changed mid-turn follow every other delivery on the result.
+      await onVolatileResult(input);
     }
     const onSelection = createPromptHandler({ openStore, rootOf, fenced, env });
     const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels: () => models?.list?.(), env });
