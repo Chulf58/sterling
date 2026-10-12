@@ -147,7 +147,7 @@ export function renderOpenCodeFullText(text, label) {
   return render(text, label, ['sterling-only', 'opencode-only']);
 }
 
-// What a reader with no Sterling installed cannot act on (decision 161e2972's
+// What a reader with no Sterling installed cannot act on (the former ruling 'agents-md-is-the-instructions-file-claude-md-is-a-one-line-import' (not in the current store)'s
 // rule: a line stays only if such an engineer can follow it). Checked over the
 // portable BODY, never the provenance header.
 export const PORTABLE_VOCABULARY = [

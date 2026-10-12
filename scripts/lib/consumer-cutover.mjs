@@ -3,7 +3,7 @@
 // consumer project off its old clone. init owns the writes, except the one settings.json
 // switch below; the rest only reads and renders text:
 //   - cloneLauncherTarget: is a sterling-launch.sh a clone launcher (one that starts
-//     claude with --plugin-dir, which overrides the installed plugin — finding 9bce09a9)?
+//     claude with --plugin-dir, which overrides the installed plugin — the former finding 'claude --plugin-dir overrides the installed plugin' (not in the current store))?
 //   - enableMarketplaceAutoUpdate: switches on "autoUpdate": true for the sterling marketplace
 //     in the user-level settings.json (user-ruled 2026-10-06 through the question form, "Init
 //     switches it on", over the warn-only rule of the decision above). The one user-level file

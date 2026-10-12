@@ -137,7 +137,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   /**
    * H1's READY / READY FOR RESEARCH / WAITING ON YOU block (decision
    * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start;
-   * full-parity ruling 7f83f57e), from the same shared lib and the store's one
+   * full-parity ruling the former ruling 'sterling-is-fully-standalone-on-opencode-2-full-parity-with-claude-code' (not in the current store)), from the same shared lib and the store's one
    * readiness function. onPrompt delivers it again whenever it changed, which
    * covers what H20's mid-session line does on Claude Code at the next prompt.
    */
@@ -279,7 +279,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       }
       // H1's registry step, once per root session: last-seen and the row's stack tags
       // (scripts/hooks/lib/registry-refresh.mjs). Never in the worker child, whose
-      // session is not the user's (anti-pattern e40bf982).
+      // session is not the user's (the former ruling 'opencode-session-boundary-code-runs-in-the-maintenance-worker-child' (not in the current store)).
       if (!inWorkerChild(env) && registrySeen.get(root) !== sessionID) {
         registrySeen.set(root, sessionID);
         try {
@@ -291,7 +291,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       }
       out.push({ key: 'undeclared', text: undeclaredBlock(root, state.config), cleared: 'UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies.' });
       // Root sessions only, and never inside the maintenance worker's own child
-      // (anti-pattern e40bf982): the worker is not the conductor filling lanes.
+      // (the former ruling 'opencode-session-boundary-code-runs-in-the-maintenance-worker-child' (not in the current store)): the worker is not the conductor filling lanes.
       if (!inWorkerChild(env)) out.push({ key: 'board', text: boardBlock(root, state.config, sessionID), cleared: 'BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply.' });
     }
     out.push({ key: 'restore', text: await rotationRestore(root, sessionID) });

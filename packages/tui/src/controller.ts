@@ -494,7 +494,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       }
 
       // 2b. the Sterling-full OpenCode conductor and roster, re-rendered with the
-      // matching OpenCode model (decision 48903a6f, DASHBOARD FUNCTIONS (a)). A
+      // matching OpenCode model (the former ruling 'sterling-on-opencode-2-is-the-knowledge-loop-in-one-small-plugin' (not in the current store), DASHBOARD FUNCTIONS (a)). A
       // project that never installed them is skipped; a refused file is said.
       // Its own try: an OpenCode failure is reported, and the decision below
       // is still written for the Claude swap that already happened.

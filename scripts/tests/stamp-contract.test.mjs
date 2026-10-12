@@ -1,5 +1,5 @@
 // AGENTS.md/CLAUDE.md split (decision agents-md-is-the-instructions-file-claude-md-is-a-one-line-import,
-// 161e2972): each TARGET_LEADS bullet propagates into whichever template CURRENTLY carries
+// the former ruling 'agents-md-is-the-instructions-file-claude-md-is-a-one-line-import' (not in the current store)): each TARGET_LEADS bullet propagates into whichever template CURRENTLY carries
 // it — AGENTS.md for a tool-agnostic lead, CLAUDE.md for a Sterling-bound one — and a sibling
 // lacking AGENTS.md entirely is reported not_migrated rather than partially patched.
 import { test } from 'node:test';

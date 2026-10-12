@@ -120,17 +120,17 @@ function resolveModelVars(templateContent, label, config) {
 }
 
 // Per-project tool extension (decision
-// per-project-agent-extra-tools-config-appended-at-render, 587472e3):
+// the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
 // config.agents[<name>].extra_tools is appended, de-duplicated, to the rendered
 // tools: line. Templates carry no token, so template_hash stays the raw template
 // hash; content_hash covers the rendered frontmatter, so the result is not
 // locally modified. Refused loudly (P5): an entry that is not one tool name (the
 // value lands in frontmatter — a newline could inject hooks:), an agent with no
 // tools: line (the main-session conductor and the inherit-all implementor,
-// decision bc1894e5, inherit every tool — nothing to extend), and any entry
+// the former ruling 'implementor-inherits-all-tools-read-only-agents-keep-allowlists' (not in the current store), inherit every tool — nothing to extend), and any entry
 // that would grant Sterling MCP tools — including the whole-server form
 // (`mcp__sterling`) and a wildcard spanning a Sterling prefix (`mcp__*`) —
-// because Sterling grants stay the template's job (decision b4388c11).
+// because Sterling grants stay the template's job (decision e7a805b6).
 function refusesSterlingGrant(entry) {
   // lowercased: the prefixes are lowercase, and a case variant must not slip past
   const lower = entry.toLowerCase();
@@ -157,13 +157,13 @@ function appendExtraTools(frontmatter, name, label, config) {
       throw new Error(`extra_tools for '${name}' (${label}): ${JSON.stringify(entry)} is not a valid tool name — one name, optional trailing *, no commas/whitespace/newlines (P5)`);
     }
     if (refusesSterlingGrant(entry)) {
-      throw new Error(`extra_tools for '${name}' (${label}): '${entry}' would grant Sterling MCP tools — Sterling grants stay the template's job (decision b4388c11); remove it from config.agents.${name}.extra_tools`);
+      throw new Error(`extra_tools for '${name}' (${label}): '${entry}' would grant Sterling MCP tools — Sterling grants stay the template's job (decision e7a805b6); remove it from config.agents.${name}.extra_tools`);
     }
   }
   const lines = frontmatter.split('\n');
   const idx = lines.findIndex((line) => /^tools:/.test(line));
   if (idx === -1) {
-    throw new Error(`extra_tools for '${name}' (${label}): the agent has no tools: line, so it inherits every session tool (the main-session conductor, or an inherit-all agent such as the implementor, decision bc1894e5) and there is no allowlist to extend — remove config.agents.${name}`);
+    throw new Error(`extra_tools for '${name}' (${label}): the agent has no tools: line, so it inherits every session tool (the main-session conductor, or an inherit-all agent such as the implementor, the former ruling implementor-inherits-all-tools-read-only-agents-keep-allowlists (not in the current store)) and there is no allowlist to extend — remove config.agents.${name}`);
   }
   const tools = lines[idx].replace(/^tools:\s*/, '').split(',').map((t) => t.trim()).filter(Boolean);
   for (const entry of extras) if (!tools.includes(entry)) tools.push(entry);
@@ -254,7 +254,7 @@ export function extractBakedCommandPaths(content) {
 }
 
 // The frontmatter model:/effort: values of an agent file (null where the header
-// carries no such line) — the surface config_drift compares (256d1059).
+// carries no such line) — the surface config_drift compares (the former ruling 'sync-agents-reports-config-models-drift-loudly-without-rewriting' (not in the current store)).
 export function extractModelEffort(content) {
   const m = normalize(content).match(/^---\n([\s\S]*?)\n---\n/);
   const fm = m ? m[1] : '';
@@ -265,7 +265,7 @@ export function extractModelEffort(content) {
 }
 
 // The frontmatter tools: entries of an agent file (null when it carries no tools:
-// line) — the second surface config_drift compares (587472e3).
+// line) — the second surface config_drift compares (the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store)).
 export function extractTools(content) {
   const m = normalize(content).match(/^---\n([\s\S]*?)\n---\n/);
   const line = (m ? m[1] : '').match(/^tools:\s*(.*)$/m);
@@ -478,7 +478,7 @@ function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, no
   // Only the entries Claude Code installs (agentHosts): an OpenCode-only agent is
   // never written to .claude/agents/.
   const entries = claudeAgentEntries(loadRegistry(registryPath));
-  // config.agents keys name registered agents (587472e3): a typo would otherwise
+  // config.agents keys name registered agents (the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store)): a typo would otherwise
   // grant nothing, silently.
   const registered = new Set(entries.map((entry) => entry.name));
   for (const key of Object.keys(config?.agents ?? {})) {
@@ -675,7 +675,7 @@ export function foreignFileInstruction(name) {
 // An unmodified, template-current, machine-current install whose frontmatter
 // model/effort differs from the resolved config.models entry reports
 // config_drift (decision sync-agents-reports-config-models-drift-loudly-without-rewriting,
-// 256d1059) and is NOT written: install/refresh/swap stay the only surfaces that
+// the former ruling 'sync-agents-reports-config-models-drift-loudly-without-rewriting' (not in the current store)) and is NOT written: install/refresh/swap stay the only surfaces that
 // realize config authority. Precedence: every writing or refusing status wins
 // over config_drift — refreshed / header_repaired / machine_rebaked write a fresh
 // render that already carries the configured values, and a locally modified file
@@ -734,15 +734,15 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
       // re-bake loudly. A frontmatter model/effort divergence from config.models
       // is reported loudly as config_drift and NOT written: config authority is
       // realized at install/refresh/swap (98064d77), and sync only reports it
-      // (256d1059 — an all-green up_to_date over a dead config bump is the
-      // silent failure of anti_pattern 85d15143).
+      // (the former ruling 'sync-agents-reports-config-models-drift-loudly-without-rewriting' (not in the current store) — an all-green up_to_date over a dead config bump is the
+      // silent failure of the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)).
       const candidate = renderCandidate();
       const sameCommands =
         JSON.stringify(extractHookCommandLines(installed)) === JSON.stringify(extractHookCommandLines(candidate));
       const installedModel = extractModelEffort(installed);
       const configuredModel = extractModelEffort(candidate);
       // Tools compare as sets: config.agents extra_tools is the only config input
-      // to this line (587472e3), so any difference is an unrealized extras change.
+      // to this line (the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store)), so any difference is an unrealized extras change.
       const installedTools = extractTools(installed) ?? [];
       const configuredTools = extractTools(candidate) ?? [];
       const missing = configuredTools.filter((t) => !installedTools.includes(t));

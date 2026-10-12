@@ -83,7 +83,7 @@ const successPredicateSchema = z
     { message: 'success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)' }
   );
 
-// One tool name for config.agents.<name>.extra_tools (587472e3). Enforced at the
+// One tool name for config.agents.<name>.extra_tools (the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store)). Enforced at the
 // render step (not in the schema), because the rendered value lands in frontmatter.
 export const AGENT_TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_.-]*\*?$/;
 
@@ -147,7 +147,7 @@ export const configSchema = z.object({
   // scripts are launcher and console glue, never a toolchain's source, and
   // flagging them was banner noise answered the same way every session. The
   // default lives in THREE places that must agree: here, templates/default-
-  // config.json (anti-pattern 85d15143), and the raw-config ladder in
+  // config.json (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)), and the raw-config ladder in
   // scripts/hooks/lib/undeclared-source-scan.mjs, which imports this constant.
   // An explicit [] still opts back in.
   undeclared_source_exclude_globs: z.array(z.string()).default(() => [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]),
@@ -189,7 +189,7 @@ export const configSchema = z.object({
   tui_split_ratio: z.number().positive().max(1).default(0.35),
   // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
   // H6-only (agent-scoped context enforcement) and DELETED with H6 under
-  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // decision `sterling-claude-code-scale-down-boundary` (d3e63e16); windows
   // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
   // denominator and the direct-mode pressure thresholds). `windows.default`
   // is a REAL fallback (decision context-window-default-is-a-real-fallback,
@@ -270,7 +270,7 @@ export const configSchema = z.object({
     .catchall(agentModelEntry)
     .default({}),
   // Per-project agent tool extension (decision
-  // per-project-agent-extra-tools-config-appended-at-render, 587472e3):
+  // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
   // agents.<registered-agent-name>.extra_tools is appended to that agent's
   // rendered tools: line at install. It must live in the schema — this top-level
   // object strips unknown keys silently. Each entry is one tool name with an
@@ -553,7 +553,7 @@ export const configSchema = z.object({
   // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
   // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
   // Consumers of the PARSED config must narrow this field themselves.
-  // The default lives twice (anti_pattern 85d15143): here and in
+  // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: z.unknown().default('hobby'),
   // Where the project's stores live (decision
@@ -578,7 +578,7 @@ export const configSchema = z.object({
   // reads a config with NO key as on when portable agents are already tracked
   // in git, which this default cannot express: read the setting through it,
   // never from the parsed config.
-  // The default lives twice (anti_pattern 85d15143): here and in
+  // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   handoff: z.unknown().default({ enabled: false }),
   // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):

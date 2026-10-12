@@ -2,7 +2,7 @@
 // design point D). An installed Sterling is a snapshot copied into one of the install
 // roots that scripts/lib/sterling-roots.mjs names: Claude Code's plugin cache (a
 // /plugin install) or OpenCode's npm cache (`opencode plugin add`). What the snapshot
-// holds depends on the source (findings 429e6526, 6308c991): a GitHub source carries
+// holds depends on the source (the former findings 'GitHub-source installed copy' and 'non-GitHub-source installed copy' (not in the current store)): a GitHub source carries
 // the tracked HEAD tree only; a directory source copies the working tree minus .git,
 // so gitignored files DO come along. The predicate therefore never reasons about
 // which files the copy holds. The authoring machine and legacy consumer machines run

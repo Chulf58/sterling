@@ -400,7 +400,7 @@ test('the probe-output/Bash pointer path re-emits known_gaps substance beside it
     );
     const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'grep -n x src/a.mjs'), dir);
     assert.equal(r.code, 0, 'AC7: delivery never blocks');
-    // 2026-09-19: decision 92088a62 deletes the queue/drain; pin the same
+    // 2026-09-19: the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) deletes the queue/drain; pin the same
     // surviving Bash payload directly in additionalContext.
     const ctx = ctxOf(r);
     assert.match(ctx, /owner gap/, 'gap site now re-emits beside the pointer (board f1489964)');
@@ -584,7 +584,7 @@ test('direct Bash path: a two-path command naming one owner emits the KNOWN GAPS
     // ONE command naming BOTH paths owned by the SAME article.
     const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'diff src/a.mjs src/b.mjs'), dir);
     assert.equal(r.code, 0, 'AC7: delivery never blocks');
-    // 2026-09-19: decision 92088a62 deletes the queue/drain; assert the
+    // 2026-09-19: the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) deletes the queue/drain; assert the
     // surviving direct Bash additionalContext at the same output strength.
     const ctx = ctxOf(r);
     const lines = ctx.split('\n');

@@ -1510,7 +1510,7 @@ export class StorageTransitionRequiredError extends Error {
  * it.
  */
 /**
- * decision config-set-warns-on-keys-sterling-does-not-read (77ff9aa8,
+ * the former ruling 'config-set-warns-on-keys-sterling-does-not-read' (not in the current store),
  * user-ruled 2026-09-28): names each unread key the WRITTEN path is or sits
  * under, reusing the schemas package's own dead-key walk (never a
  * locally-duplicated key list) — "X is not read by Sterling" plus its
@@ -1927,7 +1927,7 @@ export class SterlingTools {
 
   /**
    * The staged pipeline (and its notion of an "active run") was removed per
-   * decision sterling-claude-code-scale-down-boundary (2ad87dd1) — every
+   * decision sterling-claude-code-scale-down-boundary (d3e63e16) — every
    * check_skipped row is now a direct-mode NULL-run row (capped by the
    * store's own NULL-run retention, not by run disposal).
    */
@@ -1997,7 +1997,7 @@ export class SterlingTools {
    *     contract contentChanged documents;
    *   - every other still-owned path keeps its baseline byte-for-byte, so an
    *     unrelated write can never erase un-reconciled drift;
-   *   - a path the record stops claiming drops its baseline (decision f841392b's
+   *   - a path the record stops claiming drops its baseline (the former ruling 'a-departed-claimed-path-is-pruned-from-the-owners-reconcile-item' (not in the current store)'s
    *     prune is the queue half of the same departure).
    * Attestation PROVENANCE follows the stamp, per path (board 8c8b6d78 / R9):
    * a path this write stamps loses its baseline_attestations and
@@ -6126,7 +6126,7 @@ export class SterlingTools {
    * generic or not, via symmetric prefix matching —
    * packages/store/src/axis.ts) cover the record's central terms — mandatory
    * for same_subject (sameSubjectDigest, unchanged) but, since the B2G
-   * widening below (findings f6ada94d and
+   * widening below (the former finding 'preflight B2G measurement' (not in the current store) and
    * preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
    * september-2026), NO LONGER a listing floor here: it now gates only
    * matched_total/answerability, computed separately from the LISTED
@@ -6159,7 +6159,7 @@ export class SterlingTools {
     if (terms.length < AXIS_MIN_HITS) {
       return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matched_total: 0, matches: [], ...this.unreadDomainsDisclosure() };
     }
-    // B2G widening (findings f6ada94d and
+    // B2G widening (the former finding 'preflight B2G measurement' (not in the current store) and
     // preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
     // september-2026): requireCentrality=false — the record-centrality floor
     // no longer gates LISTING here, only matched_total/answerability below.
@@ -6295,7 +6295,7 @@ export class SterlingTools {
    * which candidates they exclude, in the MINIMUM MATCHED-HITS floor each
    * passes explicitly (since PREFLIGHT_MIN_HITS above — no default here, so
    * a caller can never inherit a floor value silently), and — since this
-   * session's B2G widening (findings f6ada94d and
+   * session's B2G widening (the former finding 'preflight B2G measurement' (not in the current store) and
    * preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
    * september-2026) — in whether hasRecordCentralityHit gates LISTING at
    * all, via the explicit `requireCentrality` flag (also no default).
@@ -6347,8 +6347,8 @@ export class SterlingTools {
       ...this.store.query({ types: ['open_question'], rank_terms: queryTerms, cap: 40 }),
     ];
     // decision pull-ranking-at-scale-order-of-work-coverage-before-columns-no-narrowing-ladder
-    // (17fa1c59) STEP 1; measured cause: research_finding
-    // why-dome-farmer-pull-cases-miss-mechanisms-september-2026 (a6503bf7),
+    // (the former ruling 'pull-ranking-at-scale-order-of-work-coverage-before-columns-no-narrowing-ladder' (not in the current store)) STEP 1; measured cause: research_finding
+    // the former finding 'why-dome-farmer-pull-cases-miss-mechanisms-september-2026' (not in the current store),
     // mechanism 4, benchmark cases p-003/p-006: hit count alone left ties to
     // fall back to the fixed type-order concatenation above, e.g. a
     // feature_article tied with a decision on hit count sorted below it purely
@@ -10312,7 +10312,7 @@ export class SterlingTools {
    * blocked_by_state (each stored blocker slug, open while a live board item
    * carries it, closed once removed; the stored list is never rewritten) and
    * unblocks (the live items waiting on this one, as `name (id8)`, decision
-   * 11b8b08c). Each key is present only when non-empty. Computed once per call
+   * the former ruling 'board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address' (not in the current store)). Each key is present only when non-empty. Computed once per call
    * over the whole set, never per row.
    */
   private boardDerived(records: readonly DurableRecord[]): Map<string, { blocked_by_state?: BlockerState[]; unblocks?: string[] }> {

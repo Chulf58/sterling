@@ -196,7 +196,7 @@ test('setup', async () => {
 // ===========================================================================
 // (a) research dispatched, NOT yet returned -> Stop does NOT block on the
 // research lane, and the event survives on disk so the duty can re-arm once
-// the agent returns (the debt cannot evaporate, P5 / decision b2474b26).
+// the agent returns (the debt cannot evaporate, P5 / the former ruling 'stop-consumes-settled-and-queued-work-never-live-declarations' (not in the current store)).
 // ===========================================================================
 
 test('(a) a dispatched researcher still presumed-active in its OWN H22 register entry is NOT nagged — the research lane stays quiet while the agent runs', () => {
@@ -531,7 +531,7 @@ test('LEGACY EVENT (no agent_id): an unrelated dispatch\'s ended.at must not dis
 // outstanding sibling event, or the group's earliest-active-event anchor gets
 // dragged back to the settled event's stale timestamp once the live dispatch
 // returns and the gate lifts, letting the earlier finding silently satisfy
-// the later, still-outstanding dispatch (decision b2474b26's rejected
+// the later, still-outstanding dispatch (the former ruling 'stop-consumes-settled-and-queued-work-never-live-declarations' (not in the current store)'s rejected
 // alternative 1: "retaining settled evidence lets an old capture satisfy
 // later research"). Also exercises DEFECT 1's fix directly: dispatch A has
 // ALREADY RETURNED (its own register entry is `inactive-confirmed`) while
@@ -901,7 +901,7 @@ test('CONTROL: an empty dispatch register behaves exactly as before — the rese
 
 // ===========================================================================
 // SUBAGENT WEB RESEARCH (decision subagent-web-research-is-tagged-and-gated-
-// on-lane-return, knowledge_get 39e03daf; finding a827c1a8). H16's matcher
+// on-lane-return, knowledge_get 39e03daf; the former finding 'H16 matcher fires on a subagent WebSearch/WebFetch' (not in the current store)). H16's matcher
 // also fires on a subagent's own WebSearch/WebFetch, and Claude Code puts
 // agent_id on every in-subagent hook event (docs/historical/PROBES.md, Layer
 // 0 probe). H16 records that agent_id on the research_tool event, and H10

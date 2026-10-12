@@ -4,7 +4,7 @@
 // blocked_by_state, H1, H20, the TUI and the OpenCode plugin all read it.
 //
 // Per live user item: blockers (each stored slug, open or closed), blockers_open
-// and unblocks as item names `name (id8)` (never bare slugs, decision 11b8b08c),
+// and unblocks as item names `name (id8)` (never bare slugs, the former ruling 'board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address' (not in the current store)),
 // needs, and state:
 //   waiting  — needs 'user' or 'grill', whatever the blocker state
 //   blocked  — at least one blocker still open (ahead of investigation and of no needs)

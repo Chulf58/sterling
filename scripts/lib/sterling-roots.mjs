@@ -7,7 +7,7 @@
 // INSTALL ROOTS:
 //   claude-code  <CLAUDE_CONFIG_DIR or ~/.claude>/plugins/cache/<marketplace>/sterling/<version>/
 //   opencode     <XDG_CACHE_HOME or ~/.cache>/opencode/npm/<key>/<timestamp>/node_modules/@chulf58/sterling/
-//                (finding 3b0d9ea0: `opencode plugin add` installs there and every update adds a
+//                (the former finding 'opencode plugin add installs under the npm cache' (not in the current store): `opencode plugin add` installs there and every update adds a
 //                new timestamp dir; the key is `name@spec` for a registry spec, so the scope may
 //                or may not be its own directory level, and `git-<slug>-<sha12>` for the Git spec
 //                Sterling ships with (STERLING_GIT_SPEC; measured 2026-10-02 on OpenCode 2.0.21),
@@ -212,7 +212,7 @@ export const sterlingNotFoundMessage = api.sterlingNotFoundMessage;
 /** The package name of the copy `opencode plugin add` installs from STERLING_GIT_SPEC (decision sterling-on-opencode-installs-from-a-git-release-branch-v2). */
 export const STERLING_NPM_PACKAGE = '@chulf58/sterling';
 
-// A `plugins` entry is the spec as typed (finding e18e1c71): the Git spec in any of the
+// A `plugins` entry is the spec as typed (the former finding 'a plugins entry is the spec as typed' (not in the current store)): the Git spec in any of the
 // forms npm-package-arg reads as Chulf58/sterling on GitHub, with any #committish or
 // #semver range, or the package name as a registry spec.
 const STERLING_GIT_REPO = /^(?:github:|git\+(?:https?|git):\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:git\+)?ssh:\/\/(?:git@)?(?:www\.)?github\.com[/:]|(?:https?|git):\/\/(?:www\.)?github\.com\/|git@(?:www\.)?github\.com:)?chulf58\/sterling(?:\.git)?\/?$/i;

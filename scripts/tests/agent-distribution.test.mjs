@@ -750,7 +750,7 @@ test('syncAgents: a LOCALLY MODIFIED install is never machine-rebaked — modifi
 });
 
 // config_drift (decision sync-agents-reports-config-models-drift-loudly-without-rewriting,
-// 256d1059; Dome Farmer #47; closes the silent half of anti_pattern 85d15143):
+// the former ruling 'sync-agents-reports-config-models-drift-loudly-without-rewriting' (not in the current store); Dome Farmer #47; closes the silent half of the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)):
 // an unmodified, template-current install whose frontmatter model/effort differs
 // from the resolved config.models entry is reported LOUDLY as config_drift —
 // never up_to_date — and sync writes nothing (install/refresh/swap stay the only
@@ -1277,7 +1277,7 @@ test('ensureConductorActivation: "installed" / "up_to_date" / "refreshed" all co
 });
 
 // "autoMemoryEnabled": false rides the same write (user-ruled 2026-09-28, "Write it
-// into settings"; finding de5104c9): Sterling projects keep knowledge in the store and
+// into settings"; the former finding 'Sterling projects keep knowledge in the store, not settings' (not in the current store)): Sterling projects keep knowledge in the store and
 // CLAUDE.md, never in Claude Code's auto-memory, which is on by default.
 test('ensureConductorActivation: no settings.json — writes both "agent" and "autoMemoryEnabled": false', () => {
   const dir = tmpdtemp();
@@ -1459,7 +1459,7 @@ test('sync-agents CLI: reports the autoMemoryEnabled write, and an explicit true
   }
 });
 
-// config_drift through the CLI (decision 256d1059): a sparse project config that
+// config_drift through the CLI (the former ruling 'sync-agents-reports-config-models-drift-loudly-without-rewriting' (not in the current store)): a sparse project config that
 // bumps one model (other keys filled from the zod defaults, as install-agents
 // resolves it) prints a status line naming agent, installed + configured
 // model/effort and the fix command; exit 0 (a report, not a gate); nothing written.
@@ -1545,7 +1545,7 @@ for (const [label, tamper, status, instructionRe] of [
 
 // -----------------------------------------------------------------------------
 // Per-project agent tool extension (decision
-// per-project-agent-extra-tools-config-appended-at-render, 587472e3; Dome Farmer
+// the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store); Dome Farmer
 // #50): config.agents.<name>.extra_tools is appended to the rendered tools: line.
 // Templates carry no token, so template_hash stays sha256(raw template); the
 // content_hash covers the rendered output, so the file is NOT locally modified.
@@ -1581,7 +1581,7 @@ test('extra_tools: refused loudly for an agent without a tools: line (main-sessi
   );
 });
 
-test('extra_tools: refused loudly for any entry that would grant Sterling MCP tools (grants stay the template\'s job, b4388c11)', () => {
+test('extra_tools: refused loudly for any entry that would grant Sterling MCP tools (grants stay the template\'s job, e7a805b6)', () => {
   for (const bad of ['mcp__sterling__knowledge_update', 'mcp__plugin_sterling_sterling__board_add', 'mcp__sterling__*', 'mcp__sterling', 'mcp__plugin_sterling_sterling', 'mcp__*', 'mcp__ster*']) {
     assert.throws(
       () => renderInstalledAgent(TEMPLATE, 'probe.md', { ...OPTS, config: EXTRAS('probe-agent', [bad]) }),
@@ -1626,7 +1626,7 @@ test('extra_tools: an extras-only config change -> sync reports config_drift nam
     const config = EXTRAS('probe-agent', ['mcp__godot__*']);
     const { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, config });
     assert.equal(report.length, 1);
-    assert.equal(report[0].status, 'config_drift', 'an extras-only change is never up_to_date (anti_pattern 85d15143)');
+    assert.equal(report[0].status, 'config_drift', 'an extras-only change is never up_to_date (the former ruling assuming sync-agents propagates a config.models bump to installed agents (not in the current store))');
     assert.equal(report[0].refused, undefined, 'config_drift is a report, not a refusal');
     assert.deepEqual(report[0].tools, { missing: ['mcp__godot__*'], unexpected: ['WebFetch'] });
     assert.match(describeConfigDrift(report[0]), /tools: missing mcp__godot__\*; unexpected WebFetch/);
@@ -1717,7 +1717,7 @@ test('install-agents + sync-agents CLI: extras render into the real researcher (
   }
 });
 
-test('extra_tools: refused loudly for an inherit-all agent (disallowedTools, no tools: line — the implementor shape, bc1894e5)', () => {
+test('extra_tools: refused loudly for an inherit-all agent (disallowedTools, no tools: line — the implementor shape, the former ruling implementor-inherits-all-tools-read-only-agents-keep-allowlists (not in the current store))', () => {
   const inheritAll = TEMPLATE.replace('tools: Read\n', 'disallowedTools: mcp__sterling__board_add, mcp__plugin_sterling_sterling__board_add\n');
   assert.throws(
     () => renderInstalledAgent(inheritAll, 'implementor.md', { ...OPTS, config: EXTRAS('probe-agent', ['mcp__godot__*']) }),

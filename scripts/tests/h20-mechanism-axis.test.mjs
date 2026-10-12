@@ -479,7 +479,7 @@ test('axisHits: matches trigger and title but NOT rationale or right_way', () =>
 // placed before hazards, and a hazard that no longer fits degrades to its
 // pointer (the existing held-back behaviour) — the header never does.
 // REWORKED 2026-09-30 for decision h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines
-// (a4912f91): the dispatch surface now renders ONE whole hazard plus trigger
+// (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store)): the dispatch surface now renders ONE whole hazard plus trigger
 // lines, so three 43-45-line hazards measured ~4.6KB and never reached the
 // ceiling. The pressure now comes from one long lead hazard plus the lines.
 // The body length is swept because the defect lives in a narrow byte window

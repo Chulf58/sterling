@@ -436,7 +436,7 @@ test('consumer update: the launcher hint names the move to the installed plugin 
   }
 });
 
-// config_drift in the fan-out (decision 256d1059): a report, not a gate and not a
+// config_drift in the fan-out (the former ruling 'sync-agents-reports-config-models-drift-loudly-without-rewriting' (not in the current store)): a report, not a gate and not a
 // change — the project stays exit 0, the drift line reaches the log verbatim
 // (it carries the fix command), and it is not counted as a changed agent.
 test('fan-out: a config_drift line is logged loudly, never counted as a change, never a failure', async () => {

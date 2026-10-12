@@ -191,7 +191,7 @@ export function guardPath(cwd, agentId, sessionId) {
   return dir ? join(dir, agentId ? `guard-agent-${agentId}.json` : 'guard-conductor.json') : null;
 }
 
-/** GUARD SCHEMA VERSION 2 (decision 92088a62, delivery-migration step 3): the
+/** GUARD SCHEMA VERSION 2 (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store), delivery-migration step 3): the
  *  flat `records`/`slugs` ledger is replaced by TWO revision-keyed ledgers,
  *  `substance` and `discovery` (each `[{id, revision}]`) — a record shown only
  *  as a pointer/discovery must still qualify for a later FULL delivery, and a
@@ -200,7 +200,7 @@ export function guardPath(cwd, agentId, sessionId) {
  *  staying silently suppressed by a stale lineage mark. This is a BUMP, not a
  *  migration: an old-shape guard on disk simply resets to empty (see
  *  `readGuard`) — a lost mark this session costs at most one duplicate
- *  delivery, which decision 92088a62 rules acceptable; a false 'delivered'
+ *  delivery, which the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) rules acceptable; a false 'delivered'
  *  mark is not. */
 export const DELIVERY_GUARD_VERSION = 2;
 
@@ -232,7 +232,7 @@ export function lineageKey(record) {
   return record?.slug ?? record?.id;
 }
 
-/** THE REVISION a record carries for guard-keying purposes (decision 92088a62
+/** THE REVISION a record carries for guard-keying purposes (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)
  *  STATE clause) — a forward-fix (`knowledge_update` in place, same id,
  *  CLAUDE.md's documented "fix forward" pattern) must re-qualify the record
  *  for delivery rather than staying silently suppressed by a mark minted
@@ -267,7 +267,7 @@ function revisionDelivered(list, record) {
 /** Add each `{identity, revision}` entry (the assembler's OWN returned shape —
  *  see `assembleDelivery`) to `list`, deduped on (id, revision). Never takes a
  *  raw record: callers persist ONLY what the assembler says actually rendered
- *  (decision 92088a62's ONE ASSEMBLER CONTRACT — "callers persist only the
+ *  (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)'s ONE ASSEMBLER CONTRACT — "callers persist only the
  *  returned sets, after successful output"). An entry with no identity is
  *  silently skipped (chrome/framing carries none, by construction). */
 function markRevisionDelivered(list, entries) {
@@ -282,7 +282,7 @@ function markRevisionDelivered(list, entries) {
 /** Was this record already delivered as full SUBSTANCE this session (at this
  *  exact revision)? A record shown only as `discovery` (a pointer) does NOT
  *  count here — it must still qualify for a later substance delivery
- *  (decision 92088a62: "a record shown as discovery still qualifies for
+ *  (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store): "a record shown as discovery still qualifies for
  *  substance later"). This is the ONE check that guards against the false-
  *  'delivered' trap: it is never satisfied by a record's id merely APPEARING
  *  in rendered text, only by the assembler's own returned emittedSubstance
@@ -343,7 +343,7 @@ export function readGuard(path) {
   try {
     if (!existsSync(path)) return emptyDeliveryGuard();
     const parsed = JSON.parse(readFileSync(path, 'utf8'));
-    // SCHEMA BUMP, NOT MIGRATION (decision 92088a62): a guard minted under a
+    // SCHEMA BUMP, NOT MIGRATION (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)): a guard minted under a
     // prior version (missing entirely on the old flat `records`/`slugs` shape,
     // or a future version this build cannot read) resets to empty rather than
     // being coerced — coercing `records: [id, ...]` into `substance:
@@ -651,7 +651,7 @@ export function isArticleDigested(article) {
 }
 
 /** Will this owner ONLY EVER render as a discovery pointer — never as full
- *  substance (fix-round MEDIUM 3, decision 92088a62)? A `reference_material`
+ *  substance (fix-round MEDIUM 3, the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store))? A `reference_material`
  *  owner is always `renderReference` (a one-line pointer, never a body); an
  *  oversize `feature_article` always takes `renderArticle`'s DIGEST branch
  *  while it stays oversize. The ONE definition callers must consult BEFORE
@@ -878,7 +878,7 @@ export function renderArticle(store, article, { gaps, root } = {}) {
       ...gapLines,
     ].join('\n');
   }
-  // COMPLETE TEXT, NOT PRE-CLIPPED (fix-round HIGH 2, decision 92088a62's ONE
+  // COMPLETE TEXT, NOT PRE-CLIPPED (fix-round HIGH 2, the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)'s ONE
   // ASSEMBLER CONTRACT: "structured inputs {..., complete text}"): this used
   // to `clip(body, charCap)`/`clip(intended_behavior, charCap)` HERE, before
   // the assembler ever saw the field — a body between charCap (2400) and
@@ -1028,11 +1028,11 @@ function hazardDisclosureLine(hazards, shown, { cap, fileKeys = [], remedy, tota
   return `… ${dropped} more hazard(s) NOT shown (${capLabel ?? `cap ${cap}`}) — ${widen} for the full set`;
 }
 
-/** Hazard blocks as ASSEMBLER PARTS (decision 92088a62), paired 1:1 with the
+/** Hazard blocks as ASSEMBLER PARTS (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)), paired 1:1 with the
  *  records that produced them: each SHOWN hazard (the same `cappedHazards`
  *  selection `renderHazards` uses internally, called here with the identical
  *  args so the two never diverge) is `kind:'hazard'` (pinned, unbudgeted —
- *  decision 301d8a0a) and `contentClass:'substance'` — a WHOLE hazard IS
+ *  the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)) and `contentClass:'substance'` — a WHOLE hazard IS
  *  substance, never a mere pointer, on every surface that renders one
  *  (item 4: Bash now included). The trailing '+N more' disclosure line, if
  *  any, carries no identity and `contentClass:'chrome'`, so it can never earn
@@ -1051,7 +1051,7 @@ export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, 
 function wholeHazardPart(ap, text, matchLabel) {
   return {
     kind: 'hazard', contentClass: 'substance', identity: ap.id, revision: recordRevision(ap), name: ap.slug || ap.title, text,
-    // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
+    // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)
     // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
     // the hard transport ceiling degrades to this bare notice — never a
     // partial trigger/right_way (the HAZARDS clause: "each whole") —
@@ -1097,13 +1097,13 @@ function hazardPointerParts(hazards, shown, { cap, fileKeys, remedy, total, supp
 }
 
 /** Per-hazard line format for the QUESTION surface (decision
- *  question-surface-gets-hazards-as-pointers, 6300c1e8 — the SECOND narrowing
- *  of 301d8a0a's hazards-whole rule, after 21e3637e's read-only-lane
+ *  the former ruling 'question-surface-gets-hazards-as-pointers' (not in the current store) — the SECOND narrowing
+ *  of the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)'s hazards-whole rule, after the former ruling 'read-only-subagent-lanes-get-hazards-as-pointers' (not in the current store)'s read-only-lane
  *  pointer): `name (id8) — HAZARD: <clipped trigger>`, name first — the SAME
  *  name-first, id8 convention h20-mechanism-axis.mjs already uses on this
  *  surface for decisions and prior answers (`pointerHead`; CLAUDE.md: never a
  *  bare id in front of a human), extended here to hazards. Distinct from
- *  hazardHeaderLine (21e3637e's read-only-lane pointer, still used by
+ *  hazardHeaderLine (the former ruling 'read-only-subagent-lanes-get-hazards-as-pointers' (not in the current store))s read-only-lane pointer, still used by
  *  `hazardPointerParts` above): that form leads with severity and the full
  *  'ANTI-PATTERN' framing for a lane about to ACT on the subject by writing;
  *  this is the quotable, name-first form for a reader auditing an ANSWER,
@@ -1114,13 +1114,13 @@ function hazardQuestionLine(ap) {
   return `  → ${clip(name, 80)} (${String(ap?.id).slice(0, 8)}) — HAZARD: ${clip(ap?.trigger, HAZARD_QUESTION_TRIGGER_CLIP)}`;
 }
 
-/** QUESTION MODE of `hazardParts` (decision 6300c1e8) — the THIRD hazard
+/** QUESTION MODE of `hazardParts` (the former ruling 'question-surface-gets-hazards-as-pointers' (not in the current store)) — the THIRD hazard
  *  rendering shape, sibling to `hazardPointerParts` above: the SAME
  *  `cappedHazards` selection `hazardParts` uses for whole mode, the SAME
  *  '+N more' disclosure math, and the SAME per-hazard credit shape (one part
  *  per shown hazard, `contentClass:'discovery'`, its own `identity`/
  *  `revision`/`name` — never one part carrying a bundled array, so the
- *  one-identity-list-for-credit-and-disclosure anti-pattern (1c22149f) does
+ *  one-identity-list-for-credit-and-disclosure anti-pattern (the former ruling 'one-identity-list-for-credit-and-disclosure-of-a-capped-delivery-part' (not in the current store)) does
  *  not apply: each pointer already IS its own part, the same shape
  *  `hazardPointerParts` uses). Differs from `hazardPointerParts` only in the
  *  header and the per-record line (`hazardQuestionLine` vs
@@ -1152,11 +1152,11 @@ function hazardQuestionParts(hazards, shown, { cap, fileKeys, remedy, total, sup
 }
 
 /** LEAD MODE of `hazardParts` (user ruling
- *  h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines, a4912f91 —
- *  the THIRD narrowing of 301d8a0a's hazards-whole rule, H20's dispatch
+ *  the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) —
+ *  the THIRD narrowing of the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)'s hazards-whole rule, H20's dispatch
  *  surface only). Measured: the conductor acted on rank 3 in 0 of 77
  *  dispatches and never fetched a hazard pointer, while about half the acts
- *  used right_way detail (finding 8d488eb5). So the rank-1 hazard of the ONE
+ *  used right_way detail (the former finding 'rank 3 hazard acted on 0 of 77 times' (not in the current store)). So the rank-1 hazard of the ONE
  *  `cappedHazards` selection stays whole (substance) and ranks 2..cap render
  *  as `hazardQuestionLine` pointers (discovery), with ONE '+N more' line for
  *  the rest. Credit is per part, as in the other modes. A caller must judge
@@ -1457,7 +1457,7 @@ function clipToBytes(text, maxBytes) {
 // ---------------------------------------------------------------------------
 // PER-DELIVERY TOTAL CAP (scale-down Slice 3c, decision
 // sterling-claude-code-scale-down-boundary; assembler contract, decision
-// 92088a62). payload_char_cap bounds one FIELD; nothing bounded a delivery as
+// the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)). payload_char_cap bounds one FIELD; nothing bounded a delivery as
 // a whole, and one governed Read measured 13-17KB. Every delivery surface
 // (H19 tool-time, H19 Bash, dispatch staging, H20) now assembles its blocks
 // through assembleDelivery: hazard blocks are PINNED and UNCHARGED against
@@ -1482,7 +1482,7 @@ function clipToBytes(text, maxBytes) {
  *  it (0 = no total cap). */
 export const DELIVERY_TOTAL_CAP_DEFAULT = 3000;
 
-/** THE HARD TRANSPORT CEILING (decision 92088a62 NOT GUARANTEED clause,
+/** THE HARD TRANSPORT CEILING (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) NOT GUARANTEED clause,
  *  fix-round HIGH 1/4): "Claude Code persists hook output over 10,000 chars
  *  and previews about 2,000; oversized hidden substance is a degraded notice
  *  and is not marked delivered." This is NOT `config.delivery.total_cap_bytes`
@@ -1494,7 +1494,7 @@ export const DELIVERY_TOTAL_CAP_DEFAULT = 3000;
  *  protects the transport boundary. */
 export const DELIVERY_TRANSPORT_VISIBLE_BYTES = 10000;
 
-/** SCHEMA MINIMUM (decision 92088a62 item 7): the smallest positive
+/** SCHEMA MINIMUM (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) item 7): the smallest positive
  *  `total_cap_bytes` this build will actually use. A tiny or misconfigured
  *  positive value (say `1`) would still let hazards and pinned chrome render
  *  in full — those are never subject to this cap — but it would squeeze every
@@ -1517,7 +1517,7 @@ export function resolveTotalCap(cwd) {
 }
 
 /**
- * THE ONE ASSEMBLER (decision 92088a62 knowledge-delivery-target-design-no-
+ * THE ONE ASSEMBLER (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) knowledge-delivery-target-design-no-
  * delayed-delivery, ONE ASSEMBLER CONTRACT clause): structured parts →
  * `{text, emittedSubstance, emittedDiscovery, omitted, omittedCount,
  * degraded}`. PURE — no I/O, no guard access, no clock. Every caller persists
@@ -1541,7 +1541,7 @@ export function resolveTotalCap(cwd) {
  * pointer, an omission, or — for the omitted-count disclosure specifically —
  * force an already-embedded hazard to give up its own room):
  *  - `kind: 'hazard'` — PINNED and UNCHARGED against `capBytes` (decision
- *    301d8a0a): never clipped to a partial excerpt, and its bytes do NOT
+ *    the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)): never clipped to a partial excerpt, and its bytes do NOT
  *    count against the CONFIGURED cap (hazards can push the ordinary total
  *    over `capBytes` by design). It is NOT exempt from the separate, hard
  *    TRANSPORT ceiling, though: a hazard whose own whole block cannot fit
@@ -1572,7 +1572,7 @@ export function resolveTotalCap(cwd) {
  * how it renders. A record earns a mark in `emittedSubstance`/
  * `emittedDiscovery` when its part's FULL text survived un-clipped — never
  * for a bare pointer or an aggregated omission, and never a SUBSTANCE mark
- * for an excerpt (decision 92088a62: "Omitted, pointer-only, unavailable and
+ * for an excerpt (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store): "Omitted, pointer-only, unavailable and
  * transport-overflow content never consumes a substance-delivery mark").
  *
  * ONE EXCEPTION, DISCOVERY ONLY (board 56d571a3): a `discovery` part that
@@ -1683,9 +1683,9 @@ function assembleOnce(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}, re
   const isHazard = (part) => part.kind === 'hazard';
   const isChrome = (part) => part.kind !== 'hazard' && part.pinned;
 
-  // TWO BUDGETS, ALWAYS BOTH ACTIVE (fix-round HIGH 1/4, decision 92088a62 NOT
+  // TWO BUDGETS, ALWAYS BOTH ACTIVE (fix-round HIGH 1/4, the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) NOT
   // GUARANTEED clause): `ordinaryCeiling` is OUR configured cap — hazards stay
-  // exempt from it (301d8a0a) — but `DELIVERY_TRANSPORT_VISIBLE_BYTES` is
+  // exempt from it (the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)) — but `DELIVERY_TRANSPORT_VISIBLE_BYTES` is
   // Claude Code's OWN hard boundary and applies to the FINAL composed string
   // as a whole, with NO exemptions — including hazards, including a disabled
   // (`0`) configured cap. `0` only ever meant "no CONFIGURED cap"; it never
@@ -1763,7 +1763,7 @@ function assembleOnce(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}, re
   };
 
   // HAZARD DEGRADE: WHOLE OR A BARE POINTER ONLY — never a partial excerpt
-  // (decision 92088a62 HAZARDS clause: "each whole"; a hazard that cannot fit
+  // (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) HAZARDS clause: "each whole"; a hazard that cannot fit
   // the transport ceiling becomes a "degraded notice", per the NOT GUARANTEED
   // clause, rather than a truncated trigger/right_way).
   const tryDegradeHazard = (part) => {
@@ -1865,7 +1865,7 @@ function assembleOnce(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}, re
   };
   const sepCost = (renderedBefore) => (renderedBefore > 0 ? bytes(sep) : 0);
 
-  // RESERVED POINTERS (decision 301d8a0a: "Each later block's pointer is
+  // RESERVED POINTERS (the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store): "Each later block's pointer is
   // reserved up front so an early large block cannot crowd it out"; restored
   // 2026-09-24 after H20 dropped the one decision that answered the question
   // to a bare id). Once chrome and hazards hold their bytes, each ordinary
@@ -1985,12 +1985,12 @@ function assembleOnce(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}, re
       return line;
     };
     // THE DISCLOSURE ITSELF MUST NEVER SILENTLY VANISH (fix-round HIGH 1,
-    // decision 92088a62 HAZARDS clause: "with the omitted count stated" — a
+    // the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) HAZARDS clause: "with the omitted count stated" — a
     // cap that drops the "+N more" line is the exact silent-omission failure
     // the disclosure exists to prevent, even when the thing crowding it out
     // is a legitimately whole, unbudgeted hazard). Priority for what gives up
     // room, in order: (1) evict an already-selected ORDINARY/chrome part —
-    // never a hazard, first pass, preserving 301d8a0a's "hazards are never
+    // never a hazard, first pass, preserving the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)'s "hazards are never
     // cut by the [CONFIGURED] cap"; unreserved parts go before a part holding
     // a reserved pointer (review 2026-09-24: the reserved decision pointer
     // was the eviction victim); (2) if nothing ordinary is left, degrade
@@ -1998,7 +1998,7 @@ function assembleOnce(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}, re
     // partial excerpt — the same whole-or-pointer rule `tryDegradeHazard`
     // enforces) — this is the aggregate's own final resort against the HARD
     // transport ceiling, not the configured cap, so it does not contradict
-    // 301d8a0a; (3) if truly nothing can be freed (no ordinary content, no
+    // the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store); (3) if truly nothing can be freed (no ordinary content, no
     // hazard has a pointer fallback), accept the aggregate line even though
     // it overruns — stating the count imperfectly beats not stating it.
     while (true) {
@@ -2022,7 +2022,7 @@ function assembleOnce(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}, re
         evictable[0];
       // Only reach for a hazard when the HARD TRANSPORT CEILING itself is
       // what still fails to fit — never for the CONFIGURED cap alone
-      // (`fitsOrdinaryCap`, decision 301d8a0a): a pathologically tiny
+      // (`fitsOrdinaryCap`, the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)): a pathologically tiny
       // `total_cap_bytes` with nothing ordinary left to evict must fall
       // straight to the final "accept the overrun" resort below, not start
       // shrinking whole hazard substance the configured cap was never
@@ -2089,7 +2089,7 @@ export function decisionBlockPointer(count, widen, top) {
  *  for SEVERAL decisions (board 6c0c848f items 1, 3, 5). The renderer shows
  *  only `decisions.slice(0, cap)`; the part's `identities` are built from that
  *  SAME slice, so a decision disclosed as "N more NOT shown" never earns a
- *  discovery mark (decision 92088a62: a false 'delivered' mark is forbidden)
+ *  discovery mark (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store): a false 'delivered' mark is forbidden)
  *  and stays eligible for a later, real delivery. Callers pass the FULL fresh
  *  list, never a pre-sliced one, so the renderer's count stays true. Each
  *  identity carries its `name` and the pointer names the top record, so the
@@ -2234,7 +2234,7 @@ export function bashPointerBlock(entries, { gapsByOwner, includeHazardLines = tr
   const gapAttached = new Set();
   for (const e of entries) {
     // `includeHazardLines: false` (delivery-migration step 3, decision
-    // 92088a62 item 4): the h19-bash-delivery.mjs caller now renders hazards
+    // the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) item 4): the h19-bash-delivery.mjs caller now renders hazards
     // as WHOLE blocks via `hazardParts` — a hazard is substance, not a
     // pointer, on every surface — so this one-line-per-hazard form is
     // skipped there. Kept default-on for any other caller (there is none

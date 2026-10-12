@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 // Run-scoped transient shapes (spec §3.2.9) — NOT knowledge-store records.
 // The staged pipeline (signals, handoffs, machine states, run records) was
-// removed per decision sterling-claude-code-scale-down-boundary (2ad87dd1);
+// removed per decision sterling-claude-code-scale-down-boundary (d3e63e16);
 // only the session-event register survives — it backs the knowledge-loop
 // events (no_capture, capture_pending, concept_designed, …) below.
 

@@ -313,7 +313,7 @@ test('H22 attribution PIN1: mixed-type batch — one coder dispatch + one test-w
 // ===========================================================================
 // PIN 2 (RE-CUT — THE RULING IS INVERTED HERE, state it plainly) — same-type
 // twins are UNATTRIBUTABLE, for EVERY class, once the bounded 3000 ms
-// siblings-retry wait (150 ms before the budget widening; finding aa3b4a4c)
+// siblings-retry wait (150 ms before the budget widening; the former finding 'background Post lands 0.34-2.24 s after Start' (not in the current store))
 // for a Post binding expires. The old expectation (a union of the same-type
 // blocks, attribution 'union', and a non-reviewer keeping
 // 'free-prose-fallback' under this exact shape) described the DELETED

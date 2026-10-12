@@ -147,7 +147,7 @@ test('full roster installs end-to-end through the CLI with detected vars; model/
     const librarian = readFileSync(join(dir, '.claude', 'agents', 'librarian.md'), 'utf8');
     assert.match(librarian, /sterling-generated v=/);
     // No hooks: block survives in any of the 4 shipped templates (scale-down
-    // decision sterling-claude-code-scale-down-boundary, 2ad87dd1) — HOOKS_DIR/NODE
+    // decision sterling-claude-code-scale-down-boundary, d3e63e16) — HOOKS_DIR/NODE
     // baking is no longer exercised by a real shipped template; see the render test
     // above for what still is (model/effort resolution).
     assert.ok(!librarian.includes('{{'), 'no substitution token survives the CLI install');
@@ -189,7 +189,7 @@ test('skills ship with live file references and pass the skill linter', () => {
 // ---------------------------------------------------------------------------
 
 // Inherit-all implementor (decision
-// implementor-inherits-all-tools-read-only-agents-keep-allowlists, bc1894e5):
+// the former ruling 'implementor-inherits-all-tools-read-only-agents-keep-allowlists' (not in the current store):
 // the implementor drops its tools: allowlist so it inherits every session tool
 // (every project MCP server, both Sterling prefixes, ToolSearch) and declares a
 // disallowedTools deny-list instead. The marker is the frontmatter itself: a
@@ -219,7 +219,7 @@ const fmOf = (content) => content.match(/^---\r?\n([\s\S]*?)\r?\n---/)[1];
 
 test('inherit-all implementor: no tools: line; disallowedTools denies exactly the Sterling store-write tools under both prefixes', () => {
   const impl = readFileSync(join(TPL, 'implementor.md'), 'utf8');
-  assert.doesNotMatch(fmOf(impl), /^tools:/m, 'the implementor inherits every session tool (bc1894e5)');
+  assert.doesNotMatch(fmOf(impl), /^tools:/m, 'the implementor inherits every session tool (the former ruling implementor-inherits-all-tools-read-only-agents-keep-allowlists (not in the current store))');
   const line = fmOf(impl).match(/^disallowedTools:\s*(.+)$/m);
   assert.ok(line, 'the implementor declares a disallowedTools deny-list');
   const denied = line[1].split(',').map((t) => t.trim());

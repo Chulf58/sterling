@@ -45,6 +45,7 @@ import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy, fileEntriesO
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
 import { publishNotice } from './lib/delivery.mjs';
+import { isForeignTree } from './lib/working-tree.mjs';
 import { evaluatePrLoop, prLoopNext, prLoopOwedText, prLoopReminderText } from './lib/pr-loop-duty.mjs';
 import { maybeLaunchMaintenanceWorker } from './lib/maintenance-worker.mjs';
 import {
@@ -1353,7 +1354,7 @@ try {
       // event already converted to a queue item by the caller before reaching
       // here — is consumed exactly as a non-deferring Stop would consume it;
       // only the genuinely-still-outstanding ones survive to re-arm the duty
-      // once their dispatch returns (decision b2474b26).
+      // once their dispatch returns (the former ruling 'stop-consumes-settled-and-queued-work-never-live-declarations' (not in the current store)).
       const survivors = [...pendingDeclarations, ...(retainedCaptureEvents ?? []), ...outstandingResearchEvents];
       if (survivors.length) {
         writeFileSync(eventsPath, JSON.stringify(survivors));
@@ -1534,7 +1535,7 @@ try {
 
   // HOLD WHILE ANY DISPATCH IS LIVE (decision
   // capture-pending-grace-per-declaration-held-while-any-dispatch-live,
-  // 294706f6, user-ruled 2026-09-25): while ANY row of the H22 register is
+  // the former ruling 'capture-pending-grace-per-declaration-held-while-any-dispatch-live' (not in the current store), user-ruled 2026-09-25): while ANY row of the H22 register is
   // presumed-active — the same classifyRegister verdict the file deferral
   // uses, `liveDispatches` above — a capture_pending declaration is neither
   // converted to debt nor re-demanded, whether or not its free text names an
@@ -1551,7 +1552,7 @@ try {
   // rounds, 5f21707a, user-ruled 2026-10-01, amending point 3 above): a lane
   // that parks on its own background work ends a register round at every
   // SubagentStop and resumes as a NEW round minutes later, so between rounds
-  // nothing is presumed-active (finding 9f82a87d measured 4-6 minute gaps).
+  // nothing is presumed-active (the former finding 'lane gaps of 4-6 minutes' (not in the current store) measured 4-6 minute gaps).
   // The declaration therefore also holds while any row of THIS session ended
   // within config.dispatch_register.resume_hold_minutes (zod default 10). A
   // foreign session's row never holds. Not guaranteed (stated in the
@@ -1574,7 +1575,7 @@ try {
   // (`capture_pending_spent`, ids from pendingDeclId), written by the Stop that
   // spent it. A marker without the list — the nag that PRECEDES a declaration,
   // the normal order since the nag names capture_pending — spends nothing
-  // (finding b8ce1d54: every declaration used to live zero Stops). Identity,
+  // (the former finding 'every declaration used to live zero Stops' (not in the current store): every declaration used to live zero Stops). Identity,
   // not wall-clock order, so a declaration stamped in the future cannot keep
   // its grace forever. An unreadable marker counts as spending every
   // declaration: the duty converts to recorded debt, the safe direction.
@@ -1782,7 +1783,7 @@ try {
   // dispatch time. An event that IS already individually satisfied or
   // discharged is CONSUMED here exactly as a non-deferring Stop would consume
   // it — never resurrected merely because an unrelated research dispatch
-  // happens to still be live (decision b2474b26's rejected alternative 1:
+  // happens to still be live (the former ruling 'stop-consumes-settled-and-queued-work-never-live-declarations' (not in the current store)'s rejected alternative 1:
   // "retaining settled evidence lets an old capture satisfy later research").
   // Computed only when there is something to check (at least one LIVE
   // agent_dispatch research event, by its own join) — an unconditional store
@@ -1845,7 +1846,7 @@ try {
   // trimmed detail, never a split on ' — ' (which may occur inside a target).
   // The same exact target joins its own item;
   // an unrelated open capture_owed, or another target over the same files,
-  // never suppresses or overwrites it (finding b8ce1d54).
+  // never suppresses or overwrites it (the former finding 'every declaration used to live zero Stops' (not in the current store)).
   const enqueuePendingDebt = (declarations) => {
     const byTarget = new Map();
     for (const e of declarations) {
@@ -1924,14 +1925,19 @@ try {
   const { ownerRows, isUnowned } = ownershipJoin(store, input.cwd);
   // What the join actually SAW for one demanded path — so a false demand is
   // diagnosable from the deny text alone instead of by re-running the query by
-  // hand. "none" is the ordinary case; a row listed here was matched and then
-  // EXCLUDED (its working_tree names another tree, whose copy of this path it
-  // owns), which is precisely the shape that looks like a hook defect.
+  // hand. "none" is the ordinary case; a row the count EXCLUDED (its
+  // working_tree names another tree, whose copy of this path it owns) is tagged
+  // EXCLUDED, using the same isForeignTree(row, input.cwd) test ownershipJoin's
+  // isUnowned applies, so the note never lists a non-counting row as an owner
+  // (GitHub issue #83).
   const ownerRowsNote = (p) => {
     const rows = ownerRows(p);
     if (!rows.length) return 'none';
     return rows
-      .map((r) => `${r.slug ?? r.title ?? r.type} (${String(r.id).slice(0, 8)}${r.working_tree ? `, working_tree=${r.working_tree}` : ''})`)
+      .map((r) => {
+        const excluded = isForeignTree(r, input.cwd) ? ', EXCLUDED: working_tree names another tree' : '';
+        return `${r.slug ?? r.title ?? r.type} (${String(r.id).slice(0, 8)}${r.working_tree ? `, working_tree=${r.working_tree}` : ''}${excluded})`;
+      })
       .join('; ');
   };
   /** Which of `list` git KNOWS RIGHT NOW — present in the INDEX (ls-files) or
@@ -2323,7 +2329,7 @@ try {
   // NOT a threshold question: newUnowned.length > 0 triggers the demand on its
   // own, so ONE newly created unowned file is enough — min_unowned_files never
   // enters it.
-  // NEWNESS BASE (board 4e624c1a, finding 6d1b3c99): a brand-new unowned file
+  // NEWNESS BASE (board 4e624c1a, the former finding 'newness base for a brand-new unowned file' (not in the current store)): a brand-new unowned file
   // added by a PLAIN GIT COMMIT made outside Claude Code between sessions is
   // already present in HEAD by the time this Stop runs, so testing newness
   // against HEAD (the pre-fix behaviour) never sees it — silent, no matter

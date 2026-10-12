@@ -50,7 +50,7 @@ export function lintAgentFences(content, label, portableBlocks = shippedPortable
 export const MAIN_SESSION_AGENTS = ['conductor.md', 'plan.md'];
 
 // Inherit-all agents (decision
-// implementor-inherits-all-tools-read-only-agents-keep-allowlists, bc1894e5):
+// the former ruling 'implementor-inherits-all-tools-read-only-agents-keep-allowlists' (not in the current store):
 // no tools: allowlist, a disallowedTools deny-list instead, so they inherit
 // every session tool including every project MCP server. Explicit, like
 // MAIN_SESSION_AGENTS: any OTHER template with disallowedTools and no tools:
@@ -108,7 +108,7 @@ export function lintAgentPrompt(content, label) {
 //
 // Deliberately scoped to the roles the item names as reporting absence most
 // often. debugger.md was deleted with the debugger template (scale-down
-// decision sterling-claude-code-scale-down-boundary, 2ad87dd1). explorer.md ->
+// decision sterling-claude-code-scale-down-boundary, d3e63e16). explorer.md ->
 // scout.md at Slice 5/8 (same decision, change 3, roster reshaped to
 // OpenSterling's shape) — scout is explorer's direct successor for this rule.
 // researcher.md joined once its own 'Absence claims' section was written.
@@ -182,7 +182,7 @@ export function parseToolsLine(content) {
 
 // The frontmatter disallowedTools: deny-list (null when absent). With no tools:
 // line it makes an agent inherit every session tool minus the deny-list, which
-// only INHERIT_ALL_AGENTS may do (bc1894e5).
+// only INHERIT_ALL_AGENTS may do (the former ruling 'implementor-inherits-all-tools-read-only-agents-keep-allowlists' (not in the current store)).
 export function parseDisallowedToolsLine(content) {
   const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!fm) return null;
@@ -234,7 +234,7 @@ export function lintToolGrants(content, label, registeredTools) {
     const denied = parseDisallowedToolsLine(content);
     if (denied === null) return [{ kind: 'missing_tools_line', detail: `${label}: no 'tools:' line in frontmatter` }];
     if (!INHERIT_ALL_AGENTS.includes(label)) {
-      return [{ kind: 'inherit_all_not_allowed', detail: `${label}: disallowedTools with no 'tools:' line inherits every session tool — only INHERIT_ALL_AGENTS (${INHERIT_ALL_AGENTS.join(', ')}) may (decision bc1894e5)` }];
+      return [{ kind: 'inherit_all_not_allowed', detail: `${label}: disallowedTools with no 'tools:' line inherits every session tool — only INHERIT_ALL_AGENTS (${INHERIT_ALL_AGENTS.join(', ')}) may (the former ruling implementor-inherits-all-tools-read-only-agents-keep-allowlists (not in the current store))` }];
     }
     // Inherit-all agent: ToolSearch and both Sterling prefixes are inherited,
     // so only the deny-list's names are checked.

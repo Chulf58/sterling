@@ -216,7 +216,7 @@ function holdLiveLock(dir) {
 // A deterministic injected clock: every read advances 10 ms, so the resolver's
 // siblings-retry budget (3000 ms since the budget widening — decision
 // dispatch-state-status-in-filename-live-scan-parses-only-live-records,
-// follow-on; finding aa3b4a4c: background Post lands 0.34-2.24 s after
+// follow-on; the former finding 'background Post lands 0.34-2.24 s after Start' (not in the current store): background Post lands 0.34-2.24 s after
 // Start) is spent in at most 300 sleeps and NO real time passes.
 function fakeClock(startMs = 1_800_000_000_000, stepMs = 10) {
   let t = startMs;

@@ -780,7 +780,7 @@ test('OpenCode sync: an older copy leaves the refusal notice naming the update r
   assert.equal(texts.length, 1);
   assert.match(texts[0], /^POST-UPDATE SYNC REFUSED \(OpenCode plugin\): this Sterling copy is 9\.9\.9-fixture, older than this project's sync marker 10\.0\.0/);
   // The old expectation pinned "run /sterling:update in OpenCode", which cannot update an
-  // installed copy: the npm copy's route is `opencode plugin update` (decision 66d04413).
+  // installed copy: the npm copy's route is `opencode plugin update` (the former ruling 'the npm-copy update route is opencode plugin update' (not in the current store)).
   assert.match(texts[0], /update it with `opencode plugin update "github:Chulf58\/sterling#semver:>=0\.18\.0"`/);
   assert.doesNotMatch(texts[0], /\/sterling:update/);
 });

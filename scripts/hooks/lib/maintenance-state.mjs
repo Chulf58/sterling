@@ -1,7 +1,7 @@
 // H1's maintenance-queue lines, host-neutral: the system-todo summary, the
 // deep-queue signal and the reconcile backlog line. Extracted from
 // h1-session-start.mjs so the OpenCode context hook states the SAME text from the
-// SAME code (board cbee2b3d, audit f2ba68c2 row 2). A sibling of operating-state.mjs,
+// SAME code (board cbee2b3d, audit the former finding 'OpenCode parity audit' (not in the current store) row 2). A sibling of operating-state.mjs,
 // not part of it: it carries the maintenance-worker lib (lockfile and journal
 // reads, which both hosts share), which the dispatch-staging bundles must not pull in.
 // Each line function returns the bare text, or '' when nothing is stated.

@@ -87,7 +87,7 @@ const SERVED_TOOLS = [
   // The one sanctioned in-session config write: any dotted key path is
   // accepted (the positive allowlist was REMOVED — decision
   // scale-down-enforcement-rules-and-locks-are-friction, knowledge_get
-  // 38c9e860), still gated by whole-document schema validation and CAS on
+  // the former ruling 'scale-down-enforcement-rules-and-locks-are-friction' (not in the current store)), still gated by whole-document schema validation and CAS on
   // the file digest — the raw Edit/Write denial on every .sterling file
   // STAYS for both channels (decision config-writes-get-a-config-set-mcp-
   // tool-with-positive-key-allowlist-raw-edit-denial-stays).

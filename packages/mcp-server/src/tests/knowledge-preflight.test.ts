@@ -121,7 +121,7 @@ test(
       // NONE of the six dominant modeling terms. Reconstructs the 2026-08-09
       // Blender false positive at the preflight surface: hasRecordCentralityHit
       // still fails on this text, so matched_total/answerability are unaffected
-      // by this record — but B2G (findings f6ada94d and
+      // by this record — but B2G (the former finding 'preflight B2G measurement' (not in the current store) and
       // preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
       // september-2026) widened the LIST itself to include a centrality-failing
       // survivor as a disclosed, non-central candidate rather than hiding it.
@@ -493,11 +493,11 @@ test(
   }
 );
 
-// --- candidate-sort tie-break pins (decision 17fa1c59, STEP 1; sort key order
+// --- candidate-sort tie-break pins (the former ruling 'pull-ranking-at-scale-order-of-work-coverage-before-columns-no-narrowing-ladder' (not in the current store), STEP 1; sort key order
 // UPDATED for knowledgePreflight by this session's B2G widening — see sort pin 3
 // below): the sort tie-break must never fall back to the fixed per-type query
 // concatenation order (anti_pattern, decision, feature_article, ...) on a tie
-// (measured cause: research_finding a6503bf7, mechanism 4, benchmark cases
+// (measured cause: the former finding 'why-dome-farmer-pull-cases-miss-mechanisms-september-2026' (not in the current store), mechanism 4, benchmark cases
 // p-003/p-006). axisCandidateMatches' OWN internal sort (tools.ts, shared with
 // same_subject) still goes hit count desc, then record-centrality hits desc,
 // then updated_at desc, then id asc — unchanged, and still what decides
@@ -992,7 +992,7 @@ test('AC-h7 (cap, negative control): a small qualifying set carries matched_tota
 // --- B2G widening pins (this session): the record-centrality floor is no
 // longer required to LIST a candidate in knowledge_preflight's `matches` —
 // only to decide matched_total/answerability, exactly as before. See
-// findings f6ada94d and
+// the former finding 'preflight B2G measurement' (not in the current store) and
 // preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
 // september-2026. Test (a) (a non-central-only survivor, ungoverned with
 // matched_total 0 but matches.length 1) is already pinned above by the

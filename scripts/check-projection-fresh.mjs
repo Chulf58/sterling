@@ -114,7 +114,7 @@ try {
       // On a non-authoring clone (consumer, or role undeclared) "Regenerate and
       // commit" is the harmful remedy — a smaller store shrinks a shared file.
       // Name the safe route instead; the check never flips the setting itself
-      // (decision a446753c: one fact, one setting).
+      // (the former ruling 'citation and projection authority is per-store' (not in the current store): one fact, one setting).
       const remedy =
         config?.machine_role === 'authoring'
           ? `Regenerate and commit: ${proj.regenerate}`

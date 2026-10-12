@@ -102,7 +102,7 @@ function main(input) {
     // Hazards render as SUBSTANCE here (whole hazard block) — freshness
     // checks ONLY the substance ledger, so a record shown elsewhere as a mere
     // discovery pointer (H20, or the Bash rung's owner pointer line) still
-    // qualifies for its real delivery here (decision 92088a62: "a record
+    // qualifies for its real delivery here (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store): "a record
     // shown as discovery still qualifies for substance later" — the
     // regression case this closes is an H20 article POINTER suppressing the
     // later full H19 article).
@@ -224,7 +224,7 @@ function main(input) {
     }
 
     // PER-DELIVERY TOTAL CAP (scale-down Slice 3c; see assembleDelivery in
-    // lib/delivery.mjs — the ONE ASSEMBLER, decision 92088a62). Hazards are
+    // lib/delivery.mjs — the ONE ASSEMBLER, the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)). Hazards are
     // complete, unbudgeted substance; owners, decisions and the line-suspect
     // footnote share what remains of the cap, degrading to `knowledge_get
     // <id>` pointers. Only the assembler's OWN returned emittedSubstance/
@@ -254,7 +254,7 @@ function main(input) {
     // MIGRATION NOTICE CHARGED ON THE CAP TOO (fix-round HIGH 4): this used
     // to be string-prepended AFTER assembly at the final stdout write, so
     // its bytes escaped the total cap entirely — the same class of bug
-    // decision 92088a62 requires closing for every chrome source. Folded in
+    // the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) requires closing for every chrome source. Folded in
     // as a LEADING pinned-but-charged part instead, exactly like the active-
     // plan line in h19-dispatch-staging.mjs.
     const migrationNoticeParts = migrationNotice ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: migrationNotice }] : [];
@@ -301,7 +301,7 @@ function main(input) {
     // residue-on-inject, which would double-deliver every healthy payload to hedge it.
     const recordDelivered = () => {
       // Inject path: guard only what the assembler says it actually emitted —
-      // never a re-scan of the composed text (decision 92088a62's ONE
+      // never a re-scan of the composed text (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)'s ONE
       // ASSEMBLER CONTRACT).
       markSubstanceDelivered(guard, emittedSubstance);
       markDiscoveryDelivered(guard, emittedDiscovery);

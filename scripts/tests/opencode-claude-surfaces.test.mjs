@@ -1,5 +1,5 @@
 // What OpenCode reads from Sterling's commands, skills and agent templates holds no
-// Claude Code surface it cannot use (board item 57187b23, audit finding f2ba68c2;
+// Claude Code surface it cannot use (board item 57187b23, audit the former finding 'OpenCode parity audit' (not in the current store);
 // decision sterling-is-fully-standalone-on-opencode-2-full-parity-with-claude-code):
 // no `.claude/` path and no `Bash` tool outside a claude-only block, and what
 // OpenCode cannot run is disclosed with its equivalent named.

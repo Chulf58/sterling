@@ -167,7 +167,7 @@ test("a path listed under the brief's Out of scope / do-not-touch sections gets 
   }
 });
 
-// KNOWN FALSE-POSITIVE CLASS, accepted (decision 630389ad: a miss is worse
+// KNOWN FALSE-POSITIVE CLASS, accepted (the former ruling 'h20-warns-on-dispatch-file-overlap-with-live-agents' (not in the current store): a miss is worse
 // than a false alarm): a path named only to say another lane owns it, or to
 // read it for context, still warns. These are claim phrasings that must warn.
 test('a path the brief claims warns', () => {

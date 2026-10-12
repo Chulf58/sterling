@@ -6,13 +6,13 @@
 // decision block, the one record that answered the question, survived only as
 // `+5 more records: knowledge_query; knowledge_get e01732d5 …`.
 //
-// Decision delivery-total-cap-and-axis-generic-floor (301d8a0a) promises
+// the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store) promises
 // "Each later block's pointer is reserved up front so an early large block
 // cannot crowd it out"; the assembler had no such reservation. User ruling
 // 2026-09-24 ("Restore + rank"): restore the reserved pointer, title the
 // '+N more' line, trim H20's header term list, and put decisions before
 // hazards on a question-shaped brief. Hazards stay whole and at most 3
-// (92088a62) — nothing here touches that.
+// (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)) — nothing here touches that.
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -89,7 +89,7 @@ test('assembler (incident byte shape): the later decision block keeps its RESERV
   const omittedIds = new Set(assembled.omitted.map((e) => e.identity));
   assert.ok(!omittedIds.has(decisionIds[0]), 'the top decision is NOT folded into the ids-only omission line');
   assert.ok(assembled.text.includes(topSlug), 'the top decision is named — never a bare id');
-  for (let i = 1; i <= 3; i++) assert.match(assembled.text, new RegExp(`hazard ${i}\\n`), `hazard ${i} still renders whole (301d8a0a)`);
+  for (let i = 1; i <= 3; i++) assert.match(assembled.text, new RegExp(`hazard ${i}\\n`), `hazard ${i} still renders whole (the former ruling delivery-total-cap-and-axis-generic-floor (not in the current store))`);
 });
 
 test('assembler: an early block that would fit alone is degraded so a later reserved pointer still fits (the pointer is reserved up front)', () => {
@@ -212,7 +212,7 @@ test('H20 E2E (incident shape, question-shaped brief): the top decision arrives 
 
     // Fixture controls: the incident's shape really is reproduced.
     // UPDATED 2026-09-30 for decision h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines
-    // (a4912f91): the dispatch surface renders rank 1 whole and ranks 2-3 as
+    // (the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store)): the dispatch surface renders rank 1 whole and ranks 2-3 as
     // trigger lines, so the three selected hazards are one block plus two
     // lines. The byte pressure of three whole hazards is pinned at the
     // assembler level in this file's unit tests above.
