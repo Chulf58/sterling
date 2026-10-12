@@ -5,7 +5,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, existsSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, readdirSync, renameSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,8 +26,9 @@ after(() => {
 
 // init isolated from the machine: scratch HOME, registry, plugin-root match and Claude
 // config dir, all OUTSIDE the project folder so a refused run can be seen to write nothing.
-function init(dir, iso, args = []) {
-  const r = spawnSync(process.execPath, [join(root, 'scripts', 'init.mjs'), '--target', dir, ...args], {
+function init(dir, iso, args = [], { sterlingRoot = root } = {}) {
+  // --preserve-symlinks keeps a symlinked Sterling path as init's own path (import.meta.url)
+  const r = spawnSync(process.execPath, ['--preserve-symlinks-main', '--preserve-symlinks', join(sterlingRoot, 'scripts', 'init.mjs'), '--target', dir, ...args], {
     encoding: 'utf8',
     cwd: dir,
     timeout: 180_000,
@@ -42,7 +43,7 @@ function init(dir, iso, args = []) {
       STERLING_OPENCODE_SETUP_DISABLE: '1',
     },
   });
-  return { code: r.status, out: (r.stdout ?? '') + (r.stderr ?? '') };
+  return { code: r.status, out: (r.stdout ?? '') + (r.stderr ?? ''), stderr: r.stderr ?? '' };
 }
 function isolation() {
   const base = tmp('sterling-naming-iso-');
@@ -134,6 +135,31 @@ test('the rule holds on a re-init, and the update ensure pass on an existing pro
   const ensure = init(unsafe, iso, ['--update-ensure']);
   assert.doesNotMatch(ensure.out, /not shell-safe/, 'the update ensure pass is not refused for the folder name');
   assert.equal(ensure.code, 0, ensure.out);
+});
+
+// User-ruled 2026-10-12, "Warn only for Sterling path": an unsafe Sterling install
+// path warns that the Plan agent will not install there, and init carries on.
+test('an unsafe Sterling path only warns on stderr: exit 0 and the project is set up', () => {
+  const base = tmp('sterling-naming-root-');
+  const sterlingRoot = join(base, 'Sterling Copy');
+  symlinkSync(root, sterlingRoot, 'dir');
+  const dir = join(tmp('sterling-naming-proj-'), 'Safe-Project');
+  mkdirSync(dir);
+  const r = init(dir, isolation(), FRESH_FLAGS, { sterlingRoot });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.stderr, /init WARNING: the Sterling path '.*\/Sterling Copy' has a character that is not shell-safe: " "\. The OpenCode Plan agent \(\.opencode\/agents\/plan\.md\) needs this path/);
+  assert.match(r.stderr, /Init continues\./);
+  assert.doesNotMatch(r.out, /init REFUSED/);
+  assert.ok(existsSync(join(dir, '.sterling', 'config.json')), 'the project is set up');
+  assert.ok(existsSync(join(dir, 'AGENTS.md')), 'the project is set up');
+});
+
+test('a safe Sterling path prints no warning', () => {
+  const dir = join(tmp('sterling-naming-proj-'), 'Safe-Project');
+  mkdirSync(dir);
+  const r = init(dir, isolation(), FRESH_FLAGS);
+  assert.equal(r.code, 0, r.out);
+  assert.doesNotMatch(r.out, /init WARNING: the Sterling path/);
 });
 
 test('--update-ensure does not exempt a folder that has no Sterling config yet', () => {

@@ -15463,12 +15463,16 @@ var canonical2 = (v) => JSON.stringify(
 );
 if (!existsSync13(target)) fail(`init REFUSED: target '${target}' does not exist`, 2);
 if (!(hasFlag("--update-ensure") && existsSync13(join25(target, ".sterling", "config.json")))) {
-  const problems = [
-    describeShellUnsafePath(fwd8(target), { label: "the project path", rerun: "re-run /sterling:init" }),
-    describeShellUnsafePath(fwd8(pluginRoot), { label: "the Sterling path", rerun: "re-run /sterling:init" })
-  ].filter(Boolean);
-  if (problems.length) fail(`init REFUSED: ${problems.join("\n")}
+  const projectProblem = describeShellUnsafePath(fwd8(target), { label: "the project path", rerun: "re-run /sterling:init" });
+  if (projectProblem) fail(`init REFUSED: ${projectProblem}
 Nothing was written.`, 2);
+  const sterlingChars = unsafeChars(fwd8(pluginRoot));
+  if (sterlingChars.length) {
+    process.stderr.write(
+      `init WARNING: the Sterling path '${fwd8(pluginRoot)}' has ${sterlingChars.length === 1 ? "a character" : "characters"} that ${sterlingChars.length === 1 ? "is" : "are"} not shell-safe: ${sterlingChars.map((c) => JSON.stringify(c)).join(" ")}. The OpenCode Plan agent (.opencode/agents/plan.md) needs this path in its shell permission rules, so it will not be installed while Sterling is there. Init continues. To get the Plan agent, move Sterling to a path that uses only ${SHELL_SAFE_CHARS_TEXT}, then run /sterling:update.
+`
+    );
+  }
 }
 if (modeFlagGiven && !PROJECT_MODES.includes(modeFlag)) {
   fail(`init REFUSED: --mode must be 'hobby' or 'work' \u2014 got ${JSON.stringify(modeFlag ?? "")}`, 2);
