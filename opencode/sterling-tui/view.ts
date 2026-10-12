@@ -82,6 +82,8 @@ export function sidebarLines(s: SidebarSummary, width = SIDEBAR_WIDTH): string[]
 export interface ModelRefLike {
   id: string;
   providerID: string;
+  /** OpenCode 2 stores the per-call variant on the child session's model */
+  variant?: string;
 }
 
 export interface TokenUsageLike {
@@ -149,11 +151,25 @@ function descendants(sessions: readonly SubagentSession[], rootID: string): Suba
   return out;
 }
 
+/** `id#variant` when the model carries a variant, else the plain id; OpenCode's
+ *  sentinel variant 'default' counts as none (as in packages/tui readSessionModels). */
+function modelLabel(m: ModelRefLike): string {
+  return m.variant && m.variant !== 'default' ? `${m.id}#${m.variant}` : m.id;
+}
+
+/** The row's model: the turn's own model, except that a turn on the session's
+ *  model id keeps the session's `#variant`, so it does not vanish when the
+ *  first turn lands (same rule as packages/tui openCodeContexts). */
+function rowModel(turn: ModelRefLike | undefined, session: ModelRefLike | undefined): ModelRefLike | undefined {
+  if (!turn) return session;
+  return session?.variant && session.id === turn.id ? { ...turn, variant: session.variant } : turn;
+}
+
 /** Sub-agent rows for the session tree under `rootID`, running ones first. */
 export function readSubagents(src: SubagentSource): SubagentRow[] {
   const rows = descendants(src.sessions, src.rootID).map((s) => {
     const turn = src.lastTurn(s.id);
-    const model = turn?.model ?? s.model;
+    const model = rowModel(turn?.model, s.model);
     const t = turn?.tokens;
     const limit = model ? src.contextLimit(model) : undefined;
     const used = t ? t.input + t.output + t.reasoning + t.cache.read + t.cache.write : undefined;
@@ -163,7 +179,7 @@ export function readSubagents(src: SubagentSource): SubagentRow[] {
       title: title ? title : shortId(s.id),
       status: src.isRunning(s.id) ? ('active' as const) : ('idle' as const),
       context: used !== undefined && limit && limit > 0 ? `${Math.round((used / limit) * 100)}%` : '?',
-      model: model?.id ?? '-',
+      model: model ? modelLabel(model) : '-',
     };
   });
   // Array.prototype.sort is stable, so each group keeps the session list's order
