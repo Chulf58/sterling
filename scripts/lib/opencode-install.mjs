@@ -1253,17 +1253,7 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   for (const { name, entry, rel, primary, mode } of fullAgentTargets(registry)) {
     const path = join(projectDir, rel);
     const templateContent = readFileSync(join(pluginRoot, 'agent-templates', entry.file), 'utf8');
-    if (usesInstallVars(templateContent, entry.opencode_full?.permission)) {
-      const unsafe = INSTALL_VARS.filter((v) => !isShellSafePath(vars[v]));
-      if (unsafe.length) {
-        // A skip, not a refusal (user-ruled 2026-10-12, decision
-        // existing-unsafe-path-project-skips-opencode-plan-agent-not-refuse): an existing
-        // project at an unsafe path still syncs; only the agent whose rules cannot be
-        // matched is left uninstalled. Init still refuses a new project there.
-        rows.push({ item: rel, status: 'skipped', detail: `the Plan agent is not installed at this path: it needs ${unsafe.map((v) => `${v === 'PROJECT_DIR' ? 'the project path' : 'the Sterling path'} (${vars[v]})`).join(' and ')} in shell permission rules, and a space, quote or glob character there cannot be matched reliably; rename the folder to a project and Sterling path made of letters, digits and _@%+=:,./- only, then rerun /sterling:update` });
-        continue;
-      }
-    }
+    const unsafe = usesInstallVars(templateContent, entry.opencode_full?.permission) ? INSTALL_VARS.filter((v) => !isShellSafePath(vars[v])) : [];
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
@@ -1281,6 +1271,23 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
         rows.push(refusal(rel, `${rel} was edited after Sterling wrote it`, `move your edits elsewhere and delete it so Sterling can regenerate it, then rerun /sterling:update`));
         continue;
       }
+    }
+    if (unsafe.length) {
+      // A skip, not a refusal (user-ruled 2026-10-12, decision
+      // existing-unsafe-path-project-skips-opencode-plan-agent-not-refuse): an existing
+      // project at an unsafe path still syncs; only the agent whose rules cannot be
+      // matched is left alone. The integrity checks above run first, so a tracked, foreign
+      // or edited file still refuses. Init still refuses a new project there.
+      const why = `it needs ${unsafe.map((v) => `${v === 'PROJECT_DIR' ? 'the project path' : 'the Sterling path'} (${vars[v]})`).join(' and ')} in shell permission rules, and a space, quote or glob character there cannot be matched reliably`;
+      const fix = 'a project and Sterling path made of letters, digits and _@%+=:,./- only';
+      rows.push({
+        item: rel,
+        status: 'skipped',
+        detail: disk === null
+          ? `the Plan agent is not installed at this path: ${why}; rename the folder to ${fix}, then rerun /sterling:update`
+          : `the existing ${rel} was left in place and is no longer updated: ${why}; rename the folder to ${fix} to have it maintained again, or delete it, then rerun /sterling:update`,
+      });
+      continue;
     }
     const model = models[name] ?? (disk === null ? undefined : frontmatterModel(disk));
     const agent = renderFullOpenCodeAgent(templateContent, entry.file, entry, { primary, mode, model, writeTools, vars });

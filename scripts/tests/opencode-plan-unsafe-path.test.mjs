@@ -94,6 +94,74 @@ test('at an unsafe path the other refusals still refuse: a roster agent edited a
   }
 });
 
+// The integrity checks come before the skip: an existing plan.md that is tracked, foreign or
+// edited refuses as it does at a safe path; only an untouched Sterling-owned one is skipped.
+test('at an unsafe path a git-tracked plan.md refuses and is left byte-identical', () => {
+  const home = mkdtempSync(join(tmpdir(), 'oc-home-'));
+  const { dir, parent } = project(true);
+  try {
+    mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
+    const mine = '# my own plan agent\n';
+    writeFileSync(join(dir, PLAN_REL), mine);
+    git(dir, ['add', '-f', PLAN_REL]);
+    git(dir, ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-qm', 'plan']);
+    const row = rowOf(setup(dir, home), PLAN_REL);
+    assert.equal(row.status, 'refused');
+    assert.match(row.instruction, /git rm --cached \.opencode\/agents\/plan\.md/);
+    assert.equal(readFileSync(join(dir, PLAN_REL), 'utf8'), mine);
+  } finally {
+    cleanup(parent, home);
+  }
+});
+
+test('at an unsafe path a foreign or edited plan.md refuses and is left byte-identical', () => {
+  const home = mkdtempSync(join(tmpdir(), 'oc-home-'));
+  const safe = project(false);
+  const { dir, parent } = project(true);
+  try {
+    mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
+    const foreign = '# not written by Sterling\n';
+    writeFileSync(join(dir, PLAN_REL), foreign);
+    const foreignRow = rowOf(setup(dir, home), PLAN_REL);
+    assert.equal(foreignRow.status, 'refused');
+    assert.match(foreignRow.instruction, /carries no Sterling header/);
+    assert.equal(readFileSync(join(dir, PLAN_REL), 'utf8'), foreign);
+
+    // a Sterling-written file (rendered at a safe path), then edited, then placed at the unsafe path
+    setup(safe.dir, home);
+    const edited = `${readFileSync(join(safe.dir, PLAN_REL), 'utf8')}\nmy edit\n`;
+    writeFileSync(join(dir, PLAN_REL), edited);
+    const editedRow = rowOf(setup(dir, home), PLAN_REL);
+    assert.equal(editedRow.status, 'refused');
+    assert.match(editedRow.instruction, /was edited after Sterling wrote it/);
+    assert.equal(readFileSync(join(dir, PLAN_REL), 'utf8'), edited);
+  } finally {
+    cleanup(parent, safe.parent, home);
+  }
+});
+
+test('at an unsafe path an unmodified Sterling-owned plan.md is left untouched; the skip line says it was left in place', () => {
+  const home = mkdtempSync(join(tmpdir(), 'oc-home-'));
+  const safe = project(false);
+  const { dir, parent } = project(true);
+  try {
+    setup(safe.dir, home);
+    mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
+    const owned = readFileSync(join(safe.dir, PLAN_REL), 'utf8');
+    writeFileSync(join(dir, PLAN_REL), owned);
+    const r = setup(dir, home);
+    const row = rowOf(r, PLAN_REL);
+    assert.equal(row.status, 'skipped');
+    assert.ok(!row.refused);
+    assert.equal(readFileSync(join(dir, PLAN_REL), 'utf8'), owned, 'byte-identical');
+    assert.match(row.detail, /the existing \.opencode\/agents\/plan\.md was left in place and is no longer updated/);
+    assert.match(row.detail, /rename the folder .* to have it maintained again, or delete it/);
+    assert.ok(!r.rows.some((x) => x.refused));
+  } finally {
+    cleanup(parent, safe.parent, home);
+  }
+});
+
 // The real CLI: a fake `opencode` on PATH answers the version probe, the Claude side is probed absent.
 function syncAgents(dir, home, binDir) {
   const r = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'sync-agents.mjs'), '--target', dir], {
