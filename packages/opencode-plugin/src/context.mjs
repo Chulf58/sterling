@@ -55,6 +55,13 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   const delivered = new Map();
   // The last root session whose start refreshed each project's registry row.
   const registrySeen = new Map();
+  // One-shot lines produced but not yet delivered, by `${root}\0${name}`. Their guards
+  // (`swept`, `registrySeen`) advance when the line is produced, and the sweep cannot
+  // produce its line twice, so the line itself is kept here until it is delivered. A call
+  // claims it (removes it) synchronously when it selects it and puts it back when its
+  // append does not happen, so a read of the notices file that throws between production
+  // and delivery loses nothing and two overlapping calls never both deliver it.
+  const heldLines = new Map();
 
   function statusLine(root) {
     const hit = statusCache.get(root);
@@ -230,7 +237,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   /**
    * The VOLATILE context of `sessionID`, as [{ key, text, cleared? }]. A keyed block is
    * delivered when its text differs from the one last delivered in the session; a block
-   * with no key (a one-shot line: the sweep, a registry failure) whenever it is produced.
+   * with no key (a one-shot line: the sweep, a registry failure) until it is delivered (claimed from
+   * `heldLines` when selected, put back by dueText's release when the append fails).
    * `cleared` is said once when a delivered keyed block becomes empty, so a stale READY
    * list or plan lock is not left standing as current in the conversation.
    */
@@ -273,8 +281,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
           line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
         }
         if (line) {
+          heldLines.set(`${root}\0sweep`, line);
           logLine(root, `context: ${line}`);
-          out.push({ text: line });
         }
       }
       // H1's registry step, once per root session: last-seen and the row's stack tags
@@ -285,8 +293,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         try {
           refreshRegistryRow(root, { config: state.config, at: now() });
         } catch (e) {
+          heldLines.set(`${root}\0registry`, `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
           logLine(root, `context: project registry refresh failed: ${errText(e)}`);
-          out.push({ text: `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.` });
         }
       }
       out.push({ key: 'undeclared', text: undeclaredBlock(root, state.config), cleared: 'UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies.' });
@@ -295,6 +303,16 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       if (!inWorkerChild(env)) out.push({ key: 'board', text: boardBlock(root, state.config, sessionID), cleared: 'BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply.' });
     }
     out.push({ key: 'restore', text: await rotationRestore(root, sessionID) });
+    // Held one-shot lines are claimed here, synchronously after the last await, so two
+    // overlapping calls cannot both select one. dueText puts a claim back (`restore`)
+    // when the append does not happen.
+    if (kind === 'root' && !inWorkerChild(env)) {
+      for (const [key, text] of [...heldLines]) {
+        if (!key.startsWith(`${root}\0`)) continue;
+        heldLines.delete(key);
+        out.push({ text, restore: () => { if (!heldLines.has(key)) heldLines.set(key, text); } });
+      }
+    }
     return out;
   }
 
@@ -317,9 +335,14 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     const seen = delivered.get(sessionID) ?? new Map();
     const marks = new Map();
     const due = [];
+    const claimed = [];
+    const release = () => { for (const fn of claimed) fn(); };
     for (const b of blocks) {
       if (!b.key) {
-        if (b.text) due.push(b.text);
+        if (b.text) {
+          due.push(b.text);
+          if (b.restore) claimed.push(b.restore);
+        }
         continue;
       }
       const last = seen.get(b.key) ?? '';
@@ -338,17 +361,22 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         notices = takeNotices(root, now());
       } catch (e) {
         // P5: said in-band and logged. The other lines are held back, unmarked, until it reads again.
+        // The claims go back first: the log write can throw, and a claim neither restored nor committed is lost.
+        release();
         logLine(root, `context: pending notices unreadable at the ${where}: ${errText(e)}`);
         return {
           text: `${VOLATILE_HEADER}\n\nSTERLING NOTICES UNREADABLE (${errText(e)}): the pending notices in ${NOTICES_REL} could not be read, so Sterling's other session lines are held back until they can; fix or delete that file.`,
           commit: () => {},
+          release: () => {},
         };
       }
       if (notices.length) due.push(`STERLING NOTICES (new since the last ones you were shown):\n${notices.map((n) => `- ${n.text}`).join('\n')}`);
     }
     return {
       text: due.length ? `${VOLATILE_HEADER}\n\n${due.join('\n\n')}` : '',
+      release,
       commit: () => {
+        claimed.length = 0;
         if (!marks.size) return;
         const record = delivered.get(sessionID) ?? remember(delivered, sessionID, new Map());
         for (const [key, text] of marks) record.set(key, text);
@@ -363,7 +391,12 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     await fenced('context', root, async () => {
       if (typeof input?.prompt?.text !== 'string') throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
       const due = await dueText(root, input.sessionID, 'prompt');
-      if (due.text) input.prompt.text = `${input.prompt.text}\n\n${due.text}`;
+      try {
+        if (due.text) input.prompt.text = `${input.prompt.text}\n\n${due.text}`;
+      } catch (e) {
+        due.release();
+        throw e;
+      }
       due.commit();
     });
   }
@@ -385,7 +418,12 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       const content = input.result?.content;
       if (!Array.isArray(content) && typeof content !== 'string') throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
       const due = await dueText(root, input.sessionID, 'tool call');
-      if (due.text) appendToResult(input.result, due.text);
+      try {
+        if (due.text) appendToResult(input.result, due.text);
+      } catch (e) {
+        due.release();
+        throw e;
+      }
       due.commit();
     });
   }

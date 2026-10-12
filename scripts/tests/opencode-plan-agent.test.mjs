@@ -203,7 +203,7 @@ test('a foreign or locally edited plan.md is refused loudly and left byte-identi
   assert.equal(readFileSync(join(dir, PLAN_REL), 'utf8'), mine);
 });
 
-test('a project path a shell rule cannot match literally refuses plan.md alone; the roster still installs', () => {
+test('a project path a shell rule cannot match literally skips plan.md alone (not a refusal); the roster still installs', () => {
   const home = mkdtempSync(join(tmpdir(), 'oc-home-'));
   const parent = mkdtempSync(join(tmpdir(), 'oc plan space-'));
   const dir = mkdtempSync(join(parent, 'p-'));
@@ -212,8 +212,12 @@ test('a project path a shell rule cannot match literally refuses plan.md alone; 
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby' }));
   const r = run(dir, home);
   const row = rowOf(r, PLAN_REL);
-  assert.equal(row.status, 'refused');
-  assert.match(row.instruction, /the project path .* in shell permission rules/);
+  // Was a refusal that made sync-agents exit 2 (GitHub #85); user-ruled 2026-10-12, decision
+  // existing-unsafe-path-project-skips-opencode-plan-agent-not-refuse: a skip, no `refused`.
+  assert.equal(row.status, 'skipped');
+  assert.ok(!row.refused);
+  assert.match(row.detail, /the Plan agent is not installed at this path: it needs the project path .* in shell permission rules/);
+  assert.match(row.detail, /rename the folder/);
   assert.ok(!existsSync(join(dir, PLAN_REL)));
   assert.equal(rowOf(r, '.opencode/agents/sterling/conductor.md')?.status, 'created');
 });
