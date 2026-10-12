@@ -272,8 +272,11 @@ test('OpenCode file touch: a superseded decision is never labelled [standing] an
     await ctx.hooks.tool['execute.before'](call);
     const after = { ...call, status: 'completed', result: { content: [{ type: 'text', text: 'read' }] } };
     await ctx.hooks.tool['execute.after'](after);
-    assert.equal(after.result.content.length, 2, 'the delivery was appended to the tool result');
-    const text = after.result.content[1].text;
+    // The session lines (context.mjs onToolResult) also ride a session's first read result; only the H19 parts count here.
+    const { VOLATILE_HEADER } = await import(pathToFileURL(join(root, 'packages', 'opencode-plugin', 'src', 'staging.mjs')).href);
+    const parts = after.result.content.filter((part) => !String(part?.text ?? '').startsWith(VOLATILE_HEADER));
+    assert.equal(parts.length, 2, 'the delivery was appended to the tool result');
+    const text = parts[1].text;
     const oldLine = lineOf(text, oldRec);
     assert.ok(oldLine, `the superseded decision is delivered:\n${text}`);
     assert.doesNotMatch(oldLine, /\[standing\]/, `a superseded decision must not read as standing:\n${oldLine}`);

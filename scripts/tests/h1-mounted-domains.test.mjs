@@ -97,9 +97,12 @@ test('the OpenCode root context carries the same domain lines, opened through it
       pluginRoot: join(p.dir, 'no-such-plugin-root'),
       getSession: () => ({ get: async ({ sessionID }) => ({ id: sessionID }) }),
     });
+    // The domain lines are session lines: the prompt hook appends them to the session's first prompt.
+    const prompt = { sessionID: 'ses_root', messageID: 'msg_turn', prompt: { text: '' }, delivery: 'immediate' };
+    await h.onPrompt(prompt);
     const i = { sessionID: 'ses_root', agent: 'build', system: [{ type: 'text', text: 'base' }], messages: [], tools: {} };
     await h.onContext(i);
-    assertThreeLines(domainLines(i.system.map((x) => x.text).join('\n')), p);
+    assertThreeLines(domainLines([...i.system.map((x) => x.text), prompt.prompt.text].join('\n')), p);
     assert.ok(opened.includes(p.domain_paths.alpha), "the domain store was opened through the plugin's opener");
   } finally {
     rmSync(p.dir, { recursive: true, force: true });
