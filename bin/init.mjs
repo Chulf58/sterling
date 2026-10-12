@@ -14253,6 +14253,7 @@ import { fileURLToPath as fileURLToPath3 } from "node:url";
 init_dist();
 
 // scripts/lib/shell-safe-path.mjs
+import { lstatSync as lstatSync5 } from "node:fs";
 import { posix } from "node:path";
 var SAFE_CHAR_CLASS = "[A-Za-z0-9_@%+=:,./-]";
 var SHELL_SAFE_PATH_RE = new RegExp(`^${SAFE_CHAR_CLASS}+$`);
@@ -14268,7 +14269,7 @@ function safeFolderName(name4) {
   const out = name4.normalize("NFKD").replace(new RegExp("\\p{M}+", "gu"), "").replace(/\s+/g, "-").split("").filter((c) => SAFE_CHAR_RE.test(c)).join("").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
   return out && out !== "." && out !== ".." ? out : null;
 }
-var dquote = (s2) => `"${s2.replace(/["$`\\]/g, "\\$&")}"`;
+var shellQuote = (s2) => `'${s2.replace(/'/g, `'\\''`)}'`;
 function shellUnsafePathFix(path) {
   if (isShellSafePath(path)) return null;
   const parent = posix.dirname(path);
@@ -14277,13 +14278,15 @@ function shellUnsafePathFix(path) {
   const newName = nameUnsafe ? safeFolderName(name4) : null;
   const unsafeParent = isShellSafePath(parent) ? null : deepestUnsafeDir(parent);
   const target2 = newName === null ? null : posix.join(parent, newName);
+  const targetExists = target2 !== null && lstatSync5(target2, { throwIfNoEntry: false }) !== void 0;
   return {
     path,
     chars: unsafeChars(path),
     nameUnsafe,
     unsafeParent,
     folder: target2,
-    mv: target2 !== null && unsafeParent === null ? `mv ${dquote(path)} ${dquote(target2)}` : null
+    targetExists,
+    mv: target2 !== null && unsafeParent === null && !targetExists ? `mv ${shellQuote(path)} ${shellQuote(target2)}` : null
   };
 }
 function deepestUnsafeDir(dir) {
@@ -14299,7 +14302,7 @@ function describeShellUnsafePath(path, { label, rerun }) {
   ];
   if (fix.nameUnsafe) {
     lines.push(
-      fix.folder === null ? `No safe name can be made from '${posix.basename(path)}': rename the folder to one made of ${SHELL_SAFE_CHARS_TEXT}.` : `Use the folder name '${posix.basename(fix.folder)}' (a space becomes a hyphen, case is kept).`
+      fix.folder === null ? `No safe name can be made from '${posix.basename(path)}': rename the folder to one made of ${SHELL_SAFE_CHARS_TEXT}.` : fix.targetExists ? `The suggested folder '${fix.folder}' already exists, so pick another name made of ${SHELL_SAFE_CHARS_TEXT} and move the folder yourself, then ${rerun} from it.` : `Use the folder name '${posix.basename(fix.folder)}' (a space becomes a hyphen, case is kept).`
     );
   }
   if (fix.unsafeParent !== null) {

@@ -4,6 +4,7 @@
 // /sterling:init applies the same rule to the project folder before it writes
 // anything, so a new project can never sit at a path the Plan agent refuses.
 // It imports only node builtins.
+import { lstatSync } from 'node:fs';
 import { posix } from 'node:path';
 
 const SAFE_CHAR_CLASS = '[A-Za-z0-9_@%+=:,./-]';
@@ -38,13 +39,16 @@ export function safeFolderName(name) {
   return out && out !== '.' && out !== '..' ? out : null;
 }
 
-// POSIX double quotes keep everything literal except " $ ` and \, which get a backslash.
-const dquote = (s) => `"${s.replace(/["$`\\]/g, '\\$&')}"`;
+// POSIX single quotes keep every character literal, ! included (Bash history
+// expansion reads ! inside double quotes); an embedded ' is written as '\''.
+export const shellQuote = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 /**
  * Why `path` (forward slashes, absolute) breaks the rule, and how to fix it; null when
- * it is safe. `folder` and `mv` are set only when the folder's own name is unsafe and
- * a safe name exists; `mv` only when that rename alone makes the whole path safe.
+ * it is safe. `folder` is set only when the folder's own name is unsafe and a safe name
+ * exists. `mv` is set only when that rename alone makes the whole path safe and nothing
+ * sits at `folder` yet (lstat: a file, directory or symlink, dangling or not, counts),
+ * because mv into an existing directory moves the folder inside it.
  * Parent directories are named, never renamed: `unsafeParent` is the deepest parent
  * path whose own name breaks the rule.
  */
@@ -56,13 +60,15 @@ export function shellUnsafePathFix(path) {
   const newName = nameUnsafe ? safeFolderName(name) : null;
   const unsafeParent = isShellSafePath(parent) ? null : deepestUnsafeDir(parent);
   const target = newName === null ? null : posix.join(parent, newName);
+  const targetExists = target !== null && lstatSync(target, { throwIfNoEntry: false }) !== undefined;
   return {
     path,
     chars: unsafeChars(path),
     nameUnsafe,
     unsafeParent,
     folder: target,
-    mv: target !== null && unsafeParent === null ? `mv ${dquote(path)} ${dquote(target)}` : null,
+    targetExists,
+    mv: target !== null && unsafeParent === null && !targetExists ? `mv ${shellQuote(path)} ${shellQuote(target)}` : null,
   };
 }
 
@@ -90,7 +96,9 @@ export function describeShellUnsafePath(path, { label, rerun }) {
     lines.push(
       fix.folder === null
         ? `No safe name can be made from '${posix.basename(path)}': rename the folder to one made of ${SHELL_SAFE_CHARS_TEXT}.`
-        : `Use the folder name '${posix.basename(fix.folder)}' (a space becomes a hyphen, case is kept).`
+        : fix.targetExists
+          ? `The suggested folder '${fix.folder}' already exists, so pick another name made of ${SHELL_SAFE_CHARS_TEXT} and move the folder yourself, then ${rerun} from it.`
+          : `Use the folder name '${posix.basename(fix.folder)}' (a space becomes a hyphen, case is kept).`
     );
   }
   if (fix.unsafeParent !== null) {

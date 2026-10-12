@@ -5,11 +5,11 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, existsSync, readdirSync, renameSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isShellSafePath, unsafeChars, safeFolderName, shellUnsafePathFix, describeShellUnsafePath } from '../lib/shell-safe-path.mjs';
+import { isShellSafePath, unsafeChars, safeFolderName, shellUnsafePathFix, describeShellUnsafePath, shellQuote } from '../lib/shell-safe-path.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const FRESH_FLAGS = ['--project-name', 'naming-test', '--stack-tags', 'node', '--toolchain', 'node:**/*.mjs', '--backup-opt-out', '--domain-description', 'node=Node facts'];
@@ -78,9 +78,10 @@ test('the fix renames only the folder, and gives an mv only when that makes the 
   const name = shellUnsafePathFix('/home/u/New Project');
   assert.equal(name.folder, '/home/u/New-Project');
   assert.equal(name.unsafeParent, null);
-  assert.equal(name.mv, 'mv "/home/u/New Project" "/home/u/New-Project"');
+  assert.equal(name.mv, "mv '/home/u/New Project' '/home/u/New-Project'");
   const quoted = shellUnsafePathFix('/home/u/My "Proj" $x');
-  assert.equal(quoted.mv, 'mv "/home/u/My \\"Proj\\" \\$x" "/home/u/My-Proj-x"', 'the old path is quoted so the shell reads it literally');
+  assert.equal(quoted.mv, `mv '/home/u/My "Proj" $x' '/home/u/My-Proj-x'`, 'the old path is single-quoted so the shell reads it literally');
+  assert.equal(shellQuote("it's"), `'it'\\''s'`, "an embedded ' is written as '\\''");
   const parent = shellUnsafePathFix('/home/u/my dir/proj');
   assert.equal(parent.nameUnsafe, false);
   assert.equal(parent.folder, null);
@@ -92,11 +93,46 @@ test('the fix renames only the folder, and gives an mv only when that makes the 
   assert.equal(both.mv, null, 'renaming the folder alone would not make the path safe');
 });
 
+// Sol review: the double-quoted mv hint let Bash history expansion rewrite a '!' in
+// the path ("event not found"). Run the rendered arguments through bash with history
+// expansion on, and require them back byte for byte.
+test('the mv arguments survive bash with history expansion on, for ! \' " $ ` and a space', () => {
+  for (const name of ['Hi!There', "Bob's Project", 'a"b c', 'cost $HOME', 'tick `id`', "all! ' \" $x `y` z"]) {
+    const path = `/home/u/${name}`;
+    const fix = shellUnsafePathFix(path);
+    assert.ok(fix.mv.startsWith('mv '), name);
+    const r = spawnSync('bash', ['--norc', '--noprofile', '-c', `set -H; set -o history\nprintf '%s\\0' ${fix.mv.slice(3)}`], { encoding: 'utf8' });
+    assert.equal(r.stderr, '', `${name}: ${r.stderr}`);
+    assert.deepEqual(r.stdout.split('\0').slice(0, -1), [path, fix.folder], name);
+  }
+});
+
+// Sol review: mv onto an existing directory moves the folder INSIDE it, so no mv is
+// offered when anything sits at the suggested path, a dangling symlink included.
+test('no mv is offered when the suggested folder already exists as a file, a directory or a symlink', () => {
+  for (const make of [
+    (p) => writeFileSync(p, ''),
+    (p) => mkdirSync(p),
+    (p) => symlinkSync(join(dirname(p), 'missing-target'), p),
+  ]) {
+    const parent = tmp('sterling-naming-exists-');
+    const path = join(parent, 'New Project');
+    mkdirSync(path);
+    make(join(parent, 'New-Project'));
+    const fix = shellUnsafePathFix(path);
+    assert.equal(fix.targetExists, true);
+    assert.equal(fix.mv, null);
+    const msg = describeShellUnsafePath(path, { label: 'the project path', rerun: 're-run /sterling:init' });
+    assert.match(msg, /The suggested folder '.*\/New-Project' already exists, so pick another name made of letters, digits and _@%\+=:,\.\/- and move the folder yourself, then re-run \/sterling:init from it\./);
+    assert.doesNotMatch(msg, /\bmv '|Use the folder name/);
+  }
+});
+
 test('the message names the path, the characters, the safe folder and the mv line; a parent case says so plainly', () => {
   const msg = describeShellUnsafePath('/home/u/New Project', { label: 'the project path', rerun: 're-run /sterling:init' });
   assert.match(msg, /the project path '\/home\/u\/New Project' has a character that is not shell-safe: " "/);
   assert.match(msg, /Use the folder name 'New-Project'/);
-  assert.match(msg, /^ {2}mv "\/home\/u\/New Project" "\/home\/u\/New-Project"$/m);
+  assert.match(msg, /^ {2}mv '\/home\/u\/New Project' '\/home\/u\/New-Project'$/m);
   assert.match(msg, /then re-run \/sterling:init from \/home\/u\/New-Project\./);
   const parent = describeShellUnsafePath('/home/my dir/proj', { label: 'the project path', rerun: 're-run /sterling:init' });
   assert.match(parent, /The parent directory '\/home\/my dir' breaks the rule; Sterling does not rename parent directories/);
@@ -114,7 +150,7 @@ test('init on a folder named "New Project" refuses with the hint and writes noth
   assert.equal(r.code, 2, r.out);
   assert.match(r.out, /init REFUSED: the project path '.*\/New Project' has a character that is not shell-safe/);
   assert.match(r.out, /Use the folder name 'New-Project'/);
-  assert.match(r.out, /mv ".*\/New Project" ".*\/New-Project"/);
+  assert.match(r.out, /mv '.*\/New Project' '.*\/New-Project'/);
   assert.match(r.out, /Nothing was written\./);
   assert.deepEqual(readdirSync(dir), [], 'the project folder is left empty');
   assert.equal(existsSync(iso.registry), false, 'no registry database is created');
