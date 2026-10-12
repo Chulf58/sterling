@@ -483,6 +483,8 @@ if (mode === 'list') {
   }
   printSearchNotes(found);
   console.log(`report-issue: ${readQueue().length} report(s) pending locally in .sterling/${QUEUE_NAME}`);
+  // A listing can be larger than a pipe holds; process.exit would drop what is still queued for stdout, so exit once it has flushed.
+  await new Promise((resolve) => process.stdout.write('', resolve));
   process.exit(0);
 }
 
