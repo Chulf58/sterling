@@ -16401,19 +16401,32 @@ function rowModel(turn, session) {
   if (!turn) return session;
   return session?.variant && session.id === turn.id ? { ...turn, variant: session.variant } : turn;
 }
+function contextFill(t) {
+  return t.input + t.cache.read + t.cache.write;
+}
+function modelLimit(models, m) {
+  if (!models) return "models not loaded";
+  const limit = models.find((x) => x.providerID === m.providerID && x.id === m.id)?.limit.context;
+  return limit && limit > 0 ? limit : "no limit for model";
+}
+function contextText(tokens, model, limit) {
+  if (!model) return "ctx: no model";
+  if (!tokens || contextFill(tokens) <= 0) return "ctx: no turn yet";
+  if (typeof limit === "string") return `ctx: ${limit}`;
+  if (!limit || limit <= 0) return "ctx: no limit";
+  return `${Math.round(contextFill(tokens) / limit * 100)}% ctx`;
+}
 function readSubagents(src) {
   const rows = descendants(src.sessions, src.rootID).map((s2) => {
     const turn = src.lastTurn(s2.id);
     const model = rowModel(turn?.model, s2.model);
-    const t = turn?.tokens;
     const limit = model ? src.contextLimit(model) : void 0;
-    const used = t ? t.input + t.output + t.reasoning + t.cache.read + t.cache.write : void 0;
     const title = s2.title?.trim();
     return {
       id: s2.id,
       title: title ? title : shortId(s2.id),
       status: src.isRunning(s2.id) ? "active" : "idle",
-      context: used !== void 0 && limit && limit > 0 ? `${Math.round(used / limit * 100)}%` : "?",
+      context: contextText(turn?.tokens, model, limit),
       model: model ? modelLabel(model) : "-"
     };
   });
@@ -16446,7 +16459,7 @@ function portraitLines(avatar, frame2, status = "active") {
 function rowText(r, width) {
   return [
     [{ text: clip(r.title, width) }],
-    [{ text: clip(`${r.status} \xB7 ${r.context} ctx \xB7 ${r.model}`, width), dim: true }],
+    [{ text: clip(`${r.status} \xB7 ${r.context} \xB7 ${r.model}`, width), dim: true }],
     [{ text: clip(r.description ?? "", width), dim: true }]
   ];
 }
@@ -16535,6 +16548,7 @@ var [frame, setFrame] = createSignal(0);
 var anyRunning = false;
 var [syncFailure, setSyncFailure] = createSignal();
 var synced = /* @__PURE__ */ new Set();
+var modelsRequested = false;
 var dashboard;
 var projectDir = process.cwd();
 function controller() {
@@ -16570,10 +16584,23 @@ function subagentData(api2, sessionID) {
             }
           );
         }
-        const turn = d.session.message.list(id).findLast((m) => m.type === "assistant" && m.tokens);
+        const turn = d.session.message.list(id).findLast((m) => m.type === "assistant" && m.tokens !== void 0 && contextFill(m.tokens) > 0);
         return turn && { tokens: turn.tokens, model: turn.model };
       },
-      contextLimit: (m) => d.location.model.list().find((x) => x.providerID === m.providerID && x.modelID === m.id)?.limit.context
+      contextLimit: (m) => {
+        const models = d.location.model.list();
+        if (!models && !modelsRequested) {
+          modelsRequested = true;
+          d.location.model.sync().then(
+            () => setSyncFailure(void 0),
+            (err) => {
+              modelsRequested = false;
+              setSyncFailure(`models unavailable \u2014 ${err?.message ?? String(err)}`);
+            }
+          );
+        }
+        return modelLimit(models, m);
+      }
     });
     const avatars = stepAvatars(avatarStates.get(rootID) ?? emptyAvatars(), rows.map((r) => r.id), Math.random);
     avatarStates.set(rootID, avatars);

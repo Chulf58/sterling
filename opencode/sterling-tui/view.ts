@@ -107,17 +107,17 @@ export interface SubagentSource {
   /** the root session whose descendants are the sub-agents */
   rootID: string;
   isRunning(id: string): boolean;
-  /** the session's latest assistant turn, when it has one */
+  /** the session's latest assistant turn whose contextFill is above 0, when it has one */
   lastTurn(id: string): { tokens?: TokenUsageLike; model?: ModelRefLike } | undefined;
-  /** the model's context window in tokens */
-  contextLimit(model: ModelRefLike): number | undefined;
+  /** the model's context window in tokens, or a short reason it is unknown */
+  contextLimit(model: ModelRefLike): number | string;
 }
 
 export interface SubagentRow {
   id: string;
   title: string;
   status: 'active' | 'idle';
-  /** '42%' of the model's context window, or '?' when either side is unknown */
+  /** '42% ctx' of the model's context window, or 'ctx: <reason>' naming the missing input */
   context: string;
   model: string;
   /** a one-line description of the task, shown on the third line when the host supplies one */
@@ -165,20 +165,53 @@ function rowModel(turn: ModelRefLike | undefined, session: ModelRefLike | undefi
   return session?.variant && session.id === turn.id ? { ...turn, variant: session.variant } : turn;
 }
 
+/** Tokens in context at a turn: input plus both cache fields. Output and
+ *  reasoning are left out, the rule packages/tui readOpenCodeContext and H10's
+ *  fillPct use, so both dashboards show the same figure. A turn still
+ *  streaming reports 0. */
+export function contextFill(t: TokenUsageLike): number {
+  return t.input + t.cache.read + t.cache.write;
+}
+
+/** The slice of OpenCode 2's ModelInfo the limit lookup reads. */
+export interface ModelInfoLike {
+  id: string;
+  providerID: string;
+  limit: { context: number };
+}
+
+/** A model's context window from OpenCode's model list, or why it is unknown.
+ *  A ModelRef's id is ModelInfo.id, not ModelInfo.modelID (the provider's API
+ *  name, which differs for e.g. GitHub Copilot and configured models); OpenCode's
+ *  own context figure matches on id the same way. The list is undefined until
+ *  OpenCode has loaded it for the location. */
+export function modelLimit(models: readonly ModelInfoLike[] | undefined, m: ModelRefLike): number | string {
+  if (!models) return 'models not loaded';
+  const limit = models.find((x) => x.providerID === m.providerID && x.id === m.id)?.limit.context;
+  return limit && limit > 0 ? limit : 'no limit for model';
+}
+
+/** The row's context: the fill as a share of the limit, else which input is missing. */
+function contextText(tokens: TokenUsageLike | undefined, model: ModelRefLike | undefined, limit: number | string | undefined): string {
+  if (!model) return 'ctx: no model';
+  if (!tokens || contextFill(tokens) <= 0) return 'ctx: no turn yet';
+  if (typeof limit === 'string') return `ctx: ${limit}`;
+  if (!limit || limit <= 0) return 'ctx: no limit';
+  return `${Math.round((contextFill(tokens) / limit) * 100)}% ctx`;
+}
+
 /** Sub-agent rows for the session tree under `rootID`, running ones first. */
 export function readSubagents(src: SubagentSource): SubagentRow[] {
   const rows = descendants(src.sessions, src.rootID).map((s) => {
     const turn = src.lastTurn(s.id);
     const model = rowModel(turn?.model, s.model);
-    const t = turn?.tokens;
     const limit = model ? src.contextLimit(model) : undefined;
-    const used = t ? t.input + t.output + t.reasoning + t.cache.read + t.cache.write : undefined;
     const title = s.title?.trim();
     return {
       id: s.id,
       title: title ? title : shortId(s.id),
       status: src.isRunning(s.id) ? ('active' as const) : ('idle' as const),
-      context: used !== undefined && limit && limit > 0 ? `${Math.round((used / limit) * 100)}%` : '?',
+      context: contextText(turn?.tokens, model, limit),
       model: model ? modelLabel(model) : '-',
     };
   });
@@ -248,7 +281,7 @@ export function portraitLines(avatar: number, frame: number, status: SubagentRow
 function rowText(r: SubagentRow, width: number): SpanLine[] {
   return [
     [{ text: clip(r.title, width) }],
-    [{ text: clip(`${r.status} · ${r.context} ctx · ${r.model}`, width), dim: true }],
+    [{ text: clip(`${r.status} · ${r.context} · ${r.model}`, width), dim: true }],
     [{ text: clip(r.description ?? '', width), dim: true }],
   ];
 }
