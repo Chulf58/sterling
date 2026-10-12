@@ -92,6 +92,13 @@ export const TARGET_LEADS = [
   // 2026-10-10). NEW to every sibling, so it arrives through INSERT_AFTER, anchored on the
   // plain-writing bullet it follows in the template.
   '- **Start every subagent in the background.**',
+  // 2026-10-12: finish a started task before ending a turn (GitHub issue #79), and resolve a
+  // review thread once its finding is handled (GitHub issues #42 and #78; user-ruled through the
+  // question form, "AGENTS.md + conductor"). Both are NEW to every sibling, so they arrive through
+  // INSERT_AFTER, Finish anchored on the background bullet and Resolve on Finish; listed in
+  // template order so a sibling missing all three gets them back in that order.
+  '- **Finish what you start.**',
+  '- **Resolve a review thread once its finding is handled.**',
   '- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**',
   // 2026-10-01: board every user ask at intake (decision
   // every-user-ask-is-boarded-at-intake-with-slim-blocked-by). Both bullets already exist in

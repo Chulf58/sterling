@@ -165,6 +165,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'the user is the one who runs the clear. If something is still in flight, name it instead and do not print the line.',
     after: 'the user is the one who runs the clear. If something is still in flight, name it instead and do not print the line. An askable question that has not gone through the question form counts as in flight.',
   },
+  {
+    commit: 'GitHub #79',
+    date: '2026-10-12',
+    reason: 'a started task is owed until its end state, and an outside wait is left only to something that will wake the conductor, never a detached process (GitHub issue #79, 2026-10-12)',
+    before: 'carry on with whatever does not depend on the user\'s answer.\n',
+    after: 'carry on with whatever does not depend on the user\'s answer.\n- A started task is owed until it reaches its end state: committed, landed (merged in a hobby project, pushed to its PR in a work project), review comments answered and their threads resolved, records reconciled. When only an outside wait is left (a review bot, a build, a lane), end the turn only while something will wake you when it is over: a running lane, or the wait running as a background Bash. A detached process sends no notice when it ends or dies, so a wait left to one is parked work. If a turn must end with nothing to wake you, say plainly what is awaited and where it will show (GitHub issue #79, 2026-10-12: in a work-mode project a Copilot review sat unanswered for about 45 minutes after a detached wait died silently, and turns ended with fixes uncommitted or review threads open until the user asked again).\n',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
