@@ -265,19 +265,67 @@ test('issue #80: after a push, a review of the PREVIOUS head that lands late is 
   }
 });
 
-test('no_review_requested: no Copilot request pending and no unconsumed review exits 3 AT ONCE, naming --request-copilot, instead of timing out', () => {
+const requestReads = (f) => calls(f).filter((c) => c.some((x) => x.startsWith('query=') && x.includes('reviewRequests'))).length;
+const reviewReads = (f) => calls(f).filter((c) => c[c.length - 1].endsWith('/reviews')).length;
+
+test('no_review_requested: no Copilot request on the first read AND on exactly one recheck after --recheck-delay exits 3, naming --request-copilot, instead of timing out', () => {
   const f = makeFixture();
   try {
     writeFileSync(join(f.state, 'review_requests.0.json'), '[]');
-    const r = run(f, ['7', '--interval', '0.05', '--timeout', '60']);
+    const r = run(f, ['7', '--interval', '0.05', '--timeout', '60', '--recheck-delay', '0.3']);
     assert.equal(r.code, 3, oneLine(r.stdout + r.stderr));
     assert.equal(r.out.status, 'no_review_requested');
     assert.equal(r.out.review, null);
     assert.equal(r.out.copilot_review_pending, false);
     assert.match(r.out.error, /--request-copilot/);
     assert.match(r.stderr, /no Copilot review is requested/);
-    assert.ok(r.ms < 10_000, `immediate, not the 60s timeout: took ${r.ms}ms`);
-    assert.equal(calls(f).filter((c) => c[c.length - 1].endsWith('/reviews')).length, 1, 'one poll, no waiting');
+    assert.ok(r.ms >= 300, `the recheck waits --recheck-delay first: took ${r.ms}ms`);
+    assert.ok(r.ms < 10_000, `not the 60s timeout: took ${r.ms}ms`);
+    assert.equal(requestReads(f), 2, 'the first read plus exactly one recheck');
+    assert.equal(reviewReads(f), 2, 'the recheck reads the reviews again too');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('recheck (Sol): a request that is absent on the first read but pending on the recheck keeps the wait going, with or without --request-copilot, and a review that lands is returned', () => {
+  for (const extra of [['--request-copilot'], []]) {
+    const f = makeFixture();
+    try {
+      f.put('pull', 0, [{ number: 7, node_id: 'PR_node_7', head: { sha: HEAD } }]);
+      writeFileSync(join(f.state, 'review_requests.0.json'), '[]');
+      writeFileSync(join(f.state, 'review_requests.1.json'), JSON.stringify([{ requestedReviewer: { __typename: 'Bot', login: 'copilot-pull-request-reviewer' } }]));
+      const waiting = run(f, ['7', '--recheck-delay', '0.05', ...extra, ...FAST]);
+      assert.equal(waiting.code, 2, `${extra}: ${oneLine(waiting.stdout + waiting.stderr)}`);
+      assert.equal(waiting.out.status, 'timeout', 'the wait continued, never no_review_requested');
+      assert.equal(waiting.out.copilot_review_pending, true);
+      if (extra.length) assert.deepEqual(waiting.out.copilot_request, { requested: true });
+      for (const name of ['count_reviews', 'count_review_requests']) rmSync(join(f.state, name), { force: true });
+      f.put('reviews', 2, [[review(530)]]);
+      const landed = run(f, ['7', '--recheck-delay', '0.05', ...extra, ...FAST]);
+      assert.equal(landed.out?.status, 'review', `${extra}: ${oneLine(landed.stdout + landed.stderr)}`);
+      assert.equal(landed.out.review.id, 530);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('recheck: the default 10s recheck stays inside the --timeout budget (a 1s budget ends in timeout, bounded), and a bad --recheck-delay is refused with no gh call', () => {
+  const f = makeFixture();
+  try {
+    writeFileSync(join(f.state, 'review_requests.0.json'), '[]');
+    const r = run(f, ['7', '--interval', '0.05', '--timeout', '1']);
+    assert.equal(r.code, 2, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'timeout');
+    assert.ok(r.ms < 4000, `bounded by --timeout, took ${r.ms}ms`);
+    rmSync(join(f.state, 'log.jsonl'));
+    for (const bad of ['-1', 'soon', '']) {
+      const e = run(f, ['7', '--recheck-delay', bad, ...FAST]);
+      assert.equal(e.code, 1, JSON.stringify(bad));
+      assert.match(e.out.error, /--recheck-delay/);
+    }
+    assert.equal(calls(f).length, 0);
   } finally {
     f.cleanup();
   }
@@ -292,12 +340,12 @@ test('no_review_requested: a consumed current-head review with no request pendin
       { requestedReviewer: { __typename: 'User', login: 'copilot-fan' } },
       { requestedReviewer: { __typename: 'Bot', login: 'github-actions' } },
     ]));
-    const consumed = run(f, ['7', '--since-review', '500', '--head', HEAD, ...FAST]);
+    const consumed = run(f, ['7', '--since-review', '500', '--head', HEAD, '--recheck-delay', '0', ...FAST]);
     assert.equal(consumed.code, 3, oneLine(consumed.stdout + consumed.stderr));
     assert.equal(consumed.out.status, 'no_review_requested');
     assert.match(consumed.out.error, /--since-review 500/);
     writeFileSync(join(f.state, 'fail_graphql'), '');
-    const failed = run(f, ['7', '--since-review', '500', '--request-copilot', ...FAST]);
+    const failed = run(f, ['7', '--since-review', '500', '--request-copilot', '--recheck-delay', '0', ...FAST]);
     assert.equal(failed.code, 3, oneLine(failed.stdout + failed.stderr));
     assert.equal(failed.out.copilot_request.requested, false);
   } finally {

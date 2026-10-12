@@ -194,6 +194,7 @@ var GH_CALL_TIMEOUT_MS = 6e4;
 var DEFAULT_TIMEOUT_S = 540;
 var DEFAULT_INTERVAL_S = 30;
 var MAX_INTERVAL_S = 120;
+var DEFAULT_RECHECK_DELAY_S = 10;
 var result = { status: "error", head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, identity_confirmed: false, previously_missed: [], body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
@@ -283,7 +284,7 @@ if (argv.includes("--settle")) {
     refuse("settle refused", e);
   }
 }
-var valued = /* @__PURE__ */ new Set(["--repo", "--since-review", "--head", "--timeout", "--interval", "--target"]);
+var valued = /* @__PURE__ */ new Set(["--repo", "--since-review", "--head", "--timeout", "--interval", "--recheck-delay", "--target"]);
 var positional = argv.filter((a, i) => !a.startsWith("--") && !valued.has(argv[i - 1]));
 if (positional.length !== 1) error("usage: pr-review-wait.mjs <pr-url|number> [--repo host/owner/repo] [--since-review <id>] [--head <sha>] [--timeout <s>] [--request-copilot]");
 var seconds = (name2, dflt) => {
@@ -302,6 +303,9 @@ var headRaw = flag("--head");
 if (headRaw !== void 0 && !/^[0-9a-f]{7,40}$/i.test(headRaw)) error(`--head must be 7-40 hex characters of a commit sha, got '${headRaw}'`);
 var expectedHead = headRaw === void 0 ? null : headRaw.toLowerCase();
 var requestCopilot = argv.includes("--request-copilot");
+var recheckRaw = flag("--recheck-delay");
+var recheckDelayS = recheckRaw === void 0 ? DEFAULT_RECHECK_DELAY_S : Number(recheckRaw);
+if (recheckRaw !== void 0 && (recheckRaw.trim() === "" || !Number.isFinite(recheckDelayS) || recheckDelayS < 0)) error(`--recheck-delay must be a number of seconds >= 0, got '${recheckRaw}'`);
 var pinnedLogins = readPinnedLogins();
 result.identity_confirmed = pinnedLogins.length > 0;
 var originUrl = spawnSync2("git", ["remote", "get-url", "origin"], { cwd: target, encoding: "utf8", timeout: 3e4 });
@@ -404,7 +408,7 @@ function copilotReviewPending() {
 }
 var NoReviewRequested = class extends Error {
 };
-function poll() {
+function poll(recheckAbsent = true) {
   const [pull] = parsePages(ghApi(base));
   const head = pull?.head?.sha;
   if (typeof head !== "string") throw new Error(`gh api ${base} returned no head.sha`);
@@ -416,8 +420,10 @@ function poll() {
   if (copilot.length) result.observed_copilot_login = copilot.reduce((a, b) => b.id > a.id ? b : a).user.login;
   const fresh = copilot.filter((r) => COMPLETED_STATES.has(r.state) && (sinceReview === null || r.id > sinceReview));
   if (!fresh.length) {
-    if (!pending) throw new NoReviewRequested();
-    return null;
+    if (pending) return null;
+    if (!recheckAbsent) throw new NoReviewRequested();
+    sleep(Math.max(0, Math.min(recheckDelayS * 1e3, deadline - Date.now())));
+    return poll(false);
   }
   const review = fresh.reduce((a, b) => b.id < a.id ? b : a);
   const headExpected = expectedHead === null || head.toLowerCase().startsWith(expectedHead);
