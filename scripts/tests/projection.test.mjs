@@ -5,7 +5,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, cpSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -255,6 +255,61 @@ test('freshness FAIL on a non-authoring clone names the store_authority route an
     assert.equal(authoring.status, 1);
     assert.match(authoring.stderr, /Regenerate and commit: node scripts\/architecture-projection\.mjs/);
     assert.doesNotMatch(authoring.stderr, /store_authority/, 'authoring remedy text is unchanged');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Issue #86: the committed projections come from the AUTHORING machine's
+// store, so on the Sterling clone itself a consumer or undeclared clone (which
+// holds knowledge of its own) reports the drift and passes, as the citation
+// check does since #84. Only the clone the script ships in is relaxed.
+test('machine_role gates the projection freshness check only on the Sterling clone itself: authoring fails, consumer and undeclared report and pass', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-proj-selfrole-'));
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    // No bin bundle exists for this check, so the fixture carries the script and
+    // its lib/ beside a node_modules link: its own parent directory is then the
+    // self root, with no store or config of the real clone in play.
+    mkdirSync(join(dir, 'scripts'), { recursive: true });
+    copyFileSync(join(root, 'scripts', 'check-projection-fresh.mjs'), join(dir, 'scripts', 'check-projection-fresh.mjs'));
+    cpSync(join(root, 'scripts', 'lib'), join(dir, 'scripts', 'lib'), { recursive: true });
+    symlinkSync(join(root, 'node_modules'), join(dir, 'node_modules'), 'dir');
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    store.create(articleRec('record-schemas-registry', 'g'));
+    store.close();
+    const committed = '# Architecture\n(store state as of 2099-01-01T00:00:00.000Z)\n';
+    writeFileSync(join(dir, 'architecture.md'), committed);
+    const writeConfig = (config) => writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(config));
+    const runSelf = () =>
+      spawnSync(process.execPath, [join(dir, 'scripts', 'check-projection-fresh.mjs'), dir], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+    const runOther = () =>
+      spawnSync(process.execPath, [join(root, 'scripts', 'check-projection-fresh.mjs'), dir], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
+
+    writeConfig({ machine_role: 'authoring' });
+    const authoring = runSelf();
+    assert.equal(authoring.status, 1, `the authoring clone must fail on a lagging projection: ${authoring.stdout}${authoring.stderr}`);
+    assert.match(authoring.stderr, /projection freshness FAILED: architecture\.md is stale/);
+
+    writeConfig({ machine_role: 'consumer' });
+    const consumer = runSelf();
+    assert.equal(consumer.status, 0, `a consumer clone must report and pass: ${consumer.stdout}${consumer.stderr}`);
+    assert.match(consumer.stdout, /REPORTED, NOT FAILED — machine_role=consumer \(only the authoring machine's store can judge a projection\)/);
+    assert.match(consumer.stdout, /as-of 2099-01-01T00:00:00\.000Z/, 'passing must not mean going quiet (P5)');
+    assert.match(consumer.stdout, /do NOT regenerate here/);
+
+    writeConfig({});
+    const undeclared = runSelf();
+    assert.equal(undeclared.status, 0, `an undeclared clone must report and pass: ${undeclared.stdout}${undeclared.stderr}`);
+    assert.match(undeclared.stdout, /REPORTED, NOT FAILED — machine_role undeclared/);
+
+    // The same fixture checked by a script that does NOT ship in it is a
+    // consuming project: machine_role does not apply, and the drift still fails.
+    writeConfig({ machine_role: 'consumer' });
+    assert.equal(runOther().status, 1, 'machine_role never relaxes the check on a root other than the clone itself');
+    writeConfig({});
+    assert.equal(runOther().status, 1, 'a non-self root with no machine_role keeps enforcement');
+    assert.equal(readFileSync(join(dir, 'architecture.md'), 'utf8'), committed, 'the check never rewrites the projection');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

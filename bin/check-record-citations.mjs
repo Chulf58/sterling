@@ -9,7 +9,7 @@ var __export = (target, all) => {
 // scripts/check-record-citations.mjs
 import { fileURLToPath } from "node:url";
 import { dirname as dirname4, join as join8 } from "node:path";
-import { existsSync as existsSync4, readFileSync as readFileSync5, realpathSync as realpathSync4 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync5 } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 // scripts/lib/project.mjs
@@ -10876,6 +10876,15 @@ function buildResolver(store2) {
   return { resolve: resolve5, getById: getById2, size: index.length };
 }
 
+// scripts/lib/self-root-role.mjs
+import { realpathSync as realpathSync4 } from "node:fs";
+function nonAuthoringSelfRoot(root2, selfRoot2, config2) {
+  if (realpathSync4(root2) !== realpathSync4(selfRoot2)) return null;
+  const role = config2?.machine_role;
+  if (role === "authoring") return null;
+  return { roleText: role === void 0 ? "machine_role undeclared" : `machine_role=${role}` };
+}
+
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
   "sterling-only": { open: "<!-- sterling-only -->", close: "<!-- /sterling-only -->" },
@@ -11048,10 +11057,9 @@ function printCurrencyWarnings() {
   for (const w of currencyWarnings) console.log(`  [${w.kind}] ${w.detail}`);
 }
 var authority = config?.store_authority ?? "primary";
-var checksSelf = realpathSync4(root) === realpathSync4(selfRoot);
-var role = config?.machine_role;
-if (violations.length > 0 && checksSelf && role !== "authoring") {
-  const roleText = role === void 0 ? "machine_role undeclared" : `machine_role=${role}`;
+var relaxed = nonAuthoringSelfRoot(root, selfRoot, config);
+if (violations.length > 0 && relaxed) {
+  const { roleText } = relaxed;
   console.log(
     `record citations: ${violations.length} citation(s) do not resolve \u2014 REPORTED, NOT FAILED \u2014 ${roleText} (only the authoring machine's store can judge a citation):`
   );

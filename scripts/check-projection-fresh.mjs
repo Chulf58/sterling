@@ -21,10 +21,14 @@ import { dirname, join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { openProject } from './lib/project.mjs';
 import { inFlightAdvisory } from './lib/dispatch-register.mjs';
+import { nonAuthoringSelfRoot } from './lib/self-root-role.mjs';
 
-// Target defaults to the plugin/repo root (npm run check); an explicit dir arg
-// lets the test — or a consuming project — point it elsewhere.
-const root = process.argv[2] ?? join(dirname(fileURLToPath(import.meta.url)), '..');
+// The Sterling clone this script ships in: scripts/ and bin/ both sit one level
+// below it, and the bin/ bundle rewrites import.meta.url to this source's path.
+// Target defaults to it (npm run check); an explicit dir arg lets the test — or
+// a consuming project — point elsewhere.
+const selfRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+const root = process.argv[2] ?? selfRoot;
 const storePath = join(root, '.sterling', 'sterling.db');
 
 const PROJECTIONS = [
@@ -106,6 +110,23 @@ try {
       console.log(
         `projection freshness: ${proj.file} as-of ${stamped}, this store's newest ${proj.label} record ${newest} — REPORTED, NOT FAILED (store_authority='secondary').\n` +
           `  The committed projection was generated from the primary store; do NOT regenerate here, it would shrink the file to this store's contents.`
+      );
+      continue;
+    }
+
+    // MACHINE ROLE, for Sterling's own tree only (GitHub issue #86, the twin of
+    // the citation arm's #84 gate; the predicate is lib/self-root-role.mjs). The
+    // committed projections were generated from the AUTHORING machine's store,
+    // so a consumer clone holding knowledge of its own (the no-records skip
+    // above misses it) always differs, and failing here aborted /sterling:update
+    // at its check step. Report the full drift and pass; never regenerate. A
+    // consuming project's own root keeps the failure below.
+    const relaxed = stamped !== newest ? nonAuthoringSelfRoot(root, selfRoot, config) : null;
+    if (relaxed) {
+      console.log(
+        `projection freshness: ${proj.file} as-of ${stamped}, this store's newest ${proj.label} record ${newest} — REPORTED, NOT FAILED — ${relaxed.roleText} (only the authoring machine's store can judge a projection).\n` +
+          `  This is Sterling's own tree on a machine that did not produce the committed projection: do NOT regenerate here, a smaller store would shrink the shared file.\n` +
+          `  On the authoring machine, declare machine_role 'authoring' in .sterling/config.json, where a stale projection must fail.`
       );
       continue;
     }
