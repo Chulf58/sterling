@@ -5,7 +5,7 @@
 // the network.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
@@ -1263,6 +1263,65 @@ test('cli --list: search stops at 5 pages of 100 and the open-issue listing page
     assert.deepEqual(pages('search/issues'), ['page=1', 'page=2', 'page=3', 'page=4', 'page=5']);
     assert.equal(pages('repos/Chulf58/sterling/issues').length, 27);
   }));
+
+// A listing larger than a pipe (64 KiB) must survive a reader that has not started reading when the CLI finishes its work.
+// The CLI's stdout is a real OS pipe (a shell pipeline) into a separate reader process that sleeps until the last listing page
+// has been requested plus a margin, so a CLI that exits with output still queued loses its tail. Pausing a parent-side stream
+// does not model this: the stream can be destroyed when the child exits.
+const lateReader = `
+const { existsSync, readFileSync } = require('node:fs');
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+for (let waited = 0; !existsSync(process.env.GO_FILE); waited += 20) {
+  if (waited >= 30_000) { console.error('late reader: never released after 30 s'); process.exit(3); }
+  sleep(20);
+}
+const text = readFileSync(0).toString('utf8');
+console.log(JSON.stringify({ bytes: Buffer.byteLength(text), lines: text.split('\\n').filter((l) => /^#\\d+ /.test(l)).length, pending: /report\\(s\\) pending locally/.test(text) }));
+`;
+test('cli --list: a listing larger than the stdout pipe is delivered whole to a reader that starts late', async () => {
+  const p = setup();
+  const goFile = join(p.base, 'reader-go');
+  let child;
+  let closed;
+  try {
+    seed(p, manyReports(600).map((r) => ({ ...r, title: `${r.title} ${'x'.repeat(500)}` })));
+    const codeFile = join(p.base, 'cli-exit-code');
+    const errFile = join(p.base, 'cli-stderr');
+    child = spawn('sh', ['-c', '{ "$0" "$@" 2>"$ERR_FILE"; echo $? >"$CODE_FILE"; } | "$0" -e "$READER"', process.execPath, script, '--list'], {
+      cwd: p.project,
+      env: { ...process.env, HOME: p.home, PATH: `${p.bin}${delimiter}${process.env.PATH}`, FAKE_GH_STATE: p.state, FAKE_GH_QUEUE: p.queue, OPENCODE: '', OPENCODE_SESSION_ID: '', READER: lateReader, GO_FILE: goFile, CODE_FILE: codeFile, ERR_FILE: errFile },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    });
+    const out = [];
+    const err = [];
+    child.stdout.on('data', (d) => out.push(d));
+    child.stderr.on('data', (d) => err.push(d));
+    closed = new Promise((resolve) => child.on('close', (code) => resolve(code)));
+    const lastPage = () => ghLog(p).some((c) => c.includes('repos/Chulf58/sterling/issues') && c.includes('page=7'));
+    for (let waited = 0; !lastPage() && waited < 50_000; waited += 50) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(lastPage(), 'the CLI never asked for the last listing page');
+    await new Promise((r) => setTimeout(r, 500));
+    writeFileSync(goFile, '');
+    const shellCode = await closed;
+    assert.equal(shellCode, 0, Buffer.concat(err).toString('utf8'));
+    assert.equal(readFileSync(codeFile, 'utf8').trim(), '0', readFileSync(errFile, 'utf8'));
+    const got = JSON.parse(Buffer.concat(out).toString('utf8'));
+    assert.equal(got.lines, 600, `the reader received ${got.bytes} bytes, a truncated listing`);
+    assert.equal(got.pending, true);
+    assert.ok(got.bytes > 65_536, 'the listing must be larger than a pipe for this test to mean anything');
+  } finally {
+    // Release the reader and give the pipeline a moment to finish, then kill whatever is left, so a failed assertion never leaves a hung pipeline.
+    writeFileSync(goFile, '');
+    if (child) {
+      let timer;
+      await Promise.race([closed, new Promise((resolve) => { timer = setTimeout(resolve, 5_000); })]);
+      clearTimeout(timer);
+      try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+    }
+    rmSync(p.base, { recursive: true, force: true });
+  }
+});
 
 test('cli --list: more than 500 newer non-report issues do not hide an unindexed report; the listing pages to a short page (GitHub issue #69 review)', () =>
   withSetup((p) => {
