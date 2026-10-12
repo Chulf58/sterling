@@ -5,7 +5,7 @@
 //
 //   node scripts/pr-review-wait.mjs <pr-url|number> [--repo host/owner/repo]
 //        [--since-review <id>] [--head <sha>] [--timeout <s>] [--interval <s>]
-//        [--request-copilot] [--target <dir>]
+//        [--request-copilot] [--recheck-delay <s>] [--target <dir>]
 //   node scripts/pr-review-wait.mjs --resolve-threads <comment-id,...> --pr <n|pr-url> [--target <dir>]
 //   node scripts/pr-review-wait.mjs --settle <clean|capped|escalated> --pr <n|pr-url> [--unknown-retry-delay <s>] [--target <dir>]
 //
@@ -28,8 +28,15 @@
 // With nothing unconsumed, it sleeps with backoff and polls again until
 // --timeout — but only while a Copilot review request is pending: with no
 // request pending and no unconsumed review, nothing will arrive, so the call
-// ends at once with status no_review_requested (exit 3) naming the remedy,
-// instead of timing out quietly. The requests are read BEFORE the reviews:
+// ends with status no_review_requested (exit 3) naming the remedy, instead of
+// timing out quietly. An absent request is read ONCE more after
+// --recheck-delay seconds (default 10, within the --timeout budget) before
+// that exit, on every call (Sol review): a request accepted by this call's
+// --request-copilot, by the previous call or by hand seconds ago may not show
+// in reviewRequests yet (the review_requested event was measured within 10s,
+// finding request-copilot-review-programmatically-requestreviewsbylogin).
+// Pending on the recheck means wait on; a review that landed meanwhile is
+// returned. The requests are read BEFORE the reviews:
 // GitHub clears the request when the review is submitted, so a request seen
 // cleared means its review is already visible to the reviews read. One call
 // never runs forever: the deadline is checked before every gh call and caps
@@ -116,6 +123,7 @@ const GH_CALL_TIMEOUT_MS = 60_000;
 const DEFAULT_TIMEOUT_S = 540; // under a 10-minute background Bash window
 const DEFAULT_INTERVAL_S = 30;
 const MAX_INTERVAL_S = 120;
+const DEFAULT_RECHECK_DELAY_S = 10; // the review_requested event showed within 10s (finding in the header)
 
 const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, identity_confirmed: false, previously_missed: [], body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
 function finish(status, extra = {}) {
@@ -224,7 +232,7 @@ if (argv.includes('--settle')) {
 }
 
 // -------------------------------------------------------------------- args
-const valued = new Set(['--repo', '--since-review', '--head', '--timeout', '--interval', '--target']);
+const valued = new Set(['--repo', '--since-review', '--head', '--timeout', '--interval', '--recheck-delay', '--target']);
 const positional = argv.filter((a, i) => !a.startsWith('--') && !valued.has(argv[i - 1]));
 if (positional.length !== 1) error('usage: pr-review-wait.mjs <pr-url|number> [--repo host/owner/repo] [--since-review <id>] [--head <sha>] [--timeout <s>] [--request-copilot]');
 const seconds = (name, dflt) => {
@@ -243,6 +251,9 @@ const headRaw = flag('--head');
 if (headRaw !== undefined && !/^[0-9a-f]{7,40}$/i.test(headRaw)) error(`--head must be 7-40 hex characters of a commit sha, got '${headRaw}'`);
 const expectedHead = headRaw === undefined ? null : headRaw.toLowerCase();
 const requestCopilot = argv.includes('--request-copilot');
+const recheckRaw = flag('--recheck-delay');
+const recheckDelayS = recheckRaw === undefined ? DEFAULT_RECHECK_DELAY_S : Number(recheckRaw);
+if (recheckRaw !== undefined && (recheckRaw.trim() === '' || !Number.isFinite(recheckDelayS) || recheckDelayS < 0)) error(`--recheck-delay must be a number of seconds >= 0, got '${recheckRaw}'`);
 const pinnedLogins = readPinnedLogins();
 result.identity_confirmed = pinnedLogins.length > 0;
 
@@ -364,7 +375,7 @@ function copilotReviewPending() {
 }
 
 class NoReviewRequested extends Error {}
-function poll() {
+function poll(recheckAbsent = true) {
   const [pull] = parsePages(ghApi(base));
   const head = pull?.head?.sha;
   if (typeof head !== 'string') throw new Error(`gh api ${base} returned no head.sha`);
@@ -378,8 +389,13 @@ function poll() {
   if (copilot.length) result.observed_copilot_login = copilot.reduce((a, b) => (b.id > a.id ? b : a)).user.login;
   const fresh = copilot.filter((r) => COMPLETED_STATES.has(r.state) && (sinceReview === null || r.id > sinceReview));
   if (!fresh.length) {
-    if (!pending) throw new NoReviewRequested();
-    return null;
+    if (pending) return null;
+    if (!recheckAbsent) throw new NoReviewRequested();
+    // One bounded recheck before the loud exit: a request accepted seconds ago
+    // may not show yet. The deadline still bounds it (the next gh call throws
+    // DeadlineReached once the budget is spent).
+    sleep(Math.max(0, Math.min(recheckDelayS * 1000, deadline - Date.now())));
+    return poll(false);
   }
   // The LOWEST fresh id first, on ANY head (Sol review, HIGH; GitHub issue
   // #80): a later review never hides an earlier one's findings, and a review
