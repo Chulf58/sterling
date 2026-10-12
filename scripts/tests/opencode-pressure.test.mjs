@@ -90,7 +90,8 @@ async function setup(dir, { sessions = { ses_1: {} }, models = [] } = {}) {
 }
 
 const used = (n) => ({ input: n - 3000, output: 900, reasoning: 0, cache: { read: 2000, write: 1000 } });
-const added = (text, base = 'next') => (text === base ? '' : text.slice(base.length + 2));
+// The pressure line(s) a prompt carries; the volatile Sterling context appended beside them (context.mjs) is not counted.
+const added = (text) => text.split('\n\n').filter((part) => part.startsWith('Sterling context')).join('\n\n');
 
 test('stepFillTokens sums input + cache.read + cache.write, as H10 sums input and both cache counts', () => {
   assert.equal(pressure.stepFillTokens({ input: 10, output: 99, reasoning: 7, cache: { read: 20, write: 5 } }), 35);
@@ -103,9 +104,9 @@ test('below the soft threshold nothing is appended', async () => {
   const p = makeProject();
   const { prompt, turn, cleanup } = await setup(p.dir);
   try {
-    assert.equal(await prompt(), 'next', 'nothing has run yet');
+    assert.equal(added(await prompt()), '', 'nothing has run yet');
     await turn(used(34_000));
-    assert.equal(await prompt(), 'next');
+    assert.equal(added(await prompt()), '');
   } finally {
     await cleanup?.();
     p.cleanup();
@@ -120,9 +121,9 @@ test('the soft note fires once at soft_pct and is not repeated on later turns', 
     const line = added(await prompt());
     assert.match(line, /^Sterling context pressure: fill 35\.0% ≥ soft threshold 35% → prefer finishing open work, delegate reads to subagents\. \(once per session\)$/);
     await turn(used(40_000));
-    assert.equal(await prompt(), 'next', 'soft is spent for the session');
+    assert.equal(added(await prompt()), '', 'soft is spent for the session');
     await turn(used(42_000));
-    assert.equal(await prompt(), 'next');
+    assert.equal(added(await prompt()), '');
   } finally {
     await cleanup?.();
     p.cleanup();
@@ -138,12 +139,12 @@ test('the hard warning fires once per session at hard_pct, after the soft note o
     await turn(used(50_000));
     assert.match(added(await prompt()), /^Sterling context warning: fill 50\.0% of the 100000-token window is past the 50% target → finish the open work and commit it; delegate reads and mechanical work to subagents \(P1\)\. \(once per session\)$/);
     await turn(used(70_000));
-    assert.equal(await prompt(), 'next', 'hard is spent for the session');
+    assert.equal(added(await prompt()), '', 'hard is spent for the session');
     // A second session that jumps straight past hard gets the hard warning only, once.
     await turn(used(60_000), { sessionID: 'ses_2' });
     assert.match(added(await prompt('next', 'ses_2')), /^Sterling context warning: fill 60\.0%/);
     await turn(used(65_000), { sessionID: 'ses_2' });
-    assert.equal(await prompt('next', 'ses_2'), 'next');
+    assert.equal(added(await prompt('next', 'ses_2')), '');
   } finally {
     await cleanup?.();
     p.cleanup();
@@ -157,7 +158,7 @@ test('with no token data the not-measured note is said once per session', async 
     await turn(undefined);
     assert.match(added(await prompt()), /^Sterling context pressure: not measured for this session \(OpenCode reported no token usage for this session's turns to the plugin\), so no soft or hard context-pressure line will appear; watch the session's length yourself\. \(once per session\)$/);
     await turn({ input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } });
-    assert.equal(await prompt(), 'next', 'the note is once per session');
+    assert.equal(added(await prompt()), '', 'the note is once per session');
   } finally {
     await cleanup?.();
     p.cleanup();
@@ -212,7 +213,7 @@ test('a child (subagent) session gets no pressure line', async () => {
   const { prompt, turn, cleanup } = await setup(p.dir, { sessions: { ses_1: {}, ses_child: { parentID: 'ses_1' } } });
   try {
     await turn(used(60_000), { sessionID: 'ses_child' });
-    assert.equal(await prompt('next', 'ses_child'), 'next');
+    assert.equal(added(await prompt('next', 'ses_child')), '');
   } finally {
     await cleanup?.();
     p.cleanup();

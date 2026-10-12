@@ -20,13 +20,17 @@ export function notStagedLine(kase) {
   return `STERLING DISPATCH STAGING (H19): this session's brief could not be staged from [${kase}] — YOUR KNOWLEDGE WAS NOT STAGED: no owning articles, hazards or decisions were delivered for your task. Do not assume the store is silent on it: rely on your dispatch brief for knowledge pointers and query the store for the area before acting. File-touch delivery still fires on your first read or edit.`;
 }
 
-/** The text of the session's first user message (its brief), or '' when there is none. */
+/** The line context.mjs puts before the volatile Sterling lines it appends to a prompt. */
+export const VOLATILE_HEADER = 'STERLING CONTEXT (added by the Sterling plugin, not typed by the user):';
+
+/** The text of the session's first user message (its brief), or '' when there is none. Sterling's own appended lines are cut off. */
 export function briefOf(messages) {
   const first = Array.isArray(messages) ? messages.find((m) => m?.role === 'user') : null;
   if (!first) return '';
   const content = first.content;
   const text = typeof content === 'string' ? content : Array.isArray(content) ? content.filter((p) => p?.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('\n') : '';
-  return text.slice(0, BRIEF_SCAN_CAP);
+  const appended = text.indexOf(`\n\n${VOLATILE_HEADER}`);
+  return (appended >= 0 ? text.slice(0, appended) : text).slice(0, BRIEF_SCAN_CAP);
 }
 
 /**

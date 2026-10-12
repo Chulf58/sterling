@@ -125,14 +125,27 @@ async function setupPlugin(dir, deps = {}, sessions = { ses_1: {} }) {
 }
 
 const contextInput = () => ({ sessionID: 'ses_1', agent: 'build', system: [{ type: 'text', text: 'base system' }], messages: [], tools: {} });
-const systemText = (i) => i.system.map((p) => p.text).join('\n');
+const systemText = (i) => [...i.system.map((p) => p.text), i.prompt?.text ?? ''].join('\n');
+/**
+ * One turn as the model sees it: the prompt hook (which appends the volatile Sterling
+ * lines to the prompt text) and then the context hook (the stable system part). The
+ * prompt is kept on the input as `prompt`, so seenText reads both.
+ */
+async function seeTurn(ctx, ci) {
+  const p = { sessionID: ci.sessionID, messageID: 'msg_turn', prompt: { text: '' }, delivery: 'immediate' };
+  await ctx.hooks.session.prompt(p);
+  await ctx.hooks.session.context(ci);
+  ci.prompt = p.prompt;
+  return ci;
+}
+
 
 test('outside a Sterling project every handler is silent', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-oc-none-'));
   try {
     const { ctx, plugin, cleanup } = await setupPlugin(dir);
     const ci = contextInput();
-    await ctx.hooks.session.context(ci);
+    await seeTurn(ctx, ci);
     assert.deepEqual(ci.system, [{ type: 'text', text: 'base system' }]);
     const call = { tool: 'edit', sessionID: 'ses_1', id: 'c1', input: { path: join(dir, 'x.mjs') } };
     await ctx.hooks.tool['execute.before'](call);
@@ -215,7 +228,7 @@ test('a service whose cwd is project A acts only on the session\'s project B: no
     const cleanA = await plugin.setup(ctxA);
 
     const ci = { ...contextInput(), sessionID: 'ses_b' };
-    await ctxB.hooks.session.context(ci);
+    await seeTurn(ctxB, ci);
     await ctxB.hooks.tool['execute.before']({ tool: 'edit', sessionID: 'ses_b', id: 'c1', input: { path: 'src/a.mjs' } });
     await ctxB.hooks.tool['execute.after']({ tool: 'edit', sessionID: 'ses_b', id: 'c1', input: { path: 'src/a.mjs' }, status: 'completed', result: { content: [{ type: 'text', text: 'ok' }] } });
     // The event names its location; a location-wide or process-wide subscription delivers it to both.
@@ -253,7 +266,7 @@ test('a session in a non-Sterling directory writes nothing anywhere, even with a
     const cleanN = await plugin.setup(ctxN);
     const cleanA = await plugin.setup(ctxA);
     const ci = { ...contextInput(), sessionID: 'ses_n' };
-    await ctxN.hooks.session.context(ci);
+    await seeTurn(ctxN, ci);
     await ctxN.hooks.tool['execute.before']({ tool: 'edit', sessionID: 'ses_n', id: 'c1', input: { path: join(none, 'x.mjs') } });
     const ended = { type: 'session.execution.succeeded', location: { directory: none }, data: { sessionID: 'ses_n' } };
     ctxA.emit(ended);
@@ -359,10 +372,10 @@ test('the startup sweep runs once per project per process, across locations of t
     const ctx2 = stubCtx(join(a.dir, 'src', 'sub'), { ses_2: {} });
     await plugin.setup(ctx1);
     await plugin.setup(ctx2);
-    await ctx1.hooks.session.context({ ...contextInput(), sessionID: 'ses_1' });
+    await seeTurn(ctx1, { ...contextInput(), sessionID: 'ses_1' });
     // A dispatch armed after the first sweep must survive the second location's first root context.
     seedBoundaryState(a.dir, 'A');
-    await ctx2.hooks.session.context({ ...contextInput(), sessionID: 'ses_2' });
+    await seeTurn(ctx2, { ...contextInput(), sessionID: 'ses_2' });
     assert.ok(existsSync(join(a.dir, '.sterling', 'transient', 'dispatch-register.json')), 'the second location does not sweep the same project again');
   } finally {
     a.cleanup();
@@ -376,7 +389,7 @@ test('session context injects the Sterling layer, the OpenCode host tail, a stat
     writeFileSync(join(p.dir, server.NOTICES_REL), JSON.stringify([{ id: 'n1', at: NOW, text: 'NOTICE-MARKER-7 owed reconcile' }]));
     const { ctx, cleanup } = await setupPlugin(p.dir);
     const ci = contextInput();
-    await ctx.hooks.session.context(ci);
+    await seeTurn(ctx, ci);
     const text = systemText(ci);
     assert.match(text, /# CLAUDE\.md — fixture-proj \(Sterling layer\)/, 'template rendered with the project name');
     assert.match(text, /## Authority \(the knowledge base is the source of truth\)/);
@@ -489,7 +502,7 @@ test('a store that fails to open degrades the context loudly instead of taking t
       },
     });
     const ci = contextInput();
-    await ctx.hooks.session.context(ci);
+    await seeTurn(ctx, ci);
     const text = systemText(ci);
     assert.match(text, /Sterling layer\)/, 'the layer is still injected');
     assert.match(text, /STERLING STATUS: store unavailable \(simulated open failure\)/);
@@ -531,11 +544,11 @@ const noteExists = (dir) => existsSync(join(dir, '.sterling', 'transient', 'rota
 const after = Date.parse(NOTE_AT) + 60_000;
 const contextFor = async (ctx, sessionID) => {
   const ci = { ...contextInput(), sessionID };
-  await ctx.hooks.session.context(ci);
+  await seeTurn(ctx, ci);
   return systemText(ci);
 };
 
-test('rotation restore: the first new root session gets the note once and consumes it; it stays for that session; the next new session does not get it', async () => {
+test('rotation restore: the first new root session gets the note once and consumes it; it is not repeated in that session; the next new session does not get it', async () => {
   const p = makeProject();
   try {
     writeNote(p.dir);
@@ -546,7 +559,7 @@ test('rotation restore: the first new root session gets the note once and consum
     assert.match(first, /`opencode --session ses_old`/);
     assert.equal(noteExists(p.dir), false, 'consumed');
     assert.equal((first.match(/ROTATION RESTORE/g) ?? []).length, 1);
-    assert.match(await contextFor(ctx, 'ses_new'), /ROTATION-SLICE-42/, 'the restore stays in that session\'s later turns');
+    assert.doesNotMatch(await contextFor(ctx, 'ses_new'), /ROTATION RESTORE/, 'the restore is in that session\'s conversation once and is not appended again');
     assert.doesNotMatch(await contextFor(ctx, 'ses_next'), /ROTATION RESTORE/, 'a second new session does not get it');
     await cleanup?.();
   } finally {
@@ -569,16 +582,15 @@ test('the maintenance worker child (STERLING_MAINTENANCE_WORKER=1) leaves the ro
     assert.equal(noteExists(p.dir), true, 'the rotation note is not consumed');
     const pi = promptInput('judge the queue');
     await worker.ctx.hooks.session.prompt(pi);
-    assert.equal(pi.prompt.text, 'judge the queue', 'the selection is not appended');
+    assert.match(pi.prompt.text, /^judge the queue/);
+    assert.doesNotMatch(pi.prompt.text, /TUI selection|A NOTICE FOR THE USER/, 'the selection and the notice are not appended');
     await worker.cleanup?.();
 
     const user = await setupPlugin(p.dir, {}, { ses_user: { time: { created: after } } });
     const userText = await contextFor(user.ctx, 'ses_user');
     assert.match(userText, /ROTATION-SLICE-42/, "the user's new session gets the restore");
     assert.match(userText, /A NOTICE FOR THE USER/, 'and the notice, still unshown');
-    const up = promptInput('next');
-    await user.ctx.hooks.session.prompt(up);
-    assert.match(up.prompt.text, /TUI selection \(one-shot\)/, 'and the selection');
+    assert.match(userText, /TUI selection \(one-shot\)/, 'and the selection, on the same first prompt');
     await user.cleanup?.();
   } finally {
     p.cleanup();
@@ -796,7 +808,7 @@ test('settlement mints reconcile duties, then advances the settled snapshot, the
     assert.ok(launches.length >= 1, 'the maintenance worker launch is attempted when claude is on PATH');
 
     const ci = contextInput();
-    await ctx.hooks.session.context(ci);
+    await seeTurn(ctx, ci);
     assert.match(systemText(ci), /alpha-feature/, 'the next context shows the settlement notice');
     await plugin.handlers.event(succeeded);
     const left = existsSync(join(p.dir, server.NOTICES_REL)) ? JSON.parse(readFileSync(join(p.dir, server.NOTICES_REL), 'utf8')) : [];
@@ -966,12 +978,14 @@ test('prompt hook: no selection leaves the prompt untouched; a store failure bec
     const { ctx, cleanup } = await setupPlugin(p.dir);
     const plain = promptInput('hello');
     await ctx.hooks.session.prompt(plain);
-    assert.equal(plain.prompt.text, 'hello');
+    assert.match(plain.prompt.text, /^hello/);
+    assert.doesNotMatch(plain.prompt.text, /TUI selection/, 'no selection is appended');
     await cleanup?.();
     const broken = await setupPlugin(p.dir, { openStore: () => { throw new Error('PROMPT-STORE-DOWN'); } });
     const pi = promptInput('hi');
     await broken.ctx.hooks.session.prompt(pi);
-    assert.equal(pi.prompt.text, 'hi');
+    assert.match(pi.prompt.text, /^hi/);
+    assert.doesNotMatch(pi.prompt.text, /TUI selection/, 'no selection is appended');
     assert.match(readFileSync(join(p.dir, server.NOTICES_REL), 'utf8'), /prompt failed \(PROMPT-STORE-DOWN\)/);
     await broken.cleanup?.();
   } finally {
@@ -1069,7 +1083,7 @@ test('settlement nags unpaid capture and article duties as a next-turn notice, t
     assert.deepEqual(systemItems(p.dir, 'article_missing'), []);
 
     const ci = contextInput();
-    await ctx.hooks.session.context(ci);
+    await seeTurn(ctx, ci);
     assert.match(systemText(ci), /capture owed/i, 'the next context shows the nag');
 
     await plugin.handlers.event(succeeded);
@@ -1256,7 +1270,7 @@ test('with no claude on PATH the worker skip is loud: one notice per process and
     assert.match(skip[0], /neither `claude` nor an OpenCode binary/);
     const log = readFileSync(join(p.dir, server.LOG_REL), 'utf8');
     assert.match(log, /no maintenance runner/i);
-    await ctx.hooks.session.context(contextInput());
+    await seeTurn(ctx, contextInput());
     await plugin.handlers.event(succeeded);
     await plugin.handlers.event(succeeded);
     assert.equal(noticeTexts(p.dir).filter((t) => /maintenance worker/i.test(t)).length, 0, 'the notice is not raised again in this process');
@@ -1339,7 +1353,7 @@ test('on Postgres storage N plugin operations open the routed store once, keep i
     const projectStores = server.createProjectStores({ backend: () => 'routed', openRouted });
     const { ctx, cleanup } = await setupPlugin(p.dir, { projectStores });
     const ci = contextInput();
-    await ctx.hooks.session.context(ci);
+    await seeTurn(ctx, ci);
     assert.match(systemText(ci), /STERLING STATUS: board 1 open/);
     const N = 6;
     for (let i = 0; i < N; i += 1) {

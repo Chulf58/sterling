@@ -1,5 +1,6 @@
-// Pending notices: written by any handler, shown to the model by the context
-// handler at the next turn, pruned at the end of the next execution.
+// Pending notices: written by any handler, appended once to the conductor's next
+// prompt by the context handler (context.mjs onPrompt), and pruned at the end of
+// the execution that showed them (settle.mjs).
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -33,19 +34,18 @@ export function addNotice(root, text, now = new Date().toISOString()) {
   writeJsonAtomic(join(root, NOTICES_REL), notices);
 }
 
-/** Notices to show now. Each is stamped shown_at the first time; it stays visible for the rest of that execution and is pruned at its end. */
+/**
+ * The notices not shown yet, each stamped shown_at `now`. They are delivered once, into
+ * the prompt that starts an execution, which keeps them in the conversation, so a shown
+ * notice is never returned again; it is pruned at that execution's end.
+ */
 export function takeNotices(root, now) {
   const notices = readNotices(root);
-  if (!notices.length) return [];
-  let changed = false;
-  for (const n of notices) {
-    if (!n.shown_at) {
-      n.shown_at = now;
-      changed = true;
-    }
-  }
-  if (changed) writeJsonAtomic(join(root, NOTICES_REL), notices);
-  return notices;
+  const fresh = notices.filter((n) => !n.shown_at);
+  if (!fresh.length) return [];
+  for (const n of fresh) n.shown_at = now;
+  writeJsonAtomic(join(root, NOTICES_REL), notices);
+  return fresh;
 }
 
 export function pruneShownNotices(root) {

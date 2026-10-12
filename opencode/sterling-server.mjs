@@ -16619,16 +16619,11 @@ function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString())
 }
 function takeNotices(root, now) {
   const notices = readNotices(root);
-  if (!notices.length) return [];
-  let changed = false;
-  for (const n of notices) {
-    if (!n.shown_at) {
-      n.shown_at = now;
-      changed = true;
-    }
-  }
-  if (changed) writeJsonAtomic(join24(root, NOTICES_REL), notices);
-  return notices;
+  const fresh = notices.filter((n) => !n.shown_at);
+  if (!fresh.length) return [];
+  for (const n of fresh) n.shown_at = now;
+  writeJsonAtomic(join24(root, NOTICES_REL), notices);
+  return fresh;
 }
 function pruneShownNotices(root) {
   const notices = readNotices(root);
@@ -18533,12 +18528,16 @@ var BRIEF_SCAN_CAP = 2e4;
 function notStagedLine(kase) {
   return `STERLING DISPATCH STAGING (H19): this session's brief could not be staged from [${kase}] \u2014 YOUR KNOWLEDGE WAS NOT STAGED: no owning articles, hazards or decisions were delivered for your task. Do not assume the store is silent on it: rely on your dispatch brief for knowledge pointers and query the store for the area before acting. File-touch delivery still fires on your first read or edit.`;
 }
+var VOLATILE_HEADER = "STERLING CONTEXT (added by the Sterling plugin, not typed by the user):";
 function briefOf(messages) {
   const first = Array.isArray(messages) ? messages.find((m) => m?.role === "user") : null;
   if (!first) return "";
   const content = first.content;
   const text = typeof content === "string" ? content : Array.isArray(content) ? content.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n") : "";
-  return text.slice(0, BRIEF_SCAN_CAP);
+  const appended = text.indexOf(`
+
+${VOLATILE_HEADER}`);
+  return (appended >= 0 ? text.slice(0, appended) : text).slice(0, BRIEF_SCAN_CAP);
 }
 function stageChild({ store, root, sessionID, agent: agentName, brief, disclosure: disclosure2 = "" }) {
   const agent = agentRole(agentName);
@@ -18977,6 +18976,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   const maintenanceCache = /* @__PURE__ */ new Map();
   const stagedCache = /* @__PURE__ */ new Map();
   const boardCache = /* @__PURE__ */ new Map();
+  const delivered = /* @__PURE__ */ new Map();
   const registrySeen = /* @__PURE__ */ new Map();
   function statusLine(root) {
     const hit = statusCache.get(root);
@@ -19081,16 +19081,22 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       return `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
     }
   }
+  function resolvePluginRoot() {
+    try {
+      return { pluginRoot: pluginRootOverride ?? sterlingRoot() };
+    } catch (e) {
+      return { pluginRoot: null, error: e };
+    }
+  }
   async function onContext(input) {
     const root = rootOf();
     if (!root) return;
     await fenced("context", root, async () => {
       await sessionSync(root, input.sessionID);
-      const restore = await rotationRestore(root, input.sessionID);
-      let pluginRoot = null;
+      const { pluginRoot, error } = resolvePluginRoot();
       let layer;
       try {
-        pluginRoot = pluginRootOverride ?? sterlingRoot();
+        if (error) throw error;
         layer = renderSterlingLayer(root, pluginRoot);
       } catch (e) {
         logLine(root, `context: layer render failed: ${errText(e)}`);
@@ -19098,64 +19104,106 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
 
 ${opencodeHostTail(pluginRoot)}`;
       }
-      const blocks = [layer, statusLine(root)];
-      const state = operatingStateLines(root, pluginRoot, { opener: openStore });
-      blocks.push(...state.lines);
-      blocks.push(...maintenanceBlocks(root, state.config));
+      const blocks = [layer];
       const kind = await sessionKind(getSession?.(), input.sessionID, parents);
       if (kind.why) {
         logLine(root, `context: child staging skipped for ${input.sessionID}, session lookup failed: ${kind.why}`);
         blocks.push(notStagedLine("session-lookup-failed"));
-      } else if (kind.kind === "root") {
-        if (!inWorkerChild(env)) {
-          try {
-            const planLock = planLockSection({ cwd: root, source: "opencode" }).context.trim();
-            if (planLock) blocks.push(planLock);
-          } catch (e) {
-            logLine(root, `context: plan lock section failed: ${errText(e)}`);
-            blocks.push(`PLAN LOCK UNAVAILABLE (${errText(e)}): the plan lock section is not stated this turn; check it with plan-lock.mjs --show.`);
-          }
-        }
-        if (sweepStale && !inWorkerChild(env) && !swept.has(root)) {
-          swept.add(root);
-          let line;
-          try {
-            line = await sweepStale(root);
-          } catch (e) {
-            line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
-          }
-          if (line) {
-            logLine(root, `context: ${line}`);
-            blocks.push(line);
-          }
-        }
-        if (!inWorkerChild(env) && registrySeen.get(root) !== input.sessionID) {
-          registrySeen.set(root, input.sessionID);
-          try {
-            refreshRegistryRow(root, { config: state.config, at: now() });
-          } catch (e) {
-            logLine(root, `context: project registry refresh failed: ${errText(e)}`);
-            blocks.push(`STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
-          }
-        }
-        const undeclared = undeclaredBlock(root, state.config);
-        if (undeclared) blocks.push(undeclared);
-        if (!inWorkerChild(env)) {
-          const board = boardBlock(root, state.config, input.sessionID);
-          if (board) blocks.push(board);
-        }
-      } else {
+      } else if (kind.kind === "child") {
         const staged = await childStaging(root, input);
         if (staged) blocks.push(staged);
       }
-      if (restore) blocks.push(restore);
-      const notices = inWorkerChild(env) ? [] : takeNotices(root, now());
-      if (notices.length) blocks.push(`STERLING NOTICES (from the end of the last turn):
-${notices.map((n) => `- ${n.text}`).join("\n")}`);
       input.system.push({ type: "text", text: blocks.join("\n\n") });
     });
   }
-  return { onContext, resetStatus: (root) => (statusCache.delete(root), maintenanceCache.delete(root), boardCache.delete(root)) };
+  async function volatileBlocks(root, sessionID, kind) {
+    const { pluginRoot } = resolvePluginRoot();
+    const state = operatingStateLines(root, pluginRoot, { opener: openStore });
+    const out = [
+      { key: "status", text: statusLine(root) },
+      { key: "operating-state", text: state.lines.join("\n\n") },
+      { key: "maintenance", text: maintenanceBlocks(root, state.config).join("\n\n") }
+    ];
+    if (kind === "root") {
+      if (!inWorkerChild(env)) {
+        let planLock;
+        try {
+          planLock = planLockSection({ cwd: root, source: "opencode" }).context.trim();
+        } catch (e) {
+          logLine(root, `context: plan lock section failed: ${errText(e)}`);
+          planLock = `PLAN LOCK UNAVAILABLE (${errText(e)}): the plan lock section is not stated this turn; check it with plan-lock.mjs --show.`;
+        }
+        out.push({ key: "plan-lock", text: planLock, cleared: "PLAN LOCK: no plan lock is active now; the one shown earlier no longer applies." });
+      }
+      if (sweepStale && !inWorkerChild(env) && !swept.has(root)) {
+        swept.add(root);
+        let line;
+        try {
+          line = await sweepStale(root);
+        } catch (e) {
+          line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
+        }
+        if (line) {
+          logLine(root, `context: ${line}`);
+          out.push({ text: line });
+        }
+      }
+      if (!inWorkerChild(env) && registrySeen.get(root) !== sessionID) {
+        registrySeen.set(root, sessionID);
+        try {
+          refreshRegistryRow(root, { config: state.config, at: now() });
+        } catch (e) {
+          logLine(root, `context: project registry refresh failed: ${errText(e)}`);
+          out.push({ text: `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.` });
+        }
+      }
+      out.push({ key: "undeclared", text: undeclaredBlock(root, state.config), cleared: "UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies." });
+      if (!inWorkerChild(env)) out.push({ key: "board", text: boardBlock(root, state.config, sessionID), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
+    }
+    out.push({ key: "restore", text: await rotationRestore(root, sessionID) });
+    return out;
+  }
+  async function onPrompt(input) {
+    const root = rootOf();
+    if (!root) return;
+    await fenced("context", root, async () => {
+      if (typeof input?.prompt?.text !== "string") throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
+      const sessionID = input.sessionID;
+      const kind = await sessionKind(getSession?.(), sessionID, parents);
+      if (kind.why) logLine(root, `context: session ${sessionID} could not be told root or child at its prompt (${kind.why}); only the lines every session gets are delivered`);
+      const blocks = await volatileBlocks(root, sessionID, kind.why ? "unknown" : kind.kind);
+      const seen = delivered.get(sessionID) ?? remember(delivered, sessionID, /* @__PURE__ */ new Map());
+      const due = [];
+      for (const b of blocks) {
+        if (!b.key) {
+          if (b.text) due.push(b.text);
+          continue;
+        }
+        const last = seen.get(b.key) ?? "";
+        if (b.text === last) continue;
+        if (b.text) due.push(b.text);
+        else if (b.cleared) due.push(b.cleared);
+        seen.set(b.key, b.text);
+      }
+      if (!kind.why && kind.kind === "root" && !inWorkerChild(env)) {
+        const notices = takeNotices(root, now());
+        if (notices.length) due.push(`STERLING NOTICES (from the end of the last turn):
+${notices.map((n) => `- ${n.text}`).join("\n")}`);
+      }
+      if (due.length) input.prompt.text = `${input.prompt.text}
+
+${VOLATILE_HEADER}
+
+${due.join("\n\n")}`;
+    });
+  }
+  return {
+    onContext,
+    onPrompt,
+    resetStatus: (root) => (statusCache.delete(root), maintenanceCache.delete(root), boardCache.delete(root)),
+    // Compaction can summarize away what was delivered: the session's next prompt gets the whole set again.
+    resetSession: (sessionID) => void delivered.delete(sessionID)
+  };
 }
 
 // packages/opencode-plugin/src/pr-loop.mjs
@@ -21261,7 +21309,7 @@ function createSterlingServer(deps = {}) {
     }
     const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env });
     const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
-    const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
+    const { onContext, onPrompt: onVolatile, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
     const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
     const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
     const dispatch = createDispatchHandlers({ rootOf, fenced });
@@ -21283,9 +21331,14 @@ function createSterlingServer(deps = {}) {
     const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels: () => models?.list?.(), env });
     async function onPrompt(input) {
       await onSelection(input);
+      await onVolatile(input);
       await pressure.onPrompt(input);
     }
-    const onCompaction = createCompactionHandler({ rootOf, fenced });
+    const compaction = createCompactionHandler({ rootOf, fenced });
+    async function onCompaction(input) {
+      if (typeof input?.sessionID === "string") resetSession(input.sessionID);
+      await compaction(input);
+    }
     async function onEvent(ev) {
       if (rootOf()) pressure.onEvent(ev);
       if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
