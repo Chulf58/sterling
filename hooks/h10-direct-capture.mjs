@@ -13800,7 +13800,10 @@ try {
   const ownerRowsNote = (p) => {
     const rows = ownerRows(p);
     if (!rows.length) return "none";
-    return rows.map((r) => `${r.slug ?? r.title ?? r.type} (${String(r.id).slice(0, 8)}${r.working_tree ? `, working_tree=${r.working_tree}` : ""})`).join("; ");
+    return rows.map((r) => {
+      const excluded = isForeignTree(r, input.cwd) ? ", EXCLUDED: working_tree names another tree" : "";
+      return `${r.slug ?? r.title ?? r.type} (${String(r.id).slice(0, 8)}${r.working_tree ? `, working_tree=${r.working_tree}` : ""}${excluded})`;
+    }).join("; ");
   };
   const gitKnowsNow = (list, cwd) => {
     const clean = (list ?? []).filter(Boolean);

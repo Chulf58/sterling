@@ -9,7 +9,7 @@ var __export = (target, all) => {
 // scripts/check-record-citations.mjs
 import { fileURLToPath } from "node:url";
 import { dirname as dirname4, join as join8 } from "node:path";
-import { existsSync as existsSync4, readFileSync as readFileSync5 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync5, realpathSync as realpathSync4 } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 // scripts/lib/project.mjs
@@ -10988,7 +10988,8 @@ function lintCitationCurrency(content, label, resolve5, getById2) {
 }
 
 // scripts/check-record-citations.mjs
-var root = process.argv[2] ?? join8(dirname4(fileURLToPath(new URL("../scripts/check-record-citations.mjs", import.meta.url).href)), "..");
+var selfRoot = join8(dirname4(fileURLToPath(new URL("../scripts/check-record-citations.mjs", import.meta.url).href)), "..");
+var root = process.argv[2] ?? selfRoot;
 var storePath = join8(root, ".sterling", "sterling.db");
 if (!existsSync4(storePath)) {
   console.log("record citations: skipped (no store)");
@@ -11047,6 +11048,20 @@ function printCurrencyWarnings() {
   for (const w of currencyWarnings) console.log(`  [${w.kind}] ${w.detail}`);
 }
 var authority = config?.store_authority ?? "primary";
+var checksSelf = realpathSync4(root) === realpathSync4(selfRoot);
+var role = config?.machine_role;
+if (violations.length > 0 && checksSelf && role !== "authoring") {
+  const roleText = role === void 0 ? "machine_role undeclared" : `machine_role=${role}`;
+  console.log(
+    `record citations: ${violations.length} citation(s) do not resolve \u2014 REPORTED, NOT FAILED \u2014 ${roleText} (only the authoring machine's store can judge a citation):`
+  );
+  for (const v of violations) console.log(`  [${v.kind}] ${v.detail}`);
+  console.log(
+    "  This is Sterling's own tree on a machine that did not mint the ids it cites. On the authoring machine, declare machine_role 'authoring' in .sterling/config.json, where these must resolve."
+  );
+  printCurrencyWarnings();
+  process.exit(0);
+}
 if (violations.length > 0 && authority === "secondary") {
   console.log(
     `record citations: ${violations.length} citation(s) do not resolve \u2014 REPORTED, NOT FAILED (store_authority='secondary'):`

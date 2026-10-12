@@ -22,7 +22,7 @@
 // the same shape as check-projection-fresh, whose store-reading pattern this mirrors.
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { openMounted, openProject } from './lib/project.mjs';
 import { buildResolver } from './lib/citations.mjs';
@@ -34,7 +34,10 @@ import {
   countCitationOptOuts,
 } from './lib/checks.mjs';
 
-const root = process.argv[2] ?? join(dirname(fileURLToPath(import.meta.url)), '..');
+// The Sterling clone this script ships in: scripts/ and bin/ both sit one level
+// below it, and the bin/ bundle rewrites import.meta.url to this source's path.
+const selfRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+const root = process.argv[2] ?? selfRoot;
 const storePath = join(root, '.sterling', 'sterling.db');
 
 if (!existsSync(storePath)) {
@@ -153,6 +156,32 @@ function printCurrencyWarnings() {
 // all, so `resolve()` already returns falsy and lintCitationCurrency never
 // gets a hit to walk — the same conditional posture falls out for free.
 const authority = config?.store_authority ?? 'primary';
+
+// MACHINE ROLE, for Sterling's own tree only (GitHub issue #84). The citations in
+// Sterling's source name records minted in the AUTHORING machine's project store.
+// A consumer clone that has a populated project store of its own (so the
+// empty-store skip above misses it) cannot resolve them, and failing here
+// aborted /sterling:update at its check step on every rerun. So when the checked
+// root IS the clone this script ships in, only machine_role 'authoring' enforces;
+// 'consumer' and undeclared report the full list and pass, naming the role.
+// Every OTHER project root (a consuming project run through sterling-check)
+// keeps the plain enforcement: init never writes machine_role there, and that
+// project's own store minted the ids its tree cites.
+const checksSelf = realpathSync(root) === realpathSync(selfRoot);
+const role = config?.machine_role;
+
+if (violations.length > 0 && checksSelf && role !== 'authoring') {
+  const roleText = role === undefined ? 'machine_role undeclared' : `machine_role=${role}`;
+  console.log(
+    `record citations: ${violations.length} citation(s) do not resolve — REPORTED, NOT FAILED — ${roleText} (only the authoring machine's store can judge a citation):`
+  );
+  for (const v of violations) console.log(`  [${v.kind}] ${v.detail}`);
+  console.log(
+    "  This is Sterling's own tree on a machine that did not mint the ids it cites. On the authoring machine, declare machine_role 'authoring' in .sterling/config.json, where these must resolve."
+  );
+  printCurrencyWarnings();
+  process.exit(0);
+}
 
 if (violations.length > 0 && authority === 'secondary') {
   console.log(
