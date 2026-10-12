@@ -12,7 +12,7 @@ import { SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
 import { probeSchemaVersion } from '../../../scripts/lib/update.mjs';
 import { opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
 import { errText, logLine } from './log.mjs';
-import { takeNotices } from './notices.mjs';
+import { NOTICES_REL, takeNotices } from './notices.mjs';
 import { readMaintenanceState } from '../../../scripts/hooks/lib/maintenance-state.mjs';
 import { laneCeiling, liveLanes, renderBoardReadiness } from '../../../scripts/hooks/lib/board-ready.mjs';
 import { maintenanceLines, operatingStateLines, undeclaredSourceBlock } from './operating-state.mjs';
@@ -46,8 +46,9 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   const undeclaredCache = new Map();
   // The system-queue summary, refreshed on the status line's TTL: it reads every system todo.
   const maintenanceCache = new Map();
-  // A child session's staged text, kept for its later requests (bounded, bounded.mjs).
-  const stagedCache = new Map();
+  // Per session, the system block its first request got, re-sent byte for byte on every later
+  // request until a compaction (resetSession) or a new process (bounded, bounded.mjs).
+  const frozenSystem = new Map();
   // H1's board readiness block, per project root, refreshed on the status line's TTL.
   const boardCache = new Map();
   // Per session, the text of each volatile block last delivered to it (bounded, bounded.mjs).
@@ -84,16 +85,13 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
 
   /** H19's staging for a child session: the records governing its own brief with the plan, TDD and return-contract chrome. */
   async function childStaging(root, input) {
-    const cached = stagedCache.get(input.sessionID);
-    if (cached) return cached;
     const brief = briefOf(input.messages);
     try {
       const store = openStore(join(root, '.sterling', 'sterling.db'));
       try {
-        const out = stageChild({ store, root, sessionID: input.sessionID, agent: input.agent, brief, disclosure: brief ? '' : notStagedLine('brief-unavailable') });
-        // The system prompt is rebuilt per request, so records the guard ledger now holds as delivered must ride every later request of this child.
-        if (out.staged) remember(stagedCache, input.sessionID, out.text);
-        return out.text;
+        // Staged once, at the child's first request: onContext freezes the result, so records the
+        // guard ledger now holds as delivered ride every later request of this child.
+        return stageChild({ store, root, sessionID: input.sessionID, agent: input.agent, brief, disclosure: brief ? '' : notStagedLine('brief-unavailable') }).text;
       } finally {
         store.close();
       }
@@ -187,8 +185,11 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   /**
    * The STABLE context, pushed into the system prompt of every request: the rendered
    * layer, plus a child session's dispatch staging (or the loud not-staged line). It is
-   * the same bytes on every request of a session, so the provider's prompt cache keeps
-   * the conversation behind it (finding
+   * rendered once, at the session's first request, and those exact bytes are re-sent on
+   * every later request, whatever changes meanwhile (a plan lock, the board, a degraded
+   * render), so the provider's prompt cache keeps the conversation behind it. Only a
+   * compaction (resetSession), which replaces the conversation anyway, or a new OpenCode
+   * process renders it again (finding
    * why-is-the-prompt-cache-hit-rate-lower-on-opencode-codeburn; user-ruled 2026-10-12,
    * "Move live lines out"). What changes during a session is delivered by onPrompt.
    */
@@ -197,6 +198,11 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     if (!root) return;
     await fenced('context', root, async () => {
       await sessionSync(root, input.sessionID);
+      const frozen = frozenSystem.get(input.sessionID);
+      if (frozen !== undefined) {
+        input.system.push({ type: 'text', text: frozen });
+        return;
+      }
       const { pluginRoot, error } = resolvePluginRoot();
       let layer;
       try {
@@ -216,7 +222,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         const staged = await childStaging(root, input);
         if (staged) blocks.push(staged);
       }
-      input.system.push({ type: 'text', text: blocks.join('\n\n') });
+      const text = remember(frozenSystem, input.sessionID, blocks.join('\n\n'));
+      input.system.push({ type: 'text', text });
     });
   }
 
@@ -292,10 +299,13 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   }
 
   /**
-   * The text to append for `sessionID` now: the STERLING CONTEXT header and the volatile
-   * blocks that changed since they were last delivered in that session, plus, in a root
-   * session, the notices not shown yet (each taken once, notices.mjs); '' when nothing
-   * changed. One record per session serves the prompt and the tool-result routes, so a
+   * What to append for `sessionID` now, as { text, commit }: text is the STERLING CONTEXT
+   * header and the volatile blocks that changed since they were last delivered in that
+   * session, plus, in a root session, the notices not shown yet (each taken once,
+   * notices.mjs), or '' when nothing changed. Nothing is marked delivered until the caller
+   * has appended the text and calls commit(), so a failure on the way loses no line. When
+   * the notices cannot be read, text is only a line saying so and commit is a no-op: the
+   * other lines stay due for the next prompt or tool call. One record per session serves the prompt and the tool-result routes, so a
    * line goes out once by whichever route comes first. A session this process has not
    * delivered to (a new or resumed session, any session after an OpenCode restart or a
    * compaction) gets the whole current set once.
@@ -304,7 +314,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     const kind = await sessionKind(getSession?.(), sessionID, parents);
     if (kind.why) logLine(root, `context: session ${sessionID} could not be told root or child at its ${where} (${kind.why}); only the lines every session gets are delivered`);
     const blocks = await volatileBlocks(root, sessionID, kind.why ? 'unknown' : kind.kind);
-    const seen = delivered.get(sessionID) ?? remember(delivered, sessionID, new Map());
+    const seen = delivered.get(sessionID) ?? new Map();
+    const marks = new Map();
     const due = [];
     for (const b of blocks) {
       if (!b.key) {
@@ -315,17 +326,34 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       if (b.text === last) continue;
       if (b.text) due.push(b.text);
       else if (b.cleared) due.push(b.cleared);
-      seen.set(b.key, b.text);
+      marks.set(b.key, b.text);
     }
     // Notices go to the conductor's (root) session only: a child that took them would
     // leave the conductor never seeing them. The worker child must not stamp the user's
     // notices shown, or settlement would prune them unseen. Both callers check their
     // target's shape before calling, so nothing after this take can fail and lose them.
     if (!kind.why && kind.kind === 'root' && !inWorkerChild(env)) {
-      const notices = takeNotices(root, now());
+      let notices;
+      try {
+        notices = takeNotices(root, now());
+      } catch (e) {
+        // P5: said in-band and logged. The other lines are held back, unmarked, until it reads again.
+        logLine(root, `context: pending notices unreadable at the ${where}: ${errText(e)}`);
+        return {
+          text: `${VOLATILE_HEADER}\n\nSTERLING NOTICES UNREADABLE (${errText(e)}): the pending notices in ${NOTICES_REL} could not be read, so Sterling's other session lines are held back until they can; fix or delete that file.`,
+          commit: () => {},
+        };
+      }
       if (notices.length) due.push(`STERLING NOTICES (new since the last ones you were shown):\n${notices.map((n) => `- ${n.text}`).join('\n')}`);
     }
-    return due.length ? `${VOLATILE_HEADER}\n\n${due.join('\n\n')}` : '';
+    return {
+      text: due.length ? `${VOLATILE_HEADER}\n\n${due.join('\n\n')}` : '',
+      commit: () => {
+        if (!marks.size) return;
+        const record = delivered.get(sessionID) ?? remember(delivered, sessionID, new Map());
+        for (const [key, text] of marks) record.set(key, text);
+      },
+    };
   }
 
   /** The prompt hook: the due lines are appended to the session's next prompt text. */
@@ -334,8 +362,9 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     if (!root) return;
     await fenced('context', root, async () => {
       if (typeof input?.prompt?.text !== 'string') throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
-      const text = await dueText(root, input.sessionID, 'prompt');
-      if (text) input.prompt.text = `${input.prompt.text}\n\n${text}`;
+      const due = await dueText(root, input.sessionID, 'prompt');
+      if (due.text) input.prompt.text = `${input.prompt.text}\n\n${due.text}`;
+      due.commit();
     });
   }
 
@@ -355,8 +384,9 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       // Checked before anything is marked delivered or a notice taken, so an unknown shape loses nothing.
       const content = input.result?.content;
       if (!Array.isArray(content) && typeof content !== 'string') throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
-      const text = await dueText(root, input.sessionID, 'tool call');
-      if (text) appendToResult(input.result, text);
+      const due = await dueText(root, input.sessionID, 'tool call');
+      if (due.text) appendToResult(input.result, due.text);
+      due.commit();
     });
   }
 
@@ -365,7 +395,9 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     onPrompt,
     onToolResult,
     resetStatus: (root) => (statusCache.delete(root), maintenanceCache.delete(root), boardCache.delete(root)),
-    // Compaction can summarize away what was delivered: the session's next prompt gets the whole set again.
-    resetSession: (sessionID) => void delivered.delete(sessionID),
+    // Compaction replaces the conversation, so the cached prefix starts over anyway: the system block
+    // is rendered again at the next request (picking up a template change or recovering a degraded
+    // render), and the session's next prompt gets the whole set of lines again.
+    resetSession: (sessionID) => void (delivered.delete(sessionID), frozenSystem.delete(sessionID)),
   };
 }
