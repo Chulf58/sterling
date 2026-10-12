@@ -521,7 +521,7 @@ test('P3 (ZERO-QUEUE-NOISE, unchanged by the carry): a capture landing WHILE the
 // ===========================================================================
 
 // SUPERSEDED IN PART, 2026-09-25: decision
-// capture-pending-grace-per-declaration-held-while-any-dispatch-live (294706f6,
+// the former ruling 'capture-pending-grace-per-declaration-held-while-any-dispatch-live' (not in the current store),
 // user-ruled) HOLDS a declaration while ANY dispatch is live, so "EVEN IF OTHER
 // DISPATCHES ARE STILL LIVE" above no longer holds. P4/P4b/P4c now pin the hold
 // while the survivors live and the conversion once they land; their
@@ -590,7 +590,7 @@ test('P4-CONTROL (must pass for the OPPOSITE reason — placed FIRST among the i
   }
 });
 
-test('P4 (pin changed by decision 294706f6): once the NAMED TARGET lands, a surviving unrelated dispatch of the SAME agent_type HOLDS the declaration; once it lands too, the duty converts to exactly ONE deduped capture_owed citing the target', () => {
+test('P4 (pin changed by the former ruling capture-pending-grace-per-declaration-held-while-any-dispatch-live (not in the current store)): once the NAMED TARGET lands, a surviving unrelated dispatch of the SAME agent_type HOLDS the declaration; once it lands too, the duty converts to exactly ONE deduped capture_owed citing the target', () => {
   // SABOTAGE that must turn this red: decide target liveness by substring —
   // `entries.some((e) => detail.includes(e.agent_type))` — i.e. the
   // implementation as reviewed.
@@ -610,12 +610,12 @@ test('P4 (pin changed by decision 294706f6): once the NAMED TARGET lands, a surv
 
     // PIN CHANGED 2026-09-25 by decision
     // capture-pending-grace-per-declaration-held-while-any-dispatch-live
-    // (294706f6, user-ruled): a declaration is HELD while ANY dispatch is live,
+    // (the former ruling 'capture-pending-grace-per-declaration-held-while-any-dispatch-live' (not in the current store), user-ruled): a declaration is HELD while ANY dispatch is live,
     // so a surviving unrelated lane now holds it too. The anti-evaporation
     // property is kept: the hold ends when the last lane lands, and the debt is
     // then recorded within the same bounded window.
     const held = stopsUntilOwed(dir, store);
-    assert.equal(held.items.length, 0, `HOLD SHAPE: an unrelated dispatch is still live, so the declaration is held (decision 294706f6). Codes: [${held.codes.join(', ')}]`);
+    assert.equal(held.items.length, 0, `HOLD SHAPE: an unrelated dispatch is still live, so the declaration is held (the former ruling capture-pending-grace-per-declaration-held-while-any-dispatch-live (not in the current store)). Codes: [${held.codes.join(', ')}]`);
     assert.equal(existsSync(eventsPath(dir)), true, 'the held declaration survives on disk');
     writeRegisterRaw(dir, []); // the last live lane lands
 
@@ -623,7 +623,7 @@ test('P4 (pin changed by decision 294706f6): once the NAMED TARGET lands, a surv
     assert.equal(
       items.length,
       1,
-      `EVAPORATION SHAPE: sub-target and every other lane LANDED and nothing was captured, so the pending duty must convert within two Stops. (Original impersonation rationale, superseded for the hold by decision 294706f6 and kept for the conversion:) An unrelated live entry that merely SHARES the target's agent_type ("coder") is not the target — matching a declaration's free text against live entries' agent_type lets any surviving lane of the same class impersonate a landed one, and the duty is then carried forever while the real debt evaporates (P5). Codes: [${codes.join(', ')}]`
+      `EVAPORATION SHAPE: sub-target and every other lane LANDED and nothing was captured, so the pending duty must convert within two Stops. (Original impersonation rationale, superseded for the hold by the former ruling capture-pending-grace-per-declaration-held-while-any-dispatch-live (not in the current store) and kept for the conversion:) An unrelated live entry that merely SHARES the target's agent_type ("coder") is not the target — matching a declaration's free text against live entries' agent_type lets any surviving lane of the same class impersonate a landed one, and the duty is then carried forever while the real debt evaporates (P5). Codes: [${codes.join(', ')}]`
     );
     assert.match(items[0].text, /sub-target/, 'the minted item cites the LANDED TARGET, so a drain can verify whether its capture landed');
     assert.equal(codes[codes.length - 1], 0, 'the converting Stop releases the session');
@@ -662,7 +662,7 @@ const idSurvivors = () => [
   liveEntry('sub-lane-104', ['src/unrelated/lane-104.mjs'], 'librarian'),
 ];
 
-test('P4b (pin changed by decision 294706f6): surviving lanes whose agent_ids substring-collide with the landed target HOLD the declaration; once they land, the duty converts citing the target', () => {
+test('P4b (pin changed by the former ruling capture-pending-grace-per-declaration-held-while-any-dispatch-live (not in the current store)): surviving lanes whose agent_ids substring-collide with the landed target HOLD the declaration; once they land, the duty converts citing the target', () => {
   // SABOTAGE that must turn this red: decide target liveness by id substring —
   // `entries.some((e) => detail.includes(e.agent_id) || e.agent_id.includes(targetId))`.
   const { dir, store, cleanup } = makeProject();
@@ -676,17 +676,17 @@ test('P4b (pin changed by decision 294706f6): surviving lanes whose agent_ids su
 
     writeRegisterRaw(dir, idSurvivors()); // ONLY sub-lane-10 lands
 
-    // PIN CHANGED 2026-09-25 (decision 294706f6, see P4): the survivors hold
+    // PIN CHANGED 2026-09-25 (the former ruling 'capture-pending-grace-per-declaration-held-while-any-dispatch-live' (not in the current store), see P4): the survivors hold
     // the declaration; conversion follows once they land too.
     const held = stopsUntilOwed(dir, store);
-    assert.equal(held.items.length, 0, `HOLD SHAPE: sub-lane-1 and sub-lane-104 are still live, so the declaration is held (decision 294706f6). Codes: [${held.codes.join(', ')}]`);
+    assert.equal(held.items.length, 0, `HOLD SHAPE: sub-lane-1 and sub-lane-104 are still live, so the declaration is held (the former ruling capture-pending-grace-per-declaration-held-while-any-dispatch-live (not in the current store)). Codes: [${held.codes.join(', ')}]`);
     writeRegisterRaw(dir, []);
 
     const { codes, items } = stopsUntilOwed(dir, store);
     assert.equal(
       items.length,
       1,
-      `EVAPORATION SHAPE (id vector): every lane landed, so the pending duty must convert within two Stops. (Original rationale, superseded for the hold by decision 294706f6: sub-lane-1 and sub-lane-104 each substring-collide with sub-lane-10 — one in each direction. A prefix relation between two unrelated lane ids is not identity, and treating it as identity carries the declaration past its own target's death.) Codes: [${codes.join(', ')}]`
+      `EVAPORATION SHAPE (id vector): every lane landed, so the pending duty must convert within two Stops. (Original rationale, superseded for the hold by the former ruling capture-pending-grace-per-declaration-held-while-any-dispatch-live (not in the current store): sub-lane-1 and sub-lane-104 each substring-collide with sub-lane-10 — one in each direction. A prefix relation between two unrelated lane ids is not identity, and treating it as identity carries the declaration past its own target's death.) Codes: [${codes.join(', ')}]`
     );
     assert.match(items[0].text, /sub-lane-10/, 'the minted item cites the landed target');
     assert.equal(codes[codes.length - 1], 0, 'the converting Stop releases the session');
@@ -708,7 +708,7 @@ const PATH_DETAIL = pendingDetail({
 });
 const pathSurvivor = () => liveEntry('sub-render-9', [NOTES_FILE], 'reviewer');
 
-test('P4c (pin changed by decision 294706f6): a surviving lane declaring a path the reason mentions HOLDS the declaration; once it lands, the duty converts citing the target', () => {
+test('P4c (pin changed by the former ruling capture-pending-grace-per-declaration-held-while-any-dispatch-live (not in the current store)): a surviving lane declaring a path the reason mentions HOLDS the declaration; once it lands, the duty converts citing the target', () => {
   // SABOTAGE that must turn this red: decide target liveness by declared-path
   // substring — `entries.some((e) => e.files.some((f) => detail.includes(f)))`.
   const { dir, store, cleanup } = makeProject();
@@ -722,17 +722,17 @@ test('P4c (pin changed by decision 294706f6): a surviving lane declaring a path 
 
     writeRegisterRaw(dir, [pathSurvivor()]); // ONLY sub-notes-3 lands
 
-    // PIN CHANGED 2026-09-25 (decision 294706f6, see P4): the survivor holds
+    // PIN CHANGED 2026-09-25 (the former ruling 'capture-pending-grace-per-declaration-held-while-any-dispatch-live' (not in the current store), see P4): the survivor holds
     // the declaration; conversion follows once it lands too.
     const held = stopsUntilOwed(dir, store);
-    assert.equal(held.items.length, 0, `HOLD SHAPE: sub-render-9 is still live, so the declaration is held (decision 294706f6). Codes: [${held.codes.join(', ')}]`);
+    assert.equal(held.items.length, 0, `HOLD SHAPE: sub-render-9 is still live, so the declaration is held (the former ruling capture-pending-grace-per-declaration-held-while-any-dispatch-live (not in the current store)). Codes: [${held.codes.join(', ')}]`);
     writeRegisterRaw(dir, []);
 
     const { codes, items } = stopsUntilOwed(dir, store);
     assert.equal(
       items.length,
       1,
-      `EVAPORATION SHAPE (declared-path vector): every lane landed, so the pending duty must convert within two Stops. (Original rationale, superseded for the hold by decision 294706f6: sub-notes-3 landed, and the only surviving lane sub-render-9 is unrelated — it merely holds ${NOTES_FILE}, a path the declaration's PROSE mentions. A file named in a reason is subject matter, not an owner; treating it as proof the target lives means the duty never converts.) Codes: [${codes.join(', ')}]`
+      `EVAPORATION SHAPE (declared-path vector): every lane landed, so the pending duty must convert within two Stops. (Original rationale, superseded for the hold by the former ruling capture-pending-grace-per-declaration-held-while-any-dispatch-live (not in the current store): sub-notes-3 landed, and the only surviving lane sub-render-9 is unrelated — it merely holds ${NOTES_FILE}, a path the declaration's PROSE mentions. A file named in a reason is subject matter, not an owner; treating it as proof the target lives means the duty never converts.) Codes: [${codes.join(', ')}]`
     );
     assert.match(items[0].text, /sub-notes-3/, 'the minted item cites the landed target, not the surviving lane');
     assert.equal(codes[codes.length - 1], 0, 'the converting Stop releases the session');

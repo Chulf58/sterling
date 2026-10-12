@@ -27,7 +27,7 @@
 // fallback if noise persists.
 //
 // NARROWED 2026-09-29 (USER RULING h23-output-axis-hazards-only-skip-listings-
-// advisory-label, knowledge_get 5564361d v2): noise persisted after the one-
+// advisory-label, knowledge_get the former ruling 'h23-output-axis-hazards-only-skip-listings-advisory-label' (not in the current store) v2): noise persisted after the one-
 // pointer cap, and a consuming project's user read the notice as an error.
 // A score threshold cannot fix it (see below), so this hook now narrows by
 // record TYPE and command CLASS instead: (1) the header opens with "ADVISORY
@@ -78,7 +78,7 @@ try {
   const rawResponse = input.tool_response;
   if (rawResponse === undefined || rawResponse === null) allow(); // nothing to match against
 
-  // COMMAND-CLASS SKIP (ruling 5564361d v2): VCS/listing output is never matched.
+  // COMMAND-CLASS SKIP (ruling the former ruling 'h23-output-axis-hazards-only-skip-listings-advisory-label' (not in the current store) v2): VCS/listing output is never matched.
   if (toolName !== 'Read' && isListingCommand(input.tool_input?.command)) allow();
 
   // The subject fan (lib/subject-fan.mjs): the project store plus the mounted

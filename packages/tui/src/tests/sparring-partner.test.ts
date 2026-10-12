@@ -149,7 +149,7 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
     ],
     // LOW-3 (second Opus re-check round): the System tab now filters
     // config.models to the classless four-agent roster
-    // (agent-roster-is-classless-four-agents f0893161) plus classifiers, so a
+    // (the former ruling 'agent-roster-is-classless-four-agents' (not in the current store) plus classifiers, so a
     // relic key here (the old 'coder'/'reviewers'/'coder_hard' roster names)
     // would simply never render a row — this fixture only cares about
     // numKeys (the row count the sparring/tdd rows sit past), so it uses the

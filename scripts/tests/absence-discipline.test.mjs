@@ -68,7 +68,7 @@ test('adding the section did NOT break the seven-section §7.3 contract or its o
   // between must not disturb it — this is the regression that would bite.
   const templates = collectAgentTemplates(templateDir).filter((t) => t.file !== 'registry.json');
   // Roster is 4 (implementor, researcher, scout, librarian) at Slice 5/8 —
-  // decision sterling-claude-code-scale-down-boundary, 2ad87dd1, change 3.
+  // decision sterling-claude-code-scale-down-boundary, d3e63e16, change 3.
   assert.ok(templates.length >= 4, `expected the full roster, saw ${templates.length}`);
   for (const t of templates) {
     assert.deepEqual(lintAgentPrompt(t.content, t.file), [], `${t.file} must still satisfy the seven sections in order`);

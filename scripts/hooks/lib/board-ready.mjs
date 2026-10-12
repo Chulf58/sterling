@@ -8,7 +8,7 @@
 //   - the OpenCode plugin's root-session context (renderBoardReadiness).
 // Readiness itself is computed in ONE place, store.boardReadiness(); this file
 // only groups, orders, caps and words it. Names are `name (id8)`, never bare
-// slugs (decision 11b8b08c). No new hook and no new config key: the ceiling is
+// slugs (the former ruling 'board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address' (not in the current store)). No new hook and no new config key: the ceiling is
 // the existing delegation.max_concurrent (a ceiling, never a quota).
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';

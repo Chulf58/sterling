@@ -2,7 +2,7 @@
 // implementation (H4 read wall). The contract is decision
 // [config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays]
 // NOTE 2026-09-19: the positive ALLOWLIST described in this contract block was REMOVED
-// (decision scale-down-enforcement-rules-and-locks-are-friction, 38c9e860): any dotted
+// (the former ruling 'scale-down-enforcement-rules-and-locks-are-friction' (not in the current store): any dotted
 // key of any depth lands; CS-2/3/4/12 were deleted, CS-11/15/19 rewritten to "lands",
 // CS-23..26 added. The block below is kept as the history of the original contract.
 // (knowledge_get 1dc3f9aa-dbd6-4448-b1ac-61b3a4dabde7), PINS paragraph +
@@ -630,7 +630,7 @@ test('CS-10: config_set is served on the MCP tool surface, and its params are ST
 // ---------------------------------------------------------------------------
 // CS-11 — UNKNOWN DELIVERY LEAVES NOW LAND (decision
 // scale-down-enforcement-rules-and-locks-are-friction, 2026-09-19, knowledge_get
-// 38c9e860): the positive allowlist is gone and no known-delivery-key
+// the former ruling 'scale-down-enforcement-rules-and-locks-are-friction' (not in the current store)): the positive allowlist is gone and no known-delivery-key
 // membership check replaces it, so `delivery.*` behaves like every other
 // namespace — any leaf is accepted, and the schema already tolerates it
 // (CS-20). This pin is the UNIT-SURFACE half; CS-19 repeats the shape through
@@ -1113,7 +1113,7 @@ test('CS-22: expected_digest is CAS over a read-then-write window — a matching
 // ---------------------------------------------------------------------------
 // CS-23 — machine_role LANDS as a bare 1-segment path (decision
 // scale-down-enforcement-rules-and-locks-are-friction, knowledge_get
-// 38c9e860): the old allowlist named machine_role as one of the two-step-
+// the former ruling 'scale-down-enforcement-rules-and-locks-are-friction' (not in the current store)): the old allowlist named machine_role as one of the two-step-
 // bypass keys that could NEVER be admitted (CS-12's deleted forbidden-
 // fragment arm). With the allowlist gone, a 1-segment path is unremarkable —
 // it lands like any other, refused only if the resulting document fails the
@@ -1273,7 +1273,7 @@ test('CS-26: a deep path whose intermediate exists as a scalar or an array is re
 
 // ---------------------------------------------------------------------------
 // CS-27 / CS-28 / CS-29 — decision
-// config-set-warns-on-keys-sterling-does-not-read (77ff9aa8, user-ruled
+// the former ruling 'config-set-warns-on-keys-sterling-does-not-read' (not in the current store), user-ruled
 // 2026-09-28): config_set still WRITES an unread key (no allowlist, no
 // refusal — the scale-down ruling), but the receipt now carries a `warnings`
 // array naming it, reusing packages/schemas' `unreadConfigKeys` so the dead-

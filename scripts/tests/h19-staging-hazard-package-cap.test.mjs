@@ -1,6 +1,6 @@
 // SubagentStart staging holds ONE hazard cap per package across its path and
 // subject channels (decision knowledge-delivery-target-design-no-delayed-delivery,
-// 92088a62: "HAZARDS: at most 3 per package"). Each channel used to call
+// the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store): "HAZARDS: at most 3 per package"). Each channel used to call
 // hazardParts at cap 3 on its own, so one package could carry six whole hazards.
 // The path channel fills the cap first; the subject channel gets what is left,
 // and anything beyond is disclosed by the omitted-count line.
@@ -229,7 +229,7 @@ for (const size of [2600, 2650, 2700, 2750, 2800, 2850]) {
 }
 
 // THE STAGING HEADER'S TERM LISTS ARE BOUNDED like H20's (user ruling
-// 2026-09-24, finding df5d9f7d, decision 301d8a0a): the header is pinned, so an
+// 2026-09-24, the former finding 'the pinned staging header' (not in the current store), the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)): the header is pinned, so an
 // uncapped union of five records' terms is charged to the ordinary cap BEFORE
 // the owner article body. Six terms are named, the rest counted.
 test('staging: five subject records with ~10 central terms each cap both header term lists at 6 plus a count, and the owner article stays whole', () => {
@@ -272,7 +272,7 @@ test('staging: five subject records with ~10 central terms each cap both header 
   }
 });
 
-test('staging: a read-only lane keeps per-channel POINTER caps (decision 21e3637e, current behaviour)', () => {
+test('staging: a read-only lane keeps per-channel POINTER caps (the former ruling read-only-subagent-lanes-get-hazards-as-pointers (not in the current store), current behaviour)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });

@@ -5,7 +5,7 @@
 // RULING: decision h22-dispatch-files-from-review-territory-and-resume-
 // inherits-prior-round (e841facd), option A: files come from the bound brief's
 // REVIEW-TERRITORY. INCIDENT: research_finding h10-article-demand-misses-live-
-// lanes-same-type-fanout-and-out-of-territory-files-october-2026 (79e20118).
+// the former finding 'lanes-same-type-fanout-and-out-of-territory-files-october-2026' (not in the current store).
 // The hook-level incident replay is h22-unattributable-row-filled-at-post;
 // these cases drive scripts/lib/dispatch-register.mjs directly:
 //   - the Start's unattributable fallback is written in a later lock hold

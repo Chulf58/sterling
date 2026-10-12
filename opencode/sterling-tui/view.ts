@@ -131,7 +131,7 @@ function shortId(id: string): string {
 }
 
 /** Every session under `rootID` by parentID, nested sub-agents included.
- *  Verified live: a child's SessionInfo carries parentID (finding 8f10e0be), so
+ *  Verified live: a child's SessionInfo carries parentID (the former finding 'a child session carries parentID' (not in the current store)), so
  *  this needs no per-session request. `seen` also stops a parent cycle. */
 function descendants(sessions: readonly SubagentSession[], rootID: string): SubagentSession[] {
   const out: SubagentSession[] = [];

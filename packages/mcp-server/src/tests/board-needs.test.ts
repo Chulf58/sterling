@@ -5,7 +5,7 @@
 // source:'user' items; board_update with needs:'' clears it. A system item is
 // refused naming the field, with nothing written. board_get and board_query's
 // text/full rows return `needs` and `unblocks`: the live items whose blocked_by
-// names this one, as `name (id8)`, never bare slugs (decision 11b8b08c).
+// names this one, as `name (id8)`, never bare slugs (the former ruling 'board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address' (not in the current store)).
 // blocked_by_state keeps its stored-slug shape and now comes from the store's
 // one readiness function, boardReadiness().
 import { test } from 'node:test';

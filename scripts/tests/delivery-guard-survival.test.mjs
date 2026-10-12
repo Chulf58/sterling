@@ -172,11 +172,11 @@ test('the clear hook has no rotation-note dependency', () => {
 
 // ---------------------------------------------------------------------------
 // AC3 — SUPERSEDED 2026-09-20 (decision knowledge-delivery-target-design-no-
-// delayed-delivery, 92088a62, delivery-migration step 3). The old assertion
+// delayed-delivery, the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store), delivery-migration step 3). The old assertion
 // here was `assert.equal(second.stdout, '', '2026-09-19: an edited version of
 // already-delivered knowledge must not re-deliver directly')` — lineage-keyed
 // (slug-based) suppression that silently swallowed a forward-fix's corrected
-// content forever. Decision 92088a62's STATE clause rules the opposite way:
+// content forever. the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)'s STATE clause rules the opposite way:
 // the guard keys on (id, revision), so a record superseded by knowledge_update
 // (new id, bumped content) is NOT the same (id, revision) as what was marked
 // delivered, and DOES re-deliver — the reader must see the correction, not a
@@ -211,7 +211,7 @@ test('AC3: a record superseded by knowledge_update (new id, same slug) DOES re-d
       links: [],
     });
 
-    // Decision 92088a62: a re-versioned record (new id here, since supersede
+    // the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store): a re-versioned record (new id here, since supersede
     // always mints one) is NOT the (id, revision) pair the guard marked
     // delivered — it re-delivers, carrying the RECONCILED content.
     const second = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
@@ -234,7 +234,7 @@ test('AC3: a record superseded by knowledge_update (new id, same slug) DOES re-d
 // ---------------------------------------------------------------------------
 // AC3b — SAME-ID revision case (fix-round test-integrity requirement, HIGH 3):
 // AC3 above only exercises supersede's NEW-id path. The load-bearing case per
-// decision 92088a62's STATE clause + fix-round HIGH 3 is a SAME-id in-place
+// the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)'s STATE clause + fix-round HIGH 3 is a SAME-id in-place
 // forward-fix (`store.updateRecord`, the `knowledge_update` shape) — id does
 // NOT change, only `version` (store-managed, bumped by the store itself) —
 // and `recordRevision` must key PRIMARILY on that version, not `updated_at`

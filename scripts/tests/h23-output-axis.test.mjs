@@ -230,7 +230,7 @@ test('AC1: an object-shaped tool_response (e.g. a structured Bash result) is str
 // 3 + tail)" — the volume cut that keeps H23's unique output-axis coverage while
 // removing the noise its ~6% follow rate paid for. Class ordering (hazards ahead
 // of decisions) survived until 2026-09-29, when ruling
-// h23-output-axis-hazards-only-skip-listings-advisory-label (5564361d v2) dropped
+// the former ruling 'h23-output-axis-hazards-only-skip-listings-advisory-label' (not in the current store) v2) dropped
 // decisions from this channel entirely: a matching decision now neither renders
 // nor counts toward the tail. Two hazards plus one decision must therefore
 // disclose "(+1 more matched)" — 1, not 2 — which is the control arm proving
@@ -266,7 +266,7 @@ test('AC1: only hazards occupy the single pointer line and the suppressed count,
 
 // ---------------------------------------------------------------------------
 // NARROWED 2026-09-29 (user ruling h23-output-axis-hazards-only-skip-listings-
-// advisory-label, knowledge_get 5564361d v2): the notice is labelled ADVISORY
+// advisory-label, knowledge_get the former ruling 'h23-output-axis-hazards-only-skip-listings-advisory-label' (not in the current store) v2): the notice is labelled ADVISORY
 // (not an error), VCS/listing command output (first token git, ls, find, grep,
 // rg) is skipped, and only anti_pattern records are pointed at.
 // ---------------------------------------------------------------------------
@@ -726,7 +726,7 @@ test('AC8: vocabulary appearing only AFTER the first 16,000 chars is never match
 // ---------------------------------------------------------------------------
 // S4b rendering marker (c): the "[authority]" marker exists only on decisions,
 // and since ruling h23-output-axis-hazards-only-skip-listings-advisory-label
-// (5564361d v2) H23 renders no decision line at all — so a decision carrying
+// (the former ruling 'h23-output-axis-hazards-only-skip-listings-advisory-label' (not in the current store) v2) H23 renders no decision line at all — so a decision carrying
 // authority stays silent here, and the surviving hazard line carries no marker.
 // ---------------------------------------------------------------------------
 

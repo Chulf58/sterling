@@ -623,7 +623,7 @@ const DERIVE_RETRY_INTERVAL_MS = 10;
 const DERIVE_PER_ATTEMPT_LOCK_MS = 30;
 // SIBLINGS-RETRY BUDGET (decision dispatch-state-status-in-filename-live-
 // scan-parses-only-live-records, follow-on): a background Post carries the
-// exact agentId and lands 0.34-2.24 s after Start (finding aa3b4a4c), so
+// exact agentId and lands 0.34-2.24 s after Start (the former finding 'background Post lands 0.34-2.24 s after Start' (not in the current store)), so
 // while the last verdict is siblings-retry the wait runs up to 3 s; a
 // lock-held retry keeps the original 150 ms bound. Neither ever guesses: an
 // expired budget is unattributable.

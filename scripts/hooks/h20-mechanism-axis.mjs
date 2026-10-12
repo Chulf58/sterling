@@ -253,7 +253,7 @@ const isQuestion = Array.isArray(input.tool_input?.questions);
 const isConsult = typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__');
 // The Task|Agent surface. Only here do hazards render lead-whole with trigger
 // lines (decision h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines,
-// a4912f91); a consult keeps them whole.
+// the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store)); a consult keeps them whole.
 const isDispatch = !isQuestion && !isConsult;
 
 
@@ -335,7 +335,7 @@ function main(input) {
         // bookkeeping failure from one that prevented the delivery.
         try {
           // Only what the assembler says it actually emitted — never a
-          // re-scan of the composed text (decision 92088a62's ONE ASSEMBLER
+          // re-scan of the composed text (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)'s ONE ASSEMBLER
           // CONTRACT).
           markSubstanceDelivered(guard, assembled.emittedSubstance);
           markDiscoveryDelivered(guard, assembled.emittedDiscovery);

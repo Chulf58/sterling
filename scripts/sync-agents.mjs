@@ -4,7 +4,7 @@
 // refuse-and-instruct per spec §16.1 Slice 1).
 //   node scripts/sync-agents.mjs --target <projectDir>
 // Exit codes: 0 = synced/up-to-date (config_drift is reported, never a refusal —
-// decision 256d1059); 2 = at least one refusal (loud), including a
+// the former ruling 'sync-agents-reports-config-models-drift-loudly-without-rewriting' (not in the current store)); 2 = at least one refusal (loud), including a
 // refused conductor activation (route A). /sterling:update reports a refusal as
 // a per-project failure: it exits non-zero, its core completion marker stays
 // valid, and it revisits the project on every later update until the refusal
@@ -104,7 +104,7 @@ const { report, restartInstruction } = !claudeHost ? { report: [], restartInstru
 let refused = 0;
 for (const r of report) {
   if (r.status === 'config_drift') {
-    // Decisions 256d1059 / 587472e3: loud, one line, never a refusal (exit stays 0);
+    // the former ruling 'sync-agents-reports-config-models-drift-loudly-without-rewriting' (not in the current store) and the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store): loud, one line, never a refusal (exit stays 0);
     // nothing written. Names model/effort and/or the tools difference.
     console.log(
       `config_drift: ${r.name} — ${describeConfigDrift(r)}; ` +
@@ -186,7 +186,7 @@ for (const r of opencodeReport) {
 }
 // Was: "run enforcement_reconcile {adopt:true}… (H17 latch)" — H17's
 // config-write taint latch and enforcement_reconcile were both removed per
-// decision sterling-claude-code-scale-down-boundary (2ad87dd1); there is no
+// decision sterling-claude-code-scale-down-boundary (d3e63e16); there is no
 // latch left to clear. restartInstruction above is the only follow-up needed.
 if (agentChangesRequireRestart(report)) console.log('\n' + restartInstruction);
 

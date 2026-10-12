@@ -225,7 +225,7 @@ test("store_authority 'secondary': a projection this store did not produce is re
 // the safe route in its remedy: "Regenerate and commit" is harmful there (a
 // smaller store shrinks a shared file). The check does not treat such a clone as
 // secondary on its own — the user sets store_authority by hand (decision
-// a446753c: one fact, one setting).
+// the former ruling 'citation and projection authority is per-store' (not in the current store): one fact, one setting).
 test('freshness FAIL on a non-authoring clone names the store_authority route and warns against regenerating; authoring text unchanged', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-proj-role-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });

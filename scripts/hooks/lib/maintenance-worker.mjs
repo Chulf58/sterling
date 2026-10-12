@@ -765,7 +765,7 @@ export function workerPrompt(pluginRoot, root, eligible = null, diffs = '') {
   return prompt;
 }
 
-/** The probed invocation (finding 611f044b), with stream-json output (the CLI
+/** The probed invocation (the former finding 'probed maintenance-worker CLI invocation' (not in the current store)), with stream-json output (the CLI
  *  refuses stream-json under -p without --verbose) and an explicit deny list.
  *  No --bare (it ignores OAuth), no bypassPermissions, no --plugin-dir (so no
  *  Sterling hook runs in the child and it cannot recurse). --agents defines

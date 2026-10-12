@@ -4812,7 +4812,7 @@ var configSchema = external_exports.object({
   // scripts are launcher and console glue, never a toolchain's source, and
   // flagging them was banner noise answered the same way every session. The
   // default lives in THREE places that must agree: here, templates/default-
-  // config.json (anti-pattern 85d15143), and the raw-config ladder in
+  // config.json (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)), and the raw-config ladder in
   // scripts/hooks/lib/undeclared-source-scan.mjs, which imports this constant.
   // An explicit [] still opts back in.
   undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default(() => [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]),
@@ -4854,7 +4854,7 @@ var configSchema = external_exports.object({
   tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
   // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
   // H6-only (agent-scoped context enforcement) and DELETED with H6 under
-  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // decision `sterling-claude-code-scale-down-boundary` (d3e63e16); windows
   // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
   // denominator and the direct-mode pressure thresholds). `windows.default`
   // is a REAL fallback (decision context-window-default-is-a-real-fallback,
@@ -4919,7 +4919,7 @@ var configSchema = external_exports.object({
     reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
   }).catchall(agentModelEntry).default({}),
   // Per-project agent tool extension (decision
-  // per-project-agent-extra-tools-config-appended-at-render, 587472e3):
+  // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
   // agents.<registered-agent-name>.extra_tools is appended to that agent's
   // rendered tools: line at install. It must live in the schema — this top-level
   // object strips unknown keys silently. Each entry is one tool name with an
@@ -5176,7 +5176,7 @@ var configSchema = external_exports.object({
   // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
   // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
   // Consumers of the PARSED config must narrow this field themselves.
-  // The default lives twice (anti_pattern 85d15143): here and in
+  // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
   // Where the project's stores live (decision
@@ -5201,7 +5201,7 @@ var configSchema = external_exports.object({
   // reads a config with NO key as on when portable agents are already tracked
   // in git, which this default cannot express: read the setting through it,
   // never from the parsed config.
-  // The default lives twice (anti_pattern 85d15143): here and in
+  // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   handoff: external_exports.unknown().default({ enabled: false }),
   // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
@@ -5586,13 +5586,13 @@ function appendExtraTools(frontmatter, name, label, config2) {
       throw new Error(`extra_tools for '${name}' (${label}): ${JSON.stringify(entry)} is not a valid tool name \u2014 one name, optional trailing *, no commas/whitespace/newlines (P5)`);
     }
     if (refusesSterlingGrant(entry)) {
-      throw new Error(`extra_tools for '${name}' (${label}): '${entry}' would grant Sterling MCP tools \u2014 Sterling grants stay the template's job (decision b4388c11); remove it from config.agents.${name}.extra_tools`);
+      throw new Error(`extra_tools for '${name}' (${label}): '${entry}' would grant Sterling MCP tools \u2014 Sterling grants stay the template's job (decision e7a805b6); remove it from config.agents.${name}.extra_tools`);
     }
   }
   const lines = frontmatter.split("\n");
   const idx = lines.findIndex((line) => /^tools:/.test(line));
   if (idx === -1) {
-    throw new Error(`extra_tools for '${name}' (${label}): the agent has no tools: line, so it inherits every session tool (the main-session conductor, or an inherit-all agent such as the implementor, decision bc1894e5) and there is no allowlist to extend \u2014 remove config.agents.${name}`);
+    throw new Error(`extra_tools for '${name}' (${label}): the agent has no tools: line, so it inherits every session tool (the main-session conductor, or an inherit-all agent such as the implementor, the former ruling implementor-inherits-all-tools-read-only-agents-keep-allowlists (not in the current store)) and there is no allowlist to extend \u2014 remove config.agents.${name}`);
   }
   const tools = lines[idx].replace(/^tools:\s*/, "").split(",").map((t) => t.trim()).filter(Boolean);
   for (const entry of extras) if (!tools.includes(entry)) tools.push(entry);
@@ -6857,7 +6857,7 @@ function renderTuiShim(pluginRoot2, installed, shimDir, { materializedRoot } = {
   const pkgDirExpr = materializedRoot ? "newestMaterializedTui()" : `join(${rootExpr(pluginRoot2, installed)}, 'opencode', 'sterling-tui')`;
   const materialized = materializedRoot ? `
 // The npm-installed Sterling's dashboard, copied out of the npm cache because OpenCode
-// gives a TUI bundle its own solid-js only outside node_modules (finding 789147ca).
+// gives a TUI bundle its own solid-js only outside node_modules (the former finding 'opencode plugin installs land under node_modules' (not in the current store)).
 // The newest copied version is taken when this loads, so an update needs no new shim.
 function newestMaterializedTui() {
   const base = ${JSON.stringify(fwd3(materializedRoot))};
@@ -6921,7 +6921,7 @@ export default {
     const dir = (api && api.location && api.location.directory) || process.cwd();
     if (!inSterlingProject(dir)) return () => {};
     // A Sterling that was found but whose dashboard does not import is thrown, not logged:
-    // a logged line is invisible in the TUI (finding 789147ca saw it swallowed).
+    // a logged line is invisible in the TUI (the former finding 'opencode plugin installs land under node_modules' (not in the current store) saw it swallowed).
     if (loadError) {
       throw new Error(String((loadError && loadError.message) || loadError) + ' \u2014 the Sterling dashboard is off. Fix the cause above, or remove ' + ${JSON.stringify(fwd3(shimDir))} + '.', { cause: loadError });
     }

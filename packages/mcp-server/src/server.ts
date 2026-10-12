@@ -924,7 +924,7 @@ export function createSterlingServer(
   );
 
   // handoff_write / handoff_read were removed with the staged pipeline
-  // (decision sterling-claude-code-scale-down-boundary, 2ad87dd1).
+  // (decision sterling-claude-code-scale-down-boundary, d3e63e16).
 
   return { server, store, tools, toolWrappers };
 }

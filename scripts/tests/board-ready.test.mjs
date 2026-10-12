@@ -292,7 +292,7 @@ test('H20 end to end: one BOARD READY line on an Agent dispatch, silent on the r
 
 // ---- OpenCode parity (packages/opencode-plugin/src/context.mjs) ----------------
 // Root sessions only; never inside the maintenance worker's child (anti-pattern
-// e40bf982); no agent-name comparison is involved (anti-pattern 217fa6ca).
+// the former ruling 'opencode-session-boundary-code-runs-in-the-maintenance-worker-child' (not in the current store)); no agent-name comparison is involved (the former ruling 'comparing-bare-agent-type-names-on-opencode' (not in the current store)).
 async function ocHandler(p, { parentID, env = {} } = {}) {
   const contextMod = await import(pathToFileURL(join(root, 'packages', 'opencode-plugin', 'src', 'context.mjs')).href);
   const session = { get: async ({ sessionID }) => ({ id: sessionID, ...(parentID ? { parentID } : {}) }) };

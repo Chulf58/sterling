@@ -184,7 +184,7 @@ test("(c) an unattributable Start (no prior Pre registration) writes files: [] a
 
 // ===========================================================================
 // (d) ABSOLUTE PATHS IN FREE PROSE (decision h22-dispatch-files-from-review-
-// territory-and-resume-inherits-prior-round, finding 79e20118's probe follow-
+// territory-and-resume-inherits-prior-round, the former finding 'lanes-same-type-fanout-and-out-of-territory-files-october-2026' (not in the current store)'s probe follow-
 // up 2026-10-03): the extractor's segments are [\w-]+, so a brief naming
 // `/abs/project/probe.txt` used to register `abs/project/probe.txt`, a path
 // that exists nowhere. An absolute path inside the project becomes repo-

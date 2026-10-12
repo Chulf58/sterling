@@ -38,7 +38,7 @@
 //
 // KNOWN FALSE-POSITIVE CLASS: a brief that names a path only to say another
 // lane owns it, or to read it for context, still warns. This is accepted,
-// because a miss is worse than a false alarm (decision 630389ad,
+// because a miss is worse than a false alarm (the former ruling 'h20-warns-on-dispatch-file-overlap-with-live-agents' (not in the current store),
 // h20-warns-on-dispatch-file-overlap-with-live-agents). Phrase-based rules
 // for it were tried and removed: they silenced real claims ("This lane owns
 // X", "X is owned by you", a bullet after "Another lane owns Y").

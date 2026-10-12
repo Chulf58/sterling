@@ -1,5 +1,5 @@
 // The user-scope codex MCP entry Sterling writes for OpenCode 2 (board item
-// parity-p4-codex-mcp-lanes-on-opencode-2-decision-7f83f57e-au; finding
+// parity-p4-codex-mcp-lanes-on-opencode-2; finding
 // codex-mcp-server-runs-under-opencode-2-0-21-servers-shape-october-2026). The entry
 // goes under mcp.servers.codex (the legacy mcp.codex with a timeout is dropped
 // silently by 2.0.21) and is written only for a Codex whose `mcp-server --help`

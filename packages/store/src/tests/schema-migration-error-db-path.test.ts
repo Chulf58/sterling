@@ -147,7 +147,7 @@ test('E1: a write against a legacy (pre-v2) store throws SchemaMigrationRequired
 
 // E2 (transaction-backstop coverage of the retry-loop CAS writer
 // casTransitionMerge) was removed with the staged-pipeline run/handoff
-// protocol (decision sterling-claude-code-scale-down-boundary, 2ad87dd1) —
+// protocol (decision sterling-claude-code-scale-down-boundary, d3e63e16) —
 // casTransitionMerge no longer exists and no other retry-loop CAS writer
 // survives in the store to carry this backstop coverage forward.
 

@@ -379,7 +379,7 @@ export class SchemaMigrationRequiredError extends Error {
 
 // RecordedExit / ACTIVE_STATES (the staged pipeline's run-protocol exit shape
 // and active-state list) were removed with the run/handoff protocol above
-// (decision sterling-claude-code-scale-down-boundary, 2ad87dd1).
+// (decision sterling-claude-code-scale-down-boundary, d3e63e16).
 
 // ---------------------------------------------------------------------------
 // AC8: catalog status + bootstrap + dedup enqueue (run r-ea9e, phase 3)
@@ -488,7 +488,7 @@ export interface BoardItemReadiness {
   id: string;
   /** the immutable address, for matching a brief that cites it; never shown as a name */
   slug?: string;
-  /** `name (id8)`: the item's current-text label, never its bare slug (decision 11b8b08c) */
+  /** `name (id8)`: the item's current-text label, never its bare slug (the former ruling 'board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address' (not in the current store)) */
   name: string;
   priority?: 'low' | 'normal' | 'high';
   updated_at: string;
@@ -3797,7 +3797,7 @@ export class SterlingStore {
   // getPendingExit, writeHandoff/readHandoffs, updateRunOptimistic and its
   // dependents appendRunEscalation/appendRunReconcileNeeded/
   // appendRunScopeAmendment/setRunReviewMandatory/incrementDispatchCount) was
-  // removed per decision sterling-claude-code-scale-down-boundary (2ad87dd1).
+  // removed per decision sterling-claude-code-scale-down-boundary (d3e63e16).
   // The `runs`/`handoffs` SQLite tables are left in place, unused — no FK
   // references them and no startup validation scans them, so leaving them is
   // safe; a DROP TABLE migration is optional cleanup, not a correctness

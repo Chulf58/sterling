@@ -199,7 +199,7 @@ test('C2: hazards are NEVER cut by the total cap — every trigger and right-way
     assert.equal(r.code, 0, oneLine(r.stderr));
     const ctx = ctxOf(r);
     for (const s of sentinels) assert.ok(ctx.includes(s), `hazard text '${s}' must arrive whole`);
-    // UPDATED 2026-09-19 for decision 301d8a0a's structured hazard budget:
+    // UPDATED 2026-09-19 for the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)'s structured hazard budget:
     // hazard substance may exceed the total cap, but every other byte — header,
     // decisions and pointers — is still bounded by it. The prior query-pointer
     // expectation treated hazards as consuming ordinary budget, contradicting
@@ -313,7 +313,7 @@ test('C5: a read-rung Bash command naming 8 governed paths injects its pointer b
     for (const id of hazardIds.slice(0, 3)) assert.ok(payload.includes(id), `hazard ${id} renders whole — never capped away (HAZARD_CAP)`);
     for (const id of hazardIds.slice(3)) assert.ok(!payload.includes(id), `hazard ${id} is beyond HAZARD_CAP — disclosed as a count, not shown`);
     assert.match(payload, /more hazard\(s\) NOT shown \(cap 3\)/, 'the hazards beyond HAZARD_CAP are disclosed as a count');
-    // Hazards are pinned/unbudgeted (decision 301d8a0a) — only the ORDINARY
+    // Hazards are pinned/unbudgeted (the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)) — only the ORDINARY
     // (non-hazard) bytes are bound by the cap, same rule C2 pins for the Read
     // rung.
     const hazardBytes = bytes(renderHazards(hazards, Number.MAX_SAFE_INTEGER, { fileKeys: rels }).join('\n\n'));
@@ -390,7 +390,7 @@ test('C7: dispatch staging of a path owned by a large article plus 8 decisions k
     const ctx = ctxOf(r);
     assert.ok(ctx.includes(`knowledge_get ${a.id}`), 'CONTROL: the staged payload names the article');
     // MEASURE THE FINAL COMPOSED CONTEXT, NOT THE KNOWLEDGE PAYLOAD ALONE
-    // (fix-round test-integrity requirement — decision 92088a62: "the cap is
+    // (fix-round test-integrity requirement — the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store): "the cap is
     // charged on the FINAL composed context string"). Stripping the fixed
     // chrome (return contract) before measuring — the old body here — could
     // never detect a cap failure caused BY that chrome (fix-round HIGH 4: the

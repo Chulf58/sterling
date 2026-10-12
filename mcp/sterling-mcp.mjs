@@ -18578,7 +18578,7 @@ var configSchema = external_exports.object({
   // scripts are launcher and console glue, never a toolchain's source, and
   // flagging them was banner noise answered the same way every session. The
   // default lives in THREE places that must agree: here, templates/default-
-  // config.json (anti-pattern 85d15143), and the raw-config ladder in
+  // config.json (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)), and the raw-config ladder in
   // scripts/hooks/lib/undeclared-source-scan.mjs, which imports this constant.
   // An explicit [] still opts back in.
   undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default(() => [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]),
@@ -18620,7 +18620,7 @@ var configSchema = external_exports.object({
   tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
   // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
   // H6-only (agent-scoped context enforcement) and DELETED with H6 under
-  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // decision `sterling-claude-code-scale-down-boundary` (d3e63e16); windows
   // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
   // denominator and the direct-mode pressure thresholds). `windows.default`
   // is a REAL fallback (decision context-window-default-is-a-real-fallback,
@@ -18685,7 +18685,7 @@ var configSchema = external_exports.object({
     reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
   }).catchall(agentModelEntry).default({}),
   // Per-project agent tool extension (decision
-  // per-project-agent-extra-tools-config-appended-at-render, 587472e3):
+  // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
   // agents.<registered-agent-name>.extra_tools is appended to that agent's
   // rendered tools: line at install. It must live in the schema — this top-level
   // object strips unknown keys silently. Each entry is one tool name with an
@@ -18942,7 +18942,7 @@ var configSchema = external_exports.object({
   // surface that ACTS on the mode (/sterling:merge, the PR review loop duty,
   // sync-agents, /sterling:update) uses, and which refuses an invalid value loudly.
   // Consumers of the PARSED config must narrow this field themselves.
-  // The default lives twice (anti_pattern 85d15143): here and in
+  // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   mode: external_exports.unknown().default("hobby"),
   // Where the project's stores live (decision
@@ -18967,7 +18967,7 @@ var configSchema = external_exports.object({
   // reads a config with NO key as on when portable agents are already tracked
   // in git, which this default cannot express: read the setting through it,
   // never from the parsed config.
-  // The default lives twice (anti_pattern 85d15143): here and in
+  // The default lives twice (the former ruling 'assuming sync-agents propagates a config.models bump to installed agents' (not in the current store)): here and in
   // templates/default-config.json; config.test.ts pins that they agree.
   handoff: external_exports.unknown().default({ enabled: false }),
   // PR review loop (decision project-mode-hobby-work-toggle-decides-flow, S3):
@@ -23995,7 +23995,7 @@ var SterlingStore = class _SterlingStore {
   // getPendingExit, writeHandoff/readHandoffs, updateRunOptimistic and its
   // dependents appendRunEscalation/appendRunReconcileNeeded/
   // appendRunScopeAmendment/setRunReviewMandatory/incrementDispatchCount) was
-  // removed per decision sterling-claude-code-scale-down-boundary (2ad87dd1).
+  // removed per decision sterling-claude-code-scale-down-boundary (d3e63e16).
   // The `runs`/`handoffs` SQLite tables are left in place, unused — no FK
   // references them and no startup validation scans them, so leaving them is
   // safe; a DROP TABLE migration is optional cleanup, not a correctness
@@ -30167,7 +30167,7 @@ var SterlingTools = class _SterlingTools {
   }
   /**
    * The staged pipeline (and its notion of an "active run") was removed per
-   * decision sterling-claude-code-scale-down-boundary (2ad87dd1) — every
+   * decision sterling-claude-code-scale-down-boundary (d3e63e16) — every
    * check_skipped row is now a direct-mode NULL-run row (capped by the
    * store's own NULL-run retention, not by run disposal).
    */
@@ -30232,7 +30232,7 @@ var SterlingTools = class _SterlingTools {
    *     contract contentChanged documents;
    *   - every other still-owned path keeps its baseline byte-for-byte, so an
    *     unrelated write can never erase un-reconciled drift;
-   *   - a path the record stops claiming drops its baseline (decision f841392b's
+   *   - a path the record stops claiming drops its baseline (the former ruling 'a-departed-claimed-path-is-pruned-from-the-owners-reconcile-item' (not in the current store)'s
    *     prune is the queue half of the same departure).
    * Attestation PROVENANCE follows the stamp, per path (board 8c8b6d78 / R9):
    * a path this write stamps loses its baseline_attestations and
@@ -33063,7 +33063,7 @@ var SterlingTools = class _SterlingTools {
    * generic or not, via symmetric prefix matching —
    * packages/store/src/axis.ts) cover the record's central terms — mandatory
    * for same_subject (sameSubjectDigest, unchanged) but, since the B2G
-   * widening below (findings f6ada94d and
+   * widening below (the former finding 'preflight B2G measurement' (not in the current store) and
    * preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
    * september-2026), NO LONGER a listing floor here: it now gates only
    * matched_total/answerability, computed separately from the LISTED
@@ -33189,7 +33189,7 @@ var SterlingTools = class _SterlingTools {
    * which candidates they exclude, in the MINIMUM MATCHED-HITS floor each
    * passes explicitly (since PREFLIGHT_MIN_HITS above — no default here, so
    * a caller can never inherit a floor value silently), and — since this
-   * session's B2G widening (findings f6ada94d and
+   * session's B2G widening (the former finding 'preflight B2G measurement' (not in the current store) and
    * preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
    * september-2026) — in whether hasRecordCentralityHit gates LISTING at
    * all, via the explicit `requireCentrality` flag (also no default).
@@ -35797,7 +35797,7 @@ ${JSON.stringify(entry)}
    * blocked_by_state (each stored blocker slug, open while a live board item
    * carries it, closed once removed; the stored list is never rewritten) and
    * unblocks (the live items waiting on this one, as `name (id8)`, decision
-   * 11b8b08c). Each key is present only when non-empty. Computed once per call
+   * the former ruling 'board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address' (not in the current store)). Each key is present only when non-empty. Computed once per call
    * over the whole set, never per row.
    */
   boardDerived(records) {

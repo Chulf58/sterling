@@ -233,7 +233,7 @@ test('a. no path in the prompt, but the prompt matches a stored anti_pattern\'s 
     assert.ok(rec, 'fixture record recorded in the store');
     const guard = guardOf(dir, 'agent-1');
     assert.ok(guard, 'guard file written for the spawned agent');
-    // Guard schema v2 (decision 92088a62): a subject-matched anti_pattern
+    // Guard schema v2 (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store)): a subject-matched anti_pattern
     // still renders as a WHOLE hazard block (substance, never a pointer), so
     // it earns a `guard.substance` mark, not a flat `guard.records` entry —
     // keyed on the FULL (id, revision) pair, not id alone (fix-round test-

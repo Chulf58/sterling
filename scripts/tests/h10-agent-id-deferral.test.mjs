@@ -5,7 +5,7 @@
 // creates outside its declared territory, and second-level subagents, are
 // otherwise owned by nobody while the lane runs (finding
 // h10-article-demand-misses-live-lanes-same-type-fanout-and-out-of-territory-
-// files-october-2026, 79e20118).
+// files-october-2026, the former finding 'lanes-same-type-fanout-and-out-of-territory-files-october-2026' (not in the current store)).
 //
 // The probe that unblocked this (2026-10-03): a subagent Write produced a
 // touches.json record {path, at, agent_id} whose agent_id matched a
@@ -341,7 +341,7 @@ test('(4b) touches without agent_id still defer through the row\'s files, as bef
 
 // Fan-out of the same agent type, both lanes writing outside what they declared
 // (finding h10-article-demand-misses-live-lanes-same-type-fanout-and-out-of-
-// territory-files-october-2026, 79e20118; board item 7e4850cf, REMAINING (1)).
+// territory-files-october-2026, the former finding 'lanes-same-type-fanout-and-out-of-territory-files-october-2026' (not in the current store); board item 7e4850cf, REMAINING (1)).
 // Two live implementor rows each declare one path that no touch matches. LANE
 // writes ALPHA and BETA; LANE_B writes GAMMA; three conductor-written files
 // (DELTA and two more) meet the threshold, so the article demand runs and is

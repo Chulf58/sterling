@@ -414,7 +414,7 @@ export function todoCards(store: SterlingStore, expanded: string[] = []): Card[]
   const todos = store.query({ types: ['todo'], source: 'user', cap: 500 });
   // Open blockers and unblocks come from the store's one readiness function
   // (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start),
-  // as item names, never bare slugs (decision 11b8b08c).
+  // as item names, never bare slugs (the former ruling 'board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address' (not in the current store)).
   const readiness = new Map(store.boardReadiness(todos).map((r) => [r.id, r]));
   for (const t of todos) {
     const todo = t as unknown as { id: string; text: string; slug?: string; priority?: string; file_keys?: string[]; objective?: string; needs?: string };

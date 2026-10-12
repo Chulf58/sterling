@@ -1,8 +1,8 @@
 // H10 capture_pending grace, debt identity and fan-out hold — decision
 // capture-pending-grace-per-declaration-held-while-any-dispatch-live
-// (knowledge_get 294706f6), root cause in finding
+// (knowledge_get the former ruling 'capture-pending-grace-per-declaration-held-while-any-dispatch-live' (not in the current store)), root cause in finding
 // capture-pending-grace-voided-by-nag-marker-and-debt-dedup-drops-target-september-2026
-// (knowledge_get b8ce1d54).
+// (knowledge_get the former finding 'every declaration used to live zero Stops' (not in the current store)).
 //
 // (1) The one-Stop grace is counted PER DECLARATION: a nag that PRECEDES the
 //     declaration (the normal order — the nag itself says "call
@@ -16,7 +16,7 @@
 //     capture-pending-hold-window-spans-resume-rounds (5f21707a): the hold
 //     also spans a row of this session that ended within
 //     dispatch_register.resume_hold_minutes (PG-c3, PG-c4).
-// A real capture still spends the declaration (decision b2474b26).
+// A real capture still spends the declaration (the former ruling 'stop-consumes-settled-and-queued-work-never-live-declarations' (not in the current store)).
 //
 // NEW SIBLING FILE by the established precedent (the h10-*.test.mjs siblings
 // duplicate their harness rather than importing one test file as a module,
@@ -317,7 +317,7 @@ test('PG-c2 (hold at the second-pass site, RED at a0c0360): with research open a
 });
 
 // RESUME-ROUND HOLD WINDOW (decision capture-pending-hold-window-spans-resume-rounds,
-// knowledge_get 5f21707a; finding 9f82a87d). A lane that parks on its own
+// knowledge_get 5f21707a; the former finding 'lane gaps of 4-6 minutes' (not in the current store)). A lane that parks on its own
 // background work ends a register round at each SubagentStop and resumes as a
 // new round minutes later. Between rounds no row is presumed-active, so the
 // declaration must also hold while any THIS-session row ended within
@@ -406,7 +406,7 @@ test('PG-d (GUARD, green before and after): a real capture spends the declaratio
 
     assert.equal(stopOnce(dir).code, 0, 'the landed capture settles');
     assert.equal(captureOwed(store).length, 0, 'the capture paid the duty');
-    assert.equal(hasDeclaration(dir), false, 'STUCK-DECLARATION SHAPE if true: a real capture spends the declaration (decision b2474b26), live dispatch or not');
+    assert.equal(hasDeclaration(dir), false, 'STUCK-DECLARATION SHAPE if true: a real capture spends the declaration (the former ruling stop-consumes-settled-and-queued-work-never-live-declarations (not in the current store)), live dispatch or not');
 
     touchRegister(dir, ['src/pending/later.mjs'], new Date().toISOString());
     const later = stopOnce(dir);

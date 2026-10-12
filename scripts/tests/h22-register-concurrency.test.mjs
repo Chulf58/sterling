@@ -252,7 +252,7 @@ function ledgerPath(dir) {
 }
 // readLedger() REMOVED — its only callers were the ledger-promotion
 // assertions removed above (SubagentStop's ledger promotion is deleted under
-// decision `sterling-claude-code-scale-down-boundary`, 2ad87dd1); ledgerPath
+// decision `sterling-claude-code-scale-down-boundary`, d3e63e16); ledgerPath
 // itself stays, still used by D3's byte-identical-absence check.
 
 // Sequential (blocking) runner.
@@ -425,7 +425,7 @@ test('C1: N concurrent SubagentStart events for N distinct agent_ids — no lost
 
 // NOTE: the ledger-promotion half of this control ("exactly one receipt
 // promoted") was REMOVED — SubagentStop's ledger promotion is deleted under
-// decision `sterling-claude-code-scale-down-boundary` (2ad87dd1). The
+// decision `sterling-claude-code-scale-down-boundary` (d3e63e16). The
 // register-side assertions (append-once, A1 mark-ended-not-deleted) are
 // unrelated to the ledger and stay as the control arm for the register's own
 // concurrency pins above.

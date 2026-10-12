@@ -309,7 +309,7 @@ test('BACKLOG line: every worker lane is named, a bounded selection of handoff r
     const b = backlog(dir, rec, now);
     assert.match(b.banner, / · 3 items in lane reconcile_needed, 2 items in lane stale_research, 1 item in lane article_missing, 1 item in lane state_review, oldest 1h, /);
     assert.match(b.line, /^RECONCILE BACKLOG: 3 items in lane reconcile_needed, 2 items in lane stale_research, 1 item in lane article_missing, 1 item in lane state_review, the oldest/);
-    assert.match(b.line, /4 of the 7 items were handed to you by the worker \(needs_conductor\) and are yours\. The worker handles the other 3\. Why: aaaaaaaa \(reconcile_needed\): the article does not describe the new --dry-run flag; bbbbbbbb \(stale_research\): the measured cost changed: x+…; cccccccc \(article_missing\): no article owns scripts\/new\/ \(\+1 more in \.sterling\/maintenance-worker\.jsonl\)\. /);
+    assert.match(b.line, /4 of the 7 items were handed to you by the worker \(needs_conductor\) and are yours\. The worker handles the other 3\. Why: aaaaaaaa \(reconcile_needed\): the article does not describe the new --dry-run flag; bbbbbbbb \(stale_research\): the measured cost changed: x+…; cccccccc \(article_missing\): no article owns scripts\/new\/ \(\+1 more in \.sterling\/maintenance-worker\.jsonl\)\. /); // not-a-citation: fixture id
     assert.doesNotMatch(b.line, /dddddddd/, 'at most three reasons');
     assert.doesNotMatch(b.line, /x{120}/, 'a long reason is clipped');
     assert.match(b.line, /Worker writes on record: 12 \(spot-check a few in \.sterling\/maintenance-worker\.jsonl\)\. /);

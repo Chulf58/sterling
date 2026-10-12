@@ -168,9 +168,9 @@ function main(input) {
   // happens turns any failure into permanent silent loss — nothing retries,
   // because the next touch sees the paths already marked.
   //
-  // ONE ASSEMBLER (decision 92088a62 item 2/4): a hazard now renders WHOLE —
+  // ONE ASSEMBLER (the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store) item 2/4): a hazard now renders WHOLE —
   // via the SAME `hazardParts`/`renderHazards` the Read rung uses, pinned and
-  // unbudgeted (decision 301d8a0a) — and earns a SUBSTANCE mark; an owner
+  // unbudgeted (the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)) — and earns a SUBSTANCE mark; an owner
   // still renders as a one-line POINTER (this hook's whole reason to exist,
   // see the header) and earns a DISCOVERY mark. Both are built as assembler
   // parts and composed through ONE `assembleDelivery` call so the total cap is

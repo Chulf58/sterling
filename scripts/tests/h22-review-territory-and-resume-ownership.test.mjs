@@ -316,7 +316,7 @@ test('a RESUMED round inherits the files of the same agent_id\'s most recent pri
     assert.equal(resumed.attribution_case, 'resume', 'sanity: classified as a resume');
     assert.deepEqual([...resumed.files].sort(), [...HELD].sort(), 'the resumed round keeps the territory it was editing');
     assert.equal(resumed.files_source, 'resume-inherited');
-    assert.equal(resumed.attribution, 'none', 'no brief was attributed to the resume — it stages nothing (17c6d781)');
+    assert.equal(resumed.attribution, 'none', 'no brief was attributed to the resume — it stages nothing (the former ruling h22-start-staging-only-when-attribution-is-unambiguous-no-sidecar (not in the current store))');
     assert.equal(resumed.tool_use_id, null, 'a resume carries no fresh binding');
   } finally {
     cleanup();

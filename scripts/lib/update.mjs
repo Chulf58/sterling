@@ -811,7 +811,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
       const out = `${r.stdout}${r.stderr}`.trim();
       const statuses = r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^[a-z_]+: /.test(l));
-      // config_drift (decision 256d1059) wrote nothing, so it is not a change; it is
+      // config_drift (the former ruling 'sync-agents-reports-config-models-drift-loudly-without-rewriting' (not in the current store)) wrote nothing, so it is not a change; it is
       // relayed verbatim below (the line carries the fix command), never a failure.
       const driftedAgents = statuses.filter((l) => l.startsWith('config_drift: '));
       // The auto-memory NOTICE (an explicit non-false autoMemoryEnabled, kept; exit 0).

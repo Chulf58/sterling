@@ -3,7 +3,7 @@
 // Handoff files and the pending Sterling issue-report count, and the mounted domain lines.
 // Extracted from h1-session-start.mjs so the OpenCode context hook
 // (packages/opencode-plugin/src/context.mjs) renders the SAME text from the SAME
-// code (board cbee2b3d, audit f2ba68c2 row 2). Each line function returns the
+// code (board cbee2b3d, audit the former finding 'OpenCode parity audit' (not in the current store) row 2). Each line function returns the
 // bare line, or '' when the line is not stated; the caller adds its own
 // separator. Builtins, sibling libs and @sterling/store only: hooks bundle this module.
 import { existsSync, readFileSync } from 'node:fs';

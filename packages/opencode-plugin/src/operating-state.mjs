@@ -1,5 +1,5 @@
 // H1's host-neutral operating-state lines for the OpenCode conductor's context
-// (board cbee2b3d, audit f2ba68c2 row 2): MACHINE ROLE, TDD posture, Project mode,
+// (board cbee2b3d, audit the former finding 'OpenCode parity audit' (not in the current store) row 2): MACHINE ROLE, TDD posture, Project mode,
 // Handoff files, Storage, the mounted domain lines, the pending Sterling issue-report count and the
 // undeclared-source scan. The line
 // text and the config reading are scripts/hooks/lib/operating-state.mjs, shared
