@@ -19061,6 +19061,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   const boardCache = /* @__PURE__ */ new Map();
   const delivered = /* @__PURE__ */ new Map();
   const registrySeen = /* @__PURE__ */ new Map();
+  const heldLines = /* @__PURE__ */ new Map();
   function statusLine(root) {
     const hit = statusCache.get(root);
     if (hit && Date.now() - hit.at < STATUS_TTL_MS) return hit.text;
@@ -19230,7 +19231,7 @@ ${opencodeHostTail(pluginRoot)}`;
         }
         if (line) {
           logLine(root, `context: ${line}`);
-          out.push({ text: line });
+          heldLines.set(`${root}\0sweep`, line);
         }
       }
       if (!inWorkerChild(env) && registrySeen.get(root) !== sessionID) {
@@ -19239,8 +19240,11 @@ ${opencodeHostTail(pluginRoot)}`;
           refreshRegistryRow(root, { config: state.config, at: now() });
         } catch (e) {
           logLine(root, `context: project registry refresh failed: ${errText(e)}`);
-          out.push({ text: `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.` });
+          heldLines.set(`${root}\0registry`, `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
         }
+      }
+      for (const [key, text] of heldLines) {
+        if (key.startsWith(`${root}\0`)) out.push({ text, onDelivered: () => heldLines.delete(key) });
       }
       out.push({ key: "undeclared", text: undeclaredBlock(root, state.config), cleared: "UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies." });
       if (!inWorkerChild(env)) out.push({ key: "board", text: boardBlock(root, state.config, sessionID), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
@@ -19255,9 +19259,13 @@ ${opencodeHostTail(pluginRoot)}`;
     const seen = delivered.get(sessionID) ?? /* @__PURE__ */ new Map();
     const marks = /* @__PURE__ */ new Map();
     const due = [];
+    const onCommit = [];
     for (const b of blocks) {
       if (!b.key) {
-        if (b.text) due.push(b.text);
+        if (b.text) {
+          due.push(b.text);
+          if (b.onDelivered) onCommit.push(b.onDelivered);
+        }
         continue;
       }
       const last = seen.get(b.key) ?? "";
@@ -19288,6 +19296,7 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
 
 ${due.join("\n\n")}` : "",
       commit: () => {
+        for (const fn of onCommit) fn();
         if (!marks.size) return;
         const record = delivered.get(sessionID) ?? remember(delivered, sessionID, /* @__PURE__ */ new Map());
         for (const [key, text] of marks) record.set(key, text);

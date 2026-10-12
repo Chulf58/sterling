@@ -42,7 +42,7 @@ function addTodo(dir, text) {
 }
 
 /** A context handler for `dir` whose sessions are ses_root (a root) and ses_child (its child). */
-function handler(dir) {
+function handler(dir, extra = {}) {
   const sessions = { ses_root: {}, ses_other: {}, ses_child: { parentID: 'ses_root' } };
   return contextMod.createContextHandler({
     openStore: (p) => new SterlingStore(p),
@@ -53,6 +53,7 @@ function handler(dir) {
     sessionSync: async () => {},
     pluginRoot: repo,
     getSession: () => ({ get: async ({ sessionID }) => ({ id: sessionID, ...sessions[sessionID] }) }),
+    ...extra,
   });
 }
 
@@ -332,6 +333,44 @@ test('an unreadable notices file is said in-band and logged, and the other lines
     assert.match(fixed, /NOTICE-AFTER-FIX/);
     assert.equal(await appended(h, 'ses_root'), '', 'and delivered once');
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a dispatch-sweep line held back by an unreadable notices file is delivered once the file reads again, then not repeated', async () => {
+  const dir = makeProject();
+  try {
+    let sweeps = 0;
+    const h = handler(dir, { sweepStale: async () => (++sweeps === 1 ? 'SWEEP-LINE-ONE-SHOT' : '') });
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(dir, notices.NOTICES_REL), '{ not json');
+    assert.doesNotMatch(await appended(h, 'ses_root'), /SWEEP-LINE-ONE-SHOT/, 'held back while the notices file is unreadable');
+    writeFileSync(join(dir, notices.NOTICES_REL), '[]');
+    assert.match(await appended(h, 'ses_root'), /SWEEP-LINE-ONE-SHOT/, 'the sweep line is not lost with the failed append');
+    assert.doesNotMatch(await appended(h, 'ses_other'), /SWEEP-LINE-ONE-SHOT/, 'and it is delivered once');
+    assert.equal(sweeps, 1, 'the sweep ran once: its line was held, not produced again');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a registry refresh failure line held back by an unreadable notices file is delivered once the file reads again', async () => {
+  const dir = makeProject();
+  const registryDb = join(dir, 'registry.db');
+  const prior = process.env.STERLING_REGISTRY_DB;
+  try {
+    writeFileSync(registryDb, 'this is not a sqlite database, so opening the registry throws');
+    process.env.STERLING_REGISTRY_DB = registryDb;
+    const h = handler(dir);
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(dir, notices.NOTICES_REL), '{ not json');
+    assert.doesNotMatch(await appended(h, 'ses_root'), /PROJECT REGISTRY REFRESH FAILED/, 'held back while the notices file is unreadable');
+    writeFileSync(join(dir, notices.NOTICES_REL), '[]');
+    assert.match(await appended(h, 'ses_root'), /PROJECT REGISTRY REFRESH FAILED/, 'the failure line is not lost with the failed append');
+    assert.doesNotMatch(await appended(h, 'ses_root'), /PROJECT REGISTRY REFRESH FAILED/, 'and it is delivered once');
+  } finally {
+    if (prior === undefined) delete process.env.STERLING_REGISTRY_DB;
+    else process.env.STERLING_REGISTRY_DB = prior;
     rmSync(dir, { recursive: true, force: true });
   }
 });
