@@ -78,6 +78,8 @@ const INSERT_AFTER = new Map([
   ['- **Lint and tests before done.**', ['- **No false action claims:**', '- **Anti-speculation:**']],
   ['- **Write plainly; no AI tells.**', ['- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
   ['- **Start every subagent in the background.**', ['- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
+  ['- **Finish what you start.**', ['- **Start every subagent in the background.**', '- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
+  ['- **Resolve a review thread once its finding is handled.**', ['- **Finish what you start.**', '- **Start every subagent in the background.**', '- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
   ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', ['- **Instruction-file proposals replace memory.**', "- **Ask, don't guess — through the AskUserQuestion tool.**"]],
   ["- **Solve, don't board.**", ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', '- **Instruction-file proposals replace memory.**', "- **Ask, don't guess — through the AskUserQuestion tool.**"]],
   ['- **Close-on-commit: a commit that fulfils a board item pays it**', ["- **Solve, don't board.**"]],
