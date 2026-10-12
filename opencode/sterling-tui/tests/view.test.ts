@@ -146,10 +146,10 @@ test('subagents: only descendants of the root, active first, with status, contex
   const rows = readSubagents(source());
   assert.deepEqual(rows.map((r) => r.id), [kid(2), kid(1)], "the running child sorts first; another root's children are excluded");
   assert.equal(rows[0].status, 'active');
-  assert.equal(rows[0].context, '25%');
+  assert.equal(rows[0].context, '20% ctx', '40k input of 200k; the 10k output is not context');
   assert.equal(rows[0].model, 'big-pickle');
   assert.equal(rows[1].status, 'idle');
-  assert.equal(rows[1].context, '?', 'no turn yet: unknown');
+  assert.equal(rows[1].context, 'ctx: no model', 'no turn and no session model: the missing input is named');
   assert.equal(rows[1].model, '-');
 });
 
@@ -160,13 +160,45 @@ test('subagents: nested children count, and a parent cycle cannot loop', () => {
   assert.deepEqual(cyclic, [], 'a cycle detached from the root is not reachable');
 });
 
-test('subagents: context % is unknown without a limit, and counts every token class', () => {
-  const noLimit = readSubagents(source({ contextLimit: () => undefined }));
-  assert.equal(noLimit[0].context, '?');
-  const all = readSubagents(source({ lastTurn: () => ({ tokens: { input: 1000, output: 1000, reasoning: 1000, cache: { read: 500, write: 500 } }, model: { id: 'm', providerID: 'p' } }), contextLimit: () => 8000 }));
-  assert.equal(all[0].context, '50%');
-  const zero = readSubagents(source({ contextLimit: () => 0 }));
-  assert.equal(zero[0].context, '?', 'a zero limit is no limit');
+test('subagents: fill is input + cache.read + cache.write over the limit, as packages/tui counts it', () => {
+  const fill = { input: 1000, output: 1000, reasoning: 1000, cache: { read: 500, write: 500 } };
+  assert.equal(view.contextFill(fill), 2000, 'output and reasoning are not in context');
+  const all = readSubagents(source({ lastTurn: () => ({ tokens: fill, model: { id: 'm', providerID: 'p' } }), contextLimit: () => 8000 }));
+  assert.equal(all[0].context, '25% ctx');
+});
+
+test('subagents: a missing input is named, never a bare ?', () => {
+  assert.equal(readSubagents(source({ contextLimit: () => 'no limit for model' }))[0].context, 'ctx: no limit for model');
+  assert.equal(readSubagents(source({ contextLimit: () => 'models not loaded' }))[0].context, 'ctx: models not loaded');
+  assert.equal(readSubagents(source({ contextLimit: () => 0 }))[0].context, 'ctx: no limit', 'a zero limit is no limit');
+  const streaming = readSubagents(source({ lastTurn: () => ({ tokens: tokens(0, 0), model: { id: 'm', providerID: 'p' } }) }));
+  assert.equal(streaming[0].context, 'ctx: no turn yet', 'a turn reporting 0 tokens is still streaming');
+  const sessions = [{ id: ROOT }, { id: kid(1), parentID: ROOT, model: { id: 'gpt-x', providerID: 'p' } }];
+  assert.equal(readSubagents(source({ sessions, lastTurn: () => undefined }))[0].context, 'ctx: no turn yet');
+  assert.ok(readSubagents(source()).every((r) => !r.context.includes('?')));
+});
+
+test('subagents: a per-call model resolves its limit by ModelInfo.id, not modelID', () => {
+  const models = [
+    { id: 'gpt-6-astra', modelID: 'gpt-6-astra-api', providerID: 'openai', limit: { context: 1_050_000 } },
+    { id: 'gpt-6-astra', modelID: 'gpt-6-astra', providerID: 'other', limit: { context: 10 } },
+    { id: 'claude-opus-5-5', modelID: 'claude-opus-5-5', providerID: 'anthropic', limit: { context: 1_000_000 } },
+  ];
+  const perCall = { id: 'gpt-6-astra', providerID: 'openai', variant: 'high' };
+  assert.equal(view.modelLimit(models, perCall), 1_050_000, 'matched on id and provider, the variant ignored');
+  assert.equal(view.modelLimit(models, { id: 'gpt-6-astra-api', providerID: 'openai' }), 'no limit for model', 'modelID is the API name, not the ref');
+  assert.equal(view.modelLimit(undefined, perCall), 'models not loaded');
+  assert.equal(view.modelLimit([{ id: 'x', providerID: 'p', limit: { context: 0 } }], { id: 'x', providerID: 'p' }), 'no limit for model');
+  // the whole row: a background child on a per-call model with only its session model and a finished turn
+  const sessions = [{ id: ROOT }, { id: kid(1), parentID: ROOT, model: perCall }];
+  const rows = readSubagents(source({
+    sessions,
+    isRunning: () => true,
+    lastTurn: () => ({ tokens: { input: 395, output: 278, reasoning: 0, cache: { read: 146_944, write: 0 } }, model: { id: 'gpt-6-astra', providerID: 'openai' } }),
+    contextLimit: (m) => view.modelLimit(models, m),
+  }));
+  assert.equal(rows[0].context, '14% ctx');
+  assert.equal(rows[0].model, 'gpt-6-astra#high');
 });
 
 test('subagents: the session model is used when no turn has a model yet; a blank title falls back to the id', () => {
@@ -205,7 +237,7 @@ test('subagents: no variant anywhere shows the plain model id', () => {
 
 const plain = (line: SpanLine) => line.map((sp) => sp.text).join('');
 const widthOf = (line: SpanLine) => [...plain(line)].length;
-const row = (over: Partial<SubagentRow> = {}): SubagentRow => ({ id: kid(2), title: 'review the diff', status: 'active', context: '25%', model: 'big-pickle', ...over });
+const row = (over: Partial<SubagentRow> = {}): SubagentRow => ({ id: kid(2), title: 'review the diff', status: 'active', context: '25% ctx', model: 'big-pickle', ...over });
 
 test('portrait: a 6x3 quadrant-block sprite on an 8x3 tinted tile, no drawn frame, explicit bg on every span', () => {
   const lines = portraitLines(5, 0);
