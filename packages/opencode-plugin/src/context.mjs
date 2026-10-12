@@ -62,6 +62,15 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   // append does not happen, so a read of the notices file that throws between production
   // and delivery loses nothing and two overlapping calls never both deliver it.
   const heldLines = new Map();
+  // The newest generation held for each key, never deleted when a line is claimed or
+  // delivered. A claim puts its line back only while its generation is still the newest,
+  // so a failed older delivery cannot bring back a line a newer one has replaced, even
+  // when that newer line has already been claimed by another call.
+  const latestGeneration = new Map();
+  function holdLine(key, line) {
+    latestGeneration.set(key, (latestGeneration.get(key) ?? 0) + 1);
+    heldLines.set(key, line);
+  }
 
   function statusLine(root) {
     const hit = statusCache.get(root);
@@ -281,7 +290,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
           line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
         }
         if (line) {
-          heldLines.set(`${root}\0sweep`, line);
+          holdLine(`${root}\0sweep`, line);
           logLine(root, `context: ${line}`);
         }
       }
@@ -293,7 +302,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         try {
           refreshRegistryRow(root, { config: state.config, at: now() });
         } catch (e) {
-          heldLines.set(`${root}\0registry`, `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
+          holdLine(`${root}\0registry`, `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
           logLine(root, `context: project registry refresh failed: ${errText(e)}`);
         }
       }
@@ -310,7 +319,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       for (const [key, text] of [...heldLines]) {
         if (!key.startsWith(`${root}\0`)) continue;
         heldLines.delete(key);
-        out.push({ text, restore: () => { if (!heldLines.has(key)) heldLines.set(key, text); } });
+        const generation = latestGeneration.get(key);
+        out.push({ text, restore: () => { if (latestGeneration.get(key) === generation && !heldLines.has(key)) heldLines.set(key, text); } });
       }
     }
     return out;

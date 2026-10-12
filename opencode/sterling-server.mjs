@@ -19062,6 +19062,11 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   const delivered = /* @__PURE__ */ new Map();
   const registrySeen = /* @__PURE__ */ new Map();
   const heldLines = /* @__PURE__ */ new Map();
+  const latestGeneration = /* @__PURE__ */ new Map();
+  function holdLine(key, line) {
+    latestGeneration.set(key, (latestGeneration.get(key) ?? 0) + 1);
+    heldLines.set(key, line);
+  }
   function statusLine(root) {
     const hit = statusCache.get(root);
     if (hit && Date.now() - hit.at < STATUS_TTL_MS) return hit.text;
@@ -19230,7 +19235,7 @@ ${opencodeHostTail(pluginRoot)}`;
           line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
         }
         if (line) {
-          heldLines.set(`${root}\0sweep`, line);
+          holdLine(`${root}\0sweep`, line);
           logLine(root, `context: ${line}`);
         }
       }
@@ -19239,7 +19244,7 @@ ${opencodeHostTail(pluginRoot)}`;
         try {
           refreshRegistryRow(root, { config: state.config, at: now() });
         } catch (e) {
-          heldLines.set(`${root}\0registry`, `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
+          holdLine(`${root}\0registry`, `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
           logLine(root, `context: project registry refresh failed: ${errText(e)}`);
         }
       }
@@ -19251,8 +19256,9 @@ ${opencodeHostTail(pluginRoot)}`;
       for (const [key, text] of [...heldLines]) {
         if (!key.startsWith(`${root}\0`)) continue;
         heldLines.delete(key);
+        const generation = latestGeneration.get(key);
         out.push({ text, restore: () => {
-          if (!heldLines.has(key)) heldLines.set(key, text);
+          if (latestGeneration.get(key) === generation && !heldLines.has(key)) heldLines.set(key, text);
         } });
       }
     }
