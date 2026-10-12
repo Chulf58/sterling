@@ -93,7 +93,7 @@ function handler(dir, { sessions = {}, pluginRoot, getSession } = {}) {
       return { id: sessionID, ...s };
     },
   };
-  return contextMod.createContextHandler({
+  const h = contextMod.createContextHandler({
     openStore: (p) => new SterlingStore(p),
     now: () => NOW,
     rootOf: () => dir,
@@ -103,9 +103,25 @@ function handler(dir, { sessions = {}, pluginRoot, getSession } = {}) {
     pluginRoot: pluginRoot ?? join(dir, 'no-such-plugin-root'),
     getSession: getSession ?? (() => session),
   });
+  return asTurn(h);
 }
 
-const textOf = (i) => i.system.map((p) => p.text).join('\n');
+/**
+ * The handler with onContext standing for one whole turn as the model sees it: onPrompt
+ * appends the volatile lines to the prompt text, then onContext builds the stable system
+ * part. The prompt is kept on the input for textOf.
+ */
+function asTurn(h) {
+  const turn = async (i) => {
+    const p = { sessionID: i.sessionID, messageID: 'msg_turn', prompt: { text: '' }, delivery: 'immediate' };
+    await h.onPrompt(p);
+    await h.onContext(i);
+    i.prompt = p.prompt;
+  };
+  return { ...h, onContext: turn };
+}
+
+const textOf = (i) => [...i.system.map((p) => p.text), i.prompt?.text ?? ''].join('\n');
 const userMsg = (text) => ({ role: 'user', content: [{ type: 'text', text }] });
 const input = (sessionID, messages = []) => ({ sessionID, agent: 'build', system: [{ type: 'text', text: 'base' }], messages, tools: {} });
 
@@ -260,7 +276,10 @@ test('the undeclared-source scan discloses a tracked source file no toolchain co
     assert.match(textOf(i), /- src: 1 uncovered source-extension file\(s\)/, 'the report names the uncovered directory');
     const again = input('ses_root');
     await h.onContext(again);
-    assert.match(textOf(again), /UNDECLARED SOURCE/i, 'the same session keeps seeing it on later requests (cached, not rescanned)');
+    assert.doesNotMatch(textOf(again), /UNDECLARED SOURCE/i, 'unchanged, so not appended again: it is already in that session\'s conversation');
+    const other = input('ses_other');
+    await h.onContext(other);
+    assert.match(textOf(other), /UNDECLARED SOURCE/i, 'another session gets it from the cached scan');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -556,7 +575,7 @@ test('an unreadable maintenance queue is a degraded line in the context, not onl
   const dir = makeProject();
   try {
     const session = { get: async ({ sessionID }) => ({ id: sessionID }) };
-    const h = contextMod.createContextHandler({
+    const h = asTurn(contextMod.createContextHandler({
       openStore: () => {
         throw new Error('store locked');
       },
@@ -567,7 +586,7 @@ test('an unreadable maintenance queue is a degraded line in the context, not onl
       sessionSync: async () => {},
       pluginRoot: join(dir, 'no-such-plugin-root'),
       getSession: () => session,
-    });
+    }));
     const i = input('ses_root');
     await h.onContext(i);
     assert.match(textOf(i), /MAINTENANCE QUEUE UNREADABLE \(store locked\)/);
@@ -613,7 +632,7 @@ test("a root session refreshes this project's registry row (last-seen and stack 
     }
   };
   const make = (env) =>
-    contextMod.createContextHandler({
+    asTurn(contextMod.createContextHandler({
       openStore: (p) => new SterlingStore(p),
       now: () => NOW,
       rootOf: () => dir,
@@ -623,7 +642,7 @@ test("a root session refreshes this project's registry row (last-seen and stack 
       pluginRoot: join(dir, 'no-such-plugin-root'),
       getSession: () => ({ get: async ({ sessionID }) => (sessionID === 'ses_child' ? { id: sessionID, parentID: 'ses_root' } : { id: sessionID }) }),
       env,
-    });
+    }));
   try {
     const registry = new ProjectRegistry(process.env.STERLING_REGISTRY_DB);
     try {
@@ -671,7 +690,7 @@ const planLockBody = (planPath) => ({
   source: 'manual',
 });
 
-test('a root request carries the PLAN LOCK section H1 renders, on every request while the lock exists', async () => {
+test('a root session gets the PLAN LOCK section H1 renders once while it is unchanged, and each new session gets it', async () => {
   const { planLockSection } = await import(pathToFileURL(join(repo, 'scripts', 'hooks', 'lib', 'plan-lock-section.mjs')).href);
   const dir = makeProject();
   try {
@@ -679,12 +698,17 @@ test('a root request carries the PLAN LOCK section H1 renders, on every request 
     const expected = planLockSection({ cwd: dir, source: 'startup' }).context.trim();
     assert.match(expected, /^PLAN LOCK: Fixture Plan — /, 'the lib renders the lock line');
     assert.match(expected, /THE APPROVED PLAN GOVERNS THIS OBJECTIVE'S SCOPE/);
-    const h = handler(dir, { sessions: { ses_a: {} } });
-    for (const sessionID of ['ses_a', 'ses_a']) {
-      const i = input(sessionID);
-      await h.onContext(i);
-      assert.ok(textOf(i).includes(expected), 'the root context holds H1\'s PLAN LOCK text verbatim');
-    }
+    const h = handler(dir, { sessions: { ses_a: {}, ses_b: {} } });
+    const first = input('ses_a');
+    await h.onContext(first);
+    assert.ok(textOf(first).includes(expected), 'the root context holds H1\'s PLAN LOCK text verbatim');
+    assert.ok(!first.system.some((p) => p.text.includes('PLAN LOCK')), 'in the prompt, never the system prompt');
+    const again = input('ses_a');
+    await h.onContext(again);
+    assert.doesNotMatch(textOf(again), /PLAN LOCK/, 'an unchanged lock is not appended again in the same session');
+    const other = input('ses_b');
+    await h.onContext(other);
+    assert.ok(textOf(other).includes(expected), 'a new session gets it on its first prompt');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -713,7 +737,7 @@ test('a child session and the maintenance worker child get no PLAN LOCK section,
     const marker = join(dir, '.sterling', 'transient', 'plan-lock-released.json');
     writeFileSync(marker, JSON.stringify({ reason: 'fixture release' }));
     const make = (env) =>
-      contextMod.createContextHandler({
+      asTurn(contextMod.createContextHandler({
         openStore: (p) => new SterlingStore(p),
         now: () => NOW,
         rootOf: () => dir,
@@ -723,7 +747,7 @@ test('a child session and the maintenance worker child get no PLAN LOCK section,
         pluginRoot: join(dir, 'no-such-plugin-root'),
         getSession: () => ({ get: async ({ sessionID }) => (sessionID === 'ses_child' ? { id: sessionID, parentID: 'ses_root' } : { id: sessionID }) }),
         env,
-      });
+      }));
     const child = input('ses_child', [userMsg('do the thing')]);
     await make({ ...process.env, STERLING_MAINTENANCE_WORKER: '' }).onContext(child);
     assert.doesNotMatch(textOf(child), /PLAN LOCK/);

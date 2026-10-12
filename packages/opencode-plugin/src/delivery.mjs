@@ -208,6 +208,11 @@ function buildPatchDelivery(store, root, rels, sessionID) {
   };
 }
 
+/** Whether `tool` is one whose result this file appends to (read, edit, write, patch, shell); context.mjs follows the same set. */
+export function isDeliveryTool(tool) {
+  return PATH_TOOLS.has(tool) || tool === 'patch' || tool === 'shell';
+}
+
 export function appendToResult(result, text) {
   if (Array.isArray(result?.content)) result.content.push({ type: 'text', text });
   else if (typeof result?.content === 'string') result.content = `${result.content}\n\n${text}`;
@@ -240,7 +245,7 @@ export function createDeliveryHandlers({ openStore, rootOf, directory, fenced })
   }
 
   async function onBefore(input) {
-    if (!PATH_TOOLS.has(input?.tool) && input?.tool !== 'patch' && input?.tool !== 'shell') return;
+    if (!isDeliveryTool(input?.tool)) return;
     const root = rootOf();
     if (!root) return;
     await fenced('delivery', root, () => {

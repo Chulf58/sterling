@@ -15360,6 +15360,9 @@ function buildPatchDelivery(store, root, rels, sessionID) {
     }
   };
 }
+function isDeliveryTool(tool) {
+  return PATH_TOOLS.has(tool) || tool === "patch" || tool === "shell";
+}
 function appendToResult(result, text) {
   if (Array.isArray(result?.content)) result.content.push({ type: "text", text });
   else if (typeof result?.content === "string") result.content = `${result.content}
@@ -15386,7 +15389,7 @@ function createDeliveryHandlers({ openStore, rootOf, directory, fenced }) {
     return null;
   }
   async function onBefore(input) {
-    if (!PATH_TOOLS.has(input?.tool) && input?.tool !== "patch" && input?.tool !== "shell") return;
+    if (!isDeliveryTool(input?.tool)) return;
     const root = rootOf();
     if (!root) return;
     await fenced("delivery", root, () => {
@@ -16619,16 +16622,11 @@ function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString())
 }
 function takeNotices(root, now) {
   const notices = readNotices(root);
-  if (!notices.length) return [];
-  let changed = false;
-  for (const n of notices) {
-    if (!n.shown_at) {
-      n.shown_at = now;
-      changed = true;
-    }
-  }
-  if (changed) writeJsonAtomic(join24(root, NOTICES_REL), notices);
-  return notices;
+  const fresh = notices.filter((n) => !n.shown_at);
+  if (!fresh.length) return [];
+  for (const n of fresh) n.shown_at = now;
+  writeJsonAtomic(join24(root, NOTICES_REL), notices);
+  return fresh;
 }
 function pruneShownNotices(root) {
   const notices = readNotices(root);
@@ -18533,12 +18531,16 @@ var BRIEF_SCAN_CAP = 2e4;
 function notStagedLine(kase) {
   return `STERLING DISPATCH STAGING (H19): this session's brief could not be staged from [${kase}] \u2014 YOUR KNOWLEDGE WAS NOT STAGED: no owning articles, hazards or decisions were delivered for your task. Do not assume the store is silent on it: rely on your dispatch brief for knowledge pointers and query the store for the area before acting. File-touch delivery still fires on your first read or edit.`;
 }
+var VOLATILE_HEADER = "STERLING CONTEXT (added by the Sterling plugin, not typed by the user):";
 function briefOf(messages) {
   const first = Array.isArray(messages) ? messages.find((m) => m?.role === "user") : null;
   if (!first) return "";
   const content = first.content;
   const text = typeof content === "string" ? content : Array.isArray(content) ? content.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n") : "";
-  return text.slice(0, BRIEF_SCAN_CAP);
+  const appended = text.indexOf(`
+
+${VOLATILE_HEADER}`);
+  return (appended >= 0 ? text.slice(0, appended) : text).slice(0, BRIEF_SCAN_CAP);
 }
 function stageChild({ store, root, sessionID, agent: agentName, brief, disclosure: disclosure2 = "" }) {
   const agent = agentRole(agentName);
@@ -18977,6 +18979,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   const maintenanceCache = /* @__PURE__ */ new Map();
   const stagedCache = /* @__PURE__ */ new Map();
   const boardCache = /* @__PURE__ */ new Map();
+  const delivered = /* @__PURE__ */ new Map();
   const registrySeen = /* @__PURE__ */ new Map();
   function statusLine(root) {
     const hit = statusCache.get(root);
@@ -19081,16 +19084,22 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       return `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
     }
   }
+  function resolvePluginRoot() {
+    try {
+      return { pluginRoot: pluginRootOverride ?? sterlingRoot() };
+    } catch (e) {
+      return { pluginRoot: null, error: e };
+    }
+  }
   async function onContext(input) {
     const root = rootOf();
     if (!root) return;
     await fenced("context", root, async () => {
       await sessionSync(root, input.sessionID);
-      const restore = await rotationRestore(root, input.sessionID);
-      let pluginRoot = null;
+      const { pluginRoot, error } = resolvePluginRoot();
       let layer;
       try {
-        pluginRoot = pluginRootOverride ?? sterlingRoot();
+        if (error) throw error;
         layer = renderSterlingLayer(root, pluginRoot);
       } catch (e) {
         logLine(root, `context: layer render failed: ${errText(e)}`);
@@ -19098,64 +19107,121 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
 
 ${opencodeHostTail(pluginRoot)}`;
       }
-      const blocks = [layer, statusLine(root)];
-      const state = operatingStateLines(root, pluginRoot, { opener: openStore });
-      blocks.push(...state.lines);
-      blocks.push(...maintenanceBlocks(root, state.config));
+      const blocks = [layer];
       const kind = await sessionKind(getSession?.(), input.sessionID, parents);
       if (kind.why) {
         logLine(root, `context: child staging skipped for ${input.sessionID}, session lookup failed: ${kind.why}`);
         blocks.push(notStagedLine("session-lookup-failed"));
-      } else if (kind.kind === "root") {
-        if (!inWorkerChild(env)) {
-          try {
-            const planLock = planLockSection({ cwd: root, source: "opencode" }).context.trim();
-            if (planLock) blocks.push(planLock);
-          } catch (e) {
-            logLine(root, `context: plan lock section failed: ${errText(e)}`);
-            blocks.push(`PLAN LOCK UNAVAILABLE (${errText(e)}): the plan lock section is not stated this turn; check it with plan-lock.mjs --show.`);
-          }
-        }
-        if (sweepStale && !inWorkerChild(env) && !swept.has(root)) {
-          swept.add(root);
-          let line;
-          try {
-            line = await sweepStale(root);
-          } catch (e) {
-            line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
-          }
-          if (line) {
-            logLine(root, `context: ${line}`);
-            blocks.push(line);
-          }
-        }
-        if (!inWorkerChild(env) && registrySeen.get(root) !== input.sessionID) {
-          registrySeen.set(root, input.sessionID);
-          try {
-            refreshRegistryRow(root, { config: state.config, at: now() });
-          } catch (e) {
-            logLine(root, `context: project registry refresh failed: ${errText(e)}`);
-            blocks.push(`STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
-          }
-        }
-        const undeclared = undeclaredBlock(root, state.config);
-        if (undeclared) blocks.push(undeclared);
-        if (!inWorkerChild(env)) {
-          const board = boardBlock(root, state.config, input.sessionID);
-          if (board) blocks.push(board);
-        }
-      } else {
+      } else if (kind.kind === "child") {
         const staged = await childStaging(root, input);
         if (staged) blocks.push(staged);
       }
-      if (restore) blocks.push(restore);
-      const notices = inWorkerChild(env) ? [] : takeNotices(root, now());
-      if (notices.length) blocks.push(`STERLING NOTICES (from the end of the last turn):
-${notices.map((n) => `- ${n.text}`).join("\n")}`);
       input.system.push({ type: "text", text: blocks.join("\n\n") });
     });
   }
-  return { onContext, resetStatus: (root) => (statusCache.delete(root), maintenanceCache.delete(root), boardCache.delete(root)) };
+  async function volatileBlocks(root, sessionID, kind) {
+    const { pluginRoot } = resolvePluginRoot();
+    const state = operatingStateLines(root, pluginRoot, { opener: openStore });
+    const out = [
+      { key: "status", text: statusLine(root) },
+      { key: "operating-state", text: state.lines.join("\n\n") },
+      { key: "maintenance", text: maintenanceBlocks(root, state.config).join("\n\n") }
+    ];
+    if (kind === "root") {
+      if (!inWorkerChild(env)) {
+        let planLock;
+        try {
+          planLock = planLockSection({ cwd: root, source: "opencode" }).context.trim();
+        } catch (e) {
+          logLine(root, `context: plan lock section failed: ${errText(e)}`);
+          planLock = `PLAN LOCK UNAVAILABLE (${errText(e)}): the plan lock section is not stated this turn; check it with plan-lock.mjs --show.`;
+        }
+        out.push({ key: "plan-lock", text: planLock, cleared: "PLAN LOCK: no plan lock is active now; the one shown earlier no longer applies." });
+      }
+      if (sweepStale && !inWorkerChild(env) && !swept.has(root)) {
+        swept.add(root);
+        let line;
+        try {
+          line = await sweepStale(root);
+        } catch (e) {
+          line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
+        }
+        if (line) {
+          logLine(root, `context: ${line}`);
+          out.push({ text: line });
+        }
+      }
+      if (!inWorkerChild(env) && registrySeen.get(root) !== sessionID) {
+        registrySeen.set(root, sessionID);
+        try {
+          refreshRegistryRow(root, { config: state.config, at: now() });
+        } catch (e) {
+          logLine(root, `context: project registry refresh failed: ${errText(e)}`);
+          out.push({ text: `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.` });
+        }
+      }
+      out.push({ key: "undeclared", text: undeclaredBlock(root, state.config), cleared: "UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies." });
+      if (!inWorkerChild(env)) out.push({ key: "board", text: boardBlock(root, state.config, sessionID), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
+    }
+    out.push({ key: "restore", text: await rotationRestore(root, sessionID) });
+    return out;
+  }
+  async function dueText(root, sessionID, where) {
+    const kind = await sessionKind(getSession?.(), sessionID, parents);
+    if (kind.why) logLine(root, `context: session ${sessionID} could not be told root or child at its ${where} (${kind.why}); only the lines every session gets are delivered`);
+    const blocks = await volatileBlocks(root, sessionID, kind.why ? "unknown" : kind.kind);
+    const seen = delivered.get(sessionID) ?? remember(delivered, sessionID, /* @__PURE__ */ new Map());
+    const due = [];
+    for (const b of blocks) {
+      if (!b.key) {
+        if (b.text) due.push(b.text);
+        continue;
+      }
+      const last = seen.get(b.key) ?? "";
+      if (b.text === last) continue;
+      if (b.text) due.push(b.text);
+      else if (b.cleared) due.push(b.cleared);
+      seen.set(b.key, b.text);
+    }
+    if (!kind.why && kind.kind === "root" && !inWorkerChild(env)) {
+      const notices = takeNotices(root, now());
+      if (notices.length) due.push(`STERLING NOTICES (new since the last ones you were shown):
+${notices.map((n) => `- ${n.text}`).join("\n")}`);
+    }
+    return due.length ? `${VOLATILE_HEADER}
+
+${due.join("\n\n")}` : "";
+  }
+  async function onPrompt(input) {
+    const root = rootOf();
+    if (!root) return;
+    await fenced("context", root, async () => {
+      if (typeof input?.prompt?.text !== "string") throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
+      const text = await dueText(root, input.sessionID, "prompt");
+      if (text) input.prompt.text = `${input.prompt.text}
+
+${text}`;
+    });
+  }
+  async function onToolResult(input) {
+    if (!isDeliveryTool(input?.tool) || input.status !== "completed") return;
+    const root = rootOf();
+    if (!root) return;
+    await fenced("context", root, async () => {
+      const content = input.result?.content;
+      if (!Array.isArray(content) && typeof content !== "string") throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
+      const text = await dueText(root, input.sessionID, "tool call");
+      if (text) appendToResult(input.result, text);
+    });
+  }
+  return {
+    onContext,
+    onPrompt,
+    onToolResult,
+    resetStatus: (root) => (statusCache.delete(root), maintenanceCache.delete(root), boardCache.delete(root)),
+    // Compaction can summarize away what was delivered: the session's next prompt gets the whole set again.
+    resetSession: (sessionID) => void delivered.delete(sessionID)
+  };
 }
 
 // packages/opencode-plugin/src/pr-loop.mjs
@@ -19594,6 +19660,123 @@ function createPromptHandler({ openStore, rootOf, fenced, env = process.env }) {
 TUI selection (one-shot): the user has selected ${selection.type} '${selection.record_id}'. Resolve the selected record via knowledge_get before answering.`;
     });
   };
+}
+
+// packages/opencode-plugin/src/pressure.mjs
+init_dist();
+var STEP_STARTED = "session.step.started";
+var STEP_ENDED = "session.step.ended";
+var STEP_FAILED = "session.step.failed";
+var EXECUTION_ENDS = /* @__PURE__ */ new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"]);
+function stepFillTokens(tokens) {
+  const n = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+  const input = n(tokens?.input);
+  const read = n(tokens?.cache?.read);
+  const write = n(tokens?.cache?.write);
+  if (input === null || read === null || write === null) return null;
+  const used = input + read + write;
+  return used > 0 ? used : null;
+}
+function createPressureWatch({ rootOf, fenced, getSession, parents, listModels, env = process.env }) {
+  const sessions = /* @__PURE__ */ new Map();
+  const opencodeWindows = /* @__PURE__ */ new Map();
+  function stateOf(sessionID) {
+    return sessions.get(sessionID) ?? remember(sessions, sessionID, { model: null, used: null, ran: false, soft: false, hard: false, noted: false });
+  }
+  function onEvent(ev) {
+    const sessionID = ev?.data?.sessionID;
+    if (typeof sessionID !== "string" || !sessionID) return;
+    if (ev.type === STEP_STARTED) {
+      const model = ev.data.model;
+      if (model && typeof model.id === "string" && model.id) stateOf(sessionID).model = { providerID: typeof model.providerID === "string" ? model.providerID : "", id: model.id };
+    } else if (ev.type === STEP_ENDED || ev.type === STEP_FAILED) {
+      const s2 = stateOf(sessionID);
+      s2.ran = true;
+      const used = stepFillTokens(ev.data.tokens);
+      if (used !== null) s2.used = used;
+    } else if (EXECUTION_ENDS.has(ev.type)) {
+      stateOf(sessionID).ran = true;
+    }
+  }
+  async function opencodeWindow(model) {
+    const key = `${model.providerID}/${model.id}`;
+    if (opencodeWindows.has(key)) return { window: opencodeWindows.get(key) };
+    let list;
+    try {
+      list = await listModels?.();
+    } catch (e) {
+      return { why: `OpenCode's model list failed: ${errText(e)}` };
+    }
+    if (!Array.isArray(list)) return { why: `OpenCode's model list is ${list === void 0 ? "unavailable" : "not an array"}` };
+    const found = list.find((m) => m?.providerID === model.providerID && (m?.modelID === model.id || m?.id === model.id));
+    const window = found?.limit?.context;
+    if (typeof window !== "number" || !(window > 0)) return { why: `OpenCode's model list has no context limit for ${key}` };
+    opencodeWindows.set(key, window);
+    return { window };
+  }
+  async function windowFor(model, windows) {
+    const base2 = model.id.replace(/\[[^\]]*\]$/, "");
+    const own = windows[`${model.providerID}/${model.id}`] ?? windows[model.id] ?? windows[base2];
+    if (own !== void 0) return { window: own, source: "" };
+    const oc = await opencodeWindow(model);
+    if (oc.window) return { window: oc.window, source: " (window from OpenCode's model list)" };
+    if (windows.default !== void 0) return { window: windows.default, source: " (window from context_watch.windows.default)" };
+    return { why: `${oc.why}, and context_watch.windows has no entry for it and no default` };
+  }
+  const notMeasured = (why) => `Sterling context pressure: not measured for this session (${why}), so no soft or hard context-pressure line will appear; watch the session's length yourself. (once per session)`;
+  async function lineFor(root, s2) {
+    if (s2.hard || !s2.ran) return "";
+    const note = (why) => {
+      if (s2.noted) return "";
+      s2.noted = true;
+      return notMeasured(why);
+    };
+    if (s2.used === null) return note("OpenCode reported no token usage for this session's turns to the plugin");
+    if (!s2.model) return note("OpenCode reported no model for this session's turns");
+    const { config, configUnreadable } = readProjectConfig2(root);
+    if (configUnreadable) return note(".sterling/config.json is unreadable");
+    let cw;
+    try {
+      cw = parseConfig(config ?? {}).context_watch;
+    } catch (e) {
+      return note(`.sterling/config.json is invalid: ${errText(e)}`);
+    }
+    const w = await windowFor(s2.model, cw.windows);
+    const modelName = `${s2.model.providerID}/${s2.model.id}`;
+    if (w.why) return note(`no context window for ${modelName}: ${w.why}`);
+    const fill = 100 * s2.used / w.window;
+    if (fill > 100) return note(`${s2.used} tokens exceed the ${w.window}-token window${w.source} for ${modelName}, so that window is wrong for it`);
+    const { soft_pct: soft, hard_pct: hard } = cw.conductor;
+    if (fill >= hard) {
+      s2.hard = true;
+      s2.soft = true;
+      return `Sterling context warning: fill ${fill.toFixed(1)}% of the ${w.window}-token window is past the ${hard}% target \u2192 finish the open work and commit it; delegate reads and mechanical work to subagents (P1).${w.source} (once per session)`;
+    }
+    if (fill >= soft && !s2.soft) {
+      s2.soft = true;
+      return `Sterling context pressure: fill ${fill.toFixed(1)}% \u2265 soft threshold ${soft}% \u2192 prefer finishing open work, delegate reads to subagents.${w.source} (once per session)`;
+    }
+    return "";
+  }
+  async function onPrompt(input) {
+    if (inWorkerChild(env)) return;
+    const root = rootOf();
+    if (!root) return;
+    const sessionID = input?.sessionID;
+    const s2 = typeof sessionID === "string" ? sessions.get(sessionID) : void 0;
+    if (!s2 || s2.hard || !s2.ran) return;
+    await fenced("prompt", root, async () => {
+      if (typeof input?.prompt?.text !== "string") throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
+      const kind = await sessionKind(getSession?.(), sessionID, parents);
+      if (kind.why) throw new Error(`context pressure skipped: could not tell whether session ${sessionID} is a root session (${kind.why})`);
+      if (kind.kind !== "root") return;
+      const line = await lineFor(root, s2);
+      if (line) input.prompt.text = `${input.prompt.text}
+
+${line}`;
+    });
+  }
+  return { onEvent, onPrompt };
 }
 
 // packages/opencode-plugin/src/settle.mjs
@@ -21123,6 +21306,7 @@ function createSterlingServer(deps = {}) {
   const bootstrap = deps.bootstrap ?? createBootstrapHandler(deps);
   function createLocation(directory) {
     let session = null;
+    let models = null;
     let chain = Promise.resolve();
     const parents = /* @__PURE__ */ new Map();
     const rootOf = () => projectRoot(directory);
@@ -21143,7 +21327,7 @@ function createSterlingServer(deps = {}) {
     }
     const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env });
     const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
-    const { onContext, resetStatus } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
+    const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
     const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
     const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
     const dispatch = createDispatchHandlers({ rootOf, fenced });
@@ -21160,10 +21344,22 @@ function createSterlingServer(deps = {}) {
       await axis.onAfter(input);
       await dispatch.onAfter(input);
       await recordResearch(input);
+      await onVolatileResult(input);
     }
-    const onPrompt = createPromptHandler({ openStore, rootOf, fenced, env });
-    const onCompaction = createCompactionHandler({ rootOf, fenced });
+    const onSelection = createPromptHandler({ openStore, rootOf, fenced, env });
+    const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels: () => models?.list?.(), env });
+    async function onPrompt(input) {
+      await onSelection(input);
+      await onVolatile(input);
+      await pressure.onPrompt(input);
+    }
+    const compaction = createCompactionHandler({ rootOf, fenced });
+    async function onCompaction(input) {
+      if (typeof input?.sessionID === "string") resetSession(input.sessionID);
+      await compaction(input);
+    }
     async function onEvent(ev) {
+      if (rootOf()) pressure.onEvent(ev);
       if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
       const evDir = ev.location?.directory;
       if (evDir !== void 0 && resolve14(String(evDir)) !== resolve14(directory)) return;
@@ -21217,6 +21413,7 @@ function createSterlingServer(deps = {}) {
     const handlers = { context: onContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };
     async function bind(ctx, guarded) {
       session = ctx.session;
+      models = ctx.model;
       const root = rootOf();
       if (!guarded) {
         const why = `this OpenCode has no ctx.permission.hook (it needs 2.0.22 or later), so the Sterling store guard (deny on .sterling/sterling.db) is NOT registered at ${directory}; shell commands are NOT guarded at all, only the edit, write and patch deny in .opencode/opencode.json holds, and project agent files in .opencode/agents/ with their own edit rules are unguarded`;
