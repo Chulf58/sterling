@@ -281,8 +281,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
           line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
         }
         if (line) {
-          logLine(root, `context: ${line}`);
           heldLines.set(`${root}\0sweep`, line);
+          logLine(root, `context: ${line}`);
         }
       }
       // H1's registry step, once per root session: last-seen and the row's stack tags
@@ -293,8 +293,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         try {
           refreshRegistryRow(root, { config: state.config, at: now() });
         } catch (e) {
-          logLine(root, `context: project registry refresh failed: ${errText(e)}`);
           heldLines.set(`${root}\0registry`, `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
+          logLine(root, `context: project registry refresh failed: ${errText(e)}`);
         }
       }
       out.push({ key: 'undeclared', text: undeclaredBlock(root, state.config), cleared: 'UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies.' });
@@ -361,8 +361,9 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         notices = takeNotices(root, now());
       } catch (e) {
         // P5: said in-band and logged. The other lines are held back, unmarked, until it reads again.
-        logLine(root, `context: pending notices unreadable at the ${where}: ${errText(e)}`);
+        // The claims go back first: the log write can throw, and a claim neither restored nor committed is lost.
         release();
+        logLine(root, `context: pending notices unreadable at the ${where}: ${errText(e)}`);
         return {
           text: `${VOLATILE_HEADER}\n\nSTERLING NOTICES UNREADABLE (${errText(e)}): the pending notices in ${NOTICES_REL} could not be read, so Sterling's other session lines are held back until they can; fix or delete that file.`,
           commit: () => {},

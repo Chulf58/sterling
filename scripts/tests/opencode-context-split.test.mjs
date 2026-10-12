@@ -414,3 +414,24 @@ test('a held one-shot line is delivered exactly once when two prompts overlap, a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a claimed one-shot line is restored even when the log write that reports an unreadable notices file throws', async () => {
+  const dir = makeProject();
+  try {
+    let sweeps = 0;
+    const h = handler(dir, { sweepStale: async () => (++sweeps === 1 ? 'SWEEP-LINE-LOGFAIL' : '') });
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(dir, notices.NOTICES_REL), '{ not json');
+    await appended(h, 'ses_root'); // the sweep line is produced and held while the notices cannot be read
+    const log = join(dir, '.sterling', 'transient', 'opencode-plugin.log');
+    rmSync(log, { force: true });
+    mkdirSync(log); // appending to a directory throws, so logLine throws
+    await assert.rejects(appended(h, 'ses_root'), 'the failing log write surfaces');
+    rmSync(log, { recursive: true });
+    writeFileSync(join(dir, notices.NOTICES_REL), '[]');
+    const fixed = [await appended(h, 'ses_root'), await appended(h, 'ses_other')].filter((t) => t.includes('SWEEP-LINE-LOGFAIL'));
+    assert.equal(fixed.length, 1, 'the claimed line was not lost with the failed log write, and is delivered once');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

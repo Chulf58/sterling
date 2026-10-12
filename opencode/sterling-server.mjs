@@ -19230,8 +19230,8 @@ ${opencodeHostTail(pluginRoot)}`;
           line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
         }
         if (line) {
-          logLine(root, `context: ${line}`);
           heldLines.set(`${root}\0sweep`, line);
+          logLine(root, `context: ${line}`);
         }
       }
       if (!inWorkerChild(env) && registrySeen.get(root) !== sessionID) {
@@ -19239,8 +19239,8 @@ ${opencodeHostTail(pluginRoot)}`;
         try {
           refreshRegistryRow(root, { config: state.config, at: now() });
         } catch (e) {
-          logLine(root, `context: project registry refresh failed: ${errText(e)}`);
           heldLines.set(`${root}\0registry`, `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
+          logLine(root, `context: project registry refresh failed: ${errText(e)}`);
         }
       }
       out.push({ key: "undeclared", text: undeclaredBlock(root, state.config), cleared: "UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies." });
@@ -19288,8 +19288,8 @@ ${opencodeHostTail(pluginRoot)}`;
       try {
         notices = takeNotices(root, now());
       } catch (e) {
-        logLine(root, `context: pending notices unreadable at the ${where}: ${errText(e)}`);
         release();
+        logLine(root, `context: pending notices unreadable at the ${where}: ${errText(e)}`);
         return {
           text: `${VOLATILE_HEADER}
 
