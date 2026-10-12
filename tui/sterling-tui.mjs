@@ -52471,7 +52471,7 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
     if (usesInstallVars(templateContent, entry.opencode_full?.permission)) {
       const unsafe = INSTALL_VARS.filter((v) => !isShellSafePath(vars[v]));
       if (unsafe.length) {
-        rows.push(refusal(rel, `${rel} needs ${unsafe.map((v) => `${v === "PROJECT_DIR" ? "the project path" : "the Sterling path"} (${vars[v]})`).join(" and ")} in shell permission rules, and a space, quote or glob character there cannot be matched reliably`, "use a project and Sterling path made of letters, digits and _@%+=:,./- only, then rerun /sterling:update"));
+        rows.push({ item: rel, status: "skipped", detail: `the Plan agent is not installed at this path: it needs ${unsafe.map((v) => `${v === "PROJECT_DIR" ? "the project path" : "the Sterling path"} (${vars[v]})`).join(" and ")} in shell permission rules, and a space, quote or glob character there cannot be matched reliably; rename the folder to a project and Sterling path made of letters, digits and _@%+=:,./- only, then rerun /sterling:update` });
         continue;
       }
     }
