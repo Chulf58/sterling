@@ -22,10 +22,11 @@
 // the same shape as check-projection-fresh, whose store-reading pattern this mirrors.
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { openMounted, openProject } from './lib/project.mjs';
 import { buildResolver } from './lib/citations.mjs';
+import { nonAuthoringSelfRoot } from './lib/self-root-role.mjs';
 import {
   lintRecordCitations,
   lintCitationCurrency,
@@ -167,11 +168,11 @@ const authority = config?.store_authority ?? 'primary';
 // Every OTHER project root (a consuming project run through sterling-check)
 // keeps the plain enforcement: init never writes machine_role there, and that
 // project's own store minted the ids its tree cites.
-const checksSelf = realpathSync(root) === realpathSync(selfRoot);
-const role = config?.machine_role;
+// The self-root and role predicate is shared with check-projection-fresh.
+const relaxed = nonAuthoringSelfRoot(root, selfRoot, config);
 
-if (violations.length > 0 && checksSelf && role !== 'authoring') {
-  const roleText = role === undefined ? 'machine_role undeclared' : `machine_role=${role}`;
+if (violations.length > 0 && relaxed) {
+  const { roleText } = relaxed;
   console.log(
     `record citations: ${violations.length} citation(s) do not resolve — REPORTED, NOT FAILED — ${roleText} (only the authoring machine's store can judge a citation):`
   );
