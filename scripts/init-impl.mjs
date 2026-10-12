@@ -142,12 +142,13 @@ if (!existsSync(target)) fail(`init REFUSED: target '${target}' does not exist`,
 // THE FOLDER NAMING RULE (user-ruled 2026-10-12, "Refuse with a rename hint"): the
 // project path goes into the OpenCode Plan agent's shell permission rules, so it must
 // pass the one shell-safe rule (shell-safe-path.mjs, the same predicate
-// opencode-install.mjs refuses plan.md on). Init refuses before any write and names
-// the safe folder and the mv command. The Sterling path goes into the same rules, but
-// an unsafe one only warns (user-ruled 2026-10-12, "Warn only for Sterling path"):
-// init continues and the Plan agent is not installed. The update ensure pass on an
-// existing project is exempt from both: other machines still hold projects at such
-// paths, and /sterling:update keeps its own plan.md refusal for them.
+// opencode-install.mjs skips the Plan agent on). Fresh init refuses the unsafe project
+// path before any write and names the safe folder and the mv command. The Sterling path
+// goes into the same rules, but an unsafe one only warns (user-ruled 2026-10-12, "Warn
+// only for Sterling path"): init continues and the Plan agent is not installed. The
+// update ensure pass on an existing project is exempt from both: other machines still
+// hold projects at such paths, and sync on one skips the Plan agent instead of refusing
+// (decision existing-unsafe-path-project-skips-opencode-plan-agent-not-refuse).
 if (!(hasFlag('--update-ensure') && existsSync(join(target, '.sterling', 'config.json')))) {
   const projectProblem = describeShellUnsafePath(fwd(target), { label: 'the project path', rerun: 're-run /sterling:init' });
   if (projectProblem) fail(`init REFUSED: ${projectProblem}\nNothing was written.`, 2);
