@@ -2,7 +2,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -410,6 +410,93 @@ test("store_authority: 'secondary' reports unresolved citations and passes; 'pri
     const primary = run();
     assert.equal(primary.status, 1, 'the minting store must still fail on an id that resolves to nothing');
     assert.match(primary.stderr, /citation_unresolved/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// GitHub issue #84: Sterling's own tree cites records minted in the AUTHORING
+// machine's project store, so a consumer clone with a populated store of its own
+// failed npm run check, and /sterling:update stopped there on every rerun. The
+// machine_role gate applies only when the checked root is the clone the script
+// ships in. The fixture becomes that clone by holding a copy of the committed
+// bin/ bundle (check-bundles-fresh proves it matches the source): the bundle's
+// own root is <fixture>/bin/.., so the fixture is "self". Any other root keeps
+// the plain enforcement, which consumer-check-distribution.test.mjs also pins.
+test('machine_role gates the citation check only on the Sterling clone itself: authoring fails, consumer and undeclared report and pass', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-citations-role-'));
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    mkdirSync(join(dir, 'bin'), { recursive: true });
+    copyFileSync(join(root, 'bin', 'check-record-citations.mjs'), join(dir, 'bin', 'check-record-citations.mjs'));
+    const writeConfig = (extra) =>
+      writeFileSync(
+        join(dir, '.sterling', 'config.json'),
+        JSON.stringify({
+          stack_tags: ['fixturedomain'],
+          domain_paths: { fixturedomain: join(dir, 'domain.db') },
+          ...extra,
+        })
+      );
+
+    // A POPULATED project store, so the empty-store skip does not fire.
+    const NOW = '2026-06-10T12:00:00.000Z';
+    const project = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    project.create({
+      id: randomUUID(), type: 'decision', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active',
+      superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      title: 'locally minted', statement: 's', alternatives_rejected: [], rationale: 'r', file_keys: [],
+    });
+    project.close();
+    new SterlingStore(join(dir, 'domain.db')).close();
+
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    writeFileSync(join(dir, 'src.mjs'), '// decision deadbeef minted on the authoring machine\n'); // not-a-citation: fixture
+    // Only src.mjs is tracked: the copied bundle stays untracked, so its own text is never scanned.
+    assert.equal(spawnSync('git', ['add', 'src.mjs'], { cwd: dir, encoding: 'utf8' }).status, 0);
+
+    const runSelf = () =>
+      spawnSync(process.execPath, [join(dir, 'bin', 'check-record-citations.mjs'), dir], {
+        encoding: 'utf8', cwd: dir, timeout: 120_000,
+      });
+    const runOther = () =>
+      spawnSync(process.execPath, [join(root, 'scripts', 'check-record-citations.mjs'), dir], {
+        encoding: 'utf8', cwd: dir, timeout: 120_000,
+      });
+
+    writeConfig({ machine_role: 'authoring' });
+    const authoring = runSelf();
+    assert.equal(authoring.status, 1, `the authoring clone must fail on an unresolved id: ${authoring.stdout}${authoring.stderr}`);
+    assert.match(authoring.stderr, /citation_unresolved/);
+    assert.match(authoring.stderr, /deadbeef/);
+
+    writeConfig({ machine_role: 'consumer' });
+    const consumer = runSelf();
+    assert.equal(consumer.status, 0, `a consumer clone must report and pass: ${consumer.stdout}${consumer.stderr}`);
+    assert.match(consumer.stdout, /REPORTED, NOT FAILED — machine_role=consumer \(only the authoring machine's store can judge a citation\)/);
+    assert.match(consumer.stdout, /citation_unresolved/, 'passing must not mean going quiet (P5)');
+    assert.match(consumer.stdout, /deadbeef/);
+
+    writeConfig({});
+    const undeclared = runSelf();
+    assert.equal(undeclared.status, 0, `an undeclared clone must report and pass: ${undeclared.stdout}${undeclared.stderr}`);
+    assert.match(undeclared.stdout, /REPORTED, NOT FAILED — machine_role undeclared \(only the authoring machine's store can judge a citation\)/);
+    assert.match(undeclared.stdout, /deadbeef/);
+
+    writeConfig({ machine_role: 'authoring', store_authority: 'secondary' });
+    const secondary = runSelf();
+    assert.equal(secondary.status, 0, `authoring with a secondary store still reports and passes: ${secondary.stdout}${secondary.stderr}`);
+    assert.match(secondary.stdout, /REPORTED, NOT FAILED \(store_authority='secondary'\)/);
+    assert.match(secondary.stdout, /deadbeef/);
+
+    // The same fixture checked by a script that does NOT ship in it is a
+    // consuming project: machine_role does not apply, and the id must resolve.
+    writeConfig({});
+    const otherUndeclared = runOther();
+    assert.equal(otherUndeclared.status, 1, `a non-self root with no machine_role keeps enforcement: ${otherUndeclared.stdout}${otherUndeclared.stderr}`);
+    assert.match(otherUndeclared.stderr, /deadbeef/);
+    writeConfig({ machine_role: 'consumer' });
+    assert.equal(runOther().status, 1, 'machine_role never relaxes the check on a root other than the clone itself');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
