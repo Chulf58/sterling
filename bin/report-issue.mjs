@@ -918,6 +918,7 @@ if (mode === "list") {
   }
   printSearchNotes(found);
   console.log(`report-issue: ${readQueue().length} report(s) pending locally in .sterling/${QUEUE_NAME}`);
+  await new Promise((resolve3) => process.stdout.write("", resolve3));
   process.exit(0);
 }
 var LABEL_COLORS = { "sterling-report": "5319e7", "severity:blocked": "d73a4a", "severity:workaround": "fbca04", "severity:friction": "c5def5" };
