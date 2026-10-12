@@ -2,6 +2,8 @@
 description: Initialize Sterling in this project — store, config, AGENTS.md, CLAUDE.md, agents, launcher, MCP wiring. Asks before assuming.
 ---
 
+**Folder naming rule.** The project's absolute path may use only letters, digits and `_@%+=:,./-` (name a folder `New-Project`, not `New Project`: a space becomes a hyphen and case is kept). Init refuses any other path before it writes anything, and prints the safe folder name and the `mv` command; relay both, and after the move re-run /sterling:init from the new folder. Check the path before asking the setup questions. The /sterling:update ensure pass does not apply this rule to an existing project.
+
 Run the setup questions, ONE question at a time (ask, don't guess; recommend where you can):
 
 1. Stack tags (`stack_tags` in `.sterling/config.json`, passed as `--stack-tags` — they mount domain knowledge stores).

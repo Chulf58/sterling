@@ -16345,6 +16345,11 @@ var HEADER = `${HANDOFF_MARKER} from this project's knowledge store \u2014 DO NO
 var TYPE_DIRS = { feature_article: "articles", decision: "decisions", anti_pattern: "anti-patterns" };
 var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
 
+// scripts/lib/shell-safe-path.mjs
+var SAFE_CHAR_CLASS = "[A-Za-z0-9_@%+=:,./-]";
+var SHELL_SAFE_PATH_RE = new RegExp(`^${SAFE_CHAR_CLASS}+$`);
+var SAFE_CHAR_RE = new RegExp(`^${SAFE_CHAR_CLASS}$`);
+
 // scripts/lib/opencode-install.mjs
 var fwd2 = (p) => p.replace(/\\/g, "/");
 var RESOLVER_SOURCE2 = `${RESOLVER_SOURCE}

@@ -71,6 +71,7 @@ import { renderOpenCodeFullText } from './agent-fences.mjs';
 import { renderOpenCodeAgent, parseOpenCodeHeader } from './opencode-agents.mjs';
 import { ignoredPaths } from './git-ignore-check.mjs';
 import { readHandoffSetting, PORTABLE_AGENT_PATHS } from './handoff-projection.mjs';
+import { isShellSafePath } from './shell-safe-path.mjs';
 
 export const STERLING_AGENTS_SUBDIR = '.opencode/agents/sterling';
 export const PROJECT_CONFIG_REL = '.opencode/opencode.json';
@@ -1158,8 +1159,9 @@ export function renderFullOpenCodeAgent(templateContent, label, entry, { primary
 const INSTALL_VARS = ['PROJECT_DIR', 'STERLING_ROOT'];
 const INSTALL_VAR_RE = /\{\{(PROJECT_DIR|STERLING_ROOT)\}\}/g;
 // A path that lands in a shell permission pattern and in the command the agent runs
-// must read the same in both without quoting, and must not hold a glob character.
-const SHELL_SAFE_PATH_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+// must read the same in both without quoting, and must not hold a glob character:
+// isShellSafePath (shell-safe-path.mjs), the rule /sterling:init also applies to the
+// project folder before it writes anything.
 
 function substituteInstallVars(text, vars) {
   return text.replace(INSTALL_VAR_RE, (token, name) => vars[name] ?? token);
@@ -1252,7 +1254,7 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
     const path = join(projectDir, rel);
     const templateContent = readFileSync(join(pluginRoot, 'agent-templates', entry.file), 'utf8');
     if (usesInstallVars(templateContent, entry.opencode_full?.permission)) {
-      const unsafe = INSTALL_VARS.filter((v) => !SHELL_SAFE_PATH_RE.test(vars[v]));
+      const unsafe = INSTALL_VARS.filter((v) => !isShellSafePath(vars[v]));
       if (unsafe.length) {
         rows.push(refusal(rel, `${rel} needs ${unsafe.map((v) => `${v === 'PROJECT_DIR' ? 'the project path' : 'the Sterling path'} (${vars[v]})`).join(' and ')} in shell permission rules, and a space, quote or glob character there cannot be matched reliably`, 'use a project and Sterling path made of letters, digits and _@%+=:,./- only, then rerun /sterling:update'));
         continue;
