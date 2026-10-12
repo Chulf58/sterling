@@ -51,6 +51,7 @@ import { isInstalledCopy } from './lib/installed-copy.mjs';
 import { cloneLauncherTarget, enableMarketplaceAutoUpdate, cloneCleanupLines } from './lib/consumer-cutover.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
 import { setupOpenCode } from './lib/opencode-install.mjs';
+import { describeShellUnsafePath, unsafeChars, SHELL_SAFE_CHARS_TEXT } from './lib/shell-safe-path.mjs';
 import { probeClaude } from './lib/claude-probe.mjs';
 import { renderClaudeText } from './lib/agent-fences.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
@@ -138,6 +139,27 @@ const canonical = (v) =>
 
 // ---- verify pass: every refusal happens BEFORE any write ----
 if (!existsSync(target)) fail(`init REFUSED: target '${target}' does not exist`, 2);
+// THE FOLDER NAMING RULE (user-ruled 2026-10-12, "Refuse with a rename hint"): the
+// project path goes into the OpenCode Plan agent's shell permission rules, so it must
+// pass the one shell-safe rule (shell-safe-path.mjs, the same predicate
+// opencode-install.mjs refuses plan.md on). Init refuses before any write and names
+// the safe folder and the mv command. The Sterling path goes into the same rules, but
+// an unsafe one only warns (user-ruled 2026-10-12, "Warn only for Sterling path"):
+// init continues and the Plan agent is not installed. The update ensure pass on an
+// existing project is exempt from both: other machines still hold projects at such
+// paths, and /sterling:update keeps its own plan.md refusal for them.
+if (!(hasFlag('--update-ensure') && existsSync(join(target, '.sterling', 'config.json')))) {
+  const projectProblem = describeShellUnsafePath(fwd(target), { label: 'the project path', rerun: 're-run /sterling:init' });
+  if (projectProblem) fail(`init REFUSED: ${projectProblem}\nNothing was written.`, 2);
+  const sterlingChars = unsafeChars(fwd(pluginRoot));
+  if (sterlingChars.length) {
+    process.stderr.write(
+      `init WARNING: the Sterling path '${fwd(pluginRoot)}' has ${sterlingChars.length === 1 ? 'a character' : 'characters'} that ${sterlingChars.length === 1 ? 'is' : 'are'} not shell-safe: ${sterlingChars.map((c) => JSON.stringify(c)).join(' ')}. ` +
+        'The OpenCode Plan agent (.opencode/agents/plan.md) needs this path in its shell permission rules, so it will not be installed while Sterling is there. ' +
+        `Init continues. To get the Plan agent, move Sterling to a path that uses only ${SHELL_SAFE_CHARS_TEXT}, then run /sterling:update.\n`
+    );
+  }
+}
 if (modeFlagGiven && !PROJECT_MODES.includes(modeFlag)) {
   fail(`init REFUSED: --mode must be 'hobby' or 'work' — got ${JSON.stringify(modeFlag ?? '')}`, 2);
 }

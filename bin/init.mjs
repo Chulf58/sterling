@@ -13197,8 +13197,8 @@ var crlf = (s2) => s2.replace(/\r?\n/g, "\r\n");
 var normalize3 = (s2) => s2.replace(/\r\n/g, "\n");
 function renderUpdateLauncher(pluginRoot2) {
   const template = readFileSync9(join17(pluginRoot2, "templates", UPDATE_TEMPLATE_WSL), "utf8");
-  const posix = pluginRoot2.replace(/\\/g, "/");
-  const cdPath = /^\/mnt\/[a-z](\/|$)/.test(posix) || !posix.startsWith("/") ? toWindowsPath(posix) : posix;
+  const posix2 = pluginRoot2.replace(/\\/g, "/");
+  const cdPath = /^\/mnt\/[a-z](\/|$)/.test(posix2) || !posix2.startsWith("/") ? toWindowsPath(posix2) : posix2;
   const body = template.replaceAll("{{WIN_PLUGIN_DIR}}", cdPath);
   return crlf(stampBody(body, "rem"));
 }
@@ -13804,8 +13804,8 @@ var toWindowsPath2 = (p) => {
   return m ? `${m[1].toUpperCase()}:${(m[2] ?? "/").replace(/\//g, "\\")}` : p.replace(/\//g, "\\");
 };
 var wslCdPath = (target2) => {
-  const posix = fwd5(target2);
-  return /^\/mnt\/[a-z](\/|$)/.test(posix) || !posix.startsWith("/") ? toWindowsPath2(posix) : posix;
+  const posix2 = fwd5(target2);
+  return /^\/mnt\/[a-z](\/|$)/.test(posix2) || !posix2.startsWith("/") ? toWindowsPath2(posix2) : posix2;
 };
 var legacySessionName = (target2) => `sterling-${basename2(target2).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project"}`;
 var sessionName = (target2) => `${legacySessionName(target2)}-${createHash3("sha256").update(fwd5(resolve6(target2))).digest("hex").slice(0, 4)}`;
@@ -14251,6 +14251,70 @@ import { homedir as homedir9 } from "node:os";
 import { dirname as dirname9, isAbsolute, join as join24, resolve as resolve7 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 init_dist();
+
+// scripts/lib/shell-safe-path.mjs
+import { lstatSync as lstatSync5 } from "node:fs";
+import { posix } from "node:path";
+var SAFE_CHAR_CLASS = "[A-Za-z0-9_@%+=:,./-]";
+var SHELL_SAFE_PATH_RE = new RegExp(`^${SAFE_CHAR_CLASS}+$`);
+var SAFE_CHAR_RE = new RegExp(`^${SAFE_CHAR_CLASS}$`);
+var SHELL_SAFE_CHARS_TEXT = "letters, digits and _@%+=:,./-";
+function isShellSafePath(path) {
+  return SHELL_SAFE_PATH_RE.test(path);
+}
+function unsafeChars(text) {
+  return [...new Set([...text].filter((c) => !SAFE_CHAR_RE.test(c)))];
+}
+function safeFolderName(name4) {
+  const out = name4.normalize("NFKD").replace(new RegExp("\\p{M}+", "gu"), "").replace(/\s+/g, "-").split("").filter((c) => SAFE_CHAR_RE.test(c)).join("").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
+  return out && out !== "." && out !== ".." ? out : null;
+}
+var shellQuote = (s2) => `'${s2.replace(/'/g, `'\\''`)}'`;
+function shellUnsafePathFix(path) {
+  if (isShellSafePath(path)) return null;
+  const parent = posix.dirname(path);
+  const name4 = posix.basename(path);
+  const nameUnsafe = unsafeChars(name4).length > 0;
+  const newName = nameUnsafe ? safeFolderName(name4) : null;
+  const unsafeParent = isShellSafePath(parent) ? null : deepestUnsafeDir(parent);
+  const target2 = newName === null ? null : posix.join(parent, newName);
+  const targetExists = target2 !== null && lstatSync5(target2, { throwIfNoEntry: false }) !== void 0;
+  return {
+    path,
+    chars: unsafeChars(path),
+    nameUnsafe,
+    unsafeParent,
+    folder: target2,
+    targetExists,
+    mv: target2 !== null && unsafeParent === null && !targetExists ? `mv ${shellQuote(path)} ${shellQuote(target2)}` : null
+  };
+}
+function deepestUnsafeDir(dir) {
+  let d = dir;
+  while (isShellSafePath(posix.basename(d)) && posix.dirname(d) !== d) d = posix.dirname(d);
+  return d;
+}
+function describeShellUnsafePath(path, { label, rerun }) {
+  const fix = shellUnsafePathFix(path);
+  if (!fix) return null;
+  const lines = [
+    `${label} '${path}' has ${fix.chars.length === 1 ? "a character" : "characters"} that ${fix.chars.length === 1 ? "is" : "are"} not shell-safe: ${fix.chars.map((c) => JSON.stringify(c)).join(" ")}. Sterling writes this path into OpenCode shell permission rules, and a space, quote, glob or non-ASCII character there cannot be matched reliably. A path may use only ${SHELL_SAFE_CHARS_TEXT}.`
+  ];
+  if (fix.nameUnsafe) {
+    lines.push(
+      fix.folder === null ? `No safe name can be made from '${posix.basename(path)}': rename the folder to one made of ${SHELL_SAFE_CHARS_TEXT}.` : fix.targetExists ? `The suggested folder '${fix.folder}' already exists, so pick another name made of ${SHELL_SAFE_CHARS_TEXT} and move the folder yourself, then ${rerun} from it.` : `Use the folder name '${posix.basename(fix.folder)}' (a space becomes a hyphen, case is kept).`
+    );
+  }
+  if (fix.unsafeParent !== null) {
+    lines.push(
+      `The parent directory '${fix.unsafeParent}' breaks the rule${fix.nameUnsafe ? " too" : ""}; Sterling does not rename parent directories. Move the folder to a location whose whole path uses only ${SHELL_SAFE_CHARS_TEXT}, then ${rerun} from there.`
+    );
+  }
+  if (fix.mv !== null) lines.push(`  ${fix.mv}`, `then ${rerun} from ${fix.folder}.`);
+  return lines.join("\n");
+}
+
+// scripts/lib/opencode-install.mjs
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
 var PROJECT_CONFIG_REL = ".opencode/opencode.json";
 var CONDUCTOR_AGENT = "sterling/conductor";
@@ -15069,7 +15133,6 @@ ${content.slice(fmEnd)}` };
 }
 var INSTALL_VARS = ["PROJECT_DIR", "STERLING_ROOT"];
 var INSTALL_VAR_RE = /\{\{(PROJECT_DIR|STERLING_ROOT)\}\}/g;
-var SHELL_SAFE_PATH_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
 function substituteInstallVars(text, vars) {
   return text.replace(INSTALL_VAR_RE, (token, name4) => vars[name4] ?? token);
 }
@@ -15128,7 +15191,7 @@ function planFullAgents({ projectDir, pluginRoot: pluginRoot2, tracked, models =
     const path = join24(projectDir, rel);
     const templateContent = readFileSync16(join24(pluginRoot2, "agent-templates", entry.file), "utf8");
     if (usesInstallVars(templateContent, entry.opencode_full?.permission)) {
-      const unsafe = INSTALL_VARS.filter((v) => !SHELL_SAFE_PATH_RE.test(vars[v]));
+      const unsafe = INSTALL_VARS.filter((v) => !isShellSafePath(vars[v]));
       if (unsafe.length) {
         rows.push(refusal(rel, `${rel} needs ${unsafe.map((v) => `${v === "PROJECT_DIR" ? "the project path" : "the Sterling path"} (${vars[v]})`).join(" and ")} in shell permission rules, and a space, quote or glob character there cannot be matched reliably`, "use a project and Sterling path made of letters, digits and _@%+=:,./- only, then rerun /sterling:update"));
         continue;
@@ -15402,6 +15465,18 @@ var canonical2 = (v) => JSON.stringify(
   (_, val) => val && typeof val === "object" && !Array.isArray(val) ? Object.fromEntries(Object.keys(val).sort().map((k) => [k, val[k]])) : val
 );
 if (!existsSync13(target)) fail(`init REFUSED: target '${target}' does not exist`, 2);
+if (!(hasFlag("--update-ensure") && existsSync13(join25(target, ".sterling", "config.json")))) {
+  const projectProblem = describeShellUnsafePath(fwd8(target), { label: "the project path", rerun: "re-run /sterling:init" });
+  if (projectProblem) fail(`init REFUSED: ${projectProblem}
+Nothing was written.`, 2);
+  const sterlingChars = unsafeChars(fwd8(pluginRoot));
+  if (sterlingChars.length) {
+    process.stderr.write(
+      `init WARNING: the Sterling path '${fwd8(pluginRoot)}' has ${sterlingChars.length === 1 ? "a character" : "characters"} that ${sterlingChars.length === 1 ? "is" : "are"} not shell-safe: ${sterlingChars.map((c) => JSON.stringify(c)).join(" ")}. The OpenCode Plan agent (.opencode/agents/plan.md) needs this path in its shell permission rules, so it will not be installed while Sterling is there. Init continues. To get the Plan agent, move Sterling to a path that uses only ${SHELL_SAFE_CHARS_TEXT}, then run /sterling:update.
+`
+    );
+  }
+}
 if (modeFlagGiven && !PROJECT_MODES.includes(modeFlag)) {
   fail(`init REFUSED: --mode must be 'hobby' or 'work' \u2014 got ${JSON.stringify(modeFlag ?? "")}`, 2);
 }
