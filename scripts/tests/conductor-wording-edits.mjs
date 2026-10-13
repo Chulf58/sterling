@@ -172,6 +172,20 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'carry on with whatever does not depend on the user\'s answer.\n',
     after: 'carry on with whatever does not depend on the user\'s answer.\n- A started task is owed until it reaches its end state: committed, landed (merged in a hobby project, pushed to its PR in a work project), review comments answered and their threads resolved, records reconciled. When only an outside wait is left (a review bot, a build, a lane), end the turn only while something will wake you when it is over: a running lane, or the wait running as a background Bash. A detached process sends no notice when it ends or dies, so a wait left to one is parked work. If a turn must end with nothing to wake you, say plainly what is awaited and where it will show (GitHub issue #79, 2026-10-12: in a work-mode project a Copilot review sat unanswered for about 45 minutes after a detached wait died silently, and turns ended with fixes uncommitted or review threads open until the user asked again).\n',
   },
+  {
+    commit: 'GitHub #87',
+    date: '2026-10-13',
+    reason: 'a dropped codex MCP server is recovered with the user running /mcp reconnect all and one retry before the Opus or Fable fallback, because Claude Code does not restart a dead stdio MCP server (GitHub issue #87; finding why-do-the-codex-mcp-tools-vanish-for-the-rest-of-a-claude-c)',
+    before: 'handed the same body through the `review-brief` skill. A practice, not a hook',
+    after: 'handed the same body through the `review-brief` skill. When a `codex` call returns "Connection closed", or Claude Code lists codex as failed to connect, the server has died, and Claude Code does not restart a dead stdio MCP server by itself: its tools stay gone for the rest of the session. Ask the user to run `/mcp reconnect all` (an interactive slash command, theirs to run), retry the call once, and only if it still fails fall back (Opus for review, Fable for sparring) and say so (GitHub issue #87; finding `why-do-the-codex-mcp-tools-vanish-for-the-rest-of-a-claude-c`). A practice, not a hook',
+  },
+  {
+    commit: 'GitHub #87',
+    date: '2026-10-13',
+    reason: 'the Astra sparring lane counts a dropped codex server as unavailable only after the reconnect-and-retry step (GitHub issue #87)',
+    before: 'With neither available, say so and proceed. Agree',
+    after: 'With neither available, say so and proceed. A dropped `codex` server counts as unavailable only after the reconnect-and-retry step in the Sol review paragraph above. Agree',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
