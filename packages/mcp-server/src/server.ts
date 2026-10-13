@@ -409,6 +409,14 @@ export function createSterlingServer(
 
   const json = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
 
+  // Param docs for id-taking params. OpenCode Code Mode shows a param's
+  // .describe() as a comment in the tool signature, so the addressing rule is
+  // visible before the first call (user-ruled 2026-10-13). Strings, not shared
+  // zod instances: a reused instance serves as a $ref (see cloneZod above).
+  const ID_LADDER = 'full uuid, exact slug, or unambiguous 8-char prefix';
+  const ID_EXACT_DESTROY = 'the EXACT full uuid: this call destroys, so a slug or an 8-char prefix is refused';
+  const RESOLVES_FULL_IDS = 'full uuids only; a slug or an 8-char prefix is refused because claimed items are hard-deleted';
+
   server.registerTool(
     'knowledge_create',
     {
@@ -453,7 +461,7 @@ export function createSterlingServer(
       description:
         "Fetch one record by id (full uuid, exact slug, or unambiguous 8-char prefix) — the full-fidelity read. version:<n> reads an archived prior version. With `field`: a windowed read of just that field — strings page by characters, arrays by elements (offset/length); returns {kind, total_chars|total_entries, offset, value|entries}; an offset past the end returns empty with the true total. Scalar/object fields return whole and refuse offset/length. Unknown field is refused naming the valid set; offset/length without field is refused. unreadable_domains (only when a mounted domain could not be read: each with its error) means a record held there cannot be found by this read.",
       inputSchema: strict({
-        id: z.string(),
+        id: z.string().describe(ID_LADDER),
         field: z.string().optional(),
         offset: z.number().int().nonnegative().optional(),
         length: z.number().int().positive().optional(),
@@ -484,7 +492,7 @@ export function createSterlingServer(
       description:
         "Split a feature_article: move a subset of its files[] / current_ac[] / live_test_refs into one or more NEW child articles. Prose moves verbatim, ac_ids are inherited (never renumbered), live_test_refs follow their ac_id, the parent keeps its slug (new version), and file coverage stays total. Refused: a moved path/ac_id not owned by the parent or claimed by two children, a child slug that duplicates another or an existing article, or moving every parent file. All validation runs first and the whole split is one transaction. resolves:[<full item ids>] explicitly closes open items of any lane except promotion_review that are keyed to the parent's chain, or that are the parent's article_oversize item (validated before the write; unnamed items stay open and are warned on the receipt). Returns {parent:{id,slug,version}, children:[{id,slug}], warnings[]} — warnings (e.g. still-oversize) never gate.",
       inputSchema: strict({
-        id: z.string(),
+        id: z.string().describe(`the parent feature_article: ${ID_LADDER}`),
         children: z
           .array(
             z.object({
@@ -504,7 +512,7 @@ export function createSterlingServer(
         resolves: z
           .array(z.string())
           .optional()
-          .describe('open maintenance-queue item ids this split discharges — validated before the write'),
+          .describe(`open maintenance-queue item ids this split discharges — ${RESOLVES_FULL_IDS}; validated before the write`),
       }),
     },
     ({ id, children, parent_what_it_does, parent_intended_behavior, reason, resolves }) =>
@@ -517,7 +525,7 @@ export function createSterlingServer(
       description:
         "Lift a passage out of one string field of a live record into a NEW record of a caller-chosen type (new_record.type required; todo/attestation refused); the source stays active minus the passage. (field, find) must match exactly once (0 or >1 matches refused with the count); replace (default '') is inserted literally. Edges are written both ways: new informed_by source, source cites new. The new record inherits the source scope (an explicit different scope is refused); attestation sources are refused; on a domain-held source a non-empty resolves is refused. All validation runs first and everything lands in one transaction. resolves:[<full item ids>] explicitly closes open reconcile_needed/refresh_reference items whose file_keys overlap the source record's (validated before the write; unnamed items stay open and are warned on the receipt). Returns {extracted, source:{id,version}, edges, warnings[]}.",
       inputSchema: strict({
-        id: z.string(),
+        id: z.string().describe(`the source record: ${ID_LADDER}`),
         field: z.string(),
         find: z.string(),
         replace: z.string().optional().describe('the text that replaces the matched passage in the source field — defaults to \'\' (pure excision)'),
@@ -531,7 +539,7 @@ export function createSterlingServer(
         resolves: z
           .array(z.string())
           .optional()
-          .describe('open maintenance-queue item ids this extract discharges — validated (plain lane, file_keys overlap) before the write'),
+          .describe(`open maintenance-queue item ids this extract discharges — ${RESOLVES_FULL_IDS}; validated (plain lane, file_keys overlap) before the write`),
       }),
     },
     ({ id, field, find, replace, new_record, reason, resolves }) =>
@@ -553,7 +561,7 @@ export function createSterlingServer(
     {
       description:
         "Size and composition without the body. With id: body_chars (what article_oversize judges; history excluded), history_chars, history_entries, supersedes_count, and over_threshold for a feature_article. Without id: per-type counts and sizes over the mounted stores, plus the 10 largest feature_article bodies against the threshold.",
-      inputSchema: strict({ id: z.string().optional() }),
+      inputSchema: strict({ id: z.string().describe(ID_LADDER).optional() }),
     },
     ({ id }) => json(tools.knowledgeStats(id))
   );
@@ -563,7 +571,10 @@ export function createSterlingServer(
     {
       description:
         "Retire a genuine DUPLICATE in favour of a surviving record: status=superseded, superseded_by=in_favor_of, no new row; it stays fetchable by id and its links survive, but queries stop serving it. Not for a merely wrong record — fix that with knowledge_update. in_favor_of is required and must be live. todos are refused (use board_remove / maintenance_remove).",
-      inputSchema: strict({ id: z.string(), in_favor_of: z.string() }),
+      inputSchema: strict({
+        id: z.string().describe(`the duplicate to retire: ${ID_LADDER}`),
+        in_favor_of: z.string().describe(`the live surviving record: ${ID_LADDER}`),
+      }),
     },
     ({ id, in_favor_of }) => json(tools.knowledgeRetire(id, in_favor_of))
   );
@@ -574,7 +585,7 @@ export function createSterlingServer(
       description:
         "Atomically replace a decision / anti_pattern / research_finding with a NEW record built from `fields` (a complete create-shaped body, not a delta) and mark old_id superseded by it, in one transaction. A slugless `fields` inherits the old slug; an explicit slug is collision-checked. If the old record enumerates 2+ rulings and the replacement leaves any uncovered, the call is refused naming them — carry them forward, or pass orphans_acknowledged:true. A reference_material whose subject is gone (its location was deleted) is closed here too: pass type 'decision' or 'research_finding' and `fields` for a short record of that type saying what happened; the reference is superseded by it and is no longer read, so it raises no further refresh_reference items. A reference whose subject still exists is repointed with knowledge_update; a duplicate goes to knowledge_retire. An open_question or disconfirmed_hypothesis whose subject is gone is closed the same way, with the same two closing types; one that still applies is updated with knowledge_update, and an answered open_question is closed there with resolution_status 'closed' and closed_into. resolves:[<full item ids>] closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to the old record's chain in the same transaction (validated before the write; unnamed items stay open). Other types are refused naming their exit path (todo → board_remove/maintenance_remove; feature_article → knowledge_update/knowledge_retire). Refusals write nothing.",
       inputSchema: strict({
-        old_id: z.string(),
+        old_id: z.string().describe(`the record being replaced: ${ID_LADDER}`),
         fields: passthrough,
         orphans_acknowledged: z.boolean().optional(),
         type: z
@@ -584,7 +595,7 @@ export function createSterlingServer(
         resolves: z
           .array(z.string())
           .optional()
-          .describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to the old record's chain that this supersession discharges — full ids, validated before the write"),
+          .describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to the old record's chain that this supersession discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write"),
       }),
     },
     ({ old_id, fields, orphans_acknowledged, type, resolves }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged, { type, resolves }))
@@ -596,12 +607,12 @@ export function createSterlingServer(
       description:
         "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body — pass only changed mutable fields; omitted fields are kept (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({
-        id: z.string(),
+        id: z.string().describe(ID_LADDER),
         body: passthrough,
         resolves: z
           .array(z.string())
           .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full ids, validated before the write'),
+          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write'),
         expected_version: z
           .number()
           .int()
@@ -621,13 +632,13 @@ export function createSterlingServer(
       description:
         "Append entries to an array field (history, files, current_ac, live_test_refs, …) without retransmitting it; same versioned write path as knowledge_update. `field` may be an array-element selector 'arr[key=value].sub' to append inside ONE element's array (e.g. field \"live_test_refs[ac_id=AC4].test_paths\", entries [\"tests/x.test.mjs\"]); the selector must match exactly one element and sub must already be an array on it. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain, plus an article_missing item when an appended files[] entry's path is one of that item's file_keys (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({
-        id: z.string(),
+        id: z.string().describe(ID_LADDER),
         field: z.string(),
         entries: z.array(z.unknown()),
         resolves: z
           .array(z.string())
           .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges — full ids, validated before the write'),
+          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write'),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
@@ -640,14 +651,14 @@ export function createSterlingServer(
       description:
         "Replace one passage inside a string field without retransmitting it. `find` must match EXACTLY ONCE — zero or multiple matches are refused with the count; extend find to disambiguate. `field` may be an array-element selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\"), which must match exactly one element. A BOOLEAN sub-field is set by value: find is its current value ('true'/'false'), replace the new one (e.g. field \"files[path=scripts/prep.mjs].unverified\", find 'true', replace 'false' clears the flag); an absent optional boolean such as files[].entry reads as 'false', so field \"files[path=skills/drain/SKILL.md].entry\", find 'false', replace 'true' sets it. Same versioned write path as knowledge_update. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt with chars_before/chars_after; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({
-        id: z.string(),
+        id: z.string().describe(ID_LADDER),
         field: z.string(),
         find: z.string(),
         replace: z.string(),
         resolves: z
           .array(z.string())
           .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full ids, validated before the write'),
+          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write'),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
@@ -688,7 +699,7 @@ export function createSterlingServer(
         resolves: z
           .array(z.string())
           .optional()
-          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full ids, validated before the write'),
+          .describe('open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record\'s chain that this write discharges — full uuids only (a slug or an 8-char prefix is refused), validated before the write'),
         projection: z.enum(['full', 'digest']).optional(),
       }),
     },
@@ -701,7 +712,7 @@ export function createSterlingServer(
     {
       description:
         "Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article, todo and attestation never promote; only a project-scoped record the project store holds does; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The receipt carries domain_description, the target domain's description. The echo (`promoted`) defaults to a digest; projection:\"full\" returns the whole record.",
-      inputSchema: strict({ id: z.string(), domain: z.string(), projection: z.enum(['full', 'digest']).optional() }),
+      inputSchema: strict({ id: z.string().describe(ID_LADDER), domain: z.string(), projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection))
   );
@@ -721,7 +732,7 @@ export function createSterlingServer(
         system_reason: z.string().optional(),
         stack_tags: z.array(z.string()).optional(),
         measured_at_head: z.string().optional(),
-        blocked_by: z.array(z.string()).optional(),
+        blocked_by: z.array(z.string()).describe(`open user board items this one waits on, each by ${ID_LADDER}`).optional(),
         needs: z.enum(BOARD_NEEDS).optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
@@ -753,7 +764,7 @@ export function createSterlingServer(
     {
       description:
         "Remove a board or queue item — the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed.",
-      inputSchema: strict({ id: z.string() }),
+      inputSchema: strict({ id: z.string().describe(ID_EXACT_DESTROY) }),
     },
     ({ id }) => json(tools.boardRemove(id))
   );
@@ -763,7 +774,7 @@ export function createSterlingServer(
     {
       description:
         "Remove a maintenance-queue (source:\"system\") item once its fulfilling artifact exists; user board items are refused. Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). Logged to the drain log; the result discloses artifact_evidence (capped compact records plus artifact_evidence_count, the de-duplicated match count within the same 200-record scan window) like board_remove — an empty list means verify against HEAD before closing.",
-      inputSchema: strict({ id: z.string() }),
+      inputSchema: strict({ id: z.string().describe(ID_EXACT_DESTROY) }),
     },
     ({ id }) => json(tools.maintenanceRemove(id))
   );
@@ -774,13 +785,13 @@ export function createSterlingServer(
       description:
         "Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; \"standalone\" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation (user items only; \"\" clears it). A text or file_keys change re-stamps measured_at_head to HEAD; pass a resolvable 40-hex sha to set it explicitly (unresolvable is refused). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:\"full\" returns the stored record.",
       inputSchema: strict({
-        id: z.string(),
+        id: z.string().describe(ID_LADDER),
         text: z.string().optional(),
         priority: z.enum(['low', 'normal', 'high']).optional(),
         file_keys: z.array(z.string()).optional(),
         objective: z.string().optional(),
         measured_at_head: z.string().optional(),
-        blocked_by: z.array(z.string()).optional(),
+        blocked_by: z.array(z.string()).describe(`replaces the list: open user board items, each by ${ID_LADDER}; [] clears it`).optional(),
         needs: z.union([z.enum(BOARD_NEEDS), z.literal('')]).optional(),
         projection: z.enum(['full', 'digest']).optional(),
       }),
@@ -793,7 +804,7 @@ export function createSterlingServer(
     {
       description:
         "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` — the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed). An item other live items wait on returns unblocks: those items as `name (id8)`.",
-      inputSchema: strict({ id: z.string() }),
+      inputSchema: strict({ id: z.string().describe(ID_LADDER) }),
     },
     ({ id }) => json(tools.boardGet(id))
   );
@@ -803,7 +814,7 @@ export function createSterlingServer(
     {
       description:
         "Replace one passage inside a board/queue item's text in place (id stable, no new version). `find` must match EXACTLY ONCE — zero or multiple matches are refused with the count, nothing written. Works on user and system items. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
-      inputSchema: strict({ id: z.string(), find: z.string(), replace: z.string(), projection: z.enum(['full', 'digest']).optional() }),
+      inputSchema: strict({ id: z.string().describe(ID_LADDER), find: z.string(), replace: z.string(), projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ id, find, replace, projection }) => json(tools.writeProjected(tools.boardEdit(id, find, replace), projection))
   );
@@ -874,7 +885,11 @@ export function createSterlingServer(
     {
       description:
         "Add a typed link: cites | informed_by | fulfills | falsified_by (supersedes is refused — use knowledge_supersede / knowledge_retire). falsified_by points FROM the record whose claim was disproven TO the record carrying the evidence; the falsified record stays live. When a successor claim exists, supersede instead.",
-      inputSchema: strict({ from: z.string(), rel: z.string(), to: z.string() }),
+      inputSchema: strict({
+        from: z.string().describe(`the record the link is stored on: ${ID_LADDER}`),
+        rel: z.string(),
+        to: z.string().describe(`the link target: ${ID_LADDER}`),
+      }),
     },
     ({ from, rel, to }) => json(tools.knowledgeLink(from, rel, to))
   );

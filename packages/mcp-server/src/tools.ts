@@ -11425,18 +11425,44 @@ export class SterlingTools {
    * that HARD-DELETES needs to be told it is not a full record id — and why
    * this tool insists on one — rather than be sent to the removal log.
    */
+  /**
+   * The refusal HINT for a destroying remove (user-ruled 2026-10-13, "Param
+   * docs + hint"): when a refused abbreviation prefixes exactly ONE record in
+   * the whole id index (live ids AND historical aliases, the same ambiguity
+   * judgement resolveRecordId makes) and that record is an open todo this tool
+   * could remove, the refusal names its full uuid and text so one retry
+   * suffices. It never resolves: the remove is still refused, and the caller
+   * must re-issue with the full id after reading which item it is. An
+   * ambiguous, unknown, too-short or non-removable match names no uuid.
+   */
+  private uniqueRemovablePrefixMatch(op: string, id: string): { id: string; source: string; name: string } | undefined {
+    if (id.length < SterlingTools.CITATION_PREFIX_LEN) return undefined;
+    const hits = this.store.recordIdIndex().filter((r) => r.id.startsWith(id));
+    const aliasHits = this.store.recordAliases().filter((a) => a.historical_id.startsWith(id));
+    if (hits.length !== 1 || aliasHits.length !== 0 || hits[0].type !== 'todo') return undefined;
+    const rec = this.store.get(hits[0].id) as unknown as Record<string, unknown> | undefined;
+    if (!rec) return undefined;
+    const source = String(rec.source ?? 'user');
+    if (op === 'maintenance_remove' && source !== 'system') return undefined;
+    return { id: String(rec.id), source, name: SterlingTools.boardItemName(rec) };
+  }
+
   private removedItemError(op: string, id: string): Error {
     if (!SterlingTools.FULL_UUID_RE.test(id)) {
       // Deliberately never mentions the removal log or "aged" — that clause
       // is only honest for a full-uuid-shaped citation (see doc comment
       // above); a shorter or non-hex identifier was never a candidate key
       // for it, whatever the item's actual history.
+      const match = this.uniqueRemovablePrefixMatch(op, id);
       return new UnresolvedIdentifierError(
         `${op}: no record '${id}' — and this tool addresses items by their EXACT full uuid only (no slug, no 8-char citation ` +
           `prefix), which '${id}' is not. Board rows are HARD-DELETED, so an abbreviation that once named a now-removed item can ` +
           `silently retarget to a different, live item and destroy it irreversibly; that is why the full id is required here — ` +
           `board_get, board_update and board_edit still resolve abbreviations, because their worst case is a recoverable edit. ` +
-          `Look the item up with board_query or maintenance_query and re-issue with the full uuid; nothing was removed.`
+          (match
+            ? `'${id}' prefixes exactly one open ${match.source}-source item: ${match.id} ("${match.name}"). If that is the item ` +
+              `you mean, re-issue with that full uuid; nothing was removed.`
+            : `Look the item up with board_query or maintenance_query and re-issue with the full uuid; nothing was removed.`)
       );
     }
     const trace = this.store.drainLogEntry(id);
