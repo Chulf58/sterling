@@ -2,16 +2,37 @@
 import { createRequire as __cr } from "node:module"; const require = __cr(import.meta.url);
 
 // scripts/pr-review-wait.mjs
-import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
-import { join as join2, resolve } from "node:path";
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { existsSync as existsSync3, readFileSync as readFileSync2 } from "node:fs";
+import { join as join3, resolve as resolve2 } from "node:path";
+
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = realpathSync(resolve(cwd, gitDir));
+  const commonReal = realpathSync(resolve(cwd, commonDir));
+  if (gitDirReal === commonReal || basename(commonReal) !== ".git") return null;
+  return { worktree: realpathSync(toplevel), mainRoot: dirname(commonReal) };
+}
+function resolveStoreRoot(target2, linkedWorktree = resolveLinkedWorktree(target2)) {
+  if (!linkedWorktree) return target2;
+  const configRel = join(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync(join(linkedWorktree.mainRoot, configRel)) && existsSync(join(linkedWorktree.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree.worktree : linkedWorktree.mainRoot;
+}
 
 // scripts/lib/work-pr.mjs
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { delimiter, dirname, join } from "node:path";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { existsSync as existsSync2, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { delimiter, dirname as dirname2, join as join2 } from "node:path";
 function gh(cwd, args) {
-  return spawnSync("gh", args, { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
+  return spawnSync2("gh", args, { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
 }
 var streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? "")).trim();
 function parseOriginRepo(url) {
@@ -31,16 +52,16 @@ function parseOriginRepo(url) {
 }
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
-var prLoopPath = (root) => join(root, PR_LOOP_REL);
+var prLoopPath = (root) => join2(root, PR_LOOP_REL);
 function writeAtomic(file, value) {
-  mkdirSync(dirname(file), { recursive: true });
+  mkdirSync(dirname2(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n");
   renameSync(tmp, file);
 }
 function readPrLoop(root) {
   const file = prLoopPath(root);
-  if (!existsSync(file)) return null;
+  if (!existsSync2(file)) return null;
   let s;
   try {
     s = JSON.parse(readFileSync(file, "utf8"));
@@ -186,7 +207,8 @@ var flag = (name2) => {
   const i = argv.indexOf(name2);
   return i >= 0 ? argv[i + 1] : void 0;
 };
-var target = resolve(flag("--target") ?? process.cwd());
+var target = resolve2(flag("--target") ?? process.cwd());
+var storeRoot = resolveStoreRoot(target);
 var COPILOT_LOGIN = /copilot/i;
 var COMPLETED_STATES = /* @__PURE__ */ new Set(["COMMENTED", "APPROVED", "CHANGES_REQUESTED"]);
 var COPILOT_REQUEST_LOGIN = "copilot-pull-request-reviewer[bot]";
@@ -203,8 +225,8 @@ function finish(status, extra = {}) {
 }
 var error = (message) => finish("error", { review: null, comments: [], error: message });
 function readPinnedLogins() {
-  const file = join2(target, ".sterling", "config.json");
-  if (!existsSync2(file)) return [];
+  const file = join3(storeRoot, ".sterling", "config.json");
+  if (!existsSync3(file)) return [];
   let cfg;
   try {
     cfg = JSON.parse(readFileSync2(file, "utf8"));
@@ -221,7 +243,7 @@ function readPinnedLogins() {
 }
 var isCopilot = (r, pinned) => typeof r?.user?.login === "string" && r.user.type === "Bot" && Number.isInteger(r.id) && (pinned.length ? pinned.includes(r.user.login) : COPILOT_LOGIN.test(r.user.login));
 function originRepoOrThrow() {
-  const url = spawnSync2("git", ["remote", "get-url", "origin"], { cwd: target, encoding: "utf8", timeout: 3e4 });
+  const url = spawnSync3("git", ["remote", "get-url", "origin"], { cwd: target, encoding: "utf8", timeout: 3e4 });
   const originRepo = url.status === 0 ? parseOriginRepo(url.stdout)?.repo : null;
   if (!originRepo) throw new Error(`origin in ${target} is missing or not a GitHub repository URL \u2014 this mode is bound to origin`);
   return originRepo;
@@ -271,7 +293,7 @@ if (argv.includes("--settle")) {
       }
     };
     const outcome = flag("--settle");
-    const s = settlePrLoop(target, outcome, flag("--pr"), { originRepo, guard: outcome === "clean" ? guard : null });
+    const s = settlePrLoop(storeRoot, outcome, flag("--pr"), { originRepo, guard: outcome === "clean" ? guard : null });
     process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at, ...merge ?? {} }) + "\n");
     process.exit(0);
   } catch (e) {
@@ -308,7 +330,7 @@ var recheckDelayS = recheckRaw === void 0 ? DEFAULT_RECHECK_DELAY_S : Number(rec
 if (recheckRaw !== void 0 && (recheckRaw.trim() === "" || !Number.isFinite(recheckDelayS) || recheckDelayS < 0)) error(`--recheck-delay must be a number of seconds >= 0, got '${recheckRaw}'`);
 var pinnedLogins = readPinnedLogins();
 result.identity_confirmed = pinnedLogins.length > 0;
-var originUrl = spawnSync2("git", ["remote", "get-url", "origin"], { cwd: target, encoding: "utf8", timeout: 3e4 });
+var originUrl = spawnSync3("git", ["remote", "get-url", "origin"], { cwd: target, encoding: "utf8", timeout: 3e4 });
 if (originUrl.status !== 0) error(`no 'origin' remote in ${target} \u2014 the PR repo is bound to origin and is never guessed`);
 var origin = parseOriginRepo(originUrl.stdout);
 if (!origin) error(`origin's URL '${originUrl.stdout.trim()}' is not a GitHub repository URL \u2014 the PR repo is bound to origin`);
@@ -332,7 +354,7 @@ function ghApi(path, { paginate = false, extra = [] } = {}) {
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw new DeadlineReached();
   const args = ["api", "--hostname", origin.host, ...paginate ? ["--paginate"] : [], ...extra, path];
-  const r = spawnSync2("gh", args, { cwd: target, encoding: "utf8", timeout: Math.min(GH_CALL_TIMEOUT_MS, remaining), env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
+  const r = spawnSync3("gh", args, { cwd: target, encoding: "utf8", timeout: Math.min(GH_CALL_TIMEOUT_MS, remaining), env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
   if (r.error?.code === "ETIMEDOUT" && Date.now() >= deadline) throw new DeadlineReached();
   if (r.error || r.status !== 0) {
     throw new Error(`gh ${args.join(" ")} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || r.stdout || "").trim()}`);
