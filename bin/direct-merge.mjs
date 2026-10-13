@@ -10621,14 +10621,12 @@ var init_dist2 = __esm({
 
 // scripts/direct-merge.mjs
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync8, readFileSync as readFileSync11, realpathSync as realpathSync5 } from "node:fs";
+import { existsSync as existsSync9, readFileSync as readFileSync11, realpathSync as realpathSync5 } from "node:fs";
 import { join as join18, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/project.mjs
-import { readFileSync as readFileSync4, existsSync as existsSync3, mkdtempSync, rmSync as rmSync2, realpathSync as realpathSync3 } from "node:fs";
-import { spawnSync } from "node:child_process";
-import { join as join8, resolve as resolve4, dirname as dirname4, basename as basename2 } from "node:path";
+import { readFileSync as readFileSync4, existsSync as existsSync4, mkdtempSync, rmSync as rmSync2 } from "node:fs";
 init_dist();
 init_dist2();
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
@@ -11102,6 +11100,27 @@ function resolveStoreWritePath(root, ...segments) {
   return target2;
 }
 
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync3, realpathSync as realpathSync3 } from "node:fs";
+import { basename as basename2, dirname as dirname4, join as join8, resolve as resolve4 } from "node:path";
+function resolveLinkedWorktree(cwd = process.cwd()) {
+  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
+  if (r.error || r.status !== 0) return null;
+  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
+  if (!gitDir || !commonDir || !toplevel) return null;
+  const gitDirReal = realpathSync3(resolve4(cwd, gitDir));
+  const commonReal = realpathSync3(resolve4(cwd, commonDir));
+  if (gitDirReal === commonReal || basename2(commonReal) !== ".git") return null;
+  return { worktree: realpathSync3(toplevel), mainRoot: dirname4(commonReal) };
+}
+function resolveStoreRoot(target2, linkedWorktree2 = resolveLinkedWorktree(target2)) {
+  if (!linkedWorktree2) return target2;
+  const configRel = join8(".sterling", "config.json");
+  const worktreeOnlyConfig = !existsSync3(join8(linkedWorktree2.mainRoot, configRel)) && existsSync3(join8(linkedWorktree2.worktree, configRel));
+  return worktreeOnlyConfig ? linkedWorktree2.worktree : linkedWorktree2.mainRoot;
+}
+
 // scripts/lib/project.mjs
 function normalizeFlag(name) {
   return name.startsWith("-") ? name : `--${name}`;
@@ -11136,16 +11155,6 @@ function fail(message, code = 1) {
   console.error(message);
   process.exit(code);
 }
-function resolveLinkedWorktree(cwd = process.cwd()) {
-  const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
-  if (r.error || r.status !== 0) return null;
-  const [gitDir, commonDir, toplevel] = r.stdout.split("\n").map((l) => l.trim());
-  if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = realpathSync3(resolve4(cwd, gitDir));
-  const commonReal = realpathSync3(resolve4(cwd, commonDir));
-  if (gitDirReal === commonReal || basename2(commonReal) !== ".git") return null;
-  return { worktree: realpathSync3(toplevel), mainRoot: dirname4(commonReal) };
-}
 function resolveProject(cwd) {
   let dbPath, configPath;
   try {
@@ -11164,10 +11173,10 @@ function resolveProject(cwd) {
     fail(named(e));
   }
   if (route?.storage === "postgres") return { storage: "postgres", dbPath, config: route.config };
-  if (!existsSync3(dbPath)) fail(`no Sterling store at ${dbPath} \u2014 not an initialized project`);
+  if (!existsSync4(dbPath)) fail(`no Sterling store at ${dbPath} \u2014 not an initialized project`);
   let config;
   try {
-    config = route ? route.config : parseConfig(existsSync3(configPath) ? JSON.parse(readFileSync4(configPath, "utf8")) : {});
+    config = route ? route.config : parseConfig(existsSync4(configPath) ? JSON.parse(readFileSync4(configPath, "utf8")) : {});
   } catch (e) {
     fail(`malformed .sterling/config.json \u2014 failing loud, never half-applying (P5): ${e.message}`);
   }
@@ -11318,7 +11327,7 @@ import { spawnSync as spawnSync3 } from "node:child_process";
 import { dirname as dirname5, join as join10 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync4, readFileSync as readFileSync5, readdirSync, realpathSync as realpathSync4 } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync5, readdirSync, realpathSync as realpathSync4 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join9, resolve as resolve5, sep as sep2 } from "node:path";
 var RESOLVER_IMPORTS = [
@@ -11464,7 +11473,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync4, readFileSync5, readdirSync, join9, homedir4);
+)(existsSync5, readFileSync5, readdirSync, join9, homedir4);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -11763,12 +11772,12 @@ init_dist2();
 init_dist();
 
 // scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync5, readFileSync as readFileSync8 } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync8 } from "node:fs";
 import { join as join13 } from "node:path";
 var CONFIG_REL3 = join13(".sterling", "config.json");
 var STORE_DB_REL = join13(".sterling", "sterling.db");
 function isSterlingRoot(dir) {
-  return typeof dir === "string" && (existsSync5(join13(dir, CONFIG_REL3)) || existsSync5(join13(dir, STORE_DB_REL)));
+  return typeof dir === "string" && (existsSync6(join13(dir, CONFIG_REL3)) || existsSync6(join13(dir, STORE_DB_REL)));
 }
 
 // scripts/hooks/lib/common.mjs
@@ -12085,7 +12094,7 @@ init_dist2();
 
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync9, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync9, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { delimiter, dirname as dirname9, join as join16 } from "node:path";
 var PR_ATTRIBUTION = "\u{1F916} Generated with [Claude Code](https://claude.com/claude-code)";
 function gh(cwd, args) {
@@ -12098,7 +12107,7 @@ function resolveGhPath() {
     if (!dir) continue;
     for (const name of names) {
       const candidate = join16(dir, name);
-      if (existsSync6(candidate)) return candidate;
+      if (existsSync7(candidate)) return candidate;
     }
   }
   return null;
@@ -12409,7 +12418,7 @@ function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE_
 
 // scripts/lib/attestation-inspection.mjs
 init_dist();
-import { existsSync as existsSync7, readFileSync as readFileSync10 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync10 } from "node:fs";
 import { join as join17 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 var EXAMPLE_CAP = 5;
@@ -12427,7 +12436,7 @@ function readAttestationGlobs(projectRoot2) {
   const dropped = { invalid_container: false, non_string: 0, empty: 0, duplicates: [] };
   try {
     const configPath = join17(projectRoot2, ".sterling", "config.json");
-    if (!existsSync7(configPath)) return { globs: [], dropped };
+    if (!existsSync8(configPath)) return { globs: [], dropped };
     const raw = JSON.parse(readFileSync10(configPath, "utf8"));
     const declared = raw && typeof raw === "object" ? raw.attestation_path_globs : void 0;
     if (declared !== void 0 && !Array.isArray(declared)) {
@@ -12498,7 +12507,7 @@ function inspectAttestations({ projectRoot: projectRoot2, touchedPaths, declared
     }
   } else {
     const dbPath = join17(projectRoot2, ".sterling", "sterling.db");
-    if (!existsSync7(dbPath)) {
+    if (!existsSync8(dbPath)) {
       return { available: false, reason: `no Sterling store at ${dbPath} \u2014 nothing to compare against` };
     }
     try {
@@ -12617,8 +12626,7 @@ function attestationDisclosureLines({ tool, result, declaredGlobs, subject, drop
 var target = arg("--target") ?? process.cwd();
 var linkedWorktree = resolveLinkedWorktree(target);
 var CONFIG_REL4 = ".sterling/config.json";
-var worktreeOnlyConfig = linkedWorktree && !existsSync8(join18(linkedWorktree.mainRoot, CONFIG_REL4)) && existsSync8(join18(linkedWorktree.worktree, CONFIG_REL4));
-var storeRoot = linkedWorktree && !worktreeOnlyConfig ? linkedWorktree.mainRoot : linkedWorktree ? linkedWorktree.worktree : target;
+var storeRoot = resolveStoreRoot(target, linkedWorktree);
 var mode;
 var modeError;
 try {
@@ -12644,14 +12652,14 @@ function fail2(message, code = 1) {
 }
 stage("git-repo");
 if (!isGitRepo(target)) fail2(`direct-merge: not a git repository: '${target}'`);
-if (linkedWorktree && !existsSync8(join18(storeRoot, CONFIG_REL4))) {
+if (linkedWorktree && !existsSync9(join18(storeRoot, CONFIG_REL4))) {
   fail2(
     `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its project mode cannot be read \u2014 there is no ${CONFIG_REL4} at '${join18(linkedWorktree.worktree, CONFIG_REL4)}' or at the main checkout '${join18(linkedWorktree.mainRoot, CONFIG_REL4)}'. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
 Run it from the main checkout, or restore its ${CONFIG_REL4}.`,
     2
   );
 }
-if (!linkedWorktree && !existsSync8(join18(target, CONFIG_REL4))) {
+if (!linkedWorktree && !existsSync9(join18(target, CONFIG_REL4))) {
   const dirs = spawnSync8("git", ["rev-parse", "--git-dir", "--git-common-dir"], { cwd: target, encoding: "utf8", timeout: 6e4 });
   const [gitDir, commonDir] = dirs.status === 0 ? dirs.stdout.split("\n").map((l) => l.trim()) : [];
   if (gitDir && commonDir && realpathSync5(resolve8(target, gitDir)) !== realpathSync5(resolve8(target, commonDir))) {
@@ -12941,7 +12949,7 @@ direct-merge: RECONCILE DEBT DISCLOSED \u2014 ${headline} cover files this branc
 stage("version");
 var GENERATED_ONLY = loadGeneratedProjections(storeRoot);
 var pluginManifestRel = ".claude-plugin/plugin.json";
-if (existsSync8(join18(target, pluginManifestRel))) {
+if (existsSync9(join18(target, pluginManifestRel))) {
   const substantive = [...changed].filter((f) => !GENERATED_ONLY.has(f));
   if (substantive.length > 0 && !process.argv.includes("--allow-same-version")) {
     const readVersion = (raw, label) => {
@@ -12953,7 +12961,7 @@ if (existsSync8(join18(target, pluginManifestRel))) {
     };
     const pkgPath = join18(target, "package.json");
     const branchPlugin = readVersion(readFileSync11(join18(target, pluginManifestRel), "utf8"), pluginManifestRel);
-    const branchPkg = existsSync8(pkgPath) ? readVersion(readFileSync11(pkgPath, "utf8"), "package.json") : null;
+    const branchPkg = existsSync9(pkgPath) ? readVersion(readFileSync11(pkgPath, "utf8"), "package.json") : null;
     const baseShow = spawnSync8("git", ["show", `${into}:${pluginManifestRel}`], { cwd: target, encoding: "utf8", timeout: 3e4 });
     const basePlugin = baseShow.status === 0 ? readVersion(baseShow.stdout, `${into}:${pluginManifestRel}`) : null;
     if (branchPkg !== null && branchPlugin !== branchPkg) {
@@ -12972,7 +12980,7 @@ The version is the clone-currency signal consumers read: bump BOTH ${pluginManif
 }
 stage("battery");
 var pkgJsonPath = join18(target, "package.json");
-var hasCheck = existsSync8(pkgJsonPath) && !!JSON.parse(readFileSync11(pkgJsonPath, "utf8")).scripts?.check;
+var hasCheck = existsSync9(pkgJsonPath) && !!JSON.parse(readFileSync11(pkgJsonPath, "utf8")).scripts?.check;
 if (hasCheck) {
   console.error("direct-merge: running the consistency-check battery (npm run check)\u2026");
   const check = defaultExec("npm", ["run", "check"], { cwd: target, timeout: 3e5 });
@@ -13027,7 +13035,7 @@ merged.attestation_disclosure = attestationDisclosure;
 try {
   if (changed.size > 0) {
     const dbPath = join18(storeRoot, ".sterling", "sterling.db");
-    if (!existsSync8(dbPath)) throw new Error(`no Sterling store at ${dbPath}`);
+    if (!existsSync9(dbPath)) throw new Error(`no Sterling store at ${dbPath}`);
     const nudgeStore = new SterlingStore(dbPath);
     let items;
     try {
@@ -13067,7 +13075,7 @@ try {
   emit({ ...merged, branches_swept: null, sweep_failed: true }, 1);
 }
 var bundleChecker = join18(target, "scripts", "check-bundles-fresh.mjs");
-if (existsSync8(bundleChecker)) {
+if (existsSync9(bundleChecker)) {
   console.error("direct-merge: rebuilding packages so the post-merge bundle check compares against MERGED source\u2026");
   const rebuilt = defaultExec("npm", ["run", "build"], { cwd: target, timeout: 6e5 });
   if (rebuilt.status !== 0) {
@@ -13109,7 +13117,7 @@ try {
     for (const t of post.query({ types: ["todo"], cap: 1e3 })) {
       if (t.source !== "system" || t.system_reason !== "file_parked") continue;
       const paths = t.file_keys ?? [];
-      if (parkedItemResolved(paths, deletedSet, (k) => existsSync8(join18(target, k)))) {
+      if (parkedItemResolved(paths, deletedSet, (k) => existsSync9(join18(target, k)))) {
         post.remove(t.id, (/* @__PURE__ */ new Date()).toISOString());
         parkedClosed += 1;
       }

@@ -13,7 +13,7 @@ import { existsSync as existsSync4, readFileSync as readFileSync5 } from "node:f
 import { spawnSync } from "node:child_process";
 
 // scripts/lib/project.mjs
-import { readFileSync as readFileSync4, existsSync as existsSync3, mkdtempSync, rmSync as rmSync2, realpathSync as realpathSync3 } from "node:fs";
+import { readFileSync as readFileSync4, existsSync as existsSync3, mkdtempSync, rmSync as rmSync2 } from "node:fs";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
 // node_modules/zod/v3/external.js
@@ -10877,9 +10877,9 @@ function buildResolver(store2) {
 }
 
 // scripts/lib/self-root-role.mjs
-import { realpathSync as realpathSync4 } from "node:fs";
+import { realpathSync as realpathSync3 } from "node:fs";
 function nonAuthoringSelfRoot(root2, selfRoot2, config2) {
-  if (realpathSync4(root2) !== realpathSync4(selfRoot2)) return null;
+  if (realpathSync3(root2) !== realpathSync3(selfRoot2)) return null;
   const role = config2?.machine_role;
   if (role === "authoring") return null;
   return { roleText: role === void 0 ? "machine_role undeclared" : `machine_role=${role}` };
