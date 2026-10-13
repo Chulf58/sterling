@@ -36535,9 +36535,45 @@ ${JSON.stringify(entry)}
    * that HARD-DELETES needs to be told it is not a full record id — and why
    * this tool insists on one — rather than be sent to the removal log.
    */
+  /**
+   * The refusal HINT for a destroying remove (user-ruled 2026-10-13, "Param
+   * docs + hint"): when a refused abbreviation prefixes exactly ONE record in
+   * the whole id index (live ids AND historical aliases, the same ambiguity
+   * judgement resolveRecordId makes) and that record is an open todo this tool
+   * could remove, the refusal names its full uuid and text so one retry
+   * suffices. It never resolves: the remove is still refused, and the caller
+   * must re-issue with the full id after reading which item it is. An
+   * ambiguous, unknown, too-short or non-removable match names no uuid, and
+   * so does a match that is not ACTIVE (a retired todo stays in the index).
+   * An id that is an exact live slug names no uuid either: the ladder resolves
+   * a slug BEFORE a prefix, so board_get would show the slug's record while a
+   * prefix hint would point at a different one.
+   *
+   * The index, alias and body reads share no snapshot, so a concurrent insert
+   * can land between them. The message therefore reports what was seen at
+   * refusal time and claims no uniqueness; no lock is taken for a hint.
+   */
+  uniqueRemovablePrefixMatch(op, id) {
+    if (id.length < _SterlingTools.CITATION_PREFIX_LEN)
+      return void 0;
+    if (this.store.recordsBySlug(id).length > 0)
+      return void 0;
+    const hits = this.store.recordIdIndex().filter((r) => r.id.startsWith(id));
+    const aliasHits = this.store.recordAliases().filter((a) => a.historical_id.startsWith(id));
+    if (hits.length !== 1 || aliasHits.length !== 0 || hits[0].type !== "todo")
+      return void 0;
+    const rec = this.store.get(hits[0].id);
+    if (!rec || rec.status !== "active")
+      return void 0;
+    const source = String(rec.source ?? "user");
+    if (op === "maintenance_remove" && source !== "system")
+      return void 0;
+    return { id: String(rec.id), source, name: _SterlingTools.boardItemName(rec) };
+  }
   removedItemError(op, id) {
     if (!_SterlingTools.FULL_UUID_RE.test(id)) {
-      return new UnresolvedIdentifierError(`${op}: no record '${id}' \u2014 and this tool addresses items by their EXACT full uuid only (no slug, no 8-char citation prefix), which '${id}' is not. Board rows are HARD-DELETED, so an abbreviation that once named a now-removed item can silently retarget to a different, live item and destroy it irreversibly; that is why the full id is required here \u2014 board_get, board_update and board_edit still resolve abbreviations, because their worst case is a recoverable edit. Look the item up with board_query or maintenance_query and re-issue with the full uuid; nothing was removed.`);
+      const match = this.uniqueRemovablePrefixMatch(op, id);
+      return new UnresolvedIdentifierError(`${op}: no record '${id}' \u2014 and this tool addresses items by their EXACT full uuid only (no slug, no 8-char citation prefix), which '${id}' is not. Board rows are HARD-DELETED, so an abbreviation that once named a now-removed item can silently retarget to a different, live item and destroy it irreversibly; that is why the full id is required here \u2014 board_get, board_update and board_edit still resolve abbreviations, because their worst case is a recoverable edit. ` + (match ? `At the time of this refusal, the only open ${match.source}-source item whose id starts with '${id}' was ${match.id} ("${match.name}"). If that is the item you mean, re-issue with that full uuid; nothing was removed.` : `Look the item up with board_query or maintenance_query and re-issue with the full uuid; nothing was removed.`));
     }
     const trace = this.store.drainLogEntry(id);
     if (trace) {
@@ -37703,6 +37739,9 @@ function createSterlingServer(target, opts = {}) {
   })));
   toolWrappers.push("busy_refusal");
   const json = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
+  const ID_LADDER = "full uuid, exact slug, or unambiguous 8-char prefix";
+  const ID_EXACT_DESTROY = "the EXACT full uuid: this call destroys, so a slug or an 8-char prefix is refused";
+  const RESOLVES_FULL_IDS = "full uuids only; a slug or an 8-char prefix is refused because claimed items are hard-deleted";
   server.registerTool("knowledge_create", {
     description: 'Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type\'s allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. Example: {"type":"decision","fields":{"title":"...","statement":"...","alternatives_rejected":[],"rationale":"..."}}. A colliding feature_article slug is refused. A links entry with rel \'supersedes\' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel \'cites\' for a deliberate partial override. A domain:<name> scope with file_keys (or an article\'s files) is refused: repo paths stay project. A reference_material\'s location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain\'s description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.' + createDomainsNote,
     inputSchema: knowledgeCreateInput
@@ -37725,7 +37764,7 @@ function createSterlingServer(target, opts = {}) {
   server.registerTool("knowledge_get", {
     description: "Fetch one record by id (full uuid, exact slug, or unambiguous 8-char prefix) \u2014 the full-fidelity read. version:<n> reads an archived prior version. With `field`: a windowed read of just that field \u2014 strings page by characters, arrays by elements (offset/length); returns {kind, total_chars|total_entries, offset, value|entries}; an offset past the end returns empty with the true total. Scalar/object fields return whole and refuse offset/length. Unknown field is refused naming the valid set; offset/length without field is refused. unreadable_domains (only when a mounted domain could not be read: each with its error) means a record held there cannot be found by this read.",
     inputSchema: strict({
-      id: external_exports.string(),
+      id: external_exports.string().describe(ID_LADDER),
       field: external_exports.string().optional(),
       offset: external_exports.number().int().nonnegative().optional(),
       length: external_exports.number().int().positive().optional(),
@@ -37739,7 +37778,7 @@ function createSterlingServer(target, opts = {}) {
   server.registerTool("knowledge_split", {
     description: "Split a feature_article: move a subset of its files[] / current_ac[] / live_test_refs into one or more NEW child articles. Prose moves verbatim, ac_ids are inherited (never renumbered), live_test_refs follow their ac_id, the parent keeps its slug (new version), and file coverage stays total. Refused: a moved path/ac_id not owned by the parent or claimed by two children, a child slug that duplicates another or an existing article, or moving every parent file. All validation runs first and the whole split is one transaction. resolves:[<full item ids>] explicitly closes open items of any lane except promotion_review that are keyed to the parent's chain, or that are the parent's article_oversize item (validated before the write; unnamed items stay open and are warned on the receipt). Returns {parent:{id,slug,version}, children:[{id,slug}], warnings[]} \u2014 warnings (e.g. still-oversize) never gate.",
     inputSchema: strict({
-      id: external_exports.string(),
+      id: external_exports.string().describe(`the parent feature_article: ${ID_LADDER}`),
       children: external_exports.array(external_exports.object({
         slug: external_exports.string().min(1),
         title: external_exports.string().min(1),
@@ -37752,13 +37791,13 @@ function createSterlingServer(target, opts = {}) {
       parent_what_it_does: external_exports.string(),
       parent_intended_behavior: external_exports.string().optional(),
       reason: external_exports.string().optional(),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open maintenance-queue item ids this split discharges \u2014 validated before the write")
+      resolves: external_exports.array(external_exports.string()).optional().describe(`open maintenance-queue item ids this split discharges \u2014 ${RESOLVES_FULL_IDS}; validated before the write`)
     })
   }, ({ id, children, parent_what_it_does, parent_intended_behavior, reason, resolves }) => json(tools.knowledgeSplitResult({ id, children, parent_what_it_does, parent_intended_behavior, reason, resolves })));
   server.registerTool("knowledge_extract", {
     description: "Lift a passage out of one string field of a live record into a NEW record of a caller-chosen type (new_record.type required; todo/attestation refused); the source stays active minus the passage. (field, find) must match exactly once (0 or >1 matches refused with the count); replace (default '') is inserted literally. Edges are written both ways: new informed_by source, source cites new. The new record inherits the source scope (an explicit different scope is refused); attestation sources are refused; on a domain-held source a non-empty resolves is refused. All validation runs first and everything lands in one transaction. resolves:[<full item ids>] explicitly closes open reconcile_needed/refresh_reference items whose file_keys overlap the source record's (validated before the write; unnamed items stay open and are warned on the receipt). Returns {extracted, source:{id,version}, edges, warnings[]}.",
     inputSchema: strict({
-      id: external_exports.string(),
+      id: external_exports.string().describe(`the source record: ${ID_LADDER}`),
       field: external_exports.string(),
       find: external_exports.string(),
       replace: external_exports.string().optional().describe("the text that replaces the matched passage in the source field \u2014 defaults to '' (pure excision)"),
@@ -37767,7 +37806,7 @@ function createSterlingServer(target, opts = {}) {
         fields: external_exports.record(external_exports.string(), external_exports.unknown())
       }).strict(),
       reason: external_exports.string().optional(),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open maintenance-queue item ids this extract discharges \u2014 validated (plain lane, file_keys overlap) before the write")
+      resolves: external_exports.array(external_exports.string()).optional().describe(`open maintenance-queue item ids this extract discharges \u2014 ${RESOLVES_FULL_IDS}; validated (plain lane, file_keys overlap) before the write`)
     })
   }, ({ id, field, find, replace, new_record, reason, resolves }) => json(tools.knowledgeExtractResult({ id, field, find, replace, new_record, reason, resolves })));
   server.registerTool("knowledge_schema", {
@@ -37776,28 +37815,31 @@ function createSterlingServer(target, opts = {}) {
   }, ({ type }) => json(tools.knowledgeSchema(type)));
   server.registerTool("knowledge_stats", {
     description: "Size and composition without the body. With id: body_chars (what article_oversize judges; history excluded), history_chars, history_entries, supersedes_count, and over_threshold for a feature_article. Without id: per-type counts and sizes over the mounted stores, plus the 10 largest feature_article bodies against the threshold.",
-    inputSchema: strict({ id: external_exports.string().optional() })
+    inputSchema: strict({ id: external_exports.string().describe(ID_LADDER).optional() })
   }, ({ id }) => json(tools.knowledgeStats(id)));
   server.registerTool("knowledge_retire", {
     description: "Retire a genuine DUPLICATE in favour of a surviving record: status=superseded, superseded_by=in_favor_of, no new row; it stays fetchable by id and its links survive, but queries stop serving it. Not for a merely wrong record \u2014 fix that with knowledge_update. in_favor_of is required and must be live. todos are refused (use board_remove / maintenance_remove).",
-    inputSchema: strict({ id: external_exports.string(), in_favor_of: external_exports.string() })
+    inputSchema: strict({
+      id: external_exports.string().describe(`the duplicate to retire: ${ID_LADDER}`),
+      in_favor_of: external_exports.string().describe(`the live surviving record: ${ID_LADDER}`)
+    })
   }, ({ id, in_favor_of }) => json(tools.knowledgeRetire(id, in_favor_of)));
   server.registerTool("knowledge_supersede", {
     description: "Atomically replace a decision / anti_pattern / research_finding with a NEW record built from `fields` (a complete create-shaped body, not a delta) and mark old_id superseded by it, in one transaction. A slugless `fields` inherits the old slug; an explicit slug is collision-checked. If the old record enumerates 2+ rulings and the replacement leaves any uncovered, the call is refused naming them \u2014 carry them forward, or pass orphans_acknowledged:true. A reference_material whose subject is gone (its location was deleted) is closed here too: pass type 'decision' or 'research_finding' and `fields` for a short record of that type saying what happened; the reference is superseded by it and is no longer read, so it raises no further refresh_reference items. A reference whose subject still exists is repointed with knowledge_update; a duplicate goes to knowledge_retire. An open_question or disconfirmed_hypothesis whose subject is gone is closed the same way, with the same two closing types; one that still applies is updated with knowledge_update, and an answered open_question is closed there with resolution_status 'closed' and closed_into. resolves:[<full item ids>] closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to the old record's chain in the same transaction (validated before the write; unnamed items stay open). Other types are refused naming their exit path (todo \u2192 board_remove/maintenance_remove; feature_article \u2192 knowledge_update/knowledge_retire). Refusals write nothing.",
     inputSchema: strict({
-      old_id: external_exports.string(),
+      old_id: external_exports.string().describe(`the record being replaced: ${ID_LADDER}`),
       fields: passthrough,
       orphans_acknowledged: external_exports.boolean().optional(),
       type: external_exports.string().optional().describe("the closing record's type, 'decision' or 'research_finding' \u2014 required when old_id is a reference_material, open_question or disconfirmed_hypothesis, otherwise omit it"),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to the old record's chain that this supersession discharges \u2014 full ids, validated before the write")
+      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to the old record's chain that this supersession discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write")
     })
   }, ({ old_id, fields, orphans_acknowledged, type, resolves }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged, { type, resolves })));
   server.registerTool("knowledge_update", {
     description: "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body \u2014 pass only changed mutable fields; omitted fields are kept (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
     inputSchema: strict({
-      id: external_exports.string(),
+      id: external_exports.string().describe(ID_LADDER),
       body: passthrough,
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full ids, validated before the write"),
+      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write"),
       expected_version: external_exports.number().int().positive().optional().describe("CAS token: the version you read. A stale value refuses naming both versions, with nothing written"),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
@@ -37805,21 +37847,21 @@ function createSterlingServer(target, opts = {}) {
   server.registerTool("knowledge_append", {
     description: `Append entries to an array field (history, files, current_ac, live_test_refs, \u2026) without retransmitting it; same versioned write path as knowledge_update. \`field\` may be an array-element selector 'arr[key=value].sub' to append inside ONE element's array (e.g. field "live_test_refs[ac_id=AC4].test_paths", entries ["tests/x.test.mjs"]); the selector must match exactly one element and sub must already be an array on it. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain, plus an article_missing item when an appended files[] entry's path is one of that item's file_keys (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.`,
     inputSchema: strict({
-      id: external_exports.string(),
+      id: external_exports.string().describe(ID_LADDER),
       field: external_exports.string(),
       entries: external_exports.array(external_exports.unknown()),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges \u2014 full ids, validated before the write"),
+      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain, or an article_missing item whose file_keys include an appended files[] path, that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write"),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, field, entries, resolves, projection }) => json(tools.writeProjected(tools.knowledgeAppend(id, field, entries, resolves), projection)));
   server.registerTool("knowledge_edit", {
     description: `Replace one passage inside a string field without retransmitting it. \`find\` must match EXACTLY ONCE \u2014 zero or multiple matches are refused with the count; extend find to disambiguate. \`field\` may be an array-element selector 'arr[key=value].sub' (e.g. "files[path=scripts/prep.mjs].role"), which must match exactly one element. A BOOLEAN sub-field is set by value: find is its current value ('true'/'false'), replace the new one (e.g. field "files[path=scripts/prep.mjs].unverified", find 'true', replace 'false' clears the flag); an absent optional boolean such as files[].entry reads as 'false', so field "files[path=skills/drain/SKILL.md].entry", find 'false', replace 'true' sets it. Same versioned write path as knowledge_update. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt with chars_before/chars_after; projection:"full" returns the whole stored record.`,
     inputSchema: strict({
-      id: external_exports.string(),
+      id: external_exports.string().describe(ID_LADDER),
       field: external_exports.string(),
       find: external_exports.string(),
       replace: external_exports.string(),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full ids, validated before the write"),
+      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write"),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, field, find, replace, resolves, projection }) => json(tools.writeProjected(tools.knowledgeEdit(id, field, find, replace, resolves), projection)));
@@ -37840,13 +37882,13 @@ function createSterlingServer(target, opts = {}) {
       id: external_exports.string().describe("the EXACT full uuid \u2014 this call destroys, so no slug and no 8-char prefix is accepted"),
       selector: external_exports.string().describe("arr[key=value] \u2014 knowledge_edit's grammar with NO trailing '.sub'; the whole matched element is removed"),
       expected_version: external_exports.number().int().positive().describe("REQUIRED: the version you read \u2014 a stale token refuses naming both versions, with nothing written"),
-      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full ids, validated before the write"),
+      resolves: external_exports.array(external_exports.string()).optional().describe("open reconcile_needed, refresh_reference, stale_research or state_review item ids keyed to this record's chain that this write discharges \u2014 full uuids only (a slug or an 8-char prefix is refused), validated before the write"),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, selector, expected_version, resolves, projection }) => json(tools.writeProjected(tools.knowledgeArrayRemove(id, selector, expected_version, resolves), projection)));
   server.registerTool("knowledge_promote", {
     description: 'Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article, todo and attestation never promote; only a project-scoped record the project store holds does; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The receipt carries domain_description, the target domain\'s description. The echo (`promoted`) defaults to a digest; projection:"full" returns the whole record.',
-    inputSchema: strict({ id: external_exports.string(), domain: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
+    inputSchema: strict({ id: external_exports.string().describe(ID_LADDER), domain: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection)));
   server.registerTool("board_add", {
     description: 'Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare `objective`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane); absent means nothing. measured_at_head is stamped to HEAD unless you pass a resolvable 40-hex sha (an unresolvable one is refused). The echo defaults to a digest; projection:"full" returns the stored record.',
@@ -37860,7 +37902,7 @@ function createSterlingServer(target, opts = {}) {
       system_reason: external_exports.string().optional(),
       stack_tags: external_exports.array(external_exports.string()).optional(),
       measured_at_head: external_exports.string().optional(),
-      blocked_by: external_exports.array(external_exports.string()).optional(),
+      blocked_by: external_exports.array(external_exports.string()).describe(`open user board items this one waits on, each by ${ID_LADDER}`).optional(),
       needs: external_exports.enum(BOARD_NEEDS).optional(),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
@@ -37880,33 +37922,33 @@ function createSterlingServer(target, opts = {}) {
   }, (args2) => json(tools.boardQueryResult(args2)));
   server.registerTool("board_remove", {
     description: "Remove a board or queue item \u2014 the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed.",
-    inputSchema: strict({ id: external_exports.string() })
+    inputSchema: strict({ id: external_exports.string().describe(ID_EXACT_DESTROY) })
   }, ({ id }) => json(tools.boardRemove(id)));
   server.registerTool("maintenance_remove", {
     description: 'Remove a maintenance-queue (source:"system") item once its fulfilling artifact exists; user board items are refused. Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). Logged to the drain log; the result discloses artifact_evidence (capped compact records plus artifact_evidence_count, the de-duplicated match count within the same 200-record scan window) like board_remove \u2014 an empty list means verify against HEAD before closing.',
-    inputSchema: strict({ id: external_exports.string() })
+    inputSchema: strict({ id: external_exports.string().describe(ID_EXACT_DESTROY) })
   }, ({ id }) => json(tools.maintenanceRemove(id)));
   server.registerTool("board_update", {
     description: 'Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation (user items only; "" clears it). A text or file_keys change re-stamps measured_at_head to HEAD; pass a resolvable 40-hex sha to set it explicitly (unresolvable is refused). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:"full" returns the stored record.',
     inputSchema: strict({
-      id: external_exports.string(),
+      id: external_exports.string().describe(ID_LADDER),
       text: external_exports.string().optional(),
       priority: external_exports.enum(["low", "normal", "high"]).optional(),
       file_keys: external_exports.array(external_exports.string()).optional(),
       objective: external_exports.string().optional(),
       measured_at_head: external_exports.string().optional(),
-      blocked_by: external_exports.array(external_exports.string()).optional(),
+      blocked_by: external_exports.array(external_exports.string()).describe(`replaces the list: open user board items, each by ${ID_LADDER}; [] clears it`).optional(),
       needs: external_exports.union([external_exports.enum(BOARD_NEEDS), external_exports.literal("")]).optional(),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, projection, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch), projection)));
   server.registerTool("board_get", {
     description: "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` \u2014 the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed). An item other live items wait on returns unblocks: those items as `name (id8)`.",
-    inputSchema: strict({ id: external_exports.string() })
+    inputSchema: strict({ id: external_exports.string().describe(ID_LADDER) })
   }, ({ id }) => json(tools.boardGet(id)));
   server.registerTool("board_edit", {
     description: 'Replace one passage inside a board/queue item\'s text in place (id stable, no new version). `find` must match EXACTLY ONCE \u2014 zero or multiple matches are refused with the count, nothing written. Works on user and system items. The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.',
-    inputSchema: strict({ id: external_exports.string(), find: external_exports.string(), replace: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
+    inputSchema: strict({ id: external_exports.string().describe(ID_LADDER), find: external_exports.string(), replace: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ id, find, replace, projection }) => json(tools.writeProjected(tools.boardEdit(id, find, replace), projection)));
   server.registerTool("no_capture", {
     description: `Declare that this session's work produced nothing durable, discharging H10's duty for events earlier than the declaration on the declared lane (later work re-arms it): omitted lane = capture only; lane:"research" for the research duty; lane:"all" for both. An unknown lane is refused. The reason is recorded. If a capture exists but lands later, use capture_pending.`,
@@ -37934,7 +37976,11 @@ function createSterlingServer(target, opts = {}) {
   }, ({ domain, description }) => json(tools.domainDescribe({ domain, description })));
   server.registerTool("knowledge_link", {
     description: "Add a typed link: cites | informed_by | fulfills | falsified_by (supersedes is refused \u2014 use knowledge_supersede / knowledge_retire). falsified_by points FROM the record whose claim was disproven TO the record carrying the evidence; the falsified record stays live. When a successor claim exists, supersede instead.",
-    inputSchema: strict({ from: external_exports.string(), rel: external_exports.string(), to: external_exports.string() })
+    inputSchema: strict({
+      from: external_exports.string().describe(`the record the link is stored on: ${ID_LADDER}`),
+      rel: external_exports.string(),
+      to: external_exports.string().describe(`the link target: ${ID_LADDER}`)
+    })
   }, ({ from, rel, to }) => json(tools.knowledgeLink(from, rel, to)));
   server.registerTool("knowledge_preflight", {
     description: 'Pre-write conflict check: does the store already govern this subject? Run it before dispatching, designing, asking the user, or drafting a new record. Pass `text` (one subject) or `texts` (an agenda, one verdict per entry, in order). Matches anti_pattern, decision, feature_article, research_finding, disconfirmed_hypothesis and open_question records. Verdicts: "verify_targets" \u2014 the store governs this; open the named matches before proceeding (a match is a pointer, not the source); "ungoverned" \u2014 nothing governs it; "insufficient" \u2014 too little vocabulary to judge; the verdict and matched_total are decided from the centrality-passing candidate set only, not the capped `matches` window. Returns {terms, matched_total, capped (present/true only when `matches` was truncated), matches:[{id,type,title,matched_on,central,source}], answerability, missing_domains (only when a configured domain has no store), unreadable_domains (only when a mounted domain could not be read: each with its error; its records are not in the result)} or {verdicts:[\u2026]}. `matches` is capped at 20, sorted centrality-first (a central match always outranks a merely-hitting one), then by raw hit count. `matches` may include records with `central:[]` (non-central) \u2014 record-centrality is no longer required to LIST a candidate, only to decide the verdict and matched_total. matched_total counts centrality-passing, qualifying records among the candidates evaluated (each record type\'s own query is itself capped at 40), not a true/exact/full count.',
