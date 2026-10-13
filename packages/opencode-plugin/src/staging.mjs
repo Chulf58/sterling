@@ -23,14 +23,23 @@ export function notStagedLine(kase) {
 /** The line context.mjs puts before the volatile Sterling lines it appends to a prompt. */
 export const VOLATILE_HEADER = 'STERLING CONTEXT (added by the Sterling plugin, not typed by the user):';
 
-/** The text of the session's first user message (its brief), or '' when there is none. Sterling's own appended lines are cut off. */
-export function briefOf(messages) {
+/**
+ * The whole text of the session's first user message (its brief), or '' when there is none.
+ * Sterling's own appended lines are cut off; nothing else is. The STERLING-DELIVERY
+ * directive is parsed from this, before briefOf's scan cap, so a trailing line is never lost.
+ */
+export function rawBriefOf(messages) {
   const first = Array.isArray(messages) ? messages.find((m) => m?.role === 'user') : null;
   if (!first) return '';
   const content = first.content;
   const text = typeof content === 'string' ? content : Array.isArray(content) ? content.filter((p) => p?.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('\n') : '';
   const appended = text.indexOf(`\n\n${VOLATILE_HEADER}`);
-  return (appended >= 0 ? text.slice(0, appended) : text).slice(0, BRIEF_SCAN_CAP);
+  return appended >= 0 ? text.slice(0, appended) : text;
+}
+
+/** The brief as staging scans it: rawBriefOf, cut to BRIEF_SCAN_CAP characters. */
+export function briefOf(messages) {
+  return rawBriefOf(messages).slice(0, BRIEF_SCAN_CAP);
 }
 
 /**

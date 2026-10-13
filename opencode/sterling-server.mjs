@@ -12195,6 +12195,13 @@ function parseSterlingDelivery(text) {
 function stripSterlingDeliveryLine(text) {
   return String(text ?? "").replace(STERLING_DELIVERY_LINE_RE, "");
 }
+var DELIVERY_OFF_NOTICE = "STERLING DELIVERY OFF for this lane: its brief carries STERLING-DELIVERY: off, so no store records are delivered. Its own knowledge_* calls are not blocked.";
+var DELIVERY_HELD_BACK_NOTICE = "STERLING DELIVERY HELD BACK: this lane's delivery policy could not be established (it could not be told apart from a same-type lane that asked for STERLING-DELIVERY: off, or the dispatch state was unreadable), so no store records are delivered.";
+function deliveryPolicyNotice(policy) {
+  if (policy === "off") return DELIVERY_OFF_NOTICE;
+  if (policy === "unknown") return DELIVERY_HELD_BACK_NOTICE;
+  return "";
+}
 
 // scripts/hooks/lib/delivery.mjs
 init_dist2();
@@ -14273,6 +14280,38 @@ function findKeyedRecord(root, key) {
 function readDispatchState(root) {
   return scanLiveState(root, { repair: false });
 }
+function readDeliveryPolicy(root, { session_id, agent_id, agent_type } = {}) {
+  if (typeof agent_id !== "string" || agent_id === "") return "on";
+  try {
+    const scan = readDispatchState(root);
+    if (scan.availability === "absent") return "on";
+    if (scan.availability !== "ok") return "unknown";
+    const own = scan.records.map(({ record }) => record).filter((record) => recordAgentIds(record).includes(agent_id));
+    let ownUnreadable = false;
+    const hash = agentIdHash(agent_id);
+    const dir = dispatchStateDir(root);
+    for (const entry of scan.done) {
+      if (!entry.idHashes.includes(hash)) continue;
+      const v = validateNamedRecord(dir, entry.file, { kind: "done", key: entry.key });
+      if (!v.exists) continue;
+      if (v.poisoned) ownUnreadable = true;
+      else if (recordAgentIds(v.record).includes(agent_id)) own.push(v.record);
+    }
+    if (own.some((record) => record.delivery === "off")) return "off";
+    if (ownUnreadable) return "unknown";
+    if (own.length > 0) return "on";
+    if (scan.poisoned.length > 0) return "unknown";
+    const typed = typeof agent_type === "string" && agent_type !== "";
+    const siblingOff = scan.records.some(
+      ({ record }) => !record.terminal && record.delivery === "off" && record.session_id === session_id && (!typed || record.subagent_type === agent_type)
+    );
+    return siblingOff ? "unknown" : "on";
+  } catch (e) {
+    process.stderr.write(`dispatch-state: delivery policy for agent '${agent_id}' could not be read (${e?.message ?? e}) \u2014 held back as 'unknown'
+`);
+    return "unknown";
+  }
+}
 function readDispatchStateLocked(root) {
   return scanLiveState(root, { repair: true });
 }
@@ -15393,7 +15432,8 @@ function appendToResult(result, text) {
 ${text}`;
   else throw new Error(`unrecognized tool result content shape (${typeof result?.content})`);
 }
-function createDeliveryHandlers({ openStore, rootOf, directory, fenced }) {
+function createDeliveryHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy }) {
+  if (!deliveryPolicy) throw new Error("createDeliveryHandlers needs the deliveryPolicy tracker");
   const pending = /* @__PURE__ */ new Map();
   function builderFor(input, root) {
     const tool = input?.tool;
@@ -15415,9 +15455,15 @@ function createDeliveryHandlers({ openStore, rootOf, directory, fenced }) {
     if (!isDeliveryTool(input?.tool)) return;
     const root = rootOf();
     if (!root) return;
-    await fenced("delivery", root, () => {
+    await fenced("delivery", root, async () => {
       const build = builderFor(input, root);
       if (!build) return;
+      const policy = await deliveryPolicy.resolve(root, input.sessionID);
+      if (policy !== "on") {
+        pending.set(input.id, { withheld: policy });
+        while (pending.size > PENDING_CAP) pending.delete(pending.keys().next().value);
+        return;
+      }
       const store = openStore(join14(root, ".sterling", "sterling.db"));
       try {
         const delivery = build(store);
@@ -15436,6 +15482,11 @@ function createDeliveryHandlers({ openStore, rootOf, directory, fenced }) {
     const root = rootOf();
     if (!root || input.status !== "completed") return;
     await fenced("delivery", root, () => {
+      if (delivery.withheld) {
+        const notice = deliveryPolicy.disclose(input.sessionID, delivery.withheld);
+        if (notice) appendToResult(input.result, notice);
+        return;
+      }
       appendToResult(input.result, delivery.text);
       delivery.commit();
     });
@@ -15707,7 +15758,8 @@ function buildOutputAxis(store, root, { tool, args, content, sessionID, director
     }
   };
 }
-function createAxisHandlers({ openStore, rootOf, directory, fenced }) {
+function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy }) {
+  if (!deliveryPolicy) throw new Error("createAxisHandlers needs the deliveryPolicy tracker");
   const pending = /* @__PURE__ */ new Map();
   async function onBefore(input) {
     const surface = axisSurface(input?.tool);
@@ -15789,7 +15841,13 @@ function createAxisHandlers({ openStore, rootOf, directory, fenced }) {
     if (!content) return;
     const root = rootOf();
     if (!root) return;
-    await fenced("axis", root, () => {
+    await fenced("axis", root, async () => {
+      const policy = await deliveryPolicy.resolve(root, input.sessionID);
+      if (policy !== "on") {
+        const notice = deliveryPolicy.disclose(input.sessionID, policy);
+        if (notice) appendToResult(input.result, notice);
+        return;
+      }
       const store = openSubjectFan(root, { opener: openStore });
       if (!store) return;
       let block;
@@ -18637,7 +18695,7 @@ function notStagedLine(kase) {
   return `STERLING DISPATCH STAGING (H19): this session's brief could not be staged from [${kase}] \u2014 YOUR KNOWLEDGE WAS NOT STAGED: no owning articles, hazards or decisions were delivered for your task. Do not assume the store is silent on it: rely on your dispatch brief for knowledge pointers and query the store for the area before acting. File-touch delivery still fires on your first read or edit.`;
 }
 var VOLATILE_HEADER = "STERLING CONTEXT (added by the Sterling plugin, not typed by the user):";
-function briefOf(messages) {
+function rawBriefOf(messages) {
   const first = Array.isArray(messages) ? messages.find((m) => m?.role === "user") : null;
   if (!first) return "";
   const content = first.content;
@@ -18645,7 +18703,10 @@ function briefOf(messages) {
   const appended = text.indexOf(`
 
 ${VOLATILE_HEADER}`);
-  return (appended >= 0 ? text.slice(0, appended) : text).slice(0, BRIEF_SCAN_CAP);
+  return appended >= 0 ? text.slice(0, appended) : text;
+}
+function briefOf(messages) {
+  return rawBriefOf(messages).slice(0, BRIEF_SCAN_CAP);
 }
 function stageChild({ store, root, sessionID, agent: agentName, brief, disclosure: disclosure2 = "" }) {
   const agent = agentRole(agentName);
@@ -18864,6 +18925,75 @@ function createDispatchHandlers({ rootOf, fenced, now = () => Date.now() }) {
   return { onBefore, onAfter, noteExecutionEnd };
 }
 
+// packages/opencode-plugin/src/delivery-policy.mjs
+async function contextMessages(session, sessionID) {
+  if (typeof session?.context !== "function") throw new Error("ctx.session.context is unavailable");
+  const got = await session.context({ sessionID });
+  const messages = Array.isArray(got) ? got : got?.data;
+  if (!Array.isArray(messages)) throw new Error(`ctx.session.context answered ${got === null ? "null" : typeof got} for session ${sessionID}, not a message list`);
+  return messages;
+}
+function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPolicy, readState: readState2 = readDispatchState }) {
+  const policies = /* @__PURE__ */ new Map();
+  const disclosed = /* @__PURE__ */ new Map();
+  function offLaneMayExist(root) {
+    for (const p of policies.values()) if (p === "off") return true;
+    const scan = readState2(root);
+    if (scan.availability === "absent") return false;
+    if (scan.availability !== "ok" || scan.poisoned.length > 0) return true;
+    return scan.records.some(({ record }) => !record.terminal && record.delivery === "off");
+  }
+  function offSiblingSeen(sessionID, parentID) {
+    for (const [id, p] of policies) if (p === "off" && id !== sessionID && parents.get(id) === parentID) return true;
+    return false;
+  }
+  async function resolve15(root, sessionID, messages) {
+    const cached = policies.get(sessionID);
+    if (cached !== void 0) return cached;
+    const kind = await sessionKind(getSession?.(), sessionID, parents);
+    if (kind.why) {
+      let may;
+      try {
+        may = offLaneMayExist(root);
+      } catch (e) {
+        logLine(root, `delivery policy: the dispatch state could not be scanned (${errText(e)})`);
+        may = true;
+      }
+      if (may) logLine(root, `delivery policy: session ${sessionID} could not be classified (${kind.why}) while an off lane may exist, so delivery is held back`);
+      return may ? "unknown" : "on";
+    }
+    if (kind.kind === "root") return remember(policies, sessionID, "on");
+    const parentID = parents.get(sessionID);
+    let brief = "";
+    if (messages !== void 0) brief = rawBriefOf(messages);
+    else {
+      try {
+        brief = rawBriefOf(await contextMessages(getSession?.(), sessionID));
+      } catch (e) {
+        logLine(root, `delivery policy: the brief of child session ${sessionID} could not be read (${errText(e)}); the dispatch state decides`);
+      }
+    }
+    const recorded = readPolicy(root, { session_id: parentID, agent_id: sessionID });
+    let policy;
+    if (brief) policy = parseSterlingDelivery(brief).policy === "off" || recorded === "off" ? "off" : "on";
+    else policy = recorded === "on" && offSiblingSeen(sessionID, parentID) ? "unknown" : recorded;
+    if (policy !== "unknown") remember(policies, sessionID, policy);
+    return policy;
+  }
+  function markDisclosed(sessionID, policy) {
+    const seen = disclosed.get(sessionID) ?? /* @__PURE__ */ new Set();
+    seen.add(policy);
+    remember(disclosed, sessionID, seen);
+  }
+  function disclose(sessionID, policy) {
+    const notice = deliveryPolicyNotice(policy);
+    if (!notice || disclosed.get(sessionID)?.has(policy)) return "";
+    markDisclosed(sessionID, policy);
+    return notice;
+  }
+  return { resolve: resolve15, disclose, markDisclosed };
+}
+
 // packages/opencode-plugin/src/worker.mjs
 import { spawn as spawn2 } from "node:child_process";
 import { existsSync as existsSync22 } from "node:fs";
@@ -19078,7 +19208,7 @@ function planLockSection(ctx) {
 // packages/opencode-plugin/src/context.mjs
 var STATUS_TTL_MS = 1e4;
 var UNDECLARED_TTL_MS = 5 * 6e4;
-function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = /* @__PURE__ */ new Map(), sweepStale, swept = /* @__PURE__ */ new Set(), env = process.env }) {
+function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = /* @__PURE__ */ new Map(), sweepStale, swept = /* @__PURE__ */ new Set(), env = process.env, deliveryPolicy = createDeliveryPolicy({ getSession, parents }) }) {
   const statusCache = /* @__PURE__ */ new Map();
   const undeclaredCache = /* @__PURE__ */ new Map();
   const maintenanceCache = /* @__PURE__ */ new Map();
@@ -19119,6 +19249,12 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     return text;
   }
   async function childStaging(root, input) {
+    const policy = await deliveryPolicy.resolve(root, input.sessionID, input.messages);
+    if (policy !== "on") {
+      const role = agentRole(input.agent);
+      deliveryPolicy.markDisclosed(input.sessionID, policy);
+      return composeContext({ agentType: role, ...dispatchChrome(root, role), unattributableLine: deliveryPolicyNotice(policy) });
+    }
     const brief = briefOf(input.messages);
     try {
       const store = openStore(join37(root, ".sterling", "sterling.db"));
@@ -21431,9 +21567,10 @@ function createSterlingServer(deps = {}) {
     }
     const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env });
     const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
-    const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
-    const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
-    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
+    const deliveryPolicy = createDeliveryPolicy({ getSession: () => session, parents });
+    const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot, deliveryPolicy });
+    const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
+    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
     const dispatch = createDispatchHandlers({ rootOf, fenced });
     const recordResearch = createResearchRecorder({ rootOf, fenced, now });
     async function onBefore(input) {
