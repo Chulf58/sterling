@@ -43,12 +43,14 @@
 // over the model's window from the shared table templates/context-windows.json
 // with the project's context_watch.windows as override.
 //
-// On OpenCode (host 'opencode', passed by the entry point) there is no such
-// transcript: a register row's agent_id is the child session's id, and the
-// fill is read from OpenCode's own database (readOpenCodeContext): the latest
-// assistant turn's input plus both cache fields, over the model's context
-// limit from the models.dev catalog OpenCode keeps in that database, else the
-// window table above.
+// On OpenCode there is no such transcript: a register row's agent_id is the
+// child session's id, and the fill is read from OpenCode's own database
+// (readOpenCodeContext): the latest assistant turn's input plus both cache
+// fields, over the model's context limit from the models.dev catalog OpenCode
+// keeps in that database, else the window table above. A row is read the
+// OpenCode way when the entry point passed host 'opencode' OR its agent_id is
+// an OpenCode session id ('ses_…'), so a TUI started without --host (a
+// launcher generated before that flag existed) still finds the figure.
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -351,6 +353,13 @@ export function defaultOpenCodeDbPath(env: Readonly<Record<string, string | unde
   return join(env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), 'opencode', 'opencode.db');
 }
 
+/** An OpenCode session id ('ses_' then base62, as session_v2.id holds it); a
+ *  Claude Code agent id never has that prefix, so such a row is OpenCode's
+ *  child session whatever --host the TUI was started with. */
+function isOpenCodeSessionId(agentId: string): boolean {
+  return /^ses_[0-9A-Za-z]+$/.test(agentId);
+}
+
 /** Tokens in context at a child session's latest assistant turn, and the model that turn ran on. */
 export interface OpenCodeContextUsage {
   tokens: number;
@@ -634,7 +643,9 @@ export function createSubagentTracker(
       if (r.agentType && !models.has(r.agentType)) models.set(r.agentType, readAgentModel(projectRoot, r.agentType));
     }
     const windows = source.rows.length ? readProjectWindows(projectRoot) : {};
-    context = host === 'opencode' ? openCodeContexts(source.rows, windows) : new Map(source.rows.map((r) => [r.agentId, contextOf(r, windows, now)]));
+    const fromOpenCode = (r: SubagentRow): boolean => host === 'opencode' || isOpenCodeSessionId(r.agentId);
+    context = openCodeContexts(source.rows.filter(fromOpenCode), windows);
+    for (const r of source.rows) if (!fromOpenCode(r)) context.set(r.agentId, contextOf(r, windows, now));
     // forget what belongs to agents that left the register
     const keys = new Set(source.rows.map(keyOf));
     for (const k of [...transcripts.keys()]) if (!keys.has(k)) transcripts.delete(k);
