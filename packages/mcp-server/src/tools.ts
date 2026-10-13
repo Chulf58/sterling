@@ -11433,15 +11433,24 @@ export class SterlingTools {
    * could remove, the refusal names its full uuid and text so one retry
    * suffices. It never resolves: the remove is still refused, and the caller
    * must re-issue with the full id after reading which item it is. An
-   * ambiguous, unknown, too-short or non-removable match names no uuid.
+   * ambiguous, unknown, too-short or non-removable match names no uuid, and
+   * so does a match that is not ACTIVE (a retired todo stays in the index).
+   * An id that is an exact live slug names no uuid either: the ladder resolves
+   * a slug BEFORE a prefix, so board_get would show the slug's record while a
+   * prefix hint would point at a different one.
+   *
+   * The index, alias and body reads share no snapshot, so a concurrent insert
+   * can land between them. The message therefore reports what was seen at
+   * refusal time and claims no uniqueness; no lock is taken for a hint.
    */
   private uniqueRemovablePrefixMatch(op: string, id: string): { id: string; source: string; name: string } | undefined {
     if (id.length < SterlingTools.CITATION_PREFIX_LEN) return undefined;
+    if (this.store.recordsBySlug(id).length > 0) return undefined;
     const hits = this.store.recordIdIndex().filter((r) => r.id.startsWith(id));
     const aliasHits = this.store.recordAliases().filter((a) => a.historical_id.startsWith(id));
     if (hits.length !== 1 || aliasHits.length !== 0 || hits[0].type !== 'todo') return undefined;
     const rec = this.store.get(hits[0].id) as unknown as Record<string, unknown> | undefined;
-    if (!rec) return undefined;
+    if (!rec || rec.status !== 'active') return undefined;
     const source = String(rec.source ?? 'user');
     if (op === 'maintenance_remove' && source !== 'system') return undefined;
     return { id: String(rec.id), source, name: SterlingTools.boardItemName(rec) };
@@ -11460,8 +11469,8 @@ export class SterlingTools {
           `silently retarget to a different, live item and destroy it irreversibly; that is why the full id is required here — ` +
           `board_get, board_update and board_edit still resolve abbreviations, because their worst case is a recoverable edit. ` +
           (match
-            ? `'${id}' prefixes exactly one open ${match.source}-source item: ${match.id} ("${match.name}"). If that is the item ` +
-              `you mean, re-issue with that full uuid; nothing was removed.`
+            ? `At the time of this refusal, the only open ${match.source}-source item whose id starts with '${id}' was ${match.id} ` +
+              `("${match.name}"). If that is the item you mean, re-issue with that full uuid; nothing was removed.`
             : `Look the item up with board_query or maintenance_query and re-issue with the full uuid; nothing was removed.`)
       );
     }

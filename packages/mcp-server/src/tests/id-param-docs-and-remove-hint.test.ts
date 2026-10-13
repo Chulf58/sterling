@@ -78,8 +78,12 @@ test('board_remove: a unique live 8-char prefix is refused, the refusal names th
     const { record } = tools.boardAdd({ text: 'ship csv export', source: 'user' }) as unknown as { record: { id: string } };
     const msg = refusal(() => tools.boardRemove(record.id.slice(0, 8)));
     assert.match(msg, /EXACT full uuid only/);
-    assert.ok(msg.includes(record.id), `the refusal names the matched full uuid — got: ${msg}`);
-    assert.match(msg, /ship csv export/, 'and the item text, so the caller can check it is the item meant');
+    assert.match(
+      msg,
+      new RegExp(`At the time of this refusal, the only open user-source item whose id starts with '${record.id.slice(0, 8)}' was ${record.id} \\("ship csv export"\\)`),
+      `the refusal reports the matched full uuid and its text as seen at refusal time — got: ${msg}`
+    );
+    assert.doesNotMatch(msg, /exactly one/i, 'no uniqueness claim: the reads share no snapshot');
     assert.match(msg, /nothing was removed/);
     assert.equal(tools.boardQuery({ source: 'user' }).length, 1, 'the item survives the refused call');
     assert.equal(tools.boardRemove(record.id).removed, record.id, 'one retry with the named uuid removes it');
@@ -97,7 +101,12 @@ test('maintenance_remove: a unique live 8-char prefix of a system item is refuse
       file_keys: ['src/y.ts'],
     }) as unknown as { record: { id: string } };
     const msg = refusal(() => tools.maintenanceRemove(record.id.slice(0, 8)));
-    assert.ok(msg.includes(record.id), `the refusal names the matched full uuid — got: ${msg}`);
+    assert.match(
+      msg,
+      new RegExp(`At the time of this refusal, the only open system-source item whose id starts with '${record.id.slice(0, 8)}' was ${record.id} `),
+      `the refusal names the matched full uuid — got: ${msg}`
+    );
+    assert.doesNotMatch(msg, /exactly one/i, 'no uniqueness claim: the reads share no snapshot');
     assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 1, 'the item survives the refused call');
   } finally {
     cleanup();
@@ -158,4 +167,44 @@ test('served input schemas: every id-taking param of every tool says what it acc
   }
   assert.ok(checked > 20, `the sweep saw the id params (${checked})`);
   assert.deepEqual(undocumented, [], 'each id param names the id forms it accepts');
+});
+
+test('board_remove: a prefix of a RETIRED (superseded) todo names no uuid — a retired row stays in the id index but is not an open item', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const { record: retired } = tools.boardAdd({ text: 'retired task', source: 'user' }) as unknown as { record: { id: string } };
+    const { record: survivor } = tools.boardAdd({ text: 'survivor task', source: 'user' }) as unknown as { record: { id: string } };
+    store.retireInFavorOf(retired.id, survivor.id, NOW);
+    assert.equal(store.get(retired.id)?.status, 'superseded', 'precondition: the todo is retired and still in the store');
+    assert.ok(store.recordIdIndex().some((r) => r.id === retired.id), 'precondition: the retired todo is still in the id index');
+
+    const msg = refusal(() => tools.boardRemove(retired.id.slice(0, 8)));
+    assert.match(msg, /EXACT full uuid only/);
+    assert.doesNotMatch(msg, UUID_RE, `a retired todo is not offered — got: ${msg}`);
+    assert.ok(store.get(retired.id), 'nothing was removed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('board_remove: when the cited id is task B\'s exact slug AND a prefix of task A\'s uuid, no uuid is offered (the ladder would resolve the slug, not the prefix)', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const { record: a } = tools.boardAdd({ text: 'task A', source: 'user' }) as unknown as { record: { id: string } };
+    const cited = a.id.slice(0, 8);
+    const { record: bSeed } = tools.boardAdd({ text: 'task B', source: 'user' }) as unknown as { record: Record<string, unknown> };
+    store.remove(String(bSeed.id), NOW);
+    const bId = '00000000-0000-4000-8000-0000000000bb';
+    store.create({ ...(JSON.parse(JSON.stringify(bSeed)) as Record<string, unknown>), id: bId, slug: cited });
+
+    const got = tools.boardGet(cited) as unknown as { id?: string; record?: { id: string } };
+    assert.equal(got.record?.id ?? got.id, bId, 'precondition: board_get resolves the cited id to task B by slug');
+
+    const msg = refusal(() => tools.boardRemove(cited));
+    assert.match(msg, /EXACT full uuid only/);
+    assert.doesNotMatch(msg, UUID_RE, `task A's uuid must not be offered for task B's slug — got: ${msg}`);
+    assert.equal(tools.boardQuery({ source: 'user' }).length, 2, 'both tasks survive');
+  } finally {
+    cleanup();
+  }
 });
