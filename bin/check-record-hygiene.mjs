@@ -7,14 +7,14 @@ var __export = (target, all) => {
 };
 
 // scripts/check-record-hygiene.mjs
-import { dirname as dirname6, join as join10 } from "node:path";
+import { dirname as dirname5, join as join10 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { existsSync as existsSync4 } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 // scripts/lib/project.mjs
-import { readFileSync as readFileSync4, existsSync as existsSync3, mkdtempSync, rmSync as rmSync2, realpathSync as realpathSync3 } from "node:fs";
-import { join as join8, resolve as resolve4, dirname as dirname4, basename as basename2 } from "node:path";
+import { readFileSync as readFileSync4, existsSync as existsSync3, mkdtempSync, rmSync as rmSync2 } from "node:fs";
+import { join as join8 } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
@@ -11058,9 +11058,9 @@ function openProjectReadOnly(cwd = process.cwd()) {
 
 // scripts/lib/record-hygiene.mjs
 import { readFileSync as readFileSync5 } from "node:fs";
-import { dirname as dirname5, join as join9 } from "node:path";
+import { dirname as dirname4, join as join9 } from "node:path";
 import { fileURLToPath } from "node:url";
-var here = dirname5(fileURLToPath(new URL("../scripts/lib/record-hygiene.mjs", import.meta.url).href));
+var here = dirname4(fileURLToPath(new URL("../scripts/lib/record-hygiene.mjs", import.meta.url).href));
 var FILLER_WORDS = JSON.parse(readFileSync5(join9(here, "record-hygiene-filler.json"), "utf8")).words;
 var FILLER = new Set(FILLER_WORDS);
 var AUDITED_TYPES = [
@@ -11138,7 +11138,7 @@ function auditRecords(records, { headFiles }) {
 var PRINT_CAP = 10;
 var args = process.argv.slice(2);
 var showAll = args.includes("--all");
-var root = args.find((a) => !a.startsWith("--")) ?? join10(dirname6(fileURLToPath2(new URL("../scripts/check-record-hygiene.mjs", import.meta.url).href)), "..");
+var root = args.find((a) => !a.startsWith("--")) ?? join10(dirname5(fileURLToPath2(new URL("../scripts/check-record-hygiene.mjs", import.meta.url).href)), "..");
 process.on("exit", (code) => {
   if (code !== 0) console.log(`record hygiene: could not run (a helper exited ${code}, see above) \u2014 REPORTING ONLY, exit code forced to 0`);
   process.exitCode = 0;

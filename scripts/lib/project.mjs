@@ -1,8 +1,7 @@
 // Shared plumbing for conductor-invoked [S] scripts: target-project resolution,
 // config, store, args.
-import { readFileSync, existsSync, mkdtempSync, rmSync, realpathSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
-import { join, resolve, dirname, basename } from 'node:path';
+import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { parseConfig } from '@sterling/schemas';
@@ -119,26 +118,9 @@ export function fail(message, code = 1) {
   process.exit(code);
 }
 
-// Opt-in worktree detection (board ks-dashboards-gap-1). A LINKED git worktree
-// never has `.sterling/` (it is gitignored), so resolveProject, which reads only
-// <cwd>/.sterling, reports "not an initialized project" there. Callers that can
-// work from a worktree ask this first and pass the returned mainRoot to
-// openProject; every other caller keeps resolveProject's behaviour unchanged.
-// A linked worktree is one whose `--git-dir` differs from its `--git-common-dir`;
-// the main checkout is the parent of the common dir. Returns
-// { worktree, mainRoot } (real paths) for a linked worktree, or null for the
-// main checkout, a non-git directory, git failing, and a bare-repo main (whose
-// common dir is not `<checkout>/.git`, so there is no main checkout to name).
-export function resolveLinkedWorktree(cwd = process.cwd()) {
-  const r = spawnSync('git', ['rev-parse', '--git-dir', '--git-common-dir', '--show-toplevel'], { cwd, encoding: 'utf8', timeout: 30_000 });
-  if (r.error || r.status !== 0) return null;
-  const [gitDir, commonDir, toplevel] = r.stdout.split('\n').map((l) => l.trim());
-  if (!gitDir || !commonDir || !toplevel) return null;
-  const gitDirReal = realpathSync(resolve(cwd, gitDir));
-  const commonReal = realpathSync(resolve(cwd, commonDir));
-  if (gitDirReal === commonReal || basename(commonReal) !== '.git') return null;
-  return { worktree: realpathSync(toplevel), mainRoot: dirname(commonReal) };
-}
+// resolveLinkedWorktree / resolveStoreRoot live in ./worktree-root.mjs (no store
+// imports, so a small bin bundle can use them); re-exported here for callers.
+export { resolveLinkedWorktree, resolveStoreRoot } from './worktree-root.mjs';
 
 // Resolve the store route + config once; every opener shares the existence
 // guard, the single config parse, and the one P5 failure path. config.storage

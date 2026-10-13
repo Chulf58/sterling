@@ -15,7 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { arg, fail as baseFail, openProject, resolveLinkedWorktree } from './lib/project.mjs';
+import { arg, fail as baseFail, openProject, resolveLinkedWorktree, resolveStoreRoot } from './lib/project.mjs';
 import { isGitRepo, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
 import { defaultExec } from './lib/update.mjs';
 import { mintSettlementReconcile, explainReconcileDebtLiveness, loadGeneratedProjections } from './hooks/lib/settlement.mjs';
@@ -39,13 +39,7 @@ const target = arg('--target') ?? process.cwd();
 // are the same directory.
 const linkedWorktree = resolveLinkedWorktree(target);
 const CONFIG_REL = '.sterling/config.json';
-// The main checkout's config wins. Only when the main checkout has none and the
-// worktree carries its own (a copy, per anti-pattern e76fd6b9) does the worktree
-// become the store root: the config, the store and the PR-loop marker then all
-// live in the one root that holds the config, never split across two.
-const worktreeOnlyConfig =
-  linkedWorktree && !existsSync(join(linkedWorktree.mainRoot, CONFIG_REL)) && existsSync(join(linkedWorktree.worktree, CONFIG_REL));
-const storeRoot = linkedWorktree && !worktreeOnlyConfig ? linkedWorktree.mainRoot : linkedWorktree ? linkedWorktree.worktree : target;
+const storeRoot = resolveStoreRoot(target, linkedWorktree);
 
 // PROJECT MODE decides the flow, read ONLY through readProjectMode (a missing
 // key is hobby), and read FIRST so a work-mode run can put every exit through

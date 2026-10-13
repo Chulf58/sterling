@@ -107,6 +107,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { resolveStoreRoot } from './lib/worktree-root.mjs';
 import { fetchSettledMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
 
 const argv = process.argv.slice(2);
@@ -115,6 +116,10 @@ const flag = (name) => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 const target = resolve(flag('--target') ?? process.cwd());
+// .sterling/ is gitignored, so a linked worktree has none: the pinned logins and
+// the armed PR-loop marker live in the main checkout, where /sterling:merge
+// (direct-merge) put them. Git and gh still run in `target`.
+const storeRoot = resolveStoreRoot(target);
 
 const COPILOT_LOGIN = /copilot/i; // UNVERIFIED until S0 (see the header); used only while unpinned
 const COMPLETED_STATES = new Set(['COMMENTED', 'APPROVED', 'CHANGES_REQUESTED']);
@@ -142,7 +147,7 @@ const error = (message) => finish('error', { review: null, comments: [], error: 
 // use pins the exact login there. Pinned, only an exact login matches. The
 // config schema keeps pr_review permissive; this is the strict judge.
 function readPinnedLogins() {
-  const file = join(target, '.sterling', 'config.json');
+  const file = join(storeRoot, '.sterling', 'config.json');
   if (!existsSync(file)) return [];
   let cfg;
   try {
@@ -218,7 +223,7 @@ if (argv.includes('--settle')) {
       }
     };
     const outcome = flag('--settle');
-    const s = settlePrLoop(target, outcome, flag('--pr'), { originRepo, guard: outcome === 'clean' ? guard : null });
+    const s = settlePrLoop(storeRoot, outcome, flag('--pr'), { originRepo, guard: outcome === 'clean' ? guard : null });
     process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at, ...(merge ?? {}) }) + '\n');
     process.exit(0);
   } catch (e) {

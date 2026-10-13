@@ -7,13 +7,13 @@ var __export = (target2, all) => {
 };
 
 // scripts/cleanup-plan.mjs
-import { lstatSync as lstatSync4, readFileSync as readFileSync5, realpathSync as realpathSync4 } from "node:fs";
-import { basename as basename3, join as join9, posix } from "node:path";
+import { lstatSync as lstatSync4, readFileSync as readFileSync5, realpathSync as realpathSync3 } from "node:fs";
+import { basename as basename2, join as join9, posix } from "node:path";
 import { spawnSync } from "node:child_process";
 
 // scripts/lib/project.mjs
-import { readFileSync as readFileSync4, existsSync as existsSync3, mkdtempSync, rmSync as rmSync2, realpathSync as realpathSync3 } from "node:fs";
-import { join as join8, resolve as resolve4, dirname as dirname4, basename as basename2 } from "node:path";
+import { readFileSync as readFileSync4, existsSync as existsSync3, mkdtempSync, rmSync as rmSync2 } from "node:fs";
+import { join as join8 } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
@@ -10905,19 +10905,19 @@ function gitUnavailable() {
   if (r.error) return `git could not be run (${r.error.message})`;
   if (r.status !== 0) return `git rev-parse failed: ${firstLine(r.stderr)}`;
   const top = r.stdout.trim();
-  if (realpathSync4(top) !== realpathSync4(target)) return `the project root is not the git top level (${top})`;
+  if (realpathSync3(top) !== realpathSync3(target)) return `the project root is not the git top level (${top})`;
   const ls = runGit(["ls-files", "-z"]);
   if (ls.error) return `git ls-files could not be run (${ls.error.message})`;
   if (ls.status !== 0) return `git ls-files failed: ${firstLine(ls.stderr)}`;
   return null;
 }
 function needlesFor(path) {
-  const base2 = basename3(path);
+  const base2 = basename2(path);
   const dot = base2.lastIndexOf(".");
   const stem = dot > 0 ? base2.slice(0, dot) : base2;
   const dirPath = posix.dirname(path);
   const inRoot = dirPath === ".";
-  const dirSegment = inRoot ? "" : basename3(dirPath);
+  const dirSegment = inRoot ? "" : basename2(dirPath);
   const lower = stem.toLowerCase();
   let needles;
   let local = [];

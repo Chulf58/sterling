@@ -11,7 +11,7 @@ import { dirname as dirname4, join as join10, resolve as resolve6 } from "node:p
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/project.mjs
-import { readFileSync as readFileSync4, existsSync as existsSync3, mkdtempSync, rmSync as rmSync2, realpathSync as realpathSync3 } from "node:fs";
+import { readFileSync as readFileSync4, existsSync as existsSync3, mkdtempSync, rmSync as rmSync2 } from "node:fs";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
 // node_modules/zod/v3/external.js

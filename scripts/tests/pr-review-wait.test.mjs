@@ -1255,3 +1255,90 @@ test('--resolve-threads: a failure on the second thread exits 1 naming the threa
     f.cleanup();
   }
 });
+
+// ------------------------------------------------------------ linked worktree
+// GitHub issue #89: .sterling/ is gitignored, so a linked worktree has none. The
+// loop is armed and copilot_logins pinned in the MAIN checkout (where
+// direct-merge puts them), and both --settle and the identity lookup must find
+// them from the worktree the PR was opened from. gh and git run in the worktree.
+
+function makeWorktreeFixture() {
+  const f = makeFixture();
+  const git = (cwd, args) => {
+    const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${oneLine(r.stderr)}`);
+  };
+  git(f.dir, ['commit', '--allow-empty', '-m', 'init']);
+  const wt = join(f.base, 'wt');
+  git(f.dir, ['worktree', 'add', '-b', 'feat/x', wt]);
+  assert.equal(existsSync(join(wt, '.sterling')), false, 'the linked worktree has no .sterling of its own');
+  return { f, fromWorktree: { ...f, dir: wt } };
+}
+
+test('--settle from a linked worktree settles the loop armed in the main checkout', () => {
+  const { f, fromWorktree } = makeWorktreeFixture();
+  try {
+    const armed = arm(f);
+    const r = run(fromWorktree, ['--settle', 'capped', '--pr', '7']);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    const after = JSON.parse(readFileSync(loopPath(f), 'utf8'));
+    assert.equal(after.status, 'capped');
+    assert.equal(after.pr_url, armed.pr_url);
+    assert.equal(existsSync(join(fromWorktree.dir, '.sterling')), false, 'nothing is written into the worktree');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--settle clean from a linked worktree runs its merge-state query too', () => {
+  const { f, fromWorktree } = makeWorktreeFixture();
+  try {
+    arm(f);
+    const r = run(fromWorktree, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(JSON.parse(readFileSync(loopPath(f), 'utf8')).status, 'clean');
+    assert.equal(calls(f).length, 1);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--settle from a linked worktree still refuses when the main checkout has no armed loop', () => {
+  const { f, fromWorktree } = makeWorktreeFixture();
+  try {
+    const r = run(fromWorktree, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(r.code, 1);
+    assert.match(r.out.error, /no PR review loop is armed here/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('identity from a linked worktree reads copilot_logins pinned in the main checkout (identity_confirmed true)', () => {
+  const { f, fromWorktree } = makeWorktreeFixture();
+  try {
+    f.put('reviews', 0, [[review(900, { login: 'copilot-helper[bot]' }), review(901)]]);
+    writeFileSync(join(f.dir, '.sterling', 'config.json'), JSON.stringify({ pr_review: { copilot_logins: [COPILOT] } }));
+    const r = run(fromWorktree, ['7', ...FAST]);
+    assert.equal(r.out.review.id, 901, oneLine(r.stdout));
+    assert.equal(r.out.identity_confirmed, true);
+    assert.equal(r.out.observed_copilot_login, COPILOT);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('a worktree that carries its own config while the main checkout has none keeps that config (direct-merge root rule)', () => {
+  const { f, fromWorktree } = makeWorktreeFixture();
+  try {
+    rmSync(join(f.dir, '.sterling'), { recursive: true, force: true });
+    mkdirSync(join(fromWorktree.dir, '.sterling'), { recursive: true });
+    f.put('reviews', 0, [[review(900, { login: 'copilot-helper[bot]' }), review(901)]]);
+    writeFileSync(join(fromWorktree.dir, '.sterling', 'config.json'), JSON.stringify({ pr_review: { copilot_logins: [COPILOT] } }));
+    const r = run(fromWorktree, ['7', ...FAST]);
+    assert.equal(r.out.review.id, 901, oneLine(r.stdout));
+    assert.equal(r.out.identity_confirmed, true);
+  } finally {
+    f.cleanup();
+  }
+});

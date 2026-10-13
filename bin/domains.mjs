@@ -7,7 +7,7 @@ var __export = (target, all) => {
 };
 
 // scripts/domains.mjs
-import { existsSync as existsSync4, readFileSync as readFileSync5, readdirSync, writeFileSync, renameSync, realpathSync as realpathSync4 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync4, readdirSync, writeFileSync, renameSync, realpathSync as realpathSync4 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { basename as basename3, dirname as dirname6, join as join10, resolve as resolve5 } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
@@ -9094,9 +9094,6 @@ function resolveStoreRoute(root) {
 }
 
 // scripts/lib/project.mjs
-import { readFileSync as readFileSync4, existsSync as existsSync3, mkdtempSync, rmSync as rmSync2, realpathSync as realpathSync3 } from "node:fs";
-import { spawnSync } from "node:child_process";
-import { join as join9, resolve as resolve4, dirname as dirname5, basename as basename2 } from "node:path";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
 // scripts/lib/store-path.mjs
@@ -9227,7 +9224,10 @@ function resolveStoreWritePath(root, ...segments) {
   return target;
 }
 
-// scripts/lib/project.mjs
+// scripts/lib/worktree-root.mjs
+import { spawnSync } from "node:child_process";
+import { existsSync as existsSync3, realpathSync as realpathSync3 } from "node:fs";
+import { basename as basename2, dirname as dirname5, join as join9, resolve as resolve4 } from "node:path";
 function resolveLinkedWorktree(cwd = process.cwd()) {
   const r = spawnSync("git", ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
@@ -9451,7 +9451,7 @@ if (opts.apply && opts.target !== void 0) {
 function readProject(dir) {
   const configPath = resolveStoreWritePath(dir, ".sterling", "config.json");
   if (!existsSync4(configPath)) return null;
-  const text = readFileSync5(configPath, "utf8");
+  const text = readFileSync4(configPath, "utf8");
   const raw = JSON.parse(text);
   return { dir, configPath, text, raw, config: parseConfig(raw) };
 }
