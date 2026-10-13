@@ -984,6 +984,56 @@ test('opencode: the tracker reads the child session\'s latest assistant turn wit
   }
 });
 
+// Regression (board 40202f58): the project's generated sterling-launch.sh predated
+// ee7ac457 and started the TUI with no --host, so host was 'claude', the OpenCode
+// child row looked for a Claude transcript and the card read '? ctx'. The
+// fixture is the live OpenCode 2.0.23 child session of 2026-10-13
+// (ses_ecbf91fc0ffekY2DTdnq6Q5TgX, sterling/implementor on
+// anthropic/claude-sonnet-5-5): its last two finished turns and the turn still
+// streaming, which carries no tokens key at all.
+const LIVE_CHILD = 'ses_ecbf91fc0ffekY2DTdnq6Q5TgX';
+const liveTurn = (created: number, tokens?: { input: number; read: number; write: number; output: number }) => ({
+  time: { created },
+  agent: 'sterling/implementor',
+  model: { id: 'claude-sonnet-5-5', providerID: 'anthropic', variant: 'default' },
+  content: [{ type: 'tool', id: 'toolu_x', name: 'shell', state: { status: tokens ? 'completed' : 'streaming', input: '' } }],
+  snapshot: { start: 'c0630d642dfd999b16e80477e8ac16a2ccebf8ec' },
+  ...(tokens ? { finish: 'tool-calls', cost: 0.03, tokens: { input: tokens.input, output: tokens.output, reasoning: 0, cache: { read: tokens.read, write: tokens.write } } } : {}),
+});
+
+test('opencode (regression 40202f58): a TUI started without --host still reads an OpenCode child session (ses_ id) from OpenCode\'s database; a Claude row keeps its transcript', () => {
+  const root = project();
+  try {
+    const db = openCodeDb(root, {
+      messages: [
+        [LIVE_CHILD, 1, 'user', { text: 'brief' }],
+        [LIVE_CHILD, 111, 'assistant', liveTurn(1791874260000, { input: 2, output: 1052, read: 73_434, write: 8_075 })],
+        [LIVE_CHILD, 124, 'assistant', liveTurn(1791874271536, { input: 2, output: 243, read: 81_509, write: 4_046 })],
+        [LIVE_CHILD, 133, 'assistant', liveTurn(1791874273653)],
+      ],
+      sessions: [[LIVE_CHILD, JSON.stringify({ id: 'claude-sonnet-5-5', providerID: 'anthropic' })]],
+      catalog: { anthropic: { id: 'anthropic', models: { 'claude-sonnet-5-5': { id: 'claude-sonnet-5-5', limit: { context: 1_000_000, output: 64_000 } } } } },
+    });
+    writeFileSync(join(root, '.sterling', 'config.json'), JSON.stringify({ context_watch: { windows: { 'claude-opus-5-5': 400_000 } } }));
+    const home = claudeHome(root, 's1', 'a1', [transcriptLine('assistant', { input_tokens: 100_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })]);
+    writeRegister(root, [
+      row(LIVE_CHILD, 'sterling/implementor', 10_000, { session_id: 'ses_ecbf96eeaffe9y2RUeMMV11nPx', model: 'anthropic/claude-sonnet-5-5' }),
+      row('a1', 'implementor', 9_000, { session_id: 's1' }),
+    ]);
+    // no host option: what main.ts passes when the launcher gives no --host
+    const v = createSubagentTracker(root, { readIntervalMs: 0, opencodeDb: db, claudeConfigDir: home }).view(NOW);
+    const kid = v.agents.find((a) => a.agentId === LIVE_CHILD)!;
+    assert.deepEqual([kid.contextTokens, kid.contextPct, kid.model], [85_557, 9, 'claude-sonnet-5-5'], '2 + 81,509 + 4,046 of 1,000,000');
+    const claude = v.agents.find((a) => a.agentId === 'a1')!;
+    assert.deepEqual([claude.contextTokens, claude.contextPct], [100_000, 25], 'a Claude agent id is still read from its transcript');
+    assert.equal(v.contextNote, undefined);
+    const text = composeSubagentBlock(v, 160, 30, 0).puts.map((p) => p.text);
+    assert.ok(text.includes('running · 9% ctx') && !text.includes('running · ? ctx'), JSON.stringify(text));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 const sessionModel = (id: string, providerID: string, variant?: string) => JSON.stringify({ id, providerID, ...(variant === undefined ? {} : { variant }) });
 
 test('opencode: a child with no assistant turn shows its session_v2 per-call model with its #variant, not the agent file\'s model', () => {

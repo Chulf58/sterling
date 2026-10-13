@@ -56469,6 +56469,9 @@ function readProjectWindows(projectRoot) {
 function defaultOpenCodeDbPath(env = process.env) {
   return join19(env.XDG_DATA_HOME || join19(homedir6(), ".local", "share"), "opencode", "opencode.db");
 }
+function isOpenCodeSessionId(agentId) {
+  return /^ses_[0-9A-Za-z]+$/.test(agentId);
+}
 var CATALOG_KEY = "models-dev:catalog";
 function openOpenCodeDb(path) {
   if (!existsSync13(path))
@@ -56648,7 +56651,11 @@ function createSubagentTracker(projectRoot, { rng = Math.random, readIntervalMs 
         models.set(r.agentType, readAgentModel(projectRoot, r.agentType));
     }
     const windows = source.rows.length ? readProjectWindows(projectRoot) : {};
-    context = host2 === "opencode" ? openCodeContexts(source.rows, windows) : new Map(source.rows.map((r) => [r.agentId, contextOf(r, windows, now)]));
+    const fromOpenCode = (r) => host2 === "opencode" || isOpenCodeSessionId(r.agentId);
+    context = openCodeContexts(source.rows.filter(fromOpenCode), windows);
+    for (const r of source.rows)
+      if (!fromOpenCode(r))
+        context.set(r.agentId, contextOf(r, windows, now));
     const keys = new Set(source.rows.map(keyOf));
     for (const k of [...transcripts.keys()])
       if (!keys.has(k))
