@@ -11606,6 +11606,24 @@ function isForeignTree(record, root) {
   return !(root && sameLocationAnyHost(String(wt), root));
 }
 
+// scripts/hooks/lib/dispatch-prompt.mjs
+var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
+function extractPathCandidates(text) {
+  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
+  return [...new Set(found)];
+}
+var STERLING_DELIVERY_LINE_RE = /^[ \t]*STERLING-DELIVERY:([^\n]*)$/gm;
+function stripSterlingDeliveryLine(text) {
+  return String(text ?? "").replace(STERLING_DELIVERY_LINE_RE, "");
+}
+var DELIVERY_OFF_NOTICE = "STERLING DELIVERY OFF for this lane: its brief carries STERLING-DELIVERY: off, so no store records are delivered. Its own knowledge_* calls are not blocked.";
+var DELIVERY_HELD_BACK_NOTICE = "STERLING DELIVERY HELD BACK: this lane's delivery policy could not be established (it could not be told apart from a same-type lane that asked for STERLING-DELIVERY: off, or the dispatch state was unreadable), so no store records are delivered.";
+function deliveryPolicyNotice(policy) {
+  if (policy === "off") return DELIVERY_OFF_NOTICE;
+  if (policy === "unknown") return DELIVERY_HELD_BACK_NOTICE;
+  return "";
+}
+
 // scripts/hooks/lib/delivery.mjs
 function deliveryDir(cwd) {
   return join10(cwd, ".sterling", "transient", "delivery");
@@ -13014,6 +13032,7 @@ function validateRecordShape(r) {
   if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: "derived_binding-shape" };
   if (!validateStarted(r.started)) return { ok: false, reason: "started-shape" };
   if (!validateTerminal(r.terminal)) return { ok: false, reason: "terminal-shape" };
+  if (r.delivery !== void 0 && r.delivery !== "off") return { ok: false, reason: "delivery-shape" };
   return { ok: true };
 }
 function classifyRecordFile(file) {
@@ -13121,6 +13140,41 @@ function validateNamedRecord(dir, name, parsed) {
     if (terminalFileName(parsed.key, record) !== name) return { exists: true, poisoned: true, reason: "ids-mismatch" };
   }
   return classified;
+}
+function readDispatchState(root) {
+  return scanLiveState(root, { repair: false });
+}
+function readDeliveryPolicy(root, { session_id, agent_id, agent_type } = {}) {
+  if (typeof agent_id !== "string" || agent_id === "") return "on";
+  try {
+    const scan = readDispatchState(root);
+    if (scan.availability === "absent") return "on";
+    if (scan.availability !== "ok") return "unknown";
+    const own = scan.records.map(({ record }) => record).filter((record) => recordAgentIds(record).includes(agent_id));
+    let ownUnreadable = false;
+    const hash = agentIdHash(agent_id);
+    const dir = dispatchStateDir(root);
+    for (const entry of scan.done) {
+      if (!entry.idHashes.includes(hash)) continue;
+      const v = validateNamedRecord(dir, entry.file, { kind: "done", key: entry.key });
+      if (!v.exists) continue;
+      if (v.poisoned) ownUnreadable = true;
+      else if (recordAgentIds(v.record).includes(agent_id)) own.push(v.record);
+    }
+    if (own.some((record) => record.delivery === "off")) return "off";
+    if (ownUnreadable) return "unknown";
+    if (own.length > 0) return "on";
+    if (scan.poisoned.length > 0) return "unknown";
+    const typed = typeof agent_type === "string" && agent_type !== "";
+    const siblingOff = scan.records.some(
+      ({ record }) => !record.terminal && record.delivery === "off" && record.session_id === session_id && (!typed || record.subagent_type === agent_type)
+    );
+    return siblingOff ? "unknown" : "on";
+  } catch (e) {
+    process.stderr.write(`dispatch-state: delivery policy for agent '${agent_id}' could not be read (${e?.message ?? e}) \u2014 held back as 'unknown'
+`);
+    return "unknown";
+  }
 }
 function readDispatchStateLocked(root) {
   return scanLiveState(root, { repair: true });
@@ -13375,13 +13429,6 @@ function hazardLaneMode(input2, root) {
   }
 }
 
-// scripts/hooks/lib/dispatch-prompt.mjs
-var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
-function extractPathCandidates(text) {
-  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
-  return [...new Set(found)];
-}
-
 // scripts/hooks/lib/plan-lock.mjs
 import { closeSync as closeSync4, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync6, openSync as openSync4, readSync as readSync2, renameSync as renameSync4, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 import { join as join14 } from "node:path";
@@ -13553,18 +13600,20 @@ function dispatchChrome(cwd, agentType) {
   }
   return { tddPostureLine: tddPostureLine3, activePlanLine: activePlanLine2 };
 }
-function composeContext({ agentType, activePlanLine: activePlanLine2 = "", payload = "", tddPostureLine: tddPostureLine3 = "", unattributableLine: unattributableLine2 = "" }) {
+function composeContext({ agentType, activePlanLine: activePlanLine2 = "", payload = "", tddPostureLine: tddPostureLine3 = "", unattributableLine: unattributableLine2 = "", deliveryLine: deliveryLine2 = "" }) {
   const out = [];
   if (activePlanLine2) out.push(activePlanLine2);
   if (payload) out.push(payload);
   if (tddPostureLine3) out.push(tddPostureLine3);
   if (unattributableLine2) out.push(unattributableLine2);
+  if (deliveryLine2) out.push(deliveryLine2);
   if (!EXEMPT_AGENT_TYPES.has(agentType)) out.push(RETURN_CONTRACT);
   return out.join("\n\n");
 }
 var chromePart = (text) => ({ kind: "ordinary", pinned: true, contentClass: "chrome", text });
 function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = [], trailingChrome = [] }) {
-  const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
+  const briefs = prompts.map(stripSterlingDeliveryLine);
+  const candidates = [...new Set(briefs.flatMap(extractPathCandidates))];
   const rels = [...new Set(candidates.map((c) => repoRel(c, cwd)).filter(Boolean))].filter(
     (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/")
   );
@@ -13574,7 +13623,7 @@ function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = 
   const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
   const subjectMatches = [];
   const seenSubject = /* @__PURE__ */ new Set();
-  for (const p of prompts) {
+  for (const p of briefs) {
     const subjectText = stripReviewTerritoryLine(p);
     const terms = extractAxisTerms(subjectText, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) continue;
@@ -13661,11 +13710,18 @@ var input = readStdin();
 var { tddPostureLine: tddPostureLine2, activePlanLine } = dispatchChrome(input.cwd, input.agent_type);
 var unattributableLine = "";
 var startPhase = "store";
+var deliveryLine = "";
+function applyDeliveryPolicy(policy) {
+  deliveryLine = deliveryPolicyNotice(policy);
+  if (deliveryLine) unattributableLine = "";
+  return deliveryLine !== "";
+}
+var policyKey = () => ({ session_id: input.session_id, agent_id: input.agent_id, agent_type: input.agent_type });
 function notStagedLine(kase) {
   return `STERLING DISPATCH STAGING (H19): this spawn's dispatch could not be attributed at Start [${kase}] \u2014 YOUR KNOWLEDGE WAS NOT STAGED: no owning articles, hazards or decisions were delivered for your task. Do not assume the store is silent on it: rely on your dispatch brief for knowledge pointers and query the store for the area before acting. File-touch delivery still fires on your first Read/Edit.`;
 }
 function combinedContext(payload) {
-  return composeContext({ agentType: input.agent_type, activePlanLine, payload, tddPostureLine: tddPostureLine2, unattributableLine });
+  return composeContext({ agentType: input.agent_type, activePlanLine, payload, tddPostureLine: tddPostureLine2, unattributableLine, deliveryLine });
 }
 function envelope(out) {
   return JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: out } });
@@ -13689,6 +13745,7 @@ async function main(input2) {
     if (resolution.source === "unattributable") {
       unattributableLine = notStagedLine(resolution.case);
     }
+    if (applyDeliveryPolicy(readDeliveryPolicy(input2.cwd, policyKey()))) return finish("");
     const prompts = typeof resolution.prompt === "string" ? [resolution.prompt] : [];
     const staged = stageBrief({
       store,
@@ -13719,6 +13776,7 @@ async function main(input2) {
     }
     if (startPhase === "store") unattributableLine = notStagedLine("store-unavailable");
     else if (startPhase === "resolution") unattributableLine = notStagedLine("resolution-failed");
+    applyDeliveryPolicy(readDeliveryPolicy(input2.cwd, policyKey()));
     const out = combinedContext("");
     if (out) return exitAfterWrite(envelope(out), 0);
     return warnNonBlocking(`H19: dispatch staging failed and nothing was emitted`);

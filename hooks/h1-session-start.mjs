@@ -12693,6 +12693,7 @@ function validateRecordShape(r) {
   if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: "derived_binding-shape" };
   if (!validateStarted(r.started)) return { ok: false, reason: "started-shape" };
   if (!validateTerminal(r.terminal)) return { ok: false, reason: "terminal-shape" };
+  if (r.delivery !== void 0 && r.delivery !== "off") return { ok: false, reason: "delivery-shape" };
   return { ok: true };
 }
 function classifyRecordFile(file) {

@@ -92,8 +92,12 @@ function buildOutputAxis(store, root, { tool, args, content, sessionID, director
  * own output is matched, and call onOutput(input, output) after the file
  * delivery has written its guard, because H23 reads the guard fresh and a
  * delivery commit writes back the guard it read before the call.
+ * `deliveryPolicy` (delivery-policy.mjs) gates H23 only. H20 is left on: it
+ * delivers to the session that makes the call, so it reaches a blind lane only
+ * when that lane dispatches (decision blind-lane-sterling-delivery-off-brief-line, point 6).
  */
-export function createAxisHandlers({ openStore, rootOf, directory, fenced }) {
+export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy }) {
+  if (!deliveryPolicy) throw new Error('createAxisHandlers needs the deliveryPolicy tracker');
   const pending = new Map();
 
   async function onBefore(input) {
@@ -184,7 +188,15 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced }) {
     if (!content) return;
     const root = rootOf();
     if (!root) return;
-    await fenced('axis', root, () => {
+    await fenced('axis', root, async () => {
+      // H23 is a store delivery too: a session whose STERLING-DELIVERY policy is not 'on'
+      // gets its notice once and no hazard pointer (delivery-policy.mjs).
+      const policy = await deliveryPolicy.resolve(root, input.sessionID);
+      if (policy !== 'on') {
+        const notice = deliveryPolicy.disclose(input.sessionID, policy);
+        if (notice) appendToResult(input.result, notice);
+        return;
+      }
       const store = openSubjectFan(root, { opener: openStore });
       if (!store) return;
       let block;

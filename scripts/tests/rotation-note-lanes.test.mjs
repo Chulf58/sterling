@@ -43,10 +43,14 @@ function makeProject() {
   return { dir, cleanup };
 }
 
-// The ambient CLAUDE_CODE_SESSION_ID of whoever runs this suite must not leak in.
+// The ambient host variables of whoever runs this suite (Claude Code's CLAUDE_CODE_SESSION_ID,
+// OpenCode's OPENCODE and OPENCODE_SESSION_ID) must not leak in: OPENCODE=1 makes the writer
+// prefer the OpenCode session id over the one a test sets.
 function runRotationNote(dir, args, envOver = {}) {
   const env = { ...process.env };
   delete env.CLAUDE_CODE_SESSION_ID;
+  delete env.OPENCODE_SESSION_ID;
+  delete env.OPENCODE;
   return spawnSync(process.execPath, [ROTATION_SCRIPT, ...args], { cwd: dir, encoding: 'utf8', timeout: 30_000, env: { ...env, ...envOver } });
 }
 

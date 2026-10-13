@@ -11708,6 +11708,52 @@ function render(x) {
   return `${label} [${x?.code}] ${x?.message ?? ""}`;
 }
 
+// scripts/hooks/lib/dispatch-prompt.mjs
+var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
+function extractPathCandidates(text) {
+  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
+  return [...new Set(found)];
+}
+var REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
+var GLOB_METACHAR_RE = /[*?[\]]/;
+function canonicalTerritoryEntry(p) {
+  if (typeof p !== "string") return { reason: "not a string" };
+  if (p === "") return { reason: "empty string" };
+  if (GLOB_METACHAR_RE.test(p)) return { reason: "glob pattern; the declaration names files or directories, never patterns" };
+  const stripped = p.endsWith("/") ? p.slice(0, -1) : p;
+  let normalized;
+  try {
+    normalized = normalizeRepoPath(stripped);
+  } catch (e) {
+    return { reason: String(e?.message ?? e).replace(/^path invariant violation: /, "") };
+  }
+  if (normalized !== stripped) return { reason: `not canonical repo-relative POSIX form (canonical: '${normalized}')` };
+  return { path: normalized };
+}
+function parseReviewTerritory(text) {
+  const match = REVIEW_TERRITORY_RE.exec(String(text ?? ""));
+  if (!match) return { present: false };
+  const raw = match[0];
+  let parsed;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch (e) {
+    return { present: true, valid: false, raw, reason: `not valid JSON (${e.message})` };
+  }
+  if (!Array.isArray(parsed)) return { present: true, valid: false, raw, reason: "not a JSON array" };
+  const files = [];
+  for (const [i, entry] of parsed.entries()) {
+    const c = canonicalTerritoryEntry(entry);
+    if (c.reason) return { present: true, valid: false, raw, reason: `entry ${i} (${JSON.stringify(entry)}): ${c.reason}` };
+    files.push(c.path);
+  }
+  return { present: true, valid: true, files: [...new Set(files)] };
+}
+var STERLING_DELIVERY_LINE_RE = /^[ \t]*STERLING-DELIVERY:([^\n]*)$/gm;
+function stripSterlingDeliveryLine(text) {
+  return String(text ?? "").replace(STERLING_DELIVERY_LINE_RE, "");
+}
+
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
   return join10(root, ".sterling", "transient", "dispatch-register.json");
@@ -11905,6 +11951,7 @@ function validateRecordShape(r) {
   if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: "derived_binding-shape" };
   if (!validateStarted(r.started)) return { ok: false, reason: "started-shape" };
   if (!validateTerminal(r.terminal)) return { ok: false, reason: "terminal-shape" };
+  if (r.delivery !== void 0 && r.delivery !== "off") return { ok: false, reason: "delivery-shape" };
   return { ok: true };
 }
 function classifyRecordFile(file) {
@@ -12063,7 +12110,7 @@ function stripReviewTerritoryLine(text) {
 }
 function outgoingProposalText(toolInput) {
   const ti = toolInput ?? {};
-  if (typeof ti.prompt === "string" && ti.prompt.trim()) return stripReviewTerritoryLine(ti.prompt);
+  if (typeof ti.prompt === "string" && ti.prompt.trim()) return stripSterlingDeliveryLine(stripReviewTerritoryLine(ti.prompt));
   if (Array.isArray(ti.questions)) {
     return ti.questions.flatMap((q) => [
       q?.question,
@@ -13073,48 +13120,6 @@ function recordAdvisoryFire(root, hook, sessionId) {
     );
   } catch {
   }
-}
-
-// scripts/hooks/lib/dispatch-prompt.mjs
-var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
-function extractPathCandidates(text) {
-  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
-  return [...new Set(found)];
-}
-var REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
-var GLOB_METACHAR_RE = /[*?[\]]/;
-function canonicalTerritoryEntry(p) {
-  if (typeof p !== "string") return { reason: "not a string" };
-  if (p === "") return { reason: "empty string" };
-  if (GLOB_METACHAR_RE.test(p)) return { reason: "glob pattern; the declaration names files or directories, never patterns" };
-  const stripped = p.endsWith("/") ? p.slice(0, -1) : p;
-  let normalized;
-  try {
-    normalized = normalizeRepoPath(stripped);
-  } catch (e) {
-    return { reason: String(e?.message ?? e).replace(/^path invariant violation: /, "") };
-  }
-  if (normalized !== stripped) return { reason: `not canonical repo-relative POSIX form (canonical: '${normalized}')` };
-  return { path: normalized };
-}
-function parseReviewTerritory(text) {
-  const match = REVIEW_TERRITORY_RE.exec(String(text ?? ""));
-  if (!match) return { present: false };
-  const raw = match[0];
-  let parsed;
-  try {
-    parsed = JSON.parse(match[1]);
-  } catch (e) {
-    return { present: true, valid: false, raw, reason: `not valid JSON (${e.message})` };
-  }
-  if (!Array.isArray(parsed)) return { present: true, valid: false, raw, reason: "not a JSON array" };
-  const files = [];
-  for (const [i, entry] of parsed.entries()) {
-    const c = canonicalTerritoryEntry(entry);
-    if (c.reason) return { present: true, valid: false, raw, reason: `entry ${i} (${JSON.stringify(entry)}): ${c.reason}` };
-    files.push(c.path);
-  }
-  return { present: true, valid: true, files: [...new Set(files)] };
 }
 
 // scripts/hooks/lib/dispatch-advisory.mjs

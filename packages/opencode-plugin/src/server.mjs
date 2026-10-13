@@ -62,6 +62,7 @@ import { createCompactionHandler } from './compaction.mjs';
 import { createBootstrapHandler, createConfigHandler } from './config.mjs';
 import { createContextHandler } from './context.mjs';
 import { createDeliveryHandlers } from './delivery.mjs';
+import { createDeliveryPolicy } from './delivery-policy.mjs';
 import { createDispatchHandlers, liveChildInRegister, rootSessionGate, sweepStaleDispatches } from './dispatch.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { NOTICES_REL, addNotice } from './notices.mjs';
@@ -206,9 +207,11 @@ export function createSterlingServer(deps = {}) {
 
     const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env });
     const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
-    const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
-    const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
-    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
+    // Each session's STERLING-DELIVERY policy, shared by child staging and the tool-time deliveries (delivery-policy.mjs).
+    const deliveryPolicy = createDeliveryPolicy({ getSession: () => session, parents });
+    const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot, deliveryPolicy });
+    const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
+    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
     const dispatch = createDispatchHandlers({ rootOf, fenced });
     const recordResearch = createResearchRecorder({ rootOf, fenced, now });
     // Every handler is fenced, so none of them throws: Sterling never denies a tool call.

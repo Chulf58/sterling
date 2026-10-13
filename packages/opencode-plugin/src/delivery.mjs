@@ -221,9 +221,12 @@ export function appendToResult(result, text) {
 
 /**
  * The execute.before / execute.after handlers. `pending` holds each built
- * delivery between the two, keyed by tool call id.
+ * delivery between the two, keyed by tool call id. `deliveryPolicy` is the
+ * location's STERLING-DELIVERY tracker (delivery-policy.mjs): a session whose
+ * policy is not 'on' gets no store record, only its notice once.
  */
-export function createDeliveryHandlers({ openStore, rootOf, directory, fenced }) {
+export function createDeliveryHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy }) {
+  if (!deliveryPolicy) throw new Error('createDeliveryHandlers needs the deliveryPolicy tracker');
   const pending = new Map();
 
   /** The delivery builder for this call, or null when the tool or its arguments give nothing to deliver for. */
@@ -248,9 +251,16 @@ export function createDeliveryHandlers({ openStore, rootOf, directory, fenced })
     if (!isDeliveryTool(input?.tool)) return;
     const root = rootOf();
     if (!root) return;
-    await fenced('delivery', root, () => {
+    await fenced('delivery', root, async () => {
       const build = builderFor(input, root);
       if (!build) return;
+      // Resolved before the store is opened: a blind lane's call never reads a record.
+      const policy = await deliveryPolicy.resolve(root, input.sessionID);
+      if (policy !== 'on') {
+        pending.set(input.id, { withheld: policy });
+        while (pending.size > PENDING_CAP) pending.delete(pending.keys().next().value);
+        return;
+      }
       const store = openStore(join(root, '.sterling', 'sterling.db'));
       try {
         const delivery = build(store);
@@ -270,6 +280,11 @@ export function createDeliveryHandlers({ openStore, rootOf, directory, fenced })
     const root = rootOf();
     if (!root || input.status !== 'completed') return;
     await fenced('delivery', root, () => {
+      if (delivery.withheld) {
+        const notice = deliveryPolicy.disclose(input.sessionID, delivery.withheld);
+        if (notice) appendToResult(input.result, notice);
+        return;
+      }
       appendToResult(input.result, delivery.text);
       delivery.commit();
     });

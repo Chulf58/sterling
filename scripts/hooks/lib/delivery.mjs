@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, openSyn
 import { join, dirname } from 'node:path';
 import { loadConfig } from './common.mjs';
 import { isForeignTree } from './working-tree.mjs';
+import { stripSterlingDeliveryLine } from './dispatch-prompt.mjs';
 
 export function deliveryDir(cwd) {
   return join(cwd, '.sterling', 'transient', 'delivery');
@@ -136,7 +137,7 @@ export function stripReviewTerritoryLine(text) {
  *  into an option/label must survive verbatim. */
 export function outgoingProposalText(toolInput) {
   const ti = toolInput ?? {};
-  if (typeof ti.prompt === 'string' && ti.prompt.trim()) return stripReviewTerritoryLine(ti.prompt);
+  if (typeof ti.prompt === 'string' && ti.prompt.trim()) return stripSterlingDeliveryLine(stripReviewTerritoryLine(ti.prompt));
   if (Array.isArray(ti.questions)) {
     return ti.questions
       .flatMap((q) => [

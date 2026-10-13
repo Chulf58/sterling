@@ -274,6 +274,9 @@ test('machine_role gates the projection freshness check only on the Sterling clo
     mkdirSync(join(dir, 'scripts'), { recursive: true });
     copyFileSync(join(root, 'scripts', 'check-projection-fresh.mjs'), join(dir, 'scripts', 'check-projection-fresh.mjs'));
     cpSync(join(root, 'scripts', 'lib'), join(dir, 'scripts', 'lib'), { recursive: true });
+    // scripts/lib/dispatch-register.mjs imports scripts/hooks/lib/dispatch-prompt.mjs, so the
+    // fixture needs that directory too.
+    cpSync(join(root, 'scripts', 'hooks', 'lib'), join(dir, 'scripts', 'hooks', 'lib'), { recursive: true });
     symlinkSync(join(root, 'node_modules'), join(dir, 'node_modules'), 'dir');
     const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
     store.create(articleRec('record-schemas-registry', 'g'));

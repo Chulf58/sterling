@@ -94,8 +94,14 @@ function h1(dir, over = {}) {
   return { ...r, out };
 }
 
+// The ambient OpenCode host variables of whoever runs this suite must not leak in: with
+// OPENCODE=1 the writer takes the OpenCode form (READY FOR NEW SESSION guidance, no
+// relaunch step), not the Claude Code form these pins assert.
 function runRotationNote(dir, args) {
-  return spawnSync(process.execPath, [ROTATION_SCRIPT, ...args], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
+  const env = { ...process.env };
+  delete env.OPENCODE_SESSION_ID;
+  delete env.OPENCODE;
+  return spawnSync(process.execPath, [ROTATION_SCRIPT, ...args], { cwd: dir, encoding: 'utf8', timeout: 30_000, env });
 }
 
 function readRotationNote(dir) {
