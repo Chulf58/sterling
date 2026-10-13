@@ -11482,6 +11482,9 @@ function render(x) {
   return `${label} [${x?.code}] ${x?.message ?? ""}`;
 }
 
+// scripts/hooks/lib/dispatch-prompt.mjs
+var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
+
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
   return join10(root, ".sterling", "transient", "dispatch-register.json");
@@ -12150,9 +12153,6 @@ function walkUpPluginRoot(moduleUrl) {
 
 // scripts/hooks/lib/dispatch-residue.mjs
 import { spawnSync as spawnSync4 } from "node:child_process";
-
-// scripts/hooks/lib/dispatch-prompt.mjs
-var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
 
 // scripts/hooks/lib/dispatch-advisory.mjs
 var TERRITORY_VERB_RE = String.raw`(?:touch(?:es|ed|ing)?|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|change(?:s|d|ing)?|writ(?:e|es|ing|ten)|alter(?:s|ed|ing)?)`;

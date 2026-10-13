@@ -12,6 +12,8 @@ import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStoreOrDegrade, loadConfig, repoRel, gitIgnored } from './lib/common.mjs';
 import { isForeignTree } from './lib/working-tree.mjs';
 import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
+import { readDeliveryPolicy } from '../lib/dispatch-register.mjs';
+import { deliveryPolicyNotice } from './lib/dispatch-prompt.mjs';
 import {
   guardPath,
   readGuard,
@@ -54,6 +56,15 @@ function main(input) {
   if (!rel) return allow(); // outside the repo: no delivery jurisdiction
   if (rel === '.git' || rel.startsWith('.git/')) return allow(); // machinery internals (H7 precedent)
   if (rel.startsWith('.sterling/')) return allow(); // the store's own tree is never governed territory
+
+  // BLIND LANE (decision blind-lane-sterling-delivery-off-brief-line): the
+  // lane's STERLING-DELIVERY policy is resolved BEFORE the store is opened. On
+  // 'off' or 'unknown' no record is delivered, only the one-line notice, on
+  // every governed touch (no once-marker exists in the register row).
+  if (input.hook_event_name === 'PostToolUse') {
+    const blindNotice = deliveryPolicyNotice(readDeliveryPolicy(input.cwd, { session_id: input.session_id, agent_id: input.agent_id, agent_type: input.agent_type }));
+    if (blindNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blindNotice } }), 0);
+  }
 
   const store = openStoreOrDegrade(input.cwd, 'H19');
   if (!store) return allow(); // not a Sterling project — no ceremony (P1)

@@ -26,6 +26,8 @@
 import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStoreOrDegrade, loadConfig, repoRel } from './lib/common.mjs';
 import { isForeignTree } from './lib/working-tree.mjs';
 import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
+import { readDeliveryPolicy } from '../lib/dispatch-register.mjs';
+import { deliveryPolicyNotice } from './lib/dispatch-prompt.mjs';
 import { statSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { maybeLaunchMaintenanceWorker } from './lib/maintenance-worker.mjs';
@@ -62,6 +64,13 @@ function main(input) {
   const command = input.tool_input?.command;
   if (!command) return allow(); // nothing to parse (not a shell call, or a malformed one)
 
+  // BLIND LANE (decision blind-lane-sterling-delivery-off-brief-line): the
+  // policy is resolved BEFORE the store is opened; the store still opens for
+  // the commit-triggered maintenance worker below, which delivers nothing to
+  // the lane. On 'off' or 'unknown' the lane gets only the one-line notice,
+  // on every shell call (no once-marker exists in the register row).
+  const blindNotice = deliveryPolicyNotice(readDeliveryPolicy(input.cwd, { session_id: input.session_id, agent_id: input.agent_id, agent_type: input.agent_type }));
+
   const store = openStoreOrDegrade(input.cwd, 'H19');
   if (!store) return allow(); // not a Sterling project — no ceremony (P1)
 
@@ -75,6 +84,7 @@ function main(input) {
   if (GIT_COMMIT_RE.test(command)) {
     maybeLaunchMaintenanceWorker({ root: input.cwd, config: loadConfig(input.cwd), store, trigger: 'commit', spawn });
   }
+  if (blindNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blindNotice } }), 0);
   const quietExit = (notice) => {
     if (notice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: notice } }), 0);
     return allow();

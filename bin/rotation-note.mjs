@@ -15,189 +15,6 @@ import { dirname as dirname2 } from "node:path";
 import { mkdirSync, readFileSync, writeFileSync, rmSync, rmdirSync, renameSync, existsSync, lstatSync, readdirSync, realpathSync, chmodSync } from "node:fs";
 import { join, resolve, dirname, isAbsolute } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-function registerPath(root) {
-  return join(root, ".sterling", "transient", "dispatch-register.json");
-}
-function parseRegisterEntry(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
-  }
-  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
-  }
-  if (typeof raw.session_id !== "string" || !raw.session_id) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
-  }
-  if (!Array.isArray(raw.files)) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
-  }
-  if (typeof raw.at !== "string" || !raw.at) {
-    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
-  }
-  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
-}
-function readRawArray(root) {
-  const p = registerPath(root);
-  if (!existsSync(p)) return { availability: "absent", arr: [] };
-  let raw;
-  try {
-    raw = readFileSync(p, "utf8");
-  } catch {
-    return { availability: "corrupt", arr: [] };
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { availability: "corrupt", arr: [] };
-  }
-  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
-  return { availability: "ok", arr: parsed };
-}
-function readRegister(root) {
-  const { availability, arr } = readRawArray(root);
-  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
-  let dropped = 0;
-  const entries = [];
-  for (const raw of arr) {
-    const r = parseRegisterEntry(raw);
-    if (r.ok) entries.push(r.entry);
-    else dropped += 1;
-  }
-  return { availability: "ok", entries, dropped };
-}
-function statusReason(entry, ctx) {
-  if (!entry) return "clock-unreadable";
-  const t = Date.parse(entry.at);
-  if (Number.isNaN(t)) return "clock-unreadable";
-  if (ctx.sessionId !== null && entry.session_id !== ctx.sessionId) return "other-session";
-  const age = ctx.now - t;
-  const lease = ctx.staleMinutes * 6e4;
-  if (age >= 0 && age < lease) return null;
-  return "lease-expired";
-}
-function dispatchStatus(entry, ctx) {
-  if (entry?.ended) return "inactive-confirmed";
-  return statusReason(entry, ctx) === null ? "presumed-active" : "unknown";
-}
-function classifyRegister(root, ctx) {
-  const { availability, entries } = readRegister(root);
-  if (availability !== "ok") return { availability, entries: [] };
-  const rows = entries.map((entry) => {
-    const status = dispatchStatus(entry, ctx);
-    const reason2 = statusReason(entry, ctx);
-    const t = Date.parse(entry.at);
-    const ageMs = Number.isNaN(t) ? null : ctx.now - t;
-    return { entry, status, reason: reason2, ageMs };
-  });
-  return { availability: "ok", entries: rows };
-}
-var MAX_PROMPT_BYTES = 512 * 1024;
-var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
-var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
-
-// scripts/hooks/lib/plan-lock.mjs
-import { closeSync, constants as FS, fstatSync, mkdirSync as mkdirSync2, openSync, readSync, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join3 } from "node:path";
-
-// scripts/hooks/lib/store-backend.mjs
-import { join as join2 } from "node:path";
-var CONFIG_REL = join2(".sterling", "config.json");
-var STORE_DB_REL = join2(".sterling", "sterling.db");
-
-// scripts/hooks/lib/plan-lock.mjs
-var PLAN_MAX_BYTES = 4 * 1024 * 1024;
-var LOCK_MAX_BYTES = 64 * 1024;
-var MARKER_MAX_BYTES = 64 * 1024;
-var LOCK_FILE = "plan-lock.json";
-var HEX64 = /^[0-9a-f]{64}$/i;
-function isAbsolutePlanPath(p) {
-  return typeof p === "string" && (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p));
-}
-function readBounded(path, maxBytes, noun) {
-  if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
-  let fd;
-  try {
-    fd = openSync(path, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
-  } catch (e) {
-    return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
-  }
-  try {
-    const st = fstatSync(fd);
-    if (!st.isFile()) return { unreadable: "is not a regular file (a directory, FIFO, socket or device cannot hold it)", code: "ENOTFILE" };
-    if (st.size > maxBytes) return { unreadable: `is ${st.size} bytes, past the ${maxBytes}-byte bound`, code: "EFBIG" };
-    const buf = Buffer.allocUnsafe(st.size);
-    let read = 0;
-    while (read < st.size) {
-      const n = readSync(fd, buf, read, st.size - read, read);
-      if (n <= 0) break;
-      read += n;
-    }
-    if (read < st.size) return { unreadable: `shrank from ${st.size} to ${read} bytes during the read`, code: "EIO" };
-    const probe = Buffer.allocUnsafe(1);
-    let extra = 0;
-    try {
-      extra = readSync(fd, probe, 0, 1, st.size);
-    } catch {
-      extra = 0;
-    }
-    if (extra > 0) return { unreadable: `grew past its ${st.size}-byte size during the read`, code: "EFBIG" };
-    return { bytes: buf };
-  } catch (e) {
-    return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
-  } finally {
-    try {
-      closeSync(fd);
-    } catch {
-    }
-  }
-}
-function readStoreFileBounded(path, maxBytes) {
-  const read = readBounded(path, maxBytes, "record");
-  if (read.unreadable) return read;
-  return { text: read.bytes.toString("utf8") };
-}
-function invalidReason(l) {
-  if (l.schema_version !== 1) return `schema_version is ${JSON.stringify(l.schema_version)}, not 1`;
-  if (!isAbsolutePlanPath(l.plan_path)) return "plan_path is not an absolute path string";
-  if (typeof l.approved_sha256 !== "string" || !HEX64.test(l.approved_sha256)) return "approved_sha256 is not a 64-character hex digest";
-  if (l.file_sha256_at_approval !== null && (typeof l.file_sha256_at_approval !== "string" || !HEX64.test(l.file_sha256_at_approval))) {
-    return "file_sha256_at_approval is neither null nor a 64-character hex digest";
-  }
-  if (typeof l.approved_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(l.approved_at) || !Number.isFinite(Date.parse(l.approved_at))) {
-    return "approved_at is not an ISO-8601 timestamp";
-  }
-  if (l.source !== "exit_plan_mode" && l.source !== "manual") return `source is ${JSON.stringify(l.source)}, not 'exit_plan_mode' or 'manual'`;
-  if (typeof l.title !== "string") return "title is not a string";
-  for (const key of ["approved_session_id", "approved_branch", "approved_head"]) {
-    if (l[key] !== null && typeof l[key] !== "string") return `${key} is neither null nor a string`;
-  }
-  if (l.text_file_mismatch !== void 0 && typeof l.text_file_mismatch !== "boolean") return "text_file_mismatch is neither absent nor a boolean";
-  if (l.observed_at !== void 0 && typeof l.observed_at !== "string") return "observed_at is neither absent nor a string";
-  if (l.observed_sha256 !== void 0 && l.observed_sha256 !== null && typeof l.observed_sha256 !== "string") return "observed_sha256 is neither absent, null, nor a string";
-  if (l.observed_status !== void 0 && !["present", "missing", "unreadable"].includes(l.observed_status)) {
-    return `observed_status is ${JSON.stringify(l.observed_status)}, not one of 'present' | 'missing' | 'unreadable'`;
-  }
-  return null;
-}
-function readLock(sterlingDir) {
-  const read = readStoreFileBounded(join3(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
-  if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
-  const raw = read.text;
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    return { malformed: `is not valid JSON (${e && e.message || e})`, raw };
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { malformed: "is not a JSON object", raw };
-  const reason2 = invalidReason(parsed);
-  if (reason2) return { malformed: reason2, raw };
-  return { lock: parsed, raw };
-}
-
-// scripts/lib/project.mjs
-import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5475,6 +5292,191 @@ var brokerResultSchema = external_exports.union([
   /** `executed` false means the server did not start the operation, so the caller may fall back; true or absent means it may have run. */
   external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(false), executed: external_exports.boolean(), error: brokerErrorSchema })
 ]);
+
+// scripts/lib/dispatch-register.mjs
+function registerPath(root) {
+  return join(root, ".sterling", "transient", "dispatch-register.json");
+}
+function parseRegisterEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
+  }
+  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
+  }
+  if (typeof raw.session_id !== "string" || !raw.session_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
+  }
+  if (!Array.isArray(raw.files)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
+  }
+  if (typeof raw.at !== "string" || !raw.at) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
+  }
+  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
+}
+function readRawArray(root) {
+  const p = registerPath(root);
+  if (!existsSync(p)) return { availability: "absent", arr: [] };
+  let raw;
+  try {
+    raw = readFileSync(p, "utf8");
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
+  return { availability: "ok", arr: parsed };
+}
+function readRegister(root) {
+  const { availability, arr } = readRawArray(root);
+  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
+  let dropped = 0;
+  const entries = [];
+  for (const raw of arr) {
+    const r = parseRegisterEntry(raw);
+    if (r.ok) entries.push(r.entry);
+    else dropped += 1;
+  }
+  return { availability: "ok", entries, dropped };
+}
+function statusReason(entry, ctx) {
+  if (!entry) return "clock-unreadable";
+  const t = Date.parse(entry.at);
+  if (Number.isNaN(t)) return "clock-unreadable";
+  if (ctx.sessionId !== null && entry.session_id !== ctx.sessionId) return "other-session";
+  const age = ctx.now - t;
+  const lease = ctx.staleMinutes * 6e4;
+  if (age >= 0 && age < lease) return null;
+  return "lease-expired";
+}
+function dispatchStatus(entry, ctx) {
+  if (entry?.ended) return "inactive-confirmed";
+  return statusReason(entry, ctx) === null ? "presumed-active" : "unknown";
+}
+function classifyRegister(root, ctx) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return { availability, entries: [] };
+  const rows = entries.map((entry) => {
+    const status = dispatchStatus(entry, ctx);
+    const reason2 = statusReason(entry, ctx);
+    const t = Date.parse(entry.at);
+    const ageMs = Number.isNaN(t) ? null : ctx.now - t;
+    return { entry, status, reason: reason2, ageMs };
+  });
+  return { availability: "ok", entries: rows };
+}
+var MAX_PROMPT_BYTES = 512 * 1024;
+var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
+
+// scripts/hooks/lib/plan-lock.mjs
+import { closeSync, constants as FS, fstatSync, mkdirSync as mkdirSync2, openSync, readSync, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join3 } from "node:path";
+
+// scripts/hooks/lib/store-backend.mjs
+import { join as join2 } from "node:path";
+var CONFIG_REL = join2(".sterling", "config.json");
+var STORE_DB_REL = join2(".sterling", "sterling.db");
+
+// scripts/hooks/lib/plan-lock.mjs
+var PLAN_MAX_BYTES = 4 * 1024 * 1024;
+var LOCK_MAX_BYTES = 64 * 1024;
+var MARKER_MAX_BYTES = 64 * 1024;
+var LOCK_FILE = "plan-lock.json";
+var HEX64 = /^[0-9a-f]{64}$/i;
+function isAbsolutePlanPath(p) {
+  return typeof p === "string" && (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p));
+}
+function readBounded(path, maxBytes, noun) {
+  if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
+  let fd;
+  try {
+    fd = openSync(path, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
+  } catch (e) {
+    return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { unreadable: "is not a regular file (a directory, FIFO, socket or device cannot hold it)", code: "ENOTFILE" };
+    if (st.size > maxBytes) return { unreadable: `is ${st.size} bytes, past the ${maxBytes}-byte bound`, code: "EFBIG" };
+    const buf = Buffer.allocUnsafe(st.size);
+    let read = 0;
+    while (read < st.size) {
+      const n = readSync(fd, buf, read, st.size - read, read);
+      if (n <= 0) break;
+      read += n;
+    }
+    if (read < st.size) return { unreadable: `shrank from ${st.size} to ${read} bytes during the read`, code: "EIO" };
+    const probe = Buffer.allocUnsafe(1);
+    let extra = 0;
+    try {
+      extra = readSync(fd, probe, 0, 1, st.size);
+    } catch {
+      extra = 0;
+    }
+    if (extra > 0) return { unreadable: `grew past its ${st.size}-byte size during the read`, code: "EFBIG" };
+    return { bytes: buf };
+  } catch (e) {
+    return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+    }
+  }
+}
+function readStoreFileBounded(path, maxBytes) {
+  const read = readBounded(path, maxBytes, "record");
+  if (read.unreadable) return read;
+  return { text: read.bytes.toString("utf8") };
+}
+function invalidReason(l) {
+  if (l.schema_version !== 1) return `schema_version is ${JSON.stringify(l.schema_version)}, not 1`;
+  if (!isAbsolutePlanPath(l.plan_path)) return "plan_path is not an absolute path string";
+  if (typeof l.approved_sha256 !== "string" || !HEX64.test(l.approved_sha256)) return "approved_sha256 is not a 64-character hex digest";
+  if (l.file_sha256_at_approval !== null && (typeof l.file_sha256_at_approval !== "string" || !HEX64.test(l.file_sha256_at_approval))) {
+    return "file_sha256_at_approval is neither null nor a 64-character hex digest";
+  }
+  if (typeof l.approved_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(l.approved_at) || !Number.isFinite(Date.parse(l.approved_at))) {
+    return "approved_at is not an ISO-8601 timestamp";
+  }
+  if (l.source !== "exit_plan_mode" && l.source !== "manual") return `source is ${JSON.stringify(l.source)}, not 'exit_plan_mode' or 'manual'`;
+  if (typeof l.title !== "string") return "title is not a string";
+  for (const key of ["approved_session_id", "approved_branch", "approved_head"]) {
+    if (l[key] !== null && typeof l[key] !== "string") return `${key} is neither null nor a string`;
+  }
+  if (l.text_file_mismatch !== void 0 && typeof l.text_file_mismatch !== "boolean") return "text_file_mismatch is neither absent nor a boolean";
+  if (l.observed_at !== void 0 && typeof l.observed_at !== "string") return "observed_at is neither absent nor a string";
+  if (l.observed_sha256 !== void 0 && l.observed_sha256 !== null && typeof l.observed_sha256 !== "string") return "observed_sha256 is neither absent, null, nor a string";
+  if (l.observed_status !== void 0 && !["present", "missing", "unreadable"].includes(l.observed_status)) {
+    return `observed_status is ${JSON.stringify(l.observed_status)}, not one of 'present' | 'missing' | 'unreadable'`;
+  }
+  return null;
+}
+function readLock(sterlingDir) {
+  const read = readStoreFileBounded(join3(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
+  const raw = read.text;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { malformed: `is not valid JSON (${e && e.message || e})`, raw };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { malformed: "is not a JSON object", raw };
+  const reason2 = invalidReason(parsed);
+  if (reason2) return { malformed: reason2, raw };
+  return { lock: parsed, raw };
+}
+
+// scripts/lib/project.mjs
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 
 // packages/store/dist/pg-bridge.js
 import { homedir } from "node:os";

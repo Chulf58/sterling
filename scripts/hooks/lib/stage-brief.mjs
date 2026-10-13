@@ -11,7 +11,7 @@
 // Hooks bundle this module: builtins, sibling libs and @sterling/store only.
 import { MAX_RANK_TERMS } from '@sterling/store';
 import { loadConfig, repoRel } from './common.mjs';
-import { extractPathCandidates } from './dispatch-prompt.mjs';
+import { extractPathCandidates, stripSterlingDeliveryLine } from './dispatch-prompt.mjs';
 import { readLock as readPlanLock, sanitizeForContext, sterlingDirOf } from './plan-lock.mjs';
 import { isForeignTree } from './working-tree.mjs';
 import { readProjectConfig, tddPostureLine as renderTddPostureLine } from './operating-state.mjs';
@@ -117,12 +117,13 @@ export function dispatchChrome(cwd, agentType) {
  * ''), TDD posture, the unattributable-start disclosure and the return contract
  * (omitted only for EXEMPT_AGENT_TYPES), joined into one string.
  */
-export function composeContext({ agentType, activePlanLine = '', payload = '', tddPostureLine = '', unattributableLine = '' }) {
+export function composeContext({ agentType, activePlanLine = '', payload = '', tddPostureLine = '', unattributableLine = '', deliveryLine = '' }) {
   const out = [];
   if (activePlanLine) out.push(activePlanLine);
   if (payload) out.push(payload);
   if (tddPostureLine) out.push(tddPostureLine);
   if (unattributableLine) out.push(unattributableLine);
+  if (deliveryLine) out.push(deliveryLine);
   if (!EXEMPT_AGENT_TYPES.has(agentType)) out.push(RETURN_CONTRACT);
   return out.join('\n\n');
 }
@@ -140,7 +141,12 @@ const chromePart = (text) => ({ kind: 'ordinary', pinned: true, contentClass: 'c
  * failed write leaves every record eligible for the next delivery.
  */
 export function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = [], trailingChrome = [] }) {
-  const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
+  // The STERLING-DELIVERY line is stripped before BOTH channels (decision
+  // blind-lane-sterling-delivery-off-brief-line): it names no path, and its
+  // words must never match a record about delivery. The caller decides the
+  // policy itself; this function only stages.
+  const briefs = prompts.map(stripSterlingDeliveryLine);
+  const candidates = [...new Set(briefs.flatMap(extractPathCandidates))];
 
   const rels = [...new Set(candidates.map((c) => repoRel(c, cwd)).filter(Boolean))].filter(
     (r) => r !== '.git' && !r.startsWith('.git/') && !r.startsWith('.sterling/')
@@ -168,7 +174,7 @@ export function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingCh
   const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
   const subjectMatches = [];
   const seenSubject = new Set();
-  for (const p of prompts) {
+  for (const p of briefs) {
     // STRIP THE REVIEW-TERRITORY RECEIPT LINE before axis-term extraction, the
     // SAME helper H20's outgoingProposalText applies (decision
     // h20-specificity-rebuild-not-fourth-patch-structural-fixes-now-red-probes-frozen,

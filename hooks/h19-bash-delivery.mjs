@@ -11328,6 +11328,125 @@ import { join as join11 } from "node:path";
 import { mkdirSync as mkdirSync4, readFileSync as readFileSync6, writeFileSync as writeFileSync2, rmSync as rmSync3, rmdirSync, renameSync as renameSync2, existsSync as existsSync5, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync4, chmodSync } from "node:fs";
 import { join as join10, resolve as resolve4, dirname as dirname5, isAbsolute } from "node:path";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+import { randomBytes, createHash as createHash2 } from "node:crypto";
+
+// scripts/lib/review-errors.mjs
+var CODES = /* @__PURE__ */ new Set([
+  // §1.4 ledger verbs
+  "ledger_corrupt",
+  "ledger_absent",
+  "ledger_digest_mismatch",
+  "compatibility_lock_held",
+  "entry_not_found",
+  "entry_selector_ambiguous",
+  "entry_not_active",
+  "class_unknown",
+  "class_not_applicable",
+  "superseder_not_found",
+  "superseder_not_reviewer_class",
+  "superseder_not_newer",
+  "superseder_branch_mismatch",
+  "superseder_lifecycle_unacceptable",
+  "superseder_coverage_incomplete",
+  "superseder_commit_not_ancestor",
+  "superseder_commit_trailer_not_roster",
+  "superseder_commit_receipt_unbound",
+  "superseder_commit_blob_mismatch",
+  "covering_not_allowed",
+  "covering_receipt_invalid",
+  "no_live_territory_disproved",
+  "reconcile_no_match",
+  "reconcile_ambiguous",
+  "reconcile_nonce_split",
+  "reconcile_unresolved",
+  "record_external_duplicate",
+  "argument_invalid",
+  // commit operation
+  "nothing_staged",
+  "message_missing",
+  "no_spendable_receipt",
+  "receipt_bytes_mismatch",
+  "coverage_incomplete",
+  "reservation_conflict",
+  "commit_failed",
+  "finalize_failed",
+  "waiver_reason_missing",
+  // A13 additions
+  "target_sha_prior_receipt_unbound",
+  "commit_verify_failed",
+  "not_sterling_project",
+  "receipt_unscoped",
+  // §1.4 disclosures (never refuse)
+  "receipt_unattributable",
+  "receipt_foreign",
+  "receipt_identity_unknown",
+  "receipt_deferred",
+  "receipt_stale",
+  "receipt_age_unverifiable",
+  "receipt_no_overlap",
+  "multi_spend",
+  "bytes_waived",
+  "legacy_entries_present",
+  "receipt_not_spent_stale_bytes",
+  "register_unavailable",
+  "dispatch_status_unknown",
+  // A9 register/ledger additions
+  "register_entry_malformed",
+  "register_agent_id_duplicate",
+  "register_lock_held",
+  "receipt_not_active",
+  "receipt_foreign_session",
+  "receipt_foreign_branch",
+  // A9 --target-sha amend mode
+  "target_sha_unresolvable",
+  "target_sha_not_head",
+  "target_sha_tree_dirty",
+  "target_sha_published",
+  "target_sha_publication_unprovable",
+  // A11 additions
+  "territory_declaration_missing",
+  "territory_declaration_malformed",
+  "dispatch_overlap",
+  "dispatch_residue",
+  // ledger entry classification
+  "ledger_entry_malformed",
+  // A19 (security review): an env override of identity is disclosed, never silent
+  "session_identity_override",
+  // dispatch state machine (decision dispatch-state-machine-pre-slot-post-
+  // binding-locked-start-resolution-replaces-transcript-attribution, §2/§5/§6)
+  "dispatch_state_collision",
+  "dispatch_post_late",
+  "dispatch_post_mismatch",
+  "dispatch_post_refused",
+  "dispatch_state_poisoned",
+  "dispatch_unattributable",
+  "dispatch_lock_held",
+  "dispatch_post_only"
+]);
+function assertCode(code) {
+  if (!CODES.has(code)) {
+    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
+  }
+}
+function disclosure(code, facts = {}, message = code) {
+  assertCode(code);
+  return { kind: "disclosure", code, facts, message };
+}
+function render(x) {
+  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
+  return `${label} [${x?.code}] ${x?.message ?? ""}`;
+}
+
+// scripts/hooks/lib/dispatch-prompt.mjs
+var DELIVERY_OFF_NOTICE = "STERLING DELIVERY OFF for this lane: its brief carries STERLING-DELIVERY: off, so no store records are delivered. Its own knowledge_* calls are not blocked.";
+var DELIVERY_HELD_BACK_NOTICE = "STERLING DELIVERY HELD BACK: this lane's delivery policy could not be established (it could not be told apart from a same-type lane that asked for STERLING-DELIVERY: off, or the dispatch state was unreadable), so no store records are delivered.";
+function deliveryPolicyNotice(policy) {
+  if (policy === "off") return DELIVERY_OFF_NOTICE;
+  if (policy === "unknown") return DELIVERY_HELD_BACK_NOTICE;
+  return "";
+}
+
+// scripts/lib/dispatch-register.mjs
 function registerPath(root) {
   return join10(root, ".sterling", "transient", "dispatch-register.json");
 }
@@ -11380,8 +11499,287 @@ function readRegister(root) {
   return { availability: "ok", entries, dropped };
 }
 var MAX_PROMPT_BYTES = 512 * 1024;
+var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
+var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
+function dispatchStateDir(root) {
+  return join10(root, ".sterling", "transient", "dispatch-state");
+}
+var LIVE_PREFIX = "live-";
+var DONE_PREFIX = "done-";
+var IDS_DELIMITER = "~";
+var ID_SEPARATOR = ".";
+var EMPTY_IDS = "none";
+var MAX_FILENAME_LENGTH = 254;
+var STATE_KEY_RE = /^(?:raw-[A-Za-z0-9_-]{1,80}|sha256-[0-9a-f]{64})$/;
+var ID_HASH_RE = /^[A-Za-z0-9_-]{43}$/;
+function liveFileName(key) {
+  return `${LIVE_PREFIX}${key}.json`;
+}
+function agentIdHash(agentId) {
+  return createHash2("sha256").update(String(agentId), "utf8").digest("base64url");
+}
+function recordAgentIds(record) {
+  return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
+}
+function terminalFileName(key, record) {
+  const hashes = [...new Set(recordAgentIds(record).map(agentIdHash))].sort();
+  const name = `${DONE_PREFIX}${key}${IDS_DELIMITER}${hashes.length ? hashes.join(ID_SEPARATOR) : EMPTY_IDS}.json`;
+  if (name.length > MAX_FILENAME_LENGTH) throw new Error(`dispatch-state: terminal filename for ${key} is ${name.length} characters \u2014 over the ${MAX_FILENAME_LENGTH} limit`);
+  return name;
+}
+function parseStateFileName(name) {
+  if (name.includes(".json.tmp-")) return { kind: "tmp" };
+  if (!name.endsWith(".json")) return { kind: "other" };
+  const stem = name.slice(0, -".json".length);
+  if (stem.startsWith(LIVE_PREFIX)) {
+    const key = stem.slice(LIVE_PREFIX.length);
+    return STATE_KEY_RE.test(key) ? { kind: "live", key } : { kind: "malformed-live" };
+  }
+  if (stem.startsWith(DONE_PREFIX)) {
+    const parts = stem.slice(DONE_PREFIX.length).split(IDS_DELIMITER);
+    const malformed = STATE_KEY_RE.test(parts[0]) ? { kind: "malformed-done", key: parts[0] } : { kind: "malformed-done" };
+    if (parts.length !== 2 || !STATE_KEY_RE.test(parts[0])) return malformed;
+    const idHashes = parts[1] === EMPTY_IDS ? [] : parts[1].split(ID_SEPARATOR);
+    const canonical = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
+    return canonical ? { kind: "done", key: parts[0], idHashes } : malformed;
+  }
+  return STATE_KEY_RE.test(stem) ? { kind: "legacy", key: stem } : { kind: "unknown-json" };
+}
+var warnedStateFiles = /* @__PURE__ */ new Set();
+function warnStateFile(file, text) {
+  const tag = `${file}\0${text}`;
+  if (warnedStateFiles.has(tag)) return;
+  warnedStateFiles.add(tag);
+  process.stderr.write(`${render(disclosure("dispatch_state_poisoned", { file }, text))}
+`);
+}
+function dispatchStateKey(toolUseId) {
+  if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
+  return `sha256-${createHash2("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+}
+function isNonEmptyString(v) {
+  return typeof v === "string" && v !== "";
+}
+function isPlainObject3(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function validatePostBinding(v) {
+  return v === void 0 || isPlainObject3(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at);
+}
+function validateDerivedBinding(v) {
+  return v === void 0 || isPlainObject3(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && isNonEmptyString(v.by);
+}
+function validateStarted(v) {
+  return v === void 0 || isPlainObject3(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && Array.isArray(v.by) && v.by.every((x) => typeof x === "string");
+}
+function validateTerminal(v) {
+  return v === void 0 || isPlainObject3(v) && isNonEmptyString(v.at) && isNonEmptyString(v.reason);
+}
+function validateRecordShape(r) {
+  if (!r || typeof r !== "object" || Array.isArray(r)) return { ok: false, reason: "not-an-object" };
+  if (r.schema !== 1) return { ok: false, reason: "unknown-schema-version" };
+  if (typeof r.tool_use_id !== "string" || !r.tool_use_id) return { ok: false, reason: "tool_use_id" };
+  if (typeof r.session_id !== "string" && r.session_id !== null) return { ok: false, reason: "session_id" };
+  if (!ORIGINS.has(r.origin)) return { ok: false, reason: "origin" };
+  if (typeof r.prompt_bytes !== "number") return { ok: false, reason: "prompt_bytes" };
+  if (typeof r.prompt_sha256 !== "string") return { ok: false, reason: "prompt_sha256" };
+  if (typeof r.prompt === "string") {
+    const bytes = Buffer.byteLength(r.prompt, "utf8");
+    const sha = createHash2("sha256").update(r.prompt, "utf8").digest("hex");
+    if (bytes !== r.prompt_bytes || sha !== r.prompt_sha256) return { ok: false, reason: "prompt-hash-mismatch" };
+  } else if (r.prompt !== null) {
+    return { ok: false, reason: "prompt-type" };
+  }
+  if (!validatePostBinding(r.post_binding)) return { ok: false, reason: "post_binding-shape" };
+  if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: "derived_binding-shape" };
+  if (!validateStarted(r.started)) return { ok: false, reason: "started-shape" };
+  if (!validateTerminal(r.terminal)) return { ok: false, reason: "terminal-shape" };
+  if (r.delivery !== void 0 && r.delivery !== "off") return { ok: false, reason: "delivery-shape" };
+  return { ok: true };
+}
+function classifyRecordFile(file) {
+  let st;
+  try {
+    st = lstatSync4(file);
+  } catch {
+    return { exists: false };
+  }
+  if (st.isSymbolicLink()) return { exists: true, poisoned: true, reason: "symlink" };
+  if (!st.isFile()) return { exists: true, poisoned: true, reason: "non-regular-file" };
+  let buf;
+  try {
+    buf = readFileSync6(file);
+  } catch {
+    return { exists: true, poisoned: true, reason: "unreadable" };
+  }
+  const text = buf.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(buf)) return { exists: true, poisoned: true, reason: "invalid-utf8" };
+  let record;
+  try {
+    record = JSON.parse(text);
+  } catch {
+    return { exists: true, poisoned: true, reason: "unparseable-json" };
+  }
+  const v = validateRecordShape(record);
+  if (!v.ok) return { exists: true, poisoned: true, reason: v.reason };
+  return { exists: true, poisoned: false, record };
+}
+function checkDispatchStateContainment(root, { create }) {
+  const dir = dispatchStateDir(root);
+  let st;
+  try {
+    st = lstatSync4(dir);
+  } catch (e) {
+    if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
+    if (!create) return { ok: true, availability: "absent" };
+    mkdirSync4(dir, { recursive: true });
+    return { ok: true, availability: "ok" };
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    return { ok: false, availability: "poisoned", reason: st.isSymbolicLink() ? "symlink" : "non-regular-file" };
+  }
+  return { ok: true, availability: "ok" };
+}
+function finishTerminalRename(root, key, record) {
+  const dir = dispatchStateDir(root);
+  const from = liveFileName(key);
+  const to = terminalFileName(key, record);
+  let occupied = false;
+  try {
+    lstatSync4(join10(dir, to));
+    occupied = true;
+  } catch (e) {
+    if (e?.code !== "ENOENT") occupied = true;
+  }
+  if (occupied) {
+    warnStateFile(from, `dispatch-state: terminal record ${from} NOT renamed \u2014 ${to} already exists; never overwritten, the live source is kept for an operator`);
+    return from;
+  }
+  try {
+    renameSync2(join10(dir, from), join10(dir, to));
+    return to;
+  } catch (e) {
+    warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
+    return from;
+  }
+}
+function listStateDir(root) {
+  const containment = checkDispatchStateContainment(root, { create: false });
+  if (!containment.ok) return { availability: "unavailable", reason: "containment", names: [] };
+  if (containment.availability === "absent") return { availability: "absent", names: [] };
+  try {
+    return { availability: "ok", names: readdirSync2(dispatchStateDir(root)) };
+  } catch (e) {
+    return { availability: "unavailable", reason: "unlistable", code: e?.code, names: [] };
+  }
+}
+function validateNamedRecord(dir, name, parsed) {
+  const classified = classifyRecordFile(join10(dir, name));
+  if (!classified.exists || classified.poisoned) return classified;
+  const record = classified.record;
+  if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
+  if (parsed.kind === "done") {
+    if (!record.terminal) return { exists: true, poisoned: true, reason: "done-name-not-terminal" };
+    if (terminalFileName(parsed.key, record) !== name) return { exists: true, poisoned: true, reason: "ids-mismatch" };
+  }
+  return classified;
+}
+function readDispatchState(root) {
+  return scanLiveState(root, { repair: false });
+}
+function readDeliveryPolicy(root, { session_id, agent_id, agent_type } = {}) {
+  if (typeof agent_id !== "string" || agent_id === "") return "on";
+  try {
+    const scan = readDispatchState(root);
+    if (scan.availability === "absent") return "on";
+    if (scan.availability !== "ok") return "unknown";
+    const own = scan.records.map(({ record }) => record).filter((record) => recordAgentIds(record).includes(agent_id));
+    let ownUnreadable = false;
+    const hash = agentIdHash(agent_id);
+    const dir = dispatchStateDir(root);
+    for (const entry of scan.done) {
+      if (!entry.idHashes.includes(hash)) continue;
+      const v = validateNamedRecord(dir, entry.file, { kind: "done", key: entry.key });
+      if (!v.exists) continue;
+      if (v.poisoned) ownUnreadable = true;
+      else if (recordAgentIds(v.record).includes(agent_id)) own.push(v.record);
+    }
+    if (own.some((record) => record.delivery === "off")) return "off";
+    if (ownUnreadable) return "unknown";
+    if (own.length > 0) return "on";
+    if (scan.poisoned.length > 0) return "unknown";
+    const typed = typeof agent_type === "string" && agent_type !== "";
+    const siblingOff = scan.records.some(
+      ({ record }) => !record.terminal && record.delivery === "off" && record.session_id === session_id && (!typed || record.subagent_type === agent_type)
+    );
+    return siblingOff ? "unknown" : "on";
+  } catch (e) {
+    process.stderr.write(`dispatch-state: delivery policy for agent '${agent_id}' could not be read (${e?.message ?? e}) \u2014 held back as 'unknown'
+`);
+    return "unknown";
+  }
+}
+function scanLiveState(root, { repair }) {
+  const dir = dispatchStateDir(root);
+  const listing = listStateDir(root);
+  if (listing.availability !== "ok") return { availability: listing.availability, ...listing.reason ? { reason: listing.reason } : {}, records: [], poisoned: [], done: [] };
+  const records = [];
+  const poisoned = [];
+  const done = [];
+  for (const name of listing.names) {
+    const parsed = parseStateFileName(name);
+    if (parsed.kind === "other") continue;
+    if (parsed.kind === "tmp") {
+      poisoned.push({ file: name, reason: "orphan-tmp-file" });
+      continue;
+    }
+    if (parsed.kind === "legacy") {
+      poisoned.push({ file: name, reason: "legacy-unmigrated" });
+      continue;
+    }
+    if (parsed.kind === "malformed-live") {
+      poisoned.push({ file: name, reason: "malformed-filename" });
+      continue;
+    }
+    if (parsed.kind === "malformed-done" || parsed.kind === "unknown-json") {
+      warnStateFile(name, `dispatch-state: '${name}' is not a live-<key>.json or done-<key>~<ids>.json name \u2014 ignored by the live scan, never read as a record`);
+      continue;
+    }
+    if (parsed.kind === "done") {
+      done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
+      continue;
+    }
+    const classified = classifyRecordFile(join10(dir, name));
+    if (!classified.exists) continue;
+    if (classified.poisoned) {
+      poisoned.push({ file: name, reason: classified.reason });
+      continue;
+    }
+    if (dispatchStateKey(classified.record.tool_use_id) !== parsed.key) {
+      poisoned.push({ file: name, reason: "key-mismatch" });
+      continue;
+    }
+    records.push({ key: parsed.key, file: name, record: classified.record });
+  }
+  const doneKeys = new Set(done.map((d) => d.key));
+  const kept = [];
+  for (const entry of records) {
+    if (doneKeys.has(entry.key)) {
+      if (!entry.record.terminal) {
+        poisoned.push({ file: entry.file, reason: "duplicate-key" });
+        continue;
+      }
+      warnStateFile(entry.file, `dispatch-state: terminal record ${entry.file} cannot be renamed: a done- file for the same key already exists \u2014 left under its live name for an operator, never renamed over it`);
+      kept.push(entry);
+      continue;
+    }
+    if (repair && entry.record.terminal) entry.file = finishTerminalRename(root, entry.key, entry.record);
+    kept.push(entry);
+  }
+  return { availability: "ok", records: kept, poisoned, done };
+}
 
 // scripts/hooks/lib/hazard-lane-mode.mjs
 var READ_ONLY_TOOLS = /* @__PURE__ */ new Set(["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "ToolSearch"]);
@@ -11437,7 +11835,7 @@ import { statSync as statSync4 } from "node:fs";
 import { spawn } from "node:child_process";
 
 // scripts/hooks/lib/maintenance-worker.mjs
-import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
+import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync3, existsSync as existsSync6, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync8, renameSync as renameSync3, rmSync as rmSync4, rmdirSync as rmdirSync2, statSync as statSync3, writeFileSync as writeFileSync3, appendFileSync } from "node:fs";
 import { dirname as dirname6, isAbsolute as isAbsolute2, join as join12, resolve as resolve5, sep } from "node:path";
@@ -12607,11 +13005,13 @@ var input = readStdin();
 function main(input2) {
   const command = input2.tool_input?.command;
   if (!command) return allow();
+  const blindNotice = deliveryPolicyNotice(readDeliveryPolicy(input2.cwd, { session_id: input2.session_id, agent_id: input2.agent_id, agent_type: input2.agent_type }));
   const store = openStoreOrDegrade(input2.cwd, "H19");
   if (!store) return allow();
   if (GIT_COMMIT_RE.test(command)) {
     maybeLaunchMaintenanceWorker({ root: input2.cwd, config: loadConfig(input2.cwd), store, trigger: "commit", spawn });
   }
+  if (blindNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input2.hook_event_name, additionalContext: blindNotice } }), 0);
   const quietExit = (notice) => {
     if (notice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input2.hook_event_name, additionalContext: notice } }), 0);
     return allow();

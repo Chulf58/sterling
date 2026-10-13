@@ -51,6 +51,7 @@ import { hostname } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, createHash } from 'node:crypto';
 import { refusal, disclosure, render } from './review-errors.mjs';
+import { parseSterlingDelivery } from '../hooks/lib/dispatch-prompt.mjs';
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -748,6 +749,15 @@ function promptFacts(rawPrompt) {
   return { prompt: isString && !oversize ? rawPrompt : null, prompt_bytes, prompt_sha256, ...(oversize ? { oversize: true } : {}) };
 }
 
+// The brief's STERLING-DELIVERY policy, parsed from the RAW prompt before the
+// oversize cap nulls it (decision blind-lane-sterling-delivery-off-brief-line).
+// Stored only when off, as `delivery: 'off'`; every terminal write spreads the
+// record, so the field survives Stop and the session boundary while the prompt
+// does not, and a resumed lane stays blind.
+function deliveryFacts(rawPrompt) {
+  return typeof rawPrompt === 'string' && parseSterlingDelivery(rawPrompt).policy === 'off' ? { delivery: 'off' } : {};
+}
+
 function stringField(v) {
   return typeof v === 'string' ? v : null;
 }
@@ -797,6 +807,7 @@ function validateRecordShape(r) {
   if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: 'derived_binding-shape' };
   if (!validateStarted(r.started)) return { ok: false, reason: 'started-shape' };
   if (!validateTerminal(r.terminal)) return { ok: false, reason: 'terminal-shape' };
+  if (r.delivery !== undefined && r.delivery !== 'off') return { ok: false, reason: 'delivery-shape' };
   return { ok: true };
 }
 
@@ -1020,6 +1031,57 @@ export function readDispatchState(root) {
   return scanLiveState(root, { repair: false });
 }
 
+// readDeliveryPolicy(root, {session_id, agent_id, agent_type}) — the ONE
+// read-only accessor for a lane's STERLING-DELIVERY policy (decision
+// blind-lane-sterling-delivery-off-brief-line). Returns 'on', 'off' or
+// 'unknown'; every delivering hook calls it before it opens the store, and on
+// 'off' or 'unknown' delivers no store record. Takes no lock and writes
+// nothing (the unlocked scan, plus parse-validation of the done- names that
+// carry this agent's id hash). In order:
+//   - no agent_id: the main thread, never a dispatched lane -> 'on'
+//   - directory absent -> 'on' (no record exists, so none carries off)
+//   - directory unavailable -> 'unknown' (an off record may be hidden)
+//   - any readable record naming this agent (live or tombstone, any session,
+//     so a resume after Stop or across the boundary stays blind) carries off
+//     -> 'off'; else such a record exists and none naming it was unreadable
+//     -> 'on'
+//   - not attributable: a poisoned entry -> 'unknown' (it may be an off
+//     sibling); a live record of this session and type carrying off ->
+//     'unknown' (user-ruled "Suppress both, disclose"); otherwise 'on', so a
+//     session that never uses the line is unchanged.
+// A throw is disclosed on stderr and read as 'unknown' (fail toward suppression).
+export function readDeliveryPolicy(root, { session_id, agent_id, agent_type } = {}) {
+  if (typeof agent_id !== 'string' || agent_id === '') return 'on';
+  try {
+    const scan = readDispatchState(root);
+    if (scan.availability === 'absent') return 'on';
+    if (scan.availability !== 'ok') return 'unknown';
+    const own = scan.records.map(({ record }) => record).filter((record) => recordAgentIds(record).includes(agent_id));
+    let ownUnreadable = false;
+    const hash = agentIdHash(agent_id);
+    const dir = dispatchStateDir(root);
+    for (const entry of scan.done) {
+      if (!entry.idHashes.includes(hash)) continue;
+      const v = validateNamedRecord(dir, entry.file, { kind: 'done', key: entry.key });
+      if (!v.exists) continue;
+      if (v.poisoned) ownUnreadable = true;
+      else if (recordAgentIds(v.record).includes(agent_id)) own.push(v.record);
+    }
+    if (own.some((record) => record.delivery === 'off')) return 'off';
+    if (ownUnreadable) return 'unknown';
+    if (own.length > 0) return 'on';
+    if (scan.poisoned.length > 0) return 'unknown';
+    const typed = typeof agent_type === 'string' && agent_type !== '';
+    const siblingOff = scan.records.some(
+      ({ record }) => !record.terminal && record.delivery === 'off' && record.session_id === session_id && (!typed || record.subagent_type === agent_type)
+    );
+    return siblingOff ? 'unknown' : 'on';
+  } catch (e) {
+    process.stderr.write(`dispatch-state: delivery policy for agent '${agent_id}' could not be read (${e?.message ?? e}) — held back as 'unknown'\n`);
+    return 'unknown';
+  }
+}
+
 // The LOCKED form every acting reader (Start, Post, Stop) uses: identical,
 // plus it finishes a crash-window rename (decision point 4).
 function readDispatchStateLocked(root) {
@@ -1224,6 +1286,7 @@ export function recordDispatchPre(root, stdin) {
     const description = stringField(stdin?.tool_input?.description);
     const session_id = stringField(stdin?.session_id);
     const prompt_id = stringField(stdin?.prompt_id);
+    const delivery = deliveryFacts(stdin?.tool_input?.prompt);
 
     if (!existing.exists) {
       const record = {
@@ -1237,6 +1300,7 @@ export function recordDispatchPre(root, stdin) {
         prompt_bytes,
         prompt_sha256,
         ...(oversize ? { oversize: true } : {}),
+        ...delivery,
         origin: 'pre',
         pre_at: new Date().toISOString(),
       };
@@ -1255,7 +1319,9 @@ export function recordDispatchPre(root, stdin) {
         ['prompt_id', prompt_id],
         ['subagent_type', subagent_type],
         ['description', description],
+        ['delivery', delivery.delivery],
       ]) {
+        if (value === undefined) continue;
         if (filled[field] === undefined || filled[field] === null) {
           filled[field] = value;
           changed = true;
@@ -1444,6 +1510,7 @@ export function recordDispatchPost(root, stdin, opts = {}) {
         prompt_bytes,
         prompt_sha256,
         ...(oversize ? { oversize: true } : {}),
+        ...deliveryFacts(typeof responsePrompt === 'string' ? responsePrompt : inputPrompt),
         origin: 'post-only',
         post_binding: { agent_id: agentId, at: new Date().toISOString() },
       };
