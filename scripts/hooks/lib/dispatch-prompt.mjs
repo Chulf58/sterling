@@ -136,3 +136,52 @@ export function parseReviewTerritory(text) {
   }
   return { present: true, valid: true, files: [...new Set(files)] };
 }
+
+// STERLING-DELIVERY brief line (decision blind-lane-sterling-delivery-off-
+// brief-line, GitHub #88). A dispatch brief carrying the line
+// `STERLING-DELIVERY: off` gets no store records from any delivering hook. The
+// ONLY accepted value is `off` (user-ruled "Off only": an exclude list cannot
+// keep a lane blind). The parser FAILS TOWARD SUPPRESSION: any other value
+// after the marker, or the marker on more than one line, still reads as off,
+// reported as malformed so the caller can say so. Anchored at line start
+// (leading horizontal whitespace allowed), case-sensitive, so a mention
+// inside a sentence or a backticked quote is not a directive. Callers parse
+// the RAW brief, before any size truncation, so a trailing line is never lost.
+const STERLING_DELIVERY_LINE_RE = /^[ \t]*STERLING-DELIVERY:([^\n]*)$/gm;
+
+/**
+ * Parses a brief's STERLING-DELIVERY directive. Returns exactly one of:
+ *   { present: false, policy: 'on' }                        — no marker line
+ *   { present: true, valid: true, policy: 'off' }           — exactly `off`
+ *   { present: true, valid: false, policy: 'off', reason }  — any other value,
+ *     or a duplicate marker line; still off (fail toward suppression)
+ */
+export function parseSterlingDelivery(text) {
+  const matches = [...String(text ?? '').matchAll(STERLING_DELIVERY_LINE_RE)];
+  if (matches.length === 0) return { present: false, policy: 'on' };
+  if (matches.length > 1) return { present: true, valid: false, policy: 'off', reason: `the marker appears on ${matches.length} lines` };
+  const value = matches[0][1].trim();
+  if (value === 'off') return { present: true, valid: true, policy: 'off' };
+  return { present: true, valid: false, policy: 'off', reason: `unrecognised value ${JSON.stringify(value)} (only 'off' is accepted)` };
+}
+
+/** Removes every STERLING-DELIVERY line from `text`, so its words never reach
+ *  path extraction or subject matching. Pure. */
+export function stripSterlingDeliveryLine(text) {
+  return String(text ?? '').replace(STERLING_DELIVERY_LINE_RE, '');
+}
+
+// The two one-line disclosures a suppressing hook prints. Neither names a
+// record, an id or a count, and the held-back wording never claims a sibling
+// supplied the directive (decision blind-lane-sterling-delivery-off-brief-line (5)).
+export const DELIVERY_OFF_NOTICE =
+  'STERLING DELIVERY OFF for this lane: its brief carries STERLING-DELIVERY: off, so no store records are delivered. Its own knowledge_* calls are not blocked.';
+export const DELIVERY_HELD_BACK_NOTICE =
+  "STERLING DELIVERY HELD BACK: this lane's delivery policy could not be established (it could not be told apart from a same-type lane that asked for STERLING-DELIVERY: off, or the dispatch state was unreadable), so no store records are delivered.";
+
+/** The notice for a resolved policy: '' for 'on'. */
+export function deliveryPolicyNotice(policy) {
+  if (policy === 'off') return DELIVERY_OFF_NOTICE;
+  if (policy === 'unknown') return DELIVERY_HELD_BACK_NOTICE;
+  return '';
+}

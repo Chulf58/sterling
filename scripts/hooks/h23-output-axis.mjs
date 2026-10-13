@@ -64,6 +64,8 @@ import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { isListingCommand } from './lib/listing-command.mjs';
 import { guardPath, readGuard, writeGuard } from './lib/delivery.mjs';
 import { composeOutputAxis, outputAxisReadGated } from './lib/axis-compose.mjs';
+import { readDeliveryPolicy } from '../lib/dispatch-register.mjs';
+import { deliveryPolicyNotice } from './lib/dispatch-prompt.mjs';
 
 // The clip and pointer cap, with the measurements behind them, live in
 // lib/axis-compose.mjs; they are re-exported here under their old names.
@@ -81,40 +83,51 @@ try {
   // COMMAND-CLASS SKIP (ruling the former ruling 'h23-output-axis-hazards-only-skip-listings-advisory-label' (not in the current store) v2): VCS/listing output is never matched.
   if (toolName !== 'Read' && isListingCommand(input.tool_input?.command)) allow();
 
-  // The subject fan (lib/subject-fan.mjs): the project store plus the mounted
-  // domains. The read gate below passes file_keys, so it reads the project store only.
-  const store = openStoreOrDegrade(input.cwd, 'H23', openSubjectFan);
-  if (!store) allow(); // not a Sterling project — no ceremony (P1)
+  // BLIND LANE (decision blind-lane-sterling-delivery-off-brief-line): resolved
+  // BEFORE the store is opened; on 'off' or 'unknown' no pointer is matched or
+  // shown, only the one-line notice (every time; no once-marker exists).
+  const blindNotice = deliveryPolicyNotice(readDeliveryPolicy(input.cwd, { session_id: input.session_id, agent_id: input.agent_id, agent_type: input.agent_type }));
+  // exitAfterWrite exits in its write callback, so the delivery body below must
+  // not run after the notice: it is a separate branch, not a fall-through.
+  if (blindNotice) exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blindNotice } }), 0);
+  else deliver();
 
-  // READ SEAM OWNERSHIP GATE — lib/axis-compose.mjs outputAxisReadGated, which
-  // carries the rationale (H19 owns governed territory; .git and .sterling are excluded).
-  if (toolName === 'Read' && outputAxisReadGated(store, repoRel(input.tool_input?.file_path, input.cwd), input.cwd)) {
+  function deliver() {
+    // The subject fan (lib/subject-fan.mjs): the project store plus the mounted
+    // domains. The read gate below passes file_keys, so it reads the project store only.
+    const store = openStoreOrDegrade(input.cwd, 'H23', openSubjectFan);
+    if (!store) allow(); // not a Sterling project — no ceremony (P1)
+
+    // READ SEAM OWNERSHIP GATE — lib/axis-compose.mjs outputAxisReadGated, which
+    // carries the rationale (H19 owns governed territory; .git and .sterling are excluded).
+    if (toolName === 'Read' && outputAxisReadGated(store, repoRel(input.tool_input?.file_path, input.cwd), input.cwd)) {
+      warnFanDegraded(store, 'H23');
+      allow();
+    }
+
+    // Stringify an object-shaped tool_response (e.g. a structured Bash result)
+    // before matching; a string tool_response is matched as-is.
+    const content = typeof rawResponse === 'string' ? rawResponse : JSON.stringify(rawResponse);
+
+    // THE COMPOSITION IS SHARED (lib/axis-compose.mjs, also called by the OpenCode
+    // plugin): the three floors, the guard.output_axis dedup and the pointer block.
+    const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
+    const composed = composeOutputAxis(store, { content, guardFor: () => readGuard(gPath) });
+    // A domain or config.json the fan could not read is one loud stderr line; the
+    // project store's delivery is unaffected.
     warnFanDegraded(store, 'H23');
-    allow();
+    if (!composed) allow();
+    const { text: payload, guard, seen, shown } = composed;
+
+    // Direct on this PostToolUse for both conductor and child contexts.
+    recordAdvisoryFire(input.cwd, 'h23', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
+    exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: payload } }), 0, {
+      onWritten: () => {
+        guard.output_axis = [...seen, ...shown.map((x) => x.record.id)];
+        writeGuard(gPath, guard);
+      },
+    });
   }
-
-  // Stringify an object-shaped tool_response (e.g. a structured Bash result)
-  // before matching; a string tool_response is matched as-is.
-  const content = typeof rawResponse === 'string' ? rawResponse : JSON.stringify(rawResponse);
-
-  // THE COMPOSITION IS SHARED (lib/axis-compose.mjs, also called by the OpenCode
-  // plugin): the three floors, the guard.output_axis dedup and the pointer block.
-  const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
-  const composed = composeOutputAxis(store, { content, guardFor: () => readGuard(gPath) });
-  // A domain or config.json the fan could not read is one loud stderr line; the
-  // project store's delivery is unaffected.
-  warnFanDegraded(store, 'H23');
-  if (!composed) allow();
-  const { text: payload, guard, seen, shown } = composed;
-
-  // Direct on this PostToolUse for both conductor and child contexts.
-  recordAdvisoryFire(input.cwd, 'h23', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
-  exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: payload } }), 0, {
-    onWritten: () => {
-      guard.output_axis = [...seen, ...shown.map((x) => x.record.id)];
-      writeGuard(gPath, guard);
-    },
-  });
 } catch (e) {
   // Delivery is an aid, never a gate, and this channel's own contract (unlike
   // H19/H20's warnNonBlocking-on-catch) is exit 0 on every path, including a

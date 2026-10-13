@@ -44,7 +44,8 @@ import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
 // RECOVERY no longer reads the parent transcript (decision dispatch-state-machine-
 // pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution):
 // this hook resolves its own dispatch's prompt through the dispatch-state machine.
-import { resolveDispatchStart } from '../lib/dispatch-register.mjs';
+import { resolveDispatchStart, readDeliveryPolicy } from '../lib/dispatch-register.mjs';
+import { deliveryPolicyNotice } from './lib/dispatch-prompt.mjs';
 import { EXEMPT_AGENT_TYPES, RETURN_CONTRACT, composeContext, dispatchChrome, stageBrief } from './lib/stage-brief.mjs';
 
 const input = readStdin();
@@ -72,6 +73,20 @@ const { tddPostureLine, activePlanLine } = dispatchChrome(input.cwd, input.agent
 // 'resolution' -> [resolution-failed] (resolveDispatchStart itself threw).
 let unattributableLine = '';
 let startPhase = 'store';
+
+// BLIND LANE (decision blind-lane-sterling-delivery-off-brief-line): a lane
+// whose policy reads 'off' or 'unknown' gets no store record at all, only the
+// one disclosure line beside the chrome. Chrome kept: the ACTIVE PLAN line
+// (the plan-lock file, not a store record), the TDD posture and the return
+// contract; none carries a record title, id or count. The unattributable line
+// is dropped for it, because that line tells the lane to query the store.
+let deliveryLine = '';
+function applyDeliveryPolicy(policy) {
+  deliveryLine = deliveryPolicyNotice(policy);
+  if (deliveryLine) unattributableLine = '';
+  return deliveryLine !== '';
+}
+const policyKey = () => ({ session_id: input.session_id, agent_id: input.agent_id, agent_type: input.agent_type });
 function notStagedLine(kase) {
   return `STERLING DISPATCH STAGING (H19): this spawn's dispatch could not be attributed at Start [${kase}] — YOUR KNOWLEDGE WAS NOT STAGED: no owning articles, hazards or decisions were delivered for your task. Do not assume the store is silent on it: rely on your dispatch brief for knowledge pointers and query the store for the area before acting. File-touch delivery still fires on your first Read/Edit.`;
 }
@@ -86,7 +101,7 @@ function notStagedLine(kase) {
 // Combines PAYLOAD (the knowledge-delivery text, may be '') with the return
 // contract (h28 fold — omitted only for EXEMPT_AGENT_TYPES) into one string.
 function combinedContext(payload) {
-  return composeContext({ agentType: input.agent_type, activePlanLine, payload, tddPostureLine, unattributableLine });
+  return composeContext({ agentType: input.agent_type, activePlanLine, payload, tddPostureLine, unattributableLine, deliveryLine });
 }
 
 /** The stdout envelope, in the one shape this hook emits. */
@@ -128,6 +143,9 @@ async function main(input) {
     if (resolution.source === 'unattributable') {
       unattributableLine = notStagedLine(resolution.case);
     }
+    // The policy is read AFTER resolution, so a Post or derived binding just
+    // written names this agent; a resume finds its own record or tombstone.
+    if (applyDeliveryPolicy(readDeliveryPolicy(input.cwd, policyKey()))) return finish('');
 
     const prompts = typeof resolution.prompt === 'string' ? [resolution.prompt] : [];
     // PATH + SUBJECT STAGING is the shared lib's (scripts/hooks/lib/stage-brief.mjs,
@@ -197,6 +215,7 @@ async function main(input) {
     }
     if (startPhase === 'store') unattributableLine = notStagedLine('store-unavailable');
     else if (startPhase === 'resolution') unattributableLine = notStagedLine('resolution-failed');
+    applyDeliveryPolicy(readDeliveryPolicy(input.cwd, policyKey()));
     const out = combinedContext('');
     if (out) return exitAfterWrite(envelope(out), 0);
     return warnNonBlocking(`H19: dispatch staging failed and nothing was emitted`);

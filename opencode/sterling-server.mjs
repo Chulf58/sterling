@@ -12140,6 +12140,70 @@ function isForeignTree(record, root) {
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync7, writeFileSync as writeFileSync2, mkdirSync as mkdirSync6, existsSync as existsSync6, renameSync as renameSync2, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
 import { join as join12, dirname as dirname6 } from "node:path";
+
+// scripts/hooks/lib/dispatch-prompt.mjs
+init_dist();
+var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
+function extractPathCandidates(text) {
+  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
+  return [...new Set(found)];
+}
+var REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
+var GLOB_METACHAR_RE = /[*?[\]]/;
+function canonicalTerritoryEntry(p) {
+  if (typeof p !== "string") return { reason: "not a string" };
+  if (p === "") return { reason: "empty string" };
+  if (GLOB_METACHAR_RE.test(p)) return { reason: "glob pattern; the declaration names files or directories, never patterns" };
+  const stripped = p.endsWith("/") ? p.slice(0, -1) : p;
+  let normalized;
+  try {
+    normalized = normalizeRepoPath(stripped);
+  } catch (e) {
+    return { reason: String(e?.message ?? e).replace(/^path invariant violation: /, "") };
+  }
+  if (normalized !== stripped) return { reason: `not canonical repo-relative POSIX form (canonical: '${normalized}')` };
+  return { path: normalized };
+}
+function parseReviewTerritory(text) {
+  const match = REVIEW_TERRITORY_RE.exec(String(text ?? ""));
+  if (!match) return { present: false };
+  const raw = match[0];
+  let parsed;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch (e) {
+    return { present: true, valid: false, raw, reason: `not valid JSON (${e.message})` };
+  }
+  if (!Array.isArray(parsed)) return { present: true, valid: false, raw, reason: "not a JSON array" };
+  const files = [];
+  for (const [i, entry] of parsed.entries()) {
+    const c = canonicalTerritoryEntry(entry);
+    if (c.reason) return { present: true, valid: false, raw, reason: `entry ${i} (${JSON.stringify(entry)}): ${c.reason}` };
+    files.push(c.path);
+  }
+  return { present: true, valid: true, files: [...new Set(files)] };
+}
+var STERLING_DELIVERY_LINE_RE = /^[ \t]*STERLING-DELIVERY:([^\n]*)$/gm;
+function parseSterlingDelivery(text) {
+  const matches = [...String(text ?? "").matchAll(STERLING_DELIVERY_LINE_RE)];
+  if (matches.length === 0) return { present: false, policy: "on" };
+  if (matches.length > 1) return { present: true, valid: false, policy: "off", reason: `the marker appears on ${matches.length} lines` };
+  const value = matches[0][1].trim();
+  if (value === "off") return { present: true, valid: true, policy: "off" };
+  return { present: true, valid: false, policy: "off", reason: `unrecognised value ${JSON.stringify(value)} (only 'off' is accepted)` };
+}
+function stripSterlingDeliveryLine(text) {
+  return String(text ?? "").replace(STERLING_DELIVERY_LINE_RE, "");
+}
+var DELIVERY_OFF_NOTICE = "STERLING DELIVERY OFF for this lane: its brief carries STERLING-DELIVERY: off, so no store records are delivered. Its own knowledge_* calls are not blocked.";
+var DELIVERY_HELD_BACK_NOTICE = "STERLING DELIVERY HELD BACK: this lane's delivery policy could not be established (it could not be told apart from a same-type lane that asked for STERLING-DELIVERY: off, or the dispatch state was unreadable), so no store records are delivered.";
+function deliveryPolicyNotice(policy) {
+  if (policy === "off") return DELIVERY_OFF_NOTICE;
+  if (policy === "unknown") return DELIVERY_HELD_BACK_NOTICE;
+  return "";
+}
+
+// scripts/hooks/lib/delivery.mjs
 init_dist2();
 function deliveryDir(cwd) {
   return join12(cwd, ".sterling", "transient", "delivery");
@@ -12155,7 +12219,7 @@ function stripReviewTerritoryLine(text) {
 }
 function outgoingProposalText(toolInput) {
   const ti = toolInput ?? {};
-  if (typeof ti.prompt === "string" && ti.prompt.trim()) return stripReviewTerritoryLine(ti.prompt);
+  if (typeof ti.prompt === "string" && ti.prompt.trim()) return stripSterlingDeliveryLine(stripReviewTerritoryLine(ti.prompt));
   if (Array.isArray(ti.questions)) {
     return ti.questions.flatMap((q) => [
       q?.question,
@@ -13420,49 +13484,6 @@ function composeOutputAxis(store, { content, guardFor }) {
   return { text: joinPointerBlock({ header, lines: pointerLines, tail }), guard, seen, shown };
 }
 
-// scripts/hooks/lib/dispatch-prompt.mjs
-init_dist();
-var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
-function extractPathCandidates(text) {
-  const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
-  return [...new Set(found)];
-}
-var REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
-var GLOB_METACHAR_RE = /[*?[\]]/;
-function canonicalTerritoryEntry(p) {
-  if (typeof p !== "string") return { reason: "not a string" };
-  if (p === "") return { reason: "empty string" };
-  if (GLOB_METACHAR_RE.test(p)) return { reason: "glob pattern; the declaration names files or directories, never patterns" };
-  const stripped = p.endsWith("/") ? p.slice(0, -1) : p;
-  let normalized;
-  try {
-    normalized = normalizeRepoPath(stripped);
-  } catch (e) {
-    return { reason: String(e?.message ?? e).replace(/^path invariant violation: /, "") };
-  }
-  if (normalized !== stripped) return { reason: `not canonical repo-relative POSIX form (canonical: '${normalized}')` };
-  return { path: normalized };
-}
-function parseReviewTerritory(text) {
-  const match = REVIEW_TERRITORY_RE.exec(String(text ?? ""));
-  if (!match) return { present: false };
-  const raw = match[0];
-  let parsed;
-  try {
-    parsed = JSON.parse(match[1]);
-  } catch (e) {
-    return { present: true, valid: false, raw, reason: `not valid JSON (${e.message})` };
-  }
-  if (!Array.isArray(parsed)) return { present: true, valid: false, raw, reason: "not a JSON array" };
-  const files = [];
-  for (const [i, entry] of parsed.entries()) {
-    const c = canonicalTerritoryEntry(entry);
-    if (c.reason) return { present: true, valid: false, raw, reason: `entry ${i} (${JSON.stringify(entry)}): ${c.reason}` };
-    files.push(c.path);
-  }
-  return { present: true, valid: true, files: [...new Set(files)] };
-}
-
 // scripts/hooks/lib/dispatch-advisory.mjs
 var HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\n)/g;
 var TERRITORY_VERB_RE = String.raw`(?:touch(?:es|ed|ing)?|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|change(?:s|d|ing)?|writ(?:e|es|ing|ten)|alter(?:s|ed|ing)?)`;
@@ -14071,6 +14092,9 @@ function promptFacts(rawPrompt) {
   const oversize = prompt_bytes > MAX_PROMPT_BYTES;
   return { prompt: isString && !oversize ? rawPrompt : null, prompt_bytes, prompt_sha256, ...oversize ? { oversize: true } : {} };
 }
+function deliveryFacts(rawPrompt) {
+  return typeof rawPrompt === "string" && parseSterlingDelivery(rawPrompt).policy === "off" ? { delivery: "off" } : {};
+}
 function stringField(v) {
   return typeof v === "string" ? v : null;
 }
@@ -14111,6 +14135,7 @@ function validateRecordShape(r) {
   if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: "derived_binding-shape" };
   if (!validateStarted(r.started)) return { ok: false, reason: "started-shape" };
   if (!validateTerminal(r.terminal)) return { ok: false, reason: "terminal-shape" };
+  if (r.delivery !== void 0 && r.delivery !== "off") return { ok: false, reason: "delivery-shape" };
   return { ok: true };
 }
 function classifyRecordFile(file) {
@@ -14254,6 +14279,38 @@ function findKeyedRecord(root, key) {
 }
 function readDispatchState(root) {
   return scanLiveState(root, { repair: false });
+}
+function readDeliveryPolicy(root, { session_id, agent_id, agent_type } = {}) {
+  if (typeof agent_id !== "string" || agent_id === "") return "on";
+  try {
+    const scan = readDispatchState(root);
+    if (scan.availability === "absent") return "on";
+    if (scan.availability !== "ok") return "unknown";
+    const own = scan.records.map(({ record }) => record).filter((record) => recordAgentIds(record).includes(agent_id));
+    let ownUnreadable = false;
+    const hash = agentIdHash(agent_id);
+    const dir = dispatchStateDir(root);
+    for (const entry of scan.done) {
+      if (!entry.idHashes.includes(hash)) continue;
+      const v = validateNamedRecord(dir, entry.file, { kind: "done", key: entry.key });
+      if (!v.exists) continue;
+      if (v.poisoned) ownUnreadable = true;
+      else if (recordAgentIds(v.record).includes(agent_id)) own.push(v.record);
+    }
+    if (own.some((record) => record.delivery === "off")) return "off";
+    if (ownUnreadable) return "unknown";
+    if (own.length > 0) return "on";
+    if (scan.poisoned.length > 0) return "unknown";
+    const typed = typeof agent_type === "string" && agent_type !== "";
+    const siblingOff = scan.records.some(
+      ({ record }) => !record.terminal && record.delivery === "off" && record.session_id === session_id && (!typed || record.subagent_type === agent_type)
+    );
+    return siblingOff ? "unknown" : "on";
+  } catch (e) {
+    process.stderr.write(`dispatch-state: delivery policy for agent '${agent_id}' could not be read (${e?.message ?? e}) \u2014 held back as 'unknown'
+`);
+    return "unknown";
+  }
 }
 function readDispatchStateLocked(root) {
   return scanLiveState(root, { repair: true });
@@ -14406,6 +14463,7 @@ function recordDispatchPre(root, stdin) {
     const description = stringField(stdin?.tool_input?.description);
     const session_id = stringField(stdin?.session_id);
     const prompt_id = stringField(stdin?.prompt_id);
+    const delivery = deliveryFacts(stdin?.tool_input?.prompt);
     if (!existing.exists) {
       const record = {
         schema: 1,
@@ -14418,6 +14476,7 @@ function recordDispatchPre(root, stdin) {
         prompt_bytes,
         prompt_sha256,
         ...oversize ? { oversize: true } : {},
+        ...delivery,
         origin: "pre",
         pre_at: (/* @__PURE__ */ new Date()).toISOString()
       };
@@ -14433,8 +14492,10 @@ function recordDispatchPre(root, stdin) {
         ["session_id", session_id],
         ["prompt_id", prompt_id],
         ["subagent_type", subagent_type],
-        ["description", description]
+        ["description", description],
+        ["delivery", delivery.delivery]
       ]) {
+        if (value === void 0) continue;
         if (filled[field] === void 0 || filled[field] === null) {
           filled[field] = value;
           changed = true;
@@ -14570,6 +14631,7 @@ function recordDispatchPost(root, stdin, opts = {}) {
         prompt_bytes,
         prompt_sha256,
         ...oversize ? { oversize: true } : {},
+        ...deliveryFacts(typeof responsePrompt === "string" ? responsePrompt : inputPrompt),
         origin: "post-only",
         post_binding: { agent_id: agentId, at: (/* @__PURE__ */ new Date()).toISOString() }
       };
@@ -15370,7 +15432,8 @@ function appendToResult(result, text) {
 ${text}`;
   else throw new Error(`unrecognized tool result content shape (${typeof result?.content})`);
 }
-function createDeliveryHandlers({ openStore, rootOf, directory, fenced }) {
+function createDeliveryHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy }) {
+  if (!deliveryPolicy) throw new Error("createDeliveryHandlers needs the deliveryPolicy tracker");
   const pending = /* @__PURE__ */ new Map();
   function builderFor(input, root) {
     const tool = input?.tool;
@@ -15392,9 +15455,15 @@ function createDeliveryHandlers({ openStore, rootOf, directory, fenced }) {
     if (!isDeliveryTool(input?.tool)) return;
     const root = rootOf();
     if (!root) return;
-    await fenced("delivery", root, () => {
+    await fenced("delivery", root, async () => {
       const build = builderFor(input, root);
       if (!build) return;
+      const policy = await deliveryPolicy.resolve(root, input.sessionID);
+      if (policy !== "on") {
+        pending.set(input.id, { withheld: policy });
+        while (pending.size > PENDING_CAP) pending.delete(pending.keys().next().value);
+        return;
+      }
       const store = openStore(join14(root, ".sterling", "sterling.db"));
       try {
         const delivery = build(store);
@@ -15413,6 +15482,11 @@ function createDeliveryHandlers({ openStore, rootOf, directory, fenced }) {
     const root = rootOf();
     if (!root || input.status !== "completed") return;
     await fenced("delivery", root, () => {
+      if (delivery.withheld) {
+        const notice = deliveryPolicy.disclose(input.sessionID, delivery.withheld);
+        if (notice) appendToResult(input.result, notice);
+        return;
+      }
       appendToResult(input.result, delivery.text);
       delivery.commit();
     });
@@ -15684,7 +15758,8 @@ function buildOutputAxis(store, root, { tool, args, content, sessionID, director
     }
   };
 }
-function createAxisHandlers({ openStore, rootOf, directory, fenced }) {
+function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy }) {
+  if (!deliveryPolicy) throw new Error("createAxisHandlers needs the deliveryPolicy tracker");
   const pending = /* @__PURE__ */ new Map();
   async function onBefore(input) {
     const surface = axisSurface(input?.tool);
@@ -15766,7 +15841,13 @@ function createAxisHandlers({ openStore, rootOf, directory, fenced }) {
     if (!content) return;
     const root = rootOf();
     if (!root) return;
-    await fenced("axis", root, () => {
+    await fenced("axis", root, async () => {
+      const policy = await deliveryPolicy.resolve(root, input.sessionID);
+      if (policy !== "on") {
+        const notice = deliveryPolicy.disclose(input.sessionID, policy);
+        if (notice) appendToResult(input.result, notice);
+        return;
+      }
       const store = openSubjectFan(root, { opener: openStore });
       if (!store) return;
       let block;
@@ -18503,18 +18584,20 @@ function dispatchChrome(cwd, agentType) {
   }
   return { tddPostureLine: tddPostureLine2, activePlanLine };
 }
-function composeContext({ agentType, activePlanLine = "", payload = "", tddPostureLine: tddPostureLine2 = "", unattributableLine = "" }) {
+function composeContext({ agentType, activePlanLine = "", payload = "", tddPostureLine: tddPostureLine2 = "", unattributableLine = "", deliveryLine = "" }) {
   const out = [];
   if (activePlanLine) out.push(activePlanLine);
   if (payload) out.push(payload);
   if (tddPostureLine2) out.push(tddPostureLine2);
   if (unattributableLine) out.push(unattributableLine);
+  if (deliveryLine) out.push(deliveryLine);
   if (!EXEMPT_AGENT_TYPES.has(agentType)) out.push(RETURN_CONTRACT);
   return out.join("\n\n");
 }
 var chromePart = (text) => ({ kind: "ordinary", pinned: true, contentClass: "chrome", text });
 function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = [], trailingChrome = [] }) {
-  const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
+  const briefs = prompts.map(stripSterlingDeliveryLine);
+  const candidates = [...new Set(briefs.flatMap(extractPathCandidates))];
   const rels = [...new Set(candidates.map((c) => repoRel(c, cwd)).filter(Boolean))].filter(
     (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/")
   );
@@ -18524,7 +18607,7 @@ function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = 
   const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
   const subjectMatches = [];
   const seenSubject = /* @__PURE__ */ new Set();
-  for (const p of prompts) {
+  for (const p of briefs) {
     const subjectText = stripReviewTerritoryLine(p);
     const terms = extractAxisTerms(subjectText, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) continue;
@@ -18612,7 +18695,7 @@ function notStagedLine(kase) {
   return `STERLING DISPATCH STAGING (H19): this session's brief could not be staged from [${kase}] \u2014 YOUR KNOWLEDGE WAS NOT STAGED: no owning articles, hazards or decisions were delivered for your task. Do not assume the store is silent on it: rely on your dispatch brief for knowledge pointers and query the store for the area before acting. File-touch delivery still fires on your first read or edit.`;
 }
 var VOLATILE_HEADER = "STERLING CONTEXT (added by the Sterling plugin, not typed by the user):";
-function briefOf(messages) {
+function rawBriefOf(messages) {
   const first = Array.isArray(messages) ? messages.find((m) => m?.role === "user") : null;
   if (!first) return "";
   const content = first.content;
@@ -18620,7 +18703,10 @@ function briefOf(messages) {
   const appended = text.indexOf(`
 
 ${VOLATILE_HEADER}`);
-  return (appended >= 0 ? text.slice(0, appended) : text).slice(0, BRIEF_SCAN_CAP);
+  return appended >= 0 ? text.slice(0, appended) : text;
+}
+function briefOf(messages) {
+  return rawBriefOf(messages).slice(0, BRIEF_SCAN_CAP);
 }
 function stageChild({ store, root, sessionID, agent: agentName, brief, disclosure: disclosure2 = "" }) {
   const agent = agentRole(agentName);
@@ -18839,6 +18925,80 @@ function createDispatchHandlers({ rootOf, fenced, now = () => Date.now() }) {
   return { onBefore, onAfter, noteExecutionEnd };
 }
 
+// packages/opencode-plugin/src/delivery-policy.mjs
+async function contextUserTexts(session, sessionID) {
+  if (typeof session?.context !== "function") throw new Error("ctx.session.context is unavailable");
+  const got = await session.context({ sessionID });
+  const messages = Array.isArray(got) ? got : got?.data;
+  if (!Array.isArray(messages)) throw new Error(`ctx.session.context answered ${got === null ? "null" : typeof got} for session ${sessionID}, not a message list`);
+  return messages.filter((m) => m?.type === "user" && typeof m.text === "string").map((m) => m.text);
+}
+function offInMessages(messages) {
+  return Array.isArray(messages) && messages.some((m) => m?.role === "user" && parseSterlingDelivery(rawBriefOf([m])).policy === "off");
+}
+function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPolicy, readState: readState2 = readDispatchState }) {
+  const off = /* @__PURE__ */ new Map();
+  const roots = /* @__PURE__ */ new Map();
+  const contextRead = /* @__PURE__ */ new Map();
+  const disclosed = /* @__PURE__ */ new Map();
+  function offLaneMayExist(root) {
+    if (off.size > 0) return true;
+    const scan = readState2(root);
+    if (scan.availability === "absent") return false;
+    if (scan.availability !== "ok" || scan.poisoned.length > 0) return true;
+    return scan.records.some(({ record }) => !record.terminal && record.delivery === "off");
+  }
+  const setOff = (sessionID) => (remember(off, sessionID, true), "off");
+  async function resolve15(root, sessionID, messages) {
+    if (off.has(sessionID)) return "off";
+    if (roots.has(sessionID)) return "on";
+    const kind = await sessionKind(getSession?.(), sessionID, parents);
+    if (off.has(sessionID)) return "off";
+    if (kind.why) {
+      let may;
+      try {
+        may = offLaneMayExist(root);
+      } catch (e) {
+        logLine(root, `delivery policy: the dispatch state could not be scanned (${errText(e)})`);
+        may = true;
+      }
+      if (may) logLine(root, `delivery policy: session ${sessionID} could not be classified (${kind.why}) while an off lane may exist, so delivery is held back`);
+      return may ? "unknown" : "on";
+    }
+    if (kind.kind === "root") {
+      remember(roots, sessionID, true);
+      return "on";
+    }
+    if (messages !== void 0) {
+      if (offInMessages(messages)) return setOff(sessionID);
+    } else if (!contextRead.has(sessionID)) {
+      try {
+        const texts = await contextUserTexts(getSession?.(), sessionID);
+        if (texts.some((t) => parseSterlingDelivery(t).policy === "off")) return setOff(sessionID);
+        remember(contextRead, sessionID, true);
+      } catch (e) {
+        logLine(root, `delivery policy: the durable context of child session ${sessionID} could not be read (${errText(e)}); the dispatch state decides`);
+      }
+      if (off.has(sessionID)) return "off";
+    }
+    const recorded = readPolicy(root, { session_id: parents.get(sessionID), agent_id: sessionID });
+    if (recorded === "off" || off.has(sessionID)) return setOff(sessionID);
+    return recorded;
+  }
+  function markDisclosed(sessionID, policy) {
+    const seen = disclosed.get(sessionID) ?? /* @__PURE__ */ new Set();
+    seen.add(policy);
+    remember(disclosed, sessionID, seen);
+  }
+  function disclose(sessionID, policy) {
+    const notice = deliveryPolicyNotice(policy);
+    if (!notice || disclosed.get(sessionID)?.has(policy)) return "";
+    markDisclosed(sessionID, policy);
+    return notice;
+  }
+  return { resolve: resolve15, disclose, markDisclosed };
+}
+
 // packages/opencode-plugin/src/worker.mjs
 import { spawn as spawn2 } from "node:child_process";
 import { existsSync as existsSync22 } from "node:fs";
@@ -19053,7 +19213,7 @@ function planLockSection(ctx) {
 // packages/opencode-plugin/src/context.mjs
 var STATUS_TTL_MS = 1e4;
 var UNDECLARED_TTL_MS = 5 * 6e4;
-function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = /* @__PURE__ */ new Map(), sweepStale, swept = /* @__PURE__ */ new Set(), env = process.env }) {
+function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = /* @__PURE__ */ new Map(), sweepStale, swept = /* @__PURE__ */ new Set(), env = process.env, deliveryPolicy = createDeliveryPolicy({ getSession, parents }) }) {
   const statusCache = /* @__PURE__ */ new Map();
   const undeclaredCache = /* @__PURE__ */ new Map();
   const maintenanceCache = /* @__PURE__ */ new Map();
@@ -19094,6 +19254,12 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     return text;
   }
   async function childStaging(root, input) {
+    const policy = await deliveryPolicy.resolve(root, input.sessionID, input.messages);
+    if (policy !== "on") {
+      const role = agentRole(input.agent);
+      deliveryPolicy.markDisclosed(input.sessionID, policy);
+      return composeContext({ agentType: role, ...dispatchChrome(root, role), unattributableLine: deliveryPolicyNotice(policy) });
+    }
     const brief = briefOf(input.messages);
     try {
       const store = openStore(join37(root, ".sterling", "sterling.db"));
@@ -21406,9 +21572,10 @@ function createSterlingServer(deps = {}) {
     }
     const rotationRestore = createRotationRestore({ getSession: () => session, now, renderRestore: deps.renderRestore, env });
     const sessionSync = deps.syncSession ?? createSessionSync({ ...deps, getSession: () => session, now, started: syncStarted });
-    const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot });
-    const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced });
-    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced });
+    const deliveryPolicy = createDeliveryPolicy({ getSession: () => session, parents });
+    const { onContext, onPrompt: onVolatile, onToolResult: onVolatileResult, resetStatus, resetSession } = createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, getSession: () => session, parents, sweepStale: sweepStaleDispatches, swept, env, sessionSync, pluginRoot: deps.sterlingRoot, deliveryPolicy });
+    const delivery = createDeliveryHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
+    const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
     const dispatch = createDispatchHandlers({ rootOf, fenced });
     const recordResearch = createResearchRecorder({ rootOf, fenced, now });
     async function onBefore(input) {

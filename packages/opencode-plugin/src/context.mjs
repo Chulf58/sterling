@@ -18,6 +18,8 @@ import { laneCeiling, liveLanes, renderBoardReadiness } from '../../../scripts/h
 import { maintenanceLines, operatingStateLines, undeclaredSourceBlock } from './operating-state.mjs';
 import { composeContext, dispatchChrome } from '../../../scripts/hooks/lib/stage-brief.mjs';
 import { VOLATILE_HEADER, briefOf, notStagedLine, stageChild } from './staging.mjs';
+import { createDeliveryPolicy } from './delivery-policy.mjs';
+import { deliveryPolicyNotice } from '../../../scripts/hooks/lib/dispatch-prompt.mjs';
 import { appendToResult, isDeliveryTool } from './delivery.mjs';
 import { agentRole } from './agent-name.mjs';
 import { remember } from './bounded.mjs';
@@ -39,8 +41,10 @@ const UNDECLARED_TTL_MS = 5 * 60_000;
  * test override for the resolved Sterling root. Returns onContext (the stable system part), onPrompt (the volatile
  * part, appended to the prompt), `resetStatus(root)`, which drops the cached status line, maintenance summary and
  * board readiness, and `resetSession(sessionID)`, which forgets what that session was delivered.
+ * `deliveryPolicy` is the location's STERLING-DELIVERY tracker (delivery-policy.mjs); a child whose policy is not
+ * 'on' is staged no records. It defaults to one built on `getSession` and `parents`.
  */
-export function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = new Map(), sweepStale, swept = new Set(), env = process.env }) {
+export function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = new Map(), sweepStale, swept = new Set(), env = process.env, deliveryPolicy = createDeliveryPolicy({ getSession, parents }) }) {
   const statusCache = new Map();
   // The undeclared-source scan, per project root: root sessions only, refreshed on UNDECLARED_TTL_MS.
   const undeclaredCache = new Map();
@@ -101,6 +105,14 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
 
   /** H19's staging for a child session: the records governing its own brief with the plan, TDD and return-contract chrome. */
   async function childStaging(root, input) {
+    // STERLING-DELIVERY: off (or a policy that cannot be established) stages no records:
+    // the chrome alone, with the notice where the not-staged line would go.
+    const policy = await deliveryPolicy.resolve(root, input.sessionID, input.messages);
+    if (policy !== 'on') {
+      const role = agentRole(input.agent);
+      deliveryPolicy.markDisclosed(input.sessionID, policy);
+      return composeContext({ agentType: role, ...dispatchChrome(root, role), unattributableLine: deliveryPolicyNotice(policy) });
+    }
     const brief = briefOf(input.messages);
     try {
       const store = openStore(join(root, '.sterling', 'sterling.db'));

@@ -5651,6 +5651,15 @@ function parseReviewTerritory(text) {
   }
   return { present: true, valid: true, files: [...new Set(files)] };
 }
+var STERLING_DELIVERY_LINE_RE = /^[ \t]*STERLING-DELIVERY:([^\n]*)$/gm;
+function parseSterlingDelivery(text) {
+  const matches = [...String(text ?? "").matchAll(STERLING_DELIVERY_LINE_RE)];
+  if (matches.length === 0) return { present: false, policy: "on" };
+  if (matches.length > 1) return { present: true, valid: false, policy: "off", reason: `the marker appears on ${matches.length} lines` };
+  const value = matches[0][1].trim();
+  if (value === "off") return { present: true, valid: true, policy: "off" };
+  return { present: true, valid: false, policy: "off", reason: `unrecognised value ${JSON.stringify(value)} (only 'off' is accepted)` };
+}
 
 // scripts/hooks/lib/transcript.mjs
 import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync, readdirSync } from "node:fs";
@@ -6303,6 +6312,9 @@ function promptFacts(rawPrompt) {
   const oversize = prompt_bytes > MAX_PROMPT_BYTES;
   return { prompt: isString && !oversize ? rawPrompt : null, prompt_bytes, prompt_sha256, ...oversize ? { oversize: true } : {} };
 }
+function deliveryFacts(rawPrompt) {
+  return typeof rawPrompt === "string" && parseSterlingDelivery(rawPrompt).policy === "off" ? { delivery: "off" } : {};
+}
 function stringField(v) {
   return typeof v === "string" ? v : null;
 }
@@ -6343,6 +6355,7 @@ function validateRecordShape(r) {
   if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: "derived_binding-shape" };
   if (!validateStarted(r.started)) return { ok: false, reason: "started-shape" };
   if (!validateTerminal(r.terminal)) return { ok: false, reason: "terminal-shape" };
+  if (r.delivery !== void 0 && r.delivery !== "off") return { ok: false, reason: "delivery-shape" };
   return { ok: true };
 }
 function classifyRecordFile(file) {
@@ -6635,6 +6648,7 @@ function recordDispatchPre(root, stdin) {
     const description = stringField(stdin?.tool_input?.description);
     const session_id = stringField(stdin?.session_id);
     const prompt_id = stringField(stdin?.prompt_id);
+    const delivery = deliveryFacts(stdin?.tool_input?.prompt);
     if (!existing.exists) {
       const record = {
         schema: 1,
@@ -6647,6 +6661,7 @@ function recordDispatchPre(root, stdin) {
         prompt_bytes,
         prompt_sha256,
         ...oversize ? { oversize: true } : {},
+        ...delivery,
         origin: "pre",
         pre_at: (/* @__PURE__ */ new Date()).toISOString()
       };
@@ -6662,8 +6677,10 @@ function recordDispatchPre(root, stdin) {
         ["session_id", session_id],
         ["prompt_id", prompt_id],
         ["subagent_type", subagent_type],
-        ["description", description]
+        ["description", description],
+        ["delivery", delivery.delivery]
       ]) {
+        if (value === void 0) continue;
         if (filled[field] === void 0 || filled[field] === null) {
           filled[field] = value;
           changed = true;
@@ -6799,6 +6816,7 @@ function recordDispatchPost(root, stdin, opts = {}) {
         prompt_bytes,
         prompt_sha256,
         ...oversize ? { oversize: true } : {},
+        ...deliveryFacts(typeof responsePrompt === "string" ? responsePrompt : inputPrompt),
         origin: "post-only",
         post_binding: { agent_id: agentId, at: (/* @__PURE__ */ new Date()).toISOString() }
       };
