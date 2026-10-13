@@ -198,15 +198,60 @@ test('tool-time delivery: read, edit, shell and H23 deliver nothing to the off c
   }
 });
 
-test('cache miss: a process that never saw the child\'s context reads its brief through session.context and suppresses', async () => {
+// ctx.session.context returns DURABLE session messages, not the model-request messages the
+// context hook gets: OpenCode 2.0.23's Session.Message.User schema is
+// { id, metadata?, time: { created }, type: 'user', text, files?, agents?, skills? }
+// (read from the 2.0.23 binary, identifier "Session.Message.User", text from the "Prompt" schema).
+const durableUser = (text, n = 1) => ({ id: `msg_${n}`, time: { created: n }, type: 'user', text });
+
+test('cache miss: a process that never saw the child\'s context reads durable session.context messages and suppresses', async () => {
   const p = makeProject();
   try {
-    const { ctx, cleanup } = await setup(p.dir, CHILDREN, { ses_off: [userMsg(OFF_BRIEF)], ses_on: [userMsg(ON_BRIEF)] });
+    const sessions = { ...CHILDREN, ses_lone: { parentID: 'ses_root2' } };
+    const { ctx, cleanup } = await setup(p.dir, sessions, { ses_off: [durableUser(OFF_BRIEF)], ses_lone: [durableUser(ON_BRIEF)] });
     const first = await call(ctx, 'ses_off', 'read', { path: 'src/a.mjs' });
     assert.equal(first, OFF, 'the off notice, once, and no record');
     const second = await call(ctx, 'ses_off', 'shell', { command: 'cat src/a.mjs' });
     assert.equal(second, '', 'the notice is not repeated and still no record');
-    assert.match(await call(ctx, 'ses_on', 'read', { path: 'src/a.mjs' }), /alpha-feature/, 'a rehydrated on child delivers as before');
+    assert.match(await call(ctx, 'ses_lone', 'read', { path: 'src/a.mjs' }), /alpha-feature/, 'a rehydrated child with no off lane beside it delivers as before');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('post-compaction context ("Continue", no off line) never establishes on beside a live off dispatch', async () => {
+  const p = makeProject();
+  try {
+    const sessions = { ...CHILDREN, ses_kid: { parentID: 'ses_root' } };
+    // The message carries both the durable and the model-request fields, so this test isolates the
+    // on-from-context rule from the shape decoding the previous test pins.
+    const resumed = { ...durableUser('Continue'), role: 'user', content: 'Continue' };
+    const { ctx, cleanup } = await setup(p.dir, sessions, { ses_kid: [resumed] });
+    await ctx.hooks.tool['execute.before']({ tool: 'subagent', sessionID: 'ses_root', agent: 'build', messageID: 'm1', id: 'call_1', input: { agent: 'sterling/implementor', description: 'd', prompt: OFF_BRIEF } });
+    assert.equal(await call(ctx, 'ses_kid', 'read', { path: 'src/a.mjs' }), HELD, 'held back, not delivered');
+    assert.doesNotMatch(await call(ctx, 'ses_kid', 'shell', { command: 'cat src/a.mjs' }), /alpha-feature|alpha-hazard/, 'and no on was cached');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('an older resolution finishing after the off brief was seen cannot turn the session back on', async () => {
+  const p = makeProject();
+  try {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    const { ctx, cleanup } = await setup(p.dir, CHILDREN, {});
+    // session.context for ses_off hangs until released, then answers with nothing readable.
+    ctx.session.context = async () => (await gate, []);
+    const slow = call(ctx, 'ses_off', 'read', { path: 'src/a.mjs' });
+    await new Promise((r) => setTimeout(r, 50));
+    const staged = await turn(ctx, 'ses_off', OFF_BRIEF);
+    assert.ok(staged.includes(OFF));
+    release();
+    assert.doesNotMatch(await slow, /alpha-feature|alpha-hazard/, 'the overlapping call delivers no record');
+    assert.doesNotMatch(await call(ctx, 'ses_off', 'read', { path: 'src/a.mjs' }), /alpha-feature|alpha-hazard/, 'off still holds afterwards');
     await cleanup?.();
   } finally {
     p.cleanup();

@@ -18926,31 +18926,40 @@ function createDispatchHandlers({ rootOf, fenced, now = () => Date.now() }) {
 }
 
 // packages/opencode-plugin/src/delivery-policy.mjs
-async function contextMessages(session, sessionID) {
+async function contextUserTexts(session, sessionID) {
   if (typeof session?.context !== "function") throw new Error("ctx.session.context is unavailable");
   const got = await session.context({ sessionID });
   const messages = Array.isArray(got) ? got : got?.data;
   if (!Array.isArray(messages)) throw new Error(`ctx.session.context answered ${got === null ? "null" : typeof got} for session ${sessionID}, not a message list`);
-  return messages;
+  return messages.filter((m) => m?.type === "user" && typeof m.text === "string").map((m) => m.text);
+}
+function briefPolicy(messages) {
+  const brief = rawBriefOf(messages);
+  return { readable: brief !== "", off: parseSterlingDelivery(brief).policy === "off" };
 }
 function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPolicy, readState: readState2 = readDispatchState }) {
-  const policies = /* @__PURE__ */ new Map();
+  const off = /* @__PURE__ */ new Map();
+  const roots = /* @__PURE__ */ new Map();
+  const briefSeen = /* @__PURE__ */ new Map();
+  const contextRead = /* @__PURE__ */ new Map();
   const disclosed = /* @__PURE__ */ new Map();
   function offLaneMayExist(root) {
-    for (const p of policies.values()) if (p === "off") return true;
+    if (off.size > 0) return true;
     const scan = readState2(root);
     if (scan.availability === "absent") return false;
     if (scan.availability !== "ok" || scan.poisoned.length > 0) return true;
     return scan.records.some(({ record }) => !record.terminal && record.delivery === "off");
   }
   function offSiblingSeen(sessionID, parentID) {
-    for (const [id, p] of policies) if (p === "off" && id !== sessionID && parents.get(id) === parentID) return true;
+    for (const id of off.keys()) if (id !== sessionID && parents.get(id) === parentID) return true;
     return false;
   }
+  const setOff = (sessionID) => (remember(off, sessionID, true), "off");
   async function resolve15(root, sessionID, messages) {
-    const cached = policies.get(sessionID);
-    if (cached !== void 0) return cached;
+    if (off.has(sessionID)) return "off";
+    if (roots.has(sessionID)) return "on";
     const kind = await sessionKind(getSession?.(), sessionID, parents);
+    if (off.has(sessionID)) return "off";
     if (kind.why) {
       let may;
       try {
@@ -18962,23 +18971,29 @@ function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPo
       if (may) logLine(root, `delivery policy: session ${sessionID} could not be classified (${kind.why}) while an off lane may exist, so delivery is held back`);
       return may ? "unknown" : "on";
     }
-    if (kind.kind === "root") return remember(policies, sessionID, "on");
-    const parentID = parents.get(sessionID);
-    let brief = "";
-    if (messages !== void 0) brief = rawBriefOf(messages);
-    else {
-      try {
-        brief = rawBriefOf(await contextMessages(getSession?.(), sessionID));
-      } catch (e) {
-        logLine(root, `delivery policy: the brief of child session ${sessionID} could not be read (${errText(e)}); the dispatch state decides`);
-      }
+    if (kind.kind === "root") {
+      remember(roots, sessionID, true);
+      return "on";
     }
+    if (messages !== void 0) {
+      const brief = briefPolicy(messages);
+      if (brief.off) return setOff(sessionID);
+      if (brief.readable) remember(briefSeen, sessionID, true);
+    } else if (!briefSeen.has(sessionID) && !contextRead.has(sessionID)) {
+      try {
+        const texts = await contextUserTexts(getSession?.(), sessionID);
+        if (texts.some((t) => parseSterlingDelivery(t).policy === "off")) return setOff(sessionID);
+        remember(contextRead, sessionID, true);
+      } catch (e) {
+        logLine(root, `delivery policy: the durable context of child session ${sessionID} could not be read (${errText(e)}); the dispatch state decides`);
+      }
+      if (off.has(sessionID)) return "off";
+    }
+    const parentID = parents.get(sessionID);
     const recorded = readPolicy(root, { session_id: parentID, agent_id: sessionID });
-    let policy;
-    if (brief) policy = parseSterlingDelivery(brief).policy === "off" || recorded === "off" ? "off" : "on";
-    else policy = recorded === "on" && offSiblingSeen(sessionID, parentID) ? "unknown" : recorded;
-    if (policy !== "unknown") remember(policies, sessionID, policy);
-    return policy;
+    if (recorded === "off" || off.has(sessionID)) return setOff(sessionID);
+    if (briefSeen.has(sessionID)) return "on";
+    return recorded === "on" && offSiblingSeen(sessionID, parentID) ? "unknown" : recorded;
   }
   function markDisclosed(sessionID, policy) {
     const seen = disclosed.get(sessionID) ?? /* @__PURE__ */ new Set();
