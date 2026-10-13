@@ -237,6 +237,23 @@ test('post-compaction context ("Continue", no off line) never establishes on bes
   }
 });
 
+test('a context-hook "Continue" message (reload after compaction) never establishes on beside an unbound off dispatch', async () => {
+  const p = makeProject();
+  try {
+    const sessions = { ...CHILDREN, ses_kid: { parentID: 'ses_root' } };
+    const { ctx, cleanup } = await setup(p.dir, sessions, { ses_kid: [durableUser('Continue')] });
+    await ctx.hooks.tool['execute.before']({ tool: 'subagent', sessionID: 'ses_root', agent: 'build', messageID: 'm1', id: 'call_1', input: { agent: 'sterling/implementor', description: 'd', prompt: OFF_BRIEF } });
+    const staged = await turn(ctx, 'ses_kid', 'Continue');
+    assert.ok(staged.includes(HELD), 'held back at staging');
+    assert.doesNotMatch(staged, /alpha-feature|alpha-hazard/);
+    const next = await call(ctx, 'ses_kid', 'read', { path: 'src/a.mjs' });
+    assert.doesNotMatch(next, /alpha-feature|alpha-hazard/, 'and at the next tool call');
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('an older resolution finishing after the off brief was seen cannot turn the session back on', async () => {
   const p = makeProject();
   try {
@@ -258,12 +275,14 @@ test('an older resolution finishing after the off brief was seen cannot turn the
   }
 });
 
-test('an unreadable brief beside an off sibling is held back; without one it is unchanged', async () => {
+test('an unreadable brief beside a live off sibling is held back; without one it is unchanged', async () => {
   const p = makeProject();
   try {
     const sessions = { ...CHILDREN, ses_x: { parentID: 'ses_root' }, ses_y: { parentID: 'ses_other' } };
     const { ctx, cleanup } = await setup(p.dir, sessions, { ses_x: new Error('context unavailable'), ses_y: new Error('context unavailable') });
     assert.match(await call(ctx, 'ses_y', 'read', { path: 'src/a.mjs' }), /alpha-feature/, 'no off lane exists yet: unchanged');
+    // The off sibling as it really arrives: the parent's subagent call writes its dispatch record, then the child runs.
+    await ctx.hooks.tool['execute.before']({ tool: 'subagent', sessionID: 'ses_root', agent: 'build', messageID: 'm1', id: 'call_off', input: { agent: 'sterling/implementor', description: 'd', prompt: OFF_BRIEF } });
     await turn(ctx, 'ses_off', OFF_BRIEF);
     const held = await call(ctx, 'ses_x', 'read', { path: 'src/a.mjs' });
     assert.equal(held, HELD, 'held back and disclosed, no record');

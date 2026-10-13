@@ -7,15 +7,17 @@
 // The in-memory maps below are a CACHE, never the authority: a session missing
 // from them (a new process after a plugin reload, an evicted entry) has its
 // policy derived again. Evidence sources and what each may establish:
-//   - the context hook's messages (model-request shape {role, content}): the
-//     child's brief as OpenCode sends it, parsed whole before staging's scan cap
-//     (staging.mjs rawBriefOf). It may establish 'off', and 'on' (exact
-//     attribution: a child's brief is its own first user message).
+//   - the context hook's messages (model-request shape {role, content}), each
+//     user message parsed whole before staging's scan cap (staging.mjs
+//     rawBriefOf). An off line establishes 'off'; nothing here establishes 'on',
+//     because after a reload and a compaction the first user message can be
+//     "Continue" rather than the brief.
 //   - ctx.session.context (durable messages; OpenCode 2.0.23 Session.Message.User
 //     is {id, metadata?, time, type: 'user', text, files?, agents?, skills?}, read
 //     from the 2.0.23 binary). It holds only the messages after the last
 //     compaction, so its first user message may be "Continue", not the brief:
 //     an off line in ANY user message establishes 'off'; it never establishes 'on'.
+//   No message text establishes 'on'.
 //   - the dispatch-state record the subagent call wrote (dispatch.mjs ->
 //     recordDispatchPre stores `delivery: 'off'`), read through readDeliveryPolicy.
 //
@@ -27,12 +29,11 @@
 //     may exist (an off session cached here, a live off dispatch record, or
 //     unreadable dispatch state), else 'on'
 //   - root -> 'on'
-//   - child: 'off' from any source above; else 'on' when the context hook's
-//     brief was seen; else readDeliveryPolicy's answer (own record, else
-//     'unknown' beside a live off sibling of the same parent), with 'on' turned
-//     into 'unknown' when this process saw an off child of the same parent
-// Only 'off' and the brief-seen fact are cached; the dispatch state is read on
-// each resolution, so later off evidence there is never shadowed by a cached 'on'.
+//   - child: 'off' from any source above; else readDeliveryPolicy's answer:
+//     its own record decides, else 'unknown' beside a live off dispatch of the
+//     same parent (user-ruled "Suppress both, disclose"), else 'on'
+// Only 'off' is cached for a child; the dispatch state is read on each
+// resolution, so later off evidence there is never shadowed by a cached 'on'.
 // Suppressing callers disclose with slice A's notices (dispatch-prompt.mjs),
 // which name no records.
 import { deliveryPolicyNotice, parseSterlingDelivery } from '../../../scripts/hooks/lib/dispatch-prompt.mjs';
@@ -51,10 +52,9 @@ async function contextUserTexts(session, sessionID) {
   return messages.filter((m) => m?.type === 'user' && typeof m.text === 'string').map((m) => m.text);
 }
 
-/** Whether the first user message of model-request `messages` (the context hook's) carries the off directive, and whether it is readable at all. */
-function briefPolicy(messages) {
-  const brief = rawBriefOf(messages);
-  return { readable: brief !== '', off: parseSterlingDelivery(brief).policy === 'off' };
+/** Whether any user message of model-request `messages` (the context hook's) carries the off directive. */
+function offInMessages(messages) {
+  return Array.isArray(messages) && messages.some((m) => m?.role === 'user' && parseSterlingDelivery(rawBriefOf([m])).policy === 'off');
 }
 
 /**
@@ -67,10 +67,9 @@ function briefPolicy(messages) {
  * notice delivered another way (the staged system prompt).
  */
 export function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPolicy, readState = readDispatchState }) {
-  // Sessions established off (never removed but by the size cap), roots, and children whose brief the context hook showed.
+  // Sessions established off (never removed but by the size cap), and root sessions.
   const off = new Map();
   const roots = new Map();
-  const briefSeen = new Map();
   // Children whose durable context was read without an off line, so it is not fetched again.
   const contextRead = new Map();
   const disclosed = new Map();
@@ -82,11 +81,6 @@ export function createDeliveryPolicy({ getSession, parents, readPolicy = readDel
     if (scan.availability === 'absent') return false;
     if (scan.availability !== 'ok' || scan.poisoned.length > 0) return true;
     return scan.records.some(({ record }) => !record.terminal && record.delivery === 'off');
-  }
-
-  function offSiblingSeen(sessionID, parentID) {
-    for (const id of off.keys()) if (id !== sessionID && parents.get(id) === parentID) return true;
-    return false;
   }
 
   const setOff = (sessionID) => (remember(off, sessionID, true), 'off');
@@ -112,10 +106,8 @@ export function createDeliveryPolicy({ getSession, parents, readPolicy = readDel
       return 'on';
     }
     if (messages !== undefined) {
-      const brief = briefPolicy(messages);
-      if (brief.off) return setOff(sessionID);
-      if (brief.readable) remember(briefSeen, sessionID, true);
-    } else if (!briefSeen.has(sessionID) && !contextRead.has(sessionID)) {
+      if (offInMessages(messages)) return setOff(sessionID);
+    } else if (!contextRead.has(sessionID)) {
       try {
         const texts = await contextUserTexts(getSession?.(), sessionID);
         if (texts.some((t) => parseSterlingDelivery(t).policy === 'off')) return setOff(sessionID);
@@ -125,11 +117,9 @@ export function createDeliveryPolicy({ getSession, parents, readPolicy = readDel
       }
       if (off.has(sessionID)) return 'off';
     }
-    const parentID = parents.get(sessionID);
-    const recorded = readPolicy(root, { session_id: parentID, agent_id: sessionID });
+    const recorded = readPolicy(root, { session_id: parents.get(sessionID), agent_id: sessionID });
     if (recorded === 'off' || off.has(sessionID)) return setOff(sessionID);
-    if (briefSeen.has(sessionID)) return 'on';
-    return recorded === 'on' && offSiblingSeen(sessionID, parentID) ? 'unknown' : recorded;
+    return recorded;
   }
 
   function markDisclosed(sessionID, policy) {

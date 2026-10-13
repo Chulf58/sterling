@@ -18933,14 +18933,12 @@ async function contextUserTexts(session, sessionID) {
   if (!Array.isArray(messages)) throw new Error(`ctx.session.context answered ${got === null ? "null" : typeof got} for session ${sessionID}, not a message list`);
   return messages.filter((m) => m?.type === "user" && typeof m.text === "string").map((m) => m.text);
 }
-function briefPolicy(messages) {
-  const brief = rawBriefOf(messages);
-  return { readable: brief !== "", off: parseSterlingDelivery(brief).policy === "off" };
+function offInMessages(messages) {
+  return Array.isArray(messages) && messages.some((m) => m?.role === "user" && parseSterlingDelivery(rawBriefOf([m])).policy === "off");
 }
 function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPolicy, readState: readState2 = readDispatchState }) {
   const off = /* @__PURE__ */ new Map();
   const roots = /* @__PURE__ */ new Map();
-  const briefSeen = /* @__PURE__ */ new Map();
   const contextRead = /* @__PURE__ */ new Map();
   const disclosed = /* @__PURE__ */ new Map();
   function offLaneMayExist(root) {
@@ -18949,10 +18947,6 @@ function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPo
     if (scan.availability === "absent") return false;
     if (scan.availability !== "ok" || scan.poisoned.length > 0) return true;
     return scan.records.some(({ record }) => !record.terminal && record.delivery === "off");
-  }
-  function offSiblingSeen(sessionID, parentID) {
-    for (const id of off.keys()) if (id !== sessionID && parents.get(id) === parentID) return true;
-    return false;
   }
   const setOff = (sessionID) => (remember(off, sessionID, true), "off");
   async function resolve15(root, sessionID, messages) {
@@ -18976,10 +18970,8 @@ function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPo
       return "on";
     }
     if (messages !== void 0) {
-      const brief = briefPolicy(messages);
-      if (brief.off) return setOff(sessionID);
-      if (brief.readable) remember(briefSeen, sessionID, true);
-    } else if (!briefSeen.has(sessionID) && !contextRead.has(sessionID)) {
+      if (offInMessages(messages)) return setOff(sessionID);
+    } else if (!contextRead.has(sessionID)) {
       try {
         const texts = await contextUserTexts(getSession?.(), sessionID);
         if (texts.some((t) => parseSterlingDelivery(t).policy === "off")) return setOff(sessionID);
@@ -18989,11 +18981,9 @@ function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPo
       }
       if (off.has(sessionID)) return "off";
     }
-    const parentID = parents.get(sessionID);
-    const recorded = readPolicy(root, { session_id: parentID, agent_id: sessionID });
+    const recorded = readPolicy(root, { session_id: parents.get(sessionID), agent_id: sessionID });
     if (recorded === "off" || off.has(sessionID)) return setOff(sessionID);
-    if (briefSeen.has(sessionID)) return "on";
-    return recorded === "on" && offSiblingSeen(sessionID, parentID) ? "unknown" : recorded;
+    return recorded;
   }
   function markDisclosed(sessionID, policy) {
     const seen = disclosed.get(sessionID) ?? /* @__PURE__ */ new Set();
