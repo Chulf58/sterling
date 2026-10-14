@@ -26,6 +26,7 @@ import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { isInstalledCopy } from './installed-copy.mjs';
+import { looksLikeSterlingSourceTree } from './sterling-source-tree.mjs';
 import { compareSterlingVersions, installHostOf, parseSterlingVersion, sterlingUpdateRemedy } from './sterling-roots.mjs';
 
 // Each step is bounded well inside H1's hooks.json timeout (180s): two steps at
@@ -85,23 +86,6 @@ function sameRealPath(a, b) {
     }
   };
   return real(a) === real(b);
-}
-
-/**
- * True when `dir` is a Sterling source tree (a clone, worktree or second checkout), judged
- * as handoff-projection's isSterlingClone judges a path that is not the running root: the
- * plugin manifest names 'sterling' and scripts/architecture-projection.mjs exists. Not
- * imported from there, because that module pulls @sterling/schemas into the hook and server
- * bundles and this one is builtins only. An unreadable or malformed manifest is "not a source tree".
- */
-function isSterlingSourceDir(dir) {
-  if (!existsSync(join(dir, 'scripts', 'architecture-projection.mjs'))) return false;
-  try {
-    return JSON.parse(readFileSync(join(dir, '.claude-plugin', 'plugin.json'), 'utf8')).name === 'sterling';
-  } catch {
-    // absent, unreadable or malformed manifest: not a Sterling source tree
-  }
-  return false;
 }
 
 /** The bundled bin/ entry when the plugin ships one, else the clone's scripts/ source. */
@@ -194,7 +178,7 @@ export async function runPostUpdateSteps(root, project, runStep) {
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
   // From here sync-agents has already run: a later failure still carries `restart`,
   // so the user is told agents changed even though the step as a whole failed.
-  if (sameRealPath(project, root) || isSterlingSourceDir(project)) return { ok: true, restart, drift: false, driftOut: '', inserted: [] };
+  if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: '', inserted: [] };
   const contract = await runStep(root, 'stamp-contract.mjs', ['--apply-inserts', '--project', project]);
   if (contract.error) return { ok: false, restart, detail: `stamp-contract did not run (${contract.error})` };
   if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
