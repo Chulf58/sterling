@@ -639,12 +639,19 @@ try {
         }
         const behind = Number.parseInt(git(['rev-list', '--count', `HEAD..origin/${defaultBranch}`]) ?? '', 10);
         if (Number.isFinite(behind) && behind > 0) {
-          currencyWarning = `⚠ Sterling is ${behind} update(s) behind — double-click sterling-update.bat (or run /sterling:update), then restart the session. A /clear is NOT enough — MCP servers survive it, so EXIT AND RELAUNCH the Claude Code CLI. `;
+          // Swap-first walkthrough (GitHub #91 follow-up). The swap order matters:
+          // --plugin-dir beats a marketplace install, so /sterling:init must run in
+          // a session started with plain `claude`, which only the user can start.
+          currencyWarning = `⚠ Sterling is ${behind} update(s) behind, and it now installs as a plugin. To switch: run \`claude plugin marketplace add Chulf58/sterling\` and \`claude plugin install sterling@sterling\`, quit, start plain \`claude\` in this project (not sterling-launch.sh or the .bat), then run /sterling:init. To stay on the clone instead, run /sterling:update (or double-click sterling-update.bat), then EXIT AND RELAUNCH the Claude Code CLI: /clear is NOT enough, MCP servers survive it. `;
           currencyContext =
-            `\n\nSTERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch. ` +
-            `Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it — fast-forward-or-refuse), ` +
-            `and remind them a session RESTART follows a successful update — that means EXIT AND RELAUNCH the Claude Code CLI, since a /clear alone does not reload the server/hook code. ` +
-            `Consumer machines update through the plugin instead: to leave the clone, run \`claude plugin marketplace add Chulf58/sterling\` and \`claude plugin install sterling@sterling\`, then start \`claude\` without --plugin-dir and run /sterling:init.`;
+            `\n\nSTERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch, and this machine still runs Sterling from that clone. ` +
+            `Consumer machines update through the plugin instead. Tell the user, then offer the swap FIRST through the question form, with staying on the clone as the alternative: "Switch to the plugin (Recommended)" or "Stay on the clone and run /sterling:update". ` +
+            `On "switch": run \`claude plugin marketplace add Chulf58/sterling\` and then \`claude plugin install sterling@sterling\` yourself. If either command prompts or fails, show the user the exact command to run as \`! <command>\` and wait. ` +
+            `Do NOT run /sterling:init in this session: it was started from the clone with --plugin-dir, and --plugin-dir takes precedence over a marketplace install. ` +
+            `Tell the user to exit and start plain \`claude\` (not sterling-launch.sh or sterling-update.bat, so without --plugin-dir) in this project. You cannot restart your own session, so this one step is theirs. ` +
+            `The new session runs /sterling:init, which rewrites the launchers, deletes the clone-pointing sterling-update.bat and prints the step to delete the old clone. ` +
+            `On "stay": run /sterling:update (never hand-reconcile or git-pull around it — fast-forward-or-refuse), ` +
+            `then remind them a session RESTART follows a successful update — that means EXIT AND RELAUNCH the Claude Code CLI, since a /clear alone does not reload the server/hook code.`;
         }
       }
     }
