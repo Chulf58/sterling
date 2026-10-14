@@ -369,16 +369,42 @@ test('H1 clone-currency signal (the gap decision foreign_be9168e8 parked): a con
     // above): the source hook's own walk-up would find THIS repo (whose
     // .sterling/config.json declares machine_role: authoring) and the
     // STERLING_PLUGIN_ROOT=clone fixture below would never be consulted at all.
-    const env = { NO_COLOR: '1', STERLING_PLUGIN_ROOT: clone, STERLING_CURRENCY_DISABLE: '0', STERLING_CURRENCY_TTL_MS: '0' };
+    // OPENCODE and OPENCODE_SESSION_ID are cleared so a run inside OpenCode cannot
+    // change host detection (knowledge hazard ddf7ad45).
+    const env = { NO_COLOR: '1', STERLING_PLUGIN_ROOT: clone, STERLING_CURRENCY_DISABLE: '0', STERLING_CURRENCY_TTL_MS: '0', OPENCODE: undefined, OPENCODE_SESSION_ID: undefined };
     const behind = JSON.parse(runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
     assert.match(behind.systemMessage, /Sterling is 1 update\(s\) behind/, 'the human is told, with the double-click remedy');
     assert.match(behind.systemMessage, /sterling-update\.bat/);
+    // swap-first walkthrough for the human (GitHub #91 follow-up): the swap comes
+    // before the stay-on-the-clone fallback, and the trap step is named
+    const banner = behind.systemMessage;
+    assert.match(banner, /claude plugin marketplace add Chulf58\/sterling/, 'the banner names the marketplace add');
+    assert.match(banner, /claude plugin install sterling@sterling/, 'the banner names the plugin install');
+    assert.match(banner, /plain `claude`/, 'the banner says to start plain claude');
+    assert.match(banner, /not sterling-launch\.sh or the \.bat/, 'the banner rules out the old launchers');
+    assert.match(banner, /\/sterling:init/, 'the banner names the init step');
+    assert.match(banner, /\/sterling:update/, 'the banner keeps /sterling:update');
+    assert.ok(banner.indexOf('/sterling:init') < banner.indexOf('/sterling:update'), 'the swap is offered before the update fallback');
+    assert.match(banner, /To stay on the clone instead/, 'the update path is framed as the fallback');
     assert.match(behind.hookSpecificOutput.additionalContext, /STERLING CLONE IS BEHIND \(H1\)/, 'the conductor is told');
     assert.ok(existsSync(join(clone, '.git', 'sterling-update-check.json')), 'the fetch throttle is stamped');
     assert.match(behind.hookSpecificOutput.additionalContext, /Consumer machines update through the plugin/, 'a consumer on a clone is told the plugin is the update path');
     assert.match(behind.hookSpecificOutput.additionalContext, /claude plugin marketplace add Chulf58\/sterling/, 'the cutover names the marketplace add');
     assert.match(behind.hookSpecificOutput.additionalContext, /claude plugin install sterling@sterling/, 'the cutover names the plugin install');
     assert.match(behind.hookSpecificOutput.additionalContext, /without --plugin-dir/, 'the cutover names dropping --plugin-dir');
+    // swap-first walkthrough for the conductor (GitHub #91 follow-up)
+    const ctx = behind.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /offer the swap FIRST through the question form/, 'the swap is offered first, through the question form');
+    assert.match(ctx, /Switch to the plugin \(Recommended\)/, 'the swap is the recommended option');
+    assert.match(ctx, /`! <command>`/, 'a prompting or failing command goes to the user as ! <command>');
+    assert.match(ctx, /Do NOT run \/sterling:init in this session/, 'init is not run in the clone-launched session');
+    assert.match(ctx, /plain `claude`/, 'the user is told to start plain claude');
+    assert.match(ctx, /not sterling-launch\.sh or sterling-update\.bat/, 'the old launchers are ruled out');
+    assert.match(ctx, /The new session runs \/sterling:init/, 'the new session runs init');
+    assert.match(ctx, /prints the step to delete the old clone/, 'the old-clone deletion step is named');
+    assert.match(ctx, /On "stay": run \/sterling:update \(never hand-reconcile or git-pull around it/, 'the update path keeps its no-hand-reconcile rule');
+    assert.match(ctx, /EXIT AND RELAUNCH the Claude Code CLI/, 'a restart follows the update');
+    assert.ok(ctx.indexOf('On "switch"') < ctx.indexOf('On "stay"'), 'swap is listed before the update fallback');
 
     // fast-forward the clone → silent IMMEDIATELY: behind is computed locally
     // per session, never served from the cache
