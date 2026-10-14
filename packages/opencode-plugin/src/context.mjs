@@ -14,7 +14,7 @@ import { SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
 import { probeSchemaVersion } from '../../../scripts/lib/update.mjs';
 import { opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
 import { errText, logLine } from './log.mjs';
-import { NOTICES_REL, takeNotices } from './notices.mjs';
+import { NOTICES_REL, claimNotices } from './notices.mjs';
 import { queueDepthLine, readMaintenanceState } from '../../../scripts/hooks/lib/maintenance-state.mjs';
 import { laneCeiling, liveLanes, renderBoardReadiness } from '../../../scripts/hooks/lib/board-ready.mjs';
 import { maintenanceLines, operatingStateLines, undeclaredSourceBlock } from './operating-state.mjs';
@@ -33,6 +33,12 @@ import { planLockSection } from '../../../scripts/hooks/lib/plan-lock-section.mj
 const STATUS_TTL_MS = 10_000;
 // The undeclared-source scan spawns git twice, so a process reuses its answer for this long.
 const UNDECLARED_TTL_MS = 5 * 60_000;
+// The worker states on the RECONCILE BACKLOG line that are not routine activity, as
+// scripts/hooks/lib/maintenance-state.mjs renders them (reconcileBacklog, workerStateText),
+// with a pause's minutes already taken out: they stay in the maintenance delivery key.
+const WORKER_ALERTS = /last worker run FAILED at .*? \(log: [^)]*\)|worker state unknown \([^)]*\)|worker disabled by \S+|worker paused after (?:a failed run|a run that closed nothing)/g;
+// The newest synthetic texts remembered per session for staging's provenance check.
+const SENT_TEXTS_CAP = 50;
 
 /**
  * `getSession()` returns the plugin context's session domain, as restore.mjs and sync.mjs take it; a session it cannot classify gets the loud not-staged line.
@@ -59,6 +65,13 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   const boardCache = new Map();
   // Per session, the text of each volatile block last delivered to it (bounded, bounded.mjs).
   const delivered = new Map();
+  // Per session, how many times resetSession ran: a delivery commits only into the generation it selected in.
+  const generations = new Map();
+  // Per session, the tail of its delivery chain (serialized); removed when the chain drains.
+  const chains = new Map();
+  // Per session, the texts sent to it as synthetic messages, so staging tells Sterling's
+  // message apart from a brief by provenance, not by its header (staging.mjs rawBriefOf).
+  const sterlingSent = new Map();
   // The last root session whose start refreshed each project's registry row.
   const registrySeen = new Map();
   // One-shot lines produced but not yet delivered, by `${root}\0${name}`. Their guards
@@ -105,6 +118,30 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     return text;
   }
 
+  /**
+   * Which whole user messages of `sessionID` are Sterling's synthetic messages, as a predicate
+   * on their text, by provenance: the texts this process sent there (sendSynthetic), else (a
+   * new process) the durable messages ctx.session.context marks type 'synthetic' with
+   * metadata.source 'sterling'. With neither, a message starting with the header is taken as
+   * Sterling's, and the log says the check ran on that weaker rule.
+   */
+  async function sterlingMessages(root, sessionID) {
+    const sent = sterlingSent.get(sessionID);
+    if (sent?.size) return (text) => sent.has(text);
+    try {
+      const session = getSession?.();
+      if (typeof session?.context !== 'function') throw new Error('ctx.session.context is unavailable');
+      const got = await session.context({ sessionID });
+      const messages = Array.isArray(got) ? got : got?.data;
+      if (!Array.isArray(messages)) throw new Error(`ctx.session.context answered ${got === null ? 'null' : typeof got}, not a message list`);
+      const durable = new Set(messages.filter((m) => m?.type === 'synthetic' && m.metadata?.source === 'sterling' && typeof m.text === 'string').map((m) => m.text));
+      return (text) => durable.has(text);
+    } catch (e) {
+      logLine(root, `context: Sterling's messages in session ${sessionID} could not be told by provenance (${errText(e)}); a user message starting with the STERLING CONTEXT header is taken as Sterling's`);
+      return (text) => text.startsWith(VOLATILE_HEADER);
+    }
+  }
+
   /** H19's staging for a child session: the records governing its own brief with the plan, TDD and return-contract chrome. */
   async function childStaging(root, input) {
     // STERLING-DELIVERY: off (or a policy that cannot be established) stages no records:
@@ -115,7 +152,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       deliveryPolicy.markDisclosed(input.sessionID, policy);
       return composeContext({ agentType: role, ...dispatchChrome(root, role), unattributableLine: deliveryPolicyNotice(policy) });
     }
-    const brief = briefOf(input.messages);
+    const brief = briefOf(input.messages, await sterlingMessages(root, input.sessionID));
     try {
       const store = openStore(join(root, '.sterling', 'sterling.db'));
       try {
@@ -166,19 +203,23 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     }
     if (!hit.state) return { text: '', sig: '' };
     const text = maintenanceLines(hit.state, config, root).join('\n\n');
-    return { text, sig: text ? maintenanceSig(hit.state, config) : '' };
+    return { text, sig: text ? maintenanceSig(hit.state, config, text) : '' };
   }
 
   /**
    * What the maintenance text says, without its wording that drifts on its own: the
-   * backlog's age (read from the clock) and the worker-state clause. It is the deep-queue
-   * line plus the reconcile lanes, oldest item, handed-off items and journal write count,
-   * so a count or a hand-off that changes still re-delivers the block.
+   * backlog's age (read from the clock) and the routine worker activity (running, batching,
+   * waiting, the last routine run). It is the deep-queue line plus the reconcile lanes,
+   * oldest item, handed-off items and journal write count, plus the worker states that are
+   * not routine, taken from the rendered `text`: a failed last run (its time and reason), an
+   * unknown state (its reason), disabled, and a back-off pause without its minutes. A count,
+   * a hand-off, a failure, an unknown state and each recovery from one change the key.
    */
-  function maintenanceSig(state, config) {
+  function maintenanceSig(state, config, text) {
     const queue = queueDepthLine({ ...state, deepThreshold: config?.maintenance_queue?.deep_threshold });
     const r = state.reconcile;
-    return JSON.stringify([queue, r.count > 0 ? [r.lanes, r.oldest, r.handedOff, r.handoffs, r.writes?.count ?? null] : null]);
+    const worker = text.replace(/worker paused \d+m after/g, 'worker paused after').match(WORKER_ALERTS) ?? [];
+    return JSON.stringify([queue, r.count > 0 ? [r.lanes, r.oldest, r.handedOff, r.handoffs, r.writes?.count ?? null, worker] : null]);
   }
 
   /**
@@ -213,11 +254,14 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     }
     if (hit.unavailable) return { text: hit.unavailable, sig: hit.unavailable };
     try {
-      const text = renderBoardReadiness({ readiness: hit.readiness, live: liveLanes(root, sessionID), ceiling: laneCeiling(config) });
-      // The delivery key is the readiness content with the lane clause held constant: a lane
+      const live = liveLanes(root, sessionID);
+      const ceiling = laneCeiling(config);
+      const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling });
+      // The delivery key is the text with only a measured lane count held constant: a lane
       // that starts or ends changes `live lanes k/n` and nothing else, and re-sending the
-      // whole list for it is the noise GitHub #93 reported.
-      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live: { availability: 'ok', count: 0 }, ceiling: { value: 0 } }) : '';
+      // whole list for it is the noise GitHub #93 reported. An unreadable dispatch register,
+      // the ceiling and its errors stay in the key, so they are said when they change.
+      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live: live.availability === 'ok' ? { ...live, count: 0 } : live, ceiling }) : '';
       return { text, sig };
     } catch (e) {
       logLine(root, `context: board readiness unreadable: ${errText(e)}`);
@@ -405,10 +449,15 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     // leave the conductor never seeing them. The worker child must not stamp the user's
     // notices shown, or settlement would prune them unseen. Both callers check their
     // target's shape before calling, so nothing after this take can fail and lose them.
+    // A compaction (resetSession) while this delivery is in flight starts a new conversation:
+    // marks computed for the old one are dropped at commit, so the new one gets the full set.
+    const generation = generations.get(sessionID) ?? 0;
+    let claimedNotices = null;
     if (!kind.why && kind.kind === 'root' && !inWorkerChild(env)) {
       let notices;
       try {
-        notices = takeNotices(root, now());
+        claimedNotices = claimNotices(root, now());
+        notices = claimedNotices.notices;
       } catch (e) {
         // P5: said in-band and logged. The other lines are held back, unmarked, until it reads again.
         // The claims go back first: the log write can throw, and a claim neither restored nor committed is lost.
@@ -418,10 +467,12 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
           text: `${VOLATILE_HEADER}\n\nSTERLING NOTICES UNREADABLE (${errText(e)}): the pending notices in ${NOTICES_REL} could not be read, so Sterling's other session lines are held back until they can; fix or delete that file.`,
           commit: () => {},
           release: () => {},
+          fresh: () => true,
         };
       }
       // A keyed notice (notices.mjs) already shown in this session is not shown again, whatever
-      // its wording now says; the take above has stamped it, so settlement prunes it unseen.
+      // its wording now says; it is still claimed above and stamped shown at commit, so
+      // settlement prunes it.
       notices = notices.filter((n) => {
         if (n.key === undefined) return true;
         const mark = `notice:${n.key}`;
@@ -433,12 +484,22 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     }
     return {
       text: due.length ? `${VOLATILE_HEADER}\n\n${due.join('\n\n')}` : '',
-      release,
+      fresh: () => (generations.get(sessionID) ?? 0) === generation,
+      // Held lines and claimed notices go back, so the next delivery offers them again.
+      release: () => {
+        release();
+        claimed.length = 0;
+        claimedNotices?.release();
+      },
       commit: () => {
         claimed.length = 0;
-        if (!marks.size) return;
-        const record = delivered.get(sessionID) ?? remember(delivered, sessionID, new Map());
-        for (const [key, text] of marks) record.set(key, text);
+        if (marks.size && (generations.get(sessionID) ?? 0) === generation) {
+          const record = delivered.get(sessionID) ?? remember(delivered, sessionID, new Map());
+          for (const [key, text] of marks) record.set(key, text);
+        }
+        // Notices are stamped shown whatever the generation: they reached the conversation
+        // the compaction then summarized, and settlement must be free to prune them.
+        claimedNotices?.commit();
       },
     };
   }
@@ -455,6 +516,10 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   async function sendSynthetic(sessionID, text, delivery) {
     const session = getSession?.();
     if (typeof session?.synthetic !== 'function') return 'ctx.session.synthetic is unavailable (an older OpenCode)';
+    // Recorded before the call: a message stored by a call that then throws is still Sterling's.
+    const sent = sterlingSent.get(sessionID) ?? remember(sterlingSent, sessionID, new Set());
+    sent.add(text);
+    while (sent.size > SENT_TEXTS_CAP) sent.delete(sent.values().next().value);
     try {
       await session.synthetic({ sessionID, text, metadata: { source: 'sterling' }, ...(delivery ? { delivery } : {}) });
       return null;
@@ -489,8 +554,23 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       due.release();
       throw e;
     }
-    if (note) remember(degradedTold, sessionID, true);
+    if (note && due.fresh()) remember(degradedTold, sessionID, true);
     due.commit();
+  }
+
+  /**
+   * Runs fn (select the due lines, then deliver them) after the session's earlier deliveries
+   * have settled, so two overlapping hooks of one session never select the same unchanged-
+   * since-delivered state and both send it. A failed delivery releases what it selected, and
+   * the next one in the chain selects it again. Sessions do not wait on each other.
+   */
+  function serialized(sessionID, fn) {
+    const prev = chains.get(sessionID) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.then(() => {}, () => {});
+    chains.set(sessionID, tail);
+    void tail.then(() => { if (chains.get(sessionID) === tail) chains.delete(sessionID); });
+    return run;
   }
 
   /** The prompt hook: the due lines reach the model as a hidden synthetic message before the prompt (see sendSynthetic). */
@@ -499,8 +579,10 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     if (!root) return;
     await fenced('context', root, async () => {
       if (typeof input?.prompt?.text !== 'string') throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
-      const due = await dueText(root, input.sessionID, 'prompt');
-      await deliver(input.sessionID, due, { append: (text) => { input.prompt.text = `${input.prompt.text}\n\n${text}`; } });
+      await serialized(input.sessionID, async () => {
+        const due = await dueText(root, input.sessionID, 'prompt');
+        await deliver(input.sessionID, due, { append: (text) => { input.prompt.text = `${input.prompt.text}\n\n${text}`; } });
+      });
     });
   }
 
@@ -520,9 +602,11 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       // Checked before anything is marked delivered or a notice taken, so an unknown shape loses nothing.
       const content = input.result?.content;
       if (!Array.isArray(content) && typeof content !== 'string') throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
-      const due = await dueText(root, input.sessionID, 'tool call');
-      // 'steer' lands in the model's current turn; 'queue' would add a model turn of its own.
-      await deliver(input.sessionID, due, { delivery: 'steer', append: (text) => appendToResult(input.result, text) });
+      await serialized(input.sessionID, async () => {
+        const due = await dueText(root, input.sessionID, 'tool call');
+        // 'steer' lands in the model's current turn; 'queue' would add a model turn of its own.
+        await deliver(input.sessionID, due, { delivery: 'steer', append: (text) => appendToResult(input.result, text) });
+      });
     });
   }
 
@@ -534,6 +618,12 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     // Compaction replaces the conversation, so the cached prefix starts over anyway: the system block
     // is rendered again at the next request (picking up a template change or recovering a degraded
     // render), and the session's next prompt gets the whole set of lines again.
-    resetSession: (sessionID) => void (delivered.delete(sessionID), frozenSystem.delete(sessionID), degradedTold.delete(sessionID)),
+    // A delivery in flight across the reset commits nothing for the new conversation (generations).
+    resetSession: (sessionID) => {
+      delivered.delete(sessionID);
+      frozenSystem.delete(sessionID);
+      degradedTold.delete(sessionID);
+      remember(generations, sessionID, (generations.get(sessionID) ?? 0) + 1);
+    },
   };
 }

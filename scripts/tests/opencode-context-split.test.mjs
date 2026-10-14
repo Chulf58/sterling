@@ -48,11 +48,12 @@ function addTodo(dir, text) {
  * message route); `opts.synthetic: null` leaves it out (an older OpenCode) and a function
  * replaces it.
  */
-function handler(dir, extra = {}, { synthetic } = {}) {
+function handler(dir, extra = {}, { synthetic, context } = {}) {
   const sessions = { ses_root: {}, ses_other: {}, ses_child: { parentID: 'ses_root' } };
   const calls = [];
   const session = { get: async ({ sessionID }) => ({ id: sessionID, ...sessions[sessionID] }) };
   if (synthetic !== null) session.synthetic = async (arg) => (synthetic ? synthetic(arg) : void calls.push(arg));
+  if (context) session.context = context;
   const h = contextMod.createContextHandler({
     openStore: (p) => new SterlingStore(p),
     now: () => NOW,
@@ -337,12 +338,180 @@ test('without ctx.session.synthetic (an older OpenCode) the lines are appended, 
   }
 });
 
-test('a child\'s brief is still recovered when Sterling\'s synthetic message is stored before it, or its lines were appended to it', () => {
-  const user = (text) => ({ role: 'user', content: [{ type: 'text', text }] });
-  const synthetic = user(`${staging.VOLATILE_HEADER}\n\nSTERLING STATUS: board 0 open\n\nSTERLING-DELIVERY: off`);
-  assert.equal(staging.briefOf([synthetic, user('do the thing in src/a.mjs')]), 'do the thing in src/a.mjs');
-  assert.equal(staging.rawBriefOf([synthetic]), '', 'a synthetic message alone is no brief, and its lines are no directive');
-  assert.equal(staging.briefOf([user(`do the thing\n\n${staging.VOLATILE_HEADER}\n\nSTERLING STATUS`)]), 'do the thing', 'the append strip is kept for the fallback route');
+const userMsg = (text) => ({ role: 'user', content: [{ type: 'text', text }] });
+const childContext = (messages) => ({ sessionID: 'ses_child', agent: 'sterling/implementor', system: [], messages, tools: {} });
+const BRIEF_UNAVAILABLE = /could not be staged from \[brief-unavailable\]/;
+
+test('a child\'s brief is told from Sterling\'s synthetic message by provenance: the text this process sent is skipped', async () => {
+  const dir = makeProject();
+  try {
+    const h = handler(dir);
+    await appended(h, 'ses_child');
+    const [sent] = h.synthetic;
+    assert.ok(sent.text.startsWith(staging.VOLATILE_HEADER));
+    const i = childContext([userMsg(sent.text), userMsg('do the thing')]);
+    await h.onContext(i);
+    assert.doesNotMatch(systemOf(i), BRIEF_UNAVAILABLE, 'the brief after Sterling\'s message was found');
+    assert.equal(staging.briefOf([userMsg(`do the thing\n\n${staging.VOLATILE_HEADER}\n\nSTERLING STATUS`)]), 'do the thing', 'the append strip is kept for the fallback route');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a genuine brief that starts with the STERLING CONTEXT header is not dropped (Sol finding 6)', async () => {
+  const dir = makeProject();
+  try {
+    // A new process: nothing sent from here; the durable messages hold no Sterling synthetic message.
+    const h = handler(dir, {}, { context: async () => [{ id: 'msg_1', type: 'user', text: 'x' }] });
+    const i = childContext([userMsg(`${staging.VOLATILE_HEADER} quoted by the conductor\n\ndo the thing`)]);
+    await h.onContext(i);
+    assert.doesNotMatch(systemOf(i), BRIEF_UNAVAILABLE, 'the brief is the user\'s message, not skipped for its first line');
+    // The durable route: a synthetic message marked source 'sterling' is skipped by its text.
+    const synthetic = `${staging.VOLATILE_HEADER}\n\nSTERLING STATUS: board 0 open`;
+    const h2 = handler(dir, {}, { context: async () => ({ data: [{ id: 'msg_0', type: 'synthetic', text: synthetic, metadata: { source: 'sterling' } }] }) });
+    const only = childContext([userMsg(synthetic)]);
+    await h2.onContext(only);
+    assert.match(systemOf(only), BRIEF_UNAVAILABLE, 'a session holding only Sterling\'s message has no brief');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- Sol review of ccca6711 -------------------------------------------------
+
+/** A synthetic fake whose first call waits for `open()`; every call is recorded in `calls`. */
+function gatedSynthetic() {
+  const calls = [];
+  let open;
+  const gate = new Promise((r) => { open = r; });
+  let first = true;
+  return {
+    calls,
+    open: () => open(),
+    fn: async (c) => {
+      calls.push(c);
+      if (first) {
+        first = false;
+        await gate;
+      }
+    },
+  };
+}
+
+test('two overlapping tool hooks of one session send an unchanged line once (Sol finding 1)', async () => {
+  const dir = makeProject();
+  try {
+    const g = gatedSynthetic();
+    const h = handler(dir, {}, { synthetic: g.fn });
+    const call = () => h.onToolResult({ tool: 'read', sessionID: 'ses_root', id: `call_${randomUUID()}`, input: { path: 'x' }, status: 'completed', result: { content: [{ type: 'text', text: 'out' }] } });
+    const a = call();
+    await new Promise((r) => setTimeout(r, 20));
+    const b = call();
+    await new Promise((r) => setTimeout(r, 20));
+    g.open();
+    await Promise.all([a, b]);
+    assert.equal(g.calls.filter((c) => /STERLING STATUS/.test(c.text)).length, 1, 'STERLING STATUS went out once');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a notice is not lost when both the synthetic call and the fallback append fail (Sol finding 2)', async () => {
+  const dir = makeProject();
+  try {
+    const h = handler(dir, {}, { synthetic: async () => { throw new Error('synthetic failed'); } });
+    notices.addNotice(dir, 'NOTICE-KEEP', NOW);
+    const failing = { sessionID: 'ses_root', messageID: 'msg_u', delivery: 'immediate', prompt: {} };
+    Object.defineProperty(failing.prompt, 'text', { get: () => 'go', set: () => { throw new Error('append failed'); }, enumerable: true });
+    await assert.rejects(h.onPrompt(failing), /append failed/);
+    const left = JSON.parse(readFileSync(join(dir, notices.NOTICES_REL), 'utf8'));
+    assert.deepEqual(left.map((n) => [n.text, n.shown_at, n.claim]), [['NOTICE-KEEP', undefined, undefined]], 'not stamped shown, and the claim was released');
+    notices.pruneShownNotices(dir);
+    const next = handler(dir);
+    assert.match(await appended(next, 'ses_root'), /NOTICE-KEEP/, 'settlement kept it and the next delivery shows it');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a notice claimed by a delivery in flight is not offered to another, and a claim from a dead delivery expires', () => {
+  const dir = makeProject();
+  try {
+    notices.addNotice(dir, 'NOTICE-C', NOW);
+    const a = notices.claimNotices(dir, NOW);
+    assert.deepEqual(a.notices.map((n) => n.text), ['NOTICE-C']);
+    assert.deepEqual(notices.claimNotices(dir, NOW).notices, [], 'claimed: not offered twice');
+    const later = new Date(Date.parse(NOW) + notices.NOTICE_CLAIM_TTL_MS).toISOString();
+    assert.deepEqual(notices.claimNotices(dir, later).notices.map((n) => n.text), ['NOTICE-C'], 'a stale claim is offered again: a repeat, never a loss');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a delivery in flight across a compaction does not mark the new conversation delivered (Sol finding 3)', async () => {
+  const dir = makeProject();
+  try {
+    const g = gatedSynthetic();
+    const h = handler(dir, {}, { synthetic: g.fn });
+    const pending = h.onPrompt({ sessionID: 'ses_root', messageID: 'msg_u', prompt: { text: 'go' }, delivery: 'immediate' });
+    await new Promise((r) => setTimeout(r, 20));
+    h.resetSession('ses_root');
+    g.open();
+    await pending;
+    await h.onPrompt({ sessionID: 'ses_root', messageID: 'msg_v', prompt: { text: 'go' }, delivery: 'immediate' });
+    assert.equal(g.calls.length, 2, 'the prompt after the compaction got the set again');
+    assert.match(g.calls[1].text, /STERLING STATUS: board 0 open/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the board block is re-delivered when the dispatch register turns unreadable or the lane ceiling changes (Sol finding 4)', async () => {
+  const dir = makeProject();
+  try {
+    addTodo(dir, 'an ask');
+    const reg = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'dispatch-register.mjs')).href);
+    const h = handler(dir);
+    assert.match(await appended(h, 'ses_root'), /live lanes 0\/\d+/);
+    mkdirSync(dirname(reg.registerPath(dir)), { recursive: true });
+    writeFileSync(reg.registerPath(dir), '{ not json');
+    h.resetStatus(dir);
+    assert.match(await appended(h, 'ses_root'), /live lanes \? \(dispatch register [a-z]+\)/, 'an unreadable register is said');
+    rmSync(reg.registerPath(dir));
+    h.resetStatus(dir);
+    assert.match(await appended(h, 'ses_root'), /live lanes 0\/\d+/, 'and so is its recovery');
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'fixture-proj', delegation: { max_concurrent: 7 } }));
+    h.resetStatus(dir);
+    assert.match(await appended(h, 'ses_root'), /live lanes 0\/7/, 'a new ceiling is said');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the maintenance block is re-delivered when the last worker run failed, and when it recovers (Sol finding 5)', async () => {
+  const dir = makeProject();
+  try {
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    store.create({
+      id: randomUUID(), type: 'todo', created_at: NOW, updated_at: NOW, author: 'system', status: 'active', superseded_by: null,
+      links: [], scope: 'project', stack_tags: [], text: 'item', source: 'system', system_reason: 'reconcile_needed', file_keys: ['src/a.mjs'],
+    });
+    store.close();
+    const h = handler(dir);
+    assert.match(await appended(h, 'ses_root'), /RECONCILE BACKLOG/);
+    const statePath = join(dir, '.sterling', 'transient', 'maintenance-worker.state.json');
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFileSync(statePath, JSON.stringify({ last_run: { ok: false, at: '2026-10-12T11:00:00.000Z', error: 'mcp not connected' } }));
+    h.resetStatus(dir);
+    assert.match(await appended(h, 'ses_root'), /last worker run FAILED at 2026-10-12T11:00:00\.000Z: mcp not connected/);
+    writeFileSync(statePath, JSON.stringify({ last_run: { ok: true, at: '2026-10-12T11:30:00.000Z', verdicts: 1 } }));
+    h.resetStatus(dir);
+    const recovered = await appended(h, 'ses_root');
+    assert.match(recovered, /RECONCILE BACKLOG/, 'the recovery is said');
+    assert.doesNotMatch(recovered, /FAILED/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a notice reaches the conductor once: a child does not take it, a shown one is not repeated, and one added later is not dropped by the prune', async () => {

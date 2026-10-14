@@ -16776,15 +16776,41 @@ function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString(),
     writeJsonAtomic(join25(root, NOTICES_REL), notices);
   });
 }
-function takeNotices(root, now) {
-  return withNoticesLock(root, () => {
+var NOTICE_CLAIM_TTL_MS = 6e4;
+var claimLive = (n, nowMs) => typeof n.claim === "string" && nowMs - Date.parse(n.claimed_at ?? "") < NOTICE_CLAIM_TTL_MS;
+function claimNotices(root, now) {
+  const nowMs = Date.parse(now);
+  const token = randomUUID3();
+  const fresh = withNoticesLock(root, () => {
     const notices = readNotices(root);
-    const fresh = notices.filter((n) => !n.shown_at);
-    if (!fresh.length) return [];
-    for (const n of fresh) n.shown_at = now;
+    const open2 = notices.filter((n) => !n.shown_at && !claimLive(n, nowMs));
+    if (!open2.length) return [];
+    for (const n of open2) Object.assign(n, { claim: token, claimed_at: now });
     writeJsonAtomic(join25(root, NOTICES_REL), notices);
-    return fresh;
+    return open2;
   });
+  const settle = (fn) => {
+    if (!fresh.length) return;
+    withNoticesLock(root, () => {
+      const notices = readNotices(root);
+      const mine = notices.filter((n) => n.claim === token);
+      if (!mine.length) return;
+      for (const n of mine) {
+        delete n.claim;
+        delete n.claimed_at;
+        fn(n);
+      }
+      writeJsonAtomic(join25(root, NOTICES_REL), notices);
+    });
+  };
+  return {
+    notices: fresh,
+    commit: () => settle((n) => {
+      n.shown_at = now;
+    }),
+    release: () => settle(() => {
+    })
+  };
 }
 function pruneShownNotices(root, { afterRead } = {}) {
   withNoticesLock(root, () => {
@@ -18695,12 +18721,12 @@ function notStagedLine(kase) {
   return `STERLING DISPATCH STAGING (H19): this session's brief could not be staged from [${kase}] \u2014 YOUR KNOWLEDGE WAS NOT STAGED: no owning articles, hazards or decisions were delivered for your task. Do not assume the store is silent on it: rely on your dispatch brief for knowledge pointers and query the store for the area before acting. File-touch delivery still fires on your first read or edit.`;
 }
 var VOLATILE_HEADER = "STERLING CONTEXT (added by the Sterling plugin, not typed by the user):";
-function rawBriefOf(messages) {
+function rawBriefOf(messages, isSterling = () => false) {
   const textOf = (m) => {
     const content = m?.content;
     return typeof content === "string" ? content : Array.isArray(content) ? content.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n") : "";
   };
-  const first = Array.isArray(messages) ? messages.find((m) => m?.role === "user" && !textOf(m).startsWith(VOLATILE_HEADER)) : null;
+  const first = Array.isArray(messages) ? messages.find((m) => m?.role === "user" && !isSterling(textOf(m))) : null;
   if (!first) return "";
   const text = textOf(first);
   const appended = text.indexOf(`
@@ -18708,8 +18734,8 @@ function rawBriefOf(messages) {
 ${VOLATILE_HEADER}`);
   return appended >= 0 ? text.slice(0, appended) : text;
 }
-function briefOf(messages) {
-  return rawBriefOf(messages).slice(0, BRIEF_SCAN_CAP);
+function briefOf(messages, isSterling) {
+  return rawBriefOf(messages, isSterling).slice(0, BRIEF_SCAN_CAP);
 }
 function stageChild({ store, root, sessionID, agent: agentName, brief, disclosure: disclosure2 = "" }) {
   const agent = agentRole(agentName);
@@ -19216,6 +19242,8 @@ function planLockSection(ctx) {
 // packages/opencode-plugin/src/context.mjs
 var STATUS_TTL_MS = 1e4;
 var UNDECLARED_TTL_MS = 5 * 6e4;
+var WORKER_ALERTS = /last worker run FAILED at .*? \(log: [^)]*\)|worker state unknown \([^)]*\)|worker disabled by \S+|worker paused after (?:a failed run|a run that closed nothing)/g;
+var SENT_TEXTS_CAP = 50;
 function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = /* @__PURE__ */ new Map(), sweepStale, swept = /* @__PURE__ */ new Set(), env = process.env, deliveryPolicy = createDeliveryPolicy({ getSession, parents }) }) {
   const statusCache = /* @__PURE__ */ new Map();
   const undeclaredCache = /* @__PURE__ */ new Map();
@@ -19223,6 +19251,9 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   const frozenSystem = /* @__PURE__ */ new Map();
   const boardCache = /* @__PURE__ */ new Map();
   const delivered = /* @__PURE__ */ new Map();
+  const generations = /* @__PURE__ */ new Map();
+  const chains = /* @__PURE__ */ new Map();
+  const sterlingSent = /* @__PURE__ */ new Map();
   const registrySeen = /* @__PURE__ */ new Map();
   const heldLines = /* @__PURE__ */ new Map();
   const latestGeneration = /* @__PURE__ */ new Map();
@@ -19256,6 +19287,22 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     statusCache.set(root, { at: Date.now(), text });
     return text;
   }
+  async function sterlingMessages(root, sessionID) {
+    const sent = sterlingSent.get(sessionID);
+    if (sent?.size) return (text) => sent.has(text);
+    try {
+      const session = getSession?.();
+      if (typeof session?.context !== "function") throw new Error("ctx.session.context is unavailable");
+      const got = await session.context({ sessionID });
+      const messages = Array.isArray(got) ? got : got?.data;
+      if (!Array.isArray(messages)) throw new Error(`ctx.session.context answered ${got === null ? "null" : typeof got}, not a message list`);
+      const durable = new Set(messages.filter((m) => m?.type === "synthetic" && m.metadata?.source === "sterling" && typeof m.text === "string").map((m) => m.text));
+      return (text) => durable.has(text);
+    } catch (e) {
+      logLine(root, `context: Sterling's messages in session ${sessionID} could not be told by provenance (${errText(e)}); a user message starting with the STERLING CONTEXT header is taken as Sterling's`);
+      return (text) => text.startsWith(VOLATILE_HEADER);
+    }
+  }
   async function childStaging(root, input) {
     const policy = await deliveryPolicy.resolve(root, input.sessionID, input.messages);
     if (policy !== "on") {
@@ -19263,7 +19310,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       deliveryPolicy.markDisclosed(input.sessionID, policy);
       return composeContext({ agentType: role, ...dispatchChrome(root, role), unattributableLine: deliveryPolicyNotice(policy) });
     }
-    const brief = briefOf(input.messages);
+    const brief = briefOf(input.messages, await sterlingMessages(root, input.sessionID));
     try {
       const store = openStore(join37(root, ".sterling", "sterling.db"));
       try {
@@ -19309,12 +19356,13 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     }
     if (!hit.state) return { text: "", sig: "" };
     const text = maintenanceLines(hit.state, config, root).join("\n\n");
-    return { text, sig: text ? maintenanceSig(hit.state, config) : "" };
+    return { text, sig: text ? maintenanceSig(hit.state, config, text) : "" };
   }
-  function maintenanceSig(state, config) {
+  function maintenanceSig(state, config, text) {
     const queue = queueDepthLine({ ...state, deepThreshold: config?.maintenance_queue?.deep_threshold });
     const r = state.reconcile;
-    return JSON.stringify([queue, r.count > 0 ? [r.lanes, r.oldest, r.handedOff, r.handoffs, r.writes?.count ?? null] : null]);
+    const worker = text.replace(/worker paused \d+m after/g, "worker paused after").match(WORKER_ALERTS) ?? [];
+    return JSON.stringify([queue, r.count > 0 ? [r.lanes, r.oldest, r.handedOff, r.handoffs, r.writes?.count ?? null, worker] : null]);
   }
   function boardBlock(root, config, sessionID) {
     let hit = boardCache.get(root);
@@ -19339,8 +19387,10 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     }
     if (hit.unavailable) return { text: hit.unavailable, sig: hit.unavailable };
     try {
-      const text = renderBoardReadiness({ readiness: hit.readiness, live: liveLanes(root, sessionID), ceiling: laneCeiling(config) });
-      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live: { availability: "ok", count: 0 }, ceiling: { value: 0 } }) : "";
+      const live = liveLanes(root, sessionID);
+      const ceiling = laneCeiling(config);
+      const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling });
+      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live: live.availability === "ok" ? { ...live, count: 0 } : live, ceiling }) : "";
       return { text, sig };
     } catch (e) {
       logLine(root, `context: board readiness unreadable: ${errText(e)}`);
@@ -19472,10 +19522,13 @@ ${opencodeHostTail(pluginRoot)}`;
       else if (b.cleared) due.push(b.cleared);
       marks.set(b.key, sig);
     }
+    const generation = generations.get(sessionID) ?? 0;
+    let claimedNotices = null;
     if (!kind.why && kind.kind === "root" && !inWorkerChild(env)) {
       let notices;
       try {
-        notices = takeNotices(root, now());
+        claimedNotices = claimNotices(root, now());
+        notices = claimedNotices.notices;
       } catch (e) {
         release();
         logLine(root, `context: pending notices unreadable at the ${where}: ${errText(e)}`);
@@ -19486,7 +19539,8 @@ STERLING NOTICES UNREADABLE (${errText(e)}): the pending notices in ${NOTICES_RE
           commit: () => {
           },
           release: () => {
-          }
+          },
+          fresh: () => true
         };
       }
       notices = notices.filter((n) => {
@@ -19503,18 +19557,29 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
       text: due.length ? `${VOLATILE_HEADER}
 
 ${due.join("\n\n")}` : "",
-      release,
+      fresh: () => (generations.get(sessionID) ?? 0) === generation,
+      // Held lines and claimed notices go back, so the next delivery offers them again.
+      release: () => {
+        release();
+        claimed.length = 0;
+        claimedNotices?.release();
+      },
       commit: () => {
         claimed.length = 0;
-        if (!marks.size) return;
-        const record = delivered.get(sessionID) ?? remember(delivered, sessionID, /* @__PURE__ */ new Map());
-        for (const [key, text] of marks) record.set(key, text);
+        if (marks.size && (generations.get(sessionID) ?? 0) === generation) {
+          const record = delivered.get(sessionID) ?? remember(delivered, sessionID, /* @__PURE__ */ new Map());
+          for (const [key, text] of marks) record.set(key, text);
+        }
+        claimedNotices?.commit();
       }
     };
   }
   async function sendSynthetic(sessionID, text, delivery) {
     const session = getSession?.();
     if (typeof session?.synthetic !== "function") return "ctx.session.synthetic is unavailable (an older OpenCode)";
+    const sent = sterlingSent.get(sessionID) ?? remember(sterlingSent, sessionID, /* @__PURE__ */ new Set());
+    sent.add(text);
+    while (sent.size > SENT_TEXTS_CAP) sent.delete(sent.values().next().value);
     try {
       await session.synthetic({ sessionID, text, metadata: { source: "sterling" }, ...delivery ? { delivery } : {} });
       return null;
@@ -19544,20 +19609,34 @@ ${note}` : due.text);
       due.release();
       throw e;
     }
-    if (note) remember(degradedTold, sessionID, true);
+    if (note && due.fresh()) remember(degradedTold, sessionID, true);
     due.commit();
+  }
+  function serialized(sessionID, fn) {
+    const prev = chains.get(sessionID) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.then(() => {
+    }, () => {
+    });
+    chains.set(sessionID, tail);
+    void tail.then(() => {
+      if (chains.get(sessionID) === tail) chains.delete(sessionID);
+    });
+    return run;
   }
   async function onPrompt(input) {
     const root = rootOf();
     if (!root) return;
     await fenced("context", root, async () => {
       if (typeof input?.prompt?.text !== "string") throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
-      const due = await dueText(root, input.sessionID, "prompt");
-      await deliver(input.sessionID, due, { append: (text) => {
-        input.prompt.text = `${input.prompt.text}
+      await serialized(input.sessionID, async () => {
+        const due = await dueText(root, input.sessionID, "prompt");
+        await deliver(input.sessionID, due, { append: (text) => {
+          input.prompt.text = `${input.prompt.text}
 
 ${text}`;
-      } });
+        } });
+      });
     });
   }
   async function onToolResult(input) {
@@ -19567,8 +19646,10 @@ ${text}`;
     await fenced("context", root, async () => {
       const content = input.result?.content;
       if (!Array.isArray(content) && typeof content !== "string") throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
-      const due = await dueText(root, input.sessionID, "tool call");
-      await deliver(input.sessionID, due, { delivery: "steer", append: (text) => appendToResult(input.result, text) });
+      await serialized(input.sessionID, async () => {
+        const due = await dueText(root, input.sessionID, "tool call");
+        await deliver(input.sessionID, due, { delivery: "steer", append: (text) => appendToResult(input.result, text) });
+      });
     });
   }
   return {
@@ -19579,7 +19660,13 @@ ${text}`;
     // Compaction replaces the conversation, so the cached prefix starts over anyway: the system block
     // is rendered again at the next request (picking up a template change or recovering a degraded
     // render), and the session's next prompt gets the whole set of lines again.
-    resetSession: (sessionID) => void (delivered.delete(sessionID), frozenSystem.delete(sessionID), degradedTold.delete(sessionID))
+    // A delivery in flight across the reset commits nothing for the new conversation (generations).
+    resetSession: (sessionID) => {
+      delivered.delete(sessionID);
+      frozenSystem.delete(sessionID);
+      degradedTold.delete(sessionID);
+      remember(generations, sessionID, (generations.get(sessionID) ?? 0) + 1);
+    }
   };
 }
 

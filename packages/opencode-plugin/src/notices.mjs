@@ -59,20 +59,60 @@ export function addNotice(root, text, now = new Date().toISOString(), key = unde
   });
 }
 
+// A claim older than this is taken to belong to a delivery that died (a crashed process):
+// the notice is offered again, so a lost claim costs a repeat, never the notice. It is well
+// above the context handler's 4000 ms budget, inside which a claim is committed or released.
+export const NOTICE_CLAIM_TTL_MS = 60_000;
+
+const claimLive = (n, nowMs) => typeof n.claim === 'string' && nowMs - Date.parse(n.claimed_at ?? '') < NOTICE_CLAIM_TTL_MS;
+
 /**
- * The notices not shown yet, each stamped shown_at `now`. They are delivered once, into
- * the prompt that starts an execution, which keeps them in the conversation, so a shown
- * notice is never returned again; it is pruned at that execution's end.
+ * The notices not shown and not claimed by another delivery, each claimed for this one.
+ * Returns { notices, commit(), release() }: commit stamps them shown_at `now` (call it once
+ * the text carrying them is delivered), release drops the claim so the next delivery offers
+ * them again. Nothing is shown until commit, so a delivery that fails loses no notice and
+ * settlement (pruneShownNotices) never prunes one unseen.
+ */
+export function claimNotices(root, now) {
+  const nowMs = Date.parse(now);
+  const token = randomUUID();
+  const fresh = withNoticesLock(root, () => {
+    const notices = readNotices(root);
+    const open = notices.filter((n) => !n.shown_at && !claimLive(n, nowMs));
+    if (!open.length) return [];
+    for (const n of open) Object.assign(n, { claim: token, claimed_at: now });
+    writeJsonAtomic(join(root, NOTICES_REL), notices);
+    return open;
+  });
+  const settle = (fn) => {
+    if (!fresh.length) return;
+    withNoticesLock(root, () => {
+      const notices = readNotices(root);
+      const mine = notices.filter((n) => n.claim === token);
+      if (!mine.length) return;
+      for (const n of mine) {
+        delete n.claim;
+        delete n.claimed_at;
+        fn(n);
+      }
+      writeJsonAtomic(join(root, NOTICES_REL), notices);
+    });
+  };
+  return {
+    notices: fresh,
+    commit: () => settle((n) => { n.shown_at = now; }),
+    release: () => settle(() => {}),
+  };
+}
+
+/**
+ * The notices not shown yet, each stamped shown_at `now`, in one step (claimNotices then
+ * commit), for a caller that has already delivered them.
  */
 export function takeNotices(root, now) {
-  return withNoticesLock(root, () => {
-    const notices = readNotices(root);
-    const fresh = notices.filter((n) => !n.shown_at);
-    if (!fresh.length) return [];
-    for (const n of fresh) n.shown_at = now;
-    writeJsonAtomic(join(root, NOTICES_REL), notices);
-    return fresh;
-  });
+  const claimed = claimNotices(root, now);
+  claimed.commit();
+  return claimed.notices;
 }
 
 /** Removes the shown notices. `afterRead` is a test seam, run between the read and the write. */
