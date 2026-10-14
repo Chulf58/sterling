@@ -26,6 +26,7 @@ import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { isInstalledCopy } from './installed-copy.mjs';
+import { looksLikeSterlingSourceTree } from './sterling-source-tree.mjs';
 import { compareSterlingVersions, installHostOf, parseSterlingVersion, sterlingUpdateRemedy } from './sterling-roots.mjs';
 
 // Each step is bounded well inside H1's hooks.json timeout (180s): two steps at
@@ -164,8 +165,10 @@ export function runStepAsync(root, name, args, { nodeBin = process.execPath } = 
  * "0 project(s) processed" (exit 0 or a refusal-only exit 2) checked nothing, which is a failure (P5).
  * Returns { ok, detail } or { ok, restart, drift, driftOut, inserted }; `inserted` is one
  * 'action lead' string per section or bullet stamp-contract wrote. When the project is the
- * plugin root itself (compared by realpath), stamp-contract is skipped, because it never
- * stamps the clone running it and would report 0 projects processed.
+ * plugin root itself (compared by realpath) or any Sterling source tree (OpenCode runs an
+ * installed copy while the session sits in the clone), stamp-contract is skipped: its
+ * AGENTS.md/CLAUDE.md are hand-tuned, not stamped from templates, and it never stamps the
+ * clone running it.
  */
 export async function runPostUpdateSteps(root, project, runStep) {
   const sync = await runStep(root, 'sync-agents.mjs', ['--target', project]);
@@ -175,7 +178,7 @@ export async function runPostUpdateSteps(root, project, runStep) {
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
   // From here sync-agents has already run: a later failure still carries `restart`,
   // so the user is told agents changed even though the step as a whole failed.
-  if (sameRealPath(project, root)) return { ok: true, restart, drift: false, driftOut: '', inserted: [] };
+  if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: '', inserted: [] };
   const contract = await runStep(root, 'stamp-contract.mjs', ['--apply-inserts', '--project', project]);
   if (contract.error) return { ok: false, restart, detail: `stamp-contract did not run (${contract.error})` };
   if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };

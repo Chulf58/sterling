@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { existsContained, readContained, readdirContained } from './contained-fs.mjs';
+import { isSterlingSourceTree } from './sterling-source-tree.mjs';
 
 const fwd = (p) => p.replace(/\\/g, '/');
 
@@ -29,15 +30,13 @@ const fwd = (p) => p.replace(/\\/g, '/');
 // its own engineers have Sterling. Identity: the same one init uses
 // (STERLING_PLUGIN_ROOT_MATCH, else the running plugin root), plus any other clone
 // recognized by its manifest — a worktree or second checkout of Sterling included.
-// The manifest probe reads TARGET paths, so it goes through contained-fs: a
-// symlinked plugin.json (or directory on the way) throws ContainmentError rather
-// than spoofing a silent "clone, skipped" (Sol re-check). Callers turn that into
-// an actionable refusal.
+// The manifest probe is the shared isSterlingSourceTree (sterling-source-tree.mjs): it
+// reads TARGET paths through contained-fs, so a symlinked plugin.json (or directory on
+// the way) throws ContainmentError rather than spoofing a silent "clone, skipped" (Sol
+// re-check). Callers turn that into an actionable refusal.
 export function isSterlingClone(root, pluginRoot) {
   if (fwd(resolve(root)) === fwd(resolve(process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot))) return true;
-  const manifest = '.claude-plugin/plugin.json';
-  if (!existsContained(root, manifest, 'file') || !existsContained(root, 'scripts/architecture-projection.mjs', 'file')) return false;
-  return JSON.parse(readContained(root, manifest)).name === 'sterling';
+  return isSterlingSourceTree(root);
 }
 
 // Project mode (decision project-mode-hobby-work-toggle-decides-flow, narrowed by

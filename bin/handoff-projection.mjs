@@ -10911,12 +10911,20 @@ function unlinkContained(root, rel) {
 import { spawnSync } from "node:child_process";
 import { existsSync as existsSync4 } from "node:fs";
 import { join as join9, resolve as resolve5 } from "node:path";
+
+// scripts/lib/sterling-source-tree.mjs
+var MANIFEST = ".claude-plugin/plugin.json";
+var SENTINEL = "scripts/architecture-projection.mjs";
+function isSterlingSourceTree(dir) {
+  if (!existsContained(dir, MANIFEST, "file") || !existsContained(dir, SENTINEL, "file")) return false;
+  return JSON.parse(readContained(dir, MANIFEST)).name === "sterling";
+}
+
+// scripts/lib/handoff-projection.mjs
 var fwd2 = (p) => p.replace(/\\/g, "/");
 function isSterlingClone(root, pluginRoot2) {
   if (fwd2(resolve5(root)) === fwd2(resolve5(process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot2))) return true;
-  const manifest = ".claude-plugin/plugin.json";
-  if (!existsContained(root, manifest, "file") || !existsContained(root, "scripts/architecture-projection.mjs", "file")) return false;
-  return JSON.parse(readContained(root, manifest)).name === "sterling";
+  return isSterlingSourceTree(root);
 }
 var CONFIG_REL2 = ".sterling/config.json";
 function readRawConfig(root, ErrorClass, subject) {
