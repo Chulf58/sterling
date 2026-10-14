@@ -10873,7 +10873,14 @@ function buildResolver(store2) {
     return hits.length > 1 ? "ambiguous" : hits[0];
   }
   const getById2 = (id) => store2.get(id);
-  return { resolve: resolve5, getById: getById2, size: index.length };
+  const slugHits = /* @__PURE__ */ new Map();
+  const resolveSlug2 = (slug) => {
+    if (!slugHits.has(slug)) {
+      slugHits.set(slug, store2.recordsBySlug(slug).length > 0 || store2.supersededRecordsBySlug(slug).length > 0);
+    }
+    return slugHits.get(slug);
+  };
+  return { resolve: resolve5, resolveSlug: resolveSlug2, getById: getById2, size: index.length };
 }
 
 // scripts/lib/self-root-role.mjs
@@ -10942,9 +10949,53 @@ function collectRecordCitations(content) {
   }
   return found;
 }
+var SLUG_MIN_HYPHENS = 3;
+var slugAfterWord = () => new RegExp(
+  `[ \\t\`'"\\[]{1,3}([a-z0-9]+(?:-[a-z0-9]+){${SLUG_MIN_HYPHENS},})(-(?=\\r?\\n|$))?(?![A-Za-z0-9_\\-/]|\\.[A-Za-z0-9])`,
+  "y"
+);
+function collectSlugCitations(content, { includeOptedOut = false } = {}) {
+  const citedWords = new RegExp(`\\b(${CITED_RECORD_WORDS.join("|")})\\b`, "gi");
+  const SLUG_AFTER_WORD = slugAfterWord();
+  const found = [];
+  for (const m of content.matchAll(citedWords)) {
+    SLUG_AFTER_WORD.lastIndex = m.index + m[0].length;
+    const s2 = SLUG_AFTER_WORD.exec(content);
+    if (!s2 || !/[a-z]/.test(s2[1])) continue;
+    if (/^[0-9a-f]{8}-/.test(s2[1])) continue;
+    const lineStart = content.lastIndexOf("\n", m.index) + 1;
+    const lineEnd = content.indexOf("\n", m.index);
+    const lineText = content.slice(lineStart, lineEnd === -1 ? content.length : lineEnd);
+    if (!includeOptedOut && lineText.includes(CITATION_OPT_OUT)) continue;
+    found.push({ word: m[0], slug: s2[1], cutOff: Boolean(s2[2]), line: content.slice(0, m.index).split("\n").length });
+  }
+  return found;
+}
+function lintSlugCitations(content, label, resolveSlug2) {
+  const out = [];
+  for (const c of collectSlugCitations(content)) {
+    if (c.cutOff) {
+      out.push({
+        kind: "citation_slug_cut_off",
+        slug: `${c.slug}-`,
+        detail: `${label}:${c.line}: '${c.word} ${c.slug}-' \u2014 the slug is cut off at a line break; write it whole on one line`
+      });
+      continue;
+    }
+    if (resolveSlug2(c.slug)) continue;
+    out.push({
+      kind: "citation_slug_unresolved",
+      slug: c.slug,
+      detail: `${label}:${c.line}: '${c.word} ${c.slug}' \u2014 no record in any mounted store carries this slug, at any status`
+    });
+  }
+  return out;
+}
 function countCitationOptOuts(content) {
   const idOnLine = /\b[0-9a-f]{8}\b/;
-  return content.split("\n").filter((l) => l.includes(CITATION_OPT_OUT) && idOnLine.test(l)).length;
+  return content.split("\n").filter(
+    (l) => l.includes(CITATION_OPT_OUT) && (idOnLine.test(l) || collectSlugCitations(l, { includeOptedOut: true }).length > 0)
+  ).length;
 }
 function lintRecordCitations(content, label, resolve5) {
   const violations2 = [];
@@ -10999,6 +11050,8 @@ function lintCitationCurrency(content, label, resolve5, getById2) {
 // scripts/check-record-citations.mjs
 var selfRoot = join8(dirname4(fileURLToPath(new URL("../scripts/check-record-citations.mjs", import.meta.url).href)), "..");
 var root = process.argv[2] ?? selfRoot;
+var SLUG_CITATIONS_FAIL = false;
+var SLUG_WARNING_PRINT_CAP = 50;
 var storePath = join8(root, ".sterling", "sterling.db");
 if (!existsSync4(storePath)) {
   console.log("record citations: skipped (no store)");
@@ -11025,7 +11078,7 @@ try {
   store.close();
   throw e;
 }
-var { resolve: resolve4, getById, size: indexSize } = resolver;
+var { resolve: resolve4, resolveSlug, getById, size: indexSize } = resolver;
 var tracked = spawnSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", timeout: 6e4 });
 if (tracked.status !== 0) {
   store.close();
@@ -11037,6 +11090,8 @@ var files = tracked.stdout.split("\0").filter(Boolean).filter((f) => SCANNED_EXT
 var violations = [];
 var currencyWarnings = [];
 var citations = 0;
+var slugCitations = 0;
+var slugWarnings = [];
 var optOuts = 0;
 for (const file of files) {
   const abs = join8(root, file);
@@ -11048,9 +11103,25 @@ for (const file of files) {
     return resolve4(id);
   });
   violations.push(...found);
+  slugCitations += collectSlugCitations(content).length;
+  slugWarnings.push(...lintSlugCitations(content, file, resolveSlug));
   currencyWarnings.push(...lintCitationCurrency(content, file, resolve4, getById));
 }
 store.close();
+if (SLUG_CITATIONS_FAIL) violations.push(...slugWarnings);
+var slugResolved = slugCitations - slugWarnings.length;
+var slugDistinct = new Set(slugWarnings.map((w) => w.slug)).size;
+var slugSummary = SLUG_CITATIONS_FAIL ? `${slugResolved} slug citation(s) resolve` : `${slugResolved} slug citation(s) resolve, ${slugWarnings.length} dangling slug citation(s) (${slugDistinct} distinct slugs) WARN ONLY`;
+function printSlugWarnings() {
+  if (SLUG_CITATIONS_FAIL || slugWarnings.length === 0) return;
+  console.log(
+    `record citations: ${slugWarnings.length} slug citation(s) (${slugDistinct} distinct slugs) resolve to no record \u2014 WARN ONLY, exit code unaffected (SLUG_CITATIONS_FAIL=false):`
+  );
+  for (const w of slugWarnings.slice(0, SLUG_WARNING_PRINT_CAP)) console.log(`  [${w.kind}] ${w.detail}`);
+  if (slugWarnings.length > SLUG_WARNING_PRINT_CAP) {
+    console.log(`  ... and ${slugWarnings.length - SLUG_WARNING_PRINT_CAP} more`);
+  }
+}
 function printCurrencyWarnings() {
   if (currencyWarnings.length === 0) return;
   console.log(`record citations: ${currencyWarnings.length} currency warning(s) \u2014 WARN ONLY, exit code unaffected:`);
@@ -11068,9 +11139,8 @@ if (violations.length > 0 && relaxed) {
     "  This is Sterling's own tree on a machine that did not mint the ids it cites. On the authoring machine, declare machine_role 'authoring' in .sterling/config.json, where these must resolve."
   );
   printCurrencyWarnings();
-  process.exit(0);
-}
-if (violations.length > 0 && authority === "secondary") {
+  printSlugWarnings();
+} else if (violations.length > 0 && authority === "secondary") {
   console.log(
     `record citations: ${violations.length} citation(s) do not resolve \u2014 REPORTED, NOT FAILED (store_authority='secondary'):`
   );
@@ -11079,18 +11149,20 @@ if (violations.length > 0 && authority === "secondary") {
     "  This store did not mint the ids the tree cites, so a dangling id here is expected rather than a defect \u2014 and by the same token a citation written HERE is unchecked. On the store that mints them, leave store_authority='primary' (the default), where these must resolve."
   );
   printCurrencyWarnings();
-  process.exit(0);
-}
-if (violations.length > 0) {
+  printSlugWarnings();
+} else if (violations.length > 0) {
   console.error(`record citations FAILED: ${violations.length} citation(s) do not resolve:`);
   for (const v of violations) console.error(`  [${v.kind}] ${v.detail}`);
   console.error(
     "  Fix the citation to name a record that exists in this store (an id from another machine is the usual cause), or drop the id."
   );
   printCurrencyWarnings();
-  process.exit(1);
+  printSlugWarnings();
+  process.exitCode = 1;
+} else {
+  printCurrencyWarnings();
+  console.log(
+    `record citations: ok (${citations} citation(s) in ${files.length} file(s) resolve against ${indexSize} records; ${slugSummary}; ${optOuts} line(s) opted out via '${CITATION_OPT_OUT}'; store_authority=${authority}; ${currencyWarnings.length} currency warning(s) on pointer surfaces (superseded citation still resolving elsewhere); ${UNCITED_RECORD_WORDS.join("/")} ids excluded by design \u2014 those records are removed when drained)`
+  );
+  printSlugWarnings();
 }
-printCurrencyWarnings();
-console.log(
-  `record citations: ok (${citations} citation(s) in ${files.length} file(s) resolve against ${indexSize} records; ${optOuts} line(s) opted out via '${CITATION_OPT_OUT}'; store_authority=${authority}; ${currencyWarnings.length} currency warning(s) on pointer surfaces (superseded citation still resolving elsewhere); ${UNCITED_RECORD_WORDS.join("/")} ids excluded by design \u2014 those records are removed when drained)`
-);

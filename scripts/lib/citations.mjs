@@ -67,5 +67,18 @@ export function buildResolver(store) {
   // get() per hop instead of widening that index for every caller).
   const getById = (id) => store.get(id);
 
-  return { resolve, getById, size: index.length };
+  // Slug resolution (rule 5 of decision c6985ed4): cross-store
+  // and status-blind like ids — recordsBySlug serves the non-superseded rows,
+  // supersededRecordsBySlug the tombstones, and a hit in either resolves.
+  // Called only for slugs the tree actually cites, cached per slug, so a store
+  // without these methods (a caller that never checks slugs) is never asked.
+  const slugHits = new Map();
+  const resolveSlug = (slug) => {
+    if (!slugHits.has(slug)) {
+      slugHits.set(slug, store.recordsBySlug(slug).length > 0 || store.supersededRecordsBySlug(slug).length > 0);
+    }
+    return slugHits.get(slug);
+  };
+
+  return { resolve, resolveSlug, getById, size: index.length };
 }
