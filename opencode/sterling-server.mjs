@@ -18246,6 +18246,14 @@ function sameRealPath(a, b) {
   };
   return real(a) === real(b);
 }
+function isSterlingSourceDir(dir) {
+  if (!existsSync20(join31(dir, "scripts", "architecture-projection.mjs"))) return false;
+  try {
+    return JSON.parse(readFileSync20(join31(dir, ".claude-plugin", "plugin.json"), "utf8")).name === "sterling";
+  } catch {
+  }
+  return false;
+}
 function pluginScript(root, name) {
   const bundled = join31(root, "bin", name);
   return existsSync20(bundled) ? bundled : join31(root, "scripts", name);
@@ -18304,7 +18312,7 @@ async function runPostUpdateSteps(root, project, runStep) {
   if (sync.status === 2) return { ok: false, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
   if (sync.status !== 0) return { ok: false, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
-  if (sameRealPath(project, root)) return { ok: true, restart, drift: false, driftOut: "", inserted: [] };
+  if (sameRealPath(project, root) || isSterlingSourceDir(project)) return { ok: true, restart, drift: false, driftOut: "", inserted: [] };
   const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
   if (contract.error) return { ok: false, restart, detail: `stamp-contract did not run (${contract.error})` };
   if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };

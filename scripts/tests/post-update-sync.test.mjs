@@ -417,6 +417,30 @@ test('runPostUpdateSteps: a project that is the plugin root, directly or through
   assert.deepEqual(calls, [`sync-agents.mjs --target ${other}`, `stamp-contract.mjs --apply-inserts --project ${other}`]);
 });
 
+test('postUpdateSync, host opencode: a Sterling source clone as the project skips stamp-contract even when the running root is a different installed copy; sync-agents runs and the marker advances', async () => {
+  const installed = makePluginRoot();
+  const sourceClone = makePluginRoot({ clone: true });
+  mkdirSync(join(sourceClone, 'scripts'), { recursive: true });
+  writeFileSync(join(sourceClone, 'scripts', 'architecture-projection.mjs'), '');
+  mkdirSync(join(sourceClone, '.sterling'), { recursive: true });
+  writeFileSync(join(sourceClone, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby' }));
+  const { calls, runStep } = recordingSteps();
+  const r = await postUpdateSync({ root: installed, project: sourceClone, host: 'opencode', runStep });
+  assert.equal(r.outcome, 'synced');
+  assert.deepEqual(calls, [`sync-agents.mjs --target ${sourceClone}`], 'stamp-contract is never invoked on a Sterling source tree');
+  assert.equal(markerOf(sourceClone).trim(), VERSION);
+  // An ordinary consumer project, even one whose manifest also says "sterling" but is no source tree, still gets stamp-contract.
+  const consumer = makeProject({ store: true });
+  mkdirSync(join(consumer, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(consumer, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: VERSION }));
+  for (const project of [makeProject({ store: true }), consumer]) {
+    const steps = recordingSteps();
+    const res = await postUpdateSync({ root: installed, project, host: 'opencode', runStep: steps.runStep });
+    assert.equal(res.outcome, 'synced');
+    assert.deepEqual(steps.calls, [`sync-agents.mjs --target ${project}`, `stamp-contract.mjs --apply-inserts --project ${project}`]);
+  }
+});
+
 test('cloneAgentSync: a clone older than the marker refuses and runs nothing; a clone version that cannot be ordered against a marker is a loud SKIP', async () => {
   const older = makePluginRoot({ clone: true });
   const project = makeProject({ marker: '10.0.0', store: false });
