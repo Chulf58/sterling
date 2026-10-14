@@ -21,11 +21,14 @@ export function createPrLoopNotice({ now, pluginRoot } = {}) {
     const at = stamp();
     if (degraded) addNotice(root, degraded, at);
     if (!state) return;
+    // One key per PR and arming: the full text and every reminder say the same thing, so
+    // the conductor sees it once per session, and a re-arm is a new key (notices.mjs).
+    const key = `pr-loop-owed:${state.pr_number}:${state.armed_at}`;
     if (announced.has(state.armed_at)) {
-      addNotice(root, prLoopReminderText(state), at);
+      addNotice(root, prLoopReminderText(state), at, key);
       return;
     }
     announced.add(state.armed_at);
-    addNotice(root, prLoopOwedText(state, prLoopNext(state, join(pluginRoot ?? sterlingRoot(), 'bin', 'pr-review-wait.mjs'))), at);
+    addNotice(root, prLoopOwedText(state, prLoopNext(state, join(pluginRoot ?? sterlingRoot(), 'bin', 'pr-review-wait.mjs'))), at, key);
   };
 }

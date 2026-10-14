@@ -16768,23 +16768,49 @@ function readNotices(root) {
   if (!Array.isArray(parsed)) throw new Error(`${NOTICES_REL} is not a JSON array`);
   return parsed;
 }
-function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString()) {
+function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString(), key = void 0) {
   withNoticesLock(root, () => {
     const notices = readNotices(root);
-    if (notices.some((n) => n.text === text && !n.shown_at)) return;
-    notices.push({ id: randomUUID3(), at: now, text });
+    if (notices.some((n) => !n.shown_at && (n.text === text || key !== void 0 && n.key === key))) return;
+    notices.push({ id: randomUUID3(), at: now, text, ...key === void 0 ? {} : { key } });
     writeJsonAtomic(join25(root, NOTICES_REL), notices);
   });
 }
-function takeNotices(root, now) {
-  return withNoticesLock(root, () => {
+var NOTICE_CLAIM_TTL_MS = 6e4;
+var claimLive = (n, nowMs) => typeof n.claim === "string" && nowMs - Date.parse(n.claimed_at ?? "") < NOTICE_CLAIM_TTL_MS;
+function claimNotices(root, now) {
+  const nowMs = Date.parse(now);
+  const token = randomUUID3();
+  const fresh = withNoticesLock(root, () => {
     const notices = readNotices(root);
-    const fresh = notices.filter((n) => !n.shown_at);
-    if (!fresh.length) return [];
-    for (const n of fresh) n.shown_at = now;
+    const open2 = notices.filter((n) => !n.shown_at && !claimLive(n, nowMs));
+    if (!open2.length) return [];
+    for (const n of open2) Object.assign(n, { claim: token, claimed_at: now });
     writeJsonAtomic(join25(root, NOTICES_REL), notices);
-    return fresh;
+    return open2;
   });
+  const settle = (fn) => {
+    if (!fresh.length) return;
+    withNoticesLock(root, () => {
+      const notices = readNotices(root);
+      const mine = notices.filter((n) => n.claim === token);
+      if (!mine.length) return;
+      for (const n of mine) {
+        delete n.claim;
+        delete n.claimed_at;
+        fn(n);
+      }
+      writeJsonAtomic(join25(root, NOTICES_REL), notices);
+    });
+  };
+  return {
+    notices: fresh,
+    commit: () => settle((n) => {
+      n.shown_at = now;
+    }),
+    release: () => settle(() => {
+    })
+  };
 }
 function pruneShownNotices(root, { afterRead } = {}) {
   withNoticesLock(root, () => {
@@ -18696,10 +18722,13 @@ function notStagedLine(kase) {
 }
 var VOLATILE_HEADER = "STERLING CONTEXT (added by the Sterling plugin, not typed by the user):";
 function rawBriefOf(messages) {
-  const first = Array.isArray(messages) ? messages.find((m) => m?.role === "user") : null;
+  const textOf = (m) => {
+    const content = m?.content;
+    return typeof content === "string" ? content : Array.isArray(content) ? content.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n") : "";
+  };
+  const first = Array.isArray(messages) ? messages.find((m) => m?.role === "user" && !textOf(m).startsWith(VOLATILE_HEADER)) : null;
   if (!first) return "";
-  const content = first.content;
-  const text = typeof content === "string" ? content : Array.isArray(content) ? content.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n") : "";
+  const text = textOf(first);
   const appended = text.indexOf(`
 
 ${VOLATILE_HEADER}`);
@@ -19213,6 +19242,8 @@ function planLockSection(ctx) {
 // packages/opencode-plugin/src/context.mjs
 var STATUS_TTL_MS = 1e4;
 var UNDECLARED_TTL_MS = 5 * 6e4;
+var WORKER_ALERTS = /last worker run FAILED at [\s\S]*? \(log: [^)]*\)|worker state unknown \([^)]*\)|worker disabled by \S+|worker paused after (?:a failed run|a run that closed nothing)/g;
+var SYNTHETIC_TIMEOUT_MS = 3e3;
 function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = /* @__PURE__ */ new Map(), sweepStale, swept = /* @__PURE__ */ new Set(), env = process.env, deliveryPolicy = createDeliveryPolicy({ getSession, parents }) }) {
   const statusCache = /* @__PURE__ */ new Map();
   const undeclaredCache = /* @__PURE__ */ new Map();
@@ -19220,6 +19251,8 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   const frozenSystem = /* @__PURE__ */ new Map();
   const boardCache = /* @__PURE__ */ new Map();
   const delivered = /* @__PURE__ */ new Map();
+  const generations = /* @__PURE__ */ new Map();
+  const chains = /* @__PURE__ */ new Map();
   const registrySeen = /* @__PURE__ */ new Map();
   const heldLines = /* @__PURE__ */ new Map();
   const latestGeneration = /* @__PURE__ */ new Map();
@@ -19300,8 +19333,19 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       hit = { at: Date.now(), state, error };
       maintenanceCache.set(root, hit);
     }
-    if (hit.error) return [`MAINTENANCE QUEUE UNREADABLE (${hit.error}) \u2014 the deep-queue signal and the reconcile backlog are not stated this turn.`];
-    return hit.state ? maintenanceLines(hit.state, config, root) : [];
+    if (hit.error) {
+      const text2 = `MAINTENANCE QUEUE UNREADABLE (${hit.error}) \u2014 the deep-queue signal and the reconcile backlog are not stated this turn.`;
+      return { text: text2, sig: text2 };
+    }
+    if (!hit.state) return { text: "", sig: "" };
+    const text = maintenanceLines(hit.state, config, root).join("\n\n");
+    return { text, sig: text ? maintenanceSig(hit.state, config, text) : "" };
+  }
+  function maintenanceSig(state, config, text) {
+    const queue = queueDepthLine({ ...state, deepThreshold: config?.maintenance_queue?.deep_threshold });
+    const r = state.reconcile;
+    const worker = text.replace(/worker paused \d+m after/g, "worker paused after").match(WORKER_ALERTS) ?? [];
+    return JSON.stringify([queue, r.count > 0 ? [r.lanes, r.oldest, r.handedOff, r.handoffs, r.writes?.count ?? null, worker] : null]);
   }
   function boardBlock(root, config, sessionID) {
     let hit = boardCache.get(root);
@@ -19324,12 +19368,17 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       }
       boardCache.set(root, hit);
     }
-    if (hit.unavailable) return hit.unavailable;
+    if (hit.unavailable) return { text: hit.unavailable, sig: hit.unavailable };
     try {
-      return renderBoardReadiness({ readiness: hit.readiness, live: liveLanes(root, sessionID), ceiling: laneCeiling(config) });
+      const live = liveLanes(root, sessionID);
+      const ceiling = laneCeiling(config);
+      const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling });
+      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live: live.availability === "ok" ? { ...live, count: 0 } : live, ceiling }) : "";
+      return { text, sig };
     } catch (e) {
       logLine(root, `context: board readiness unreadable: ${errText(e)}`);
-      return `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
+      const text = `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
+      return { text, sig: text };
     }
   }
   function resolvePluginRoot() {
@@ -19379,7 +19428,7 @@ ${opencodeHostTail(pluginRoot)}`;
     const out = [
       { key: "status", text: statusLine(root) },
       { key: "operating-state", text: state.lines.join("\n\n") },
-      { key: "maintenance", text: maintenanceBlocks(root, state.config).join("\n\n") }
+      { key: "maintenance", ...maintenanceBlocks(root, state.config) }
     ];
     if (kind === "root") {
       if (!inWorkerChild(env)) {
@@ -19415,7 +19464,7 @@ ${opencodeHostTail(pluginRoot)}`;
         }
       }
       out.push({ key: "undeclared", text: undeclaredBlock(root, state.config), cleared: "UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies." });
-      if (!inWorkerChild(env)) out.push({ key: "board", text: boardBlock(root, state.config, sessionID), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
+      if (!inWorkerChild(env)) out.push({ key: "board", ...boardBlock(root, state.config, sessionID), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
     }
     out.push({ key: "restore", text: await rotationRestore(root, sessionID) });
     if (kind === "root" && !inWorkerChild(env)) {
@@ -19450,15 +19499,19 @@ ${opencodeHostTail(pluginRoot)}`;
         continue;
       }
       const last = seen.get(b.key) ?? "";
-      if (b.text === last) continue;
+      const sig = b.sig ?? b.text;
+      if (sig === last) continue;
       if (b.text) due.push(b.text);
       else if (b.cleared) due.push(b.cleared);
-      marks.set(b.key, b.text);
+      marks.set(b.key, sig);
     }
+    const generation = generations.get(sessionID) ?? 0;
+    let claimedNotices = null;
     if (!kind.why && kind.kind === "root" && !inWorkerChild(env)) {
       let notices;
       try {
-        notices = takeNotices(root, now());
+        claimedNotices = claimNotices(root, now());
+        notices = claimedNotices.notices;
       } catch (e) {
         release();
         logLine(root, `context: pending notices unreadable at the ${where}: ${errText(e)}`);
@@ -19469,9 +19522,17 @@ STERLING NOTICES UNREADABLE (${errText(e)}): the pending notices in ${NOTICES_RE
           commit: () => {
           },
           release: () => {
-          }
+          },
+          fresh: () => true
         };
       }
+      notices = notices.filter((n) => {
+        if (n.key === void 0) return true;
+        const mark = `notice:${n.key}`;
+        if (seen.has(mark) || marks.has(mark)) return false;
+        marks.set(mark, "shown");
+        return true;
+      });
       if (notices.length) due.push(`STERLING NOTICES (new since the last ones you were shown):
 ${notices.map((n) => `- ${n.text}`).join("\n")}`);
     }
@@ -19479,30 +19540,113 @@ ${notices.map((n) => `- ${n.text}`).join("\n")}`);
       text: due.length ? `${VOLATILE_HEADER}
 
 ${due.join("\n\n")}` : "",
-      release,
+      fresh: () => (generations.get(sessionID) ?? 0) === generation,
+      // Held lines and claimed notices go back, so the next delivery offers them again.
+      release: () => {
+        release();
+        claimed.length = 0;
+        claimedNotices?.release();
+      },
       commit: () => {
         claimed.length = 0;
-        if (!marks.size) return;
-        const record = delivered.get(sessionID) ?? remember(delivered, sessionID, /* @__PURE__ */ new Map());
-        for (const [key, text] of marks) record.set(key, text);
+        if (marks.size && (generations.get(sessionID) ?? 0) === generation) {
+          const record = delivered.get(sessionID) ?? remember(delivered, sessionID, /* @__PURE__ */ new Map());
+          for (const [key, text] of marks) record.set(key, text);
+        }
+        claimedNotices?.commit();
       }
     };
+  }
+  async function sendSynthetic(sessionID, text, delivery) {
+    const session = getSession?.();
+    if (typeof session?.synthetic !== "function") return { why: "ctx.session.synthetic is unavailable (an older OpenCode)" };
+    let timer;
+    try {
+      const call = Promise.resolve(session.synthetic({ sessionID, text, metadata: { source: "sterling" }, ...delivery ? { delivery } : {} })).then(() => ({ sent: true }));
+      const late2 = new Promise((resolve15) => {
+        timer = setTimeout(() => resolve15({ why: `ctx.session.synthetic did not settle within ${SYNTHETIC_TIMEOUT_MS} ms`, uncertain: true }), SYNTHETIC_TIMEOUT_MS);
+      });
+      return await Promise.race([call, late2]);
+    } catch (e) {
+      return { why: errText(e) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  const degradedTold = /* @__PURE__ */ new Map();
+  const timeoutUntold = /* @__PURE__ */ new Map();
+  const told = (sessionID, kind) => degradedTold.get(sessionID)?.has(kind) === true;
+  function degradedNote(sessionID, why) {
+    if (told(sessionID, "append")) return "";
+    return `STERLING DELIVERY DEGRADED (${why}): Sterling's session lines are appended to the user's prompt or a tool result this session, so the user sees them; they are no longer sent as a hidden message.`;
+  }
+  function timeoutNote(sessionID) {
+    const why = timeoutUntold.get(sessionID);
+    if (!why || told(sessionID, "timeout")) return "";
+    return `STERLING DELIVERY DEGRADED (${why}): Sterling's session lines were sent again, so a line shown earlier may repeat once.`;
+  }
+  function markTold(sessionID, kind) {
+    const kinds = degradedTold.get(sessionID) ?? remember(degradedTold, sessionID, /* @__PURE__ */ new Set());
+    kinds.add(kind);
+  }
+  async function deliver(sessionID, due, { delivery, append }) {
+    const notes = [];
+    try {
+      if (due.text) {
+        const pendingTimeout = timeoutNote(sessionID);
+        const text = pendingTimeout ? `${due.text}
+
+${pendingTimeout}` : due.text;
+        const result = await sendSynthetic(sessionID, text, delivery);
+        if (result.uncertain) {
+          remember(timeoutUntold, sessionID, result.why);
+          due.release();
+          return;
+        }
+        if (pendingTimeout) notes.push("timeout");
+        if (!result.sent) {
+          const note = degradedNote(sessionID, result.why);
+          if (note) notes.push("append");
+          append(note ? `${text}
+
+${note}` : text);
+        }
+      }
+    } catch (e) {
+      due.release();
+      throw e;
+    }
+    if (due.fresh()) {
+      for (const kind of notes) markTold(sessionID, kind);
+      if (notes.includes("timeout")) timeoutUntold.delete(sessionID);
+    }
+    due.commit();
+  }
+  function serialized(sessionID, fn) {
+    const prev = chains.get(sessionID) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.then(() => {
+    }, () => {
+    });
+    chains.set(sessionID, tail);
+    void tail.then(() => {
+      if (chains.get(sessionID) === tail) chains.delete(sessionID);
+    });
+    return run;
   }
   async function onPrompt(input) {
     const root = rootOf();
     if (!root) return;
     await fenced("context", root, async () => {
       if (typeof input?.prompt?.text !== "string") throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
-      const due = await dueText(root, input.sessionID, "prompt");
-      try {
-        if (due.text) input.prompt.text = `${input.prompt.text}
+      await serialized(input.sessionID, async () => {
+        const due = await dueText(root, input.sessionID, "prompt");
+        await deliver(input.sessionID, due, { append: (text) => {
+          input.prompt.text = `${input.prompt.text}
 
-${due.text}`;
-      } catch (e) {
-        due.release();
-        throw e;
-      }
-      due.commit();
+${text}`;
+        } });
+      });
     });
   }
   async function onToolResult(input) {
@@ -19512,14 +19656,10 @@ ${due.text}`;
     await fenced("context", root, async () => {
       const content = input.result?.content;
       if (!Array.isArray(content) && typeof content !== "string") throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
-      const due = await dueText(root, input.sessionID, "tool call");
-      try {
-        if (due.text) appendToResult(input.result, due.text);
-      } catch (e) {
-        due.release();
-        throw e;
-      }
-      due.commit();
+      await serialized(input.sessionID, async () => {
+        const due = await dueText(root, input.sessionID, "tool call");
+        await deliver(input.sessionID, due, { delivery: "steer", append: (text) => appendToResult(input.result, text) });
+      });
     });
   }
   return {
@@ -19530,7 +19670,14 @@ ${due.text}`;
     // Compaction replaces the conversation, so the cached prefix starts over anyway: the system block
     // is rendered again at the next request (picking up a template change or recovering a degraded
     // render), and the session's next prompt gets the whole set of lines again.
-    resetSession: (sessionID) => void (delivered.delete(sessionID), frozenSystem.delete(sessionID))
+    // A delivery in flight across the reset commits nothing for the new conversation (generations).
+    resetSession: (sessionID) => {
+      delivered.delete(sessionID);
+      frozenSystem.delete(sessionID);
+      degradedTold.delete(sessionID);
+      timeoutUntold.delete(sessionID);
+      remember(generations, sessionID, (generations.get(sessionID) ?? 0) + 1);
+    }
   };
 }
 
@@ -19579,12 +19726,13 @@ function createPrLoopNotice({ now, pluginRoot } = {}) {
     const at = stamp();
     if (degraded) addNotice(root, degraded, at);
     if (!state) return;
+    const key = `pr-loop-owed:${state.pr_number}:${state.armed_at}`;
     if (announced.has(state.armed_at)) {
-      addNotice(root, prLoopReminderText(state), at);
+      addNotice(root, prLoopReminderText(state), at, key);
       return;
     }
     announced.add(state.armed_at);
-    addNotice(root, prLoopOwedText(state, prLoopNext(state, join39(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"))), at);
+    addNotice(root, prLoopOwedText(state, prLoopNext(state, join39(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"))), at, key);
   };
 }
 
@@ -20607,6 +20755,9 @@ function liveDispatch(root) {
   }
   return { live: false };
 }
+function heldKey(why) {
+  return `snapshot-not-advanced:${why.replace(/^\d+ /, "").replace(/ \([^()]*\)$/, "")}`;
+}
 function createSettle({ openStore, now, launchWorkerFor }) {
   async function settle(root) {
     pruneShownNotices(root);
@@ -20636,7 +20787,7 @@ function createSettle({ openStore, now, launchWorkerFor }) {
       }
       for (const text of duties.notices) addNotice(root, text, at);
       if (git.base_lost) addNotice(root, `Sterling settlement: the settled commit ${git.settled.sha} is no longer reachable from HEAD ${git.next.sha}; duties for the commits between them were not derived. Reconcile them by hand from git log.`, at);
-      if (dispatch.live) addNotice(root, `Sterling settlement: the settled snapshot was not advanced because ${dispatch.why}; the first settlement after the dispatch ends advances it. If no subagent is still running (OpenCode exited or crashed mid-dispatch), restart OpenCode: its first root request sweeps the dispatch records a dead process left live.`, at);
+      if (dispatch.live) addNotice(root, `Sterling settlement: the settled snapshot was not advanced because ${dispatch.why}; the first settlement after the dispatch ends advances it. If no subagent is still running (OpenCode exited or crashed mid-dispatch), restart OpenCode: its first root request sweeps the dispatch records a dead process left live.`, at, heldKey(dispatch.why));
     } catch (e) {
       logLine(root, `settle failed: ${errText(e)}`);
       addNotice(root, `Sterling settlement failed (${errText(e)}); the settled snapshot was not advanced, so the next turn retries the same range.`, at);
