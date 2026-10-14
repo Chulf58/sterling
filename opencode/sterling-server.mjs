@@ -16356,6 +16356,24 @@ init_agent_fences();
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync11 } from "node:fs";
 import { join as join20, resolve as resolve10 } from "node:path";
+
+// scripts/lib/sterling-source-tree.mjs
+var MANIFEST = ".claude-plugin/plugin.json";
+var SENTINEL = "scripts/architecture-projection.mjs";
+function isSterlingSourceTree(dir) {
+  if (!existsContained(dir, MANIFEST, "file") || !existsContained(dir, SENTINEL, "file")) return false;
+  return JSON.parse(readContained(dir, MANIFEST)).name === "sterling";
+}
+function looksLikeSterlingSourceTree(dir) {
+  try {
+    return isSterlingSourceTree(dir);
+  } catch (err) {
+    if (err instanceof ContainmentError || err instanceof SyntaxError || err instanceof TypeError || typeof err?.code === "string") return false;
+    throw err;
+  }
+}
+
+// scripts/lib/handoff-projection.mjs
 init_dist();
 var CONFIG_REL4 = ".sterling/config.json";
 var PORTABLE_AGENT_PATHS = [".opencode/agents/implementor.md", ".opencode/agents/researcher.md", ".opencode/agents/scout.md"];
@@ -18304,7 +18322,7 @@ async function runPostUpdateSteps(root, project, runStep) {
   if (sync.status === 2) return { ok: false, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
   if (sync.status !== 0) return { ok: false, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
   const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
-  if (sameRealPath(project, root)) return { ok: true, restart, drift: false, driftOut: "", inserted: [] };
+  if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: "", inserted: [] };
   const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
   if (contract.error) return { ok: false, restart, detail: `stamp-contract did not run (${contract.error})` };
   if (contract.status !== 0 && contract.status !== 2) return { ok: false, restart, detail: `stamp-contract exited ${contract.status}: ${contract.tail}` };
