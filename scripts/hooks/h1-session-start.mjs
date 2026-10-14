@@ -599,7 +599,9 @@ try {
   const root = process.env.STERLING_CURRENCY_DISABLE === '1' ? null : pluginRoot();
   const gitDir = root ? join(root, '.git') : null;
   // .git as a FILE is a worktree — an authoring-machine shape; skip (fail-open).
-  if (gitDir && existsSync(gitDir) && statSync(gitDir).isDirectory()) {
+  // An installed copy (a root under a host's install cache, even one carrying a
+  // .git) is updated by the host, never by a fetch here (GitHub #91).
+  if (gitDir && existsSync(gitDir) && statSync(gitDir).isDirectory() && !isInstalledCopy(root)) {
     let role = null;
     try {
       role = JSON.parse(readFileSync(join(root, '.sterling', 'config.json'), 'utf8')).machine_role;
@@ -641,7 +643,8 @@ try {
           currencyContext =
             `\n\nSTERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch. ` +
             `Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it — fast-forward-or-refuse), ` +
-            `and remind them a session RESTART follows a successful update — that means EXIT AND RELAUNCH the Claude Code CLI, since a /clear alone does not reload the server/hook code.`;
+            `and remind them a session RESTART follows a successful update — that means EXIT AND RELAUNCH the Claude Code CLI, since a /clear alone does not reload the server/hook code. ` +
+            `Consumer machines update through the plugin instead: to leave the clone, run \`claude plugin marketplace add Chulf58/sterling\` and \`claude plugin install sterling@sterling\`, then start \`claude\` without --plugin-dir and run /sterling:init.`;
         }
       }
     }

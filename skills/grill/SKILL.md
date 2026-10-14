@@ -59,7 +59,7 @@ Each question is its own `AskUserQuestion` call:
 ## 5. Before closure
 
 <!-- claude-only -->
-- **Astra sparring, when warranted** (a new mechanism, persistent state, a deletion boundary, anything hard to unship): put the ruled design, your proposal and your own objections through the `codex` MCP tool — `model: gpt-6-astra`, `sandbox: read-only`, `approval-policy: never`, `config: {model_reasoning_effort: "high"}`. It runs **before** closure; a new trade-off it raises goes back to the tree as a form.
+- **Astra sparring, when warranted** (a new mechanism, persistent state, a deletion boundary, anything hard to unship): put the ruled design, your proposal and your own objections through the `codex` MCP tool — `model: gpt-6-astra`, `sandbox: read-only`, `approval-policy: never`, `config: {model_reasoning_effort: "high", features: {view_image: false}}` (the `view_image` override keeps an image result from pushing one MCP message past Claude Code's 16 MB stdio limit, GitHub issue #90). It runs **before** closure; a new trade-off it raises goes back to the tree as a form.
 <!-- /claude-only -->
 <!-- opencode-only -->
 On OpenCode, the Astra sparring bullet reads as follows.

@@ -31899,7 +31899,9 @@ var SterlingTools = class _SterlingTools {
     return void 0;
   }
   /**
-   * A READ-TIME MINT (stale_research, refresh_reference): never throws and never
+   * A READ-TIME MINT (stale_research, refresh_reference, and the feature_article
+   * drift arm's reconcile_needed, deletion_candidate, file_parked and
+   * state_review, GitHub #92): never throws and never
    * pays for a no-op. The contract on maintenanceEnqueue is that a mint must not
    * make a READ throw, but the write itself can be refused (live schema version
    * drift, a locked database), so the refusal is caught and RETURNED for the
@@ -31990,6 +31992,11 @@ var SterlingTools = class _SterlingTools {
           }
         }
       }
+      let featureMintFailed;
+      const featureMint = (args2) => {
+        const failed = this.mintAtRead(args2);
+        featureMintFailed ??= failed;
+      };
       if (record2.type === "feature_article" && this.repoRoot) {
         const a = record2;
         const roleFor = (p) => (a.files ?? []).find((f) => f.path === p)?.role;
@@ -32031,7 +32038,7 @@ var SterlingTools = class _SterlingTools {
           for (const d of drifts.slice(0, DRIFT_ITEMS_PER_READ)) {
             const disclaimed = this.disclaimsOwnership(roleFor(d.path)) ? ` NOTE: this article's own files[] role for ${d.path} disclaims ownership of it, so this item will recur on every future edit to that file and each one will be a no-op. Consider REMOVING ${d.path} from files[] instead of reconciling \u2014 check the co-owners first (knowledge_query file_keys:["${d.path}"]) so the path is not left orphaned.` : "";
             const deletionCandidate = d.missing && d.neverTracked;
-            this.maintenanceEnqueue({
+            featureMint({
               reason: deletionCandidate ? "deletion_candidate" : "reconcile_needed",
               text: (d.missing ? deletionCandidate ? `owned file ${d.path} of article '${a.slug}' no longer exists (out-of-band deletion) and was never tracked on any git ref this repo can reach \u2014 DELETION CANDIDATE, not a reconcile: confirm the deletion (drop ${d.path} from files[]) or restore the file, then close this via the deletion_candidate drain` : `reconcile article '${a.slug}' \u2014 owned file ${d.path} no longer exists (out-of-band deletion)` : `reconcile article '${a.slug}' \u2014 owned file ${d.path} changed on disk after the article's last update (out-of-band edit)`) + disclaimed,
               file_keys: [d.path],
@@ -32043,7 +32050,7 @@ var SterlingTools = class _SterlingTools {
             const overflowDeletions = overflow.filter((d) => d.missing && d.neverTracked);
             const overflowReconciles = overflow.filter((d) => !(d.missing && d.neverTracked));
             if (overflowReconciles.length) {
-              this.maintenanceEnqueue({
+              featureMint({
                 reason: "reconcile_needed",
                 text: `reconcile article '${a.slug}' \u2014 ${overflowReconciles.length} owned files drifted in one read beyond the first ${DRIFT_ITEMS_PER_READ} (which have their own items); the remainder (${overflowReconciles.map((d) => d.path).join(", ")}) is covered by this one. A drift this wide usually means a whole-area change \u2014 reconcile the article as a whole.`,
                 file_keys: overflowReconciles.map((d) => d.path),
@@ -32051,7 +32058,7 @@ var SterlingTools = class _SterlingTools {
               });
             }
             if (overflowDeletions.length) {
-              this.maintenanceEnqueue({
+              featureMint({
                 reason: "deletion_candidate",
                 text: `article '${a.slug}' \u2014 ${overflowDeletions.length} owned files beyond the first ${DRIFT_ITEMS_PER_READ} are DELETION CANDIDATES: never tracked on any git ref this repo can reach (${overflowDeletions.map((d) => d.path).join(", ")}). Confirm the deletions (drop them from files[]) or restore the files, then close via the deletion_candidate drain.`,
                 file_keys: overflowDeletions.map((d) => d.path),
@@ -32059,10 +32066,10 @@ var SterlingTools = class _SterlingTools {
               });
             }
           }
-          return { ...record2, verify_before_use: true };
+          return { ...record2, verify_before_use: true, ...featureMintFailed ? { maintenance_mint_failed: featureMintFailed } : {} };
         }
         for (const p of parkedFiles.slice(0, DRIFT_ITEMS_PER_READ)) {
-          this.maintenanceEnqueue({
+          featureMint({
             reason: "file_parked",
             text: `article '${a.slug}' \u2014 owned file ${p.path} is absent from the working tree but ALIVE on '${p.ref}'. INFORMATIONAL: no reconcile is owed and the article is correct as written. DO NOT DROP ${p.path} FROM THIS ARTICLE'S files[] \u2014 the path becomes valid again when that branch merges. This item closes when the branch lands (the merge gate sweeps it), not by a write.`,
             file_keys: [p.path],
@@ -32113,7 +32120,7 @@ var SterlingTools = class _SterlingTools {
             }
           }
           const flagged = [.../* @__PURE__ */ new Set([...unverifiedPaths, ...unreached.map((v) => v.path), ...looksWired.map((v) => v.path)])];
-          this.maintenanceEnqueue({
+          featureMint({
             reason: "state_review",
             text: `review article '${a.slug}' metadata against reality: ${reasons.join("; and ")}. Check the prose against the code before changing anything \u2014 in the reported case every acceptance criterion HELD and only the metadata was wrong, so the fix was a state change and a files[] role pass, not a rewrite. Then ${steps.length ? steps.join("; then ") : "knowledge_update the state"}` + (unverifiedPaths.length ? `, and clear each unverified flag once its role is written from the file \u2014 one targeted call per path, never a whole-array files[] update: ` + unverifiedPaths.map((p) => `knowledge_edit(id: '${a.id}', field: 'files[path=${p}].unverified', find: 'true', replace: 'false')`).join("; ") : "") + `.`,
             file_keys: flagged.length ? flagged : files.map((f) => f.path).slice(0, DRIFT_ITEMS_PER_READ),
@@ -32121,11 +32128,12 @@ var SterlingTools = class _SterlingTools {
           });
         }
       }
+      const mintNote = featureMintFailed ? { maintenance_mint_failed: featureMintFailed } : {};
       const basis = record2.basis;
       if ((basis === "platform" || basis === "external") && ageDays(record2.updated_at) > this.config.staleness.platform_external_days) {
-        return { ...record2, verify_before_use: true };
+        return { ...record2, verify_before_use: true, ...mintNote };
       }
-      return record2;
+      return featureMintFailed ? { ...record2, ...mintNote } : record2;
     });
   }
   /**
