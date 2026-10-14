@@ -375,6 +375,10 @@ test('H1 clone-currency signal (the gap decision foreign_be9168e8 parked): a con
     assert.match(behind.systemMessage, /sterling-update\.bat/);
     assert.match(behind.hookSpecificOutput.additionalContext, /STERLING CLONE IS BEHIND \(H1\)/, 'the conductor is told');
     assert.ok(existsSync(join(clone, '.git', 'sterling-update-check.json')), 'the fetch throttle is stamped');
+    assert.match(behind.hookSpecificOutput.additionalContext, /Consumer machines update through the plugin/, 'a consumer on a clone is told the plugin is the update path');
+    assert.match(behind.hookSpecificOutput.additionalContext, /claude plugin marketplace add Chulf58\/sterling/, 'the cutover names the marketplace add');
+    assert.match(behind.hookSpecificOutput.additionalContext, /claude plugin install sterling@sterling/, 'the cutover names the plugin install');
+    assert.match(behind.hookSpecificOutput.additionalContext, /without --plugin-dir/, 'the cutover names dropping --plugin-dir');
 
     // fast-forward the clone → silent IMMEDIATELY: behind is computed locally
     // per session, never served from the cache
@@ -393,6 +397,62 @@ test('H1 clone-currency signal (the gap decision foreign_be9168e8 parked): a con
     writeFileSync(join(clone, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'authoring' }));
     const authoring = JSON.parse(runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
     assert.doesNotMatch(authoring.systemMessage, /behind/, 'authoring machines opt out via their declared role');
+  } finally {
+    cleanup();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('H1 clone-currency signal (GitHub #91): a plugin-installed copy that carries a .git is never probed — no fetch, no stamp, no behind message', () => {
+  const { dir, cleanup } = makeProject();
+  const base = mkdtempSync(join(tmpdir(), 'sterling-currency-installed-'));
+  const sh = (cwd, args) => {
+    const r = spawnSync('git', ['-c', 'user.email=t@sterling.test', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  };
+  try {
+    const origin = join(base, 'origin.git');
+    const author = join(base, 'author');
+    const fakeHome = join(base, 'home');
+    // the Claude Code plugin cache: <CLAUDE_CONFIG_DIR>/plugins/cache/<marketplace>/<plugin>/<version>
+    const installed = join(fakeHome, '.claude', 'plugins', 'cache', 'sterling', 'sterling', '0.0.0');
+    mkdirSync(author);
+    mkdirSync(dirname(installed), { recursive: true });
+    sh(base, ['init', '--bare', '--initial-branch=main', origin]);
+    sh(base, ['init', '--initial-branch=main', author]);
+    writeFileSync(join(author, 'f.txt'), 'v1\n');
+    sh(author, ['add', '-A']);
+    sh(author, ['commit', '-m', 'one']);
+    sh(author, ['remote', 'add', 'origin', origin]);
+    sh(author, ['push', '-u', 'origin', 'main']);
+    sh(base, ['clone', origin, installed]);
+    writeFileSync(join(author, 'f.txt'), 'v2\n');
+    sh(author, ['add', '-A']);
+    sh(author, ['commit', '-m', 'two']);
+    sh(author, ['push']);
+
+    // HOME/USERPROFILE/CLAUDE_CONFIG_DIR/XDG_CACHE_HOME point every install-root
+    // lookup at the fake home. OPENCODE and OPENCODE_SESSION_ID are cleared so a
+    // run inside OpenCode cannot change host detection (knowledge hazard ddf7ad45).
+    const env = {
+      NO_COLOR: '1',
+      STERLING_PLUGIN_ROOT: installed,
+      STERLING_CURRENCY_DISABLE: '0',
+      STERLING_CURRENCY_TTL_MS: '0',
+      HOME: fakeHome,
+      USERPROFILE: fakeHome,
+      CLAUDE_CONFIG_DIR: join(fakeHome, '.claude'),
+      XDG_CACHE_HOME: join(fakeHome, '.cache'),
+      OPENCODE: undefined,
+      OPENCODE_SESSION_ID: undefined,
+    };
+    const r = runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env);
+    assert.equal(r.code, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.equal(typeof out.systemMessage, 'string', 'H1 ran and rendered (non-vacuity)');
+    assert.doesNotMatch(out.systemMessage, /behind/, 'an installed copy gets no behind warning for the human');
+    assert.doesNotMatch(out.hookSpecificOutput.additionalContext, /STERLING CLONE IS BEHIND/, 'nor for the conductor');
+    assert.ok(!existsSync(join(installed, '.git', 'sterling-update-check.json')), 'no fetch throttle stamp on an installed copy');
   } finally {
     cleanup();
     rmSync(base, { recursive: true, force: true });

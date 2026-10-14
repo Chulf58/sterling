@@ -4290,7 +4290,9 @@ export class SterlingTools {
   }
 
   /**
-   * A READ-TIME MINT (stale_research, refresh_reference): never throws and never
+   * A READ-TIME MINT (stale_research, refresh_reference, and the feature_article
+   * drift arm's reconcile_needed, deletion_candidate, file_parked and
+   * state_review, GitHub #92): never throws and never
    * pays for a no-op. The contract on maintenanceEnqueue is that a mint must not
    * make a READ throw, but the write itself can be refused (live schema version
    * drift, a locked database), so the refusal is caught and RETURNED for the
@@ -4427,6 +4429,18 @@ export class SterlingTools {
       // article's updated_at, or missing from disk (deletion is drift), flags
       // the article and enqueues ONE reconcile_needed item (same feature_link
       // dedup as H7 — one drain surface regardless of trigger).
+      // The feature_article arm's mints go through mintAtRead like every other
+      // read-time mint (GitHub #92): a direct maintenanceEnqueue let a busy write
+      // lock (StoreBusyError) escape and fail the whole read. The arm can mint
+      // several items; each is still attempted, and the FIRST refusal is the one
+      // disclosed on the record (and so on the envelope).
+      let featureMintFailed: MintFailure | undefined;
+      const featureMint = (args: { reason: string; text: string; file_keys?: string[]; feature_link?: string }) => {
+        // Call first, then keep: `featureMintFailed ??= this.mintAtRead(args)`
+        // would skip every mint after the first refusal.
+        const failed = this.mintAtRead(args);
+        featureMintFailed ??= failed;
+      };
       if (record.type === 'feature_article' && this.repoRoot) {
         const a = record as unknown as {
           id: string;
@@ -4519,7 +4533,9 @@ export class SterlingTools {
           // point's fold keeps it, just inside the same item — and doing a
           // pre-check here as well as in the store would put the dedup rule
           // in two places, which is how the four copies drifted apart to
-          // begin with.
+          // begin with. (mintAtRead's store precheck, enqueueWouldBeNoop,
+          // always answers false for this lane, so every such read still
+          // takes the write path.)
           for (const d of drifts.slice(0, DRIFT_ITEMS_PER_READ)) {
             // If the article's OWN role text disclaims the path, say so on the
             // item (board b7269100). Otherwise this exact no-op gets re-audited
@@ -4542,7 +4558,7 @@ export class SterlingTools {
             // normal, closeable editorial fact, and the latter's probe proved
             // nothing, so it must not be read as the stronger verdict.
             const deletionCandidate = d.missing && d.neverTracked;
-            this.maintenanceEnqueue({
+            featureMint({
               reason: deletionCandidate ? 'deletion_candidate' : 'reconcile_needed',
               text:
                 (d.missing
@@ -4569,7 +4585,7 @@ export class SterlingTools {
             const overflowDeletions = overflow.filter((d) => d.missing && d.neverTracked);
             const overflowReconciles = overflow.filter((d) => !(d.missing && d.neverTracked));
             if (overflowReconciles.length) {
-              this.maintenanceEnqueue({
+              featureMint({
                 reason: 'reconcile_needed',
                 text:
                   `reconcile article '${a.slug}' — ${overflowReconciles.length} owned files drifted in one read beyond the first ${DRIFT_ITEMS_PER_READ} (which have their own items); the remainder (${overflowReconciles
@@ -4580,7 +4596,7 @@ export class SterlingTools {
               });
             }
             if (overflowDeletions.length) {
-              this.maintenanceEnqueue({
+              featureMint({
                 reason: 'deletion_candidate',
                 text:
                   `article '${a.slug}' — ${overflowDeletions.length} owned files beyond the first ${DRIFT_ITEMS_PER_READ} are DELETION CANDIDATES: never tracked on any git ref this repo can reach (${overflowDeletions
@@ -4591,7 +4607,7 @@ export class SterlingTools {
               });
             }
           }
-          return { ...record, verify_before_use: true };
+          return { ...record, verify_before_use: true, ...(featureMintFailed ? { maintenance_mint_failed: featureMintFailed } : {}) };
         }
         // A PARKED file is recorded once and does NOT raise verify_before_use:
         // the article's claims are accurate, the path is simply not in this
@@ -4601,7 +4617,7 @@ export class SterlingTools {
         // scoped to the two drift lanes — because no article write changes
         // where the file lives.
         for (const p of parkedFiles.slice(0, DRIFT_ITEMS_PER_READ)) {
-          this.maintenanceEnqueue({
+          featureMint({
             reason: 'file_parked',
             text:
               `article '${a.slug}' — owned file ${p.path} is absent from the working tree but ALIVE on '${p.ref}'. ` +
@@ -4713,7 +4729,7 @@ export class SterlingTools {
             }
           }
           const flagged = [...new Set([...unverifiedPaths, ...unreached.map((v) => v.path), ...looksWired.map((v) => v.path)])];
-          this.maintenanceEnqueue({
+          featureMint({
             reason: 'state_review',
             text:
               `review article '${a.slug}' metadata against reality: ${reasons.join('; and ')}. ` +
@@ -4729,11 +4745,12 @@ export class SterlingTools {
           });
         }
       }
+      const mintNote = featureMintFailed ? { maintenance_mint_failed: featureMintFailed } : {};
       const basis = (record as unknown as { basis?: string }).basis;
       if ((basis === 'platform' || basis === 'external') && ageDays(record.updated_at) > this.config.staleness.platform_external_days) {
-        return { ...record, verify_before_use: true };
+        return { ...record, verify_before_use: true, ...mintNote };
       }
-      return record;
+      return featureMintFailed ? { ...record, ...mintNote } : record;
     });
   }
 

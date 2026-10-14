@@ -15525,7 +15525,7 @@ var currencyContext = "";
 try {
   const root = process.env.STERLING_CURRENCY_DISABLE === "1" ? null : pluginRoot2();
   const gitDir = root ? join32(root, ".git") : null;
-  if (gitDir && existsSync19(gitDir) && statSync8(gitDir).isDirectory()) {
+  if (gitDir && existsSync19(gitDir) && statSync8(gitDir).isDirectory() && !isInstalledCopy(root)) {
     let role = null;
     try {
       role = JSON.parse(readFileSync20(join32(root, ".sterling", "config.json"), "utf8")).machine_role;
@@ -15559,7 +15559,7 @@ try {
           currencyWarning = `\u26A0 Sterling is ${behind} update(s) behind \u2014 double-click sterling-update.bat (or run /sterling:update), then restart the session. A /clear is NOT enough \u2014 MCP servers survive it, so EXIT AND RELAUNCH the Claude Code CLI. `;
           currencyContext = `
 
-STERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch. Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it \u2014 fast-forward-or-refuse), and remind them a session RESTART follows a successful update \u2014 that means EXIT AND RELAUNCH the Claude Code CLI, since a /clear alone does not reload the server/hook code.`;
+STERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch. Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it \u2014 fast-forward-or-refuse), and remind them a session RESTART follows a successful update \u2014 that means EXIT AND RELAUNCH the Claude Code CLI, since a /clear alone does not reload the server/hook code. Consumer machines update through the plugin instead: to leave the clone, run \`claude plugin marketplace add Chulf58/sterling\` and \`claude plugin install sterling@sterling\`, then start \`claude\` without --plugin-dir and run /sterling:init.`;
         }
       }
     }

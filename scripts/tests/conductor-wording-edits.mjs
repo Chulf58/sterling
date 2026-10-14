@@ -186,6 +186,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'With neither available, say so and proceed. Agree',
     after: 'With neither available, say so and proceed. A dropped `codex` server counts as unavailable only after the reconnect-and-retry step in the Sol review paragraph above. Agree',
   },
+  {
+    commit: 'GitHub #90',
+    date: '2026-10-14',
+    reason: 'every codex call passes features.view_image=false, because an image result can push one MCP message past Claude Code\'s 16 MB stdio limit and Claude Code then drops the server for the rest of the session (GitHub issue #90; measured on codex-cli 0.153.4: tools.view_image does not remove the tool)',
+    before: '(GitHub issue #87; finding `why-do-the-codex-mcp-tools-vanish-for-the-rest-of-a-claude-c`). A practice, not a hook',
+    after: '(GitHub issues #87 and #90; finding `why-do-the-codex-mcp-tools-vanish-for-the-rest-of-a-claude-c`). Every `codex` call also passes `config: {features: {view_image: false}}`, because an image result can push one MCP message past Claude Code\'s 16 MB stdio limit, and Claude Code then drops the server for the rest of the session (GitHub issue #90); `tools.view_image` does not remove the tool on 0.153.4. A practice, not a hook',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
