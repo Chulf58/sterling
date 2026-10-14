@@ -17,6 +17,16 @@
 // Plus the type-word rule in lib/checks.mjs: board/todo/maintenance ids are
 // NOT required to resolve, because those records are removed when drained (P4).
 //
+// SLUG citations (rule 5 of decision c6985ed4; grammar in
+// lib/checks.mjs collectSlugCitations) resolve the same way, cross-store and at
+// any status, but a dangling slug is a WARNING that leaves the exit code alone
+// while SLUG_CITATIONS_FAIL below is false. User-ruled 2026-10-14 ("Build it
+// warn-only now"): the store forked on 2026-09-21 and about 216 cited records
+// live only in the hobby computer's store until it is imported (board
+// 907216e6). THE SWITCH: once that import lands and the warnings are cleared,
+// set SLUG_CITATIONS_FAIL = true; dangling slugs then fail the check exactly
+// like dangling ids. Nothing else changes.
+//
 // Outside an initialized project (no store) — and inside one whose PROJECT store
 // holds no records at all, the consumer-clone shape — this is a loud no-op pass:
 // the same shape as check-projection-fresh, whose store-reading pattern this mirrors.
@@ -29,6 +39,8 @@ import { buildResolver } from './lib/citations.mjs';
 import { nonAuthoringSelfRoot } from './lib/self-root-role.mjs';
 import {
   lintRecordCitations,
+  lintSlugCitations,
+  collectSlugCitations,
   lintCitationCurrency,
   UNCITED_RECORD_WORDS,
   CITATION_OPT_OUT,
@@ -39,6 +51,12 @@ import {
 // below it, and the bin/ bundle rewrites import.meta.url to this source's path.
 const selfRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const root = process.argv[2] ?? selfRoot;
+
+// The one switch for slug citations (see the header): false = report dangling
+// slugs as warnings, exit code unaffected; true = they fail like dangling ids.
+const SLUG_CITATIONS_FAIL = false;
+// How many slug warnings are printed; the full count is always reported.
+const SLUG_WARNING_PRINT_CAP = 50;
 const storePath = join(root, '.sterling', 'sterling.db');
 
 if (!existsSync(storePath)) {
@@ -98,7 +116,7 @@ try {
   store.close();
   throw e;
 }
-const { resolve, getById, size: indexSize } = resolver;
+const { resolve, resolveSlug, getById, size: indexSize } = resolver;
 
 const tracked = spawnSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', timeout: 60_000 });
 if (tracked.status !== 0) {
@@ -121,6 +139,8 @@ const violations = [];
 // see lib/checks.mjs for the full rationale. Never affects the exit code below.
 const currencyWarnings = [];
 let citations = 0;
+let slugCitations = 0;
+const slugWarnings = [];
 let optOuts = 0;
 for (const file of files) {
   const abs = join(root, file);
@@ -134,9 +154,29 @@ for (const file of files) {
     return resolve(id);
   });
   violations.push(...found);
+  slugCitations += collectSlugCitations(content).length;
+  slugWarnings.push(...lintSlugCitations(content, file, resolveSlug));
   currencyWarnings.push(...lintCitationCurrency(content, file, resolve, getById));
 }
 store.close();
+
+if (SLUG_CITATIONS_FAIL) violations.push(...slugWarnings);
+const slugResolved = slugCitations - slugWarnings.length;
+const slugDistinct = new Set(slugWarnings.map((w) => w.slug)).size;
+const slugSummary = SLUG_CITATIONS_FAIL
+  ? `${slugResolved} slug citation(s) resolve`
+  : `${slugResolved} slug citation(s) resolve, ${slugWarnings.length} dangling slug citation(s) (${slugDistinct} distinct slugs) WARN ONLY`;
+
+function printSlugWarnings() {
+  if (SLUG_CITATIONS_FAIL || slugWarnings.length === 0) return;
+  console.log(
+    `record citations: ${slugWarnings.length} slug citation(s) (${slugDistinct} distinct slugs) resolve to no record — WARN ONLY, exit code unaffected (SLUG_CITATIONS_FAIL=false):`
+  );
+  for (const w of slugWarnings.slice(0, SLUG_WARNING_PRINT_CAP)) console.log(`  [${w.kind}] ${w.detail}`);
+  if (slugWarnings.length > SLUG_WARNING_PRINT_CAP) {
+    console.log(`  ... and ${slugWarnings.length - SLUG_WARNING_PRINT_CAP} more`);
+  }
+}
 
 function printCurrencyWarnings() {
   if (currencyWarnings.length === 0) return;
@@ -181,10 +221,8 @@ if (violations.length > 0 && relaxed) {
     "  This is Sterling's own tree on a machine that did not mint the ids it cites. On the authoring machine, declare machine_role 'authoring' in .sterling/config.json, where these must resolve."
   );
   printCurrencyWarnings();
-  process.exit(0);
-}
-
-if (violations.length > 0 && authority === 'secondary') {
+  printSlugWarnings();
+} else if (violations.length > 0 && authority === 'secondary') {
   console.log(
     `record citations: ${violations.length} citation(s) do not resolve — REPORTED, NOT FAILED (store_authority='secondary'):`
   );
@@ -193,24 +231,27 @@ if (violations.length > 0 && authority === 'secondary') {
     "  This store did not mint the ids the tree cites, so a dangling id here is expected rather than a defect — and by the same token a citation written HERE is unchecked. On the store that mints them, leave store_authority='primary' (the default), where these must resolve."
   );
   printCurrencyWarnings();
-  process.exit(0);
-}
-
-if (violations.length > 0) {
+  printSlugWarnings();
+} else if (violations.length > 0) {
   console.error(`record citations FAILED: ${violations.length} citation(s) do not resolve:`);
   for (const v of violations) console.error(`  [${v.kind}] ${v.detail}`);
   console.error(
     '  Fix the citation to name a record that exists in this store (an id from another machine is the usual cause), or drop the id.'
   );
   printCurrencyWarnings();
-  process.exit(1);
+  printSlugWarnings();
+  // exitCode, not exit(): the warning list can be long, and exit() right after
+  // console.log to a pipe can cut the output short.
+  process.exitCode = 1;
+} else {
+  printCurrencyWarnings();
+  console.log(
+    `record citations: ok (${citations} citation(s) in ${files.length} file(s) resolve against ${indexSize} records; ` +
+      `${slugSummary}; ` +
+      `${optOuts} line(s) opted out via '${CITATION_OPT_OUT}'; ` +
+      `store_authority=${authority}; ` +
+      `${currencyWarnings.length} currency warning(s) on pointer surfaces (superseded citation still resolving elsewhere); ` +
+      `${UNCITED_RECORD_WORDS.join('/')} ids excluded by design — those records are removed when drained)`
+  );
+  printSlugWarnings();
 }
-
-printCurrencyWarnings();
-console.log(
-  `record citations: ok (${citations} citation(s) in ${files.length} file(s) resolve against ${indexSize} records; ` +
-    `${optOuts} line(s) opted out via '${CITATION_OPT_OUT}'; ` +
-    `store_authority=${authority}; ` +
-    `${currencyWarnings.length} currency warning(s) on pointer surfaces (superseded citation still resolving elsewhere); ` +
-    `${UNCITED_RECORD_WORDS.join('/')} ids excluded by design — those records are removed when drained)`
-);
