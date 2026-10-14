@@ -2,7 +2,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -18,6 +18,9 @@ import {
   isPointerSurface,
   resolveSupersessionHead,
   lintCitationCurrency,
+  collectSlugCitations,
+  lintSlugCitations,
+  countCitationOptOuts,
 } from '../lib/checks.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -134,6 +137,89 @@ test('citation lint: fails on nothing, passes on a TOMBSTONE, flags an ambiguous
   const dangling = lintRecordCitations('decision deadbeef', 'y.mjs', () => undefined); // not-a-citation: fixture
   assert.deepEqual(dangling.map((v) => v.kind), ['citation_unresolved']);
   assert.match(dangling[0].detail, /y\.mjs:1/);
+});
+
+// -- SLUG citations (rule 5 of decision c6985ed4) ------------
+// Fixture slugs are built by concatenation ('decision ' + S4) so this file's own
+// source never puts a slug right after a record word: the live check scans it.
+const S4 = 'alpha-beta-gamma-delta'; // a fixture slug with 3 hyphens
+const slugsOf = (text) => collectSlugCitations(text).map((c) => [c.word, c.slug]);
+
+test('slug grammar: a hyphenated slug right after a durable record word is a citation, in every separator form', () => {
+  for (const sep of [' ', ' `', " '", ' "', ' [', '  ']) {
+    assert.deepEqual(slugsOf('see decision' + sep + S4 + ' for it'), [['decision', S4]], JSON.stringify(sep));
+  }
+  // sentence punctuation after the slug still ends it
+  for (const tail of ['.', ',', ';', ')', '`', "'", ']', ':', '']) {
+    assert.deepEqual(slugsOf('finding ' + S4 + tail), [['finding', S4]], JSON.stringify(tail));
+  }
+  assert.deepEqual(slugsOf('Decision ' + S4), [['Decision', S4]], 'the record word is case-insensitive');
+  assert.equal(collectSlugCitations('x\ny\nanti_pattern ' + S4)[0].line, 3);
+});
+
+test('slug grammar: each measured prose class is rejected', () => {
+  // 1-2 hyphens: prose ('in-session', 'user-ruled') and dates
+  assert.deepEqual(slugsOf('a decision ' + 'user-ruled' + ' today'), []);
+  assert.deepEqual(slugsOf('the finding ' + 'alpha-beta-gamma' + ' holds'), [], 'two hyphens is below the floor');
+  assert.deepEqual(slugsOf('decision ' + '2026-09-06'), [], 'a date');
+  assert.deepEqual(slugsOf('decision ' + '2026-09-06-10'), [], 'digits only, no letter');
+  // hyphen glued to the record word: 'decision-making'
+  assert.deepEqual(slugsOf('decision' + '-making-is-hard-here'), []);
+  // mixed case: the token continues past the lowercase part
+  assert.deepEqual(slugsOf('finding ' + 'GitHub-source-install-copies'), []);
+  assert.deepEqual(slugsOf('finding ' + 'plugin-github-Source-install'), []);
+  // the '(slug' fixture form
+  assert.deepEqual(slugsOf('decision (' + S4), []);
+  // part of a path or file name
+  assert.deepEqual(slugsOf('article ' + S4 + '/index.ts'), []);
+  assert.deepEqual(slugsOf('article ' + S4 + '.mjs'), []);
+  assert.deepEqual(slugsOf('article ' + S4 + '_x'), []);
+  // not adjacent: a slug later in the window is prose, unlike an id
+  assert.deepEqual(slugsOf('decision about ' + S4), []);
+  // id-shaped tokens belong to the id grammar: a full uuid, and an 8-hex id
+  // followed by a hyphenated tail (ID_TOKEN claims the 8 hex chars)
+  const uuid = 'c6985ed4' + '-c1ec-48dd-ab6d-dd643a63cdca';
+  assert.deepEqual(slugsOf('decision ' + uuid), []);
+  assert.deepEqual(collectRecordCitations('decision ' + uuid).map((c) => c.id), [uuid]);
+  assert.deepEqual(slugsOf('decision ' + 'c6985ed4' + '-and-more-words'), []);
+  assert.deepEqual(collectRecordCitations('decision ' + 'c6985ed4' + '-and-more-words').map((c) => c.id), ['c6985ed4']);
+  assert.deepEqual(slugsOf('decision ' + 'c6985ed' + '-and-more-words'), [['decision', 'c6985ed-and-more-words']], 'seven hex chars is not an id');
+});
+
+test('slug grammar: the nearest preceding record word owns the slug; board/todo words claim theirs', () => {
+  assert.deepEqual(slugsOf('board ' + S4), [], 'a board slug is not required to resolve');
+  assert.deepEqual(slugsOf('todo ' + S4), []);
+  assert.deepEqual(slugsOf('decision board ' + S4), [], 'board, not decision, is the nearest word');
+  assert.deepEqual(slugsOf('board item, then finding ' + S4), [['finding', S4]]);
+  assert.deepEqual(
+    slugsOf('decision ' + S4 + ' and anti_pattern ' + 'one-two-three-four'),
+    [['decision', S4], ['anti_pattern', 'one-two-three-four']]
+  );
+});
+
+test('slug lint: resolving slug passes, dangling slug warns, a wrapped slug is reported cut off, opt-out is counted', () => {
+  const asked = [];
+  const resolveSlug = (s) => {
+    asked.push(s);
+    return s === S4;
+  };
+  assert.deepEqual(lintSlugCitations('decision ' + S4, 'a.mjs', resolveSlug), []);
+  const dangling = lintSlugCitations('x\ndecision ' + 'no-such-record-here', 'b.mjs', resolveSlug);
+  assert.deepEqual(dangling.map((w) => [w.kind, w.slug]), [['citation_slug_unresolved', 'no-such-record-here']]);
+  assert.match(dangling[0].detail, /^b\.mjs:2: /);
+
+  // wrapped mid-slug at a line end: reported as cut off, never resolved
+  asked.length = 0;
+  const cut = lintSlugCitations('// decision ' + 'alpha-beta-gamma-delta-' + '\n// epsilon', 'c.mjs', resolveSlug);
+  assert.deepEqual(cut.map((w) => [w.kind, w.slug]), [['citation_slug_cut_off', S4 + '-']]);
+  assert.deepEqual(asked, [], 'a cut-off slug is never looked up');
+  assert.deepEqual(lintSlugCitations('decision ' + S4 + '- then', 'd.mjs', resolveSlug), [], 'a trailing hyphen mid-line is not a wrap');
+
+  // the line opt-out silences it and is counted as a suppressing line
+  const optedOut = 'decision ' + 'no-such-record-here' + ' // ' + 'not-a-' + 'citation';
+  assert.deepEqual(lintSlugCitations(optedOut, 'e.mjs', resolveSlug), []);
+  assert.equal(countCitationOptOuts(optedOut + '\nplain line\n'), 1);
+  assert.equal(countCitationOptOuts('mentions ' + 'not-a-' + 'citation' + ' only\n'), 0, 'a bare marker mention is not counted');
 });
 
 // -- record-id citation CURRENCY (board 9d0fb893) ---------------------------
@@ -314,6 +400,101 @@ test('check-record-citations: a stale id on a POINTER SURFACE warns without fail
     assert.match(r.stdout, /CLAUDE\.md/);
     assert.ok(r.stdout.includes(head.id), 'the warning names the live head by full id');
     assert.ok(!/src\.mjs.*citation_stale/.test(r.stdout), 'the non-pointer citation of the same id is silent');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('check-record-citations: slugs resolve across MOUNTED stores and at ANY status; a dangling slug warns without failing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-citations-slugs-'));
+  try {
+    const NOW = '2026-06-10T12:00:00.000Z';
+    const decision = (slug, scope = 'project') => ({
+      id: randomUUID(), type: 'decision', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active',
+      superseded_by: null, links: [], scope, stack_tags: [],
+      title: 't', statement: 's', alternatives_rejected: [], rationale: 'r', file_keys: [],
+      ...(slug ? { slug } : {}),
+    });
+    const ACTIVE = 'fixture-active-slug-record';
+    const TOMB = 'fixture-tombstone-only-slug';
+    const DOMAIN = 'fixture-domain-held-slug';
+    const DANGLING = 'fixture-slug-nobody-holds';
+
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(
+      join(dir, '.sterling', 'config.json'),
+      JSON.stringify({ stack_tags: ['fixturedomain'], domain_paths: { fixturedomain: join(dir, 'domain.db') } })
+    );
+    const project = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const activeRec = decision(ACTIVE);
+    project.create(activeRec);
+    const old = decision(TOMB);
+    project.create(old);
+    // the successor carries NO slug, so only the tombstone holds TOMB: the
+    // citation must resolve through supersededRecordsBySlug alone
+    project.supersede(old.id, { ...decision(undefined), updated_at: '2026-06-10T13:00:00.000Z' });
+    project.close();
+    const domain = new SterlingStore(join(dir, 'domain.db'));
+    domain.create(decision(DOMAIN, 'domain:fixturedomain'));
+    domain.close();
+
+    const write = (body) => writeFileSync(join(dir, 'src.mjs'), body);
+    const run = () =>
+      spawnSync(process.execPath, [join(root, 'scripts', 'check-record-citations.mjs'), dir], {
+        encoding: 'utf8', cwd: dir, timeout: 120_000,
+      });
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+
+    write(['active', ACTIVE, 'tombstone', TOMB, 'domain', DOMAIN].reduce(
+      (acc, v, i, a) => (i % 2 ? acc + `// decision \`${v}\` (${a[i - 1]})\n` : acc), ''
+    ));
+    spawnSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8' });
+    const clean = run();
+    assert.equal(clean.status, 0, `${clean.stdout}${clean.stderr}`);
+    assert.match(clean.stdout, /3 slug citation\(s\) resolve, 0 dangling slug citation\(s\)/);
+    assert.doesNotMatch(clean.stdout, /citation_slug_unresolved/);
+
+    write(`// decision ${ACTIVE}\n// finding ${DANGLING}\n// finding ${DANGLING} again\n`);
+    spawnSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8' });
+    const dirty = run();
+    assert.equal(dirty.status, 0, 'a dangling slug is a WARNING while SLUG_CITATIONS_FAIL is false');
+    assert.match(dirty.stdout, /1 slug citation\(s\) resolve, 2 dangling slug citation\(s\) \(1 distinct slugs\) WARN ONLY/);
+    assert.match(dirty.stdout, new RegExp(`\\[citation_slug_unresolved\\] src\\.mjs:2: 'finding ${DANGLING}'`));
+    assert.match(dirty.stdout, /src\.mjs:3: /);
+
+    // A full-uuid id citation (and an id followed by a hyphenated tail) is the
+    // id grammar's, never a slug: no slug warning in warn mode, and no failure
+    // with the switch flipped. Fail mode runs the self-contained bin bundle
+    // with SLUG_CITATIONS_FAIL rewritten to true, from its own temp dir so the
+    // checked root is not the bundle's self-root (which machine_role relaxes).
+    write(`// decision ${activeRec.id}\n// decision ${activeRec.id.slice(0, 8)}-then-more-prose\n`);
+    spawnSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8' });
+    const warnMode = run();
+    assert.equal(warnMode.status, 0, `${warnMode.stdout}${warnMode.stderr}`);
+    assert.match(warnMode.stdout, /2 citation\(s\) in .* 0 slug citation\(s\) resolve, 0 dangling slug citation\(s\)/);
+
+    const binDir = mkdtempSync(join(tmpdir(), 'sterling-citations-failmode-'));
+    try {
+      mkdirSync(join(binDir, 'bin'));
+      const bundle = readFileSync(join(root, 'bin', 'check-record-citations.mjs'), 'utf8');
+      const flipped = bundle.replace('var SLUG_CITATIONS_FAIL = false;', 'var SLUG_CITATIONS_FAIL = true;');
+      assert.notEqual(flipped, bundle, 'the bundle carries the switch');
+      writeFileSync(join(binDir, 'bin', 'check-record-citations.mjs'), flipped);
+      const runFail = () =>
+        spawnSync(process.execPath, [join(binDir, 'bin', 'check-record-citations.mjs'), dir], {
+          encoding: 'utf8', cwd: dir, timeout: 120_000,
+        });
+      const failMode = runFail();
+      assert.equal(failMode.status, 0, `a uuid citation must not fail in fail mode: ${failMode.stdout}${failMode.stderr}`);
+      // ... and the flip is real: a dangling slug does fail in this mode
+      write(`// finding ${DANGLING}\n`);
+      spawnSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8' });
+      const failDangling = runFail();
+      assert.equal(failDangling.status, 1, `${failDangling.stdout}${failDangling.stderr}`);
+      assert.match(failDangling.stderr, /citation_slug_unresolved/);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

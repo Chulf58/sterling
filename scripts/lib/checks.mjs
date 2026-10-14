@@ -391,12 +391,107 @@ export function collectRecordCitations(content) {
   return found;
 }
 
-/** Lines that actually SUPPRESS a citation: the marker plus an id-shaped token.
- *  Counting bare marker mentions (this file's own constant, prose about the
- *  mechanism) would inflate the number the check reports as its bypass tally. */
+// -- SLUG citations (rule 5 of decision c6985ed4) ------------
+// Rulings are cited by slug as often as by id ('decision `every-user-ask-...`').
+// The grammar was set by measuring the tree on 2026-10-14 (1,092 candidate
+// tokens after a durable record word in authored source), and each restriction
+// below drops a prose class seen there:
+//   - the slug sits RIGHT AFTER the record word, separated only by 1-3 of
+//     space, backtick, quote or '['. Adjacency, not the id window: a hyphenated
+//     word somewhere later on the line is prose far more often than a citation.
+//     Adjacency also settles ownership: the nearest preceding record word is the
+//     one in front of the slug, so 'board some-item-slug-here' stays a board
+//     citation and is not checked (rule 1), exactly as for ids;
+//   - '(' is NOT a separator: '(slug' was only seen in test fixtures (11);
+//   - at least THREE hyphens: 1-2 hyphen tokens were overwhelmingly prose
+//     ('in-session', 'user-ruled', 'anti-pattern' — 101 seen) and dates
+//     ('2026-09-06'). A short real slug is therefore not checked; that is the
+//     price of not crying wolf;
+//   - lowercase letters, digits and hyphens only, with at least one letter, and
+//     the token must END there: a following letter of either case, digit, '_',
+//     '-' or '/', or a '.' that continues a word, means the token is part of
+//     something else (mixed-case prose such as 'GitHub-source', a path, a file
+//     name), so it is not a citation at all;
+//   - a token whose first segment is 8 hex chars belongs to the id grammar
+//     (a full uuid, or an 8-char id that ID_TOKEN matches up to the hyphen),
+//     so it is never also read as a slug.
+// One exception to "must END there": a slug whose line ends in a hyphen was
+// wrapped mid-slug (229 hits, 100 distinct, all comment or markdown wraps). It is still a
+// citation, but as written it names no slug — markdown joins the lines with a
+// space and grep cannot find it — so it is reported as cut off, never resolved.
+// The 'not-a-citation' line opt-out applies unchanged.
+const SLUG_MIN_HYPHENS = 3;
+// Built per call (cheap) rather than at module load, so the many bundles that
+// inline checks.mjs for other exports do not carry it.
+const slugAfterWord = () =>
+  new RegExp(
+    `[ \\t\`'"\\[]{1,3}([a-z0-9]+(?:-[a-z0-9]+){${SLUG_MIN_HYPHENS},})(-(?=\\r?\\n|$))?(?![A-Za-z0-9_\\-/]|\\.[A-Za-z0-9])`,
+    'y'
+  );
+
+/** Every {word, slug, line, cutOff} slug citation in one file's content. With
+ *  `includeOptedOut` the opt-out marker is ignored (used only to count the
+ *  lines it suppresses). */
+export function collectSlugCitations(content, { includeOptedOut = false } = {}) {
+  // Only the durable words are searched: adjacency already makes the word in
+  // front of the slug its owner, so a board/todo word never needs to claim one.
+  const citedWords = new RegExp(`\\b(${CITED_RECORD_WORDS.join('|')})\\b`, 'gi');
+  const SLUG_AFTER_WORD = slugAfterWord();
+  const found = [];
+  for (const m of content.matchAll(citedWords)) {
+    SLUG_AFTER_WORD.lastIndex = m.index + m[0].length;
+    const s = SLUG_AFTER_WORD.exec(content);
+    if (!s || !/[a-z]/.test(s[1])) continue;
+    // A token opening with 8 hex chars and a hyphen is the ID grammar's: a full
+    // uuid, or an id prefix ID_TOKEN already claims at that hyphen's \b.
+    if (/^[0-9a-f]{8}-/.test(s[1])) continue;
+    const lineStart = content.lastIndexOf('\n', m.index) + 1;
+    const lineEnd = content.indexOf('\n', m.index);
+    const lineText = content.slice(lineStart, lineEnd === -1 ? content.length : lineEnd);
+    if (!includeOptedOut && lineText.includes(CITATION_OPT_OUT)) continue;
+    found.push({ word: m[0], slug: s[1], cutOff: Boolean(s[2]), line: content.slice(0, m.index).split('\n').length });
+  }
+  return found;
+}
+
+/** Warnings for one file's dangling slug citations. `resolveSlug(slug)` is
+ *  truthy when any record in any mounted store carries the slug, at any status
+ *  (rule 3). Slugs have no ambiguity case: a supersession chain legitimately
+ *  shares one slug, and the store refuses two live records under one. */
+export function lintSlugCitations(content, label, resolveSlug) {
+  const out = [];
+  for (const c of collectSlugCitations(content)) {
+    if (c.cutOff) {
+      out.push({
+        kind: 'citation_slug_cut_off',
+        slug: `${c.slug}-`,
+        detail: `${label}:${c.line}: '${c.word} ${c.slug}-' — the slug is cut off at a line break; write it whole on one line`,
+      });
+      continue;
+    }
+    if (resolveSlug(c.slug)) continue;
+    out.push({
+      kind: 'citation_slug_unresolved',
+      slug: c.slug,
+      detail: `${label}:${c.line}: '${c.word} ${c.slug}' — no record in any mounted store carries this slug, at any status`,
+    });
+  }
+  return out;
+}
+
+/** Lines that actually SUPPRESS a citation: the marker plus an id-shaped token
+ *  or a slug citation. Counting bare marker mentions (this file's own constant,
+ *  prose about the mechanism) would inflate the number the check reports as
+ *  its bypass tally. */
 export function countCitationOptOuts(content) {
   const idOnLine = /\b[0-9a-f]{8}\b/;
-  return content.split('\n').filter((l) => l.includes(CITATION_OPT_OUT) && idOnLine.test(l)).length;
+  return content
+    .split('\n')
+    .filter(
+      (l) =>
+        l.includes(CITATION_OPT_OUT) &&
+        (idOnLine.test(l) || collectSlugCitations(l, { includeOptedOut: true }).length > 0)
+    ).length;
 }
 
 /** Violations for one file. `resolve(id)` answers with {status} for a hit,
