@@ -102,8 +102,8 @@ function runHook(script, input, cwd, env = {}) {
 // an unstated delivery channel (same helper the h22 suite uses).
 const out = (r) => `${r.stdout}\n${r.stderr}`;
 // The deferral line on a non-blocking release reaches the conductor through the
-// notice channel, not stdout/stderr (decision h10-deferral-is-conductor-facing-
-// degradations-stay-loud), so the union now includes the published notices.
+// notice channel, not stdout/stderr
+// (decision h10-deferral-is-conductor-facing-degradations-stay-loud), so the union now includes the published notices.
 const noticesDir = (dir) => join(dir, '.sterling', 'transient', 'notices');
 const disclosed = (r, dir) =>
   [out(r), ...(existsSync(noticesDir(dir)) ? readdirSync(noticesDir(dir)).map((n) => readFileSync(join(noticesDir(dir), n), 'utf8')) : [])].join('\n');

@@ -1,6 +1,6 @@
 // H7 stores the hook payload's agent_id on a touch record, as a MEASUREMENT
-// instrument only (decision h22-dispatch-files-from-review-territory-and-
-// resume-inherits-prior-round, 2026-10-02 amendment): a later live run reads
+// instrument only
+// (decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round, 2026-10-02 amendment): a later live run reads
 // touches.json to learn whether a subagent's PostToolUse Write/Edit carries
 // agent_id. No consumer reads the field.
 //   - a payload with a non-empty string agent_id stores it on the record

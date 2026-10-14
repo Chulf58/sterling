@@ -5,8 +5,8 @@
 // and the "each whole" clause of knowledge-delivery-target-design-no-delayed-
 // delivery: a lane that cannot edit cannot commit the mistake a hazard warns
 // against, so it gets the pointer; a write-capable lane and the main session
-// keep hazards whole. Design map: finding hazard-delivery-call-sites-lane-
-// identity-and-substance-only-freshness-trap-september-2026.
+// keep hazards whole. Design map:
+// finding hazard-delivery-call-sites-lane-identity-and-substance-only-freshness-trap-september-2026.
 //
 // FAIL WHOLE. 'pointer' requires every link of the chain to hold; any missing
 // field, unresolvable type, unreadable file or thrown error answers 'whole' —

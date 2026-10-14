@@ -1,6 +1,6 @@
 // sterling-launch.sh rendering (templates/launcher-tmux.sh) — one place for the two
-// shapes (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-
-// clone, ruling point 3):
+// shapes
+// (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone, ruling point 3):
 //
 //   AUTHORING CLONE (a .git at the plugin root): claude starts with
 //   `--plugin-dir <clone>` and the TUI is the clone's committed bundle,

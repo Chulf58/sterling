@@ -1,5 +1,5 @@
-// Project launchers (§11, decision launchers-consolidated-to-claude-code-and-opencode-
-// pair): one engine, sterling-launch.sh claude|opencode|tui (templates/launcher-tmux.sh),
+// Project launchers (§11,
+// decision launchers-consolidated-to-claude-code-and-opencode-pair): one engine, sterling-launch.sh claude|opencode|tui (templates/launcher-tmux.sh),
 // and two thin openers per platform that call it:
 //
 //   windows (WSL2, or node on native Windows): claude-code.bat, opencode.bat
@@ -223,8 +223,8 @@ export function ensureLaunchers(target, pluginRoot, {
   const session = sessionName(target);
   const legacySession = legacySessionName(target);
 
-  // Older generated engines (decision init-and-update-refresh-an-older-generated-
-  // launcher): a pristine render of an EARLIER template version is rewritten and
+  // Older generated engines
+  // (decision init-and-update-refresh-an-older-generated-launcher): a pristine render of an EARLIER template version is rewritten and
   // reported `refreshed`; one matching no version is a hand edit, left untouched with a
   // loud line. The versions are read only once the engine differs.
   const olderGenerated = (text) => olderGeneratedLauncher(text, 'launcher-tmux.sh', history.get());

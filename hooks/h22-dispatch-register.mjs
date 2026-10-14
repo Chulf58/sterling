@@ -4831,8 +4831,8 @@ var configSchema = external_exports.object({
   // scripts/hooks/lib/undeclared-source-scan.mjs, which imports this constant.
   // An explicit [] still opts back in.
   undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default(() => [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]),
-  // Attestation disclosure (decision attestation-staleness-disclosure-only-
-  // never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
+  // Attestation disclosure
+  // (decision attestation-staleness-disclosure-only-never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
   // POSIX globs whose touched paths get a comparable-human-record rollup at
   // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
   // field can ever refuse an operation; the refusing form of this feature was
@@ -5107,8 +5107,8 @@ var configSchema = external_exports.object({
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
   // PreToolUse injection works; Read touches fall back to the queue).
-  // NOT .strict() (review-reverted, config_set decision config-writes-get-a-
-  // config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays
+  // NOT .strict() (review-reverted, config_set
+  // decision config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays
   // item 1): a first attempt made this object .strict() so config_set's
   // whole-document validation would refuse an unrecognized delivery leaf.
   // That is a FORWARD-COMPATIBILITY BRICK with no in-session remedy — ANY
@@ -5951,8 +5951,8 @@ var CODES = /* @__PURE__ */ new Set([
   "ledger_entry_malformed",
   // A19 (security review): an env override of identity is disclosed, never silent
   "session_identity_override",
-  // dispatch state machine (decision dispatch-state-machine-pre-slot-post-
-  // binding-locked-start-resolution-replaces-transcript-attribution, §2/§5/§6)
+  // dispatch state machine
+  // (decision dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution, §2/§5/§6)
   "dispatch_state_collision",
   "dispatch_post_late",
   "dispatch_post_mismatch",

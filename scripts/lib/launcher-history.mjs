@@ -1,12 +1,12 @@
-// Recognising an older generated launcher (decision init-and-update-refresh-an-older-
-// generated-launcher). init rewrites sterling-launch.sh, sterling.bat or tui.bat when the
+// Recognising an older generated launcher
+// (decision init-and-update-refresh-an-older-generated-launcher). init rewrites sterling-launch.sh, sterling.bat or tui.bat when the
 // file on disk is a pristine render of an EARLIER version of its template, and leaves
 // anything else alone as a hand edit.
 //
 // MATCHING: each historical template is split into literal segments at its {{TOKEN}}
 // placeholders (the headSegments approach in scripts/init-impl.mjs; never one big
-// wildcard regex, anti-pattern wildcard-regex-over-multi-kb-legacy-text-hits-v8-regexp-
-// too-large). The file must start with the first segment, end with the last, and hold
+// wildcard regex,
+// anti-pattern wildcard-regex-over-multi-kb-legacy-text-hits-v8-regexp-too-large). The file must start with the first segment, end with the last, and hold
 // every middle segment in order. The text between two segments is that placeholder's
 // value and must pass the placeholder's validator in PLACEHOLDER_VALUES, which accepts
 // only what some version of init could have rendered there. A placeholder with no
@@ -19,8 +19,8 @@
 // template texts. The {{PLUGIN_PATHS}} installed-copy block is rendered by
 // scripts/lib/launcher-tmux.mjs from scripts/lib/sterling-roots.mjs, so its earlier values
 // come from running each committed version of those modules (installedBlockAt). An
-// installed copy (no git, decision sterling-ships-as-a-marketplace-plugin-authoring-
-// machine-keeps-its-clone) reads bin/launcher-history.json, which build:bin writes from
+// installed copy (no git,
+// decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone) reads bin/launcher-history.json, which build:bin writes from
 // the same git walk (launcherHistorySnapshot). A renderer version that cannot run in
 // isolation is skipped like a missing closure and reported once (replayFailures), never
 // thrown: one bad commit must not crash init, the update ensure pass or build:bin. The snapshot leaves out the current texts,

@@ -89,11 +89,11 @@ const SERVED_TOOLS = [
   // scale-down-enforcement-rules-and-locks-are-friction, knowledge_get
   // the former ruling 'scale-down-enforcement-rules-and-locks-are-friction' (not in the current store)), still gated by whole-document schema validation and CAS on
   // the file digest — the raw Edit/Write denial on every .sterling file
-  // STAYS for both channels (decision config-writes-get-a-config-set-mcp-
-  // tool-with-positive-key-allowlist-raw-edit-denial-stays).
+  // STAYS for both channels
+  // (decision config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays).
   'config_set',
-  // Domains D2 (board 25c0d858; decision projects-mount-domains-and-sibling-
-  // projects): read or set a mounted domain's description, the store_meta row
+  // Domains D2 (board 25c0d858;
+  // decision projects-mount-domains-and-sibling-projects): read or set a mounted domain's description, the store_meta row
   // that decides which knowledge belongs in that domain.
   'domain_describe',
 ];

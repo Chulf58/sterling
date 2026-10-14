@@ -900,8 +900,8 @@ test('CONTROL: an empty dispatch register behaves exactly as before — the rese
 });
 
 // ===========================================================================
-// SUBAGENT WEB RESEARCH (decision subagent-web-research-is-tagged-and-gated-
-// on-lane-return, knowledge_get 39e03daf; the former finding 'H16 matcher fires on a subagent WebSearch/WebFetch' (not in the current store)). H16's matcher
+// SUBAGENT WEB RESEARCH
+// (decision subagent-web-research-is-tagged-and-gated-on-lane-return, knowledge_get 39e03daf; the former finding 'H16 matcher fires on a subagent WebSearch/WebFetch' (not in the current store)). H16's matcher
 // also fires on a subagent's own WebSearch/WebFetch, and Claude Code puts
 // agent_id on every in-subagent hook event (docs/historical/PROBES.md, Layer
 // 0 probe). H16 records that agent_id on the research_tool event, and H10
@@ -988,8 +988,8 @@ test('CONDUCTOR WEBFETCH (GUARD, green before and after): a WebFetch with no age
 });
 
 // ---------------------------------------------------------------------------
-// MULTI-ROUND LANE (fix round on decision subagent-web-research-is-tagged-and-
-// gated-on-lane-return, review HIGH). Every SendMessage resume, and the
+// MULTI-ROUND LANE (fix round on
+// decision subagent-web-research-is-tagged-and-gated-on-lane-return, review HIGH). Every SendMessage resume, and the
 // parked-lane shape, gives one agent_id 2+ rounds in a session, so the
 // singleton join is ambiguous for a tagged web call. A tagged web call is
 // live while ANY same-session round of its lane is presumed-active (H22

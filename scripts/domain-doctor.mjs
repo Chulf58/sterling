@@ -186,8 +186,8 @@ function fail(msg, code = 2) {
   process.exit(code);
 }
 
-// ONE shared, exact-token parser (decision sanctioned-script-store-writes-one-
-// containment-helper-one-arg-parser, R5) — both spellings, duplicate refusal,
+// ONE shared, exact-token parser
+// (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5) — both spellings, duplicate refusal,
 // flag-as-value refusal. Same bare-name convenience wrapper this script
 // already offered; `undefined` on absence preserves every existing `?? fail(...)`
 // call site unchanged.
@@ -213,8 +213,8 @@ const POSIX = (p) => p.replace(/\\/g, '/');
  *  plus the Windows-side home when running under WSL (the machine's other
  *  launcher context — the flip between the two is the incident's leading cause). */
 function defaultRoots() {
-  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
-  // helper-one-arg-parser, R5): homedir() always exists, so the helper's
+  // CONTAINMENT
+  // (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5): homedir() always exists, so the helper's
   // realpath step never trips here. The alternate Windows-side home may not
   // exist at all on this machine (not running under WSL) — existence is
   // checked BEFORE the helper runs, because the helper's realpath step
@@ -684,8 +684,8 @@ function storeFilesUnder(rootList, { onInaccessible = null } = {}) {
 
 function projectContext(projectDir) {
   if (!projectDir) fail('--project <dir> is required');
-  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
-  // helper-one-arg-parser, R5): projectDir is caller-supplied (--project).
+  // CONTAINMENT
+  // (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5): projectDir is caller-supplied (--project).
   let dotDir;
   try {
     dotDir = resolveStoreWritePath(projectDir, '.sterling');
@@ -2447,8 +2447,8 @@ function restore() {
     );
   }
 
-  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
-  // helper-one-arg-parser, R5) for the DEFAULT path only: an admin-configured
+  // CONTAINMENT
+  // (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5) for the DEFAULT path only: an admin-configured
   // config.domain_paths[domain] is an explicit, already-trusted absolute path
   // with no fixed root to validate against, so it passes through unchanged.
   // The default join was previously a bare lexical join of `domain` (a CLI
@@ -2589,8 +2589,8 @@ function storePresence(dbPath) {
  * then a lone `*.db`, matching projectContext's older fallback.
  */
 function scopeAuditProjectContext(projectDir) {
-  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
-  // helper-one-arg-parser, R5): projectDir is caller-supplied (--project).
+  // CONTAINMENT
+  // (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5): projectDir is caller-supplied (--project).
   let dotDir;
   try {
     dotDir = resolveStoreWritePath(projectDir, '.sterling');

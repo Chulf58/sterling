@@ -1,5 +1,5 @@
-// H10 AGENT-ID DEFERRAL — decision h22-dispatch-files-from-review-territory-
-// and-resume-inherits-prior-round (e841facd), amendment 2026-10-02 (2):
+// H10 AGENT-ID DEFERRAL —
+// decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round (e841facd), amendment 2026-10-02 (2):
 // "Once a live subagent Write shows agent_id in the touches file, H10 defers a
 // touch whose agent has a presumed-active register row." Why: files a lane
 // creates outside its declared territory, and second-level subagents, are
@@ -340,8 +340,7 @@ test('(4b) touches without agent_id still defer through the row\'s files, as bef
 });
 
 // Fan-out of the same agent type, both lanes writing outside what they declared
-// (finding h10-article-demand-misses-live-lanes-same-type-fanout-and-out-of-
-// territory-files-october-2026, the former finding 'lanes-same-type-fanout-and-out-of-territory-files-october-2026' (not in the current store); board item 7e4850cf, REMAINING (1)).
+// (finding h10-article-demand-misses-live-lanes-same-type-fanout-and-out-of-territory-files-october-2026, the former finding 'lanes-same-type-fanout-and-out-of-territory-files-october-2026' (not in the current store); board item 7e4850cf, REMAINING (1)).
 // Two live implementor rows each declare one path that no touch matches. LANE
 // writes ALPHA and BETA; LANE_B writes GAMMA; three conductor-written files
 // (DELTA and two more) meet the threshold, so the article demand runs and is

@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // FROZEN PINS — the NAMED mount refusal on every resolves-bearing mutation
-// lane, decision `domain-held-subject-queue-items-close-two-step-named-
-// mount-refusal-on-every-lane-label-routed-transaction-retired` (knowledge_get
+// lane,
+// decision `domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired` (knowledge_get
 // f2c61919-59ca-482e-8fab-53a7ddf13a2f). Written from the decision's own
 // words, never from tools.ts (H4 forbids reading it for this role).
 //

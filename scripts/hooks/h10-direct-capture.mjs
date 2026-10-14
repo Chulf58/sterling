@@ -94,8 +94,8 @@ import {
  * an orphan) stays true.
  */
 /**
- * LANE LIVENESS FROM RECENT TOUCHES (decision h10-lane-liveness-from-recent-
- * touches-past-the-lease, board 526710de). The register's `at` is set at
+ * LANE LIVENESS FROM RECENT TOUCHES
+ * (decision h10-lane-liveness-from-recent-touches-past-the-lease, board 526710de). The register's `at` is set at
  * registration and never refreshed, so a lane running past
  * dispatch_register.stale_minutes would read as expired while it is still
  * writing. H7 stamps every subagent touch with its agent_id, so a touch newer
@@ -477,8 +477,8 @@ try {
   // fillPct), which already reflects compaction — not a cumulative sum.
   // P5: a window resolved through context_watch.windows.default is a guessed
   // denominator, not a mapped one — the pressure line says so briefly so a
-  // reader can tell the two apart (decision context-window-default-is-a-real-
-  // fallback, user-ruled 2026-09-22).
+  // reader can tell the two apart
+  // (decision context-window-default-is-a-real-fallback, user-ruled 2026-09-22).
   const defaultWindowNote = () =>
     pressure.window_source === 'shared'
       ? ' (window from the shared table templates/context-windows.json)'
@@ -638,8 +638,8 @@ try {
         disclose(`H10: context advisory publish failed — ${String((e && e.message) || e)}; it will retry on the next Stop\n`);
       }
     }
-    // FAN-OUT DEFERRAL (decision h10-deferral-is-conductor-facing-degradations-
-    // stay-loud): informational, so it never rides the systemMessage below —
+    // FAN-OUT DEFERRAL
+    // (decision h10-deferral-is-conductor-facing-degradations-stay-loud): informational, so it never rides the systemMessage below —
     // it reaches the conductor as the next prompt's additionalContext
     // (h19-delivery-drain), keyed by session so a notice from this session's
     // last Stop is never drained into the next session.
@@ -653,8 +653,8 @@ try {
     }
     // R0: the payload and the exit are ONE state machine — a bare
     // process.stdout.write() followed by a separate allow() can exit before
-    // the pipe drains (decision hook-stdout-exit-after-write-callback-bound-
-    // exit-deny-stays-synchronous).
+    // the pipe drains
+    // (decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-synchronous).
     // PR REVIEW LOOP nag due and no duty block carried it: this release BLOCKS
     // once instead (see the prLoop block below degradationParts).
     if (prLoop?.blockDue) writeThenSpend(degradationParts.join('\n\n'), [prLoop.spend, spendDispatchUnknownKeys]);
@@ -753,8 +753,8 @@ try {
   // loud to the register alone (the pre-slice behaviour).
   // Lane liveness is read from the claimed touches BEFORE this filter: a lane
   // whose recent writes were committed has no touch left after it, but it is
-  // still running (decision h10-lane-liveness-from-recent-touches-past-the-
-  // lease).
+  // still running
+  // (decision h10-lane-liveness-from-recent-touches-past-the-lease).
   const writingAgentIds = recentlyWritingAgentIds(touches, Date.parse(now), config.dispatch_register.stale_minutes);
   const git = gitTouches(input.cwd, now);
   let lostSettlementMessage = '';
@@ -904,8 +904,8 @@ try {
   // A `research_tool` event (WebSearch/WebFetch) made by the CONDUCTOR is
   // never gated: the call is synchronous and complete by construction, and it
   // carries no join key. One made INSIDE a subagent carries that lane's
-  // `agent_id` (H16, decision subagent-web-research-is-tagged-and-gated-on-
-  // lane-return) and is gated exactly like an agent_dispatch event, through
+  // `agent_id` (H16,
+  // decision subagent-web-research-is-tagged-and-gated-on-lane-return) and is gated exactly like an agent_dispatch event, through
   // the same `ownRegisterRow` join below: the lane's web research is owed only
   // once the lane returns. H16 records no tool_use_id on it (a web call's own
   // id is never a launch id), and the singleton join cannot serve it: a lane
@@ -1037,8 +1037,8 @@ try {
   // stripped for COMPARISON ONLY: touches.json keeps exactly what H7 wrote.
   const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
   const joinKey = (p) => String(p ?? '').replace(WORKTREE_PREFIX_RE, '');
-  // DIRECTORY ENTRIES (decision h22-dispatch-files-from-review-territory-and-
-  // resume-inherits-prior-round): a REVIEW-TERRITORY may declare a directory,
+  // DIRECTORY ENTRIES
+  // (decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round): a REVIEW-TERRITORY may declare a directory,
   // e.g. "game/farm", so every register `files` entry owns a path exactly or
   // on a '/' boundary ("game/farm/crop.gd", never "game/farmhouse.gd") — the
   // shared matcher pathOwnedBy, the same one the residue probe uses. An entry
@@ -1109,8 +1109,8 @@ try {
   const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...ownersOf(p)]))];
   // Disclosure, not a demand. Deliberately avoids the article-demand and
   // capture-nag wording — a deferred duty is not owed to the conductor right
-  // now. SPLIT (decision h10-deferral-is-conductor-facing-degradations-stay-
-  // loud): degradationParts (lost settlement, residue, [dispatch_status_unknown],
+  // now. SPLIT
+  // (decision h10-deferral-is-conductor-facing-degradations-stay-loud): degradationParts (lost settlement, residue, [dispatch_status_unknown],
   // [register_unavailable], PR-loop state) ride every release loud (P5); the
   // deferral line is informational and conductor-facing only — the notice
   // channel on a release (releaseWithPressure), the capped line inside a
@@ -1548,8 +1548,8 @@ try {
   // Not guaranteed (stated in the decision): a stale presumed-active row that
   // never received a terminal hook holds the declaration until its TTL expires.
   //
-  // RESUME-ROUND WINDOW (decision capture-pending-hold-window-spans-resume-
-  // rounds, 5f21707a, user-ruled 2026-10-01, amending point 3 above): a lane
+  // RESUME-ROUND WINDOW
+  // (decision capture-pending-hold-window-spans-resume-rounds, user-ruled 2026-10-01, amending point 3 above): a lane
   // that parks on its own background work ends a register round at every
   // SubagentStop and resumes as a NEW round minutes later, so between rounds
   // nothing is presumed-active (the former finding 'lane gaps of 4-6 minutes' (not in the current store) measured 4-6 minute gaps).
@@ -2551,8 +2551,8 @@ try {
     }
   }
 
-  // Presentation only (decision h10-stop-flood-shorter-and-fewer-repeat-
-  // compaction-once-per-session-unknown-note, ee8ab1f5): a short header, one
+  // Presentation only
+  // (decision h10-stop-flood-shorter-and-fewer-repeat-compaction-once-per-session-unknown-note, ee8ab1f5): a short header, one
   // line per open duty carrying only its executable remedy tokens (points
   // A/B) — and, on the NEXT nag cycle carrying the identical semantic shape,
   // ONE compacted line instead of the full bullets. The prose this replaces
@@ -2569,8 +2569,8 @@ try {
     // Any fan-out deferral/staleness leads the block: the demands that follow are
     // exactly the ones the deferral did NOT cover (decision foreign_ec9eacaa).
     // Inside the nag the deferral line names at most 3 paths and carries no
-    // rationale tail (decision h10-deferral-is-conductor-facing-degradations-
-    // stay-loud (4)); degradations ride unchanged.
+    // rationale tail
+    // (decision h10-deferral-is-conductor-facing-degradations-stay-loud (4)); degradations ride unchanged.
     const parts = [deferralLine(3), ...degradationParts].filter(Boolean);
 
     const hasDebug = activeDebugEvents.length > 0;

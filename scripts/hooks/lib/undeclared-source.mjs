@@ -41,8 +41,8 @@ function extensionOf(path) {
  * a genuinely case-sensitive filesystem (ext4) is strictly less costly than a
  * false 'uncovered' finding on a case-insensitive one, and for COVERAGE this
  * is a disclosure surface (no gate, no enforcement) where over-covering is
- * the safe direction (decision undeclared-source-disclosure-per-file-
- * coverage-live-h1-scan: "disclosure only"). Matches raw-path-first so the
+ * the safe direction
+ * (decision undeclared-source-disclosure-per-file-coverage-live-h1-scan: "disclosure only"). Matches raw-path-first so the
  * common, already-consistent-casing case pays no extra work.
  *
  * WHY THIS NEVER APPLIES TO EXCLUDE GLOBS: exclusion is the opposite

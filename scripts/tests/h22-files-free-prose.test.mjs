@@ -14,8 +14,8 @@
 // surrounding prose, with `files_source: 'free-prose-fallback'` rather than
 // the deleted 'review-territory' provenance.
 //
-// Arm (b) was RE-CUT by decision h22-dispatch-files-from-review-territory-and-
-// resume-inherits-prior-round (e841facd): a valid REVIEW-TERRITORY now decides
+// Arm (b) was RE-CUT by
+// decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round (e841facd): a valid REVIEW-TERRITORY now decides
 // `files`. Arms (a) and (c), briefs without a declaration, are unchanged.
 //
 // Harness mirrors the now-deleted scripts/tests/h22-claimed-territory.test.mjs
@@ -129,8 +129,8 @@ test('(a) a prohibited path mention and an owned path mention BOTH land in files
 });
 
 // ===========================================================================
-// (b) RE-CUT by decision h22-dispatch-files-from-review-territory-and-resume-
-// inherits-prior-round (e841facd). This arm used to pin the opposite: that a
+// (b) RE-CUT by
+// decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round (e841facd). This arm used to pin the opposite: that a
 // REVIEW-TERRITORY line was unparsed and its path merely joined the free-
 // prose union. A valid declaration is now the authority for `files`, so a
 // path mentioned only in the surrounding prose is NOT owned, and files_source
@@ -183,8 +183,8 @@ test("(c) an unattributable Start (no prior Pre registration) writes files: [] a
 });
 
 // ===========================================================================
-// (d) ABSOLUTE PATHS IN FREE PROSE (decision h22-dispatch-files-from-review-
-// territory-and-resume-inherits-prior-round, the former finding 'lanes-same-type-fanout-and-out-of-territory-files-october-2026' (not in the current store)'s probe follow-
+// (d) ABSOLUTE PATHS IN FREE PROSE
+// (decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round, the former finding 'lanes-same-type-fanout-and-out-of-territory-files-october-2026' (not in the current store)'s probe follow-
 // up 2026-10-03): the extractor's segments are [\w-]+, so a brief naming
 // `/abs/project/probe.txt` used to register `abs/project/probe.txt`, a path
 // that exists nowhere. An absolute path inside the project becomes repo-

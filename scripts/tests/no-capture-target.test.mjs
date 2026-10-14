@@ -797,8 +797,8 @@ test('an IN-ROOT file symlink at the write target (session-events.json -> ../con
 // ===========================================================================
 //
 // WHY THIS IS THE DANGEROUS ONE: a bare `no_capture` declaration discharges a
-// WIDER duty than a lane-scoped one (decision `no-capture-discharge-is-lane-
-// scoped`). So an empty `--lane=` silently degrading into a BARE declaration
+// WIDER duty than a lane-scoped one
+// (decision `no-capture-discharge-is-lane-scoped`). So an empty `--lane=` silently degrading into a BARE declaration
 // is not a parse nit — it is an over-discharge that hides an open duty, and it
 // exits 0, which means nothing anywhere reports it.
 //

@@ -171,8 +171,8 @@ test('the clear hook has no rotation-note dependency', () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC3 — SUPERSEDED 2026-09-20 (decision knowledge-delivery-target-design-no-
-// delayed-delivery, the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store), delivery-migration step 3). The old assertion
+// AC3 — SUPERSEDED 2026-09-20
+// (decision knowledge-delivery-target-design-no-delayed-delivery, the former ruling 'knowledge-delivery-target-design-no-delayed-delivery' (not in the current store), delivery-migration step 3). The old assertion
 // here was `assert.equal(second.stdout, '', '2026-09-19: an edited version of
 // already-delivered knowledge must not re-deliver directly')` — lineage-keyed
 // (slug-based) suppression that silently swallowed a forward-fix's corrected

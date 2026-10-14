@@ -13,8 +13,8 @@ import { harnessMounted as harnessMountedShared } from './test-helpers/mounted-h
 // tools are agnostic to mounting, so this pins that scope routing, cross-store
 // retrieval, holding-store updates, and PROJECT-LOCAL run state all hold when
 // the conductor drives them through SterlingTools (§3.3 / §3.4).
-// CONSOLIDATED 2026-09-06 (board R4; decision scope-drift-closed-by-column-
-// authoritative-reads-not-format-change): this body moved VERBATIM into
+// CONSOLIDATED 2026-09-06 (board R4;
+// decision scope-drift-closed-by-column-authoritative-reads-not-format-change): this body moved VERBATIM into
 // ./test-helpers/mounted-harness.ts, shared with resolves-append-join.test.ts
 // and knowledge-extract.test.ts. BEHAVIOUR-NEUTRAL: same 'sterling-domain-'
 // prefix, same frozen clock, same randomUUID, same single 'genesys' mount,

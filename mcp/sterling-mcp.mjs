@@ -18582,8 +18582,8 @@ var configSchema = external_exports.object({
   // scripts/hooks/lib/undeclared-source-scan.mjs, which imports this constant.
   // An explicit [] still opts back in.
   undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default(() => [...DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS]),
-  // Attestation disclosure (decision attestation-staleness-disclosure-only-
-  // never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
+  // Attestation disclosure
+  // (decision attestation-staleness-disclosure-only-never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
   // POSIX globs whose touched paths get a comparable-human-record rollup at
   // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
   // field can ever refuse an operation; the refusing form of this feature was
@@ -18858,8 +18858,8 @@ var configSchema = external_exports.object({
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
   // PreToolUse injection works; Read touches fall back to the queue).
-  // NOT .strict() (review-reverted, config_set decision config-writes-get-a-
-  // config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays
+  // NOT .strict() (review-reverted, config_set
+  // decision config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays
   // item 1): a first attempt made this object .strict() so config_set's
   // whole-document validation would refuse an unrecognized delivery leaf.
   // That is a FORWARD-COMPATIBILITY BRICK with no in-session remedy — ANY
@@ -22996,8 +22996,8 @@ var SterlingStore = class _SterlingStore {
    * `buildReconcileText` builder the fold uses, and an item pruned to zero
    * paths is removed through the SAME `remove()` normal-removal path every
    * other closed system todo takes — so the drain log and the FTS row stay
-   * honest either way. `decision reconcile-needed-identity-is-reason-plus-
-   * owner-file-keys-unioned` means there is at most one such item per owner in
+   * honest either way.
+   * `decision reconcile-needed-identity-is-reason-plus-owner-file-keys-unioned` means there is at most one such item per owner in
    * practice, but this loops over every match rather than assuming it, so a
    * legacy duplicate is not silently skipped.
    *
@@ -32834,8 +32834,7 @@ var SterlingTools = class _SterlingTools {
   }
   /**
    * FINDABILITY DISCLOSURE for knowledge_create/knowledge_update receipts
-   * (decision make-records-findable-authoring-rule-disclosure-lint-then-blind-
-   * experiment, part 2). Reports the record's central terms — recordCentralTerms
+   * (decision make-records-findable-authoring-rule-disclosure-lint-then-blind-experiment, part 2). Reports the record's central terms — recordCentralTerms
    * in packages/store/src/axis.ts, the same set knowledge_preflight reports as
    * `central` and H20 prints as "central to the record" — and warns when a
    * path-carrying type has no file paths, because push-by-file can then never
@@ -33745,8 +33744,8 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     return this.store.inboundSupersedes(id).map((r) => _SterlingTools.inboundSupersedesEntry(r));
   }
   /**
-   * knowledge_get's FIELD-WINDOW tail (decision compaction-tooling-windowed-read-
-   * plus-split), extracted so the ARCHIVED-ALIAS read shares it byte-for-byte
+   * knowledge_get's FIELD-WINDOW tail
+   * (decision compaction-tooling-windowed-read-plus-split), extracted so the ARCHIVED-ALIAS read shares it byte-for-byte
    * instead of skipping it (review finding — see the HistoricalIdError branch
    * above). `full` is whatever body the read resolved to: the live record, an
    * archived version snapshot, or an alias snapshot. legacy_resolution rides
@@ -34111,8 +34110,8 @@ ${JSON.stringify(value, null, 2)}` : void 0;
   }
   /**
    * The article_oversize dedup marker articleOversizeWarnings mints/matches
-   * for a slug (decision article-oversize-dedups-on-the-slug-at-its-minting-
-   * site, 19b506ce-5c12-46d5-afa1-5a32170bab8d). Extracted so every caller
+   * for a slug
+   * (decision article-oversize-dedups-on-the-slug-at-its-minting-site-the, 19b506ce-5c12-46d5-afa1-5a32170bab8d). Extracted so every caller
    * that needs to recognize "is this item the oversize item for THIS article"
    * — articleOversizeWarnings itself and validateResolveClaim's split
    * semantics below — derives the prefix from the ONE place that owns the
@@ -37168,8 +37167,7 @@ ${JSON.stringify(entry)}
   /** The old-record types a closing note of another type may close, each with
    *  the sentence its refusal prints for the record that is NOT dead (its
    *  in-place path and its duplicate path). reference_material came first
-   *  (decision a-dead-reference-material-is-superseded-by-a-closing-note-of-
-   *  another-type): its body is a pointer at a location. open_question and
+   *  (decision a-dead-reference-material-is-superseded-by-a-closing-note-of-another-type): its body is a pointer at a location. open_question and
    *  disconfirmed_hypothesis joined by user ruling 2026-10-03 (board bdd80e1a,
    *  "Supersede for the two small types, articles stay as today"): a question
    *  or a refuted trail about code that no longer exists has nothing of its
@@ -37333,8 +37331,7 @@ ${JSON.stringify(entry)}
    * single-ruling supersession — no check.
    *
    * A DEAD reference_material WAS THE FIRST CROSS-TYPE CASE (board 3b5c6877,
-   * decision record-audit-dead-records-superseded-stale-findings-by-age-
-   * report-arm-plus-sampled-audit). A reference whose location is gone had no
+   * decision record-audit-dead-records-superseded-stale-findings-by-age-report-arm-plus-sampled-audit). A reference whose location is gone had no
    * exit: knowledge_update can only repoint it, knowledge_retire needs a
    * surviving duplicate, and the deletion arm of the refresh_reference mint
    * fires on every read while it stays active. A dead open_question and a dead

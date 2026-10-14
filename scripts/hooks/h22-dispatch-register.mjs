@@ -1,6 +1,6 @@
 // scripts/hooks/h22-dispatch-register.mjs — R1 REBUILD, THEN EXTENDED with the
-// dispatch STATE MACHINE (decision `dispatch-state-machine-pre-slot-post-
-// binding-locked-start-resolution-replaces-transcript-attribution`).
+// dispatch STATE MACHINE
+// (decision `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`).
 //
 // INVARIANT: ONE hook, registered on PreToolUse/PostToolUse/PostToolUseFailure
 // (matcher Task|Agent — recording dispatch-state only, never gating) and on
@@ -71,12 +71,12 @@ function loadExclusiveResourceNames(cwd) {
 // any) the dispatch-state resolution attributes to this Start. The Start-side
 // POSITIONAL WALK-BACK FUNCTION that used to read the parent transcript is
 // DELETED — resolveAndRegisterStart's resolution is now the sole source of
-// "which prompt is mine" (decision dispatch-state-machine-pre-slot-post-
-// binding-locked-start-resolution-replaces-transcript-attribution).
+// "which prompt is mine"
+// (decision dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution).
 //
 // `files` (territory EXAMINED — the field H10's deferral and H1/H10's residue
-// probe read) comes from, in order (decision h22-dispatch-files-from-review-
-// territory-and-resume-inherits-prior-round):
+// probe read) comes from, in order
+// (decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round):
 //   1. a valid REVIEW-TERRITORY declaration in the attributed brief
 //      (files_source 'review-territory');
 //   2. otherwise free-prose extraction over the brief ('free-prose-fallback',
@@ -89,8 +89,8 @@ function loadExclusiveResourceNames(cwd) {
 //      lane fills the row from its brief's REVIEW-TERRITORY (postTerritory);
 //      a later resume then inherits those files through 3.
 // The claimed_files/claimed_glob_prefixes write-side negation guard stays
-// deleted (research_finding h22-dispatch-register-consumer-map-which-parts-
-// have-a-reader-september-2026).
+// deleted
+// (research_finding h22-dispatch-register-consumer-map-which-parts-have-a-reader-september-2026).
 // ---------------------------------------------------------------------------
 
 // An absolute candidate keeps its leading '/', so normalizeRegisterPaths makes
@@ -175,8 +175,8 @@ function regularFileEntries(files, cwd) {
 // The territory a binding Post fills into a row its Start left unattributable
 // (recordDispatchPost's fillUnattributableRowLocked): the bound brief's valid
 // REVIEW-TERRITORY only, normalised and kind-recorded exactly as at Start.
-// Free prose is not a fallback here (decision h22-dispatch-files-from-review-
-// territory-and-resume-inherits-prior-round, option A).
+// Free prose is not a fallback here
+// (decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round, option A).
 function postTerritory(prompt, cwd) {
   const territory = parseReviewTerritory(prompt);
   if (!territory.present) return { ok: false, reason: 'the bound brief declares no REVIEW-TERRITORY' };

@@ -97,11 +97,11 @@ export function ensureUpdateLauncher(target, pluginRoot) {
     return { status: 'skipped', detail: `target missing: ${target}` };
   }
   // An INSTALLED plugin copy has no clone to update: the plugin manager delivers new
-  // versions (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-
-  // its-clone, ruling point 3), and the launcher's `cd` into a versioned cache
+  // versions
+  // (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone, ruling point 3), and the launcher's `cd` into a versioned cache
   // directory would break at the next update. Nothing is written, not even the
-  // .gitignore entry. S6 (decision s6-consumer-cutover-init-on-installed-copy-fixes-
-  // launchers): an updater that an earlier clone-run init wrote only leads into a clone
+  // .gitignore entry. S6
+  // (decision s6-consumer-cutover-init-on-installed-copy-fixes-launchers): an updater that an earlier clone-run init wrote only leads into a clone
   // that is going away, so the generated shape is deleted and its clone returned for
   // init's manual clone-deletion step; any other content is left alone with a notice.
   if (isInstalledCopy(pluginRoot)) {

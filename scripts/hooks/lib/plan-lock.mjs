@@ -110,8 +110,8 @@ export function sanitizeForContext(value, max) {
  *   O_NOFOLLOW refuses a SYMLINK at the final component, so a symlink aimed at
  *   a FIFO cannot even be opened. It guards ONLY the last component — an
  *   intermediate directory swap is still possible and is NOT claimed to be
- *   closed here (anti_pattern `descriptor-pin-defeated-at-acquisition-when-the-
- *   directory-fd-is-opened-by-absolute-path`).
+ *   closed here
+ *   (anti_pattern `descriptor-pin-defeated-at-acquisition-when-the-directory-fd-is-opened-by-absolute-path`).
  *
  *   O_NONBLOCK is what makes the fstat check below REACHABLE against a DIRECT
  *   FIFO. Without it, opening a FIFO with no writer blocks forever INSIDE

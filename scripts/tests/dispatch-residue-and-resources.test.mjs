@@ -635,8 +635,8 @@ test('SPEC B (6) CONTROL: an empty register plus a self-claim never produces a s
 });
 
 // ===========================================================================
-// SPEC A (8) — DECLARED DIRECTORIES (decision h22-dispatch-files-from-review-
-// territory-and-resume-inherits-prior-round, e841facd; Sol review of its
+// SPEC A (8) — DECLARED DIRECTORIES
+// (decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round, e841facd; Sol review of its
 // implementation). A REVIEW-TERRITORY may declare a directory ("src/farm"),
 // so a register entry's `files` can hold one. The residue probe must report
 // the DIRTY DESCENDANTS of such an entry: exact-only matching returned

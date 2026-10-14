@@ -1,6 +1,6 @@
 // scripts/lib/dispatch-register.mjs — THE dispatch register AND dispatch
-// state-machine owner (decision `dispatch-state-machine-pre-slot-post-binding-
-// locked-start-resolution-replaces-transcript-attribution`).
+// state-machine owner
+// (decision `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`).
 //
 // INVARIANT (register): this module is the ONE authority for the transient
 // dispatch register's persisted shape (RegisterEntry), its parser, its
@@ -622,8 +622,8 @@ const ORIGINS = new Set(['pre', 'post-only', 'failure-only']);
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const DERIVE_RETRY_INTERVAL_MS = 10;
 const DERIVE_PER_ATTEMPT_LOCK_MS = 30;
-// SIBLINGS-RETRY BUDGET (decision dispatch-state-status-in-filename-live-
-// scan-parses-only-live-records, follow-on): a background Post carries the
+// SIBLINGS-RETRY BUDGET
+// (decision dispatch-state-status-in-filename-live-scan-parses-only-live-records, follow-on): a background Post carries the
 // exact agentId and lands 0.34-2.24 s after Start (the former finding 'background Post lands 0.34-2.24 s after Start' (not in the current store)), so
 // while the last verdict is siblings-retry the wait runs up to 3 s; a
 // lock-held retry keeps the original 150 ms bound. Neither ever guesses: an
@@ -650,8 +650,8 @@ export function dispatchStateDir(root) {
   return join(root, '.sterling', 'transient', 'dispatch-state');
 }
 
-// STATUS IN THE FILENAME (decision `dispatch-state-status-in-filename-live-
-// scan-parses-only-live-records`). One flat directory:
+// STATUS IN THE FILENAME
+// (decision `dispatch-state-status-in-filename-live-scan-parses-only-live-records`). One flat directory:
 //   live-<key>.json               a non-terminal record
 //   done-<key>~<ids>.json         a terminal record; <ids> is the sorted,
 //                                 de-duplicated SHA-256 base64url of EVERY
@@ -1017,8 +1017,8 @@ function findKeyedRecord(root, key) {
 // poisoned entry is reported, never silently skipped and never condemning the
 // readable remainder (mirrors readRegister's own posture).
 //
-// THE HOT SCAN PARSES live-* ONLY (decision `dispatch-state-status-in-
-// filename-live-scan-parses-only-live-records`): terminal history is listed
+// THE HOT SCAN PARSES live-* ONLY
+// (decision `dispatch-state-status-in-filename-live-scan-parses-only-live-records`): terminal history is listed
 // by NAME in `done` and never opened here. `records` holds every valid live-*
 // record — including a crash-window one (terminal body under a live name),
 // which every consumer's `!terminal` / pending filter already excludes from
@@ -1193,8 +1193,7 @@ function hasRegisterRound(root, sessionId, agentId) {
 
 // priorRoundFiles — the `files` of this (session, agent_id)'s most recent
 // register round, or null when no such round exists. A resume inherits them
-// (decision h22-dispatch-files-from-review-territory-and-resume-inherits-
-// prior-round): the resumed agent is still editing the territory it had, and
+// (decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round): the resumed agent is still editing the territory it had, and
 // a resume re-fires only SubagentStart, never Pre/Post, so no brief exists to
 // re-derive it from. Most recent = highest `round` (1 when absent); a tie
 // keeps the later register position. Only the register carries `files`; a
@@ -1345,8 +1344,8 @@ export function recordDispatchPre(root, stdin) {
 }
 
 // fillUnattributableRowLocked — a Post that binds a lane fills that lane's
-// register row when its Start had given up (decision h22-dispatch-files-from-
-// review-territory-and-resume-inherits-prior-round, option A; finding h10-
+// register row when its Start had given up
+// (decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round, option A; finding h10-
 // article-demand-misses-live-lanes-same-type-fanout-and-out-of-territory-
 // files-october-2026). The CALLER holds withRegisterLock and has already
 // written the binding (a late Post, whose state record is already terminal,
@@ -1983,8 +1982,8 @@ export function sessionBoundarySweep(root, opts = {}) {
     return unlistable();
   }
 
-  // LEGACY MIGRATION (decision `dispatch-state-status-in-filename-live-scan-
-  // parses-only-live-records` point 6): a pre-migration flat `<key>.json` is
+  // LEGACY MIGRATION
+  // (decision `dispatch-state-status-in-filename-live-scan-parses-only-live-records` point 6): a pre-migration flat `<key>.json` is
   // renamed onto its live-/done- name HERE — the session boundary, under
   // H1's lock hold, never mid-burst. A poisoned or key-mismatched legacy file
   // is left for a human (the hot scan keeps failing closed on it); an

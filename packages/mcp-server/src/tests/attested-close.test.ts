@@ -1160,8 +1160,8 @@ test('[R9-19] a repo using git\'s SHA-256 object format (64-char HEAD) is accept
 
 // ===========================================================================
 // PIN [R9-20a] — tree membership, not filesystem existence, is the name
-// authority (decision `attested-close-proves-buffer-equality-through-git-
-// not-path-resolution`, 2026-09-06): the close-time proof is made from ONE
+// authority
+// (decision `attested-close-proves-buffer-equality-through-git-not-path-resolution`, 2026-09-06): the close-time proof is made from ONE
 // batched `git ls-tree` read of HEAD's tree, matched by literal exact name —
 // so a file_key that resolves to a real file ON DISK but is NOT the
 // byte-for-byte name of a regular-file entry in HEAD's tree is refused AT

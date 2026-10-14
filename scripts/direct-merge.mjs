@@ -26,8 +26,8 @@ import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { SterlingStore } from '@sterling/store';
 import { readProjectMode } from './lib/handoff-projection.mjs';
 import { workPreflight, shipAsPr, pushWithWindowsRetry, localBranchRefusal, installWorkResult, armPrLoop, noOriginRemote, NO_ORIGIN_LOCAL_MERGE_NOTICE, PR_LOOP_REL } from './lib/work-pr.mjs';
-// Attestation disclosure (decision attestation-staleness-disclosure-only-never-
-// a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
+// Attestation disclosure
+// (decision attestation-staleness-disclosure-only-never-a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
 // block above the merge action.
 import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, parseNulPathList } from './lib/attestation-inspection.mjs';
 const target = arg('--target') ?? process.cwd();
@@ -645,8 +645,8 @@ if (hasCheck) {
 }
 
 // ===========================================================================
-// ATTESTATION DISCLOSURE (decision attestation-staleness-disclosure-only-never-
-// a-refusing-gate, 1f069af4 v2; board attestation-gate 9868a0dd).
+// ATTESTATION DISCLOSURE
+// (decision attestation-staleness-disclosure-only-never-a-refusing-gate, 1f069af4 v2; board attestation-gate 9868a0dd).
 //
 // WHY THIS SURFACE EXISTS AT ALL, given the ruling was about COMMIT time: the
 // design's first sparring round found commit-only delivery FATAL as a complete
@@ -960,8 +960,8 @@ if (noOriginFallback) {
   }
 }
 
-// RELEASE FOR OPENCODE (decision sterling-on-opencode-installs-from-a-git-
-// release-branch-v2): a pushed hobby merge that moved package.json's version
+// RELEASE FOR OPENCODE
+// (decision sterling-on-opencode-installs-from-a-git-release-branch-v2): a pushed hobby merge that moved package.json's version
 // writes the merged tree as a commit on `opencode-release`, tags it v<version>
 // and pushes both; `opencode plugin add/update` follows the tags. Any other
 // merge skips with one line. A refusal (origin unreadable, the tag already names

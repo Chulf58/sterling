@@ -1,8 +1,8 @@
 // H10 DIRECTORY DEFERRAL — a file CREATED under a live dispatch's declared
 // directory is deferred to that dispatch and raises no article demand.
 //
-// RULING: decision h22-dispatch-files-from-review-territory-and-resume-
-// inherits-prior-round (e841facd) — "H10's deferral join treats a declared
+// RULING:
+// decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round (e841facd) — "H10's deferral join treats a declared
 // directory entry as a path prefix, not only an exact match." Dome Farmer
 // asked whether a brand-new file under a declared directory (one that did not
 // exist when the lane was dispatched) is covered; this pins that it is.

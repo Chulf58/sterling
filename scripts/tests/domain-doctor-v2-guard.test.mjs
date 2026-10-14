@@ -746,8 +746,8 @@ test('AC14: adopt on a destination with no records table fails loud, not with a 
 // destination. Both directions matter: a live sidecar must survive
 // byte-identical (catches a mutating handle), and a cold store must gain no
 // new sidecars at all (catches the litter a naive "open read-only" can still
-// leave — anti_pattern a-writable-sqlite-open-on-a-wal-database-mutates-the-
-// main-fi, 8616e72d — which is exactly why this file's own verification via
+// leave —
+// anti_pattern a-writable-sqlite-open-on-a-wal-database-mutates-the-main-fi, 8616e72d — which is exactly why this file's own verification via
 // openRO/listIds is never interleaved between an AC15 before/after snapshot).
 // ROUND-4 CAUTION APPLIED: the same trap can bite the FIXTURE, not just the
 // assertions — the hot-WAL proof (a byte-copy of the main .db checked for
@@ -1311,8 +1311,7 @@ test('AC20: migrate refuses when the source holds EXACTLY ONE record_relations r
 // `create()` mints a record_relations row for EVERY body link, so a SOURCE
 // fixture carrying body links now trips the AC20 relations-containment guard
 // and migrate refuses at exit 2 BEFORE the body comparator is ever reached
-// (decision [migrate-relations-containment-narrows-migrate-to-unlinked-
-// stores], 88f3db69: migrate refuses ANY source holding ANY record_relations
+// (decision [migrate-relations-containment-narrows-migrate-to-unlinked-stores], 88f3db69: migrate refuses ANY source holding ANY record_relations
 // row; that ruling is shipped and twice-reviewed). The consequences were:
 // the control could never reach its exit-0 skip, and the two conflict pins
 // exited 2 for the WRONG REASON — a relations refusal, not a body conflict —

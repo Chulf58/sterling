@@ -71,8 +71,8 @@ import { resolveStoreWritePath } from './lib/store-path.mjs';
 
 const argv = process.argv.slice(2);
 
-// ONE shared, exact-token parser (decision sanctioned-script-store-writes-one-
-// containment-helper-one-arg-parser, R5) — both spellings, duplicate refusal,
+// ONE shared, exact-token parser
+// (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5) — both spellings, duplicate refusal,
 // and a split-form value that is itself a flag is never read as a value. Same
 // bare-name convenience wrapper this script already offered; the value is
 // null when absent (this script's existing null-check convention), never
@@ -104,8 +104,8 @@ if (!isSterlingProject(cwd)) {
   refuse(`${cwd} is not an initialized Sterling project (no .sterling/sterling.db) — run from the project root`);
 }
 const sterlingDir = sterlingDirOf(cwd);
-// CONTAINMENT (decision sanctioned-script-store-writes-one-containment-helper-
-// one-arg-parser, R5): this is the ONE path scripts/plan-lock.mjs itself
+// CONTAINMENT
+// (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5): this is the ONE path scripts/plan-lock.mjs itself
 // writes to directly (the --release rmSync below) — the shared read/write
 // primitives in ./hooks/lib/plan-lock.mjs (writeLock/writeMarker, keyed off
 // sterlingDir) are that module's own locked machinery and stay untouched here.

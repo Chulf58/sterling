@@ -3,8 +3,8 @@
 // RED on a missing-module error until scripts/hooks/lib/undeclared-source.mjs
 // is authored):
 //
-// Governing record: decision `undeclared-source-disclosure-per-file-coverage-
-// live-h1-scan` (knowledge_get b128f79c-043a-45ab-b3cf-125f5d44f234). Board
+// Governing record:
+// decision `undeclared-source-disclosure-per-file-coverage-live-h1-scan` (knowledge_get b128f79c-043a-45ab-b3cf-125f5d44f234). Board
 // 44ef6838. This file pins the PURE half only — no git spawning, no hook
 // wiring (H1/init wiring is a separate slice's concern).
 //

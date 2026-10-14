@@ -412,8 +412,8 @@ test('C1: N concurrent SubagentStart events for N distinct agent_ids — no lost
 // C2 REMOVED — its entire subject was "no lost ledger promotion" under
 // concurrent SubagentStop. SubagentStop's reviewer-class ledger promotion
 // (promoteAtStop and its owner module scripts/hooks/lib/review-ledger-
-// entry.mjs) was deleted under decision `sterling-claude-code-scale-down-
-// boundary` (2ad87dd1) — nothing is ever promoted to .sterling/review-
+// entry.mjs) was deleted under
+// decision `sterling-claude-code-scale-down-boundary` (d3e63e16) — nothing is ever promoted to .sterling/review-
 // ledger.json anymore, so there is no register-only content left to keep;
 // the seeded entries and every assertion here exist solely to observe the
 // now-deleted promotion.
@@ -638,7 +638,7 @@ test('D3: under a HELD register lock a reviewer-class SubagentStop writes NOTHIN
 // never marks the round at all.
 // NOTE: the ledger-promotion half ("promotes exactly one receipt") was
 // REMOVED — SubagentStop's ledger promotion is deleted under decision
-// `sterling-claude-code-scale-down-boundary` (2ad87dd1); the register-side
+// `sterling-claude-code-scale-down-boundary` (d3e63e16); the register-side
 // mark-ended assertion is unrelated to the ledger and stays.
 // SABOTAGE: gate the ended-mark on something other than the lock (e.g. never
 // mark on Stop) -> this goes red while D3 stays green.
@@ -773,7 +773,7 @@ test('H10-TIMEOUT: while the register lock is held, an H10 Stop that would stamp
 // DISPATCH-IDENTITY (control) REMOVED — its entire subject was ledger-append
 // dedupe keying (dispatch identity vs. agent_type+at) on receipt promotion.
 // SubagentStop's ledger promotion is deleted under decision
-// `sterling-claude-code-scale-down-boundary` (2ad87dd1); there is no ledger
+// `sterling-claude-code-scale-down-boundary` (d3e63e16); there is no ledger
 // append left to key, so no register-only content survives.
 
 // ===========================================================================
@@ -805,7 +805,7 @@ test('H10-TIMEOUT: while the register lock is held, an H10 Stop that would stamp
 // NOTE: the ledger-promotion assertions ("promotes exactly one receipt" /
 // "promotes nothing — no second receipt") were REMOVED — SubagentStop's
 // ledger promotion is deleted under decision
-// `sterling-claude-code-scale-down-boundary` (2ad87dd1); the register-side
+// `sterling-claude-code-scale-down-boundary` (d3e63e16); the register-side
 // mark-ended-once / no-phantom-append assertions are unrelated to the ledger
 // and stay.
 // SABOTAGE: mark the entry ended again (or append a phantom entry) on a
@@ -836,7 +836,7 @@ test('R1-A97: a repeated Stop against an already-ENDED round touches nothing fur
 // NOTE: the ledger-promotion assertions ("mints its OWN receipt" /
 // started_at binding) were REMOVED — SubagentStop's ledger promotion is
 // deleted under decision `sterling-claude-code-scale-down-boundary`
-// (2ad87dd1); the register-side assertions (both rounds survive, round 1's
+// (d3e63e16); the register-side assertions (both rounds survive, round 1's
 // ended timestamp is untouched, round 2 is the one marked) are unrelated to
 // the ledger and stay.
 // SABOTAGE: mark BOTH entries ended, or refresh round 1's ended timestamp,

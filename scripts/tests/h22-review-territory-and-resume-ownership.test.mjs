@@ -2,8 +2,8 @@
 // resumed agent keeps its prior round's `files`, and H10 defers a touched file
 // to the agent that actually owns it.
 //
-// RULING: decision h22-dispatch-files-from-review-territory-and-resume-
-// inherits-prior-round (e841facd). ROOT CAUSE: research_finding h10-deferral-
+// RULING:
+// decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round (e841facd). ROOT CAUSE: research_finding h10-deferral-
 // owner-from-brief-free-prose-and-resume-owns-nothing-september-2026
 // (95241ec6). INCIDENT: Dome Farmer docs/sterling-issues.md:438-443 — H10
 // deferred game/main.gd, game/net/snapshot_codec.gd and game/ui/front_end.gd

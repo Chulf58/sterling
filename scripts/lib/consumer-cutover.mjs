@@ -1,5 +1,5 @@
-// Consumer cutover [S6] (decision s6-consumer-cutover-init-on-installed-copy-fixes-
-// launchers): what /sterling:init, run from an INSTALLED plugin copy, needs to move a
+// Consumer cutover [S6]
+// (decision s6-consumer-cutover-init-on-installed-copy-fixes-launchers): what /sterling:init, run from an INSTALLED plugin copy, needs to move a
 // consumer project off its old clone. init owns the writes, except the one settings.json
 // switch below; the rest only reads and renders text:
 //   - cloneLauncherTarget: is a sterling-launch.sh a clone launcher (one that starts

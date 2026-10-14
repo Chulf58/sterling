@@ -85,8 +85,8 @@ function harness() {
 // domain scope (MountedStores + parseConfig({stack_tags:[name]})) — not
 // faked, the same real domain-store write path knowledge_create already
 // routes through. Used only by the scope-guard and domain-source pins below.
-// CONSOLIDATED 2026-09-06 (board R4; decision scope-drift-closed-by-column-
-// authoritative-reads-not-format-change): this body moved VERBATIM into
+// CONSOLIDATED 2026-09-06 (board R4;
+// decision scope-drift-closed-by-column-authoritative-reads-not-format-change): this body moved VERBATIM into
 // ./test-helpers/mounted-harness.ts, shared with resolves-append-join.test.ts
 // and domain-routing.test.ts. BEHAVIOUR-NEUTRAL: same prefix, same NOW clock,
 // same randomUUID, same single-mount layout; `domainDb` is still returned (no

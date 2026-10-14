@@ -6,8 +6,8 @@
 // satisfy. This agent holds no Bash and cannot run this suite; the
 // coordinator runs it directly. Every test below carries a SABOTAGE comment
 // naming the one-line implementation change that must turn it red once
-// `show` exists, per decision a-ruling-change-is-verified-by-mutation-not-by-
-// a-green-suite.
+// `show` exists, per
+// decision a-ruling-change-is-verified-by-mutation-not-by-a-green-suite.
 //
 // EXPECTED RED, PRECISELY, ALL OF THEM:
 //   AC-S1 (crux + control), AC-S2, AC-S3, AC-S4, AC-S5 (control + multi),
