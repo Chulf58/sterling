@@ -25,20 +25,23 @@ export const VOLATILE_HEADER = 'STERLING CONTEXT (added by the Sterling plugin, 
 
 /**
  * The whole text of the session's first user message (its brief), or '' when there is none.
- * Sterling's own lines are cut off; nothing else is. `isSterling(text)` says which whole user
- * messages are Sterling's synthetic messages (context.mjs sends them before the brief): it is
- * decided by provenance, the texts Sterling sent, because the context hook's message shape
- * carries none (OpenCode 2.0.23 core/src/session/runner/to-llm-message.ts turns a synthetic
- * message into {id, role: 'user', content} with no type or metadata). Lines the fallback path
- * appended to the brief are cut at the header. The STERLING-DELIVERY
+ * Sterling's own lines are cut off; nothing else is. A user message that starts with the
+ * STERLING CONTEXT header is Sterling's synthetic message (context.mjs sends it before the
+ * brief) and is skipped, so neither staging nor the STERLING-DELIVERY parse ever reads
+ * Sterling's own text as the brief. The header is the only mark the context hook's shape
+ * carries: OpenCode 2.0.23 core/src/session/runner/to-llm-message.ts turns a synthetic message
+ * into {id, role: 'user', content} with no type or metadata. A genuine brief that itself
+ * begins with the header would be skipped too; no conductor brief does (accepted residual
+ * risk, conductor ruling on GitHub #93). Lines the fallback path appended to the brief are cut
+ * at the header. The STERLING-DELIVERY
  * directive is parsed from this, before briefOf's scan cap, so a trailing line is never lost.
  */
-export function rawBriefOf(messages, isSterling = () => false) {
+export function rawBriefOf(messages) {
   const textOf = (m) => {
     const content = m?.content;
     return typeof content === 'string' ? content : Array.isArray(content) ? content.filter((p) => p?.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('\n') : '';
   };
-  const first = Array.isArray(messages) ? messages.find((m) => m?.role === 'user' && !isSterling(textOf(m))) : null;
+  const first = Array.isArray(messages) ? messages.find((m) => m?.role === 'user' && !textOf(m).startsWith(VOLATILE_HEADER)) : null;
   if (!first) return '';
   const text = textOf(first);
   const appended = text.indexOf(`\n\n${VOLATILE_HEADER}`);
@@ -46,8 +49,8 @@ export function rawBriefOf(messages, isSterling = () => false) {
 }
 
 /** The brief as staging scans it: rawBriefOf, cut to BRIEF_SCAN_CAP characters. */
-export function briefOf(messages, isSterling) {
-  return rawBriefOf(messages, isSterling).slice(0, BRIEF_SCAN_CAP);
+export function briefOf(messages) {
+  return rawBriefOf(messages).slice(0, BRIEF_SCAN_CAP);
 }
 
 /**

@@ -36,9 +36,13 @@ const UNDECLARED_TTL_MS = 5 * 60_000;
 // The worker states on the RECONCILE BACKLOG line that are not routine activity, as
 // scripts/hooks/lib/maintenance-state.mjs renders them (reconcileBacklog, workerStateText),
 // with a pause's minutes already taken out: they stay in the maintenance delivery key.
-const WORKER_ALERTS = /last worker run FAILED at .*? \(log: [^)]*\)|worker state unknown \([^)]*\)|worker disabled by \S+|worker paused after (?:a failed run|a run that closed nothing)/g;
-// The newest synthetic texts remembered per session for staging's provenance check.
-const SENT_TEXTS_CAP = 50;
+// A failure reason can span lines (a worker error 'process failed\npermission denied'), so the
+// FAILED clause is matched across newlines up to its log pointer.
+const WORKER_ALERTS = /last worker run FAILED at [\s\S]*? \(log: [^)]*\)|worker state unknown \([^)]*\)|worker disabled by \S+|worker paused after (?:a failed run|a run that closed nothing)/g;
+// How long a ctx.session.synthetic call may take before its delivery is treated as uncertain
+// (deliver). Below the context handler's 4000 ms fence (server.mjs BUDGET_MS), so a call that
+// never settles cannot hold the session's delivery chain (serialized) past one hook.
+export const SYNTHETIC_TIMEOUT_MS = 3000;
 
 /**
  * `getSession()` returns the plugin context's session domain, as restore.mjs and sync.mjs take it; a session it cannot classify gets the loud not-staged line.
@@ -69,9 +73,6 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   const generations = new Map();
   // Per session, the tail of its delivery chain (serialized); removed when the chain drains.
   const chains = new Map();
-  // Per session, the texts sent to it as synthetic messages, so staging tells Sterling's
-  // message apart from a brief by provenance, not by its header (staging.mjs rawBriefOf).
-  const sterlingSent = new Map();
   // The last root session whose start refreshed each project's registry row.
   const registrySeen = new Map();
   // One-shot lines produced but not yet delivered, by `${root}\0${name}`. Their guards
@@ -118,30 +119,6 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     return text;
   }
 
-  /**
-   * Which whole user messages of `sessionID` are Sterling's synthetic messages, as a predicate
-   * on their text, by provenance: the texts this process sent there (sendSynthetic), else (a
-   * new process) the durable messages ctx.session.context marks type 'synthetic' with
-   * metadata.source 'sterling'. With neither, a message starting with the header is taken as
-   * Sterling's, and the log says the check ran on that weaker rule.
-   */
-  async function sterlingMessages(root, sessionID) {
-    const sent = sterlingSent.get(sessionID);
-    if (sent?.size) return (text) => sent.has(text);
-    try {
-      const session = getSession?.();
-      if (typeof session?.context !== 'function') throw new Error('ctx.session.context is unavailable');
-      const got = await session.context({ sessionID });
-      const messages = Array.isArray(got) ? got : got?.data;
-      if (!Array.isArray(messages)) throw new Error(`ctx.session.context answered ${got === null ? 'null' : typeof got}, not a message list`);
-      const durable = new Set(messages.filter((m) => m?.type === 'synthetic' && m.metadata?.source === 'sterling' && typeof m.text === 'string').map((m) => m.text));
-      return (text) => durable.has(text);
-    } catch (e) {
-      logLine(root, `context: Sterling's messages in session ${sessionID} could not be told by provenance (${errText(e)}); a user message starting with the STERLING CONTEXT header is taken as Sterling's`);
-      return (text) => text.startsWith(VOLATILE_HEADER);
-    }
-  }
-
   /** H19's staging for a child session: the records governing its own brief with the plan, TDD and return-contract chrome. */
   async function childStaging(root, input) {
     // STERLING-DELIVERY: off (or a policy that cannot be established) stages no records:
@@ -152,7 +129,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       deliveryPolicy.markDisclosed(input.sessionID, policy);
       return composeContext({ agentType: role, ...dispatchChrome(root, role), unattributableLine: deliveryPolicyNotice(policy) });
     }
-    const brief = briefOf(input.messages, await sterlingMessages(root, input.sessionID));
+    const brief = briefOf(input.messages);
     try {
       const store = openStore(join(root, '.sterling', 'sterling.db'));
       try {
@@ -508,53 +485,87 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
    * Sends the due text to the model as a synthetic user message with no description, which
    * OpenCode hides in the TUI and the web app (finding
    * opencode-synthetic-message-hides-plugin-context-from-tui-model-still-sees-it; GitHub #93),
-   * so the user's own text and tool output stay untouched. Resolves to null once the message
-   * is sent. When it cannot be sent (an OpenCode without ctx.session.synthetic, or a call
-   * that throws) it resolves to the reason, and the caller appends the text the old way
-   * (P5: the first fallback in a session also says so, `degradedNote`).
+   * so the user's own text and tool output stay untouched. Resolves to { sent: true } once the
+   * message is sent. When it cannot be sent (an OpenCode without ctx.session.synthetic, or a
+   * call that throws) it resolves to { why }, and the caller appends the text the old way
+   * (P5: the first fallback in a session also says so, `degradedNote`). A call that has not
+   * settled within SYNTHETIC_TIMEOUT_MS resolves to { why, uncertain: true }: it may still
+   * land, so the caller neither appends nor commits (deliver).
    */
   async function sendSynthetic(sessionID, text, delivery) {
     const session = getSession?.();
-    if (typeof session?.synthetic !== 'function') return 'ctx.session.synthetic is unavailable (an older OpenCode)';
-    // Recorded before the call: a message stored by a call that then throws is still Sterling's.
-    const sent = sterlingSent.get(sessionID) ?? remember(sterlingSent, sessionID, new Set());
-    sent.add(text);
-    while (sent.size > SENT_TEXTS_CAP) sent.delete(sent.values().next().value);
+    if (typeof session?.synthetic !== 'function') return { why: 'ctx.session.synthetic is unavailable (an older OpenCode)' };
+    let timer;
     try {
-      await session.synthetic({ sessionID, text, metadata: { source: 'sterling' }, ...(delivery ? { delivery } : {}) });
-      return null;
+      const call = Promise.resolve(session.synthetic({ sessionID, text, metadata: { source: 'sterling' }, ...(delivery ? { delivery } : {}) })).then(() => ({ sent: true }));
+      const late = new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ why: `ctx.session.synthetic did not settle within ${SYNTHETIC_TIMEOUT_MS} ms`, uncertain: true }), SYNTHETIC_TIMEOUT_MS);
+      });
+      return await Promise.race([call, late]);
     } catch (e) {
-      return errText(e);
+      return { why: errText(e) };
+    } finally {
+      clearTimeout(timer);
     }
   }
 
-  // Sessions already told that Sterling's lines are appended instead of sent hidden.
+  // Per session, the kinds of degraded delivery it was already told about ('append', 'timeout').
   const degradedTold = new Map();
+  // Per session, a timeout not said yet: its note rides the session's next delivery.
+  const timeoutUntold = new Map();
+  const told = (sessionID, kind) => degradedTold.get(sessionID)?.has(kind) === true;
   function degradedNote(sessionID, why) {
-    if (degradedTold.has(sessionID)) return '';
+    if (told(sessionID, 'append')) return '';
     return `STERLING DELIVERY DEGRADED (${why}): Sterling's session lines are appended to the user's prompt or a tool result this session, so the user sees them; they are no longer sent as a hidden message.`;
+  }
+  function timeoutNote(sessionID) {
+    const why = timeoutUntold.get(sessionID);
+    if (!why || told(sessionID, 'timeout')) return '';
+    return `STERLING DELIVERY DEGRADED (${why}): Sterling's session lines were sent again, so a line shown earlier may repeat once.`;
+  }
+  function markTold(sessionID, kind) {
+    const kinds = degradedTold.get(sessionID) ?? remember(degradedTold, sessionID, new Set());
+    kinds.add(kind);
   }
 
   /**
    * Delivers `due` (dueText's result): hidden when it can be, else through `append(text)`, the
    * route's old way. The marks are committed only after one of the two has delivered.
+   *
+   * A synthetic call that times out is UNCERTAIN: OpenCode may store the message later. The
+   * selected lines and claimed notices are released, not committed, and nothing is appended,
+   * so the next delivery sends them again, with a degraded note naming the timeout. If the
+   * late call does land, the conversation gets those lines twice: a repeat is the accepted
+   * cost, chosen over losing the lines (commit) or a guaranteed duplicate now (append) or a
+   * session whose delivery chain waits forever on one call (no timeout).
    */
   async function deliver(sessionID, due, { delivery, append }) {
-    let note = '';
-    let why = null;
+    const notes = [];
     try {
       if (due.text) {
-        why = await sendSynthetic(sessionID, due.text, delivery);
-        if (why) {
-          note = degradedNote(sessionID, why);
-          append(note ? `${due.text}\n\n${note}` : due.text);
+        const pendingTimeout = timeoutNote(sessionID);
+        const text = pendingTimeout ? `${due.text}\n\n${pendingTimeout}` : due.text;
+        const result = await sendSynthetic(sessionID, text, delivery);
+        if (result.uncertain) {
+          remember(timeoutUntold, sessionID, result.why);
+          due.release();
+          return;
+        }
+        if (pendingTimeout) notes.push('timeout');
+        if (!result.sent) {
+          const note = degradedNote(sessionID, result.why);
+          if (note) notes.push('append');
+          append(note ? `${text}\n\n${note}` : text);
         }
       }
     } catch (e) {
       due.release();
       throw e;
     }
-    if (note && due.fresh()) remember(degradedTold, sessionID, true);
+    if (due.fresh()) {
+      for (const kind of notes) markTold(sessionID, kind);
+      if (notes.includes('timeout')) timeoutUntold.delete(sessionID);
+    }
     due.commit();
   }
 
@@ -623,6 +634,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       delivered.delete(sessionID);
       frozenSystem.delete(sessionID);
       degradedTold.delete(sessionID);
+      timeoutUntold.delete(sessionID);
       remember(generations, sessionID, (generations.get(sessionID) ?? 0) + 1);
     },
   };

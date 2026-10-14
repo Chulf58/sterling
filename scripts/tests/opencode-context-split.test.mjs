@@ -48,12 +48,11 @@ function addTodo(dir, text) {
  * message route); `opts.synthetic: null` leaves it out (an older OpenCode) and a function
  * replaces it.
  */
-function handler(dir, extra = {}, { synthetic, context } = {}) {
+function handler(dir, extra = {}, { synthetic } = {}) {
   const sessions = { ses_root: {}, ses_other: {}, ses_child: { parentID: 'ses_root' } };
   const calls = [];
   const session = { get: async ({ sessionID }) => ({ id: sessionID, ...sessions[sessionID] }) };
   if (synthetic !== null) session.synthetic = async (arg) => (synthetic ? synthetic(arg) : void calls.push(arg));
-  if (context) session.context = context;
   const h = contextMod.createContextHandler({
     openStore: (p) => new SterlingStore(p),
     now: () => NOW,
@@ -342,39 +341,36 @@ const userMsg = (text) => ({ role: 'user', content: [{ type: 'text', text }] });
 const childContext = (messages) => ({ sessionID: 'ses_child', agent: 'sterling/implementor', system: [], messages, tools: {} });
 const BRIEF_UNAVAILABLE = /could not be staged from \[brief-unavailable\]/;
 
-test('a child\'s brief is told from Sterling\'s synthetic message by provenance: the text this process sent is skipped', async () => {
+test('a child\'s brief is recovered exactly when Sterling\'s synthetic message is stored before it, or its lines were appended to it', async () => {
+  const synthetic = userMsg(`${staging.VOLATILE_HEADER}\n\nSTERLING STATUS: board 0 open`);
+  assert.equal(staging.briefOf([synthetic, userMsg('do the thing in src/a.mjs')]), 'do the thing in src/a.mjs');
+  assert.equal(staging.briefOf([synthetic, userMsg('do the thing in src/a.mjs'), userMsg('a later message')]), 'do the thing in src/a.mjs', 'the brief, not a later user message');
+  assert.equal(staging.rawBriefOf([synthetic]), '', 'a synthetic message alone is no brief');
+  assert.equal(staging.briefOf([userMsg(`do the thing\n\n${staging.VOLATILE_HEADER}\n\nSTERLING STATUS`)]), 'do the thing', 'the append strip is kept for the fallback route');
+  // Through the handler: the text this process really sends is skipped, and the child is staged from its brief.
   const dir = makeProject();
   try {
     const h = handler(dir);
     await appended(h, 'ses_child');
-    const [sent] = h.synthetic;
-    assert.ok(sent.text.startsWith(staging.VOLATILE_HEADER));
-    const i = childContext([userMsg(sent.text), userMsg('do the thing')]);
+    const i = childContext([userMsg(h.synthetic[0].text), userMsg('do the thing')]);
     await h.onContext(i);
-    assert.doesNotMatch(systemOf(i), BRIEF_UNAVAILABLE, 'the brief after Sterling\'s message was found');
-    assert.equal(staging.briefOf([userMsg(`do the thing\n\n${staging.VOLATILE_HEADER}\n\nSTERLING STATUS`)]), 'do the thing', 'the append strip is kept for the fallback route');
+    assert.doesNotMatch(systemOf(i), BRIEF_UNAVAILABLE);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('a genuine brief that starts with the STERLING CONTEXT header is not dropped (Sol finding 6)', async () => {
-  const dir = makeProject();
-  try {
-    // A new process: nothing sent from here; the durable messages hold no Sterling synthetic message.
-    const h = handler(dir, {}, { context: async () => [{ id: 'msg_1', type: 'user', text: 'x' }] });
-    const i = childContext([userMsg(`${staging.VOLATILE_HEADER} quoted by the conductor\n\ndo the thing`)]);
-    await h.onContext(i);
-    assert.doesNotMatch(systemOf(i), BRIEF_UNAVAILABLE, 'the brief is the user\'s message, not skipped for its first line');
-    // The durable route: a synthetic message marked source 'sterling' is skipped by its text.
-    const synthetic = `${staging.VOLATILE_HEADER}\n\nSTERLING STATUS: board 0 open`;
-    const h2 = handler(dir, {}, { context: async () => ({ data: [{ id: 'msg_0', type: 'synthetic', text: synthetic, metadata: { source: 'sterling' } }] }) });
-    const only = childContext([userMsg(synthetic)]);
-    await h2.onContext(only);
-    assert.match(systemOf(only), BRIEF_UNAVAILABLE, 'a session holding only Sterling\'s message has no brief');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+test('a STERLING-DELIVERY: off line inside Sterling\'s own synthetic message does not blind the lane; one in the brief does', async () => {
+  const policyMod = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'delivery-policy.mjs')).href);
+  const make = () => policyMod.createDeliveryPolicy({
+    getSession: () => ({ get: async ({ sessionID }) => ({ id: sessionID, parentID: 'ses_root' }) }),
+    parents: new Map(),
+    readPolicy: () => 'on',
+  });
+  // A worker error quoted in Sterling's lines can carry the directive on a line of its own.
+  const quoted = userMsg(`${staging.VOLATILE_HEADER}\n\nlast worker run FAILED at 2026-10-12T11:00:00.000Z: brief said\nSTERLING-DELIVERY: off\n(log: .sterling/maintenance-worker.log)`);
+  assert.equal(await make().resolve('/nowhere', 'ses_c1', [quoted, userMsg('do the thing')]), 'on', 'Sterling\'s text is never read as a directive');
+  assert.equal(await make().resolve('/nowhere', 'ses_c2', [quoted, userMsg('do the thing\nSTERLING-DELIVERY: off')]), 'off', 'the brief\'s own line still blinds the lane');
 });
 
 // ---- Sol review of ccca6711 -------------------------------------------------
@@ -509,6 +505,89 @@ test('the maintenance block is re-delivered when the last worker run failed, and
     const recovered = await appended(h, 'ses_root');
     assert.match(recovered, /RECONCILE BACKLOG/, 'the recovery is said');
     assert.doesNotMatch(recovered, /FAILED/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- Sol re-check of fee7d5f0 ------------------------------------------------
+
+/** Lets pending microtasks and immediates run: a delivery that is not stuck settles within these rounds. */
+async function settled(p) {
+  let done = false;
+  p.then(() => { done = true; }, () => { done = true; });
+  for (let n = 0; n < 20 && !done; n++) await new Promise((r) => setImmediate(r));
+  return done;
+}
+
+test('a synthetic call that never settles times out: nothing is appended or committed, and the next prompt delivers with a note (ruling B)', async (t) => {
+  const dir = makeProject();
+  try {
+    const sent = [];
+    let first = true;
+    let called;
+    const reached = new Promise((r) => { called = r; });
+    const h = handler(dir, {}, {
+      synthetic: (c) => {
+        if (first) {
+          first = false;
+          called();
+          return new Promise(() => {});
+        }
+        sent.push(c);
+        return Promise.resolve();
+      },
+    });
+    notices.addNotice(dir, 'NOTICE-AFTER-TIMEOUT', NOW);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const input = { sessionID: 'ses_root', messageID: 'msg_u', prompt: { text: 'go' }, delivery: 'immediate' };
+    const stuck = h.onPrompt(input);
+    await reached;
+    t.mock.timers.tick(contextMod.SYNTHETIC_TIMEOUT_MS);
+    assert.equal(await settled(stuck), true, 'the hook returns once the call times out');
+    assert.equal(input.prompt.text, 'go', 'no append fallback on an uncertain delivery');
+    const left = JSON.parse(readFileSync(join(dir, notices.NOTICES_REL), 'utf8'));
+    assert.deepEqual(left.map((n) => [n.text, n.shown_at, n.claim]), [['NOTICE-AFTER-TIMEOUT', undefined, undefined]], 'the notice claim was released, not committed');
+
+    const next = { sessionID: 'ses_root', messageID: 'msg_v', prompt: { text: 'go' }, delivery: 'immediate' };
+    assert.equal(await settled(h.onPrompt(next)), true, 'the session chain was not held by the stuck call');
+    assert.equal(sent.length, 1);
+    assert.match(sent[0].text, /STERLING STATUS: board 0 open/, 'the released lines are sent again');
+    assert.match(sent[0].text, /NOTICE-AFTER-TIMEOUT/);
+    assert.match(sent[0].text, new RegExp(`STERLING DELIVERY DEGRADED \\(ctx\\.session\\.synthetic did not settle within ${contextMod.SYNTHETIC_TIMEOUT_MS} ms\\)`));
+
+    addTodo(dir, 'later ask');
+    h.resetStatus(dir);
+    assert.equal(await settled(h.onPrompt({ sessionID: 'ses_root', messageID: 'msg_w', prompt: { text: 'go' }, delivery: 'immediate' })), true);
+    assert.equal(sent.length, 2);
+    assert.doesNotMatch(sent[1].text, /DEGRADED/, 'the timeout note is said once per session');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a multi-line worker failure reason is in the maintenance key: it is delivered, and a change in its second line is too (ruling C)', async () => {
+  const dir = makeProject();
+  try {
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    store.create({
+      id: randomUUID(), type: 'todo', created_at: NOW, updated_at: NOW, author: 'system', status: 'active', superseded_by: null,
+      links: [], scope: 'project', stack_tags: [], text: 'item', source: 'system', system_reason: 'reconcile_needed', file_keys: ['src/a.mjs'],
+    });
+    store.close();
+    const h = handler(dir);
+    assert.match(await appended(h, 'ses_root'), /RECONCILE BACKLOG/);
+    const statePath = join(dir, '.sterling', 'transient', 'maintenance-worker.state.json');
+    mkdirSync(dirname(statePath), { recursive: true });
+    const fail = (error) => writeFileSync(statePath, JSON.stringify({ last_run: { ok: false, at: '2026-10-12T11:00:00.000Z', error } }));
+    fail('process failed\npermission denied');
+    h.resetStatus(dir);
+    assert.match(await appended(h, 'ses_root'), /last worker run FAILED at 2026-10-12T11:00:00\.000Z: process failed\npermission denied/);
+    fail('process failed\nmcp not connected');
+    h.resetStatus(dir);
+    assert.match(await appended(h, 'ses_root'), /process failed\nmcp not connected/, 'the second line is part of the failure identity');
+    h.resetStatus(dir);
+    assert.equal(await appended(h, 'ses_root'), '', 'an unchanged failure is not sent again');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

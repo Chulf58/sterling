@@ -18721,12 +18721,12 @@ function notStagedLine(kase) {
   return `STERLING DISPATCH STAGING (H19): this session's brief could not be staged from [${kase}] \u2014 YOUR KNOWLEDGE WAS NOT STAGED: no owning articles, hazards or decisions were delivered for your task. Do not assume the store is silent on it: rely on your dispatch brief for knowledge pointers and query the store for the area before acting. File-touch delivery still fires on your first read or edit.`;
 }
 var VOLATILE_HEADER = "STERLING CONTEXT (added by the Sterling plugin, not typed by the user):";
-function rawBriefOf(messages, isSterling = () => false) {
+function rawBriefOf(messages) {
   const textOf = (m) => {
     const content = m?.content;
     return typeof content === "string" ? content : Array.isArray(content) ? content.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n") : "";
   };
-  const first = Array.isArray(messages) ? messages.find((m) => m?.role === "user" && !isSterling(textOf(m))) : null;
+  const first = Array.isArray(messages) ? messages.find((m) => m?.role === "user" && !textOf(m).startsWith(VOLATILE_HEADER)) : null;
   if (!first) return "";
   const text = textOf(first);
   const appended = text.indexOf(`
@@ -18734,8 +18734,8 @@ function rawBriefOf(messages, isSterling = () => false) {
 ${VOLATILE_HEADER}`);
   return appended >= 0 ? text.slice(0, appended) : text;
 }
-function briefOf(messages, isSterling) {
-  return rawBriefOf(messages, isSterling).slice(0, BRIEF_SCAN_CAP);
+function briefOf(messages) {
+  return rawBriefOf(messages).slice(0, BRIEF_SCAN_CAP);
 }
 function stageChild({ store, root, sessionID, agent: agentName, brief, disclosure: disclosure2 = "" }) {
   const agent = agentRole(agentName);
@@ -19242,8 +19242,8 @@ function planLockSection(ctx) {
 // packages/opencode-plugin/src/context.mjs
 var STATUS_TTL_MS = 1e4;
 var UNDECLARED_TTL_MS = 5 * 6e4;
-var WORKER_ALERTS = /last worker run FAILED at .*? \(log: [^)]*\)|worker state unknown \([^)]*\)|worker disabled by \S+|worker paused after (?:a failed run|a run that closed nothing)/g;
-var SENT_TEXTS_CAP = 50;
+var WORKER_ALERTS = /last worker run FAILED at [\s\S]*? \(log: [^)]*\)|worker state unknown \([^)]*\)|worker disabled by \S+|worker paused after (?:a failed run|a run that closed nothing)/g;
+var SYNTHETIC_TIMEOUT_MS = 3e3;
 function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore, sessionSync, pluginRoot: pluginRootOverride, getSession, parents = /* @__PURE__ */ new Map(), sweepStale, swept = /* @__PURE__ */ new Set(), env = process.env, deliveryPolicy = createDeliveryPolicy({ getSession, parents }) }) {
   const statusCache = /* @__PURE__ */ new Map();
   const undeclaredCache = /* @__PURE__ */ new Map();
@@ -19253,7 +19253,6 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   const delivered = /* @__PURE__ */ new Map();
   const generations = /* @__PURE__ */ new Map();
   const chains = /* @__PURE__ */ new Map();
-  const sterlingSent = /* @__PURE__ */ new Map();
   const registrySeen = /* @__PURE__ */ new Map();
   const heldLines = /* @__PURE__ */ new Map();
   const latestGeneration = /* @__PURE__ */ new Map();
@@ -19287,22 +19286,6 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     statusCache.set(root, { at: Date.now(), text });
     return text;
   }
-  async function sterlingMessages(root, sessionID) {
-    const sent = sterlingSent.get(sessionID);
-    if (sent?.size) return (text) => sent.has(text);
-    try {
-      const session = getSession?.();
-      if (typeof session?.context !== "function") throw new Error("ctx.session.context is unavailable");
-      const got = await session.context({ sessionID });
-      const messages = Array.isArray(got) ? got : got?.data;
-      if (!Array.isArray(messages)) throw new Error(`ctx.session.context answered ${got === null ? "null" : typeof got}, not a message list`);
-      const durable = new Set(messages.filter((m) => m?.type === "synthetic" && m.metadata?.source === "sterling" && typeof m.text === "string").map((m) => m.text));
-      return (text) => durable.has(text);
-    } catch (e) {
-      logLine(root, `context: Sterling's messages in session ${sessionID} could not be told by provenance (${errText(e)}); a user message starting with the STERLING CONTEXT header is taken as Sterling's`);
-      return (text) => text.startsWith(VOLATILE_HEADER);
-    }
-  }
   async function childStaging(root, input) {
     const policy = await deliveryPolicy.resolve(root, input.sessionID, input.messages);
     if (policy !== "on") {
@@ -19310,7 +19293,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       deliveryPolicy.markDisclosed(input.sessionID, policy);
       return composeContext({ agentType: role, ...dispatchChrome(root, role), unattributableLine: deliveryPolicyNotice(policy) });
     }
-    const brief = briefOf(input.messages, await sterlingMessages(root, input.sessionID));
+    const brief = briefOf(input.messages);
     try {
       const store = openStore(join37(root, ".sterling", "sterling.db"));
       try {
@@ -19576,40 +19559,67 @@ ${due.join("\n\n")}` : "",
   }
   async function sendSynthetic(sessionID, text, delivery) {
     const session = getSession?.();
-    if (typeof session?.synthetic !== "function") return "ctx.session.synthetic is unavailable (an older OpenCode)";
-    const sent = sterlingSent.get(sessionID) ?? remember(sterlingSent, sessionID, /* @__PURE__ */ new Set());
-    sent.add(text);
-    while (sent.size > SENT_TEXTS_CAP) sent.delete(sent.values().next().value);
+    if (typeof session?.synthetic !== "function") return { why: "ctx.session.synthetic is unavailable (an older OpenCode)" };
+    let timer;
     try {
-      await session.synthetic({ sessionID, text, metadata: { source: "sterling" }, ...delivery ? { delivery } : {} });
-      return null;
+      const call = Promise.resolve(session.synthetic({ sessionID, text, metadata: { source: "sterling" }, ...delivery ? { delivery } : {} })).then(() => ({ sent: true }));
+      const late2 = new Promise((resolve15) => {
+        timer = setTimeout(() => resolve15({ why: `ctx.session.synthetic did not settle within ${SYNTHETIC_TIMEOUT_MS} ms`, uncertain: true }), SYNTHETIC_TIMEOUT_MS);
+      });
+      return await Promise.race([call, late2]);
     } catch (e) {
-      return errText(e);
+      return { why: errText(e) };
+    } finally {
+      clearTimeout(timer);
     }
   }
   const degradedTold = /* @__PURE__ */ new Map();
+  const timeoutUntold = /* @__PURE__ */ new Map();
+  const told = (sessionID, kind) => degradedTold.get(sessionID)?.has(kind) === true;
   function degradedNote(sessionID, why) {
-    if (degradedTold.has(sessionID)) return "";
+    if (told(sessionID, "append")) return "";
     return `STERLING DELIVERY DEGRADED (${why}): Sterling's session lines are appended to the user's prompt or a tool result this session, so the user sees them; they are no longer sent as a hidden message.`;
   }
+  function timeoutNote(sessionID) {
+    const why = timeoutUntold.get(sessionID);
+    if (!why || told(sessionID, "timeout")) return "";
+    return `STERLING DELIVERY DEGRADED (${why}): Sterling's session lines were sent again, so a line shown earlier may repeat once.`;
+  }
+  function markTold(sessionID, kind) {
+    const kinds = degradedTold.get(sessionID) ?? remember(degradedTold, sessionID, /* @__PURE__ */ new Set());
+    kinds.add(kind);
+  }
   async function deliver(sessionID, due, { delivery, append }) {
-    let note = "";
-    let why = null;
+    const notes = [];
     try {
       if (due.text) {
-        why = await sendSynthetic(sessionID, due.text, delivery);
-        if (why) {
-          note = degradedNote(sessionID, why);
-          append(note ? `${due.text}
+        const pendingTimeout = timeoutNote(sessionID);
+        const text = pendingTimeout ? `${due.text}
 
-${note}` : due.text);
+${pendingTimeout}` : due.text;
+        const result = await sendSynthetic(sessionID, text, delivery);
+        if (result.uncertain) {
+          remember(timeoutUntold, sessionID, result.why);
+          due.release();
+          return;
+        }
+        if (pendingTimeout) notes.push("timeout");
+        if (!result.sent) {
+          const note = degradedNote(sessionID, result.why);
+          if (note) notes.push("append");
+          append(note ? `${text}
+
+${note}` : text);
         }
       }
     } catch (e) {
       due.release();
       throw e;
     }
-    if (note && due.fresh()) remember(degradedTold, sessionID, true);
+    if (due.fresh()) {
+      for (const kind of notes) markTold(sessionID, kind);
+      if (notes.includes("timeout")) timeoutUntold.delete(sessionID);
+    }
     due.commit();
   }
   function serialized(sessionID, fn) {
@@ -19665,6 +19675,7 @@ ${text}`;
       delivered.delete(sessionID);
       frozenSystem.delete(sessionID);
       degradedTold.delete(sessionID);
+      timeoutUntold.delete(sessionID);
       remember(generations, sessionID, (generations.get(sessionID) ?? 0) + 1);
     }
   };
