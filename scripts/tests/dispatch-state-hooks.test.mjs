@@ -518,8 +518,8 @@ test('DSH-5: a RESUME (an already-ended round for this agent_id + a fresh same-t
     assert.equal(rounds.length, 2, 'each Start is its own round (decision 24dc4c63) — a resume appends round 2'); // not-a-citation: fixture id
     const unended = rounds.filter((e) => !e.ended);
     assert.equal(unended.length, 1);
-    // RE-CUT by decision h22-dispatch-files-from-review-territory-and-resume-
-    // inherits-prior-round (e841facd): the resumed round keeps round 1's
+    // RE-CUT by
+    // decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round (e841facd): the resumed round keeps round 1's
     // territory (was files: []), and still never takes the stranger's.
     assert.deepEqual(unended[0].files, ['src/round1.mjs'], "the resumed round inherits its own prior round's files, never the fresh slot's src/fresh.mjs");
     assert.equal(unended[0].files_source, 'resume-inherited');
@@ -690,8 +690,8 @@ test('DSH-10: extractPathCandidates SURVIVES in scripts/hooks/lib/dispatch-promp
   assert.equal(existsSync(DISPATCH_PROMPT_LIB), true, 'the prompt-parsing lib is kept, not deleted with the tail readers');
   const mod = await import(pathToFileURL(DISPATCH_PROMPT_LIB).href);
   assert.equal(typeof mod.extractPathCandidates, 'function', 'extractPathCandidates stays exported — the consumers parse the resolved prompt with it');
-  // RE-CUT by decision h22-dispatch-files-from-review-territory-and-resume-
-  // inherits-prior-round (e841facd): parseReviewTerritory was deleted in
+  // RE-CUT by
+  // decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round (e841facd): parseReviewTerritory was deleted in
   // e16e127 as reader-less, but it fed the register's `files`, which H10's
   // deferral join reads. It is restored; it was removed from the list below.
   assert.equal(typeof mod.parseReviewTerritory, 'function', "parseReviewTerritory is exported again — H22's SubagentStart reads it");

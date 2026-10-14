@@ -58,8 +58,8 @@ const input = readStdin();
 // costs only its own line, never h19's other staging.
 const { tddPostureLine, activePlanLine } = dispatchChrome(input.cwd, input.agent_type);
 
-// UNATTRIBUTABLE-START DISCLOSURE (decision dispatch-state-machine-pre-slot-
-// post-binding-locked-start-resolution-replaces-transcript-attribution §6):
+// UNATTRIBUTABLE-START DISCLOSURE
+// (decision dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution §6):
 // set inside main() once resolveDispatchStart's verdict is known, and folded
 // into combinedContext() beside the return contract — never a transcript
 // fallback, exactly one line, on 'unattributable' only ('resume' emits
@@ -91,8 +91,8 @@ function notStagedLine(kase) {
   return `STERLING DISPATCH STAGING (H19): this spawn's dispatch could not be attributed at Start [${kase}] — YOUR KNOWLEDGE WAS NOT STAGED: no owning articles, hazards or decisions were delivered for your task. Do not assume the store is silent on it: rely on your dispatch brief for knowledge pointers and query the store for the area before acting. File-touch delivery still fires on your first Read/Edit.`;
 }
 
-// THE ONE-ENVELOPE RULE IS THE HELPER'S NOW (decision hook-stdout-exit-after-
-// write-callback-bound-exit-deny-stays-synchronous): exitAfterWrite suppresses a
+// THE ONE-ENVELOPE RULE IS THE HELPER'S NOW
+// (decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-synchronous): exitAfterWrite suppresses a
 // second non-empty stdout payload and DISCLOSES the drop on stderr, so the local
 // `emitted` flag this file used to carry is gone — one mechanism, not two that
 // can disagree. The same call is also what makes the exit wait for the stream to
@@ -130,8 +130,7 @@ async function main(input) {
     startPhase = 'resolution';
 
     // DISPATCH-STATE RESOLUTION replaces the old parent-transcript prompt scan
-    // (decision dispatch-state-machine-pre-slot-post-binding-locked-start-
-    // resolution-replaces-transcript-attribution §5/§6). 'resume' emits nothing
+    // (decision dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution §5/§6). 'resume' emits nothing
     // extra; 'unattributable' stages no territory and gets exactly one line
     // beside the return contract; a resolved prompt is staged normally.
     const resolution = await resolveDispatchStart(

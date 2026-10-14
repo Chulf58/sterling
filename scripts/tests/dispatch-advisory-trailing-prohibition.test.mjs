@@ -30,8 +30,8 @@
 // (h22-dispatch-register.mjs `claimed_files` WRITE side) are DELETED WHOLE:
 // h26-dispatch-overlap.mjs is already deleted under the scale-down decision
 // (sterling-claude-code-scale-down-boundary, 2ad87dd1), and `claimed_files`
-// had no non-test reader (research_finding h22-dispatch-register-consumer-
-// map-which-parts-have-a-reader-september-2026) — h22's SubagentStart no
+// had no non-test reader
+// (research_finding h22-dispatch-register-consumer-map-which-parts-have-a-reader-september-2026) — h22's SubagentStart no
 // longer computes or writes it. hasUnsuppressedMatch/escapeRe (GROUPS A/B
 // below) remain live via scripts/hooks/lib/dispatch-residue.mjs.
 

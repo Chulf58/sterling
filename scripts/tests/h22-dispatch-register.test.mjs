@@ -114,8 +114,8 @@ function out(r) {
   return `${r.stdout}\n${r.stderr}`;
 }
 // The deferral line on a non-blocking release reaches the conductor through the
-// notice channel, not stdout/stderr (decision h10-deferral-is-conductor-facing-
-// degradations-stay-loud), so the union now includes the published notices.
+// notice channel, not stdout/stderr
+// (decision h10-deferral-is-conductor-facing-degradations-stay-loud), so the union now includes the published notices.
 function disclosed(r, dir) {
   const notices = join(dir, '.sterling', 'transient', 'notices');
   const texts = existsSync(notices) ? readdirSync(notices).map((n) => readFileSync(join(notices, n), 'utf8')) : [];
@@ -458,8 +458,8 @@ test('R1-A94 CONTROL: the SAME agent_id after an ENDED round is ADMITTED as a ne
     // STRANGER's territory, and H19's delivery guard would make that
     // misattribution permanent. The pending slot below proves it was left for
     // its real owner.
-    // SECOND RE-CUT, decision h22-dispatch-files-from-review-territory-and-
-    // resume-inherits-prior-round (e841facd): the resumed round still stages
+    // SECOND RE-CUT,
+    // decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round (e841facd): the resumed round still stages
     // nothing and never claims the fresh slot, but it now INHERITS round 1's
     // territory (was files:[] files_source:'unattributable').
     assert.deepEqual(unended[0].files, ['src/x.mjs'], "a RESUMED round inherits its own round 1's territory (§5(ii) still holds) — it must never claim the fresh pending slot's src/y.mjs");

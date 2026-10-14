@@ -272,8 +272,8 @@ test('probeCodex: every failure path reports its discriminating reason, carries 
 // tests). The command-carrying arm's dedicated tests were removed with it.
 
 // =============================================================================
-// USER-SCOPE CHECK (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-
-// keeps-its-clone, ruling point 2): the codex server is registered in the user-level
+// USER-SCOPE CHECK
+// (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone, ruling point 2): the codex server is registered in the user-level
 // Claude config, never in the plugin's file. userScopeCodexServer reads it;
 // codexUserScopeLine picks the ONE loud remedy line.
 // =============================================================================

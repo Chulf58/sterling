@@ -73,8 +73,8 @@ export function probeCodex({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_MS, 
 // The official codex mcp-server stdio subcommand — no wrapper (research_finding foreign_dadf858e).
 // The bare `codex` spelling is what probeCodex proves: its success means "the `codex` on
 // PATH ran". (An absolute-path override once existed for the native-Windows probe's result;
-// that probe was retired with the native launcher — decision native-windows-launcher-retired-
-// wsl2-only — so nothing produces a probe result carrying a command anymore, and
+// that probe was retired with the native launcher —
+// decision native-windows-launcher-retired-wsl2-only — so nothing produces a probe result carrying a command anymore, and
 // withCodexEntry no longer looks for one.)
 export const CODEX_MCP_ENTRY = { command: 'codex', args: ['mcp-server'] };
 
@@ -105,8 +105,8 @@ export function codexSkipLine(reason, version) {
   return `codex mcp: skipped — ${text}`;
 }
 
-// USER-SCOPE CHECK (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-
-// keeps-its-clone, ruling point 2). The codex server is registered in the user-level
+// USER-SCOPE CHECK
+// (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone, ruling point 2). The codex server is registered in the user-level
 // Claude config (`claude mcp add --scope user`), which Claude Code keeps in
 // `<CLAUDE_CONFIG_DIR or home>/.claude.json` under a top-level `mcpServers`. init only
 // READS that file: a missing file is "not registered", an unparseable one is reported as

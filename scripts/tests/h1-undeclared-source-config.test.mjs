@@ -1,6 +1,6 @@
 // H1 SessionStart — the undeclared-source-disclosure CONFIG LADDER
-// (board 44ef6838; decision `undeclared-source-disclosure-per-file-coverage-
-// live-h1-scan`, knowledge_get b128f79c-043a-45ab-b3cf-125f5d44f234).
+// (board 44ef6838;
+// decision `undeclared-source-disclosure-per-file-coverage-live-h1-scan`, knowledge_get b128f79c-043a-45ab-b3cf-125f5d44f234).
 //
 // This file is a NEW sibling, not an extension of h1-accuracy.test.mjs: that
 // file governs a different concern (uncapped queue counts, the delegation

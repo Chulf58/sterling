@@ -1,7 +1,6 @@
 // Record-hygiene check arm (board 7a75851c step 3). REPORTING ONLY: it lists what
 // it finds, loudly, and ALWAYS exits 0 — it never fails the battery. Spec:
-// decisions record-audit-dead-records-superseded-stale-findings-by-age-report-arm-
-// plus-sampled-audit and make-records-findable-authoring-rule-disclosure-lint-then-
+// decisions record-audit-dead-records-superseded-stale-findings-by-age-report-arm-plus-sampled-audit and make-records-findable-authoring-rule-disclosure-lint-then-
 // blind-experiment, part 3 of each. Over every knowledge record type it reports:
 //   dead_path             file_keys / files[].path / doc location absent at HEAD
 //   no_file_paths         a type that carries file paths, with none

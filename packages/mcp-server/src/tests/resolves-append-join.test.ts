@@ -1103,8 +1103,8 @@ test('target scope refusal: an append-join whose target article has scope other 
  *  other arm in this file. Used ONLY where the pin is about the PHYSICAL
  *  project/domain store boundary — the plain harness() above stays the
  *  right tool everywhere that boundary is not the point. */
-// CONSOLIDATED 2026-09-06 (board R4; decision scope-drift-closed-by-column-
-// authoritative-reads-not-format-change): this body moved VERBATIM into
+// CONSOLIDATED 2026-09-06 (board R4;
+// decision scope-drift-closed-by-column-authoritative-reads-not-format-change): this body moved VERBATIM into
 // ./test-helpers/mounted-harness.ts, now shared with knowledge-extract.test.ts
 // and domain-routing.test.ts, so mount-boundary pins land on ONE real
 // two-store fixture instead of three copies that had already drifted apart.
@@ -1610,9 +1610,8 @@ test('mount-boundary: a DOMAIN-scoped target cannot enter a resolves transaction
     assert.throws(
       () => widen(tools).knowledgeUpdate(article.id, { what_it_does: 'reconciled' }, [item.id]),
       (err: Error) => {
-        // TIGHTENED 2026-09-06 per decision `domain-held-subject-queue-items-
-        // close-two-step-named-mount-refusal-on-every-lane-label-routed-
-        // transaction-retired` (knowledge_get f2c61919-59ca-482e-8fab-
+        // TIGHTENED 2026-09-06 per
+        // decision `domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired` (knowledge_get f2c61919-59ca-482e-8fab-
         // 53a7ddf13a2f): a bare /scope/i is satisfied by the store's generic
         // 'nested transaction'-class guard too (that guard happens to mention
         // "scope" incidentally), so it cannot discriminate the NAMED refusal

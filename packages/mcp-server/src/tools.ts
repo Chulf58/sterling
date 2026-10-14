@@ -63,8 +63,8 @@ export interface CreateResult {
    */
   warnings: string[];
   /**
-   * FINDABILITY DISCLOSURE (decision make-records-findable-authoring-rule-
-   * disclosure-lint-then-blind-experiment, part 2): the record's central terms,
+   * FINDABILITY DISCLOSURE
+   * (decision make-records-findable-authoring-rule-disclosure-lint-then-blind-experiment, part 2): the record's central terms,
    * the set push delivery and knowledge_preflight match on. Omitted when the
    * type has none (reference_material, todo). Disclosure only.
    */
@@ -4335,8 +4335,7 @@ export class SterlingTools {
         const threshold = this.config.staleness.research_days[r.volatility_hint ?? 'medium'];
         const sourceAge = ageDays(r.source_date);
         const stale = r.status === 'flagged_stale' || sourceAge > threshold;
-        // Decision record-audit-dead-records-superseded-stale-findings-by-age-
-        // report-arm-plus-sampled-audit: a finding whose volatility clock has run
+        // Decision record-audit-dead-records-superseded-stale-findings-by-age-report-arm-plus-sampled-audit: a finding whose volatility clock has run
         // out (age only — a flagged_stale status does not mint) raises ONE
         // stale_research item, keyed on the finding. The text carries no age
         // number, so a daily re-read leaves the open item byte-identical.
@@ -4383,8 +4382,8 @@ export class SterlingTools {
         if (tree?.unresolved) return { ...record, verify_before_use: true };
         if (rel && tree?.root) {
           const stat = statSync(join(tree.root, rel), { throwIfNoEntry: false });
-          // DELETION IS DRIFT (decision record-audit-dead-records-superseded-
-          // stale-findings-by-age-report-arm-plus-sampled-audit): a repo-located
+          // DELETION IS DRIFT
+          // (decision record-audit-dead-records-superseded-stale-findings-by-age-report-arm-plus-sampled-audit): a repo-located
           // doc whose file is gone mints the same refresh_reference item, unless
           // git shows the path alive on another ref (parked on an unmerged
           // branch, the feature-article arm's reading of absence).
@@ -5804,8 +5803,7 @@ export class SterlingTools {
 
   /**
    * FINDABILITY DISCLOSURE for knowledge_create/knowledge_update receipts
-   * (decision make-records-findable-authoring-rule-disclosure-lint-then-blind-
-   * experiment, part 2). Reports the record's central terms — recordCentralTerms
+   * (decision make-records-findable-authoring-rule-disclosure-lint-then-blind-experiment, part 2). Reports the record's central terms — recordCentralTerms
    * in packages/store/src/axis.ts, the same set knowledge_preflight reports as
    * `central` and H20 prints as "central to the record" — and warns when a
    * path-carrying type has no file paths, because push-by-file can then never
@@ -7040,8 +7038,8 @@ export class SterlingTools {
   }
 
   /**
-   * knowledge_get's FIELD-WINDOW tail (decision compaction-tooling-windowed-read-
-   * plus-split), extracted so the ARCHIVED-ALIAS read shares it byte-for-byte
+   * knowledge_get's FIELD-WINDOW tail
+   * (decision compaction-tooling-windowed-read-plus-split), extracted so the ARCHIVED-ALIAS read shares it byte-for-byte
    * instead of skipping it (review finding — see the HistoricalIdError branch
    * above). `full` is whatever body the read resolved to: the live record, an
    * archived version snapshot, or an alias snapshot. legacy_resolution rides
@@ -7525,8 +7523,8 @@ export class SterlingTools {
 
   /**
    * The article_oversize dedup marker articleOversizeWarnings mints/matches
-   * for a slug (decision article-oversize-dedups-on-the-slug-at-its-minting-
-   * site, 19b506ce-5c12-46d5-afa1-5a32170bab8d). Extracted so every caller
+   * for a slug
+   * (decision article-oversize-dedups-on-the-slug-at-its-minting-site-the, 19b506ce-5c12-46d5-afa1-5a32170bab8d). Extracted so every caller
    * that needs to recognize "is this item the oversize item for THIS article"
    * — articleOversizeWarnings itself and validateResolveClaim's split
    * semantics below — derives the prefix from the ONE place that owns the
@@ -12438,8 +12436,7 @@ export class SterlingTools {
   /** The old-record types a closing note of another type may close, each with
    *  the sentence its refusal prints for the record that is NOT dead (its
    *  in-place path and its duplicate path). reference_material came first
-   *  (decision a-dead-reference-material-is-superseded-by-a-closing-note-of-
-   *  another-type): its body is a pointer at a location. open_question and
+   *  (decision a-dead-reference-material-is-superseded-by-a-closing-note-of-another-type): its body is a pointer at a location. open_question and
    *  disconfirmed_hypothesis joined by user ruling 2026-10-03 (board bdd80e1a,
    *  "Supersede for the two small types, articles stay as today"): a question
    *  or a refuted trail about code that no longer exists has nothing of its
@@ -12575,8 +12572,7 @@ export class SterlingTools {
    * single-ruling supersession — no check.
    *
    * A DEAD reference_material WAS THE FIRST CROSS-TYPE CASE (board 3b5c6877,
-   * decision record-audit-dead-records-superseded-stale-findings-by-age-
-   * report-arm-plus-sampled-audit). A reference whose location is gone had no
+   * decision record-audit-dead-records-superseded-stale-findings-by-age-report-arm-plus-sampled-audit). A reference whose location is gone had no
    * exit: knowledge_update can only repoint it, knowledge_retire needs a
    * surviving duplicate, and the deletion arm of the refresh_reference mint
    * fires on every read while it stays active. A dead open_question and a dead

@@ -34,8 +34,8 @@
 // THE DISPLAY FORM. A headline that shows only `name (id8)` and drops the full
 // uuid is WRONG, and H3 pins it wrong — not on aesthetics, but because
 // board_remove and maintenance_remove REFUSE every address form except the
-// exact full uuid (AC23, anti-pattern no-bounded-trail-guard-for-destructive-
-// addressing, severity BLOCK). A headline listing that carried only an 8-char
+// exact full uuid (AC23,
+// anti-pattern no-bounded-trail-guard-for-destructive-addressing, severity BLOCK). A headline listing that carried only an 8-char
 // id would leave every item in it UNDELETABLE from what the reader was shown.
 // The id8 inside the parentheses is a DISPLAY abbreviation for a human eye; the
 // `id` field is the machine address, and they are not the same thing.

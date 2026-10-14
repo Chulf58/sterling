@@ -6,8 +6,7 @@ import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
 
-// Decision make-records-findable-authoring-rule-disclosure-lint-then-blind-
-// experiment, part (2): knowledge_create and knowledge_update DISCLOSE the
+// Decision make-records-findable-authoring-rule-disclosure-lint-then-blind-experiment, part (2): knowledge_create and knowledge_update DISCLOSE the
 // record's central terms (what push delivery and knowledge_preflight match on)
 // and WARN when a path-carrying record has no file paths. Disclosure only —
 // nothing here refuses a write or changes what is stored.

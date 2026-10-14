@@ -670,8 +670,8 @@ function safeStringArray(value) {
  *  enumerate zero stores and exit 0 (roster review finding, fixer-mode). */
 function domainRoots() {
   const given = arg('roots');
-  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
-  // helper-one-arg-parser, R5): homedir() always exists, so the helper's
+  // CONTAINMENT
+  // (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5): homedir() always exists, so the helper's
   // realpath step never trips here.
   return { roots: given ? given.split(',') : [resolveStoreWritePath(homedir(), '.sterling', 'domains')], explicit: !!given };
 }
@@ -866,8 +866,8 @@ function enumerateStores() {
 }
 
 /**
- * --all-stores (fleet mode, decision migrate-stores-all-stores-advisory-
- * fleet-mode — inverts the earlier exit-3 refusal stub). See the file's
+ * --all-stores (fleet mode,
+ * decision migrate-stores-all-stores-advisory-fleet-mode — inverts the earlier exit-3 refusal stub). See the file's
  * --ALL-STORES header note for the full design; this is the driver: warn
  * once, enumerate, self-spawn the --db flow per store, print one result line
  * each plus a final summary, never abort the loop on a per-store failure.

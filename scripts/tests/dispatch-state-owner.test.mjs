@@ -90,8 +90,8 @@ function writeStateRaw(dir, fileName, content) {
 function readStateRaw(dir, fileName) {
   return JSON.parse(readFileSync(join(stateDir(dir), fileName), 'utf8'));
 }
-// STATUS IN THE FILENAME (decision `dispatch-state-status-in-filename-live-
-// scan-parses-only-live-records`): a planted fixture lands on the name the
+// STATUS IN THE FILENAME
+// (decision `dispatch-state-status-in-filename-live-scan-parses-only-live-records`): a planted fixture lands on the name the
 // owner itself would give it — live-<key>.json, or done-<key>~<ids>.json for
 // a terminal body — so a fixture pins behaviour, not a pre-migration name.
 function writeStateRecord(dir, record) {
@@ -1338,8 +1338,8 @@ test('DS-RS03: a RESUME still appends a fresh UNENDED round (each Start is its o
     assert.equal(rounds.length, 2, 'round 2 is appended beside the ended round 1');
     const unended = rounds.filter((e) => !e.ended);
     assert.equal(unended.length, 1);
-    // RE-CUT by decision h22-dispatch-files-from-review-territory-and-resume-
-    // inherits-prior-round (e841facd): a resume still stages nothing, but its
+    // RE-CUT by
+    // decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round (e841facd): a resume still stages nothing, but its
     // round keeps the territory of the agent's prior round. The resolution
     // carries it to the builder; H22's use of it is pinned in DSH-5.
     assert.deepEqual(r.resolution.inherited_files, ['src/round1.mjs'], "a resume stages nothing, but its resolution carries its prior round's territory");

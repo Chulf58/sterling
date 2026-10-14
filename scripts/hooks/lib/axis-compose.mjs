@@ -517,8 +517,8 @@ export function composeMechanismAxis(store, { root, outgoing, toolInput, surface
   // rank-1 hazard is whole and ranks 2-3 are one-line trigger pointers
   // ('lead' mode, the former ruling 'h20-dispatch-surface-lead-hazard-whole-rest-as-trigger-lines' (not in the current store) — the third narrowing). On the
   // AskUserQuestion surface only, they
-  // render as ONE-LINE POINTERS (decision question-surface-gets-hazards-
-  // as-pointers, the former ruling 'question-surface-gets-hazards-as-pointers' (not in the current store) — the second narrowing of the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)'s hazards-whole
+  // render as ONE-LINE POINTERS
+  // (decision question-surface-gets-hazards-as-pointers, the former ruling 'question-surface-gets-hazards-as-pointers' (not in the current store) — the second narrowing of the former ruling 'delivery-total-cap-and-axis-generic-floor' (not in the current store)'s hazards-whole
   // rule, after the former ruling 'read-only-subagent-lanes-get-hazards-as-pointers' (not in the current store)'s read-only-lane pointer): no edit happens while
   // the user answers a question, so the whole right-way text is not needed
   // there. `hazardParts`' 'question' mode is the SAME cap-and-disclose

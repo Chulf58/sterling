@@ -2,8 +2,8 @@
 // not whole TRIGGER/RIGHT WAY blocks (user ruling 2026-09-28, "Revisit for
 // read-only lanes", amending decision delivery-total-cap-and-axis-generic-floor
 // and the "each whole" clause of knowledge-delivery-target-design-no-delayed-
-// delivery). Design map: finding hazard-delivery-call-sites-lane-identity-and-
-// substance-only-freshness-trap-september-2026.
+// delivery). Design map:
+// finding hazard-delivery-call-sites-lane-identity-and-substance-only-freshness-trap-september-2026.
 //
 // Pinned here:
 //   1. hazardLaneMode's FAIL-WHOLE matrix: 'pointer' only for a subagent lane

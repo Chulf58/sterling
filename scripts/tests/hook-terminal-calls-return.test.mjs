@@ -8,8 +8,8 @@
 // FATAL #1: a helper that RETURNS while a write is pending turns every early
 // `if (x) finish();` into fall-through).
 //
-// Spec: decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-
-// synchronous (knowledge_get fa147ba4-c7fe-4a15-8ff6-0b08e2a203fa), MIGRATION
+// Spec:
+// decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-synchronous (knowledge_get fa147ba4-c7fe-4a15-8ff6-0b08e2a203fa), MIGRATION
 // paragraph. This is a source-text structural pin — it reads the hook files
 // as text (permitted: locating/structural facts about the migration shape,
 // not behavioral implementation detail) and asserts a syntactic invariant a

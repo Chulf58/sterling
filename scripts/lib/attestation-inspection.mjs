@@ -1,6 +1,6 @@
 // scripts/lib/attestation-inspection.mjs — the ONE read-only attestation
-// inspector behind decision attestation-staleness-disclosure-only-never-a-
-// refusing-gate (1f069af4 v2; board attestation-gate 9868a0dd), shared by
+// inspector behind
+// decision attestation-staleness-disclosure-only-never-a-refusing-gate (1f069af4 v2; board attestation-gate 9868a0dd), shared by
 // direct-merge.mjs (branch vs merge base).
 //
 // WHAT THIS IS FOR, and what it deliberately is NOT. The consumer's ask was a

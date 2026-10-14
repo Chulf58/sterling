@@ -3,8 +3,8 @@
 // in the same sense as domain-doctor-show.test.mjs: this file is authored
 // alongside the fix, not blind ahead of it, but each test still names the
 // exact SABOTAGE that must turn it red, per the mutation-verification
-// discipline (decision a-ruling-change-is-verified-by-mutation-not-by-a-
-// green-suite) so a later regression is caught rather than rubber-stamped.
+// discipline
+// (decision a-ruling-change-is-verified-by-mutation-not-by-a-green-suite) so a later regression is caught rather than rubber-stamped.
 //
 // HOUSE STYLE: fixture helpers are copied from scripts/tests/domain-doctor-
 // show.test.mjs by value, not imported — that file is a frozen pin and

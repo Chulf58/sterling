@@ -11,8 +11,8 @@
 // is a directory on disk (FE-1 asserts this). So H22 records the kind at
 // SubagentStart: entries that are regular files on disk at that moment go into
 // `file_entries`, and only those lose the prefix match. Missing entries and
-// directories keep it (decision h22-dispatch-files-from-review-territory-and-
-// resume-inherits-prior-round, 2026-09-29 amendment: a slash-less entry is a
+// directories keep it
+// (decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round, 2026-09-29 amendment: a slash-less entry is a
 // directory). Registers written before `file_entries` existed keep today's
 // prefix match for every entry.
 //

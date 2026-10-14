@@ -155,8 +155,8 @@ function envelopeFor(extraContext) {
  *  parses as nothing at all — so updatedInput is dropped and the codex model pin
  *  is lost exactly when something has already gone wrong.
  *
- *  THAT RULE IS THE SHARED HELPER'S NOW (decision hook-stdout-exit-after-write-
- *  callback-bound-exit-deny-stays-synchronous): exitAfterWrite holds the
+ *  THAT RULE IS THE SHARED HELPER'S NOW
+ *  (decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-synchronous): exitAfterWrite holds the
  *  one-envelope state, suppresses a second non-empty payload, DISCLOSES the drop
  *  on stderr (P5) — and, the reason it exists, exits inside the write callback
  *  so the envelope is never truncated by the exit. The local `emitted` flag is
@@ -215,8 +215,8 @@ function markBoardReadyShown() {
   }
 }
 
-/** DISPATCH OVERLAP (decision h20-warns-on-dispatch-file-overlap-with-live-
- *  agents): on the Task|Agent surface only, the advisory block naming files
+/** DISPATCH OVERLAP
+ *  (decision h20-warns-on-dispatch-file-overlap-with-live-agents): on the Task|Agent surface only, the advisory block naming files
  *  this brief shares with a live dispatch, a degraded line when the register
  *  cannot be read, or null. Computed once and memoized, like the model pin,
  *  because EVERY output path below carries it: the early exits through
@@ -258,8 +258,7 @@ const isDispatch = !isQuestion && !isConsult;
 
 
 // THE BODY IS A FUNCTION, AND EVERY TERMINAL CALL INSIDE IT IS A `return`
-// (decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-
-// synchronous). The exit now happens in the stdout write callback, so a bare
+// (decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-synchronous). The exit now happens in the stdout write callback, so a bare
 // `finish()` schedules the write and RETURNS — it no longer stops the
 // statements after it the way a hard process.exit did. Returning is what
 // preserves that guarantee; the module then ends, the loop drains, and the

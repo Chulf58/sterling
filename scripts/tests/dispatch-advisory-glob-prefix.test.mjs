@@ -6,8 +6,8 @@
 // GROUP B (h22-dispatch-register.mjs `claimed_glob_prefixes`, the register
 // write side) and GROUP C (h26-dispatch-overlap.mjs prefix-aware overlap
 // comparison) are DELETED WHOLE: `claimed_glob_prefixes` had no non-test
-// reader (research_finding h22-dispatch-register-consumer-map-which-parts-
-// have-a-reader-september-2026) and h26-dispatch-overlap.mjs is already
+// reader
+// (research_finding h22-dispatch-register-consumer-map-which-parts-have-a-reader-september-2026) and h26-dispatch-overlap.mjs is already
 // deleted under the scale-down decision (sterling-claude-code-scale-down-
 // boundary, 2ad87dd1). Only GROUP A survives — the pure-function extractor
 // (extractGlobPrefixCandidates) and its detector integration remain exported

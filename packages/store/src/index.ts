@@ -2383,8 +2383,8 @@ export class SterlingStore {
    * `buildReconcileText` builder the fold uses, and an item pruned to zero
    * paths is removed through the SAME `remove()` normal-removal path every
    * other closed system todo takes — so the drain log and the FTS row stay
-   * honest either way. `decision reconcile-needed-identity-is-reason-plus-
-   * owner-file-keys-unioned` means there is at most one such item per owner in
+   * honest either way.
+   * `decision reconcile-needed-identity-is-reason-plus-owner-file-keys-unioned` means there is at most one such item per owner in
    * practice, but this loops over every match rather than assuming it, so a
    * legacy duplicate is not silently skipped.
    *

@@ -510,8 +510,8 @@ test('AC6: other transient files (pressure-nagged.json, conductor-pressure.json)
   }
 });
 
-// ---- FIX C — MOOT, REMOVED S4 (decision `b-baseline-hash-list-concrete-
-// design`, fe861066; ruling 78dc9bd6): the conductor-attested enforcement
+// ---- FIX C — MOOT, REMOVED S4
+// (decision `b-baseline-hash-list-concrete-design`, fe861066; ruling 78dc9bd6): the conductor-attested enforcement
 // stamp this stub pinned (.sterling/transient/enforcement-stamp.json, written
 // by scripts/enforcement-stamp.mjs) no longer exists — the whole stamp
 // apparatus is deleted, and per fe861066 D2 "H1's SessionStart stamp-rmSync

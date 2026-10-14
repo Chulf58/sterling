@@ -1,6 +1,6 @@
 // Undeclared-source disclosure — the SHARED SCAN GLUE (fix round, roster
-// review MED-1/MED-2/MED-3 on decision undeclared-source-disclosure-per-
-// file-coverage-live-h1-scan, board 44ef6838). Sibling to the PURE module
+// review MED-1/MED-2/MED-3 on
+// decision undeclared-source-disclosure-per-file-coverage-live-h1-scan, board 44ef6838). Sibling to the PURE module
 // scripts/hooks/lib/undeclared-source.mjs (classification + rendering only,
 // no git spawning — kept exactly as before, since scripts/tests/
 // undeclared-source.test.mjs pins its API and nothing here touches it).

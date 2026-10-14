@@ -130,8 +130,8 @@ export { resolveLinkedWorktree, resolveStoreRoot } from './worktree-root.mjs';
 // identity, missing credentials or an unreachable server fails by name and
 // never falls back.
 //
-// CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
-// helper-one-arg-parser, R5): dbPath is what openProject/openMounted hand to
+// CONTAINMENT
+// (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5): dbPath is what openProject/openMounted hand to
 // `new SterlingStore(dbPath)`, opened WRITABLE — a symlinked `.sterling` here
 // would redirect every store write this shared opener makes, for every
 // caller of openProject/openMounted. Routed through the helper so a
@@ -246,8 +246,8 @@ export function openProjectReadOnly(cwd = process.cwd()) {
   return { cwd, store, config, close };
 }
 
-// CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
-// helper-one-arg-parser, R5): the shared run-directory path builder for
+// CONTAINMENT
+// (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5): the shared run-directory path builder for
 // §10-adjacent scripts that read/write run-scoped files. cwd is
 // always an opened project root by the time callers reach here (openProject/
 // openMounted already ran), so this only throws on a genuinely malformed or

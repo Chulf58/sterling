@@ -11,8 +11,8 @@
 //      exact full uuid is required;
 //   2. a refused prefix that names exactly ONE removable open item prints that
 //      item's full uuid, so one retry suffices. The remove is STILL refused and
-//      the item survives (decision id-ladder-extends-to-board-tools-with-
-//      collision-guard: destroying paths take the exact full uuid only). An
+//      the item survives
+//      (decision id-ladder-extends-to-board-tools-with-collision-guard: destroying paths take the exact full uuid only). An
 //      ambiguous or unknown prefix names no uuid.
 // ---------------------------------------------------------------------------
 import { test } from 'node:test';
