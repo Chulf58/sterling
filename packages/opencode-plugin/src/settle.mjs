@@ -269,6 +269,15 @@ export function liveDispatch(root) {
   return { live: false };
 }
 
+/**
+ * The dedupe key of the "snapshot not advanced" notice: liveDispatch's `why` without its
+ * leading count and its trailing parenthesized detail (agent ids, session ids), so each
+ * execution end that finds a dispatch still live shows the notice once per session.
+ */
+export function heldKey(why) {
+  return `snapshot-not-advanced:${why.replace(/^\d+ /, '').replace(/ \([^()]*\)$/, '')}`;
+}
+
 /** The settle step for one execution; `launchWorkerFor(root, at)` runs after a settlement that did not fail. */
 export function createSettle({ openStore, now, launchWorkerFor }) {
   async function settle(root) {
@@ -299,7 +308,7 @@ export function createSettle({ openStore, now, launchWorkerFor }) {
       }
       for (const text of duties.notices) addNotice(root, text, at);
       if (git.base_lost) addNotice(root, `Sterling settlement: the settled commit ${git.settled.sha} is no longer reachable from HEAD ${git.next.sha}; duties for the commits between them were not derived. Reconcile them by hand from git log.`, at);
-      if (dispatch.live) addNotice(root, `Sterling settlement: the settled snapshot was not advanced because ${dispatch.why}; the first settlement after the dispatch ends advances it. If no subagent is still running (OpenCode exited or crashed mid-dispatch), restart OpenCode: its first root request sweeps the dispatch records a dead process left live.`, at);
+      if (dispatch.live) addNotice(root, `Sterling settlement: the settled snapshot was not advanced because ${dispatch.why}; the first settlement after the dispatch ends advances it. If no subagent is still running (OpenCode exited or crashed mid-dispatch), restart OpenCode: its first root request sweeps the dispatch records a dead process left live.`, at, heldKey(dispatch.why));
     } catch (e) {
       logLine(root, `settle failed: ${errText(e)}`);
       addNotice(root, `Sterling settlement failed (${errText(e)}); the settled snapshot was not advanced, so the next turn retries the same range.`, at);

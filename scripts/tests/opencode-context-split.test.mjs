@@ -1,7 +1,8 @@
 // The OpenCode session context split (user-ruled 2026-10-12, "Move live lines out"; finding
 // why-is-the-prompt-cache-hit-rate-lower-on-opencode-codeburn): the system prompt carries only
 // stable Sterling text, and the lines that change (status, board readiness, notices, ...) are
-// appended to the session's next prompt when they changed since that session last got them.
+// sent to the session as a hidden synthetic message (GitHub #93) when they changed since that
+// session last got them; without ctx.session.synthetic they are appended to the prompt.
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -41,10 +42,18 @@ function addTodo(dir, text) {
   }
 }
 
-/** A context handler for `dir` whose sessions are ses_root (a root) and ses_child (its child). */
-function handler(dir, extra = {}) {
+/**
+ * A context handler for `dir` whose sessions are ses_root (a root) and ses_child (its child).
+ * Its ctx.session.synthetic records each call in `h.synthetic` (OpenCode 2.0.23's hidden
+ * message route); `opts.synthetic: null` leaves it out (an older OpenCode) and a function
+ * replaces it.
+ */
+function handler(dir, extra = {}, { synthetic } = {}) {
   const sessions = { ses_root: {}, ses_other: {}, ses_child: { parentID: 'ses_root' } };
-  return contextMod.createContextHandler({
+  const calls = [];
+  const session = { get: async ({ sessionID }) => ({ id: sessionID, ...sessions[sessionID] }) };
+  if (synthetic !== null) session.synthetic = async (arg) => (synthetic ? synthetic(arg) : void calls.push(arg));
+  const h = contextMod.createContextHandler({
     openStore: (p) => new SterlingStore(p),
     now: () => NOW,
     rootOf: () => dir,
@@ -52,16 +61,37 @@ function handler(dir, extra = {}) {
     rotationRestore: async () => '',
     sessionSync: async () => {},
     pluginRoot: repo,
-    getSession: () => ({ get: async ({ sessionID }) => ({ id: sessionID, ...sessions[sessionID] }) }),
+    getSession: () => session,
     ...extra,
   });
+  h.synthetic = calls;
+  return h;
 }
 
 const contextInput = (sessionID) => ({ sessionID, agent: 'build', system: [{ type: 'text', text: 'base' }], messages: [], tools: {} });
 const systemOf = (i) => i.system.map((p) => p.text).join('\n');
 
-/** The text onPrompt appended to a prompt of `sessionID` ('' when nothing). */
+/**
+ * What onPrompt delivered for a prompt of `sessionID` ('' when nothing): the text of the synthetic
+ * messages it sent. The user's prompt text must come out untouched, and a synthetic call carries
+ * no description and metadata.source 'sterling' (hidden in the TUI and the web app, GitHub #93).
+ */
 async function appended(h, sessionID) {
+  const before = h.synthetic.length;
+  const input = { sessionID, messageID: 'msg_u', prompt: { text: 'go' }, delivery: 'immediate' };
+  await h.onPrompt(input);
+  assert.equal(input.prompt.text, 'go', 'the user\'s prompt text is untouched');
+  const sent = h.synthetic.slice(before).filter((c) => c.sessionID === sessionID);
+  for (const c of sent) {
+    assert.deepEqual(c.metadata, { source: 'sterling' });
+    assert.equal('description' in c, false, 'no description, or the message is shown');
+    assert.equal(c.delivery, undefined, 'the prompt route sends no delivery');
+  }
+  return sent.map((c) => c.text).join('\n');
+}
+
+/** The old route, for a handler without ctx.session.synthetic: the text onPrompt appended to the prompt ('' when nothing). */
+async function appendedToPrompt(h, sessionID) {
   const input = { sessionID, messageID: 'msg_u', prompt: { text: 'go' }, delivery: 'immediate' };
   await h.onPrompt(input);
   return input.prompt.text === 'go' ? '' : input.prompt.text.slice('go\n\n'.length);
@@ -137,6 +167,184 @@ test('a line that goes empty after it was shown is said to be cleared, once', as
   }
 });
 
+// GitHub #93: a block whose meaningful content did not change is not sent again.
+test('the board block is not re-delivered when only the live-lane count changed, and is when the READY list changes', async () => {
+  const dir = makeProject();
+  try {
+    addTodo(dir, 'first ask');
+    const reg = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'dispatch-register.mjs')).href);
+    const h = handler(dir);
+    assert.match(await appended(h, 'ses_root'), /live lanes 0\/\d+.*\n[\s\S]*READY \(1\):\n- first ask/);
+    await reg.registerStart(dir, { agent_id: 'lane-a', agent_type: 'implementor', session_id: 'ses_root', files: [], tool_use_id: null, at: new Date().toISOString() });
+    h.resetStatus(dir);
+    assert.doesNotMatch(await appended(h, 'ses_root'), /BOARD READINESS/, 'a lane start alone sends no board block');
+    addTodo(dir, 'second ask');
+    h.resetStatus(dir);
+    const changed = await appended(h, 'ses_root');
+    assert.match(changed, /live lanes 1\/\d+/, 'a changed list is sent with the current lane count');
+    assert.match(changed, /READY \(2\):/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the maintenance block is not re-delivered when only its age changed, and is when the backlog changes', async (t) => {
+  const dir = makeProject();
+  try {
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const sysItem = (reason) => store.create({
+      id: randomUUID(), type: 'todo', created_at: '2026-10-01T12:00:00.000Z', updated_at: NOW, author: 'system', status: 'active', superseded_by: null,
+      links: [], scope: 'project', stack_tags: [], text: `item ${reason}`, source: 'system', system_reason: reason, file_keys: ['src/a.mjs'],
+    });
+    sysItem('reconcile_needed');
+    t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-12T12:00:00.000Z') });
+    const h = handler(dir);
+    const first = await appended(h, 'ses_root');
+    assert.match(first, /RECONCILE BACKLOG: 1 item in lane reconcile_needed.*\(11d 0h\)/);
+    t.mock.timers.tick(5 * 3600 * 1000);
+    h.resetStatus(dir);
+    assert.doesNotMatch(await appended(h, 'ses_root'), /RECONCILE BACKLOG/, 'five hours older: not sent again');
+    sysItem('reconcile_needed');
+    h.resetStatus(dir);
+    const changed = await appended(h, 'ses_root');
+    assert.match(changed, /RECONCILE BACKLOG: 2 items in lane reconcile_needed.*\(11d 5h\)/, 'a count change is sent with the current age');
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a keyed notice is shown once per session however its wording changes, and again after a compaction', async () => {
+  const dir = makeProject();
+  try {
+    const h = handler(dir);
+    const settle = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'settle.mjs')).href);
+    const held = (why) => notices.addNotice(dir, `Sterling settlement: the settled snapshot was not advanced because ${why}; the first settlement after the dispatch ends advances it.`, NOW, settle.heldKey(why));
+    held('1 dispatch(es) still registered (agent-a)');
+    assert.match(await appended(h, 'ses_root'), /not advanced because 1 dispatch\(es\) still registered \(agent-a\)/);
+    notices.pruneShownNotices(dir);
+    held('2 dispatch(es) still registered (agent-a, agent-b)');
+    assert.doesNotMatch(await appended(h, 'ses_root'), /not advanced/, 'the same notice with another count and ids is not shown again');
+    notices.pruneShownNotices(dir);
+    held('the dispatch register is corrupt');
+    assert.match(await appended(h, 'ses_root'), /not advanced because the dispatch register is corrupt/, 'a different cause is a different notice');
+
+    const prKey = (armed) => `pr-loop-owed:7:${armed}`;
+    notices.addNotice(dir, '• PR review loop owed (work mode): PR #7 full text', NOW, prKey('2026-09-26T10:00:00.000Z'));
+    assert.match(await appended(h, 'ses_root'), /PR review loop owed \(work mode\)/);
+    notices.pruneShownNotices(dir);
+    notices.addNotice(dir, 'PR review loop owed: PR #7 reminder', NOW, prKey('2026-09-26T10:00:00.000Z'));
+    assert.doesNotMatch(await appended(h, 'ses_root'), /PR review loop owed/, 'the reminder of the same arming is not shown again');
+    notices.pruneShownNotices(dir);
+    notices.addNotice(dir, 'PR review loop owed: PR #7 re-armed', NOW, prKey('2026-09-27T10:00:00.000Z'));
+    assert.match(await appended(h, 'ses_root'), /PR #7 re-armed/, 'a re-arm is a new notice');
+
+    h.resetSession('ses_root');
+    notices.pruneShownNotices(dir);
+    held('1 dispatch(es) still registered (agent-a)');
+    assert.match(await appended(h, 'ses_root'), /not advanced because 1 dispatch/, 'after a compaction the conversation is new, so it is shown again');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the lines go out as one hidden synthetic message: no description, source sterling, header kept, user text untouched', async () => {
+  const dir = makeProject();
+  try {
+    const h = handler(dir);
+    const input = { sessionID: 'ses_root', messageID: 'msg_u', prompt: { text: 'go' }, delivery: 'immediate' };
+    await h.onPrompt(input);
+    assert.equal(input.prompt.text, 'go');
+    assert.equal(h.synthetic.length, 1);
+    const [call] = h.synthetic;
+    assert.deepEqual(Object.keys(call).sort(), ['metadata', 'sessionID', 'text']);
+    assert.deepEqual(call.metadata, { source: 'sterling' });
+    assert.ok(call.text.startsWith(`${staging.VOLATILE_HEADER}\n\n`));
+    assert.match(call.text, /STERLING STATUS: board 0 open/);
+    assert.doesNotMatch(call.text, /STERLING DELIVERY DEGRADED/);
+    addTodo(dir, 'mid-turn ask');
+    h.resetStatus(dir);
+    await toolAppended(h, 'ses_root');
+    assert.deepEqual(h.synthetic.at(-1).delivery, 'steer');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a synthetic call that throws falls back to the old append with a degraded note once per session, and the lines are delivered once', async () => {
+  const dir = makeProject();
+  try {
+    const h = handler(dir, {}, { synthetic: async () => { throw new Error('synthetic refused'); } });
+    const first = await appendedToPrompt(h, 'ses_root');
+    assert.match(first, /STERLING STATUS: board 0 open/, 'nothing is lost');
+    assert.match(first, /STERLING DELIVERY DEGRADED \(synthetic refused\)/, 'the degraded path says so');
+    assert.equal(await appendedToPrompt(h, 'ses_root'), '', 'the fallback append delivered the lines, so they are not due again');
+    addTodo(dir, 'next ask');
+    h.resetStatus(dir);
+    const next = await appendedToPrompt(h, 'ses_root');
+    assert.match(next, /READY \(1\):\n- next ask/);
+    assert.doesNotMatch(next, /DEGRADED/, 'the note is said once per session');
+    // The tool route falls back the same way, appending to the result.
+    addTodo(dir, 'third ask');
+    h.resetStatus(dir);
+    const input = { tool: 'read', sessionID: 'ses_other', id: 'call_1', input: { path: 'x' }, status: 'completed', result: { content: [{ type: 'text', text: 'tool output' }] } };
+    await h.onToolResult(input);
+    assert.deepEqual(input.result.content[0], { type: 'text', text: 'tool output' });
+    const text = input.result.content.slice(1).map((p) => p.text).join('\n');
+    assert.match(text, /STERLING STATUS: board 2 open/);
+    assert.match(text, /STERLING DELIVERY DEGRADED \(synthetic refused\)/, 'a session of its own is told once too');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('after a compaction a working synthetic call sends the set again, without the degraded note', async () => {
+  const dir = makeProject();
+  try {
+    let fail = true;
+    const sent = [];
+    const h = handler(dir, {}, { synthetic: async (c) => { if (fail) throw new Error('boom'); sent.push(c); } });
+    assert.match(await appendedToPrompt(h, 'ses_root'), /STERLING STATUS/);
+    fail = false;
+    h.resetSession('ses_root');
+    await h.onPrompt({ sessionID: 'ses_root', messageID: 'msg_u', prompt: { text: 'go' }, delivery: 'immediate' });
+    assert.equal(sent.length, 1);
+    assert.doesNotMatch(sent[0].text, /DEGRADED/, 'the note lives in the conversation that was replaced');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('without ctx.session.synthetic (an older OpenCode) the lines are appended, with the degraded note once per session', async () => {
+  const dir = makeProject();
+  try {
+    const h = handler(dir, {}, { synthetic: null });
+    const first = await appendedToPrompt(h, 'ses_root');
+    assert.match(first, /STERLING STATUS: board 0 open/);
+    assert.match(first, /STERLING DELIVERY DEGRADED \(ctx\.session\.synthetic is unavailable/);
+    addTodo(dir, 'another ask');
+    h.resetStatus(dir);
+    const second = await appendedToPrompt(h, 'ses_root');
+    assert.match(second, /READY \(1\)/);
+    assert.doesNotMatch(second, /DEGRADED/);
+    const tool = { tool: 'edit', sessionID: 'ses_root', id: 'call_2', input: { path: 'x' }, status: 'completed', result: { content: [{ type: 'text', text: 'out' }] } };
+    addTodo(dir, 'and another');
+    h.resetStatus(dir);
+    await h.onToolResult(tool);
+    assert.match(tool.result.content.slice(1).map((p) => p.text).join('\n'), /READY \(2\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a child\'s brief is still recovered when Sterling\'s synthetic message is stored before it, or its lines were appended to it', () => {
+  const user = (text) => ({ role: 'user', content: [{ type: 'text', text }] });
+  const synthetic = user(`${staging.VOLATILE_HEADER}\n\nSTERLING STATUS: board 0 open\n\nSTERLING-DELIVERY: off`);
+  assert.equal(staging.briefOf([synthetic, user('do the thing in src/a.mjs')]), 'do the thing in src/a.mjs');
+  assert.equal(staging.rawBriefOf([synthetic]), '', 'a synthetic message alone is no brief, and its lines are no directive');
+  assert.equal(staging.briefOf([user(`do the thing\n\n${staging.VOLATILE_HEADER}\n\nSTERLING STATUS`)]), 'do the thing', 'the append strip is kept for the fallback route');
+});
+
 test('a notice reaches the conductor once: a child does not take it, a shown one is not repeated, and one added later is not dropped by the prune', async () => {
   const dir = makeProject();
   try {
@@ -188,11 +396,19 @@ test('after an OpenCode restart or a compaction, the next prompt gets the whole 
   }
 });
 
-/** A completed `tool` call of `sessionID` after onToolResult ran; returns what was appended ('' when nothing). */
+/** A completed `tool` call of `sessionID` after onToolResult ran; returns the synthetic text sent ('' when nothing). The result stays as the tool made it, and the call steers into the current turn. */
 async function toolAppended(h, sessionID, tool = 'read') {
+  const before = h.synthetic.length;
   const input = { tool, sessionID, id: `call_${randomUUID()}`, input: { path: 'x' }, status: 'completed', result: { content: [{ type: 'text', text: 'tool output' }] } };
   await h.onToolResult(input);
-  return input.result.content.slice(1).map((p) => p.text).join('\n');
+  assert.deepEqual(input.result.content, [{ type: 'text', text: 'tool output' }], 'the tool output is untouched');
+  const sent = h.synthetic.slice(before);
+  for (const c of sent) {
+    assert.equal(c.delivery, 'steer', 'never queue: it adds a model turn');
+    assert.deepEqual(c.metadata, { source: 'sterling' });
+    assert.equal('description' in c, false);
+  }
+  return sent.map((c) => c.text).join('\n');
 }
 
 test('mid-turn: a change between two tool calls is appended once to the next tool result, and the next prompt does not repeat it', async () => {
@@ -402,8 +618,10 @@ test('a held one-shot line is delivered exactly once when two prompts overlap, a
     const both = [await first, second].filter((t) => t.includes('SWEEP-LINE-OVERLAP'));
     assert.equal(both.length, 1, 'the held line is delivered exactly once across both prompts');
 
-    // A failed append puts a claimed line back: the next prompt gets it.
-    const h2 = handler(dir, { sweepStale: async () => 'SWEEP-LINE-RETRY' });
+    // A failed delivery puts a claimed line back: the next prompt gets it. The delivery fails when the synthetic
+    // call throws and the fallback append throws too (the hidden route replaced the append as the first attempt).
+    let syntheticCalls = 0;
+    const h2 = handler(dir, { sweepStale: async () => 'SWEEP-LINE-RETRY' }, { synthetic: async (c) => { if (syntheticCalls++ === 0) throw new Error('synthetic failed'); h2.synthetic.push(c); } });
     const failing = { sessionID: 'ses_root', messageID: 'msg_u', delivery: 'immediate', prompt: {} };
     let writes = 0;
     Object.defineProperty(failing.prompt, 'text', { get: () => 'go', set: () => { if (writes++ === 0) throw new Error('append failed'); }, enumerable: true });
@@ -454,10 +672,17 @@ test('a failed older delivery does not restore a registry failure line after a n
         if (restores++ === 0) await gateRestoreA; // call A is paused after it held line A and before it claims it
         return '';
       },
-      getSession: () => ({ get: async ({ sessionID }) => {
-        if (sessionID === 'ses_other') await gateKindB; // call B is paused before it holds line B
-        return { id: sessionID };
-      } }),
+      getSession: () => ({
+        get: async ({ sessionID }) => {
+          if (sessionID === 'ses_other') await gateKindB; // call B is paused before it holds line B
+          return { id: sessionID };
+        },
+        // Call A's delivery fails: its synthetic call throws and so does its fallback append. Call B's goes through.
+        synthetic: async (c) => {
+          if (c.sessionID === 'ses_root') throw new Error('synthetic failed late');
+          h.synthetic.push(c);
+        },
+      }),
     });
     const lineA = /REGISTRY REFRESH FAILED \(.*not a database/;
     const lineB = /REGISTRY REFRESH FAILED \((?!.*not a database)/;

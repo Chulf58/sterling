@@ -2,9 +2,11 @@
 // staging for a child (subagent) session, pushed into the system prompt of every request
 // and the same bytes on each. VOLATILE: the status line, H1's operating-state and
 // maintenance lines, the plan lock, the dispatch sweep, board readiness, the rotation
-// restore and pending notices, appended to the session's next prompt text, or to the
-// next read/edit/write/patch/shell result mid-turn, when they changed since they were
-// last delivered there (user-ruled 2026-10-12, "Move live lines
+// restore and pending notices, sent as a hidden synthetic message before the session's next
+// prompt, or (delivery 'steer') after the next read/edit/write/patch/shell result mid-turn,
+// when they changed since they were last delivered there; an OpenCode without
+// ctx.session.synthetic, or a failed call, gets them appended to the prompt or result
+// with a degraded note (GitHub #93; user-ruled 2026-10-12, "Move live lines
 // out": a system prompt that changed every turn re-wrote the whole conversation to the
 // provider's prompt cache; finding why-is-the-prompt-cache-hit-rate-lower-on-opencode-codeburn).
 import { join } from 'node:path';
@@ -13,7 +15,7 @@ import { probeSchemaVersion } from '../../../scripts/lib/update.mjs';
 import { opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
 import { errText, logLine } from './log.mjs';
 import { NOTICES_REL, takeNotices } from './notices.mjs';
-import { readMaintenanceState } from '../../../scripts/hooks/lib/maintenance-state.mjs';
+import { queueDepthLine, readMaintenanceState } from '../../../scripts/hooks/lib/maintenance-state.mjs';
 import { laneCeiling, liveLanes, renderBoardReadiness } from '../../../scripts/hooks/lib/board-ready.mjs';
 import { maintenanceLines, operatingStateLines, undeclaredSourceBlock } from './operating-state.mjs';
 import { composeContext, dispatchChrome } from '../../../scripts/hooks/lib/stage-brief.mjs';
@@ -158,8 +160,25 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       hit = { at: Date.now(), state, error };
       maintenanceCache.set(root, hit);
     }
-    if (hit.error) return [`MAINTENANCE QUEUE UNREADABLE (${hit.error}) — the deep-queue signal and the reconcile backlog are not stated this turn.`];
-    return hit.state ? maintenanceLines(hit.state, config, root) : [];
+    if (hit.error) {
+      const text = `MAINTENANCE QUEUE UNREADABLE (${hit.error}) — the deep-queue signal and the reconcile backlog are not stated this turn.`;
+      return { text, sig: text };
+    }
+    if (!hit.state) return { text: '', sig: '' };
+    const text = maintenanceLines(hit.state, config, root).join('\n\n');
+    return { text, sig: text ? maintenanceSig(hit.state, config) : '' };
+  }
+
+  /**
+   * What the maintenance text says, without its wording that drifts on its own: the
+   * backlog's age (read from the clock) and the worker-state clause. It is the deep-queue
+   * line plus the reconcile lanes, oldest item, handed-off items and journal write count,
+   * so a count or a hand-off that changes still re-delivers the block.
+   */
+  function maintenanceSig(state, config) {
+    const queue = queueDepthLine({ ...state, deepThreshold: config?.maintenance_queue?.deep_threshold });
+    const r = state.reconcile;
+    return JSON.stringify([queue, r.count > 0 ? [r.lanes, r.oldest, r.handedOff, r.handoffs, r.writes?.count ?? null] : null]);
   }
 
   /**
@@ -192,12 +211,18 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       }
       boardCache.set(root, hit);
     }
-    if (hit.unavailable) return hit.unavailable;
+    if (hit.unavailable) return { text: hit.unavailable, sig: hit.unavailable };
     try {
-      return renderBoardReadiness({ readiness: hit.readiness, live: liveLanes(root, sessionID), ceiling: laneCeiling(config) });
+      const text = renderBoardReadiness({ readiness: hit.readiness, live: liveLanes(root, sessionID), ceiling: laneCeiling(config) });
+      // The delivery key is the readiness content with the lane clause held constant: a lane
+      // that starts or ends changes `live lanes k/n` and nothing else, and re-sending the
+      // whole list for it is the noise GitHub #93 reported.
+      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live: { availability: 'ok', count: 0 }, ceiling: { value: 0 } }) : '';
+      return { text, sig };
     } catch (e) {
       logLine(root, `context: board readiness unreadable: ${errText(e)}`);
-      return `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
+      const text = `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
+      return { text, sig: text };
     }
   }
 
@@ -256,8 +281,10 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   }
 
   /**
-   * The VOLATILE context of `sessionID`, as [{ key, text, cleared? }]. A keyed block is
-   * delivered when its text differs from the one last delivered in the session; a block
+   * The VOLATILE context of `sessionID`, as [{ key, text, sig?, cleared? }]. A keyed block is
+   * delivered when its `sig` (its text when it has none) differs from the one last delivered
+   * in the session: the board and maintenance blocks carry a sig that leaves out wording
+   * that drifts on its own (live lane count, backlog age, worker state). A block
    * with no key (a one-shot line: the sweep, a registry failure) until it is delivered (claimed from
    * `heldLines` when selected, put back by dueText's release when the append fails).
    * `cleared` is said once when a delivered keyed block becomes empty, so a stale READY
@@ -270,7 +297,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     const out = [
       { key: 'status', text: statusLine(root) },
       { key: 'operating-state', text: state.lines.join('\n\n') },
-      { key: 'maintenance', text: maintenanceBlocks(root, state.config).join('\n\n') },
+      { key: 'maintenance', ...maintenanceBlocks(root, state.config) },
     ];
     if (kind === 'root') {
       // H1's PLAN LOCK section (scripts/hooks/lib/plan-lock-section.mjs), each time it
@@ -321,7 +348,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       out.push({ key: 'undeclared', text: undeclaredBlock(root, state.config), cleared: 'UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies.' });
       // Root sessions only, and never inside the maintenance worker's own child
       // (the former ruling 'opencode-session-boundary-code-runs-in-the-maintenance-worker-child' (not in the current store)): the worker is not the conductor filling lanes.
-      if (!inWorkerChild(env)) out.push({ key: 'board', text: boardBlock(root, state.config, sessionID), cleared: 'BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply.' });
+      if (!inWorkerChild(env)) out.push({ key: 'board', ...boardBlock(root, state.config, sessionID), cleared: 'BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply.' });
     }
     out.push({ key: 'restore', text: await rotationRestore(root, sessionID) });
     // Held one-shot lines are claimed here, synchronously after the last await, so two
@@ -368,10 +395,11 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         continue;
       }
       const last = seen.get(b.key) ?? '';
-      if (b.text === last) continue;
+      const sig = b.sig ?? b.text;
+      if (sig === last) continue;
       if (b.text) due.push(b.text);
       else if (b.cleared) due.push(b.cleared);
-      marks.set(b.key, b.text);
+      marks.set(b.key, sig);
     }
     // Notices go to the conductor's (root) session only: a child that took them would
     // leave the conductor never seeing them. The worker child must not stamp the user's
@@ -392,6 +420,15 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
           release: () => {},
         };
       }
+      // A keyed notice (notices.mjs) already shown in this session is not shown again, whatever
+      // its wording now says; the take above has stamped it, so settlement prunes it unseen.
+      notices = notices.filter((n) => {
+        if (n.key === undefined) return true;
+        const mark = `notice:${n.key}`;
+        if (seen.has(mark) || marks.has(mark)) return false;
+        marks.set(mark, 'shown');
+        return true;
+      });
       if (notices.length) due.push(`STERLING NOTICES (new since the last ones you were shown):\n${notices.map((n) => `- ${n.text}`).join('\n')}`);
     }
     return {
@@ -406,20 +443,64 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     };
   }
 
-  /** The prompt hook: the due lines are appended to the session's next prompt text. */
+  /**
+   * Sends the due text to the model as a synthetic user message with no description, which
+   * OpenCode hides in the TUI and the web app (finding
+   * opencode-synthetic-message-hides-plugin-context-from-tui-model-still-sees-it; GitHub #93),
+   * so the user's own text and tool output stay untouched. Resolves to null once the message
+   * is sent. When it cannot be sent (an OpenCode without ctx.session.synthetic, or a call
+   * that throws) it resolves to the reason, and the caller appends the text the old way
+   * (P5: the first fallback in a session also says so, `degradedNote`).
+   */
+  async function sendSynthetic(sessionID, text, delivery) {
+    const session = getSession?.();
+    if (typeof session?.synthetic !== 'function') return 'ctx.session.synthetic is unavailable (an older OpenCode)';
+    try {
+      await session.synthetic({ sessionID, text, metadata: { source: 'sterling' }, ...(delivery ? { delivery } : {}) });
+      return null;
+    } catch (e) {
+      return errText(e);
+    }
+  }
+
+  // Sessions already told that Sterling's lines are appended instead of sent hidden.
+  const degradedTold = new Map();
+  function degradedNote(sessionID, why) {
+    if (degradedTold.has(sessionID)) return '';
+    return `STERLING DELIVERY DEGRADED (${why}): Sterling's session lines are appended to the user's prompt or a tool result this session, so the user sees them; they are no longer sent as a hidden message.`;
+  }
+
+  /**
+   * Delivers `due` (dueText's result): hidden when it can be, else through `append(text)`, the
+   * route's old way. The marks are committed only after one of the two has delivered.
+   */
+  async function deliver(sessionID, due, { delivery, append }) {
+    let note = '';
+    let why = null;
+    try {
+      if (due.text) {
+        why = await sendSynthetic(sessionID, due.text, delivery);
+        if (why) {
+          note = degradedNote(sessionID, why);
+          append(note ? `${due.text}\n\n${note}` : due.text);
+        }
+      }
+    } catch (e) {
+      due.release();
+      throw e;
+    }
+    if (note) remember(degradedTold, sessionID, true);
+    due.commit();
+  }
+
+  /** The prompt hook: the due lines reach the model as a hidden synthetic message before the prompt (see sendSynthetic). */
   async function onPrompt(input) {
     const root = rootOf();
     if (!root) return;
     await fenced('context', root, async () => {
       if (typeof input?.prompt?.text !== 'string') throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
       const due = await dueText(root, input.sessionID, 'prompt');
-      try {
-        if (due.text) input.prompt.text = `${input.prompt.text}\n\n${due.text}`;
-      } catch (e) {
-        due.release();
-        throw e;
-      }
-      due.commit();
+      await deliver(input.sessionID, due, { append: (text) => { input.prompt.text = `${input.prompt.text}\n\n${text}`; } });
     });
   }
 
@@ -440,13 +521,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       const content = input.result?.content;
       if (!Array.isArray(content) && typeof content !== 'string') throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
       const due = await dueText(root, input.sessionID, 'tool call');
-      try {
-        if (due.text) appendToResult(input.result, due.text);
-      } catch (e) {
-        due.release();
-        throw e;
-      }
-      due.commit();
+      // 'steer' lands in the model's current turn; 'queue' would add a model turn of its own.
+      await deliver(input.sessionID, due, { delivery: 'steer', append: (text) => appendToResult(input.result, text) });
     });
   }
 
@@ -458,6 +534,6 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     // Compaction replaces the conversation, so the cached prefix starts over anyway: the system block
     // is rendered again at the next request (picking up a template change or recovering a degraded
     // render), and the session's next prompt gets the whole set of lines again.
-    resetSession: (sessionID) => void (delivered.delete(sessionID), frozenSystem.delete(sessionID)),
+    resetSession: (sessionID) => void (delivered.delete(sessionID), frozenSystem.delete(sessionID), degradedTold.delete(sessionID)),
   };
 }

@@ -45,11 +45,16 @@ function readNotices(root) {
   return parsed;
 }
 
-export function addNotice(root, text, now = new Date().toISOString()) {
+/**
+ * `key`, when given, names the notice's normalized content: a notice that is re-minted
+ * with new incidental wording (a dispatch count, agent ids) keeps the same key, and
+ * the context handler shows a key once per session (context.mjs dueText).
+ */
+export function addNotice(root, text, now = new Date().toISOString(), key = undefined) {
   withNoticesLock(root, () => {
     const notices = readNotices(root);
-    if (notices.some((n) => n.text === text && !n.shown_at)) return;
-    notices.push({ id: randomUUID(), at: now, text });
+    if (notices.some((n) => !n.shown_at && (n.text === text || (key !== undefined && n.key === key)))) return;
+    notices.push({ id: randomUUID(), at: now, text, ...(key === undefined ? {} : { key }) });
     writeJsonAtomic(join(root, NOTICES_REL), notices);
   });
 }

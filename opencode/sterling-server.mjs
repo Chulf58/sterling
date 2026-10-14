@@ -16768,11 +16768,11 @@ function readNotices(root) {
   if (!Array.isArray(parsed)) throw new Error(`${NOTICES_REL} is not a JSON array`);
   return parsed;
 }
-function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString()) {
+function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString(), key = void 0) {
   withNoticesLock(root, () => {
     const notices = readNotices(root);
-    if (notices.some((n) => n.text === text && !n.shown_at)) return;
-    notices.push({ id: randomUUID3(), at: now, text });
+    if (notices.some((n) => !n.shown_at && (n.text === text || key !== void 0 && n.key === key))) return;
+    notices.push({ id: randomUUID3(), at: now, text, ...key === void 0 ? {} : { key } });
     writeJsonAtomic(join25(root, NOTICES_REL), notices);
   });
 }
@@ -18696,10 +18696,13 @@ function notStagedLine(kase) {
 }
 var VOLATILE_HEADER = "STERLING CONTEXT (added by the Sterling plugin, not typed by the user):";
 function rawBriefOf(messages) {
-  const first = Array.isArray(messages) ? messages.find((m) => m?.role === "user") : null;
+  const textOf = (m) => {
+    const content = m?.content;
+    return typeof content === "string" ? content : Array.isArray(content) ? content.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n") : "";
+  };
+  const first = Array.isArray(messages) ? messages.find((m) => m?.role === "user" && !textOf(m).startsWith(VOLATILE_HEADER)) : null;
   if (!first) return "";
-  const content = first.content;
-  const text = typeof content === "string" ? content : Array.isArray(content) ? content.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n") : "";
+  const text = textOf(first);
   const appended = text.indexOf(`
 
 ${VOLATILE_HEADER}`);
@@ -19300,8 +19303,18 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       hit = { at: Date.now(), state, error };
       maintenanceCache.set(root, hit);
     }
-    if (hit.error) return [`MAINTENANCE QUEUE UNREADABLE (${hit.error}) \u2014 the deep-queue signal and the reconcile backlog are not stated this turn.`];
-    return hit.state ? maintenanceLines(hit.state, config, root) : [];
+    if (hit.error) {
+      const text2 = `MAINTENANCE QUEUE UNREADABLE (${hit.error}) \u2014 the deep-queue signal and the reconcile backlog are not stated this turn.`;
+      return { text: text2, sig: text2 };
+    }
+    if (!hit.state) return { text: "", sig: "" };
+    const text = maintenanceLines(hit.state, config, root).join("\n\n");
+    return { text, sig: text ? maintenanceSig(hit.state, config) : "" };
+  }
+  function maintenanceSig(state, config) {
+    const queue = queueDepthLine({ ...state, deepThreshold: config?.maintenance_queue?.deep_threshold });
+    const r = state.reconcile;
+    return JSON.stringify([queue, r.count > 0 ? [r.lanes, r.oldest, r.handedOff, r.handoffs, r.writes?.count ?? null] : null]);
   }
   function boardBlock(root, config, sessionID) {
     let hit = boardCache.get(root);
@@ -19324,12 +19337,15 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       }
       boardCache.set(root, hit);
     }
-    if (hit.unavailable) return hit.unavailable;
+    if (hit.unavailable) return { text: hit.unavailable, sig: hit.unavailable };
     try {
-      return renderBoardReadiness({ readiness: hit.readiness, live: liveLanes(root, sessionID), ceiling: laneCeiling(config) });
+      const text = renderBoardReadiness({ readiness: hit.readiness, live: liveLanes(root, sessionID), ceiling: laneCeiling(config) });
+      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live: { availability: "ok", count: 0 }, ceiling: { value: 0 } }) : "";
+      return { text, sig };
     } catch (e) {
       logLine(root, `context: board readiness unreadable: ${errText(e)}`);
-      return `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
+      const text = `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
+      return { text, sig: text };
     }
   }
   function resolvePluginRoot() {
@@ -19379,7 +19395,7 @@ ${opencodeHostTail(pluginRoot)}`;
     const out = [
       { key: "status", text: statusLine(root) },
       { key: "operating-state", text: state.lines.join("\n\n") },
-      { key: "maintenance", text: maintenanceBlocks(root, state.config).join("\n\n") }
+      { key: "maintenance", ...maintenanceBlocks(root, state.config) }
     ];
     if (kind === "root") {
       if (!inWorkerChild(env)) {
@@ -19415,7 +19431,7 @@ ${opencodeHostTail(pluginRoot)}`;
         }
       }
       out.push({ key: "undeclared", text: undeclaredBlock(root, state.config), cleared: "UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies." });
-      if (!inWorkerChild(env)) out.push({ key: "board", text: boardBlock(root, state.config, sessionID), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
+      if (!inWorkerChild(env)) out.push({ key: "board", ...boardBlock(root, state.config, sessionID), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
     }
     out.push({ key: "restore", text: await rotationRestore(root, sessionID) });
     if (kind === "root" && !inWorkerChild(env)) {
@@ -19450,10 +19466,11 @@ ${opencodeHostTail(pluginRoot)}`;
         continue;
       }
       const last = seen.get(b.key) ?? "";
-      if (b.text === last) continue;
+      const sig = b.sig ?? b.text;
+      if (sig === last) continue;
       if (b.text) due.push(b.text);
       else if (b.cleared) due.push(b.cleared);
-      marks.set(b.key, b.text);
+      marks.set(b.key, sig);
     }
     if (!kind.why && kind.kind === "root" && !inWorkerChild(env)) {
       let notices;
@@ -19472,6 +19489,13 @@ STERLING NOTICES UNREADABLE (${errText(e)}): the pending notices in ${NOTICES_RE
           }
         };
       }
+      notices = notices.filter((n) => {
+        if (n.key === void 0) return true;
+        const mark = `notice:${n.key}`;
+        if (seen.has(mark) || marks.has(mark)) return false;
+        marks.set(mark, "shown");
+        return true;
+      });
       if (notices.length) due.push(`STERLING NOTICES (new since the last ones you were shown):
 ${notices.map((n) => `- ${n.text}`).join("\n")}`);
     }
@@ -19488,21 +19512,52 @@ ${due.join("\n\n")}` : "",
       }
     };
   }
+  async function sendSynthetic(sessionID, text, delivery) {
+    const session = getSession?.();
+    if (typeof session?.synthetic !== "function") return "ctx.session.synthetic is unavailable (an older OpenCode)";
+    try {
+      await session.synthetic({ sessionID, text, metadata: { source: "sterling" }, ...delivery ? { delivery } : {} });
+      return null;
+    } catch (e) {
+      return errText(e);
+    }
+  }
+  const degradedTold = /* @__PURE__ */ new Map();
+  function degradedNote(sessionID, why) {
+    if (degradedTold.has(sessionID)) return "";
+    return `STERLING DELIVERY DEGRADED (${why}): Sterling's session lines are appended to the user's prompt or a tool result this session, so the user sees them; they are no longer sent as a hidden message.`;
+  }
+  async function deliver(sessionID, due, { delivery, append }) {
+    let note = "";
+    let why = null;
+    try {
+      if (due.text) {
+        why = await sendSynthetic(sessionID, due.text, delivery);
+        if (why) {
+          note = degradedNote(sessionID, why);
+          append(note ? `${due.text}
+
+${note}` : due.text);
+        }
+      }
+    } catch (e) {
+      due.release();
+      throw e;
+    }
+    if (note) remember(degradedTold, sessionID, true);
+    due.commit();
+  }
   async function onPrompt(input) {
     const root = rootOf();
     if (!root) return;
     await fenced("context", root, async () => {
       if (typeof input?.prompt?.text !== "string") throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
       const due = await dueText(root, input.sessionID, "prompt");
-      try {
-        if (due.text) input.prompt.text = `${input.prompt.text}
+      await deliver(input.sessionID, due, { append: (text) => {
+        input.prompt.text = `${input.prompt.text}
 
-${due.text}`;
-      } catch (e) {
-        due.release();
-        throw e;
-      }
-      due.commit();
+${text}`;
+      } });
     });
   }
   async function onToolResult(input) {
@@ -19513,13 +19568,7 @@ ${due.text}`;
       const content = input.result?.content;
       if (!Array.isArray(content) && typeof content !== "string") throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
       const due = await dueText(root, input.sessionID, "tool call");
-      try {
-        if (due.text) appendToResult(input.result, due.text);
-      } catch (e) {
-        due.release();
-        throw e;
-      }
-      due.commit();
+      await deliver(input.sessionID, due, { delivery: "steer", append: (text) => appendToResult(input.result, text) });
     });
   }
   return {
@@ -19530,7 +19579,7 @@ ${due.text}`;
     // Compaction replaces the conversation, so the cached prefix starts over anyway: the system block
     // is rendered again at the next request (picking up a template change or recovering a degraded
     // render), and the session's next prompt gets the whole set of lines again.
-    resetSession: (sessionID) => void (delivered.delete(sessionID), frozenSystem.delete(sessionID))
+    resetSession: (sessionID) => void (delivered.delete(sessionID), frozenSystem.delete(sessionID), degradedTold.delete(sessionID))
   };
 }
 
@@ -19579,12 +19628,13 @@ function createPrLoopNotice({ now, pluginRoot } = {}) {
     const at = stamp();
     if (degraded) addNotice(root, degraded, at);
     if (!state) return;
+    const key = `pr-loop-owed:${state.pr_number}:${state.armed_at}`;
     if (announced.has(state.armed_at)) {
-      addNotice(root, prLoopReminderText(state), at);
+      addNotice(root, prLoopReminderText(state), at, key);
       return;
     }
     announced.add(state.armed_at);
-    addNotice(root, prLoopOwedText(state, prLoopNext(state, join39(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"))), at);
+    addNotice(root, prLoopOwedText(state, prLoopNext(state, join39(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"))), at, key);
   };
 }
 
@@ -20607,6 +20657,9 @@ function liveDispatch(root) {
   }
   return { live: false };
 }
+function heldKey(why) {
+  return `snapshot-not-advanced:${why.replace(/^\d+ /, "").replace(/ \([^()]*\)$/, "")}`;
+}
 function createSettle({ openStore, now, launchWorkerFor }) {
   async function settle(root) {
     pruneShownNotices(root);
@@ -20636,7 +20689,7 @@ function createSettle({ openStore, now, launchWorkerFor }) {
       }
       for (const text of duties.notices) addNotice(root, text, at);
       if (git.base_lost) addNotice(root, `Sterling settlement: the settled commit ${git.settled.sha} is no longer reachable from HEAD ${git.next.sha}; duties for the commits between them were not derived. Reconcile them by hand from git log.`, at);
-      if (dispatch.live) addNotice(root, `Sterling settlement: the settled snapshot was not advanced because ${dispatch.why}; the first settlement after the dispatch ends advances it. If no subagent is still running (OpenCode exited or crashed mid-dispatch), restart OpenCode: its first root request sweeps the dispatch records a dead process left live.`, at);
+      if (dispatch.live) addNotice(root, `Sterling settlement: the settled snapshot was not advanced because ${dispatch.why}; the first settlement after the dispatch ends advances it. If no subagent is still running (OpenCode exited or crashed mid-dispatch), restart OpenCode: its first root request sweeps the dispatch records a dead process left live.`, at, heldKey(dispatch.why));
     } catch (e) {
       logLine(root, `settle failed: ${errText(e)}`);
       addNotice(root, `Sterling settlement failed (${errText(e)}); the settled snapshot was not advanced, so the next turn retries the same range.`, at);
