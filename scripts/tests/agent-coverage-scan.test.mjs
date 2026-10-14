@@ -630,8 +630,8 @@ test('F1: the agent-coverage report runs on the ALREADY-CURRENT path — a clone
   try {
     const registered = makeAgentProject(rootDir, 'project-registered');
     // A matching completion marker is required to reach the already-current
-    // shortcut (decision already-current-requires-a-completion-marker-not-git-
-    // currency, commit 4912d15): `before.behind === 0` alone now falls through
+    // shortcut
+    // (decision already-current-requires-a-completion-marker-not-git-currency, commit 4912d15): `before.behind === 0` alone now falls through
     // into the full resume sequence instead. 'a'.repeat(40) matches this local
     // fakeExec's HEAD_A default (below) — the sha `rev-parse HEAD` reports when
     // no merge has happened, which is exactly this already-current case.

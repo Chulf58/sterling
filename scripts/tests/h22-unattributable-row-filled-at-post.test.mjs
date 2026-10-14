@@ -1,11 +1,10 @@
 // H22: an UNATTRIBUTABLE register row gets its files from the PostToolUse that
 // binds its lane, and a resume of that lane inherits them.
 //
-// RULING: decision h22-dispatch-files-from-review-territory-and-resume-
-// inherits-prior-round (e841facd), option A only: files come from the bound
+// RULING:
+// decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round (e841facd), option A only: files come from the bound
 // brief's REVIEW-TERRITORY, never from the lane's actual writes. INCIDENT:
-// research_finding h10-article-demand-misses-live-lanes-same-type-fanout-and-
-// out-of-territory-files-october-2026 (the former finding 'lanes-same-type-fanout-and-out-of-territory-files-october-2026' (not in the current store)), board 18a80a56. In Dome
+// research_finding h10-article-demand-misses-live-lanes-same-type-fanout-and-out-of-territory-files-october-2026 (the former finding 'lanes-same-type-fanout-and-out-of-territory-files-october-2026' (not in the current store)), board 18a80a56. In Dome
 // Farmer three implementor-graphic lanes started within one second, every
 // Start gave up as unattributable('same-type-siblings-in-flight') and wrote
 // files: [], the Posts that bound the lanes about 0.6s later wrote only the

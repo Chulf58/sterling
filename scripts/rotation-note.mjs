@@ -19,8 +19,8 @@ import { resolveStoreWritePath } from './lib/store-path.mjs';
 
 // Local wrappers preserve this script's existing exit code (2) and message
 // prefix while delegating all real parsing to the ONE shared, exact-token
-// parser (decision sanctioned-script-store-writes-one-containment-helper-one-
-// arg-parser, R5) — both spellings, duplicate refusal, flag-as-value refusal.
+// parser
+// (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5) — both spellings, duplicate refusal, flag-as-value refusal.
 function arg(name) {
   try {
     return sharedArg(`--${name}`) ?? null;
@@ -34,8 +34,8 @@ function fail(msg) {
 }
 
 const cwd = process.cwd();
-// CONTAINMENT (decision sanctioned-script-store-writes-one-containment-helper-
-// one-arg-parser, R5): even this existence probe derives its path through the
+// CONTAINMENT
+// (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5): even this existence probe derives its path through the
 // helper, so a symlinked `.sterling` is refused here rather than followed.
 let sterlingDirForCheck;
 try {
@@ -113,8 +113,8 @@ const lanes = readLanes();
 // a wrong id sends the user to `claude --resume` the wrong session. A value that
 // is not id-shaped (^[A-Za-z0-9_-]{1,128}$) is refused to null, because H1 prints
 // it inside a runnable command. Absent or malformed -> null, never guessed.
-// ON OPENCODE (decision sterling-is-fully-standalone-on-opencode-2-full-parity-
-// with-claude-code): OpenCode 2.0.21's shell tool sets OPENCODE_SESSION_ID (and
+// ON OPENCODE
+// (decision sterling-is-fully-standalone-on-opencode-2-full-parity-with-claude-code): OpenCode 2.0.21's shell tool sets OPENCODE_SESSION_ID (and
 // OPENCODE=1) for every command; the way back is then `opencode --session <id>`,
 // and the note records session_host 'opencode' so the restore names that command.
 // PRECEDENCE when both ids are set: with OPENCODE=1 and a valid OPENCODE_SESSION_ID
@@ -271,8 +271,8 @@ const note = {
   at: new Date().toISOString(),
 };
 
-// CONTAINMENT (decision sanctioned-script-store-writes-one-containment-helper-
-// one-arg-parser, R5): refuses a symlink component beneath cwd on the way to
+// CONTAINMENT
+// (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5): refuses a symlink component beneath cwd on the way to
 // the note, naming both resolved paths, before anything is written.
 let notePath;
 try {

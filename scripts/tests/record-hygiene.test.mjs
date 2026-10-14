@@ -1,6 +1,5 @@
 // Contract tests for the record-hygiene REPORTING arm (board 7a75851c step 3;
-// decisions record-audit-dead-records-superseded-stale-findings-by-age-report-arm-
-// plus-sampled-audit and make-records-findable-authoring-rule-disclosure-lint-then-
+// decisions record-audit-dead-records-superseded-stale-findings-by-age-report-arm-plus-sampled-audit and make-records-findable-authoring-rule-disclosure-lint-then-
 // blind-experiment, part 3 of each). The arm lists findings and NEVER fails the
 // battery: every exit below is 0.
 import { test, before } from 'node:test';

@@ -2,8 +2,8 @@
 // declaration parser, both over a dispatch prompt's TEXT.
 //
 // THE PARENT-TRANSCRIPT PROMPT READER FUNCTIONS THAT USED TO LIVE HERE ARE
-// DELETED (decision `dispatch-state-machine-pre-slot-post-binding-locked-
-// start-resolution-replaces-transcript-attribution`): the parent transcript is LAGGED at
+// DELETED
+// (decision `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`): the parent transcript is LAGGED at
 // SubagentStart (measured, not assumed) and cannot attribute a prompt to a
 // spawn safely by any ordering trick. Every consumer now recovers its own
 // prompt (if any) from scripts/lib/dispatch-register.mjs's resolveDispatchStart,
@@ -12,8 +12,8 @@
 // call once they have a prompt string in hand.
 //
 // THE REVIEW-TERRITORY STRUCTURED DECLARATION PARSER (parseReviewTerritory)
-// IS RESTORED (decision h22-dispatch-files-from-review-territory-and-resume-
-// inherits-prior-round): it was deleted in e16e127 as reader-less, but it fed
+// IS RESTORED
+// (decision h22-dispatch-files-from-review-territory-and-resume-inherits-prior-round): it was deleted in e16e127 as reader-less, but it fed
 // the register's `files`, which H10's deferral join reads. Without it every
 // path in a brief's "NEVER write" list became that lane's ownership.
 import { posix } from 'node:path';
@@ -137,8 +137,8 @@ export function parseReviewTerritory(text) {
   return { present: true, valid: true, files: [...new Set(files)] };
 }
 
-// STERLING-DELIVERY brief line (decision blind-lane-sterling-delivery-off-
-// brief-line, GitHub #88). A dispatch brief carrying the line
+// STERLING-DELIVERY brief line
+// (decision blind-lane-sterling-delivery-off-brief-line, GitHub #88). A dispatch brief carrying the line
 // `STERLING-DELIVERY: off` gets no store records from any delivering hook. The
 // ONLY accepted value is `off` (user-ruled "Off only": an exclude list cannot
 // keep a lane blind). The parser FAILS TOWARD SUPPRESSION: any other value

@@ -1,5 +1,5 @@
-// Older generated launchers are refreshed (decision init-and-update-refresh-an-older-
-// generated-launcher): init, and the /sterling:update ensure pass that runs it, rewrite a
+// Older generated launchers are refreshed
+// (decision init-and-update-refresh-an-older-generated-launcher): init, and the /sterling:update ensure pass that runs it, rewrite a
 // sterling-launch.sh / sterling.bat / tui.bat that is a pristine render of an EARLIER
 // template version, and say so. A launcher matching no known version is a hand edit: it
 // stays byte-identical and a loud line names it and the remedy. The known versions come

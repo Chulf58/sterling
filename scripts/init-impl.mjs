@@ -183,8 +183,8 @@ for (const rel of ['.sterling', '.sterling/runs', 'docs', 'docs/briefs', '.claud
   }
 }
 
-// CLAUDE CODE PROBE (decision init-without-claude-code-probes-and-skips-claude-artifacts-
-// loudly): the launchers, .claude/agents, the conductor activation and the ~/.claude.json
+// CLAUDE CODE PROBE
+// (decision init-without-claude-code-probes-and-skips-claude-artifacts-loudly): the launchers, .claude/agents, the conductor activation and the ~/.claude.json
 // Codex check are Claude-only, so on a machine without `claude` they are not written (one
 // loud line, below, names them). STERLING_CLAUDE_PROBE is the test-isolation seam, honored
 // at THIS call site: unset/'' -> the real probe; 'ok' -> force present; 'absent' -> force
@@ -837,8 +837,8 @@ if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
   }
 }
 
-// S6 consumer cutover (decision s6-consumer-cutover-init-on-installed-copy-fixes-
-// launchers): on an installed copy, a launcher that starts claude with --plugin-dir keeps
+// S6 consumer cutover
+// (decision s6-consumer-cutover-init-on-installed-copy-fixes-launchers): on an installed copy, a launcher that starts claude with --plugin-dir keeps
 // the project on its old clone (--plugin-dir overrides the installed plugin), so it is
 // replaced even without a stamp. The clones that launcher and sterling-update.bat named
 // are collected for the manual deletion step printed at the end; nothing deletes them.
@@ -849,8 +849,8 @@ const oldClonePaths = [];
 // Code or OpenCode is installed, and the opener pair of each tool that is.
 const launcherHistory = launcherHistoryLoader(pluginRoot);
 if (launcherToolsFound.claude || launcherToolsFound.opencode) {
-  // WSL/tmux launchers (§11, decision launchers-consolidated-to-claude-code-and-opencode-
-  // pair): the engine sterling-launch.sh claude|opencode|tui, plus claude-code.bat and
+  // WSL/tmux launchers (§11,
+  // decision launchers-consolidated-to-claude-code-and-opencode-pair): the engine sterling-launch.sh claude|opencode|tui, plus claude-code.bat and
   // opencode.bat on a Windows (WSL2) host or claude-code.sh and opencode.sh on a native
   // Linux host. node/claude/opencode and the terminal are found at RUN time, so init
   // bakes no program paths. Ensure logic in scripts/lib/launchers.mjs.
@@ -910,8 +910,8 @@ if (claudeHost) {
   // agent installation (§2.2) via the §13 sync semantics: installed | refreshed |
   // up_to_date | locally-modified left | refuse-on-local-modification
   // No machine vars are baked: the only template tokens are {{MODEL}}/{{EFFORT}}, resolved
-  // from config below (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-
-  // keeps-its-clone, design point C: nothing an installed agent says names a plugin path).
+  // from config below
+  // (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone, design point C: nothing an installed agent says names a plugin path).
   const installedPluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version;
   const { report: agentReport } = syncAgents({
     templatesDir: join(pluginRoot, 'agent-templates'),
@@ -1077,8 +1077,8 @@ if (handoffCloneTarget === true) {
 // → a second, empty-store server. Instead the plugin manifest (.claude-plugin/plugin.json
 // mcpServers) references .claude-plugin/sterling-mcp.json, read ONLY through the manifest
 // and never as a project config — so the dual-role cannot exist. That file is COMMITTED
-// and machine-independent (decision sterling-ships-as-a-marketplace-plugin-authoring-
-// machine-keeps-its-clone, slice S2): it names the bundled server through
+// and machine-independent
+// (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone, slice S2): it names the bundled server through
 // ${CLAUDE_PLUGIN_ROOT} and the store through ${CLAUDE_PROJECT_DIR}, both substituted by
 // Claude Code at spawn, so init NEVER writes into the plugin directory any more — a run
 // from a consuming project touches nothing outside --target. A consuming project still
@@ -1103,8 +1103,8 @@ const readMcp = () => {
   }
 };
 
-// CODEX MCP LIVES AT USER SCOPE (decision sterling-ships-as-a-marketplace-plugin-
-// authoring-machine-keeps-its-clone, ruling point 2; finding
+// CODEX MCP LIVES AT USER SCOPE
+// (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone, ruling point 2; finding
 // codex-mcp-bridge-needs-codex-0-153-4-pinned-side-install): the codex server is
 // machine truth, so it is registered in the user-level Claude config, never in the
 // plugin's committed file. Init only CHECKS for it and, when it is missing, prints ONE
@@ -1138,8 +1138,8 @@ if (claudeHost) {
   }
 }
 
-// PLUGIN AUTO-UPDATE (S6, decision s6-consumer-cutover-init-on-installed-copy-fixes-
-// launchers, ruling point 3, overturned 2026-10-06 by the user through the question form:
+// PLUGIN AUTO-UPDATE (S6,
+// decision s6-consumer-cutover-init-on-installed-copy-fixes-launchers, ruling point 3, overturned 2026-10-06 by the user through the question form:
 // "Init switches it on"): a third-party marketplace does not auto-update by default
 // (finding plugin-github-source-install-copies-tracked-head-tree-october-2026), so an
 // installed copy sets autoUpdate: true on the sterling entry in the user-level settings.json.
@@ -1286,8 +1286,8 @@ for (const line of warns) console.log(line);
 for (const line of notes) console.log(line);
 for (const instruction of agentInstructions) console.log('\n' + instruction);
 
-// UNDECLARED-SOURCE DISCLOSURE (decision undeclared-source-disclosure-per-
-// file-coverage-live-h1-scan, board 44ef6838): the SAME shared ladder
+// UNDECLARED-SOURCE DISCLOSURE
+// (decision undeclared-source-disclosure-per-file-coverage-live-h1-scan, board 44ef6838): the SAME shared ladder
 // scripts/hooks/h1-session-start.mjs calls — computeUndeclaredSourceDisclosure
 // in scripts/hooks/lib/undeclared-source-scan.mjs (fix-round MED-2/MED-3: one
 // function, one semantics, instead of two independently-drifting copies) —

@@ -82,8 +82,8 @@ if (trimmedEvidence.startsWith('--') || OWN_FLAGS.includes(trimmedEvidence)) {
   );
 }
 
-// CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
-// helper-one-arg-parser, R5): target is process.cwd() here (not caller-
+// CONTAINMENT
+// (decision sanctioned-script-store-writes-one-containment-helper-one-arg-parser, R5): target is process.cwd() here (not caller-
 // controlled), but every .sterling path in a converted writer derives
 // through the helper regardless, per the manifest's zero-lexical-join bar.
 let configPath;

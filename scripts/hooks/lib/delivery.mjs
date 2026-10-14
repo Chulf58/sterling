@@ -692,8 +692,8 @@ export function isOwnerDiscoveryOnly(record) {
 // separate per-gap ledger to maintain.
 //
 // THE BASH/PROBE-OUTPUT SEAM (board f1489964, closing what this section used
-// to describe as an accepted exclusion — decision known-gaps-inline-ships-
-// with-probe-seam-boarded 53fd6f62's ship condition): the Bash pointer path
+// to describe as an accepted exclusion —
+// decision known-gaps-inline-ships-with-probe-seam-boarded 53fd6f62's ship condition): the Bash pointer path
 // (h19-bash-delivery.mjs / bashPointerBlock below) still never calls
 // renderArticle — a pointer stays a pointer, never the article body — but it
 // now reuses renderKnownGapsLines/budgetKnownGaps directly to append the SAME
@@ -1588,8 +1588,8 @@ export function resolveTotalCap(cwd) {
  * ranked top on every later dispatch.
  */
 export function assembleDelivery(parts, capBytes, options = {}) {
-  // NAMED HOLD-BACK, TWO PLACEMENTS (decision delivery-total-cap-and-axis-
-  // generic-floor, "Known residual"; review of 4e1c6d9): the room held back
+  // NAMED HOLD-BACK, TWO PLACEMENTS
+  // (decision delivery-total-cap-and-axis-generic-floor, "Known residual"; review of 4e1c6d9): the room held back
   // from excerpts for the '+N more' line is first sized as at 8965c63, from the
   // fully-named line. Only when some pass could hold less (not even the names
   // it carries fit) is the placement re-run with the reduced hold, and that

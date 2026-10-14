@@ -45,8 +45,8 @@
 // inverts to 'exit 0 + only the pin line'". The implementation lane must update
 // that sibling assertion; it is not weakened or touched from here.
 //
-// SABOTAGE DISCIPLINE (decision 'a-ruling-change-is-verified-by-mutation-not-by-
-// a-green-suite'): every test carries the ONE-LINE implementation change that
+// SABOTAGE DISCIPLINE
+// (decision 'a-ruling-change-is-verified-by-mutation-not-by-a-green-suite'): every test carries the ONE-LINE implementation change that
 // must turn it RED. Absence-shaped verdicts ("no model injected") carry an
 // in-test CONTROL arm that must pass for the OPPOSITE reason, so a green never
 // means "injection is broken everywhere".

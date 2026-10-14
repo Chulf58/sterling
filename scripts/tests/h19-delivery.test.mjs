@@ -124,8 +124,8 @@ const preEdit = (dir, file, extra = {}) => ({
 
 // 2026-09-19 re-pointed from prompt-drain aggregation to the direct cap
 // assembler; 2026-09-20 re-pointed AGAIN from the deleted UUID-scanning
-// helper (the rejected design, decision knowledge-delivery-target-design-no-
-// delayed-delivery) to the assembler's own returned emittedDiscovery set: a
+// helper (the rejected design,
+// decision knowledge-delivery-target-design-no-delayed-delivery) to the assembler's own returned emittedDiscovery set: a
 // record's id appearing in the composed text is no longer what marks it
 // delivered — only assembleDelivery saying the part survived WHOLE does.
 test('review H3: aggregate prefixes do not spend a record guard; the overflowed record can deliver in full later', () => {
@@ -1063,8 +1063,8 @@ test('H19: a one-hop pointer to a genuinely absent slug still says so', () => {
 // hole exactly where the traffic is, and it was SILENT. These tests pin the
 // three deliberate differences from full delivery: pointer not article, always
 // direct on its own PostToolUse (no enqueue/drain — that path was deleted in
-// delivery-migration step 2, decision knowledge-delivery-target-design-no-
-// delayed-delivery), and silence on unowned territory. AC7 still holds: no
+// delivery-migration step 2,
+// decision knowledge-delivery-target-design-no-delayed-delivery), and silence on unowned territory. AC7 still holds: no
 // path may exit 2.
 // ---------------------------------------------------------------------------
 
@@ -1177,8 +1177,8 @@ test('bash delivery: a directory argument never fans out across the files beneat
   }
 });
 
-// Superseded 2026-09-20 (Step 3, decision knowledge-delivery-target-design-
-// no-delayed-delivery item 4): a Bash hazard now renders WHOLE via the SAME
+// Superseded 2026-09-20 (Step 3,
+// decision knowledge-delivery-target-design-no-delayed-delivery item 4): a Bash hazard now renders WHOLE via the SAME
 // hazardHeaderLine every other surface uses, never the old one-line
 // "⚠ HAZARD anti_pattern '<title>'" pointer form — a whole hazard is
 // substance, never a mere pointer.

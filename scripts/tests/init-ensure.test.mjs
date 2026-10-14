@@ -1136,8 +1136,8 @@ test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed 
 // =============================================================================
 // Part C — CODEX MCP AT USER SCOPE, AND NOTHING WRITTEN INTO THE PLUGIN DIRECTORY
 // (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone,
-// slice S2 and ruling point 2; finding codex-mcp-bridge-needs-codex-0-153-4-pinned-
-// side-install). This Part replaces the former "sparring-partner" cases that pinned
+// slice S2 and ruling point 2;
+// finding codex-mcp-bridge-needs-codex-0-153-4-pinned-side-install). This Part replaces the former "sparring-partner" cases that pinned
 // init GENERATING .claude-plugin/sterling-mcp.json (a per-machine file with absolute
 // paths and a probed codex entry, refreshed in place): that file is now one COMMITTED,
 // machine-independent file, and the codex server lives in the user-level Claude config.
@@ -1465,8 +1465,8 @@ const statusLineFor = (out, path) => (out.match(new RegExp(`^${escapeRe(path)}\\
 // F1 / F1b (the managed refresh of a stale plugin MCP command, and the `differs`
 // report on a hand-edited entry) were REMOVED with the behaviour they pinned: init no
 // longer generates, refreshes or reports .claude-plugin/sterling-mcp.json — the file is
-// committed and machine-independent (decision sterling-ships-as-a-marketplace-plugin-
-// authoring-machine-keeps-its-clone, slice S2). What replaces them is Part C's
+// committed and machine-independent
+// (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone, slice S2). What replaces them is Part C's
 // "init writes NOTHING into the plugin directory" and "committed plugin MCP config".
 
 // F2 (the inert-opt-in disclosure) was REMOVED with the opt-in it disclosed

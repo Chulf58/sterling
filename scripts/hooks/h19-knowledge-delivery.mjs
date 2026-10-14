@@ -47,8 +47,7 @@ import {
 const input = readStdin();
 
 // THE BODY IS A FUNCTION, AND EVERY TERMINAL CALL INSIDE IT IS A `return`
-// (decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-
-// synchronous). On the INJECT path the process now exits inside the stdout
+// (decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-synchronous). On the INJECT path the process now exits inside the stdout
 // write callback, so a bare `allow()` no longer stops what follows it the way a
 // hard exit did; returning is what preserves that.
 function main(input) {
@@ -289,8 +288,7 @@ function main(input) {
     // arms, so a guard written before a failed delivery silences the article for the whole session
     // with no residue and no detector.
     // ON THE INJECT PATH THAT ORDERING IS NOW MECHANICAL, not positional
-    // (decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-
-    // synchronous): the bookkeeping rides `onWritten`, so it runs only after the
+    // (decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-synchronous): the bookkeeping rides `onWritten`, so it runs only after the
     // stream has actually taken the payload — a write that fails leaves the guard
     // untouched by construction rather than by statement order, and the process
     // exits non-zero instead of reporting a clean delivery. ENQUEUE keeps the

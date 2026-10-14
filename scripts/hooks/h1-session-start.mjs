@@ -61,8 +61,7 @@ async function deleteRegisterUnderLock(cwd) {
       cwd,
       () => {
         // DISPATCH-STATE SESSION-BOUNDARY SWEEP RUNS FIRST (X3, Codex review;
-        // decision dispatch-state-machine-pre-slot-post-binding-locked-start-
-        // resolution-replaces-transcript-attribution §4b), inside this SAME
+        // decision dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution §4b), inside this SAME
         // lock hold — one lock for register AND dispatch state. ORDER is
         // load-bearing: a crash AFTER the sweep but before the register
         // delete leaves only the sweep's conservative, already-terminalized
@@ -736,12 +735,12 @@ await deleteRegisterUnderLock(input.cwd);
 
 // GRAVESTONE — an unconditional `rmSync` of the conductor-attested enforcement
 // stamp (`.sterling/transient/enforcement-stamp.json`, decision foreign_6e132e19) stood
-// here. DELETED 2026-08-30 (S4) by decisions h17-demotes-to-tripwire-with-
-// minimal-b-hash-list (78dc9bd6) and b-baseline-hash-list-concrete-design
+// here. DELETED 2026-08-30 (S4) by
+// decisions h17-demotes-to-tripwire-with-minimal-b-hash-list (78dc9bd6) and b-baseline-hash-list-concrete-design
 // (fe861066): the stamp/attestation apparatus is gone whole, so there is nothing
 // left at that path for H1 to reclaim.
-// UPDATED 2026-09-19 (scale-down, decision sterling-claude-code-scale-down-
-// boundary): the stamp's would-be successor — the persistent (B) baseline hash
+// UPDATED 2026-09-19 (scale-down,
+// decision sterling-claude-code-scale-down-boundary): the stamp's would-be successor — the persistent (B) baseline hash
 // list at `.sterling/enforcement-baseline.json` — and its ONLY writer,
 // `scripts/enforcement-reconcile.mjs`, are BOTH deleted whole (commit a83f5be,
 // "delete ... enforcement self-protection"). Nothing in this codebase mints,
@@ -1363,8 +1362,8 @@ try {
 agentCurrencyWarning = cloneSyncWarning + agentCurrencyWarning;
 agentCurrencyContext = cloneSyncContext + agentCurrencyContext;
 
-// UNDECLARED-SOURCE DISCLOSURE (decision undeclared-source-disclosure-per-
-// file-coverage-live-h1-scan, board 44ef6838). Per-FILE live coverage scan
+// UNDECLARED-SOURCE DISCLOSURE
+// (decision undeclared-source-disclosure-per-file-coverage-live-h1-scan, board 44ef6838). Per-FILE live coverage scan
 // against config.toolchains[].path_globs, computed FRESH every session start —
 // NO cache (a stale cached scan under-reports silently, the exact silence
 // this feature exists to close). DISCLOSURE ONLY: never denies, never gates,
@@ -1465,7 +1464,7 @@ const output = {
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the
-// pipe drains (decision hook-stdout-exit-after-write-callback-bound-exit-
-// deny-stays-synchronous). This is the true end of the script — nothing
+// pipe drains
+// (decision hook-stdout-exit-after-write-callback-bound-exit-deny-stays-synchronous). This is the true end of the script — nothing
 // follows, so exitAfterWrite's async settle can never race a later statement.
 exitAfterWrite(JSON.stringify(output), 0);

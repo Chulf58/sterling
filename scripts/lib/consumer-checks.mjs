@@ -43,8 +43,8 @@ const fwd = (p) => p.replace(/\\/g, '/');
 // path. JSON.stringify produces a correctly escaped, self-quoting literal
 // regardless of the path's separator style.
 //
-// INSTALLED COPY (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-
-// keeps-its-clone, ruling point 3): no path into a versioned plugin cache may be baked,
+// INSTALLED COPY
+// (decision sterling-ships-as-a-marketplace-plugin-authoring-machine-keeps-its-clone, ruling point 3): no path into a versioned plugin cache may be baked,
 // since the next plugin update moves it. The placeholder becomes a call to the
 // generated newestInstalledPluginDir(), which picks the newest installed Sterling at
 // RUN time through the shared resolver (scripts/lib/sterling-roots.mjs), inlined

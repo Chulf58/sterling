@@ -1,6 +1,6 @@
 // scripts/lib/attestation-inspection.mjs with Postgres storage (issue
-// Chulf58/sterling#26 item 7; decision storage-backend-is-its-own-config-key-
-// written-only-by-store-move). The inspector is disclosure-only: on a
+// Chulf58/sterling#26 item 7;
+// decision storage-backend-is-its-own-config-key-written-only-by-store-move). The inspector is disclosure-only: on a
 // Postgres-storage project it reads the live attestations from the project's
 // Postgres store through a read-only snapshot, and every failure is
 // { available:false, reason } with no throw and no read of a sterling.db left
