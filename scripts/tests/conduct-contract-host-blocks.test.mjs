@@ -54,7 +54,11 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // Moved 2026-10-13 (from 97aab1a6…): the Claude Code "Codex runs through the MCP tool" bullet gains the
 // dropped-server recovery, the user runs /mcp reconnect all and the call is retried once before the
 // Opus or Fable fallback (GitHub issue #87; finding why-do-the-codex-mcp-tools-vanish-for-the-rest-of-a-claude-c).
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = '3ff5644b4640fc0ca93cc65f6a7fbd94249cd929bee9d1059c70b02e52c89ee0';
+// Moved 2026-10-14 (from 3ff5644b…): the same bullet gains `features: {view_image: false}` in the per-call
+// config, with the reason (an image result can push one MCP message past Claude Code's 16 MB stdio limit
+// and Claude Code then drops the server) and the note that `tools.view_image` does not work on 0.153.4
+// (GitHub issue #90).
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = '35f1120fa3dd1e23c7b365dbbd859720f06f9296de297269823c2282a03a3495';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);
