@@ -2,9 +2,11 @@
 // staging for a child (subagent) session, pushed into the system prompt of every request
 // and the same bytes on each. VOLATILE: the status line, H1's operating-state and
 // maintenance lines, the plan lock, the dispatch sweep, board readiness, the rotation
-// restore and pending notices, appended to the session's next prompt text, or to the
-// next read/edit/write/patch/shell result mid-turn, when they changed since they were
-// last delivered there (user-ruled 2026-10-12, "Move live lines
+// restore and pending notices, sent as a hidden synthetic message before the session's next
+// prompt, or (delivery 'steer') after the next read/edit/write/patch/shell result mid-turn,
+// when they changed since they were last delivered there; an OpenCode without
+// ctx.session.synthetic, or a failed call, gets them appended to the prompt or result
+// with a degraded note (GitHub #93; user-ruled 2026-10-12, "Move live lines
 // out": a system prompt that changed every turn re-wrote the whole conversation to the
 // provider's prompt cache; finding why-is-the-prompt-cache-hit-rate-lower-on-opencode-codeburn).
 import { join } from 'node:path';
@@ -12,8 +14,8 @@ import { SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
 import { probeSchemaVersion } from '../../../scripts/lib/update.mjs';
 import { opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
 import { errText, logLine } from './log.mjs';
-import { NOTICES_REL, takeNotices } from './notices.mjs';
-import { readMaintenanceState } from '../../../scripts/hooks/lib/maintenance-state.mjs';
+import { NOTICES_REL, claimNotices } from './notices.mjs';
+import { queueDepthLine, readMaintenanceState } from '../../../scripts/hooks/lib/maintenance-state.mjs';
 import { laneCeiling, liveLanes, renderBoardReadiness } from '../../../scripts/hooks/lib/board-ready.mjs';
 import { maintenanceLines, operatingStateLines, undeclaredSourceBlock } from './operating-state.mjs';
 import { composeContext, dispatchChrome } from '../../../scripts/hooks/lib/stage-brief.mjs';
@@ -31,6 +33,16 @@ import { planLockSection } from '../../../scripts/hooks/lib/plan-lock-section.mj
 const STATUS_TTL_MS = 10_000;
 // The undeclared-source scan spawns git twice, so a process reuses its answer for this long.
 const UNDECLARED_TTL_MS = 5 * 60_000;
+// The worker states on the RECONCILE BACKLOG line that are not routine activity, as
+// scripts/hooks/lib/maintenance-state.mjs renders them (reconcileBacklog, workerStateText),
+// with a pause's minutes already taken out: they stay in the maintenance delivery key.
+// A failure reason can span lines (a worker error 'process failed\npermission denied'), so the
+// FAILED clause is matched across newlines up to its log pointer.
+const WORKER_ALERTS = /last worker run FAILED at [\s\S]*? \(log: [^)]*\)|worker state unknown \([^)]*\)|worker disabled by \S+|worker paused after (?:a failed run|a run that closed nothing)/g;
+// How long a ctx.session.synthetic call may take before its delivery is treated as uncertain
+// (deliver). Below the context handler's 4000 ms fence (server.mjs BUDGET_MS), so a call that
+// never settles cannot hold the session's delivery chain (serialized) past one hook.
+export const SYNTHETIC_TIMEOUT_MS = 3000;
 
 /**
  * `getSession()` returns the plugin context's session domain, as restore.mjs and sync.mjs take it; a session it cannot classify gets the loud not-staged line.
@@ -57,6 +69,10 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   const boardCache = new Map();
   // Per session, the text of each volatile block last delivered to it (bounded, bounded.mjs).
   const delivered = new Map();
+  // Per session, how many times resetSession ran: a delivery commits only into the generation it selected in.
+  const generations = new Map();
+  // Per session, the tail of its delivery chain (serialized); removed when the chain drains.
+  const chains = new Map();
   // The last root session whose start refreshed each project's registry row.
   const registrySeen = new Map();
   // One-shot lines produced but not yet delivered, by `${root}\0${name}`. Their guards
@@ -158,8 +174,29 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       hit = { at: Date.now(), state, error };
       maintenanceCache.set(root, hit);
     }
-    if (hit.error) return [`MAINTENANCE QUEUE UNREADABLE (${hit.error}) — the deep-queue signal and the reconcile backlog are not stated this turn.`];
-    return hit.state ? maintenanceLines(hit.state, config, root) : [];
+    if (hit.error) {
+      const text = `MAINTENANCE QUEUE UNREADABLE (${hit.error}) — the deep-queue signal and the reconcile backlog are not stated this turn.`;
+      return { text, sig: text };
+    }
+    if (!hit.state) return { text: '', sig: '' };
+    const text = maintenanceLines(hit.state, config, root).join('\n\n');
+    return { text, sig: text ? maintenanceSig(hit.state, config, text) : '' };
+  }
+
+  /**
+   * What the maintenance text says, without its wording that drifts on its own: the
+   * backlog's age (read from the clock) and the routine worker activity (running, batching,
+   * waiting, the last routine run). It is the deep-queue line plus the reconcile lanes,
+   * oldest item, handed-off items and journal write count, plus the worker states that are
+   * not routine, taken from the rendered `text`: a failed last run (its time and reason), an
+   * unknown state (its reason), disabled, and a back-off pause without its minutes. A count,
+   * a hand-off, a failure, an unknown state and each recovery from one change the key.
+   */
+  function maintenanceSig(state, config, text) {
+    const queue = queueDepthLine({ ...state, deepThreshold: config?.maintenance_queue?.deep_threshold });
+    const r = state.reconcile;
+    const worker = text.replace(/worker paused \d+m after/g, 'worker paused after').match(WORKER_ALERTS) ?? [];
+    return JSON.stringify([queue, r.count > 0 ? [r.lanes, r.oldest, r.handedOff, r.handoffs, r.writes?.count ?? null, worker] : null]);
   }
 
   /**
@@ -192,12 +229,21 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       }
       boardCache.set(root, hit);
     }
-    if (hit.unavailable) return hit.unavailable;
+    if (hit.unavailable) return { text: hit.unavailable, sig: hit.unavailable };
     try {
-      return renderBoardReadiness({ readiness: hit.readiness, live: liveLanes(root, sessionID), ceiling: laneCeiling(config) });
+      const live = liveLanes(root, sessionID);
+      const ceiling = laneCeiling(config);
+      const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling });
+      // The delivery key is the text with only a measured lane count held constant: a lane
+      // that starts or ends changes `live lanes k/n` and nothing else, and re-sending the
+      // whole list for it is the noise GitHub #93 reported. An unreadable dispatch register,
+      // the ceiling and its errors stay in the key, so they are said when they change.
+      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live: live.availability === 'ok' ? { ...live, count: 0 } : live, ceiling }) : '';
+      return { text, sig };
     } catch (e) {
       logLine(root, `context: board readiness unreadable: ${errText(e)}`);
-      return `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
+      const text = `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
+      return { text, sig: text };
     }
   }
 
@@ -256,8 +302,10 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   }
 
   /**
-   * The VOLATILE context of `sessionID`, as [{ key, text, cleared? }]. A keyed block is
-   * delivered when its text differs from the one last delivered in the session; a block
+   * The VOLATILE context of `sessionID`, as [{ key, text, sig?, cleared? }]. A keyed block is
+   * delivered when its `sig` (its text when it has none) differs from the one last delivered
+   * in the session: the board and maintenance blocks carry a sig that leaves out wording
+   * that drifts on its own (live lane count, backlog age, worker state). A block
    * with no key (a one-shot line: the sweep, a registry failure) until it is delivered (claimed from
    * `heldLines` when selected, put back by dueText's release when the append fails).
    * `cleared` is said once when a delivered keyed block becomes empty, so a stale READY
@@ -270,7 +318,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     const out = [
       { key: 'status', text: statusLine(root) },
       { key: 'operating-state', text: state.lines.join('\n\n') },
-      { key: 'maintenance', text: maintenanceBlocks(root, state.config).join('\n\n') },
+      { key: 'maintenance', ...maintenanceBlocks(root, state.config) },
     ];
     if (kind === 'root') {
       // H1's PLAN LOCK section (scripts/hooks/lib/plan-lock-section.mjs), each time it
@@ -321,7 +369,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       out.push({ key: 'undeclared', text: undeclaredBlock(root, state.config), cleared: 'UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies.' });
       // Root sessions only, and never inside the maintenance worker's own child
       // (the former ruling 'opencode-session-boundary-code-runs-in-the-maintenance-worker-child' (not in the current store)): the worker is not the conductor filling lanes.
-      if (!inWorkerChild(env)) out.push({ key: 'board', text: boardBlock(root, state.config, sessionID), cleared: 'BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply.' });
+      if (!inWorkerChild(env)) out.push({ key: 'board', ...boardBlock(root, state.config, sessionID), cleared: 'BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply.' });
     }
     out.push({ key: 'restore', text: await rotationRestore(root, sessionID) });
     // Held one-shot lines are claimed here, synchronously after the last await, so two
@@ -368,19 +416,25 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         continue;
       }
       const last = seen.get(b.key) ?? '';
-      if (b.text === last) continue;
+      const sig = b.sig ?? b.text;
+      if (sig === last) continue;
       if (b.text) due.push(b.text);
       else if (b.cleared) due.push(b.cleared);
-      marks.set(b.key, b.text);
+      marks.set(b.key, sig);
     }
     // Notices go to the conductor's (root) session only: a child that took them would
     // leave the conductor never seeing them. The worker child must not stamp the user's
     // notices shown, or settlement would prune them unseen. Both callers check their
     // target's shape before calling, so nothing after this take can fail and lose them.
+    // A compaction (resetSession) while this delivery is in flight starts a new conversation:
+    // marks computed for the old one are dropped at commit, so the new one gets the full set.
+    const generation = generations.get(sessionID) ?? 0;
+    let claimedNotices = null;
     if (!kind.why && kind.kind === 'root' && !inWorkerChild(env)) {
       let notices;
       try {
-        notices = takeNotices(root, now());
+        claimedNotices = claimNotices(root, now());
+        notices = claimedNotices.notices;
       } catch (e) {
         // P5: said in-band and logged. The other lines are held back, unmarked, until it reads again.
         // The claims go back first: the log write can throw, and a claim neither restored nor committed is lost.
@@ -390,36 +444,156 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
           text: `${VOLATILE_HEADER}\n\nSTERLING NOTICES UNREADABLE (${errText(e)}): the pending notices in ${NOTICES_REL} could not be read, so Sterling's other session lines are held back until they can; fix or delete that file.`,
           commit: () => {},
           release: () => {},
+          fresh: () => true,
         };
       }
+      // A keyed notice (notices.mjs) already shown in this session is not shown again, whatever
+      // its wording now says; it is still claimed above and stamped shown at commit, so
+      // settlement prunes it.
+      notices = notices.filter((n) => {
+        if (n.key === undefined) return true;
+        const mark = `notice:${n.key}`;
+        if (seen.has(mark) || marks.has(mark)) return false;
+        marks.set(mark, 'shown');
+        return true;
+      });
       if (notices.length) due.push(`STERLING NOTICES (new since the last ones you were shown):\n${notices.map((n) => `- ${n.text}`).join('\n')}`);
     }
     return {
       text: due.length ? `${VOLATILE_HEADER}\n\n${due.join('\n\n')}` : '',
-      release,
+      fresh: () => (generations.get(sessionID) ?? 0) === generation,
+      // Held lines and claimed notices go back, so the next delivery offers them again.
+      release: () => {
+        release();
+        claimed.length = 0;
+        claimedNotices?.release();
+      },
       commit: () => {
         claimed.length = 0;
-        if (!marks.size) return;
-        const record = delivered.get(sessionID) ?? remember(delivered, sessionID, new Map());
-        for (const [key, text] of marks) record.set(key, text);
+        if (marks.size && (generations.get(sessionID) ?? 0) === generation) {
+          const record = delivered.get(sessionID) ?? remember(delivered, sessionID, new Map());
+          for (const [key, text] of marks) record.set(key, text);
+        }
+        // Notices are stamped shown whatever the generation: they reached the conversation
+        // the compaction then summarized, and settlement must be free to prune them.
+        claimedNotices?.commit();
       },
     };
   }
 
-  /** The prompt hook: the due lines are appended to the session's next prompt text. */
+  /**
+   * Sends the due text to the model as a synthetic user message with no description, which
+   * OpenCode hides in the TUI and the web app (finding
+   * opencode-synthetic-message-hides-plugin-context-from-tui-model-still-sees-it; GitHub #93),
+   * so the user's own text and tool output stay untouched. Resolves to { sent: true } once the
+   * message is sent. When it cannot be sent (an OpenCode without ctx.session.synthetic, or a
+   * call that throws) it resolves to { why }, and the caller appends the text the old way
+   * (P5: the first fallback in a session also says so, `degradedNote`). A call that has not
+   * settled within SYNTHETIC_TIMEOUT_MS resolves to { why, uncertain: true }: it may still
+   * land, so the caller neither appends nor commits (deliver).
+   */
+  async function sendSynthetic(sessionID, text, delivery) {
+    const session = getSession?.();
+    if (typeof session?.synthetic !== 'function') return { why: 'ctx.session.synthetic is unavailable (an older OpenCode)' };
+    let timer;
+    try {
+      const call = Promise.resolve(session.synthetic({ sessionID, text, metadata: { source: 'sterling' }, ...(delivery ? { delivery } : {}) })).then(() => ({ sent: true }));
+      const late = new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ why: `ctx.session.synthetic did not settle within ${SYNTHETIC_TIMEOUT_MS} ms`, uncertain: true }), SYNTHETIC_TIMEOUT_MS);
+      });
+      return await Promise.race([call, late]);
+    } catch (e) {
+      return { why: errText(e) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Per session, the kinds of degraded delivery it was already told about ('append', 'timeout').
+  const degradedTold = new Map();
+  // Per session, a timeout not said yet: its note rides the session's next delivery.
+  const timeoutUntold = new Map();
+  const told = (sessionID, kind) => degradedTold.get(sessionID)?.has(kind) === true;
+  function degradedNote(sessionID, why) {
+    if (told(sessionID, 'append')) return '';
+    return `STERLING DELIVERY DEGRADED (${why}): Sterling's session lines are appended to the user's prompt or a tool result this session, so the user sees them; they are no longer sent as a hidden message.`;
+  }
+  function timeoutNote(sessionID) {
+    const why = timeoutUntold.get(sessionID);
+    if (!why || told(sessionID, 'timeout')) return '';
+    return `STERLING DELIVERY DEGRADED (${why}): Sterling's session lines were sent again, so a line shown earlier may repeat once.`;
+  }
+  function markTold(sessionID, kind) {
+    const kinds = degradedTold.get(sessionID) ?? remember(degradedTold, sessionID, new Set());
+    kinds.add(kind);
+  }
+
+  /**
+   * Delivers `due` (dueText's result): hidden when it can be, else through `append(text)`, the
+   * route's old way. The marks are committed only after one of the two has delivered.
+   *
+   * A synthetic call that times out is UNCERTAIN: OpenCode may store the message later. The
+   * selected lines and claimed notices are released, not committed, and nothing is appended,
+   * so the next delivery sends them again, with a degraded note naming the timeout. If the
+   * late call does land, the conversation gets those lines twice: a repeat is the accepted
+   * cost, chosen over losing the lines (commit) or a guaranteed duplicate now (append) or a
+   * session whose delivery chain waits forever on one call (no timeout).
+   */
+  async function deliver(sessionID, due, { delivery, append }) {
+    const notes = [];
+    try {
+      if (due.text) {
+        const pendingTimeout = timeoutNote(sessionID);
+        const text = pendingTimeout ? `${due.text}\n\n${pendingTimeout}` : due.text;
+        const result = await sendSynthetic(sessionID, text, delivery);
+        if (result.uncertain) {
+          remember(timeoutUntold, sessionID, result.why);
+          due.release();
+          return;
+        }
+        if (pendingTimeout) notes.push('timeout');
+        if (!result.sent) {
+          const note = degradedNote(sessionID, result.why);
+          if (note) notes.push('append');
+          append(note ? `${text}\n\n${note}` : text);
+        }
+      }
+    } catch (e) {
+      due.release();
+      throw e;
+    }
+    if (due.fresh()) {
+      for (const kind of notes) markTold(sessionID, kind);
+      if (notes.includes('timeout')) timeoutUntold.delete(sessionID);
+    }
+    due.commit();
+  }
+
+  /**
+   * Runs fn (select the due lines, then deliver them) after the session's earlier deliveries
+   * have settled, so two overlapping hooks of one session never select the same unchanged-
+   * since-delivered state and both send it. A failed delivery releases what it selected, and
+   * the next one in the chain selects it again. Sessions do not wait on each other.
+   */
+  function serialized(sessionID, fn) {
+    const prev = chains.get(sessionID) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.then(() => {}, () => {});
+    chains.set(sessionID, tail);
+    void tail.then(() => { if (chains.get(sessionID) === tail) chains.delete(sessionID); });
+    return run;
+  }
+
+  /** The prompt hook: the due lines reach the model as a hidden synthetic message before the prompt (see sendSynthetic). */
   async function onPrompt(input) {
     const root = rootOf();
     if (!root) return;
     await fenced('context', root, async () => {
       if (typeof input?.prompt?.text !== 'string') throw new Error(`unrecognized prompt shape (prompt.text is ${typeof input?.prompt?.text})`);
-      const due = await dueText(root, input.sessionID, 'prompt');
-      try {
-        if (due.text) input.prompt.text = `${input.prompt.text}\n\n${due.text}`;
-      } catch (e) {
-        due.release();
-        throw e;
-      }
-      due.commit();
+      await serialized(input.sessionID, async () => {
+        const due = await dueText(root, input.sessionID, 'prompt');
+        await deliver(input.sessionID, due, { append: (text) => { input.prompt.text = `${input.prompt.text}\n\n${text}`; } });
+      });
     });
   }
 
@@ -439,14 +613,11 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       // Checked before anything is marked delivered or a notice taken, so an unknown shape loses nothing.
       const content = input.result?.content;
       if (!Array.isArray(content) && typeof content !== 'string') throw new Error(`unrecognized tool result content shape (${typeof content}); the changed session lines wait for the next prompt or tool call`);
-      const due = await dueText(root, input.sessionID, 'tool call');
-      try {
-        if (due.text) appendToResult(input.result, due.text);
-      } catch (e) {
-        due.release();
-        throw e;
-      }
-      due.commit();
+      await serialized(input.sessionID, async () => {
+        const due = await dueText(root, input.sessionID, 'tool call');
+        // 'steer' lands in the model's current turn; 'queue' would add a model turn of its own.
+        await deliver(input.sessionID, due, { delivery: 'steer', append: (text) => appendToResult(input.result, text) });
+      });
     });
   }
 
@@ -458,6 +629,13 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     // Compaction replaces the conversation, so the cached prefix starts over anyway: the system block
     // is rendered again at the next request (picking up a template change or recovering a degraded
     // render), and the session's next prompt gets the whole set of lines again.
-    resetSession: (sessionID) => void (delivered.delete(sessionID), frozenSystem.delete(sessionID)),
+    // A delivery in flight across the reset commits nothing for the new conversation (generations).
+    resetSession: (sessionID) => {
+      delivered.delete(sessionID);
+      frozenSystem.delete(sessionID);
+      degradedTold.delete(sessionID);
+      timeoutUntold.delete(sessionID);
+      remember(generations, sessionID, (generations.get(sessionID) ?? 0) + 1);
+    },
   };
 }

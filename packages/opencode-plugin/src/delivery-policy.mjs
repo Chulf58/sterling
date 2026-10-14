@@ -52,7 +52,11 @@ async function contextUserTexts(session, sessionID) {
   return messages.filter((m) => m?.type === 'user' && typeof m.text === 'string').map((m) => m.text);
 }
 
-/** Whether any user message of model-request `messages` (the context hook's) carries the off directive. */
+/**
+ * Whether any user message of model-request `messages` (the context hook's) carries the off
+ * directive. Sterling's own synthetic message (it starts with the STERLING CONTEXT header) is
+ * never read for one: rawBriefOf gives '' for it, so a quoted error line cannot blind a lane.
+ */
 function offInMessages(messages) {
   return Array.isArray(messages) && messages.some((m) => m?.role === 'user' && parseSterlingDelivery(rawBriefOf([m])).policy === 'off');
 }
