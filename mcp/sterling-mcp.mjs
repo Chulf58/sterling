@@ -35834,7 +35834,10 @@ ${JSON.stringify(entry)}
     let stampedHead;
     if (measured_at_head !== void 0) {
       const candidate = String(measured_at_head);
-      if (!MEASURED_AT_HEAD_RE.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
+      if (!MEASURED_AT_HEAD_RE.test(candidate)) {
+        throw new Error(`board_add: measured_at_head '${candidate}' is refused for its shape \u2014 a full 40-character lowercase hex SHA is required, abbreviations are not accepted \u2014 refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`);
+      }
+      if (!this.shaResolves(candidate, this.repoRoot)) {
         throw new Error(`board_add: measured_at_head '${candidate}' does not resolve to a commit in this repo \u2014 refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`);
       }
       stampedHead = candidate;
@@ -36331,7 +36334,10 @@ ${JSON.stringify(entry)}
       throw _SterlingTools.needsSystemRefusal("board_update");
     if ("measured_at_head" in patch) {
       const candidate = String(patch.measured_at_head);
-      if (!MEASURED_AT_HEAD_RE.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
+      if (!MEASURED_AT_HEAD_RE.test(candidate)) {
+        throw new Error(`board_update: measured_at_head '${candidate}' is refused for its shape \u2014 a full 40-character lowercase hex SHA is required, abbreviations are not accepted \u2014 refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`);
+      }
+      if (!this.shaResolves(candidate, this.repoRoot)) {
         throw new Error(`board_update: measured_at_head '${candidate}' does not resolve to a commit in this repo \u2014 refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`);
       }
     } else if ("text" in patch || "file_keys" in patch) {
@@ -37896,7 +37902,7 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({ id: external_exports.string().describe(ID_LADDER), domain: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection)));
   server.registerTool("board_add", {
-    description: 'Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare `objective`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane); absent means nothing. measured_at_head is stamped to HEAD unless you pass a resolvable 40-hex sha (an unresolvable one is refused). The echo defaults to a digest; projection:"full" returns the stored record.',
+    description: 'Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare `objective`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane); absent means nothing. measured_at_head is stamped to HEAD unless you pass a full 40-character lowercase hex SHA that is a commit in this repo (an abbreviated or otherwise malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). The echo defaults to a digest; projection:"full" returns the stored record.',
     inputSchema: strict({
       text: external_exports.string(),
       source: external_exports.enum(["user", "system"]),
@@ -37934,7 +37940,7 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({ id: external_exports.string().describe(ID_EXACT_DESTROY) })
   }, ({ id }) => json(tools.maintenanceRemove(id)));
   server.registerTool("board_update", {
-    description: 'Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation (user items only; "" clears it). A text or file_keys change re-stamps measured_at_head to HEAD; pass a resolvable 40-hex sha to set it explicitly (unresolvable is refused). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:"full" returns the stored record.',
+    description: 'Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation (user items only; "" clears it). A text or file_keys change re-stamps measured_at_head to HEAD; pass a full 40-character lowercase hex SHA that is a commit in this repo to set it explicitly (an abbreviated or malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:"full" returns the stored record.',
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
       text: external_exports.string().optional(),

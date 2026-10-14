@@ -10383,7 +10383,14 @@ export class SterlingTools {
       // shaResolves — git resolves an abbreviated sha too, so a short-but-real
       // value would pass shaResolves and only fail later at the schema layer
       // with a bare zod message instead of this refusal naming the value.
-      if (!MEASURED_AT_HEAD_RE.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
+      // The shape refusal names the shape, because an abbreviation of a real
+      // commit is not an unresolvable commit.
+      if (!MEASURED_AT_HEAD_RE.test(candidate)) {
+        throw new Error(
+          `board_add: measured_at_head '${candidate}' is refused for its shape — a full 40-character lowercase hex SHA is required, abbreviations are not accepted — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
+        );
+      }
+      if (!this.shaResolves(candidate, this.repoRoot)) {
         throw new Error(
           `board_add: measured_at_head '${candidate}' does not resolve to a commit in this repo — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
         );
@@ -11126,7 +11133,12 @@ export class SterlingTools {
     if ('measured_at_head' in patch) {
       const candidate = String(patch.measured_at_head);
       // FIX F5: shape check before shaResolves (see boardAdd's identical fix).
-      if (!MEASURED_AT_HEAD_RE.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
+      if (!MEASURED_AT_HEAD_RE.test(candidate)) {
+        throw new Error(
+          `board_update: measured_at_head '${candidate}' is refused for its shape — a full 40-character lowercase hex SHA is required, abbreviations are not accepted — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
+        );
+      }
+      if (!this.shaResolves(candidate, this.repoRoot)) {
         throw new Error(
           `board_update: measured_at_head '${candidate}' does not resolve to a commit in this repo — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
         );
