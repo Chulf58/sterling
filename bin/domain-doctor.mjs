@@ -10923,12 +10923,22 @@ Renames a whole domain on this machine. Without --apply it prints the plan and w
   const unresolved = [];
   const absent = [];
   for (const row of rows) {
-    if (!existsSync3(row.repo_path)) {
+    const folder = storePresence(row.repo_path);
+    if (folder.inaccessible) {
+      unresolved.push({ row, error: `the folder cannot be read (${folder.accessError})` });
+      continue;
+    }
+    if (!folder.exists) {
       absent.push({ row, why: "registered path does not exist" });
       continue;
     }
     const configPath = join10(row.repo_path, ".sterling", "config.json");
-    if (!existsSync3(configPath)) {
+    const configPresence = storePresence(configPath);
+    if (configPresence.inaccessible) {
+      unresolved.push({ row, error: `.sterling/config.json cannot be read (${configPresence.accessError})` });
+      continue;
+    }
+    if (!configPresence.exists) {
       absent.push({ row, why: "no .sterling/config.json" });
       continue;
     }

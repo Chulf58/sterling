@@ -3568,8 +3568,9 @@ function writeRenameFence(oldPath, fence, oldName) {
  *      Refuse when <new> is not a domain name, when projects map <old> to
  *      different files, when a project mounting <old> is on Postgres, when
  *      <new> already has a store or is already mounted, or when a record is
- *      scoped other than domain:<old>. An unreadable config is listed as
- *      unresolved and not rewritten.
+ *      scoped other than domain:<old>, or when a registered project's folder
+ *      or config exists but cannot be read (every one is named). Only a
+ *      folder or config that is absent (ENOENT) is skipped and reported.
  *   2. Fence the old store (store_meta move_fence, kind 'rename').
  *   3. Copy, rewrite scope, validate, publish (renameCopy).
  *   4. Rewrite stack_tags and domain_paths in each mounting project's config
@@ -3610,13 +3611,26 @@ export function rename({ crashAt = null } = {}) {
   const unresolved = [];
   const absent = [];
   for (const row of rows) {
-    if (!existsSync(row.repo_path)) {
+    // existsSync answers false for EACCES/EPERM as well as ENOENT, so presence
+    // is probed with stat (storePresence): only ENOENT is absent; any other
+    // error is an unreadable project, which refuses below.
+    const folder = storePresence(row.repo_path);
+    if (folder.inaccessible) {
+      unresolved.push({ row, error: `the folder cannot be read (${folder.accessError})` });
+      continue;
+    }
+    if (!folder.exists) {
       absent.push({ row, why: 'registered path does not exist' });
       continue;
     }
     const configPath = join(row.repo_path, '.sterling', 'config.json');
+    const configPresence = storePresence(configPath);
+    if (configPresence.inaccessible) {
+      unresolved.push({ row, error: `.sterling/config.json cannot be read (${configPresence.accessError})` });
+      continue;
+    }
     // A folder with no config is not a Sterling project now and mounts nothing.
-    if (!existsSync(configPath)) {
+    if (!configPresence.exists) {
       absent.push({ row, why: 'no .sterling/config.json' });
       continue;
     }

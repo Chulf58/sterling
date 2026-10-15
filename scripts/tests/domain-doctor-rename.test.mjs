@@ -8,7 +8,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -408,4 +408,39 @@ test('the shipped bin ignores STERLING_TEST_RENAME_CRASH_AT: the crash seam is r
   assert.doesNotMatch(r.stderr, /test crash/);
   assert.deepEqual(config(m.projects.alpha).stack_tags, ['customerhub', 'sterling']);
   assert.ok(!readFileSync(join(root, 'bin', 'domain-doctor.mjs'), 'utf8').includes('STERLING_TEST_RENAME_CRASH_AT'), 'the bundle does not read the variable');
+});
+
+const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
+test('an inaccessible .sterling folder of a registered project refuses the rename with nothing written', { skip: isRoot ? 'running as root: chmod 000 does not deny root' : process.platform === 'win32' ? 'chmod does not deny on Windows' : false }, () => {
+  const m = machine();
+  const dotDir = join(m.projects.gamma.dir, '.sterling');
+  const oldHash = sha(m.oldPath);
+  const alpha = readFileSync(m.projects.alpha.configPath, 'utf8');
+  chmodSync(dotDir, 0o000);
+  let r;
+  try {
+    r = doctor(m, ['rename', 'chulf', 'customerhub', '--apply']);
+  } finally {
+    chmodSync(dotDir, 0o755);
+  }
+  assert.equal(r.code, 2, r.stdout);
+  assert.match(r.stderr, /1 registered project config\(s\) cannot be read/);
+  assert.match(r.stderr, /gamma \(.*\.sterling\/config\.json cannot be read \(EACCES/);
+  assert.equal(fenceOf(m.oldPath), undefined);
+  assert.equal(sha(m.oldPath), oldHash);
+  assert.equal(existsSync(dirname(m.newPath)), false);
+  assert.equal(readFileSync(m.projects.alpha.configPath, 'utf8'), alpha);
+});
+
+test('a registered folder that exists with no .sterling/config.json is skipped and reported', () => {
+  const m = machine();
+  const bare = POSIX(join(m.dir, 'bare'));
+  mkdirSync(bare);
+  const reg = new ProjectRegistry(m.registryDb);
+  reg.register({ repo_path: bare, name: 'bare', stack_tags: ['chulf'], toolchains: [], sterling_version: null, at: stamp() });
+  reg.close();
+  const r = doctor(m, ['rename', 'chulf', 'customerhub']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /skipped \(no \.sterling\/config\.json, not rewritten\): bare/);
 });
