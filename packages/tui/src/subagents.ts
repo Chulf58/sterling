@@ -54,9 +54,9 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { AGENT_MODEL_KEY, parseConfig } from '@sterling/schemas';
+import { openForeignDbReadOnly } from '@sterling/store';
 import { readRegister, dispatchStateDir, dispatchStateKey, type RegisterEntry } from '../../../scripts/lib/dispatch-register.mjs';
 import { deriveAgentTranscript, fillPct, latestUsage, readTail } from '../../../scripts/hooks/lib/transcript.mjs';
 import { sterlingRootFrom } from '../../../scripts/lib/opencode-install.mjs';
@@ -386,22 +386,24 @@ export interface OpenCodeContextRead {
 
 const CATALOG_KEY = 'models-dev:catalog';
 
+/** How long a read waits on a rollback-journal writer's lock; the card refreshes on the next tick anyway. */
+const OPENCODE_DB_BUSY_MS = 50;
+
 /** Open OpenCode's database without writing to it or beside it, and delete
- *  nothing. With no -wal, every committed frame is in the main file, so an
- *  immutable open reads it complete as of that instant and creates no -wal or
- *  -shm. With a -wal (OpenCode running, or a writer that crashed, -shm or
- *  not), a plain read-only open is WAL-aware and sees the turns committed to
- *  it. The one gap: a commit that lands between the -wal check and the query
- *  is missed, so the card shows the previous turn until the next tick.
- *  Nothing beside the database is ever removed: deleting a file beside
- *  another program's live database can remove a -wal it has just started
- *  writing (anti-pattern a-writable-sqlite-open-on-a-wal-database-mutates-the-main-fi). */
+ *  nothing: the store package's openForeignDbReadOnly decides how from the
+ *  journal topology. A WAL database with no -wal is read immutable (every
+ *  committed frame is in the main file, nothing is created); one with a -wal
+ *  (OpenCode running, or a writer that crashed, -shm or not) is read with a
+ *  plain read-only open, which is WAL-aware. The one gap: a commit that lands
+ *  between the -wal check and the query is missed, so the card shows the
+ *  previous turn until the next tick. A rollback-journal database is never
+ *  opened immutable, which would read a writer's uncommitted pages. Nothing
+ *  beside the database is ever removed: deleting a file beside another
+ *  program's live database can remove a -wal it has just started writing
+ *  (anti-pattern a-writable-sqlite-open-on-a-wal-database-mutates-the-main-fi). */
 function openOpenCodeDb(path: string): DatabaseSync {
   if (!existsSync(path)) throw new Error(`no OpenCode database at ${path}`);
-  if (existsSync(`${path}-wal`)) return new DatabaseSync(path, { readOnly: true });
-  const url = pathToFileURL(path);
-  url.searchParams.set('immutable', '1');
-  return new DatabaseSync(url, { readOnly: true });
+  return openForeignDbReadOnly(path, OPENCODE_DB_BUSY_MS);
 }
 
 /** Read each session's latest assistant turn that carries tokens (input plus

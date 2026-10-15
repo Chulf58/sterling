@@ -54273,8 +54273,6 @@ function mouseToEvent(name, data) {
 import { existsSync as existsSync14, readFileSync as readFileSync16, readdirSync as readdirSync8, statSync as statSync6 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { join as join20 } from "node:path";
-import { pathToFileURL as pathToFileURL2 } from "node:url";
-import { DatabaseSync as DatabaseSync6 } from "node:sqlite";
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync8, readFileSync as readFileSync15, writeFileSync as writeFileSync7, rmSync as rmSync4, rmdirSync, renameSync as renameSync5, existsSync as existsSync12, lstatSync as lstatSync6, readdirSync as readdirSync6, realpathSync as realpathSync5, chmodSync } from "node:fs";
@@ -56954,14 +56952,11 @@ function isOpenCodeSessionId(agentId) {
   return /^ses_[0-9A-Za-z]+$/.test(agentId);
 }
 var CATALOG_KEY = "models-dev:catalog";
+var OPENCODE_DB_BUSY_MS = 50;
 function openOpenCodeDb(path) {
   if (!existsSync14(path))
     throw new Error(`no OpenCode database at ${path}`);
-  if (existsSync14(`${path}-wal`))
-    return new DatabaseSync6(path, { readOnly: true });
-  const url = pathToFileURL2(path);
-  url.searchParams.set("immutable", "1");
-  return new DatabaseSync6(url, { readOnly: true });
+  return openForeignDbReadOnly(path, OPENCODE_DB_BUSY_MS);
 }
 function readOpenCodeContext(dbPath, sessionIds, catalogStamp) {
   const db = openOpenCodeDb(dbPath);
