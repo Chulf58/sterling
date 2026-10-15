@@ -156,7 +156,61 @@ test('refuses a missing path and a missing .sterling', () => {
   mkdirSync(bare);
   const r = run(s.registryDb, '--remove', bare, '--apply');
   assert.equal(r.code, 1, r.out);
-  assert.match(r.out, /there is no store to remove/, r.out);
+  assert.match(r.out, /nothing to remove: .*bare\/\.sterling does not exist and no registry row matches/, r.out);
+});
+
+test('no row and no .sterling: the dry run and --apply refuse with "nothing to remove"', () => {
+  const s = sandbox({ register: false });
+  rmSync(s.sterling, { recursive: true });
+  const dry = run(s.registryDb, '--remove', s.project);
+  assert.equal(dry.code, 1, dry.out);
+  assert.match(dry.out, /--apply would REFUSE:\n  - nothing to remove: /, dry.out);
+  const app = run(s.registryDb, '--remove', s.project, '--apply');
+  assert.equal(app.code, 1, app.out);
+  const res = JSON.parse(app.stdout);
+  assert.deepEqual(res.steps.map((x) => [x.step, x.ok]), [['validate', false]]);
+  assert.match(res.steps[0].refusals[0], /^nothing to remove: /);
+  assert.ok(existsSync(join(s.project, 'src.txt')));
+});
+
+test('row present, .sterling gone: the dry run says it only unregisters, exit 0, changes nothing', () => {
+  const s = sandbox();
+  rmSync(s.sterling, { recursive: true });
+  const r = run(s.registryDb, '--remove', s.project);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /store already removed.*--apply only unregisters demo\./i, r.out);
+  assert.doesNotMatch(r.out, /REFUSE/, r.out);
+  assert.deepEqual(rows(s.registryDb), [s.project]);
+});
+
+test('row present, .sterling gone: --apply runs validate then unregister only; no backup, files untouched', () => {
+  const s = sandbox();
+  rmSync(s.sterling, { recursive: true });
+  const r = run(s.registryDb, '--remove', s.project, '--apply');
+  assert.equal(r.code, 0, r.out);
+  const res = JSON.parse(r.stdout);
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.steps.map((x) => [x.step, x.ok]), [['validate', true], ['unregister', true]]);
+  assert.equal(res.steps[0].mode, 'unregister-only');
+  assert.equal(res.steps[1].removed, s.project);
+  assert.deepEqual(rows(s.registryDb), []);
+  assert.ok(!existsSync(s.backups), 'no backup is made');
+  for (const f of ['AGENTS.md', 'src.txt', '.opencode/opencode.json']) assert.ok(existsSync(join(s.project, f)), `${f} is untouched`);
+});
+
+test('row present, .sterling gone: identity refusals still hold (several rows, symlinked path)', () => {
+  const s = sandbox();
+  rmSync(s.sterling, { recursive: true });
+  const link = join(s.dir, 'alias');
+  symlinkSync(s.project, link);
+  const viaLink = run(s.registryDb, '--remove', link, '--apply');
+  assert.equal(viaLink.code, 1, viaLink.out);
+  assert.match(viaLink.out, /is a symlink/, viaLink.out);
+  reg(s.registryDb, `${s.project}/`, 'demo-dup');
+  const dup = run(s.registryDb, '--remove', s.project, '--apply');
+  assert.equal(dup.code, 1, dup.out);
+  assert.match(dup.out, /2 registry rows match this path/, dup.out);
+  assert.equal(rows(s.registryDb).length, 2, 'no row removed');
 });
 
 test('refuses when several registry rows match the path', () => {

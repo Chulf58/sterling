@@ -204,8 +204,14 @@ function inspect(input, stamp) {
   const dir = join(t.real, '.sterling');
   t.sterlingDir = dir;
   const sst = lstatOrUndefined(dir);
-  if (!sst) refusals.push(`${dir} does not exist; there is no store to remove`);
-  else if (sst.isSymbolicLink()) refusals.push(`${dir} is a symlink; refusing to delete through it`);
+  if (!sst) {
+    // No store left but exactly one row: --apply only unregisters (a delete whose
+    // unregister failed is finished this way). Several rows are refused above.
+    if (rows.length === 1) t.unregisterOnly = true;
+    else if (rows.length === 0) refusals.push(`nothing to remove: ${dir} does not exist and no registry row matches ${abs}`);
+    return t;
+  }
+  if (sst.isSymbolicLink()) refusals.push(`${dir} is a symlink; refusing to delete through it`);
   else if (!sst.isDirectory()) refusals.push(`${dir} is not a directory`);
   if (!sst || sst.isSymbolicLink() || !sst.isDirectory()) return t;
 
@@ -288,6 +294,11 @@ function storeSummary(dir) {
 function dryRunRemove(input) {
   const t = inspect(input, utcStamp(new Date()));
   console.log(`Remove preview (dry run; nothing is changed)\n`);
+  if (t.unregisterOnly && !t.refusals.length) {
+    console.log(`Registry: registered under ${t.row.name} (${t.row.repo_path})`);
+    console.log(`Store already removed (${t.sterlingDir} does not exist); --apply only unregisters ${t.row.name}. No backup and no open check are needed, because nothing is deleted.`);
+    return 0;
+  }
   console.log(`Directory to delete: ${t.sterlingDir ?? `${t.path}/.sterling`}`);
   console.log(`Registry: ${t.row ? `registered under ${t.row.name} (${t.row.repo_path})` : 'not registered'}`);
   if (t.sterlingDir && existsSync(t.sterlingDir) && lstatSync(t.sterlingDir).isDirectory()) {
@@ -347,7 +358,8 @@ function applyRemove(input) {
     steps.push({ step: 'validate', ok: false, refusals: t.refusals });
     return finish(1);
   }
-  steps.push({ step: 'validate', ok: true, target: t.sterlingDir, registered: t.row ? t.row.repo_path : null });
+  steps.push({ step: 'validate', ok: true, mode: t.unregisterOnly ? 'unregister-only' : 'remove', target: t.sterlingDir, registered: t.row ? t.row.repo_path : null });
+  if (t.unregisterOnly) return finish(unregister(t, steps));
 
   try {
     mkdirSync(t.backupRoot, { recursive: true });
@@ -390,21 +402,26 @@ function applyRemove(input) {
     return finish(1);
   }
 
+  return finish(unregister(t, steps));
+}
+
+/** Remove the target's registry row (or note there is none); returns the exit code. */
+function unregister(t, steps) {
   if (!t.row) {
     steps.push({ step: 'unregister', ok: true, skipped: 'not registered' });
-    return finish(0);
+    return 0;
   }
   try {
     if (!registry.remove(t.row.repo_path)) throw new Error(`no row for ${t.row.repo_path} was found to remove`);
     steps.push({ step: 'unregister', ok: true, removed: t.row.repo_path });
+    return 0;
   } catch (e) {
     steps.push({
       step: 'unregister',
       ok: false,
       error: e.message,
-      note: `.sterling is deleted and backed up; the registry row for ${t.row.repo_path} remains. Run list-projects.mjs --prune-missing once the folder itself is gone (it checks the folder, not .sterling).`,
+      note: `the registry row for ${t.row.repo_path} remains${t.unregisterOnly ? '' : '; .sterling is deleted and backed up'}. Re-run list-projects.mjs --remove ${t.path} --apply: with .sterling gone it only unregisters.`,
     });
-    return finish(1);
+    return 1;
   }
-  return finish(0);
 }
