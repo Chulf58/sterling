@@ -436,12 +436,43 @@ const UP_TO = `(updated_at > ? OR (updated_at = ? AND id >= ?))`;
 type ScanRow = { id: string; body: string; ok: number; source: unknown; slug: unknown; text: unknown; order_updated_at: string };
 
 /** Open the other store, run `read` with the budget, close it. The budget is checked before the open. */
+/**
+ * Test seams for the cross-project board read, passed as a function
+ * parameter. Production callers pass none.
+ */
+export interface ForeignReadHooks {
+  /** called inside each scan step, after SQLite returned its rows and before the deadline is checked, with the rows read so far */
+  inStep?: (rowsSoFar: number) => void;
+  /** called after each scan batch, before the next one */
+  betweenBatches?: () => void;
+}
+
+/**
+ * Open the other store, run `read` with the budget inside ONE read
+ * transaction, close it. The budget is checked before the open. The version
+ * pragma, the lookup and every scan range then see one snapshot, so a write
+ * there between two batches cannot make an item appear twice or vanish.
+ * Per open mode (openForeignDbReadOnly):
+ *   - immutable (WAL with no -wal): SQLite takes no locks and the file is
+ *     read as one fixed image; the transaction changes nothing.
+ *   - WAL with -wal (read-only): the first read pins a WAL snapshot that
+ *     later commits there do not change; their writer is never blocked.
+ *   - rollback journal (read-only): the first read takes a SHARED lock that is
+ *     held until the ROLLBACK, so a writer there waits (its own busy timeout)
+ *     for at most this read's time budget.
+ * The transaction is ended with ROLLBACK in finally; it never wrote anything.
+ */
 function withForeignDb<T>(dbPath: string, opts: ReadForeignBoardOptions, read: (db: DatabaseSync, budget: ReadBudget) => T, onExhausted: (why: string) => T): T {
   const budget = new ReadBudget(opts);
   if (budget.remaining() <= 0) return onExhausted(budget.exhausted('before the store was opened'));
   const db = openForeignDbReadOnly(dbPath, budget.busyTimeout());
   try {
-    return read(db, budget);
+    db.exec('BEGIN');
+    try {
+      return read(db, budget);
+    } finally {
+      db.exec('ROLLBACK');
+    }
   } finally {
     db.close();
   }
@@ -461,7 +492,11 @@ function withForeignDb<T>(dbPath: string, opts: ReadForeignBoardOptions, read: (
  * never a short board read as complete. With `after` (a cursor's position),
  * the rows past it are scanned first. An open or query failure is thrown.
  */
-export function readForeignBoard(dbPath: string, opts: ReadForeignBoardOptions & { after?: BoardOrderKey } = {}): ForeignBoardRead {
+export function readForeignBoard(
+  dbPath: string,
+  opts: ReadForeignBoardOptions & { after?: BoardOrderKey } = {},
+  hooks: ForeignReadHooks = {}
+): ForeignBoardRead {
   const empty = (): ForeignBoardRead => ({ items: [], unreadable: [], slugHolders: new Map(), schemaVersion: 0 });
   return withForeignDb(
     dbPath,
@@ -480,7 +515,7 @@ export function readForeignBoard(dbPath: string, opts: ReadForeignBoardOptions &
             [UP_TO, [opts.after.updated_at, opts.after.updated_at, opts.after.id]],
           ]
         : [['1', []]];
-      const truncated = scanRanges(db, budget, ranges, Math.max(1, opts.batchSize ?? 200), out);
+      const truncated = scanRanges(db, budget, ranges, Math.max(1, opts.batchSize ?? 200), out, hooks);
       if (truncated) out.truncated = truncated;
       else if (budget.remaining() <= 0) out.truncated = budget.exhausted(`after ${out.items.length + out.unreadable.length} board rows were read`);
       return out;
@@ -490,17 +525,29 @@ export function readForeignBoard(dbPath: string, opts: ReadForeignBoardOptions &
 }
 
 /** Scan each range in board order, batch by batch; the reason the budget ran out, or undefined when every range was read. */
-function scanRanges(db: DatabaseSync, budget: ReadBudget, ranges: readonly (readonly [string, (string | number)[]])[], batch: number, out: ForeignBoardRead): string | undefined {
+function scanRanges(
+  db: DatabaseSync,
+  budget: ReadBudget,
+  ranges: readonly (readonly [string, (string | number)[]])[],
+  batch: number,
+  out: ForeignBoardRead,
+  hooks: ForeignReadHooks = {}
+): string | undefined {
   let rows = 0;
   for (const [range, params] of ranges) {
     let last: { updated_at: string; id: string } | undefined;
     for (;;) {
       const sql = `SELECT ${SCAN_COLUMNS} FROM records WHERE ${LIVE_TODO} AND ${range}${last ? ` AND ${AFTER}` : ''} ORDER BY updated_at DESC, id DESC LIMIT ?`;
       const args = [...params, ...(last ? [last.updated_at, last.updated_at, last.id] : []), batch];
-      const got = budget.step(db, () => db.prepare(sql).all(...args) as ScanRow[]);
+      const got = budget.step(db, () => {
+        const batchRows = db.prepare(sql).all(...args) as ScanRow[];
+        hooks.inStep?.(rows + batchRows.length);
+        return batchRows;
+      });
       if (got === undefined) return budget.exhausted(`after ${rows} board rows were read`);
       for (const row of got) absorbRow(row, out);
       rows += got.length;
+      hooks.betweenBatches?.();
       if (got.length < batch) break;
       const tail = got[got.length - 1];
       last = { updated_at: tail.order_updated_at, id: tail.id };

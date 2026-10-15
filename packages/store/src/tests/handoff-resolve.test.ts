@@ -522,23 +522,92 @@ test('readForeignBoard: leaves no litter — a WAL store with no -wal and a roll
   }
 });
 
-test('readForeignBoard (review #3): a deadline crossed during the final SQLite step, or just before returning, is disclosed as truncation', () => {
+test('readForeignBoard (review #3): time that passes DURING the final scan step is disclosed as truncation', () => {
   const b = receiver();
   try {
     for (let i = 0; i < 3; i++) mk(b.store, { text: `Item ${i}` });
     b.store.close();
     const db = join(b.root, '.sterling', 'sterling.db');
-    let calls = 0;
-    const whole = readForeignBoard(db, { batchSize: 10, clock: () => (calls++, 0) });
-    assert.equal(whole.truncated, undefined, 'precondition: a frozen clock reads the whole board');
+    let now = 0;
+    // The step that delivers the last row is where the deadline passes; no
+    // clock read is calibrated, the hook only moves time inside that step.
+    const read = readForeignBoard(db, { budgetMs: 1000, clock: () => now }, { inStep: (rowsSoFar) => { if (rowsSoFar >= 3) now = 5000; } });
+    assert.match(read.truncated ?? '', /^time budget exhausted \(1000 ms\)/, 'a deadline crossed during the final step is disclosed');
+    now = 0;
+    const whole = readForeignBoard(db, { budgetMs: 1000, clock: () => now }, { inStep: () => {} });
+    assert.equal(whole.truncated, undefined, 'control: with time standing still the read is whole');
     assert.equal(whole.items.length, 3);
-    // The last clock read is the check before returning; the one before it is
-    // the check after the final scan step.
-    for (const jumpAt of [calls - 1, calls]) {
-      let n = 0;
-      const read = readForeignBoard(db, { batchSize: 10, clock: () => (++n >= jumpAt ? 1e9 : 0) });
-      assert.match(read.truncated ?? '', /^time budget exhausted/, `a deadline crossed at clock read ${jumpAt} of ${calls} is disclosed`);
-    }
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard (re-check #1): every batch and both cursor ranges read ONE snapshot — a write there between batches adds no duplicate', () => {
+  const b = receiver();
+  try {
+    const t = (n: number) => `2026-10-15T12:00:0${n}.000Z`;
+    const i1 = mk(b.store, { text: 'Oldest', updated_at: t(1) });
+    const i2 = mk(b.store, { text: 'Middle', updated_at: t(2) });
+    mk(b.store, { text: 'Newest', updated_at: t(3) });
+    const db = join(b.root, '.sterling', 'sterling.db');
+    assert.equal(existsSync(`${db}-wal`), true, 'precondition: the receiver is running (hot -wal), the read-only WAL path');
+    let wrote = false;
+    const bump = () => {
+      if (wrote) return;
+      wrote = true;
+      // The receiver moves the oldest item, already read past the cursor, to the head.
+      const w = new DatabaseSync(db);
+      try {
+        const row = w.prepare('SELECT body FROM records WHERE id = ?').get(i1.id) as { body: string };
+        w.prepare('UPDATE records SET updated_at = ?, body = ? WHERE id = ?').run(t(4), JSON.stringify({ ...JSON.parse(row.body), updated_at: t(4) }), i1.id);
+      } finally {
+        w.close();
+      }
+    };
+    const read = readForeignBoard(db, { batchSize: 1, after: { updated_at: t(2), id: i2.id } }, { betweenBatches: bump });
+    assert.equal(wrote, true, 'the write ran between batches');
+    const ids = read.items.map((i) => i.id);
+    assert.equal(new Set(ids).size, ids.length, `no item is read twice: ${ids.join(', ')}`);
+    assert.equal(ids.length, 3, 'the count is the count of the snapshot');
+    assert.equal(read.truncated, undefined);
+    assert.equal((b.store.get(i1.id) as { updated_at: string } | undefined)?.updated_at, t(4), 'the write committed there');
+  } finally {
+    b.store.close();
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard (re-check #1): on a rollback-journal store the read holds its shared lock, so a writer there waits until the read ends', () => {
+  const b = receiver();
+  try {
+    mk(b.store, { text: 'One' });
+    mk(b.store, { text: 'Two' });
+    b.store.close();
+    const db = join(b.root, '.sterling', 'sterling.db');
+    const w0 = new DatabaseSync(db);
+    w0.exec('PRAGMA journal_mode=DELETE');
+    w0.close();
+    let refused = '';
+    const read = readForeignBoard(db, { batchSize: 1 }, {
+      betweenBatches: () => {
+        if (refused) return;
+        const w = new DatabaseSync(db);
+        try {
+          w.exec('PRAGMA busy_timeout=0');
+          w.exec(`UPDATE records SET updated_at = '2030-01-01T00:00:00.000Z'`);
+          refused = 'no';
+        } catch (e) {
+          refused = (e as Error).message;
+        } finally {
+          w.close();
+        }
+      },
+    });
+    assert.match(refused, /database is locked/, 'the writer waits on the reader\'s shared lock');
+    assert.equal(read.items.length, 2);
+    const after = new DatabaseSync(db);
+    after.exec(`UPDATE records SET updated_at = updated_at`);
+    after.close();
   } finally {
     b.cleanup();
   }

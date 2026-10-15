@@ -9573,12 +9573,17 @@ function withForeignDb(dbPath, opts2, read, onExhausted) {
     return onExhausted(budget.exhausted("before the store was opened"));
   const db = openForeignDbReadOnly(dbPath, budget.busyTimeout());
   try {
-    return read(db, budget);
+    db.exec("BEGIN");
+    try {
+      return read(db, budget);
+    } finally {
+      db.exec("ROLLBACK");
+    }
   } finally {
     db.close();
   }
 }
-function readForeignBoard(dbPath, opts2 = {}) {
+function readForeignBoard(dbPath, opts2 = {}, hooks = {}) {
   const empty = () => ({ items: [], unreadable: [], slugHolders: /* @__PURE__ */ new Map(), schemaVersion: 0 });
   return withForeignDb(dbPath, opts2, (db, budget) => {
     const out = empty();
@@ -9592,7 +9597,7 @@ function readForeignBoard(dbPath, opts2 = {}) {
       [AFTER, [opts2.after.updated_at, opts2.after.updated_at, opts2.after.id]],
       [UP_TO, [opts2.after.updated_at, opts2.after.updated_at, opts2.after.id]]
     ] : [["1", []]];
-    const truncated = scanRanges(db, budget, ranges, Math.max(1, opts2.batchSize ?? 200), out);
+    const truncated = scanRanges(db, budget, ranges, Math.max(1, opts2.batchSize ?? 200), out, hooks);
     if (truncated)
       out.truncated = truncated;
     else if (budget.remaining() <= 0)
@@ -9600,19 +9605,24 @@ function readForeignBoard(dbPath, opts2 = {}) {
     return out;
   }, (why) => ({ ...empty(), truncated: why }));
 }
-function scanRanges(db, budget, ranges, batch, out) {
+function scanRanges(db, budget, ranges, batch, out, hooks = {}) {
   let rows = 0;
   for (const [range, params] of ranges) {
     let last;
     for (; ; ) {
       const sql = `SELECT ${SCAN_COLUMNS} FROM records WHERE ${LIVE_TODO} AND ${range}${last ? ` AND ${AFTER}` : ""} ORDER BY updated_at DESC, id DESC LIMIT ?`;
       const args = [...params, ...last ? [last.updated_at, last.updated_at, last.id] : [], batch];
-      const got = budget.step(db, () => db.prepare(sql).all(...args));
+      const got = budget.step(db, () => {
+        const batchRows = db.prepare(sql).all(...args);
+        hooks.inStep?.(rows + batchRows.length);
+        return batchRows;
+      });
       if (got === void 0)
         return budget.exhausted(`after ${rows} board rows were read`);
       for (const row of got)
         absorbRow(row, out);
       rows += got.length;
+      hooks.betweenBatches?.();
       if (got.length < batch)
         break;
       const tail = got[got.length - 1];
