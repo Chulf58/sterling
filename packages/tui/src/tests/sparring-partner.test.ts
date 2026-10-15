@@ -293,9 +293,11 @@ test('sparring 4: UP/DOWN traverse past the config.models keys onto the toggle r
     // project-mode-hobby-work-toggle-decides-flow) then joined below the tdd row,
     // and the handoff files row (decision
     // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting)
-    // below that, so the handoff files row is now the true bottom.
-    const clamped = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 4 }), key('DOWN'), undefined, undefined, snap);
-    assert.equal(clamped.ui.cursor, numKeys + 4, "DOWN clamps at the tab's true last row (the handoff files row), not the model row");
+    // below that, and the PR auto-merge row (decision
+    // work-mode-pr-auto-merge-when-copilot-loop-ends-clean) below that, so the
+    // PR auto-merge row is now the true bottom.
+    const clamped = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 5 }), key('DOWN'), undefined, undefined, snap);
+    assert.equal(clamped.ui.cursor, numKeys + 5, "DOWN clamps at the tab's true last row (the PR auto-merge row), not the model row");
 
     let up = SR.reduce(store, r.ui, key('UP'), undefined, undefined, snap);
     assert.equal(up.ui.cursor, numKeys, 'UP from the model row returns to the toggle row');

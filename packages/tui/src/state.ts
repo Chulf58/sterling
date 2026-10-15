@@ -232,6 +232,12 @@ export interface AgentRosterSnapshot {
    *  not be read (UNKNOWN, never the default). Only 'sqlite' and 'postgres' are
    *  recognized; any other value comes back as its JSON text. */
   storage?: string | null;
+  /** config.pr_review.auto_merge_on_clean (decision
+   *  work-mode-pr-auto-merge-when-copilot-loop-ends-clean), as its strict judge
+   *  autoMergeOnCleanOf reads it: true or false, absent → on. A string is a raw
+   *  value the judge refuses (INVALID); null → the config could not be read
+   *  (UNKNOWN, never the default). */
+  autoMergeOnClean?: boolean | string | null;
 }
 
 /** A projected System-tab line (renderer prints text verbatim; kind styles it). */
@@ -276,8 +282,13 @@ export interface SystemTabView {
    *  a single-entry list, same toggle-only shape as modeRows, appended after it in
    *  cursor order; hidden while a config.models picker is open. */
   handoffRows: SystemRow[];
+  /** PR auto-merge toggle row (decision
+   *  work-mode-pr-auto-merge-when-copilot-loop-ends-clean): a single-entry list,
+   *  same toggle-only shape as handoffRows, appended after it in cursor order;
+   *  hidden while a config.models picker is open. */
+  autoMergeRows: SystemRow[];
   /** storage row (board 6ca1a3c5): a single-entry READ-ONLY list drawn after the
-   *  handoff row. It owns no cursor index (the cursor clamp does not count it) and
+   *  PR auto-merge row. It owns no cursor index (the cursor clamp does not count it) and
    *  no effect, because only the move-store skill writes config.storage. */
   storageRows: SystemRow[];
 }
@@ -292,6 +303,7 @@ const EMPTY_ROSTER: AgentRosterSnapshot = {
   mode: 'hobby',
   handoff: false,
   storage: undefined,
+  autoMergeOnClean: true,
 };
 
 /** Pure scalar drift check: true iff the installed value differs from config. */
@@ -526,6 +538,13 @@ export interface HandoffToggleEffect {
   type: 'handoff_toggle';
   enabled: boolean;
 }
+/** System tab, PR auto-merge row (decision
+ *  work-mode-pr-auto-merge-when-copilot-loop-ends-clean): writes
+ *  config.pr_review.auto_merge_on_clean. Carries the NEW value. */
+export interface AutoMergeToggleEffect {
+  type: 'auto_merge_toggle';
+  enabled: boolean;
+}
 /** Tasks tab board-item edit commit (user-ruled 2026-09-28, board f25e5547
  *  lane J): the TUI's second write surface after the System tab. Carries the
  *  full replacement text; runEffects executes it through the same store
@@ -556,6 +575,7 @@ export type Effect =
   | TddToggleEffect
   | ModeToggleEffect
   | HandoffToggleEffect
+  | AutoMergeToggleEffect
   | BoardEditEffect
   | GithubRefreshEffect;
 
@@ -925,9 +945,11 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
   // the handoff files row follows the project mode row, at keys.length + 4.
   const handoffRows = selector ? [] : [handoffToggleRow(snap, ui, width, keys.length + 4)];
+  // the PR auto-merge row follows the handoff files row, at keys.length + 5.
+  const autoMergeRows = selector ? [] : [autoMergeToggleRow(snap, ui, width, keys.length + 5)];
   // the storage row is read-only: it takes no cursor index.
   const storageRows = selector ? [] : [storageRow(snap, width)];
-  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, storageRows };
+  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, storageRows };
 }
 
 /** The catalog-status banner: absent / current(fresh) / stale-with-date. */
@@ -1030,6 +1052,20 @@ function handoffToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number,
   const why = snap.handoffDetail === undefined ? '' : ` (${snap.handoffDetail})`;
   const shown = handoff === null ? `UNKNOWN (${snap.handoffDetail ?? 'config unreadable'})` : handoff === true ? `ON${why}` : handoff === false ? `OFF${why}` : `INVALID (${handoff})`;
   return { id: 'sys:handoff_files', lines: [{ text: clip(`${marker}Handoff files: ${shown}`), kind: 'title', selected }] };
+}
+
+/** PR auto-merge row (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean):
+ *  ON or OFF from config.pr_review.auto_merge_on_clean (absent → ON), UNKNOWN for
+ *  an unreadable config, and INVALID for a raw value its judge refuses — never
+ *  shown as on or off. It acts only in work mode, where the PR review loop runs.
+ *  Mirrors handoffToggleRow's shape. */
+function autoMergeToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorIndex: number): SystemRow {
+  const clip = (s: string): string => clipEllipsis(s, width);
+  const value = snap.autoMergeOnClean === undefined ? true : snap.autoMergeOnClean;
+  const selected = ui.cursor === cursorIndex;
+  const marker = selected ? '› ' : '  ';
+  const shown = value === null ? 'UNKNOWN (config unreadable)' : value === true ? 'ON' : value === false ? 'OFF' : `INVALID (${value})`;
+  return { id: 'sys:pr_auto_merge', lines: [{ text: clip(`${marker}Auto-merge clean PRs (work mode): ${shown}`), kind: 'title', selected }] };
 }
 
 /** storage row (board 6ca1a3c5), READ-ONLY and never selected: SERVED POSTGRES for
@@ -1429,8 +1465,9 @@ function systemDashboardState(
   // tdd toggle row (decision foreign_752caf98): drawn after the sparring-partner
   // rows, same row shape — a separate list, never merged.
   // project mode row (decision project-mode-hobby-work-toggle-decides-flow): drawn
-  // after the tdd row, same row shape. The handoff files row follows it.
-  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.storageRows]) {
+  // after the tdd row, same row shape. The handoff files row follows it, then
+  // the PR auto-merge row.
+  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.storageRows]) {
     const lines: RowLine[] = sr.lines.map((l) => ({
       text: l.text,
       kind: (l.kind === 'title' ? 'title' : l.kind === 'meta' ? 'meta' : 'body') as RowLine['kind'],
@@ -2023,7 +2060,10 @@ function reduceNodes(
         // + 5 since the handoff files row (sysKeys.length + 4, decision
         // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting)
         // joined after the project mode row.
-        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 5 - 1)));
+        // + 6 since the PR auto-merge row (sysKeys.length + 5, decision
+        // work-mode-pr-auto-merge-when-copilot-loop-ends-clean) joined after the
+        // handoff files row.
+        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 6 - 1)));
         const sel = ui.selector;
         const editing = ui.sparringModelEdit !== undefined;
         switch (event.name) {
@@ -2100,6 +2140,13 @@ function reduceNodes(
               // handoff files row: an immediate flip. An invalid value flips to
               // off, the default — a visible, deliberate write, never a guess.
               effects.push({ type: 'handoff_toggle', enabled: (roster.handoff ?? false) === false });
+              return { ui: { ...ui, cursor, notice: undefined }, effects };
+            }
+            if (cursor === sysKeys.length + 5) {
+              // PR auto-merge row: an immediate flip. An invalid or unknown value
+              // flips to OFF, the side that never merges — a visible, deliberate
+              // write, never a guess.
+              effects.push({ type: 'auto_merge_toggle', enabled: (roster.autoMergeOnClean ?? true) === false });
               return { ui: { ...ui, cursor, notice: undefined }, effects };
             }
             const key = sysKeys[cursor];

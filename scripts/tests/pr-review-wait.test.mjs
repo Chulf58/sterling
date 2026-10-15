@@ -968,6 +968,104 @@ test('--settle clean: CLEAN with every thread resolved settles clean and reports
   }
 });
 
+// Auto-merge switch (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean,
+// board 2ebbea9d): a clean settle reports the switch and auto_merge, true only
+// when the switch is on AND GitHub says the PR can merge now.
+const writeConfig = (f, cfg) => {
+  mkdirSync(join(f.dir, '.sterling'), { recursive: true });
+  writeFileSync(join(f.dir, '.sterling', 'config.json'), typeof cfg === 'string' ? cfg : JSON.stringify(cfg));
+};
+
+test('--settle clean: auto_merge is true by default (no config, no key) on a mergeable PR, with the reviewed head to pin the merge to', () => {
+  for (const cfg of [undefined, {}, { pr_review: { copilot_logins: [] } }, { pr_review: { auto_merge_on_clean: true } }]) {
+    const f = makeFixture();
+    try {
+      if (cfg !== undefined) writeConfig(f, cfg);
+      arm(f);
+      putMerge(f, [mergePage('CLEAN', [thread('PRRT_done', { isResolved: true })])]);
+      const r = run(f, ['--settle', 'clean', '--pr', '7']);
+      assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+      assert.equal(r.out.auto_merge_on_clean, true, `switch on for ${JSON.stringify(cfg)}`);
+      assert.equal(r.out.auto_merge, true);
+      assert.equal(r.out.head_sha, HEAD);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('--settle clean: auto_merge is false when the switch is off, and when the PR still awaits a human review', () => {
+  const f = makeFixture();
+  try {
+    writeConfig(f, { pr_review: { copilot_logins: [], auto_merge_on_clean: false } });
+    arm(f);
+    putMerge(f, [mergePage('CLEAN')]);
+    const off = run(f, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(off.code, 0, oneLine(off.stdout + off.stderr));
+    assert.equal(off.out.status, 'clean');
+    assert.equal(off.out.mergeable_now, true);
+    assert.equal(off.out.auto_merge_on_clean, false);
+    assert.equal(off.out.auto_merge, false, 'switch off: a human merges');
+  } finally {
+    f.cleanup();
+  }
+  const g = makeFixture();
+  try {
+    arm(g);
+    putMerge(g, [mergePage('BLOCKED', [], { reviewDecision: 'REVIEW_REQUIRED' })]);
+    const waiting = run(g, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(waiting.code, 0, oneLine(waiting.stdout + waiting.stderr));
+    assert.equal(waiting.out.awaiting_human_review, true);
+    assert.equal(waiting.out.auto_merge_on_clean, true);
+    assert.equal(waiting.out.auto_merge, false, 'a PR awaiting a human approval is never auto-merged');
+  } finally {
+    g.cleanup();
+  }
+});
+
+test('--settle clean: an auto-merge switch that is not a boolean (or a pr_review that is not an object, or an unreadable config) refuses before any gh call, loop untouched', () => {
+  for (const [raw, pattern] of [
+    [{ pr_review: { auto_merge_on_clean: 'yes' } }, /auto_merge_on_clean must be true or false, got "yes"/],
+    [{ pr_review: { auto_merge_on_clean: 1 } }, /auto_merge_on_clean must be true or false, got 1/],
+    [{ pr_review: 'on' }, /pr_review must be an object/],
+    ['{not json', /not valid JSON/],
+  ]) {
+    const f = makeFixture();
+    try {
+      writeConfig(f, raw);
+      arm(f);
+      const before = readFileSync(loopPath(f), 'utf8');
+      putMerge(f, [mergePage('CLEAN')]);
+      const r = run(f, ['--settle', 'clean', '--pr', '7']);
+      assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+      assert.equal(r.out.status, 'error');
+      assert.match(r.out.error, pattern);
+      assert.equal(r.out.auto_merge, undefined, 'a refusal never carries a merge cue');
+      assert.equal(calls(f).length, 0, 'refused before GitHub is asked');
+      assert.equal(readFileSync(loopPath(f), 'utf8'), before, 'the loop stays owed');
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('--settle capped and escalated carry no auto-merge cue and ignore the switch, even a malformed one', () => {
+  for (const outcome of ['capped', 'escalated']) {
+    const f = makeFixture();
+    try {
+      writeConfig(f, { pr_review: { auto_merge_on_clean: 'yes' } });
+      arm(f);
+      const r = run(f, ['--settle', outcome, '--pr', '7']);
+      assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+      assert.equal(r.out.status, outcome);
+      assert.equal('auto_merge' in r.out, false);
+      assert.equal('auto_merge_on_clean' in r.out, false);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
 test('--settle clean: BLOCKED with no unresolved thread blocks unless the only thing missing is a required human review', () => {
   const f = makeFixture();
   try {

@@ -169,6 +169,25 @@ function mergeBlockers(state) {
   }
   return { mergeable_now: blockers.length === 0 && !awaiting, blockers, unresolved_threads: unresolved, awaiting_human_review: awaiting };
 }
+var AutoMergeSettingError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "AutoMergeSettingError";
+  }
+};
+function autoMergeOnCleanOf(cfg) {
+  const block = cfg?.pr_review;
+  if (block === void 0) return true;
+  if (block === null || typeof block !== "object" || Array.isArray(block)) {
+    throw new AutoMergeSettingError(`config pr_review must be an object, got ${JSON.stringify(block)}`);
+  }
+  const value = block.auto_merge_on_clean;
+  if (value === void 0) return true;
+  if (typeof value !== "boolean") {
+    throw new AutoMergeSettingError(`config pr_review.auto_merge_on_clean must be true or false, got ${JSON.stringify(value)} \u2014 switch it in the TUI System tab or fix the file`);
+  }
+  return value;
+}
 function resolveReviewThreads(cwd, repo, number, commentIds) {
   const { host } = splitRepo(repo);
   const { threads } = fetchPrMergeState(cwd, repo, number);
@@ -278,21 +297,33 @@ function retryDelayMs() {
   if (!Number.isFinite(n) || n < 0) throw new Error(`--unknown-retry-delay must be a number of seconds >= 0, got '${raw}'`);
   return n * 1e3;
 }
+function readAutoMergeOnClean() {
+  const file = join3(storeRoot, ".sterling", "config.json");
+  if (!existsSync3(file)) return autoMergeOnCleanOf(void 0);
+  let cfg;
+  try {
+    cfg = JSON.parse(readFileSync2(file, "utf8"));
+  } catch (e) {
+    throw new Error(`.sterling/config.json is not valid JSON (${e.message}) \u2014 the auto-merge switch cannot be read; nothing settled`);
+  }
+  return autoMergeOnCleanOf(cfg);
+}
 if (argv.includes("--settle")) {
   let merge = null;
   try {
     const originRepo = originRepoOrThrow();
+    const outcome = flag("--settle");
+    const autoMergeOnClean = outcome === "clean" ? readAutoMergeOnClean() : null;
     const guard = (armed) => {
       const state = fetchSettledMergeState(target, originRepo, armed.pr_number, { retryDelayMs: retryDelayMs() });
       const verdict = mergeBlockers(state);
-      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review };
+      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: autoMergeOnClean === true && verdict.mergeable_now === true, head_sha: armed.head_sha };
       if (verdict.blockers.length) {
         const err = new Error(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join("; ")} \u2014 resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`);
         err.blocked = { ...merge, blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads };
         throw err;
       }
     };
-    const outcome = flag("--settle");
     const s = settlePrLoop(storeRoot, outcome, flag("--pr"), { originRepo, guard: outcome === "clean" ? guard : null });
     process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at, ...merge ?? {} }) + "\n");
     process.exit(0);

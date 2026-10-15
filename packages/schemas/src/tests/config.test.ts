@@ -409,15 +409,20 @@ test('handoff: parseConfig is PERMISSIVE — any value is preserved raw, never c
   assert.deepEqual(unreadConfigKeys({ handoff: { enabled: true } }), [], 'handoff is a key the schema reads');
 });
 
-test('pr_review (PR review loop identity pin): permissive, defaults to copilot_logins [], and the template carries the same default', () => {
-  assert.deepEqual(parseConfig({}).pr_review, { copilot_logins: [] });
+test('pr_review (PR review loop identity pin and auto-merge switch): permissive, defaults to copilot_logins [] with auto_merge_on_clean true, and the template carries the same default', () => {
+  assert.deepEqual(parseConfig({}).pr_review, { copilot_logins: [], auto_merge_on_clean: true });
   const rawTemplate = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
-  assert.deepEqual(rawTemplate.pr_review, { copilot_logins: [] }, 'templates/default-config.json declares pr_review explicitly');
+  assert.deepEqual(rawTemplate.pr_review, { copilot_logins: [], auto_merge_on_clean: true }, 'templates/default-config.json declares pr_review explicitly');
   assert.deepEqual(parseConfig(rawTemplate).pr_review, parseConfig({}).pr_review);
   // PERMISSIVE like mode: a malformed value is preserved raw, never thrown on;
-  // pr-review-wait.mjs is the strict judge.
+  // pr-review-wait.mjs (autoMergeOnCleanOf in scripts/lib/work-pr.mjs for the
+  // switch) is the strict judge.
   assert.doesNotThrow(() => parseConfig({ pr_review: { copilot_logins: 'x' } }));
+  assert.doesNotThrow(() => parseConfig({ pr_review: { copilot_logins: [], auto_merge_on_clean: 'yes' } }));
+  assert.deepEqual(parseConfig({ pr_review: { auto_merge_on_clean: 'yes' } }).pr_review, { auto_merge_on_clean: 'yes' }, 'a malformed switch is preserved raw, never coerced to on');
   assert.deepEqual(parseConfig({ pr_review: { copilot_logins: ['a[bot]'] } }).pr_review, { copilot_logins: ['a[bot]'] });
+  assert.deepEqual(parseConfig({ pr_review: { copilot_logins: [], auto_merge_on_clean: false } }).pr_review, { copilot_logins: [], auto_merge_on_clean: false });
+  assert.deepEqual(unreadConfigKeys({ pr_review: { auto_merge_on_clean: false } }), [], 'auto_merge_on_clean is a key the schema reads');
 });
 
 // Undeclared-source default (decision gap-hunt-2026-09-28-rulings item 6): shell

@@ -5391,9 +5391,16 @@ var configSchema = external_exports.object({
   // first use; empty means unpinned (any Bot login matching /copilot/i, with
   // identity_confirmed false). PERMISSIVE like mode: a malformed value is
   // preserved raw, never thrown on; scripts/pr-review-wait.mjs is the strict
-  // judge. The default lives twice: here and in templates/default-config.json
-  // (config.test.ts pins that they agree).
-  pr_review: external_exports.unknown().default({ copilot_logins: [] })
+  // judge. auto_merge_on_clean (decision
+  // work-mode-pr-auto-merge-when-copilot-loop-ends-clean, board 2ebbea9d): when
+  // the loop settles clean and GitHub reports the PR mergeable, the conductor
+  // squash-merges it and deletes the branch; false leaves the merge to a human.
+  // Absent means on. Its strict judge is autoMergeOnCleanOf() in
+  // scripts/lib/work-pr.mjs, which refuses a value that is not a boolean, so a
+  // typo never turns into a merge. Toggled in the TUI System tab. The default
+  // lives twice: here and in templates/default-config.json (config.test.ts pins
+  // that they agree).
+  pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true })
 });
 var RETIRED_MODEL_KEYS = [
   "coder",
@@ -11126,7 +11133,8 @@ var EMPTY_ROSTER = {
   tdd: { enabled: true },
   mode: "hobby",
   handoff: false,
-  storage: void 0
+  storage: void 0,
+  autoMergeOnClean: true
 };
 function driftOf(installed, config) {
   return installed !== config;
@@ -11327,8 +11335,9 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
   const tddRows = selector ? [] : [tddToggleRow(snap, ui, width, keys.length + 2)];
   const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
   const handoffRows = selector ? [] : [handoffToggleRow(snap, ui, width, keys.length + 4)];
+  const autoMergeRows = selector ? [] : [autoMergeToggleRow(snap, ui, width, keys.length + 5)];
   const storageRows = selector ? [] : [storageRow(snap, width)];
-  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, storageRows };
+  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, storageRows };
 }
 function catalogBanner(catalog, width) {
   const clip3 = (s2) => clipEllipsis(s2, width);
@@ -11384,6 +11393,14 @@ function handoffToggleRow(snap, ui, width, cursorIndex) {
   const why = snap.handoffDetail === void 0 ? "" : ` (${snap.handoffDetail})`;
   const shown = handoff === null ? `UNKNOWN (${snap.handoffDetail ?? "config unreadable"})` : handoff === true ? `ON${why}` : handoff === false ? `OFF${why}` : `INVALID (${handoff})`;
   return { id: "sys:handoff_files", lines: [{ text: clip3(`${marker}Handoff files: ${shown}`), kind: "title", selected }] };
+}
+function autoMergeToggleRow(snap, ui, width, cursorIndex) {
+  const clip3 = (s2) => clipEllipsis(s2, width);
+  const value = snap.autoMergeOnClean === void 0 ? true : snap.autoMergeOnClean;
+  const selected = ui.cursor === cursorIndex;
+  const marker = selected ? "\u203A " : "  ";
+  const shown = value === null ? "UNKNOWN (config unreadable)" : value === true ? "ON" : value === false ? "OFF" : `INVALID (${value})`;
+  return { id: "sys:pr_auto_merge", lines: [{ text: clip3(`${marker}Auto-merge clean PRs (work mode): ${shown}`), kind: "title", selected }] };
 }
 function storageRow(snap, width) {
   const clip3 = (s2) => clipEllipsis(s2, width);
@@ -11647,7 +11664,7 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop, tabs, max
     rows.push({ id: sr.id, type: "system", selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
     screenRow += lines.length;
   }
-  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.storageRows]) {
+  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.storageRows]) {
     const lines = sr.lines.map((l) => ({
       text: l.text,
       kind: l.kind === "title" ? "title" : l.kind === "meta" ? "meta" : "body"
@@ -12057,7 +12074,7 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
       }
       if (ui.tab === SYSTEM_TAB && roster) {
         const sysKeys = Object.keys(roster.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
-        const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 5 - 1)));
+        const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 6 - 1)));
         const sel = ui.selector;
         const editing = ui.sparringModelEdit !== void 0;
         switch (event.name) {
@@ -12119,6 +12136,10 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
             }
             if (cursor === sysKeys.length + 4) {
               effects.push({ type: "handoff_toggle", enabled: (roster.handoff ?? false) === false });
+              return { ui: { ...ui, cursor, notice: void 0 }, effects };
+            }
+            if (cursor === sysKeys.length + 5) {
+              effects.push({ type: "auto_merge_toggle", enabled: (roster.autoMergeOnClean ?? true) === false });
               return { ui: { ...ui, cursor, notice: void 0 }, effects };
             }
             const key = sysKeys[cursor];
@@ -12393,6 +12414,39 @@ function applyHandoffToggle(e, onError, path) {
     onError?.(`handoff toggle failed \u2014 ${err.message}`);
     return false;
   }
+}
+function applyAutoMergeToggle(e, onError, path) {
+  try {
+    writeConfigKey(configPath(path), "pr_review", (old) => {
+      const block = old !== null && typeof old === "object" && !Array.isArray(old) ? old : {};
+      return { ...block, auto_merge_on_clean: e.enabled };
+    });
+    return true;
+  } catch (err) {
+    onError?.(`auto-merge toggle failed \u2014 ${err.message}`);
+    return false;
+  }
+}
+
+// scripts/lib/work-pr.mjs
+var AutoMergeSettingError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "AutoMergeSettingError";
+  }
+};
+function autoMergeOnCleanOf(cfg) {
+  const block = cfg?.pr_review;
+  if (block === void 0) return true;
+  if (block === null || typeof block !== "object" || Array.isArray(block)) {
+    throw new AutoMergeSettingError(`config pr_review must be an object, got ${JSON.stringify(block)}`);
+  }
+  const value = block.auto_merge_on_clean;
+  if (value === void 0) return true;
+  if (typeof value !== "boolean") {
+    throw new AutoMergeSettingError(`config pr_review.auto_merge_on_clean must be true or false, got ${JSON.stringify(value)} \u2014 switch it in the TUI System tab or fix the file`);
+  }
+  return value;
 }
 
 // packages/tui/dist/data-version.js
@@ -13664,6 +13718,22 @@ function openDashboard(storePath, options = {}) {
       return { handoff: JSON.stringify(block !== null && typeof block === "object" && !Array.isArray(block) ? block.enabled : block) };
     }
   }
+  function readAutoMergeOnClean() {
+    let raw;
+    try {
+      raw = JSON.parse(readFileSync12(configPath2, "utf8"));
+    } catch {
+      return null;
+    }
+    try {
+      return autoMergeOnCleanOf(raw);
+    } catch (err) {
+      if (!(err instanceof AutoMergeSettingError))
+        throw err;
+      const block = raw?.pr_review;
+      return JSON.stringify(block !== null && typeof block === "object" && !Array.isArray(block) ? block.auto_merge_on_clean : block);
+    }
+  }
   function loadRoster() {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     let config;
@@ -13700,7 +13770,7 @@ function openDashboard(storePath, options = {}) {
     } catch (err) {
       ui = { ...ui, notice: `catalog unavailable \u2014 ${err.message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), ...handoff };
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), ...handoff };
   }
   function applySparringModel(e) {
     try {
@@ -13881,6 +13951,7 @@ function openDashboard(storePath, options = {}) {
     const tddToggles = effects.filter((e) => e.type === "tdd_toggle");
     const modeToggles = effects.filter((e) => e.type === "mode_toggle");
     const handoffToggles = effects.filter((e) => e.type === "handoff_toggle");
+    const autoMergeToggles = effects.filter((e) => e.type === "auto_merge_toggle");
     let toggleWrote = false;
     let toggleFailure;
     const collectFailure = (msg) => {
@@ -13908,8 +13979,17 @@ function openDashboard(storePath, options = {}) {
         handoffWritten = e.enabled;
       }
     }
+    let autoMergeWritten;
+    for (const e of autoMergeToggles) {
+      if (applyAutoMergeToggle(e, collectFailure, configPath2)) {
+        toggleWrote = true;
+        autoMergeWritten = e.enabled;
+      }
+    }
     if (toggleFailure !== void 0) {
       notice(toggleFailure);
+    } else if (autoMergeWritten !== void 0) {
+      notice(autoMergeWritten ? "auto-merge turned on \u2014 in work mode, a PR whose Copilot review loop ends clean and that GitHub reports mergeable is squash-merged by the conductor and its branch deleted." : "auto-merge turned off \u2014 in work mode, a human merges every PR, a clean one included.");
     } else if (modeWritten !== void 0) {
       notice(modeWritten === "work" ? "project mode set to work \u2014 /sterling:merge now opens a pull request and the review loop follows; nothing is merged directly." : "project mode set to hobby \u2014 /sterling:merge now merges directly into the base branch.");
     } else if (handoffWritten !== void 0) {
@@ -13917,7 +13997,7 @@ function openDashboard(storePath, options = {}) {
     } else if (toggleWrote) {
       notice("config.json updated \u2014 hooks pick this up on their next invocation; restart the session to reload the MCP server.");
     }
-    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length)
+    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length)
       roster = loadRoster();
     for (const e of effects) {
       if (e.type === "select")

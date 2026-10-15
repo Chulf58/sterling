@@ -38,9 +38,11 @@ test('controller: the TDD toggle on the System tab writes config.tdd.enabled thr
   try {
     await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
     assert.equal(ctl.roster()?.tdd?.enabled, true, 'the roster loads on System-tab activation');
-    // config.models defaults fill the top rows; the handoff files row is last
-    // (DOWN clamps on it), the mode row sits above it and the tdd row above that.
+    // config.models defaults fill the top rows; the PR auto-merge row is last
+    // (DOWN clamps on it), the handoff files row sits above it, the mode row
+    // above that and the tdd row above that.
     for (let i = 0; i < 30; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
+    await ctl.handle({ kind: 'key', name: 'UP' }, VP);
     await ctl.handle({ kind: 'key', name: 'UP' }, VP);
     await ctl.handle({ kind: 'key', name: 'UP' }, VP);
     await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
@@ -64,7 +66,9 @@ for (const mode of ['hobby', 'work']) {
     try {
       await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
       assert.equal(ctl.roster()?.handoff, false, 'no handoff key and nothing tracked reads off, in work mode too');
+      // the PR auto-merge row is last; the handoff files row sits above it
       for (let i = 0; i < 30; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
+      await ctl.handle({ kind: 'key', name: 'UP' }, VP);
       await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
       let written = JSON.parse(readFileSync(f.configPath, 'utf8'));
       assert.deepEqual(written.handoff, { enabled: true }, 'config.handoff.enabled written');
@@ -90,6 +94,60 @@ for (const mode of ['hobby', 'work']) {
     }
   });
 }
+
+// The PR auto-merge row (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean)
+// is the System tab's last row: it writes pr_review.auto_merge_on_clean, keeps
+// the pinned Copilot login, and reads back through the loop's own judge.
+test('controller: the auto-merge toggle writes pr_review.auto_merge_on_clean through handle(), keeps copilot_logins, and reloads the roster', async () => {
+  const f = fixture({ mode: 'work', pr_review: { copilot_logins: ['copilot-pull-request-reviewer[bot]'] } });
+  const ctl = openDashboard(f.storePath);
+  try {
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    assert.equal(ctl.roster()?.autoMergeOnClean, true, 'an absent switch reads on');
+    for (let i = 0; i < 30; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
+    await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
+    let written = JSON.parse(readFileSync(f.configPath, 'utf8'));
+    assert.deepEqual(written.pr_review, { copilot_logins: ['copilot-pull-request-reviewer[bot]'], auto_merge_on_clean: false });
+    assert.equal(written.mode, 'work', 'the mode is untouched');
+    assert.equal(ctl.roster()?.autoMergeOnClean, false, 'the roster reloads after the write');
+    assert.match(ctl.ui().notice ?? '', /^auto-merge turned off — .*human merges/);
+    await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
+    written = JSON.parse(readFileSync(f.configPath, 'utf8'));
+    assert.equal(written.pr_review.auto_merge_on_clean, true);
+    assert.match(ctl.ui().notice ?? '', /^auto-merge turned on — /);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test('controller: a malformed auto-merge switch reaches the roster as its JSON text (INVALID); an unreadable config is UNKNOWN', async () => {
+  for (const [config, expected] of [
+    [{ pr_review: { auto_merge_on_clean: 'yes' } }, '"yes"'],
+    [{ pr_review: 'on' }, '"on"'],
+  ] as const) {
+    const f = fixture(config as unknown as Record<string, unknown>);
+    const ctl = openDashboard(f.storePath);
+    try {
+      await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+      assert.equal(ctl.roster()?.autoMergeOnClean, expected);
+    } finally {
+      ctl.close();
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  }
+  // the store refuses to open on a malformed config, so it breaks after opening
+  const f = fixture();
+  const ctl = openDashboard(f.storePath);
+  try {
+    writeFileSync(f.configPath, '{not json');
+    await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+    assert.equal(ctl.roster()?.autoMergeOnClean, null);
+  } finally {
+    ctl.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
 
 test('controller: a non-boolean handoff value reaches the roster as its JSON text (the row shows INVALID)', async () => {
   const f = fixture({ handoff: { enabled: 'yes' } });
