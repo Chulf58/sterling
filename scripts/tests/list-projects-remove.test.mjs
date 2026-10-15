@@ -66,11 +66,18 @@ function rows(registryDb) {
   }
 }
 
+/** An empty fake /proc: the default, so a case does not depend on this machine's process
+ *  table. The open-handle case passes the real /proc through `extraEnv`. */
+function fakeProc() {
+  return mkdtempSync(join(tmp, 'proc-'));
+}
+
 function run(registryDb, ...args) {
+  const extraEnv = typeof args.at(-1) === 'object' ? args.pop() : {};
   const r = spawnSync(process.execPath, [SCRIPT, ...args], {
     encoding: 'utf8',
     timeout: 60_000,
-    env: { ...process.env, STERLING_REGISTRY_DB: registryDb, OPENCODE: undefined, OPENCODE_SESSION_ID: undefined },
+    env: { ...process.env, STERLING_REGISTRY_DB: registryDb, STERLING_PROC_ROOT: fakeProc(), OPENCODE: undefined, OPENCODE_SESSION_ID: undefined, ...extraEnv },
   });
   return { code: r.status, out: `${r.stdout}${r.stderr}`, stdout: r.stdout };
 }
@@ -113,12 +120,12 @@ test('flag refusals: unknown flag, --apply without --remove, --remove with --pru
 });
 
 /** Expect both the dry run and --apply to refuse with `pattern`, deleting nothing. */
-function expectRefusal(s, target, pattern) {
-  const dry = run(s.registryDb, '--remove', target);
+function expectRefusal(s, target, pattern, env = {}) {
+  const dry = run(s.registryDb, '--remove', target, env);
   assert.notEqual(dry.code, 0, dry.out);
   assert.match(dry.out, /--apply would REFUSE/, dry.out);
   assert.match(dry.out, pattern, dry.out);
-  const app = run(s.registryDb, '--remove', target, '--apply');
+  const app = run(s.registryDb, '--remove', target, '--apply', env);
   assert.equal(app.code, 1, app.out);
   const res = JSON.parse(app.stdout);
   assert.equal(res.ok, false);
@@ -253,7 +260,7 @@ test('refuses while another process holds the store open, naming its pid', async
       holder.stdout.on('data', (d) => d.toString().includes('ready') && res());
       holder.on('exit', (c) => rej(new Error(`holder exited ${c}`)));
     });
-    expectRefusal(s, s.project, new RegExp(`process ${holder.pid} \\(.*\\) has .*sterling\\.db open`));
+    expectRefusal(s, s.project, new RegExp(`process ${holder.pid} \\(.*\\) has .*sterling\\.db open`), { STERLING_PROC_ROOT: '/proc' });
   } finally {
     holder.kill();
   }
@@ -318,4 +325,76 @@ test('--prune-missing is unchanged: removes only rows whose path is gone', () =>
   assert.match(r.out, /Pruned 1 missing project\./, r.out);
   assert.deepEqual(rows(s.registryDb), [s.project]);
   assert.ok(existsSync(s.sterling));
+});
+
+// ── Sol review of feat/project-remove-109 (REQUEST_CHANGES) ─────────────────────
+
+test('the dry run never deletes a -wal that appears after its sidecar checks', () => {
+  const s = sandbox();
+  const wal = join(s.sterling, 'sterling.db-wal');
+  const hook = join(s.dir, 'writer-starts.cjs');
+  writeFileSync(hook, `require('node:fs').writeFileSync(${JSON.stringify(wal)}, 'committed frames from a writer');\n`);
+  const r = run(s.registryDb, '--remove', s.project, { STERLING_TEST_BEFORE_STORE_READ: hook });
+  assert.equal(r.code, 0, r.out);
+  assert.ok(existsSync(wal), 'the -wal a writer created during the preview is still there');
+  assert.equal(readFileSync(wal, 'utf8'), 'committed frames from a writer');
+  assert.match(r.out, /sterling\.db-wal.* appeared during the read .*left in place/, r.out);
+});
+
+test('the dry run skips the counts when a -wal has no -shm, creating nothing', () => {
+  const s = sandbox();
+  writeFileSync(join(s.sterling, 'sterling.db-wal'), '');
+  const r = run(s.registryDb, '--remove', s.project);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /Records: could not be read \(a -wal exists without a -shm/, r.out);
+  assert.ok(!existsSync(join(s.sterling, 'sterling.db-shm')), 'no -shm was created');
+});
+
+test("a mount under a descendant named '..shared' inside the target .sterling refuses", () => {
+  const s = sandbox();
+  const other = join(s.dir, 'other');
+  mkdirSync(join(other, '.sterling'), { recursive: true });
+  writeFileSync(join(other, '.sterling', 'config.json'), JSON.stringify({ stack_tags: ['shared'], domain_paths: { shared: join(s.sterling, '..shared', 'sterling.db') } }));
+  reg(s.registryDb, other, 'other', ['shared']);
+  expectRefusal(s, s.project, /registered project other .* mounts domain 'shared' at .*\/\.sterling\/\.\.shared\/sterling\.db/);
+});
+
+/** A fake /proc entry whose fd dir cannot be listed, owned (per its status) by `uid`. */
+function blindPid(proc, pid, uid, comm) {
+  const d = join(proc, String(pid));
+  mkdirSync(join(d, 'fd'), { recursive: true });
+  writeFileSync(join(d, 'status'), `Name:\t${comm}\nUid:\t${uid}\t${uid}\t${uid}\t${uid}\n`);
+  writeFileSync(join(d, 'comm'), `${comm}\n`);
+  chmodSync(join(d, 'fd'), 0o000);
+  return () => chmodSync(join(d, 'fd'), 0o700);
+}
+
+test('open check: a same-uid process whose fds cannot be read refuses, naming its pid', () => {
+  const s = sandbox();
+  const proc = fakeProc();
+  const restore = blindPid(proc, 999991, process.getuid(), 'mine');
+  try {
+    expectRefusal(s, s.project, /process 999991 \(mine\) runs as this user but its open files cannot be read \(EACCES\)/, { STERLING_PROC_ROOT: proc });
+  } finally {
+    restore();
+  }
+});
+
+test('open check: an other-uid process whose fds cannot be read is disclosed, never refused', () => {
+  const s = sandbox();
+  const proc = fakeProc();
+  const restore = blindPid(proc, 999992, process.getuid() + 1, 'theirs');
+  try {
+    const r = run(s.registryDb, '--remove', s.project, { STERLING_PROC_ROOT: proc });
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /1 process\(es\) of other users could not be inspected and do not refuse/, r.out);
+    assert.doesNotMatch(r.out, /999992/, r.out);
+  } finally {
+    restore();
+  }
+});
+
+test('open check: an unreadable /proc refuses and says the check could not run', () => {
+  const s = sandbox();
+  expectRefusal(s, s.project, /the open-store check could not run: .* is not readable/, { STERLING_PROC_ROOT: join(s.dir, 'no-proc') });
 });

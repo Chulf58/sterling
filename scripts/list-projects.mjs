@@ -8,8 +8,9 @@
 // GitHub #109). The script never prompts; the caller asks the user between the two.
 //   node scripts/list-projects.mjs [--prune-missing]
 //   node scripts/list-projects.mjs --remove <path> [--apply]
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
-import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { statSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { createRequire } from 'node:module';
 import { ProjectRegistry, registryPath, resolveDomainMounts, openForeignDbReadOnly } from '@sterling/store';
 import { parseConfig, sameLocationAnyHost } from '@sterling/schemas';
 import { LAUNCHER_GITIGNORE_ENTRIES } from './lib/launchers.mjs';
@@ -43,14 +44,6 @@ const LEFTOVER_NAMES = ['AGENTS.md', 'CLAUDE.md', '.opencode', '.claude', ...LAU
 
 const STORE_FILES = ['sterling.db', 'sterling.db-wal', 'sterling.db-shm'];
 
-const args = parseArgs(process.argv.slice(2));
-const registry = new ProjectRegistry(registryPath());
-try {
-  if (args.remove !== undefined) process.exitCode = args.apply ? applyRemove(args.remove) : dryRunRemove(args.remove);
-  else listProjects(args.prune);
-} finally {
-  registry.close();
-}
 
 function listProjects(prune) {
   if (prune) {
@@ -101,7 +94,8 @@ function lstatOrUndefined(p) {
 /** Is p the directory dir or inside it (plain path comparison of absolute paths)? */
 function isWithin(p, dir) {
   const rel = relative(dir, p);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  // Segment comparison: a child named '..shared' is inside, only '..' itself or '../x' is out.
+  return !(rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel));
 }
 
 /** p and, when it exists, its realpath: a path is inside dir if either form is. */
@@ -115,51 +109,86 @@ function pathForms(p) {
   return forms;
 }
 
+/** /proc, or the directory STERLING_PROC_ROOT names (a test seam for a fake /proc). */
+const PROC = process.env.STERLING_PROC_ROOT ?? '/proc';
+
+/** A pid that vanished mid-scan: not a failure of the check. */
+const vanished = (e) => e?.code === 'ENOENT' || e?.code === 'ESRCH';
+
+/** Does pid run as this user (real or effective uid)? Undefined when it vanished. */
+function ownedByMe(pid) {
+  const me = process.getuid();
+  try {
+    const m = readFileSync(`${PROC}/${pid}/status`, 'utf8').match(/^Uid:\s+(\d+)\s+(\d+)/m);
+    if (m) return Number(m[1]) === me || Number(m[2]) === me;
+  } catch (e) {
+    if (vanished(e)) return undefined;
+  }
+  try {
+    return statSync(`${PROC}/${pid}`).uid === me;
+  } catch (e) {
+    if (vanished(e)) return undefined;
+    throw e;
+  }
+}
+
+function commOf(pid) {
+  try {
+    return readFileSync(`${PROC}/${pid}/comm`, 'utf8').trim();
+  } catch {
+    return '?'; // the process exited; the pid is still the evidence
+  }
+}
+
 /**
  * Processes holding any of `files` open, from /proc/<pid>/fd readlinks. Best
  * effort: it cannot see a session that starts later or a Windows-side handle.
- * Returns { ran: false, reason } when /proc cannot be listed, so the caller
- * refuses instead of claiming the check ran.
+ * A process of THIS user whose fds cannot be read (EACCES/EPERM) is returned in
+ * `sameUserBlind`, and the caller refuses on it, since a Sterling session runs
+ * as the user. Other users' uninspectable processes are only counted. A pid
+ * that vanishes (ENOENT/ESRCH) is skipped. Returns { ran: false, reason } when
+ * /proc cannot be listed, so the caller refuses instead of claiming the check ran.
  */
 function openHolders(files) {
   let pids;
   try {
-    pids = readdirSync('/proc').filter((d) => /^\d+$/.test(d));
+    pids = readdirSync(PROC).filter((d) => /^\d+$/.test(d));
   } catch (e) {
-    return { ran: false, reason: `/proc is not readable (${e.code ?? e.message})` };
+    return { ran: false, reason: `${PROC} is not readable (${e.code ?? e.message})` };
   }
   const wanted = new Set(files);
   const holders = [];
-  let uninspectable = 0;
+  const sameUserBlind = [];
+  let otherUserBlind = 0;
+  const blind = (pid, e) => {
+    const mine = ownedByMe(pid);
+    if (mine === undefined) return;
+    if (mine) sameUserBlind.push({ pid: Number(pid), command: commOf(pid), reason: e.code ?? e.message });
+    else otherUserBlind++;
+  };
   for (const pid of pids) {
     if (Number(pid) === process.pid) continue;
     let fds;
     try {
-      fds = readdirSync(`/proc/${pid}/fd`);
+      fds = readdirSync(`${PROC}/${pid}/fd`);
     } catch (e) {
-      if (e?.code !== 'ENOENT') uninspectable++;
+      if (!vanished(e)) blind(pid, e);
       continue;
     }
     for (const fd of fds) {
       let link;
       try {
-        link = readlinkSync(`/proc/${pid}/fd/${fd}`);
-      } catch {
-        continue; // the fd closed between the listing and the readlink
+        link = readlinkSync(`${PROC}/${pid}/fd/${fd}`);
+      } catch (e) {
+        if (vanished(e)) continue; // the fd or the process closed between the listing and the readlink
+        blind(pid, e);
+        break;
       }
       const file = link.endsWith(' (deleted)') ? link.slice(0, -' (deleted)'.length) : link;
-      if (wanted.has(file)) {
-        let comm = '?';
-        try {
-          comm = readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
-        } catch {
-          // the process exited after its fd was read; the pid is still the evidence
-        }
-        holders.push({ pid: Number(pid), command: comm, file });
-      }
+      if (wanted.has(file)) holders.push({ pid: Number(pid), command: commOf(pid), file });
     }
   }
-  return { ran: true, holders, uninspectable };
+  return { ran: true, holders, sameUserBlind, otherUserBlind };
 }
 
 function utcStamp(d) {
@@ -265,30 +294,47 @@ function inspect(input, stamp) {
   if (!open.ran) refusals.push(`the open-store check could not run: ${open.reason}`);
   else {
     for (const h of open.holders) refusals.push(`process ${h.pid} (${h.command}) has ${h.file} open; close that session first`);
-    t.uninspectable = open.uninspectable;
+    for (const b of open.sameUserBlind) refusals.push(`process ${b.pid} (${b.command}) runs as this user but its open files cannot be read (${b.reason}); the open check cannot clear it`);
+    t.uninspectable = open.otherUserBlind;
   }
   return t;
 }
 
-/** Record counts by type and open board items, read without writing beside the db. */
+/** Test seam: STERLING_TEST_BEFORE_STORE_READ names a CommonJS module run after
+ *  the sidecar checks and before the open, to simulate a writer starting then. */
+function testHookBeforeStoreRead() {
+  const hook = process.env.STERLING_TEST_BEFORE_STORE_READ;
+  if (hook) createRequire(import.meta.url)(resolve(hook));
+}
+
+/**
+ * Record counts by type and open board items. Never deletes or writes any file
+ * in the target: a -wal without a -shm would make a read-only open create the
+ * -shm, so the counts are skipped then. Every other topology reads through
+ * openForeignDbReadOnly, which creates nothing (immutable when there is no -wal).
+ * A sidecar that appears during the read is reported and left in place.
+ */
 function storeSummary(dir) {
   const dbPath = join(dir, 'sterling.db');
   if (!existsSync(dbPath)) return { error: 'no sterling.db' };
   const hadWal = existsSync(`${dbPath}-wal`);
   const hadShm = existsSync(`${dbPath}-shm`);
+  if (hadWal && !hadShm) return { error: 'a -wal exists without a -shm, and reading would create the -shm; skipped' };
+  testHookBeforeStoreRead();
   let db;
+  const out = {};
   try {
     db = openForeignDbReadOnly(dbPath, 2000);
-    const byType = Object.fromEntries(db.prepare('SELECT type, COUNT(*) AS n FROM records GROUP BY type ORDER BY type').all().map((r) => [r.type, r.n]));
-    const board = db.prepare("SELECT COUNT(*) AS n FROM records WHERE type = 'todo' AND lifecycle = 'live' AND json_extract(body, '$.source') = 'user'").get().n;
-    return { byType, openBoardItems: board };
+    out.byType = Object.fromEntries(db.prepare('SELECT type, COUNT(*) AS n FROM records GROUP BY type ORDER BY type').all().map((r) => [r.type, r.n]));
+    out.openBoardItems = db.prepare("SELECT COUNT(*) AS n FROM records WHERE type = 'todo' AND lifecycle = 'live' AND json_extract(body, '$.source') = 'user'").get().n;
   } catch (e) {
-    return { error: e.message };
+    out.error = e.message;
   } finally {
     db?.close();
-    if (!hadWal) rmSync(`${dbPath}-wal`, { force: true });
-    if (!hadShm) rmSync(`${dbPath}-shm`, { force: true });
   }
+  const appeared = [['-wal', hadWal], ['-shm', hadShm]].filter(([x, had]) => !had && existsSync(`${dbPath}${x}`)).map(([x]) => `sterling.db${x}`);
+  if (appeared.length) out.appeared = appeared;
+  return out;
 }
 
 function dryRunRemove(input) {
@@ -309,6 +355,7 @@ function dryRunRemove(input) {
       console.log(`Records by type: ${parts.length ? parts.join(', ') : 'none'}`);
       console.log(`Open board items: ${s.openBoardItems}`);
     }
+    if (s.appeared) console.log(`  ${s.appeared.join(', ')} appeared during the read (a writer may have started); left in place`);
     const others = readdirSync(t.sterlingDir, { withFileTypes: true }).filter((e) => !STORE_FILES.includes(e.name)).map((e) => (e.isDirectory() ? `${e.name}/` : e.name));
     console.log(`Other entries inside .sterling (deleted too): ${others.length ? others.join(', ') : 'none'}`);
   }
@@ -319,8 +366,7 @@ function dryRunRemove(input) {
   }
   console.log(`Backup destination: ${t.backupDest ?? 'none (see refusals)'}`);
   if (t.uninspectable === undefined) console.log(`Open check: did not run`);
-  else if (t.uninspectable) console.log(`Open check: ran over /proc; ${t.uninspectable} process(es) could not be inspected (not readable by this user), and a Windows-side handle or a later session is not seen`);
-  else console.log(`Open check: ran over /proc (best effort); a Windows-side handle or a later session is not seen`);
+  else console.log(`Open check: ran over /proc (best effort). A process of this user that cannot be inspected refuses; ${t.uninspectable} process(es) of other users could not be inspected and do not refuse. A Windows-side handle or a later session is not seen`);
   if (t.refusals.length) {
     console.log(`\n--apply would REFUSE:`);
     for (const r of t.refusals) console.log(`  - ${r}`);
@@ -424,4 +470,14 @@ function unregister(t, steps) {
     });
     return 1;
   }
+}
+
+// Runs last, after every module-level constant is initialized.
+const args = parseArgs(process.argv.slice(2));
+const registry = new ProjectRegistry(registryPath());
+try {
+  if (args.remove !== undefined) process.exitCode = args.apply ? applyRemove(args.remove) : dryRunRemove(args.remove);
+  else listProjects(args.prune);
+} finally {
+  registry.close();
 }

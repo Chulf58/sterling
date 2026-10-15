@@ -7,8 +7,9 @@ var __export = (target, all) => {
 };
 
 // scripts/list-projects.mjs
-import { cpSync, existsSync as existsSync3, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, readdirSync as readdirSync2, readlinkSync, realpathSync as realpathSync2, rmSync } from "node:fs";
-import { basename, isAbsolute, join as join5, relative, resolve as resolve2 } from "node:path";
+import { statSync, cpSync, existsSync as existsSync3, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, readdirSync as readdirSync2, readlinkSync, realpathSync as realpathSync2, rmSync } from "node:fs";
+import { basename, isAbsolute, join as join5, relative, resolve as resolve2, sep as sep2 } from "node:path";
+import { createRequire } from "node:module";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5944,14 +5945,6 @@ function parseArgs(argv) {
 }
 var LEFTOVER_NAMES = ["AGENTS.md", "CLAUDE.md", ".opencode", ".claude", ...LAUNCHER_GITIGNORE_ENTRIES, UPDATE_LAUNCHER_NAME];
 var STORE_FILES = ["sterling.db", "sterling.db-wal", "sterling.db-shm"];
-var args = parseArgs(process.argv.slice(2));
-var registry = new ProjectRegistry(registryPath());
-try {
-  if (args.remove !== void 0) process.exitCode = args.apply ? applyRemove(args.remove) : dryRunRemove(args.remove);
-  else listProjects(args.prune);
-} finally {
-  registry.close();
-}
 function listProjects(prune) {
   if (prune) {
     let removed = 0;
@@ -5996,7 +5989,7 @@ function lstatOrUndefined(p) {
 }
 function isWithin(p, dir) {
   const rel = relative(dir, p);
-  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
+  return !(rel === ".." || rel.startsWith(`..${sep2}`) || isAbsolute(rel));
 }
 function pathForms(p) {
   const forms = [p];
@@ -6007,44 +6000,70 @@ function pathForms(p) {
   }
   return forms;
 }
+var PROC = process.env.STERLING_PROC_ROOT ?? "/proc";
+var vanished = (e) => e?.code === "ENOENT" || e?.code === "ESRCH";
+function ownedByMe(pid) {
+  const me = process.getuid();
+  try {
+    const m = readFileSync3(`${PROC}/${pid}/status`, "utf8").match(/^Uid:\s+(\d+)\s+(\d+)/m);
+    if (m) return Number(m[1]) === me || Number(m[2]) === me;
+  } catch (e) {
+    if (vanished(e)) return void 0;
+  }
+  try {
+    return statSync(`${PROC}/${pid}`).uid === me;
+  } catch (e) {
+    if (vanished(e)) return void 0;
+    throw e;
+  }
+}
+function commOf(pid) {
+  try {
+    return readFileSync3(`${PROC}/${pid}/comm`, "utf8").trim();
+  } catch {
+    return "?";
+  }
+}
 function openHolders(files) {
   let pids;
   try {
-    pids = readdirSync2("/proc").filter((d) => /^\d+$/.test(d));
+    pids = readdirSync2(PROC).filter((d) => /^\d+$/.test(d));
   } catch (e) {
-    return { ran: false, reason: `/proc is not readable (${e.code ?? e.message})` };
+    return { ran: false, reason: `${PROC} is not readable (${e.code ?? e.message})` };
   }
   const wanted = new Set(files);
   const holders = [];
-  let uninspectable = 0;
+  const sameUserBlind = [];
+  let otherUserBlind = 0;
+  const blind = (pid, e) => {
+    const mine = ownedByMe(pid);
+    if (mine === void 0) return;
+    if (mine) sameUserBlind.push({ pid: Number(pid), command: commOf(pid), reason: e.code ?? e.message });
+    else otherUserBlind++;
+  };
   for (const pid of pids) {
     if (Number(pid) === process.pid) continue;
     let fds;
     try {
-      fds = readdirSync2(`/proc/${pid}/fd`);
+      fds = readdirSync2(`${PROC}/${pid}/fd`);
     } catch (e) {
-      if (e?.code !== "ENOENT") uninspectable++;
+      if (!vanished(e)) blind(pid, e);
       continue;
     }
     for (const fd of fds) {
       let link;
       try {
-        link = readlinkSync(`/proc/${pid}/fd/${fd}`);
-      } catch {
-        continue;
+        link = readlinkSync(`${PROC}/${pid}/fd/${fd}`);
+      } catch (e) {
+        if (vanished(e)) continue;
+        blind(pid, e);
+        break;
       }
       const file = link.endsWith(" (deleted)") ? link.slice(0, -" (deleted)".length) : link;
-      if (wanted.has(file)) {
-        let comm = "?";
-        try {
-          comm = readFileSync3(`/proc/${pid}/comm`, "utf8").trim();
-        } catch {
-        }
-        holders.push({ pid: Number(pid), command: comm, file });
-      }
+      if (wanted.has(file)) holders.push({ pid: Number(pid), command: commOf(pid), file });
     }
   }
-  return { ran: true, holders, uninspectable };
+  return { ran: true, holders, sameUserBlind, otherUserBlind };
 }
 function utcStamp(d) {
   return d.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
@@ -6133,28 +6152,36 @@ function inspect(input, stamp) {
   if (!open.ran) refusals.push(`the open-store check could not run: ${open.reason}`);
   else {
     for (const h of open.holders) refusals.push(`process ${h.pid} (${h.command}) has ${h.file} open; close that session first`);
-    t.uninspectable = open.uninspectable;
+    for (const b of open.sameUserBlind) refusals.push(`process ${b.pid} (${b.command}) runs as this user but its open files cannot be read (${b.reason}); the open check cannot clear it`);
+    t.uninspectable = open.otherUserBlind;
   }
   return t;
+}
+function testHookBeforeStoreRead() {
+  const hook = process.env.STERLING_TEST_BEFORE_STORE_READ;
+  if (hook) createRequire(new URL("../scripts/list-projects.mjs", import.meta.url).href)(resolve2(hook));
 }
 function storeSummary(dir) {
   const dbPath = join5(dir, "sterling.db");
   if (!existsSync3(dbPath)) return { error: "no sterling.db" };
   const hadWal = existsSync3(`${dbPath}-wal`);
   const hadShm = existsSync3(`${dbPath}-shm`);
+  if (hadWal && !hadShm) return { error: "a -wal exists without a -shm, and reading would create the -shm; skipped" };
+  testHookBeforeStoreRead();
   let db;
+  const out = {};
   try {
     db = openForeignDbReadOnly(dbPath, 2e3);
-    const byType = Object.fromEntries(db.prepare("SELECT type, COUNT(*) AS n FROM records GROUP BY type ORDER BY type").all().map((r) => [r.type, r.n]));
-    const board = db.prepare("SELECT COUNT(*) AS n FROM records WHERE type = 'todo' AND lifecycle = 'live' AND json_extract(body, '$.source') = 'user'").get().n;
-    return { byType, openBoardItems: board };
+    out.byType = Object.fromEntries(db.prepare("SELECT type, COUNT(*) AS n FROM records GROUP BY type ORDER BY type").all().map((r) => [r.type, r.n]));
+    out.openBoardItems = db.prepare("SELECT COUNT(*) AS n FROM records WHERE type = 'todo' AND lifecycle = 'live' AND json_extract(body, '$.source') = 'user'").get().n;
   } catch (e) {
-    return { error: e.message };
+    out.error = e.message;
   } finally {
     db?.close();
-    if (!hadWal) rmSync(`${dbPath}-wal`, { force: true });
-    if (!hadShm) rmSync(`${dbPath}-shm`, { force: true });
   }
+  const appeared = [["-wal", hadWal], ["-shm", hadShm]].filter(([x, had]) => !had && existsSync3(`${dbPath}${x}`)).map(([x]) => `sterling.db${x}`);
+  if (appeared.length) out.appeared = appeared;
+  return out;
 }
 function dryRunRemove(input) {
   const t = inspect(input, utcStamp(/* @__PURE__ */ new Date()));
@@ -6175,6 +6202,7 @@ function dryRunRemove(input) {
       console.log(`Records by type: ${parts.length ? parts.join(", ") : "none"}`);
       console.log(`Open board items: ${s.openBoardItems}`);
     }
+    if (s.appeared) console.log(`  ${s.appeared.join(", ")} appeared during the read (a writer may have started); left in place`);
     const others = readdirSync2(t.sterlingDir, { withFileTypes: true }).filter((e) => !STORE_FILES.includes(e.name)).map((e) => e.isDirectory() ? `${e.name}/` : e.name);
     console.log(`Other entries inside .sterling (deleted too): ${others.length ? others.join(", ") : "none"}`);
   }
@@ -6185,8 +6213,7 @@ function dryRunRemove(input) {
   }
   console.log(`Backup destination: ${t.backupDest ?? "none (see refusals)"}`);
   if (t.uninspectable === void 0) console.log(`Open check: did not run`);
-  else if (t.uninspectable) console.log(`Open check: ran over /proc; ${t.uninspectable} process(es) could not be inspected (not readable by this user), and a Windows-side handle or a later session is not seen`);
-  else console.log(`Open check: ran over /proc (best effort); a Windows-side handle or a later session is not seen`);
+  else console.log(`Open check: ran over /proc (best effort). A process of this user that cannot be inspected refuses; ${t.uninspectable} process(es) of other users could not be inspected and do not refuse. A Windows-side handle or a later session is not seen`);
   if (t.refusals.length) {
     console.log(`
 --apply would REFUSE:`);
@@ -6281,4 +6308,12 @@ function unregister(t, steps) {
     });
     return 1;
   }
+}
+var args = parseArgs(process.argv.slice(2));
+var registry = new ProjectRegistry(registryPath());
+try {
+  if (args.remove !== void 0) process.exitCode = args.apply ? applyRemove(args.remove) : dryRunRemove(args.remove);
+  else listProjects(args.prune);
+} finally {
+  registry.close();
 }
