@@ -10,16 +10,18 @@ import { DatabaseSync } from 'node:sqlite';
 import { closeSync, existsSync, openSync, readFileSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { HANDOFFS_DIR_REL, handoffClosureSchema, todoHandoffSchema, type TodoHandoff } from '@sterling/schemas';
+import { HANDOFFS_DIR_REL, handoffClosureReadSchema, handoffEvidenceFileReadSchema, todoHandoffReadSchema, todoWaitFieldsReadSchema, type HandoffEvidence, type TodoHandoff } from '@sterling/schemas';
 
 export type SentHandoff = Extract<TodoHandoff, { role: 'sent' }>;
 
-/** open: the item is on the receiver's board. done: it was removed and its
- *  closure file says so. gone: removed with no closure file (an older
+/** open: the item is on the receiver's board. needs_user: it is there and
+ *  marked needs 'user' or 'grill'. blocked: it is there and at least one of its
+ *  blockers is still a live board item in the receiver's store. done: it was
+ *  removed and its closure file says so. gone: removed with no closure file (an older
  *  receiver, or a hand delete), so completion is unverified. unknown: the
  *  receiver could not be read or its row does not match. unconfirmed: the
  *  receiver's item id was never recorded (delivery did not finish). */
-export type HandoffStatusState = 'open' | 'done' | 'gone' | 'unknown' | 'unconfirmed';
+export type HandoffStatusState = 'open' | 'needs_user' | 'blocked' | 'done' | 'gone' | 'unknown' | 'unconfirmed';
 
 export interface HandoffStatus {
   state: HandoffStatusState;
@@ -27,12 +29,16 @@ export interface HandoffStatus {
   text: string;
   closed_at?: string;
   note?: string;
+  /** the milestone the hand-off named (GitHub issue #108), on every state */
+  milestone?: string;
+  /** what the receiver said it did when it closed the item; only on done, and only from a valid sidecar for this hand-off */
+  evidence?: HandoffEvidence;
 }
 
 /** The sent-handoff metadata of a tracker body, or undefined when the item is not a valid tracker. */
 export function sentHandoffOf(rec: { handoff?: unknown }): SentHandoff | undefined {
   if (rec.handoff === undefined) return undefined;
-  const parsed = todoHandoffSchema.safeParse(rec.handoff);
+  const parsed = todoHandoffReadSchema.safeParse(rec.handoff);
   return parsed.success && parsed.data.role === 'sent' ? parsed.data : undefined;
 }
 
@@ -102,9 +108,46 @@ function readIfPresent(p: string): string | undefined {
   }
 }
 
+const EVIDENCE_LABELS: [keyof HandoffEvidence, string][] = [['commit', 'commit'], ['pr', 'PR'], ['deploy', 'deploy'], ['url', 'url']];
+
+function evidenceText(e: HandoffEvidence): string {
+  return EVIDENCE_LABELS.filter(([k]) => e[k] !== undefined).map(([k, label]) => `${label} ${e[k]}`).join(', ');
+}
+
+/**
+ * The evidence sidecar `<transfer_id>.evidence.json` beside the closure file
+ * (GitHub issue #108), or undefined. Read tolerantly: a missing, unreadable,
+ * malformed or other hand-off's sidecar is no evidence, never proof and never
+ * a reason to doubt the closure. Blank values are dropped.
+ */
+function readEvidence(h: SentHandoff & { to_item_id: string }): HandoffEvidence | undefined {
+  let parsed;
+  try {
+    const text = readIfPresent(join(h.to_root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
+    if (text === undefined) return undefined;
+    parsed = handoffEvidenceFileReadSchema.safeParse(JSON.parse(text));
+  } catch {
+    // An unreadable or unparsable sidecar is no evidence; the closure file alone decides done.
+    return undefined;
+  }
+  if (!parsed.success || parsed.data.transfer_id !== h.transfer_id || parsed.data.item_id !== h.to_item_id) return undefined;
+  const out: HandoffEvidence = {};
+  for (const [k] of EVIDENCE_LABELS) {
+    const v = parsed.data.evidence[k]?.trim();
+    if (v) out[k] = v;
+  }
+  return out;
+}
+
 const statusText = {
   open: (to: string) => `open in ${to}`,
-  done: (to: string, closedAt: string, note?: string) => `DONE in ${to} ${closedAt}${note ? `: ${note}` : ''}`,
+  needs_user: (to: string, reason?: string) => `needs user in ${to}${reason ? `: ${reason}` : ''}`,
+  blocked: (to: string) => `blocked in ${to}`,
+  done: (to: string, closedAt: string, note?: string, milestone?: string, evidence?: HandoffEvidence) => {
+    const head = milestone === undefined ? `DONE in ${to} ${closedAt}` : evidence ? `DONE in ${to} ${closedAt} (${milestone})` : `DONE in ${to} ${closedAt}, unverified (${milestone})`;
+    const parts = [evidence ? evidenceText(evidence) : undefined, note].filter((p): p is string => p !== undefined && p.length > 0);
+    return parts.length ? `${head}: ${parts.join('; ')}` : head;
+  },
   gone: (to: string) => `gone from ${to}'s board, completion unverified`,
   unknown: (reason: string) => `status unknown: ${reason}`,
   unconfirmed: () => 'delivery unconfirmed',
@@ -135,7 +178,7 @@ function closureStatus(h: SentHandoff & { to_item_id: string }): HandoffStatus {
   try {
     text = readIfPresent(p);
     if (text === undefined) return { state: 'gone', text: statusText.gone(h.to_name) };
-    parsed = handoffClosureSchema.safeParse(JSON.parse(text));
+    parsed = handoffClosureReadSchema.safeParse(JSON.parse(text));
   } catch (e) {
     return unknown(`the closure file ${p} is unreadable (${errText(e)})`);
   }
@@ -144,16 +187,34 @@ function closureStatus(h: SentHandoff & { to_item_id: string }): HandoffStatus {
   if (c.transfer_id !== h.transfer_id || c.item_id !== h.to_item_id) {
     return unknown(`the closure file ${p} names transfer ${c.transfer_id} item ${c.item_id}, not transfer ${h.transfer_id} item ${h.to_item_id}`);
   }
-  return { state: 'done', text: statusText.done(h.to_name, c.closed_at, c.note), closed_at: c.closed_at, ...(c.note ? { note: c.note } : {}) };
+  const evidence = readEvidence(h);
+  return {
+    state: 'done',
+    text: statusText.done(h.to_name, c.closed_at, c.note, h.milestone, evidence),
+    closed_at: c.closed_at,
+    ...(c.note ? { note: c.note } : {}),
+    ...(evidence ? { evidence } : {}),
+  };
 }
 
-/** One tracker's status against an already-open receiver database. */
-function rowStatus(db: DatabaseSync, trackerId: string, h: SentHandoff & { to_item_id: string }): HandoffStatus {
+/**
+ * One tracker's status against an already-open receiver database. Precedence
+ * (decision handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe):
+ * needs 'user' or 'grill' first, then a blocker that is still a live board
+ * item there (blocked_by keeps the slugs of removed blockers, so a slug no live
+ * todo carries is closed, the rule board readiness uses), then open. needs
+ * 'investigation' reads open. The fields are read through the shared
+ * todoWaitFieldsReadSchema, so its needs_reason rule holds here too. The time
+ * budget is checked before each blocker lookup, caps that lookup's busy
+ * timeout, and is checked again after it; running out reads unknown, never
+ * open or blocked.
+ */
+function rowStatus(db: DatabaseSync, trackerId: string, h: SentHandoff & { to_item_id: string }, budget: LookupBudget): HandoffStatus {
   const row = db.prepare('SELECT body, status FROM records WHERE id = ?').get(h.to_item_id) as { body: string; status: string } | undefined;
   if (!row) return closureStatus(h);
-  let body: { type?: unknown; handoff?: unknown };
+  let body: Record<string, unknown>;
   try {
-    body = JSON.parse(row.body) as typeof body;
+    body = JSON.parse(row.body) as Record<string, unknown>;
   } catch (e) {
     return unknown(`${h.to_name}'s row ${h.to_item_id} is not valid JSON (${errText(e)})`);
   }
@@ -162,11 +223,37 @@ function rowStatus(db: DatabaseSync, trackerId: string, h: SentHandoff & { to_it
   // Matched on the uuid alone; the metadata is then checked, and a missing or
   // different one reads as unknown, never as absent or open.
   if (body.handoff === undefined) return unknown(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} carries no handoff record (an older Sterling there may have dropped it on an edit)`);
-  const meta = todoHandoffSchema.safeParse(body.handoff);
+  const meta = todoHandoffReadSchema.safeParse(body.handoff);
   if (!meta.success || meta.data.role !== 'received' || meta.data.transfer_id !== h.transfer_id || meta.data.from_item_id !== trackerId) {
     return unknown(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} carries handoff metadata for a different transfer`);
   }
+  const waitParsed = todoWaitFieldsReadSchema.safeParse(body);
+  if (!waitParsed.success) {
+    return unknown(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} cannot be read: ${waitParsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  }
+  const wait = waitParsed.data;
+  if (wait.needs === 'user' || wait.needs === 'grill') return { state: 'needs_user', text: statusText.needs_user(h.to_name, wait.needs_reason?.trim()) };
+  if (wait.blocked_by?.length) {
+    const live = db.prepare(`SELECT 1 FROM records WHERE type = 'todo' AND status != 'superseded' AND json_extract(body, '$.slug') = ? LIMIT 1`);
+    for (const slug of new Set(wait.blocked_by)) {
+      const where = `${h.to_name}'s blocker ${slug}`;
+      const before = budget.remaining();
+      if (before <= 0) return unknown(budget.exhausted(where));
+      setBusyTimeout(db, Math.min(budget.busy, before));
+      const found = live.get(slug) !== undefined;
+      if (budget.remaining() <= 0) return unknown(budget.exhausted(`the result for ${where}`));
+      if (found) return { state: 'blocked', text: statusText.blocked(h.to_name) };
+    }
+  }
   return { state: 'open', text: statusText.open(h.to_name) };
+}
+
+interface LookupBudget {
+  /** ms left in the budget; zero or less means no further lookup may start */
+  remaining: () => number;
+  exhausted: (where: string) => string;
+  /** the per-lookup busy timeout before capping to what is left */
+  busy: number;
 }
 
 export interface ResolveSentHandoffsOptions {
@@ -252,7 +339,7 @@ export function resolveSentHandoffs(
         }
         try {
           setBusyTimeout(db, Math.min(busy, now));
-          out.set(id, rowStatus(db, id, h));
+          out.set(id, rowStatus(db, id, h, { remaining, exhausted, busy }));
         } catch (e) {
           out.set(id, unknown(`${h.to_name}'s database could not be read (${errText(e)})`));
         }
@@ -260,6 +347,12 @@ export function resolveSentHandoffs(
     } finally {
       db.close();
     }
+  }
+  // The milestone the tracker named rides every state (GitHub issue #108).
+  for (const t of trackers) {
+    const status = out.get(t.id);
+    const milestone = status && sentHandoffOf(t)?.milestone;
+    if (status && milestone) out.set(t.id, { ...status, milestone });
   }
   return out;
 }
