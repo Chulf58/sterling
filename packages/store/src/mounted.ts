@@ -13,7 +13,7 @@ import { mkdirSync, existsSync, rmSync, openSync, closeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { SterlingStore, SchemaMigrationRequiredError, StoreRowDecodeError, UnsupportedSchemaVersionError, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions, type BoardItemReadiness, type WriteOptions } from './index.js';
-import { validateRecord, type DurableRecord, type SterlingConfig } from '@sterling/schemas';
+import { validateRecord, parseStoreFence, STORE_FENCE_KEY, type DurableRecord, type RenameFence, type SterlingConfig } from '@sterling/schemas';
 import { allocateShares } from './shares.js';
 import { PgBridgeClosedError, PgBridgeTimeoutError, PgQueryError, PgWorkerDiedError } from './pg-bridge.js';
 import { PgLockTimeoutError, PgNulCharacterError, PgStatementTimeoutError, PgStoreMissingError } from './pg-driver.js';
@@ -174,6 +174,49 @@ export class DomainNotCreatedError extends Error {
   }
 }
 
+/** A mounted domain whose store carries a rename fence: `domain-doctor rename`
+ *  copied it under a new name, and this file is the old one, kept as the
+ *  backup. It is refused at mount instead of being read, so a project still
+ *  tagged with the old name is told the new one (decision
+ *  domain-rename-is-a-fenced-copy-verb-on-domain-doctor). */
+export class DomainRenamedError extends Error {
+  readonly domain: string;
+  readonly db_path: string;
+  readonly renamed_to: string;
+  readonly renamed_path: string;
+  constructor(domain: string, dbPath: string, fence: RenameFence) {
+    super(
+      `domain '${domain}' was renamed to '${fence.to_domain}' on ${fence.fenced_at} (operation ${fence.operation_id}); ` +
+        `the store at '${dbPath}' is the fenced old copy, so it is NOT mounted and its knowledge is not read. ` +
+        `The domain now lives at '${fence.to_path}'. Change '${domain}' to '${fence.to_domain}' in stack_tags (and in domain_paths, if it names '${domain}') ` +
+        `in this project's .sterling/config.json, then restart the session.`
+    );
+    this.name = 'DomainRenamedError';
+    this.domain = domain;
+    this.db_path = dbPath;
+    this.renamed_to = fence.to_domain;
+    this.renamed_path = fence.to_path;
+  }
+}
+
+/** UnreadableDomain.note for a domain refused at mount because it was renamed. */
+const RENAMED_AT_MOUNT_NOTE = 'refused at mount because the domain was renamed; update stack_tags and restart the session';
+
+/** The rename fence a store carries, or null for none (or a move fence). A
+ *  fence value that does not parse is left to the write path, which refuses
+ *  every write to a fenced store and names the unreadable fence. */
+function renameFenceOf(store: SterlingStore): RenameFence | null {
+  const value = store.getMeta(STORE_FENCE_KEY);
+  if (value === undefined) return null;
+  let fence;
+  try {
+    fence = parseStoreFence(value);
+  } catch {
+    return null;
+  }
+  return fence.kind === 'rename' ? fence : null;
+}
+
 /** The one-line warning for a configured domain that was skipped because its
  *  store does not exist. Shared by every caller that mounts with skipMissing
  *  and announces the skip, so the wording cannot drift between them. */
@@ -316,6 +359,7 @@ export class MountedStores {
           }
           this.domains.set(m.name, store);
           this.probeDomain(m.name, store);
+          this.refuseRenamed(m.name, store);
         }
       } catch (e) {
         this.close();
@@ -348,11 +392,32 @@ export class MountedStores {
         }
         this.domains.set(m.name, store);
         this.probeDomain(m.name, store);
+        this.refuseRenamed(m.name, store);
       }
     } catch (e) {
       this.close();
       throw e;
     }
+  }
+
+  /** Mount-time rename check, after the probe: a store a rename fenced is
+   *  closed and dropped with a DomainRenamedError naming the new domain, so it
+   *  is neither read nor written and every read discloses it on
+   *  unreadableDomains. A domain the probe already dropped is left as it is. */
+  private refuseRenamed(name: string, store: SterlingStore): void {
+    if (this.isUnreadable(name)) return;
+    let fence: RenameFence | null;
+    try {
+      fence = renameFenceOf(store);
+    } catch (e) {
+      if (!this.isStoreFailure(e)) throw e;
+      this.dropDomain(name, e, true);
+      return;
+    }
+    if (!fence) return;
+    this.domains.delete(name);
+    store.close();
+    this.dropDomain(name, new DomainRenamedError(name, this.domainPaths.get(name) ?? '', fence), true, RENAMED_AT_MOUNT_NOTE);
   }
 
   /** Mount-time read check. A pre-v2 store opens and answers some reads (get,
@@ -376,7 +441,7 @@ export class MountedStores {
    *  is safe to leave because a dropped domain cannot be written either
    *  (assertWritable): a session never writes into a store it cannot read back,
    *  and the slug checks still ask it (fanEveryDomain). */
-  private dropDomain(name: string, e: unknown, atMount = false): void {
+  private dropDomain(name: string, e: unknown, atMount = false, note?: string): void {
     // Postgres storage drops nothing: the failing open or read throws, naming the domain.
     if (this.work) throw new DomainUnavailableError(name, this.domainPaths.get(name) ?? '', e);
     if (this.isUnreadable(name)) return;
@@ -384,7 +449,7 @@ export class MountedStores {
       name,
       dbPath: this.domainPaths.get(name) ?? '',
       error: errorText(e),
-      note: atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE,
+      note: note ?? (atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE),
     });
   }
 

@@ -5558,6 +5558,55 @@ var brokerResultSchema = external_exports.union([
   external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(false), executed: external_exports.boolean(), error: brokerErrorSchema })
 ]);
 
+// packages/schemas/dist/store-fence.js
+var STORE_FENCE_KEY = "move_fence";
+var moveFenceSchema = external_exports.object({
+  kind: external_exports.literal("move").optional(),
+  move_id: external_exports.string(),
+  /** The counterpart the store moved to: 'postgres:<schema>' or 'sqlite:<absolute path>'. */
+  to: external_exports.string(),
+  fenced_at: external_exports.string().optional(),
+  /** The manifest digest of the content at fencing; null until the snapshot is taken. */
+  manifest_digest: external_exports.string().nullable().optional()
+}).passthrough();
+var DOMAIN_NAME_RE = /^[a-z0-9_-]+$/;
+var renameFenceSchema = external_exports.object({
+  kind: external_exports.literal("rename"),
+  /** The rename's operation id; the copy's receipt carries the same id. */
+  operation_id: external_exports.string().min(1),
+  from_domain: external_exports.string().regex(DOMAIN_NAME_RE),
+  to_domain: external_exports.string().regex(DOMAIN_NAME_RE),
+  /** Absolute POSIX path of the store published under the new name. */
+  to_path: external_exports.string().min(1),
+  fenced_at: external_exports.string()
+}).strict();
+function parseStoreFence(value) {
+  let raw;
+  try {
+    raw = JSON.parse(value);
+  } catch {
+    throw new Error(`store_meta '${STORE_FENCE_KEY}' is not JSON (${value.slice(0, 80)})`);
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`store_meta '${STORE_FENCE_KEY}' is not an object (${value.slice(0, 80)})`);
+  }
+  const kind = raw.kind;
+  if (kind === "rename") {
+    const r = renameFenceSchema.safeParse(raw);
+    if (!r.success)
+      throw new Error(`store_meta '${STORE_FENCE_KEY}' is a malformed rename fence: ${r.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}`);
+    return r.data;
+  }
+  if (kind === void 0 || kind === "move") {
+    const r = moveFenceSchema.safeParse(raw);
+    if (!r.success)
+      throw new Error(`store_meta '${STORE_FENCE_KEY}' is a malformed move fence: ${r.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}`);
+    const fence = { ...r.data, kind: "move" };
+    return fence;
+  }
+  throw new Error(`store_meta '${STORE_FENCE_KEY}' has an unknown fence kind ${JSON.stringify(kind)}`);
+}
+
 // packages/store/dist/mounted.js
 import { dirname, join as join3 } from "node:path";
 import { homedir as homedir2 } from "node:os";
@@ -7084,10 +7133,26 @@ var OperationRepeatedError = class extends Error {
 };
 var StoreMovedError = class extends Error {
   db_path;
-  constructor(db_path) {
-    super(`store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`);
+  /** The new domain name when a rename fenced this store, else null. */
+  renamed_to;
+  constructor(db_path, fence) {
+    let renamedTo = null;
+    let message = `store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`;
+    if (fence !== void 0) {
+      try {
+        const f = parseStoreFence(fence);
+        if (f.kind === "rename") {
+          renamedTo = f.to_domain;
+          message = `store '${db_path}' was renamed: domain '${f.from_domain}' is now '${f.to_domain}' (store at '${f.to_path}'), so writes to this old store are refused; nothing was written. Change '${f.from_domain}' to '${f.to_domain}' in stack_tags (and domain_paths) of .sterling/config.json, then restart the session.`;
+        }
+      } catch (e) {
+        message = `store '${db_path}' carries a write fence that could not be read (${e.message}), so writes to it are refused; nothing was written.`;
+      }
+    }
+    super(message);
     this.db_path = db_path;
     this.name = "StoreMovedError";
+    this.renamed_to = renamedTo;
   }
 };
 var SQLITE_BUSY_EXTENDED = {
@@ -9460,8 +9525,9 @@ var SterlingStore = class _SterlingStore {
     this.txDepth++;
     try {
       this.assertLiveSchemaVersion("transaction");
-      if (this.db.prepare("SELECT 1 FROM store_meta WHERE key = 'move_fence'").get())
-        throw new StoreMovedError(this.dbPath);
+      const fence = this.db.prepare("SELECT value FROM store_meta WHERE key = ?").get(STORE_FENCE_KEY);
+      if (fence)
+        throw new StoreMovedError(this.dbPath, fence.value);
       fn();
       this.db.commit();
     } catch (e) {
@@ -9595,7 +9661,7 @@ import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { existsSync as existsSync2, mkdirSync as mkdirSync2, mkdtempSync, readFileSync as readFileSync3, realpathSync as realpathSync2, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname as dirname5, join as join8, resolve as resolve3 } from "node:path";
-var MOVE_FENCE_KEY = "move_fence";
+var MOVE_FENCE_KEY = STORE_FENCE_KEY;
 var MOVE_RECEIPT_KEY = "move_receipt";
 var MOVE_CONTROL_KEYS = [MOVE_FENCE_KEY, MOVE_RECEIPT_KEY];
 var MOVE_MANIFEST_VERSION = 1;
@@ -9621,6 +9687,8 @@ var MoveRegistryProjectError = class extends MoveError {
 var MoveSchemaError = class extends MoveError {
 };
 var MoveSourceFencedError = class extends MoveError {
+};
+var MoveRenamedStoreError = class extends MoveError {
 };
 var MoveTargetNotEmptyError = class extends MoveError {
 };
@@ -9766,13 +9834,17 @@ function nonEmptyTables(snapshot) {
 function parseFence(value, where) {
   if (value === void 0)
     return null;
+  let f;
   try {
-    const f = JSON.parse(value);
-    if (typeof f.move_id === "string" && typeof f.to === "string")
-      return f;
+    f = parseStoreFence(value);
   } catch {
+    throw new MoveSchemaError(`${where}: store_meta '${MOVE_FENCE_KEY}' is not a move fence (${value.slice(0, 80)}); refusing to guess`);
   }
-  throw new MoveSchemaError(`${where}: store_meta '${MOVE_FENCE_KEY}' is not a move fence (${value.slice(0, 80)}); refusing to guess`);
+  if (f.kind === "rename") {
+    throw new MoveRenamedStoreError(`${where} is the fenced old copy of domain '${f.from_domain}', which domain-doctor rename renamed to '${f.to_domain}' (store at '${f.to_path}', operation ${f.operation_id}). A store move never reads or writes a renamed store; nothing was moved. Mount '${f.to_domain}' instead.`);
+  }
+  const { kind: _kind, ...stored } = f;
+  return stored;
 }
 function parseReceipt(value, where) {
   try {

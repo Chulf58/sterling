@@ -21,13 +21,15 @@ import {
   FRESHNESS_VALUES,
   boardDisplayLabel,
   displayHandle,
+  parseStoreFence,
+  STORE_FENCE_KEY,
   type BoardNeeds,
   type DurableRecord,
   type Lifecycle,
   type Freshness,
 } from '@sterling/schemas';
 
-export { MountedStores, MixedScoreScaleError, type DomainMount, resolveDomainMounts, createDomain, DomainNotCreatedError, DOMAIN_DESCRIPTION_KEY, missingDomainWarning } from './mounted.js';
+export { MountedStores, MixedScoreScaleError, type DomainMount, resolveDomainMounts, createDomain, DomainNotCreatedError, DomainRenamedError, DOMAIN_DESCRIPTION_KEY, missingDomainWarning } from './mounted.js';
 export { allocateShares, DEFAULT_PROJECT_SHARE } from './shares.js';
 export { fitDomains, DOMAIN_FIT_MIN_TERMS } from './domain-fit.js';
 export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
@@ -225,17 +227,36 @@ export class OperationRepeatedError extends Error {
 }
 
 /**
- * A write to a store that a store move left (store-move.ts): its store_meta
- * holds the move fence, so the store's records now live on the other backend.
- * Checked inside the write lock by SterlingStore.tx(); the mover's own writes
- * go through raw drivers and are not refused.
+ * A write to a fenced store: its store_meta holds the fence (STORE_FENCE_KEY).
+ * A move fence (store-move.ts) means the store's records now live on the other
+ * backend; a rename fence (domain-doctor rename) means the domain was copied
+ * under a new name and this file is the old one, kept as the backup. Checked
+ * inside the write lock by SterlingStore.tx(); the mover's and the renamer's
+ * own writes go through raw drivers and are not refused. `fence` is the raw
+ * store_meta value, used only to word the message: any value refuses.
  */
 export class StoreMovedError extends Error {
-  constructor(readonly db_path: string) {
-    super(
-      `store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`
-    );
+  /** The new domain name when a rename fenced this store, else null. */
+  readonly renamed_to: string | null;
+  constructor(readonly db_path: string, fence?: string) {
+    let renamedTo: string | null = null;
+    let message = `store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`;
+    if (fence !== undefined) {
+      try {
+        const f = parseStoreFence(fence);
+        if (f.kind === 'rename') {
+          renamedTo = f.to_domain;
+          message =
+            `store '${db_path}' was renamed: domain '${f.from_domain}' is now '${f.to_domain}' (store at '${f.to_path}'), so writes to this old store are refused; nothing was written. ` +
+            `Change '${f.from_domain}' to '${f.to_domain}' in stack_tags (and domain_paths) of .sterling/config.json, then restart the session.`;
+        }
+      } catch (e) {
+        message = `store '${db_path}' carries a write fence that could not be read (${(e as Error).message}), so writes to it are refused; nothing was written.`;
+      }
+    }
+    super(message);
     this.name = 'StoreMovedError';
+    this.renamed_to = renamedTo;
   }
 }
 
@@ -4277,10 +4298,11 @@ export class SterlingStore {
       // silently admitted. Re-reading here, while the write lock is held,
       // guarantees the version cannot move again before fn() writes.
       this.assertLiveSchemaVersion('transaction');
-      // The move fence (store-move.ts, MOVE_FENCE_KEY; spelled out here because
-      // importing it would make a cycle), read under the same lock: a store a
-      // move left refuses every write.
-      if (this.db.prepare("SELECT 1 FROM store_meta WHERE key = 'move_fence'").get()) throw new StoreMovedError(this.dbPath);
+      // The write fence (STORE_FENCE_KEY, either kind: a move or a domain
+      // rename left this store), read under the same lock: a fenced store
+      // refuses every write.
+      const fence = this.db.prepare('SELECT value FROM store_meta WHERE key = ?').get(STORE_FENCE_KEY) as { value: string } | undefined;
+      if (fence) throw new StoreMovedError(this.dbPath, fence.value);
       fn();
       this.db.commit();
     } catch (e) {

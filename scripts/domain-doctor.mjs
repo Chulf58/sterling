@@ -165,17 +165,37 @@
 //     Exit 0 clean (every row agrees, nothing was blocked); exit 3 FINDINGS
 //     exist; exit 2 the audit COULD NOT BE COMPLETED (a blocked store/row or an
 //     ambiguous mount) — an operator can always tell "clean" from "blocked".
+//
+//   node scripts/domain-doctor.mjs rename <old> <new> [--apply]
+//     Rename a whole knowledge domain on this machine, keeping every record id,
+//     link, version, alias and relation (decision
+//     domain-rename-is-a-fenced-copy-verb-on-domain-doctor, issue #94). Dry run
+//     by default: it prints the old and new store, every registered project
+//     whose CURRENT config mounts <old> with its stack_tags/domain_paths change,
+//     and the AGENTS.md lines to change by hand. --apply fences the old store
+//     (store_meta move_fence, kind 'rename'), copies it with VACUUM INTO, and on
+//     the copy rewrites records.scope and body.scope to domain:<new> in one
+//     transaction with a receipt; the copy is validated table by table and
+//     published beside the old store as <root>/<new>/sterling.db without
+//     replacing anything; then each mounting project's config and registry row
+//     is rewritten. The fenced old store stays as the backup. A crash leaves the
+//     old store fenced, and rerunning --apply resumes from the fence and the
+//     receipt. Refuses: a name outside SCOPE_RE, projects that map <old> to
+//     different files, a mounting project on Postgres, an existing or mounted
+//     <new>, a record scoped other than domain:<old>, a store not at schema v2.
+//     record_versions and record stack_tags are not changed. Exit 0 done or dry
+//     run, exit 2 refused.
 import {
   readFileSync, readdirSync, existsSync, mkdirSync, openSync, readSync, closeSync,
-  realpathSync, statSync, rmSync, linkSync, writeFileSync,
+  realpathSync, statSync, rmSync, linkSync, writeFileSync, renameSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { SterlingStore, resolveDomainMounts, droppedKeyPaths, renderCappedPathList } from '@sterling/store';
-import { parseConfig, validateRecord } from '@sterling/schemas';
+import { SterlingStore, resolveDomainMounts, droppedKeyPaths, renderCappedPathList, ProjectRegistry, registryPath } from '@sterling/store';
+import { parseConfig, validateRecord, SCOPE_RE, STORE_FENCE_KEY, parseStoreFence } from '@sterling/schemas';
 import { buildResolver } from './lib/citations.mjs';
 import { arg as sharedArg, hasFlag as sharedHasFlag } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
@@ -3216,6 +3236,548 @@ function scopeAudit() {
   process.exit(exitCode);
 }
 
+// ---------------------------------------------------------------------------
+// rename <old> <new> [--apply] (issue #94, decision
+// domain-rename-is-a-fenced-copy-verb-on-domain-doctor)
+// ---------------------------------------------------------------------------
+
+/** store_meta key of the completion receipt the renamed copy carries. */
+const RENAME_RECEIPT_KEY = 'rename_receipt';
+
+/** Test seam: STERLING_TEST_RENAME_CRASH_AT=<point> exits the process at that
+ *  point of an --apply run (exit 70), so a test can build the crash state and
+ *  resume from it. Points: after-fence, after-publish. */
+function renameCrashPoint(point) {
+  if (process.env.STERLING_TEST_RENAME_CRASH_AT === point) {
+    console.error(`domain-doctor: test crash injected at '${point}'`);
+    process.exit(70);
+  }
+}
+
+/** A records.body with its scope set to `scope`, or null when the body has no
+ *  scope key (the column is authoritative on read; a missing key stays missing). */
+function bodyWithScope(body, scope) {
+  const parsed = JSON.parse(body);
+  if (!Object.hasOwn(parsed, 'scope')) return null;
+  parsed.scope = scope;
+  return JSON.stringify(parsed);
+}
+
+/** The scope findings of a domain store's records: every row whose scope
+ *  column, or whose body scope when present, is not `expected`. Read through
+ *  any connection (`db`), so the same check runs read-only and inside the
+ *  fence transaction. */
+function foreignScopes(db, expected) {
+  const found = [];
+  for (const r of db.prepare('SELECT id, scope, body FROM records').all()) {
+    if (r.scope !== expected) {
+      found.push({ id: r.id, where: 'records.scope', scope: r.scope });
+      continue;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(r.body);
+    } catch (e) {
+      found.push({ id: r.id, where: 'body', scope: `unparseable body (${e.message})` });
+      continue;
+    }
+    if (Object.hasOwn(parsed, 'scope') && parsed.scope !== expected) found.push({ id: r.id, where: 'body.scope', scope: String(parsed.scope) });
+  }
+  return found;
+}
+
+/** What the read-only look at the old store found. Never calls fail(): it runs
+ *  inside readOnlyProbe, whose cleanup a process.exit would skip. */
+function renameSurveyOld(oldPath, oldName) {
+  return readOnlyProbe(oldPath, (db) => {
+    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name));
+    const missing = ['records', 'record_versions', 'record_aliases', 'record_relations', 'store_meta'].filter((t) => !tables.has(t));
+    if (missing.length) return { missing };
+    const fenceRow = db.prepare('SELECT value FROM store_meta WHERE key = ?').get(STORE_FENCE_KEY);
+    const description = db.prepare("SELECT value FROM store_meta WHERE key = 'description'").get()?.value ?? null;
+    return {
+      missing,
+      fenceValue: fenceRow?.value,
+      description,
+      records: db.prepare('SELECT COUNT(*) AS n FROM records').get().n,
+      foreign: foreignScopes(db, `domain:${oldName}`),
+    };
+  });
+}
+
+/** The rename receipt a store carries, or null; `error` when it cannot be read. */
+function readRenameReceipt(dbPath) {
+  try {
+    return readOnlyProbe(dbPath, (db) => {
+      const row = db.prepare('SELECT value FROM store_meta WHERE key = ?').get(RENAME_RECEIPT_KEY);
+      return { receipt: row ? JSON.parse(row.value) : null };
+    });
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+/** One AGENTS.md's lines that name `oldName` as a whole word, with the
+ *  replacement line. The file is never written: it is tracked in that repo. */
+function agentsMdLines(dir, oldName, newName) {
+  const path = join(dir, 'AGENTS.md');
+  if (!existsSync(path)) return [];
+  const escaped = oldName.replace(/[-\\^$.*+?()[\]{}|]/g, '\\$&');
+  const word = new RegExp(`(^|[^a-z0-9_-])${escaped}(?![a-z0-9_-])`, 'g');
+  const out = [];
+  readFileSync(path, 'utf8').split('\n').forEach((line, i) => {
+    word.lastIndex = 0;
+    if (!word.test(line)) return;
+    out.push({ path: POSIX(path), line: i + 1, before: line, after: line.replace(word, (_m, pre) => `${pre}${newName}`) });
+  });
+  return out;
+}
+
+/** The raw config with `oldName` renamed: stack_tags in place, and a
+ *  domain_paths key for it renamed in place with `newPath` as its value. null
+ *  when the config does not mount `oldName`. */
+function renamedConfig(raw, oldName, newName, newPath) {
+  if (!Array.isArray(raw.stack_tags) || !raw.stack_tags.includes(oldName)) return null;
+  const next = { ...raw, stack_tags: raw.stack_tags.map((t) => (t === oldName ? newName : t)) };
+  if (raw.domain_paths && typeof raw.domain_paths === 'object' && Object.hasOwn(raw.domain_paths, oldName)) {
+    next.domain_paths = Object.fromEntries(Object.entries(raw.domain_paths).map(([k, v]) => (k === oldName ? [newName, newPath] : [k, v])));
+  }
+  return next;
+}
+
+/**
+ * Rewrite one project's config with compare-and-swap: the new text goes to a
+ * temporary file beside it, and is renamed over the config only if the config
+ * still holds the text it was computed from; a changed config is re-read and
+ * the rewrite recomputed, up to three times. This narrows the window against
+ * a concurrent config writer (domains --apply, init, config_set); it does not
+ * close it, because no lock is shared by every config writer.
+ */
+function rewriteConfigCas(dir, configPath, oldName, newName, newPath) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const text = readFileSync(configPath, 'utf8');
+    const next = renamedConfig(JSON.parse(text), oldName, newName, newPath);
+    if (next === null) return { changed: false, raw: JSON.parse(text) };
+    parseConfig(next);
+    const tmp = resolveStoreWritePath(dir, '.sterling', `config.json.rename-${process.pid}-${randomUUID()}.tmp`);
+    writeFileSync(tmp, JSON.stringify(next, null, 2) + (text.endsWith('\n') ? '\n' : ''));
+    if (readFileSync(configPath, 'utf8') !== text) {
+      rmSync(tmp, { force: true });
+      continue;
+    }
+    renameSync(tmp, configPath);
+    return { changed: true, raw: next };
+  }
+  throw new Error(`'${configPath}' kept changing while it was being rewritten (3 attempts)`);
+}
+
+/** Every table of a store, rows as sorted JSON lines. BLOBs become hex. VACUUM
+ *  may renumber implicit rowids, so rows compare as a multiset, not by rowid. */
+function dumpTables(dbPath) {
+  return readOnlyProbe(dbPath, (db) => {
+    const out = new Map();
+    const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map((r) => r.name);
+    for (const name of names) {
+      const rows = db.prepare(`SELECT * FROM "${name.replace(/"/g, '""')}"`).all();
+      out.set(name, rows);
+    }
+    return out;
+  });
+}
+
+const rowLine = (row) => JSON.stringify(row, (_k, v) => (v instanceof Uint8Array ? `hex:${Buffer.from(v).toString('hex')}` : v));
+
+/**
+ * Validate the renamed copy against the old store, table by table. Expected
+ * differences, and only these: the old store's fence is gone and the copy
+ * carries the receipt; every records row has scope domain:<new>, and its body
+ * scope (when the body has one) is domain:<new>. Every other column and row of
+ * every table, record_versions, record_aliases, record_relations and the FTS
+ * tables included, must be identical. Returns the differences found.
+ */
+function validateRenamedCopy(oldPath, copyPath, oldName, newName, operationId) {
+  const before = dumpTables(oldPath);
+  const after = dumpTables(copyPath);
+  const problems = [];
+  const names = new Set([...before.keys(), ...after.keys()]);
+  const normalizeRecord = (row, scope, side) => {
+    if (row.scope !== scope) problems.push(`records ${row.id}: ${side} scope column is '${row.scope}', expected '${scope}'`);
+    const body = JSON.parse(row.body);
+    if (Object.hasOwn(body, 'scope') && body.scope !== scope) problems.push(`records ${row.id}: ${side} body scope is '${body.scope}', expected '${scope}'`);
+    const { scope: _bodyScope, ...rest } = body;
+    return rowLine({ ...row, scope: null, body: rest, body_has_scope: Object.hasOwn(body, 'scope') });
+  };
+  let receipt = null;
+  for (const name of names) {
+    let a = before.get(name);
+    let b = after.get(name);
+    if (!a || !b) {
+      problems.push(`table '${name}' exists only in the ${a ? 'old store' : 'copy'}`);
+      continue;
+    }
+    let aLines;
+    let bLines;
+    if (name === 'records') {
+      aLines = a.map((r) => normalizeRecord(r, `domain:${oldName}`, 'old'));
+      bLines = b.map((r) => normalizeRecord(r, `domain:${newName}`, 'copy'));
+    } else {
+      if (name === 'store_meta') {
+        a = a.filter((r) => r.key !== STORE_FENCE_KEY);
+        const r = b.find((x) => x.key === RENAME_RECEIPT_KEY);
+        receipt = r ? JSON.parse(r.value) : null;
+        b = b.filter((x) => x.key !== RENAME_RECEIPT_KEY);
+        if (b.some((x) => x.key === STORE_FENCE_KEY)) problems.push('store_meta: the copy still carries a write fence');
+      }
+      aLines = a.map(rowLine);
+      bLines = b.map(rowLine);
+    }
+    const counts = new Map();
+    for (const l of aLines) counts.set(l, (counts.get(l) ?? 0) + 1);
+    for (const l of bLines) counts.set(l, (counts.get(l) ?? 0) - 1);
+    const onlyA = [...counts].filter(([, n]) => n > 0).map(([l]) => l);
+    const onlyB = [...counts].filter(([, n]) => n < 0).map(([l]) => l);
+    if (aLines.length !== bLines.length || onlyA.length || onlyB.length) {
+      problems.push(`table '${name}': ${aLines.length} row(s) in the old store, ${bLines.length} in the copy; ${onlyA.length} only in the old store, ${onlyB.length} only in the copy` + (onlyA[0] ? ` (first: ${onlyA[0].slice(0, 160)})` : ''));
+    }
+  }
+  if (!receipt || receipt.operation_id !== operationId || receipt.from_domain !== oldName || receipt.to_domain !== newName) {
+    problems.push(`store_meta '${RENAME_RECEIPT_KEY}' is missing or does not match operation ${operationId}`);
+  }
+  return problems;
+}
+
+/**
+ * The copy step: VACUUM INTO a unique temporary file beside the target, then
+ * in ONE transaction on that copy delete the fence, rewrite records.scope and
+ * body.scope from domain:<old> to domain:<new> (any other scope aborts the
+ * transaction), and write the receipt. The copy is closed, validated against
+ * the old store, and published with linkSync, which never replaces an existing
+ * file. The search index is not rebuilt: no record type's search text carries
+ * scope (packages/schemas/src/records.ts, the fts builders), and validation
+ * proves the FTS tables are unchanged.
+ */
+function renameCopy(oldPath, newPath, oldName, newName, operationId) {
+  const destDir = dirname(newPath);
+  mkdirSync(destDir, { recursive: true });
+  const temp = POSIX(join(destDir, `.rename-${operationId}-${process.pid}-${randomUUID()}.tmp`));
+  pendingSnapshot = temp;
+  vacuumIntoSnapshot(oldPath, temp);
+  const db = new DatabaseSync(temp);
+  let rewritten = 0;
+  let foreign = [];
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare('DELETE FROM store_meta WHERE key = ?').run(STORE_FENCE_KEY);
+      foreign = foreignScopes(db, `domain:${oldName}`);
+      if (foreign.length === 0) {
+        const update = db.prepare('UPDATE records SET scope = ?, body = ? WHERE id = ?');
+        for (const r of db.prepare('SELECT id, body FROM records').all()) {
+          update.run(`domain:${newName}`, bodyWithScope(r.body, `domain:${newName}`) ?? r.body, r.id);
+          rewritten++;
+        }
+        const receipt = {
+          operation_id: operationId,
+          from_domain: oldName,
+          to_domain: newName,
+          from_path: POSIX(oldPath),
+          to_path: POSIX(newPath),
+          records: rewritten,
+          completed_at: new Date().toISOString(),
+        };
+        db.prepare('INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?)').run(RENAME_RECEIPT_KEY, JSON.stringify(receipt), receipt.completed_at);
+        db.exec('COMMIT');
+      } else {
+        db.exec('ROLLBACK');
+      }
+    } catch (e) {
+      if (db.isTransaction) db.exec('ROLLBACK');
+      throw e;
+    }
+  } finally {
+    db.close();
+  }
+  if (foreign.length) {
+    fail(
+      `refusing: the copy holds ${foreign.length} record(s) whose scope is not 'domain:${oldName}' (${foreign.slice(0, 5).map((f) => `${f.id} ${f.where}=${f.scope}`).join('; ')}). ` +
+        `Nothing was published at '${newPath}' and no config was changed. The old store keeps its rename fence; rerun with --apply after the scopes are repaired.`
+    );
+  }
+  const problems = validateRenamedCopy(oldPath, temp, oldName, newName, operationId);
+  if (problems.length) {
+    fail(
+      `refusing: the renamed copy does not match the old store apart from the scope rewrite:\n  ${problems.slice(0, 20).join('\n  ')}\n` +
+        `Nothing was published at '${newPath}' and no config was changed. The old store keeps its rename fence.`
+    );
+  }
+  try {
+    linkSync(temp, newPath);
+  } catch (e) {
+    fail(
+      `refusing: the renamed copy could not be published at '${newPath}' (${e.code ?? 'error'}: ${e.message}). ` +
+        (e.code === 'EEXIST' ? 'A file appeared there while the copy was being made; it was not touched. ' : '') +
+        'No config was changed. The old store keeps its rename fence.'
+    );
+  }
+  rmSync(temp, { force: true });
+  pendingSnapshot = null;
+  return rewritten;
+}
+
+/** Write the rename fence on the old store under BEGIN IMMEDIATE (its write
+ *  lock), after re-checking inside that lock that no fence is there and that
+ *  every record is scoped domain:<old>. Returns an error text, or null. */
+function writeRenameFence(oldPath, fence, oldName) {
+  const db = new DatabaseSync(oldPath);
+  try {
+    db.exec('PRAGMA busy_timeout = 10000');
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const existing = db.prepare('SELECT value FROM store_meta WHERE key = ?').get(STORE_FENCE_KEY);
+      if (existing) {
+        db.exec('ROLLBACK');
+        return `the old store gained a write fence while this ran (${existing.value.slice(0, 120)})`;
+      }
+      const foreign = foreignScopes(db, `domain:${oldName}`);
+      if (foreign.length) {
+        db.exec('ROLLBACK');
+        return `${foreign.length} record(s) are not scoped 'domain:${oldName}' (${foreign.slice(0, 5).map((f) => `${f.id} ${f.where}=${f.scope}`).join('; ')})`;
+      }
+      db.prepare('INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?)').run(STORE_FENCE_KEY, JSON.stringify(fence), fence.fenced_at);
+      db.exec('COMMIT');
+      return null;
+    } catch (e) {
+      if (db.isTransaction) db.exec('ROLLBACK');
+      throw e;
+    }
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * rename <old> <new> [--apply]: rename a whole domain on this machine. Dry run
+ * by default. Steps, in this order (each one's refusals come before it writes):
+ *   1. Resolve: read every registered project's CURRENT config (the registry's
+ *      tags can be stale) and find the one physical store <old> maps to.
+ *      Refuse when <new> is not a domain name, when projects map <old> to
+ *      different files, when a project mounting <old> is on Postgres, when
+ *      <new> already has a store or is already mounted, or when a record is
+ *      scoped other than domain:<old>. An unreadable config is listed as
+ *      unresolved and not rewritten.
+ *   2. Fence the old store (store_meta move_fence, kind 'rename').
+ *   3. Copy, rewrite scope, validate, publish (renameCopy).
+ *   4. Rewrite stack_tags and domain_paths in each mounting project's config
+ *      and its registry row, from the receipt the published copy carries.
+ *   5. Leave the fenced old store in place as the backup, and print the
+ *      AGENTS.md lines to change by hand.
+ * A crash leaves the old store fenced; rerunning with --apply resumes: the
+ * fence names the operation, the copy is redone if it was not published, and
+ * configs are rewritten only once the published copy's receipt matches.
+ * Exit 0 done or dry run; exit 2 refused.
+ */
+function rename() {
+  const oldName = process.argv[3];
+  const newName = process.argv[4];
+  const apply = hasFlag('apply');
+  const usage = 'usage: domain-doctor.mjs rename <old> <new> [--apply]';
+  for (const [label, n] of [['<old>', oldName], ['<new>', newName]]) {
+    if (!n || n.startsWith('--')) fail(`${usage} (missing ${label})`);
+    if (!SCOPE_RE.test(`domain:${n}`)) fail(`refusing: ${label} '${n}' is not a domain name ('domain:${n}' does not match ${SCOPE_RE}). Nothing was written.`);
+  }
+  if (oldName === newName) fail(`refusing: <old> and <new> are both '${oldName}'. Nothing was written.`);
+
+  // 1. Resolve from every registered project's current config.
+  const regPath = registryPath();
+  if (!existsSync(regPath)) fail(`refusing: there is no project registry at '${POSIX(regPath)}', so the projects mounting '${oldName}' cannot be found. Nothing was written.`);
+  const registry = new ProjectRegistry(regPath);
+  let rows;
+  try {
+    rows = registry.list();
+  } finally {
+    registry.close();
+  }
+  const projects = [];
+  const unresolved = [];
+  const absent = [];
+  for (const row of rows) {
+    if (!existsSync(row.repo_path)) {
+      absent.push(row);
+      continue;
+    }
+    const configPath = join(row.repo_path, '.sterling', 'config.json');
+    try {
+      const config = parseConfig(JSON.parse(readFileSync(configPath, 'utf8')));
+      const mounts = resolveDomainMounts(config);
+      projects.push({
+        row,
+        dir: row.repo_path,
+        configPath,
+        config,
+        oldMount: mounts.find((m) => m.name === oldName) ?? null,
+        newMount: mounts.find((m) => m.name === newName) ?? null,
+        newPathKey: Object.hasOwn(config.domain_paths, newName),
+      });
+    } catch (e) {
+      unresolved.push({ row, error: e.message });
+    }
+  }
+  const mounting = projects.filter((p) => p.oldMount);
+  const oldPath = mounting.length ? POSIX(mounting[0].oldMount.dbPath) : POSIX(join(homedir(), '.sterling', 'domains', oldName, 'sterling.db'));
+  const elsewhere = mounting.filter((p) => !sameFile(POSIX(p.oldMount.dbPath), oldPath));
+  if (elsewhere.length) {
+    fail(
+      `refusing: the projects mounting '${oldName}' do not agree on its store: ${mounting.map((p) => `${p.row.name} → ${POSIX(p.oldMount.dbPath)}`).join('; ')}. ` +
+        'A rename renames one physical store; repair the configs first. Nothing was written.'
+    );
+  }
+  if (!existsSync(oldPath)) fail(`refusing: domain '${oldName}' has no store at '${oldPath}'. Nothing was written.`);
+  const onPostgres = mounting.filter((p) => p.config.storage === 'postgres');
+  if (onPostgres.length) {
+    fail(`refusing: ${onPostgres.map((p) => `${p.row.name} (${p.dir})`).join(', ')} mount${onPostgres.length === 1 ? 's' : ''} '${oldName}' on Postgres storage; a domain rename is SQLite only. Nothing was written.`);
+  }
+  if (basename(oldPath) !== 'sterling.db' || basename(dirname(oldPath)) !== oldName) {
+    fail(`refusing: the store for '${oldName}' is at '${oldPath}', not at <root>/${oldName}/sterling.db, so there is no sibling path to give '${newName}'. Nothing was written.`);
+  }
+  const newPath = POSIX(join(dirname(dirname(oldPath)), newName, 'sterling.db'));
+
+  const probe = probeSchemaVersion(oldPath);
+  if (probe.error) fail(`refusing: ${probe.error}`);
+  if (probe.version !== SUPPORTED_SCHEMA_VERSION) {
+    fail(`refusing: the store for '${oldName}' ('${oldPath}') is at schema version ${probe.version}; a rename copies only a v${SUPPORTED_SCHEMA_VERSION} store. Nothing was written.`);
+  }
+  const survey = renameSurveyOld(oldPath, oldName);
+  if (survey.missing.length) fail(`refusing: '${oldPath}' is not a complete Sterling store (no ${survey.missing.join(', ')}). Nothing was written.`);
+  if (survey.foreign.length) {
+    fail(
+      `refusing: ${survey.foreign.length} record(s) in '${oldPath}' are not scoped 'domain:${oldName}': ` +
+        `${survey.foreign.slice(0, 10).map((f) => `${f.id} ${f.where}=${f.scope}`).join('; ')}. A rename relabels only domain:${oldName} records. Nothing was written.`
+    );
+  }
+
+  // Fresh, or resuming the rename a crash left?
+  let fence = null;
+  if (survey.fenceValue !== undefined) {
+    try {
+      fence = parseStoreFence(survey.fenceValue);
+    } catch (e) {
+      fail(`refusing: '${oldPath}' carries a write fence that cannot be read (${e.message}). Nothing was written.`);
+    }
+    if (fence.kind !== 'rename') fail(`refusing: '${oldPath}' is fenced by store move ${fence.move_id} (to ${fence.to}); it is not this machine's live copy of '${oldName}'. Nothing was written.`);
+    if (fence.from_domain !== oldName || fence.to_domain !== newName) {
+      fail(`refusing: '${oldPath}' was already renamed from '${fence.from_domain}' to '${fence.to_domain}' (operation ${fence.operation_id}); it cannot be renamed to '${newName}'. Nothing was written.`);
+    }
+    if (!sameFile(fence.to_path, newPath) && fence.to_path !== newPath) {
+      fail(`refusing: the rename fence on '${oldPath}' names '${fence.to_path}' as the new store, but '${newName}' resolves to '${newPath}' now. Nothing was written.`);
+    }
+  }
+  const resuming = fence !== null;
+  const published = existsSync(newPath);
+  if (published) {
+    const r = resuming ? readRenameReceipt(newPath) : null;
+    if (!resuming || r.error || !r.receipt || r.receipt.operation_id !== fence.operation_id) {
+      fail(
+        `refusing: domain '${newName}' already has a store at '${newPath}'` +
+          (resuming ? ` that does not carry the receipt of operation ${fence.operation_id}${r.error ? ` (${r.error})` : ''}` : '') +
+          '. A rename never merges into or replaces an existing domain. Nothing was written.'
+      );
+    }
+  }
+  const mountsNew = projects.filter((p) => p.newMount || p.newPathKey);
+  const wrongNew = mountsNew.filter((p) => !resuming || !p.newMount || !sameFile(POSIX(p.newMount.dbPath), newPath));
+  if (wrongNew.length) {
+    fail(
+      `refusing: domain '${newName}' is already mounted or named by ${wrongNew.map((p) => `${p.row.name} (${p.dir})`).join(', ')}` +
+        `${resuming ? `, and not as the copy this rename published at '${newPath}'` : ''}. A rename never merges into an existing domain. Nothing was written.`
+    );
+  }
+  const both = mounting.filter((p) => p.newMount);
+  if (both.length) fail(`refusing: ${both.map((p) => p.row.name).join(', ')} mount both '${oldName}' and '${newName}'. Nothing was written.`);
+
+  // The plan, printed in a dry run and before an --apply acts.
+  const agents = mounting.flatMap((p) => agentsMdLines(p.dir, oldName, newName));
+  console.log(`rename domain '${oldName}' → '${newName}'${apply ? ' --apply' : ' (dry run)'}`);
+  console.log(`  old store: ${oldPath} (${survey.records} record(s), schema v${probe.version})${survey.description ? `; description: ${survey.description}` : '; no description'}`);
+  console.log(`  new store: ${newPath}`);
+  if (resuming) console.log(`  resuming operation ${fence.operation_id} (old store fenced at ${fence.fenced_at}; renamed copy ${published ? 'published' : 'not published yet'})`);
+  console.log(`  projects mounting '${oldName}' (${mounting.length}):`);
+  for (const p of mounting) {
+    const raw = JSON.parse(readFileSync(p.configPath, 'utf8'));
+    const next = renamedConfig(raw, oldName, newName, newPath);
+    if (!next) {
+      console.log(`    - ${p.row.name} (${p.dir}): its config changed while this ran and no longer lists '${oldName}' in stack_tags`);
+      continue;
+    }
+    const pathNote = raw.domain_paths && Object.hasOwn(raw.domain_paths, oldName) ? `; domain_paths '${oldName}' → '${newName}': ${newPath}` : '';
+    console.log(`    - ${p.row.name} (${p.dir}): stack_tags [${raw.stack_tags.join(', ')}] → [${next.stack_tags.join(', ')}]${pathNote}`);
+  }
+  if (resuming && mountsNew.length) console.log(`  already renamed: ${mountsNew.map((p) => p.row.name).join(', ')}`);
+  for (const u of unresolved) console.log(`  UNRESOLVED (config unreadable, not rewritten): ${u.row.name} (${u.row.repo_path}): ${u.error}`);
+  for (const a of absent) console.log(`  absent (registered path does not exist, not rewritten): ${a.name} (${a.repo_path})`);
+  if (agents.length) {
+    console.log(`  AGENTS.md lines to change by hand (this verb never edits another repo's tracked files):`);
+    for (const l of agents) console.log(`    ${l.path}:${l.line}\n      - ${l.before}\n      + ${l.after}`);
+  }
+  if (!apply) {
+    console.log('Dry run: nothing was written. Rerun with --apply to fence the old store, publish the renamed copy and rewrite the configs above.');
+    return;
+  }
+
+  // 2. Fence.
+  if (!resuming) {
+    fence = { kind: 'rename', operation_id: randomUUID(), from_domain: oldName, to_domain: newName, to_path: newPath, fenced_at: new Date().toISOString() };
+    const err = writeRenameFence(oldPath, fence, oldName);
+    if (err) fail(`refusing: ${err}. The fence was not written and nothing else was changed.`);
+    console.log(`  fenced the old store (operation ${fence.operation_id}): writes to it are refused from now on`);
+  }
+  renameCrashPoint('after-fence');
+
+  // 3. Copy, rewrite, validate, publish.
+  if (!existsSync(newPath)) {
+    const n = renameCopy(oldPath, newPath, oldName, newName, fence.operation_id);
+    console.log(`  published the renamed copy at ${newPath}: ${n} record(s) rescoped to domain:${newName}; ids, links, versions, aliases and relations unchanged`);
+  }
+  renameCrashPoint('after-publish');
+
+  // 4. Configs and registry rows, only from a matching receipt.
+  const r = readRenameReceipt(newPath);
+  if (r.error || !r.receipt || r.receipt.operation_id !== fence.operation_id || r.receipt.from_domain !== oldName || r.receipt.to_domain !== newName) {
+    fail(`refusing to rewrite any config: the store at '${newPath}' does not carry the receipt of operation ${fence.operation_id}${r.error ? ` (${r.error})` : ''}. The old store stays fenced.`);
+  }
+  const done = [];
+  const failed = [];
+  for (const p of [...mounting, ...mountsNew]) {
+    try {
+      const res = rewriteConfigCas(p.dir, p.configPath, oldName, newName, newPath);
+      if (res.changed) done.push(`${p.row.name}: config rewritten`);
+      const tags = parseConfig(res.raw).stack_tags;
+      if (JSON.stringify(p.row.stack_tags) !== JSON.stringify(tags)) {
+        const reg = new ProjectRegistry(regPath);
+        try {
+          reg.updateStackTags(p.row.repo_path, tags);
+        } finally {
+          reg.close();
+        }
+        done.push(`${p.row.name}: registry row stack_tags → [${tags.join(', ')}]`);
+      }
+    } catch (e) {
+      failed.push(`${p.row.name} (${p.configPath}): ${e.message}`);
+    }
+  }
+  for (const line of done) console.log(`  ${line}`);
+  if (failed.length) {
+    fail(
+      `the renamed copy is published, but ${failed.length} project config(s) could not be rewritten:\n  ${failed.join('\n  ')}\n` +
+        `Fix them and rerun 'rename ${oldName} ${newName} --apply'; it resumes from the receipt and rewrites only what is left.`
+    );
+  }
+  console.log(
+    `RENAMED '${oldName}' to '${newName}' (operation ${fence.operation_id}). The old store stays at '${oldPath}', fenced, as the backup: ` +
+      `a session that mounts it is refused and told the new name, and a running session's writes to it are refused. ` +
+      'Restart the sessions of the projects above so they mount the new store.'
+  );
+}
+
 /**
  * Is this file being RUN, or merely IMPORTED? Until readOnlyProbe was exported
  * (see its comment) the question could not arise — the module was CLI-only, so
@@ -3265,7 +3827,8 @@ if (invokedAsCli()) {
     else if (mode === 'adopt') adopt();
     else if (mode === 'show') show();
     else if (mode === 'scope-audit') scopeAudit();
-    else fail(`usage: domain-doctor.mjs scan|sweep|restore|migrate|adopt|show|scope-audit … (got '${mode ?? ''}')`);
+    else if (mode === 'rename') rename();
+    else fail(`usage: domain-doctor.mjs scan|sweep|restore|migrate|adopt|show|scope-audit|rename … (got '${mode ?? ''}')`);
   } catch (e) {
     fail(`'${mode}' failed unexpectedly and was abandoned where it stood: ${e?.message ?? e}`);
   }

@@ -5789,6 +5789,62 @@ var init_broker = __esm({
   }
 });
 
+// packages/schemas/dist/store-fence.js
+function parseStoreFence(value) {
+  let raw;
+  try {
+    raw = JSON.parse(value);
+  } catch {
+    throw new Error(`store_meta '${STORE_FENCE_KEY}' is not JSON (${value.slice(0, 80)})`);
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`store_meta '${STORE_FENCE_KEY}' is not an object (${value.slice(0, 80)})`);
+  }
+  const kind = raw.kind;
+  if (kind === "rename") {
+    const r = renameFenceSchema.safeParse(raw);
+    if (!r.success)
+      throw new Error(`store_meta '${STORE_FENCE_KEY}' is a malformed rename fence: ${r.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}`);
+    return r.data;
+  }
+  if (kind === void 0 || kind === "move") {
+    const r = moveFenceSchema.safeParse(raw);
+    if (!r.success)
+      throw new Error(`store_meta '${STORE_FENCE_KEY}' is a malformed move fence: ${r.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}`);
+    const fence = { ...r.data, kind: "move" };
+    return fence;
+  }
+  throw new Error(`store_meta '${STORE_FENCE_KEY}' has an unknown fence kind ${JSON.stringify(kind)}`);
+}
+var STORE_FENCE_KEY, moveFenceSchema, DOMAIN_NAME_RE, renameFenceSchema;
+var init_store_fence = __esm({
+  "packages/schemas/dist/store-fence.js"() {
+    "use strict";
+    init_zod();
+    STORE_FENCE_KEY = "move_fence";
+    moveFenceSchema = external_exports.object({
+      kind: external_exports.literal("move").optional(),
+      move_id: external_exports.string(),
+      /** The counterpart the store moved to: 'postgres:<schema>' or 'sqlite:<absolute path>'. */
+      to: external_exports.string(),
+      fenced_at: external_exports.string().optional(),
+      /** The manifest digest of the content at fencing; null until the snapshot is taken. */
+      manifest_digest: external_exports.string().nullable().optional()
+    }).passthrough();
+    DOMAIN_NAME_RE = /^[a-z0-9_-]+$/;
+    renameFenceSchema = external_exports.object({
+      kind: external_exports.literal("rename"),
+      /** The rename's operation id; the copy's receipt carries the same id. */
+      operation_id: external_exports.string().min(1),
+      from_domain: external_exports.string().regex(DOMAIN_NAME_RE),
+      to_domain: external_exports.string().regex(DOMAIN_NAME_RE),
+      /** Absolute POSIX path of the store published under the new name. */
+      to_path: external_exports.string().min(1),
+      fenced_at: external_exports.string()
+    }).strict();
+  }
+});
+
 // packages/schemas/dist/index.js
 var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
@@ -5803,6 +5859,7 @@ var init_dist = __esm({
     init_staleness();
     init_project();
     init_broker();
+    init_store_fence();
   }
 });
 
@@ -6971,6 +7028,18 @@ function isStoreFailure(e) {
 function isPgStoreFailure(e) {
   return e instanceof PgStoreMissingError || e instanceof PgQueryError || e instanceof PgLockTimeoutError || e instanceof PgStatementTimeoutError || e instanceof PgNulCharacterError || e instanceof PgBridgeClosedError || e instanceof PgBridgeTimeoutError || e instanceof PgWorkerDiedError;
 }
+function renameFenceOf(store) {
+  const value = store.getMeta(STORE_FENCE_KEY);
+  if (value === void 0)
+    return null;
+  let fence;
+  try {
+    fence = parseStoreFence(value);
+  } catch {
+    return null;
+  }
+  return fence.kind === "rename" ? fence : null;
+}
 function missingDomainWarning(m) {
   return `sterling: domain '${m.name}' is configured but has no store at '${m.dbPath}'; it is NOT mounted, so its knowledge is not read and writes to scope domain:${m.name} are refused. Create it with createDomain (a description is required), or run init to set it up.`;
 }
@@ -7001,7 +7070,7 @@ function createDomain(name4, description, dbPath2) {
   }
   store.close();
 }
-var PROBE_ID, DROPPED_AFTER_MOUNT_NOTE, DROPPED_AT_MOUNT_NOTE, errorText, DomainUnavailableError, DOMAIN_DESCRIPTION_KEY, MixedScoreScaleError, DomainNotCreatedError, MountedStores;
+var PROBE_ID, DROPPED_AFTER_MOUNT_NOTE, DROPPED_AT_MOUNT_NOTE, errorText, DomainUnavailableError, DOMAIN_DESCRIPTION_KEY, MixedScoreScaleError, DomainNotCreatedError, DomainRenamedError, RENAMED_AT_MOUNT_NOTE, MountedStores;
 var init_mounted = __esm({
   "packages/store/dist/mounted.js"() {
     "use strict";
@@ -7043,6 +7112,21 @@ var init_mounted = __esm({
         this.db_path = dbPath2;
       }
     };
+    DomainRenamedError = class extends Error {
+      domain;
+      db_path;
+      renamed_to;
+      renamed_path;
+      constructor(domain, dbPath2, fence) {
+        super(`domain '${domain}' was renamed to '${fence.to_domain}' on ${fence.fenced_at} (operation ${fence.operation_id}); the store at '${dbPath2}' is the fenced old copy, so it is NOT mounted and its knowledge is not read. The domain now lives at '${fence.to_path}'. Change '${domain}' to '${fence.to_domain}' in stack_tags (and in domain_paths, if it names '${domain}') in this project's .sterling/config.json, then restart the session.`);
+        this.name = "DomainRenamedError";
+        this.domain = domain;
+        this.db_path = dbPath2;
+        this.renamed_to = fence.to_domain;
+        this.renamed_path = fence.to_path;
+      }
+    };
+    RENAMED_AT_MOUNT_NOTE = "refused at mount because the domain was renamed; update stack_tags and restart the session";
     MountedStores = class {
       /** The project store — also the home of the board/maintenance queue and
        *  other project-local transient state (the run/handoff protocol this
@@ -7133,6 +7217,7 @@ var init_mounted = __esm({
               }
               this.domains.set(m.name, store);
               this.probeDomain(m.name, store);
+              this.refuseRenamed(m.name, store);
             }
           } catch (e) {
             this.close();
@@ -7163,11 +7248,34 @@ var init_mounted = __esm({
             }
             this.domains.set(m.name, store);
             this.probeDomain(m.name, store);
+            this.refuseRenamed(m.name, store);
           }
         } catch (e) {
           this.close();
           throw e;
         }
+      }
+      /** Mount-time rename check, after the probe: a store a rename fenced is
+       *  closed and dropped with a DomainRenamedError naming the new domain, so it
+       *  is neither read nor written and every read discloses it on
+       *  unreadableDomains. A domain the probe already dropped is left as it is. */
+      refuseRenamed(name4, store) {
+        if (this.isUnreadable(name4))
+          return;
+        let fence;
+        try {
+          fence = renameFenceOf(store);
+        } catch (e) {
+          if (!this.isStoreFailure(e))
+            throw e;
+          this.dropDomain(name4, e, true);
+          return;
+        }
+        if (!fence)
+          return;
+        this.domains.delete(name4);
+        store.close();
+        this.dropDomain(name4, new DomainRenamedError(name4, this.domainPaths.get(name4) ?? "", fence), true, RENAMED_AT_MOUNT_NOTE);
       }
       /** Mount-time read check. A pre-v2 store opens and answers some reads (get,
        *  query over pre-v2 bodies) but not others (inboundSupersedes: it has no
@@ -7190,7 +7298,7 @@ var init_mounted = __esm({
        *  is safe to leave because a dropped domain cannot be written either
        *  (assertWritable): a session never writes into a store it cannot read back,
        *  and the slug checks still ask it (fanEveryDomain). */
-      dropDomain(name4, e, atMount = false) {
+      dropDomain(name4, e, atMount = false, note) {
         if (this.work)
           throw new DomainUnavailableError(name4, this.domainPaths.get(name4) ?? "", e);
         if (this.isUnreadable(name4))
@@ -7199,7 +7307,7 @@ var init_mounted = __esm({
           name: name4,
           dbPath: this.domainPaths.get(name4) ?? "",
           error: errorText(e),
-          note: atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE
+          note: note ?? (atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE)
         });
       }
       /** The failures that drop a domain in hobby mode and fail the call in work
@@ -8713,6 +8821,7 @@ __export(dist_exports, {
   DOMAIN_DESCRIPTION_KEY: () => DOMAIN_DESCRIPTION_KEY,
   DOMAIN_FIT_MIN_TERMS: () => DOMAIN_FIT_MIN_TERMS,
   DomainNotCreatedError: () => DomainNotCreatedError,
+  DomainRenamedError: () => DomainRenamedError,
   GENERIC_DEV_TERMS: () => GENERIC_DEV_TERMS,
   JournalDemotionRefusedError: () => JournalDemotionRefusedError,
   MAX_RANK_TERMS: () => MAX_RANK_TERMS,
@@ -9094,10 +9203,26 @@ var init_dist2 = __esm({
     };
     StoreMovedError = class extends Error {
       db_path;
-      constructor(db_path) {
-        super(`store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`);
+      /** The new domain name when a rename fenced this store, else null. */
+      renamed_to;
+      constructor(db_path, fence) {
+        let renamedTo = null;
+        let message = `store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`;
+        if (fence !== void 0) {
+          try {
+            const f = parseStoreFence(fence);
+            if (f.kind === "rename") {
+              renamedTo = f.to_domain;
+              message = `store '${db_path}' was renamed: domain '${f.from_domain}' is now '${f.to_domain}' (store at '${f.to_path}'), so writes to this old store are refused; nothing was written. Change '${f.from_domain}' to '${f.to_domain}' in stack_tags (and domain_paths) of .sterling/config.json, then restart the session.`;
+            }
+          } catch (e) {
+            message = `store '${db_path}' carries a write fence that could not be read (${e.message}), so writes to it are refused; nothing was written.`;
+          }
+        }
+        super(message);
         this.db_path = db_path;
         this.name = "StoreMovedError";
+        this.renamed_to = renamedTo;
       }
     };
     SQLITE_BUSY_EXTENDED = {
@@ -11252,8 +11377,9 @@ var init_dist2 = __esm({
         this.txDepth++;
         try {
           this.assertLiveSchemaVersion("transaction");
-          if (this.db.prepare("SELECT 1 FROM store_meta WHERE key = 'move_fence'").get())
-            throw new StoreMovedError(this.dbPath);
+          const fence = this.db.prepare("SELECT value FROM store_meta WHERE key = ?").get(STORE_FENCE_KEY);
+          if (fence)
+            throw new StoreMovedError(this.dbPath, fence.value);
           fn();
           this.db.commit();
         } catch (e) {

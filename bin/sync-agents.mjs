@@ -5405,6 +5405,28 @@ var brokerResultSchema = external_exports.union([
   external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(false), executed: external_exports.boolean(), error: brokerErrorSchema })
 ]);
 
+// packages/schemas/dist/store-fence.js
+var moveFenceSchema = external_exports.object({
+  kind: external_exports.literal("move").optional(),
+  move_id: external_exports.string(),
+  /** The counterpart the store moved to: 'postgres:<schema>' or 'sqlite:<absolute path>'. */
+  to: external_exports.string(),
+  fenced_at: external_exports.string().optional(),
+  /** The manifest digest of the content at fencing; null until the snapshot is taken. */
+  manifest_digest: external_exports.string().nullable().optional()
+}).passthrough();
+var DOMAIN_NAME_RE = /^[a-z0-9_-]+$/;
+var renameFenceSchema = external_exports.object({
+  kind: external_exports.literal("rename"),
+  /** The rename's operation id; the copy's receipt carries the same id. */
+  operation_id: external_exports.string().min(1),
+  from_domain: external_exports.string().regex(DOMAIN_NAME_RE),
+  to_domain: external_exports.string().regex(DOMAIN_NAME_RE),
+  /** Absolute POSIX path of the store published under the new name. */
+  to_path: external_exports.string().min(1),
+  fenced_at: external_exports.string()
+}).strict();
+
 // scripts/lib/agent-distribution.mjs
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync as readFileSync2, writeFileSync, readdirSync, existsSync, mkdirSync, statSync, lstatSync as lstatSync2, unlinkSync, renameSync, linkSync } from "node:fs";
