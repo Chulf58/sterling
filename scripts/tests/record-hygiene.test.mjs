@@ -10,6 +10,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MODELS_CATALOG_LOCATION } from '@sterling/store';
 import { auditRecords, pathLive, FILLER_WORDS } from '../lib/record-hygiene.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -56,6 +57,22 @@ test('dead article files[] and dead reference location (kind doc only) are repor
   assert.deepEqual(kinds(r), ['dead_path', 'dead_path']);
   assert.ok(r.findings.some((f) => /src\/old\.mjs/.test(f.detail)));
   assert.ok(r.findings.some((f) => /docs\/gone\.md/.test(f.detail)));
+});
+
+// GitHub issue #98: bootstrapCatalogIfAbsent seeds the 'Models catalog' with the
+// synthetic location '.sterling/models-catalog' (content lives in its `catalog`
+// field), which the lint read as a repo path absent at HEAD.
+test('#98 the seeded Models catalog is neither dead_path nor no_file_paths; a catalog on a missing real doc still is dead_path', () => {
+  const seeded = base('reference_material', {
+    title: 'Models catalog', kind: 'doc', location: MODELS_CATALOG_LOCATION, summary: 's',
+    catalog: { entries: [{ id: 'm', label: 'm', tier: 'unknown', status: 'active' }] },
+  });
+  assert.deepEqual(auditRecords([seeded], { headFiles: HEAD_FILES }).findings, []);
+  const real = base('reference_material', {
+    title: 'Catalog doc', kind: 'doc', location: 'docs/gone-catalog.md', summary: 's',
+    catalog: { entries: [{ id: 'm', label: 'm', tier: 'unknown', status: 'active' }] },
+  });
+  assert.deepEqual(kinds(auditRecords([real], { headFiles: HEAD_FILES })), ['dead_path']);
 });
 
 test('a type that carries file paths but has none is reported; reference url is exempt', () => {

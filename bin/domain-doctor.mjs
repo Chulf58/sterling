@@ -10659,6 +10659,15 @@ function bodyWithScope(body, scope) {
   parsed.scope = scope;
   return JSON.stringify(parsed);
 }
+function retaggedList(tags, oldName, newName) {
+  return [...new Set(tags.map((t) => t === oldName ? newName : t))];
+}
+function bodyWithRetag(body, oldName, newName) {
+  const parsed = JSON.parse(body);
+  if (!Array.isArray(parsed.stack_tags)) return null;
+  parsed.stack_tags = retaggedList(parsed.stack_tags, oldName, newName);
+  return JSON.stringify(parsed);
+}
 function foreignScopes(db, expected) {
   const found = [];
   for (const r of db.prepare("SELECT id, scope, body FROM records").all()) {
@@ -10753,7 +10762,7 @@ function dumpTables(dbPath) {
   });
 }
 var rowLine = (row) => JSON.stringify(row, (_k, v) => v instanceof Uint8Array ? `hex:${Buffer.from(v).toString("hex")}` : v);
-function validateRenamedCopy(oldPath, copyPath, oldName, newName, operationId) {
+function validateRenamedCopy(oldPath, copyPath, oldName, newName, operationId, retag = false) {
   const before = dumpTables(oldPath);
   const after = dumpTables(copyPath);
   const problems = [];
@@ -10763,6 +10772,7 @@ function validateRenamedCopy(oldPath, copyPath, oldName, newName, operationId) {
     const body = JSON.parse(row.body);
     if (Object.hasOwn(body, "scope") && body.scope !== scope) problems.push(`records ${row.id}: ${side} body scope is '${body.scope}', expected '${scope}'`);
     const { scope: _bodyScope, ...rest } = body;
+    if (retag && side === "old" && Array.isArray(rest.stack_tags)) rest.stack_tags = retaggedList(rest.stack_tags, oldName, newName);
     return rowLine({ ...row, scope: null, body: rest, body_has_scope: Object.hasOwn(body, "scope") });
   };
   let receipt = null;
@@ -10779,6 +10789,10 @@ function validateRenamedCopy(oldPath, copyPath, oldName, newName, operationId) {
       aLines = a.map((r) => normalizeRecord(r, `domain:${oldName}`, "old"));
       bLines = b.map((r) => normalizeRecord(r, `domain:${newName}`, "copy"));
     } else {
+      if (name === "record_stack_tags" && retag) {
+        const seen = /* @__PURE__ */ new Set();
+        a = a.map((r) => ({ ...r, tag: r.tag === oldName ? newName : r.tag })).filter((r) => !seen.has(`${r.record_id}\0${r.tag}`) && seen.add(`${r.record_id}\0${r.tag}`));
+      }
       if (name === "store_meta") {
         a = a.filter((r2) => r2.key !== STORE_FENCE_KEY);
         const r = b.find((x) => x.key === RENAME_RECEIPT_KEY);
@@ -10803,7 +10817,7 @@ function validateRenamedCopy(oldPath, copyPath, oldName, newName, operationId) {
   }
   return problems;
 }
-function renameCopy(oldPath, newPath, oldName, newName, operationId) {
+function renameCopy(oldPath, newPath, oldName, newName, operationId, retag = false) {
   const destDir = dirname6(newPath);
   mkdirSync4(destDir, { recursive: true });
   const temp = POSIX(join10(destDir, `.rename-${operationId}-${process.pid}-${randomUUID2()}.tmp`));
@@ -10820,8 +10834,14 @@ function renameCopy(oldPath, newPath, oldName, newName, operationId) {
       if (foreign.length === 0) {
         const update = db.prepare("UPDATE records SET scope = ?, body = ? WHERE id = ?");
         for (const r of db.prepare("SELECT id, body FROM records").all()) {
-          update.run(`domain:${newName}`, bodyWithScope(r.body, `domain:${newName}`) ?? r.body, r.id);
+          let body = bodyWithScope(r.body, `domain:${newName}`) ?? r.body;
+          if (retag) body = bodyWithRetag(body, oldName, newName) ?? body;
+          update.run(`domain:${newName}`, body, r.id);
           rewritten++;
+        }
+        if (retag) {
+          db.prepare("DELETE FROM record_stack_tags WHERE tag = ? AND record_id IN (SELECT record_id FROM record_stack_tags WHERE tag = ?)").run(oldName, newName);
+          db.prepare("UPDATE record_stack_tags SET tag = ? WHERE tag = ?").run(newName, oldName);
         }
         const receipt = {
           operation_id: operationId,
@@ -10830,6 +10850,7 @@ function renameCopy(oldPath, newPath, oldName, newName, operationId) {
           from_path: POSIX(oldPath),
           to_path: POSIX(newPath),
           records: rewritten,
+          retagged: retag,
           completed_at: (/* @__PURE__ */ new Date()).toISOString()
         };
         db.prepare("INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?)").run(RENAME_RECEIPT_KEY, JSON.stringify(receipt), receipt.completed_at);
@@ -10849,10 +10870,10 @@ function renameCopy(oldPath, newPath, oldName, newName, operationId) {
       `refusing: the copy holds ${foreign.length} record(s) whose scope is not 'domain:${oldName}' (${foreign.slice(0, 5).map((f) => `${f.id} ${f.where}=${f.scope}`).join("; ")}). Nothing was published at '${newPath}' and no config was changed. The old store keeps its rename fence; rerun with --apply after the scopes are repaired.`
     );
   }
-  const problems = validateRenamedCopy(oldPath, temp, oldName, newName, operationId);
+  const problems = validateRenamedCopy(oldPath, temp, oldName, newName, operationId, retag);
   if (problems.length) {
     fail(
-      `refusing: the renamed copy does not match the old store apart from the scope rewrite:
+      `refusing: the renamed copy does not match the old store apart from the scope rewrite${retag ? " and the --retag rewrite" : ""}:
   ${problems.slice(0, 20).join("\n  ")}
 Nothing was published at '${newPath}' and no config was changed. The old store keeps its rename fence.`
     );
@@ -10899,10 +10920,12 @@ function rename({ crashAt = null } = {}) {
   const oldName = process.argv[3];
   const newName = process.argv[4];
   const apply = hasFlag2("apply");
-  const usage = "usage: domain-doctor.mjs rename <old> <new> [--apply]";
+  const retag = hasFlag2("retag");
+  const usage = "usage: domain-doctor.mjs rename <old> <new> [--apply] [--retag]";
   if (process.argv.slice(3).includes("--help")) {
     console.log(`${usage}
-Renames a whole domain on this machine. Without --apply it prints the plan and writes nothing.`);
+Renames a whole domain on this machine. Without --apply it prints the plan and writes nothing.
+--retag also rewrites <old> to <new> in the stack_tags of the records in the renamed domain store. Records in project stores are not touched.`);
     return;
   }
   for (const [label, n] of [["<old>", oldName], ["<new>", newName]]) {
@@ -11019,6 +11042,11 @@ Fix or unregister them, then rerun. Nothing was written.`
   const published = existsSync3(newPath);
   if (published) {
     const r2 = resuming ? readRenameReceipt(newPath) : null;
+    if (resuming && !r2.error && r2.receipt && r2.receipt.operation_id === fence.operation_id && r2.receipt.retagged === true !== retag) {
+      fail(
+        `refusing: the copy this rename already published at '${newPath}' was made ${r2.receipt.retagged === true ? "with" : "without"} --retag, so rerun with${r2.receipt.retagged === true ? "" : "out"} --retag. Nothing was written.`
+      );
+    }
     if (!resuming || r2.error || !r2.receipt || r2.receipt.operation_id !== fence.operation_id) {
       fail(
         `refusing: domain '${newName}' already has a store at '${newPath}'` + (resuming ? ` that does not carry the receipt of operation ${fence.operation_id}${r2.error ? ` (${r2.error})` : ""}` : "") + ". A rename never merges into or replaces an existing domain. Nothing was written."
@@ -11050,6 +11078,9 @@ Fix or unregister them, then rerun. Nothing was written.`
     const pathNote = raw.domain_paths && Object.hasOwn(raw.domain_paths, oldName) ? `; domain_paths '${oldName}' \u2192 '${newName}': ${newPath}` : "";
     console.log(`    - ${p.row.name} (${p.dir}): stack_tags [${raw.stack_tags.join(", ")}] \u2192 [${next.stack_tags.join(", ")}]${pathNote}`);
   }
+  console.log(
+    retag ? `  record stack_tags: '${oldName}' \u2192 '${newName}' in the records of the renamed domain store (--retag); version history keeps the old tag. Records in project stores keep '${oldName}': retag those through the MCP tools (knowledge_update).` : `  record stack_tags keep '${oldName}' (default). --retag rewrites them to '${newName}' in the renamed domain store's records; records in project stores must be retagged through the MCP tools (knowledge_update).`
+  );
   if (resuming && mountsNew.length) console.log(`  already renamed: ${mountsNew.map((p) => p.row.name).join(", ")}`);
   for (const a of absent) console.log(`  skipped (${a.why}, not rewritten): ${a.row.name} (${a.row.repo_path})`);
   if (agents.length) {
@@ -11059,7 +11090,7 @@ Fix or unregister them, then rerun. Nothing was written.`
       + ${l.after}`);
   }
   if (!apply) {
-    console.log("Dry run: nothing was written. Rerun with --apply to fence the old store, publish the renamed copy and rewrite the configs above.");
+    console.log(`Dry run: nothing was written. Rerun with --apply${retag ? " --retag" : ""} to fence the old store, publish the renamed copy and rewrite the configs above.`);
     return;
   }
   if (!resuming) {
@@ -11070,8 +11101,8 @@ Fix or unregister them, then rerun. Nothing was written.`
   }
   renameCrashPoint("after-fence", crashAt);
   if (!existsSync3(newPath)) {
-    const n = renameCopy(oldPath, newPath, oldName, newName, fence.operation_id);
-    console.log(`  published the renamed copy at ${newPath}: ${n} record(s) rescoped to domain:${newName}; ids, links, versions, aliases and relations unchanged`);
+    const n = renameCopy(oldPath, newPath, oldName, newName, fence.operation_id, retag);
+    console.log(`  published the renamed copy at ${newPath}: ${n} record(s) rescoped to domain:${newName}${retag ? ` and retagged '${oldName}' \u2192 '${newName}'` : ""}; ids, links, versions, aliases and relations unchanged`);
   }
   renameCrashPoint("after-publish", crashAt);
   const r = readRenameReceipt(newPath);

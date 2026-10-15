@@ -201,7 +201,7 @@ test('work from a linked worktree: the store and mode come from the main checkou
     assert.equal(git(p.origin, ['rev-parse', 'main']), p.originMainSha, 'origin main did not move');
     assert.equal(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'main did not move');
     assert.equal(git(p.wt, ['branch', '--show-current']), 'feat/sprockets', 'the worktree keeps its branch');
-    const marker = join(p.dir, '.sterling', 'transient', 'pr-loop.json');
+    const marker = join(p.dir, '.sterling', 'transient', 'pr-loops', '7.json'); // one file per PR (GitHub issue #104)
     assert.ok(existsSync(marker), 'the PR review loop duty is armed in the MAIN checkout, where the hooks read it');
     assert.equal(JSON.parse(readFileSync(marker, 'utf8')).pr_number, 7);
     assert.equal(existsSync(join(p.wt, '.sterling')), false, 'nothing is written under the worktree');
@@ -291,4 +291,19 @@ test('linked worktree of a BARE main (no main checkout to read the mode from): r
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+// GitHub issue #101: a conductor read the mode from the worktree (no config, so
+// "a missing key is hobby" per commands/merge.md) and concluded the merge would
+// push the base. The gate reads the main checkout's config and refuses hobby in
+// a worktree (tests above); the command doc must say so next to the hobby
+// default, or the doc keeps steering a reader to the wrong mode.
+test('commands/merge.md: the "missing key is hobby" rule names the linked-worktree exception (mode from the main checkout, hobby refused there)', () => {
+  const doc = readFileSync(join(root, 'commands', 'merge.md'), 'utf8');
+  const para = doc.split('\n').find((l) => l.includes('**Project mode decides the flow**'));
+  assert.ok(para, 'the project-mode paragraph exists');
+  assert.match(para, /a missing key is `hobby`/);
+  assert.match(para, /linked git worktree/, 'the paragraph names the linked worktree case');
+  assert.match(para, /main checkout's `\.sterling\/config\.json`/, 'it says where a worktree run reads its mode');
+  assert.match(para, /never merges into or pushes the base/, 'it says a worktree never pushes the base');
 });

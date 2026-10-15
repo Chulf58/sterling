@@ -11205,12 +11205,13 @@ function pathLive(path, headFiles) {
   for (const f of headFiles) if (f.startsWith(prefix)) return true;
   return false;
 }
+var isSeededCatalog = (rec) => rec.type === "reference_material" && rec.location === MODELS_CATALOG_LOCATION;
 function pathClaims(rec) {
   if (rec.type === "feature_article") return (rec.files ?? []).map((f) => ({ path: f.path, field: "files" }));
-  if (rec.type === "reference_material") return rec.kind === "doc" && rec.location ? [{ path: rec.location, field: "location" }] : [];
+  if (rec.type === "reference_material") return rec.kind === "doc" && rec.location && !isSeededCatalog(rec) ? [{ path: rec.location, field: "location" }] : [];
   return (rec.file_keys ?? []).map((p) => ({ path: p, field: "file_keys" }));
 }
-var carriesPaths = (rec) => !(rec.type === "reference_material" && rec.kind !== "doc");
+var carriesPaths = (rec) => !(rec.type === "reference_material" && (rec.kind !== "doc" || isSeededCatalog(rec)));
 var label = (rec) => rec.slug || rec.title || rec.question || rec.id;
 function auditRecords(records, { headFiles }) {
   const findings = [];

@@ -18544,33 +18544,68 @@ POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart 
 
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { existsSync as existsSync21, mkdirSync as mkdirSync15, readFileSync as readFileSync21, renameSync as renameSync8, writeFileSync as writeFileSync10 } from "node:fs";
+import { existsSync as existsSync21, linkSync, mkdirSync as mkdirSync15, readdirSync as readdirSync8, readFileSync as readFileSync21, renameSync as renameSync8, unlinkSync as unlinkSync4, writeFileSync as writeFileSync10 } from "node:fs";
 import { delimiter, dirname as dirname14, join as join32 } from "node:path";
 function noOriginRemote(cwd) {
   const r = spawnSync5("git", ["remote"], { cwd, encoding: "utf8", timeout: 3e4 });
   return r.status === 0 && !r.stdout.split("\n").map((l) => l.trim()).includes("origin");
 }
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
+var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
 var prLoopPath = (root) => join32(root, PR_LOOP_REL);
-function readPrLoop(root) {
-  const file = prLoopPath(root);
-  if (!existsSync21(file)) return null;
+var prLoopFileRel = (prNumber) => `${PR_LOOPS_DIR_REL}/${prNumber}.json`;
+function parsePrLoopFile(file, rel) {
+  try {
+    return parsePrLoopFileOrThrow(file, rel);
+  } catch (e) {
+    e.rel = rel;
+    throw e;
+  }
+}
+function parsePrLoopFileOrThrow(file, rel) {
   let s2;
   try {
     s2 = JSON.parse(readFileSync21(file, "utf8"));
   } catch (e) {
-    throw new Error(`${PR_LOOP_REL} is not valid JSON (${e.message})`);
+    throw new Error(`${rel} is not valid JSON (${e.message})`);
   }
   const str = (v) => typeof v === "string" && v.length > 0;
   if (!s2 || typeof s2 !== "object" || Array.isArray(s2) || !str(s2.pr_url) || !Number.isInteger(s2.pr_number) || !str(s2.repo) || !str(s2.head_sha) || !str(s2.armed_at)) {
-    throw new Error(`${PR_LOOP_REL} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s2)}`);
+    throw new Error(`${rel} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s2)}`);
   }
   if (s2.status !== "owed" && !PR_LOOP_OUTCOMES.includes(s2.status)) {
-    throw new Error(`${PR_LOOP_REL} has status ${JSON.stringify(s2.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
+    throw new Error(`${rel} has status ${JSON.stringify(s2.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
   }
-  if (s2.status !== "owed" && !str(s2.settled_at)) throw new Error(`${PR_LOOP_REL} is settled '${s2.status}' without settled_at`);
+  if (s2.status !== "owed" && !str(s2.settled_at)) throw new Error(`${rel} is settled '${s2.status}' without settled_at`);
   return s2;
+}
+function readPrLoopEntries(root) {
+  const entries = [];
+  const dir = join32(root, PR_LOOPS_DIR_REL);
+  if (existsSync21(dir)) {
+    for (const name of readdirSync8(dir).sort()) {
+      const m = name.match(/^(\d+)\.json$/);
+      if (!m) continue;
+      const rel = prLoopFileRel(m[1]);
+      const state = parsePrLoopFile(join32(dir, name), rel);
+      if (state.pr_number !== Number(m[1])) throw Object.assign(new Error(`${rel} holds the loop of PR #${state.pr_number}`), { rel });
+      entries.push({ state, file: join32(dir, name), rel });
+    }
+  }
+  if (existsSync21(prLoopPath(root))) {
+    const state = parsePrLoopFile(prLoopPath(root), PR_LOOP_REL);
+    if (!entries.some((e) => e.state.pr_number === state.pr_number)) entries.push({ state, file: prLoopPath(root), rel: PR_LOOP_REL });
+  }
+  return entries;
+}
+function readPrLoops(root) {
+  return readPrLoopEntries(root).map((e) => e.state).sort((a, b) => a.armed_at < b.armed_at ? -1 : a.armed_at > b.armed_at ? 1 : a.pr_number - b.pr_number);
+}
+function prLoopStateExists(root) {
+  if (existsSync21(prLoopPath(root))) return true;
+  const dir = join32(root, PR_LOOPS_DIR_REL);
+  return existsSync21(dir) && readdirSync8(dir).some((n) => /^\d+\.json$/.test(n));
 }
 
 // packages/opencode-plugin/src/operating-state.mjs
@@ -18598,7 +18633,7 @@ init_dist2();
 
 // scripts/hooks/lib/plan-lock.mjs
 import { createHash as createHash5, randomUUID as randomUUID5 } from "node:crypto";
-import { closeSync as closeSync7, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync16, openSync as openSync7, readSync as readSync3, renameSync as renameSync9, unlinkSync as unlinkSync4, writeFileSync as writeFileSync11 } from "node:fs";
+import { closeSync as closeSync7, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync16, openSync as openSync7, readSync as readSync3, renameSync as renameSync9, unlinkSync as unlinkSync5, writeFileSync as writeFileSync11 } from "node:fs";
 import { join as join33 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
@@ -18726,7 +18761,7 @@ function claimMarker(path) {
   }
   const read = readStoreFileBounded(claimed, MARKER_MAX_BYTES);
   try {
-    unlinkSync4(claimed);
+    unlinkSync5(claimed);
   } catch {
   }
   return read.unreadable ? { unreadable: read.unreadable } : read.text;
@@ -18922,7 +18957,7 @@ function remember(map, key, value, cap = SESSION_CACHE_CAP) {
 }
 
 // packages/opencode-plugin/src/dispatch.mjs
-import { mkdirSync as mkdirSync17, readdirSync as readdirSync8, rmSync as rmSync8, statSync as statSync7 } from "node:fs";
+import { mkdirSync as mkdirSync17, readdirSync as readdirSync9, rmSync as rmSync8, statSync as statSync7 } from "node:fs";
 import { basename as basename3, dirname as dirname15, join as join34 } from "node:path";
 function claudeShape(input) {
   const args = input.input && typeof input.input === "object" ? input.input : {};
@@ -19000,7 +19035,7 @@ async function sweepStaleDispatches(root) {
         terminated = sweep.terminated ?? 0;
         rmSync8(registerPath(root), { force: true });
         const registerBasename = basename3(registerPath(root));
-        for (const f of readdirSync8(transientDir)) {
+        for (const f of readdirSync9(transientDir)) {
           if (f.startsWith(`${registerBasename}.tmp-`)) rmSync8(join34(transientDir, f), { force: true });
         }
       },
@@ -19832,37 +19867,36 @@ ${text}`;
 }
 
 // packages/opencode-plugin/src/pr-loop.mjs
-import { join as join39 } from "node:path";
+import { join as join38 } from "node:path";
 
 // scripts/hooks/lib/pr-loop-duty.mjs
-import { existsSync as existsSync24 } from "node:fs";
-import { join as join38 } from "node:path";
 var errMessage = (e) => String(e && e.message || e);
-function evaluatePrLoop(root) {
+var LOOP_FILES = `${PR_LOOPS_DIR_REL}/ or ${PR_LOOP_REL}`;
+function evaluatePrLoops(root) {
   let mode;
   try {
     mode = readProjectMode(root);
   } catch (e) {
-    if (existsSync24(join38(root, PR_LOOP_REL))) {
+    if (prLoopStateExists(root)) {
       return {
-        state: null,
-        degraded: `\u2022 PR review loop: the project mode is unreadable (${errMessage(e)}) \u2014 ${PR_LOOP_REL} exists but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
+        states: [],
+        degraded: `\u2022 PR review loop: the project mode is unreadable (${errMessage(e)}) \u2014 PR loop state exists (${LOOP_FILES}) but its state was not evaluated. Fix config.mode (TUI System tab); if it is a work project, a PR review loop may be owed.`
       };
     }
-    return { state: null, degraded: null };
+    return { states: [], degraded: null };
   }
-  if (mode !== "work") return { state: null, degraded: null };
-  let state;
+  if (mode !== "work") return { states: [], degraded: null };
+  let loops;
   try {
-    state = readPrLoop(root);
+    loops = readPrLoops(root);
   } catch (e) {
-    return { state: null, degraded: `\u2022 PR review loop: ${PR_LOOP_REL} is unreadable (${errMessage(e)}) \u2014 whether a loop is owed is UNKNOWN; rerun /sterling:merge to re-arm it, or delete the file if no PR is open.` };
+    return { states: [], degraded: `\u2022 PR review loop: ${e?.rel ?? LOOP_FILES} is unreadable (${errMessage(e)}) \u2014 whether a loop is owed is UNKNOWN; rerun /sterling:merge to re-arm it, or delete the file if its PR is not open.` };
   }
-  if (!state || state.status !== "owed") return { state: null, degraded: null };
-  return { state, degraded: null };
+  return { states: loops.filter((s2) => s2.status === "owed"), degraded: null };
 }
-function prLoopNext(state, waitScript) {
-  return `run the pr-review-loop skill: wait with node "${waitScript}" ${state.pr_url} (background), disposition each finding, push fixes via /sterling:merge; when the loop ends, settle it: node "${waitScript}" --settle <clean|capped|escalated> --pr ${state.pr_number}. Ending the session mid-loop: board item pointing at the PR + the PR link and next action in the rotation note.`;
+function prLoopNext(state, waitScript, { host = "claude-code" } = {}) {
+  const wait = host === "opencode" ? `wait with node "${waitScript}" ${state.pr_url} (add --request-copilot on the first wait after a push) started with the shell tool's background: true, which notifies you when it ends; never detach it with nohup or &` : `wait with node "${waitScript}" ${state.pr_url} (background)`;
+  return `run the pr-review-loop skill: ${wait}, disposition each finding, push fixes via /sterling:merge; when the loop ends, settle it: node "${waitScript}" --settle <clean|capped|escalated> --pr ${state.pr_number}. Ending the session mid-loop: board item pointing at the PR + the PR link and next action in the rotation note.`;
 }
 var prLoopOwedText = (state, next) => `\u2022 PR review loop owed (work mode): PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? "?").slice(0, 7)}, armed ${state.armed_at}) \u2014 ${next}`;
 var prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number} ${state.pr_url} \u2014 next: pr-review-loop skill, then --settle clean|capped|escalated --pr ${state.pr_number}.`;
@@ -19872,28 +19906,29 @@ function createPrLoopNotice({ now, pluginRoot } = {}) {
   const stamp = now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
   const announced = /* @__PURE__ */ new Set();
   return function notify(root) {
-    const { state, degraded } = evaluatePrLoop(root);
+    const { states, degraded } = evaluatePrLoops(root);
     const at = stamp();
     if (degraded) addNotice(root, degraded, at);
-    if (!state) return;
-    const key = `pr-loop-owed:${state.pr_number}:${state.armed_at}`;
-    if (announced.has(state.armed_at)) {
-      addNotice(root, prLoopReminderText(state), at, key);
-      return;
+    for (const state of states) {
+      const key = `pr-loop-owed:${state.pr_number}:${state.armed_at}`;
+      if (announced.has(key)) {
+        addNotice(root, prLoopReminderText(state), at, key);
+        continue;
+      }
+      announced.add(key);
+      addNotice(root, prLoopOwedText(state, prLoopNext(state, join38(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"), { host: "opencode" })), at, key);
     }
-    announced.add(state.armed_at);
-    addNotice(root, prLoopOwedText(state, prLoopNext(state, join39(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"))), at, key);
   };
 }
 
 // packages/opencode-plugin/src/restore.mjs
 import { statSync as statSync8 } from "node:fs";
-import { join as join41 } from "node:path";
+import { join as join40 } from "node:path";
 
 // scripts/hooks/lib/rotation-restore.mjs
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync25, readFileSync as readFileSync22, rmSync as rmSync9 } from "node:fs";
-import { join as join40 } from "node:path";
+import { existsSync as existsSync24, readFileSync as readFileSync22, rmSync as rmSync9 } from "node:fs";
+import { join as join39 } from "node:path";
 var NOTE_PROSE_MAX = 2e3;
 var LIVE_DISPATCH_MAX = 20;
 var LIVE_TERRITORY_MAX = 40;
@@ -19910,11 +19945,11 @@ var NOTE_FIELD_MAX = {
 };
 var LANE_HANDOFF_MAX = 1e3;
 function rotationNotePath(cwd) {
-  return join40(cwd, ".sterling", "transient", "rotation-note.json");
+  return join39(cwd, ".sterling", "transient", "rotation-note.json");
 }
 function readRotationNote(cwd) {
   const notePath = rotationNotePath(cwd);
-  if (!existsSync25(notePath)) return null;
+  if (!existsSync24(notePath)) return null;
   return JSON.parse(readFileSync22(notePath, "utf8"));
 }
 function consumeRotationNote(cwd) {
@@ -20101,7 +20136,7 @@ function createRotationRestore({ getSession, now, renderRestore = renderRotation
     let planLock = null;
     let planLockMalformed = false;
     try {
-      const read = readLock(join41(root, ".sterling"));
+      const read = readLock(join40(root, ".sterling"));
       planLock = read.lock ?? null;
       planLockMalformed = Boolean(read.malformed);
     } catch (e) {
@@ -20145,16 +20180,16 @@ function createResearchRecorder({ rootOf, fenced, now }) {
 }
 
 // packages/opencode-plugin/src/selection.mjs
-import { join as join43 } from "node:path";
+import { join as join42 } from "node:path";
 
 // scripts/hooks/lib/selection-file.mjs
 import { mkdirSync as mkdirSync18, readFileSync as readFileSync23, renameSync as renameSync10, rmSync as rmSync10, writeFileSync as writeFileSync12 } from "node:fs";
 import { hostname as hostname2 } from "node:os";
-import { join as join42 } from "node:path";
+import { join as join41 } from "node:path";
 import { randomUUID as randomUUID6 } from "node:crypto";
 function selectionFilePath(root, host = hostname2()) {
   const safeHost = String(host).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
-  return join42(root, ".sterling", "transient", `selection.${safeHost}.json`);
+  return join41(root, ".sterling", "transient", `selection.${safeHost}.json`);
 }
 function takeSelectionFile(root) {
   const path = selectionFilePath(root);
@@ -20190,7 +20225,7 @@ function createPromptHandler({ openStore, rootOf, fenced, env = process.env }) {
       if (storeBackend(root) === "routed") {
         selection = takeSelectionFile(root);
       } else {
-        const store = openStore(join43(root, ".sterling", "sterling.db"));
+        const store = openStore(join42(root, ".sterling", "sterling.db"));
         try {
           selection = store.takeSelection();
         } finally {
@@ -20326,15 +20361,15 @@ ${line}`;
 init_dist();
 import { spawnSync as spawnSync9 } from "node:child_process";
 import { randomUUID as randomUUID9 } from "node:crypto";
-import { existsSync as existsSync27, mkdirSync as mkdirSync20, readFileSync as readFileSync26, renameSync as renameSync12, rmSync as rmSync12, writeFileSync as writeFileSync14 } from "node:fs";
-import { dirname as dirname17, join as join46 } from "node:path";
+import { existsSync as existsSync26, mkdirSync as mkdirSync20, readFileSync as readFileSync26, renameSync as renameSync12, rmSync as rmSync12, writeFileSync as writeFileSync14 } from "node:fs";
+import { dirname as dirname17, join as join45 } from "node:path";
 
 // scripts/hooks/lib/session-duties.mjs
 init_dist();
 init_dist2();
 import { randomUUID as randomUUID7 } from "node:crypto";
-import { existsSync as existsSync26, readFileSync as readFileSync24, readdirSync as readdirSync9 } from "node:fs";
-import { join as join44 } from "node:path";
+import { existsSync as existsSync25, readFileSync as readFileSync24, readdirSync as readdirSync10 } from "node:fs";
+import { join as join43 } from "node:path";
 var ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 var isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
 var IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
@@ -20386,7 +20421,7 @@ function openDutyRecords(store, config, { opener = (dbPath) => new SterlingStore
         return domains;
       }
       for (const m of resolveDomainMounts(config)) {
-        if (!existsSync26(m.dbPath)) continue;
+        if (!existsSync25(m.dbPath)) continue;
         try {
           domains.push({ name: m.name, store: opener(m.dbPath) });
         } catch (e) {
@@ -20467,7 +20502,7 @@ function readKnowledgeWrites(root) {
   const errorText3 = (e) => e && typeof e.code === "string" && e.code || "unknown error";
   let names;
   try {
-    names = readdirSync9(join44(root, KNOWLEDGE_WRITES_DIR_REL));
+    names = readdirSync10(join43(root, KNOWLEDGE_WRITES_DIR_REL));
   } catch (e) {
     if (e && e.code === "ENOENT") return { latestAt, unreadable };
     unreadable.push({ file: KNOWLEDGE_WRITES_DIR_REL, error: errorText3(e) });
@@ -20478,7 +20513,7 @@ function readKnowledgeWrites(root) {
     const file = `${KNOWLEDGE_WRITES_DIR_REL}/${name}`;
     let text;
     try {
-      text = readFileSync24(join44(root, file), "utf8");
+      text = readFileSync24(join43(root, file), "utf8");
     } catch (e) {
       if (!(e && e.code === "ENOENT")) unreadable.push({ file, error: errorText3(e) });
       continue;
@@ -20578,10 +20613,10 @@ init_dist2();
 import { createHash as createHash6, randomUUID as randomUUID8 } from "node:crypto";
 import { readFileSync as readFileSync25, writeFileSync as writeFileSync13, mkdirSync as mkdirSync19, rmSync as rmSync11, statSync as statSync9, renameSync as renameSync11 } from "node:fs";
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { join as join45, dirname as dirname16 } from "node:path";
+import { join as join44, dirname as dirname16 } from "node:path";
 function hashFile(root, rel) {
   try {
-    return createHash6("sha256").update(readFileSync25(join45(root, rel))).digest("hex");
+    return createHash6("sha256").update(readFileSync25(join44(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -20595,7 +20630,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync25(join45(root, ".sterling", "config.json"), "utf8");
+    const raw = readFileSync25(join44(root, ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);
@@ -20662,7 +20697,7 @@ function changedSince(root, base2) {
 var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
 function readGitSettled(root) {
   try {
-    const s2 = JSON.parse(readFileSync25(join45(root, GIT_SETTLED_REL), "utf8"));
+    const s2 = JSON.parse(readFileSync25(join44(root, GIT_SETTLED_REL), "utf8"));
     return typeof s2?.sha === "string" && s2.dirty && typeof s2.dirty === "object" ? s2 : null;
   } catch {
     return null;
@@ -20701,7 +20736,7 @@ function gitTouches(root, now) {
     const candidates = [...changed].map((path) => {
       let at = settled.at;
       try {
-        at = statSync9(join45(root, path)).mtime.toISOString();
+        at = statSync9(join44(root, path)).mtime.toISOString();
       } catch {
       }
       return { path, at: typeof at === "string" ? at : now };
@@ -20712,7 +20747,7 @@ function gitTouches(root, now) {
   }
 }
 function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
-  const p = join45(root, GIT_SETTLED_REL);
+  const p = join44(root, GIT_SETTLED_REL);
   mkdirSync19(dirname16(p), { recursive: true });
   if (ifAbsent) {
     try {
@@ -20743,15 +20778,15 @@ var EVENTS_REL = ".sterling/transient/session-events.json";
 var WEIGHED_KINDS = /* @__PURE__ */ new Set(["concept_designed", "research_tool", "agent_dispatch"]);
 var eventKey = (e) => `${e.kind}|${e.detail ?? ""}|${e.at ?? ""}`;
 function readDutyState(root) {
-  const p = join46(root, DUTIES_REL);
-  if (!existsSync27(p)) return { owed: [], weighed: [] };
+  const p = join45(root, DUTIES_REL);
+  if (!existsSync26(p)) return { owed: [], weighed: [] };
   const parsed = JSON.parse(readFileSync26(p, "utf8"));
   if (!parsed || !Array.isArray(parsed.owed) || !Array.isArray(parsed.weighed)) throw new Error(`${DUTIES_REL} is not a {owed, weighed} object`);
   return parsed;
 }
 function readSessionEvents(root) {
-  const p = join46(root, EVENTS_REL);
-  if (!existsSync27(p)) return { events: [] };
+  const p = join45(root, EVENTS_REL);
+  if (!existsSync26(p)) return { events: [] };
   try {
     const parsed = JSON.parse(readFileSync26(p, "utf8"));
     if (!Array.isArray(parsed)) return { events: [], error: "it is not a JSON array" };
@@ -20770,7 +20805,7 @@ function newSince(root, base2, paths) {
 function articleDemand(store, root, config, paths, base2, degraded) {
   const exempt = demandExemption(config, loadGeneratedProjections(root));
   const { isUnowned } = ownershipJoin(store, root);
-  let unowned = paths.filter((p) => existsSync27(join46(root, p)) && !exempt(p) && isUnowned(p));
+  let unowned = paths.filter((p) => existsSync26(join45(root, p)) && !exempt(p) && isUnowned(p));
   if (unowned.length) {
     const ignored = gitIgnored(unowned, root);
     if (ignored === null) degraded.push("git check-ignore failed, so ignored files may be named");
@@ -20848,7 +20883,7 @@ function weighDuties(store, records, config, root, at, git) {
   if (queued.length) notices.push(`Sterling settlement: duties the previous turn left unpaid are now queued as maintenance items: ${queued.join(", ")}. Pay them, or drain them with /sterling:drain.`);
   const owed = [];
   const windowStart = isValidAt(git.settled.at) ? git.settled.at : at;
-  const changed = git.candidates.filter((c) => existsSync27(join46(root, c.path)));
+  const changed = git.candidates.filter((c) => existsSync26(join45(root, c.path)));
   const generated = loadGeneratedProjections(root);
   const touched = changed.filter((c) => !IMAGE_BINARY_EXT.test(c.path) && !generated.has(c.path) && !dischargedByCutoff(c.at, cutoffs.capture));
   if (touched.length && !capturedSince(records, windowStart)) {
@@ -20876,7 +20911,7 @@ ${owed.map((d) => `- ${describe(d)}`).join("\n")}`);
   if (degraded.length) notices.push(`Sterling settlement: the article demand was checked with a degraded probe: ${degraded.join("; ")}.`);
   const present = new Set(events.map(eventKey));
   const nextWeighed = [.../* @__PURE__ */ new Set([...state.weighed.filter((k) => present.has(k)), ...fresh.map(eventKey)])];
-  writeJsonAtomic2(join46(root, DUTIES_REL), { owed, weighed: nextWeighed });
+  writeJsonAtomic2(join45(root, DUTIES_REL), { owed, weighed: nextWeighed });
   return { notices };
 }
 function writeJsonAtomic2(path, value) {
@@ -20924,7 +20959,7 @@ function createSettle({ openStore, now, launchWorkerFor }) {
     const dispatch = liveDispatch(root);
     let store;
     try {
-      store = openStore(join46(root, ".sterling", "sterling.db"));
+      store = openStore(join45(root, ".sterling", "sterling.db"));
       const minted = mintSettlementReconcile(store, root, git.candidates.map((c) => c.path), at);
       const duties = settleDuties(store, root, git, at, { opener: openStore });
       if (!dispatch.live) writeGitSettled(root, git.next);
@@ -21599,22 +21634,22 @@ function createProjectStores({ openRouted = (root) => openRoutedStores(root).sto
 // packages/opencode-plugin/src/sync.mjs
 import { rmSync as rmSync13 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { join as join48 } from "node:path";
+import { join as join47 } from "node:path";
 
 // scripts/hooks/lib/domain-notice.mjs
 import { spawn as spawn3, spawnSync as spawnSync10 } from "node:child_process";
-import { existsSync as existsSync28, readFileSync as readFileSync27 } from "node:fs";
-import { join as join47 } from "node:path";
+import { existsSync as existsSync27, readFileSync as readFileSync27 } from "node:fs";
+import { join as join46 } from "node:path";
 var DOMAIN_MAP_TIMEOUT_MS = 3e4;
 function domainMapDue(root, project, env = process.env) {
   if (env[WORKER_ENV_FLAG] === "1") return null;
-  if (existsSync28(join47(project, DOMAIN_MAP_PENDING_REL))) return "marker";
+  if (existsSync27(join46(project, DOMAIN_MAP_PENDING_REL))) return "marker";
   if (!postUpdateApplies(root, project)) return null;
   const current = readPluginVersion(root);
   if (!current || !parseVersion(current)) return null;
   let previous = null;
   try {
-    previous = readFileSync27(join47(project, SYNC_MARKER_REL), "utf8").trim() || null;
+    previous = readFileSync27(join46(project, SYNC_MARKER_REL), "utf8").trim() || null;
   } catch {
   }
   return previous === null || (compareVersions(current, previous) ?? 1) > 0 ? "sync" : null;
@@ -21622,7 +21657,7 @@ function domainMapDue(root, project, env = process.env) {
 function mapScript(root) {
   if (!root) return { error: "the Sterling plugin root is unresolved" };
   const script = pluginScript(root, "domains.mjs");
-  return existsSync28(script) ? { script } : { error: `${script} is missing` };
+  return existsSync27(script) ? { script } : { error: `${script} is missing` };
 }
 var mapArgs = (script, project) => [script, "--target", project, "--json"];
 function mapResult({ error, signal, status, stdout, stderr }) {
@@ -21721,9 +21756,9 @@ function createSessionSync(deps = {}) {
     }
     if (map && due === "marker") {
       try {
-        rmSync13(join48(root, DOMAIN_MAP_PENDING_REL), { force: true });
+        rmSync13(join47(root, DOMAIN_MAP_PENDING_REL), { force: true });
       } catch (e) {
-        unremoved = pendingFileNote(join48(root, DOMAIN_MAP_PENDING_REL), e);
+        unremoved = pendingFileNote(join47(root, DOMAIN_MAP_PENDING_REL), e);
         started.add(root);
       }
     }

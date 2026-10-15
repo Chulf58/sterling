@@ -16,7 +16,7 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, chmodSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, delimiter } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -418,23 +418,134 @@ test('work: an origin that is not a GitHub-shaped URL (a local path) is refused 
   }
 });
 
-test('work: an open PR from the same head into ANOTHER base is not reused — a new PR is created against the requested base', () => {
+// GitHub issue #103 (user-ruled 2026-10-15, "Reuse the open PR's base"): a
+// stacked PR whose base was moved to another branch is REUSED without --into,
+// and its base drives the whole run. 'release' exists only on origin, so the
+// base also resolves through the #99 origin fallback.
+test('work: without --into, an open PR from the same head into ANOTHER base (a stacked PR) is REUSED — its base becomes the run\'s base; no second PR', () => {
   const p = makeProject({ mode: 'work' });
   try {
+    git(p.dir, ['push', 'origin', 'main:release'], { ...process.env, ...p.ssh });
     seedPr(p, { number: 30, base: 'release' });
     const r = runDirectMerge(p);
     assert.equal(r.status, 0, `work merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
-    const out = JSON.parse(r.stdout);
-    assert.equal(out.created, true, 'the release PR is not reused for a merge into main');
+    const out = parseSingleJson(r.stdout, 'stacked reuse');
+    assert.equal(out.created, false, 'the stacked PR is reused');
+    assert.equal(out.pr_number, 30);
+    assert.equal(createCalls(p.gh.state).length, 0, 'no second PR is created against main');
+    assert.match(r.stderr, /open PR into 'release'.*#30.*using that as the base/s, 'stderr says which PR picked the base');
+    const lists = ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'list');
+    assert.ok(lists.some((l) => !l.includes('--base') && l[l.indexOf('--head') + 1] === p.branchName), 'the head is looked up in any base');
+    for (const l of lists.filter((c) => c.includes('--base'))) {
+      assert.equal(l[l.indexOf('--base') + 1], 'release', 'the reuse lookup filters by the stacked base');
+    }
+    for (const l of lists) {
+      assert.match(l[l.indexOf('--json') + 1], /headRefName/);
+      assert.match(l[l.indexOf('--json') + 1], /baseRefName/);
+    }
+    assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'the branch is pushed');
+    assertBaseUntouched(p, 'stacked reuse');
+    assert.equal(gitMaybe(p.dir, ['rev-parse', '--verify', 'refs/heads/release']), null, 'no local release branch is created');
+  } finally {
+    p.cleanup();
+  }
+});
+
+// Sol review of #103: the default base was resolved (and refused) BEFORE the
+// open-PR lookup, so a clone that knows only origin/release exited 2 with no
+// lookup at all. The open PR's base must come first.
+test('work: a stack-only clone (only origin/release; no origin/HEAD, main or master) with one open PR into release REUSES it — the PR lookup comes before the default base', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    git(p.dir, ['push', 'origin', 'main:release'], { ...process.env, ...p.ssh });
+    git(p.dir, ['branch', '-D', 'main']);
+    git(p.dir, ['update-ref', '-d', 'refs/remotes/origin/main']);
+    assert.equal(gitMaybe(p.dir, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']), null, 'fixture: no origin/HEAD');
+    for (const ref of ['refs/heads/main', 'refs/heads/master', 'refs/remotes/origin/main', 'refs/remotes/origin/master']) {
+      assert.equal(gitMaybe(p.dir, ['rev-parse', '--verify', '--quiet', ref]), null, `fixture: no ${ref}`);
+    }
+    assert.ok(gitMaybe(p.dir, ['rev-parse', '--verify', 'refs/remotes/origin/release']), 'fixture: origin/release exists');
+    seedPr(p, { number: 30, base: 'release' });
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `stack-only clone must ship — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const out = parseSingleJson(r.stdout, 'stack-only');
+    assert.equal(out.created, false);
+    assert.equal(out.pr_number, 30);
+    assert.equal(createCalls(p.gh.state).length, 0, 'no PR is created');
+    assert.ok(ghCalls(p.gh.state).some((c) => c[0] === 'pr' && c[1] === 'list' && !c.includes('--base')), 'the any-base lookup ran');
+    assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'the branch is pushed');
+    assert.equal(git(p.origin, ['rev-parse', 'main']), p.originMainSha, 'origin main did not move');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: without --into, open PRs from the same head into DIFFERENT bases refuse with exit 2 naming each and asking for --into; nothing pushed, nothing created', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    seedPr(p, { number: 30, base: 'release' });
+    seedPr(p, { number: 31, base: 'main' });
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 2, `several bases exit 2 — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const out = parseSingleJson(r.stdout, 'several bases');
+    assert.equal(out.ok, false);
+    assert.match(out.error, /#30 into release/);
+    assert.match(out.error, /#31 into main/);
+    assert.match(out.error, /--into/);
+    assert.equal(createCalls(p.gh.state).length, 0, 'no create');
+    assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch is not pushed');
+    assertBaseUntouched(p, 'several bases');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: an EXPLICIT --into keeps today\'s behaviour — an open PR into another base is not reused; a new PR is created against --into', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    seedPr(p, { number: 30, base: 'release' });
+    const r = runDirectMerge(p, ['--into', 'main']);
+    assert.equal(r.status, 0, `work merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const out = parseSingleJson(r.stdout, 'explicit --into');
+    assert.equal(out.created, true, 'the release PR is not reused for an explicit merge into main');
     assert.notEqual(out.pr_number, 30);
     const creates = createCalls(p.gh.state);
     assert.equal(creates.length, 1);
     assert.equal(creates[0].fields.base, 'main');
     for (const l of ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'list')) {
-      assert.equal(l[l.indexOf('--base') + 1], 'main', 'the lookup filters by base');
-      assert.match(l[l.indexOf('--json') + 1], /headRefName/);
-      assert.match(l[l.indexOf('--json') + 1], /baseRefName/);
+      assert.equal(l[l.indexOf('--base') + 1], 'main', 'with --into, every lookup filters by that base');
     }
+  } finally {
+    p.cleanup();
+  }
+});
+
+// GitHub issue #99: a work clone with no origin/HEAD symref and no LOCAL main
+// (only origin/main) stopped at stage 'branch', and once origin/HEAD was set it
+// stopped at stage 'resolve' (git rev-parse main). Work mode never touches the
+// local base, so the remote-tracking base is enough.
+test('work: no origin/HEAD and no local main, only origin/main — the base resolves from origin, the PR opens against main; no local main is created', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    git(p.dir, ['branch', '-D', 'main']);
+    assert.equal(gitMaybe(p.dir, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']), null, 'fixture: no origin/HEAD');
+    assert.ok(gitMaybe(p.dir, ['rev-parse', '--verify', 'refs/remotes/origin/main']), 'fixture: origin/main exists');
+    const r1 = runDirectMerge(p);
+    assert.equal(r1.status, 0, `no origin/HEAD, no local main: must ship — stdout=${oneLine(r1.stdout)} stderr=${oneLine(r1.stderr)}`);
+    const out1 = parseSingleJson(r1.stdout, 'no origin/HEAD');
+    assert.equal(out1.created, true);
+    assert.equal(createCalls(p.gh.state)[0].fields.base, 'main', 'the PR targets origin\'s main');
+
+    git(p.dir, ['remote', 'set-head', 'origin', 'main']);
+    const r2 = runDirectMerge(p);
+    assert.equal(r2.status, 0, `origin/HEAD set, still no local main: must ship — stdout=${oneLine(r2.stdout)} stderr=${oneLine(r2.stderr)}`);
+    const out2 = parseSingleJson(r2.stdout, 'origin/HEAD set');
+    assert.equal(out2.created, false, 'the rerun reuses the PR');
+    assert.equal(out2.pr_number, out1.pr_number);
+
+    assert.equal(gitMaybe(p.dir, ['rev-parse', '--verify', 'refs/heads/main']), null, 'the gate never creates a local main');
+    assert.equal(git(p.origin, ['rev-parse', 'main']), p.originMainSha, 'origin main did not move');
+    assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'the branch is pushed');
   } finally {
     p.cleanup();
   }
@@ -668,7 +779,9 @@ test('work: the PR create FAILS but the PR exists afterwards (a create race or a
     assert.equal(out.created, false, 'reported as reused, not as created by this run');
     assert.equal(out.pr_url, 'https://github.com/acme/widget/pull/7');
     assert.equal(out.pr_number, 7);
-    const lists = ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'list');
+    // The any-base lookup that picks the base (issue #103) carries no --base; the
+    // repo/head/base lookups are counted here.
+    const lists = ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'list' && c.includes('--base'));
     assert.equal(lists.length, 2, 'one lookup before the create, one strict lookup after it failed');
     const after = lists[1];
     assert.equal(after[after.indexOf('--repo') + 1], ORIGIN_REPO);
@@ -690,7 +803,7 @@ test('work: the create exits 0 but its answer is NOT a PR, and the PR exists —
     assert.equal(out.created, false, 'not asserted as created by this run when the answer was not a PR');
     assert.equal(out.pr_url, 'https://github.com/acme/widget/pull/7');
     assert.equal(out.pr_number, 7);
-    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'list').length, 2, 'one lookup before the create, one read-back after the unreadable answer');
+    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'list' && c.includes('--base')).length, 2, 'one lookup before the create, one read-back after the unreadable answer (the base-picking any-base lookup is not counted)');
     noPrCreateEver(p.gh.state);
     assertArmed(p, { number: 7 });
   } finally {
@@ -716,7 +829,7 @@ test('work: the create exits 0 but its answer is NOT a PR, and no PR is found �
     assert.equal(out.pr_url, null);
     assert.equal(out.pr_number, null);
     assert.equal(out.created, false);
-    assert.equal(existsSync(prLoopFile(p)), false, 'a ship that ends UNKNOWN arms nothing');
+    assert.equal(noLoopArmed(p), true, 'a ship that ends UNKNOWN arms nothing');
   } finally {
     p.cleanup();
   }
@@ -887,7 +1000,7 @@ for (const mode of [undefined, 'hobby']) {
       assert.notEqual(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'hobby merges into main');
       assert.equal(git(p.origin, ['rev-parse', 'main']), git(p.dir, ['rev-parse', 'main']), 'hobby pushes main to origin');
       assert.equal(gitMaybe(p.dir, ['rev-parse', '--verify', `refs/heads/${p.branchName}`]), null, 'hobby deletes the merged branch');
-      assert.equal(existsSync(prLoopFile(p)), false, 'hobby never arms the PR review loop duty');
+      assert.equal(noLoopArmed(p), true, 'hobby never arms the PR review loop duty');
     } finally {
       p.cleanup();
     }
@@ -928,7 +1041,7 @@ test("work + no 'origin' remote: merges LOCALLY like hobby, says loudly that no 
     assert.equal(gitMaybe(p.dir, ['rev-parse', '--verify', `refs/heads/${p.branchName}`]), null, 'the merged branch is deleted like hobby');
     // The state the PR flow would have written: no file, and the duty rule H10
     // and the OpenCode plugin share reads nothing owed and nothing degraded.
-    assert.equal(existsSync(prLoopFile(p)), false, 'no pr-loop.json is armed');
+    assert.equal(noLoopArmed(p), true, 'no PR loop file is armed');
     assert.deepEqual(evaluatePrLoop(p.dir), { state: null, degraded: null }, 'the shared PR-loop duty rule owes nothing');
   } finally {
     p.cleanup();
@@ -1016,7 +1129,7 @@ for (const handoff of [true, false]) {
       const out = parseSingleJson(r.stdout, 'work + handoff');
       assert.deepEqual([out.mode, out.ok, out.created, out.pr_number], ['work', true, true, 7]);
       assertBaseUntouched(p, 'work + handoff');
-      assert.equal(existsSync(prLoopFile(p)), true, 'the PR review loop duty is armed');
+      assert.equal(existsSync(prLoopFile(p, 7)), true, 'the PR review loop duty is armed');
       for (const f of HANDOFF_PATHS) assert.equal(existsSync(join(p.dir, f)), false, `${f} is not written by a merge`);
     } finally {
       p.cleanup();
@@ -1031,7 +1144,7 @@ for (const handoff of [true, false]) {
       assert.equal(parseSingleJson(r.stdout, 'hobby + handoff').mode, undefined, 'the hobby report shape is unchanged');
       assert.deepEqual(ghCalls(p.gh.state), [], 'hobby never calls gh');
       assert.notEqual(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'hobby merges into main');
-      assert.equal(existsSync(prLoopFile(p)), false, 'hobby never arms the PR review loop duty');
+      assert.equal(noLoopArmed(p), true, 'hobby never arms the PR review loop duty');
       for (const f of HANDOFF_PATHS) assert.equal(existsSync(join(p.dir, f)), false, `${f} is not written by a merge`);
     } finally {
       p.cleanup();
@@ -1041,15 +1154,23 @@ for (const handoff of [true, false]) {
 
 // ---------------------------------------------------------------- S3 arming
 // A work-mode merge that CREATES or REUSES a PR arms the H10 'PR review loop
-// owed' duty (slice S3): .sterling/transient/pr-loop.json with the PR, origin's
-// repo, the pushed (pinned) head SHA and status 'owed'. A failed ship arms
-// nothing.
+// owed' duty (slice S3): .sterling/transient/pr-loops/<pr number>.json, one
+// file per PR (GitHub issue #104), with the PR, origin's repo, the pushed
+// (pinned) head SHA and status 'owed'. A failed ship arms nothing. The legacy
+// single-loop file .sterling/transient/pr-loop.json is still read; seeds below
+// use it, and an arm moves or supersedes it.
 
-const prLoopFile = (p) => join(p.dir, '.sterling', 'transient', 'pr-loop.json');
+const legacyLoopFile = (p) => join(p.dir, '.sterling', 'transient', 'pr-loop.json');
+const prLoopFile = (p, number) => join(p.dir, '.sterling', 'transient', 'pr-loops', `${number}.json`);
+/** No loop state of any PR on disk: no legacy file, no per-PR file. */
+function noLoopArmed(p) {
+  const dir = join(p.dir, '.sterling', 'transient', 'pr-loops');
+  return !existsSync(legacyLoopFile(p)) && (!existsSync(dir) || readdirSync(dir).length === 0);
+}
 
 function assertArmed(p, { number }) {
-  assert.ok(existsSync(prLoopFile(p)), 'pr-loop.json is written');
-  const s = JSON.parse(readFileSync(prLoopFile(p), 'utf8'));
+  assert.ok(existsSync(prLoopFile(p, number)), `pr-loops/${number}.json is written`);
+  const s = JSON.parse(readFileSync(prLoopFile(p, number), 'utf8'));
   assert.deepEqual(Object.keys(s).sort(), ['armed_at', 'head_sha', 'pr_number', 'pr_url', 'repo', 'status']);
   assert.equal(s.pr_url, `https://${ORIGIN_REPO}/pull/${number}`);
   assert.equal(s.pr_number, number);
@@ -1059,7 +1180,7 @@ function assertArmed(p, { number }) {
   assert.ok(!Number.isNaN(Date.parse(s.armed_at)), 'armed_at is an ISO time');
 }
 
-test('work S3: CREATING the PR arms the PR review loop duty (pr-loop.json, status owed, the pushed head)', () => {
+test('work S3: CREATING the PR arms the PR review loop duty (pr-loops/<n>.json, status owed, the pushed head)', () => {
   const p = makeProject({ mode: 'work' });
   try {
     const r = runDirectMerge(p);
@@ -1075,10 +1196,11 @@ test('work S3: REUSING an open PR re-arms the duty — a settled loop goes back 
   try {
     seedPr(p, { number: 41 });
     mkdirSync(join(p.dir, '.sterling', 'transient'), { recursive: true });
-    writeFileSync(prLoopFile(p), JSON.stringify({ pr_url: `https://${ORIGIN_REPO}/pull/41`, pr_number: 41, repo: ORIGIN_REPO, head_sha: 'f'.repeat(40), armed_at: '2026-01-01T00:00:00.000Z', status: 'clean', settled_at: '2026-01-01T01:00:00.000Z' }));
+    writeFileSync(legacyLoopFile(p), JSON.stringify({ pr_url: `https://${ORIGIN_REPO}/pull/41`, pr_number: 41, repo: ORIGIN_REPO, head_sha: 'f'.repeat(40), armed_at: '2026-01-01T00:00:00.000Z', status: 'clean', settled_at: '2026-01-01T01:00:00.000Z' }));
     const r = runDirectMerge(p);
     assert.equal(r.status, 0, oneLine(r.stdout + r.stderr));
     assertArmed(p, { number: 41 });
+    assert.equal(existsSync(legacyLoopFile(p)), false, 'the re-arm of the same PR supersedes the legacy file');
   } finally {
     p.cleanup();
   }
@@ -1090,7 +1212,7 @@ test('work S3: a ship that FAILS (the PR create fails, no PR found) arms nothing
     writeFileSync(join(p.gh.state, 'create_fail'), '');
     const r = runDirectMerge(p);
     assert.equal(r.status, 1, oneLine(r.stdout + r.stderr));
-    assert.equal(existsSync(prLoopFile(p)), false);
+    assert.equal(noLoopArmed(p), true);
   } finally {
     p.cleanup();
   }
@@ -1101,11 +1223,11 @@ test('work S3: a failed create, then a PR opened by hand, then a rerun — the r
   try {
     const settled = { pr_url: `https://${ORIGIN_REPO}/pull/33`, pr_number: 33, repo: ORIGIN_REPO, head_sha: 'e'.repeat(40), armed_at: '2026-01-01T00:00:00.000Z', status: 'clean', settled_at: '2026-01-01T01:00:00.000Z' };
     mkdirSync(join(p.dir, '.sterling', 'transient'), { recursive: true });
-    writeFileSync(prLoopFile(p), JSON.stringify(settled));
+    writeFileSync(legacyLoopFile(p), JSON.stringify(settled));
     writeFileSync(join(p.gh.state, 'create_fail'), '');
     const r1 = runDirectMerge(p);
     assert.equal(r1.status, 1, oneLine(r1.stdout + r1.stderr));
-    assert.deepEqual(JSON.parse(readFileSync(prLoopFile(p), 'utf8')), settled, 'the failed ship leaves the earlier loop state untouched');
+    assert.deepEqual(JSON.parse(readFileSync(legacyLoopFile(p), 'utf8')), settled, 'the failed ship leaves the earlier loop state untouched');
 
     rmSync(join(p.gh.state, 'create_fail'));
     seedPr(p, { number: 52 });
@@ -1117,6 +1239,7 @@ test('work S3: a failed create, then a PR opened by hand, then a rerun — the r
     assert.equal(createCalls(p.gh.state).length, 1, 'the rerun makes no second create call (only the failed one)');
     noPrCreateEver(p.gh.state);
     assertArmed(p, { number: 52 });
+    assert.deepEqual(JSON.parse(readFileSync(prLoopFile(p, 33), 'utf8')), settled, 'the other PR\'s settled loop is kept, moved to its own file');
   } finally {
     p.cleanup();
   }

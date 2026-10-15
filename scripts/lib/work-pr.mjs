@@ -12,7 +12,7 @@
 // retry. The flow is retryable end to end: a rerun after "pushed, but no PR"
 // finds no open PR, pushes again (a no-op) and creates it.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 
 export const PR_ATTRIBUTION = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
@@ -169,8 +169,25 @@ export function prTextFromCommits(cwd, mergeBase, branchTip, branch) {
  * failure, a malformed answer, or more than one match — an unknown answer
  * must never read as "no PR" (a duplicate) or pick one PR at random. */
 export function findOpenPr(cwd, repo, branch, base) {
-  const r = gh(cwd, ['pr', 'list', '--repo', repo, '--head', branch, '--base', base, '--state', 'open', '--json', 'url,number,headRefName,baseRefName']);
-  if (r.status !== 0) throw new Error(`gh pr list --repo ${repo} --head ${branch} --base ${base} failed (exit ${r.status}): ${streams(r)}`);
+  const matches = openPrsForHead(cwd, repo, branch, base);
+  if (matches.length > 1) {
+    throw new Error(
+      `${matches.length} open PRs in ${repo} from ${branch} into ${base} (${matches.map((pr) => `#${pr.number} ${pr.url}`).join(', ')}) — ` +
+        'refusing to pick one. Close the duplicates on GitHub, then rerun.'
+    );
+  }
+  return matches.length ? { url: matches[0].url, number: matches[0].number } : null;
+}
+
+/** Every open PR in `repo` whose head is `branch`, into `base` when given or
+ * into ANY base when it is omitted (GitHub issue #103: a stacked PR whose base
+ * was moved to another feature branch). Each entry is validated and returned as
+ * { url, number, headRefName, baseRefName }. Throws on a gh failure or a
+ * malformed answer, never reading an unknown answer as "no PR". */
+export function openPrsForHead(cwd, repo, branch, base) {
+  const baseArgs = base === undefined ? [] : ['--base', base];
+  const r = gh(cwd, ['pr', 'list', '--repo', repo, '--head', branch, ...baseArgs, '--state', 'open', '--json', 'url,number,headRefName,baseRefName']);
+  if (r.status !== 0) throw new Error(`gh pr list --repo ${repo} --head ${branch}${base === undefined ? '' : ` --base ${base}`} failed (exit ${r.status}): ${streams(r)}`);
   let prs;
   try {
     prs = JSON.parse(r.stdout);
@@ -183,14 +200,9 @@ export function findOpenPr(cwd, repo, branch, base) {
       throw new Error(`gh pr list returned an entry without url/number/headRefName/baseRefName: ${JSON.stringify(pr)}`);
     }
   }
-  const matches = prs.filter((pr) => pr.headRefName === branch && pr.baseRefName === base);
-  if (matches.length > 1) {
-    throw new Error(
-      `${matches.length} open PRs in ${repo} from ${branch} into ${base} (${matches.map((pr) => `#${pr.number} ${pr.url}`).join(', ')}) — ` +
-        'refusing to pick one. Close the duplicates on GitHub, then rerun.'
-    );
-  }
-  return matches.length ? { url: matches[0].url, number: matches[0].number } : null;
+  return prs
+    .filter((pr) => pr.headRefName === branch && (base === undefined || pr.baseRefName === base))
+    .map(({ url, number, headRefName, baseRefName }) => ({ url, number, headRefName, baseRefName }));
 }
 
 /** `git push <args>` with the WSL git.exe retry (credentials in the Windows
@@ -401,15 +413,26 @@ export function shipAsPr({ cwd, repo, branch, base, mergeBase, branchTip, state,
 
 // ------------------------------------------------------------- PR review loop
 // The H10 'PR review loop owed' duty (slice S3, skill pr-review-loop). A
-// work-mode merge that creates OR reuses a PR arms it by writing
-// .sterling/transient/pr-loop.json; the conductor discharges it only through
-// the deliberate settle act (pr-review-wait.mjs --settle). H10 reads it on
-// every Stop and nags while status is 'owed'. The loop's own state (round,
-// consumed review id, reviewed head) lives on the PR's progress comment, never
-// here: this file only says that a loop is owed, and for which PR.
+// work-mode merge that creates OR reuses a PR arms it by writing that PR's
+// state file, .sterling/transient/pr-loops/<pr number>.json; the conductor
+// discharges it only through the deliberate settle act (pr-review-wait.mjs
+// --settle). H10 reads it on every Stop and nags while a loop is 'owed'. The
+// loop's own state (round, consumed review id, reviewed head) lives on the PR's
+// progress comment, never here: these files only say that a loop is owed, and
+// for which PR.
+//
+// ONE FILE PER PR (GitHub issue #104): open PRs from several worktrees each
+// keep their own armed loop, and arming one never replaces another's. The
+// single-loop file of earlier versions, .sterling/transient/pr-loop.json
+// (PR_LOOP_REL), is still read, and a settle writes back to it, so a loop
+// armed before the upgrade can be settled in place. The next arm moves it to
+// its per-PR file (unless that PR already has one) and deletes it.
 export const PR_LOOP_REL = '.sterling/transient/pr-loop.json';
+export const PR_LOOPS_DIR_REL = '.sterling/transient/pr-loops';
 export const PR_LOOP_OUTCOMES = ['clean', 'capped', 'escalated'];
 export const prLoopPath = (root) => join(root, PR_LOOP_REL);
+export const prLoopFile = (root, prNumber) => join(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
+const prLoopFileRel = (prNumber) => `${PR_LOOPS_DIR_REL}/${prNumber}.json`;
 
 function writeAtomic(file, value) {
   mkdirSync(dirname(file), { recursive: true });
@@ -419,36 +442,176 @@ function writeAtomic(file, value) {
 }
 
 /** Arm (or re-arm) the duty for this PR at the pushed head. A re-arm on reuse
- * replaces any earlier state, settled or not: a new head is owed a new review. */
-export function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = new Date().toISOString() }) {
+ * replaces that PR's earlier state, settled or not: a new head is owed a new
+ * review. Other PRs' loops are left alone. A readable legacy single-loop file
+ * for ANOTHER PR is moved to its own per-PR file first, never over one that
+ * exists; the legacy file is then deleted. An unreadable legacy file is left
+ * in place, so the readers keep disclosing it. `beforeLegacyPublish` is a test
+ * seam passed to writeExclusive: it runs at the publication boundary, after
+ * the temp file is written and immediately before the one step that decides
+ * and publishes, where a concurrent arm of the legacy PR can land. */
+export function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = new Date().toISOString(), beforeLegacyPublish = null }) {
   const state = { pr_url, pr_number, repo, head_sha, armed_at: now, status: 'owed' };
-  writeAtomic(prLoopPath(root), state);
+  writeAtomic(prLoopFile(root, pr_number), state);
+  const legacy = prLoopPath(root);
+  if (existsSync(legacy)) {
+    let old = null;
+    try {
+      old = parsePrLoopFile(legacy, PR_LOOP_REL);
+    } catch {
+      old = null; // unreadable: left in place for the readers to disclose
+    }
+    if (old) {
+      // NO CHECK-THEN-WRITE (Sol review): a concurrent arm of the legacy PR
+      // between an existence check and the write would be overwritten by this
+      // older state, losing the owed duty. writeExclusive publishes only when
+      // the per-PR file does not exist, as one step; an existing file is
+      // newer, so the legacy copy is dropped.
+      if (old.pr_number !== pr_number) writeExclusive(prLoopFile(root, old.pr_number), old, { beforePublish: beforeLegacyPublish });
+      try {
+        unlinkSync(legacy);
+      } catch (e) {
+        if (e?.code !== 'ENOENT') throw e; // a concurrent arm already moved it
+      }
+    }
+  }
   return state;
 }
 
-/** The armed loop, or null when none was ever armed. Throws on an unreadable
- * or malformed file — an unknown state is never read as "nothing owed". */
-export function readPrLoop(root) {
-  const file = prLoopPath(root);
-  if (!existsSync(file)) return null;
+/** Publish `value` at `file` only if `file` does not exist: written to a temp
+ * file, then hard-linked into place (link fails with EEXIST instead of
+ * replacing), so deciding and publishing are one filesystem step. Returns
+ * false when the file already existed. `beforePublish` (a test seam) runs
+ * immediately before that step. */
+function writeExclusive(file, value, { beforePublish = null } = {}) {
+  mkdirSync(dirname(file), { recursive: true });
+  // Its own temp name: an arm of the same PR in this process (writeAtomic's
+  // .tmp-<pid>) must not replace this file before it is linked.
+  const tmp = `${file}.excl-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n');
+  try {
+    if (beforePublish) beforePublish(value);
+    linkSync(tmp, file);
+    return true;
+  } catch (e) {
+    if (e?.code === 'EEXIST') return false;
+    throw e;
+  } finally {
+    unlinkSync(tmp);
+  }
+}
+
+/** Parse and validate one loop file; `rel` names it in errors and is set on
+ * the thrown error as `.rel`. */
+function parsePrLoopFile(file, rel) {
+  try {
+    return parsePrLoopFileOrThrow(file, rel);
+  } catch (e) {
+    e.rel = rel;
+    throw e;
+  }
+}
+function parsePrLoopFileOrThrow(file, rel) {
   let s;
   try {
     s = JSON.parse(readFileSync(file, 'utf8'));
   } catch (e) {
-    throw new Error(`${PR_LOOP_REL} is not valid JSON (${e.message})`);
+    throw new Error(`${rel} is not valid JSON (${e.message})`);
   }
   // STRICT (Sol review): anything but an exact known status, a missing
   // repo/head_sha, or a settled outcome without settled_at is UNREADABLE —
   // the caller discloses it; it is never read as settled.
   const str = (v) => typeof v === 'string' && v.length > 0;
   if (!s || typeof s !== 'object' || Array.isArray(s) || !str(s.pr_url) || !Number.isInteger(s.pr_number) || !str(s.repo) || !str(s.head_sha) || !str(s.armed_at)) {
-    throw new Error(`${PR_LOOP_REL} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s)}`);
+    throw new Error(`${rel} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s)}`);
   }
   if (s.status !== 'owed' && !PR_LOOP_OUTCOMES.includes(s.status)) {
-    throw new Error(`${PR_LOOP_REL} has status ${JSON.stringify(s.status)} — it must be exactly owed, ${PR_LOOP_OUTCOMES.join(', ')}`);
+    throw new Error(`${rel} has status ${JSON.stringify(s.status)} — it must be exactly owed, ${PR_LOOP_OUTCOMES.join(', ')}`);
   }
-  if (s.status !== 'owed' && !str(s.settled_at)) throw new Error(`${PR_LOOP_REL} is settled '${s.status}' without settled_at`);
+  if (s.status !== 'owed' && !str(s.settled_at)) throw new Error(`${rel} is settled '${s.status}' without settled_at`);
   return s;
+}
+
+/** Every armed loop as { state, file, rel }: the per-PR files, then the legacy
+ * file unless its PR also has a per-PR file (that one is newer). Throws on any
+ * unreadable or malformed file, or a per-PR file that holds another PR. */
+function readPrLoopEntries(root) {
+  const entries = [];
+  const dir = join(root, PR_LOOPS_DIR_REL);
+  if (existsSync(dir)) {
+    for (const name of readdirSync(dir).sort()) {
+      const m = name.match(/^(\d+)\.json$/);
+      if (!m) continue; // an in-flight .tmp-<pid> write
+      const rel = prLoopFileRel(m[1]);
+      const state = parsePrLoopFile(join(dir, name), rel);
+      if (state.pr_number !== Number(m[1])) throw Object.assign(new Error(`${rel} holds the loop of PR #${state.pr_number}`), { rel });
+      entries.push({ state, file: join(dir, name), rel });
+    }
+  }
+  if (existsSync(prLoopPath(root))) {
+    const state = parsePrLoopFile(prLoopPath(root), PR_LOOP_REL);
+    if (!entries.some((e) => e.state.pr_number === state.pr_number)) entries.push({ state, file: prLoopPath(root), rel: PR_LOOP_REL });
+  }
+  return entries;
+}
+
+/** Every armed loop, oldest arming first. [] when none was ever armed. Throws
+ * on an unreadable or malformed file — an unknown state is never read as
+ * "nothing owed". */
+export function readPrLoops(root) {
+  return readPrLoopEntries(root)
+    .map((e) => e.state)
+    .sort((a, b) => (a.armed_at < b.armed_at ? -1 : a.armed_at > b.armed_at ? 1 : a.pr_number - b.pr_number));
+}
+
+/** The loop armed for PR `prNumber` as { state, file, rel }, or null. Reads
+ * only that PR's file, else the legacy file when that PR has none: another
+ * PR's malformed file never blocks this one. Throws when a file it must read
+ * is unreadable or holds another PR. */
+function readPrLoopEntry(root, prNumber) {
+  const file = prLoopFile(root, prNumber);
+  if (existsSync(file)) {
+    const rel = prLoopFileRel(prNumber);
+    const state = parsePrLoopFile(file, rel);
+    if (state.pr_number !== prNumber) throw Object.assign(new Error(`${rel} holds the loop of PR #${state.pr_number}`), { rel });
+    return { state, file, rel };
+  }
+  if (!existsSync(prLoopPath(root))) return null;
+  const state = parsePrLoopFile(prLoopPath(root), PR_LOOP_REL);
+  return state.pr_number === prNumber ? { state, file: prLoopPath(root), rel: PR_LOOP_REL } : null;
+}
+
+/** One armed loop, or null. With `prNumber`, that PR's loop, read on its own
+ * (readPrLoopEntry). Without it, the loop a single-loop reader shows: the
+ * oldest OWED loop, else the most recently armed one; throws like
+ * readPrLoops. */
+export function readPrLoop(root, prNumber) {
+  if (prNumber !== undefined) return readPrLoopEntry(root, prNumber)?.state ?? null;
+  const loops = readPrLoops(root);
+  return loops.find((s) => s.status === 'owed') ?? loops.at(-1) ?? null;
+}
+
+/** Each loop file on disk, read tolerantly for a diagnostic: { file, state }
+ * or { file, error }. */
+function listPrLoopFilesForDiagnostic(root) {
+  const files = [];
+  const dir = join(root, PR_LOOPS_DIR_REL);
+  if (existsSync(dir)) for (const name of readdirSync(dir).sort()) if (/^\d+\.json$/.test(name)) files.push([join(dir, name), prLoopFileRel(name.slice(0, -5))]);
+  if (existsSync(prLoopPath(root))) files.push([prLoopPath(root), PR_LOOP_REL]);
+  return files.map(([file, rel]) => {
+    try {
+      return { file, state: parsePrLoopFile(file, rel) };
+    } catch (e) {
+      return { file, error: e.message };
+    }
+  });
+}
+
+/** Whether any loop state exists on disk (read or not). */
+export function prLoopStateExists(root) {
+  if (existsSync(prLoopPath(root))) return true;
+  const dir = join(root, PR_LOOPS_DIR_REL);
+  return existsSync(dir) && readdirSync(dir).some((n) => /^\d+\.json$/.test(n));
 }
 
 /** `https://host/owner/repo/pull/<n>` → { repo: 'host/owner/repo', number }, or null. */
@@ -457,35 +620,44 @@ export function parsePrUrl(url) {
   return m ? { repo: `${m[1]}/${m[2]}/${m[3]}`, number: Number(m[4]) } : null;
 }
 
-/** The deliberate settle act: mark the armed loop clean, capped or escalated.
- * `prRef` is the PR number or its full URL. BOUND (Sol review): the armed
- * state must be coherent (pr_url, repo and pr_number agree), its repo must be
- * `originRepo` (the current origin), `prRef` must name that same PR, and the
- * loop must still be OWED — a settled loop is never re-settled. `guard`, when
- * given, runs last with the armed state and throws to refuse (the clean
- * outcome uses it to check that GitHub would let the PR merge). Throws
- * (nothing written) otherwise. */
+/** The deliberate settle act: mark the loop armed for the named PR clean,
+ * capped or escalated. `prRef` is the PR number or its full URL. BOUND (Sol
+ * review): the armed state must be coherent (pr_url, repo and pr_number
+ * agree), its repo must be `originRepo` (the current origin), `prRef` must
+ * name that same PR, and the loop must still be OWED — a settled loop is never
+ * re-settled. `guard`, when given, runs last with the armed state and throws
+ * to refuse (the clean outcome uses it to check that GitHub would let the PR
+ * merge). Throws (nothing written) otherwise. Other PRs' loops are never
+ * read for the decision or written. */
 export function settlePrLoop(root, outcome, prRef, { originRepo, now = new Date().toISOString(), guard = null }) {
   if (!PR_LOOP_OUTCOMES.includes(outcome)) throw new Error(`--settle must be one of ${PR_LOOP_OUTCOMES.join('|')}, got '${outcome}'`);
   const ref = /^\d+$/.test(String(prRef ?? '')) ? { repo: null, number: Number(prRef) } : parsePrUrl(prRef);
   if (!ref) throw new Error('--settle needs --pr <number|PR URL>, the PR the loop was armed for');
-  const s = readPrLoop(root);
-  if (!s) throw new Error(`no PR review loop is armed here (${PR_LOOP_REL} is absent) — nothing to settle`);
-  const armed = parsePrUrl(s.pr_url);
-  if (!armed || armed.repo !== s.repo || armed.number !== s.pr_number) {
-    throw new Error(`${PR_LOOP_REL} is incoherent (pr_url ${s.pr_url}, repo ${s.repo}, pr_number ${s.pr_number}) — nothing settled; rerun /sterling:merge to re-arm it`);
-  }
   // A stuck loop (armed for a PR other than the one being settled, typically
   // because the PR was opened by hand after a failed create) names its way out.
-  const unstick = `armed head ${s.head_sha}; to re-arm it for the current PR, rerun /sterling:merge on the branch this PR was opened from; to discard the armed state, run: rm ${prLoopPath(root)}`;
-  if (s.repo !== originRepo) throw new Error(`the armed loop is for ${s.repo}, not origin's repo (${originRepo}) — nothing settled (${unstick})`);
-  if (ref.number !== s.pr_number || (ref.repo !== null && ref.repo !== s.repo)) {
-    throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} — nothing settled (${unstick})`);
+  const unstick = (e) => `armed head ${e.state.head_sha}; to re-arm it for the current PR, rerun /sterling:merge on the branch this PR was opened from; to discard the armed state, run: rm ${e.file}`;
+  // Only the named PR's state decides (Sol review): other PRs' files are read
+  // only to name them when this PR has no loop.
+  const entry = readPrLoopEntry(root, ref.number);
+  if (!entry) {
+    const others = listPrLoopFilesForDiagnostic(root);
+    if (!others.length) throw new Error(`no PR review loop is armed here (${PR_LOOPS_DIR_REL}/ and ${PR_LOOP_REL} are absent) — nothing to settle`);
+    const armed = others.map((o) => (o.state ? `PR #${o.state.pr_number} (${o.state.pr_url}, ${unstick(o)})` : `${o.file} (unreadable: ${o.error})`)).join('; ');
+    throw new Error(`no PR review loop is armed for ${prRef}; the armed loops are for ${armed} — nothing settled`);
+  }
+  const s = entry.state;
+  const armed = parsePrUrl(s.pr_url);
+  if (!armed || armed.repo !== s.repo || armed.number !== s.pr_number) {
+    throw new Error(`${entry.rel} is incoherent (pr_url ${s.pr_url}, repo ${s.repo}, pr_number ${s.pr_number}) — nothing settled; rerun /sterling:merge to re-arm it`);
+  }
+  if (s.repo !== originRepo) throw new Error(`the armed loop is for ${s.repo}, not origin's repo (${originRepo}) — nothing settled (${unstick(entry)})`);
+  if (ref.repo !== null && ref.repo !== s.repo) {
+    throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} — nothing settled (${unstick(entry)})`);
   }
   if (s.status !== 'owed') throw new Error(`the loop for ${s.pr_url} is already settled '${s.status}' (${s.settled_at}); only an owed loop can be settled`);
   if (guard) guard(s);
   const next = { ...s, status: outcome, settled_at: now };
-  writeAtomic(prLoopPath(root), next);
+  writeAtomic(entry.file, next);
   return next;
 }
 

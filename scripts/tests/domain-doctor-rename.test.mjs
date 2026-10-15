@@ -139,7 +139,8 @@ test('dry run prints the plan and writes nothing', () => {
   assert.match(r.stdout, /beta .*stack_tags \[node, chulf\] → \[node, customerhub\]; domain_paths 'chulf' → 'customerhub'/);
   assert.ok(r.stdout.includes(m.newPath), 'names the new store path');
   assert.match(r.stdout, /AGENTS\.md:3\n\s+- Stack tags \(= domain mount manifest\): chulf, sterling\.\n\s+\+ Stack tags \(= domain mount manifest\): customerhub, sterling\./);
-  assert.match(r.stdout, /Dry run: nothing was written/);
+  assert.match(r.stdout, /Dry run: nothing was written\. Rerun with --apply to fence/);
+  assert.match(r.stdout, /record stack_tags keep 'chulf' \(default\)\. --retag rewrites them to 'customerhub'.*project stores must be retagged through the MCP tools \(knowledge_update\)/);
   assert.doesNotMatch(r.stdout, /gamma/);
   assert.equal(sha(m.oldPath), before.old);
   assert.equal(readFileSync(m.projects.alpha.configPath, 'utf8'), before.alpha);
@@ -443,4 +444,86 @@ test('a registered folder that exists with no .sterling/config.json is skipped a
   const r = doctor(m, ['rename', 'chulf', 'customerhub']);
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /skipped \(no \.sterling\/config\.json, not rewritten\): bare/);
+});
+
+/** The machine plus one record that already carries both tags, so --retag has a collision to merge. */
+function retagMachine() {
+  const m = machine();
+  const store = new SterlingStore(m.oldPath);
+  const both = store.create(ref('domain:chulf', { title: 'Tagged both ways', stack_tags: ['chulf', 'customerhub', 'node'] }));
+  store.close();
+  return { ...m, both: both.id };
+}
+
+test('--retag rewrites the old name in record stack_tags (body and record_stack_tags) of the domain copy and nothing else; the default keeps it', () => {
+  const m = retagMachine();
+  const dry = doctor(m, ['rename', 'chulf', 'customerhub', '--retag']);
+  assert.equal(dry.code, 0, dry.stderr);
+  assert.match(dry.stdout, /record stack_tags: 'chulf' → 'customerhub' in the records of the renamed domain store \(--retag\).*Records in project stores keep 'chulf'.*knowledge_update/);
+  assert.match(dry.stdout, /Rerun with --apply --retag to fence/);
+  assert.equal(fenceOf(m.oldPath), undefined, 'a dry run writes nothing');
+
+  const oldVersions = readRows(m.oldPath, 'SELECT * FROM record_versions ORDER BY record_id, version');
+  const oldRelations = readRows(m.oldPath, 'SELECT * FROM record_relations ORDER BY source_id, rel, target_id');
+  const oldAliases = readRows(m.oldPath, 'SELECT * FROM record_aliases ORDER BY historical_id');
+  const oldFts = readRows(m.oldPath, 'SELECT record_id, text FROM records_fts ORDER BY record_id');
+  const oldFileKeys = readRows(m.oldPath, 'SELECT * FROM record_file_keys ORDER BY record_id, path');
+  const oldVersionBodies = oldVersions.map((v) => JSON.parse(v.body).stack_tags);
+  assert.ok(oldVersionBodies.some((t) => t.includes('chulf')), 'the fixture has history carrying the old tag');
+
+  const r = doctor(m, ['rename', 'chulf', 'customerhub', '--apply', '--retag']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /retagged 'chulf' → 'customerhub'/);
+
+  const rows = readRows(m.newPath, 'SELECT id, scope, body FROM records ORDER BY id');
+  assert.equal(rows.length, 3);
+  for (const row of rows) {
+    const body = JSON.parse(row.body);
+    assert.equal(row.scope, 'domain:customerhub');
+    assert.equal(body.scope, 'domain:customerhub');
+    assert.ok(!body.stack_tags.includes('chulf'), 'no record body keeps the old tag');
+    assert.ok(body.stack_tags.includes('customerhub'));
+  }
+  assert.deepEqual(JSON.parse(rows.find((x) => x.id === m.both).body).stack_tags, ['customerhub', 'node'], 'a record that carried both tags keeps one, order kept');
+  assert.deepEqual(
+    readRows(m.newPath, 'SELECT record_id, tag FROM record_stack_tags ORDER BY record_id, tag').map((x) => ({ ...x })),
+    [...m.ids.map((id) => ({ record_id: id, tag: 'customerhub' })), { record_id: m.both, tag: 'customerhub' }, { record_id: m.both, tag: 'node' }].sort((x, y) => (x.record_id + x.tag < y.record_id + y.tag ? -1 : 1))
+  );
+  assert.deepEqual(readRows(m.newPath, 'SELECT * FROM record_versions ORDER BY record_id, version'), oldVersions, 'record_versions keep the old tag, byte-exact');
+  assert.deepEqual(readRows(m.newPath, 'SELECT * FROM record_relations ORDER BY source_id, rel, target_id'), oldRelations);
+  assert.deepEqual(readRows(m.newPath, 'SELECT * FROM record_aliases ORDER BY historical_id'), oldAliases);
+  assert.deepEqual(readRows(m.newPath, 'SELECT record_id, text FROM records_fts ORDER BY record_id'), oldFts);
+  assert.deepEqual(readRows(m.newPath, 'SELECT * FROM record_file_keys ORDER BY record_id, path'), oldFileKeys);
+  assert.equal(JSON.parse(readRows(m.newPath, "SELECT value FROM store_meta WHERE key = 'rename_receipt'")[0].value).retagged, true);
+  // The old store, the backup, is untouched.
+  assert.ok(readRows(m.oldPath, 'SELECT body FROM records').every((x) => JSON.parse(x.body).stack_tags.includes('chulf')));
+
+  // Mounted under the new name, the records read back with the new tag and a stack_tags filter on it finds them.
+  const mounted = new MountedStores(join(m.dir, 'project.db'), [{ name: 'customerhub', dbPath: m.newPath }]);
+  try {
+    assert.deepEqual(mounted.get(m.ids[0]).stack_tags, ['customerhub']);
+    const found = mounted.query({ stack_tags: ['customerhub'] });
+    assert.deepEqual(found.map((x) => x.id).sort(), [...m.ids, m.both].sort(), 'a stack_tags filter on the new name finds every record');
+  } finally {
+    mounted.close();
+  }
+});
+
+test('--retag resume: the rerun must use the same flag as the copy it finds, and the same flag finishes the rename', () => {
+  const m = retagMachine();
+  const crashed = doctorCrash(m, ['rename', 'chulf', 'customerhub', '--apply', '--retag'], 'after-publish');
+  assert.equal(crashed.code, 70, crashed.stderr);
+  const mismatch = doctor(m, ['rename', 'chulf', 'customerhub', '--apply']);
+  assert.equal(mismatch.code, 2);
+  assert.match(mismatch.stderr, /was made with --retag, so rerun with --retag/);
+  assert.deepEqual(config(m.projects.alpha).stack_tags, ['chulf', 'sterling'], 'the refusal rewrote no config');
+  const resumed = doctor(m, ['rename', 'chulf', 'customerhub', '--apply', '--retag']);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.deepEqual(config(m.projects.alpha).stack_tags, ['customerhub', 'sterling']);
+
+  const n = retagMachine();
+  assert.equal(doctorCrash(n, ['rename', 'chulf', 'customerhub', '--apply'], 'after-publish').code, 70);
+  const other = doctor(n, ['rename', 'chulf', 'customerhub', '--apply', '--retag']);
+  assert.equal(other.code, 2);
+  assert.match(other.stderr, /was made without --retag, so rerun without --retag/);
 });

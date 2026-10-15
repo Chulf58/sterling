@@ -544,7 +544,9 @@ const assertNoDeadTerms = (label, content) => {
 const agentsMdTemplateRaw = readFileSync(join(pluginRoot, 'templates', 'target-agents-md.md'), 'utf8')
   .replaceAll('{{PROJECT_NAME}}', eff.projectName)
   .replaceAll('{{STACK_TAGS}}', eff.stackTags.join(', '))
-  .replaceAll('{{TOOLCHAINS}}', baked.map((t) => `${t.adapter} (${t.path_globs.join(', ')})`).join('; '))
+  // Each glob goes in a code span: unquoted, GitHub reads `**/*.mjs, **/*.ts` as bold markup
+  // (GitHub issue #96). A glob holding a backtick would end the span early, so it stays plain text.
+  .replaceAll('{{TOOLCHAINS}}', baked.map((t) => `${t.adapter} (${t.path_globs.map((g) => (g.includes('`') ? g : `\`${g}\``)).join(', ')})`).join('; '))
   // Filled from a toolchain's `lint` and `format` run commands. No registered adapter declares
   // either today, so the line asks the project to record its own; an existing AGENTS.md is
   // never rewritten, so what the project writes there stays.

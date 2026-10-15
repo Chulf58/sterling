@@ -29,7 +29,7 @@ function resolveStoreRoot(target2, linkedWorktree = resolveLinkedWorktree(target
 
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync2, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync as existsSync2, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname as dirname2, join as join2 } from "node:path";
 function gh(cwd, args) {
   return spawnSync2("gh", args, { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
@@ -51,32 +51,68 @@ function parseOriginRepo(url) {
   return { host, repo: `${host}/${owner2}/${name2}` };
 }
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
+var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
 var prLoopPath = (root) => join2(root, PR_LOOP_REL);
+var prLoopFile = (root, prNumber2) => join2(root, PR_LOOPS_DIR_REL, `${prNumber2}.json`);
+var prLoopFileRel = (prNumber2) => `${PR_LOOPS_DIR_REL}/${prNumber2}.json`;
 function writeAtomic(file, value) {
   mkdirSync(dirname2(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n");
   renameSync(tmp, file);
 }
-function readPrLoop(root) {
-  const file = prLoopPath(root);
-  if (!existsSync2(file)) return null;
+function parsePrLoopFile(file, rel) {
+  try {
+    return parsePrLoopFileOrThrow(file, rel);
+  } catch (e) {
+    e.rel = rel;
+    throw e;
+  }
+}
+function parsePrLoopFileOrThrow(file, rel) {
   let s;
   try {
     s = JSON.parse(readFileSync(file, "utf8"));
   } catch (e) {
-    throw new Error(`${PR_LOOP_REL} is not valid JSON (${e.message})`);
+    throw new Error(`${rel} is not valid JSON (${e.message})`);
   }
   const str = (v) => typeof v === "string" && v.length > 0;
   if (!s || typeof s !== "object" || Array.isArray(s) || !str(s.pr_url) || !Number.isInteger(s.pr_number) || !str(s.repo) || !str(s.head_sha) || !str(s.armed_at)) {
-    throw new Error(`${PR_LOOP_REL} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s)}`);
+    throw new Error(`${rel} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s)}`);
   }
   if (s.status !== "owed" && !PR_LOOP_OUTCOMES.includes(s.status)) {
-    throw new Error(`${PR_LOOP_REL} has status ${JSON.stringify(s.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
+    throw new Error(`${rel} has status ${JSON.stringify(s.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
   }
-  if (s.status !== "owed" && !str(s.settled_at)) throw new Error(`${PR_LOOP_REL} is settled '${s.status}' without settled_at`);
+  if (s.status !== "owed" && !str(s.settled_at)) throw new Error(`${rel} is settled '${s.status}' without settled_at`);
   return s;
+}
+function readPrLoopEntry(root, prNumber2) {
+  const file = prLoopFile(root, prNumber2);
+  if (existsSync2(file)) {
+    const rel = prLoopFileRel(prNumber2);
+    const state2 = parsePrLoopFile(file, rel);
+    if (state2.pr_number !== prNumber2) throw Object.assign(new Error(`${rel} holds the loop of PR #${state2.pr_number}`), { rel });
+    return { state: state2, file, rel };
+  }
+  if (!existsSync2(prLoopPath(root))) return null;
+  const state = parsePrLoopFile(prLoopPath(root), PR_LOOP_REL);
+  return state.pr_number === prNumber2 ? { state, file: prLoopPath(root), rel: PR_LOOP_REL } : null;
+}
+function listPrLoopFilesForDiagnostic(root) {
+  const files = [];
+  const dir = join2(root, PR_LOOPS_DIR_REL);
+  if (existsSync2(dir)) {
+    for (const name2 of readdirSync(dir).sort()) if (/^\d+\.json$/.test(name2)) files.push([join2(dir, name2), prLoopFileRel(name2.slice(0, -5))]);
+  }
+  if (existsSync2(prLoopPath(root))) files.push([prLoopPath(root), PR_LOOP_REL]);
+  return files.map(([file, rel]) => {
+    try {
+      return { file, state: parsePrLoopFile(file, rel) };
+    } catch (e) {
+      return { file, error: e.message };
+    }
+  });
 }
 function parsePrUrl(url) {
   const m = String(url ?? "").match(/^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/);
@@ -86,21 +122,27 @@ function settlePrLoop(root, outcome, prRef, { originRepo, now = (/* @__PURE__ */
   if (!PR_LOOP_OUTCOMES.includes(outcome)) throw new Error(`--settle must be one of ${PR_LOOP_OUTCOMES.join("|")}, got '${outcome}'`);
   const ref = /^\d+$/.test(String(prRef ?? "")) ? { repo: null, number: Number(prRef) } : parsePrUrl(prRef);
   if (!ref) throw new Error("--settle needs --pr <number|PR URL>, the PR the loop was armed for");
-  const s = readPrLoop(root);
-  if (!s) throw new Error(`no PR review loop is armed here (${PR_LOOP_REL} is absent) \u2014 nothing to settle`);
+  const unstick = (e) => `armed head ${e.state.head_sha}; to re-arm it for the current PR, rerun /sterling:merge on the branch this PR was opened from; to discard the armed state, run: rm ${e.file}`;
+  const entry = readPrLoopEntry(root, ref.number);
+  if (!entry) {
+    const others = listPrLoopFilesForDiagnostic(root);
+    if (!others.length) throw new Error(`no PR review loop is armed here (${PR_LOOPS_DIR_REL}/ and ${PR_LOOP_REL} are absent) \u2014 nothing to settle`);
+    const armed2 = others.map((o) => o.state ? `PR #${o.state.pr_number} (${o.state.pr_url}, ${unstick(o)})` : `${o.file} (unreadable: ${o.error})`).join("; ");
+    throw new Error(`no PR review loop is armed for ${prRef}; the armed loops are for ${armed2} \u2014 nothing settled`);
+  }
+  const s = entry.state;
   const armed = parsePrUrl(s.pr_url);
   if (!armed || armed.repo !== s.repo || armed.number !== s.pr_number) {
-    throw new Error(`${PR_LOOP_REL} is incoherent (pr_url ${s.pr_url}, repo ${s.repo}, pr_number ${s.pr_number}) \u2014 nothing settled; rerun /sterling:merge to re-arm it`);
+    throw new Error(`${entry.rel} is incoherent (pr_url ${s.pr_url}, repo ${s.repo}, pr_number ${s.pr_number}) \u2014 nothing settled; rerun /sterling:merge to re-arm it`);
   }
-  const unstick = `armed head ${s.head_sha}; to re-arm it for the current PR, rerun /sterling:merge on the branch this PR was opened from; to discard the armed state, run: rm ${prLoopPath(root)}`;
-  if (s.repo !== originRepo) throw new Error(`the armed loop is for ${s.repo}, not origin's repo (${originRepo}) \u2014 nothing settled (${unstick})`);
-  if (ref.number !== s.pr_number || ref.repo !== null && ref.repo !== s.repo) {
-    throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} \u2014 nothing settled (${unstick})`);
+  if (s.repo !== originRepo) throw new Error(`the armed loop is for ${s.repo}, not origin's repo (${originRepo}) \u2014 nothing settled (${unstick(entry)})`);
+  if (ref.repo !== null && ref.repo !== s.repo) {
+    throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} \u2014 nothing settled (${unstick(entry)})`);
   }
   if (s.status !== "owed") throw new Error(`the loop for ${s.pr_url} is already settled '${s.status}' (${s.settled_at}); only an owed loop can be settled`);
   if (guard) guard(s);
   const next = { ...s, status: outcome, settled_at: now };
-  writeAtomic(prLoopPath(root), next);
+  writeAtomic(entry.file, next);
   return next;
 }
 var MERGEABLE_STATES = /* @__PURE__ */ new Set(["CLEAN", "HAS_HOOKS", "UNSTABLE"]);
@@ -240,7 +282,7 @@ var DEFAULT_TIMEOUT_S = 540;
 var DEFAULT_INTERVAL_S = 30;
 var MAX_INTERVAL_S = 120;
 var DEFAULT_RECHECK_DELAY_S = 10;
-var result = { status: "error", head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, identity_confirmed: false, previously_missed: [], body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
+var result = { status: "error", head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
   process.stdout.write(JSON.stringify(out) + "\n");
@@ -398,21 +440,68 @@ function ghApi(path, { paginate = false, extra = [] } = {}) {
 }
 function parsePreviouslyMissed(body) {
   const items = [];
-  let inSection = false;
+  let found = false;
+  let declared = null;
+  let depth = 0;
+  let base2 = 0;
+  let nested = null;
+  const finishNested = () => {
+    const title = nested.title ?? "";
+    const text = nested.text.join(" ");
+    items.push(`${title}${nested.loc ? `${title ? " " : ""}(${nested.loc})` : ""}${text ? `${title || nested.loc ? ": " : ""}${text}` : ""}`);
+    nested = null;
+  };
+  const stripTags = (s) => s.replace(/<[^>]*>/g, "").trim();
   for (const line of String(body ?? "").split(/\r?\n/)) {
-    const plain = line.replace(/<[^>]*>/g, "").replace(/^[\s#*_]+/, "");
     const isHeading = /^\s{0,3}#{1,6}\s/.test(line);
-    if (/^previously missed/i.test(plain) && (isHeading || /^\s*(\*\*|__|<summary|<details)/i.test(line))) {
-      inSection = true;
+    if (!found) {
+      const plain = line.replace(/<[^>]*>/g, "").replace(/^[\s#*_]+/, "");
+      if (/^previously missed/i.test(plain) && (isHeading || /^\s*(\*\*|__|<summary|<details)/i.test(line))) {
+        found = true;
+        const count = plain.match(/^previously missed\s*\((\d+)\)/i);
+        declared = count ? Number(count[1]) : null;
+        base2 = /<summary|<details/i.test(line) ? 1 : 0;
+        depth = base2;
+      }
       continue;
     }
-    if (!inSection) continue;
-    if (isHeading || /<\/details>/i.test(line)) break;
-    const item = line.match(/^\s*(?:[-*+]|\d+[.)])\s+(.*\S)\s*$/);
+    if (isHeading && !nested) break;
+    let ended = false;
+    let rest = "";
+    for (const part of line.split(/(<details\b[^>]*>|<\/details\s*>|<summary\b[^>]*>[\s\S]*?<\/summary\s*>)/i)) {
+      if (/^<details\b/i.test(part)) {
+        depth++;
+        if (!nested && depth === base2 + 1) nested = { title: null, loc: null, text: [] };
+      } else if (/^<\/details/i.test(part)) {
+        if (nested && depth === base2 + 1) {
+          if (rest.trim()) nested.text.push(rest.trim());
+          rest = "";
+          finishNested();
+        }
+        depth--;
+        if (depth < base2 || depth < 0) {
+          ended = true;
+          break;
+        }
+      } else if (/^<summary\b/i.test(part)) {
+        if (nested && nested.title === null) nested.title = stripTags(part);
+      } else rest += part;
+    }
+    if (ended) break;
+    if (nested) {
+      const t = stripTags(rest);
+      const loc = t.match(/^`([^`\s]+:\d+(?:-\d+)?)`$/);
+      if (loc && nested.loc === null) nested.loc = loc[1];
+      else if (t) nested.text.push(t);
+      continue;
+    }
+    const item = rest.match(/^\s*(?:[-*+]|\d+[.)])\s+(.*\S)\s*$/);
     if (item) items.push(item[1]);
-    else if (items.length && /^\s+\S/.test(line)) items[items.length - 1] += ` ${line.trim()}`;
+    else if (items.length && /^\s+\S/.test(rest)) items[items.length - 1] += ` ${rest.trim()}`;
   }
-  return items;
+  if (nested) finishNested();
+  const unparsed = found && (declared === null ? items.length === 0 : declared !== items.length);
+  return { items, unparsed };
 }
 function requestCopilotReview() {
   try {
@@ -494,11 +583,13 @@ function poll(recheckAbsent = true) {
     }
   }
   const body = review.body ?? "";
+  const missed = parsePreviouslyMissed(body);
   return {
     review: { id: review.id, commit_id: review.commit_id, author: review.user.login, state: review.state, body },
     comments,
     stale_review: stale,
-    previously_missed: parsePreviouslyMissed(body),
+    previously_missed: missed.items,
+    previously_missed_unparsed: missed.unparsed,
     body_findings_without_comments: body.trim() !== "" && comments.length === 0
   };
 }

@@ -199,6 +199,7 @@ test('a NEW Copilot review on the CURRENT head is returned with its comments (pa
       stale_review: false,
       identity_confirmed: false,
       previously_missed: [],
+      previously_missed_unparsed: false,
       body_findings_without_comments: false,
       copilot_request: null,
       copilot_review_pending: true,
@@ -748,6 +749,34 @@ test('--settle refuses to RE-settle: only an owed loop can be settled', () => {
   }
 });
 
+// GitHub issue #104: with three PRs open from three worktrees, each
+// /sterling:merge re-armed the ONE loop file, so settling PR 7 failed with
+// "the armed loop is for PR #9". Each PR now has its own loop file.
+test('issue #104: --settle settles the named PR\'s loop while other PRs\' loops are armed, and leaves theirs untouched', () => {
+  const f = makeFixture();
+  try {
+    const dir = join(f.dir, '.sterling', 'transient', 'pr-loops');
+    mkdirSync(dir, { recursive: true });
+    const per = (n) => join(dir, `${n}.json`);
+    for (const n of [7, 8, 9]) {
+      writeFileSync(per(n), JSON.stringify({ pr_url: `https://github.com/acme/widget/pull/${n}`, pr_number: n, repo: 'github.com/acme/widget', head_sha: HEAD, armed_at: `2026-09-26T1${n}:00:00.000Z`, status: 'owed' }));
+    }
+    const before8 = readFileSync(per(8), 'utf8');
+    const r = run(f, ['--settle', 'escalated', '--pr', '7']);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.pr_number, 7);
+    assert.equal(JSON.parse(readFileSync(per(7), 'utf8')).status, 'escalated');
+    assert.equal(readFileSync(per(8), 'utf8'), before8);
+    assert.equal(JSON.parse(readFileSync(per(9), 'utf8')).status, 'owed');
+    const clean = run(f, ['--settle', 'clean', '--pr', '9']);
+    assert.equal(clean.code, 0, oneLine(clean.stdout + clean.stderr));
+    assert.equal(JSON.parse(readFileSync(per(9), 'utf8')).status, 'clean');
+    assert.equal(readFileSync(per(8), 'utf8'), before8);
+  } finally {
+    f.cleanup();
+  }
+});
+
 // ------------------------------------------------- --head accepts a short sha
 test('--head: a 7-char prefix of the PR head matches (upper case too); a short sha that is not a prefix does not, so the review comes back stale', () => {
   for (const [head, stale] of [[HEAD.slice(0, 7), false], [HEAD.slice(0, 12).toUpperCase(), false], [HEAD, false], ['aaaaaab', true]]) {
@@ -819,6 +848,85 @@ test('previously_missed: a bold or <summary> heading form is found, and the sect
     assert.deepEqual(r.out.previously_missed, ['one', 'two']);
     f.put('reviews', 0, [[review(701, { body: '**Previously missed**\n- bold one' })]]);
     assert.deepEqual(run(f, ['7', ...FAST]).out.previously_missed, ['bold one']);
+  } finally {
+    f.cleanup();
+  }
+});
+
+// GitHub issue #102: Copilot's ccr-overview-v2 body nests each previously
+// missed finding in its own <details> block (summary title, a backticked
+// path:line, a paragraph). The list-item parser returned [] for it.
+const NESTED_MISSED_BODY = [
+  '## Pull request overview',
+  '',
+  'Copilot reviewed 4 out of 4 changed files and generated no new comments.',
+  '',
+  '<details>',
+  '<summary>Previously missed (3)</summary>',
+  '',
+  '<details>',
+  '<summary>Unchecked null on the parse path</summary>',
+  '',
+  '`src/a.mjs:10`',
+  '',
+  'parse() can return null here and the caller',
+  'dereferences it.',
+  '</details>',
+  '',
+  '<details><summary>Timeout is never cleared</summary>',
+  '',
+  '`src/b.mjs:22-25`',
+  '',
+  'The timer keeps the process alive.</details>',
+  '',
+  '<details>',
+  '<summary>Missing await</summary>',
+  '',
+  '`src/c.mjs:3`',
+  '',
+  'The promise is dropped.',
+  '</details>',
+  '',
+  '</details>',
+  '',
+  '<details><summary>Tips</summary>',
+  '- not a finding',
+  '</details>',
+].join('\n');
+
+test('previously_missed (issue #102): nested <details> findings are each returned as "title (path:line): text", and the section is not flagged unparsed', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(703, { body: NESTED_MISSED_BODY })]]);
+    const r = run(f, ['7', ...FAST]);
+    assert.equal(r.out.status, 'review', oneLine(r.stdout));
+    assert.deepEqual(r.out.previously_missed, [
+      'Unchecked null on the parse path (src/a.mjs:10): parse() can return null here and the caller dereferences it.',
+      'Timeout is never cleared (src/b.mjs:22-25): The timer keeps the process alive.',
+      'Missing await (src/c.mjs:3): The promise is dropped.',
+    ]);
+    assert.equal(r.out.previously_missed_unparsed, false);
+    assert.equal(r.out.body_findings_without_comments, true);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('previously_missed_unparsed (issue #102): a section whose findings cannot be read, or whose "(N)" disagrees with what was read, says so instead of reading as clean', () => {
+  const f = makeFixture();
+  try {
+    for (const [body, items] of [
+      [['<details><summary>Previously missed (2)</summary>', '', 'A finding in a shape nobody parses.', '</details>'].join('\n'), []],
+      [['<details><summary>Previously missed (3)</summary>', '- one', '- two', '</details>'].join('\n'), ['one', 'two']],
+      [['## Previously missed', '', 'free text only'].join('\n'), []],
+    ]) {
+      f.put('reviews', 0, [[review(704, { body })]]);
+      const r = run(f, ['7', ...FAST]);
+      assert.deepEqual(r.out.previously_missed, items, body);
+      assert.equal(r.out.previously_missed_unparsed, true, body);
+    }
+    f.put('reviews', 0, [[review(704, { body: 'No section at all.' })]]);
+    assert.equal(run(f, ['7', ...FAST]).out.previously_missed_unparsed, false, 'an absent section is not unparsed');
   } finally {
     f.cleanup();
   }
