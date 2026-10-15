@@ -11,6 +11,8 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
 import { ProjectRegistry, SterlingStore } from '@sterling/store';
 import { z } from 'zod';
 import { SterlingTools } from '../tools.js';
@@ -491,5 +493,277 @@ test('evidence (#108 review): the served board_remove tool refuses evidence {} a
     await server.close();
     store.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ------------------- board_query / board_get target_project: read another project's board -------------------
+// Decision read-another-projects-board-board-query-target-project-read-only:
+// the other project's USER board, read-only, same filters/order/paging and
+// projections, marked with source_project; this repo's own annotations read
+// 'unavailable:other_project'; nothing is written there.
+
+/** Add user items to beta through beta's own tools, then close beta's store. */
+function seedBeta(h: ReturnType<typeof harness>, items: Loose[]): Loose[] {
+  const b = h.betaTools();
+  try {
+    return items.map((it) => (b.tools.boardAdd({ source: 'user', ...it } as Parameters<SterlingTools['boardAdd']>[0]) as unknown as { record: Loose }).record);
+  } finally {
+    b.close();
+  }
+}
+
+test('board_query target_project: filters and paging over the other board, every record marked; a cursor never crosses between local and foreign', () => {
+  const h = harness();
+  try {
+    const seeded = seedBeta(h, [
+      { text: 'Apple one', objective: 'x' },
+      { text: 'Apple two', objective: 'x', file_keys: ['src/k.ts'] },
+      { text: 'Pear', objective: 'x' },
+      { text: 'Other objective', objective: 'y' },
+    ]);
+    for (const text of ['Local a', 'Local b', 'Local c']) h.tools.boardAdd({ text, source: 'user', objective: 'x' });
+
+    const first = h.tools.foreignBoardQuery({ target_project: 'beta', objective: 'x', cap: 2 });
+    assert.equal(first.source_project, 'beta');
+    assert.equal(first.source_root, h.beta);
+    assert.equal(first.matched_filter, 3);
+    assert.equal(first.capped, true);
+    assert.ok(first.next_cursor);
+    const second = h.tools.foreignBoardQuery({ target_project: 'beta', objective: 'x', cap: 2, cursor: first.next_cursor });
+    assert.equal(second.capped, false);
+    const walked = [...first.records, ...second.records];
+    const xIds = seeded.filter((s) => s.objective === 'x').map((s) => s.id);
+    assert.deepEqual(walked.map((r) => r.id).sort(), [...xIds].sort(), 'the cursor walk visits each beta item once');
+    const byOffset = h.tools.foreignBoardQuery({ target_project: 'beta', objective: 'x', cap: 2, offset: 2 });
+    assert.deepEqual(byOffset.records.map((r) => r.id), second.records.map((r) => r.id));
+    for (const r of walked) {
+      assert.equal(r.source_project, 'beta');
+      assert.equal(r.source_root, h.beta);
+    }
+
+    assert.equal(h.tools.foreignBoardQuery({ target_project: 'beta', contains: 'APPLE' }).matched_filter, 2);
+    assert.deepEqual(h.tools.foreignBoardQuery({ target_project: 'beta', file_keys: ['./src/k.ts'] }).records.map((r) => r.text), ['Apple two']);
+    assert.equal(h.tools.foreignBoardQuery({ target_project: 'beta', source: 'user' }).matched_filter, 4);
+
+    assert.throws(() => h.tools.boardQueryResult({ objective: 'x', cap: 2, cursor: first.next_cursor }), /DIFFERENT query \(target_project: "beta" -> null\)/);
+    const local = h.tools.boardQueryResult({ objective: 'x', cap: 2 });
+    assert.ok(local.next_cursor);
+    assert.throws(() => h.tools.foreignBoardQuery({ target_project: 'beta', objective: 'x', cap: 2, cursor: local.next_cursor }), /DIFFERENT query \(target_project: null -> "beta"\)/);
+    assert.throws(() => h.tools.boardQueryResult({ target_project: 'beta' }), /target_project is served by foreignBoardQuery/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('board_query target_project: source:system refused; this repo\'s annotations read unavailable:other_project in every projection', () => {
+  const h = harness();
+  try {
+    seedBeta(h, [{ text: 'Shared path one', objective: 'x', file_keys: ['src/a.ts'] }, { text: 'Shared path two', objective: 'x', file_keys: ['src/a.ts'] }]);
+    assert.throws(() => h.tools.foreignBoardQuery({ target_project: 'beta', source: 'system' }), /board_query: source:'system' cannot go with target_project.*Nothing was read\./);
+    for (const projection of ['text', 'full', 'digest', 'headline'] as const) {
+      const res = h.tools.foreignBoardQuery({ target_project: 'beta', projection });
+      assert.equal(res.provenance, 'unavailable:other_project');
+      assert.equal(res.reconcile_provenance, 'unavailable:other_project');
+      assert.equal(res.artifact_evidence_provenance, 'unavailable:other_project');
+      assert.equal(res.lane_advisory, 'unavailable:other_project', 'the two items share a path, yet no advisory is computed');
+      assert.equal(res.returned, 2, projection);
+      for (const r of res.records) {
+        assert.equal(r.source_project, 'beta', projection);
+        assert.equal('artifact_evidence' in r || 'artifact_evidence_count' in r, false, projection);
+      }
+      assert.equal('target_schema_version' in res, false, 'the same schema version is not disclosed');
+    }
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('board_get target_project: by full uuid, exact slug and 8-char prefix; unknown refused; the alias archive is said to be skipped', () => {
+  const h = harness();
+  try {
+    const [item] = seedBeta(h, [{ text: 'Fetch me whole\nwith a second line', objective: 'x' }]);
+    for (const ref of [String(item.id), String(item.slug), String(item.id).slice(0, 8)]) {
+      const got = h.tools.foreignBoardGet(ref, 'beta');
+      assert.equal(got.id, item.id, ref);
+      assert.equal(got.text, 'Fetch me whole\nwith a second line');
+      assert.equal(got.source_project, 'beta');
+      assert.equal(got.source_root, h.beta);
+      assert.match(String(got.historical_ids), /not searched/);
+      assert.ok(got.label);
+    }
+    assert.throws(() => h.tools.foreignBoardGet('no-such-slug', 'beta'), /board_get: 'no-such-slug' names no user board item in project 'beta'.*historical-id archive is not searched/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('board_query/board_get target_project: unknown and self refused with read wording; board_add keeps its write wording', () => {
+  const h = harness();
+  try {
+    assert.throws(() => h.tools.foreignBoardQuery({ target_project: 'nobody' }), /^Error: board_query: target_project 'nobody' is refused: no registered project has that name; registered: alpha, beta\. Nothing was read\.$/);
+    assert.throws(() => h.tools.foreignBoardQuery({ target_project: 'alpha' }), /board_query: target_project 'alpha' is refused: it is this session's own project; read it without target_project\. Nothing was read\./);
+    assert.throws(() => h.tools.foreignBoardGet('x', 'alpha'), /board_get: target_project 'alpha' is refused: it is this session's own project; read it without target_project\. Nothing was read\./);
+    assert.throws(() => h.tools.foreignBoardGet('x', 'nobody'), /board_get: target_project 'nobody' is refused: no registered project has that name/);
+    const bare = projectDir(h.base, 'bare', { store: false });
+    h.register('bare', bare);
+    assert.throws(() => h.tools.foreignBoardQuery({ target_project: 'bare' }), /it has no store at .*sterling\.db, and a read never creates one\. Nothing was read\./);
+    assert.equal(existsSync(join(bare, '.sterling', 'sterling.db')), false, 'the read created no store');
+    assert.throws(() => h.tools.boardAdd({ text: 'x', source: 'user', target_project: 'alpha' }), /board_add: target_project 'alpha' is refused: it is this session's own project; add the item without target_project\. Nothing was written\./);
+    assert.throws(() => h.tools.boardAdd({ text: 'x', source: 'user', target_project: 'bare' }), /and a handoff never creates one\. Nothing was written\./);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('board_query/board_get target_project: blocked_by_state and unblocks against the other board; its tracker reads handoff_status unavailable', () => {
+  const h = harness();
+  try {
+    const b = h.betaTools();
+    let blocker: Loose;
+    let waiter: Loose;
+    try {
+      blocker = (b.tools.boardAdd({ text: 'Blocker there', source: 'user', objective: 'x' }) as unknown as { record: Loose }).record;
+      waiter = (b.tools.boardAdd({ text: 'Waits there', source: 'user', objective: 'x', blocked_by: [String(blocker.slug)] }) as unknown as { record: Loose }).record;
+    } finally {
+      b.close();
+    }
+    const rows = new Map(h.tools.foreignBoardQuery({ target_project: 'beta' }).records.map((r) => [r.id, r]));
+    assert.deepEqual(rows.get(waiter.id)?.blocked_by_state, [{ slug: blocker.slug, state: 'open' }]);
+    assert.equal((rows.get(blocker.id)?.unblocks as string[]).length, 1);
+    assert.deepEqual(h.tools.foreignBoardGet(String(waiter.id), 'beta').blocked_by_state, [{ slug: blocker.slug, state: 'open' }]);
+    const b2 = h.betaTools();
+    try {
+      b2.tools.boardRemove(String(blocker.id));
+    } finally {
+      b2.close();
+    }
+    assert.deepEqual(h.tools.foreignBoardGet(String(waiter.id), 'beta').blocked_by_state, [{ slug: blocker.slug, state: 'closed' }], 'a blocker removed there reads closed');
+
+    // alpha hands a task to beta; beta reads alpha's board and sees the tracker.
+    const sent = h.tools.boardAdd({ text: 'Do it over there', source: 'user', target_project: 'beta' }) as unknown as Loose;
+    const trackerId = (sent.handoff_delivery as { tracker: { id: string } }).tracker.id;
+    const betaStore = new SterlingStore(join(h.beta, '.sterling', 'sterling.db'));
+    try {
+      const fromBeta = new SterlingTools({ store: betaStore, repoRoot: h.beta, registryPath: h.reg, now: () => NOW });
+      const tracker = fromBeta.foreignBoardQuery({ target_project: 'alpha' }).records.find((r) => r.id === trackerId);
+      assert.equal(tracker?.readiness, 'delegated');
+      assert.equal(tracker?.handoff_status, 'unavailable:other_project');
+      assert.equal(tracker?.source_project, 'alpha');
+    } finally {
+      betaStore.close();
+    }
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('board_query target_project: budget exhaustion, unreadable rows and a schema-version difference are disclosed', () => {
+  const h = harness();
+  try {
+    seedBeta(h, [{ text: 'Readable', objective: 'x' }]);
+    const db = join(h.beta, '.sterling', 'sterling.db');
+    const bad = randomUUID();
+    const w = new DatabaseSync(db);
+    w.prepare(`INSERT INTO records (id, type, status, scope, created_at, updated_at, author, body) VALUES (?, 'todo', 'active', 'project', ?, ?, 'conductor', '{broken')`).run(bad, NOW, NOW);
+    w.exec('PRAGMA user_version=3');
+    w.close();
+
+    const res = h.tools.foreignBoardQuery({ target_project: 'beta' });
+    assert.equal(res.matched_filter, 1);
+    assert.deepEqual(res.unreadable, [{ id: bad, reason: 'the stored body is not valid JSON' }]);
+    assert.equal(res.target_schema_version, 3);
+    assert.match(res.note ?? '', /schema version 3 and this Sterling supports 2/);
+    assert.match(res.note ?? '', /1 board row\(s\) could not be read/);
+    assert.throws(() => h.tools.foreignBoardGet(bad, 'beta'), /cannot be read by this Sterling: the stored body is not valid JSON/);
+
+    const starved = new SterlingTools({ store: h.store, repoRoot: h.alpha, registryPath: h.reg, now: () => NOW, foreignBoardRead: { budgetMs: 0 } });
+    const cut = starved.foreignBoardQuery({ target_project: 'beta' });
+    assert.match(cut.truncated ?? '', /time budget exhausted/);
+    assert.equal(cut.capped, false);
+    assert.match(cut.note ?? '', /matched_filter is a FLOOR and a page that is not capped is NOT the end of that board/);
+    assert.throws(() => starved.foreignBoardGet('Readable', 'beta'), /cut short .* NOT proof it is absent/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('board_query/board_get: the served tools register target_project under the strict input schema', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-foreign-schema-'));
+  const { server, store } = createSterlingServer(join(dir, 'sterling.db'));
+  const client = new Client({ name: 'test-client', version: '0.0.1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const listed = (await client.listTools()).tools;
+    for (const name of ['board_query', 'board_get']) {
+      const schema = listed.find((t) => t.name === name)?.inputSchema as { properties?: Record<string, { type?: string }>; additionalProperties?: unknown; required?: string[] };
+      assert.equal(schema.properties?.target_project?.type, 'string', name);
+      assert.equal(schema.additionalProperties, false, name);
+      assert.equal((schema.required ?? []).includes('target_project'), false, name);
+    }
+  } finally {
+    await client.close();
+    await server.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** Raw rows in beta's store, as another Sterling might have written them; `body` null writes a valid user item. */
+function rawBetaRows(h: ReturnType<typeof harness>, rows: { id: string; body?: string; text?: string }[]): void {
+  const w = new DatabaseSync(join(h.beta, '.sterling', 'sterling.db'));
+  try {
+    const ins = w.prepare(`INSERT INTO records (id, type, status, scope, created_at, updated_at, author, body) VALUES (?, 'todo', 'active', 'project', ?, ?, 'conductor', ?)`);
+    w.exec('BEGIN');
+    for (const r of rows) {
+      const body =
+        r.body ??
+        JSON.stringify({ id: r.id, type: 'todo', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [], source: 'user', text: r.text ?? 'Raw item' });
+      ins.run(r.id, NOW, NOW, body);
+    }
+    w.exec('COMMIT');
+  } finally {
+    w.close();
+  }
+}
+
+test('board_query/board_get target_project (review #1): a board past 1000 items is paged to its last item, and board_get reaches the oldest', () => {
+  const h = harness();
+  try {
+    const ids = Array.from({ length: 1001 }, () => randomUUID());
+    rawBetaRows(h, ids.map((id, i) => ({ id, text: `Item ${i}` })));
+    const oldest = [...ids].sort()[0];
+    const first = h.tools.foreignBoardQuery({ target_project: 'beta', cap: 1000, projection: 'headline' });
+    assert.equal(first.matched_filter, 1001);
+    assert.equal(first.capped, true);
+    assert.ok(first.next_cursor, 'a continuation is offered');
+    const second = h.tools.foreignBoardQuery({ target_project: 'beta', cap: 1000, projection: 'headline', cursor: first.next_cursor });
+    assert.deepEqual(second.records.map((r) => r.id), [oldest]);
+    assert.equal(second.capped, false);
+    assert.equal(second.truncated, undefined);
+    assert.deepEqual(h.tools.foreignBoardQuery({ target_project: 'beta', cap: 1000, offset: 1000, projection: 'headline' }).records.map((r) => r.id), [oldest]);
+    assert.equal(h.tools.foreignBoardGet(oldest, 'beta').id, oldest);
+    assert.equal(h.tools.foreignBoardGet(oldest.slice(0, 8), 'beta').id, oldest);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('board_get target_project (review #2): an 8-char prefix shared by a readable and an unreadable row is ambiguous; a cut-short prefix lookup is refused', () => {
+  const h = harness();
+  try {
+    const readable = 'abcdef12-0000-4000-8000-000000000001';
+    const broken = 'abcdef12-0000-4000-8000-000000000002';
+    rawBetaRows(h, [{ id: readable, text: 'Readable' }, { id: broken, body: '{broken' }]);
+    assert.throws(
+      () => h.tools.foreignBoardGet('abcdef12', 'beta'),
+      (e: Error) => /^board_get: 'abcdef12' is ambiguous in project 'beta', 2 live todo rows match it: /.test(e.message) && e.message.includes(readable) && e.message.includes(broken)
+    );
+    assert.equal(h.tools.foreignBoardGet(readable, 'beta').id, readable, 'the full uuid still resolves');
+    assert.throws(() => h.tools.foreignBoardGet(broken, 'beta'), /cannot be read by this Sterling: the stored body is not valid JSON/);
+    const starved = new SterlingTools({ store: h.store, repoRoot: h.alpha, registryPath: h.reg, now: () => NOW, foreignBoardRead: { budgetMs: 0 } });
+    assert.throws(() => starved.foreignBoardGet('abcdef12', 'beta'), /was not found in project 'beta': the lookup was cut short .* NOT proof it is absent/);
+  } finally {
+    h.cleanup();
   }
 });

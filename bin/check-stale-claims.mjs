@@ -4275,7 +4275,7 @@ function undeclaredPhaseInterfaces(rec) {
   const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
   return rec.phases.flatMap((phase) => (phase.interfaces ?? []).filter((name4) => !declared.has(name4)).map((name4) => ({ phase_id: phase.phase_id, name: name4 })));
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4730,6 +4730,16 @@ var init_records = __esm({
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
       }
     });
+    todoBoardItemReadSchema = external_exports.object({
+      id: external_exports.string().min(1),
+      type: external_exports.literal("todo"),
+      source: external_exports.enum(["user", "system"]),
+      updated_at: external_exports.string().min(1),
+      text: external_exports.string().optional(),
+      slug: external_exports.string().min(1).optional(),
+      objective: external_exports.string().optional(),
+      file_keys: external_exports.array(external_exports.string()).optional()
+    }).passthrough();
     todoSchema = base.extend({
       type: external_exports.literal("todo"),
       // Human-readable handle (decision human-readable-ids-for-board-items, S1) —

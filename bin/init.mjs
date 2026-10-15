@@ -4326,7 +4326,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4782,6 +4782,16 @@ var init_records = __esm({
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
       }
     });
+    todoBoardItemReadSchema = external_exports.object({
+      id: external_exports.string().min(1),
+      type: external_exports.literal("todo"),
+      source: external_exports.enum(["user", "system"]),
+      updated_at: external_exports.string().min(1),
+      text: external_exports.string().optional(),
+      slug: external_exports.string().min(1).optional(),
+      objective: external_exports.string().optional(),
+      file_keys: external_exports.array(external_exports.string()).optional()
+    }).passthrough();
     todoSchema = base.extend({
       type: external_exports.literal("todo"),
       // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -8730,7 +8740,149 @@ function resolveSentHandoffs(trackers, opts = {}) {
   }
   return out;
 }
-var EVIDENCE_LABELS, statusText;
+function withForeignDb(dbPath2, opts, read, onExhausted) {
+  const budget = new ReadBudget(opts);
+  if (budget.remaining() <= 0)
+    return onExhausted(budget.exhausted("before the store was opened"));
+  const db = openForeignDbReadOnly(dbPath2, budget.busyTimeout());
+  try {
+    db.exec("BEGIN");
+    try {
+      return read(db, budget);
+    } finally {
+      db.exec("ROLLBACK");
+    }
+  } finally {
+    db.close();
+  }
+}
+function readForeignBoard(dbPath2, opts = {}, hooks = {}) {
+  const empty = () => ({ items: [], unreadable: [], slugHolders: /* @__PURE__ */ new Map(), schemaVersion: 0 });
+  return withForeignDb(dbPath2, opts, (db, budget) => {
+    const out = empty();
+    const version = budget.step(db, () => db.prepare("PRAGMA user_version").get());
+    if (version === void 0) {
+      out.truncated = budget.exhausted("before the schema version was read");
+      return out;
+    }
+    out.schemaVersion = Number(version.user_version);
+    const ranges = opts.after ? [
+      [AFTER, [opts.after.updated_at, opts.after.updated_at, opts.after.id]],
+      [UP_TO, [opts.after.updated_at, opts.after.updated_at, opts.after.id]]
+    ] : [["1", []]];
+    const truncated = scanRanges(db, budget, ranges, Math.max(1, opts.batchSize ?? 200), out, hooks);
+    if (truncated)
+      out.truncated = truncated;
+    else if (budget.remaining() <= 0)
+      out.truncated = budget.exhausted(`after ${out.items.length + out.unreadable.length} board rows were read`);
+    return out;
+  }, (why) => ({ ...empty(), truncated: why }));
+}
+function scanRanges(db, budget, ranges, batch, out, hooks = {}) {
+  let rows = 0;
+  for (const [range, params] of ranges) {
+    let last;
+    for (; ; ) {
+      const sql = `SELECT ${SCAN_COLUMNS} FROM records WHERE ${LIVE_TODO} AND ${range}${last ? ` AND ${AFTER}` : ""} ORDER BY updated_at DESC, id DESC LIMIT ?`;
+      const args = [...params, ...last ? [last.updated_at, last.updated_at, last.id] : [], batch];
+      const got = budget.step(db, () => {
+        const batchRows = db.prepare(sql).all(...args);
+        hooks.inStep?.(rows + batchRows.length);
+        return batchRows;
+      });
+      if (got === void 0)
+        return budget.exhausted(`after ${rows} board rows were read`);
+      for (const row of got)
+        absorbRow(row, out);
+      rows += got.length;
+      hooks.betweenBatches?.();
+      if (got.length < batch)
+        break;
+      const tail = got[got.length - 1];
+      last = { updated_at: tail.order_updated_at, id: tail.id };
+    }
+  }
+  return void 0;
+}
+function absorbRow(row, out) {
+  if (!row.ok) {
+    out.unreadable.push({ id: row.id, reason: "the stored body is not valid JSON" });
+    return;
+  }
+  if (typeof row.slug === "string" && row.slug.length > 0) {
+    out.slugHolders.set(row.slug, { id: row.id, slug: row.slug, ...typeof row.text === "string" ? { text: row.text } : {} });
+  }
+  if (row.source === "system")
+    return;
+  const parsed = parseForeignItem(row.id, row.body);
+  if (typeof parsed === "string")
+    out.unreadable.push({ id: row.id, reason: parsed });
+  else
+    out.items.push(parsed);
+}
+function getForeignBoardItem(dbPath2, ref, where, opts = {}) {
+  const emptyBoard = (why) => ({ items: [], unreadable: [], slugHolders: /* @__PURE__ */ new Map(), schemaVersion: 0, truncated: why });
+  return withForeignDb(dbPath2, opts, (db, budget) => {
+    const cut = (why) => ({ lookup: { refused: `was not found ${where}: the lookup was cut short (${why}), so this is NOT proof it is absent; retry` }, board: emptyBoard(why) });
+    const cols = `id, body, json_valid(body) AS ok, CASE WHEN json_valid(body) THEN json_extract(body, '$.source') END AS source`;
+    const steps = [
+      [`SELECT ${cols} FROM records WHERE id = ? AND ${LIVE_TODO} LIMIT 2`, ref],
+      [`SELECT ${cols} FROM records WHERE ${LIVE_TODO} AND (CASE WHEN json_valid(body) THEN json_extract(body, '$.slug') END) = ? LIMIT 2`, ref]
+    ];
+    if (/^[0-9a-f]{8}$/i.test(ref))
+      steps.push([`SELECT ${cols} FROM records WHERE ${LIVE_TODO} AND id LIKE ? || '%' LIMIT 10`, ref.toLowerCase()]);
+    let rows = [];
+    for (const [sql, arg2] of steps) {
+      const got = budget.step(db, () => db.prepare(sql).all(arg2));
+      if (got === void 0)
+        return cut(budget.exhausted("during the lookup"));
+      if (got.length) {
+        rows = got;
+        break;
+      }
+    }
+    let lookup;
+    if (rows.length === 0)
+      lookup = { refused: `names no user board item ${where}` };
+    else if (rows.length > 1)
+      lookup = { refused: `is ambiguous ${where}, ${rows.length} live todo rows match it: ${rows.map((r) => r.id).join(", ")}` };
+    else if (!rows[0].ok)
+      lookup = { refused: `${where} (${rows[0].id}) cannot be read by this Sterling: the stored body is not valid JSON` };
+    else if (rows[0].source === "system")
+      lookup = { refused: `${where} (${rows[0].id}) is a maintenance-queue item; another project's maintenance queue is not read` };
+    else {
+      const parsed = parseForeignItem(rows[0].id, rows[0].body);
+      lookup = typeof parsed === "string" ? { refused: `${where} (${rows[0].id}) cannot be read by this Sterling: ${parsed}` } : { found: parsed };
+    }
+    if (!("found" in lookup))
+      return { lookup, board: emptyBoard("not read: the lookup found no readable item") };
+    const board = { items: [], unreadable: [], slugHolders: /* @__PURE__ */ new Map(), schemaVersion: 0 };
+    const version = budget.step(db, () => db.prepare("PRAGMA user_version").get());
+    if (version === void 0)
+      return { lookup, board: { ...board, truncated: budget.exhausted("before the schema version was read") } };
+    board.schemaVersion = Number(version.user_version);
+    const truncated = scanRanges(db, budget, [["1", []]], Math.max(1, opts.batchSize ?? 200), board);
+    if (truncated)
+      board.truncated = truncated;
+    else if (budget.remaining() <= 0)
+      board.truncated = budget.exhausted(`after ${board.items.length + board.unreadable.length} board rows were read`);
+    return { lookup, board };
+  }, (why) => ({ lookup: { refused: `was not found ${where}: the lookup was cut short (${why}), so this is NOT proof it is absent; retry` }, board: emptyBoard(why) }));
+}
+function parseForeignItem(id, body) {
+  const raw = JSON.parse(body);
+  const item = todoBoardItemReadSchema.safeParse(raw);
+  const issues = (e) => e.issues.map((i) => `${i.path.join(".") || "(body)"}: ${i.message}`).join("; ");
+  if (!item.success)
+    return issues(item.error);
+  if (item.data.id !== id)
+    return `the body's id ${item.data.id} differs from the row id`;
+  const wait = todoWaitFieldsReadSchema.safeParse(raw);
+  if (!wait.success)
+    return issues(wait.error);
+  return item.data;
+}
+var EVIDENCE_LABELS, statusText, ReadBudget, LIVE_TODO, SCAN_COLUMNS, AFTER, UP_TO;
 var init_handoff = __esm({
   "packages/store/dist/handoff.js"() {
     "use strict";
@@ -8749,6 +8901,44 @@ var init_handoff = __esm({
       unknown: (reason) => `status unknown: ${reason}`,
       unconfirmed: () => "delivery unconfirmed"
     };
+    ReadBudget = class {
+      started;
+      busy;
+      budget;
+      clock;
+      constructor(opts) {
+        this.busy = opts.busyTimeoutMs ?? 250;
+        this.budget = opts.budgetMs ?? 1500;
+        this.clock = opts.clock ?? Date.now;
+        this.started = this.clock();
+      }
+      remaining() {
+        return this.budget - (this.clock() - this.started);
+      }
+      busyTimeout() {
+        return Math.min(this.busy, Math.max(0, this.remaining()));
+      }
+      exhausted(where) {
+        return `time budget exhausted (${this.budget} ms) ${where}`;
+      }
+      /** Runs one SQLite step inside the budget, or returns undefined when the budget ran out before or during it. */
+      step(db, run) {
+        const before = this.remaining();
+        if (before <= 0)
+          return void 0;
+        setBusyTimeout(db, Math.min(this.busy, before));
+        const out = run();
+        return this.remaining() <= 0 ? void 0 : out;
+      }
+    };
+    LIVE_TODO = `type = 'todo' AND status != 'superseded'`;
+    SCAN_COLUMNS = `id, body, json_valid(body) AS ok,
+  CASE WHEN json_valid(body) THEN json_extract(body, '$.source') END AS source,
+  CASE WHEN json_valid(body) THEN json_extract(body, '$.slug') END AS slug,
+  CASE WHEN json_valid(body) THEN json_extract(body, '$.text') END AS text,
+  updated_at AS order_updated_at`;
+    AFTER = `(updated_at < ? OR (updated_at = ? AND id < ?))`;
+    UP_TO = `(updated_at > ? OR (updated_at = ? AND id >= ?))`;
   }
 });
 
@@ -9208,6 +9398,7 @@ __export(dist_exports, {
   axisHits: () => axisHits,
   axisNarrowText: () => axisNarrowText,
   axisTitleText: () => axisTitleText,
+  boardReadinessOf: () => boardReadinessOf,
   buildPgConnectionConfig: () => buildPgConnectionConfig,
   buildReconcileText: () => buildReconcileText,
   catalogStatus: () => catalogStatus,
@@ -9222,6 +9413,7 @@ __export(dist_exports, {
   extractAxisTerms: () => extractAxisTerms,
   extractAxisTermsUncapped: () => extractAxisTermsUncapped,
   fitDomains: () => fitDomains,
+  getForeignBoardItem: () => getForeignBoardItem,
   hasDiscriminatingHit: () => hasDiscriminatingHit,
   hasFullNarrowCentralityCoverage: () => hasFullNarrowCentralityCoverage,
   hasRecordCentralityHit: () => hasRecordCentralityHit,
@@ -9235,6 +9427,7 @@ __export(dist_exports, {
   pgSearchQuery: () => pgSearchQuery,
   rankTermDedupeKey: () => rankTermDedupeKey,
   rankTerms: () => rankTerms,
+  readForeignBoard: () => readForeignBoard,
   readPgCredentials: () => readPgCredentials,
   recordCentralTerms: () => recordCentralTerms,
   recordCentralityHits: () => recordCentralityHits,
@@ -9328,6 +9521,45 @@ function deepReplaceString(value, from, to) {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
   }
   return value;
+}
+function boardReadinessOf(targets, live, openBlocker) {
+  const dependents = /* @__PURE__ */ new Map();
+  for (const t of live) {
+    for (const slug of new Set(t.blocked_by ?? [])) {
+      const list = dependents.get(slug);
+      if (list)
+        list.push(t);
+      else
+        dependents.set(slug, [t]);
+    }
+  }
+  return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+    const blockers = [];
+    const blockersOpen = [];
+    for (const slug of t.blocked_by ?? []) {
+      const holder = openBlocker(slug);
+      blockers.push({ slug, state: holder ? "open" : "closed" });
+      if (holder)
+        blockersOpen.push(boardItemHandle(holder));
+    }
+    const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+    const sent = sentHandoffOf(t);
+    const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+    return {
+      id: t.id,
+      ...t.slug ? { slug: t.slug } : {},
+      name: boardItemHandle(t),
+      ...t.priority ? { priority: t.priority } : {},
+      updated_at: t.updated_at,
+      file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+      ...t.needs ? { needs: t.needs } : {},
+      blockers,
+      blockers_open: blockersOpen,
+      unblocks,
+      state,
+      ...sent ? { handoff: sent } : {}
+    };
+  });
 }
 function compareBoardReadiness(a, b) {
   const pa = PRIORITY_RANK[a.priority ?? "normal"] ?? 1;
@@ -10881,45 +11113,8 @@ var init_dist2 = __esm({
           for (const t of live)
             if (t.slug)
               bySlug.set(t.slug, t);
-          const dependents = /* @__PURE__ */ new Map();
-          for (const t of live) {
-            for (const slug of new Set(t.blocked_by ?? [])) {
-              const list = dependents.get(slug);
-              if (list)
-                list.push(t);
-              else
-                dependents.set(slug, [t]);
-            }
-          }
           const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
-          const targets = items2 ?? live;
-          return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
-            const blockers = [];
-            const blockersOpen = [];
-            for (const slug of t.blocked_by ?? []) {
-              const holder = openBlocker(slug);
-              blockers.push({ slug, state: holder ? "open" : "closed" });
-              if (holder)
-                blockersOpen.push(boardItemHandle(holder));
-            }
-            const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-            const sent = sentHandoffOf(t);
-            const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
-            return {
-              id: t.id,
-              ...t.slug ? { slug: t.slug } : {},
-              name: boardItemHandle(t),
-              ...t.priority ? { priority: t.priority } : {},
-              updated_at: t.updated_at,
-              file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
-              ...t.needs ? { needs: t.needs } : {},
-              blockers,
-              blockers_open: blockersOpen,
-              unblocks,
-              state,
-              ...sent ? { handoff: sent } : {}
-            };
-          });
+          return boardReadinessOf(items2 ?? live, live, openBlocker);
         });
       }
       /**

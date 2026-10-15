@@ -33,7 +33,7 @@ export { MountedStores, MixedScoreScaleError, type DomainMount, resolveDomainMou
 export { allocateShares, DEFAULT_PROJECT_SHARE } from './shares.js';
 export { fitDomains, DOMAIN_FIT_MIN_TERMS } from './domain-fit.js';
 export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
-export { resolveSentHandoffs, sentHandoffOf, openForeignDbReadOnly, type SentHandoff, type HandoffStatus, type HandoffStatusState, type ResolveSentHandoffsOptions } from './handoff.js';
+export { resolveSentHandoffs, sentHandoffOf, openForeignDbReadOnly, readForeignBoard, getForeignBoardItem, type ForeignReadHooks, type ForeignBoardRead, type ForeignBoardLookup, type BoardOrderKey, type ReadForeignBoardOptions, type SentHandoff, type HandoffStatus, type HandoffStatusState, type ResolveSentHandoffsOptions } from './handoff.js';
 export * from './axis.js';
 import { AXIS_MAX_TERM_LEN } from './axis.js';
 import { sentHandoffOf, type SentHandoff } from './handoff.js';
@@ -529,6 +529,84 @@ export interface BoardItemReadiness {
   state: BoardReadinessState;
   /** a 'delegated' item's sent-handoff metadata, for resolveSentHandoffs */
   handoff?: SentHandoff;
+}
+
+/** The board-item fields boardReadinessOf reads; unknown keys are ignored. */
+export interface BoardReadinessInput {
+  id: string;
+  type: string;
+  text?: string;
+  slug?: string;
+  source?: string;
+  priority?: 'low' | 'normal' | 'high';
+  updated_at: string;
+  file_keys?: string[];
+  needs?: BoardNeeds;
+  blocked_by?: string[];
+  handoff?: unknown;
+}
+
+/**
+ * The ONE readiness rule, pure: each live user item among `targets`, with
+ * `live` (every live user item, for `unblocks`) and `openBlocker` (the live
+ * todo carrying a slug, either source, or undefined once it is removed).
+ * store.boardReadiness feeds it this store; the cross-project board read
+ * (board_query/board_get target_project) feeds it the other project's rows.
+ */
+export function boardReadinessOf(
+  targets: readonly BoardReadinessInput[],
+  live: readonly BoardReadinessInput[],
+  openBlocker: (slug: string) => { id: string; text?: unknown; slug?: unknown } | undefined
+): BoardItemReadiness[] {
+  const dependents = new Map<string, BoardReadinessInput[]>();
+  for (const t of live) {
+    for (const slug of new Set(t.blocked_by ?? [])) {
+      const list = dependents.get(slug);
+      if (list) list.push(t);
+      else dependents.set(slug, [t]);
+    }
+  }
+  return targets
+    .filter((t) => t.type === 'todo' && t.source === 'user')
+    .map((t) => {
+      const blockers: BoardBlockerState[] = [];
+      const blockersOpen: string[] = [];
+      for (const slug of t.blocked_by ?? []) {
+        const holder = openBlocker(slug);
+        blockers.push({ slug, state: holder ? 'open' : 'closed' });
+        if (holder) blockersOpen.push(boardItemHandle(holder));
+      }
+      const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+      // 'user' and 'grill' items wait for the user whatever their blockers (the ruling),
+      // so WAITING is shown every session; an open blocker still wins over
+      // investigation and over no needs.
+      // A sent tracker is delegated before anything else: its work is in the
+      // receiving project, and its needs or blockers do not make it runnable here.
+      const sent = sentHandoffOf(t);
+      const state: BoardReadinessState = sent
+        ? 'delegated'
+        : t.needs === 'user' || t.needs === 'grill'
+          ? 'waiting'
+          : blockersOpen.length
+            ? 'blocked'
+            : t.needs === 'investigation'
+              ? 'research'
+              : 'ready';
+      return {
+        id: t.id,
+        ...(t.slug ? { slug: t.slug } : {}),
+        name: boardItemHandle(t),
+        ...(t.priority ? { priority: t.priority } : {}),
+        updated_at: t.updated_at,
+        file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+        ...(t.needs ? { needs: t.needs } : {}),
+        blockers,
+        blockers_open: blockersOpen,
+        unblocks,
+        state,
+        ...(sent ? { handoff: sent } : {}),
+      };
+    });
 }
 
 const PRIORITY_RANK: Record<string, number> = { high: 0, normal: 1, low: 2 };
@@ -3091,78 +3169,16 @@ export class SterlingStore {
    */
   boardReadiness(items?: readonly DurableRecord[]): BoardItemReadiness[] {
     return this.readTx(() => {
-      type Todo = {
-        id: string;
-        type: string;
-        text?: string;
-        slug?: string;
-        source?: string;
-        priority?: 'low' | 'normal' | 'high';
-        updated_at: string;
-        file_keys?: string[];
-        needs?: BoardNeeds;
-        blocked_by?: string[];
-        handoff?: unknown;
-      };
       const total = this.count({ types: ['todo'], source: 'user' });
-      const live = (total > 0 ? this.query({ types: ['todo'], source: 'user', cap: total }) : []) as unknown as Todo[];
-      const bySlug = new Map<string, Todo>();
+      const live = (total > 0 ? this.query({ types: ['todo'], source: 'user', cap: total }) : []) as unknown as BoardReadinessInput[];
+      const bySlug = new Map<string, BoardReadinessInput>();
       for (const t of live) if (t.slug) bySlug.set(t.slug, t);
-      const dependents = new Map<string, Todo[]>();
-      for (const t of live) {
-        for (const slug of new Set(t.blocked_by ?? [])) {
-          const list = dependents.get(slug);
-          if (list) list.push(t);
-          else dependents.set(slug, [t]);
-        }
-      }
       // The open-blocker test the board tools always used: a live todo carries the
       // slug. Live user items answer it without a query; anything else falls back
       // to recordsBySlug so the definition is unchanged.
-      const openBlocker = (slug: string): Todo | undefined =>
-        bySlug.get(slug) ?? (this.recordsBySlug(slug).find((r) => r.type === 'todo') as unknown as Todo | undefined);
-      const targets = (items ?? live) as unknown as Todo[];
-      return targets
-        .filter((t) => t.type === 'todo' && t.source === 'user')
-        .map((t) => {
-          const blockers: BoardBlockerState[] = [];
-          const blockersOpen: string[] = [];
-          for (const slug of t.blocked_by ?? []) {
-            const holder = openBlocker(slug);
-            blockers.push({ slug, state: holder ? 'open' : 'closed' });
-            if (holder) blockersOpen.push(boardItemHandle(holder));
-          }
-          const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-          // 'user' and 'grill' items wait for the user whatever their blockers (the ruling),
-          // so WAITING is shown every session; an open blocker still wins over
-          // investigation and over no needs.
-          // A sent tracker is delegated before anything else: its work is in the
-          // receiving project, and its needs or blockers do not make it runnable here.
-          const sent = sentHandoffOf(t);
-          const state: BoardReadinessState = sent
-            ? 'delegated'
-            : t.needs === 'user' || t.needs === 'grill'
-              ? 'waiting'
-              : blockersOpen.length
-                ? 'blocked'
-                : t.needs === 'investigation'
-                  ? 'research'
-                  : 'ready';
-          return {
-            id: t.id,
-            ...(t.slug ? { slug: t.slug } : {}),
-            name: boardItemHandle(t),
-            ...(t.priority ? { priority: t.priority } : {}),
-            updated_at: t.updated_at,
-            file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
-            ...(t.needs ? { needs: t.needs } : {}),
-            blockers,
-            blockers_open: blockersOpen,
-            unblocks,
-            state,
-            ...(sent ? { handoff: sent } : {}),
-          };
-        });
+      const openBlocker = (slug: string): BoardReadinessInput | undefined =>
+        bySlug.get(slug) ?? (this.recordsBySlug(slug).find((r) => r.type === 'todo') as unknown as BoardReadinessInput | undefined);
+      return boardReadinessOf((items ?? live) as unknown as BoardReadinessInput[], live, openBlocker);
     });
   }
 

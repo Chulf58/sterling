@@ -783,6 +783,11 @@ test('git-ro HARDENING (S2.2): a repo-local `log.showSignature=true` + malicious
       fakeGpg,
       [
         '#!/bin/sh',
+        // Drain stdin FIRST: git pipes the commit payload to gpg.program's
+        // stdin, and if the script exits before git has written it, git's
+        // write fails with EPIPE and `commit -S` dies with "gpg failed to sign
+        // the data" — a load-dependent race that made this fixture flaky.
+        'cat > /dev/null',
         'case "$*" in',
         '  *--verify*)',
         `    : > "${marker}"`,

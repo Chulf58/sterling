@@ -17640,6 +17640,16 @@ var todoWaitFieldsReadSchema = external_exports.object({
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
   }
 });
+var todoBoardItemReadSchema = external_exports.object({
+  id: external_exports.string().min(1),
+  type: external_exports.literal("todo"),
+  source: external_exports.enum(["user", "system"]),
+  updated_at: external_exports.string().min(1),
+  text: external_exports.string().optional(),
+  slug: external_exports.string().min(1).optional(),
+  objective: external_exports.string().optional(),
+  file_keys: external_exports.array(external_exports.string()).optional()
+}).passthrough();
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }
@@ -22014,6 +22024,186 @@ function resolveSentHandoffs(trackers, opts = {}) {
   }
   return out;
 }
+var ReadBudget = class {
+  started;
+  busy;
+  budget;
+  clock;
+  constructor(opts) {
+    this.busy = opts.busyTimeoutMs ?? 250;
+    this.budget = opts.budgetMs ?? 1500;
+    this.clock = opts.clock ?? Date.now;
+    this.started = this.clock();
+  }
+  remaining() {
+    return this.budget - (this.clock() - this.started);
+  }
+  busyTimeout() {
+    return Math.min(this.busy, Math.max(0, this.remaining()));
+  }
+  exhausted(where) {
+    return `time budget exhausted (${this.budget} ms) ${where}`;
+  }
+  /** Runs one SQLite step inside the budget, or returns undefined when the budget ran out before or during it. */
+  step(db, run) {
+    const before = this.remaining();
+    if (before <= 0)
+      return void 0;
+    setBusyTimeout(db, Math.min(this.busy, before));
+    const out = run();
+    return this.remaining() <= 0 ? void 0 : out;
+  }
+};
+var LIVE_TODO = `type = 'todo' AND status != 'superseded'`;
+var SCAN_COLUMNS = `id, body, json_valid(body) AS ok,
+  CASE WHEN json_valid(body) THEN json_extract(body, '$.source') END AS source,
+  CASE WHEN json_valid(body) THEN json_extract(body, '$.slug') END AS slug,
+  CASE WHEN json_valid(body) THEN json_extract(body, '$.text') END AS text,
+  updated_at AS order_updated_at`;
+var AFTER = `(updated_at < ? OR (updated_at = ? AND id < ?))`;
+var UP_TO = `(updated_at > ? OR (updated_at = ? AND id >= ?))`;
+function withForeignDb(dbPath, opts, read, onExhausted) {
+  const budget = new ReadBudget(opts);
+  if (budget.remaining() <= 0)
+    return onExhausted(budget.exhausted("before the store was opened"));
+  const db = openForeignDbReadOnly(dbPath, budget.busyTimeout());
+  try {
+    db.exec("BEGIN");
+    try {
+      return read(db, budget);
+    } finally {
+      db.exec("ROLLBACK");
+    }
+  } finally {
+    db.close();
+  }
+}
+function readForeignBoard(dbPath, opts = {}, hooks = {}) {
+  const empty = () => ({ items: [], unreadable: [], slugHolders: /* @__PURE__ */ new Map(), schemaVersion: 0 });
+  return withForeignDb(dbPath, opts, (db, budget) => {
+    const out = empty();
+    const version2 = budget.step(db, () => db.prepare("PRAGMA user_version").get());
+    if (version2 === void 0) {
+      out.truncated = budget.exhausted("before the schema version was read");
+      return out;
+    }
+    out.schemaVersion = Number(version2.user_version);
+    const ranges = opts.after ? [
+      [AFTER, [opts.after.updated_at, opts.after.updated_at, opts.after.id]],
+      [UP_TO, [opts.after.updated_at, opts.after.updated_at, opts.after.id]]
+    ] : [["1", []]];
+    const truncated = scanRanges(db, budget, ranges, Math.max(1, opts.batchSize ?? 200), out, hooks);
+    if (truncated)
+      out.truncated = truncated;
+    else if (budget.remaining() <= 0)
+      out.truncated = budget.exhausted(`after ${out.items.length + out.unreadable.length} board rows were read`);
+    return out;
+  }, (why) => ({ ...empty(), truncated: why }));
+}
+function scanRanges(db, budget, ranges, batch, out, hooks = {}) {
+  let rows = 0;
+  for (const [range, params] of ranges) {
+    let last;
+    for (; ; ) {
+      const sql = `SELECT ${SCAN_COLUMNS} FROM records WHERE ${LIVE_TODO} AND ${range}${last ? ` AND ${AFTER}` : ""} ORDER BY updated_at DESC, id DESC LIMIT ?`;
+      const args2 = [...params, ...last ? [last.updated_at, last.updated_at, last.id] : [], batch];
+      const got = budget.step(db, () => {
+        const batchRows = db.prepare(sql).all(...args2);
+        hooks.inStep?.(rows + batchRows.length);
+        return batchRows;
+      });
+      if (got === void 0)
+        return budget.exhausted(`after ${rows} board rows were read`);
+      for (const row of got)
+        absorbRow(row, out);
+      rows += got.length;
+      hooks.betweenBatches?.();
+      if (got.length < batch)
+        break;
+      const tail = got[got.length - 1];
+      last = { updated_at: tail.order_updated_at, id: tail.id };
+    }
+  }
+  return void 0;
+}
+function absorbRow(row, out) {
+  if (!row.ok) {
+    out.unreadable.push({ id: row.id, reason: "the stored body is not valid JSON" });
+    return;
+  }
+  if (typeof row.slug === "string" && row.slug.length > 0) {
+    out.slugHolders.set(row.slug, { id: row.id, slug: row.slug, ...typeof row.text === "string" ? { text: row.text } : {} });
+  }
+  if (row.source === "system")
+    return;
+  const parsed = parseForeignItem(row.id, row.body);
+  if (typeof parsed === "string")
+    out.unreadable.push({ id: row.id, reason: parsed });
+  else
+    out.items.push(parsed);
+}
+function getForeignBoardItem(dbPath, ref, where, opts = {}) {
+  const emptyBoard = (why) => ({ items: [], unreadable: [], slugHolders: /* @__PURE__ */ new Map(), schemaVersion: 0, truncated: why });
+  return withForeignDb(dbPath, opts, (db, budget) => {
+    const cut = (why) => ({ lookup: { refused: `was not found ${where}: the lookup was cut short (${why}), so this is NOT proof it is absent; retry` }, board: emptyBoard(why) });
+    const cols = `id, body, json_valid(body) AS ok, CASE WHEN json_valid(body) THEN json_extract(body, '$.source') END AS source`;
+    const steps = [
+      [`SELECT ${cols} FROM records WHERE id = ? AND ${LIVE_TODO} LIMIT 2`, ref],
+      [`SELECT ${cols} FROM records WHERE ${LIVE_TODO} AND (CASE WHEN json_valid(body) THEN json_extract(body, '$.slug') END) = ? LIMIT 2`, ref]
+    ];
+    if (/^[0-9a-f]{8}$/i.test(ref))
+      steps.push([`SELECT ${cols} FROM records WHERE ${LIVE_TODO} AND id LIKE ? || '%' LIMIT 10`, ref.toLowerCase()]);
+    let rows = [];
+    for (const [sql, arg] of steps) {
+      const got = budget.step(db, () => db.prepare(sql).all(arg));
+      if (got === void 0)
+        return cut(budget.exhausted("during the lookup"));
+      if (got.length) {
+        rows = got;
+        break;
+      }
+    }
+    let lookup;
+    if (rows.length === 0)
+      lookup = { refused: `names no user board item ${where}` };
+    else if (rows.length > 1)
+      lookup = { refused: `is ambiguous ${where}, ${rows.length} live todo rows match it: ${rows.map((r) => r.id).join(", ")}` };
+    else if (!rows[0].ok)
+      lookup = { refused: `${where} (${rows[0].id}) cannot be read by this Sterling: the stored body is not valid JSON` };
+    else if (rows[0].source === "system")
+      lookup = { refused: `${where} (${rows[0].id}) is a maintenance-queue item; another project's maintenance queue is not read` };
+    else {
+      const parsed = parseForeignItem(rows[0].id, rows[0].body);
+      lookup = typeof parsed === "string" ? { refused: `${where} (${rows[0].id}) cannot be read by this Sterling: ${parsed}` } : { found: parsed };
+    }
+    if (!("found" in lookup))
+      return { lookup, board: emptyBoard("not read: the lookup found no readable item") };
+    const board = { items: [], unreadable: [], slugHolders: /* @__PURE__ */ new Map(), schemaVersion: 0 };
+    const version2 = budget.step(db, () => db.prepare("PRAGMA user_version").get());
+    if (version2 === void 0)
+      return { lookup, board: { ...board, truncated: budget.exhausted("before the schema version was read") } };
+    board.schemaVersion = Number(version2.user_version);
+    const truncated = scanRanges(db, budget, [["1", []]], Math.max(1, opts.batchSize ?? 200), board);
+    if (truncated)
+      board.truncated = truncated;
+    else if (budget.remaining() <= 0)
+      board.truncated = budget.exhausted(`after ${board.items.length + board.unreadable.length} board rows were read`);
+    return { lookup, board };
+  }, (why) => ({ lookup: { refused: `was not found ${where}: the lookup was cut short (${why}), so this is NOT proof it is absent; retry` }, board: emptyBoard(why) }));
+}
+function parseForeignItem(id, body) {
+  const raw = JSON.parse(body);
+  const item = todoBoardItemReadSchema.safeParse(raw);
+  const issues = (e) => e.issues.map((i) => `${i.path.join(".") || "(body)"}: ${i.message}`).join("; ");
+  if (!item.success)
+    return issues(item.error);
+  if (item.data.id !== id)
+    return `the body's id ${item.data.id} differs from the row id`;
+  const wait = todoWaitFieldsReadSchema.safeParse(raw);
+  if (!wait.success)
+    return issues(wait.error);
+  return item.data;
+}
 
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
@@ -22567,6 +22757,45 @@ function deepReplaceString(value, from, to) {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
   }
   return value;
+}
+function boardReadinessOf(targets, live, openBlocker) {
+  const dependents = /* @__PURE__ */ new Map();
+  for (const t of live) {
+    for (const slug of new Set(t.blocked_by ?? [])) {
+      const list = dependents.get(slug);
+      if (list)
+        list.push(t);
+      else
+        dependents.set(slug, [t]);
+    }
+  }
+  return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+    const blockers = [];
+    const blockersOpen = [];
+    for (const slug of t.blocked_by ?? []) {
+      const holder = openBlocker(slug);
+      blockers.push({ slug, state: holder ? "open" : "closed" });
+      if (holder)
+        blockersOpen.push(boardItemHandle(holder));
+    }
+    const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+    const sent = sentHandoffOf(t);
+    const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+    return {
+      id: t.id,
+      ...t.slug ? { slug: t.slug } : {},
+      name: boardItemHandle(t),
+      ...t.priority ? { priority: t.priority } : {},
+      updated_at: t.updated_at,
+      file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+      ...t.needs ? { needs: t.needs } : {},
+      blockers,
+      blockers_open: blockersOpen,
+      unblocks,
+      state,
+      ...sent ? { handoff: sent } : {}
+    };
+  });
 }
 function boardItemHandle(rec) {
   const label = boardDisplayLabel(rec.text, rec.slug);
@@ -23995,45 +24224,8 @@ var SterlingStore = class _SterlingStore {
       for (const t of live)
         if (t.slug)
           bySlug.set(t.slug, t);
-      const dependents = /* @__PURE__ */ new Map();
-      for (const t of live) {
-        for (const slug of new Set(t.blocked_by ?? [])) {
-          const list = dependents.get(slug);
-          if (list)
-            list.push(t);
-          else
-            dependents.set(slug, [t]);
-        }
-      }
       const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
-      const targets = items ?? live;
-      return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
-        const blockers = [];
-        const blockersOpen = [];
-        for (const slug of t.blocked_by ?? []) {
-          const holder = openBlocker(slug);
-          blockers.push({ slug, state: holder ? "open" : "closed" });
-          if (holder)
-            blockersOpen.push(boardItemHandle(holder));
-        }
-        const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-        const sent = sentHandoffOf(t);
-        const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
-        return {
-          id: t.id,
-          ...t.slug ? { slug: t.slug } : {},
-          name: boardItemHandle(t),
-          ...t.priority ? { priority: t.priority } : {},
-          updated_at: t.updated_at,
-          file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
-          ...t.needs ? { needs: t.needs } : {},
-          blockers,
-          blockers_open: blockersOpen,
-          unblocks,
-          state,
-          ...sent ? { handoff: sent } : {}
-        };
-      });
+      return boardReadinessOf(items ?? live, live, openBlocker);
     });
   }
   /**
@@ -29692,10 +29884,25 @@ function canonical(p) {
     return abs;
   }
 }
-function resolveHandoffTarget(name, selfRoot, regPath = registryPath()) {
-  const refuse = (why) => new Error(`board_add: target_project '${name}' is refused: ${why}. Nothing was written.`);
+var WRITE_WORDING = {
+  nothing: "Nothing was written.",
+  noRoot: "this server has no project root, so it cannot say which project the task comes from",
+  self: "it is this session's own project; add the item without target_project",
+  sqliteOnly: "a handoff writes SQLite stores only",
+  neverCreates: "a handoff never creates one"
+};
+var READ_WORDING = {
+  nothing: "Nothing was read.",
+  noRoot: "this server has no project root, so it cannot tell its own project from another",
+  self: "it is this session's own project; read it without target_project",
+  sqliteOnly: "another project's board is read from SQLite stores only",
+  neverCreates: "a read never creates one"
+};
+function resolveHandoffTarget(name, selfRoot, regPath = registryPath(), use = "board_add") {
+  const w = use === "board_add" ? WRITE_WORDING : READ_WORDING;
+  const refuse = (why) => new Error(`${use}: target_project '${name}' is refused: ${why}. ${w.nothing}`);
   if (!selfRoot)
-    throw refuse("this server has no project root, so it cannot say which project the task comes from");
+    throw refuse(w.noRoot);
   if (!existsSync4(regPath))
     throw refuse(`there is no project registry at ${regPath} (projects are registered by /sterling:init)`);
   const registry2 = new ProjectRegistry(regPath);
@@ -29716,7 +29923,7 @@ function resolveHandoffTarget(name, selfRoot, regPath = registryPath()) {
     throw refuse(`the name is ambiguous, ${roots.length} registered roots carry it: ${roots.join(", ")}`);
   const root = roots[0];
   if (canonical(root) === self)
-    throw refuse("it is this session's own project; add the item without target_project");
+    throw refuse(w.self);
   if (!existsSync4(root))
     throw refuse(`its registered root ${root} does not exist`);
   let route;
@@ -29728,10 +29935,10 @@ function resolveHandoffTarget(name, selfRoot, regPath = registryPath()) {
   if (route === null)
     throw refuse(`${root} has no .sterling/config.json, so it is not an initialized Sterling project`);
   if (route.storage !== "sqlite")
-    throw refuse(`its storage is ${route.storage}; a handoff writes SQLite stores only`);
+    throw refuse(`its storage is ${route.storage}; ${w.sqliteOnly}`);
   const dbPath = join11(root, ".sterling", "sterling.db");
   if (!existsSync4(dbPath))
-    throw refuse(`it has no store at ${dbPath}, and a handoff never creates one`);
+    throw refuse(`it has no store at ${dbPath}, and ${w.neverCreates}`);
   return { name, root, dbPath, selfName };
 }
 
@@ -30311,6 +30518,7 @@ function textRowRecord(record2) {
   }
   return out;
 }
+var FOREIGN_UNAVAILABLE = "unavailable:other_project";
 function mountedDomainSurface(stores) {
   return {
     names: () => stores.domainNames(),
@@ -30370,6 +30578,8 @@ function boardCursorIdentity(surface, filter) {
     identity.contains = filter.contains.toLowerCase();
   if (filter.feature_slug !== void 0)
     identity.feature_slug = filter.feature_slug;
+  if (filter.target_project !== void 0)
+    identity.target_project = filter.target_project;
   return identity;
 }
 function describeIdentityMismatch(minted, current) {
@@ -30643,8 +30853,10 @@ var SterlingTools = class _SterlingTools {
   repoRoot;
   domains;
   registryPath;
+  foreignBoardRead;
   constructor(deps) {
     this.registryPath = deps.registryPath;
+    this.foreignBoardRead = deps.foreignBoardRead;
     this.store = deps.store;
     this.config = deps.config ?? parseConfig({});
     this.now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
@@ -36906,6 +37118,9 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
    * documenting its own guarantee.
    */
   boardQueryResult(filter = {}, surface = "board_query") {
+    if (filter.target_project !== void 0) {
+      throw new Error(`${surface}: target_project is served by foreignBoardQuery, never by this project's board read`);
+    }
     const { matching, scanTruncated } = this.boardFiltered(filter);
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;
     const { records, offset, capped, next_cursor } = this.pageBoard(surface, matching, filter);
@@ -37100,6 +37315,143 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       throw new Error(`board_get: '${id}' resolves to a ${record2.type}, not a board/queue item \u2014 board_get reads board_add/maintenance_enqueue items only; use knowledge_get for other record types`);
     }
     return this.withDisplayLabel(record2);
+  }
+  /**
+   * Read another registered project's user board (decision
+   * read-another-projects-board-board-query-target-project-read-only): the
+   * target is resolved through the registry (self and unknown refused with read
+   * wording), its store read raw and read-only under a time budget, and nothing
+   * is written there. Returns the read with the target it came from.
+   */
+  readForeignTarget(target_project, tool, read) {
+    const target = resolveHandoffTarget(target_project, this.repoRoot, this.registryPath, tool);
+    let result;
+    try {
+      result = read(target.dbPath);
+    } catch (e) {
+      throw new Error(`${tool}: target_project '${target_project}' could not be read: ${e?.message ?? String(e)}. Nothing was written.`);
+    }
+    return { source: { source_project: target.name, source_root: target.root }, result };
+  }
+  /** What every foreign read discloses about the other store: a schema-version difference, unreadable rows, a cut-short read. */
+  static foreignDisclosures(read, notes) {
+    const out = {};
+    if (read.schemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+      out.target_schema_version = read.schemaVersion;
+      notes.push(`the other store is at schema version ${read.schemaVersion} and this Sterling supports ${SUPPORTED_SCHEMA_VERSION}: items were read tolerantly (fields this build does not know are passed through; an item missing a field the read relies on is listed under unreadable)`);
+    }
+    if (read.unreadable.length) {
+      out.unreadable = read.unreadable;
+      notes.push(`${read.unreadable.length} board row(s) could not be read by this Sterling and are listed under unreadable by id; they are not counted in matched_filter`);
+    }
+    if (read.truncated) {
+      out.truncated = read.truncated;
+      notes.push(`the read was cut short (${read.truncated}), so matched_filter is a FLOOR and a page that is not capped is NOT the end of that board; blocked_by_state and unblocks were not computed \u2014 retry the call`);
+    }
+    return out;
+  }
+  /**
+   * blocked_by_state, unblocks and readiness against the OTHER board's live
+   * slugs, through the one readiness rule (boardReadinessOf); a tracker there
+   * reads handoff_status 'unavailable:other_project'. Empty when the read was
+   * partial, because a missing slug would then read as a closed blocker.
+   */
+  static foreignDerived(read, page) {
+    const out = /* @__PURE__ */ new Map();
+    if (read.truncated)
+      return out;
+    const readiness = boardReadinessOf(page, read.items, (slug) => read.slugHolders.get(slug));
+    for (const r of readiness) {
+      out.set(r.id, {
+        ...r.blockers.length ? { blocked_by_state: r.blockers } : {},
+        ...r.unblocks.length ? { unblocks: r.unblocks } : {},
+        ...r.state === "delegated" ? { readiness: "delegated", handoff_status: FOREIGN_UNAVAILABLE } : {}
+      });
+    }
+    return out;
+  }
+  /**
+   * board_query with target_project: another project's USER board, read-only,
+   * with the same filters (objective, file_keys, contains), the same order
+   * (compareBoardOrder) and the same offset/cursor paging as here; a cursor is
+   * bound to its target_project, so it never crosses between a local and a
+   * foreign query. source:'system' is refused: the other project's maintenance
+   * queue is its own housekeeping (the user's ruling).
+   */
+  foreignBoardQuery(filter) {
+    if (filter.source === "system") {
+      throw new Error(`board_query: source:'system' cannot go with target_project \u2014 only another project's user board is read, never its maintenance queue. Nothing was read.`);
+    }
+    const after = filter.cursor !== void 0 && filter.offset === void 0 ? decodeBoardCursor("board_query", filter.cursor) : void 0;
+    const { source, result: read } = this.readForeignTarget(filter.target_project, "board_query", (dbPath) => readForeignBoard(dbPath, { ...this.foreignBoardRead, ...after ? { after: { updated_at: after.updated_at, id: after.id } } : {} }));
+    let matching = read.items;
+    if (filter.contains) {
+      const needle = filter.contains.toLowerCase();
+      matching = matching.filter((t) => (typeof t.text === "string" ? t.text : "").toLowerCase().includes(needle));
+    }
+    if (filter.objective !== void 0) {
+      const wanted = filter.objective === "standalone" ? void 0 : filter.objective;
+      matching = matching.filter((t) => t.objective === wanted);
+    }
+    if (filter.file_keys && filter.file_keys.length > 0) {
+      const wanted = new Set(filter.file_keys.map(normalizeRepoPath));
+      matching = matching.filter((t) => Array.isArray(t.file_keys) && t.file_keys.some((k) => typeof k === "string" && wanted.has(k)));
+    }
+    const ordered = [...matching].sort((a, b) => compareBoardOrder(String(a.updated_at), String(a.id), String(b.updated_at), String(b.id)));
+    const cap = filter.cap ?? DEFAULT_BOARD_CAP;
+    const page = this.pageBoard("board_query", ordered, filter);
+    const records = page.records;
+    const projection = filter.projection ?? "text";
+    const notes = [];
+    if (page.capped) {
+      notes.push(`cap reached \u2014 showing ${records.length} of ${ordered.length} matching items; page with cursor:"${page.next_cursor}"` + (filter.cursor === void 0 ? ` or offset:${page.offset + records.length}` : "") + `, or raise cap`);
+    }
+    const disclosures = _SterlingTools.foreignDisclosures(read, notes);
+    const derived = projection === "text" || projection === "full" ? _SterlingTools.foreignDerived(read, records) : /* @__PURE__ */ new Map();
+    const projected = records.map((r) => {
+      const base2 = projection === "text" ? textRowRecord(r) : projection === "headline" ? headlineRecord(r) : projection === "digest" ? digestRecord(r) : { ...r };
+      return { ...base2, ...derived.get(String(r.id)), ...source };
+    });
+    return {
+      ...source,
+      matched_filter: ordered.length,
+      returned: records.length,
+      cap,
+      capped: page.capped,
+      offset: page.offset,
+      ...page.next_cursor !== void 0 ? { next_cursor: page.next_cursor } : {},
+      provenance: FOREIGN_UNAVAILABLE,
+      reconcile_provenance: FOREIGN_UNAVAILABLE,
+      artifact_evidence_provenance: FOREIGN_UNAVAILABLE,
+      lane_advisory: FOREIGN_UNAVAILABLE,
+      ...disclosures,
+      ...notes.length ? { note: notes.join("; ") } : {},
+      records: projected
+    };
+  }
+  /**
+   * board_get with target_project: one user board item from another project,
+   * in full, by full uuid, exact slug or unambiguous 8-char prefix. The
+   * historical-id archive is not searched there, and the result says so.
+   */
+  foreignBoardGet(id, target_project) {
+    const { source, result } = this.readForeignTarget(target_project, "board_get", (dbPath) => getForeignBoardItem(dbPath, id, `in project '${target_project}'`, this.foreignBoardRead));
+    if ("refused" in result.lookup) {
+      throw new Error(`board_get: '${id}' ${result.lookup.refused} (a full uuid, exact slug or 8-char prefix; the maintenance queue is not read and the historical-id archive is not searched for another project)`);
+    }
+    const hit = result.lookup.found;
+    const notes = [];
+    const disclosures = _SterlingTools.foreignDisclosures(result.board, notes);
+    const label = boardDisplayLabel(hit.text, hit.slug);
+    return {
+      ...hit,
+      ...label ? { label } : {},
+      ..._SterlingTools.foreignDerived(result.board, [hit]).get(String(hit.id)),
+      ...source,
+      historical_ids: "not searched: the historical-id archive is read for this project only",
+      ...disclosures,
+      ...notes.length ? { note: notes.join("; ") } : {}
+    };
   }
   /**
    * ATTACH AN EXPLICIT DISPLAY LABEL, NEVER TOUCH `slug` (board 081508d0,
@@ -38569,6 +38921,7 @@ function createSterlingServer(target, opts = {}) {
   toolWrappers.push("busy_refusal");
   const json = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
   const ID_LADDER = "full uuid, exact slug, or unambiguous 8-char prefix";
+  const FOREIGN_BOARD_READ = "a project name from this machine's project registry (/sterling:projects); reads that project's user board read-only instead of this one";
   const ID_EXACT_DESTROY = "the EXACT full uuid: this call destroys, so a slug or an 8-char prefix is refused";
   const RESOLVES_FULL_IDS = "full uuids only; a slug or an 8-char prefix is refused because claimed items are hard-deleted";
   server.registerTool("knowledge_create", {
@@ -38739,7 +39092,7 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ projection, ...args2 }) => json(tools.writeProjected(tools.boardAdd(args2), projection)));
   server.registerTool("board_query", {
-    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, unblocks (live items waiting on this one, as \`name (id8)\`), readiness:'delegated' with handoff_status {state, text} on a tracker for a task handed to another project, updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane.`,
+    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, unblocks (live items waiting on this one, as \`name (id8)\`), readiness:'delegated' with handoff_status {state, text} on a tracker for a task handed to another project, updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:"system" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.`,
     inputSchema: strict({
       source: external_exports.enum(["user", "system"]).optional(),
       objective: external_exports.string().optional(),
@@ -38748,9 +39101,10 @@ function createSterlingServer(target, opts = {}) {
       cap: external_exports.number().int().positive().optional(),
       offset: external_exports.number().int().nonnegative().optional(),
       cursor: external_exports.string().optional(),
-      projection: external_exports.enum(["text", "full", "digest", "headline"]).optional()
+      projection: external_exports.enum(["text", "full", "digest", "headline"]).optional(),
+      target_project: external_exports.string().describe(FOREIGN_BOARD_READ).optional()
     })
-  }, (args2) => json(tools.boardQueryResult(args2)));
+  }, ({ target_project, ...args2 }) => json(target_project !== void 0 ? tools.foreignBoardQuery({ ...args2, target_project }) : tools.boardQueryResult(args2)));
   server.registerTool("board_remove", {
     description: "Remove a board or queue item \u2014 the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed. An item handed over from another project first writes .sterling/handoffs/<transfer_id>.json, which the sending project reads as done; `note` (handed-over items only) is carried in that file, and a failed write refuses the removal. `evidence` (handed-over items only: commit, pr, deploy, url, at least one non-blank) is written first to .sterling/handoffs/<transfer_id>.evidence.json, which the sending project shows on its DONE status; a failed write refuses the removal.",
     inputSchema: strict({
@@ -38779,9 +39133,12 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ id, projection, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch), projection)));
   server.registerTool("board_get", {
-    description: "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` \u2014 the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed). An item other live items wait on returns unblocks: those items as `name (id8)`.",
-    inputSchema: strict({ id: external_exports.string().describe(ID_LADDER) })
-  }, ({ id }) => json(tools.boardGet(id)));
+    description: "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` \u2014 the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed). An item other live items wait on returns unblocks: those items as `name (id8)`. target_project reads one user board item from another registered project, read-only, by full uuid, exact slug or unambiguous 8-char prefix, with source_project and source_root; the historical-id archive is not searched there.",
+    inputSchema: strict({
+      id: external_exports.string().describe(ID_LADDER),
+      target_project: external_exports.string().describe(FOREIGN_BOARD_READ).optional()
+    })
+  }, ({ id, target_project }) => json(target_project !== void 0 ? tools.foreignBoardGet(id, target_project) : tools.boardGet(id)));
   server.registerTool("board_edit", {
     description: 'Replace one passage inside a board/queue item\'s text in place (id stable, no new version). `find` must match EXACTLY ONCE \u2014 zero or multiple matches are refused with the count, nothing written. Works on user and system items. The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.',
     inputSchema: strict({ id: external_exports.string().describe(ID_LADDER), find: external_exports.string(), replace: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
