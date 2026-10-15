@@ -708,3 +708,62 @@ test('board_query/board_get: the served tools register target_project under the 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/** Raw rows in beta's store, as another Sterling might have written them; `body` null writes a valid user item. */
+function rawBetaRows(h: ReturnType<typeof harness>, rows: { id: string; body?: string; text?: string }[]): void {
+  const w = new DatabaseSync(join(h.beta, '.sterling', 'sterling.db'));
+  try {
+    const ins = w.prepare(`INSERT INTO records (id, type, status, scope, created_at, updated_at, author, body) VALUES (?, 'todo', 'active', 'project', ?, ?, 'conductor', ?)`);
+    w.exec('BEGIN');
+    for (const r of rows) {
+      const body =
+        r.body ??
+        JSON.stringify({ id: r.id, type: 'todo', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [], source: 'user', text: r.text ?? 'Raw item' });
+      ins.run(r.id, NOW, NOW, body);
+    }
+    w.exec('COMMIT');
+  } finally {
+    w.close();
+  }
+}
+
+test('board_query/board_get target_project (review #1): a board past 1000 items is paged to its last item, and board_get reaches the oldest', () => {
+  const h = harness();
+  try {
+    const ids = Array.from({ length: 1001 }, () => randomUUID());
+    rawBetaRows(h, ids.map((id, i) => ({ id, text: `Item ${i}` })));
+    const oldest = [...ids].sort()[0];
+    const first = h.tools.foreignBoardQuery({ target_project: 'beta', cap: 1000, projection: 'headline' });
+    assert.equal(first.matched_filter, 1001);
+    assert.equal(first.capped, true);
+    assert.ok(first.next_cursor, 'a continuation is offered');
+    const second = h.tools.foreignBoardQuery({ target_project: 'beta', cap: 1000, projection: 'headline', cursor: first.next_cursor });
+    assert.deepEqual(second.records.map((r) => r.id), [oldest]);
+    assert.equal(second.capped, false);
+    assert.equal(second.truncated, undefined);
+    assert.deepEqual(h.tools.foreignBoardQuery({ target_project: 'beta', cap: 1000, offset: 1000, projection: 'headline' }).records.map((r) => r.id), [oldest]);
+    assert.equal(h.tools.foreignBoardGet(oldest, 'beta').id, oldest);
+    assert.equal(h.tools.foreignBoardGet(oldest.slice(0, 8), 'beta').id, oldest);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('board_get target_project (review #2): an 8-char prefix shared by a readable and an unreadable row is ambiguous; a cut-short prefix lookup is refused', () => {
+  const h = harness();
+  try {
+    const readable = 'abcdef12-0000-4000-8000-000000000001';
+    const broken = 'abcdef12-0000-4000-8000-000000000002';
+    rawBetaRows(h, [{ id: readable, text: 'Readable' }, { id: broken, body: '{broken' }]);
+    assert.throws(
+      () => h.tools.foreignBoardGet('abcdef12', 'beta'),
+      (e: Error) => /^board_get: 'abcdef12' is ambiguous in project 'beta', 2 live todo rows match it: /.test(e.message) && e.message.includes(readable) && e.message.includes(broken)
+    );
+    assert.equal(h.tools.foreignBoardGet(readable, 'beta').id, readable, 'the full uuid still resolves');
+    assert.throws(() => h.tools.foreignBoardGet(broken, 'beta'), /cannot be read by this Sterling: the stored body is not valid JSON/);
+    const starved = new SterlingTools({ store: h.store, repoRoot: h.alpha, registryPath: h.reg, now: () => NOW, foreignBoardRead: { budgetMs: 0 } });
+    assert.throws(() => starved.foreignBoardGet('abcdef12', 'beta'), /was not found in project 'beta': the lookup was cut short .* NOT proof it is absent/);
+  } finally {
+    h.cleanup();
+  }
+});

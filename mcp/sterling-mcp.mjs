@@ -22024,62 +22024,162 @@ function resolveSentHandoffs(trackers, opts = {}) {
   }
   return out;
 }
-function readForeignBoard(dbPath, opts = {}) {
-  const busy = opts.busyTimeoutMs ?? 250;
-  const budget = opts.budgetMs ?? 1500;
-  const clock = opts.clock ?? Date.now;
-  const scanCap = opts.scanCap ?? 1e3;
-  const checkEvery = Math.max(1, opts.checkEvery ?? 50);
-  const started = clock();
-  const remaining = () => budget - (clock() - started);
-  const out = { items: [], unreadable: [], slugHolders: /* @__PURE__ */ new Map(), schemaVersion: 0, scanTruncated: false };
-  const exhausted = (rows) => `time budget exhausted (${budget} ms) after ${rows} board rows were read`;
-  if (remaining() <= 0) {
-    out.truncated = exhausted(0);
-    return out;
+var ReadBudget = class {
+  started;
+  busy;
+  budget;
+  clock;
+  constructor(opts) {
+    this.busy = opts.busyTimeoutMs ?? 250;
+    this.budget = opts.budgetMs ?? 1500;
+    this.clock = opts.clock ?? Date.now;
+    this.started = this.clock();
   }
-  const db = openForeignDbReadOnly(dbPath, Math.min(busy, remaining()));
+  remaining() {
+    return this.budget - (this.clock() - this.started);
+  }
+  busyTimeout() {
+    return Math.min(this.busy, Math.max(0, this.remaining()));
+  }
+  exhausted(where) {
+    return `time budget exhausted (${this.budget} ms) ${where}`;
+  }
+  /** Runs one SQLite step inside the budget, or returns undefined when the budget ran out before or during it. */
+  step(db, run) {
+    const before = this.remaining();
+    if (before <= 0)
+      return void 0;
+    setBusyTimeout(db, Math.min(this.busy, before));
+    const out = run();
+    return this.remaining() <= 0 ? void 0 : out;
+  }
+};
+var LIVE_TODO = `type = 'todo' AND status != 'superseded'`;
+var SCAN_COLUMNS = `id, body, json_valid(body) AS ok,
+  CASE WHEN json_valid(body) THEN json_extract(body, '$.source') END AS source,
+  CASE WHEN json_valid(body) THEN json_extract(body, '$.slug') END AS slug,
+  CASE WHEN json_valid(body) THEN json_extract(body, '$.text') END AS text,
+  updated_at AS order_updated_at`;
+var AFTER = `(updated_at < ? OR (updated_at = ? AND id < ?))`;
+var UP_TO = `(updated_at > ? OR (updated_at = ? AND id >= ?))`;
+function withForeignDb(dbPath, opts, read, onExhausted) {
+  const budget = new ReadBudget(opts);
+  if (budget.remaining() <= 0)
+    return onExhausted(budget.exhausted("before the store was opened"));
+  const db = openForeignDbReadOnly(dbPath, budget.busyTimeout());
   try {
-    out.schemaVersion = Number(db.prepare("PRAGMA user_version").get().user_version);
-    setBusyTimeout(db, Math.min(busy, Math.max(0, remaining())));
-    const stmt = db.prepare(`SELECT id, body, json_valid(body) AS ok,
-         CASE WHEN json_valid(body) THEN json_extract(body, '$.source') END AS source,
-         CASE WHEN json_valid(body) THEN json_extract(body, '$.slug') END AS slug,
-         CASE WHEN json_valid(body) THEN json_extract(body, '$.text') END AS text
-       FROM records WHERE type = 'todo' AND status != 'superseded'
-       ORDER BY updated_at DESC, id DESC`);
-    let rows = 0;
-    let users = 0;
-    for (const row of stmt.iterate()) {
-      if (rows % checkEvery === 0 && remaining() <= 0) {
-        out.truncated = exhausted(rows);
-        break;
-      }
-      rows++;
-      if (!row.ok) {
-        out.unreadable.push({ id: row.id, reason: "the stored body is not valid JSON" });
-        continue;
-      }
-      if (typeof row.slug === "string" && row.slug.length > 0) {
-        out.slugHolders.set(row.slug, { id: row.id, slug: row.slug, ...typeof row.text === "string" ? { text: row.text } : {} });
-      }
-      if (row.source === "system")
-        continue;
-      if (users >= scanCap) {
-        out.scanTruncated = true;
-        continue;
-      }
-      users++;
-      const reason = parseForeignItem(row.id, row.body);
-      if (typeof reason === "string")
-        out.unreadable.push({ id: row.id, reason });
-      else
-        out.items.push(reason);
-    }
+    return read(db, budget);
   } finally {
     db.close();
   }
-  return out;
+}
+function readForeignBoard(dbPath, opts = {}) {
+  const empty = () => ({ items: [], unreadable: [], slugHolders: /* @__PURE__ */ new Map(), schemaVersion: 0 });
+  return withForeignDb(dbPath, opts, (db, budget) => {
+    const out = empty();
+    const version2 = budget.step(db, () => db.prepare("PRAGMA user_version").get());
+    if (version2 === void 0) {
+      out.truncated = budget.exhausted("before the schema version was read");
+      return out;
+    }
+    out.schemaVersion = Number(version2.user_version);
+    const ranges = opts.after ? [
+      [AFTER, [opts.after.updated_at, opts.after.updated_at, opts.after.id]],
+      [UP_TO, [opts.after.updated_at, opts.after.updated_at, opts.after.id]]
+    ] : [["1", []]];
+    const truncated = scanRanges(db, budget, ranges, Math.max(1, opts.batchSize ?? 200), out);
+    if (truncated)
+      out.truncated = truncated;
+    else if (budget.remaining() <= 0)
+      out.truncated = budget.exhausted(`after ${out.items.length + out.unreadable.length} board rows were read`);
+    return out;
+  }, (why) => ({ ...empty(), truncated: why }));
+}
+function scanRanges(db, budget, ranges, batch, out) {
+  let rows = 0;
+  for (const [range, params] of ranges) {
+    let last;
+    for (; ; ) {
+      const sql = `SELECT ${SCAN_COLUMNS} FROM records WHERE ${LIVE_TODO} AND ${range}${last ? ` AND ${AFTER}` : ""} ORDER BY updated_at DESC, id DESC LIMIT ?`;
+      const args2 = [...params, ...last ? [last.updated_at, last.updated_at, last.id] : [], batch];
+      const got = budget.step(db, () => db.prepare(sql).all(...args2));
+      if (got === void 0)
+        return budget.exhausted(`after ${rows} board rows were read`);
+      for (const row of got)
+        absorbRow(row, out);
+      rows += got.length;
+      if (got.length < batch)
+        break;
+      const tail = got[got.length - 1];
+      last = { updated_at: tail.order_updated_at, id: tail.id };
+    }
+  }
+  return void 0;
+}
+function absorbRow(row, out) {
+  if (!row.ok) {
+    out.unreadable.push({ id: row.id, reason: "the stored body is not valid JSON" });
+    return;
+  }
+  if (typeof row.slug === "string" && row.slug.length > 0) {
+    out.slugHolders.set(row.slug, { id: row.id, slug: row.slug, ...typeof row.text === "string" ? { text: row.text } : {} });
+  }
+  if (row.source === "system")
+    return;
+  const parsed = parseForeignItem(row.id, row.body);
+  if (typeof parsed === "string")
+    out.unreadable.push({ id: row.id, reason: parsed });
+  else
+    out.items.push(parsed);
+}
+function getForeignBoardItem(dbPath, ref, where, opts = {}) {
+  const emptyBoard = (why) => ({ items: [], unreadable: [], slugHolders: /* @__PURE__ */ new Map(), schemaVersion: 0, truncated: why });
+  return withForeignDb(dbPath, opts, (db, budget) => {
+    const cut = (why) => ({ lookup: { refused: `was not found ${where}: the lookup was cut short (${why}), so this is NOT proof it is absent; retry` }, board: emptyBoard(why) });
+    const cols = `id, body, json_valid(body) AS ok, CASE WHEN json_valid(body) THEN json_extract(body, '$.source') END AS source`;
+    const steps = [
+      [`SELECT ${cols} FROM records WHERE id = ? AND ${LIVE_TODO} LIMIT 2`, ref],
+      [`SELECT ${cols} FROM records WHERE ${LIVE_TODO} AND (CASE WHEN json_valid(body) THEN json_extract(body, '$.slug') END) = ? LIMIT 2`, ref]
+    ];
+    if (/^[0-9a-f]{8}$/i.test(ref))
+      steps.push([`SELECT ${cols} FROM records WHERE ${LIVE_TODO} AND id LIKE ? || '%' LIMIT 10`, ref.toLowerCase()]);
+    let rows = [];
+    for (const [sql, arg] of steps) {
+      const got = budget.step(db, () => db.prepare(sql).all(arg));
+      if (got === void 0)
+        return cut(budget.exhausted("during the lookup"));
+      if (got.length) {
+        rows = got;
+        break;
+      }
+    }
+    let lookup;
+    if (rows.length === 0)
+      lookup = { refused: `names no user board item ${where}` };
+    else if (rows.length > 1)
+      lookup = { refused: `is ambiguous ${where}, ${rows.length} live todo rows match it: ${rows.map((r) => r.id).join(", ")}` };
+    else if (!rows[0].ok)
+      lookup = { refused: `${where} (${rows[0].id}) cannot be read by this Sterling: the stored body is not valid JSON` };
+    else if (rows[0].source === "system")
+      lookup = { refused: `${where} (${rows[0].id}) is a maintenance-queue item; another project's maintenance queue is not read` };
+    else {
+      const parsed = parseForeignItem(rows[0].id, rows[0].body);
+      lookup = typeof parsed === "string" ? { refused: `${where} (${rows[0].id}) cannot be read by this Sterling: ${parsed}` } : { found: parsed };
+    }
+    if (!("found" in lookup))
+      return { lookup, board: emptyBoard("not read: the lookup found no readable item") };
+    const board = { items: [], unreadable: [], slugHolders: /* @__PURE__ */ new Map(), schemaVersion: 0 };
+    const version2 = budget.step(db, () => db.prepare("PRAGMA user_version").get());
+    if (version2 === void 0)
+      return { lookup, board: { ...board, truncated: budget.exhausted("before the schema version was read") } };
+    board.schemaVersion = Number(version2.user_version);
+    const truncated = scanRanges(db, budget, [["1", []]], Math.max(1, opts.batchSize ?? 200), board);
+    if (truncated)
+      board.truncated = truncated;
+    else if (budget.remaining() <= 0)
+      board.truncated = budget.exhausted(`after ${board.items.length + board.unreadable.length} board rows were read`);
+    return { lookup, board };
+  }, (why) => ({ lookup: { refused: `was not found ${where}: the lookup was cut short (${why}), so this is NOT proof it is absent; retry` }, board: emptyBoard(why) }));
 }
 function parseForeignItem(id, body) {
   const raw = JSON.parse(body);
@@ -37213,15 +37313,15 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
    * wording), its store read raw and read-only under a time budget, and nothing
    * is written there. Returns the read with the target it came from.
    */
-  readForeignTarget(target_project, tool) {
+  readForeignTarget(target_project, tool, read) {
     const target = resolveHandoffTarget(target_project, this.repoRoot, this.registryPath, tool);
-    let read;
+    let result;
     try {
-      read = readForeignBoard(target.dbPath, { scanCap: BOARD_SCAN_CAP, ...this.foreignBoardRead });
+      result = read(target.dbPath);
     } catch (e) {
       throw new Error(`${tool}: target_project '${target_project}' could not be read: ${e?.message ?? String(e)}. Nothing was written.`);
     }
-    return { source: { source_project: target.name, source_root: target.root }, read };
+    return { source: { source_project: target.name, source_root: target.root }, result };
   }
   /** What every foreign read discloses about the other store: a schema-version difference, unreadable rows, a cut-short read. */
   static foreignDisclosures(read, notes) {
@@ -37237,8 +37337,6 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     if (read.truncated) {
       out.truncated = read.truncated;
       notes.push(`the read was cut short (${read.truncated}), so matched_filter is a FLOOR and a page that is not capped is NOT the end of that board; blocked_by_state and unblocks were not computed \u2014 retry the call`);
-    } else if (read.scanTruncated) {
-      notes.push(`the board holds more than ${BOARD_SCAN_CAP} user items; only the ${BOARD_SCAN_CAP} most recently updated were read, so matched_filter is a FLOOR`);
     }
     return out;
   }
@@ -37250,7 +37348,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
    */
   static foreignDerived(read, page) {
     const out = /* @__PURE__ */ new Map();
-    if (read.truncated || read.scanTruncated)
+    if (read.truncated)
       return out;
     const readiness = boardReadinessOf(page, read.items, (slug) => read.slugHolders.get(slug));
     for (const r of readiness) {
@@ -37274,7 +37372,8 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     if (filter.source === "system") {
       throw new Error(`board_query: source:'system' cannot go with target_project \u2014 only another project's user board is read, never its maintenance queue. Nothing was read.`);
     }
-    const { source, read } = this.readForeignTarget(filter.target_project, "board_query");
+    const after = filter.cursor !== void 0 && filter.offset === void 0 ? decodeBoardCursor("board_query", filter.cursor) : void 0;
+    const { source, result: read } = this.readForeignTarget(filter.target_project, "board_query", (dbPath) => readForeignBoard(dbPath, { ...this.foreignBoardRead, ...after ? { after: { updated_at: after.updated_at, id: after.id } } : {} }));
     let matching = read.items;
     if (filter.contains) {
       const needle = filter.contains.toLowerCase();
@@ -37326,30 +37425,18 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
    * historical-id archive is not searched there, and the result says so.
    */
   foreignBoardGet(id, target_project) {
-    const { source, read } = this.readForeignTarget(target_project, "board_get");
-    const where = `in project '${source.source_project}'`;
-    const lower = id.toLowerCase();
-    let hit = read.items.find((t) => t.id === id) ?? read.items.find((t) => t.slug === id);
-    if (!hit && /^[0-9a-f]{8}$/.test(lower)) {
-      const byPrefix = read.items.filter((t) => String(t.id).toLowerCase().startsWith(lower));
-      if (byPrefix.length > 1) {
-        throw new Error(`board_get: '${id}' is ambiguous ${where}, ${byPrefix.length} user board items start with it: ${byPrefix.map((t) => String(t.id)).join(", ")}`);
-      }
-      hit = byPrefix[0];
+    const { source, result } = this.readForeignTarget(target_project, "board_get", (dbPath) => getForeignBoardItem(dbPath, id, `in project '${target_project}'`, this.foreignBoardRead));
+    if ("refused" in result.lookup) {
+      throw new Error(`board_get: '${id}' ${result.lookup.refused} (a full uuid, exact slug or 8-char prefix; the maintenance queue is not read and the historical-id archive is not searched for another project)`);
     }
-    if (!hit) {
-      const bad = read.unreadable.find((u) => u.id === id || lower.length === 8 && u.id.toLowerCase().startsWith(lower));
-      if (bad)
-        throw new Error(`board_get: '${id}' ${where} cannot be read by this Sterling: ${bad.reason}`);
-      throw new Error(`board_get: '${id}' names no user board item ${where}` + (read.truncated ? ` within the read, which was cut short (${read.truncated}), so this is NOT proof it is absent \u2014 retry` : "") + ` (a full uuid, exact slug or 8-char prefix; the maintenance queue is not read and the historical-id archive is not searched for another project)`);
-    }
+    const hit = result.lookup.found;
     const notes = [];
-    const disclosures = _SterlingTools.foreignDisclosures(read, notes);
+    const disclosures = _SterlingTools.foreignDisclosures(result.board, notes);
     const label = boardDisplayLabel(hit.text, hit.slug);
     return {
       ...hit,
       ...label ? { label } : {},
-      ..._SterlingTools.foreignDerived(read, [hit]).get(String(hit.id)),
+      ..._SterlingTools.foreignDerived(result.board, [hit]).get(String(hit.id)),
       ...source,
       historical_ids: "not searched: the historical-id archive is read for this project only",
       ...disclosures,

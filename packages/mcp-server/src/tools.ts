@@ -29,6 +29,7 @@ import {
   resolveSentHandoffs,
   sentHandoffOf,
   readForeignBoard,
+  getForeignBoardItem,
   boardReadinessOf,
   SUPPORTED_SCHEMA_VERSION,
   type ForeignBoardRead,
@@ -11458,15 +11459,15 @@ export class SterlingTools {
    * wording), its store read raw and read-only under a time budget, and nothing
    * is written there. Returns the read with the target it came from.
    */
-  private readForeignTarget(target_project: string, tool: 'board_query' | 'board_get'): { source: ForeignSource; read: ForeignBoardRead } {
+  private readForeignTarget<T>(target_project: string, tool: 'board_query' | 'board_get', read: (dbPath: string) => T): { source: ForeignSource; result: T } {
     const target = resolveHandoffTarget(target_project, this.repoRoot, this.registryPath, tool);
-    let read: ForeignBoardRead;
+    let result: T;
     try {
-      read = readForeignBoard(target.dbPath, { scanCap: BOARD_SCAN_CAP, ...this.foreignBoardRead });
+      result = read(target.dbPath);
     } catch (e) {
       throw new Error(`${tool}: target_project '${target_project}' could not be read: ${(e as Error)?.message ?? String(e)}. Nothing was written.`);
     }
-    return { source: { source_project: target.name, source_root: target.root }, read };
+    return { source: { source_project: target.name, source_root: target.root }, result };
   }
 
   /** What every foreign read discloses about the other store: a schema-version difference, unreadable rows, a cut-short read. */
@@ -11489,8 +11490,6 @@ export class SterlingTools {
         `the read was cut short (${read.truncated}), so matched_filter is a FLOOR and a page that is not capped is NOT the end of that board; ` +
           `blocked_by_state and unblocks were not computed — retry the call`
       );
-    } else if (read.scanTruncated) {
-      notes.push(`the board holds more than ${BOARD_SCAN_CAP} user items; only the ${BOARD_SCAN_CAP} most recently updated were read, so matched_filter is a FLOOR`);
     }
     return out;
   }
@@ -11503,7 +11502,7 @@ export class SterlingTools {
    */
   private static foreignDerived(read: ForeignBoardRead, page: readonly Record<string, unknown>[]): Map<string, Record<string, unknown>> {
     const out = new Map<string, Record<string, unknown>>();
-    if (read.truncated || read.scanTruncated) return out;
+    if (read.truncated) return out;
     type Input = Parameters<typeof boardReadinessOf>[0][number];
     const readiness = boardReadinessOf(page as unknown as Input[], read.items as unknown as Input[], (slug) => read.slugHolders.get(slug));
     for (const r of readiness) {
@@ -11530,7 +11529,12 @@ export class SterlingTools {
         `board_query: source:'system' cannot go with target_project — only another project's user board is read, never its maintenance queue. Nothing was read.`
       );
     }
-    const { source, read } = this.readForeignTarget(filter.target_project, 'board_query');
+    // A cursor's rows are read first, so its page is reached even when the
+    // budget runs out before the rows ahead of it are counted.
+    const after = filter.cursor !== undefined && filter.offset === undefined ? decodeBoardCursor('board_query', filter.cursor) : undefined;
+    const { source, result: read } = this.readForeignTarget(filter.target_project, 'board_query', (dbPath) =>
+      readForeignBoard(dbPath, { ...this.foreignBoardRead, ...(after ? { after: { updated_at: after.updated_at, id: after.id } } : {}) })
+    );
     let matching = read.items;
     if (filter.contains) {
       const needle = filter.contains.toLowerCase();
@@ -11588,33 +11592,23 @@ export class SterlingTools {
    * historical-id archive is not searched there, and the result says so.
    */
   foreignBoardGet(id: string, target_project: string): Record<string, unknown> {
-    const { source, read } = this.readForeignTarget(target_project, 'board_get');
-    const where = `in project '${source.source_project}'`;
-    const lower = id.toLowerCase();
-    let hit = read.items.find((t) => t.id === id) ?? read.items.find((t) => t.slug === id);
-    if (!hit && /^[0-9a-f]{8}$/.test(lower)) {
-      const byPrefix = read.items.filter((t) => String(t.id).toLowerCase().startsWith(lower));
-      if (byPrefix.length > 1) {
-        throw new Error(`board_get: '${id}' is ambiguous ${where}, ${byPrefix.length} user board items start with it: ${byPrefix.map((t) => String(t.id)).join(', ')}`);
-      }
-      hit = byPrefix[0];
-    }
-    if (!hit) {
-      const bad = read.unreadable.find((u) => u.id === id || (lower.length === 8 && u.id.toLowerCase().startsWith(lower)));
-      if (bad) throw new Error(`board_get: '${id}' ${where} cannot be read by this Sterling: ${bad.reason}`);
+    const { source, result } = this.readForeignTarget(target_project, 'board_get', (dbPath) =>
+      getForeignBoardItem(dbPath, id, `in project '${target_project}'`, this.foreignBoardRead)
+    );
+    if ('refused' in result.lookup) {
       throw new Error(
-        `board_get: '${id}' names no user board item ${where}` +
-          (read.truncated ? ` within the read, which was cut short (${read.truncated}), so this is NOT proof it is absent — retry` : '') +
+        `board_get: '${id}' ${result.lookup.refused}` +
           ` (a full uuid, exact slug or 8-char prefix; the maintenance queue is not read and the historical-id archive is not searched for another project)`
       );
     }
+    const hit = result.lookup.found;
     const notes: string[] = [];
-    const disclosures = SterlingTools.foreignDisclosures(read, notes);
+    const disclosures = SterlingTools.foreignDisclosures(result.board, notes);
     const label = boardDisplayLabel(hit.text, hit.slug);
     return {
       ...hit,
       ...(label ? { label } : {}),
-      ...SterlingTools.foreignDerived(read, [hit]).get(String(hit.id)),
+      ...SterlingTools.foreignDerived(result.board, [hit]).get(String(hit.id)),
       ...source,
       historical_ids: 'not searched: the historical-id archive is read for this project only',
       ...disclosures,

@@ -430,7 +430,6 @@ test('readForeignBoard: user items only, in board order, with live slugs of eith
     assert.deepEqual(read.items.map((i) => i.id), [two.id, one.id]);
     assert.deepEqual([...read.slugHolders.keys()].sort(), ['one', 'queue-item', 'two']);
     assert.equal(read.truncated, undefined);
-    assert.equal(read.scanTruncated, false);
     assert.deepEqual(read.unreadable, []);
     assert.equal(read.schemaVersion, 2);
   } finally {
@@ -469,13 +468,13 @@ test('readForeignBoard: the time budget is checked per N rows; running out is di
     b.store.close();
     const db = join(b.root, '.sterling', 'sterling.db');
     let t = 0;
-    const read = readForeignBoard(db, { budgetMs: 650, checkEvery: 1, clock: () => (t += 100) });
+    const read = readForeignBoard(db, { budgetMs: 1050, batchSize: 1, clock: () => (t += 100) });
     assert.ok(read.truncated, 'the read says it was cut short');
-    assert.match(read.truncated ?? '', /^time budget exhausted \(650 ms\) after \d+ board rows were read$/);
+    assert.match(read.truncated ?? '', /^time budget exhausted \(1050 ms\) after \d+ board rows were read$/);
     assert.ok(read.items.length > 0 && read.items.length < 6, `a partial read, got ${read.items.length}`);
     const none = readForeignBoard(db, { budgetMs: 0 });
     assert.equal(none.items.length, 0);
-    assert.match(none.truncated ?? '', /after 0 board rows/);
+    assert.match(none.truncated ?? '', /before the store was opened/);
   } finally {
     b.cleanup();
   }
@@ -520,5 +519,56 @@ test('readForeignBoard: leaves no litter — a WAL store with no -wal and a roll
     } finally {
       b.cleanup();
     }
+  }
+});
+
+test('readForeignBoard (review #3): a deadline crossed during the final SQLite step, or just before returning, is disclosed as truncation', () => {
+  const b = receiver();
+  try {
+    for (let i = 0; i < 3; i++) mk(b.store, { text: `Item ${i}` });
+    b.store.close();
+    const db = join(b.root, '.sterling', 'sterling.db');
+    let calls = 0;
+    const whole = readForeignBoard(db, { batchSize: 10, clock: () => (calls++, 0) });
+    assert.equal(whole.truncated, undefined, 'precondition: a frozen clock reads the whole board');
+    assert.equal(whole.items.length, 3);
+    // The last clock read is the check before returning; the one before it is
+    // the check after the final scan step.
+    for (const jumpAt of [calls - 1, calls]) {
+      let n = 0;
+      const read = readForeignBoard(db, { batchSize: 10, clock: () => (++n >= jumpAt ? 1e9 : 0) });
+      assert.match(read.truncated ?? '', /^time budget exhausted/, `a deadline crossed at clock read ${jumpAt} of ${calls} is disclosed`);
+    }
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard (review #1): no row ceiling, and with `after` the rows past the cursor are read first', () => {
+  const b = receiver();
+  try {
+    b.store.close();
+    const db = join(b.root, '.sterling', 'sterling.db');
+    const w = new DatabaseSync(db);
+    const ins = w.prepare(`INSERT INTO records (id, type, status, scope, created_at, updated_at, author, body) VALUES (?, 'todo', 'active', 'project', ?, ?, 'conductor', ?)`);
+    w.exec('BEGIN');
+    const ids: string[] = [];
+    for (let i = 0; i < 1005; i++) {
+      const id = randomUUID();
+      ids.push(id);
+      ins.run(id, NOW, NOW, JSON.stringify({ ...envelope(), id, source: 'user', text: `Item ${i}` }));
+    }
+    w.exec('COMMIT');
+    w.close();
+    assert.equal(readForeignBoard(db).items.length, 1005, 'every live user item is read');
+    const sorted = [...ids].sort().reverse();
+    const cursor = { updated_at: NOW, id: sorted[1002] };
+    // one scan step only: the budget runs out after the first batch
+    let t = 0;
+    const read = readForeignBoard(db, { after: cursor, batchSize: 100, budgetMs: 650, clock: () => (t += 100) });
+    assert.ok(read.truncated);
+    assert.deepEqual(read.items.map((i) => i.id).sort(), [sorted[1003], sorted[1004]].sort(), 'the rows past the cursor came first');
+  } finally {
+    b.cleanup();
   }
 });
