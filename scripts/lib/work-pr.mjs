@@ -447,8 +447,9 @@ function writeAtomic(file, value) {
  * for ANOTHER PR is moved to its own per-PR file first, never over one that
  * exists; the legacy file is then deleted. An unreadable legacy file is left
  * in place, so the readers keep disclosing it. `beforeLegacyPublish` is a test
- * seam, called after the legacy file is read and before its state is
- * published, where a concurrent arm of the legacy PR can land. */
+ * seam passed to writeExclusive: it runs at the publication boundary, after
+ * the temp file is written and immediately before the one step that decides
+ * and publishes, where a concurrent arm of the legacy PR can land. */
 export function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = new Date().toISOString(), beforeLegacyPublish = null }) {
   const state = { pr_url, pr_number, repo, head_sha, armed_at: now, status: 'owed' };
   writeAtomic(prLoopFile(root, pr_number), state);
@@ -461,13 +462,12 @@ export function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = new D
       old = null; // unreadable: left in place for the readers to disclose
     }
     if (old) {
-      if (beforeLegacyPublish) beforeLegacyPublish(old);
       // NO CHECK-THEN-WRITE (Sol review): a concurrent arm of the legacy PR
       // between an existence check and the write would be overwritten by this
       // older state, losing the owed duty. writeExclusive publishes only when
       // the per-PR file does not exist, as one step; an existing file is
       // newer, so the legacy copy is dropped.
-      if (old.pr_number !== pr_number) writeExclusive(prLoopFile(root, old.pr_number), old);
+      if (old.pr_number !== pr_number) writeExclusive(prLoopFile(root, old.pr_number), old, { beforePublish: beforeLegacyPublish });
       try {
         unlinkSync(legacy);
       } catch (e) {
@@ -480,12 +480,17 @@ export function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = new D
 
 /** Publish `value` at `file` only if `file` does not exist: written to a temp
  * file, then hard-linked into place (link fails with EEXIST instead of
- * replacing). Returns false when the file already existed. */
-function writeExclusive(file, value) {
+ * replacing), so deciding and publishing are one filesystem step. Returns
+ * false when the file already existed. `beforePublish` (a test seam) runs
+ * immediately before that step. */
+function writeExclusive(file, value, { beforePublish = null } = {}) {
   mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}`;
+  // Its own temp name: an arm of the same PR in this process (writeAtomic's
+  // .tmp-<pid>) must not replace this file before it is linked.
+  const tmp = `${file}.excl-${process.pid}`;
   writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n');
   try {
+    if (beforePublish) beforePublish(value);
     linkSync(tmp, file);
     return true;
   } catch (e) {

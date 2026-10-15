@@ -165,8 +165,10 @@ test('issue #104: an unreadable per-PR file is disclosed by name, and an unreada
 });
 
 // Sol review (HIGH) on #104: migrating the legacy loop of PR 7 while PR 8 is
-// armed must never overwrite a concurrent re-arm of PR 7 that lands between
-// reading the legacy file and publishing it. The seam re-arms PR 7 there.
+// armed must never overwrite a concurrent re-arm of PR 7. The seam re-arms
+// PR 7 at the publication boundary, after anything the publish could have
+// checked and immediately before it writes, so a check-then-write publish
+// (existsSync, then a replacing write) fails this test.
 test('issue #104: a re-arm of the legacy PR that lands mid-migration is never overwritten by the old settled state', () => {
   const settled = { ...STATE, status: 'clean', settled_at: '2026-09-27T10:00:00.000Z' };
   const p = project('work', settled);

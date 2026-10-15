@@ -12561,8 +12561,7 @@ function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE_
       old = null;
     }
     if (old) {
-      if (beforeLegacyPublish) beforeLegacyPublish(old);
-      if (old.pr_number !== pr_number) writeExclusive(prLoopFile(root, old.pr_number), old);
+      if (old.pr_number !== pr_number) writeExclusive(prLoopFile(root, old.pr_number), old, { beforePublish: beforeLegacyPublish });
       try {
         unlinkSync2(legacy);
       } catch (e) {
@@ -12572,11 +12571,12 @@ function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE_
   }
   return state;
 }
-function writeExclusive(file, value) {
+function writeExclusive(file, value, { beforePublish = null } = {}) {
   mkdirSync5(dirname9(file), { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}`;
+  const tmp = `${file}.excl-${process.pid}`;
   writeFileSync2(tmp, JSON.stringify(value, null, 2) + "\n");
   try {
+    if (beforePublish) beforePublish(value);
     linkSync(tmp, file);
     return true;
   } catch (e) {
