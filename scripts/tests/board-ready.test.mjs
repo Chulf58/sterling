@@ -336,6 +336,27 @@ test('OpenCode: a root session context carries the board readiness block', async
   }
 });
 
+test('OpenCode: a delegated tracker shows the status read from the receiving project (GitHub issue #105)', async () => {
+  const p = project();
+  const beta = project();
+  try {
+    const transfer = randomUUID();
+    const trackerId = randomUUID();
+    const remote = mk(beta.store, { text: 'Do it there', handoff: { role: 'received', transfer_id: transfer, from_root: p.dir, from_name: 'alpha', from_item_id: trackerId } });
+    beta.store.close();
+    mk(p.store, { id: trackerId, text: "Handed to project 'beta': Do it there", handoff: { role: 'sent', transfer_id: transfer, to_root: beta.dir, to_name: 'beta', to_item_id: remote.id } });
+    mk(p.store, { text: "Handed to project 'beta': Pending", handoff: { role: 'sent', transfer_id: randomUUID(), to_root: beta.dir, to_name: 'beta', to_item_id: null } });
+    const text = await ocContext(p);
+    assert.match(text, /DELEGATED TO OTHER PROJECTS \(2, not run here\):/);
+    assert.ok(text.includes(`- ${h("Handed to project 'beta': Do it there", { id: trackerId })} — project 'beta': open in beta`), text.slice(-1500));
+    assert.match(text, /Pending \([0-9a-f]{8}\) — project 'beta': delivery unconfirmed/);
+    assert.doesNotMatch(text, /status not read here/);
+  } finally {
+    p.cleanup();
+    rmSync(beta.dir, { recursive: true, force: true });
+  }
+});
+
 test('OpenCode: the maintenance worker child gets no board readiness block', async () => {
   const p = project();
   try {

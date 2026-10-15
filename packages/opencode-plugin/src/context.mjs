@@ -10,7 +10,7 @@
 // out": a system prompt that changed every turn re-wrote the whole conversation to the
 // provider's prompt cache; finding why-is-the-prompt-cache-hit-rate-lower-on-opencode-codeburn).
 import { join } from 'node:path';
-import { SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
+import { SUPPORTED_SCHEMA_VERSION, resolveSentHandoffs } from '@sterling/store';
 import { probeSchemaVersion } from '../../../scripts/lib/update.mjs';
 import { opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
 import { errText, logLine } from './log.mjs';
@@ -200,6 +200,25 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
   }
 
   /**
+   * The status of each tracker for a task handed to another project (GitHub
+   * issue #105), read-only from the receiving projects' stores with H1's 500 ms
+   * budget, cached with the readiness it belongs to. resolveSentHandoffs never
+   * throws for one receiver (an unreadable one reads "status unknown: <reason>");
+   * if the call itself fails the block is rendered without statuses, so each
+   * delegated line says its status was not read, and the failure is logged.
+   */
+  function delegatedStatuses(root, readiness) {
+    const delegated = readiness.filter((r) => r.state === 'delegated');
+    if (!delegated.length) return undefined;
+    try {
+      return resolveSentHandoffs(delegated.map((r) => ({ id: r.id, handoff: r.handoff })), { budgetMs: 500 });
+    } catch (e) {
+      logLine(root, `context: delegated board item status unreadable: ${errText(e)}`);
+      return undefined;
+    }
+  }
+
+  /**
    * H1's READY / READY FOR RESEARCH / WAITING ON YOU block (decision
    * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start;
    * full-parity ruling the former ruling 'sterling-is-fully-standalone-on-opencode-2-full-parity-with-claude-code' (not in the current store)), from the same shared lib and the store's one
@@ -219,7 +238,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
         } finally {
           store.close();
         }
-        hit = { at: Date.now(), readiness };
+        hit = { at: Date.now(), readiness, handoffStatus: delegatedStatuses(root, readiness) };
       } catch (e) {
         logLine(root, `context: board readiness unreadable: ${errText(e)}`);
         hit = {
@@ -233,12 +252,12 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     try {
       const live = liveLanes(root, sessionID);
       const ceiling = laneCeiling(config);
-      const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling });
+      const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus });
       // The delivery key is the text with only a measured lane count held constant: a lane
       // that starts or ends changes `live lanes k/n` and nothing else, and re-sending the
       // whole list for it is the noise GitHub #93 reported. An unreadable dispatch register,
       // the ceiling and its errors stay in the key, so they are said when they change.
-      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live: live.availability === 'ok' ? { ...live, count: 0 } : live, ceiling }) : '';
+      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live: live.availability === 'ok' ? { ...live, count: 0 } : live, ceiling, handoffStatus: hit.handoffStatus }) : '';
       return { text, sig };
     } catch (e) {
       logLine(root, `context: board readiness unreadable: ${errText(e)}`);

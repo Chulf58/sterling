@@ -4548,6 +4548,28 @@ var SYSTEM_REASONS = [
 var TODO_SYSTEM_SOURCE = "system";
 var TODO_SYSTEM_REQUIRES = ["system_reason"];
 var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+var todoHandoffSchema = external_exports.discriminatedUnion("role", [
+  external_exports.object({
+    role: external_exports.literal("received"),
+    transfer_id: external_exports.string().uuid(),
+    from_root: external_exports.string().min(1),
+    from_name: external_exports.string().min(1),
+    from_item_id: external_exports.string().uuid()
+  }).strict(),
+  external_exports.object({
+    role: external_exports.literal("sent"),
+    transfer_id: external_exports.string().uuid(),
+    to_root: external_exports.string().min(1),
+    to_name: external_exports.string().min(1),
+    to_item_id: external_exports.string().uuid().nullable()
+  }).strict()
+]);
+var handoffClosureSchema = external_exports.object({
+  transfer_id: external_exports.string().uuid(),
+  item_id: external_exports.string().uuid(),
+  closed_at: external_exports.string().min(1),
+  note: external_exports.string().min(1).optional()
+}).strict();
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }
@@ -4598,9 +4620,14 @@ var todoSchema = base.extend({
   // 'investigation' still auto-starts, as a researcher lane; 'user' and
   // 'grill' wait for the user. Not a progress status: `status` keeps meaning
   // supersession only. Absent means nothing beyond the blockers.
-  needs: external_exports.enum(BOARD_NEEDS).optional()
+  needs: external_exports.enum(BOARD_NEEDS).optional(),
+  // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
+  handoff: todoHandoffSchema.optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
+  if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
+  }
   if (rec.source === TODO_SYSTEM_SOURCE) {
     for (const field of TODO_SYSTEM_REQUIRES) {
       if (!rec[field]) {
@@ -7583,8 +7610,17 @@ var AXIS_MAX_TERM_LEN = 64;
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 
-// packages/store/dist/sqlite-driver.js
+// packages/store/dist/handoff.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
+function sentHandoffOf(rec) {
+  if (rec.handoff === void 0)
+    return void 0;
+  const parsed = todoHandoffSchema.safeParse(rec.handoff);
+  return parsed.success && parsed.data.role === "sent" ? parsed.data : void 0;
+}
+
+// packages/store/dist/sqlite-driver.js
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { realpathSync } from "node:fs";
 import { dirname as dirname2, basename, join as join4, resolve as resolvePath } from "node:path";
 var DDL = `
@@ -7758,7 +7794,7 @@ var SqliteDriver = class {
     }
     this.busyTimeoutMs = busyTimeoutMs;
     this.dbPath = resolvePath(path);
-    this.db = new DatabaseSync2(path);
+    this.db = new DatabaseSync3(path);
     let classifiedPath = this.dbPath;
     try {
       classifiedPath = join4(realpathSync(dirname2(this.dbPath)), basename(this.dbPath));
@@ -9575,7 +9611,8 @@ var SterlingStore = class _SterlingStore {
             blockersOpen.push(boardItemHandle(holder));
         }
         const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-        const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+        const sent = sentHandoffOf(t);
+        const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
         return {
           id: t.id,
           ...t.slug ? { slug: t.slug } : {},
@@ -9587,7 +9624,8 @@ var SterlingStore = class _SterlingStore {
           blockers,
           blockers_open: blockersOpen,
           unblocks,
-          state
+          state,
+          ...sent ? { handoff: sent } : {}
         };
       });
     });
@@ -11388,7 +11426,7 @@ function openStoreOrDegrade(cwd, who, open2 = openStore) {
 
 // scripts/hooks/lib/session-events.mjs
 import { existsSync as existsSync5, mkdirSync as mkdirSync4, readFileSync as readFileSync6, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { dirname as dirname5, join as join10 } from "node:path";
 var SESSION_EVENTS_REL = join10(".sterling", "transient", "session-events.json");
 function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
@@ -11425,7 +11463,7 @@ var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
 var SQLITE_BUSY = 5;
 function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
   const lockPath = `${path}.lock.db`;
-  const db = new DatabaseSync3(lockPath);
+  const db = new DatabaseSync4(lockPath);
   try {
     db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timeoutMs2))}`);
     try {

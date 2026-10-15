@@ -2981,7 +2981,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve5.call(this, root, ref);
+      let _sch = resolve6.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -3008,7 +3008,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve5(root, ref) {
+    function resolve6(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3639,7 +3639,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve5(baseURI, relativeURI, options) {
+    function resolve6(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
@@ -3897,7 +3897,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve5,
+      resolve: resolve6,
       resolveComponent,
       equal,
       serialize,
@@ -6887,7 +6887,7 @@ var require_dist = __commonJS({
 });
 
 // packages/mcp-server/dist/main.js
-import { dirname as dirname9, isAbsolute as isAbsolute2, join as join13, resolve as resolve4 } from "node:path";
+import { dirname as dirname10, isAbsolute as isAbsolute2, join as join16, resolve as resolve5 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
@@ -13000,21 +13000,21 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve5) => {
+    return new Promise((resolve6) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve5();
+        resolve6();
       } else {
-        this._stdout.once("drain", resolve5);
+        this._stdout.once("drain", resolve6);
       }
     });
   }
 };
 
 // packages/store/dist/routing.js
-import { lstatSync as lstatSync3, readFileSync as readFileSync3 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join8, resolve as resolve2 } from "node:path";
+import { lstatSync as lstatSync3, readFileSync as readFileSync4 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join10, resolve as resolve2 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -17579,6 +17579,29 @@ var SYSTEM_REASONS = [
 var TODO_SYSTEM_SOURCE = "system";
 var TODO_SYSTEM_REQUIRES = ["system_reason"];
 var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+var todoHandoffSchema = external_exports.discriminatedUnion("role", [
+  external_exports.object({
+    role: external_exports.literal("received"),
+    transfer_id: external_exports.string().uuid(),
+    from_root: external_exports.string().min(1),
+    from_name: external_exports.string().min(1),
+    from_item_id: external_exports.string().uuid()
+  }).strict(),
+  external_exports.object({
+    role: external_exports.literal("sent"),
+    transfer_id: external_exports.string().uuid(),
+    to_root: external_exports.string().min(1),
+    to_name: external_exports.string().min(1),
+    to_item_id: external_exports.string().uuid().nullable()
+  }).strict()
+]);
+var HANDOFFS_DIR_REL = ".sterling/handoffs";
+var handoffClosureSchema = external_exports.object({
+  transfer_id: external_exports.string().uuid(),
+  item_id: external_exports.string().uuid(),
+  closed_at: external_exports.string().min(1),
+  note: external_exports.string().min(1).optional()
+}).strict();
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }
@@ -17629,9 +17652,14 @@ var todoSchema = base.extend({
   // 'investigation' still auto-starts, as a researcher lane; 'user' and
   // 'grill' wait for the user. Not a progress status: `status` keeps meaning
   // supersession only. Absent means nothing beyond the blockers.
-  needs: external_exports.enum(BOARD_NEEDS).optional()
+  needs: external_exports.enum(BOARD_NEEDS).optional(),
+  // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
+  handoff: todoHandoffSchema.optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
+  if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
+  }
   if (rec.source === TODO_SYSTEM_SOURCE) {
     for (const field of TODO_SYSTEM_REQUIRES) {
       if (!rec[field]) {
@@ -19294,8 +19322,8 @@ function parseStoreFence(value) {
 }
 
 // packages/store/dist/index.js
-import { mkdirSync as mkdirSync2, existsSync as existsSync2, statSync as statSync2 } from "node:fs";
-import { dirname as dirname4, join as join6, resolve as resolvePath2 } from "node:path";
+import { mkdirSync as mkdirSync3, existsSync as existsSync3, statSync as statSync2 } from "node:fs";
+import { dirname as dirname5, join as join8, resolve as resolvePath2 } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // packages/store/dist/mounted.js
@@ -21612,11 +21640,273 @@ function fitDomains(recordText, domains, opts = {}) {
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
+import { mkdirSync as mkdirSync2 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { dirname as dirname3, join as join5 } from "node:path";
+var REGISTRY_DDL = `
+CREATE TABLE IF NOT EXISTS projects (
+  repo_path TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  stack_tags TEXT NOT NULL,
+  toolchains TEXT NOT NULL,
+  sterling_version TEXT,
+  first_init_at TEXT NOT NULL,
+  last_init_at TEXT NOT NULL,
+  last_seen_at TEXT
+);`;
+function registryPath() {
+  return process.env.STERLING_REGISTRY_DB ?? join5(homedir3(), ".sterling", "registry.db");
+}
+var ProjectRegistry = class {
+  db;
+  constructor(path = registryPath()) {
+    mkdirSync2(dirname3(path), { recursive: true });
+    this.db = new DatabaseSync(path);
+    this.db.exec("PRAGMA busy_timeout=5000");
+    this.db.exec("PRAGMA journal_mode=WAL");
+    this.db.exec(REGISTRY_DDL);
+  }
+  /** Upsert by repo_path (init event, P4): create on first init
+   *  (first_init_at = last_init_at = at), refresh the mutable fields + last_init_at
+   *  on re-init while preserving first_init_at. */
+  register(input) {
+    this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+         ON CONFLICT(repo_path) DO UPDATE SET
+           name = excluded.name,
+           stack_tags = excluded.stack_tags,
+           toolchains = excluded.toolchains,
+           sterling_version = excluded.sterling_version,
+           last_init_at = excluded.last_init_at`).run(input.repo_path, input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.at);
+  }
+  /** Session-activity touch (H1 SessionStart): update last_seen_at for an
+   *  EXISTING row only — never create (registration is init's job). Returns
+   *  whether a row was updated. */
+  touchLastSeen(repoPath2, at) {
+    return this.db.prepare("UPDATE projects SET last_seen_at = ? WHERE repo_path = ?").run(at, repoPath2).changes > 0;
+  }
+  /** Mount-change refresh (/sterling:domains --apply): replace stack_tags of an
+   *  EXISTING row and nothing else, so the row's init dates and version still
+   *  say when and by which Sterling the project was last initialized. Never
+   *  creates a row. Returns whether a row was updated. */
+  updateStackTags(repoPath2, stackTags) {
+    return this.db.prepare("UPDATE projects SET stack_tags = ? WHERE repo_path = ?").run(JSON.stringify(stackTags), repoPath2).changes > 0;
+  }
+  /** All registered projects, name-ordered. Stale-at-read (existence of
+   *  repo_path) is the caller's lazy check — the registry stores no liveness. */
+  list() {
+    return this.db.prepare("SELECT * FROM projects ORDER BY name").all().map((r) => projectRegistrationSchema.parse({
+      ...r,
+      stack_tags: JSON.parse(r.stack_tags),
+      toolchains: JSON.parse(r.toolchains)
+    }));
+  }
+  /** Human-gated removal (the /sterling:projects prune of a missing project) —
+   *  never automatic. Returns whether a row was removed. */
+  remove(repoPath2) {
+    return this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2).changes > 0;
+  }
+  close() {
+    this.db.close();
+  }
+};
+
+// packages/store/dist/handoff.js
+import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
+import { closeSync as closeSync2, existsSync as existsSync2, openSync as openSync2, readFileSync as readFileSync3, readSync } from "node:fs";
+import { join as join6 } from "node:path";
+import { pathToFileURL } from "node:url";
+function sentHandoffOf(rec) {
+  if (rec.handoff === void 0)
+    return void 0;
+  const parsed = todoHandoffSchema.safeParse(rec.handoff);
+  return parsed.success && parsed.data.role === "sent" ? parsed.data : void 0;
+}
+function journalTopology(path) {
+  const header = Buffer.alloc(100);
+  const fd = openSync2(path, "r");
+  let read;
+  try {
+    read = readSync(fd, header, 0, 100, 0);
+  } finally {
+    closeSync2(fd);
+  }
+  if (read < 100 || header.toString("latin1", 0, 16) !== "SQLite format 3\0")
+    throw new Error(`${path} is not a SQLite database`);
+  return header[18] === 2 ? "wal" : "rollback";
+}
+function openForeignDbReadOnly(path, busyTimeoutMs) {
+  let topology;
+  try {
+    topology = journalTopology(path);
+  } catch (e) {
+    if (e?.code === "ENOENT")
+      throw new Error(`no database at ${path}`);
+    throw e;
+  }
+  let db;
+  if (topology === "rollback" || existsSync2(`${path}-wal`)) {
+    db = new DatabaseSync2(path, { readOnly: true });
+  } else {
+    const url = pathToFileURL(path);
+    url.searchParams.set("immutable", "1");
+    db = new DatabaseSync2(url, { readOnly: true });
+  }
+  setBusyTimeout(db, busyTimeoutMs);
+  return db;
+}
+function setBusyTimeout(db, ms) {
+  db.exec(`PRAGMA busy_timeout=${Math.max(0, Math.floor(ms))}`);
+}
+function readIfPresent(p) {
+  try {
+    return readFileSync3(p, "utf8");
+  } catch (e) {
+    if (e?.code === "ENOENT")
+      return void 0;
+    throw e;
+  }
+}
+var statusText = {
+  open: (to) => `open in ${to}`,
+  done: (to, closedAt, note) => `DONE in ${to} ${closedAt}${note ? `: ${note}` : ""}`,
+  gone: (to) => `gone from ${to}'s board, completion unverified`,
+  unknown: (reason) => `status unknown: ${reason}`,
+  unconfirmed: () => "delivery unconfirmed"
+};
+function unknown2(reason) {
+  return { state: "unknown", text: statusText.unknown(reason) };
+}
+function errText(e) {
+  return e?.message ?? String(e);
+}
+function receiverStorage(root) {
+  const text = readIfPresent(join6(root, ".sterling", "config.json"));
+  if (text === void 0)
+    return void 0;
+  const raw = JSON.parse(text);
+  return typeof raw.storage === "string" ? raw.storage : void 0;
+}
+function closureStatus(h) {
+  const p = join6(h.to_root, HANDOFFS_DIR_REL, `${h.transfer_id}.json`);
+  let text;
+  let parsed;
+  try {
+    text = readIfPresent(p);
+    if (text === void 0)
+      return { state: "gone", text: statusText.gone(h.to_name) };
+    parsed = handoffClosureSchema.safeParse(JSON.parse(text));
+  } catch (e) {
+    return unknown2(`the closure file ${p} is unreadable (${errText(e)})`);
+  }
+  if (!parsed.success)
+    return unknown2(`the closure file ${p} is not a closure record (${parsed.error.issues.map((i) => i.message).join("; ")})`);
+  const c = parsed.data;
+  if (c.transfer_id !== h.transfer_id || c.item_id !== h.to_item_id) {
+    return unknown2(`the closure file ${p} names transfer ${c.transfer_id} item ${c.item_id}, not transfer ${h.transfer_id} item ${h.to_item_id}`);
+  }
+  return { state: "done", text: statusText.done(h.to_name, c.closed_at, c.note), closed_at: c.closed_at, ...c.note ? { note: c.note } : {} };
+}
+function rowStatus(db, trackerId, h) {
+  const row = db.prepare("SELECT body, status FROM records WHERE id = ?").get(h.to_item_id);
+  if (!row)
+    return closureStatus(h);
+  let body;
+  try {
+    body = JSON.parse(row.body);
+  } catch (e) {
+    return unknown2(`${h.to_name}'s row ${h.to_item_id} is not valid JSON (${errText(e)})`);
+  }
+  if (body.type !== "todo")
+    return unknown2(`${h.to_name}'s record ${h.to_item_id} is a ${String(body.type)}, not a board item`);
+  if (row.status === "superseded")
+    return unknown2(`${h.to_name}'s item ${h.to_item_id} is superseded, which a board item never is`);
+  if (body.handoff === void 0)
+    return unknown2(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} carries no handoff record (an older Sterling there may have dropped it on an edit)`);
+  const meta = todoHandoffSchema.safeParse(body.handoff);
+  if (!meta.success || meta.data.role !== "received" || meta.data.transfer_id !== h.transfer_id || meta.data.from_item_id !== trackerId) {
+    return unknown2(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} carries handoff metadata for a different transfer`);
+  }
+  return { state: "open", text: statusText.open(h.to_name) };
+}
+function resolveSentHandoffs(trackers, opts = {}) {
+  const busy = opts.busyTimeoutMs ?? 250;
+  const budget = opts.budgetMs ?? 1500;
+  const clock = opts.clock ?? Date.now;
+  const started = clock();
+  const remaining = () => budget - (clock() - started);
+  const exhausted = (where) => `time budget exhausted (${budget} ms) before ${where} was read`;
+  const out = /* @__PURE__ */ new Map();
+  const groups = /* @__PURE__ */ new Map();
+  for (const t of trackers) {
+    if (t.handoff === void 0)
+      continue;
+    const h = sentHandoffOf(t);
+    if (!h) {
+      out.set(t.id, unknown2("this tracker carries handoff metadata this Sterling cannot read"));
+      continue;
+    }
+    if (h.to_item_id === null) {
+      out.set(t.id, { state: "unconfirmed", text: statusText.unconfirmed() });
+      continue;
+    }
+    const list = groups.get(h.to_root) ?? [];
+    list.push({ id: t.id, h });
+    groups.set(h.to_root, list);
+  }
+  for (const [root, list] of groups) {
+    const fail = (reason) => {
+      for (const { id } of list)
+        out.set(id, unknown2(reason));
+    };
+    const left = remaining();
+    if (left <= 0) {
+      fail(exhausted(root));
+      continue;
+    }
+    let storage;
+    try {
+      storage = receiverStorage(root);
+    } catch (e) {
+      fail(`${root}/.sterling/config.json is unreadable (${errText(e)})`);
+      continue;
+    }
+    if (storage !== void 0 && storage !== "sqlite") {
+      fail(`${root} now uses ${storage} storage, which this reader does not open`);
+      continue;
+    }
+    let db;
+    try {
+      db = openForeignDbReadOnly(join6(root, ".sterling", "sterling.db"), Math.min(busy, left));
+    } catch (e) {
+      fail(errText(e));
+      continue;
+    }
+    try {
+      for (const { id, h } of list) {
+        const now = remaining();
+        if (now <= 0) {
+          out.set(id, unknown2(exhausted(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)}`)));
+          continue;
+        }
+        try {
+          setBusyTimeout(db, Math.min(busy, now));
+          out.set(id, rowStatus(db, id, h));
+        } catch (e) {
+          out.set(id, unknown2(`${h.to_name}'s database could not be read (${errText(e)})`));
+        }
+      }
+    } finally {
+      db.close();
+    }
+  }
+  return out;
+}
 
 // packages/store/dist/sqlite-driver.js
-import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { realpathSync } from "node:fs";
-import { dirname as dirname3, basename, join as join5, resolve as resolvePath } from "node:path";
+import { dirname as dirname4, basename, join as join7, resolve as resolvePath } from "node:path";
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -21788,10 +22078,10 @@ var SqliteDriver = class {
     }
     this.busyTimeoutMs = busyTimeoutMs;
     this.dbPath = resolvePath(path);
-    this.db = new DatabaseSync2(path);
+    this.db = new DatabaseSync3(path);
     let classifiedPath = this.dbPath;
     try {
-      classifiedPath = join5(realpathSync(dirname3(this.dbPath)), basename(this.dbPath));
+      classifiedPath = join7(realpathSync(dirname4(this.dbPath)), basename(this.dbPath));
     } catch {
     }
     this.classifiedPath = classifiedPath;
@@ -22004,7 +22294,7 @@ var SqliteDriver = class {
 var storeDriverFactory;
 function classifyClaimPath(repoRoot, path) {
   try {
-    return statSync2(join6(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
+    return statSync2(join8(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
   } catch (err) {
     const code = err?.code;
     if (code === "ENOENT")
@@ -23615,7 +23905,8 @@ var SterlingStore = class _SterlingStore {
             blockersOpen.push(boardItemHandle(holder));
         }
         const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-        const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+        const sent = sentHandoffOf(t);
+        const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
         return {
           id: t.id,
           ...t.slug ? { slug: t.slug } : {},
@@ -23627,7 +23918,8 @@ var SterlingStore = class _SterlingStore {
           blockers,
           blockers_open: blockersOpen,
           unblocks,
-          state
+          state,
+          ...sent ? { handoff: sent } : {}
         };
       });
     });
@@ -24103,10 +24395,10 @@ var SterlingStore = class _SterlingStore {
   /** Backup snapshot (§2.3): the driver copies the store to the configured backup path (SQLite: VACUUM INTO). Refuses to overwrite. */
   snapshot(targetPath) {
     const target = targetPath.replace(/\\/g, "/");
-    if (existsSync2(target)) {
+    if (existsSync3(target)) {
       throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
     }
-    mkdirSync2(dirname4(target), { recursive: true });
+    mkdirSync3(dirname5(target), { recursive: true });
     this.db.snapshot(target);
   }
   close() {
@@ -24529,8 +24821,8 @@ var SterlingStore = class _SterlingStore {
 
 // packages/store/dist/broker-runtime.js
 import { createHash } from "node:crypto";
-import { closeSync as closeSync2, constants as FS, fstatSync, lstatSync as lstatSync2, mkdirSync as mkdirSync3, openSync as openSync2, readdirSync, readSync, realpathSync as realpathSync2, renameSync, rmSync as rmSync2, writeFileSync } from "node:fs";
-import { join as join7 } from "node:path";
+import { closeSync as closeSync3, constants as FS, fstatSync, lstatSync as lstatSync2, mkdirSync as mkdirSync4, openSync as openSync3, readdirSync, readSync as readSync2, realpathSync as realpathSync2, renameSync, rmSync as rmSync2, writeFileSync } from "node:fs";
+import { join as join9 } from "node:path";
 var BrokerRuntimeDirError = class extends Error {
   constructor(message) {
     super(message);
@@ -24547,7 +24839,7 @@ function brokerDirPath(env = process.env) {
     return void 0;
   const xdg = env.XDG_RUNTIME_DIR;
   if (xdg && xdg.startsWith("/") && !onWindowsDrive(xdg))
-    return join7(xdg, "sterling");
+    return join9(xdg, "sterling");
   return `/tmp/sterling-${id}`;
 }
 function assertPrivate(path, kind) {
@@ -24578,7 +24870,7 @@ function brokerDir({ create, env = process.env }) {
       throw new BrokerRuntimeDirError(`broker directory ${dir} cannot be read (${e.message})`);
     if (!create)
       return void 0;
-    mkdirSync3(dir, { mode: 448 });
+    mkdirSync4(dir, { mode: 448 });
   }
   assertPrivate(dir, "directory");
   return dir;
@@ -24587,14 +24879,14 @@ function brokerProjectKey(root) {
   return createHash("sha256").update(realpathSync2(root)).digest("hex").slice(0, 16);
 }
 function brokerSocketPath(dir, instanceId) {
-  return join7(dir, `${instanceId}.sock`);
+  return join9(dir, `${instanceId}.sock`);
 }
 function brokerRegistrationPath(dir, root, instanceId) {
-  return join7(dir, `${brokerProjectKey(root)}.${instanceId}.json`);
+  return join9(dir, `${brokerProjectKey(root)}.${instanceId}.json`);
 }
 function publishBrokerRegistration(dir, root, reg) {
   const path = brokerRegistrationPath(dir, root, reg.instance_id);
-  const tmp = join7(dir, `.${reg.instance_id}.json.tmp`);
+  const tmp = join9(dir, `.${reg.instance_id}.json.tmp`);
   writeFileSync(tmp, JSON.stringify(brokerRegistrationSchema.parse(reg)), { mode: 384 });
   renameSync(tmp, path);
   return path;
@@ -24636,10 +24928,10 @@ var PostgresStoreNotMovedError = class extends PgStoreMissingError {
   }
 };
 function routedCredentialsPath() {
-  return join8(homedir3(), ".sterling", "credentials", "served.json");
+  return join10(homedir4(), ".sterling", "credentials", "served.json");
 }
 function readConfig(root) {
-  const path = join8(root, CONFIG_REL);
+  const path = join10(root, CONFIG_REL);
   try {
     lstatSync3(path);
   } catch (e) {
@@ -24649,7 +24941,7 @@ function readConfig(root) {
   }
   let raw;
   try {
-    raw = JSON.parse(readFileSync3(path, "utf8"));
+    raw = JSON.parse(readFileSync4(path, "utf8"));
   } catch (e) {
     throw new StoreSettingsError(`malformed ${path}: ${e.message}. Nothing was opened.`);
   }
@@ -24698,7 +24990,7 @@ function resolveStoreRoute(root) {
     return null;
   const { config: config2 } = read;
   if (read.raw.storage !== "postgres") {
-    return { storage: "sqlite", root: absRoot, config: config2, projectDbPath: join8(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config2) };
+    return { storage: "sqlite", root: absRoot, config: config2, projectDbPath: join10(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config2) };
   }
   const shown = absRoot.replace(/\\/g, "/");
   const identity = readProjectIdentity(absRoot);
@@ -24889,7 +25181,7 @@ function routeOrDefault(root) {
     return route;
   const config2 = parseConfig({});
   const absRoot = resolve2(root);
-  return { storage: "sqlite", root: absRoot, config: config2, projectDbPath: join8(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config2) };
+  return { storage: "sqlite", root: absRoot, config: config2, projectDbPath: join10(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config2) };
 }
 function openRoutedStores(root, opts = {}) {
   const route = routeOrDefault(root);
@@ -26953,7 +27245,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
+        await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -26970,7 +27262,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -27048,7 +27340,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve5(parseResult.data);
+            resolve6(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -27309,12 +27601,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve5, interval);
+      const timeoutId = setTimeout(resolve6, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -28414,7 +28706,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
+      await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -28983,8 +29275,8 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // packages/mcp-server/dist/server.js
-import { readFileSync as readFileSync8, existsSync as existsSync6 } from "node:fs";
-import { join as join12, dirname as dirname7 } from "node:path";
+import { readFileSync as readFileSync9, existsSync as existsSync8 } from "node:fs";
+import { join as join15, dirname as dirname8 } from "node:path";
 
 // packages/mcp-server/dist/held-stores.js
 function holdRoutedStores(opened, reopen, announce) {
@@ -29035,7 +29327,7 @@ function holdRoutedStores(opened, reopen, announce) {
 }
 
 // packages/mcp-server/dist/worker-policy.js
-import { readFileSync as readFileSync4 } from "node:fs";
+import { readFileSync as readFileSync5 } from "node:fs";
 import { posix } from "node:path";
 var WORKER_STAMP_KEY = "worker_stamp";
 var WORKER_FIELD_ALLOW_LIST = {
@@ -29095,7 +29387,7 @@ var WorkerGuard = class {
   load(tool) {
     let raw;
     try {
-      raw = readFileSync4(this.args.path, "utf8");
+      raw = readFileSync5(this.args.path, "utf8");
     } catch (e) {
       throw new WorkerPolicyRefusal(tool, "policy_unreadable", `the policy file ${this.args.path} could not be read (${e.message})`);
     }
@@ -29273,15 +29565,69 @@ function guardWorkerTools(server, guard) {
 // packages/mcp-server/dist/tools.js
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync as existsSync5, lstatSync as lstatSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync7, readdirSync as readdirSync3, realpathSync as realpathSync3, renameSync as renameSync3, statSync as statSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { basename as basename2, dirname as dirname6, isAbsolute, join as join11, relative, sep } from "node:path";
+import { appendFileSync, chmodSync, existsSync as existsSync7, lstatSync as lstatSync5, mkdirSync as mkdirSync6, readFileSync as readFileSync8, readdirSync as readdirSync3, realpathSync as realpathSync4, renameSync as renameSync3, statSync as statSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { basename as basename3, dirname as dirname7, isAbsolute, join as join14, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+
+// packages/mcp-server/dist/handoff-target.js
+import { existsSync as existsSync4, realpathSync as realpathSync3 } from "node:fs";
+import { basename as basename2, join as join11, resolve as resolve3 } from "node:path";
+function canonical(p) {
+  const abs = resolve3(p);
+  try {
+    return realpathSync3(abs);
+  } catch {
+    return abs;
+  }
+}
+function resolveHandoffTarget(name, selfRoot, regPath = registryPath()) {
+  const refuse = (why) => new Error(`board_add: target_project '${name}' is refused: ${why}. Nothing was written.`);
+  if (!selfRoot)
+    throw refuse("this server has no project root, so it cannot say which project the task comes from");
+  if (!existsSync4(regPath))
+    throw refuse(`there is no project registry at ${regPath} (projects are registered by /sterling:init)`);
+  const registry2 = new ProjectRegistry(regPath);
+  let rows;
+  try {
+    rows = registry2.list();
+  } finally {
+    registry2.close();
+  }
+  const self = canonical(selfRoot);
+  const selfRow = rows.find((r) => canonical(r.repo_path) === self);
+  const selfName = selfRow?.name ?? basename2(self);
+  const roots = [...new Set(rows.filter((r) => r.name === name).map((r) => r.repo_path))];
+  if (roots.length === 0) {
+    throw refuse(`no registered project has that name; registered: ${rows.length ? [...new Set(rows.map((r) => r.name))].join(", ") : "(none)"}`);
+  }
+  if (roots.length > 1)
+    throw refuse(`the name is ambiguous, ${roots.length} registered roots carry it: ${roots.join(", ")}`);
+  const root = roots[0];
+  if (canonical(root) === self)
+    throw refuse("it is this session's own project; add the item without target_project");
+  if (!existsSync4(root))
+    throw refuse(`its registered root ${root} does not exist`);
+  let route;
+  try {
+    route = resolveStoreRoute(root);
+  } catch (e) {
+    throw refuse(`its store settings could not be read (${e?.message ?? String(e)})`);
+  }
+  if (route === null)
+    throw refuse(`${root} has no .sterling/config.json, so it is not an initialized Sterling project`);
+  if (route.storage !== "sqlite")
+    throw refuse(`its storage is ${route.storage}; a handoff writes SQLite stores only`);
+  const dbPath = join11(root, ".sterling", "sterling.db");
+  if (!existsSync4(dbPath))
+    throw refuse(`it has no store at ${dbPath}, and a handoff never creates one`);
+  return { name, root, dbPath, selfName };
+}
 
 // packages/mcp-server/dist/attestation-proof.js
 import { spawnSync } from "node:child_process";
 import { createHash as createHash2 } from "node:crypto";
-import { closeSync as closeSync3, constants as fsConstants, fstatSync as fstatSync2, lstatSync as lstatSync4, openSync as openSync3, readSync as readSync2 } from "node:fs";
-import { resolve as resolve3 } from "node:path";
+import { closeSync as closeSync4, constants as fsConstants, fstatSync as fstatSync2, lstatSync as lstatSync4, openSync as openSync4, readSync as readSync3 } from "node:fs";
+import { resolve as resolve4 } from "node:path";
 var AttestationRefusal = class extends Error {
   path;
   reason;
@@ -29391,7 +29737,7 @@ function fsStep(key, what, fn) {
   }
 }
 function readOwnedFile(root, key, remainingBytes, maxTotalBytes) {
-  const abs = resolve3(root, ...key.split("/"));
+  const abs = resolve4(root, ...key.split("/"));
   const pre = fsStep(key, "lstat", () => lstatSync4(abs, { throwIfNoEntry: false }));
   if (!pre)
     throw new AttestationRefusal("the path does not exist in the worktree", key);
@@ -29400,7 +29746,7 @@ function readOwnedFile(root, key, remainingBytes, maxTotalBytes) {
   if (!pre.isFile())
     throw new AttestationRefusal("the worktree path is not a regular file", key);
   const noFollow = fsConstants.O_NOFOLLOW ?? 0;
-  const fd = fsStep(key, "open", () => openSync3(abs, fsConstants.O_RDONLY | noFollow));
+  const fd = fsStep(key, "open", () => openSync4(abs, fsConstants.O_RDONLY | noFollow));
   try {
     const st = fsStep(key, "fstat", () => fstatSync2(fd));
     if (!st.isFile())
@@ -29411,7 +29757,7 @@ function readOwnedFile(root, key, remainingBytes, maxTotalBytes) {
     const bytes = Buffer.allocUnsafe(st.size);
     let filled = 0;
     while (filled < st.size) {
-      const read = fsStep(key, "read", () => readSync2(fd, bytes, filled, st.size - filled, filled));
+      const read = fsStep(key, "read", () => readSync3(fd, bytes, filled, st.size - filled, filled));
       if (read === 0) {
         throw new AttestationRefusal(`the file is shorter than the ${st.size} bytes fstat reported (only ${filled} could be read) \u2014 it changed size while it was being read, so no buffer here can be attested`, key);
       }
@@ -29419,7 +29765,7 @@ function readOwnedFile(root, key, remainingBytes, maxTotalBytes) {
     }
     return bytes;
   } finally {
-    closeSync3(fd);
+    closeSync4(fd);
   }
 }
 function hashObjectOf(root, key, bytes) {
@@ -29472,8 +29818,8 @@ function readHeadFile(root, key) {
 }
 
 // packages/mcp-server/dist/entry-reachability.js
-import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync5 } from "node:fs";
-import { join as join9 } from "node:path";
+import { existsSync as existsSync5, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
+import { join as join12 } from "node:path";
 var MCP_TOOL_FILES = /* @__PURE__ */ new Set(["packages/mcp-server/src/server.ts", "packages/mcp-server/src/tools.ts"]);
 var TOOL_NAME_TOKEN = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
 function classifyPath(path) {
@@ -29586,7 +29932,7 @@ var EntryReachability = class {
     return hit ? { path, kind: "hook", reached: true, detail: `hooks/hooks.json runs ${target}` } : { path, kind: "hook", reached: false, detail: `no hooks/hooks.json command runs ${target}` };
   }
   judgePresent(path, kind) {
-    return existsSync3(join9(this.root, path)) ? { path, kind, reached: true, detail: `${kind} file present` } : { path, kind, reached: false, detail: `${path} does not exist, so nothing discovers it` };
+    return existsSync5(join12(this.root, path)) ? { path, kind, reached: true, detail: `${kind} file present` } : { path, kind, reached: false, detail: `${path} does not exist, so nothing discovers it` };
   }
   judgeTool(path, role) {
     const names = this.toolNames ??= this.load("packages/mcp-server/src/server.ts", (text) => {
@@ -29695,11 +30041,11 @@ var EntryReachability = class {
       return null;
     const name = path.slice(path.lastIndexOf("/") + 1);
     const notReached = (why) => ({ path, kind: "script", reached: false, detail: `${BIN_REGISTRY_FILE} SPAWNED_ENTRIES maps it to ${spawner}, but ${why}` });
-    if (!existsSync3(join9(this.root, spawner)))
+    if (!existsSync5(join12(this.root, spawner)))
       return notReached(`${spawner} does not exist`);
     let text;
     try {
-      text = readFileSync5(join9(this.root, spawner), "utf8");
+      text = readFileSync6(join12(this.root, spawner), "utf8");
     } catch (err) {
       return notReached(`${spawner} could not be read (${err.message})`);
     }
@@ -29714,7 +30060,7 @@ var EntryReachability = class {
     const out = /* @__PURE__ */ new Map();
     const add = (rel) => {
       try {
-        out.set(rel, readFileSync5(join9(this.root, rel), "utf8"));
+        out.set(rel, readFileSync6(join12(this.root, rel), "utf8"));
       } catch (err) {
         const code = err.code;
         if (code !== "ENOENT" && code !== "EISDIR")
@@ -29723,7 +30069,7 @@ var EntryReachability = class {
     };
     const list = (dir) => {
       try {
-        return readdirSync2(join9(this.root, dir));
+        return readdirSync2(join12(this.root, dir));
       } catch (err) {
         if (err.code === "ENOENT")
           return [];
@@ -29750,8 +30096,8 @@ var EntryReachability = class {
    * or a projection script and a manifest that disagree, is 'unclear'.
    */
   readCloneState() {
-    const marker = existsSync3(join9(this.root, "scripts/architecture-projection.mjs"));
-    const manifestPresent = existsSync3(join9(this.root, ".claude-plugin/plugin.json"));
+    const marker = existsSync5(join12(this.root, "scripts/architecture-projection.mjs"));
+    const manifestPresent = existsSync5(join12(this.root, ".claude-plugin/plugin.json"));
     if (!manifestPresent)
       return marker ? "unclear" : "consumer";
     const manifest = this.load(".claude-plugin/plugin.json", (text) => JSON.parse(text).name);
@@ -29762,7 +30108,7 @@ var EntryReachability = class {
     return marker ? "unclear" : "consumer";
   }
   readNpmScripts() {
-    if (!existsSync3(join9(this.root, "package.json")))
+    if (!existsSync5(join12(this.root, "package.json")))
       return { ok: true, value: [] };
     return this.load("package.json", (text) => {
       const scripts = JSON.parse(text).scripts ?? {};
@@ -29770,11 +30116,11 @@ var EntryReachability = class {
     });
   }
   load(rel, parse3) {
-    const abs = join9(this.root, rel);
-    if (!existsSync3(abs))
+    const abs = join12(this.root, rel);
+    if (!existsSync5(abs))
       return { ok: false, why: `${rel} is missing` };
     try {
-      return { ok: true, value: parse3(readFileSync5(abs, "utf8")) };
+      return { ok: true, value: parse3(readFileSync6(abs, "utf8")) };
     } catch (err) {
       return { ok: false, why: `${rel} could not be parsed (${err.message})` };
     }
@@ -29782,16 +30128,16 @@ var EntryReachability = class {
 };
 
 // scripts/hooks/lib/session-events.mjs
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync6, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
-import { dirname as dirname5, join as join10 } from "node:path";
-var SESSION_EVENTS_REL = join10(".sterling", "transient", "session-events.json");
+import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync7, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
+import { dirname as dirname6, join as join13 } from "node:path";
+var SESSION_EVENTS_REL = join13(".sterling", "transient", "session-events.json");
 function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
-  mkdirSync4(dirname5(eventsPath), { recursive: true });
+  mkdirSync5(dirname6(eventsPath), { recursive: true });
   withSessionEventsLock(
     eventsPath,
     () => {
-      const events = existsSync4(eventsPath) ? JSON.parse(readFileSync6(eventsPath, "utf8")) : [];
+      const events = existsSync6(eventsPath) ? JSON.parse(readFileSync7(eventsPath, "utf8")) : [];
       events.push(...newEvents);
       const tmp = `${eventsPath}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
       writeFileSync2(tmp, JSON.stringify(events), { flag: "wx" });
@@ -29812,7 +30158,7 @@ var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
 var SQLITE_BUSY = 5;
 function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
   const lockPath = `${path}.lock.db`;
-  const db = new DatabaseSync3(lockPath);
+  const db = new DatabaseSync4(lockPath);
   try {
     db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timeoutMs2))}`);
     try {
@@ -30025,8 +30371,8 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
   }
   if (path === "storage" || path.startsWith("storage."))
     throw new StorageTransitionRequiredError(path);
-  const configDir = join11(repoRoot, ".sterling");
-  const configPath = join11(configDir, "config.json");
+  const configDir = join14(repoRoot, ".sterling");
+  const configPath = join14(configDir, "config.json");
   let dirLst;
   try {
     dirLst = lstatSync5(configDir);
@@ -30042,8 +30388,8 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
   if (dirLst.isSymbolicLink()) {
     throw new Error(`config_set: .sterling is a symlink at the project root \u2014 refusing a structured write beneath a linked directory. Nothing was written.`);
   }
-  const realDir = realpathSync3(configDir);
-  const realRoot = realpathSync3(repoRoot);
+  const realDir = realpathSync4(configDir);
+  const realRoot = realpathSync4(repoRoot);
   const relDir = relative(realRoot, realDir);
   if (relDir === ".." || relDir.startsWith(`..${sep}`) || isAbsolute(relDir)) {
     throw new Error(`config_set: .sterling resolves outside the project root (${realDir}) \u2014 refusing. Nothing was written.`);
@@ -30065,7 +30411,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (!fileLst.isFile()) {
       throw new Error(`config_set: .sterling/config.json is not a regular file \u2014 refusing. Nothing was written.`);
     }
-    currentBytes = readFileSync7(configPath);
+    currentBytes = readFileSync8(configPath);
   } else {
     currentBytes = Buffer.alloc(0);
   }
@@ -30129,7 +30475,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 ${issues}. Nothing was written.`);
   }
   const serialized = JSON.stringify(mutated, null, 2) + "\n";
-  const tmpPath = join11(configDir, `config.json.tmp-${randomUUID2()}`);
+  const tmpPath = join14(configDir, `config.json.tmp-${randomUUID2()}`);
   writeFileSync3(tmpPath, serialized);
   let renamed = false;
   try {
@@ -30141,7 +30487,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     }
     let raceBytes;
     try {
-      raceBytes = readFileSync7(configPath);
+      raceBytes = readFileSync8(configPath);
     } catch {
       raceBytes = Buffer.alloc(0);
     }
@@ -30184,7 +30530,9 @@ var SterlingTools = class _SterlingTools {
   newId;
   repoRoot;
   domains;
+  registryPath;
   constructor(deps) {
+    this.registryPath = deps.registryPath;
     this.store = deps.store;
     this.config = deps.config ?? parseConfig({});
     this.now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
@@ -30334,7 +30682,7 @@ var SterlingTools = class _SterlingTools {
     for (const rel of _SterlingTools.baselineablePaths(record2)) {
       if (only && !only.has(rel))
         continue;
-      const shape = lstatSync5(join11(root, rel), { throwIfNoEntry: false });
+      const shape = lstatSync5(join14(root, rel), { throwIfNoEntry: false });
       if (!shape || !shape.isFile())
         continue;
       const hash = this.hashFile(rel, root);
@@ -30467,7 +30815,7 @@ var SterlingTools = class _SterlingTools {
       return { root: mapped, unresolved: false };
     if (!this.repoRoot)
       return { root: void 0, unresolved: true };
-    return { root: join11(this.repoRoot, mapped), unresolved: false };
+    return { root: join14(this.repoRoot, mapped), unresolved: false };
   }
   /**
    * Does a record's working_tree name a tree OTHER than this project? A
@@ -31076,7 +31424,7 @@ var SterlingTools = class _SterlingTools {
     if (!root)
       return void 0;
     try {
-      return createHash3("sha256").update(readFileSync7(join11(root, rel))).digest("hex");
+      return createHash3("sha256").update(readFileSync8(join14(root, rel))).digest("hex");
     } catch {
       return void 0;
     }
@@ -31140,7 +31488,7 @@ var SterlingTools = class _SterlingTools {
     const baseline = ctx.baselines?.[rel];
     let stat;
     try {
-      stat = statSync3(join11(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
+      stat = statSync3(join14(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
     } catch (err) {
       const code = err?.code;
       return { verdict: { kind: "unavailable", reason: `stat_failed_${String(code ?? "unknown").toLowerCase()}` } };
@@ -31612,11 +31960,11 @@ var SterlingTools = class _SterlingTools {
    * An unregistered type is left to validateRecord's louder rejection.
    */
   refuseUnknownFields(type, candidate, op = "knowledge write") {
-    const unknown2 = unknownFieldsIn(type, candidate);
-    if (unknown2.length === 0)
+    const unknown3 = unknownFieldsIn(type, candidate);
+    if (unknown3.length === 0)
       return;
     const valid = [...knownFieldsFor(type) ?? []].sort().join(", ");
-    throw new Error(`${op}: '${type}' does not define ${unknown2.map((k) => `'${k}'`).join(", ")} \u2014 the field would have been silently dropped and the write reported success. Valid fields: ${valid}.`);
+    throw new Error(`${op}: '${type}' does not define ${unknown3.map((k) => `'${k}'`).join(", ")} \u2014 the field would have been silently dropped and the write reported success. Valid fields: ${valid}.`);
   }
   /**
    * Caller-facing field path for a zod issue: numeric segments render as
@@ -32095,7 +32443,7 @@ var SterlingTools = class _SterlingTools {
         if (tree?.unresolved)
           return { ...record2, verify_before_use: true };
         if (rel && tree?.root) {
-          const stat = statSync3(join11(tree.root, rel), { throwIfNoEntry: false });
+          const stat = statSync3(join14(tree.root, rel), { throwIfNoEntry: false });
           if (!stat && this.parkedOnRef(rel, tree.root).status !== "parked") {
             const mintFailed = this.mintAtRead({
               reason: "refresh_reference",
@@ -34045,8 +34393,8 @@ ${JSON.stringify(value, null, 2)}` : void 0;
    * dead id.
    */
   historicalIdRefusal(alias, addressed, toolName) {
-    const canonical = this.store.get(alias.canonical_id);
-    const currentVersion = canonical?.version;
+    const canonical2 = this.store.get(alias.canonical_id);
+    const currentVersion = canonical2?.version;
     const addressedAs = addressed === alias.historical_id ? `'${addressed}'` : `'${addressed}' \u2192 '${alias.historical_id}'`;
     return new HistoricalIdError(`${toolName}: ${addressedAs} is a HISTORICAL id \u2014 the record it named was collapsed into canonical record '${alias.canonical_id}'${currentVersion !== void 0 ? ` (now at version ${currentVersion})` : ""}, and version ${alias.archived_version} is the snapshot this id is pinned to. Reads through this id still work (knowledge_get serves that archived snapshot with a legacy_resolution block); a WRITE must address '${alias.canonical_id}'. Nothing was written.`, alias);
   }
@@ -34064,17 +34412,17 @@ ${JSON.stringify(value, null, 2)}` : void 0;
    * how a reader comes to believe an old citation said something it never said.
    */
   serveArchivedAlias(alias) {
-    const canonical = this.store.get(alias.canonical_id);
-    const snapshot = canonical && canonical.version === alias.archived_version ? canonical : this.store.getRecordVersion(alias.canonical_id, alias.archived_version);
+    const canonical2 = this.store.get(alias.canonical_id);
+    const snapshot = canonical2 && canonical2.version === alias.archived_version ? canonical2 : this.store.getRecordVersion(alias.canonical_id, alias.archived_version);
     if (!snapshot) {
-      throw new Error(`knowledge_get: '${alias.historical_id}' is a historical id pinned to version ${alias.archived_version} of '${alias.canonical_id}', but no such archived version is stored${canonical?.version !== void 0 ? ` (that record is at version ${canonical.version})` : ""} \u2014 the alias index and the version archive disagree, and nothing was fabricated in their place.`);
+      throw new Error(`knowledge_get: '${alias.historical_id}' is a historical id pinned to version ${alias.archived_version} of '${alias.canonical_id}', but no such archived version is stored${canonical2?.version !== void 0 ? ` (that record is at version ${canonical2.version})` : ""} \u2014 the alias index and the version archive disagree, and nothing was fabricated in their place.`);
     }
     return {
       ...snapshot,
       legacy_resolution: {
         canonical_id: alias.canonical_id,
         archived_version: alias.archived_version,
-        current_version: canonical?.version ?? alias.archived_version
+        current_version: canonical2?.version ?? alias.archived_version
       }
     };
   }
@@ -35583,10 +35931,10 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     try {
       if (!this.repoRoot)
         throw new Error("no project root is known to this server");
-      if (!existsSync5(join11(this.repoRoot, ".sterling")))
+      if (!existsSync7(join14(this.repoRoot, ".sterling")))
         throw new Error(`${this.repoRoot} has no .sterling directory`);
-      ledgerPath = join11(this.repoRoot, PROCESS_KNOWLEDGE_WRITES_REL);
-      mkdirSync5(dirname6(ledgerPath), { recursive: true });
+      ledgerPath = join14(this.repoRoot, PROCESS_KNOWLEDGE_WRITES_REL);
+      mkdirSync6(dirname7(ledgerPath), { recursive: true });
       const entry = knowledgeWriteSchema.parse({ id: record2.id, type: record2.type, at: this.now() });
       appendFileSync(ledgerPath, `
 ${JSON.stringify(entry)}
@@ -35622,7 +35970,7 @@ ${JSON.stringify(entry)}
     const MIN_LINE_BYTES = 30;
     if (statSync3(ledgerPath).size <= KNOWLEDGE_WRITES_COMPACT_LINES * MIN_LINE_BYTES)
       return;
-    const lines = readFileSync7(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
+    const lines = readFileSync8(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
     if (lines.length <= KNOWLEDGE_WRITES_COMPACT_LINES)
       return;
     const latest = /* @__PURE__ */ new Map();
@@ -35640,7 +35988,7 @@ ${JSON.stringify(entry)}
       latest.set(ok.data.id, ok.data);
     }
     const kept = [...latest.values()].slice(-KNOWLEDGE_WRITES_KEEP_IDS);
-    const tmp = join11(dirname6(ledgerPath), knowledgeWritesTempFile(basename2(ledgerPath), process.pid, randomUUID2()));
+    const tmp = join14(dirname7(ledgerPath), knowledgeWritesTempFile(basename3(ledgerPath), process.pid, randomUUID2()));
     try {
       writeFileSync3(tmp, kept.map((e) => `${JSON.stringify(e)}
 `).join(""));
@@ -35688,7 +36036,7 @@ ${JSON.stringify(entry)}
   removeExpiredDomainWriteLedgers() {
     if (!this.repoRoot)
       return void 0;
-    const dir = join11(this.repoRoot, KNOWLEDGE_WRITES_DIR_REL);
+    const dir = join14(this.repoRoot, KNOWLEDGE_WRITES_DIR_REL);
     const gone = (err) => err?.code === "ENOENT";
     const text = (err) => err instanceof Error ? err.message : String(err);
     let names;
@@ -35709,7 +36057,7 @@ ${JSON.stringify(entry)}
       const ownerPid = name === legacy ? null : knowledgeWritesOwnerPid(name) ?? knowledgeWritesTempOwnerPid(name);
       if (name !== legacy && ownerPid === null)
         continue;
-      const path = join11(dir, name);
+      const path = join14(dir, name);
       let mtimeMs;
       try {
         mtimeMs = statSync3(path).mtimeMs;
@@ -35749,7 +36097,7 @@ ${JSON.stringify(entry)}
     if (!this.repoRoot) {
       throw new Error("session-event write: no project root is known to this server, so the transient register location cannot be resolved \u2014 use the script fallback (bin/no-capture.mjs / bin/concept-designed.mjs in the Sterling install root)");
     }
-    const eventsPath = join11(this.repoRoot, ".sterling", "transient", "session-events.json");
+    const eventsPath = join14(this.repoRoot, ".sterling", "transient", "session-events.json");
     const at = this.now();
     appendSessionEventsAt(eventsPath, entries.map((e) => ({ ...e, at })));
     return { at };
@@ -35936,15 +36284,112 @@ ${JSON.stringify(entry)}
     const users = records.filter((r) => r.source === "user");
     if (!users.length)
       return out;
-    for (const r of this.store.boardReadiness(users)) {
+    const readiness = this.store.boardReadiness(users);
+    const statuses = resolveSentHandoffs(readiness.filter((r) => r.handoff).map((r) => ({ id: r.id, handoff: r.handoff })));
+    for (const r of readiness) {
+      const status = statuses.get(r.id);
       out.set(r.id, {
         ...r.blockers.length ? { blocked_by_state: r.blockers } : {},
-        ...r.unblocks.length ? { unblocks: r.unblocks } : {}
+        ...r.unblocks.length ? { unblocks: r.unblocks } : {},
+        ...r.state === "delegated" ? { readiness: "delegated" } : {},
+        ...status ? { handoff_status: status } : {}
       });
     }
     return out;
   }
+  /** The board_add fields a handoff carries; everything else is this repo's own context and is refused. */
+  static HANDOFF_FIELDS = ["target_project", "text", "source", "objective", "priority", "needs"];
+  /**
+   * board_add with target_project (GitHub issue #105, user-ruled 2026-10-15):
+   * put a user board item on a registered sibling project's board and keep a
+   * tracker here. Three writes, in this order, each failure loud and naming
+   * its step:
+   *   1. the tracker on THIS board, handoff {role:'sent', to_item_id:null};
+   *      a crash after this step leaves a tracker reading "delivery unconfirmed";
+   *   2. the item in the target's store, through the normal board_add path on
+   *      the target's own stores with the target's repo for HEAD and slug,
+   *      handoff {role:'received'} naming this project and the tracker;
+   *   3. the target item's id onto the tracker.
+   * The target is never asked to write here: its board_remove leaves a
+   * closure file the tracker's status is read from (resolveSentHandoffs).
+   * objective groups the tracker on this board only; priority goes to both;
+   * needs goes to the target's item only (the tracker is delegated).
+   */
+  boardAddHandoff(args2) {
+    if (args2.source !== "user")
+      throw new Error(`board_add: target_project hands over source:'user' board tasks only, never maintenance-queue items. Nothing was written.`);
+    const allowed = _SterlingTools.HANDOFF_FIELDS;
+    const extra = Object.keys(args2).filter((k) => !allowed.includes(k));
+    if (extra.length) {
+      throw new Error(`board_add: ${extra.map((k) => `'${k}'`).join(", ")} cannot go with target_project \u2014 file paths, blockers, links, tags and commit stamps belong to this repo and mean nothing in another project. A handoff takes ${allowed.join(", ")}. Nothing was written.`);
+    }
+    const { target_project, text, objective, priority, needs } = args2;
+    if (typeof target_project !== "string" || target_project.length === 0)
+      throw new Error(`board_add: target_project must be a registered project name. Nothing was written.`);
+    if (typeof text !== "string" || text.trim().length === 0)
+      throw new Error(`board_add: text is required. Nothing was written.`);
+    const target = resolveHandoffTarget(target_project, this.repoRoot, this.registryPath);
+    const fromRoot = this.repoRoot;
+    const transferId = this.newId();
+    let tracker;
+    try {
+      tracker = this.boardAdd({
+        text: `Handed to project '${target.name}': ${text}`,
+        source: "user",
+        ...objective !== void 0 ? { objective } : {},
+        ...priority !== void 0 ? { priority } : {},
+        handoff: { role: "sent", transfer_id: transferId, to_root: target.root, to_name: target.name, to_item_id: null }
+      });
+    } catch (e) {
+      throw new Error(`board_add target_project: step 1 of 3 (the tracker on this board) failed: ${e?.message ?? String(e)} Nothing was written in either project.`, { cause: e });
+    }
+    const trackerId = tracker.record.id;
+    let delivered;
+    try {
+      const routed = openRoutedStores(target.root, { mount: true, skipMissing: true });
+      try {
+        const remote = new _SterlingTools({ store: routed.stores, config: routed.config, repoRoot: target.root, now: this.now, newId: this.newId });
+        delivered = remote.boardAdd({
+          text: `${text}
+
+Handed over from project '${target.selfName}' (${fromRoot}); its tracker there is ${trackerId}.`,
+          source: "user",
+          objective: "standalone",
+          ...priority !== void 0 ? { priority } : {},
+          ...needs !== void 0 ? { needs } : {},
+          handoff: { role: "received", transfer_id: transferId, from_root: fromRoot, from_name: target.selfName, from_item_id: trackerId }
+        });
+      } finally {
+        routed.stores.close();
+      }
+    } catch (e) {
+      throw new Error(`board_add target_project: step 2 of 3 (writing the item into project '${target.name}' at ${target.root}) failed: ${e?.message ?? String(e)} The tracker ${trackerId} is on this board and reads 'delivery unconfirmed'; remove it with board_remove before retrying.`, { cause: e });
+    }
+    const deliveredId = delivered.record.id;
+    let confirmed;
+    try {
+      const current = this.store.get(trackerId);
+      if (!current)
+        throw new Error(`the tracker ${trackerId} is no longer on this board`);
+      const handoff = { role: "sent", transfer_id: transferId, to_root: target.root, to_name: target.name, to_item_id: deliveredId };
+      confirmed = this.store.updateTodo(trackerId, { ...current, handoff, updated_at: this.now() }, current.version !== void 0 ? { expected_version: current.version } : {});
+    } catch (e) {
+      throw new Error(`board_add target_project: step 3 of 3 (recording the delivered item's id on the tracker) failed: ${e?.message ?? String(e)} Project '${target.name}' holds the item ${deliveredId}; the tracker ${trackerId} reads 'delivery unconfirmed'.`, { cause: e });
+    }
+    const slugOf = (r) => r.slug;
+    return {
+      ...tracker,
+      record: confirmed,
+      handoff_delivery: {
+        transfer_id: transferId,
+        tracker: { id: trackerId, ...slugOf(confirmed) ? { slug: slugOf(confirmed) } : {} },
+        delivered: { project: target.name, root: target.root, id: deliveredId, ...slugOf(delivered.record) ? { slug: slugOf(delivered.record) } : {} }
+      }
+    };
+  }
   boardAdd(args2, opts) {
+    if (args2.target_project !== void 0)
+      return this.boardAddHandoff(args2);
     const { text, source, objective, measured_at_head, blocked_by, needs, ...rest } = args2;
     if (objective !== void 0 && source === "system") {
       throw new Error(`board_add: 'objective' groups source:'user' board tasks only \u2014 maintenance-queue items are lane-keyed by system_reason, never objective-grouped`);
@@ -36442,9 +36887,9 @@ ${JSON.stringify(entry)}
     if (old.type !== "todo")
       throw new Error(`board_update: '${id}' is a ${old.type}, not a task \u2014 board_update only edits board/queue items`);
     const updatable = _SterlingTools.BOARD_UPDATABLE_FIELDS;
-    const unknown2 = Object.keys(patch).filter((k) => !updatable.includes(k));
-    if (unknown2.length) {
-      throw new Error(`board_update: ${unknown2.map((k) => `'${k}'`).join(", ")} ${unknown2.length === 1 ? "is" : "are"} not editable through board_update \u2014 only ${updatable.join("/")} may change in place. source/system_reason decide which surface an item lives on and must never move by edit; status/id/created_at/type/superseded_by are server-owned. Updating never closes an item \u2014 board_remove, bound to the fulfilling artifact-write, remains the only exit. Valid fields: ${updatable.join(", ")}.`);
+    const unknown3 = Object.keys(patch).filter((k) => !updatable.includes(k));
+    if (unknown3.length) {
+      throw new Error(`board_update: ${unknown3.map((k) => `'${k}'`).join(", ")} ${unknown3.length === 1 ? "is" : "are"} not editable through board_update \u2014 only ${updatable.join("/")} may change in place. source/system_reason decide which surface an item lives on and must never move by edit; status/id/created_at/type/superseded_by are server-owned. Updating never closes an item \u2014 board_remove, bound to the fulfilling artifact-write, remains the only exit. Valid fields: ${updatable.join(", ")}.`);
     }
     if (Object.keys(patch).length === 0) {
       throw new Error(`board_update: no fields to update \u2014 pass at least one of ${updatable.join(", ")}`);
@@ -37150,13 +37595,24 @@ ${JSON.stringify(entry)}
    * Every refusal here NAMES WHY (removedItemError) — a bare "no record" is
    * what sent callers hunting for a deleted item in the first place.
    */
-  boardRemove(id) {
+  boardRemove(id, closeNote) {
     const record2 = this.store.get(id);
     if (!record2)
       throw this.removedItemError("board_remove", id);
     if (record2.type !== "todo")
       throw new Error(`board_remove: '${id}' is a ${record2.type}, not a task`);
-    const evidence = this.removalArtifactEvidence(record2);
+    const received = record2.handoff;
+    const receivedMeta = received !== void 0 ? todoHandoffSchema.safeParse(received) : void 0;
+    const isReceived = receivedMeta?.success === true && receivedMeta.data.role === "received";
+    if (closeNote !== void 0 && !isReceived) {
+      throw new Error(`board_remove: 'note' is sent back to the project a task came from, and '${id}' was not handed over from another project, so the note would go nowhere. Remove it without a note. Nothing was removed.`);
+    }
+    let closurePath;
+    if (isReceived && receivedMeta?.success) {
+      closurePath = this.writeHandoffClosure(record2.id, receivedMeta.data.transfer_id, closeNote);
+    }
+    const closure = closurePath ? { handoff_closure: closurePath } : {};
+    const evidence = { ...this.removalArtifactEvidence(record2), ...closure };
     const attestation = this.attestAlreadyPaidClose("board_remove", record2);
     if (attestation && "domain_held" in attestation) {
       return { removed: record2.id, ...evidence, note: evidence.note ? `${evidence.note} ${attestation.note}` : attestation.note };
@@ -37171,6 +37627,36 @@ ${JSON.stringify(entry)}
     }
     this.store.remove(record2.id, this.now());
     return { removed: record2.id, ...evidence };
+  }
+  /**
+   * Write `<root>/.sterling/handoffs/<transfer_id>.json` for a received
+   * handoff item about to be removed, through a temp file and a rename so the
+   * sender never reads half a file. Not under sterling.db, so it is outside
+   * the store-write rule. Any failure refuses the removal by name.
+   */
+  writeHandoffClosure(itemId, transferId, note) {
+    const fail = (why, cause) => new Error(`board_remove: '${itemId}' was handed over from another project, which reads its completion from a closure file, and that file could not be written (${why}). Nothing was removed.`, cause !== void 0 ? { cause } : void 0);
+    if (!this.repoRoot)
+      throw fail("this server has no project root");
+    if (note !== void 0 && note.trim().length === 0)
+      throw fail("the note is blank; omit it or say what was done");
+    const dir = join14(this.repoRoot, HANDOFFS_DIR_REL);
+    const path = join14(dir, `${transferId}.json`);
+    const closure = { transfer_id: transferId, item_id: itemId, closed_at: this.now(), ...note !== void 0 ? { note } : {} };
+    const tmp = `${path}.${process.pid}.tmp`;
+    try {
+      mkdirSync6(dir, { recursive: true });
+      writeFileSync3(tmp, JSON.stringify(closure, null, 2) + "\n");
+      renameSync3(tmp, path);
+    } catch (e) {
+      try {
+        if (existsSync7(tmp))
+          unlinkSync2(tmp);
+      } catch {
+      }
+      throw fail(e?.message ?? String(e), e);
+    }
+    return path;
   }
   /**
    * maintenance_remove — board_remove NARROWED TO THE MAINTENANCE QUEUE, so the
@@ -37816,13 +38302,13 @@ var StoreArgInPostgresStorageError = class extends Error {
   }
 };
 function openStoreArg(storePath2) {
-  const configPath = join12(dirname7(storePath2), "config.json");
-  const raw = existsSync6(configPath) ? JSON.parse(readFileSync8(configPath, "utf8")) : {};
+  const configPath = join15(dirname8(storePath2), "config.json");
+  const raw = existsSync8(configPath) ? JSON.parse(readFileSync9(configPath, "utf8")) : {};
   const config2 = parseConfig(raw);
   if (raw.storage === "postgres")
     throw new StoreArgInPostgresStorageError(configPath);
   const store = new MountedStores(storePath2, resolveDomainMounts(config2), { skipMissing: true });
-  return { store, config: config2, repoRoot: dirname7(dirname7(storePath2)) };
+  return { store, config: config2, repoRoot: dirname8(dirname8(storePath2)) };
 }
 function createSterlingServer(target, opts = {}) {
   let opened;
@@ -38026,7 +38512,7 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({ id: external_exports.string().describe(ID_LADDER), domain: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection)));
   server.registerTool("board_add", {
-    description: 'Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare `objective`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane); absent means nothing. measured_at_head is stamped to HEAD unless you pass a full 40-character lowercase hex SHA that is a commit in this repo (an abbreviated or otherwise malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). The echo defaults to a digest; projection:"full" returns the stored record.',
+    description: `Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare \`objective\`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane); absent means nothing. measured_at_head is stamped to HEAD unless you pass a full 40-character lowercase hex SHA that is a commit in this repo (an abbreviated or otherwise malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). target_project (user items only) hands the task to another project registered on this machine, by its registry name: the item is written into that project's board with this project's name and the requester's words, and a tracker stays on this board (readiness 'delegated', never READY) whose board_query/board_get handoff_status reads open, DONE (with the closing note), gone (completion unverified), status unknown, or delivery unconfirmed. It is refused, with nothing written, when the name is unknown or ambiguous, names this project, or the target has no SQLite store; with it only text, source, objective (the tracker's), priority and needs (the target item's) are accepted. The receipt's handoff_delivery names both items. The echo defaults to a digest; projection:"full" returns the stored record.`,
     inputSchema: strict({
       text: external_exports.string(),
       source: external_exports.enum(["user", "system"]),
@@ -38039,11 +38525,12 @@ function createSterlingServer(target, opts = {}) {
       measured_at_head: external_exports.string().optional(),
       blocked_by: external_exports.array(external_exports.string()).describe(`open user board items this one waits on, each by ${ID_LADDER}`).optional(),
       needs: external_exports.enum(BOARD_NEEDS).optional(),
+      target_project: external_exports.string().describe("a project name from this machine's project registry (/sterling:projects); hands the task to that project and keeps a tracker here").optional(),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ projection, ...args2 }) => json(tools.writeProjected(tools.boardAdd(args2), projection)));
   server.registerTool("board_query", {
-    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, unblocks (live items waiting on this one, as \`name (id8)\`), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane.`,
+    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, unblocks (live items waiting on this one, as \`name (id8)\`), readiness:'delegated' with handoff_status {state, text} on a tracker for a task handed to another project, updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane.`,
     inputSchema: strict({
       source: external_exports.enum(["user", "system"]).optional(),
       objective: external_exports.string().optional(),
@@ -38056,9 +38543,12 @@ function createSterlingServer(target, opts = {}) {
     })
   }, (args2) => json(tools.boardQueryResult(args2)));
   server.registerTool("board_remove", {
-    description: "Remove a board or queue item \u2014 the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed.",
-    inputSchema: strict({ id: external_exports.string().describe(ID_EXACT_DESTROY) })
-  }, ({ id }) => json(tools.boardRemove(id)));
+    description: "Remove a board or queue item \u2014 the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed. An item handed over from another project first writes .sterling/handoffs/<transfer_id>.json, which the sending project reads as done; `note` (handed-over items only) is carried in that file, and a failed write refuses the removal.",
+    inputSchema: strict({
+      id: external_exports.string().describe(ID_EXACT_DESTROY),
+      note: external_exports.string().describe("handed-over items only: what was done, sent back to the project the task came from").optional()
+    })
+  }, ({ id, note }) => json(tools.boardRemove(id, note)));
   server.registerTool("maintenance_remove", {
     description: 'Remove a maintenance-queue (source:"system") item once its fulfilling artifact exists; user board items are refused. Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). Logged to the drain log; the result discloses artifact_evidence (capped compact records plus artifact_evidence_count, the de-duplicated match count within the same 200-record scan window) like board_remove \u2014 an empty list means verify against HEAD before closing.',
     inputSchema: strict({ id: external_exports.string().describe(ID_EXACT_DESTROY) })
@@ -38143,20 +38633,20 @@ function createSterlingServer(target, opts = {}) {
 }
 
 // packages/mcp-server/dist/runtime.js
-import { readFileSync as readFileSync9, mkdirSync as mkdirSync6, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname8 } from "node:path";
+import { readFileSync as readFileSync10, mkdirSync as mkdirSync7, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname9 } from "node:path";
 function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */ new Date()).toISOString()) {
   try {
     let buildId = "unknown";
     try {
-      const raw = readFileSync9(buildIdPath(serverDir), "utf8").trim();
+      const raw = readFileSync10(buildIdPath(serverDir), "utf8").trim();
       if (raw)
         buildId = raw;
     } catch {
     }
     const marker = runtimeMarkerSchema.parse({ build_id: buildId, pid: process.pid, booted_at: now() });
     const markerPath = runtimeMarkerPath(storePath2);
-    mkdirSync6(dirname8(markerPath), { recursive: true });
+    mkdirSync7(dirname9(markerPath), { recursive: true });
     writeFileSync4(markerPath, JSON.stringify(marker));
     return marker;
   } catch {
@@ -38167,10 +38657,10 @@ function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */
 // packages/mcp-server/dist/broker.js
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { chmodSync as chmodSync2, readFileSync as readFileSync10, realpathSync as realpathSync4 } from "node:fs";
+import { chmodSync as chmodSync2, readFileSync as readFileSync11, realpathSync as realpathSync5 } from "node:fs";
 function buildIdOf(serverDir) {
   try {
-    return readFileSync10(buildIdPath(serverDir), "utf8").trim() || "unknown";
+    return readFileSync11(buildIdPath(serverDir), "utf8").trim() || "unknown";
   } catch {
     return "unknown";
   }
@@ -38201,7 +38691,7 @@ async function startHookBroker({ stores, route, serverDir, env = process.env }) 
   if (dir === void 0)
     return null;
   const instanceId = randomBytes(16).toString("hex");
-  const root = realpathSync4(route.root);
+  const root = realpathSync5(route.root);
   const identity = {
     instance_id: instanceId,
     protocol: BROKER_PROTOCOL,
@@ -38357,8 +38847,8 @@ if (pathArg.includes("${")) {
   console.error(`sterling-mcp: ${flagName} path contains an unexpanded placeholder: '${pathArg}' \u2014 refusing to create a phantom store (P5). In --mcp-config or project-scope configs use \${CLAUDE_PROJECT_DIR:-.} (plugin-scope configs expand the bare form).`);
   process.exit(2);
 }
-var projectRoot = projectArg !== void 0 ? resolve4(projectArg) : void 0;
-var storePath = projectRoot !== void 0 ? join13(projectRoot, ".sterling", "sterling.db") : resolve4(pathArg);
+var projectRoot = projectArg !== void 0 ? resolve5(projectArg) : void 0;
+var storePath = projectRoot !== void 0 ? join16(projectRoot, ".sterling", "sterling.db") : resolve5(pathArg);
 var created;
 try {
   created = createSterlingServer(projectRoot !== void 0 ? { projectRoot } : storePath, { workerPolicy });
@@ -38367,13 +38857,13 @@ try {
   console.error(`sterling-mcp: ${err?.constructor?.name ?? err?.name ?? "Error"}: ${err?.message ?? String(e)}`);
   process.exit(1);
 }
-recordRuntimeMarker(storePath, dirname9(fileURLToPath(import.meta.url)));
+recordRuntimeMarker(storePath, dirname10(fileURLToPath(import.meta.url)));
 await created.server.connect(new StdioServerTransport());
 if (projectRoot !== void 0) {
   const route = resolveStoreRoute(projectRoot);
   if (route?.storage === "postgres") {
     try {
-      const broker = await startHookBroker({ stores: created.store, route, serverDir: dirname9(fileURLToPath(import.meta.url)) });
+      const broker = await startHookBroker({ stores: created.store, route, serverDir: dirname10(fileURLToPath(import.meta.url)) });
       if (broker === null) {
         console.error("sterling-mcp: the hook store broker is not available on this platform (no Unix sockets with uids); hooks connect to Postgres directly.");
       } else {
