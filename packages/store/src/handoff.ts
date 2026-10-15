@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { closeSync, existsSync, openSync, readFileSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { BOARD_NEEDS, HANDOFFS_DIR_REL, handoffClosureSchema, todoHandoffReadSchema, type TodoHandoff } from '@sterling/schemas';
+import { BOARD_NEEDS, HANDOFFS_DIR_REL, handoffClosureReadSchema, handoffEvidenceFileReadSchema, todoHandoffReadSchema, type HandoffEvidence, type TodoHandoff } from '@sterling/schemas';
 
 export type SentHandoff = Extract<TodoHandoff, { role: 'sent' }>;
 
@@ -29,6 +29,10 @@ export interface HandoffStatus {
   text: string;
   closed_at?: string;
   note?: string;
+  /** the milestone the hand-off named (GitHub issue #108), on every state */
+  milestone?: string;
+  /** what the receiver said it did when it closed the item; only on done, and only from a valid sidecar for this hand-off */
+  evidence?: HandoffEvidence;
 }
 
 /** The sent-handoff metadata of a tracker body, or undefined when the item is not a valid tracker. */
@@ -104,11 +108,46 @@ function readIfPresent(p: string): string | undefined {
   }
 }
 
+const EVIDENCE_LABELS: [keyof HandoffEvidence, string][] = [['commit', 'commit'], ['pr', 'PR'], ['deploy', 'deploy'], ['url', 'url']];
+
+function evidenceText(e: HandoffEvidence): string {
+  return EVIDENCE_LABELS.filter(([k]) => e[k] !== undefined).map(([k, label]) => `${label} ${e[k]}`).join(', ');
+}
+
+/**
+ * The evidence sidecar `<transfer_id>.evidence.json` beside the closure file
+ * (GitHub issue #108), or undefined. Read tolerantly: a missing, unreadable,
+ * malformed or other hand-off's sidecar is no evidence, never proof and never
+ * a reason to doubt the closure. Blank values are dropped.
+ */
+function readEvidence(h: SentHandoff & { to_item_id: string }): HandoffEvidence | undefined {
+  let parsed;
+  try {
+    const text = readIfPresent(join(h.to_root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
+    if (text === undefined) return undefined;
+    parsed = handoffEvidenceFileReadSchema.safeParse(JSON.parse(text));
+  } catch {
+    // An unreadable or unparsable sidecar is no evidence; the closure file alone decides done.
+    return undefined;
+  }
+  if (!parsed.success || parsed.data.transfer_id !== h.transfer_id || parsed.data.item_id !== h.to_item_id) return undefined;
+  const out: HandoffEvidence = {};
+  for (const [k] of EVIDENCE_LABELS) {
+    const v = parsed.data.evidence[k]?.trim();
+    if (v) out[k] = v;
+  }
+  return out;
+}
+
 const statusText = {
   open: (to: string) => `open in ${to}`,
   needs_user: (to: string, reason?: string) => `needs user in ${to}${reason ? `: ${reason}` : ''}`,
   blocked: (to: string) => `blocked in ${to}`,
-  done: (to: string, closedAt: string, note?: string) => `DONE in ${to} ${closedAt}${note ? `: ${note}` : ''}`,
+  done: (to: string, closedAt: string, note?: string, milestone?: string, evidence?: HandoffEvidence) => {
+    const head = milestone === undefined ? `DONE in ${to} ${closedAt}` : evidence ? `DONE in ${to} ${closedAt} (${milestone})` : `DONE in ${to} ${closedAt}, unverified (${milestone})`;
+    const parts = [evidence ? evidenceText(evidence) : undefined, note].filter((p): p is string => p !== undefined && p.length > 0);
+    return parts.length ? `${head}: ${parts.join('; ')}` : head;
+  },
   gone: (to: string) => `gone from ${to}'s board, completion unverified`,
   unknown: (reason: string) => `status unknown: ${reason}`,
   unconfirmed: () => 'delivery unconfirmed',
@@ -139,7 +178,7 @@ function closureStatus(h: SentHandoff & { to_item_id: string }): HandoffStatus {
   try {
     text = readIfPresent(p);
     if (text === undefined) return { state: 'gone', text: statusText.gone(h.to_name) };
-    parsed = handoffClosureSchema.safeParse(JSON.parse(text));
+    parsed = handoffClosureReadSchema.safeParse(JSON.parse(text));
   } catch (e) {
     return unknown(`the closure file ${p} is unreadable (${errText(e)})`);
   }
@@ -148,7 +187,14 @@ function closureStatus(h: SentHandoff & { to_item_id: string }): HandoffStatus {
   if (c.transfer_id !== h.transfer_id || c.item_id !== h.to_item_id) {
     return unknown(`the closure file ${p} names transfer ${c.transfer_id} item ${c.item_id}, not transfer ${h.transfer_id} item ${h.to_item_id}`);
   }
-  return { state: 'done', text: statusText.done(h.to_name, c.closed_at, c.note), closed_at: c.closed_at, ...(c.note ? { note: c.note } : {}) };
+  const evidence = readEvidence(h);
+  return {
+    state: 'done',
+    text: statusText.done(h.to_name, c.closed_at, c.note, h.milestone, evidence),
+    closed_at: c.closed_at,
+    ...(c.note ? { note: c.note } : {}),
+    ...(evidence ? { evidence } : {}),
+  };
 }
 
 /** The receiver row's needs, needs_reason and blocked_by, or a reason they cannot be read. Unknown keys are ignored; a known field of the wrong shape is refused. */
@@ -295,6 +341,12 @@ export function resolveSentHandoffs(
     } finally {
       db.close();
     }
+  }
+  // The milestone the tracker named rides every state (GitHub issue #108).
+  for (const t of trackers) {
+    const status = out.get(t.id);
+    const milestone = status && sentHandoffOf(t)?.milestone;
+    if (status && milestone) out.set(t.id, { ...status, milestone });
   }
   return out;
 }

@@ -4544,6 +4544,7 @@ var SYSTEM_REASONS = [
 var TODO_SYSTEM_SOURCE = "system";
 var TODO_SYSTEM_REQUIRES = ["system_reason"];
 var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+var HANDOFF_MILESTONE_MAX = 80;
 var receivedHandoffShape = external_exports.object({
   role: external_exports.literal("received"),
   transfer_id: external_exports.string().uuid(),
@@ -4556,7 +4557,11 @@ var sentHandoffShape = external_exports.object({
   transfer_id: external_exports.string().uuid(),
   to_root: external_exports.string().min(1),
   to_name: external_exports.string().min(1),
-  to_item_id: external_exports.string().uuid().nullable()
+  to_item_id: external_exports.string().uuid().nullable(),
+  // What the receiving project should reach before closing (GitHub issue #108).
+  // Kept on the sender's tracker only; the receiver sees it as a line in its
+  // item's text, so no receiver-side shape an older Sterling reads changes.
+  milestone: external_exports.string().trim().min(1).max(HANDOFF_MILESTONE_MAX).optional()
 });
 var todoHandoffSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
 var todoHandoffReadSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape, sentHandoffShape]);
@@ -4566,6 +4571,26 @@ var handoffClosureSchema = external_exports.object({
   closed_at: external_exports.string().min(1),
   note: external_exports.string().min(1).optional()
 }).strict();
+var handoffClosureReadSchema = handoffClosureSchema.strip();
+var handoffEvidenceShape = external_exports.object({
+  commit: external_exports.string().optional(),
+  pr: external_exports.string().optional(),
+  deploy: external_exports.string().optional(),
+  url: external_exports.string().optional()
+});
+var hasEvidence = (e) => Object.values(e).some((v) => typeof v === "string" && v.trim().length > 0);
+var EVIDENCE_EMPTY = "evidence needs at least one non-blank value of commit, pr, deploy or url";
+var handoffEvidenceSchema = handoffEvidenceShape.strict().refine(hasEvidence, EVIDENCE_EMPTY);
+var handoffEvidenceFileSchema = external_exports.object({
+  transfer_id: external_exports.string().uuid(),
+  item_id: external_exports.string().uuid(),
+  evidence: handoffEvidenceSchema
+}).strict();
+var handoffEvidenceFileReadSchema = external_exports.object({
+  transfer_id: external_exports.string().uuid(),
+  item_id: external_exports.string().uuid(),
+  evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY)
+});
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }

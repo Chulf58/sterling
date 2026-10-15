@@ -17579,6 +17579,7 @@ var SYSTEM_REASONS = [
 var TODO_SYSTEM_SOURCE = "system";
 var TODO_SYSTEM_REQUIRES = ["system_reason"];
 var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+var HANDOFF_MILESTONE_MAX = 80;
 var receivedHandoffShape = external_exports.object({
   role: external_exports.literal("received"),
   transfer_id: external_exports.string().uuid(),
@@ -17591,7 +17592,11 @@ var sentHandoffShape = external_exports.object({
   transfer_id: external_exports.string().uuid(),
   to_root: external_exports.string().min(1),
   to_name: external_exports.string().min(1),
-  to_item_id: external_exports.string().uuid().nullable()
+  to_item_id: external_exports.string().uuid().nullable(),
+  // What the receiving project should reach before closing (GitHub issue #108).
+  // Kept on the sender's tracker only; the receiver sees it as a line in its
+  // item's text, so no receiver-side shape an older Sterling reads changes.
+  milestone: external_exports.string().trim().min(1).max(HANDOFF_MILESTONE_MAX).optional()
 });
 var todoHandoffSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
 var todoHandoffReadSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape, sentHandoffShape]);
@@ -17602,6 +17607,26 @@ var handoffClosureSchema = external_exports.object({
   closed_at: external_exports.string().min(1),
   note: external_exports.string().min(1).optional()
 }).strict();
+var handoffClosureReadSchema = handoffClosureSchema.strip();
+var handoffEvidenceShape = external_exports.object({
+  commit: external_exports.string().optional(),
+  pr: external_exports.string().optional(),
+  deploy: external_exports.string().optional(),
+  url: external_exports.string().optional()
+});
+var hasEvidence = (e) => Object.values(e).some((v) => typeof v === "string" && v.trim().length > 0);
+var EVIDENCE_EMPTY = "evidence needs at least one non-blank value of commit, pr, deploy or url";
+var handoffEvidenceSchema = handoffEvidenceShape.strict().refine(hasEvidence, EVIDENCE_EMPTY);
+var handoffEvidenceFileSchema = external_exports.object({
+  transfer_id: external_exports.string().uuid(),
+  item_id: external_exports.string().uuid(),
+  evidence: handoffEvidenceSchema
+}).strict();
+var handoffEvidenceFileReadSchema = external_exports.object({
+  transfer_id: external_exports.string().uuid(),
+  item_id: external_exports.string().uuid(),
+  evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY)
+});
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }
@@ -21776,11 +21801,39 @@ function readIfPresent(p) {
     throw e;
   }
 }
+var EVIDENCE_LABELS = [["commit", "commit"], ["pr", "PR"], ["deploy", "deploy"], ["url", "url"]];
+function evidenceText(e) {
+  return EVIDENCE_LABELS.filter(([k]) => e[k] !== void 0).map(([k, label]) => `${label} ${e[k]}`).join(", ");
+}
+function readEvidence(h) {
+  let parsed;
+  try {
+    const text = readIfPresent(join6(h.to_root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
+    if (text === void 0)
+      return void 0;
+    parsed = handoffEvidenceFileReadSchema.safeParse(JSON.parse(text));
+  } catch {
+    return void 0;
+  }
+  if (!parsed.success || parsed.data.transfer_id !== h.transfer_id || parsed.data.item_id !== h.to_item_id)
+    return void 0;
+  const out = {};
+  for (const [k] of EVIDENCE_LABELS) {
+    const v = parsed.data.evidence[k]?.trim();
+    if (v)
+      out[k] = v;
+  }
+  return out;
+}
 var statusText = {
   open: (to) => `open in ${to}`,
   needs_user: (to, reason) => `needs user in ${to}${reason ? `: ${reason}` : ""}`,
   blocked: (to) => `blocked in ${to}`,
-  done: (to, closedAt, note) => `DONE in ${to} ${closedAt}${note ? `: ${note}` : ""}`,
+  done: (to, closedAt, note, milestone, evidence) => {
+    const head = milestone === void 0 ? `DONE in ${to} ${closedAt}` : evidence ? `DONE in ${to} ${closedAt} (${milestone})` : `DONE in ${to} ${closedAt}, unverified (${milestone})`;
+    const parts = [evidence ? evidenceText(evidence) : void 0, note].filter((p) => p !== void 0 && p.length > 0);
+    return parts.length ? `${head}: ${parts.join("; ")}` : head;
+  },
   gone: (to) => `gone from ${to}'s board, completion unverified`,
   unknown: (reason) => `status unknown: ${reason}`,
   unconfirmed: () => "delivery unconfirmed"
@@ -21806,7 +21859,7 @@ function closureStatus(h) {
     text = readIfPresent(p);
     if (text === void 0)
       return { state: "gone", text: statusText.gone(h.to_name) };
-    parsed = handoffClosureSchema.safeParse(JSON.parse(text));
+    parsed = handoffClosureReadSchema.safeParse(JSON.parse(text));
   } catch (e) {
     return unknown2(`the closure file ${p} is unreadable (${errText(e)})`);
   }
@@ -21816,7 +21869,14 @@ function closureStatus(h) {
   if (c.transfer_id !== h.transfer_id || c.item_id !== h.to_item_id) {
     return unknown2(`the closure file ${p} names transfer ${c.transfer_id} item ${c.item_id}, not transfer ${h.transfer_id} item ${h.to_item_id}`);
   }
-  return { state: "done", text: statusText.done(h.to_name, c.closed_at, c.note), closed_at: c.closed_at, ...c.note ? { note: c.note } : {} };
+  const evidence = readEvidence(h);
+  return {
+    state: "done",
+    text: statusText.done(h.to_name, c.closed_at, c.note, h.milestone, evidence),
+    closed_at: c.closed_at,
+    ...c.note ? { note: c.note } : {},
+    ...evidence ? { evidence } : {}
+  };
 }
 function readWaitFields(body) {
   const { needs, needs_reason, blocked_by } = body;
@@ -21938,6 +21998,12 @@ function resolveSentHandoffs(trackers, opts = {}) {
     } finally {
       db.close();
     }
+  }
+  for (const t of trackers) {
+    const status = out.get(t.id);
+    const milestone = status && sentHandoffOf(t)?.milestone;
+    if (status && milestone)
+      out.set(t.id, { ...status, milestone });
   }
   return out;
 }
@@ -36337,7 +36403,7 @@ ${JSON.stringify(entry)}
     return out;
   }
   /** The board_add fields a handoff carries; everything else is this repo's own context and is refused. */
-  static HANDOFF_FIELDS = ["target_project", "text", "source", "objective", "priority", "needs"];
+  static HANDOFF_FIELDS = ["target_project", "text", "source", "objective", "priority", "needs", "milestone"];
   /**
    * board_add with target_project (GitHub issue #105, user-ruled 2026-10-15):
    * put a user board item on a registered sibling project's board and keep a
@@ -36353,6 +36419,9 @@ ${JSON.stringify(entry)}
    * closure file the tracker's status is read from (resolveSentHandoffs).
    * objective groups the tracker on this board only; priority goes to both;
    * needs goes to the target's item only (the tracker is delegated).
+   * milestone (GitHub issue #108) is kept in the tracker's handoff only; the
+   * target's item gets it as a line of text, so the received handoff keeps the
+   * shape an older receiver validates.
    */
   boardAddHandoff(args2) {
     if (args2.source !== "user")
@@ -36367,6 +36436,14 @@ ${JSON.stringify(entry)}
       throw new Error(`board_add: target_project must be a registered project name. Nothing was written.`);
     if (typeof text !== "string" || text.trim().length === 0)
       throw new Error(`board_add: text is required. Nothing was written.`);
+    let milestone;
+    if (args2.milestone !== void 0) {
+      milestone = typeof args2.milestone === "string" ? args2.milestone.trim() : "";
+      if (milestone.length === 0 || milestone.length > HANDOFF_MILESTONE_MAX) {
+        throw new Error(`board_add: milestone must be non-blank text of at most ${HANDOFF_MILESTONE_MAX} characters, saying what the other project should reach before closing. Nothing was written.`);
+      }
+    }
+    const milestoneField = milestone !== void 0 ? { milestone } : {};
     const target = resolveHandoffTarget(target_project, this.repoRoot, this.registryPath);
     const fromRoot = this.repoRoot;
     const transferId = this.newId();
@@ -36377,7 +36454,7 @@ ${JSON.stringify(entry)}
         source: "user",
         ...objective !== void 0 ? { objective } : {},
         ...priority !== void 0 ? { priority } : {},
-        handoff: { role: "sent", transfer_id: transferId, to_root: target.root, to_name: target.name, to_item_id: null }
+        handoff: { role: "sent", transfer_id: transferId, to_root: target.root, to_name: target.name, to_item_id: null, ...milestoneField }
       });
     } catch (e) {
       throw new Error(`board_add target_project: step 1 of 3 (the tracker on this board) failed: ${e?.message ?? String(e)} Nothing was written in either project.`, { cause: e });
@@ -36391,7 +36468,8 @@ ${JSON.stringify(entry)}
         delivered = remote.boardAdd({
           text: `${text}
 
-Handed over from project '${target.selfName}' (${fromRoot}); its tracker there is ${trackerId}.`,
+${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
+` : ""}Handed over from project '${target.selfName}' (${fromRoot}); its tracker there is ${trackerId}.`,
           source: "user",
           objective: "standalone",
           ...priority !== void 0 ? { priority } : {},
@@ -36410,7 +36488,7 @@ Handed over from project '${target.selfName}' (${fromRoot}); its tracker there i
       const current = this.store.get(trackerId);
       if (!current)
         throw new Error(`the tracker ${trackerId} is no longer on this board`);
-      const handoff = { role: "sent", transfer_id: transferId, to_root: target.root, to_name: target.name, to_item_id: deliveredId };
+      const handoff = { role: "sent", transfer_id: transferId, to_root: target.root, to_name: target.name, to_item_id: deliveredId, ...milestoneField };
       confirmed = this.store.updateTodo(trackerId, { ...current, handoff, updated_at: this.now() }, current.version !== void 0 ? { expected_version: current.version } : {});
     } catch (e) {
       throw new Error(`board_add target_project: step 3 of 3 (recording the delivered item's id on the tracker) failed: ${e?.message ?? String(e)} Project '${target.name}' holds the item ${deliveredId}; the tracker ${trackerId} reads 'delivery unconfirmed'.`, { cause: e });
@@ -37648,7 +37726,7 @@ Handed over from project '${target.selfName}' (${fromRoot}); its tracker there i
    * Every refusal here NAMES WHY (removedItemError) — a bare "no record" is
    * what sent callers hunting for a deleted item in the first place.
    */
-  boardRemove(id, closeNote) {
+  boardRemove(id, closeNote, closeEvidence) {
     const record2 = this.store.get(id);
     if (!record2)
       throw this.removedItemError("board_remove", id);
@@ -37660,11 +37738,29 @@ Handed over from project '${target.selfName}' (${fromRoot}); its tracker there i
     if (closeNote !== void 0 && !isReceived) {
       throw new Error(`board_remove: 'note' is sent back to the project a task came from, and '${id}' was not handed over from another project, so the note would go nowhere. Remove it without a note. Nothing was removed.`);
     }
+    if (closeEvidence !== void 0 && !isReceived) {
+      throw new Error(`board_remove: 'evidence' is sent back to the project a task came from, and '${id}' was not handed over from another project, so it would go nowhere. Remove it without evidence. Nothing was removed.`);
+    }
+    let checkedEvidence;
+    if (closeEvidence !== void 0) {
+      const parsed = handoffEvidenceSchema.safeParse(closeEvidence);
+      if (!parsed.success) {
+        throw new Error(`board_remove: evidence is refused (${parsed.error.issues.map((i) => i.message).join("; ")}); pass at least one of commit, pr, deploy or url as non-blank text. Nothing was removed.`);
+      }
+      checkedEvidence = {};
+      for (const [k, v] of Object.entries(parsed.data)) {
+        if (v !== void 0 && v.trim().length > 0)
+          checkedEvidence[k] = v.trim();
+      }
+    }
     let closurePath;
+    let evidencePath;
     if (isReceived && receivedMeta?.success) {
+      if (checkedEvidence)
+        evidencePath = this.writeHandoffEvidence(record2.id, receivedMeta.data.transfer_id, checkedEvidence);
       closurePath = this.writeHandoffClosure(record2.id, receivedMeta.data.transfer_id, closeNote);
     }
-    const closure = closurePath ? { handoff_closure: closurePath } : {};
+    const closure = { ...closurePath ? { handoff_closure: closurePath } : {}, ...evidencePath ? { handoff_evidence: evidencePath } : {} };
     const evidence = { ...this.removalArtifactEvidence(record2), ...closure };
     const attestation = this.attestAlreadyPaidClose("board_remove", record2);
     if (attestation && "domain_held" in attestation) {
@@ -37680,6 +37776,35 @@ Handed over from project '${target.selfName}' (${fromRoot}); its tracker there i
     }
     this.store.remove(record2.id, this.now());
     return { removed: record2.id, ...evidence };
+  }
+  /**
+   * Write `<root>/.sterling/handoffs/<transfer_id>.evidence.json` (GitHub
+   * issue #108) through a temp file and a rename, before the closure file.
+   * The closure file keeps its old shape, so an older sender still reads done;
+   * a newer sender reads this sidecar and checks its transfer and item ids.
+   * Any failure refuses the removal by name.
+   */
+  writeHandoffEvidence(itemId, transferId, evidence) {
+    const fail = (why, cause) => new Error(`board_remove: '${itemId}' was handed over from another project, and its evidence file could not be written (${why}). Nothing was removed.`, cause !== void 0 ? { cause } : void 0);
+    if (!this.repoRoot)
+      throw fail("this server has no project root");
+    const dir = join14(this.repoRoot, HANDOFFS_DIR_REL);
+    const path = join14(dir, `${transferId}.evidence.json`);
+    const file = { transfer_id: transferId, item_id: itemId, evidence };
+    const tmp = `${path}.${process.pid}.tmp`;
+    try {
+      mkdirSync6(dir, { recursive: true });
+      writeFileSync3(tmp, JSON.stringify(file, null, 2) + "\n");
+      renameSync3(tmp, path);
+    } catch (e) {
+      try {
+        if (existsSync7(tmp))
+          unlinkSync2(tmp);
+      } catch {
+      }
+      throw fail(e?.message ?? String(e), e);
+    }
+    return path;
   }
   /**
    * Write `<root>/.sterling/handoffs/<transfer_id>.json` for a received
@@ -38565,7 +38690,7 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({ id: external_exports.string().describe(ID_LADDER), domain: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection)));
   server.registerTool("board_add", {
-    description: `Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare \`objective\`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane); absent means nothing. measured_at_head is stamped to HEAD unless you pass a full 40-character lowercase hex SHA that is a commit in this repo (an abbreviated or otherwise malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). target_project (user items only) hands the task to another project registered on this machine, by its registry name: the item is written into that project's board with this project's name and the requester's words, and a tracker stays on this board (readiness 'delegated', never READY) whose board_query/board_get handoff_status reads open, needs user in <project> (with the reason when one is set), blocked in <project> (a blocker there is still on its board), DONE (with the closing note), gone (completion unverified), status unknown, or delivery unconfirmed. It is refused, with nothing written, when the name is unknown or ambiguous, names this project, or the target has no SQLite store; with it only text, source, objective (the tracker's), priority and needs (the target item's) are accepted. The receipt's handoff_delivery names both items. The echo defaults to a digest; projection:"full" returns the stored record.`,
+    description: `Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare \`objective\`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane); absent means nothing. measured_at_head is stamped to HEAD unless you pass a full 40-character lowercase hex SHA that is a commit in this repo (an abbreviated or otherwise malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). target_project (user items only) hands the task to another project registered on this machine, by its registry name: the item is written into that project's board with this project's name and the requester's words, and a tracker stays on this board (readiness 'delegated', never READY) whose board_query/board_get handoff_status reads open, needs user in <project> (with the reason when one is set), blocked in <project> (a blocker there is still on its board), DONE (with the closing note), gone (completion unverified), status unknown, or delivery unconfirmed. It is refused, with nothing written, when the name is unknown or ambiguous, names this project, or the target has no SQLite store; with it only text, source, objective (the tracker's), priority, needs (the target item's) and milestone are accepted. milestone (at most 80 characters) says what the target should reach before closing: it is kept on the tracker and written into the target item's text; a DONE status then shows the receiver's evidence, or 'unverified' when none came back. The receipt's handoff_delivery names both items. The echo defaults to a digest; projection:"full" returns the stored record.`,
     inputSchema: strict({
       text: external_exports.string(),
       source: external_exports.enum(["user", "system"]),
@@ -38579,6 +38704,7 @@ function createSterlingServer(target, opts = {}) {
       blocked_by: external_exports.array(external_exports.string()).describe(`open user board items this one waits on, each by ${ID_LADDER}`).optional(),
       needs: external_exports.enum(BOARD_NEEDS).optional(),
       target_project: external_exports.string().describe("a project name from this machine's project registry (/sterling:projects); hands the task to that project and keeps a tracker here").optional(),
+      milestone: external_exports.string().describe("with target_project only: what the other project should reach before closing, at most 80 characters").optional(),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ projection, ...args2 }) => json(tools.writeProjected(tools.boardAdd(args2), projection)));
@@ -38596,12 +38722,13 @@ function createSterlingServer(target, opts = {}) {
     })
   }, (args2) => json(tools.boardQueryResult(args2)));
   server.registerTool("board_remove", {
-    description: "Remove a board or queue item \u2014 the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed. An item handed over from another project first writes .sterling/handoffs/<transfer_id>.json, which the sending project reads as done; `note` (handed-over items only) is carried in that file, and a failed write refuses the removal.",
+    description: "Remove a board or queue item \u2014 the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). The result discloses artifact_evidence (up to 3 compact {id8,type,name} records touching the item's file_keys or citing its id, written since it was created) with artifact_evidence_count = the number of distinct matches in the scanned window (the file_keys scan and the id-citation scan, each over the 200 most recently updated evidence records, de-duplicated), not an all-time total; an empty list means the close rests on your word. An already-removed id reports when it was removed. An item handed over from another project first writes .sterling/handoffs/<transfer_id>.json, which the sending project reads as done; `note` (handed-over items only) is carried in that file, and a failed write refuses the removal. `evidence` (handed-over items only: commit, pr, deploy, url, at least one non-blank) is written first to .sterling/handoffs/<transfer_id>.evidence.json, which the sending project shows on its DONE status; a failed write refuses the removal.",
     inputSchema: strict({
       id: external_exports.string().describe(ID_EXACT_DESTROY),
-      note: external_exports.string().describe("handed-over items only: what was done, sent back to the project the task came from").optional()
+      note: external_exports.string().describe("handed-over items only: what was done, sent back to the project the task came from").optional(),
+      evidence: external_exports.object({ commit: external_exports.string().optional(), pr: external_exports.string().optional(), deploy: external_exports.string().optional(), url: external_exports.string().optional() }).strict().describe("handed-over items only: what the work shipped as; at least one non-blank value").optional()
     })
-  }, ({ id, note }) => json(tools.boardRemove(id, note)));
+  }, ({ id, note, evidence }) => json(tools.boardRemove(id, note, evidence)));
   server.registerTool("maintenance_remove", {
     description: 'Remove a maintenance-queue (source:"system") item once its fulfilling artifact exists; user board items are refused. Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). Logged to the drain log; the result discloses artifact_evidence (capped compact records plus artifact_evidence_count, the de-duplicated match count within the same 200-record scan window) like board_remove \u2014 an empty list means verify against HEAD before closing.',
     inputSchema: strict({ id: external_exports.string().describe(ID_EXACT_DESTROY) })

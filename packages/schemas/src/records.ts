@@ -653,6 +653,9 @@ export const TODO_USER_ONLY_FIELDS = { blocked_by: 'orders', needs: 'marks' } as
  * not accept it and board_update refuses it by name, so no generic edit can
  * strip or change it.
  */
+/** The longest milestone board_add target_project accepts, after trimming. */
+export const HANDOFF_MILESTONE_MAX = 80;
+
 const receivedHandoffShape = z.object({
   role: z.literal('received'),
   transfer_id: z.string().uuid(),
@@ -666,6 +669,10 @@ const sentHandoffShape = z.object({
   to_root: z.string().min(1),
   to_name: z.string().min(1),
   to_item_id: z.string().uuid().nullable(),
+  // What the receiving project should reach before closing (GitHub issue #108).
+  // Kept on the sender's tracker only; the receiver sees it as a line in its
+  // item's text, so no receiver-side shape an older Sterling reads changes.
+  milestone: z.string().trim().min(1).max(HANDOFF_MILESTONE_MAX).optional(),
 });
 export const todoHandoffSchema = z.discriminatedUnion('role', [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
 
@@ -697,6 +704,49 @@ export const handoffClosureSchema = z
   .strict();
 
 export type HandoffClosure = z.infer<typeof handoffClosureSchema>;
+
+/** The closure shape for READING: unknown keys are dropped, known fields still checked. */
+export const handoffClosureReadSchema = handoffClosureSchema.strip();
+
+/**
+ * What a receiving project says it did when it closes a handed-over item
+ * (GitHub issue #108): at least one non-blank value. It is the receiver's own
+ * statement, not independent verification.
+ */
+const handoffEvidenceShape = z.object({
+  commit: z.string().optional(),
+  pr: z.string().optional(),
+  deploy: z.string().optional(),
+  url: z.string().optional(),
+});
+const hasEvidence = (e: Record<string, string | undefined>) => Object.values(e).some((v) => typeof v === 'string' && v.trim().length > 0);
+const EVIDENCE_EMPTY = 'evidence needs at least one non-blank value of commit, pr, deploy or url';
+export const handoffEvidenceSchema = handoffEvidenceShape.strict().refine(hasEvidence, EVIDENCE_EMPTY);
+
+export type HandoffEvidence = z.infer<typeof handoffEvidenceSchema>;
+
+/**
+ * The sidecar `<root>/.sterling/handoffs/<transfer_id>.evidence.json` the
+ * receiver's board_remove writes BEFORE the closure file, so the closure file
+ * keeps the shape an older sender reads. transfer_id and item_id let the
+ * sender check it belongs to its hand-off.
+ */
+export const handoffEvidenceFileSchema = z
+  .object({
+    transfer_id: z.string().uuid(),
+    item_id: z.string().uuid(),
+    evidence: handoffEvidenceSchema,
+  })
+  .strict();
+
+/** The sidecar shape for READING: unknown keys are dropped, known fields still checked. */
+export const handoffEvidenceFileReadSchema = z.object({
+  transfer_id: z.string().uuid(),
+  item_id: z.string().uuid(),
+  evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY),
+});
+
+export type HandoffEvidenceFile = z.infer<typeof handoffEvidenceFileSchema>;
 
 /** True when a board item lists its own slug among its blockers. */
 export function todoBlocksItself(rec: { slug?: string; blocked_by?: string[] }): boolean {

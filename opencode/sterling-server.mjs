@@ -4324,7 +4324,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4722,6 +4722,7 @@ var init_records = __esm({
     TODO_SYSTEM_SOURCE = "system";
     TODO_SYSTEM_REQUIRES = ["system_reason"];
     TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+    HANDOFF_MILESTONE_MAX = 80;
     receivedHandoffShape = external_exports.object({
       role: external_exports.literal("received"),
       transfer_id: external_exports.string().uuid(),
@@ -4734,7 +4735,11 @@ var init_records = __esm({
       transfer_id: external_exports.string().uuid(),
       to_root: external_exports.string().min(1),
       to_name: external_exports.string().min(1),
-      to_item_id: external_exports.string().uuid().nullable()
+      to_item_id: external_exports.string().uuid().nullable(),
+      // What the receiving project should reach before closing (GitHub issue #108).
+      // Kept on the sender's tracker only; the receiver sees it as a line in its
+      // item's text, so no receiver-side shape an older Sterling reads changes.
+      milestone: external_exports.string().trim().min(1).max(HANDOFF_MILESTONE_MAX).optional()
     });
     todoHandoffSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
     todoHandoffReadSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape, sentHandoffShape]);
@@ -4745,6 +4750,26 @@ var init_records = __esm({
       closed_at: external_exports.string().min(1),
       note: external_exports.string().min(1).optional()
     }).strict();
+    handoffClosureReadSchema = handoffClosureSchema.strip();
+    handoffEvidenceShape = external_exports.object({
+      commit: external_exports.string().optional(),
+      pr: external_exports.string().optional(),
+      deploy: external_exports.string().optional(),
+      url: external_exports.string().optional()
+    });
+    hasEvidence = (e) => Object.values(e).some((v) => typeof v === "string" && v.trim().length > 0);
+    EVIDENCE_EMPTY = "evidence needs at least one non-blank value of commit, pr, deploy or url";
+    handoffEvidenceSchema = handoffEvidenceShape.strict().refine(hasEvidence, EVIDENCE_EMPTY);
+    handoffEvidenceFileSchema = external_exports.object({
+      transfer_id: external_exports.string().uuid(),
+      item_id: external_exports.string().uuid(),
+      evidence: handoffEvidenceSchema
+    }).strict();
+    handoffEvidenceFileReadSchema = external_exports.object({
+      transfer_id: external_exports.string().uuid(),
+      item_id: external_exports.string().uuid(),
+      evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY)
+    });
     todoSchema = base.extend({
       type: external_exports.literal("todo"),
       // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -8340,6 +8365,29 @@ function readIfPresent(p) {
     throw e;
   }
 }
+function evidenceText(e) {
+  return EVIDENCE_LABELS.filter(([k]) => e[k] !== void 0).map(([k, label]) => `${label} ${e[k]}`).join(", ");
+}
+function readEvidence(h) {
+  let parsed;
+  try {
+    const text = readIfPresent(join5(h.to_root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
+    if (text === void 0)
+      return void 0;
+    parsed = handoffEvidenceFileReadSchema.safeParse(JSON.parse(text));
+  } catch {
+    return void 0;
+  }
+  if (!parsed.success || parsed.data.transfer_id !== h.transfer_id || parsed.data.item_id !== h.to_item_id)
+    return void 0;
+  const out = {};
+  for (const [k] of EVIDENCE_LABELS) {
+    const v = parsed.data.evidence[k]?.trim();
+    if (v)
+      out[k] = v;
+  }
+  return out;
+}
 function unknown(reason) {
   return { state: "unknown", text: statusText.unknown(reason) };
 }
@@ -8361,7 +8409,7 @@ function closureStatus(h) {
     text = readIfPresent(p);
     if (text === void 0)
       return { state: "gone", text: statusText.gone(h.to_name) };
-    parsed = handoffClosureSchema.safeParse(JSON.parse(text));
+    parsed = handoffClosureReadSchema.safeParse(JSON.parse(text));
   } catch (e) {
     return unknown(`the closure file ${p} is unreadable (${errText(e)})`);
   }
@@ -8371,7 +8419,14 @@ function closureStatus(h) {
   if (c.transfer_id !== h.transfer_id || c.item_id !== h.to_item_id) {
     return unknown(`the closure file ${p} names transfer ${c.transfer_id} item ${c.item_id}, not transfer ${h.transfer_id} item ${h.to_item_id}`);
   }
-  return { state: "done", text: statusText.done(h.to_name, c.closed_at, c.note), closed_at: c.closed_at, ...c.note ? { note: c.note } : {} };
+  const evidence = readEvidence(h);
+  return {
+    state: "done",
+    text: statusText.done(h.to_name, c.closed_at, c.note, h.milestone, evidence),
+    closed_at: c.closed_at,
+    ...c.note ? { note: c.note } : {},
+    ...evidence ? { evidence } : {}
+  };
 }
 function readWaitFields(body) {
   const { needs, needs_reason, blocked_by } = body;
@@ -8494,18 +8549,29 @@ function resolveSentHandoffs(trackers, opts = {}) {
       db.close();
     }
   }
+  for (const t of trackers) {
+    const status = out.get(t.id);
+    const milestone = status && sentHandoffOf(t)?.milestone;
+    if (status && milestone)
+      out.set(t.id, { ...status, milestone });
+  }
   return out;
 }
-var statusText;
+var EVIDENCE_LABELS, statusText;
 var init_handoff = __esm({
   "packages/store/dist/handoff.js"() {
     "use strict";
     init_dist();
+    EVIDENCE_LABELS = [["commit", "commit"], ["pr", "PR"], ["deploy", "deploy"], ["url", "url"]];
     statusText = {
       open: (to) => `open in ${to}`,
       needs_user: (to, reason) => `needs user in ${to}${reason ? `: ${reason}` : ""}`,
       blocked: (to) => `blocked in ${to}`,
-      done: (to, closedAt, note) => `DONE in ${to} ${closedAt}${note ? `: ${note}` : ""}`,
+      done: (to, closedAt, note, milestone, evidence) => {
+        const head = milestone === void 0 ? `DONE in ${to} ${closedAt}` : evidence ? `DONE in ${to} ${closedAt} (${milestone})` : `DONE in ${to} ${closedAt}, unverified (${milestone})`;
+        const parts = [evidence ? evidenceText(evidence) : void 0, note].filter((p) => p !== void 0 && p.length > 0);
+        return parts.length ? `${head}: ${parts.join("; ")}` : head;
+      },
       gone: (to) => `gone from ${to}'s board, completion unverified`,
       unknown: (reason) => `status unknown: ${reason}`,
       unconfirmed: () => "delivery unconfirmed"

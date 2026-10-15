@@ -4310,7 +4310,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, handoffClosureSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4708,6 +4708,7 @@ var init_records = __esm({
     TODO_SYSTEM_SOURCE = "system";
     TODO_SYSTEM_REQUIRES = ["system_reason"];
     TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+    HANDOFF_MILESTONE_MAX = 80;
     receivedHandoffShape = external_exports.object({
       role: external_exports.literal("received"),
       transfer_id: external_exports.string().uuid(),
@@ -4720,7 +4721,11 @@ var init_records = __esm({
       transfer_id: external_exports.string().uuid(),
       to_root: external_exports.string().min(1),
       to_name: external_exports.string().min(1),
-      to_item_id: external_exports.string().uuid().nullable()
+      to_item_id: external_exports.string().uuid().nullable(),
+      // What the receiving project should reach before closing (GitHub issue #108).
+      // Kept on the sender's tracker only; the receiver sees it as a line in its
+      // item's text, so no receiver-side shape an older Sterling reads changes.
+      milestone: external_exports.string().trim().min(1).max(HANDOFF_MILESTONE_MAX).optional()
     });
     todoHandoffSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
     todoHandoffReadSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape, sentHandoffShape]);
@@ -4730,6 +4735,26 @@ var init_records = __esm({
       closed_at: external_exports.string().min(1),
       note: external_exports.string().min(1).optional()
     }).strict();
+    handoffClosureReadSchema = handoffClosureSchema.strip();
+    handoffEvidenceShape = external_exports.object({
+      commit: external_exports.string().optional(),
+      pr: external_exports.string().optional(),
+      deploy: external_exports.string().optional(),
+      url: external_exports.string().optional()
+    });
+    hasEvidence = (e) => Object.values(e).some((v) => typeof v === "string" && v.trim().length > 0);
+    EVIDENCE_EMPTY = "evidence needs at least one non-blank value of commit, pr, deploy or url";
+    handoffEvidenceSchema = handoffEvidenceShape.strict().refine(hasEvidence, EVIDENCE_EMPTY);
+    handoffEvidenceFileSchema = external_exports.object({
+      transfer_id: external_exports.string().uuid(),
+      item_id: external_exports.string().uuid(),
+      evidence: handoffEvidenceSchema
+    }).strict();
+    handoffEvidenceFileReadSchema = external_exports.object({
+      transfer_id: external_exports.string().uuid(),
+      item_id: external_exports.string().uuid(),
+      evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY)
+    });
     todoSchema = base.extend({
       type: external_exports.literal("todo"),
       // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
