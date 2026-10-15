@@ -51634,7 +51634,11 @@ var AutoMergeSettingError = class extends Error {
   }
 };
 function autoMergeOnCleanOf(cfg) {
-  const block = cfg?.pr_review;
+  if (cfg === void 0) return true;
+  if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) {
+    throw new AutoMergeSettingError(`config root must be an object, got ${JSON.stringify(cfg)}`);
+  }
+  const block = cfg.pr_review;
   if (block === void 0) return true;
   if (block === null || typeof block !== "object" || Array.isArray(block)) {
     throw new AutoMergeSettingError(`config pr_review must be an object, got ${JSON.stringify(block)}`);
@@ -52928,7 +52932,9 @@ function openDashboard(storePath2, options = {}) {
     } catch (err) {
       if (!(err instanceof AutoMergeSettingError))
         throw err;
-      const block = raw?.pr_review;
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw))
+        return JSON.stringify(raw);
+      const block = raw.pr_review;
       return JSON.stringify(block !== null && typeof block === "object" && !Array.isArray(block) ? block.auto_merge_on_clean : block);
     }
   }

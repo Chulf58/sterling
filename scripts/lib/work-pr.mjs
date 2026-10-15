@@ -602,11 +602,16 @@ export class AutoMergeSettingError extends Error {
  * squash-merges a PR whose review loop settled clean. `cfg` is the parsed
  * .sterling/config.json object (undefined when the file is absent). An absent
  * block or key is on, the shipped default. A pr_review that is not an object,
- * or a switch that is not a boolean, throws an AutoMergeSettingError naming the
- * value: a typo must never read as on, and must never silently read as off
- * either. */
+ * or a switch that is not a boolean, or a config whose root is not an object
+ * (null, a number, a string, an array), throws an AutoMergeSettingError naming
+ * the value: a typo must never read as on, and must never silently read as off
+ * either. Only an undefined cfg (no config file) is on without inspection. */
 export function autoMergeOnCleanOf(cfg) {
-  const block = cfg?.pr_review;
+  if (cfg === undefined) return true;
+  if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) {
+    throw new AutoMergeSettingError(`config root must be an object, got ${JSON.stringify(cfg)}`);
+  }
+  const block = cfg.pr_review;
   if (block === undefined) return true;
   if (block === null || typeof block !== 'object' || Array.isArray(block)) {
     throw new AutoMergeSettingError(`config pr_review must be an object, got ${JSON.stringify(block)}`);

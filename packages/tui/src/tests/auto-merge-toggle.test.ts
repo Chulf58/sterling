@@ -77,6 +77,11 @@ test('auto-merge row: ON when absent (the default), ON, OFF, INVALID for a refus
   const invalid = rowText(snapshot({ autoMergeOnClean: '"yes"' }));
   assert.match(invalid, /: INVALID \("yes"\)$/);
   assert.doesNotMatch(invalid, /\bON\b|\bOFF\b/, 'an invalid value never reads as on or off');
+  for (const root of ['null', '7', '"x"', '[]']) {
+    const text = rowText(snapshot({ autoMergeOnClean: root }));
+    assert.match(text, new RegExp(`: INVALID \\(${root.replace(/[[\]]/g, '\\$&')}\\)$`), `a ${root} config root shows INVALID`);
+    assert.doesNotMatch(text, /\bON\b|\bOFF\b/);
+  }
   assert.match(rowText(snapshot({ autoMergeOnClean: null })), /: UNKNOWN \(config unreadable\)$/, 'never the on default');
 });
 

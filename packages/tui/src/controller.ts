@@ -395,9 +395,9 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
    *  back as its JSON text (INVALID); an unreadable config is null (UNKNOWN,
    *  never the on default). */
   function readAutoMergeOnClean(): boolean | string | null {
-    let raw: { pr_review?: unknown } | null;
+    let raw: unknown;
     try {
-      raw = JSON.parse(readFileSync(configPath, 'utf8')) as { pr_review?: unknown } | null;
+      raw = JSON.parse(readFileSync(configPath, 'utf8'));
     } catch {
       return null;
     }
@@ -405,7 +405,8 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       return autoMergeOnCleanOf(raw);
     } catch (err) {
       if (!(err instanceof AutoMergeSettingError)) throw err;
-      const block = raw?.pr_review;
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return JSON.stringify(raw);
+      const block = (raw as { pr_review?: unknown }).pr_review;
       return JSON.stringify(block !== null && typeof block === 'object' && !Array.isArray(block) ? (block as { auto_merge_on_clean?: unknown }).auto_merge_on_clean : block);
     }
   }

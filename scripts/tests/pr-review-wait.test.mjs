@@ -1023,11 +1023,15 @@ test('--settle clean: auto_merge is false when the switch is off, and when the P
   }
 });
 
-test('--settle clean: an auto-merge switch that is not a boolean (or a pr_review that is not an object, or an unreadable config) refuses before any gh call, loop untouched', () => {
+test('--settle clean: an auto-merge switch that is not a boolean (or a pr_review or config root that is not an object, or an unreadable config) refuses before any gh call, loop untouched', () => {
   for (const [raw, pattern] of [
     [{ pr_review: { auto_merge_on_clean: 'yes' } }, /auto_merge_on_clean must be true or false, got "yes"/],
     [{ pr_review: { auto_merge_on_clean: 1 } }, /auto_merge_on_clean must be true or false, got 1/],
     [{ pr_review: 'on' }, /pr_review must be an object/],
+    ['null', /config root must be an object, got null/],
+    ['7', /config root must be an object, got 7/],
+    ['"x"', /config root must be an object, got "x"/],
+    ['[]', /config root must be an object, got \[\]/],
     ['{not json', /not valid JSON/],
   ]) {
     const f = makeFixture();

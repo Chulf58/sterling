@@ -136,7 +136,19 @@ test('controller: a malformed auto-merge switch reaches the roster as its JSON t
       rmSync(f.dir, { recursive: true, force: true });
     }
   }
-  // the store refuses to open on a malformed config, so it breaks after opening
+  // the store may refuse to open on a malformed config, so it breaks after opening
+  for (const [text, expected] of [['null', 'null'], ['7', '7'], ['"x"', '"x"'], ['[]', '[]']] as const) {
+    const f = fixture();
+    const ctl = openDashboard(f.storePath);
+    try {
+      writeFileSync(f.configPath, text);
+      await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
+      assert.equal(ctl.roster()?.autoMergeOnClean, expected, `a ${text} root is INVALID, never on`);
+    } finally {
+      ctl.close();
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  }
   const f = fixture();
   const ctl = openDashboard(f.storePath);
   try {
