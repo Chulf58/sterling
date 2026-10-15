@@ -132,6 +132,32 @@ function ownedByMe(pid) {
   }
 }
 
+/** The command name from /proc/<pid>/comm, else the basename of argv[0] from
+ *  cmdline; undefined when neither can be read. */
+function nameOf(pid) {
+  try {
+    const comm = readFileSync(`${PROC}/${pid}/comm`, 'utf8').trim();
+    if (comm) return comm;
+  } catch {
+    // fall back to cmdline
+  }
+  try {
+    const argv0 = readFileSync(`${PROC}/${pid}/cmdline`, 'utf8').split('\0')[0];
+    if (argv0) return basename(argv0);
+  } catch {
+    // unknown
+  }
+  return undefined;
+}
+
+/** Command names that could hold a Sterling store open (user-ruled 2026-10-15). */
+const STERLING_CAPABLE = new Set(['node', 'bun', 'opencode', 'claude', 'sqlite3']);
+
+/** Could this process hold a Sterling store? An unknown name counts as yes. */
+function couldBeSterling(name) {
+  return name === undefined || STERLING_CAPABLE.has(name) || /sterling/i.test(name);
+}
+
 function commOf(pid) {
   try {
     return readFileSync(`${PROC}/${pid}/comm`, 'utf8').trim();
@@ -144,7 +170,11 @@ function commOf(pid) {
  * Processes holding any of `files` open, from /proc/<pid>/fd readlinks. Best
  * effort: it cannot see a session that starts later or a Windows-side handle.
  * A process of THIS user whose fds cannot be read (EACCES/EPERM) is returned in
- * `sameUserBlind`, and the caller refuses on it, since a Sterling session runs
+ * `sameUserBlind` with `possiblySterling` set when its command name is node,
+ * bun, opencode, claude or sqlite3, contains "sterling", or cannot be read; the
+ * caller refuses on those (a Sterling session runs as the user) and warns on the
+ * rest. A same-uid process may be uninspectable for unrelated reasons, e.g.
+ * (sd-pam), fusermount3 and browser sandboxes;
  * as the user. Other users' uninspectable processes are only counted. A pid
  * that vanishes (ENOENT/ESRCH) is skipped. Returns { ran: false, reason } when
  * /proc cannot be listed, so the caller refuses instead of claiming the check ran.
@@ -163,7 +193,10 @@ function openHolders(files) {
   const blind = (pid, e) => {
     const mine = ownedByMe(pid);
     if (mine === undefined) return;
-    if (mine) sameUserBlind.push({ pid: Number(pid), command: commOf(pid), reason: e.code ?? e.message });
+    if (mine) {
+      const name = nameOf(pid);
+      sameUserBlind.push({ pid: Number(pid), command: name ?? 'unknown', possiblySterling: couldBeSterling(name), reason: e.code ?? e.message });
+    }
     else otherUserBlind++;
   };
   for (const pid of pids) {
@@ -294,7 +327,11 @@ function inspect(input, stamp) {
   if (!open.ran) refusals.push(`the open-store check could not run: ${open.reason}`);
   else {
     for (const h of open.holders) refusals.push(`process ${h.pid} (${h.command}) has ${h.file} open; close that session first`);
-    for (const b of open.sameUserBlind) refusals.push(`process ${b.pid} (${b.command}) runs as this user but its open files cannot be read (${b.reason}); the open check cannot clear it`);
+    t.openWarnings = [];
+    for (const b of open.sameUserBlind) {
+      if (b.possiblySterling) refusals.push(`process ${b.pid} (${b.command}) runs as this user, could hold a Sterling store, and its open files cannot be read (${b.reason}); the open check cannot clear it`);
+      else t.openWarnings.push(`process ${b.pid} (${b.command}) runs as this user and its open files cannot be read (${b.reason}); not a command that holds a Sterling store, so it does not refuse`);
+    }
     t.uninspectable = open.otherUserBlind;
   }
   return t;
@@ -366,7 +403,10 @@ function dryRunRemove(input) {
   }
   console.log(`Backup destination: ${t.backupDest ?? 'none (see refusals)'}`);
   if (t.uninspectable === undefined) console.log(`Open check: did not run`);
-  else console.log(`Open check: ran over /proc (best effort). A process of this user that cannot be inspected refuses; ${t.uninspectable} process(es) of other users could not be inspected and do not refuse. A Windows-side handle or a later session is not seen`);
+  else {
+    console.log(`Open check: ran over /proc (best effort). A process of this user that cannot be inspected refuses when its command is node, bun, opencode, claude or sqlite3, contains "sterling", or cannot be read; ${t.uninspectable} process(es) of other users could not be inspected and do not refuse. A Windows-side handle or a later session is not seen`);
+    for (const w of t.openWarnings) console.log(`  warning: ${w}`);
+  }
   if (t.refusals.length) {
     console.log(`\n--apply would REFUSE:`);
     for (const r of t.refusals) console.log(`  - ${r}`);
@@ -404,7 +444,7 @@ function applyRemove(input) {
     steps.push({ step: 'validate', ok: false, refusals: t.refusals });
     return finish(1);
   }
-  steps.push({ step: 'validate', ok: true, mode: t.unregisterOnly ? 'unregister-only' : 'remove', target: t.sterlingDir, registered: t.row ? t.row.repo_path : null });
+  steps.push({ step: 'validate', ok: true, ...(t.openWarnings?.length ? { warnings: t.openWarnings } : {}), mode: t.unregisterOnly ? 'unregister-only' : 'remove', target: t.sterlingDir, registered: t.row ? t.row.repo_path : null });
   if (t.unregisterOnly) return finish(unregister(t, steps));
 
   try {

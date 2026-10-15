@@ -369,12 +369,12 @@ function blindPid(proc, pid, uid, comm) {
   return () => chmodSync(join(d, 'fd'), 0o700);
 }
 
-test('open check: a same-uid process whose fds cannot be read refuses, naming its pid', () => {
+test('open check: a same-uid node process whose fds cannot be read refuses, naming its pid', () => {
   const s = sandbox();
   const proc = fakeProc();
-  const restore = blindPid(proc, 999991, process.getuid(), 'mine');
+  const restore = blindPid(proc, 999991, process.getuid(), 'node');
   try {
-    expectRefusal(s, s.project, /process 999991 \(mine\) runs as this user but its open files cannot be read \(EACCES\)/, { STERLING_PROC_ROOT: proc });
+    expectRefusal(s, s.project, /process 999991 \(node\) runs as this user, could hold a Sterling store, and its open files cannot be read \(EACCES\)/, { STERLING_PROC_ROOT: proc });
   } finally {
     restore();
   }
@@ -397,4 +397,48 @@ test('open check: an other-uid process whose fds cannot be read is disclosed, ne
 test('open check: an unreadable /proc refuses and says the check could not run', () => {
   const s = sandbox();
   expectRefusal(s, s.project, /the open-store check could not run: .* is not readable/, { STERLING_PROC_ROOT: join(s.dir, 'no-proc') });
+});
+
+// User ruling 2026-10-15, "Refuse only if it could be Sterling (Recommended)".
+
+test('open check: same-uid uninspectable (sd-pam) and msedge are warned, never refused', () => {
+  const s = sandbox();
+  const proc = fakeProc();
+  const restores = [blindPid(proc, 999993, process.getuid(), '(sd-pam)'), blindPid(proc, 999994, process.getuid(), 'msedge')];
+  try {
+    const dry = run(s.registryDb, '--remove', s.project, { STERLING_PROC_ROOT: proc });
+    assert.equal(dry.code, 0, dry.out);
+    assert.match(dry.out, /warning: process 999993 \(\(sd-pam\)\) runs as this user .* does not refuse/, dry.out);
+    assert.match(dry.out, /warning: process 999994 \(msedge\) runs as this user .* does not refuse/, dry.out);
+    const app = run(s.registryDb, '--remove', s.project, '--apply', { STERLING_PROC_ROOT: proc });
+    assert.equal(app.code, 0, app.out);
+    const res = JSON.parse(app.stdout);
+    assert.equal(res.steps[0].warnings.length, 2);
+    assert.ok(!existsSync(s.sterling));
+  } finally {
+    restores.forEach((r) => r());
+  }
+});
+
+test('open check: a same-uid uninspectable process whose command name cannot be read refuses', () => {
+  const s = sandbox();
+  const proc = fakeProc();
+  const restore = blindPid(proc, 999995, process.getuid(), 'hidden');
+  chmodSync(join(proc, '999995', 'comm'), 0o000);
+  try {
+    expectRefusal(s, s.project, /process 999995 \(unknown\) runs as this user, could hold a Sterling store/, { STERLING_PROC_ROOT: proc });
+  } finally {
+    restore();
+  }
+});
+
+test('open check: a same-uid uninspectable process whose name contains "sterling" refuses', () => {
+  const s = sandbox();
+  const proc = fakeProc();
+  const restore = blindPid(proc, 999996, process.getuid(), 'sterling-mcp');
+  try {
+    expectRefusal(s, s.project, /process 999996 \(sterling-mcp\) runs as this user, could hold a Sterling store/, { STERLING_PROC_ROOT: proc });
+  } finally {
+    restore();
+  }
 });
