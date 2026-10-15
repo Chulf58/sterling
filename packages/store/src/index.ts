@@ -33,8 +33,10 @@ export { MountedStores, MixedScoreScaleError, type DomainMount, resolveDomainMou
 export { allocateShares, DEFAULT_PROJECT_SHARE } from './shares.js';
 export { fitDomains, DOMAIN_FIT_MIN_TERMS } from './domain-fit.js';
 export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
+export { resolveSentHandoffs, sentHandoffOf, openForeignDbReadOnly, type SentHandoff, type HandoffStatus, type HandoffStatusState, type ResolveSentHandoffsOptions } from './handoff.js';
 export * from './axis.js';
 import { AXIS_MAX_TERM_LEN } from './axis.js';
+import { sentHandoffOf, type SentHandoff } from './handoff.js';
 export type { StoreDriver, StoreStatement, StoreRunResult, StoreDialect, SqlParam } from './driver.js';
 export {
   SqliteDriver,
@@ -501,9 +503,12 @@ export interface BoardBlockerState {
  * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start).
  * `state`: 'waiting' for needs user|grill whatever the blockers, else
  * 'blocked' while any blocker is open, else 'research' for needs investigation
- * (a researcher lane, never an implementor), else 'ready'.
+ * (a researcher lane, never an implementor), else 'ready'. A tracker for a
+ * task handed to another project (todo handoff.role 'sent', GitHub issue #105)
+ * is 'delegated' whatever its other fields: the work runs in the other
+ * project, so it is never READY and never WAITING ON YOU here.
  */
-export type BoardReadinessState = 'ready' | 'research' | 'waiting' | 'blocked';
+export type BoardReadinessState = 'ready' | 'research' | 'waiting' | 'blocked' | 'delegated';
 
 export interface BoardItemReadiness {
   id: string;
@@ -522,6 +527,8 @@ export interface BoardItemReadiness {
   /** the live user items whose blocked_by names this item, as item names */
   unblocks: string[];
   state: BoardReadinessState;
+  /** a 'delegated' item's sent-handoff metadata, for resolveSentHandoffs */
+  handoff?: SentHandoff;
 }
 
 const PRIORITY_RANK: Record<string, number> = { high: 0, normal: 1, low: 2 };
@@ -3095,6 +3102,7 @@ export class SterlingStore {
         file_keys?: string[];
         needs?: BoardNeeds;
         blocked_by?: string[];
+        handoff?: unknown;
       };
       const total = this.count({ types: ['todo'], source: 'user' });
       const live = (total > 0 ? this.query({ types: ['todo'], source: 'user', cap: total }) : []) as unknown as Todo[];
@@ -3128,8 +3136,18 @@ export class SterlingStore {
           // 'user' and 'grill' items wait for the user whatever their blockers (the ruling),
           // so WAITING is shown every session; an open blocker still wins over
           // investigation and over no needs.
-          const state: BoardReadinessState =
-            t.needs === 'user' || t.needs === 'grill' ? 'waiting' : blockersOpen.length ? 'blocked' : t.needs === 'investigation' ? 'research' : 'ready';
+          // A sent tracker is delegated before anything else: its work is in the
+          // receiving project, and its needs or blockers do not make it runnable here.
+          const sent = sentHandoffOf(t);
+          const state: BoardReadinessState = sent
+            ? 'delegated'
+            : t.needs === 'user' || t.needs === 'grill'
+              ? 'waiting'
+              : blockersOpen.length
+                ? 'blocked'
+                : t.needs === 'investigation'
+                  ? 'research'
+                  : 'ready';
           return {
             id: t.id,
             ...(t.slug ? { slug: t.slug } : {}),
@@ -3142,6 +3160,7 @@ export class SterlingStore {
             blockers_open: blockersOpen,
             unblocks,
             state,
+            ...(sent ? { handoff: sent } : {}),
           };
         });
     });

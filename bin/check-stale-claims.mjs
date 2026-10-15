@@ -4272,7 +4272,7 @@ function undeclaredPhaseInterfaces(rec) {
   const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
   return rec.phases.flatMap((phase) => (phase.interfaces ?? []).filter((name4) => !declared.has(name4)).map((name4) => ({ phase_id: phase.phase_id, name: name4 })));
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, todoHandoffSchema, handoffClosureSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4670,6 +4670,28 @@ var init_records = __esm({
     TODO_SYSTEM_SOURCE = "system";
     TODO_SYSTEM_REQUIRES = ["system_reason"];
     TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+    todoHandoffSchema = external_exports.discriminatedUnion("role", [
+      external_exports.object({
+        role: external_exports.literal("received"),
+        transfer_id: external_exports.string().uuid(),
+        from_root: external_exports.string().min(1),
+        from_name: external_exports.string().min(1),
+        from_item_id: external_exports.string().uuid()
+      }).strict(),
+      external_exports.object({
+        role: external_exports.literal("sent"),
+        transfer_id: external_exports.string().uuid(),
+        to_root: external_exports.string().min(1),
+        to_name: external_exports.string().min(1),
+        to_item_id: external_exports.string().uuid().nullable()
+      }).strict()
+    ]);
+    handoffClosureSchema = external_exports.object({
+      transfer_id: external_exports.string().uuid(),
+      item_id: external_exports.string().uuid(),
+      closed_at: external_exports.string().min(1),
+      note: external_exports.string().min(1).optional()
+    }).strict();
     todoSchema = base.extend({
       type: external_exports.literal("todo"),
       // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -4717,9 +4739,14 @@ var init_records = __esm({
       // 'investigation' still auto-starts, as a researcher lane; 'user' and
       // 'grill' wait for the user. Not a progress status: `status` keeps meaning
       // supersession only. Absent means nothing beyond the blockers.
-      needs: external_exports.enum(BOARD_NEEDS).optional()
+      needs: external_exports.enum(BOARD_NEEDS).optional(),
+      // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
+      handoff: todoHandoffSchema.optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
+      if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
+      }
       if (rec.source === TODO_SYSTEM_SOURCE) {
         for (const field of TODO_SYSTEM_REQUIRES) {
           if (!rec[field]) {
@@ -5856,7 +5883,7 @@ import { spawnSync as spawnSync4 } from "node:child_process";
 
 // scripts/lib/project.mjs
 init_dist();
-import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 
 // packages/store/dist/index.js
 init_zod();
@@ -5985,8 +6012,12 @@ var AXIS_MAX_TERM_LEN = 64;
 import { DatabaseSync } from "node:sqlite";
 init_dist();
 
-// packages/store/dist/sqlite-driver.js
+// packages/store/dist/handoff.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
+init_dist();
+
+// packages/store/dist/sqlite-driver.js
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 
 // packages/store/dist/index.js
 var MAX_RANK_TERMS = 16;

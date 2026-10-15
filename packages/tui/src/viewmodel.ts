@@ -1,7 +1,8 @@
 // TUI view models (spec §11): pure projections over the durable stores —
 // every tab is a live view; nothing here mutates anything.
 import { DRAIN_VERBS, RECORD_TYPES, displayHandle, boardDisplayLabel } from '@sterling/schemas';
-import type { SterlingStore, MountedStores } from '@sterling/store';
+import type { SterlingStore, MountedStores, BoardItemReadiness, HandoffStatus } from '@sterling/store';
+import { resolveSentHandoffs } from '@sterling/store';
 
 export interface Card {
   id: string;
@@ -408,6 +409,12 @@ export function blockedByLine(openNames: readonly string[]): string | undefined 
   return openNames.length ? `blocked by: ${openNames.join(', ')}` : undefined;
 }
 
+/** A delegated tracker's card line: `delegated to <project>: <status>`; undefined for any other item. */
+export function delegatedLine(r: BoardItemReadiness | undefined, statuses: ReadonlyMap<string, HandoffStatus>): string | undefined {
+  if (!r || r.state !== 'delegated' || !r.handoff) return undefined;
+  return `delegated to ${r.handoff.to_name}: ${statuses.get(r.id)?.text ?? 'status not read'}`;
+}
+
 export function todoCards(store: SterlingStore, expanded: string[] = []): Card[] {
   const groups = new Map<string, Card[]>();
   const flat: Card[] = [];
@@ -416,6 +423,11 @@ export function todoCards(store: SterlingStore, expanded: string[] = []): Card[]
   // (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start),
   // as item names, never bare slugs (the former ruling 'board-item-label-comes-from-current-text-the-slug-stays-an-immutable-address' (not in the current store)).
   const readiness = new Map(store.boardReadiness(todos).map((r) => [r.id, r]));
+  // A tracker for a task handed to another project (GitHub issue #105) shows
+  // where it went and its status, read-only from that project's store under a
+  // short budget (this runs on the 1 Hz tick).
+  const delegated = [...readiness.values()].filter((r) => r.state === 'delegated');
+  const handoffStatus = delegated.length ? resolveSentHandoffs(delegated.map((r) => ({ id: r.id, handoff: r.handoff })), { busyTimeoutMs: 50, budgetMs: 200 }) : new Map();
   for (const t of todos) {
     const todo = t as unknown as { id: string; text: string; slug?: string; priority?: string; file_keys?: string[]; objective?: string; needs?: string };
     // `name (id8)` where a LABEL EXISTS (decision foreign_2e8c30e4; board 081508d0
@@ -438,7 +450,12 @@ export function todoCards(store: SterlingStore, expanded: string[] = []): Card[]
       // and selection effects plus every destroying call need the whole thing.
       title: label ? displayHandle(label, todo.id) : todo.text.split('\n')[0],
       body: todo.text,
-      detail: [todo.priority && `priority: ${todo.priority}`, todo.needs && `needs: ${todo.needs}`, todo.file_keys?.length && `files: ${todo.file_keys.join(', ')}`]
+      detail: [
+        delegatedLine(readiness.get(todo.id), handoffStatus),
+        todo.priority && `priority: ${todo.priority}`,
+        todo.needs && `needs: ${todo.needs}`,
+        todo.file_keys?.length && `files: ${todo.file_keys.join(', ')}`,
+      ]
         .filter(Boolean)
         .join(' · '),
     };

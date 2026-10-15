@@ -643,6 +643,57 @@ export const TODO_SYSTEM_SOURCE = 'system';
 export const TODO_SYSTEM_REQUIRES = ['system_reason'] as const;
 export const TODO_USER_ONLY_FIELDS = { blocked_by: 'orders', needs: 'marks' } as const;
 
+/**
+ * A board item handed from one project to a registered sibling (GitHub issue
+ * #105, user-ruled 2026-10-15). The receiving project's item carries
+ * role 'received' and names where it came from; the sending project keeps a
+ * tracker with role 'sent' that names where it went. to_item_id is null while
+ * delivery is unconfirmed (the tracker is written first, the receiver's item
+ * second, then this id). Server-written only: board_add's tool schema does
+ * not accept it and board_update refuses it by name, so no generic edit can
+ * strip or change it.
+ */
+export const todoHandoffSchema = z.discriminatedUnion('role', [
+  z
+    .object({
+      role: z.literal('received'),
+      transfer_id: z.string().uuid(),
+      from_root: z.string().min(1),
+      from_name: z.string().min(1),
+      from_item_id: z.string().uuid(),
+    })
+    .strict(),
+  z
+    .object({
+      role: z.literal('sent'),
+      transfer_id: z.string().uuid(),
+      to_root: z.string().min(1),
+      to_name: z.string().min(1),
+      to_item_id: z.string().uuid().nullable(),
+    })
+    .strict(),
+]);
+
+export type TodoHandoff = z.infer<typeof todoHandoffSchema>;
+
+/** Where a receiving project writes its closure files, relative to its root. */
+export const HANDOFFS_DIR_REL = '.sterling/handoffs';
+
+/** The closure file `<root>/.sterling/handoffs/<transfer_id>.json` that the
+ *  receiving project's board_remove writes before it deletes a received item.
+ *  The sending project reads it to tell "done" from "gone"; the receiver never
+ *  writes the sender's database (completion is pulled). */
+export const handoffClosureSchema = z
+  .object({
+    transfer_id: z.string().uuid(),
+    item_id: z.string().uuid(),
+    closed_at: z.string().min(1),
+    note: z.string().min(1).optional(),
+  })
+  .strict();
+
+export type HandoffClosure = z.infer<typeof handoffClosureSchema>;
+
 /** True when a board item lists its own slug among its blockers. */
 export function todoBlocksItself(rec: { slug?: string; blocked_by?: string[] }): boolean {
   return rec.slug !== undefined && rec.blocked_by?.includes(rec.slug) === true;
@@ -702,9 +753,14 @@ export const todoSchema = base
     // 'grill' wait for the user. Not a progress status: `status` keeps meaning
     // supersession only. Absent means nothing beyond the blockers.
     needs: z.enum(BOARD_NEEDS).optional(),
+    // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
+    handoff: todoHandoffSchema.optional(),
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);
+    if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['handoff'], message: `handoff marks source:'user' board tasks only — maintenance-queue items are never handed to another project` });
+    }
     if (rec.source === TODO_SYSTEM_SOURCE) {
       for (const field of TODO_SYSTEM_REQUIRES) {
         if (!rec[field]) {
