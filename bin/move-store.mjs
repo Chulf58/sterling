@@ -9955,6 +9955,11 @@ function writeSqliteFenceChecked(path, fence, check) {
         const counts = MOVE_TABLES.map((t) => ({ name: t.name, n: Number(driver.prepare(`SELECT COUNT(*) AS n FROM ${t.name}${whereClause(t)}`).get().n) }));
         check(counts.filter((c) => c.n > 0).map((c) => `${c.name} (${c.n})`), counts.find((c) => c.name === "records").n);
       }
+      const current = driver.prepare("SELECT value FROM store_meta WHERE key = ?").get(MOVE_FENCE_KEY);
+      const existing = parseFence(current?.value, sqliteLabel(path));
+      if (existing && existing.move_id !== fence.move_id) {
+        throw new MoveSourceFencedError(`${sqliteLabel(path)} is fenced by move ${existing.move_id} (to ${existing.to}), not by move ${fence.move_id}; the fence was left as it is. Nothing was moved.`);
+      }
       driver.prepare(upsertMetaSql()).run(MOVE_FENCE_KEY, JSON.stringify(fence), (/* @__PURE__ */ new Date()).toISOString());
       driver.commit();
     } catch (e) {

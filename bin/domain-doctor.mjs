@@ -10640,8 +10640,8 @@ CROSS-STORE (${crossStore.length})`);
   process.exit(exitCode);
 }
 var RENAME_RECEIPT_KEY = "rename_receipt";
-function renameCrashPoint(point) {
-  if (process.env.STERLING_TEST_RENAME_CRASH_AT === point) {
+function renameCrashPoint(point, crashAt) {
+  if (crashAt === point) {
     console.error(`domain-doctor: test crash injected at '${point}'`);
     process.exit(70);
   }
@@ -10888,7 +10888,7 @@ function writeRenameFence(oldPath, fence, oldName) {
     db.close();
   }
 }
-function rename() {
+function rename({ crashAt = null } = {}) {
   const oldName = process.argv[3];
   const newName = process.argv[4];
   const apply = hasFlag2("apply");
@@ -10917,10 +10917,14 @@ Renames a whole domain on this machine. Without --apply it prints the plan and w
   const absent = [];
   for (const row of rows) {
     if (!existsSync3(row.repo_path)) {
-      absent.push(row);
+      absent.push({ row, why: "registered path does not exist" });
       continue;
     }
     const configPath = join10(row.repo_path, ".sterling", "config.json");
+    if (!existsSync3(configPath)) {
+      absent.push({ row, why: "no .sterling/config.json" });
+      continue;
+    }
     try {
       const config = parseConfig(JSON.parse(readFileSync2(configPath, "utf8")));
       const mounts = resolveDomainMounts(config);
@@ -10937,8 +10941,21 @@ Renames a whole domain on this machine. Without --apply it prints the plan and w
       unresolved.push({ row, error: e.message });
     }
   }
+  if (unresolved.length) {
+    fail(
+      `refusing: ${unresolved.length} registered project config(s) cannot be read, so whether they mount '${oldName}' or '${newName}' is unknown:
+  ${unresolved.map((u) => `${u.row.name} (${u.row.repo_path}): ${u.error}`).join("\n  ")}
+Fix or unregister them, then rerun. Nothing was written.`
+    );
+  }
   const mounting = projects.filter((p) => p.oldMount);
-  const oldPath = mounting.length ? POSIX(mounting[0].oldMount.dbPath) : POSIX(join10(homedir4(), ".sterling", "domains", oldName, "sterling.db"));
+  let oldPath = mounting.length ? POSIX(mounting[0].oldMount.dbPath) : null;
+  if (oldPath === null) {
+    const receipts = [...new Set(projects.filter((p) => p.newMount).map((p) => POSIX(p.newMount.dbPath)))].filter((path) => existsSync3(path)).map((path) => readRenameReceipt(path).receipt).filter((r2) => r2 && r2.from_domain === oldName && r2.to_domain === newName);
+    const from = [...new Set(receipts.map((r2) => r2.from_path))];
+    if (from.length > 1) fail(`refusing: the stores mounted as '${newName}' carry rename receipts naming different old stores (${from.join(", ")}). Nothing was written.`);
+    oldPath = from[0] ?? POSIX(join10(homedir4(), ".sterling", "domains", oldName, "sterling.db"));
+  }
   const elsewhere = mounting.filter((p) => !sameFile(POSIX(p.oldMount.dbPath), oldPath));
   if (elsewhere.length) {
     fail(
@@ -11017,8 +11034,7 @@ Renames a whole domain on this machine. Without --apply it prints the plan and w
     console.log(`    - ${p.row.name} (${p.dir}): stack_tags [${raw.stack_tags.join(", ")}] \u2192 [${next.stack_tags.join(", ")}]${pathNote}`);
   }
   if (resuming && mountsNew.length) console.log(`  already renamed: ${mountsNew.map((p) => p.row.name).join(", ")}`);
-  for (const u of unresolved) console.log(`  UNRESOLVED (config unreadable, not rewritten): ${u.row.name} (${u.row.repo_path}): ${u.error}`);
-  for (const a of absent) console.log(`  absent (registered path does not exist, not rewritten): ${a.name} (${a.repo_path})`);
+  for (const a of absent) console.log(`  skipped (${a.why}, not rewritten): ${a.row.name} (${a.row.repo_path})`);
   if (agents.length) {
     console.log(`  AGENTS.md lines to change by hand (this verb never edits another repo's tracked files):`);
     for (const l of agents) console.log(`    ${l.path}:${l.line}
@@ -11035,34 +11051,41 @@ Renames a whole domain on this machine. Without --apply it prints the plan and w
     if (err) fail(`refusing: ${err}. The fence was not written and nothing else was changed.`);
     console.log(`  fenced the old store (operation ${fence.operation_id}): writes to it are refused from now on`);
   }
-  renameCrashPoint("after-fence");
+  renameCrashPoint("after-fence", crashAt);
   if (!existsSync3(newPath)) {
     const n = renameCopy(oldPath, newPath, oldName, newName, fence.operation_id);
     console.log(`  published the renamed copy at ${newPath}: ${n} record(s) rescoped to domain:${newName}; ids, links, versions, aliases and relations unchanged`);
   }
-  renameCrashPoint("after-publish");
+  renameCrashPoint("after-publish", crashAt);
   const r = readRenameReceipt(newPath);
   if (r.error || !r.receipt || r.receipt.operation_id !== fence.operation_id || r.receipt.from_domain !== oldName || r.receipt.to_domain !== newName) {
     fail(`refusing to rewrite any config: the store at '${newPath}' does not carry the receipt of operation ${fence.operation_id}${r.error ? ` (${r.error})` : ""}. The old store stays fenced.`);
   }
   const done = [];
   const failed = [];
+  const rewritten = [];
   for (const p of [...mounting, ...mountsNew]) {
     try {
       const res = rewriteConfigCas(p.dir, p.configPath, oldName, newName, newPath);
       if (res.changed) done.push(`${p.row.name}: config rewritten`);
-      const tags = parseConfig(res.raw).stack_tags;
-      if (JSON.stringify(p.row.stack_tags) !== JSON.stringify(tags)) {
-        const reg = new ProjectRegistry(regPath);
-        try {
-          reg.updateStackTags(p.row.repo_path, tags);
-        } finally {
-          reg.close();
-        }
-        done.push(`${p.row.name}: registry row stack_tags \u2192 [${tags.join(", ")}]`);
-      }
+      rewritten.push({ p, tags: parseConfig(res.raw).stack_tags });
     } catch (e) {
       failed.push(`${p.row.name} (${p.configPath}): ${e.message}`);
+    }
+  }
+  renameCrashPoint("after-configs", crashAt);
+  for (const { p, tags } of rewritten) {
+    if (JSON.stringify(p.row.stack_tags) === JSON.stringify(tags)) continue;
+    try {
+      const reg = new ProjectRegistry(regPath);
+      try {
+        reg.updateStackTags(p.row.repo_path, tags);
+      } finally {
+        reg.close();
+      }
+      done.push(`${p.row.name}: registry row stack_tags \u2192 [${tags.join(", ")}]`);
+    } catch (e) {
+      failed.push(`${p.row.name} (registry row): ${e.message}`);
     }
   }
   for (const line of done) console.log(`  ${line}`);
@@ -11112,5 +11135,6 @@ if (invokedAsCli()) {
 }
 export {
   readOnlyProbe,
+  rename,
   vacuumIntoSnapshot
 };

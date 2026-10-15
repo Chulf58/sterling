@@ -3244,11 +3244,13 @@ function scopeAudit() {
 /** store_meta key of the completion receipt the renamed copy carries. */
 const RENAME_RECEIPT_KEY = 'rename_receipt';
 
-/** Test seam: STERLING_TEST_RENAME_CRASH_AT=<point> exits the process at that
- *  point of an --apply run (exit 70), so a test can build the crash state and
- *  resume from it. Points: after-fence, after-publish. */
-function renameCrashPoint(point) {
-  if (process.env.STERLING_TEST_RENAME_CRASH_AT === point) {
+/** Test seam: `crashAt`, passed only by a test that imports rename() and calls
+ *  it with { crashAt }, exits the process at that point of an --apply run (exit
+ *  70), so the test can build the crash state and resume from it. The CLI
+ *  never passes it, so the shipped command has no way to trigger it. Points:
+ *  after-fence, after-publish, after-configs. */
+function renameCrashPoint(point, crashAt) {
+  if (crashAt === point) {
     console.error(`domain-doctor: test crash injected at '${point}'`);
     process.exit(70);
   }
@@ -3349,9 +3351,12 @@ function renamedConfig(raw, oldName, newName, newPath) {
  * Rewrite one project's config with compare-and-swap: the new text goes to a
  * temporary file beside it, and is renamed over the config only if the config
  * still holds the text it was computed from; a changed config is re-read and
- * the rewrite recomputed, up to three times. This narrows the window against
- * a concurrent config writer (domains --apply, init, config_set); it does not
- * close it, because no lock is shared by every config writer.
+ * the rewrite recomputed, up to three times. The compare runs immediately
+ * before renameSync. This narrows the window against a concurrent config
+ * writer; it does not close it, because no lock is shared by the config
+ * writers (scripts/domains.mjs --apply, scripts/init-impl.mjs, config_set in
+ * packages/mcp-server/src/tools.ts, packages/tui/src/config-writeback.ts,
+ * writeProjectStorage in packages/store/src/store-move.ts), and none takes one.
  */
 function rewriteConfigCas(dir, configPath, oldName, newName, newPath) {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -3576,7 +3581,7 @@ function writeRenameFence(oldPath, fence, oldName) {
  * configs are rewritten only once the published copy's receipt matches.
  * Exit 0 done or dry run; exit 2 refused.
  */
-function rename() {
+export function rename({ crashAt = null } = {}) {
   const oldName = process.argv[3];
   const newName = process.argv[4];
   const apply = hasFlag('apply');
@@ -3606,10 +3611,15 @@ function rename() {
   const absent = [];
   for (const row of rows) {
     if (!existsSync(row.repo_path)) {
-      absent.push(row);
+      absent.push({ row, why: 'registered path does not exist' });
       continue;
     }
     const configPath = join(row.repo_path, '.sterling', 'config.json');
+    // A folder with no config is not a Sterling project now and mounts nothing.
+    if (!existsSync(configPath)) {
+      absent.push({ row, why: 'no .sterling/config.json' });
+      continue;
+    }
     try {
       const config = parseConfig(JSON.parse(readFileSync(configPath, 'utf8')));
       const mounts = resolveDomainMounts(config);
@@ -3626,8 +3636,29 @@ function rename() {
       unresolved.push({ row, error: e.message });
     }
   }
+  // A config that exists and cannot be read may mount <old> at another file,
+  // or on Postgres, or already mount <new>: nothing about this rename can be
+  // checked against it, so the rename refuses before it writes anything.
+  if (unresolved.length) {
+    fail(
+      `refusing: ${unresolved.length} registered project config(s) cannot be read, so whether they mount '${oldName}' or '${newName}' is unknown:\n  ` +
+        `${unresolved.map((u) => `${u.row.name} (${u.row.repo_path}): ${u.error}`).join('\n  ')}\nFix or unregister them, then rerun. Nothing was written.`
+    );
+  }
   const mounting = projects.filter((p) => p.oldMount);
-  const oldPath = mounting.length ? POSIX(mounting[0].oldMount.dbPath) : POSIX(join(homedir(), '.sterling', 'domains', oldName, 'sterling.db'));
+  let oldPath = mounting.length ? POSIX(mounting[0].oldMount.dbPath) : null;
+  if (oldPath === null) {
+    // No config mounts <old> any more: a rename that already rewrote every
+    // config and stopped before it finished. The published copy's receipt
+    // records where the old store is, which may be a custom domain_paths path.
+    const receipts = [...new Set(projects.filter((p) => p.newMount).map((p) => POSIX(p.newMount.dbPath)))]
+      .filter((path) => existsSync(path))
+      .map((path) => readRenameReceipt(path).receipt)
+      .filter((r) => r && r.from_domain === oldName && r.to_domain === newName);
+    const from = [...new Set(receipts.map((r) => r.from_path))];
+    if (from.length > 1) fail(`refusing: the stores mounted as '${newName}' carry rename receipts naming different old stores (${from.join(', ')}). Nothing was written.`);
+    oldPath = from[0] ?? POSIX(join(homedir(), '.sterling', 'domains', oldName, 'sterling.db'));
+  }
   const elsewhere = mounting.filter((p) => !sameFile(POSIX(p.oldMount.dbPath), oldPath));
   if (elsewhere.length) {
     fail(
@@ -3716,8 +3747,7 @@ function rename() {
     console.log(`    - ${p.row.name} (${p.dir}): stack_tags [${raw.stack_tags.join(', ')}] → [${next.stack_tags.join(', ')}]${pathNote}`);
   }
   if (resuming && mountsNew.length) console.log(`  already renamed: ${mountsNew.map((p) => p.row.name).join(', ')}`);
-  for (const u of unresolved) console.log(`  UNRESOLVED (config unreadable, not rewritten): ${u.row.name} (${u.row.repo_path}): ${u.error}`);
-  for (const a of absent) console.log(`  absent (registered path does not exist, not rewritten): ${a.name} (${a.repo_path})`);
+  for (const a of absent) console.log(`  skipped (${a.why}, not rewritten): ${a.row.name} (${a.row.repo_path})`);
   if (agents.length) {
     console.log(`  AGENTS.md lines to change by hand (this verb never edits another repo's tracked files):`);
     for (const l of agents) console.log(`    ${l.path}:${l.line}\n      - ${l.before}\n      + ${l.after}`);
@@ -3734,14 +3764,14 @@ function rename() {
     if (err) fail(`refusing: ${err}. The fence was not written and nothing else was changed.`);
     console.log(`  fenced the old store (operation ${fence.operation_id}): writes to it are refused from now on`);
   }
-  renameCrashPoint('after-fence');
+  renameCrashPoint('after-fence', crashAt);
 
   // 3. Copy, rewrite, validate, publish.
   if (!existsSync(newPath)) {
     const n = renameCopy(oldPath, newPath, oldName, newName, fence.operation_id);
     console.log(`  published the renamed copy at ${newPath}: ${n} record(s) rescoped to domain:${newName}; ids, links, versions, aliases and relations unchanged`);
   }
-  renameCrashPoint('after-publish');
+  renameCrashPoint('after-publish', crashAt);
 
   // 4. Configs and registry rows, only from a matching receipt.
   const r = readRenameReceipt(newPath);
@@ -3750,22 +3780,29 @@ function rename() {
   }
   const done = [];
   const failed = [];
+  const rewritten = [];
   for (const p of [...mounting, ...mountsNew]) {
     try {
       const res = rewriteConfigCas(p.dir, p.configPath, oldName, newName, newPath);
       if (res.changed) done.push(`${p.row.name}: config rewritten`);
-      const tags = parseConfig(res.raw).stack_tags;
-      if (JSON.stringify(p.row.stack_tags) !== JSON.stringify(tags)) {
-        const reg = new ProjectRegistry(regPath);
-        try {
-          reg.updateStackTags(p.row.repo_path, tags);
-        } finally {
-          reg.close();
-        }
-        done.push(`${p.row.name}: registry row stack_tags → [${tags.join(', ')}]`);
-      }
+      rewritten.push({ p, tags: parseConfig(res.raw).stack_tags });
     } catch (e) {
       failed.push(`${p.row.name} (${p.configPath}): ${e.message}`);
+    }
+  }
+  renameCrashPoint('after-configs', crashAt);
+  for (const { p, tags } of rewritten) {
+    if (JSON.stringify(p.row.stack_tags) === JSON.stringify(tags)) continue;
+    try {
+      const reg = new ProjectRegistry(regPath);
+      try {
+        reg.updateStackTags(p.row.repo_path, tags);
+      } finally {
+        reg.close();
+      }
+      done.push(`${p.row.name}: registry row stack_tags → [${tags.join(', ')}]`);
+    } catch (e) {
+      failed.push(`${p.row.name} (registry row): ${e.message}`);
     }
   }
   for (const line of done) console.log(`  ${line}`);

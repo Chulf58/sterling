@@ -56,12 +56,14 @@ function readRows(dbPath, sql) {
 /** A machine: a temp home with the 'chulf' domain store, a registry, and three
  *  registered projects. alpha mounts chulf by the default path, beta through an
  *  explicit domain_paths entry, gamma does not mount it. */
-function machine({ beta = {} } = {}) {
+function machine({ beta = {}, custom = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'doctor-rename-'));
   const home = join(dir, 'home');
   const domains = join(home, '.sterling', 'domains');
-  const oldPath = POSIX(join(domains, 'chulf', 'sterling.db'));
-  const newPath = POSIX(join(domains, 'customerhub', 'sterling.db'));
+  // custom: the store lives outside the default root, named by domain_paths in every mounting project.
+  const root = custom ? POSIX(join(dir, 'custom-domains')) : POSIX(domains);
+  const oldPath = `${root}/chulf/sterling.db`;
+  const newPath = `${root}/customerhub/sterling.db`;
   mkdirSync(dirname(oldPath), { recursive: true });
   createDomain('chulf', 'Customer hub integration knowledge', oldPath);
   const store = new SterlingStore(oldPath);
@@ -80,7 +82,7 @@ function machine({ beta = {} } = {}) {
   const projects = {};
   const reg = new ProjectRegistry(registryDb);
   const configs = {
-    alpha: { stack_tags: ['chulf', 'sterling'] },
+    alpha: custom ? { stack_tags: ['chulf', 'sterling'], domain_paths: { chulf: oldPath } } : { stack_tags: ['chulf', 'sterling'] },
     beta: { stack_tags: ['node', 'chulf'], domain_paths: { chulf: oldPath }, ...beta },
     gamma: { stack_tags: ['node'] },
   };
@@ -102,6 +104,23 @@ function doctor(m, args, extraEnv = {}) {
     cwd: m.dir,
     timeout: 60_000,
     env: { ...process.env, HOME: m.home, STERLING_REGISTRY_DB: m.registryDb, ...extraEnv },
+  });
+  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+/** rename() called in a child through an import, with the crash seam set:
+ *  the CLI never sets it, so this is the only way to reach it. argv[1] names
+ *  this test file so the module's CLI dispatch does not run on import. */
+function doctorCrash(m, args, crashAt) {
+  const code =
+    `process.argv = [process.execPath, ${JSON.stringify(fileURLToPath(import.meta.url))}, ...${JSON.stringify(args)}];` +
+    `const { rename } = await import(${JSON.stringify(pathToFileURL(join(root, 'scripts', 'domain-doctor.mjs')).href)});` +
+    `rename({ crashAt: ${JSON.stringify(crashAt)} });`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+    encoding: 'utf8',
+    cwd: m.dir,
+    timeout: 60_000,
+    env: { ...process.env, HOME: m.home, STERLING_REGISTRY_DB: m.registryDb },
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
@@ -212,7 +231,7 @@ test('--apply renames: copy rescoped with ids, versions, aliases and relations i
 
 test('a crash between publishing the copy and rewriting configs resumes from the receipt', () => {
   const m = machine();
-  const crashed = doctor(m, ['rename', 'chulf', 'customerhub', '--apply'], { STERLING_TEST_RENAME_CRASH_AT: 'after-publish' });
+  const crashed = doctorCrash(m, ['rename', 'chulf', 'customerhub', '--apply'], 'after-publish');
   assert.equal(crashed.code, 70, crashed.stderr);
   assert.ok(existsSync(m.newPath), 'the copy was published');
   assert.deepEqual(config(m.projects.alpha).stack_tags, ['chulf', 'sterling'], 'no config was rewritten before the crash');
@@ -235,7 +254,7 @@ test('a crash between publishing the copy and rewriting configs resumes from the
 
 test('a crash after fencing, before the copy, resumes by making the copy under the same operation', () => {
   const m = machine();
-  const crashed = doctor(m, ['rename', 'chulf', 'customerhub', '--apply'], { STERLING_TEST_RENAME_CRASH_AT: 'after-fence' });
+  const crashed = doctorCrash(m, ['rename', 'chulf', 'customerhub', '--apply'], 'after-fence');
   assert.equal(crashed.code, 70, crashed.stderr);
   assert.equal(existsSync(m.newPath), false);
   const fence = parseStoreFence(fenceOf(m.oldPath));
@@ -331,4 +350,62 @@ test('bin/domain-doctor.mjs ships the rename verb and runs from a plugin tree wi
 
   const skill = readFileSync(join(root, 'skills', 'mounting-domains', 'SKILL.md'), 'utf8');
   assert.ok(skill.includes('node "${CLAUDE_PLUGIN_ROOT}/bin/domain-doctor.mjs" rename <old> <new>'), 'the skill runs the shipped bundle');
+});
+
+test('an unreadable config of a registered project refuses the rename before anything is written, naming every blocked project; a missing folder is skipped', () => {
+  const m = machine();
+  writeFileSync(m.projects.gamma.configPath, '{ not json');
+  writeFileSync(m.projects.beta.configPath, JSON.stringify({ stack_tags: 'chulf' }));
+  const reg = new ProjectRegistry(m.registryDb);
+  reg.register({ repo_path: POSIX(join(m.dir, 'gone')), name: 'gone', stack_tags: ['chulf'], toolchains: [], sterling_version: null, at: stamp() });
+  reg.close();
+  const oldHash = sha(m.oldPath);
+  const alpha = readFileSync(m.projects.alpha.configPath, 'utf8');
+  for (const args of [['rename', 'chulf', 'customerhub'], ['rename', 'chulf', 'customerhub', '--apply']]) {
+    const r = doctor(m, args);
+    assert.equal(r.code, 2, r.stdout);
+    assert.match(r.stderr, /2 registered project config\(s\) cannot be read/);
+    assert.match(r.stderr, /gamma \(/);
+    assert.match(r.stderr, /beta \(/);
+    assert.doesNotMatch(r.stderr, /gone/, 'a registered folder that no longer exists is not a blocker');
+  }
+  assert.equal(fenceOf(m.oldPath), undefined);
+  assert.equal(sha(m.oldPath), oldHash);
+  assert.equal(existsSync(dirname(m.newPath)), false);
+  assert.equal(readFileSync(m.projects.alpha.configPath, 'utf8'), alpha);
+
+  // With the configs repaired, the missing folder is reported as skipped and the rename runs.
+  writeFileSync(m.projects.gamma.configPath, JSON.stringify({ stack_tags: ['node'] }));
+  writeFileSync(m.projects.beta.configPath, JSON.stringify({ stack_tags: ['node', 'chulf'], domain_paths: { chulf: m.oldPath } }));
+  const ok = doctor(m, ['rename', 'chulf', 'customerhub', '--apply']);
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.match(ok.stdout, /skipped \(registered path does not exist, not rewritten\): gone/);
+});
+
+test('a custom-path store: a stop after every config is rewritten and before the registry rows are, resumes from the receipt', () => {
+  const m = machine({ custom: true });
+  assert.ok(!m.oldPath.includes('/home/'), 'the store is outside the default domains root');
+  const crashed = doctorCrash(m, ['rename', 'chulf', 'customerhub', '--apply'], 'after-configs');
+  assert.equal(crashed.code, 70, crashed.stderr);
+  assert.deepEqual(config(m.projects.alpha).domain_paths, { customerhub: m.newPath });
+  assert.deepEqual(config(m.projects.beta).domain_paths, { customerhub: m.newPath });
+  assert.deepEqual(registryRows(m).alpha, ['chulf', 'sterling'], 'the registry row was not updated before the stop');
+
+  const resumed = doctor(m, ['rename', 'chulf', 'customerhub', '--apply']);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.ok(resumed.stdout.includes(`old store: ${m.oldPath}`), 'the old store path is recovered from the receipt, not the default root');
+  assert.match(resumed.stdout, /resuming operation/);
+  assert.deepEqual(registryRows(m), { alpha: ['customerhub', 'sterling'], beta: ['node', 'customerhub'], gamma: ['node'] });
+});
+
+test('the shipped bin ignores STERLING_TEST_RENAME_CRASH_AT: the crash seam is reachable only through an import', () => {
+  const m = machine();
+  const r = spawnSync(process.execPath, [join(root, 'bin', 'domain-doctor.mjs'), 'rename', 'chulf', 'customerhub', '--apply'], {
+    encoding: 'utf8', cwd: m.dir, timeout: 60_000,
+    env: { ...process.env, HOME: m.home, STERLING_REGISTRY_DB: m.registryDb, STERLING_TEST_RENAME_CRASH_AT: 'after-publish' },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /test crash/);
+  assert.deepEqual(config(m.projects.alpha).stack_tags, ['customerhub', 'sterling']);
+  assert.ok(!readFileSync(join(root, 'bin', 'domain-doctor.mjs'), 'utf8').includes('STERLING_TEST_RENAME_CRASH_AT'), 'the bundle does not read the variable');
 });

@@ -2,11 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseStoreFence, STORE_FENCE_KEY } from '@sterling/schemas';
 import { DomainRenamedError, MountedStores, SterlingStore, StoreMovedError, createDomain } from '../index.js';
-import { MoveRenamedStoreError, readSqliteFence } from '../store-move.js';
+import { MoveRenamedStoreError, MoveSourceFencedError, readSqliteFence, writeSqliteFence } from '../store-move.js';
 import { sqliteOnly } from './pg-test-support.js';
 
 // The rename fence (decision domain-rename-is-a-fenced-copy-verb-on-domain-doctor):
@@ -131,4 +132,40 @@ test('store-move refuses a rename-fenced store and still reads a move fence', { 
   m.setMeta(STORE_FENCE_KEY, JSON.stringify(fence));
   m.close();
   assert.deepEqual(readSqliteFence(moved), fence, 'a move fence reads back exactly as stored, with no kind added');
+});
+
+test('the move fence writer re-reads the fence under its lock: a rename fence that landed after the move read "no fence" refuses the move and stays byte-identical', { skip: sqliteOnly('SQLite fence write') }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rename-fence-'));
+  const path = domainStore(dir, 'chulf');
+  // The move's earlier read: no fence.
+  assert.equal(readSqliteFence(path), null);
+  // A rename commits its fence in between.
+  const s = new SterlingStore(path);
+  const renameValue = JSON.stringify(renameFence(join(dir, 'domains', 'customerhub', 'sterling.db')));
+  s.setMeta(STORE_FENCE_KEY, renameValue);
+  s.close();
+  const raw = () => {
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      return db.prepare('SELECT value, updated_at FROM store_meta WHERE key = ?').get(STORE_FENCE_KEY);
+    } finally {
+      db.close();
+    }
+  };
+  const before = raw();
+  const moveFence = { move_id: 'm1', to: 'postgres:x', fenced_at: NOW, manifest_digest: null };
+  assert.throws(() => writeSqliteFence(path, moveFence), MoveRenamedStoreError);
+  assert.deepEqual(raw(), before, 'the rename fence row is unchanged');
+  assert.equal((raw() as { value: string }).value, renameValue);
+});
+
+test('the move fence writer inserts when absent, updates its own move id, and refuses another move\'s fence', { skip: sqliteOnly('SQLite fence write') }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rename-fence-'));
+  const path = domainStore(dir, 'node');
+  const fence = { move_id: 'm1', to: 'postgres:x', fenced_at: NOW, manifest_digest: null };
+  writeSqliteFence(path, fence);
+  writeSqliteFence(path, { ...fence, manifest_digest: 'd1' });
+  assert.deepEqual(readSqliteFence(path), { ...fence, manifest_digest: 'd1' });
+  assert.throws(() => writeSqliteFence(path, { ...fence, move_id: 'm2' }), MoveSourceFencedError);
+  assert.deepEqual(readSqliteFence(path), { ...fence, manifest_digest: 'd1' });
 });
