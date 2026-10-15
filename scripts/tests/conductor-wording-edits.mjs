@@ -214,6 +214,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'A question answered only in chat is not boarded. The todo list stays',
     after: 'A question answered only in chat is not boarded. An ask meant for another project on this machine goes onto that project\'s board through `board_add` with `target_project` (its registry name), not onto this one; this board keeps the tracker, which shows when the other project has finished it (decision `hand-a-board-task-to-a-sibling-project-board-add-target-proj`). The todo list stays',
   },
+  {
+    commit: 'board a2e06183',
+    date: '2026-10-15',
+    reason: 'hand-off guidance for the receiver states, milestone and evidence: the sender names a milestone, the receiver marks a stuck task needs: user with needs_reason and closes with evidence (decision handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe; user-ruled 2026-10-15)',
+    before: 'which shows when the other project has finished it (decision `hand-a-board-task-to-a-sibling-project-board-add-target-proj`). The todo list stays',
+    after: "which shows when the other project has finished it (decision `hand-a-board-task-to-a-sibling-project-board-add-target-proj`). When a later task here depends on the other project's work, name the point it must reach with `milestone` (for example `merged` or `deployed:test`); its tracker then reads `unverified` if the work is closed without evidence. A task handed TO this project arrives with the sender's words: when it is stuck on the user, set `needs: user` with `needs_reason` saying what must be decided, so the sender's tracker shows it; close it with `board_remove` and a `note`, plus `evidence` (`commit`, `pr`, `deploy` or `url`) whenever the item names a milestone (decision `handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe`). The todo list stays",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
