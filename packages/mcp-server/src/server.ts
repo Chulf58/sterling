@@ -414,6 +414,8 @@ export function createSterlingServer(
   // visible before the first call (user-ruled 2026-10-13). Strings, not shared
   // zod instances: a reused instance serves as a $ref (see cloneZod above).
   const ID_LADDER = 'full uuid, exact slug, or unambiguous 8-char prefix';
+  const FOREIGN_BOARD_READ =
+    "a project name from this machine's project registry (/sterling:projects); reads that project's user board read-only instead of this one";
   const ID_EXACT_DESTROY = 'the EXACT full uuid: this call destroys, so a slug or an 8-char prefix is refused';
   const RESOLVES_FULL_IDS = 'full uuids only; a slug or an 8-char prefix is refused because claimed items are hard-deleted';
 
@@ -746,7 +748,7 @@ export function createSterlingServer(
     'board_query',
     {
       description:
-        "List open board items. source:\"user\" is the board, source:\"system\" the maintenance queue. Filters (AND): objective (exact; \"standalone\" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched — raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: \"text\" (default) — id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, unblocks (live items waiting on this one, as `name (id8)`), readiness:'delegated' with handoff_status {state, text} on a tracker for a task handed to another project, updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; \"headline\" — id, name, priority, objective/system_reason, 80-char text; \"digest\" — one clipped line per item; \"full\" — whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id — a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane.",
+        "List open board items. source:\"user\" is the board, source:\"system\" the maintenance queue. Filters (AND): objective (exact; \"standalone\" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched — raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: \"text\" (default) — id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, unblocks (live items waiting on this one, as `name (id8)`), readiness:'delegated' with handoff_status {state, text} on a tracker for a task handed to another project, updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; \"headline\" — id, name, priority, objective/system_reason, 80-char text; \"digest\" — one clipped line per item; \"full\" — whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id — a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:\"system\" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.",
       inputSchema: strict({
         source: z.enum(['user', 'system']).optional(),
         objective: z.string().optional(),
@@ -756,9 +758,10 @@ export function createSterlingServer(
         offset: z.number().int().nonnegative().optional(),
         cursor: z.string().optional(),
         projection: z.enum(['text', 'full', 'digest', 'headline']).optional(),
+        target_project: z.string().describe(FOREIGN_BOARD_READ).optional(),
       }),
     },
-    (args) => json(tools.boardQueryResult(args))
+    ({ target_project, ...args }) => json(target_project !== undefined ? tools.foreignBoardQuery({ ...args, target_project }) : tools.boardQueryResult(args))
   );
 
   server.registerTool(
@@ -810,10 +813,13 @@ export function createSterlingServer(
     'board_get',
     {
       description:
-        "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` — the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed). An item other live items wait on returns unblocks: those items as `name (id8)`.",
-      inputSchema: strict({ id: z.string().describe(ID_LADDER) }),
+        "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` — the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering. An item with blocked_by also returns blocked_by_state: each blocker slug with its current state, open or closed (a removed blocker is closed). An item other live items wait on returns unblocks: those items as `name (id8)`. target_project reads one user board item from another registered project, read-only, by full uuid, exact slug or unambiguous 8-char prefix, with source_project and source_root; the historical-id archive is not searched there.",
+      inputSchema: strict({
+        id: z.string().describe(ID_LADDER),
+        target_project: z.string().describe(FOREIGN_BOARD_READ).optional(),
+      }),
     },
-    ({ id }) => json(tools.boardGet(id))
+    ({ id, target_project }) => json(target_project !== undefined ? tools.foreignBoardGet(id, target_project) : tools.boardGet(id))
   );
 
   server.registerTool(

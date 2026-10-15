@@ -4645,6 +4645,16 @@ var todoWaitFieldsReadSchema = external_exports.object({
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
   }
 });
+var todoBoardItemReadSchema = external_exports.object({
+  id: external_exports.string().min(1),
+  type: external_exports.literal("todo"),
+  source: external_exports.enum(["user", "system"]),
+  updated_at: external_exports.string().min(1),
+  text: external_exports.string().optional(),
+  slug: external_exports.string().min(1).optional(),
+  objective: external_exports.string().optional(),
+  file_keys: external_exports.array(external_exports.string()).optional()
+}).passthrough();
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }
@@ -8548,6 +8558,45 @@ function deepReplaceString(value, from, to) {
   }
   return value;
 }
+function boardReadinessOf(targets, live, openBlocker) {
+  const dependents = /* @__PURE__ */ new Map();
+  for (const t of live) {
+    for (const slug of new Set(t.blocked_by ?? [])) {
+      const list = dependents.get(slug);
+      if (list)
+        list.push(t);
+      else
+        dependents.set(slug, [t]);
+    }
+  }
+  return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+    const blockers = [];
+    const blockersOpen = [];
+    for (const slug of t.blocked_by ?? []) {
+      const holder = openBlocker(slug);
+      blockers.push({ slug, state: holder ? "open" : "closed" });
+      if (holder)
+        blockersOpen.push(boardItemHandle(holder));
+    }
+    const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+    const sent = sentHandoffOf(t);
+    const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+    return {
+      id: t.id,
+      ...t.slug ? { slug: t.slug } : {},
+      name: boardItemHandle(t),
+      ...t.priority ? { priority: t.priority } : {},
+      updated_at: t.updated_at,
+      file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+      ...t.needs ? { needs: t.needs } : {},
+      blockers,
+      blockers_open: blockersOpen,
+      unblocks,
+      state,
+      ...sent ? { handoff: sent } : {}
+    };
+  });
+}
 function boardItemHandle(rec) {
   const label = boardDisplayLabel(rec.text, rec.slug);
   return label ? displayHandle(label, rec.id) : `(unnamed board item) (${rec.id.slice(0, 8)})`;
@@ -9975,45 +10024,8 @@ var SterlingStore = class _SterlingStore {
       for (const t of live)
         if (t.slug)
           bySlug.set(t.slug, t);
-      const dependents = /* @__PURE__ */ new Map();
-      for (const t of live) {
-        for (const slug of new Set(t.blocked_by ?? [])) {
-          const list = dependents.get(slug);
-          if (list)
-            list.push(t);
-          else
-            dependents.set(slug, [t]);
-        }
-      }
       const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
-      const targets = items ?? live;
-      return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
-        const blockers = [];
-        const blockersOpen = [];
-        for (const slug of t.blocked_by ?? []) {
-          const holder = openBlocker(slug);
-          blockers.push({ slug, state: holder ? "open" : "closed" });
-          if (holder)
-            blockersOpen.push(boardItemHandle(holder));
-        }
-        const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-        const sent = sentHandoffOf(t);
-        const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
-        return {
-          id: t.id,
-          ...t.slug ? { slug: t.slug } : {},
-          name: boardItemHandle(t),
-          ...t.priority ? { priority: t.priority } : {},
-          updated_at: t.updated_at,
-          file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
-          ...t.needs ? { needs: t.needs } : {},
-          blockers,
-          blockers_open: blockersOpen,
-          unblocks,
-          state,
-          ...sent ? { handoff: sent } : {}
-        };
-      });
+      return boardReadinessOf(items ?? live, live, openBlocker);
     });
   }
   /**

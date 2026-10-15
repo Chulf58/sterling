@@ -16,7 +16,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SterlingStore, resolveSentHandoffs } from '../index.js';
+import { SterlingStore, readForeignBoard, resolveSentHandoffs } from '../index.js';
 
 const NOW = '2026-10-15T12:00:00.000Z';
 
@@ -399,6 +399,244 @@ test('resolveSentHandoffs: a receiver row carrying needs_reason without needs us
     const out = resolveSentHandoffs([{ id: tracker, handoff: sent(b.root, transfer, item.id) }]);
     assert.equal(out.get(tracker)?.state, 'unknown');
     assert.match(out.get(tracker)?.text ?? '', /cannot be read: needs_reason: needs_reason goes only with needs 'user' or 'grill'/);
+  } finally {
+    b.cleanup();
+  }
+});
+
+// ------------------- readForeignBoard: another project's user board, read-only -------------------
+// Decision read-another-projects-board-board-query-target-project-read-only:
+// raw SQL on openForeignDbReadOnly, tolerant parse, a total time budget, and
+// nothing written beside or into the other store.
+
+/** Insert a raw todo row, bypassing the store's validation, as an older or newer Sterling might have written it. */
+function rawTodo(db: string, id: string, body: string, updated_at = NOW): void {
+  const w = new DatabaseSync(db);
+  try {
+    w.prepare(`INSERT INTO records (id, type, status, scope, created_at, updated_at, author, body) VALUES (?, 'todo', 'active', 'project', ?, ?, 'conductor', ?)`).run(id, NOW, updated_at, body);
+  } finally {
+    w.close();
+  }
+}
+
+test('readForeignBoard: user items only, in board order, with live slugs of either source; system items are never returned', () => {
+  const b = receiver();
+  try {
+    const one = mk(b.store, { text: 'One', slug: 'one', updated_at: '2026-10-15T12:00:01.000Z' });
+    const two = mk(b.store, { text: 'Two', slug: 'two', updated_at: '2026-10-15T12:00:02.000Z' });
+    mk(b.store, { text: 'Queue item', slug: 'queue-item', source: 'system', system_reason: 'reconcile_needed' });
+    b.store.close();
+    const read = readForeignBoard(join(b.root, '.sterling', 'sterling.db'));
+    assert.deepEqual(read.items.map((i) => i.id), [two.id, one.id]);
+    assert.deepEqual([...read.slugHolders.keys()].sort(), ['one', 'queue-item', 'two']);
+    assert.equal(read.truncated, undefined);
+    assert.deepEqual(read.unreadable, []);
+    assert.equal(read.schemaVersion, 2);
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard: a body that fails the tolerant parse is listed as unreadable by id, never dropped; unknown keys pass through', () => {
+  const b = receiver();
+  try {
+    const good = mk(b.store, { text: 'Readable' });
+    b.store.close();
+    const db = join(b.root, '.sterling', 'sterling.db');
+    const notJson = randomUUID();
+    const badWait = randomUUID();
+    const newer = randomUUID();
+    rawTodo(db, notJson, '{not json');
+    rawTodo(db, badWait, JSON.stringify({ ...envelope(), id: badWait, source: 'user', text: 'x', needs_reason: 'why' }));
+    rawTodo(db, newer, JSON.stringify({ ...envelope(), id: newer, source: 'user', text: 'From a newer Sterling', future_field: { a: 1 } }));
+    const read = readForeignBoard(db);
+    assert.deepEqual(read.items.map((i) => i.id).sort(), [good.id, newer].sort());
+    assert.deepEqual((read.items.find((i) => i.id === newer) as Record<string, unknown>).future_field, { a: 1 });
+    const unreadable = new Map(read.unreadable.map((u) => [u.id, u.reason]));
+    assert.deepEqual([...unreadable.keys()].sort(), [badWait, notJson].sort());
+    assert.match(unreadable.get(notJson) ?? '', /not valid JSON/);
+    assert.match(unreadable.get(badWait) ?? '', /needs_reason/);
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard: the time budget is checked per N rows; running out is disclosed as truncation with the rows read so far', () => {
+  const b = receiver();
+  try {
+    for (let i = 0; i < 6; i++) mk(b.store, { text: `Item ${i}` });
+    b.store.close();
+    const db = join(b.root, '.sterling', 'sterling.db');
+    let t = 0;
+    const read = readForeignBoard(db, { budgetMs: 1050, batchSize: 1, clock: () => (t += 100) });
+    assert.ok(read.truncated, 'the read says it was cut short');
+    assert.match(read.truncated ?? '', /^time budget exhausted \(1050 ms\) after \d+ board rows were read$/);
+    assert.ok(read.items.length > 0 && read.items.length < 6, `a partial read, got ${read.items.length}`);
+    const none = readForeignBoard(db, { budgetMs: 0 });
+    assert.equal(none.items.length, 0);
+    assert.match(none.truncated ?? '', /before the store was opened/);
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard: the PRAGMA user_version is reported as read', () => {
+  const b = receiver();
+  try {
+    mk(b.store, { text: 'One' });
+    b.store.close();
+    const db = join(b.root, '.sterling', 'sterling.db');
+    const w = new DatabaseSync(db);
+    w.exec('PRAGMA user_version=7');
+    w.close();
+    assert.equal(readForeignBoard(db).schemaVersion, 7);
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard: leaves no litter — a WAL store with no -wal and a rollback-journal store keep their files and bytes', () => {
+  const hash = (p: string) => createHash('sha256').update(readFileSync(p)).digest('hex');
+  for (const mode of ['wal', 'delete'] as const) {
+    const b = receiver();
+    try {
+      mk(b.store, { text: 'One' });
+      b.store.close();
+      const dir = join(b.root, '.sterling');
+      const db = join(dir, 'sterling.db');
+      if (mode === 'delete') {
+        const w = new DatabaseSync(db);
+        w.exec('PRAGMA journal_mode=DELETE');
+        w.close();
+      }
+      assert.equal(existsSync(`${db}-wal`), false, `precondition (${mode}): no -wal`);
+      const before = readdirSync(dir).sort();
+      const main = hash(db);
+      const read = readForeignBoard(db);
+      assert.equal(read.items.length, 1, mode);
+      assert.deepEqual(readdirSync(dir).sort(), before, `${mode}: no -wal, -shm or -journal was left beside the store`);
+      assert.equal(hash(db), main, `${mode}: the main file is byte-identical`);
+    } finally {
+      b.cleanup();
+    }
+  }
+});
+
+test('readForeignBoard (review #3): time that passes DURING the final scan step is disclosed as truncation', () => {
+  const b = receiver();
+  try {
+    for (let i = 0; i < 3; i++) mk(b.store, { text: `Item ${i}` });
+    b.store.close();
+    const db = join(b.root, '.sterling', 'sterling.db');
+    let now = 0;
+    // The step that delivers the last row is where the deadline passes; no
+    // clock read is calibrated, the hook only moves time inside that step.
+    const read = readForeignBoard(db, { budgetMs: 1000, clock: () => now }, { inStep: (rowsSoFar) => { if (rowsSoFar >= 3) now = 5000; } });
+    assert.match(read.truncated ?? '', /^time budget exhausted \(1000 ms\)/, 'a deadline crossed during the final step is disclosed');
+    now = 0;
+    const whole = readForeignBoard(db, { budgetMs: 1000, clock: () => now }, { inStep: () => {} });
+    assert.equal(whole.truncated, undefined, 'control: with time standing still the read is whole');
+    assert.equal(whole.items.length, 3);
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard (re-check #1): every batch and both cursor ranges read ONE snapshot — a write there between batches adds no duplicate', () => {
+  const b = receiver();
+  try {
+    const t = (n: number) => `2026-10-15T12:00:0${n}.000Z`;
+    const i1 = mk(b.store, { text: 'Oldest', updated_at: t(1) });
+    const i2 = mk(b.store, { text: 'Middle', updated_at: t(2) });
+    mk(b.store, { text: 'Newest', updated_at: t(3) });
+    const db = join(b.root, '.sterling', 'sterling.db');
+    assert.equal(existsSync(`${db}-wal`), true, 'precondition: the receiver is running (hot -wal), the read-only WAL path');
+    let wrote = false;
+    const bump = () => {
+      if (wrote) return;
+      wrote = true;
+      // The receiver moves the oldest item, already read past the cursor, to the head.
+      const w = new DatabaseSync(db);
+      try {
+        const row = w.prepare('SELECT body FROM records WHERE id = ?').get(i1.id) as { body: string };
+        w.prepare('UPDATE records SET updated_at = ?, body = ? WHERE id = ?').run(t(4), JSON.stringify({ ...JSON.parse(row.body), updated_at: t(4) }), i1.id);
+      } finally {
+        w.close();
+      }
+    };
+    const read = readForeignBoard(db, { batchSize: 1, after: { updated_at: t(2), id: i2.id } }, { betweenBatches: bump });
+    assert.equal(wrote, true, 'the write ran between batches');
+    const ids = read.items.map((i) => i.id);
+    assert.equal(new Set(ids).size, ids.length, `no item is read twice: ${ids.join(', ')}`);
+    assert.equal(ids.length, 3, 'the count is the count of the snapshot');
+    assert.equal(read.truncated, undefined);
+    assert.equal((b.store.get(i1.id) as { updated_at: string } | undefined)?.updated_at, t(4), 'the write committed there');
+  } finally {
+    b.store.close();
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard (re-check #1): on a rollback-journal store the read holds its shared lock, so a writer there waits until the read ends', () => {
+  const b = receiver();
+  try {
+    mk(b.store, { text: 'One' });
+    mk(b.store, { text: 'Two' });
+    b.store.close();
+    const db = join(b.root, '.sterling', 'sterling.db');
+    const w0 = new DatabaseSync(db);
+    w0.exec('PRAGMA journal_mode=DELETE');
+    w0.close();
+    let refused = '';
+    const read = readForeignBoard(db, { batchSize: 1 }, {
+      betweenBatches: () => {
+        if (refused) return;
+        const w = new DatabaseSync(db);
+        try {
+          w.exec('PRAGMA busy_timeout=0');
+          w.exec(`UPDATE records SET updated_at = '2030-01-01T00:00:00.000Z'`);
+          refused = 'no';
+        } catch (e) {
+          refused = (e as Error).message;
+        } finally {
+          w.close();
+        }
+      },
+    });
+    assert.match(refused, /database is locked/, 'the writer waits on the reader\'s shared lock');
+    assert.equal(read.items.length, 2);
+    const after = new DatabaseSync(db);
+    after.exec(`UPDATE records SET updated_at = updated_at`);
+    after.close();
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard (review #1): no row ceiling, and with `after` the rows past the cursor are read first', () => {
+  const b = receiver();
+  try {
+    b.store.close();
+    const db = join(b.root, '.sterling', 'sterling.db');
+    const w = new DatabaseSync(db);
+    const ins = w.prepare(`INSERT INTO records (id, type, status, scope, created_at, updated_at, author, body) VALUES (?, 'todo', 'active', 'project', ?, ?, 'conductor', ?)`);
+    w.exec('BEGIN');
+    const ids: string[] = [];
+    for (let i = 0; i < 1005; i++) {
+      const id = randomUUID();
+      ids.push(id);
+      ins.run(id, NOW, NOW, JSON.stringify({ ...envelope(), id, source: 'user', text: `Item ${i}` }));
+    }
+    w.exec('COMMIT');
+    w.close();
+    assert.equal(readForeignBoard(db).items.length, 1005, 'every live user item is read');
+    const sorted = [...ids].sort().reverse();
+    const cursor = { updated_at: NOW, id: sorted[1002] };
+    // one scan step only: the budget runs out after the first batch
+    let t = 0;
+    const read = readForeignBoard(db, { after: cursor, batchSize: 100, budgetMs: 650, clock: () => (t += 100) });
+    assert.ok(read.truncated);
+    assert.deepEqual(read.items.map((i) => i.id).sort(), [sorted[1003], sorted[1004]].sort(), 'the rows past the cursor came first');
   } finally {
     b.cleanup();
   }

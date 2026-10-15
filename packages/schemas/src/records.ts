@@ -774,6 +774,27 @@ export const todoWaitFieldsReadSchema = z
     }
   });
 
+/**
+ * A board item read from ANOTHER project's store (board_query/board_get
+ * target_project, decision
+ * read-another-projects-board-board-query-target-project-read-only), for
+ * READING across Sterling versions: unknown keys pass through, because a newer
+ * Sterling there may add fields, and only the fields the read relies on are
+ * checked. The wait fields are checked separately by todoWaitFieldsReadSchema.
+ */
+export const todoBoardItemReadSchema = z
+  .object({
+    id: z.string().min(1),
+    type: z.literal('todo'),
+    source: z.enum(['user', 'system']),
+    updated_at: z.string().min(1),
+    text: z.string().optional(),
+    slug: z.string().min(1).optional(),
+    objective: z.string().optional(),
+    file_keys: z.array(z.string()).optional(),
+  })
+  .passthrough();
+
 /** True when a board item lists its own slug among its blockers. */
 export function todoBlocksItself(rec: { slug?: string; blocked_by?: string[] }): boolean {
   return rec.slug !== undefined && rec.blocked_by?.includes(rec.slug) === true;

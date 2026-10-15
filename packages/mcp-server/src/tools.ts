@@ -28,6 +28,12 @@ import {
   allocateShares,
   resolveSentHandoffs,
   sentHandoffOf,
+  readForeignBoard,
+  getForeignBoardItem,
+  boardReadinessOf,
+  SUPPORTED_SCHEMA_VERSION,
+  type ForeignBoardRead,
+  type ReadForeignBoardOptions,
   type HandoffStatus,
   type QueryOptions,
   type ToolStore,
@@ -235,6 +241,13 @@ export interface BoardFilter {
    * silently ignored.
    */
   cursor?: string;
+  /**
+   * board_query only: read ANOTHER registered project's user board, read-only
+   * (decision read-another-projects-board-board-query-target-project-read-only).
+   * Served by foreignBoardQuery, never by boardQueryResult; part of the cursor
+   * identity, so a cursor never crosses between a local and a foreign query.
+   */
+  target_project?: string;
 }
 
 /**
@@ -512,6 +525,43 @@ export interface BoardQueryResult {
 }
 
 /**
+ * What a field that describes THIS repo reads on another project's board
+ * (decision read-another-projects-board-board-query-target-project-read-only):
+ * provenance against our HEAD, artifact evidence, reconcile status, the lane
+ * advisory and the hand-off status of that project's own trackers are not
+ * computed there, by the user's ruling.
+ */
+export const FOREIGN_UNAVAILABLE = 'unavailable:other_project';
+
+/** Where a foreign board read came from, on the envelope and on every record. */
+interface ForeignSource {
+  source_project: string;
+  source_root: string;
+}
+
+/** board_query with target_project: the read-only envelope over another project's user board. */
+export interface ForeignBoardQueryResult extends ForeignSource {
+  matched_filter: number;
+  returned: number;
+  cap: number;
+  capped: boolean;
+  offset: number;
+  next_cursor?: string;
+  provenance: typeof FOREIGN_UNAVAILABLE;
+  reconcile_provenance: typeof FOREIGN_UNAVAILABLE;
+  artifact_evidence_provenance: typeof FOREIGN_UNAVAILABLE;
+  lane_advisory: typeof FOREIGN_UNAVAILABLE;
+  /** the other store's PRAGMA user_version, present only when it differs from this build's SUPPORTED_SCHEMA_VERSION */
+  target_schema_version?: number;
+  /** user-board rows that failed the tolerant parse, by id; never dropped silently */
+  unreadable?: { id: string; reason: string }[];
+  /** present when the time budget ran out mid-read: the board shown is partial */
+  truncated?: string;
+  note?: string;
+  records: Record<string, unknown>[];
+}
+
+/**
  * knowledge_query's per-record staleness verdict (see computeBaselineDrift):
  * the DERIVED reading of the server-owned `file_baselines` the query projection
  * strips — which owned paths' bytes have moved since the record was written
@@ -716,6 +766,8 @@ export interface ToolDeps {
   repoRoot?: string;
   /** the machine's project registry file, for board_add target_project; absent → registryPath() */
   registryPath?: string;
+  /** the time budget for reading another project's board (board_query/board_get target_project); absent → the reader's defaults */
+  foreignBoardRead?: ReadForeignBoardOptions;
   /** The mounted-domain surface (Domains D2). Absent: derived from a
    *  MountedStores `store`, or none at all for a plain single store. */
   domains?: DomainSurface;
@@ -963,6 +1015,7 @@ function boardCursorIdentity(surface: BoardSurface, filter: BoardFilter): Record
   }
   if (filter.contains) identity.contains = filter.contains.toLowerCase();
   if (filter.feature_slug !== undefined) identity.feature_slug = filter.feature_slug;
+  if (filter.target_project !== undefined) identity.target_project = filter.target_project;
   return identity;
 }
 
@@ -1825,9 +1878,11 @@ export class SterlingTools {
   private repoRoot?: string;
   private domains?: DomainSurface;
   private registryPath?: string;
+  private foreignBoardRead?: ReadForeignBoardOptions;
 
   constructor(deps: ToolDeps) {
     this.registryPath = deps.registryPath;
+    this.foreignBoardRead = deps.foreignBoardRead;
     this.store = deps.store;
     this.config = deps.config ?? parseConfig({});
     this.now = deps.now ?? (() => new Date().toISOString());
@@ -11055,6 +11110,9 @@ export class SterlingTools {
    * documenting its own guarantee.
    */
   boardQueryResult(filter: BoardFilter = {}, surface: BoardSurface = 'board_query'): BoardQueryResult {
+    if (filter.target_project !== undefined) {
+      throw new Error(`${surface}: target_project is served by foreignBoardQuery, never by this project's board read`);
+    }
     const { matching, scanTruncated } = this.boardFiltered(filter);
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;
     const { records, offset, capped, next_cursor } = this.pageBoard(surface, matching, filter);
@@ -11392,6 +11450,170 @@ export class SterlingTools {
       );
     }
     return this.withDisplayLabel(record);
+  }
+
+  /**
+   * Read another registered project's user board (decision
+   * read-another-projects-board-board-query-target-project-read-only): the
+   * target is resolved through the registry (self and unknown refused with read
+   * wording), its store read raw and read-only under a time budget, and nothing
+   * is written there. Returns the read with the target it came from.
+   */
+  private readForeignTarget<T>(target_project: string, tool: 'board_query' | 'board_get', read: (dbPath: string) => T): { source: ForeignSource; result: T } {
+    const target = resolveHandoffTarget(target_project, this.repoRoot, this.registryPath, tool);
+    let result: T;
+    try {
+      result = read(target.dbPath);
+    } catch (e) {
+      throw new Error(`${tool}: target_project '${target_project}' could not be read: ${(e as Error)?.message ?? String(e)}. Nothing was written.`);
+    }
+    return { source: { source_project: target.name, source_root: target.root }, result };
+  }
+
+  /** What every foreign read discloses about the other store: a schema-version difference, unreadable rows, a cut-short read. */
+  private static foreignDisclosures(read: ForeignBoardRead, notes: string[]): Partial<ForeignBoardQueryResult> {
+    const out: Partial<ForeignBoardQueryResult> = {};
+    if (read.schemaVersion !== SUPPORTED_SCHEMA_VERSION) {
+      out.target_schema_version = read.schemaVersion;
+      notes.push(
+        `the other store is at schema version ${read.schemaVersion} and this Sterling supports ${SUPPORTED_SCHEMA_VERSION}: items were read tolerantly ` +
+          `(fields this build does not know are passed through; an item missing a field the read relies on is listed under unreadable)`
+      );
+    }
+    if (read.unreadable.length) {
+      out.unreadable = read.unreadable;
+      notes.push(`${read.unreadable.length} board row(s) could not be read by this Sterling and are listed under unreadable by id; they are not counted in matched_filter`);
+    }
+    if (read.truncated) {
+      out.truncated = read.truncated;
+      notes.push(
+        `the read was cut short (${read.truncated}), so matched_filter is a FLOOR and a page that is not capped is NOT the end of that board; ` +
+          `blocked_by_state and unblocks were not computed — retry the call`
+      );
+    }
+    return out;
+  }
+
+  /**
+   * blocked_by_state, unblocks and readiness against the OTHER board's live
+   * slugs, through the one readiness rule (boardReadinessOf); a tracker there
+   * reads handoff_status 'unavailable:other_project'. Empty when the read was
+   * partial, because a missing slug would then read as a closed blocker.
+   */
+  private static foreignDerived(read: ForeignBoardRead, page: readonly Record<string, unknown>[]): Map<string, Record<string, unknown>> {
+    const out = new Map<string, Record<string, unknown>>();
+    if (read.truncated) return out;
+    type Input = Parameters<typeof boardReadinessOf>[0][number];
+    const readiness = boardReadinessOf(page as unknown as Input[], read.items as unknown as Input[], (slug) => read.slugHolders.get(slug));
+    for (const r of readiness) {
+      out.set(r.id, {
+        ...(r.blockers.length ? { blocked_by_state: r.blockers } : {}),
+        ...(r.unblocks.length ? { unblocks: r.unblocks } : {}),
+        ...(r.state === 'delegated' ? { readiness: 'delegated', handoff_status: FOREIGN_UNAVAILABLE } : {}),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * board_query with target_project: another project's USER board, read-only,
+   * with the same filters (objective, file_keys, contains), the same order
+   * (compareBoardOrder) and the same offset/cursor paging as here; a cursor is
+   * bound to its target_project, so it never crosses between a local and a
+   * foreign query. source:'system' is refused: the other project's maintenance
+   * queue is its own housekeeping (the user's ruling).
+   */
+  foreignBoardQuery(filter: BoardFilter & { target_project: string }): ForeignBoardQueryResult {
+    if (filter.source === 'system') {
+      throw new Error(
+        `board_query: source:'system' cannot go with target_project — only another project's user board is read, never its maintenance queue. Nothing was read.`
+      );
+    }
+    // A cursor's rows are read first, so its page is reached even when the
+    // budget runs out before the rows ahead of it are counted.
+    const after = filter.cursor !== undefined && filter.offset === undefined ? decodeBoardCursor('board_query', filter.cursor) : undefined;
+    const { source, result: read } = this.readForeignTarget(filter.target_project, 'board_query', (dbPath) =>
+      readForeignBoard(dbPath, { ...this.foreignBoardRead, ...(after ? { after: { updated_at: after.updated_at, id: after.id } } : {}) })
+    );
+    let matching = read.items;
+    if (filter.contains) {
+      const needle = filter.contains.toLowerCase();
+      matching = matching.filter((t) => (typeof t.text === 'string' ? t.text : '').toLowerCase().includes(needle));
+    }
+    if (filter.objective !== undefined) {
+      const wanted = filter.objective === 'standalone' ? undefined : filter.objective;
+      matching = matching.filter((t) => t.objective === wanted);
+    }
+    if (filter.file_keys && filter.file_keys.length > 0) {
+      const wanted = new Set(filter.file_keys.map(normalizeRepoPath));
+      matching = matching.filter((t) => Array.isArray(t.file_keys) && t.file_keys.some((k) => typeof k === 'string' && wanted.has(k)));
+    }
+    const ordered = [...matching].sort((a, b) => compareBoardOrder(String(a.updated_at), String(a.id), String(b.updated_at), String(b.id)));
+    const cap = filter.cap ?? DEFAULT_BOARD_CAP;
+    const page = this.pageBoard('board_query', ordered as unknown as DurableRecord[], filter);
+    const records = page.records as unknown as Record<string, unknown>[];
+    const projection = filter.projection ?? 'text';
+    const notes: string[] = [];
+    if (page.capped) {
+      notes.push(
+        `cap reached — showing ${records.length} of ${ordered.length} matching items; page with cursor:"${page.next_cursor}"` +
+          (filter.cursor === undefined ? ` or offset:${page.offset + records.length}` : '') +
+          `, or raise cap`
+      );
+    }
+    const disclosures = SterlingTools.foreignDisclosures(read, notes);
+    const derived = projection === 'text' || projection === 'full' ? SterlingTools.foreignDerived(read, records) : new Map<string, Record<string, unknown>>();
+    const projected = records.map((r) => {
+      const base =
+        projection === 'text' ? textRowRecord(r) : projection === 'headline' ? headlineRecord(r) : projection === 'digest' ? digestRecord(r) : { ...r };
+      return { ...base, ...derived.get(String(r.id)), ...source };
+    });
+    return {
+      ...source,
+      matched_filter: ordered.length,
+      returned: records.length,
+      cap,
+      capped: page.capped,
+      offset: page.offset,
+      ...(page.next_cursor !== undefined ? { next_cursor: page.next_cursor } : {}),
+      provenance: FOREIGN_UNAVAILABLE,
+      reconcile_provenance: FOREIGN_UNAVAILABLE,
+      artifact_evidence_provenance: FOREIGN_UNAVAILABLE,
+      lane_advisory: FOREIGN_UNAVAILABLE,
+      ...disclosures,
+      ...(notes.length ? { note: notes.join('; ') } : {}),
+      records: projected,
+    };
+  }
+
+  /**
+   * board_get with target_project: one user board item from another project,
+   * in full, by full uuid, exact slug or unambiguous 8-char prefix. The
+   * historical-id archive is not searched there, and the result says so.
+   */
+  foreignBoardGet(id: string, target_project: string): Record<string, unknown> {
+    const { source, result } = this.readForeignTarget(target_project, 'board_get', (dbPath) =>
+      getForeignBoardItem(dbPath, id, `in project '${target_project}'`, this.foreignBoardRead)
+    );
+    if ('refused' in result.lookup) {
+      throw new Error(
+        `board_get: '${id}' ${result.lookup.refused}` +
+          ` (a full uuid, exact slug or 8-char prefix; the maintenance queue is not read and the historical-id archive is not searched for another project)`
+      );
+    }
+    const hit = result.lookup.found;
+    const notes: string[] = [];
+    const disclosures = SterlingTools.foreignDisclosures(result.board, notes);
+    const label = boardDisplayLabel(hit.text, hit.slug);
+    return {
+      ...hit,
+      ...(label ? { label } : {}),
+      ...SterlingTools.foreignDerived(result.board, [hit]).get(String(hit.id)),
+      ...source,
+      historical_ids: 'not searched: the historical-id archive is read for this project only',
+      ...disclosures,
+      ...(notes.length ? { note: notes.join('; ') } : {}),
+    };
   }
 
   /**

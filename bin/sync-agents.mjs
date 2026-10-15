@@ -4606,6 +4606,16 @@ var todoWaitFieldsReadSchema = external_exports.object({
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
   }
 });
+var todoBoardItemReadSchema = external_exports.object({
+  id: external_exports.string().min(1),
+  type: external_exports.literal("todo"),
+  source: external_exports.enum(["user", "system"]),
+  updated_at: external_exports.string().min(1),
+  text: external_exports.string().optional(),
+  slug: external_exports.string().min(1).optional(),
+  objective: external_exports.string().optional(),
+  file_keys: external_exports.array(external_exports.string()).optional()
+}).passthrough();
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }

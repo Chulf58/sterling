@@ -24,6 +24,25 @@ function canonical(p: string): string {
   }
 }
 
+/** Which tool resolves the target: board_add writes there, board_query and board_get only read. */
+export type HandoffTargetUse = 'board_add' | 'board_query' | 'board_get';
+
+const WRITE_WORDING = {
+  nothing: 'Nothing was written.',
+  noRoot: 'this server has no project root, so it cannot say which project the task comes from',
+  self: "it is this session's own project; add the item without target_project",
+  sqliteOnly: 'a handoff writes SQLite stores only',
+  neverCreates: 'a handoff never creates one',
+};
+
+const READ_WORDING = {
+  nothing: 'Nothing was read.',
+  noRoot: 'this server has no project root, so it cannot tell its own project from another',
+  self: "it is this session's own project; read it without target_project",
+  sqliteOnly: 'another project\'s board is read from SQLite stores only',
+  neverCreates: 'a read never creates one',
+};
+
 /**
  * The registered project `name` names, refused when: this server has no
  * project root; there is no registry; no project or more than one project
@@ -32,9 +51,15 @@ function canonical(p: string): string {
  * a store, because opening a missing SQLite store creates a fresh one); or its
  * storage is not SQLite.
  */
-export function resolveHandoffTarget(name: string, selfRoot: string | undefined, regPath: string = registryPath()): HandoffTarget {
-  const refuse = (why: string) => new Error(`board_add: target_project '${name}' is refused: ${why}. Nothing was written.`);
-  if (!selfRoot) throw refuse('this server has no project root, so it cannot say which project the task comes from');
+export function resolveHandoffTarget(
+  name: string,
+  selfRoot: string | undefined,
+  regPath: string = registryPath(),
+  use: HandoffTargetUse = 'board_add'
+): HandoffTarget {
+  const w = use === 'board_add' ? WRITE_WORDING : READ_WORDING;
+  const refuse = (why: string) => new Error(`${use}: target_project '${name}' is refused: ${why}. ${w.nothing}`);
+  if (!selfRoot) throw refuse(w.noRoot);
   if (!existsSync(regPath)) throw refuse(`there is no project registry at ${regPath} (projects are registered by /sterling:init)`);
   const registry = new ProjectRegistry(regPath);
   let rows;
@@ -52,7 +77,7 @@ export function resolveHandoffTarget(name: string, selfRoot: string | undefined,
   }
   if (roots.length > 1) throw refuse(`the name is ambiguous, ${roots.length} registered roots carry it: ${roots.join(', ')}`);
   const root = roots[0];
-  if (canonical(root) === self) throw refuse('it is this session\'s own project; add the item without target_project');
+  if (canonical(root) === self) throw refuse(w.self);
   if (!existsSync(root)) throw refuse(`its registered root ${root} does not exist`);
   let route;
   try {
@@ -61,8 +86,8 @@ export function resolveHandoffTarget(name: string, selfRoot: string | undefined,
     throw refuse(`its store settings could not be read (${(e as Error)?.message ?? String(e)})`);
   }
   if (route === null) throw refuse(`${root} has no .sterling/config.json, so it is not an initialized Sterling project`);
-  if (route.storage !== 'sqlite') throw refuse(`its storage is ${route.storage}; a handoff writes SQLite stores only`);
+  if (route.storage !== 'sqlite') throw refuse(`its storage is ${route.storage}; ${w.sqliteOnly}`);
   const dbPath = join(root, '.sterling', 'sterling.db');
-  if (!existsSync(dbPath)) throw refuse(`it has no store at ${dbPath}, and a handoff never creates one`);
+  if (!existsSync(dbPath)) throw refuse(`it has no store at ${dbPath}, and ${w.neverCreates}`);
   return { name, root, dbPath, selfName };
 }
