@@ -3581,6 +3581,10 @@ function rename() {
   const newName = process.argv[4];
   const apply = hasFlag('apply');
   const usage = 'usage: domain-doctor.mjs rename <old> <new> [--apply]';
+  if (process.argv.slice(3).includes('--help')) {
+    console.log(`${usage}\nRenames a whole domain on this machine. Without --apply it prints the plan and writes nothing.`);
+    return;
+  }
   for (const [label, n] of [['<old>', oldName], ['<new>', newName]]) {
     if (!n || n.startsWith('--')) fail(`${usage} (missing ${label})`);
     if (!SCOPE_RE.test(`domain:${n}`)) fail(`refusing: ${label} '${n}' is not a domain name ('domain:${n}' does not match ${SCOPE_RE}). Nothing was written.`);
@@ -3796,7 +3800,19 @@ function rename() {
 function invokedAsCli() {
   try {
     if (!process.argv[1]) return true;
-    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+    // The bin/ bundle rewrites import.meta.url to name this scripts/ source
+    // (source-location identity, scripts/lib/bundled-artifacts.mjs), so the
+    // shipped bin/domain-doctor.mjs is accepted beside the source (anti_pattern
+    // bin-bundle-main-guard-compares-against-source-path-and-never-runs).
+    const launched = realpathSync(process.argv[1]);
+    const entries = [fileURLToPath(import.meta.url), fileURLToPath(new URL('../bin/domain-doctor.mjs', import.meta.url))];
+    return entries.some((entry) => {
+      try {
+        return realpathSync(entry) === launched;
+      } catch {
+        return false;
+      }
+    });
   } catch {
     return true;
   }

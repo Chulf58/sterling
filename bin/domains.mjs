@@ -9339,6 +9339,7 @@ function buildDomainMap({ stores, projects: projects2, current: current2, notes:
       description: s2?.description ?? null,
       format: s2?.format ?? null,
       unreadable: s2?.unreadable ?? null,
+      renamed_to: s2?.renamed_to ?? null,
       mounted_by: everyone.filter((p) => p.mounts.includes(name)).map((p) => p.name)
     };
   });
@@ -9352,9 +9353,10 @@ function buildDomainMap({ stores, projects: projects2, current: current2, notes:
     current: me ? { ...me, registered } : null,
     domains,
     near_names: [...spellings.values()].filter((group) => group.length > 1),
-    unmounted: domains.filter((d) => d.has_store && d.mounted_by.length === 0).map((d) => d.name),
+    unmounted: domains.filter((d) => d.has_store && !d.renamed_to && d.mounted_by.length === 0).map((d) => d.name),
+    renamed: domains.filter((d) => d.renamed_to).map((d) => ({ name: d.name, to: d.renamed_to, mounted_by: d.mounted_by })),
     tags_without_store: domains.filter((d) => !d.has_store).map((d) => ({ tag: d.name, projects: d.mounted_by })),
-    undescribed: domains.filter((d) => d.has_store && !d.unreadable && d.format === "current" && !d.description).map((d) => d.name),
+    undescribed: domains.filter((d) => d.has_store && !d.unreadable && !d.renamed_to && d.format === "current" && !d.description).map((d) => d.name),
     old_format: domains.filter((d) => d.format === "old").map((d) => d.name),
     unreadable: domains.filter((d) => d.unreadable).map((d) => ({ name: d.name, error: d.unreadable })),
     siblings,
@@ -9408,7 +9410,7 @@ function renderDomainMap(map, { applyCommand = "/sterling:domains" } = {}) {
   const width = Math.max(0, ...map.domains.map((d) => d.name.length));
   for (const d of map.domains) {
     out.push(`  ${d.name.padEnd(width)}  mounted by: ${list(d.mounted_by)}`);
-    const detail = !d.has_store ? "(no store: the tag names a domain that was never created)" : d.unreadable ? `(could not be read: ${d.unreadable})` : d.format === "old" ? "(old format)" : d.description || "(no description)";
+    const detail = !d.has_store ? "(no store: the tag names a domain that was never created)" : d.unreadable ? `(could not be read: ${d.unreadable})` : d.renamed_to ? `(renamed \u2192 ${d.renamed_to} (fenced backup))` : d.format === "old" ? "(old format)" : d.description || "(no description)";
     out.push(`  ${" ".repeat(width)}  ${detail}`);
   }
   out.push("");
@@ -9416,6 +9418,11 @@ function renderDomainMap(map, { applyCommand = "/sterling:domains" } = {}) {
   out.push(`Tags that name no store: ${list(map.tags_without_store.map((t) => `${t.tag} (${t.projects.join(", ")})`))}`);
   if (map.tags_without_store.length) {
     out.push("  A tag with no store is not mounted: nothing is read from it and writes to it are refused. Adding it with a description creates the store.");
+  }
+  if (map.renamed.length) {
+    out.push(`Renamed domains (fenced backups): ${map.renamed.map((r) => `${r.name} \u2192 ${r.to}`).join(", ")}`);
+    const stale = map.renamed.filter((r) => r.mounted_by.length);
+    if (stale.length) out.push(`  Still tagged with the old name, so the domain is refused at mount: ${stale.map((r) => `${list(r.mounted_by)} (${r.name} \u2192 ${r.to})`).join("; ")}. Replace the old tag with the new one in those projects' stack_tags.`);
   }
   out.push(`Stores with no description: ${list(map.undescribed)}`);
   if (map.undescribed.length) {
@@ -9538,7 +9545,7 @@ if (project) {
 var onPostgres = route?.storage === "postgres";
 var domainsRoot = join10(homedir5(), ".sterling", "domains");
 function inspectStore(name, dbPath) {
-  const entry = { name, path: fwd2(dbPath), description: null, format: "current", unreadable: null };
+  const entry = { name, path: fwd2(dbPath), description: null, format: "current", unreadable: null, renamed_to: null };
   let db;
   try {
     db = new DatabaseSync4(dbPath, { readOnly: true });
@@ -9547,6 +9554,11 @@ function inspectStore(name, dbPath) {
     if (tables.length && version < SUPPORTED_SCHEMA_VERSION) entry.format = "old";
     else if (tables.includes("store_meta")) {
       entry.description = db.prepare("SELECT value FROM store_meta WHERE key = ?").get(DOMAIN_DESCRIPTION_KEY)?.value?.trim() || null;
+      const fence = db.prepare("SELECT value FROM store_meta WHERE key = ?").get(STORE_FENCE_KEY)?.value;
+      if (fence !== void 0) {
+        const parsed = parseStoreFence(fence);
+        if (parsed.kind === "rename") entry.renamed_to = parsed.to_domain;
+      }
     }
   } catch (e) {
     entry.unreadable = String(e?.message ?? e);
@@ -9686,8 +9698,11 @@ for (const name of opts.descriptions.keys()) {
 }
 var mounted = project.config.stack_tags;
 {
-  const stores = listStores().map((st) => st.name);
+  const listed = listStores();
+  const stores = listed.map((st) => st.name);
   for (const name of opts.add) {
+    const renamed = listed.find((st) => st.name === name && st.renamed_to);
+    if (renamed) refuse(`'${name}' was renamed to '${renamed.renamed_to}'; its store at ${renamed.path} is the fenced backup and cannot be mounted. Add '${renamed.renamed_to}' instead. Nothing was written.`);
     const differs = (other) => other !== name && other.toLowerCase() === name.toLowerCase();
     const exact = stores.includes(name) || projects.some((p) => p.exists && p.stack_tags.includes(name));
     if (exact) continue;

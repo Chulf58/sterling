@@ -78,9 +78,9 @@ Records already written in the project about the subject stay project-scoped. Do
 
 Use this when the user wants a domain called something else, for example `chulf` to `customerhub` (decision `domain-rename-is-a-fenced-copy-verb-on-domain-doctor`). It renames the whole domain on this machine. It does not merge into an existing domain, move some of the records, or keep the old name as an alias. Each other machine runs it for itself.
 
-The command runs from a Sterling clone, because the plugin's `bin/` does not ship it:
+Run it from the project, with the plugin's bundled copy:
 
-`node scripts/domain-doctor.mjs rename <old> <new>`
+`node "${CLAUDE_PLUGIN_ROOT}/bin/domain-doctor.mjs" rename <old> <new>`
 
 Without `--apply` it writes nothing and prints the plan: the old and new store paths, the record count, each registered project whose config mounts `<old>` with its `stack_tags` and `domain_paths` change, projects whose config could not be read (they are not changed), and the `AGENTS.md` lines to change by hand. Show the plan to the user and ask through the question form before running it again with `--apply`.
 
@@ -103,4 +103,4 @@ After it runs:
 - [ ] The user was told to restart the session, and `AGENTS.md` matches the new tags.
 - [ ] The map was re-run and shows this project under each added domain.
 - [ ] Each sibling step was named to the user with the project and its path, and the one-machine, one-user limit was stated.
-- [ ] Nothing was removed and no record was moved by hand (a rename went through `domain-doctor rename`, and the user saw the dry-run plan first).
+- [ ] Nothing was removed and no record was moved by hand (a rename went through `bin/domain-doctor.mjs rename`, and the user saw the dry-run plan first).

@@ -292,3 +292,43 @@ test('refusals: an existing target, a Postgres project, disagreeing store paths,
   assert.equal(bad.code, 2);
   assert.match(bad.stderr, /is not a domain name/);
 });
+
+test('the domains map shows a rename-fenced store as a renamed backup, and --apply --add refuses the old name', () => {
+  const m = machine();
+  assert.equal(doctor(m, ['rename', 'chulf', 'customerhub', '--apply']).code, 0);
+  const env = { ...process.env, HOME: m.home, STERLING_REGISTRY_DB: m.registryDb };
+  const map = spawnSync(process.execPath, [join(root, 'scripts', 'domains.mjs'), '--target', m.projects.gamma.dir], { encoding: 'utf8', cwd: m.dir, env, timeout: 60_000 });
+  assert.equal(map.status, 0, map.stderr);
+  assert.match(map.stdout, /^ {2}chulf\s+mounted by: none\n\s+\(renamed → customerhub \(fenced backup\)\)$/m);
+  assert.match(map.stdout, /Renamed domains \(fenced backups\): chulf → customerhub/);
+  assert.match(map.stdout, /Stores no project mounts: none/, 'the backup is not listed as an ordinary unmounted store');
+  const add = spawnSync(process.execPath, [join(root, 'scripts', 'domains.mjs'), '--apply', '--add', 'chulf'], { encoding: 'utf8', cwd: m.projects.gamma.dir, env, timeout: 60_000 });
+  assert.equal(add.status, 2);
+  assert.match(add.stderr, /'chulf' was renamed to 'customerhub'.*Add 'customerhub' instead/);
+  assert.deepEqual(config(m.projects.gamma).stack_tags, ['node']);
+});
+
+test('bin/domain-doctor.mjs ships the rename verb and runs from a plugin tree with no node_modules', () => {
+  const m = machine();
+  const plugin = join(m.dir, 'plugin');
+  mkdirSync(join(plugin, 'bin'), { recursive: true });
+  const bundle = join(plugin, 'bin', 'domain-doctor.mjs');
+  writeFileSync(bundle, readFileSync(join(root, 'bin', 'domain-doctor.mjs')));
+  const run = (args) => spawnSync(process.execPath, [bundle, ...args], { encoding: 'utf8', cwd: m.dir, timeout: 60_000, env: { ...process.env, HOME: m.home, STERLING_REGISTRY_DB: m.registryDb } });
+
+  const help = run(['rename', '--help']);
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /usage: domain-doctor\.mjs rename <old> <new> \[--apply\]/);
+  // A usage error is printed, never a silent exit 0 (anti_pattern bin-bundle-main-guard-compares-against-source-path-and-never-runs).
+  const usage = run(['rename']);
+  assert.equal(usage.status, 2);
+  assert.match(usage.stderr, /usage: domain-doctor\.mjs rename/);
+
+  const dry = run(['rename', 'chulf', 'customerhub']);
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, /Dry run: nothing was written/);
+  assert.equal(existsSync(m.newPath), false);
+
+  const skill = readFileSync(join(root, 'skills', 'mounting-domains', 'SKILL.md'), 'utf8');
+  assert.ok(skill.includes('node "${CLAUDE_PLUGIN_ROOT}/bin/domain-doctor.mjs" rename <old> <new>'), 'the skill runs the shipped bundle');
+});
