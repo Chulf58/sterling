@@ -63,6 +63,7 @@
     "enabled": false
   },
   "pr_review": {
-    "copilot_logins": []
+    "copilot_logins": [],
+    "auto_merge_on_clean": true
   }
 }

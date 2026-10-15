@@ -263,14 +263,18 @@ test('toggles 3: UP/DOWN traverse past sparringRows onto the tdd row, and clamp 
     // (decision project-mode-hobby-work-toggle-decides-flow) sits below it at
     // numKeys + 3, and the handoff files row (decision
     // project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting)
-    // below that at numKeys + 4, which owns the bottom clamp (pinned in
-    // handoff-toggle.test.ts).
+    // below that at numKeys + 4, and the PR auto-merge row (decision
+    // work-mode-pr-auto-merge-when-copilot-loop-ends-clean) below that at
+    // numKeys + 5, which owns the bottom clamp (pinned in
+    // auto-merge-toggle.test.ts).
     const below = SR.reduce(store, r.ui, key('DOWN'), undefined, undefined, snap);
     assert.equal(below.ui.cursor, numKeys + 3, 'DOWN past the tdd row lands on the project mode row');
-    const last = SR.reduce(store, below.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(last.ui.cursor, numKeys + 4, 'DOWN past the project mode row lands on the handoff files row');
+    const handoff = SR.reduce(store, below.ui, key('DOWN'), undefined, undefined, snap);
+    assert.equal(handoff.ui.cursor, numKeys + 4, 'DOWN past the project mode row lands on the handoff files row');
+    const last = SR.reduce(store, handoff.ui, key('DOWN'), undefined, undefined, snap);
+    assert.equal(last.ui.cursor, numKeys + 5, 'DOWN past the handoff files row lands on the PR auto-merge row');
     const clamped = SR.reduce(store, last.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(clamped.ui.cursor, numKeys + 4, "DOWN clamps at the tab's true last row (the handoff files row)");
+    assert.equal(clamped.ui.cursor, numKeys + 5, "DOWN clamps at the tab's true last row (the PR auto-merge row)");
 
     const up = SR.reduce(store, r.ui, key('UP'), undefined, undefined, snap);
     assert.equal(up.ui.cursor, numKeys + 1, 'UP from the tdd row returns to the sparring model row');
@@ -441,11 +445,11 @@ test('toggles 7 (board 8fc765e2): a notice banner does not push the selected row
     assert.strictEqual(typeof stateMod.screenLineToRow, 'function', 'screenLineToRow must be exported');
 
     const numKeys = Object.keys(baseSnapshot().configModels).length;
-    // Every non-banner row on the tab, so bannerRowCount below can subtract them: config rows + 2 sparring + 1 tdd (frozen: toggles 1-6) + 1 project mode (decision project-mode-hobby-work-toggle-decides-flow) + 1 handoff files (decision project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) + 1 read-only storage row (board 6ca1a3c5), which is drawn but takes no cursor stop.
-    const totalSelectableRows = numKeys + 6;
+    // Every non-banner row on the tab, so bannerRowCount below can subtract them: config rows + 2 sparring + 1 tdd (frozen: toggles 1-6) + 1 project mode (decision project-mode-hobby-work-toggle-decides-flow) + 1 handoff files (decision project-mode-means-shipping-flow-only-handoff-files-are-a-separate-setting) + 1 PR auto-merge (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean) + 1 read-only storage row (board 6ca1a3c5), which is drawn but takes no cursor stop.
+    const totalSelectableRows = numKeys + 7;
     const maxBodyLines = 2; // total SYS_TAB rows exceed this — the roster is taller than the viewport
     const vp = { maxBodyLines, width: 80 };
-    const lastRowCursor = numKeys + 4; // the handoff files row — the last selectable row on the tab
+    const lastRowCursor = numKeys + 5; // the PR auto-merge row — the last selectable row on the tab
 
     interface DashRow { selected?: boolean }
     interface Dash { rows: DashRow[]; bodyTop: number; scroll?: number }

@@ -39072,8 +39072,8 @@ import { dirname as dirname9, join as join20 } from "node:path";
 import { performance } from "node:perf_hooks";
 
 // packages/tui/dist/controller.js
-import { readFileSync as readFileSync12, writeFileSync as writeFileSync5, existsSync as existsSync9 } from "node:fs";
-import { basename as basename2, dirname as dirname5, join as join16 } from "node:path";
+import { readFileSync as readFileSync13, writeFileSync as writeFileSync6, existsSync as existsSync10 } from "node:fs";
+import { basename as basename2, dirname as dirname6, join as join17 } from "node:path";
 import { randomUUID as randomUUID5 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
@@ -44451,9 +44451,16 @@ var configSchema = external_exports.object({
   // first use; empty means unpinned (any Bot login matching /copilot/i, with
   // identity_confirmed false). PERMISSIVE like mode: a malformed value is
   // preserved raw, never thrown on; scripts/pr-review-wait.mjs is the strict
-  // judge. The default lives twice: here and in templates/default-config.json
-  // (config.test.ts pins that they agree).
-  pr_review: external_exports.unknown().default({ copilot_logins: [] })
+  // judge. auto_merge_on_clean (decision
+  // work-mode-pr-auto-merge-when-copilot-loop-ends-clean, board 2ebbea9d): when
+  // the loop settles clean and GitHub reports the PR mergeable, the conductor
+  // squash-merges it and deletes the branch; false leaves the merge to a human.
+  // Absent means on. Its strict judge is autoMergeOnCleanOf() in
+  // scripts/lib/work-pr.mjs, which refuses a value that is not a boolean, so a
+  // typo never turns into a merge. Toggled in the TUI System tab. The default
+  // lives twice: here and in templates/default-config.json (config.test.ts pins
+  // that they agree).
+  pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true })
 });
 var RETIRED_MODEL_KEYS = [
   "coder",
@@ -50279,7 +50286,8 @@ var EMPTY_ROSTER = {
   tdd: { enabled: true },
   mode: "hobby",
   handoff: false,
-  storage: void 0
+  storage: void 0,
+  autoMergeOnClean: true
 };
 function driftOf(installed, config) {
   return installed !== config;
@@ -50483,8 +50491,9 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
   const tddRows = selector ? [] : [tddToggleRow(snap, ui, width, keys.length + 2)];
   const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
   const handoffRows = selector ? [] : [handoffToggleRow(snap, ui, width, keys.length + 4)];
+  const autoMergeRows = selector ? [] : [autoMergeToggleRow(snap, ui, width, keys.length + 5)];
   const storageRows = selector ? [] : [storageRow(snap, width)];
-  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, storageRows };
+  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, storageRows };
 }
 function catalogBanner(catalog, width) {
   const clip2 = (s2) => clipEllipsis(s2, width);
@@ -50540,6 +50549,14 @@ function handoffToggleRow(snap, ui, width, cursorIndex) {
   const why = snap.handoffDetail === void 0 ? "" : ` (${snap.handoffDetail})`;
   const shown = handoff === null ? `UNKNOWN (${snap.handoffDetail ?? "config unreadable"})` : handoff === true ? `ON${why}` : handoff === false ? `OFF${why}` : `INVALID (${handoff})`;
   return { id: "sys:handoff_files", lines: [{ text: clip2(`${marker}Handoff files: ${shown}`), kind: "title", selected }] };
+}
+function autoMergeToggleRow(snap, ui, width, cursorIndex) {
+  const clip2 = (s2) => clipEllipsis(s2, width);
+  const value = snap.autoMergeOnClean === void 0 ? true : snap.autoMergeOnClean;
+  const selected = ui.cursor === cursorIndex;
+  const marker = selected ? "\u203A " : "  ";
+  const shown = value === null ? "UNKNOWN (config unreadable)" : value === true ? "ON" : value === false ? "OFF" : `INVALID (${value})`;
+  return { id: "sys:pr_auto_merge", lines: [{ text: clip2(`${marker}Auto-merge clean PRs (work mode): ${shown}`), kind: "title", selected }] };
 }
 function storageRow(snap, width) {
   const clip2 = (s2) => clipEllipsis(s2, width);
@@ -50806,7 +50823,7 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, ma
     rows.push({ id: sr.id, type: "system", selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
     screenRow += lines.length;
   }
-  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.storageRows]) {
+  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.storageRows]) {
     const lines = sr.lines.map((l) => ({
       text: l.text,
       kind: l.kind === "title" ? "title" : l.kind === "meta" ? "meta" : "body"
@@ -51216,7 +51233,7 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
       }
       if (ui.tab === SYSTEM_TAB && roster) {
         const sysKeys = Object.keys(roster.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
-        const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 5 - 1)));
+        const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 6 - 1)));
         const sel = ui.selector;
         const editing = ui.sparringModelEdit !== void 0;
         switch (event2.name) {
@@ -51278,6 +51295,10 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
             }
             if (cursor === sysKeys.length + 4) {
               effects.push({ type: "handoff_toggle", enabled: (roster.handoff ?? false) === false });
+              return { ui: { ...ui, cursor, notice: void 0 }, effects };
+            }
+            if (cursor === sysKeys.length + 5) {
+              effects.push({ type: "auto_merge_toggle", enabled: (roster.autoMergeOnClean ?? true) === false });
               return { ui: { ...ui, cursor, notice: void 0 }, effects };
             }
             const key = sysKeys[cursor];
@@ -51553,15 +51574,91 @@ function applyHandoffToggle(e, onError, path) {
     return false;
   }
 }
+function applyAutoMergeToggle(e, onError, path) {
+  try {
+    writeConfigKey(configPath(path), "pr_review", (old) => {
+      const block = old !== null && typeof old === "object" && !Array.isArray(old) ? old : {};
+      return { ...block, auto_merge_on_clean: e.enabled };
+    });
+    return true;
+  } catch (err) {
+    onError?.(`auto-merge toggle failed \u2014 ${err.message}`);
+    return false;
+  }
+}
+
+// scripts/lib/work-pr.mjs
+import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync5, renameSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { delimiter, dirname as dirname4, join as join8 } from "node:path";
+function parseOriginRepo(url) {
+  const u = String(url ?? "").trim();
+  let host2;
+  let path;
+  let m = u.match(/^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/);
+  if (m) [, host2, path] = m;
+  else if (m = u.match(/^(?:[^@/:]+@)?([^/:]+):(?!\/)(.+)$/)) [, host2, path] = m;
+  else return null;
+  const parts = path.replace(/\/+$/, "").replace(/\.git$/, "").split("/");
+  if (parts.length !== 2) return null;
+  const [owner2, name] = parts;
+  const seg = /^[A-Za-z0-9_.-]+$/;
+  if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(host2) || !seg.test(owner2) || !seg.test(name) || [owner2, name].some((part) => part === "." || part === "..")) return null;
+  return { host: host2, repo: `${host2}/${owner2}/${name}` };
+}
+var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
+var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
+var prLoopPath = (root) => join8(root, PR_LOOP_REL);
+function readPrLoop(root) {
+  const file = prLoopPath(root);
+  if (!existsSync3(file)) return null;
+  let s2;
+  try {
+    s2 = JSON.parse(readFileSync5(file, "utf8"));
+  } catch (e) {
+    throw new Error(`${PR_LOOP_REL} is not valid JSON (${e.message})`);
+  }
+  const str2 = (v) => typeof v === "string" && v.length > 0;
+  if (!s2 || typeof s2 !== "object" || Array.isArray(s2) || !str2(s2.pr_url) || !Number.isInteger(s2.pr_number) || !str2(s2.repo) || !str2(s2.head_sha) || !str2(s2.armed_at)) {
+    throw new Error(`${PR_LOOP_REL} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s2)}`);
+  }
+  if (s2.status !== "owed" && !PR_LOOP_OUTCOMES.includes(s2.status)) {
+    throw new Error(`${PR_LOOP_REL} has status ${JSON.stringify(s2.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
+  }
+  if (s2.status !== "owed" && !str2(s2.settled_at)) throw new Error(`${PR_LOOP_REL} is settled '${s2.status}' without settled_at`);
+  return s2;
+}
+var AutoMergeSettingError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "AutoMergeSettingError";
+  }
+};
+function autoMergeOnCleanOf(cfg) {
+  if (cfg === void 0) return true;
+  if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) {
+    throw new AutoMergeSettingError(`config root must be an object, got ${JSON.stringify(cfg)}`);
+  }
+  const block = cfg.pr_review;
+  if (block === void 0) return true;
+  if (block === null || typeof block !== "object" || Array.isArray(block)) {
+    throw new AutoMergeSettingError(`config pr_review must be an object, got ${JSON.stringify(block)}`);
+  }
+  const value = block.auto_merge_on_clean;
+  if (value === void 0) return true;
+  if (typeof value !== "boolean") {
+    throw new AutoMergeSettingError(`config pr_review.auto_merge_on_clean must be true or false, got ${JSON.stringify(value)} \u2014 switch it in the TUI System tab or fix the file`);
+  }
+  return value;
+}
 
 // packages/tui/dist/data-version.js
-import { existsSync as existsSync3 } from "node:fs";
+import { existsSync as existsSync4 } from "node:fs";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 function openDataVersionProbe(paths) {
   const conns = [];
   try {
     for (const path of paths) {
-      if (!existsSync3(path))
+      if (!existsSync4(path))
         continue;
       const db = new DatabaseSync3(path, { readOnly: true });
       conns.push({ db, stmt: db.prepare("PRAGMA data_version") });
@@ -51584,7 +51681,7 @@ function openDataVersionProbe(paths) {
 
 // scripts/lib/agent-distribution.mjs
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync5, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync4, mkdirSync as mkdirSync3, statSync as statSync3, lstatSync as lstatSync3, unlinkSync, renameSync, linkSync } from "node:fs";
+import { readFileSync as readFileSync6, writeFileSync as writeFileSync3, readdirSync, existsSync as existsSync5, mkdirSync as mkdirSync4, statSync as statSync3, lstatSync as lstatSync3, unlinkSync, renameSync as renameSync2, linkSync } from "node:fs";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -51786,7 +51883,7 @@ function validateHosts(entry, where) {
   }
 }
 function loadRegistry(registryPath2) {
-  const registry = JSON.parse(readFileSync5(registryPath2, "utf8"));
+  const registry = JSON.parse(readFileSync6(registryPath2, "utf8"));
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
     throw new Error(`agent registry ${registryPath2}: unsupported shape (expected {version: 1, agents: []})`);
   }
@@ -51822,11 +51919,11 @@ var RESTART_INSTRUCTION = [
 ].join("\n");
 
 // scripts/lib/codex-mcp.mjs
-import { readFileSync as readFileSync6 } from "node:fs";
+import { readFileSync as readFileSync7 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join8 } from "node:path";
-function userScopeCodexServer({ env = process.env, home = homedir4(), readFile = readFileSync6 } = {}) {
-  const path = join8(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+import { join as join9 } from "node:path";
+function userScopeCodexServer({ env = process.env, home = homedir4(), readFile = readFileSync7 } = {}) {
+  const path = join9(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
   let raw;
   try {
     raw = readFile(path, "utf8");
@@ -51845,16 +51942,16 @@ function userScopeCodexServer({ env = process.env, home = homedir4(), readFile =
 
 // scripts/lib/handoff-projection.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync5 } from "node:fs";
-import { join as join11, resolve as resolve5 } from "node:path";
+import { existsSync as existsSync6 } from "node:fs";
+import { join as join12, resolve as resolve5 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync5, readFileSync as readFileSync7, readdirSync as readdirSync2, mkdirSync as mkdirSync4, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync2, constants } from "node:fs";
-import { join as join10, resolve as resolve4 } from "node:path";
+import { lstatSync as lstatSync5, readFileSync as readFileSync8, readdirSync as readdirSync2, mkdirSync as mkdirSync5, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { join as join11, resolve as resolve4 } from "node:path";
 
 // scripts/lib/store-path.mjs
 import { lstatSync as lstatSync4, realpathSync as realpathSync2 } from "node:fs";
-import { join as join9, resolve as resolve3, sep } from "node:path";
+import { join as join10, resolve as resolve3, sep } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target } = {}) {
     super(message);
@@ -51897,7 +51994,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   if (target !== rootResolved && !target.startsWith(rootResolved + sep)) {
     throw new StorePathContainmentError(
-      `resolveStoreWritePath: '${join9(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
+      `resolveStoreWritePath: '${join10(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
       { root: rootResolved, target }
     );
   }
@@ -51905,7 +52002,7 @@ function resolveStoreWritePath(root, ...segments) {
   let cursor = rootResolved;
   let deepestExisting = rootResolved;
   for (const part of relParts) {
-    const next = join9(cursor, part);
+    const next = join10(cursor, part);
     let st;
     try {
       st = lstatSync4(next);
@@ -51970,7 +52067,7 @@ function resolveStoreWritePath(root, ...segments) {
     );
   }
   const suffix = target.slice(deepestExisting.length);
-  const reconstructed = suffix ? join9(realDeepest, suffix) : realDeepest;
+  const reconstructed = suffix ? join10(realDeepest, suffix) : realDeepest;
   if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target}') resolves outside the project \u2014 refusing, nothing was written`,
@@ -52000,7 +52097,7 @@ function containedPath(root, rel, leaf) {
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
   let cursor = resolve4(root);
   for (const [index, part] of segments.entries()) {
-    cursor = join10(cursor, part);
+    cursor = join11(cursor, part);
     const st = lstatOrNull(cursor);
     if (!st) break;
     const isLeaf = index === segments.length - 1;
@@ -52020,7 +52117,7 @@ function existsContained(root, rel, leaf) {
   return lstatOrNull(containedPath(root, rel, leaf)) !== null;
 }
 function readContained(root, rel) {
-  return readFileSync7(containedPath(root, rel, "file"), "utf8");
+  return readFileSync8(containedPath(root, rel, "file"), "utf8");
 }
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
@@ -52047,10 +52144,10 @@ function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
     }
     return { stdout: r.stdout || "" };
   };
-  if (!existsSync5(root)) return { files: [], unknown: null };
+  if (!existsSync6(root)) return { files: [], unknown: null };
   const inside = run(["rev-parse", "--is-inside-work-tree"]);
   if (inside.failed) {
-    if (inside.notARepo && !existsSync5(join11(root, ".git"))) return { files: [], unknown: null };
+    if (inside.notARepo && !existsSync6(join12(root, ".git"))) return { files: [], unknown: null };
     return { files: [], unknown: inside.failed };
   }
   if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
@@ -52100,14 +52197,14 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
-import { existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync9, readdirSync as readdirSync4, realpathSync as realpathSync4, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname4, isAbsolute, join as join13, resolve as resolve7 } from "node:path";
+import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync10, readdirSync as readdirSync4, realpathSync as realpathSync4, renameSync as renameSync3, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname5, isAbsolute, join as join14, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync6, readFileSync as readFileSync8, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync9, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { join as join12, resolve as resolve6, sep as sep2 } from "node:path";
+import { join as join13, resolve as resolve6, sep as sep2 } from "node:path";
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
@@ -52251,7 +52348,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync6, readFileSync8, readdirSync3, join12, homedir5);
+)(existsSync7, readFileSync9, readdirSync3, join13, homedir5);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -52358,10 +52455,10 @@ var FULL_PERMISSIONS = {
 };
 var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
 function storeWriteTools(pluginRoot = sterlingRootFrom()) {
-  const fm = normalize3(readFileSync9(join13(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
+  const fm = normalize3(readFileSync10(join14(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
   const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
   const tools = [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))].map((t) => `sterling_${t}`);
-  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(join13(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
+  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(join14(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
   return tools;
 }
 function opencodeModelRef(model) {
@@ -52376,10 +52473,10 @@ function opencodeModelFor({ model, opencodeModel } = {}) {
   return opencodeModel;
 }
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
-  const start = dirname4(fileURLToPath(moduleUrl));
-  for (let dir = start; ; dir = dirname4(dir)) {
-    if (existsSync7(join13(dir, "agent-templates", "registry.json"))) return dir;
-    if (dirname4(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
+  const start = dirname5(fileURLToPath(moduleUrl));
+  for (let dir = start; ; dir = dirname5(dir)) {
+    if (existsSync8(join14(dir, "agent-templates", "registry.json"))) return dir;
+    if (dirname5(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
 function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, mode, model, writeTools, vars = {} } = {}) {
@@ -52461,19 +52558,19 @@ function fullAgentTargets(registry) {
   return targets;
 }
 function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
-  const registry = loadRegistry(join13(pluginRoot, "agent-templates", "registry.json"));
+  const registry = loadRegistry(join14(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const vars = { PROJECT_DIR: fwd2(projectDir), STERLING_ROOT: fwd2(pluginRoot) };
   const rows = [];
   for (const { name, entry, rel, primary, mode } of fullAgentTargets(registry)) {
-    const path = join13(projectDir, rel);
-    const templateContent = readFileSync9(join13(pluginRoot, "agent-templates", entry.file), "utf8");
+    const path = join14(projectDir, rel);
+    const templateContent = readFileSync10(join14(pluginRoot, "agent-templates", entry.file), "utf8");
     const unsafe = usesInstallVars(templateContent, entry.opencode_full?.permission) ? INSTALL_VARS.filter((v) => !isShellSafePath(vars[v])) : [];
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const raw = existsSync7(path) ? readFileSync9(path, "utf8") : null;
+    const raw = existsSync8(path) ? readFileSync10(path, "utf8") : null;
     const disk = raw === null ? null : normalize3(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
@@ -52509,7 +52606,7 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   return rows;
 }
 function swapFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync7(join13(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync8(join14(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
@@ -52517,14 +52614,14 @@ function swapFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeMod
   return { rows: ensureFullAgents({ projectDir, pluginRoot, tracked, models }) };
 }
 function stageFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync7(join13(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync8(join14(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
   return stageFullAgents({ projectDir, pluginRoot, tracked, models });
 }
-function writeFileAtomic(path, content, { writeFile = writeFileSync3, rename = renameSync2 } = {}) {
+function writeFileAtomic(path, content, { writeFile = writeFileSync4, rename = renameSync3 } = {}) {
   const tmp = `${path}.tmp-${randomUUID3()}`;
   try {
     writeFile(tmp, content);
@@ -52538,7 +52635,7 @@ function writeFullAgentFiles(writes, fs = {}) {
   const done = [];
   try {
     for (const w of writes) {
-      mkdirSync5(dirname4(w.path), { recursive: true });
+      mkdirSync6(dirname5(w.path), { recursive: true });
       writeFileAtomic(w.path, w.content, fs);
       done.push(w);
     }
@@ -52565,15 +52662,15 @@ function restoreFullAgentFiles(writes, fs = {}) {
 }
 
 // scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync8, readFileSync as readFileSync10 } from "node:fs";
-import { join as join14 } from "node:path";
-var CONFIG_REL3 = join14(".sterling", "config.json");
-var STORE_DB_REL = join14(".sterling", "sterling.db");
+import { existsSync as existsSync9, readFileSync as readFileSync11 } from "node:fs";
+import { join as join15 } from "node:path";
+var CONFIG_REL3 = join15(".sterling", "config.json");
+var STORE_DB_REL = join15(".sterling", "sterling.db");
 function storeBackend(root) {
-  const dbExists = () => existsSync8(join14(root, STORE_DB_REL));
+  const dbExists = () => existsSync9(join15(root, STORE_DB_REL));
   let text;
   try {
-    text = readFileSync10(join14(root, CONFIG_REL3), "utf8");
+    text = readFileSync11(join15(root, CONFIG_REL3), "utf8");
   } catch (e) {
     if (e?.code === "ENOENT") return "sqlite";
     return dbExists() ? "sqlite" : "routed";
@@ -52588,29 +52685,29 @@ function storeBackend(root) {
 }
 
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync11, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync12, renameSync as renameSync4, rmSync as rmSync3, writeFileSync as writeFileSync5 } from "node:fs";
 import { hostname } from "node:os";
-import { join as join15 } from "node:path";
+import { join as join16 } from "node:path";
 import { randomUUID as randomUUID4 } from "node:crypto";
 function selectionFilePath(root, host2 = hostname()) {
   const safeHost = String(host2).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
-  return join15(root, ".sterling", "transient", `selection.${safeHost}.json`);
+  return join16(root, ".sterling", "transient", `selection.${safeHost}.json`);
 }
 function writeSelectionFile(root, type, recordId, at) {
   const path = selectionFilePath(root);
-  mkdirSync6(join15(root, ".sterling", "transient"), { recursive: true });
+  mkdirSync7(join16(root, ".sterling", "transient"), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${randomUUID4()}`;
-  writeFileSync4(tmp, JSON.stringify({ type, record_id: recordId, at }));
-  renameSync3(tmp, path);
+  writeFileSync5(tmp, JSON.stringify({ type, record_id: recordId, at }));
+  renameSync4(tmp, path);
 }
 
 // packages/tui/dist/controller.js
 var DASHBOARD_BUSY_TIMEOUT_MS = 250;
 function openDashboard(storePath2, options = {}) {
   const disabled = options.disabledEffects ?? {};
-  const configPath2 = join16(dirname5(storePath2), "config.json");
-  const projectRoot = dirname5(dirname5(storePath2));
-  const agentsDir = join16(projectRoot, ".claude", "agents");
+  const configPath2 = join17(dirname6(storePath2), "config.json");
+  const projectRoot = dirname6(dirname6(storePath2));
+  const agentsDir = join17(projectRoot, ".claude", "agents");
   function resolveProjectHeadSha() {
     try {
       const sha = execFileSync2("git", ["rev-parse", "HEAD"], {
@@ -52628,7 +52725,7 @@ function openDashboard(storePath2, options = {}) {
   let domainsAvailable = true;
   if (!routed) {
     try {
-      const config = parseConfig(JSON.parse(readFileSync12(configPath2, "utf8")));
+      const config = parseConfig(JSON.parse(readFileSync13(configPath2, "utf8")));
       mounts = resolveDomainMounts(config);
     } catch {
       mounts = [];
@@ -52767,7 +52864,7 @@ function openDashboard(storePath2, options = {}) {
   let roster;
   function readInstalledModelEffort(name) {
     try {
-      const content = readFileSync12(join16(agentsDir, `${name}.md`), "utf8");
+      const content = readFileSync13(join17(agentsDir, `${name}.md`), "utf8");
       const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
       const block = fm ? fm[1] : "";
       return {
@@ -52783,7 +52880,7 @@ function openDashboard(storePath2, options = {}) {
   }
   function readRawMode() {
     try {
-      const raw = JSON.parse(readFileSync12(configPath2, "utf8"));
+      const raw = JSON.parse(readFileSync13(configPath2, "utf8"));
       return raw.mode === void 0 ? void 0 : typeof raw.mode === "string" ? raw.mode : JSON.stringify(raw.mode);
     } catch (err) {
       ui = { ...ui, notice: `project mode unknown \u2014 config unreadable: ${err.message}` };
@@ -52793,7 +52890,7 @@ function openDashboard(storePath2, options = {}) {
   function readRawStorage() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync12(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync13(configPath2, "utf8"));
     } catch {
       return null;
     }
@@ -52805,7 +52902,7 @@ function openDashboard(storePath2, options = {}) {
   function readHandoff() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync12(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync13(configPath2, "utf8"));
     } catch {
       return { handoff: null };
     }
@@ -52823,11 +52920,29 @@ function openDashboard(storePath2, options = {}) {
       return { handoff: JSON.stringify(block !== null && typeof block === "object" && !Array.isArray(block) ? block.enabled : block) };
     }
   }
+  function readAutoMergeOnClean() {
+    let raw;
+    try {
+      raw = JSON.parse(readFileSync13(configPath2, "utf8"));
+    } catch {
+      return null;
+    }
+    try {
+      return autoMergeOnCleanOf(raw);
+    } catch (err) {
+      if (!(err instanceof AutoMergeSettingError))
+        throw err;
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw))
+        return JSON.stringify(raw);
+      const block = raw.pr_review;
+      return JSON.stringify(block !== null && typeof block === "object" && !Array.isArray(block) ? block.auto_merge_on_clean : block);
+    }
+  }
   function loadRoster() {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     let config;
     try {
-      config = parseConfig(JSON.parse(readFileSync12(configPath2, "utf8")));
+      config = parseConfig(JSON.parse(readFileSync13(configPath2, "utf8")));
     } catch {
       config = { models: {}, models_catalog: { staleness_days: 45 } };
     }
@@ -52838,7 +52953,7 @@ function openDashboard(storePath2, options = {}) {
     const mode = readRawMode();
     const handoff = readHandoff();
     const codexWired = probeCodexWired();
-    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync9(join16(agentsDir, `${name}.md`))).map((name) => {
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync10(join17(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
       return { name, installedModel: v.model, installedEffort: v.effort };
     });
@@ -52859,11 +52974,11 @@ function openDashboard(storePath2, options = {}) {
     } catch (err) {
       ui = { ...ui, notice: `catalog unavailable \u2014 ${err.message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), ...handoff };
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), ...handoff };
   }
   function applySparringModel(e) {
     try {
-      const raw = JSON.parse(readFileSync12(configPath2, "utf8"));
+      const raw = JSON.parse(readFileSync13(configPath2, "utf8"));
       const { model: _legacy, ...sp } = { ...raw.sparring_partner };
       const { model: _previous, ...rest } = { ...sp.models?.openai };
       const models = { ...sp.models };
@@ -52872,7 +52987,7 @@ function openDashboard(storePath2, options = {}) {
       else
         delete models.openai;
       raw.sparring_partner = { ...sp, models };
-      writeFileSync5(configPath2, JSON.stringify(raw, null, 2) + "\n");
+      writeFileSync6(configPath2, JSON.stringify(raw, null, 2) + "\n");
     } catch (err) {
       ui = { ...ui, notice: `sparring partner model update failed \u2014 ${err.message}` };
     }
@@ -52880,19 +52995,19 @@ function openDashboard(storePath2, options = {}) {
   async function applySwap(e) {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     try {
-      const raw = JSON.parse(readFileSync12(configPath2, "utf8"));
+      const raw = JSON.parse(readFileSync13(configPath2, "utf8"));
       raw.models = raw.models ?? {};
       const prev = raw.models[e.key] ?? {};
       raw.models[e.key] = { ...prev, model: e.to.model, effort: e.to.effort };
-      writeFileSync5(configPath2, JSON.stringify(raw, null, 2) + "\n");
+      writeFileSync6(configPath2, JSON.stringify(raw, null, 2) + "\n");
       const opencodeModel = typeof prev.opencode_model === "string" ? prev.opencode_model : void 0;
       for (const name of e.agents) {
-        const p = join16(agentsDir, `${name}.md`);
-        if (!existsSync9(p))
+        const p = join17(agentsDir, `${name}.md`);
+        if (!existsSync10(p))
           continue;
-        const content = readFileSync12(p, "utf8");
+        const content = readFileSync13(p, "utf8");
         const hdr = parseInstalledHeader(content);
-        writeFileSync5(p, setInstalledModelEffort(content, {
+        writeFileSync6(p, setInstalledModelEffort(content, {
           model: e.to.model,
           effort: e.to.effort,
           pluginVersion: hdr?.pluginVersion ?? "0.0.0",
@@ -52938,7 +53053,7 @@ function openDashboard(storePath2, options = {}) {
     try {
       if (e.to !== void 0 && !OPENCODE_MODEL_REF_RE.test(e.to))
         throw new Error(`'${e.to}' is not a <provider>/<model> id`);
-      configBefore = readFileSync12(configPath2, "utf8");
+      configBefore = readFileSync13(configPath2, "utf8");
       const raw = JSON.parse(configBefore);
       raw.models = raw.models ?? {};
       const { opencode_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
@@ -53040,6 +53155,7 @@ function openDashboard(storePath2, options = {}) {
     const tddToggles = effects.filter((e) => e.type === "tdd_toggle");
     const modeToggles = effects.filter((e) => e.type === "mode_toggle");
     const handoffToggles = effects.filter((e) => e.type === "handoff_toggle");
+    const autoMergeToggles = effects.filter((e) => e.type === "auto_merge_toggle");
     let toggleWrote = false;
     let toggleFailure;
     const collectFailure = (msg) => {
@@ -53067,8 +53183,17 @@ function openDashboard(storePath2, options = {}) {
         handoffWritten = e.enabled;
       }
     }
+    let autoMergeWritten;
+    for (const e of autoMergeToggles) {
+      if (applyAutoMergeToggle(e, collectFailure, configPath2)) {
+        toggleWrote = true;
+        autoMergeWritten = e.enabled;
+      }
+    }
     if (toggleFailure !== void 0) {
       notice(toggleFailure);
+    } else if (autoMergeWritten !== void 0) {
+      notice(autoMergeWritten ? "auto-merge turned on \u2014 in work mode, a PR whose Copilot review loop ends clean and that GitHub reports mergeable is squash-merged by the conductor and its branch deleted." : "auto-merge turned off \u2014 in work mode, a human merges every PR, a clean one included.");
     } else if (modeWritten !== void 0) {
       notice(modeWritten === "work" ? "project mode set to work \u2014 /sterling:merge now opens a pull request and the review loop follows; nothing is merged directly." : "project mode set to hobby \u2014 /sterling:merge now merges directly into the base branch.");
     } else if (handoffWritten !== void 0) {
@@ -53076,7 +53201,7 @@ function openDashboard(storePath2, options = {}) {
     } else if (toggleWrote) {
       notice("config.json updated \u2014 hooks pick this up on their next invocation; restart the session to reload the MCP server.");
     }
-    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length)
+    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length)
       roster = loadRoster();
     for (const e of effects) {
       if (e.type === "select")
@@ -53133,49 +53258,6 @@ function openDashboard(storePath2, options = {}) {
 
 // packages/tui/dist/github-status.js
 import { execFile as nodeExecFile } from "node:child_process";
-
-// scripts/lib/work-pr.mjs
-import { existsSync as existsSync10, mkdirSync as mkdirSync7, readFileSync as readFileSync13, renameSync as renameSync4, writeFileSync as writeFileSync6 } from "node:fs";
-import { delimiter, dirname as dirname6, join as join17 } from "node:path";
-function parseOriginRepo(url) {
-  const u = String(url ?? "").trim();
-  let host2;
-  let path;
-  let m = u.match(/^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/);
-  if (m) [, host2, path] = m;
-  else if (m = u.match(/^(?:[^@/:]+@)?([^/:]+):(?!\/)(.+)$/)) [, host2, path] = m;
-  else return null;
-  const parts = path.replace(/\/+$/, "").replace(/\.git$/, "").split("/");
-  if (parts.length !== 2) return null;
-  const [owner2, name] = parts;
-  const seg = /^[A-Za-z0-9_.-]+$/;
-  if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(host2) || !seg.test(owner2) || !seg.test(name) || [owner2, name].some((part) => part === "." || part === "..")) return null;
-  return { host: host2, repo: `${host2}/${owner2}/${name}` };
-}
-var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
-var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
-var prLoopPath = (root) => join17(root, PR_LOOP_REL);
-function readPrLoop(root) {
-  const file = prLoopPath(root);
-  if (!existsSync10(file)) return null;
-  let s2;
-  try {
-    s2 = JSON.parse(readFileSync13(file, "utf8"));
-  } catch (e) {
-    throw new Error(`${PR_LOOP_REL} is not valid JSON (${e.message})`);
-  }
-  const str2 = (v) => typeof v === "string" && v.length > 0;
-  if (!s2 || typeof s2 !== "object" || Array.isArray(s2) || !str2(s2.pr_url) || !Number.isInteger(s2.pr_number) || !str2(s2.repo) || !str2(s2.head_sha) || !str2(s2.armed_at)) {
-    throw new Error(`${PR_LOOP_REL} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s2)}`);
-  }
-  if (s2.status !== "owed" && !PR_LOOP_OUTCOMES.includes(s2.status)) {
-    throw new Error(`${PR_LOOP_REL} has status ${JSON.stringify(s2.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
-  }
-  if (s2.status !== "owed" && !str2(s2.settled_at)) throw new Error(`${PR_LOOP_REL} is settled '${s2.status}' without settled_at`);
-  return s2;
-}
-
-// packages/tui/dist/github-status.js
 var POLL_MS = 6e4;
 var FAST_POLL_MS = 2e4;
 var IDLE_POLL_MS = 3e5;
