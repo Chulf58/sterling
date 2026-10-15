@@ -17627,6 +17627,19 @@ var handoffEvidenceFileReadSchema = external_exports.object({
   item_id: external_exports.string().uuid(),
   evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY)
 });
+var needsReasonField = external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank");
+function needsReasonAllowed(needs) {
+  return needs === "user" || needs === "grill";
+}
+var todoWaitFieldsReadSchema = external_exports.object({
+  needs: external_exports.enum(BOARD_NEEDS).optional(),
+  needs_reason: needsReasonField.optional(),
+  blocked_by: external_exports.array(external_exports.string().min(1)).optional()
+}).superRefine((rec, ctx) => {
+  if (rec.needs_reason !== void 0 && !needsReasonAllowed(rec.needs)) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
+  }
+});
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }
@@ -17682,12 +17695,12 @@ var todoSchema = base.extend({
   // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
   // only with needs 'user' or 'grill' on a source:'user' item. A sender's
   // tracker shows it as "needs user in <project>: <reason>".
-  needs_reason: external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank").optional(),
+  needs_reason: needsReasonField.optional(),
   // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
   handoff: todoHandoffSchema.optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
-  if (rec.needs_reason !== void 0 && (rec.source !== "user" || rec.needs !== "user" && rec.needs !== "grill")) {
+  if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
   }
   if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
@@ -21878,21 +21891,7 @@ function closureStatus(h) {
     ...evidence ? { evidence } : {}
   };
 }
-function readWaitFields(body) {
-  const { needs, needs_reason, blocked_by } = body;
-  if (needs !== void 0 && !(typeof needs === "string" && BOARD_NEEDS.includes(needs)))
-    return `its needs value ${JSON.stringify(needs)} is not one this Sterling knows`;
-  if (needs_reason !== void 0 && !(typeof needs_reason === "string" && needs_reason.trim().length > 0))
-    return "its needs_reason is not a non-blank string";
-  if (blocked_by !== void 0 && !(Array.isArray(blocked_by) && blocked_by.every((s2) => typeof s2 === "string" && s2.length > 0)))
-    return "its blocked_by is not a list of slugs";
-  return {
-    ...needs !== void 0 ? { needs } : {},
-    ...needs_reason !== void 0 ? { needs_reason: needs_reason.trim() } : {},
-    blocked_by: blocked_by ?? []
-  };
-}
-function rowStatus(db, trackerId, h, remaining, exhausted) {
+function rowStatus(db, trackerId, h, budget) {
   const row = db.prepare("SELECT body, status FROM records WHERE id = ?").get(h.to_item_id);
   if (!row)
     return closureStatus(h);
@@ -21912,17 +21911,25 @@ function rowStatus(db, trackerId, h, remaining, exhausted) {
   if (!meta.success || meta.data.role !== "received" || meta.data.transfer_id !== h.transfer_id || meta.data.from_item_id !== trackerId) {
     return unknown2(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} carries handoff metadata for a different transfer`);
   }
-  const wait = readWaitFields(body);
-  if (typeof wait === "string")
-    return unknown2(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} cannot be read: ${wait}`);
+  const waitParsed = todoWaitFieldsReadSchema.safeParse(body);
+  if (!waitParsed.success) {
+    return unknown2(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} cannot be read: ${waitParsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+  }
+  const wait = waitParsed.data;
   if (wait.needs === "user" || wait.needs === "grill")
-    return { state: "needs_user", text: statusText.needs_user(h.to_name, wait.needs_reason) };
-  if (wait.blocked_by.length) {
+    return { state: "needs_user", text: statusText.needs_user(h.to_name, wait.needs_reason?.trim()) };
+  if (wait.blocked_by?.length) {
     const live = db.prepare(`SELECT 1 FROM records WHERE type = 'todo' AND status != 'superseded' AND json_extract(body, '$.slug') = ? LIMIT 1`);
     for (const slug of new Set(wait.blocked_by)) {
-      if (remaining() <= 0)
-        return unknown2(exhausted(`${h.to_name}'s blocker ${slug}`));
-      if (live.get(slug))
+      const where = `${h.to_name}'s blocker ${slug}`;
+      const before = budget.remaining();
+      if (before <= 0)
+        return unknown2(budget.exhausted(where));
+      setBusyTimeout(db, Math.min(budget.busy, before));
+      const found = live.get(slug) !== void 0;
+      if (budget.remaining() <= 0)
+        return unknown2(budget.exhausted(`the result for ${where}`));
+      if (found)
         return { state: "blocked", text: statusText.blocked(h.to_name) };
     }
   }
@@ -21990,7 +21997,7 @@ function resolveSentHandoffs(trackers, opts = {}) {
         }
         try {
           setBusyTimeout(db, Math.min(busy, now));
-          out.set(id, rowStatus(db, id, h, remaining, exhausted));
+          out.set(id, rowStatus(db, id, h, { remaining, exhausted, busy }));
         } catch (e) {
           out.set(id, unknown2(`${h.to_name}'s database could not be read (${errText(e)})`));
         }
@@ -37753,11 +37760,16 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
           checkedEvidence[k] = v.trim();
       }
     }
+    if (closeNote !== void 0 && closeNote.trim().length === 0) {
+      throw new Error(`board_remove: '${record2.id}' was handed over from another project, which reads its completion from a closure file, and that file could not be written (the note is blank; omit it or say what was done). Nothing was removed.`);
+    }
     let closurePath;
     let evidencePath;
     if (isReceived && receivedMeta?.success) {
       if (checkedEvidence)
         evidencePath = this.writeHandoffEvidence(record2.id, receivedMeta.data.transfer_id, checkedEvidence);
+      else
+        this.removeStaleHandoffEvidence(record2.id, receivedMeta.data.transfer_id);
       closurePath = this.writeHandoffClosure(record2.id, receivedMeta.data.transfer_id, closeNote);
     }
     const closure = { ...closurePath ? { handoff_closure: closurePath } : {}, ...evidencePath ? { handoff_evidence: evidencePath } : {} };
@@ -37776,6 +37788,26 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     }
     this.store.remove(record2.id, this.now());
     return { removed: record2.id, ...evidence };
+  }
+  /**
+   * Delete `<root>/.sterling/handoffs/<transfer_id>.evidence.json` before a
+   * close that gives no evidence. A missing file (or a missing directory) is the normal case; any other
+   * failure refuses the removal by name, because a leftover sidecar would be
+   * shown to the sender as this close's evidence.
+   */
+  removeStaleHandoffEvidence(itemId, transferId) {
+    if (!this.repoRoot) {
+      throw new Error(`board_remove: '${itemId}' was handed over from another project, and this server has no project root to clear its evidence file in. Nothing was removed.`);
+    }
+    const path = join14(this.repoRoot, HANDOFFS_DIR_REL, `${transferId}.evidence.json`);
+    try {
+      unlinkSync2(path);
+    } catch (e) {
+      const code = e?.code;
+      if (code === "ENOENT" || code === "ENOTDIR")
+        return;
+      throw new Error(`board_remove: '${itemId}' was handed over from another project, and the evidence file ${path} left by an earlier close could not be deleted (${e?.message ?? String(e)}); this close gives no evidence, so that file must go first. Nothing was removed.`, { cause: e });
+    }
   }
   /**
    * Write `<root>/.sterling/handoffs/<transfer_id>.evidence.json` (GitHub
@@ -37816,8 +37848,6 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const fail = (why, cause) => new Error(`board_remove: '${itemId}' was handed over from another project, which reads its completion from a closure file, and that file could not be written (${why}). Nothing was removed.`, cause !== void 0 ? { cause } : void 0);
     if (!this.repoRoot)
       throw fail("this server has no project root");
-    if (note !== void 0 && note.trim().length === 0)
-      throw fail("the note is blank; omit it or say what was done");
     const dir = join14(this.repoRoot, HANDOFFS_DIR_REL);
     const path = join14(dir, `${transferId}.json`);
     const closure = { transfer_id: transferId, item_id: itemId, closed_at: this.now(), ...note !== void 0 ? { note } : {} };
@@ -38726,7 +38756,7 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({
       id: external_exports.string().describe(ID_EXACT_DESTROY),
       note: external_exports.string().describe("handed-over items only: what was done, sent back to the project the task came from").optional(),
-      evidence: external_exports.object({ commit: external_exports.string().optional(), pr: external_exports.string().optional(), deploy: external_exports.string().optional(), url: external_exports.string().optional() }).strict().describe("handed-over items only: what the work shipped as; at least one non-blank value").optional()
+      evidence: cloneZod(handoffEvidenceSchema).describe("handed-over items only: what the work shipped as; at least one non-blank value of commit, pr, deploy or url").optional()
     })
   }, ({ id, note, evidence }) => json(tools.boardRemove(id, note, evidence)));
   server.registerTool("maintenance_remove", {

@@ -14,6 +14,9 @@ import { join } from 'node:path';
 import { ProjectRegistry, SterlingStore } from '@sterling/store';
 import { z } from 'zod';
 import { SterlingTools } from '../tools.js';
+import { createSterlingServer } from '../server.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 const NOW = '2026-10-15T12:00:00.000Z';
 type Loose = Record<string, unknown>;
@@ -421,5 +424,72 @@ test('skew (#108): the closure file written alongside evidence parses with the o
     assert.equal(oldClosure.safeParse(file).success, true);
   } finally {
     h.cleanup();
+  }
+});
+
+test('evidence (#108 review): a refused close leaves no sidecar, and a retry without evidence reads DONE, unverified', () => {
+  const h = harness();
+  try {
+    const d = handOver(h, { milestone: 'merged' });
+    const sidecar = join(h.beta, '.sterling', 'handoffs', `${d.transfer_id}.evidence.json`);
+    const b = h.betaTools();
+    try {
+      assert.throws(() => b.tools.boardRemove(d.delivered.id, ' ', { deploy: 'old' }), /the note is blank/);
+      assert.equal(existsSync(sidecar), false, 'the refused close wrote no evidence file');
+      // A sidecar left behind by an earlier close that failed after writing it.
+      mkdirSync(join(h.beta, '.sterling', 'handoffs'), { recursive: true });
+      writeFileSync(sidecar, JSON.stringify({ transfer_id: d.transfer_id, item_id: d.delivered.id, evidence: { deploy: 'old' } }));
+      const res = b.tools.boardRemove(d.delivered.id);
+      assert.equal(res.handoff_evidence, undefined);
+      assert.equal(existsSync(sidecar), false, 'a close without evidence deletes a leftover sidecar');
+    } finally {
+      b.close();
+    }
+    assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'done', text: `DONE in beta ${NOW}, unverified (merged)`, closed_at: NOW, milestone: 'merged' });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('evidence (#108 review): a leftover sidecar that cannot be deleted refuses the close, and the item stays', () => {
+  const h = harness();
+  try {
+    const d = handOver(h, { milestone: 'merged' });
+    const dir = join(h.beta, '.sterling', 'handoffs');
+    // A non-empty directory in the sidecar's place: unlink fails with EISDIR/EPERM, not ENOENT.
+    mkdirSync(join(dir, `${d.transfer_id}.evidence.json`, 'x'), { recursive: true });
+    const b = h.betaTools();
+    try {
+      assert.throws(() => b.tools.boardRemove(d.delivered.id), /the evidence file .* left by an earlier close could not be deleted \(.*\); .* Nothing was removed\./);
+      assert.ok(b.tools.boardGet(d.delivered.id), 'the item is still on the board');
+    } finally {
+      b.close();
+    }
+    assert.equal(existsSync(join(dir, `${d.transfer_id}.json`)), false, 'no closure file was written');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('evidence (#108 review): the served board_remove tool refuses evidence {} at its input schema', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-evidence-schema-'));
+  const { server, store } = createSterlingServer(join(dir, 'sterling.db'));
+  const client = new Client({ name: 'test-client', version: '0.0.1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const served = (await client.listTools()).tools.find((t) => t.name === 'board_remove');
+    const evidence = (served?.inputSchema.properties as Record<string, { properties?: Record<string, unknown>; additionalProperties?: unknown }>).evidence;
+    assert.deepEqual(Object.keys(evidence.properties ?? {}).sort(), ['commit', 'deploy', 'pr', 'url']);
+    assert.equal(evidence.additionalProperties, false);
+    const id = '00000000-0000-4000-8000-000000000000';
+    const res = (await client.callTool({ name: 'board_remove', arguments: { id, evidence: {} } })) as { isError?: boolean; content: { text: string }[] };
+    assert.equal(res.isError, true);
+    assert.match(res.content[0].text, /evidence needs at least one non-blank value/);
+  } finally {
+    await client.close();
+    await server.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

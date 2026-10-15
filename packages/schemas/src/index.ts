@@ -27,6 +27,8 @@ export {
   todoSchema,
   todoHandoffSchema,
   todoHandoffReadSchema,
+  todoWaitFieldsReadSchema,
+  needsReasonAllowed,
   type TodoHandoff,
   HANDOFFS_DIR_REL,
   handoffClosureSchema,

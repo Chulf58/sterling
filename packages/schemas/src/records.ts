@@ -748,6 +748,32 @@ export const handoffEvidenceFileReadSchema = z.object({
 
 export type HandoffEvidenceFile = z.infer<typeof handoffEvidenceFileSchema>;
 
+/** A board item's needs_reason: non-blank text (GitHub issue #107). */
+const needsReasonField = z.string().min(1).refine((v) => v.trim().length > 0, 'needs_reason must not be blank');
+
+/** needs_reason goes only with needs 'user' or 'grill' (GitHub issue #107). */
+export function needsReasonAllowed(needs: string | undefined): boolean {
+  return needs === 'user' || needs === 'grill';
+}
+
+/**
+ * The fields a sending project reads from the receiver's board item to tell
+ * open, needs user and blocked apart (GitHub issue #107), for READING: unknown
+ * keys are dropped, the known fields and the needs_reason rule are checked as
+ * todoSchema checks them.
+ */
+export const todoWaitFieldsReadSchema = z
+  .object({
+    needs: z.enum(BOARD_NEEDS).optional(),
+    needs_reason: needsReasonField.optional(),
+    blocked_by: z.array(z.string().min(1)).optional(),
+  })
+  .superRefine((rec, ctx) => {
+    if (rec.needs_reason !== undefined && !needsReasonAllowed(rec.needs)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['needs_reason'], message: `needs_reason goes only with needs 'user' or 'grill'` });
+    }
+  });
+
 /** True when a board item lists its own slug among its blockers. */
 export function todoBlocksItself(rec: { slug?: string; blocked_by?: string[] }): boolean {
   return rec.slug !== undefined && rec.blocked_by?.includes(rec.slug) === true;
@@ -811,13 +837,13 @@ export const todoSchema = base
     // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
     // only with needs 'user' or 'grill' on a source:'user' item. A sender's
     // tracker shows it as "needs user in <project>: <reason>".
-    needs_reason: z.string().min(1).refine((v) => v.trim().length > 0, 'needs_reason must not be blank').optional(),
+    needs_reason: needsReasonField.optional(),
     // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
     handoff: todoHandoffSchema.optional(),
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);
-    if (rec.needs_reason !== undefined && (rec.source !== 'user' || (rec.needs !== 'user' && rec.needs !== 'grill'))) {
+    if (rec.needs_reason !== undefined && (rec.source !== 'user' || !needsReasonAllowed(rec.needs))) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['needs_reason'], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
     }
     if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== undefined) {

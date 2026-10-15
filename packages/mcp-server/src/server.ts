@@ -6,7 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { z, ZodError } from 'zod';
-import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS } from '@sterling/schemas';
+import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS, handoffEvidenceSchema } from '@sterling/schemas';
 import { MountedStores, StoreBusyError, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { holdRoutedStores } from './held-stores.js';
@@ -769,11 +769,7 @@ export function createSterlingServer(
       inputSchema: strict({
         id: z.string().describe(ID_EXACT_DESTROY),
         note: z.string().describe('handed-over items only: what was done, sent back to the project the task came from').optional(),
-        evidence: z
-          .object({ commit: z.string().optional(), pr: z.string().optional(), deploy: z.string().optional(), url: z.string().optional() })
-          .strict()
-          .describe('handed-over items only: what the work shipped as; at least one non-blank value')
-          .optional(),
+        evidence: cloneZod(handoffEvidenceSchema).describe('handed-over items only: what the work shipped as; at least one non-blank value of commit, pr, deploy or url').optional(),
       }),
     },
     ({ id, note, evidence }) => json(tools.boardRemove(id, note, evidence))

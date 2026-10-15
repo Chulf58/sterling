@@ -4314,6 +4314,9 @@ var init_envelope = __esm({
 });
 
 // packages/schemas/dist/records.js
+function needsReasonAllowed(needs) {
+  return needs === "user" || needs === "grill";
+}
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }
@@ -4893,7 +4896,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, DRAIN_VERBS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, DIGEST_CLIP, clipped, RECORD_TYPES, HEADLINE_CLIP, NAME_CLIP, clipName, displayHandle, EXAMPLE_MAX_DEPTH, EXAMPLE_MAX_CHARS, REPO_PATH_FORMAT, REPO_PATH_REFUSALS, OMIT_EXAMPLE;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, DRAIN_VERBS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, DIGEST_CLIP, clipped, RECORD_TYPES, HEADLINE_CLIP, NAME_CLIP, clipName, displayHandle, EXAMPLE_MAX_DEPTH, EXAMPLE_MAX_CHARS, REPO_PATH_FORMAT, REPO_PATH_REFUSALS, OMIT_EXAMPLE;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -5363,6 +5366,16 @@ var init_records = __esm({
       item_id: external_exports.string().uuid(),
       evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY)
     });
+    needsReasonField = external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank");
+    todoWaitFieldsReadSchema = external_exports.object({
+      needs: external_exports.enum(BOARD_NEEDS).optional(),
+      needs_reason: needsReasonField.optional(),
+      blocked_by: external_exports.array(external_exports.string().min(1)).optional()
+    }).superRefine((rec, ctx) => {
+      if (rec.needs_reason !== void 0 && !needsReasonAllowed(rec.needs)) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
+      }
+    });
     todoSchema = base.extend({
       type: external_exports.literal("todo"),
       // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -5415,12 +5428,12 @@ var init_records = __esm({
       // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
       // only with needs 'user' or 'grill' on a source:'user' item. A sender's
       // tracker shows it as "needs user in <project>: <reason>".
-      needs_reason: external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank").optional(),
+      needs_reason: needsReasonField.optional(),
       // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
       handoff: todoHandoffSchema.optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
-      if (rec.needs_reason !== void 0 && (rec.source !== "user" || rec.needs !== "user" && rec.needs !== "grill")) {
+      if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
       }
       if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
@@ -6700,6 +6713,7 @@ __export(dist_exports, {
   matchesGlob: () => matchesGlob,
   modelsCatalogSchema: () => modelsCatalogSchema,
   moveFenceSchema: () => moveFenceSchema,
+  needsReasonAllowed: () => needsReasonAllowed,
   noCaptureLaneSchema: () => noCaptureLaneSchema,
   normalizeLocation: () => normalizeLocation,
   normalizeRawConfig: () => normalizeRawConfig,
@@ -6730,6 +6744,7 @@ __export(dist_exports, {
   todoHandoffReadSchema: () => todoHandoffReadSchema,
   todoHandoffSchema: () => todoHandoffSchema,
   todoSchema: () => todoSchema,
+  todoWaitFieldsReadSchema: () => todoWaitFieldsReadSchema,
   undeclaredPhaseInterfaces: () => undeclaredPhaseInterfaces,
   unknownFieldsIn: () => unknownFieldsIn,
   unreadConfigKeys: () => unreadConfigKeys,
@@ -9418,21 +9433,7 @@ function closureStatus(h) {
     ...evidence ? { evidence } : {}
   };
 }
-function readWaitFields(body) {
-  const { needs, needs_reason, blocked_by } = body;
-  if (needs !== void 0 && !(typeof needs === "string" && BOARD_NEEDS.includes(needs)))
-    return `its needs value ${JSON.stringify(needs)} is not one this Sterling knows`;
-  if (needs_reason !== void 0 && !(typeof needs_reason === "string" && needs_reason.trim().length > 0))
-    return "its needs_reason is not a non-blank string";
-  if (blocked_by !== void 0 && !(Array.isArray(blocked_by) && blocked_by.every((s2) => typeof s2 === "string" && s2.length > 0)))
-    return "its blocked_by is not a list of slugs";
-  return {
-    ...needs !== void 0 ? { needs } : {},
-    ...needs_reason !== void 0 ? { needs_reason: needs_reason.trim() } : {},
-    blocked_by: blocked_by ?? []
-  };
-}
-function rowStatus(db, trackerId, h, remaining, exhausted) {
+function rowStatus(db, trackerId, h, budget) {
   const row = db.prepare("SELECT body, status FROM records WHERE id = ?").get(h.to_item_id);
   if (!row)
     return closureStatus(h);
@@ -9452,17 +9453,25 @@ function rowStatus(db, trackerId, h, remaining, exhausted) {
   if (!meta.success || meta.data.role !== "received" || meta.data.transfer_id !== h.transfer_id || meta.data.from_item_id !== trackerId) {
     return unknown(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} carries handoff metadata for a different transfer`);
   }
-  const wait = readWaitFields(body);
-  if (typeof wait === "string")
-    return unknown(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} cannot be read: ${wait}`);
+  const waitParsed = todoWaitFieldsReadSchema.safeParse(body);
+  if (!waitParsed.success) {
+    return unknown(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} cannot be read: ${waitParsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+  }
+  const wait = waitParsed.data;
   if (wait.needs === "user" || wait.needs === "grill")
-    return { state: "needs_user", text: statusText.needs_user(h.to_name, wait.needs_reason) };
-  if (wait.blocked_by.length) {
+    return { state: "needs_user", text: statusText.needs_user(h.to_name, wait.needs_reason?.trim()) };
+  if (wait.blocked_by?.length) {
     const live = db.prepare(`SELECT 1 FROM records WHERE type = 'todo' AND status != 'superseded' AND json_extract(body, '$.slug') = ? LIMIT 1`);
     for (const slug of new Set(wait.blocked_by)) {
-      if (remaining() <= 0)
-        return unknown(exhausted(`${h.to_name}'s blocker ${slug}`));
-      if (live.get(slug))
+      const where = `${h.to_name}'s blocker ${slug}`;
+      const before = budget.remaining();
+      if (before <= 0)
+        return unknown(budget.exhausted(where));
+      setBusyTimeout(db, Math.min(budget.busy, before));
+      const found = live.get(slug) !== void 0;
+      if (budget.remaining() <= 0)
+        return unknown(budget.exhausted(`the result for ${where}`));
+      if (found)
         return { state: "blocked", text: statusText.blocked(h.to_name) };
     }
   }
@@ -9530,7 +9539,7 @@ function resolveSentHandoffs(trackers, opts2 = {}) {
         }
         try {
           setBusyTimeout(db, Math.min(busy, now));
-          out.set(id, rowStatus(db, id, h, remaining, exhausted));
+          out.set(id, rowStatus(db, id, h, { remaining, exhausted, busy }));
         } catch (e) {
           out.set(id, unknown(`${h.to_name}'s database could not be read (${errText(e)})`));
         }

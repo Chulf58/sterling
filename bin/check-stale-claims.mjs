@@ -4265,6 +4265,9 @@ var init_envelope = __esm({
 });
 
 // packages/schemas/dist/records.js
+function needsReasonAllowed(needs) {
+  return needs === "user" || needs === "grill";
+}
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }
@@ -4272,7 +4275,7 @@ function undeclaredPhaseInterfaces(rec) {
   const declared = new Set(rec.technical_design.interfaces.map((i) => i.name));
   return rec.phases.flatMap((phase) => (phase.interfaces ?? []).filter((name4) => !declared.has(name4)).map((name4) => ({ phase_id: phase.phase_id, name: name4 })));
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4717,6 +4720,16 @@ var init_records = __esm({
       item_id: external_exports.string().uuid(),
       evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY)
     });
+    needsReasonField = external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank");
+    todoWaitFieldsReadSchema = external_exports.object({
+      needs: external_exports.enum(BOARD_NEEDS).optional(),
+      needs_reason: needsReasonField.optional(),
+      blocked_by: external_exports.array(external_exports.string().min(1)).optional()
+    }).superRefine((rec, ctx) => {
+      if (rec.needs_reason !== void 0 && !needsReasonAllowed(rec.needs)) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
+      }
+    });
     todoSchema = base.extend({
       type: external_exports.literal("todo"),
       // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -4769,12 +4782,12 @@ var init_records = __esm({
       // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
       // only with needs 'user' or 'grill' on a source:'user' item. A sender's
       // tracker shows it as "needs user in <project>: <reason>".
-      needs_reason: external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank").optional(),
+      needs_reason: needsReasonField.optional(),
       // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
       handoff: todoHandoffSchema.optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
-      if (rec.needs_reason !== void 0 && (rec.source !== "user" || rec.needs !== "user" && rec.needs !== "grill")) {
+      if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
       }
       if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {

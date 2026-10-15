@@ -4602,6 +4602,19 @@ var handoffEvidenceFileReadSchema = external_exports.object({
   item_id: external_exports.string().uuid(),
   evidence: handoffEvidenceShape.refine(hasEvidence, EVIDENCE_EMPTY)
 });
+var needsReasonField = external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank");
+function needsReasonAllowed(needs) {
+  return needs === "user" || needs === "grill";
+}
+var todoWaitFieldsReadSchema = external_exports.object({
+  needs: external_exports.enum(BOARD_NEEDS).optional(),
+  needs_reason: needsReasonField.optional(),
+  blocked_by: external_exports.array(external_exports.string().min(1)).optional()
+}).superRefine((rec, ctx) => {
+  if (rec.needs_reason !== void 0 && !needsReasonAllowed(rec.needs)) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
+  }
+});
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
 }
@@ -4657,12 +4670,12 @@ var todoSchema = base.extend({
   // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
   // only with needs 'user' or 'grill' on a source:'user' item. A sender's
   // tracker shows it as "needs user in <project>: <reason>".
-  needs_reason: external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank").optional(),
+  needs_reason: needsReasonField.optional(),
   // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
   handoff: todoHandoffSchema.optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
-  if (rec.needs_reason !== void 0 && (rec.source !== "user" || rec.needs !== "user" && rec.needs !== "grill")) {
+  if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
   }
   if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {

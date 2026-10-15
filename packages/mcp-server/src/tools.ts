@@ -12409,12 +12409,22 @@ export class SterlingTools {
         if (v !== undefined && v.trim().length > 0) checkedEvidence[k] = v.trim();
       }
     }
+    // Every input is checked before anything is written, so a refused close
+    // leaves no file behind.
+    if (closeNote !== undefined && closeNote.trim().length === 0) {
+      throw new Error(
+        `board_remove: '${record.id}' was handed over from another project, which reads its completion from a closure file, and that file could not be written (the note is blank; omit it or say what was done). Nothing was removed.`
+      );
+    }
     // The evidence sidecar goes first, so a failed write refuses the removal
-    // before the closure file says done (GitHub issue #108).
+    // before the closure file says done (GitHub issue #108). A close without
+    // evidence first deletes any sidecar an earlier, failed close left, so the
+    // sender never shows evidence this close did not give.
     let closurePath: string | undefined;
     let evidencePath: string | undefined;
     if (isReceived && receivedMeta?.success) {
       if (checkedEvidence) evidencePath = this.writeHandoffEvidence(record.id, receivedMeta.data.transfer_id, checkedEvidence);
+      else this.removeStaleHandoffEvidence(record.id, receivedMeta.data.transfer_id);
       closurePath = this.writeHandoffClosure(record.id, receivedMeta.data.transfer_id, closeNote);
     }
     const closure = { ...(closurePath ? { handoff_closure: closurePath } : {}), ...(evidencePath ? { handoff_evidence: evidencePath } : {}) };
@@ -12439,6 +12449,30 @@ export class SterlingTools {
     }
     this.store.remove(record.id, this.now()); // system todos land in the §3.2.7 drain log
     return { removed: record.id, ...evidence };
+  }
+
+  /**
+   * Delete `<root>/.sterling/handoffs/<transfer_id>.evidence.json` before a
+   * close that gives no evidence. A missing file (or a missing directory) is the normal case; any other
+   * failure refuses the removal by name, because a leftover sidecar would be
+   * shown to the sender as this close's evidence.
+   */
+  private removeStaleHandoffEvidence(itemId: string, transferId: string): void {
+    if (!this.repoRoot) {
+      throw new Error(`board_remove: '${itemId}' was handed over from another project, and this server has no project root to clear its evidence file in. Nothing was removed.`);
+    }
+    const path = join(this.repoRoot, HANDOFFS_DIR_REL, `${transferId}.evidence.json`);
+    try {
+      unlinkSync(path);
+    } catch (e) {
+      // ENOENT: no sidecar. ENOTDIR: a path component is not a directory, so no sidecar can exist there.
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return;
+      throw new Error(
+        `board_remove: '${itemId}' was handed over from another project, and the evidence file ${path} left by an earlier close could not be deleted (${(e as Error)?.message ?? String(e)}); this close gives no evidence, so that file must go first. Nothing was removed.`,
+        { cause: e }
+      );
+    }
   }
 
   /**
@@ -12487,7 +12521,6 @@ export class SterlingTools {
         cause !== undefined ? { cause } : undefined
       );
     if (!this.repoRoot) throw fail('this server has no project root');
-    if (note !== undefined && note.trim().length === 0) throw fail('the note is blank; omit it or say what was done');
     const dir = join(this.repoRoot, HANDOFFS_DIR_REL);
     const path = join(dir, `${transferId}.json`);
     const closure: HandoffClosure = { transfer_id: transferId, item_id: itemId, closed_at: this.now(), ...(note !== undefined ? { note } : {}) };

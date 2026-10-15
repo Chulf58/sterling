@@ -354,12 +354,51 @@ test('resolveSentHandoffs: unknown keys on the receiver row and its handoff are 
     patchBody({ future_field: 1 }, { future_key: 'x' });
     assert.deepEqual(read(), { state: 'open', text: 'open in beta' });
     patchBody({ needs: 'someday' });
-    assert.match(read()?.text ?? '', /^status unknown: beta's item .* cannot be read: its needs value "someday"/);
+    assert.match(read()?.text ?? '', /^status unknown: beta's item .* cannot be read: needs: Invalid enum value/);
     patchBody({ needs: 'user', blocked_by: 'not-a-list' });
-    assert.match(read()?.text ?? '', /its blocked_by is not a list of slugs/);
+    assert.match(read()?.text ?? '', /cannot be read: blocked_by: Expected array/);
     patchBody({ blocked_by: [] }, { transfer_id: randomUUID() });
     assert.match(read()?.text ?? '', /different transfer/);
     db.close();
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('resolveSentHandoffs: a deadline crossed DURING the last blocker query reads unknown, never open', () => {
+  const b = receiver();
+  try {
+    const tracker = randomUUID();
+    const transfer = randomUUID();
+    const item = mk(b.store, { text: 'Blocked by a removed item', blocked_by: ['gone-blocker'], handoff: { role: 'received', transfer_id: transfer, from_root: '/x/alpha', from_name: 'alpha', from_item_id: tracker } });
+    b.store.close();
+    // clock calls: start, the receiver check, the lookup check, the check before
+    // the blocker query (which also caps its busy timeout); the query then
+    // "takes" 300 ms, so the check after it is past the 250 ms budget.
+    let calls = 0;
+    const out = resolveSentHandoffs([{ id: tracker, handoff: sent(b.root, transfer, item.id) }], { budgetMs: 250, clock: () => (++calls <= 4 ? 0 : 300) });
+    assert.equal(calls, 5, 'the budget is read once more after the query');
+    assert.equal(out.get(tracker)?.state, 'unknown');
+    assert.match(out.get(tracker)?.text ?? '', /^status unknown: time budget exhausted \(250 ms\) before the result for beta's blocker gone-blocker was read$/);
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('resolveSentHandoffs: a receiver row carrying needs_reason without needs user or grill reads unknown', () => {
+  const b = receiver();
+  try {
+    const tracker = randomUUID();
+    const transfer = randomUUID();
+    const item = mk(b.store, { text: 'There', needs: 'investigation', handoff: { role: 'received', transfer_id: transfer, from_root: '/x/alpha', from_name: 'alpha', from_item_id: tracker } });
+    b.store.close();
+    const db = new DatabaseSync(join(b.root, '.sterling', 'sterling.db'));
+    const row = db.prepare('SELECT body FROM records WHERE id = ?').get(item.id) as { body: string };
+    db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify({ ...JSON.parse(row.body), needs_reason: 'x' }), item.id);
+    db.close();
+    const out = resolveSentHandoffs([{ id: tracker, handoff: sent(b.root, transfer, item.id) }]);
+    assert.equal(out.get(tracker)?.state, 'unknown');
+    assert.match(out.get(tracker)?.text ?? '', /cannot be read: needs_reason: needs_reason goes only with needs 'user' or 'grill'/);
   } finally {
     b.cleanup();
   }
