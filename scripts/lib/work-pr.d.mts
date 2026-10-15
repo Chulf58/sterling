@@ -1,6 +1,6 @@
 // Type declarations for the parts of work-pr.mjs that TypeScript packages
 // import statically (packages/tui/src/github-status.ts, the dashboard's
-// GitHub status poller).
+// GitHub status poller, and controller.ts, the System tab's auto-merge row).
 export function parseOriginRepo(url: string): { host: string; repo: string } | null;
 export function readPrLoop(root: string): {
   pr_url: string;
@@ -11,3 +11,5 @@ export function readPrLoop(root: string): {
   status: 'owed' | 'clean' | 'capped' | 'escalated';
   settled_at?: string;
 } | null;
+export function autoMergeOnCleanOf(cfg: unknown): boolean;
+export class AutoMergeSettingError extends Error {}

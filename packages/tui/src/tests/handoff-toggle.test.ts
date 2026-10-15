@@ -22,8 +22,8 @@ import * as stateMod from '../state.js';
 //   • `handoffDetail?: string` says why, in brackets after the value: 'not set'
 //     for an absent key, the tracked-files note for ON without a key, and the git
 //     error for UNKNOWN when git could not say what is tracked.
-//   • cursor index: configModels-key-count + 4 (after the project mode row); it
-//     is the tab's last row, so DOWN clamps there.
+//   • cursor index: configModels-key-count + 4 (after the project mode row);
+//     the PR auto-merge row follows it at + 5.
 //   • ENTER/SPACE emit { type: 'handoff_toggle', enabled } with the NEW value:
 //     off → on, on → off, invalid → off (the default).
 //   • hidden (empty array) while a config.models picker is open.
@@ -120,16 +120,19 @@ test('handoff row: says why — OFF (not set) for an absent key, ON by tracked f
   assert.match(row({ handoff: true }), /Handoff files: ON$/);
 });
 
-test('handoff row: DOWN from the project mode row lands on it; it is the last row (DOWN clamps); UP returns to the mode row', () => {
+test('handoff row: DOWN from the project mode row lands on it; DOWN again moves to the PR auto-merge row; UP returns to the mode row', () => {
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot({ handoff: false });
     const n = Object.keys(snap.configModels).length;
     const down = reduce(store, st({ tab: SYS_TAB, cursor: n + 3 }), key('DOWN'), undefined, undefined, snap);
     assert.equal(down.ui.cursor, n + 4);
-    const clamped = reduce(store, down.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(clamped.ui.cursor, n + 4);
-    const up = reduce(store, clamped.ui, key('UP'), undefined, undefined, snap);
+    // the PR auto-merge row (decision
+    // work-mode-pr-auto-merge-when-copilot-loop-ends-clean) follows it and is
+    // now the tab's last row; auto-merge-toggle.test.ts pins the clamp there.
+    const next = reduce(store, down.ui, key('DOWN'), undefined, undefined, snap);
+    assert.equal(next.ui.cursor, n + 5);
+    const up = reduce(store, down.ui, key('UP'), undefined, undefined, snap);
     assert.equal(up.ui.cursor, n + 3);
     const view = buildSystemTab!(snap, down.ui, 80);
     assert.equal(view.handoffRows![0].lines[0].selected, true, 'the row is marked selected under the cursor');

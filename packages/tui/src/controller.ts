@@ -10,8 +10,9 @@ import { execFileSync } from 'node:child_process';
 import { MountedStores, SterlingStore, StoreBusyError, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { parseConfig, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE } from '@sterling/schemas';
-import { buildDashboardFrame, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect } from './state.js';
-import { applyHandoffToggle, applyModeToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
+import { buildDashboardFrame, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect } from './state.js';
+import { applyAutoMergeToggle, applyHandoffToggle, applyModeToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
+import { AutoMergeSettingError, autoMergeOnCleanOf } from '../../../scripts/lib/work-pr.mjs';
 import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
 // Static, so esbuild inlines both into the bundles: an installed copy has no
 // node_modules and no packages/*/dist, so a run-time import of the scripts/lib
@@ -387,6 +388,29 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     }
   }
 
+  /** config.pr_review.auto_merge_on_clean (decision
+   *  work-mode-pr-auto-merge-when-copilot-loop-ends-clean), read from the RAW
+   *  config by the judge the PR review loop uses (autoMergeOnCleanOf), so the
+   *  row shows what a clean settle will act on. A value the judge refuses comes
+   *  back as its JSON text (INVALID); an unreadable config is null (UNKNOWN,
+   *  never the on default). */
+  function readAutoMergeOnClean(): boolean | string | null {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    } catch {
+      return null;
+    }
+    try {
+      return autoMergeOnCleanOf(raw);
+    } catch (err) {
+      if (!(err instanceof AutoMergeSettingError)) throw err;
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return JSON.stringify(raw);
+      const block = (raw as { pr_review?: unknown }).pr_review;
+      return JSON.stringify(block !== null && typeof block === 'object' && !Array.isArray(block) ? (block as { auto_merge_on_clean?: unknown }).auto_merge_on_clean : block);
+    }
+  }
+
   /** Build the AgentRosterSnapshot at tab activation: installed frontmatter +
    *  config.models + a bootstrapped catalog with its precomputed status. Enqueues
    *  a deduped refresh when the catalog is stale (decision foreign_98064d77). */
@@ -436,7 +460,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // finding 41/43) — surface it as a visible System-tab notice instead.
       ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), ...handoff };
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), ...handoff };
   }
 
   /** Execute a sparring_model effect: config.sparring_partner.models.openai
@@ -648,6 +672,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     const tddToggles = effects.filter((e): e is TddToggleEffect => e.type === 'tdd_toggle');
     const modeToggles = effects.filter((e): e is ModeToggleEffect => e.type === 'mode_toggle');
     const handoffToggles = effects.filter((e): e is HandoffToggleEffect => e.type === 'handoff_toggle');
+    const autoMergeToggles = effects.filter((e): e is AutoMergeToggleEffect => e.type === 'auto_merge_toggle');
     let toggleWrote = false;
     let toggleFailure: string | undefined;
     const collectFailure = (msg: string) => { toggleFailure = msg; };
@@ -657,8 +682,15 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     for (const e of modeToggles) { if (applyModeToggle(e, collectFailure, configPath)) { toggleWrote = true; modeWritten = e.mode; } }
     let handoffWritten: boolean | undefined;
     for (const e of handoffToggles) { if (applyHandoffToggle(e, collectFailure, configPath)) { toggleWrote = true; handoffWritten = e.enabled; } }
+    let autoMergeWritten: boolean | undefined;
+    for (const e of autoMergeToggles) { if (applyAutoMergeToggle(e, collectFailure, configPath)) { toggleWrote = true; autoMergeWritten = e.enabled; } }
     if (toggleFailure !== undefined) {
       notice(toggleFailure);
+    } else if (autoMergeWritten !== undefined) {
+      // what the switch changes, said at the moment it is made
+      notice(autoMergeWritten
+        ? 'auto-merge turned on — in work mode, a PR whose Copilot review loop ends clean and that GitHub reports mergeable is squash-merged by the conductor and its branch deleted.'
+        : 'auto-merge turned off — in work mode, a human merges every PR, a clean one included.');
     } else if (modeWritten !== undefined) {
       // what the switch changes, said at the moment it is made: only how work ships
       notice(modeWritten === 'work'
@@ -675,7 +707,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // that does not — restart the session to pick the new value up there.
       notice('config.json updated — hooks pick this up on their next invocation; restart the session to reload the MCP server.');
     }
-    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length) roster = loadRoster();
+    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length) roster = loadRoster();
     for (const e of effects) {
       if (e.type === 'select') pending = [...pending.filter((p) => p.type !== 'select'), e];
       else if (e.type === 'board_edit') pending.push(e);

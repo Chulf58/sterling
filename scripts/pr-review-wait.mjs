@@ -104,11 +104,18 @@
 // --unknown-retry-delay seconds (default 3) and blocks if still UNKNOWN. A clean
 // output carries merge_state_status, review_decision, check_rollup, mergeable_now
 // and awaiting_human_review. A gh failure refuses too.
+// A clean output also carries auto_merge_on_clean (config
+// pr_review.auto_merge_on_clean, absent = on) and auto_merge, which is true only
+// when the switch is on AND mergeable_now: the skill's cue to squash-merge the PR,
+// pinned to head_sha (the armed, reviewed head)
+// (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean). The switch is
+// read before anything is asked or written; a value that is not a boolean
+// refuses the clean settle, so a typo never decides a merge.
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { resolveStoreRoot } from './lib/worktree-root.mjs';
-import { fetchSettledMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
+import { autoMergeOnCleanOf, fetchSettledMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (name) => {
@@ -207,22 +214,37 @@ function retryDelayMs() {
   return n * 1000;
 }
 
+// config pr_review.auto_merge_on_clean through its strict judge; an unreadable
+// config throws instead of reading as either value.
+function readAutoMergeOnClean() {
+  const file = join(storeRoot, '.sterling', 'config.json');
+  if (!existsSync(file)) return autoMergeOnCleanOf(undefined);
+  let cfg;
+  try {
+    cfg = JSON.parse(readFileSync(file, 'utf8'));
+  } catch (e) {
+    throw new Error(`.sterling/config.json is not valid JSON (${e.message}) — the auto-merge switch cannot be read; nothing settled`);
+  }
+  return autoMergeOnCleanOf(cfg);
+}
+
 if (argv.includes('--settle')) {
   let merge = null;
   try {
     const originRepo = originRepoOrThrow();
+    const outcome = flag('--settle');
+    const autoMergeOnClean = outcome === 'clean' ? readAutoMergeOnClean() : null;
     // Only a clean outcome claims the PR is ready for a human, so only it asks GitHub.
     const guard = (armed) => {
       const state = fetchSettledMergeState(target, originRepo, armed.pr_number, { retryDelayMs: retryDelayMs() });
       const verdict = mergeBlockers(state);
-      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review };
+      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: autoMergeOnClean === true && verdict.mergeable_now === true, head_sha: armed.head_sha };
       if (verdict.blockers.length) {
         const err = new Error(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join('; ')} — resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`);
         err.blocked = { ...merge, blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads };
         throw err;
       }
     };
-    const outcome = flag('--settle');
     const s = settlePrLoop(storeRoot, outcome, flag('--pr'), { originRepo, guard: outcome === 'clean' ? guard : null });
     process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at, ...(merge ?? {}) }) + '\n');
     process.exit(0);

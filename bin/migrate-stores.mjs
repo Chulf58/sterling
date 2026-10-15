@@ -5387,9 +5387,16 @@ var configSchema = external_exports.object({
   // first use; empty means unpinned (any Bot login matching /copilot/i, with
   // identity_confirmed false). PERMISSIVE like mode: a malformed value is
   // preserved raw, never thrown on; scripts/pr-review-wait.mjs is the strict
-  // judge. The default lives twice: here and in templates/default-config.json
-  // (config.test.ts pins that they agree).
-  pr_review: external_exports.unknown().default({ copilot_logins: [] })
+  // judge. auto_merge_on_clean (decision
+  // work-mode-pr-auto-merge-when-copilot-loop-ends-clean, board 2ebbea9d): when
+  // the loop settles clean and GitHub reports the PR mergeable, the conductor
+  // squash-merges it and deletes the branch; false leaves the merge to a human.
+  // Absent means on. Its strict judge is autoMergeOnCleanOf() in
+  // scripts/lib/work-pr.mjs, which refuses a value that is not a boolean, so a
+  // typo never turns into a merge. Toggled in the TUI System tab. The default
+  // lives twice: here and in templates/default-config.json (config.test.ts pins
+  // that they agree).
+  pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true })
 });
 
 // packages/schemas/dist/registry.js

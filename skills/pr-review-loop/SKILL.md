@@ -1,11 +1,11 @@
 ---
 name: pr-review-loop
-description: Work-mode Copilot PR review loop — run it after /sterling:merge opens or reuses a PR in a WORK project. One conductor owns it; bin/pr-review-wait.mjs does the waiting; each Copilot finding is fixed, disagreed with or escalated as taste; it ends clean, capped (5 rounds) or escalated and is then settled to discharge H10's 'PR review loop owed' duty.
+description: Work-mode Copilot PR review loop — run it after /sterling:merge opens or reuses a PR in a WORK project. One conductor owns it; bin/pr-review-wait.mjs does the waiting; each Copilot finding is fixed, disagreed with or escalated as taste; it ends clean, capped (5 rounds) or escalated and is then settled to discharge H10's 'PR review loop owed' duty; a clean end squash-merges the PR when the auto-merge switch is on.
 ---
 
 # PR review loop (work mode)
 
-Decision `project-mode-hobby-work-toggle-decides-flow`. Sol (the `reviewer` agent on Opus when Sol is capped) has already reviewed before the PR opened; Copilot now reviews on GitHub. A human merges the PR — you never do.
+Decision `project-mode-hobby-work-toggle-decides-flow`. Sol (the `reviewer` agent on Opus when Sol is capped) has already reviewed before the PR opened; Copilot now reviews on GitHub. When the loop ends clean and the auto-merge switch is on (the default), you squash-merge the PR yourself (see "Auto-merge on a clean end" below; decision `work-mode-pr-auto-merge-when-copilot-loop-ends-clean`). Otherwise a human merges it.
 
 ## Owner and tools
 
@@ -43,7 +43,28 @@ One **progress comment** on the PR holds the state: round, consumed review id, r
 - **CAPPED**: 5 completed review/response cycles across the PR's lifetime, not per session. Poll attempts do not count.
 - **ESCALATED**: a ruling from the user is outstanding (taste or ambiguity), and nothing else is left to do.
 
-Then settle H10's duty. This is a deliberate act, and it names the PR: `node "${CLAUDE_PLUGIN_ROOT}/bin/pr-review-wait.mjs" --settle <clean|capped|escalated> --pr <n|PR URL>`. It refuses unless the armed loop is still owed, is for origin's repo and is the PR you name; a settled loop is never re-settled (the next `/sterling:merge` push re-arms it). A clean settle prints `merge_state_status`, `review_decision`, `mergeable_now` and `awaiting_human_review`. Report the outcome, the PR link, the round count and whether a human can merge now (`mergeable_now`, or what the PR still awaits) to the user, and put the same line in the progress comment. For `capped` and `escalated` the merge state is not checked; say so rather than implying the PR is mergeable.
+Then settle H10's duty. This is a deliberate act, and it names the PR: `node "${CLAUDE_PLUGIN_ROOT}/bin/pr-review-wait.mjs" --settle <clean|capped|escalated> --pr <n|PR URL>`. It refuses unless the armed loop is still owed, is for origin's repo and is the PR you name; a settled loop is never re-settled (the next `/sterling:merge` push re-arms it). A clean settle prints `merge_state_status`, `review_decision`, `check_rollup`, `mergeable_now`, `awaiting_human_review`, `auto_merge_on_clean`, `auto_merge` and `head_sha`. Report the outcome, the PR link, the round count and whether the PR was merged or can be merged now (`mergeable_now`, or what the PR still awaits) to the user, and put the same line in the progress comment. For `capped` and `escalated` the merge state is not checked and nothing is merged; say so rather than implying the PR is mergeable.
+
+## Auto-merge on a clean end
+
+Decision `work-mode-pr-auto-merge-when-copilot-loop-ends-clean` (user-ruled 2026-10-14: per-project switch, on by default; squash and delete the branch). The switch is `pr_review.auto_merge_on_clean` in `.sterling/config.json`, toggled in the TUI System tab ("Auto-merge clean PRs"); a missing key is on.
+
+**Only a CLEAN settle that printed `auto_merge: true` merges.** The settle is the clean-state check, so always settle first; a merged PR can no longer be settled. `auto_merge` is true only when all of these hold:
+
+- **No open findings**: the loop ended CLEAN as defined above (a completed Copilot review of the current head, every finding dispositioned, no taste comment awaiting a ruling). This is your judgment, made before you run `--settle clean`.
+- **Every review thread resolved**: the settle reads every page of the PR's `reviewThreads` through `gh api graphql` and refuses on any `isResolved: false`.
+- **Required checks green and nothing else blocking**: GitHub's `mergeStateStatus` is CLEAN, HAS_HOOKS or UNSTABLE. A failing or pending required check, a missing required approval or a conflict shows as BLOCKED, BEHIND or DIRTY, which refuses the settle. A PR that waits only for a human approval settles clean with `awaiting_human_review: true` and `mergeable_now: false`, so `auto_merge` is false.
+- **The switch is on**: `auto_merge_on_clean: true`. A value that is not true or false refuses the clean settle before GitHub is asked, naming the value; fix it in the TUI System tab and settle again.
+
+`auto_merge: false` on a clean settle means a human merges: say which reason applies (switch off, or awaiting a human approval). `capped` and `escalated` print no `auto_merge` and never merge.
+
+When `auto_merge` is true, take `<host>`, `<owner>`, `<repo>` and `<n>` from the printed `pr_url` and run these three calls in order. Every call is `gh api`, never `gh pr merge`: under WSL the Windows gh.exe that `gh pr` commands resolve needs a git binary it cannot find (the same reason `/sterling:merge` opens the PR with `gh api`, `commands/merge.md`), and `gh pr merge --delete-branch` also switches and deletes local branches. If gh.exe fails on auth under WSL, pass the token across with `GH_TOKEN` and `WSLENV` as anti-pattern `work-mode-pr-create-fails-with-must-be-a-collaborator-http-4` says.
+
+1. Read the head branch: `gh api --hostname <host> repos/<owner>/<repo>/pulls/<n> --jq '{state: .state, ref: .head.ref, repo: .head.repo.full_name}'`. Go on only when `state` is `open` and `repo` is `<owner>/<repo>`; a PR from another repository is never merged or deleted here, so report it.
+2. Merge, pinned to the reviewed head: `gh api --hostname <host> --method PUT repos/<owner>/<repo>/pulls/<n>/merge -f merge_method=squash -f sha=<head_sha>`, with `head_sha` from the settle output. Only a response with `"merged": true` is a merge; note its `sha`. Any other answer is a refusal: 405 (not mergeable: branch protection, a check, a required review), 409 (the head moved since the review) or 422. Then stop: leave the PR open, report GitHub's message word for word, and do not retry. Never pass `--admin` or any other bypass, and never force a refused merge (the decision rules this out).
+3. Delete the branch, only after step 2 returned `"merged": true`: `gh api --hostname <host> --method DELETE repos/<owner>/<repo>/git/refs/heads/<ref>`. A 204 deleted it. A 422 "Reference does not exist" means GitHub already deleted it (the repository deletes head branches on merge); report that. Any other failure is reported; the merge stands.
+
+Then put "merged by the conductor (squash `<sha>`), branch `<ref>` deleted" in the progress comment and report the same to the user, with the PR link. Local branches and worktrees are left as they are; say so.
 
 ## Interrupted mid-loop
 

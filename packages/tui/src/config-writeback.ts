@@ -27,7 +27,7 @@
 // — board 09f05fca half 2, review fix.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { HandoffToggleEffect, ModeToggleEffect, SparringToggleEffect, TddToggleEffect } from './state.js';
+import type { AutoMergeToggleEffect, HandoffToggleEffect, ModeToggleEffect, SparringToggleEffect, TddToggleEffect } from './state.js';
 
 function configPath(explicit?: string): string {
   return explicit ?? join(process.cwd(), '.sterling', 'config.json');
@@ -126,6 +126,25 @@ export function applyHandoffToggle(e: HandoffToggleEffect, onError?: (msg: strin
     return true;
   } catch (err) {
     onError?.(`handoff toggle failed — ${(err as Error).message}`);
+    return false;
+  }
+}
+
+/** Execute an auto_merge_toggle effect: config.pr_review.auto_merge_on_clean
+ *  write only (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean) —
+ *  mirrors applyHandoffToggle. Every other pr_review key (copilot_logins, the
+ *  pinned Copilot identity) is kept. A recorded `pr_review` that is not an
+ *  object is replaced, never spread. Optional trailing `path` overrides the
+ *  cwd-derived default (see applySparringToggle). */
+export function applyAutoMergeToggle(e: AutoMergeToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
+  try {
+    writeConfigKey(configPath(path), 'pr_review', (old) => {
+      const block = old !== null && typeof old === 'object' && !Array.isArray(old) ? old : {};
+      return { ...block, auto_merge_on_clean: e.enabled };
+    });
+    return true;
+  } catch (err) {
+    onError?.(`auto-merge toggle failed — ${(err as Error).message}`);
     return false;
   }
 }
