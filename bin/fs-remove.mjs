@@ -5542,6 +5542,55 @@ var brokerResultSchema = external_exports.union([
   external_exports.object({ type: external_exports.literal("result"), id: external_exports.number().int(), ok: external_exports.literal(false), executed: external_exports.boolean(), error: brokerErrorSchema })
 ]);
 
+// packages/schemas/dist/store-fence.js
+var STORE_FENCE_KEY = "move_fence";
+var moveFenceSchema = external_exports.object({
+  kind: external_exports.literal("move").optional(),
+  move_id: external_exports.string(),
+  /** The counterpart the store moved to: 'postgres:<schema>' or 'sqlite:<absolute path>'. */
+  to: external_exports.string(),
+  fenced_at: external_exports.string().optional(),
+  /** The manifest digest of the content at fencing; null until the snapshot is taken. */
+  manifest_digest: external_exports.string().nullable().optional()
+}).passthrough();
+var DOMAIN_NAME_RE = /^[a-z0-9_-]+$/;
+var renameFenceSchema = external_exports.object({
+  kind: external_exports.literal("rename"),
+  /** The rename's operation id; the copy's receipt carries the same id. */
+  operation_id: external_exports.string().min(1),
+  from_domain: external_exports.string().regex(DOMAIN_NAME_RE),
+  to_domain: external_exports.string().regex(DOMAIN_NAME_RE),
+  /** Absolute POSIX path of the store published under the new name. */
+  to_path: external_exports.string().min(1),
+  fenced_at: external_exports.string()
+}).strict();
+function parseStoreFence(value) {
+  let raw;
+  try {
+    raw = JSON.parse(value);
+  } catch {
+    throw new Error(`store_meta '${STORE_FENCE_KEY}' is not JSON (${value.slice(0, 80)})`);
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`store_meta '${STORE_FENCE_KEY}' is not an object (${value.slice(0, 80)})`);
+  }
+  const kind = raw.kind;
+  if (kind === "rename") {
+    const r = renameFenceSchema.safeParse(raw);
+    if (!r.success)
+      throw new Error(`store_meta '${STORE_FENCE_KEY}' is a malformed rename fence: ${r.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}`);
+    return r.data;
+  }
+  if (kind === void 0 || kind === "move") {
+    const r = moveFenceSchema.safeParse(raw);
+    if (!r.success)
+      throw new Error(`store_meta '${STORE_FENCE_KEY}' is a malformed move fence: ${r.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}`);
+    const fence = { ...r.data, kind: "move" };
+    return fence;
+  }
+  throw new Error(`store_meta '${STORE_FENCE_KEY}' has an unknown fence kind ${JSON.stringify(kind)}`);
+}
+
 // scripts/lib/project.mjs
 import { readFileSync as readFileSync4, existsSync as existsSync3, mkdtempSync, rmSync as rmSync2 } from "node:fs";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
@@ -6653,6 +6702,33 @@ var DomainNotCreatedError = class extends Error {
     this.db_path = dbPath;
   }
 };
+var DomainRenamedError = class extends Error {
+  domain;
+  db_path;
+  renamed_to;
+  renamed_path;
+  constructor(domain, dbPath, fence) {
+    super(`domain '${domain}' was renamed to '${fence.to_domain}' on ${fence.fenced_at} (operation ${fence.operation_id}); the store at '${dbPath}' is the fenced old copy, so it is NOT mounted and its knowledge is not read. The domain now lives at '${fence.to_path}'. Change '${domain}' to '${fence.to_domain}' in stack_tags (and in domain_paths, if it names '${domain}') in this project's .sterling/config.json, then restart the session.`);
+    this.name = "DomainRenamedError";
+    this.domain = domain;
+    this.db_path = dbPath;
+    this.renamed_to = fence.to_domain;
+    this.renamed_path = fence.to_path;
+  }
+};
+var RENAMED_AT_MOUNT_NOTE = "refused at mount because the domain was renamed; update stack_tags and restart the session";
+function renameFenceOf(store2) {
+  const value = store2.getMeta(STORE_FENCE_KEY);
+  if (value === void 0)
+    return null;
+  let fence;
+  try {
+    fence = parseStoreFence(value);
+  } catch {
+    return null;
+  }
+  return fence.kind === "rename" ? fence : null;
+}
 var MountedStores = class {
   /** The project store — also the home of the board/maintenance queue and
    *  other project-local transient state (the run/handoff protocol this
@@ -6743,6 +6819,7 @@ var MountedStores = class {
           }
           this.domains.set(m.name, store2);
           this.probeDomain(m.name, store2);
+          this.refuseRenamed(m.name, store2);
         }
       } catch (e) {
         this.close();
@@ -6773,11 +6850,34 @@ var MountedStores = class {
         }
         this.domains.set(m.name, store2);
         this.probeDomain(m.name, store2);
+        this.refuseRenamed(m.name, store2);
       }
     } catch (e) {
       this.close();
       throw e;
     }
+  }
+  /** Mount-time rename check, after the probe: a store a rename fenced is
+   *  closed and dropped with a DomainRenamedError naming the new domain, so it
+   *  is neither read nor written and every read discloses it on
+   *  unreadableDomains. A domain the probe already dropped is left as it is. */
+  refuseRenamed(name, store2) {
+    if (this.isUnreadable(name))
+      return;
+    let fence;
+    try {
+      fence = renameFenceOf(store2);
+    } catch (e) {
+      if (!this.isStoreFailure(e))
+        throw e;
+      this.dropDomain(name, e, true);
+      return;
+    }
+    if (!fence)
+      return;
+    this.domains.delete(name);
+    store2.close();
+    this.dropDomain(name, new DomainRenamedError(name, this.domainPaths.get(name) ?? "", fence), true, RENAMED_AT_MOUNT_NOTE);
   }
   /** Mount-time read check. A pre-v2 store opens and answers some reads (get,
    *  query over pre-v2 bodies) but not others (inboundSupersedes: it has no
@@ -6800,7 +6900,7 @@ var MountedStores = class {
    *  is safe to leave because a dropped domain cannot be written either
    *  (assertWritable): a session never writes into a store it cannot read back,
    *  and the slug checks still ask it (fanEveryDomain). */
-  dropDomain(name, e, atMount = false) {
+  dropDomain(name, e, atMount = false, note) {
     if (this.work)
       throw new DomainUnavailableError(name, this.domainPaths.get(name) ?? "", e);
     if (this.isUnreadable(name))
@@ -6809,7 +6909,7 @@ var MountedStores = class {
       name,
       dbPath: this.domainPaths.get(name) ?? "",
       error: errorText(e),
-      note: atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE
+      note: note ?? (atMount ? DROPPED_AT_MOUNT_NOTE : DROPPED_AFTER_MOUNT_NOTE)
     });
   }
   /** The failures that drop a domain in hobby mode and fail the call in work
@@ -7878,10 +7978,26 @@ var OperationRepeatedError = class extends Error {
 };
 var StoreMovedError = class extends Error {
   db_path;
-  constructor(db_path) {
-    super(`store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`);
+  /** The new domain name when a rename fenced this store, else null. */
+  renamed_to;
+  constructor(db_path, fence) {
+    let renamedTo = null;
+    let message = `store '${db_path}' was moved: it is the side a store move left, so writes to it are refused; nothing was written. Open the store through its current storage (config.storage) instead.`;
+    if (fence !== void 0) {
+      try {
+        const f = parseStoreFence(fence);
+        if (f.kind === "rename") {
+          renamedTo = f.to_domain;
+          message = `store '${db_path}' was renamed: domain '${f.from_domain}' is now '${f.to_domain}' (store at '${f.to_path}'), so writes to this old store are refused; nothing was written. Change '${f.from_domain}' to '${f.to_domain}' in stack_tags (and domain_paths) of .sterling/config.json, then restart the session.`;
+        }
+      } catch (e) {
+        message = `store '${db_path}' carries a write fence that could not be read (${e.message}), so writes to it are refused; nothing was written.`;
+      }
+    }
+    super(message);
     this.db_path = db_path;
     this.name = "StoreMovedError";
+    this.renamed_to = renamedTo;
   }
 };
 var SQLITE_BUSY_EXTENDED = {
@@ -10254,8 +10370,9 @@ var SterlingStore = class _SterlingStore {
     this.txDepth++;
     try {
       this.assertLiveSchemaVersion("transaction");
-      if (this.db.prepare("SELECT 1 FROM store_meta WHERE key = 'move_fence'").get())
-        throw new StoreMovedError(this.dbPath);
+      const fence = this.db.prepare("SELECT value FROM store_meta WHERE key = ?").get(STORE_FENCE_KEY);
+      if (fence)
+        throw new StoreMovedError(this.dbPath, fence.value);
       fn();
       this.db.commit();
     } catch (e) {

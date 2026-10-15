@@ -96,3 +96,5 @@ export {
   isBrokerOperation,
 } from './broker.js';
 export type { BrokerTarget, BrokerIdentity, BrokerRegistration, BrokerHello, BrokerError, BrokerWelcome, BrokerCall, BrokerResult } from './broker.js';
+export { STORE_FENCE_KEY, moveFenceSchema, renameFenceSchema, parseStoreFence } from './store-fence.js';
+export type { StoreFence, RenameFence, MoveFenceValue } from './store-fence.js';

@@ -5456,6 +5456,35 @@ var init_broker = __esm({
   }
 });
 
+// packages/schemas/dist/store-fence.js
+var moveFenceSchema, DOMAIN_NAME_RE, renameFenceSchema;
+var init_store_fence = __esm({
+  "packages/schemas/dist/store-fence.js"() {
+    "use strict";
+    init_zod();
+    moveFenceSchema = external_exports.object({
+      kind: external_exports.literal("move").optional(),
+      move_id: external_exports.string(),
+      /** The counterpart the store moved to: 'postgres:<schema>' or 'sqlite:<absolute path>'. */
+      to: external_exports.string(),
+      fenced_at: external_exports.string().optional(),
+      /** The manifest digest of the content at fencing; null until the snapshot is taken. */
+      manifest_digest: external_exports.string().nullable().optional()
+    }).passthrough();
+    DOMAIN_NAME_RE = /^[a-z0-9_-]+$/;
+    renameFenceSchema = external_exports.object({
+      kind: external_exports.literal("rename"),
+      /** The rename's operation id; the copy's receipt carries the same id. */
+      operation_id: external_exports.string().min(1),
+      from_domain: external_exports.string().regex(DOMAIN_NAME_RE),
+      to_domain: external_exports.string().regex(DOMAIN_NAME_RE),
+      /** Absolute POSIX path of the store published under the new name. */
+      to_path: external_exports.string().min(1),
+      fenced_at: external_exports.string()
+    }).strict();
+  }
+});
+
 // packages/schemas/dist/index.js
 var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
@@ -5470,6 +5499,7 @@ var init_dist = __esm({
     init_staleness();
     init_project();
     init_broker();
+    init_store_fence();
   }
 });
 

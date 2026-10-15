@@ -42,7 +42,7 @@ const namesOf = (p) => new Set([lower(p.name), lower(folderName(p.path))].filter
 const unique = (list) => [...new Set(list)];
 
 /**
- * stores:   [{ name, path, description | null, format: 'current' | 'old', unreadable: null | string }]
+ * stores:   [{ name, path, description | null, format: 'current' | 'old', unreadable: null | string, renamed_to?: null | string }]
  * projects: [{ name, path, stack_tags, exists }]  the registry entries
  * current:  { name, path, stack_tags } | null     the project the command runs in, with its live tags
  * notes:    string[]                              caller remarks carried into the output
@@ -65,6 +65,7 @@ export function buildDomainMap({ stores, projects, current, notes = [] }) {
       description: s?.description ?? null,
       format: s?.format ?? null,
       unreadable: s?.unreadable ?? null,
+      renamed_to: s?.renamed_to ?? null,
       mounted_by: everyone.filter((p) => p.mounts.includes(name)).map((p) => p.name),
     };
   });
@@ -81,9 +82,10 @@ export function buildDomainMap({ stores, projects, current, notes = [] }) {
     current: me ? { ...me, registered } : null,
     domains,
     near_names: [...spellings.values()].filter((group) => group.length > 1),
-    unmounted: domains.filter((d) => d.has_store && d.mounted_by.length === 0).map((d) => d.name),
+    unmounted: domains.filter((d) => d.has_store && !d.renamed_to && d.mounted_by.length === 0).map((d) => d.name),
+    renamed: domains.filter((d) => d.renamed_to).map((d) => ({ name: d.name, to: d.renamed_to, mounted_by: d.mounted_by })),
     tags_without_store: domains.filter((d) => !d.has_store).map((d) => ({ tag: d.name, projects: d.mounted_by })),
-    undescribed: domains.filter((d) => d.has_store && !d.unreadable && d.format === 'current' && !d.description).map((d) => d.name),
+    undescribed: domains.filter((d) => d.has_store && !d.unreadable && !d.renamed_to && d.format === 'current' && !d.description).map((d) => d.name),
     old_format: domains.filter((d) => d.format === 'old').map((d) => d.name),
     unreadable: domains.filter((d) => d.unreadable).map((d) => ({ name: d.name, error: d.unreadable })),
     siblings,
@@ -149,7 +151,9 @@ export function renderDomainMap(map, { applyCommand = '/sterling:domains' } = {}
       ? '(no store: the tag names a domain that was never created)'
       : d.unreadable
         ? `(could not be read: ${d.unreadable})`
-        : d.format === 'old'
+        : d.renamed_to
+          ? `(renamed → ${d.renamed_to} (fenced backup))`
+          : d.format === 'old'
           ? '(old format)'
           : d.description || '(no description)';
     out.push(`  ${' '.repeat(width)}  ${detail}`);
@@ -160,6 +164,11 @@ export function renderDomainMap(map, { applyCommand = '/sterling:domains' } = {}
   out.push(`Tags that name no store: ${list(map.tags_without_store.map((t) => `${t.tag} (${t.projects.join(', ')})`))}`);
   if (map.tags_without_store.length) {
     out.push('  A tag with no store is not mounted: nothing is read from it and writes to it are refused. Adding it with a description creates the store.');
+  }
+  if (map.renamed.length) {
+    out.push(`Renamed domains (fenced backups): ${map.renamed.map((r) => `${r.name} → ${r.to}`).join(', ')}`);
+    const stale = map.renamed.filter((r) => r.mounted_by.length);
+    if (stale.length) out.push(`  Still tagged with the old name, so the domain is refused at mount: ${stale.map((r) => `${list(r.mounted_by)} (${r.name} → ${r.to})`).join('; ')}. Replace the old tag with the new one in those projects' stack_tags.`);
   }
   out.push(`Stores with no description: ${list(map.undescribed)}`);
   if (map.undescribed.length) {

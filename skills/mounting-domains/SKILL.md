@@ -48,7 +48,7 @@ It adds the tags to this project's `stack_tags`, creates each missing store with
 
 Check before moving on: the output lists each domain as created, already having a store, or already mounted, and prints the new `stack_tags`.
 
-Never hand-edit `stack_tags` when the CLI can make the change: a hand edit skips the store creation and leaves the registry entry stale. Never remove a mount and never move records as part of this SOP.
+Never hand-edit `stack_tags` when the CLI can make the change: a hand edit skips the store creation and leaves the registry entry stale. Never remove a mount and never move records as part of this SOP. Renaming a whole domain is the one exception, and it has its own command (step 10).
 
 ## 6. Load the mount and confirm it
 
@@ -74,7 +74,27 @@ Records already written in the project about the subject stay project-scoped. Do
 - **A store in the old format** ("Stores in the old format"): in a project that mounts it, `knowledge_query` and `knowledge_get` fail until Sterling is updated to a version that isolates the store. Do not repair or migrate it here. Tell the user, run `/sterling:update`, and if it persists report it with `/sterling:report-issue`.
 - **A tag with no store** ("Tags that name no store"): the tag is not mounted, so nothing is read from it and writes to it are refused. First check step 2 for a near name. If the subject is real and has no store, run step 5 for that tag with a description: the CLI creates the store and leaves the tag as it is.
 
-## 10. Before saying done
+## 10. Renaming a domain
+
+Use this when the user wants a domain called something else, for example `chulf` to `customerhub` (decision `domain-rename-is-a-fenced-copy-verb-on-domain-doctor`). It renames the whole domain on this machine. It does not merge into an existing domain, move some of the records, or keep the old name as an alias. Each other machine runs it for itself.
+
+Run it from the project, with the plugin's bundled copy:
+
+`node "${CLAUDE_PLUGIN_ROOT}/bin/domain-doctor.mjs" rename <old> <new>`
+
+Without `--apply` it writes nothing and prints the plan: the old and new store paths, the record count, each registered project whose config mounts `<old>` with its `stack_tags` and `domain_paths` change, projects whose config could not be read (they are not changed), and the `AGENTS.md` lines to change by hand. Show the plan to the user and ask through the question form before running it again with `--apply`.
+
+With `--apply` it fences the old store so no session can write to it, copies it to `<root>/<new>/sterling.db` with every record's scope changed to `domain:<new>`, checks the copy against the old store table by table, and then rewrites each mounting project's config and registry row. Record ids, links, versions, aliases and relations do not change. Record `stack_tags` and the version history keep the old name. The old store stays where it was, fenced, as the backup.
+
+It refuses, with nothing written, when `<new>` already has a store or is mounted anywhere, when projects point `<old>` at different files, when a project mounting `<old>` is on Postgres, or when a record in the store is not scoped `domain:<old>`.
+
+After it runs:
+- Tell the user to restart every session of the listed projects. A running session keeps reading the old copy until then, and its writes to the old domain are refused with a message naming the new one.
+- A project that still has the old name in `stack_tags` (one on another machine, or one the registry does not list) gets the old domain refused at mount, with the new name in the message. Run `/sterling:domains` there and replace the tag.
+- Change the printed `AGENTS.md` lines in each project by hand. They are tracked files in those repos, so the command never edits them.
+- If it stopped partway (a crash, or a config it could not write), run the same `--apply` command again. It resumes from the fence and the copy's receipt and changes only what is left.
+
+## 11. Before saying done
 
 - [ ] The map was run and the full domain list was read for an existing or near-named store.
 - [ ] The user chose the list through the question form.
@@ -83,4 +103,4 @@ Records already written in the project about the subject stay project-scoped. Do
 - [ ] The user was told to restart the session, and `AGENTS.md` matches the new tags.
 - [ ] The map was re-run and shows this project under each added domain.
 - [ ] Each sibling step was named to the user with the project and its path, and the one-machine, one-user limit was stated.
-- [ ] Nothing was removed and no record was moved by hand.
+- [ ] Nothing was removed and no record was moved by hand (a rename went through `bin/domain-doctor.mjs rename`, and the user saw the dry-run plan first).
