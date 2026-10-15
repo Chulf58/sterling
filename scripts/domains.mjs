@@ -40,7 +40,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync, realp
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { parseConfig, sameLocationAnyHost } from '@sterling/schemas';
+import { parseConfig, parseStoreFence, sameLocationAnyHost, STORE_FENCE_KEY } from '@sterling/schemas';
 import { ProjectRegistry, registryPath, createDomain, resolveDomainMounts, DOMAIN_DESCRIPTION_KEY, SUPPORTED_SCHEMA_VERSION, PgBridge, readPgCredentials, assertSterlingSchemaName } from '@sterling/store';
 import { resolveStoreRoute, pgStoreNames } from '@sterling/store/routing';
 import { resolveLinkedWorktree } from './lib/project.mjs';
@@ -143,7 +143,7 @@ const onPostgres = route?.storage === 'postgres';
 const domainsRoot = join(homedir(), '.sterling', 'domains');
 
 function inspectStore(name, dbPath) {
-  const entry = { name, path: fwd(dbPath), description: null, format: 'current', unreadable: null };
+  const entry = { name, path: fwd(dbPath), description: null, format: 'current', unreadable: null, renamed_to: null };
   let db;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
@@ -154,6 +154,13 @@ function inspectStore(name, dbPath) {
     if (tables.length && version < SUPPORTED_SCHEMA_VERSION) entry.format = 'old';
     else if (tables.includes('store_meta')) {
       entry.description = db.prepare('SELECT value FROM store_meta WHERE key = ?').get(DOMAIN_DESCRIPTION_KEY)?.value?.trim() || null;
+      // A store domain-doctor rename left behind: the fenced backup of a domain
+      // that now lives under another name.
+      const fence = db.prepare('SELECT value FROM store_meta WHERE key = ?').get(STORE_FENCE_KEY)?.value;
+      if (fence !== undefined) {
+        const parsed = parseStoreFence(fence);
+        if (parsed.kind === 'rename') entry.renamed_to = parsed.to_domain;
+      }
     }
   } catch (e) {
     entry.unreadable = String(e?.message ?? e);
@@ -331,8 +338,11 @@ const mounted = project.config.stack_tags;
 // One subject, one store: a name that matches an existing store or tag in all
 // but case would make a second store beside it.
 {
-  const stores = listStores().map((st) => st.name);
+  const listed = listStores();
+  const stores = listed.map((st) => st.name);
   for (const name of opts.add) {
+    const renamed = listed.find((st) => st.name === name && st.renamed_to);
+    if (renamed) refuse(`'${name}' was renamed to '${renamed.renamed_to}'; its store at ${renamed.path} is the fenced backup and cannot be mounted. Add '${renamed.renamed_to}' instead. Nothing was written.`);
     const differs = (other) => other !== name && other.toLowerCase() === name.toLowerCase();
     const exact = stores.includes(name) || projects.some((p) => p.exists && p.stack_tags.includes(name));
     if (exact) continue;

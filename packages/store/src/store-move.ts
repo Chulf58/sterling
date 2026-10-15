@@ -32,7 +32,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { RECORD_TYPES, parseConfig, readProjectIdentity, readProjectMode, type ProjectMode } from '@sterling/schemas';
+import { RECORD_TYPES, STORE_FENCE_KEY, parseConfig, parseStoreFence, readProjectIdentity, readProjectMode, type ProjectMode } from '@sterling/schemas';
 import { SterlingStore, SUPPORTED_SCHEMA_VERSION } from './index.js';
 import { resolveDomainMounts } from './mounted.js';
 import { SqliteDriver, sqliteDialect } from './sqlite-driver.js';
@@ -51,8 +51,9 @@ import {
 } from './pg-driver.js';
 import { PG_TEST_NAMESPACE_ENV, pgStoreNames } from './routing.js';
 
-/** store_meta key holding the write fence on the side a move left. */
-export const MOVE_FENCE_KEY = 'move_fence';
+/** store_meta key holding the write fence on the side a move left. The same
+ *  key carries a domain rename's fence (STORE_FENCE_KEY in @sterling/schemas). */
+export const MOVE_FENCE_KEY = STORE_FENCE_KEY;
 /** store_meta key holding the receipt on a SQLite target (Postgres targets use <meta>.move_receipts). */
 export const MOVE_RECEIPT_KEY = 'move_receipt';
 const MOVE_CONTROL_KEYS = [MOVE_FENCE_KEY, MOVE_RECEIPT_KEY];
@@ -91,6 +92,8 @@ export class MoveRegistryProjectError extends MoveError {}
 export class MoveSchemaError extends MoveError {}
 /** The source is fenced toward a different counterpart: it was already moved elsewhere. */
 export class MoveSourceFencedError extends MoveError {}
+/** The store carries a rename fence: domain-doctor rename left it as the old copy of a renamed domain. */
+export class MoveRenamedStoreError extends MoveError {}
 /** The target holds data and no receipt or untouched fence makes it this move's own. */
 export class MoveTargetNotEmptyError extends MoveError {}
 /** An id would mean two things: in records and record_aliases, or in source and target. */
@@ -398,15 +401,30 @@ export interface MoveReceipt {
   committed_at: string;
 }
 
+/**
+ * The move fence a store carries, null for none. A rename fence (the old copy
+ * of a domain that domain-doctor rename renamed) is refused, never read as a
+ * move fence: moving or overwriting that file would move the backup of a
+ * domain that now lives under another name.
+ */
 function parseFence(value: string | undefined, where: string): MoveFence | null {
   if (value === undefined) return null;
+  let f;
   try {
-    const f = JSON.parse(value) as MoveFence;
-    if (typeof f.move_id === 'string' && typeof f.to === 'string') return f;
+    f = parseStoreFence(value);
   } catch {
-    /* refused below */
+    throw new MoveSchemaError(`${where}: store_meta '${MOVE_FENCE_KEY}' is not a move fence (${value.slice(0, 80)}); refusing to guess`);
   }
-  throw new MoveSchemaError(`${where}: store_meta '${MOVE_FENCE_KEY}' is not a move fence (${value.slice(0, 80)}); refusing to guess`);
+  if (f.kind === 'rename') {
+    throw new MoveRenamedStoreError(
+      `${where} is the fenced old copy of domain '${f.from_domain}', which domain-doctor rename renamed to '${f.to_domain}' ` +
+        `(store at '${f.to_path}', operation ${f.operation_id}). A store move never reads or writes a renamed store; nothing was moved. ` +
+        `Mount '${f.to_domain}' instead.`
+    );
+  }
+  // The stored value as it was: a move fence is written with no `kind`.
+  const { kind: _kind, ...stored } = f;
+  return stored as unknown as MoveFence;
 }
 
 function parseReceipt(value: string, where: string): MoveReceipt {
@@ -599,6 +617,13 @@ export function writeSqliteFence(path: string, fence: MoveFence): void {
  * move copies that hold rows, counted inside that same transaction, as
  * nonEmptyTables names them. A check that throws rolls back with no fence
  * written, and no other write can land between the count and the fence.
+ *
+ * The fence already in the store is re-read under the same lock, because a
+ * caller's earlier read can be stale: a domain-doctor rename may have fenced
+ * the store since. A rename fence refuses (MoveRenamedStoreError, through
+ * parseFence) and a move fence from another move refuses
+ * (MoveSourceFencedError); the row is written only when no fence is there or
+ * when the fence there carries this move's id.
  */
 function writeSqliteFenceChecked(path: string, fence: MoveFence, check: ((occupied: string[], records: number) => void) | null): void {
   const driver = new SqliteDriver(path);
@@ -608,6 +633,13 @@ function writeSqliteFenceChecked(path: string, fence: MoveFence, check: ((occupi
       if (check) {
         const counts = MOVE_TABLES.map((t) => ({ name: t.name, n: Number((driver.prepare(`SELECT COUNT(*) AS n FROM ${t.name}${whereClause(t)}`).get() as { n: number | bigint }).n) }));
         check(counts.filter((c) => c.n > 0).map((c) => `${c.name} (${c.n})`), counts.find((c) => c.name === 'records')!.n);
+      }
+      const current = driver.prepare('SELECT value FROM store_meta WHERE key = ?').get(MOVE_FENCE_KEY) as { value: string } | undefined;
+      const existing = parseFence(current?.value, sqliteLabel(path));
+      if (existing && existing.move_id !== fence.move_id) {
+        throw new MoveSourceFencedError(
+          `${sqliteLabel(path)} is fenced by move ${existing.move_id} (to ${existing.to}), not by move ${fence.move_id}; the fence was left as it is. Nothing was moved.`
+        );
       }
       driver.prepare(upsertMetaSql()).run(MOVE_FENCE_KEY, JSON.stringify(fence), new Date().toISOString());
       driver.commit();

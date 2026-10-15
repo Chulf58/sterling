@@ -369,6 +369,8 @@ export const BIN_ENTRIES = {
   'concept-designed': 'scripts/concept-designed.mjs',
   'debug-scope': 'scripts/debug-scope.mjs',
   'direct-merge': 'scripts/direct-merge.mjs',
+  // the domain rename skills/mounting-domains/SKILL.md runs on each machine; an installed copy has no packages/*/dist
+  'domain-doctor': 'scripts/domain-doctor.mjs',
   // the domain map and --apply that commands/domains.md runs in a consumer project
   domains: 'scripts/domains.mjs',
   'fs-remove': 'scripts/fs-remove.mjs',
