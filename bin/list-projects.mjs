@@ -7,9 +7,7 @@ var __export = (target, all) => {
 };
 
 // scripts/list-projects.mjs
-import { statSync, cpSync, existsSync as existsSync3, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, readdirSync as readdirSync2, readlinkSync, realpathSync as realpathSync2, rmSync } from "node:fs";
-import { basename, isAbsolute, join as join5, relative, resolve as resolve2, sep as sep2 } from "node:path";
-import { createRequire } from "node:module";
+import { existsSync as existsSync4 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5717,6 +5715,10 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
   return deduped;
 }).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 
+// scripts/lib/project-remove.mjs
+import { cpSync, existsSync as existsSync3, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, readdirSync as readdirSync2, readlinkSync, realpathSync as realpathSync2, rmSync, statSync } from "node:fs";
+import { basename, isAbsolute, join as join5, relative, resolve as resolve2, sep as sep2 } from "node:path";
+
 // scripts/lib/sterling-roots.mjs
 import { existsSync as existsSync2, readFileSync as readFileSync2, readdirSync, realpathSync } from "node:fs";
 import { homedir as homedir4 } from "node:os";
@@ -5920,65 +5922,9 @@ var LAUNCHER_GITIGNORE_ENTRIES = [
 // scripts/lib/update-launcher.mjs
 var UPDATE_LAUNCHER_NAME = "sterling-update.bat";
 
-// scripts/list-projects.mjs
-function usage(msg) {
-  console.error(`list-projects REFUSED: ${msg}
-usage: list-projects.mjs [--prune-missing] | --remove <path> [--apply]`);
-  process.exit(2);
-}
-function parseArgs(argv) {
-  const out = { prune: false, remove: void 0, apply: false };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--prune-missing") out.prune = true;
-    else if (a === "--apply") out.apply = true;
-    else if (a === "--remove") {
-      const v = argv[++i];
-      if (v === void 0 || v.startsWith("--")) usage("--remove needs a path");
-      if (out.remove !== void 0) usage("--remove given more than once");
-      out.remove = v;
-    } else usage(`unknown argument '${a}'`);
-  }
-  if (out.apply && out.remove === void 0) usage("--apply needs --remove <path>");
-  if (out.prune && out.remove !== void 0) usage("--prune-missing and --remove cannot be combined");
-  return out;
-}
+// scripts/lib/project-remove.mjs
 var LEFTOVER_NAMES = ["AGENTS.md", "CLAUDE.md", ".opencode", ".claude", ...LAUNCHER_GITIGNORE_ENTRIES, UPDATE_LAUNCHER_NAME];
 var STORE_FILES = ["sterling.db", "sterling.db-wal", "sterling.db-shm"];
-function listProjects(prune) {
-  if (prune) {
-    let removed = 0;
-    for (const p of registry.list()) {
-      if (!existsSync3(p.repo_path)) {
-        registry.remove(p.repo_path);
-        removed++;
-      }
-    }
-    console.log(`Pruned ${removed} missing project${removed === 1 ? "" : "s"}.
-`);
-  }
-  const rows = registry.list();
-  if (!rows.length) {
-    console.log("No projects registered yet \u2014 run /sterling:init in a project to register it.");
-    return;
-  }
-  console.log(`${rows.length} registered Sterling project${rows.length === 1 ? "" : "s"}:
-`);
-  for (const p of rows) {
-    const live = existsSync3(p.repo_path);
-    const tags = p.stack_tags.length ? p.stack_tags.join(", ") : "\u2014";
-    const tools = p.toolchains.length ? p.toolchains.join(", ") : "\u2014";
-    const seen = p.last_seen_at ? p.last_seen_at.slice(0, 10) : "never";
-    console.log(`${live ? "\u2022" : "\u2717"} ${p.name}  (${p.repo_path})${live ? "" : "  \u2014 MISSING"}`);
-    console.log(`    domains/tags: [${tags}]   toolchains: [${tools}]   sterling: ${p.sterling_version ?? "?"}`);
-    console.log(`    first init: ${p.first_init_at.slice(0, 10)}   last init: ${p.last_init_at.slice(0, 10)}   last seen: ${seen}`);
-  }
-  const missing = rows.filter((p) => !existsSync3(p.repo_path)).length;
-  if (missing && !prune) {
-    console.log(`
-${missing} project${missing === 1 ? "" : "s"} MISSING (path gone). Prune with: node "<Sterling root>/bin/list-projects.mjs" --prune-missing`);
-  }
-}
 function lstatOrUndefined(p) {
   try {
     return lstatSync(p);
@@ -6000,31 +5946,30 @@ function pathForms(p) {
   }
   return forms;
 }
-var PROC = process.env.STERLING_PROC_ROOT ?? "/proc";
 var vanished = (e) => e?.code === "ENOENT" || e?.code === "ESRCH";
-function ownedByMe(pid) {
+function ownedByMe(pid, proc) {
   const me = process.getuid();
   try {
-    const m = readFileSync3(`${PROC}/${pid}/status`, "utf8").match(/^Uid:\s+(\d+)\s+(\d+)/m);
+    const m = readFileSync3(`${proc}/${pid}/status`, "utf8").match(/^Uid:\s+(\d+)\s+(\d+)/m);
     if (m) return Number(m[1]) === me || Number(m[2]) === me;
   } catch (e) {
     if (vanished(e)) return void 0;
   }
   try {
-    return statSync(`${PROC}/${pid}`).uid === me;
+    return statSync(`${proc}/${pid}`).uid === me;
   } catch (e) {
     if (vanished(e)) return void 0;
     throw e;
   }
 }
-function nameOf(pid) {
+function nameOf(pid, proc) {
   try {
-    const comm = readFileSync3(`${PROC}/${pid}/comm`, "utf8").trim();
+    const comm = readFileSync3(`${proc}/${pid}/comm`, "utf8").trim();
     if (comm) return comm;
   } catch {
   }
   try {
-    const argv0 = readFileSync3(`${PROC}/${pid}/cmdline`, "utf8").split("\0")[0];
+    const argv0 = readFileSync3(`${proc}/${pid}/cmdline`, "utf8").split("\0")[0];
     if (argv0) return basename(argv0);
   } catch {
   }
@@ -6034,29 +5979,29 @@ var STERLING_CAPABLE = /* @__PURE__ */ new Set(["node", "bun", "opencode", "clau
 function couldBeSterling(name) {
   return name === void 0 || STERLING_CAPABLE.has(name) || /sterling/i.test(name);
 }
-function commOf(pid) {
+function commOf(pid, proc) {
   try {
-    return readFileSync3(`${PROC}/${pid}/comm`, "utf8").trim();
+    return readFileSync3(`${proc}/${pid}/comm`, "utf8").trim();
   } catch {
     return "?";
   }
 }
-function openHolders(files) {
+function openHolders(files, proc) {
   let pids;
   try {
-    pids = readdirSync2(PROC).filter((d) => /^\d+$/.test(d));
+    pids = readdirSync2(proc).filter((d) => /^\d+$/.test(d));
   } catch (e) {
-    return { ran: false, reason: `${PROC} is not readable (${e.code ?? e.message})` };
+    return { ran: false, reason: `${proc} is not readable (${e.code ?? e.message})` };
   }
   const wanted = new Set(files);
   const holders = [];
   const sameUserBlind = [];
   let otherUserBlind = 0;
   const blind = (pid, e) => {
-    const mine = ownedByMe(pid);
+    const mine = ownedByMe(pid, proc);
     if (mine === void 0) return;
     if (mine) {
-      const name = nameOf(pid);
+      const name = nameOf(pid, proc);
       sameUserBlind.push({ pid: Number(pid), command: name ?? "unknown", possiblySterling: couldBeSterling(name), reason: e.code ?? e.message });
     } else otherUserBlind++;
   };
@@ -6064,7 +6009,7 @@ function openHolders(files) {
     if (Number(pid) === process.pid) continue;
     let fds;
     try {
-      fds = readdirSync2(`${PROC}/${pid}/fd`);
+      fds = readdirSync2(`${proc}/${pid}/fd`);
     } catch (e) {
       if (!vanished(e)) blind(pid, e);
       continue;
@@ -6072,7 +6017,7 @@ function openHolders(files) {
     for (const fd of fds) {
       let link;
       try {
-        link = readlinkSync(`${PROC}/${pid}/fd/${fd}`);
+        link = readlinkSync(`${proc}/${pid}/fd/${fd}`);
       } catch (e) {
         if (vanished(e)) continue;
         blind(pid, e);
@@ -6087,7 +6032,7 @@ function openHolders(files) {
 function utcStamp(d) {
   return d.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
 }
-function inspect(input, stamp) {
+function inspect(ctx, input, stamp) {
   const refusals = [];
   const abs = resolve2(input);
   const t = { input, path: abs, refusals };
@@ -6100,7 +6045,7 @@ function inspect(input, stamp) {
     if (real !== abs) refusals.push(`${abs} resolves through a symlink to ${real}; pass the canonical path`);
     t.real = real;
   }
-  const rows = registry.list().filter((r) => {
+  const rows = ctx.registry.list().filter((r) => {
     if (sameLocationAnyHost(r.repo_path, abs) || t.real && sameLocationAnyHost(r.repo_path, t.real)) return true;
     if (!t.real) return false;
     try {
@@ -6144,7 +6089,7 @@ function inspect(input, stamp) {
     }
   }
   if (pathForms(registryPath()).some((p) => isWithin(p, dir))) refusals.push(`the project registry ${registryPath()} is inside ${dir}`);
-  for (const other of registry.list()) {
+  for (const other of ctx.registry.list()) {
     if (rows.some((r) => r.repo_path === other.repo_path) || !existsSync3(other.repo_path)) continue;
     let otherRaw;
     try {
@@ -6167,7 +6112,7 @@ function inspect(input, stamp) {
     }
   }
   t.storeFiles = STORE_FILES.map((f) => join5(dir, f));
-  const open = openHolders(t.storeFiles);
+  const open = openHolders(t.storeFiles, ctx.procRoot);
   if (!open.ran) refusals.push(`the open-store check could not run: ${open.reason}`);
   else {
     for (const h of open.holders) refusals.push(`process ${h.pid} (${h.command}) has ${h.file} open; close that session first`);
@@ -6180,17 +6125,13 @@ function inspect(input, stamp) {
   }
   return t;
 }
-function testHookBeforeStoreRead() {
-  const hook = process.env.STERLING_TEST_BEFORE_STORE_READ;
-  if (hook) createRequire(new URL("../scripts/list-projects.mjs", import.meta.url).href)(resolve2(hook));
-}
-function storeSummary(dir) {
+function storeSummary(dir, beforeStoreRead) {
   const dbPath = join5(dir, "sterling.db");
   if (!existsSync3(dbPath)) return { error: "no sterling.db" };
   const hadWal = existsSync3(`${dbPath}-wal`);
   const hadShm = existsSync3(`${dbPath}-shm`);
   if (hadWal && !hadShm) return { error: "a -wal exists without a -shm, and reading would create the -shm; skipped" };
-  testHookBeforeStoreRead();
+  beforeStoreRead?.();
   let db;
   const out = {};
   try {
@@ -6206,47 +6147,47 @@ function storeSummary(dir) {
   if (appeared.length) out.appeared = appeared;
   return out;
 }
-function dryRunRemove(input) {
-  const t = inspect(input, utcStamp(/* @__PURE__ */ new Date()));
-  console.log(`Remove preview (dry run; nothing is changed)
+function dryRunRemove(ctx, input) {
+  const t = inspect(ctx, input, utcStamp(/* @__PURE__ */ new Date()));
+  ctx.log(`Remove preview (dry run; nothing is changed)
 `);
   if (t.unregisterOnly && !t.refusals.length) {
-    console.log(`Registry: registered under ${t.row.name} (${t.row.repo_path})`);
-    console.log(`Store already removed (${t.sterlingDir} does not exist); --apply only unregisters ${t.row.name}. No backup and no open check are needed, because nothing is deleted.`);
+    ctx.log(`Registry: registered under ${t.row.name} (${t.row.repo_path})`);
+    ctx.log(`Store already removed (${t.sterlingDir} does not exist); --apply only unregisters ${t.row.name}. No backup and no open check are needed, because nothing is deleted.`);
     return 0;
   }
-  console.log(`Directory to delete: ${t.sterlingDir ?? `${t.path}/.sterling`}`);
-  console.log(`Registry: ${t.row ? `registered under ${t.row.name} (${t.row.repo_path})` : "not registered"}`);
+  ctx.log(`Directory to delete: ${t.sterlingDir ?? `${t.path}/.sterling`}`);
+  ctx.log(`Registry: ${t.row ? `registered under ${t.row.name} (${t.row.repo_path})` : "not registered"}`);
   if (t.sterlingDir && existsSync3(t.sterlingDir) && lstatSync(t.sterlingDir).isDirectory()) {
-    const s = storeSummary(t.sterlingDir);
-    if (s.error) console.log(`Records: could not be read (${s.error})`);
+    const s = storeSummary(t.sterlingDir, ctx.beforeStoreRead);
+    if (s.error) ctx.log(`Records: could not be read (${s.error})`);
     else {
       const parts = Object.entries(s.byType).map(([k, n]) => `${k} ${n}`);
-      console.log(`Records by type: ${parts.length ? parts.join(", ") : "none"}`);
-      console.log(`Open board items: ${s.openBoardItems}`);
+      ctx.log(`Records by type: ${parts.length ? parts.join(", ") : "none"}`);
+      ctx.log(`Open board items: ${s.openBoardItems}`);
     }
-    if (s.appeared) console.log(`  ${s.appeared.join(", ")} appeared during the read (a writer may have started); left in place`);
+    if (s.appeared) ctx.log(`  ${s.appeared.join(", ")} appeared during the read (a writer may have started); left in place`);
     const others = readdirSync2(t.sterlingDir, { withFileTypes: true }).filter((e) => !STORE_FILES.includes(e.name)).map((e) => e.isDirectory() ? `${e.name}/` : e.name);
-    console.log(`Other entries inside .sterling (deleted too): ${others.length ? others.join(", ") : "none"}`);
+    ctx.log(`Other entries inside .sterling (deleted too): ${others.length ? others.join(", ") : "none"}`);
   }
   if (t.real) {
     const left = LEFTOVER_NAMES.filter((n) => existsSync3(join5(t.real, n)));
-    console.log(`Left in place outside .sterling (never deleted): ${left.length ? left.join(", ") : "none"}`);
-    if (left.includes(".opencode")) console.log(`  .opencode is still active: OpenCode loads ancestor configs into nested projects, so remove it by hand if that matters`);
+    ctx.log(`Left in place outside .sterling (never deleted): ${left.length ? left.join(", ") : "none"}`);
+    if (left.includes(".opencode")) ctx.log(`  .opencode is still active: OpenCode loads ancestor configs into nested projects, so remove it by hand if that matters`);
   }
-  console.log(`Backup destination: ${t.backupDest ?? "none (see refusals)"}`);
-  if (t.uninspectable === void 0) console.log(`Open check: did not run`);
+  ctx.log(`Backup destination: ${t.backupDest ?? "none (see refusals)"}`);
+  if (t.uninspectable === void 0) ctx.log(`Open check: did not run`);
   else {
-    console.log(`Open check: ran over /proc (best effort). A process of this user that cannot be inspected refuses when its command is node, bun, opencode, claude or sqlite3, contains "sterling", or cannot be read; ${t.uninspectable} process(es) of other users could not be inspected and do not refuse. A Windows-side handle or a later session is not seen`);
-    for (const w of t.openWarnings) console.log(`  warning: ${w}`);
+    ctx.log(`Open check: ran over /proc (best effort). A process of this user that cannot be inspected refuses when its command is node, bun, opencode, claude or sqlite3, contains "sterling", or cannot be read; ${t.uninspectable} process(es) of other users could not be inspected and do not refuse. A Windows-side handle or a later session is not seen`);
+    for (const w of t.openWarnings) ctx.log(`  warning: ${w}`);
   }
   if (t.refusals.length) {
-    console.log(`
+    ctx.log(`
 --apply would REFUSE:`);
-    for (const r of t.refusals) console.log(`  - ${r}`);
+    for (const r of t.refusals) ctx.log(`  - ${r}`);
     return 1;
   }
-  console.log(`
+  ctx.log(`
 --apply would proceed: back up, verify, delete ${t.sterlingDir}, ${t.row ? "unregister" : "nothing to unregister"}.`);
   return 0;
 }
@@ -6261,22 +6202,22 @@ function tree(dir, rel = "", out = /* @__PURE__ */ new Map()) {
   }
   return out;
 }
-function applyRemove(input) {
+function applyRemove(ctx, input) {
   const stamp = utcStamp(/* @__PURE__ */ new Date());
   const steps = [];
   const result = { remove: resolve2(input), apply: true, steps, ok: false };
   const finish = (code) => {
     result.ok = code === 0;
-    console.log(JSON.stringify(result, null, 2));
+    ctx.log(JSON.stringify(result, null, 2));
     return code;
   };
-  const t = inspect(input, stamp);
+  const t = inspect(ctx, input, stamp);
   if (t.refusals.length) {
     steps.push({ step: "validate", ok: false, refusals: t.refusals });
     return finish(1);
   }
   steps.push({ step: "validate", ok: true, ...t.openWarnings?.length ? { warnings: t.openWarnings } : {}, mode: t.unregisterOnly ? "unregister-only" : "remove", target: t.sterlingDir, registered: t.row ? t.row.repo_path : null });
-  if (t.unregisterOnly) return finish(unregister(t, steps));
+  if (t.unregisterOnly) return finish(unregister(ctx, t, steps));
   try {
     mkdirSync2(t.backupRoot, { recursive: true });
     if (existsSync3(t.backupDest)) throw new Error(`${t.backupDest} already exists`);
@@ -6301,7 +6242,7 @@ function applyRemove(input) {
     steps.push({ step: "verify", ok: false, error: e.message, note: "nothing was deleted" });
     return finish(1);
   }
-  const again = inspect(input, stamp);
+  const again = inspect(ctx, input, stamp);
   if (again.refusals.length || again.real !== t.real || again.row?.repo_path !== t.row?.repo_path) {
     steps.push({ step: "recheck", ok: false, refusals: again.refusals.length ? again.refusals : ["the target or its registry row changed during the backup"], note: "nothing was deleted; the backup remains" });
     return finish(1);
@@ -6314,15 +6255,15 @@ function applyRemove(input) {
     steps.push({ step: "delete", ok: false, error: e.message, note: `the delete may be partial; the verified backup is at ${t.backupDest}` });
     return finish(1);
   }
-  return finish(unregister(t, steps));
+  return finish(unregister(ctx, t, steps));
 }
-function unregister(t, steps) {
+function unregister(ctx, t, steps) {
   if (!t.row) {
     steps.push({ step: "unregister", ok: true, skipped: "not registered" });
     return 0;
   }
   try {
-    if (!registry.remove(t.row.repo_path)) throw new Error(`no row for ${t.row.repo_path} was found to remove`);
+    if (!ctx.registry.remove(t.row.repo_path)) throw new Error(`no row for ${t.row.repo_path} was found to remove`);
     steps.push({ step: "unregister", ok: true, removed: t.row.repo_path });
     return 0;
   } catch (e) {
@@ -6335,10 +6276,72 @@ function unregister(t, steps) {
     return 1;
   }
 }
+function removeProject(registry2, input, { apply = false, procRoot = "/proc", beforeStoreRead, log = console.log } = {}) {
+  const ctx = { registry: registry2, procRoot, beforeStoreRead, log };
+  return apply ? applyRemove(ctx, input) : dryRunRemove(ctx, input);
+}
+
+// scripts/list-projects.mjs
+function usage(msg) {
+  console.error(`list-projects REFUSED: ${msg}
+usage: list-projects.mjs [--prune-missing] | --remove <path> [--apply]`);
+  process.exit(2);
+}
+function parseArgs(argv) {
+  const out = { prune: false, remove: void 0, apply: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--prune-missing") out.prune = true;
+    else if (a === "--apply") out.apply = true;
+    else if (a === "--remove") {
+      const v = argv[++i];
+      if (v === void 0 || v.startsWith("--")) usage("--remove needs a path");
+      if (out.remove !== void 0) usage("--remove given more than once");
+      out.remove = v;
+    } else usage(`unknown argument '${a}'`);
+  }
+  if (out.apply && out.remove === void 0) usage("--apply needs --remove <path>");
+  if (out.prune && out.remove !== void 0) usage("--prune-missing and --remove cannot be combined");
+  return out;
+}
+function listProjects(prune) {
+  if (prune) {
+    let removed = 0;
+    for (const p of registry.list()) {
+      if (!existsSync4(p.repo_path)) {
+        registry.remove(p.repo_path);
+        removed++;
+      }
+    }
+    console.log(`Pruned ${removed} missing project${removed === 1 ? "" : "s"}.
+`);
+  }
+  const rows = registry.list();
+  if (!rows.length) {
+    console.log("No projects registered yet \u2014 run /sterling:init in a project to register it.");
+    return;
+  }
+  console.log(`${rows.length} registered Sterling project${rows.length === 1 ? "" : "s"}:
+`);
+  for (const p of rows) {
+    const live = existsSync4(p.repo_path);
+    const tags = p.stack_tags.length ? p.stack_tags.join(", ") : "\u2014";
+    const tools = p.toolchains.length ? p.toolchains.join(", ") : "\u2014";
+    const seen = p.last_seen_at ? p.last_seen_at.slice(0, 10) : "never";
+    console.log(`${live ? "\u2022" : "\u2717"} ${p.name}  (${p.repo_path})${live ? "" : "  \u2014 MISSING"}`);
+    console.log(`    domains/tags: [${tags}]   toolchains: [${tools}]   sterling: ${p.sterling_version ?? "?"}`);
+    console.log(`    first init: ${p.first_init_at.slice(0, 10)}   last init: ${p.last_init_at.slice(0, 10)}   last seen: ${seen}`);
+  }
+  const missing = rows.filter((p) => !existsSync4(p.repo_path)).length;
+  if (missing && !prune) {
+    console.log(`
+${missing} project${missing === 1 ? "" : "s"} MISSING (path gone). Prune with: node "<Sterling root>/bin/list-projects.mjs" --prune-missing`);
+  }
+}
 var args = parseArgs(process.argv.slice(2));
 var registry = new ProjectRegistry(registryPath());
 try {
-  if (args.remove !== void 0) process.exitCode = args.apply ? applyRemove(args.remove) : dryRunRemove(args.remove);
+  if (args.remove !== void 0) process.exitCode = removeProject(registry, args.remove, { apply: args.apply });
   else listProjects(args.prune);
 } finally {
   registry.close();

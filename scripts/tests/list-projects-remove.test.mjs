@@ -17,9 +17,11 @@ const SCRIPT = join(root, 'scripts', 'list-projects.mjs');
 
 let ProjectRegistry;
 let SterlingStore;
+let removeProject;
 let tmp;
 before(async () => {
   ({ ProjectRegistry, SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
+  ({ removeProject } = await import(pathToFileURL(join(root, 'scripts', 'lib', 'project-remove.mjs')).href));
   tmp = mkdtempSync(join(tmpdir(), 'sterling-list-projects-remove-'));
 });
 after(() => rmSync(tmp, { recursive: true, force: true }));
@@ -66,8 +68,7 @@ function rows(registryDb) {
   }
 }
 
-/** An empty fake /proc: the default, so a case does not depend on this machine's process
- *  table. The open-handle case passes the real /proc through `extraEnv`. */
+/** An empty fake /proc for the module-level cases (removeProject's procRoot). */
 function fakeProc() {
   return mkdtempSync(join(tmp, 'proc-'));
 }
@@ -77,9 +78,23 @@ function run(registryDb, ...args) {
   const r = spawnSync(process.execPath, [SCRIPT, ...args], {
     encoding: 'utf8',
     timeout: 60_000,
-    env: { ...process.env, STERLING_REGISTRY_DB: registryDb, STERLING_PROC_ROOT: fakeProc(), OPENCODE: undefined, OPENCODE_SESSION_ID: undefined, ...extraEnv },
+    env: { ...process.env, STERLING_REGISTRY_DB: registryDb, OPENCODE: undefined, OPENCODE_SESSION_ID: undefined, ...extraEnv },
   });
   return { code: r.status, out: `${r.stdout}${r.stderr}`, stdout: r.stdout };
+}
+
+/** removeProject called in-process with injected deps (fake /proc, before-read callback):
+ *  the only way to reach those seams, since the CLI passes neither. */
+function direct(s, target, deps = {}, apply = false) {
+  const lines = [];
+  const registry = new ProjectRegistry(s.registryDb);
+  try {
+    const code = removeProject(registry, target, { ...deps, apply, log: (l) => lines.push(l) });
+    const out = lines.join('\n');
+    return { code, out, stdout: out };
+  } finally {
+    registry.close();
+  }
 }
 
 test('dry run lists target, registration, counts, other entries, leftovers and backup; exits 0; changes nothing', () => {
@@ -120,12 +135,13 @@ test('flag refusals: unknown flag, --apply without --remove, --remove with --pru
 });
 
 /** Expect both the dry run and --apply to refuse with `pattern`, deleting nothing. */
-function expectRefusal(s, target, pattern, env = {}) {
-  const dry = run(s.registryDb, '--remove', target, env);
+function expectRefusal(s, target, pattern, deps) {
+  const invoke = (apply) => (deps ? direct(s, target, deps, apply) : run(s.registryDb, '--remove', target, ...(apply ? ['--apply'] : [])));
+  const dry = invoke(false);
   assert.notEqual(dry.code, 0, dry.out);
   assert.match(dry.out, /--apply would REFUSE/, dry.out);
   assert.match(dry.out, pattern, dry.out);
-  const app = run(s.registryDb, '--remove', target, '--apply', env);
+  const app = invoke(true);
   assert.equal(app.code, 1, app.out);
   const res = JSON.parse(app.stdout);
   assert.equal(res.ok, false);
@@ -260,7 +276,7 @@ test('refuses while another process holds the store open, naming its pid', async
       holder.stdout.on('data', (d) => d.toString().includes('ready') && res());
       holder.on('exit', (c) => rej(new Error(`holder exited ${c}`)));
     });
-    expectRefusal(s, s.project, new RegExp(`process ${holder.pid} \\(.*\\) has .*sterling\\.db open`), { STERLING_PROC_ROOT: '/proc' });
+    expectRefusal(s, s.project, new RegExp(`process ${holder.pid} \\(.*\\) has .*sterling\\.db open`));
   } finally {
     holder.kill();
   }
@@ -332,9 +348,7 @@ test('--prune-missing is unchanged: removes only rows whose path is gone', () =>
 test('the dry run never deletes a -wal that appears after its sidecar checks', () => {
   const s = sandbox();
   const wal = join(s.sterling, 'sterling.db-wal');
-  const hook = join(s.dir, 'writer-starts.cjs');
-  writeFileSync(hook, `require('node:fs').writeFileSync(${JSON.stringify(wal)}, 'committed frames from a writer');\n`);
-  const r = run(s.registryDb, '--remove', s.project, { STERLING_TEST_BEFORE_STORE_READ: hook });
+  const r = direct(s, s.project, { procRoot: fakeProc(), beforeStoreRead: () => writeFileSync(wal, 'committed frames from a writer') });
   assert.equal(r.code, 0, r.out);
   assert.ok(existsSync(wal), 'the -wal a writer created during the preview is still there');
   assert.equal(readFileSync(wal, 'utf8'), 'committed frames from a writer');
@@ -374,7 +388,7 @@ test('open check: a same-uid node process whose fds cannot be read refuses, nami
   const proc = fakeProc();
   const restore = blindPid(proc, 999991, process.getuid(), 'node');
   try {
-    expectRefusal(s, s.project, /process 999991 \(node\) runs as this user, could hold a Sterling store, and its open files cannot be read \(EACCES\)/, { STERLING_PROC_ROOT: proc });
+    expectRefusal(s, s.project, /process 999991 \(node\) runs as this user, could hold a Sterling store, and its open files cannot be read \(EACCES\)/, { procRoot: proc });
   } finally {
     restore();
   }
@@ -385,7 +399,7 @@ test('open check: an other-uid process whose fds cannot be read is disclosed, ne
   const proc = fakeProc();
   const restore = blindPid(proc, 999992, process.getuid() + 1, 'theirs');
   try {
-    const r = run(s.registryDb, '--remove', s.project, { STERLING_PROC_ROOT: proc });
+    const r = direct(s, s.project, { procRoot: proc });
     assert.equal(r.code, 0, r.out);
     assert.match(r.out, /1 process\(es\) of other users could not be inspected and do not refuse/, r.out);
     assert.doesNotMatch(r.out, /999992/, r.out);
@@ -396,7 +410,7 @@ test('open check: an other-uid process whose fds cannot be read is disclosed, ne
 
 test('open check: an unreadable /proc refuses and says the check could not run', () => {
   const s = sandbox();
-  expectRefusal(s, s.project, /the open-store check could not run: .* is not readable/, { STERLING_PROC_ROOT: join(s.dir, 'no-proc') });
+  expectRefusal(s, s.project, /the open-store check could not run: .* is not readable/, { procRoot: join(s.dir, 'no-proc') });
 });
 
 // User ruling 2026-10-15, "Refuse only if it could be Sterling (Recommended)".
@@ -406,11 +420,11 @@ test('open check: same-uid uninspectable (sd-pam) and msedge are warned, never r
   const proc = fakeProc();
   const restores = [blindPid(proc, 999993, process.getuid(), '(sd-pam)'), blindPid(proc, 999994, process.getuid(), 'msedge')];
   try {
-    const dry = run(s.registryDb, '--remove', s.project, { STERLING_PROC_ROOT: proc });
+    const dry = direct(s, s.project, { procRoot: proc });
     assert.equal(dry.code, 0, dry.out);
     assert.match(dry.out, /warning: process 999993 \(\(sd-pam\)\) runs as this user .* does not refuse/, dry.out);
     assert.match(dry.out, /warning: process 999994 \(msedge\) runs as this user .* does not refuse/, dry.out);
-    const app = run(s.registryDb, '--remove', s.project, '--apply', { STERLING_PROC_ROOT: proc });
+    const app = direct(s, s.project, { procRoot: proc }, true);
     assert.equal(app.code, 0, app.out);
     const res = JSON.parse(app.stdout);
     assert.equal(res.steps[0].warnings.length, 2);
@@ -426,7 +440,7 @@ test('open check: a same-uid uninspectable process whose command name cannot be 
   const restore = blindPid(proc, 999995, process.getuid(), 'hidden');
   chmodSync(join(proc, '999995', 'comm'), 0o000);
   try {
-    expectRefusal(s, s.project, /process 999995 \(unknown\) runs as this user, could hold a Sterling store/, { STERLING_PROC_ROOT: proc });
+    expectRefusal(s, s.project, /process 999995 \(unknown\) runs as this user, could hold a Sterling store/, { procRoot: proc });
   } finally {
     restore();
   }
@@ -437,8 +451,30 @@ test('open check: a same-uid uninspectable process whose name contains "sterling
   const proc = fakeProc();
   const restore = blindPid(proc, 999996, process.getuid(), 'sterling-mcp');
   try {
-    expectRefusal(s, s.project, /process 999996 \(sterling-mcp\) runs as this user, could hold a Sterling store/, { STERLING_PROC_ROOT: proc });
+    expectRefusal(s, s.project, /process 999996 \(sterling-mcp\) runs as this user, could hold a Sterling store/, { procRoot: proc });
   } finally {
     restore();
+  }
+});
+
+// Sol re-check: no environment variable may change the shipped command's safety checks.
+
+test('the CLI ignores STERLING_PROC_ROOT: with it set to an empty dir, an open store still refuses naming the pid', async () => {
+  const s = sandbox();
+  const holder = spawn(process.execPath, ['-e', `const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(${JSON.stringify(join(s.sterling, 'sterling.db'))}); db.prepare('SELECT 1').get(); console.log('ready'); setInterval(() => {}, 1000);`], { stdio: ['ignore', 'pipe', 'inherit'] });
+  try {
+    await new Promise((res, rej) => {
+      holder.stdout.on('data', (d) => d.toString().includes('ready') && res());
+      holder.on('exit', (c) => rej(new Error(`holder exited ${c}`)));
+    });
+    const empty = fakeProc();
+    for (const args of [['--remove', s.project], ['--remove', s.project, '--apply']]) {
+      const r = run(s.registryDb, ...args, { STERLING_PROC_ROOT: empty, STERLING_TEST_BEFORE_STORE_READ: join(s.dir, 'no-such-module.cjs') });
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, new RegExp(`process ${holder.pid} \\(.*\\) has .*sterling\\.db open`), r.out);
+    }
+    assert.ok(existsSync(join(s.sterling, 'sterling.db')));
+  } finally {
+    holder.kill();
   }
 });
