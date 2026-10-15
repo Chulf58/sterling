@@ -33,7 +33,7 @@ import {
   type ToolStore,
 } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
-import { HANDOFFS_DIR_REL, todoHandoffSchema, type HandoffClosure } from '@sterling/schemas';
+import { HANDOFF_MILESTONE_MAX, HANDOFFS_DIR_REL, handoffEvidenceSchema, todoHandoffSchema, type HandoffClosure, type HandoffEvidence, type HandoffEvidenceFile } from '@sterling/schemas';
 import { resolveHandoffTarget } from './handoff-target.js';
 import { AttestationRefusal, collectAttestationEvidence, readHeadFile, type AttestationEvidence } from './attestation-proof.js';
 import { EntryReachability, type EntryVerdict } from './entry-reachability.js';
@@ -288,7 +288,7 @@ export type BoardProjection = Projection | 'headline' | 'text';
  */
 export const BOARD_TEXT_CLIP = 240;
 
-const BOARD_TEXT_FIELDS = ['id', 'slug', 'objective', 'source', 'system_reason', 'status', 'priority', 'feature_link', 'blocked_by', 'needs', 'updated_at'] as const;
+const BOARD_TEXT_FIELDS = ['id', 'slug', 'objective', 'source', 'system_reason', 'status', 'priority', 'feature_link', 'blocked_by', 'needs', 'needs_reason', 'updated_at'] as const;
 
 function textRowRecord(record: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -10371,7 +10371,7 @@ export class SterlingTools {
   }
 
   /** The board_add fields a handoff carries; everything else is this repo's own context and is refused. */
-  private static readonly HANDOFF_FIELDS = ['target_project', 'text', 'source', 'objective', 'priority', 'needs'] as const;
+  private static readonly HANDOFF_FIELDS = ['target_project', 'text', 'source', 'objective', 'priority', 'needs', 'milestone'] as const;
 
   /**
    * board_add with target_project (GitHub issue #105, user-ruled 2026-10-15):
@@ -10388,6 +10388,9 @@ export class SterlingTools {
    * closure file the tracker's status is read from (resolveSentHandoffs).
    * objective groups the tracker on this board only; priority goes to both;
    * needs goes to the target's item only (the tracker is delegated).
+   * milestone (GitHub issue #108) is kept in the tracker's handoff only; the
+   * target's item gets it as a line of text, so the received handoff keeps the
+   * shape an older receiver validates.
    */
   private boardAddHandoff(args: Record<string, unknown>): CreateResult & { notice?: string; handoff_delivery: HandoffDelivery } {
     if (args.source !== 'user') throw new Error(`board_add: target_project hands over source:'user' board tasks only, never maintenance-queue items. Nothing was written.`);
@@ -10402,6 +10405,14 @@ export class SterlingTools {
     const { target_project, text, objective, priority, needs } = args;
     if (typeof target_project !== 'string' || target_project.length === 0) throw new Error(`board_add: target_project must be a registered project name. Nothing was written.`);
     if (typeof text !== 'string' || text.trim().length === 0) throw new Error(`board_add: text is required. Nothing was written.`);
+    let milestone: string | undefined;
+    if (args.milestone !== undefined) {
+      milestone = typeof args.milestone === 'string' ? args.milestone.trim() : '';
+      if (milestone.length === 0 || milestone.length > HANDOFF_MILESTONE_MAX) {
+        throw new Error(`board_add: milestone must be non-blank text of at most ${HANDOFF_MILESTONE_MAX} characters, saying what the other project should reach before closing. Nothing was written.`);
+      }
+    }
+    const milestoneField = milestone !== undefined ? { milestone } : {};
     const target = resolveHandoffTarget(target_project, this.repoRoot, this.registryPath);
     const fromRoot = this.repoRoot as string;
     const transferId = this.newId();
@@ -10414,7 +10425,7 @@ export class SterlingTools {
         source: 'user',
         ...(objective !== undefined ? { objective } : {}),
         ...(priority !== undefined ? { priority } : {}),
-        handoff: { role: 'sent', transfer_id: transferId, to_root: target.root, to_name: target.name, to_item_id: null },
+        handoff: { role: 'sent', transfer_id: transferId, to_root: target.root, to_name: target.name, to_item_id: null, ...milestoneField },
       });
     } catch (e) {
       throw new Error(`board_add target_project: step 1 of 3 (the tracker on this board) failed: ${(e as Error)?.message ?? String(e)} Nothing was written in either project.`, { cause: e });
@@ -10428,7 +10439,7 @@ export class SterlingTools {
       try {
         const remote = new SterlingTools({ store: routed.stores, config: routed.config, repoRoot: target.root, now: this.now, newId: this.newId });
         delivered = remote.boardAdd({
-          text: `${text}\n\nHanded over from project '${target.selfName}' (${fromRoot}); its tracker there is ${trackerId}.`,
+          text: `${text}\n\n${milestone !== undefined ? `Milestone to reach before closing: ${milestone}\n` : ''}Handed over from project '${target.selfName}' (${fromRoot}); its tracker there is ${trackerId}.`,
           source: 'user',
           objective: 'standalone',
           ...(priority !== undefined ? { priority } : {}),
@@ -10452,7 +10463,7 @@ export class SterlingTools {
     try {
       const current = this.store.get(trackerId);
       if (!current) throw new Error(`the tracker ${trackerId} is no longer on this board`);
-      const handoff = { role: 'sent', transfer_id: transferId, to_root: target.root, to_name: target.name, to_item_id: deliveredId };
+      const handoff = { role: 'sent', transfer_id: transferId, to_root: target.root, to_name: target.name, to_item_id: deliveredId, ...milestoneField };
       confirmed = this.store.updateTodo(trackerId, { ...current, handoff, updated_at: this.now() }, current.version !== undefined ? { expected_version: current.version } : {});
     } catch (e) {
       throw new Error(
@@ -11223,7 +11234,7 @@ export class SterlingTools {
    * changed nothing the caller asked for. An empty patch is refused for the
    * same reason: nothing to update is not a no-op success.
    */
-  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective', 'measured_at_head', 'blocked_by', 'needs'] as const;
+  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective', 'measured_at_head', 'blocked_by', 'needs', 'needs_reason'] as const;
 
   boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord & { claims_check?: string } {
     // Resolves through the SAME ladder as knowledge_get/board_get (full uuid,
@@ -11253,6 +11264,22 @@ export class SterlingTools {
       patch = { ...patch, blocked_by: this.resolveBlockedBy(patch.blocked_by, 'board_update', old.id) };
     }
     if ('needs' in patch && (old as unknown as { source?: string }).source === 'system') throw SterlingTools.needsSystemRefusal('board_update');
+    // needs_reason (GitHub issue #107): why the item waits for the user. It goes
+    // only with needs 'user' or 'grill', is cleared by '' and by any change of
+    // needs that does not give a new reason in the same call.
+    if ('needs_reason' in patch) {
+      const reason = patch.needs_reason;
+      if (typeof reason !== 'string') throw new Error(`board_update: needs_reason must be a string ('' clears it). Nothing was updated.`);
+      if (reason.trim().length > 0) {
+        const needsAfter = 'needs' in patch ? patch.needs : (old as unknown as { needs?: string }).needs;
+        if ((old as unknown as { source?: string }).source !== 'user' || (needsAfter !== 'user' && needsAfter !== 'grill')) {
+          throw new Error(
+            `board_update: needs_reason says why an item waits for the user, so it goes only with needs 'user' or 'grill' on a source:'user' board task; this item's needs would be ${needsAfter === undefined || needsAfter === '' ? 'absent' : `'${String(needsAfter)}'`}. Nothing was updated.`
+          );
+        }
+        patch = { ...patch, needs_reason: reason.trim() };
+      }
+    }
     // board-provenance-measured-at-head: a text/file_keys rewrite carries new
     // evidence, so it re-stamps measured_at_head to the CURRENT HEAD — unless
     // the caller explicitly named a measured_at_head in this same patch, which
@@ -11289,6 +11316,7 @@ export class SterlingTools {
     if (Array.isArray(next.blocked_by) && next.blocked_by.length === 0) delete next.blocked_by;
     // needs:'' clears the field to absent, the same way.
     if (next.needs === '') delete next.needs;
+    if (next.needs_reason === '' || ('needs' in patch && !('needs_reason' in patch))) delete next.needs_reason;
     // old.id (the resolved canonical id), not the caller's possibly-short
     // citation — a mounted domain store's routing (storeHolding) keys off the
     // real id, and a bare prefix would not resolve there.
@@ -12333,10 +12361,12 @@ export class SterlingTools {
    * Every refusal here NAMES WHY (removedItemError) — a bare "no record" is
    * what sent callers hunting for a deleted item in the first place.
    */
-  boardRemove(id: string, closeNote?: string): {
+  boardRemove(id: string, closeNote?: string, closeEvidence?: unknown): {
     removed: string;
     /** a received handoff item's closure file, written before the row was deleted */
     handoff_closure?: string;
+    /** a received handoff item's evidence sidecar, written before the closure file */
+    handoff_evidence?: string;
     artifact_evidence?: ArtifactEvidenceRecord[];
     /** the FULL dedup'd match count — may exceed artifact_evidence.length (capped like board_query's) */
     artifact_evidence_count?: number;
@@ -12363,11 +12393,41 @@ export class SterlingTools {
         `board_remove: 'note' is sent back to the project a task came from, and '${id}' was not handed over from another project, so the note would go nowhere. Remove it without a note. Nothing was removed.`
       );
     }
+    if (closeEvidence !== undefined && !isReceived) {
+      throw new Error(
+        `board_remove: 'evidence' is sent back to the project a task came from, and '${id}' was not handed over from another project, so it would go nowhere. Remove it without evidence. Nothing was removed.`
+      );
+    }
+    let checkedEvidence: HandoffEvidence | undefined;
+    if (closeEvidence !== undefined) {
+      const parsed = handoffEvidenceSchema.safeParse(closeEvidence);
+      if (!parsed.success) {
+        throw new Error(`board_remove: evidence is refused (${parsed.error.issues.map((i) => i.message).join('; ')}); pass at least one of commit, pr, deploy or url as non-blank text. Nothing was removed.`);
+      }
+      checkedEvidence = {};
+      for (const [k, v] of Object.entries(parsed.data) as [keyof HandoffEvidence, string | undefined][]) {
+        if (v !== undefined && v.trim().length > 0) checkedEvidence[k] = v.trim();
+      }
+    }
+    // Every input is checked before anything is written, so a refused close
+    // leaves no file behind.
+    if (closeNote !== undefined && closeNote.trim().length === 0) {
+      throw new Error(
+        `board_remove: '${record.id}' was handed over from another project, which reads its completion from a closure file, and that file could not be written (the note is blank; omit it or say what was done). Nothing was removed.`
+      );
+    }
+    // The evidence sidecar goes first, so a failed write refuses the removal
+    // before the closure file says done (GitHub issue #108). A close without
+    // evidence first deletes any sidecar an earlier, failed close left, so the
+    // sender never shows evidence this close did not give.
     let closurePath: string | undefined;
+    let evidencePath: string | undefined;
     if (isReceived && receivedMeta?.success) {
+      if (checkedEvidence) evidencePath = this.writeHandoffEvidence(record.id, receivedMeta.data.transfer_id, checkedEvidence);
+      else this.removeStaleHandoffEvidence(record.id, receivedMeta.data.transfer_id);
       closurePath = this.writeHandoffClosure(record.id, receivedMeta.data.transfer_id, closeNote);
     }
-    const closure = closurePath ? { handoff_closure: closurePath } : {};
+    const closure = { ...(closurePath ? { handoff_closure: closurePath } : {}), ...(evidencePath ? { handoff_evidence: evidencePath } : {}) };
     const evidence = { ...this.removalArtifactEvidence(record), ...closure };
     // R9 PARITY (board 8c8b6d78): a system reconcile_needed item closes the SAME
     // way from either removal tool. board_remove is the conductor's surface and
@@ -12392,6 +12452,63 @@ export class SterlingTools {
   }
 
   /**
+   * Delete `<root>/.sterling/handoffs/<transfer_id>.evidence.json` before a
+   * close that gives no evidence. A missing file (or a missing directory) is the normal case; any other
+   * failure refuses the removal by name, because a leftover sidecar would be
+   * shown to the sender as this close's evidence.
+   */
+  private removeStaleHandoffEvidence(itemId: string, transferId: string): void {
+    if (!this.repoRoot) {
+      throw new Error(`board_remove: '${itemId}' was handed over from another project, and this server has no project root to clear its evidence file in. Nothing was removed.`);
+    }
+    const path = join(this.repoRoot, HANDOFFS_DIR_REL, `${transferId}.evidence.json`);
+    try {
+      unlinkSync(path);
+    } catch (e) {
+      // ENOENT: no sidecar. ENOTDIR: a path component is not a directory, so no sidecar can exist there.
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return;
+      throw new Error(
+        `board_remove: '${itemId}' was handed over from another project, and the evidence file ${path} left by an earlier close could not be deleted (${(e as Error)?.message ?? String(e)}); this close gives no evidence, so that file must go first. Nothing was removed.`,
+        { cause: e }
+      );
+    }
+  }
+
+  /**
+   * Write `<root>/.sterling/handoffs/<transfer_id>.evidence.json` (GitHub
+   * issue #108) through a temp file and a rename, before the closure file.
+   * The closure file keeps its old shape, so an older sender still reads done;
+   * a newer sender reads this sidecar and checks its transfer and item ids.
+   * Any failure refuses the removal by name.
+   */
+  private writeHandoffEvidence(itemId: string, transferId: string, evidence: HandoffEvidence): string {
+    const fail = (why: string, cause?: unknown) =>
+      new Error(
+        `board_remove: '${itemId}' was handed over from another project, and its evidence file could not be written (${why}). Nothing was removed.`,
+        cause !== undefined ? { cause } : undefined
+      );
+    if (!this.repoRoot) throw fail('this server has no project root');
+    const dir = join(this.repoRoot, HANDOFFS_DIR_REL);
+    const path = join(dir, `${transferId}.evidence.json`);
+    const file: HandoffEvidenceFile = { transfer_id: transferId, item_id: itemId, evidence };
+    const tmp = `${path}.${process.pid}.tmp`;
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(tmp, JSON.stringify(file, null, 2) + '\n');
+      renameSync(tmp, path);
+    } catch (e) {
+      try {
+        if (existsSync(tmp)) unlinkSync(tmp);
+      } catch {
+        // The refusal below names the write failure; a leftover temp file is never read (the reader opens only <transfer_id>.evidence.json).
+      }
+      throw fail((e as Error)?.message ?? String(e), e);
+    }
+    return path;
+  }
+
+  /**
    * Write `<root>/.sterling/handoffs/<transfer_id>.json` for a received
    * handoff item about to be removed, through a temp file and a rename so the
    * sender never reads half a file. Not under sterling.db, so it is outside
@@ -12404,7 +12521,6 @@ export class SterlingTools {
         cause !== undefined ? { cause } : undefined
       );
     if (!this.repoRoot) throw fail('this server has no project root');
-    if (note !== undefined && note.trim().length === 0) throw fail('the note is blank; omit it or say what was done');
     const dir = join(this.repoRoot, HANDOFFS_DIR_REL);
     const path = join(dir, `${transferId}.json`);
     const closure: HandoffClosure = { transfer_id: transferId, item_id: itemId, closed_at: this.now(), ...(note !== undefined ? { note } : {}) };
