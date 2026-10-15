@@ -279,6 +279,8 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     assert.doesNotMatch(claudeMd, /<!-- \/?(claude|opencode)-only -->|READY FOR NEW SESSION|\{\{STERLING_ROOT\}\}/);
     assert.match(agentsMd, /^# AGENTS\.md — ensure-target\n/, 'AGENTS.md renders the project name');
     assert.ok(agentsMd.includes('Stack tags (= domain mount manifest): node, sterling'), 'AGENTS.md carries the project facts');
+    // Each glob sits in a code span: bare `**/*.mjs` renders as bold markup on GitHub (issue #96).
+    assert.match(agentsMd, /^- Toolchains: node \(`\*\*\/\*\.mjs`\)  <!--/m, 'AGENTS.md wraps each toolchain glob in a code span');
     // No registered adapter declares a lint or format command, so the fact line asks for one.
     assert.match(agentsMd, /^- Lint\/format command: not recorded yet; add it here$/m, 'AGENTS.md has a place for the lint/format command');
     assert.match(agentsMd, /^- \*\*Lint and tests before done\.\*\* .*Red lint is a blocker, not a note\./m, 'AGENTS.md carries the lint rule');

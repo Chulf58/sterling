@@ -12226,7 +12226,7 @@ init_dist2();
 
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync9, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync7, linkSync, mkdirSync as mkdirSync5, readdirSync as readdirSync3, readFileSync as readFileSync9, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { delimiter, dirname as dirname9, join as join16 } from "node:path";
 var PR_ATTRIBUTION = "\u{1F916} Generated with [Claude Code](https://claude.com/claude-code)";
 function gh(cwd, args) {
@@ -12335,8 +12335,18 @@ ${c.body}` : `## ${c.subject}`);
   return { title: branch2, body: [...sections, PR_ATTRIBUTION].join("\n\n") };
 }
 function findOpenPr(cwd, repo, branch2, base2) {
-  const r = gh(cwd, ["pr", "list", "--repo", repo, "--head", branch2, "--base", base2, "--state", "open", "--json", "url,number,headRefName,baseRefName"]);
-  if (r.status !== 0) throw new Error(`gh pr list --repo ${repo} --head ${branch2} --base ${base2} failed (exit ${r.status}): ${streams(r)}`);
+  const matches = openPrsForHead(cwd, repo, branch2, base2);
+  if (matches.length > 1) {
+    throw new Error(
+      `${matches.length} open PRs in ${repo} from ${branch2} into ${base2} (${matches.map((pr) => `#${pr.number} ${pr.url}`).join(", ")}) \u2014 refusing to pick one. Close the duplicates on GitHub, then rerun.`
+    );
+  }
+  return matches.length ? { url: matches[0].url, number: matches[0].number } : null;
+}
+function openPrsForHead(cwd, repo, branch2, base2) {
+  const baseArgs = base2 === void 0 ? [] : ["--base", base2];
+  const r = gh(cwd, ["pr", "list", "--repo", repo, "--head", branch2, ...baseArgs, "--state", "open", "--json", "url,number,headRefName,baseRefName"]);
+  if (r.status !== 0) throw new Error(`gh pr list --repo ${repo} --head ${branch2}${base2 === void 0 ? "" : ` --base ${base2}`} failed (exit ${r.status}): ${streams(r)}`);
   let prs;
   try {
     prs = JSON.parse(r.stdout);
@@ -12349,13 +12359,7 @@ function findOpenPr(cwd, repo, branch2, base2) {
       throw new Error(`gh pr list returned an entry without url/number/headRefName/baseRefName: ${JSON.stringify(pr)}`);
     }
   }
-  const matches = prs.filter((pr) => pr.headRefName === branch2 && pr.baseRefName === base2);
-  if (matches.length > 1) {
-    throw new Error(
-      `${matches.length} open PRs in ${repo} from ${branch2} into ${base2} (${matches.map((pr) => `#${pr.number} ${pr.url}`).join(", ")}) \u2014 refusing to pick one. Close the duplicates on GitHub, then rerun.`
-    );
-  }
-  return matches.length ? { url: matches[0].url, number: matches[0].number } : null;
+  return prs.filter((pr) => pr.headRefName === branch2 && (base2 === void 0 || pr.baseRefName === base2)).map(({ url, number, headRefName, baseRefName }) => ({ url, number, headRefName, baseRefName }));
 }
 function pushWithWindowsRetry(cwd, pushArgs, log) {
   const tryPush = (cmd) => spawnSync7(cmd, ["push", ...pushArgs], {
@@ -12535,17 +12539,77 @@ function shipAsPr({ cwd, repo, branch: branch2, base: base2, mergeBase: mergeBas
   return null;
 }
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
+var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
+var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
 var prLoopPath = (root) => join16(root, PR_LOOP_REL);
+var prLoopFile = (root, prNumber) => join16(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
 function writeAtomic(file, value) {
   mkdirSync5(dirname9(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync2(tmp, JSON.stringify(value, null, 2) + "\n");
   renameSync2(tmp, file);
 }
-function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE__ */ new Date()).toISOString() }) {
+function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE__ */ new Date()).toISOString(), beforeLegacyPublish = null }) {
   const state = { pr_url, pr_number, repo, head_sha, armed_at: now, status: "owed" };
-  writeAtomic(prLoopPath(root), state);
+  writeAtomic(prLoopFile(root, pr_number), state);
+  const legacy = prLoopPath(root);
+  if (existsSync7(legacy)) {
+    let old = null;
+    try {
+      old = parsePrLoopFile(legacy, PR_LOOP_REL);
+    } catch {
+      old = null;
+    }
+    if (old) {
+      if (beforeLegacyPublish) beforeLegacyPublish(old);
+      if (old.pr_number !== pr_number) writeExclusive(prLoopFile(root, old.pr_number), old);
+      try {
+        unlinkSync2(legacy);
+      } catch (e) {
+        if (e?.code !== "ENOENT") throw e;
+      }
+    }
+  }
   return state;
+}
+function writeExclusive(file, value) {
+  mkdirSync5(dirname9(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  writeFileSync2(tmp, JSON.stringify(value, null, 2) + "\n");
+  try {
+    linkSync(tmp, file);
+    return true;
+  } catch (e) {
+    if (e?.code === "EEXIST") return false;
+    throw e;
+  } finally {
+    unlinkSync2(tmp);
+  }
+}
+function parsePrLoopFile(file, rel) {
+  try {
+    return parsePrLoopFileOrThrow(file, rel);
+  } catch (e) {
+    e.rel = rel;
+    throw e;
+  }
+}
+function parsePrLoopFileOrThrow(file, rel) {
+  let s2;
+  try {
+    s2 = JSON.parse(readFileSync9(file, "utf8"));
+  } catch (e) {
+    throw new Error(`${rel} is not valid JSON (${e.message})`);
+  }
+  const str = (v) => typeof v === "string" && v.length > 0;
+  if (!s2 || typeof s2 !== "object" || Array.isArray(s2) || !str(s2.pr_url) || !Number.isInteger(s2.pr_number) || !str(s2.repo) || !str(s2.head_sha) || !str(s2.armed_at)) {
+    throw new Error(`${rel} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s2)}`);
+  }
+  if (s2.status !== "owed" && !PR_LOOP_OUTCOMES.includes(s2.status)) {
+    throw new Error(`${rel} has status ${JSON.stringify(s2.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
+  }
+  if (s2.status !== "owed" && !str(s2.settled_at)) throw new Error(`${rel} is settled '${s2.status}' without settled_at`);
+  return s2;
 }
 
 // scripts/lib/attestation-inspection.mjs
@@ -12832,7 +12896,37 @@ if (shipsPr) {
   workRepo = pre.repo;
 }
 stage("branch");
-var into = arg("--into") ?? defaultBranch(target);
+var hasRef = (ref) => spawnSync8("git", ["rev-parse", "--verify", "--quiet", ref], { cwd: target, encoding: "utf8", timeout: 3e4 }).status === 0;
+function workDefaultBranch() {
+  try {
+    return { base: defaultBranch(target) };
+  } catch (e) {
+    const remote = ["main", "master"].find((b) => hasRef(`refs/remotes/origin/${b}`));
+    if (remote) return { base: remote };
+    return {
+      error: `direct-merge: ${e?.message ?? e}; work mode also found no origin/main or origin/master, and the branch has no open PR to take a base from \u2014 run 'git fetch origin' and 'git remote set-head origin -a', or pass --into`
+    };
+  }
+}
+var into = arg("--into") ?? (shipsPr ? null : defaultBranch(target));
+function openPrBase(head) {
+  let prs;
+  try {
+    prs = openPrsForHead(target, workRepo, head);
+  } catch (e) {
+    fail2(`direct-merge: could not look up open PRs for ${head} \u2014 nothing pushed, nothing created. ${e?.message ?? e}
+Pass --into <base> to name the base.`);
+  }
+  if (new Set(prs.map((pr) => pr.baseRefName)).size > 1) {
+    fail2(
+      `direct-merge: ${prs.length} open PRs in ${workRepo} from ${head} (${prs.map((pr) => `#${pr.number} into ${pr.baseRefName} ${pr.url}`).join(", ")}) \u2014 refusing to pick a base. Rerun with --into <base> naming the PR to update. Nothing pushed.`,
+      2
+    );
+  }
+  if (prs.length === 0) return null;
+  console.error(`direct-merge: work mode \u2014 ${head} has an open PR into '${prs[0].baseRefName}' (${prs.map((pr) => `#${pr.number} ${pr.url}`).join(", ")}); using that as the base (--into overrides).`);
+  return prs[0].baseRefName;
+}
 var symbolic = spawnSync8("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
 if (symbolic.error || symbolic.status !== 0 && !(symbolic.status === 1 && !(symbolic.stderr ?? "").trim())) {
   fail2(
@@ -12856,6 +12950,11 @@ The consistency battery (npm run check) validates the checked-out tree, so it ca
 Check out '${branch}' and rerun (with or without --branch).`,
     2
   );
+}
+if (shipsPr && into === null) {
+  const fallback = workDefaultBranch();
+  if (fallback.base !== void 0 && branch === fallback.base) into = fallback.base;
+  else into = openPrBase(branch) ?? fallback.base ?? fail2(fallback.error, 2);
 }
 if (branch === into) {
   fail2(
@@ -12911,7 +13010,8 @@ var resolveSha = (ref, label) => {
   if (r.status !== 0) fail2(`direct-merge: git rev-parse ${label} ('${ref}') failed: ${(r.stderr || "").trim()}`);
   return r.stdout.trim();
 };
-var intoTip = resolveSha(into, "into");
+var intoRef = shipsPr && !hasRef(`refs/heads/${into}`) && hasRef(`refs/remotes/origin/${into}`) ? `refs/remotes/origin/${into}` : into;
+var intoTip = resolveSha(intoRef, "into");
 var branchTip = resolveSha(branch, "branch");
 var mergeBaseR = spawnSync8("git", ["merge-base", intoTip, branchTip], { cwd: target, encoding: "utf8", timeout: 3e4 });
 if (mergeBaseR.status !== 0) fail2(`direct-merge: git merge-base ${intoTip} ${branchTip} failed: ${(mergeBaseR.stderr || "").trim()}`);
@@ -13094,7 +13194,7 @@ if (existsSync9(join18(target, pluginManifestRel))) {
     const pkgPath = join18(target, "package.json");
     const branchPlugin = readVersion(readFileSync11(join18(target, pluginManifestRel), "utf8"), pluginManifestRel);
     const branchPkg = existsSync9(pkgPath) ? readVersion(readFileSync11(pkgPath, "utf8"), "package.json") : null;
-    const baseShow = spawnSync8("git", ["show", `${into}:${pluginManifestRel}`], { cwd: target, encoding: "utf8", timeout: 3e4 });
+    const baseShow = spawnSync8("git", ["show", `${intoTip}:${pluginManifestRel}`], { cwd: target, encoding: "utf8", timeout: 3e4 });
     const basePlugin = baseShow.status === 0 ? readVersion(baseShow.stdout, `${into}:${pluginManifestRel}`) : null;
     if (branchPkg !== null && branchPlugin !== branchPkg) {
       fail2(
@@ -13150,9 +13250,9 @@ if (shipsPr) {
   if (shipped) work.fail(shipped.error, shipped.exitCode);
   try {
     armPrLoop(storeRoot, { pr_url: work.state.pr_url, pr_number: work.state.pr_number, repo: workRepo, head_sha: branchTip });
-    console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} \u2014 run the pr-review-loop skill (armed in ${PR_LOOP_REL}).`);
+    console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} \u2014 run the pr-review-loop skill (armed in ${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json).`);
   } catch (e) {
-    console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOP_REL}: ${e?.message ?? e}) \u2014 H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
+    console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json: ${e?.message ?? e}) \u2014 H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
   }
   work.succeed();
 }

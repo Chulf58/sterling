@@ -51705,7 +51705,7 @@ function applyAutoMergeToggle(e, onError, path) {
 }
 
 // scripts/lib/work-pr.mjs
-import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync5, renameSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync3, linkSync, mkdirSync as mkdirSync3, readdirSync, readFileSync as readFileSync5, renameSync, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { delimiter, dirname as dirname4, join as join8 } from "node:path";
 function parseOriginRepo(url) {
   const u = String(url ?? "").trim();
@@ -51723,26 +51723,74 @@ function parseOriginRepo(url) {
   return { host: host2, repo: `${host2}/${owner2}/${name}` };
 }
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
+var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
 var prLoopPath = (root) => join8(root, PR_LOOP_REL);
-function readPrLoop(root) {
-  const file = prLoopPath(root);
-  if (!existsSync3(file)) return null;
+var prLoopFile = (root, prNumber) => join8(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
+var prLoopFileRel = (prNumber) => `${PR_LOOPS_DIR_REL}/${prNumber}.json`;
+function parsePrLoopFile(file, rel) {
+  try {
+    return parsePrLoopFileOrThrow(file, rel);
+  } catch (e) {
+    e.rel = rel;
+    throw e;
+  }
+}
+function parsePrLoopFileOrThrow(file, rel) {
   let s2;
   try {
     s2 = JSON.parse(readFileSync5(file, "utf8"));
   } catch (e) {
-    throw new Error(`${PR_LOOP_REL} is not valid JSON (${e.message})`);
+    throw new Error(`${rel} is not valid JSON (${e.message})`);
   }
   const str2 = (v) => typeof v === "string" && v.length > 0;
   if (!s2 || typeof s2 !== "object" || Array.isArray(s2) || !str2(s2.pr_url) || !Number.isInteger(s2.pr_number) || !str2(s2.repo) || !str2(s2.head_sha) || !str2(s2.armed_at)) {
-    throw new Error(`${PR_LOOP_REL} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s2)}`);
+    throw new Error(`${rel} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s2)}`);
   }
   if (s2.status !== "owed" && !PR_LOOP_OUTCOMES.includes(s2.status)) {
-    throw new Error(`${PR_LOOP_REL} has status ${JSON.stringify(s2.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
+    throw new Error(`${rel} has status ${JSON.stringify(s2.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
   }
-  if (s2.status !== "owed" && !str2(s2.settled_at)) throw new Error(`${PR_LOOP_REL} is settled '${s2.status}' without settled_at`);
+  if (s2.status !== "owed" && !str2(s2.settled_at)) throw new Error(`${rel} is settled '${s2.status}' without settled_at`);
   return s2;
+}
+function readPrLoopEntries(root) {
+  const entries = [];
+  const dir = join8(root, PR_LOOPS_DIR_REL);
+  if (existsSync3(dir)) {
+    for (const name of readdirSync(dir).sort()) {
+      const m = name.match(/^(\d+)\.json$/);
+      if (!m) continue;
+      const rel = prLoopFileRel(m[1]);
+      const state = parsePrLoopFile(join8(dir, name), rel);
+      if (state.pr_number !== Number(m[1])) throw Object.assign(new Error(`${rel} holds the loop of PR #${state.pr_number}`), { rel });
+      entries.push({ state, file: join8(dir, name), rel });
+    }
+  }
+  if (existsSync3(prLoopPath(root))) {
+    const state = parsePrLoopFile(prLoopPath(root), PR_LOOP_REL);
+    if (!entries.some((e) => e.state.pr_number === state.pr_number)) entries.push({ state, file: prLoopPath(root), rel: PR_LOOP_REL });
+  }
+  return entries;
+}
+function readPrLoops(root) {
+  return readPrLoopEntries(root).map((e) => e.state).sort((a, b) => a.armed_at < b.armed_at ? -1 : a.armed_at > b.armed_at ? 1 : a.pr_number - b.pr_number);
+}
+function readPrLoopEntry(root, prNumber) {
+  const file = prLoopFile(root, prNumber);
+  if (existsSync3(file)) {
+    const rel = prLoopFileRel(prNumber);
+    const state2 = parsePrLoopFile(file, rel);
+    if (state2.pr_number !== prNumber) throw Object.assign(new Error(`${rel} holds the loop of PR #${state2.pr_number}`), { rel });
+    return { state: state2, file, rel };
+  }
+  if (!existsSync3(prLoopPath(root))) return null;
+  const state = parsePrLoopFile(prLoopPath(root), PR_LOOP_REL);
+  return state.pr_number === prNumber ? { state, file: prLoopPath(root), rel: PR_LOOP_REL } : null;
+}
+function readPrLoop(root, prNumber) {
+  if (prNumber !== void 0) return readPrLoopEntry(root, prNumber)?.state ?? null;
+  const loops = readPrLoops(root);
+  return loops.find((s2) => s2.status === "owed") ?? loops.at(-1) ?? null;
 }
 var AutoMergeSettingError = class extends Error {
   constructor(message) {
@@ -51798,7 +51846,7 @@ function openDataVersionProbe(paths) {
 
 // scripts/lib/agent-distribution.mjs
 import { createHash, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync6, writeFileSync as writeFileSync3, readdirSync, existsSync as existsSync5, mkdirSync as mkdirSync4, statSync as statSync3, lstatSync as lstatSync3, unlinkSync, renameSync as renameSync2, linkSync } from "node:fs";
+import { readFileSync as readFileSync6, writeFileSync as writeFileSync3, readdirSync as readdirSync2, existsSync as existsSync5, mkdirSync as mkdirSync4, statSync as statSync3, lstatSync as lstatSync3, unlinkSync as unlinkSync2, renameSync as renameSync2, linkSync as linkSync2 } from "node:fs";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -52063,7 +52111,7 @@ import { existsSync as existsSync6 } from "node:fs";
 import { join as join12, resolve as resolve5 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync5, readFileSync as readFileSync8, readdirSync as readdirSync2, mkdirSync as mkdirSync5, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { lstatSync as lstatSync5, readFileSync as readFileSync8, readdirSync as readdirSync3, mkdirSync as mkdirSync5, openSync as openSync2, writeSync, closeSync as closeSync2, unlinkSync as unlinkSync3, constants } from "node:fs";
 import { join as join11, resolve as resolve4 } from "node:path";
 
 // scripts/lib/store-path.mjs
@@ -52314,12 +52362,12 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
-import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync10, readdirSync as readdirSync4, realpathSync as realpathSync4, renameSync as renameSync3, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync10, readdirSync as readdirSync5, realpathSync as realpathSync4, renameSync as renameSync3, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync4, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname5, isAbsolute, join as join14, resolve as resolve7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync7, readFileSync as readFileSync9, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync9, readdirSync as readdirSync4, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
 import { join as join13, resolve as resolve6, sep as sep2 } from "node:path";
 var RESOLVER_IMPORTS = [
@@ -52465,7 +52513,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync7, readFileSync9, readdirSync3, join13, homedir5);
+)(existsSync7, readFileSync9, readdirSync4, join13, homedir5);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -53988,14 +54036,14 @@ function mouseToEvent(name, data) {
 }
 
 // packages/tui/dist/subagents.js
-import { existsSync as existsSync13, readFileSync as readFileSync15, readdirSync as readdirSync7, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync13, readFileSync as readFileSync15, readdirSync as readdirSync8, statSync as statSync6 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
 import { join as join19 } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync8, readFileSync as readFileSync14, writeFileSync as writeFileSync7, rmSync as rmSync4, rmdirSync, renameSync as renameSync5, existsSync as existsSync11, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync5, chmodSync } from "node:fs";
+import { mkdirSync as mkdirSync8, readFileSync as readFileSync14, writeFileSync as writeFileSync7, rmSync as rmSync4, rmdirSync, renameSync as renameSync5, existsSync as existsSync11, lstatSync as lstatSync6, readdirSync as readdirSync6, realpathSync as realpathSync5, chmodSync } from "node:fs";
 import { join as join18, resolve as resolve8, dirname as dirname7, isAbsolute as isAbsolute2 } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash3 } from "node:crypto";
@@ -54063,7 +54111,7 @@ function dispatchStateKey(toolUseId) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync12, statSync as statSync5, readdirSync as readdirSync6 } from "node:fs";
+import { openSync as openSync3, readSync, closeSync as closeSync3, fstatSync, existsSync as existsSync12, statSync as statSync5, readdirSync as readdirSync7 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
@@ -54071,7 +54119,7 @@ function deriveAgentTranscript(parentTranscriptPath, agentId) {
   if (existsSync12(flat)) return flat;
   const wfRoot = `${sessionDir}/subagents/workflows`;
   try {
-    for (const d of readdirSync6(wfRoot)) {
+    for (const d of readdirSync7(wfRoot)) {
       const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
       if (existsSync12(candidate)) return candidate;
     }
@@ -56579,7 +56627,7 @@ function readDispatchDescription(projectRoot, toolUseId) {
   let file = join19(dir, `live-${key}.json`);
   try {
     if (!existsSync13(file)) {
-      const done = readdirSync7(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
+      const done = readdirSync8(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
       if (!done)
         return null;
       file = join19(dir, done);
@@ -56617,7 +56665,7 @@ function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir
   if (!dir) {
     let all;
     try {
-      all = readdirSync7(projects);
+      all = readdirSync8(projects);
     } catch {
       return null;
     }

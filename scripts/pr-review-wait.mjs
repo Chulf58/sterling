@@ -69,11 +69,15 @@
 //   {status:'review'|'timeout'|'no_review_requested'|'error', head_sha,
 //    review:{id, commit_id, author, state, body}|null,
 //    comments:[{id, path, line, body, in_reply_to}],
-//    previously_missed:[string], body_findings_without_comments,
+//    previously_missed:[string], previously_missed_unparsed,
+//    body_findings_without_comments,
 //    copilot_request:null|{requested, error?}, copilot_review_pending,
 //    observed_copilot_login, stale_review, identity_confirmed[, error]}
-// previously_missed is the list items under a "Previously missed" heading of the
-// review body ([] when absent). body_findings_without_comments is true for any
+// previously_missed is the findings under a "Previously missed" heading of the
+// review body, as list items or as nested <details> blocks ([] when absent);
+// previously_missed_unparsed is true when that section exists but the findings
+// read do not match it (none, or not the "(N)" its heading declares), so the
+// body must be read by hand. body_findings_without_comments is true for any
 // non-blank body with no inline comments, because the body format is Copilot's
 // and may change: such a review is not clean until the body has been read.
 // copilot_review_pending is what the last poll read (null before any poll).
@@ -137,7 +141,7 @@ const DEFAULT_INTERVAL_S = 30;
 const MAX_INTERVAL_S = 120;
 const DEFAULT_RECHECK_DELAY_S = 10; // the review_requested event showed within 10s (finding in the header)
 
-const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, identity_confirmed: false, previously_missed: [], body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
+const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
   process.stdout.write(JSON.stringify(out) + '\n');
@@ -321,27 +325,81 @@ function ghApi(path, { paginate = false, extra = [] } = {}) {
   return r.stdout;
 }
 
-/** The "Previously missed" findings of a review body: the list items under a
- * heading (markdown heading, bold line or <summary>) that starts with that
- * phrase, up to the next markdown heading or </details>. A line indented under
- * an item continues it. [] when the section is absent. */
+/** The "Previously missed" findings of a review body, under a heading
+ * (markdown heading, bold line or <summary>) that starts with that phrase, up
+ * to the next markdown heading or the </details> that closes the section. Two
+ * finding shapes are read: list items (a line indented under an item
+ * continues it), and nested <details> blocks, one per finding, as Copilot's
+ * ccr-overview-v2 body writes them (GitHub issue #102): the block's <summary>
+ * is the title, a line that is only a backticked `path:line` is the location,
+ * and the remaining lines are the text, joined as "title (path:line): text".
+ * `unparsed` is true when a section was found but the findings read do not
+ * match it: none read, or fewer or more than the "(N)" its heading declares.
+ * { items: [], unparsed: false } when the section is absent. */
 function parsePreviouslyMissed(body) {
   const items = [];
-  let inSection = false;
+  let found = false;
+  let declared = null;
+  let depth = 0; // <details> nesting relative to the body, counted inside the section
+  let base = 0; // the depth of the section itself: 1 when it is a <details> block
+  let nested = null; // the finding block being read: { title, loc, text[] }
+  const finishNested = () => {
+    const title = nested.title ?? '';
+    const text = nested.text.join(' ');
+    items.push(`${title}${nested.loc ? `${title ? ' ' : ''}(${nested.loc})` : ''}${text ? `${title || nested.loc ? ': ' : ''}${text}` : ''}`);
+    nested = null;
+  };
+  const stripTags = (s) => s.replace(/<[^>]*>/g, '').trim();
   for (const line of String(body ?? '').split(/\r?\n/)) {
-    const plain = line.replace(/<[^>]*>/g, '').replace(/^[\s#*_]+/, '');
     const isHeading = /^\s{0,3}#{1,6}\s/.test(line);
-    if (/^previously missed/i.test(plain) && (isHeading || /^\s*(\*\*|__|<summary|<details)/i.test(line))) {
-      inSection = true;
+    if (!found) {
+      const plain = line.replace(/<[^>]*>/g, '').replace(/^[\s#*_]+/, '');
+      if (/^previously missed/i.test(plain) && (isHeading || /^\s*(\*\*|__|<summary|<details)/i.test(line))) {
+        found = true;
+        const count = plain.match(/^previously missed\s*\((\d+)\)/i);
+        declared = count ? Number(count[1]) : null;
+        base = /<summary|<details/i.test(line) ? 1 : 0;
+        depth = base;
+      }
       continue;
     }
-    if (!inSection) continue;
-    if (isHeading || /<\/details>/i.test(line)) break;
-    const item = line.match(/^\s*(?:[-*+]|\d+[.)])\s+(.*\S)\s*$/);
+    if (isHeading && !nested) break;
+    let ended = false;
+    let rest = '';
+    for (const part of line.split(/(<details\b[^>]*>|<\/details\s*>|<summary\b[^>]*>[\s\S]*?<\/summary\s*>)/i)) {
+      if (/^<details\b/i.test(part)) {
+        depth++;
+        if (!nested && depth === base + 1) nested = { title: null, loc: null, text: [] };
+      } else if (/^<\/details/i.test(part)) {
+        if (nested && depth === base + 1) {
+          if (rest.trim()) nested.text.push(rest.trim());
+          rest = '';
+          finishNested();
+        }
+        depth--;
+        if (depth < base || depth < 0) {
+          ended = true;
+          break;
+        }
+      } else if (/^<summary\b/i.test(part)) {
+        if (nested && nested.title === null) nested.title = stripTags(part);
+      } else rest += part;
+    }
+    if (ended) break;
+    if (nested) {
+      const t = stripTags(rest);
+      const loc = t.match(/^`([^`\s]+:\d+(?:-\d+)?)`$/);
+      if (loc && nested.loc === null) nested.loc = loc[1];
+      else if (t) nested.text.push(t);
+      continue;
+    }
+    const item = rest.match(/^\s*(?:[-*+]|\d+[.)])\s+(.*\S)\s*$/);
     if (item) items.push(item[1]);
-    else if (items.length && /^\s+\S/.test(line)) items[items.length - 1] += ` ${line.trim()}`;
+    else if (items.length && /^\s+\S/.test(rest)) items[items.length - 1] += ` ${rest.trim()}`;
   }
-  return items;
+  if (nested) finishNested();
+  const unparsed = found && (declared === null ? items.length === 0 : declared !== items.length);
+  return { items, unparsed };
 }
 
 /** --request-copilot: one GraphQL mutation, never aborting the wait. */
@@ -447,11 +505,13 @@ function poll(recheckAbsent = true) {
     }
   }
   const body = review.body ?? '';
+  const missed = parsePreviouslyMissed(body);
   return {
     review: { id: review.id, commit_id: review.commit_id, author: review.user.login, state: review.state, body },
     comments,
     stale_review: stale,
-    previously_missed: parsePreviouslyMissed(body),
+    previously_missed: missed.items,
+    previously_missed_unparsed: missed.unparsed,
     body_findings_without_comments: body.trim() !== '' && comments.length === 0,
   };
 }

@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { recordCentralTerms } from '@sterling/store';
+import { recordCentralTerms, MODELS_CATALOG_LOCATION } from '@sterling/store';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -42,15 +42,20 @@ export function pathLive(path, headFiles) {
   return false;
 }
 
+/** The seeded 'Models catalog' (issue #98): its location is a synthetic name for
+ *  content the record holds in its own `catalog` field, never a file. */
+const isSeededCatalog = (rec) => rec.type === 'reference_material' && rec.location === MODELS_CATALOG_LOCATION;
+
 /** The repo-path claims one record makes. A reference_material location is a
- *  path only for kind 'doc'; url and pdf locations are external. */
+ *  path only for kind 'doc'; url and pdf locations are external, and so is the
+ *  seeded catalog's synthetic one. */
 function pathClaims(rec) {
   if (rec.type === 'feature_article') return (rec.files ?? []).map((f) => ({ path: f.path, field: 'files' }));
-  if (rec.type === 'reference_material') return rec.kind === 'doc' && rec.location ? [{ path: rec.location, field: 'location' }] : [];
+  if (rec.type === 'reference_material') return rec.kind === 'doc' && rec.location && !isSeededCatalog(rec) ? [{ path: rec.location, field: 'location' }] : [];
   return (rec.file_keys ?? []).map((p) => ({ path: p, field: 'file_keys' }));
 }
 
-const carriesPaths = (rec) => !(rec.type === 'reference_material' && rec.kind !== 'doc');
+const carriesPaths = (rec) => !(rec.type === 'reference_material' && (rec.kind !== 'doc' || isSeededCatalog(rec)));
 const label = (rec) => rec.slug || rec.title || rec.question || rec.id;
 
 /**
