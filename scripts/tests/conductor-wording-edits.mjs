@@ -207,6 +207,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "with the PR's status reported — never merged; a human merges the PR.",
     after: "with the PR's status reported. The PR is merged only at the end of a clean review loop with the auto-merge switch on (the `pr-review-loop` skill); otherwise a human merges it.",
   },
+  {
+    commit: 'board 5ff6acd8',
+    date: '2026-10-15',
+    reason: 'an ask meant for another project goes onto that project\'s board through board_add with target_project, and this board keeps the tracker (decision hand-a-board-task-to-a-sibling-project-board-add-target-proj; user-ruled 2026-10-15)',
+    before: 'A question answered only in chat is not boarded. The todo list stays',
+    after: 'A question answered only in chat is not boarded. An ask meant for another project on this machine goes onto that project\'s board through `board_add` with `target_project` (its registry name), not onto this one; this board keeps the tracker, which shows when the other project has finished it (decision `hand-a-board-task-to-a-sibling-project-board-add-target-proj`). The todo list stays',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
