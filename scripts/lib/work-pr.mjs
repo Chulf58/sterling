@@ -589,6 +589,41 @@ export function mergeBlockers(state) {
   return { mergeable_now: blockers.length === 0 && !awaiting, blockers, unresolved_threads: unresolved, awaiting_human_review: awaiting };
 }
 
+/** A config.pr_review value autoMergeOnCleanOf refuses. */
+export class AutoMergeSettingError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'AutoMergeSettingError';
+  }
+}
+
+/** The auto-merge switch, config.pr_review.auto_merge_on_clean (decision
+ * work-mode-pr-auto-merge-when-copilot-loop-ends-clean): whether the conductor
+ * squash-merges a PR whose review loop settled clean. `cfg` is the parsed
+ * .sterling/config.json object (undefined when the file is absent). An absent
+ * block or key is on, the shipped default. A pr_review that is not an object,
+ * or a switch that is not a boolean, or a config whose root is not an object
+ * (null, a number, a string, an array), throws an AutoMergeSettingError naming
+ * the value: a typo must never read as on, and must never silently read as off
+ * either. Only an undefined cfg (no config file) is on without inspection. */
+export function autoMergeOnCleanOf(cfg) {
+  if (cfg === undefined) return true;
+  if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) {
+    throw new AutoMergeSettingError(`config root must be an object, got ${JSON.stringify(cfg)}`);
+  }
+  const block = cfg.pr_review;
+  if (block === undefined) return true;
+  if (block === null || typeof block !== 'object' || Array.isArray(block)) {
+    throw new AutoMergeSettingError(`config pr_review must be an object, got ${JSON.stringify(block)}`);
+  }
+  const value = block.auto_merge_on_clean;
+  if (value === undefined) return true;
+  if (typeof value !== 'boolean') {
+    throw new AutoMergeSettingError(`config pr_review.auto_merge_on_clean must be true or false, got ${JSON.stringify(value)} — switch it in the TUI System tab or fix the file`);
+  }
+  return value;
+}
+
 /** Resolve the review thread of each given review-comment id (the REST id the
  * wait helper returns in comments[].id; a reply anywhere in the thread counts).
  * Every id is matched to a thread BEFORE any mutation, so an unknown id throws
