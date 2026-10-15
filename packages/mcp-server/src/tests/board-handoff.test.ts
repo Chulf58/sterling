@@ -215,3 +215,65 @@ test('board_remove: a note on an item that was not handed over is refused; a rec
     h.cleanup();
   }
 });
+
+test('needs_reason (#107): set with needs user, shown on the sender tracker; cleared by a needs change unless given again; refused without user or grill', () => {
+  const h = harness();
+  try {
+    const d = (h.tools.boardAdd({ text: 'Do it\nsee src/a.ts:1', source: 'user', target_project: 'beta' }) as unknown as Loose).handoff_delivery as { tracker: { id: string }; delivered: { id: string } };
+    const b = h.betaTools();
+    try {
+      const item = () => b.tools.boardGet(d.delivered.id) as unknown as Loose;
+      assert.throws(() => b.tools.boardUpdate(d.delivered.id, { needs_reason: 'pick a colour' }), /needs_reason says why an item waits for the user, .* this item's needs would be absent\. Nothing was updated\./);
+      assert.throws(() => b.tools.boardUpdate(d.delivered.id, { needs: 'investigation', needs_reason: 'pick a colour' }), /this item's needs would be 'investigation'/);
+      assert.equal('needs_reason' in item(), false);
+
+      b.tools.boardUpdate(d.delivered.id, { needs: 'user', needs_reason: '  pick a colour ' });
+      assert.equal(item().needs_reason, 'pick a colour');
+      assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'needs_user', text: 'needs user in beta: pick a colour' });
+      const row = h.tools.boardQueryResult({ source: 'user' }).records.find((r) => (r as Loose).id === d.tracker.id) as Loose;
+      assert.equal(row.readiness, 'delegated', 'a needs-user hand-off stays in the delegated group');
+      assert.equal(h.store.boardReadiness().find((r) => r.id === d.tracker.id)?.state, 'delegated');
+
+      b.tools.boardUpdate(d.delivered.id, { needs: 'user' });
+      assert.equal('needs_reason' in item(), false, 'user -> user with no reason clears it');
+      assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'needs_user', text: 'needs user in beta' });
+
+      b.tools.boardUpdate(d.delivered.id, { needs: 'grill', needs_reason: 'scope' });
+      b.tools.boardUpdate(d.delivered.id, { needs: 'investigation' });
+      assert.equal('needs_reason' in item(), false, 'user/grill -> investigation clears it');
+      assert.equal(statusOf(h.tools, d.tracker.id)?.state, 'open');
+
+      b.tools.boardUpdate(d.delivered.id, { needs: 'user', needs_reason: 'scope' });
+      b.tools.boardUpdate(d.delivered.id, { text: 'Edited\nsee src/a.ts:3' });
+      assert.equal(item().needs_reason, 'scope', 'an edit that does not touch needs keeps the reason');
+      b.tools.boardUpdate(d.delivered.id, { needs_reason: '' });
+      assert.equal('needs_reason' in item(), false, "'' clears it");
+      assert.equal(item().needs, 'user');
+    } finally {
+      b.close();
+    }
+    const sys = h.tools.boardAdd({ text: 'Queue item', source: 'system', system_reason: 'reconcile_needed' }).record.id;
+    assert.throws(() => h.tools.boardUpdate(sys, { needs_reason: 'x' }), /goes only with needs 'user' or 'grill' on a source:'user' board task/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('blocked in the receiving project (#107): a live blocker reads blocked; removing the blocker reads open', () => {
+  const h = harness();
+  try {
+    const d = (h.tools.boardAdd({ text: 'Do it\nsee src/a.ts:1', source: 'user', target_project: 'beta' }) as unknown as Loose).handoff_delivery as { tracker: { id: string }; delivered: { id: string } };
+    const b = h.betaTools();
+    try {
+      const blocker = b.tools.boardAdd({ text: 'First this\nsee src/b.ts:1', source: 'user', objective: 'standalone' }).record;
+      b.tools.boardUpdate(d.delivered.id, { blocked_by: [blocker.id] });
+      assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'blocked', text: 'blocked in beta' });
+      b.tools.boardRemove(blocker.id);
+      assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'open', text: 'open in beta' });
+    } finally {
+      b.close();
+    }
+  } finally {
+    h.cleanup();
+  }
+});

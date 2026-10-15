@@ -17579,22 +17579,22 @@ var SYSTEM_REASONS = [
 var TODO_SYSTEM_SOURCE = "system";
 var TODO_SYSTEM_REQUIRES = ["system_reason"];
 var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
-var todoHandoffSchema = external_exports.discriminatedUnion("role", [
-  external_exports.object({
-    role: external_exports.literal("received"),
-    transfer_id: external_exports.string().uuid(),
-    from_root: external_exports.string().min(1),
-    from_name: external_exports.string().min(1),
-    from_item_id: external_exports.string().uuid()
-  }).strict(),
-  external_exports.object({
-    role: external_exports.literal("sent"),
-    transfer_id: external_exports.string().uuid(),
-    to_root: external_exports.string().min(1),
-    to_name: external_exports.string().min(1),
-    to_item_id: external_exports.string().uuid().nullable()
-  }).strict()
-]);
+var receivedHandoffShape = external_exports.object({
+  role: external_exports.literal("received"),
+  transfer_id: external_exports.string().uuid(),
+  from_root: external_exports.string().min(1),
+  from_name: external_exports.string().min(1),
+  from_item_id: external_exports.string().uuid()
+});
+var sentHandoffShape = external_exports.object({
+  role: external_exports.literal("sent"),
+  transfer_id: external_exports.string().uuid(),
+  to_root: external_exports.string().min(1),
+  to_name: external_exports.string().min(1),
+  to_item_id: external_exports.string().uuid().nullable()
+});
+var todoHandoffSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
+var todoHandoffReadSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape, sentHandoffShape]);
 var HANDOFFS_DIR_REL = ".sterling/handoffs";
 var handoffClosureSchema = external_exports.object({
   transfer_id: external_exports.string().uuid(),
@@ -17653,10 +17653,18 @@ var todoSchema = base.extend({
   // 'grill' wait for the user. Not a progress status: `status` keeps meaning
   // supersession only. Absent means nothing beyond the blockers.
   needs: external_exports.enum(BOARD_NEEDS).optional(),
+  // Why a user item waits for the user (GitHub issue #107, decision
+  // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
+  // only with needs 'user' or 'grill' on a source:'user' item. A sender's
+  // tracker shows it as "needs user in <project>: <reason>".
+  needs_reason: external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank").optional(),
   // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
   handoff: todoHandoffSchema.optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
+  if (rec.needs_reason !== void 0 && (rec.source !== "user" || rec.needs !== "user" && rec.needs !== "grill")) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
+  }
   if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
   }
@@ -18364,6 +18372,7 @@ function recordFieldConditions(type) {
       for (const field of userOnly)
         out.push([field, `Refused when source is '${TODO_SYSTEM_SOURCE}'.`]);
       out.push(["blocked_by", "An item cannot list its own slug."]);
+      out.push(["needs_reason", "Accepted only when needs is 'user' or 'grill' on a source 'user' item."]);
       return out;
     }
     case "open_question":
@@ -21719,7 +21728,7 @@ import { pathToFileURL } from "node:url";
 function sentHandoffOf(rec) {
   if (rec.handoff === void 0)
     return void 0;
-  const parsed = todoHandoffSchema.safeParse(rec.handoff);
+  const parsed = todoHandoffReadSchema.safeParse(rec.handoff);
   return parsed.success && parsed.data.role === "sent" ? parsed.data : void 0;
 }
 function journalTopology(path) {
@@ -21769,6 +21778,8 @@ function readIfPresent(p) {
 }
 var statusText = {
   open: (to) => `open in ${to}`,
+  needs_user: (to, reason) => `needs user in ${to}${reason ? `: ${reason}` : ""}`,
+  blocked: (to) => `blocked in ${to}`,
   done: (to, closedAt, note) => `DONE in ${to} ${closedAt}${note ? `: ${note}` : ""}`,
   gone: (to) => `gone from ${to}'s board, completion unverified`,
   unknown: (reason) => `status unknown: ${reason}`,
@@ -21807,7 +21818,21 @@ function closureStatus(h) {
   }
   return { state: "done", text: statusText.done(h.to_name, c.closed_at, c.note), closed_at: c.closed_at, ...c.note ? { note: c.note } : {} };
 }
-function rowStatus(db, trackerId, h) {
+function readWaitFields(body) {
+  const { needs, needs_reason, blocked_by } = body;
+  if (needs !== void 0 && !(typeof needs === "string" && BOARD_NEEDS.includes(needs)))
+    return `its needs value ${JSON.stringify(needs)} is not one this Sterling knows`;
+  if (needs_reason !== void 0 && !(typeof needs_reason === "string" && needs_reason.trim().length > 0))
+    return "its needs_reason is not a non-blank string";
+  if (blocked_by !== void 0 && !(Array.isArray(blocked_by) && blocked_by.every((s2) => typeof s2 === "string" && s2.length > 0)))
+    return "its blocked_by is not a list of slugs";
+  return {
+    ...needs !== void 0 ? { needs } : {},
+    ...needs_reason !== void 0 ? { needs_reason: needs_reason.trim() } : {},
+    blocked_by: blocked_by ?? []
+  };
+}
+function rowStatus(db, trackerId, h, remaining, exhausted) {
   const row = db.prepare("SELECT body, status FROM records WHERE id = ?").get(h.to_item_id);
   if (!row)
     return closureStatus(h);
@@ -21823,9 +21848,23 @@ function rowStatus(db, trackerId, h) {
     return unknown2(`${h.to_name}'s item ${h.to_item_id} is superseded, which a board item never is`);
   if (body.handoff === void 0)
     return unknown2(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} carries no handoff record (an older Sterling there may have dropped it on an edit)`);
-  const meta = todoHandoffSchema.safeParse(body.handoff);
+  const meta = todoHandoffReadSchema.safeParse(body.handoff);
   if (!meta.success || meta.data.role !== "received" || meta.data.transfer_id !== h.transfer_id || meta.data.from_item_id !== trackerId) {
     return unknown2(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} carries handoff metadata for a different transfer`);
+  }
+  const wait = readWaitFields(body);
+  if (typeof wait === "string")
+    return unknown2(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} cannot be read: ${wait}`);
+  if (wait.needs === "user" || wait.needs === "grill")
+    return { state: "needs_user", text: statusText.needs_user(h.to_name, wait.needs_reason) };
+  if (wait.blocked_by.length) {
+    const live = db.prepare(`SELECT 1 FROM records WHERE type = 'todo' AND status != 'superseded' AND json_extract(body, '$.slug') = ? LIMIT 1`);
+    for (const slug of new Set(wait.blocked_by)) {
+      if (remaining() <= 0)
+        return unknown2(exhausted(`${h.to_name}'s blocker ${slug}`));
+      if (live.get(slug))
+        return { state: "blocked", text: statusText.blocked(h.to_name) };
+    }
   }
   return { state: "open", text: statusText.open(h.to_name) };
 }
@@ -21891,7 +21930,7 @@ function resolveSentHandoffs(trackers, opts = {}) {
         }
         try {
           setBusyTimeout(db, Math.min(busy, now));
-          out.set(id, rowStatus(db, id, h));
+          out.set(id, rowStatus(db, id, h, remaining, exhausted));
         } catch (e) {
           out.set(id, unknown2(`${h.to_name}'s database could not be read (${errText(e)})`));
         }
@@ -30186,7 +30225,7 @@ function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
 
 // packages/mcp-server/dist/tools.js
 var BOARD_TEXT_CLIP = 240;
-var BOARD_TEXT_FIELDS = ["id", "slug", "objective", "source", "system_reason", "status", "priority", "feature_link", "blocked_by", "needs", "updated_at"];
+var BOARD_TEXT_FIELDS = ["id", "slug", "objective", "source", "system_reason", "status", "priority", "feature_link", "blocked_by", "needs", "needs_reason", "updated_at"];
 function textRowRecord(record2) {
   const out = {};
   for (const f of BOARD_TEXT_FIELDS) {
@@ -36881,7 +36920,7 @@ Handed over from project '${target.selfName}' (${fromRoot}); its tracker there i
    * changed nothing the caller asked for. An empty patch is refused for the
    * same reason: nothing to update is not a no-op success.
    */
-  static BOARD_UPDATABLE_FIELDS = ["text", "priority", "file_keys", "objective", "measured_at_head", "blocked_by", "needs"];
+  static BOARD_UPDATABLE_FIELDS = ["text", "priority", "file_keys", "objective", "measured_at_head", "blocked_by", "needs", "needs_reason"];
   boardUpdate(id, patch) {
     const old = this.resolveRecordId(id, "board_update");
     if (old.type !== "todo")
@@ -36901,6 +36940,18 @@ Handed over from project '${target.selfName}' (${fromRoot}); its tracker there i
     }
     if ("needs" in patch && old.source === "system")
       throw _SterlingTools.needsSystemRefusal("board_update");
+    if ("needs_reason" in patch) {
+      const reason = patch.needs_reason;
+      if (typeof reason !== "string")
+        throw new Error(`board_update: needs_reason must be a string ('' clears it). Nothing was updated.`);
+      if (reason.trim().length > 0) {
+        const needsAfter = "needs" in patch ? patch.needs : old.needs;
+        if (old.source !== "user" || needsAfter !== "user" && needsAfter !== "grill") {
+          throw new Error(`board_update: needs_reason says why an item waits for the user, so it goes only with needs 'user' or 'grill' on a source:'user' board task; this item's needs would be ${needsAfter === void 0 || needsAfter === "" ? "absent" : `'${String(needsAfter)}'`}. Nothing was updated.`);
+        }
+        patch = { ...patch, needs_reason: reason.trim() };
+      }
+    }
     if ("measured_at_head" in patch) {
       const candidate = String(patch.measured_at_head);
       if (!MEASURED_AT_HEAD_RE.test(candidate)) {
@@ -36921,6 +36972,8 @@ Handed over from project '${target.selfName}' (${fromRoot}); its tracker there i
       delete next.blocked_by;
     if (next.needs === "")
       delete next.needs;
+    if (next.needs_reason === "" || "needs" in patch && !("needs_reason" in patch))
+      delete next.needs_reason;
     const claimsCheck = this.assertClaimedPaths("board_update", next);
     try {
       const updated = this.store.updateTodo(old.id, next, old.version !== void 0 ? { expected_version: old.version } : {});
@@ -38512,7 +38565,7 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({ id: external_exports.string().describe(ID_LADDER), domain: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection)));
   server.registerTool("board_add", {
-    description: `Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare \`objective\`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane); absent means nothing. measured_at_head is stamped to HEAD unless you pass a full 40-character lowercase hex SHA that is a commit in this repo (an abbreviated or otherwise malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). target_project (user items only) hands the task to another project registered on this machine, by its registry name: the item is written into that project's board with this project's name and the requester's words, and a tracker stays on this board (readiness 'delegated', never READY) whose board_query/board_get handoff_status reads open, DONE (with the closing note), gone (completion unverified), status unknown, or delivery unconfirmed. It is refused, with nothing written, when the name is unknown or ambiguous, names this project, or the target has no SQLite store; with it only text, source, objective (the tracker's), priority and needs (the target item's) are accepted. The receipt's handoff_delivery names both items. The echo defaults to a digest; projection:"full" returns the stored record.`,
+    description: `Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare \`objective\`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane); absent means nothing. measured_at_head is stamped to HEAD unless you pass a full 40-character lowercase hex SHA that is a commit in this repo (an abbreviated or otherwise malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). target_project (user items only) hands the task to another project registered on this machine, by its registry name: the item is written into that project's board with this project's name and the requester's words, and a tracker stays on this board (readiness 'delegated', never READY) whose board_query/board_get handoff_status reads open, needs user in <project> (with the reason when one is set), blocked in <project> (a blocker there is still on its board), DONE (with the closing note), gone (completion unverified), status unknown, or delivery unconfirmed. It is refused, with nothing written, when the name is unknown or ambiguous, names this project, or the target has no SQLite store; with it only text, source, objective (the tracker's), priority and needs (the target item's) are accepted. The receipt's handoff_delivery names both items. The echo defaults to a digest; projection:"full" returns the stored record.`,
     inputSchema: strict({
       text: external_exports.string(),
       source: external_exports.enum(["user", "system"]),
@@ -38554,7 +38607,7 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({ id: external_exports.string().describe(ID_EXACT_DESTROY) })
   }, ({ id }) => json(tools.maintenanceRemove(id)));
   server.registerTool("board_update", {
-    description: 'Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation (user items only; "" clears it). A text or file_keys change re-stamps measured_at_head to HEAD; pass a full 40-character lowercase hex SHA that is a commit in this repo to set it explicitly (an abbreviated or malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:"full" returns the stored record.',
+    description: `Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation (user items only; "" clears it). needs_reason says why a user or grill item waits ("" clears it; changing needs clears it unless a new reason is given); a sending project's tracker shows it. A text or file_keys change re-stamps measured_at_head to HEAD; pass a full 40-character lowercase hex SHA that is a commit in this repo to set it explicitly (an abbreviated or malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:"full" returns the stored record.`,
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
       text: external_exports.string().optional(),
@@ -38564,6 +38617,7 @@ function createSterlingServer(target, opts = {}) {
       measured_at_head: external_exports.string().optional(),
       blocked_by: external_exports.array(external_exports.string()).describe(`replaces the list: open user board items, each by ${ID_LADDER}; [] clears it`).optional(),
       needs: external_exports.union([external_exports.enum(BOARD_NEEDS), external_exports.literal("")]).optional(),
+      needs_reason: external_exports.string().describe("why the item waits for the user; only with needs user or grill; '' clears it, and a needs change clears it unless a new reason is given").optional(),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, projection, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch), projection)));

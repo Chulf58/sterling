@@ -10,16 +10,18 @@ import { DatabaseSync } from 'node:sqlite';
 import { closeSync, existsSync, openSync, readFileSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { HANDOFFS_DIR_REL, handoffClosureSchema, todoHandoffSchema, type TodoHandoff } from '@sterling/schemas';
+import { BOARD_NEEDS, HANDOFFS_DIR_REL, handoffClosureSchema, todoHandoffReadSchema, type TodoHandoff } from '@sterling/schemas';
 
 export type SentHandoff = Extract<TodoHandoff, { role: 'sent' }>;
 
-/** open: the item is on the receiver's board. done: it was removed and its
- *  closure file says so. gone: removed with no closure file (an older
+/** open: the item is on the receiver's board. needs_user: it is there and
+ *  marked needs 'user' or 'grill'. blocked: it is there and at least one of its
+ *  blockers is still a live board item in the receiver's store. done: it was
+ *  removed and its closure file says so. gone: removed with no closure file (an older
  *  receiver, or a hand delete), so completion is unverified. unknown: the
  *  receiver could not be read or its row does not match. unconfirmed: the
  *  receiver's item id was never recorded (delivery did not finish). */
-export type HandoffStatusState = 'open' | 'done' | 'gone' | 'unknown' | 'unconfirmed';
+export type HandoffStatusState = 'open' | 'needs_user' | 'blocked' | 'done' | 'gone' | 'unknown' | 'unconfirmed';
 
 export interface HandoffStatus {
   state: HandoffStatusState;
@@ -32,7 +34,7 @@ export interface HandoffStatus {
 /** The sent-handoff metadata of a tracker body, or undefined when the item is not a valid tracker. */
 export function sentHandoffOf(rec: { handoff?: unknown }): SentHandoff | undefined {
   if (rec.handoff === undefined) return undefined;
-  const parsed = todoHandoffSchema.safeParse(rec.handoff);
+  const parsed = todoHandoffReadSchema.safeParse(rec.handoff);
   return parsed.success && parsed.data.role === 'sent' ? parsed.data : undefined;
 }
 
@@ -104,6 +106,8 @@ function readIfPresent(p: string): string | undefined {
 
 const statusText = {
   open: (to: string) => `open in ${to}`,
+  needs_user: (to: string, reason?: string) => `needs user in ${to}${reason ? `: ${reason}` : ''}`,
+  blocked: (to: string) => `blocked in ${to}`,
   done: (to: string, closedAt: string, note?: string) => `DONE in ${to} ${closedAt}${note ? `: ${note}` : ''}`,
   gone: (to: string) => `gone from ${to}'s board, completion unverified`,
   unknown: (reason: string) => `status unknown: ${reason}`,
@@ -147,13 +151,34 @@ function closureStatus(h: SentHandoff & { to_item_id: string }): HandoffStatus {
   return { state: 'done', text: statusText.done(h.to_name, c.closed_at, c.note), closed_at: c.closed_at, ...(c.note ? { note: c.note } : {}) };
 }
 
-/** One tracker's status against an already-open receiver database. */
-function rowStatus(db: DatabaseSync, trackerId: string, h: SentHandoff & { to_item_id: string }): HandoffStatus {
+/** The receiver row's needs, needs_reason and blocked_by, or a reason they cannot be read. Unknown keys are ignored; a known field of the wrong shape is refused. */
+function readWaitFields(body: Record<string, unknown>): { needs?: string; needs_reason?: string; blocked_by: string[] } | string {
+  const { needs, needs_reason, blocked_by } = body;
+  if (needs !== undefined && !(typeof needs === 'string' && (BOARD_NEEDS as readonly string[]).includes(needs))) return `its needs value ${JSON.stringify(needs)} is not one this Sterling knows`;
+  if (needs_reason !== undefined && !(typeof needs_reason === 'string' && needs_reason.trim().length > 0)) return 'its needs_reason is not a non-blank string';
+  if (blocked_by !== undefined && !(Array.isArray(blocked_by) && blocked_by.every((s) => typeof s === 'string' && s.length > 0))) return 'its blocked_by is not a list of slugs';
+  return {
+    ...(needs !== undefined ? { needs: needs as string } : {}),
+    ...(needs_reason !== undefined ? { needs_reason: (needs_reason as string).trim() } : {}),
+    blocked_by: (blocked_by as string[] | undefined) ?? [],
+  };
+}
+
+/**
+ * One tracker's status against an already-open receiver database. Precedence
+ * (decision handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe):
+ * needs 'user' or 'grill' first, then a blocker that is still a live board
+ * item there (blocked_by keeps the slugs of removed blockers, so a slug no live
+ * todo carries is closed, the rule board readiness uses), then open. needs
+ * 'investigation' reads open. Each blocker lookup is checked against the time
+ * budget first (`remaining`); running out reads unknown, never open.
+ */
+function rowStatus(db: DatabaseSync, trackerId: string, h: SentHandoff & { to_item_id: string }, remaining: () => number, exhausted: (where: string) => string): HandoffStatus {
   const row = db.prepare('SELECT body, status FROM records WHERE id = ?').get(h.to_item_id) as { body: string; status: string } | undefined;
   if (!row) return closureStatus(h);
-  let body: { type?: unknown; handoff?: unknown };
+  let body: Record<string, unknown>;
   try {
-    body = JSON.parse(row.body) as typeof body;
+    body = JSON.parse(row.body) as Record<string, unknown>;
   } catch (e) {
     return unknown(`${h.to_name}'s row ${h.to_item_id} is not valid JSON (${errText(e)})`);
   }
@@ -162,9 +187,19 @@ function rowStatus(db: DatabaseSync, trackerId: string, h: SentHandoff & { to_it
   // Matched on the uuid alone; the metadata is then checked, and a missing or
   // different one reads as unknown, never as absent or open.
   if (body.handoff === undefined) return unknown(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} carries no handoff record (an older Sterling there may have dropped it on an edit)`);
-  const meta = todoHandoffSchema.safeParse(body.handoff);
+  const meta = todoHandoffReadSchema.safeParse(body.handoff);
   if (!meta.success || meta.data.role !== 'received' || meta.data.transfer_id !== h.transfer_id || meta.data.from_item_id !== trackerId) {
     return unknown(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} carries handoff metadata for a different transfer`);
+  }
+  const wait = readWaitFields(body);
+  if (typeof wait === 'string') return unknown(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} cannot be read: ${wait}`);
+  if (wait.needs === 'user' || wait.needs === 'grill') return { state: 'needs_user', text: statusText.needs_user(h.to_name, wait.needs_reason) };
+  if (wait.blocked_by.length) {
+    const live = db.prepare(`SELECT 1 FROM records WHERE type = 'todo' AND status != 'superseded' AND json_extract(body, '$.slug') = ? LIMIT 1`);
+    for (const slug of new Set(wait.blocked_by)) {
+      if (remaining() <= 0) return unknown(exhausted(`${h.to_name}'s blocker ${slug}`));
+      if (live.get(slug)) return { state: 'blocked', text: statusText.blocked(h.to_name) };
+    }
   }
   return { state: 'open', text: statusText.open(h.to_name) };
 }
@@ -252,7 +287,7 @@ export function resolveSentHandoffs(
         }
         try {
           setBusyTimeout(db, Math.min(busy, now));
-          out.set(id, rowStatus(db, id, h));
+          out.set(id, rowStatus(db, id, h, remaining, exhausted));
         } catch (e) {
           out.set(id, unknown(`${h.to_name}'s database could not be read (${errText(e)})`));
         }

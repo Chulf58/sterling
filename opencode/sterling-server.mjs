@@ -4324,7 +4324,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, todoHandoffSchema, HANDOFFS_DIR_REL, handoffClosureSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4722,22 +4722,22 @@ var init_records = __esm({
     TODO_SYSTEM_SOURCE = "system";
     TODO_SYSTEM_REQUIRES = ["system_reason"];
     TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
-    todoHandoffSchema = external_exports.discriminatedUnion("role", [
-      external_exports.object({
-        role: external_exports.literal("received"),
-        transfer_id: external_exports.string().uuid(),
-        from_root: external_exports.string().min(1),
-        from_name: external_exports.string().min(1),
-        from_item_id: external_exports.string().uuid()
-      }).strict(),
-      external_exports.object({
-        role: external_exports.literal("sent"),
-        transfer_id: external_exports.string().uuid(),
-        to_root: external_exports.string().min(1),
-        to_name: external_exports.string().min(1),
-        to_item_id: external_exports.string().uuid().nullable()
-      }).strict()
-    ]);
+    receivedHandoffShape = external_exports.object({
+      role: external_exports.literal("received"),
+      transfer_id: external_exports.string().uuid(),
+      from_root: external_exports.string().min(1),
+      from_name: external_exports.string().min(1),
+      from_item_id: external_exports.string().uuid()
+    });
+    sentHandoffShape = external_exports.object({
+      role: external_exports.literal("sent"),
+      transfer_id: external_exports.string().uuid(),
+      to_root: external_exports.string().min(1),
+      to_name: external_exports.string().min(1),
+      to_item_id: external_exports.string().uuid().nullable()
+    });
+    todoHandoffSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
+    todoHandoffReadSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape, sentHandoffShape]);
     HANDOFFS_DIR_REL = ".sterling/handoffs";
     handoffClosureSchema = external_exports.object({
       transfer_id: external_exports.string().uuid(),
@@ -4793,10 +4793,18 @@ var init_records = __esm({
       // 'grill' wait for the user. Not a progress status: `status` keeps meaning
       // supersession only. Absent means nothing beyond the blockers.
       needs: external_exports.enum(BOARD_NEEDS).optional(),
+      // Why a user item waits for the user (GitHub issue #107, decision
+      // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
+      // only with needs 'user' or 'grill' on a source:'user' item. A sender's
+      // tracker shows it as "needs user in <project>: <reason>".
+      needs_reason: external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank").optional(),
       // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
       handoff: todoHandoffSchema.optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
+      if (rec.needs_reason !== void 0 && (rec.source !== "user" || rec.needs !== "user" && rec.needs !== "grill")) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
+      }
       if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
       }
@@ -8284,7 +8292,7 @@ import { pathToFileURL } from "node:url";
 function sentHandoffOf(rec) {
   if (rec.handoff === void 0)
     return void 0;
-  const parsed = todoHandoffSchema.safeParse(rec.handoff);
+  const parsed = todoHandoffReadSchema.safeParse(rec.handoff);
   return parsed.success && parsed.data.role === "sent" ? parsed.data : void 0;
 }
 function journalTopology(path) {
@@ -8365,7 +8373,21 @@ function closureStatus(h) {
   }
   return { state: "done", text: statusText.done(h.to_name, c.closed_at, c.note), closed_at: c.closed_at, ...c.note ? { note: c.note } : {} };
 }
-function rowStatus(db, trackerId, h) {
+function readWaitFields(body) {
+  const { needs, needs_reason, blocked_by } = body;
+  if (needs !== void 0 && !(typeof needs === "string" && BOARD_NEEDS.includes(needs)))
+    return `its needs value ${JSON.stringify(needs)} is not one this Sterling knows`;
+  if (needs_reason !== void 0 && !(typeof needs_reason === "string" && needs_reason.trim().length > 0))
+    return "its needs_reason is not a non-blank string";
+  if (blocked_by !== void 0 && !(Array.isArray(blocked_by) && blocked_by.every((s2) => typeof s2 === "string" && s2.length > 0)))
+    return "its blocked_by is not a list of slugs";
+  return {
+    ...needs !== void 0 ? { needs } : {},
+    ...needs_reason !== void 0 ? { needs_reason: needs_reason.trim() } : {},
+    blocked_by: blocked_by ?? []
+  };
+}
+function rowStatus(db, trackerId, h, remaining, exhausted) {
   const row = db.prepare("SELECT body, status FROM records WHERE id = ?").get(h.to_item_id);
   if (!row)
     return closureStatus(h);
@@ -8381,9 +8403,23 @@ function rowStatus(db, trackerId, h) {
     return unknown(`${h.to_name}'s item ${h.to_item_id} is superseded, which a board item never is`);
   if (body.handoff === void 0)
     return unknown(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} carries no handoff record (an older Sterling there may have dropped it on an edit)`);
-  const meta = todoHandoffSchema.safeParse(body.handoff);
+  const meta = todoHandoffReadSchema.safeParse(body.handoff);
   if (!meta.success || meta.data.role !== "received" || meta.data.transfer_id !== h.transfer_id || meta.data.from_item_id !== trackerId) {
     return unknown(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} carries handoff metadata for a different transfer`);
+  }
+  const wait = readWaitFields(body);
+  if (typeof wait === "string")
+    return unknown(`${h.to_name}'s item ${h.to_item_id.slice(0, 8)} cannot be read: ${wait}`);
+  if (wait.needs === "user" || wait.needs === "grill")
+    return { state: "needs_user", text: statusText.needs_user(h.to_name, wait.needs_reason) };
+  if (wait.blocked_by.length) {
+    const live = db.prepare(`SELECT 1 FROM records WHERE type = 'todo' AND status != 'superseded' AND json_extract(body, '$.slug') = ? LIMIT 1`);
+    for (const slug of new Set(wait.blocked_by)) {
+      if (remaining() <= 0)
+        return unknown(exhausted(`${h.to_name}'s blocker ${slug}`));
+      if (live.get(slug))
+        return { state: "blocked", text: statusText.blocked(h.to_name) };
+    }
   }
   return { state: "open", text: statusText.open(h.to_name) };
 }
@@ -8449,7 +8485,7 @@ function resolveSentHandoffs(trackers, opts = {}) {
         }
         try {
           setBusyTimeout(db, Math.min(busy, now));
-          out.set(id, rowStatus(db, id, h));
+          out.set(id, rowStatus(db, id, h, remaining, exhausted));
         } catch (e) {
           out.set(id, unknown(`${h.to_name}'s database could not be read (${errText(e)})`));
         }
@@ -8467,6 +8503,8 @@ var init_handoff = __esm({
     init_dist();
     statusText = {
       open: (to) => `open in ${to}`,
+      needs_user: (to, reason) => `needs user in ${to}${reason ? `: ${reason}` : ""}`,
+      blocked: (to) => `blocked in ${to}`,
       done: (to, closedAt, note) => `DONE in ${to} ${closedAt}${note ? `: ${note}` : ""}`,
       gone: (to) => `gone from ${to}'s board, completion unverified`,
       unknown: (reason) => `status unknown: ${reason}`,

@@ -282,3 +282,85 @@ test('resolveSentHandoffs: a config.json behind an inaccessible directory reads 
     b.cleanup();
   }
 });
+
+// GitHub issue #107: the receiver row's needs, needs_reason and blocked_by.
+// Precedence: needs user/grill, then a blocker still live there, then open.
+test('resolveSentHandoffs: needs user or grill, then a live blocker, then open; investigation and a removed blocker read open', () => {
+  const b = receiver();
+  try {
+    mk(b.store, { text: 'Live blocker', slug: 'live-blocker' });
+    const removed = mk(b.store, { text: 'Removed blocker', slug: 'removed-blocker' });
+    const cases: Record<string, Record<string, unknown>> = {
+      userReason: { needs: 'user', needs_reason: 'pick a colour', blocked_by: ['live-blocker'] },
+      grill: { needs: 'grill' },
+      blocked: { needs: 'investigation', blocked_by: ['removed-blocker', 'live-blocker'] },
+      stale: { blocked_by: ['removed-blocker'] },
+      investigation: { needs: 'investigation' },
+    };
+    const trackers: { id: string; handoff: unknown }[] = [];
+    const idOf: Record<string, string> = {};
+    for (const [name, over] of Object.entries(cases)) {
+      const tracker = randomUUID();
+      const transfer = randomUUID();
+      const item = mk(b.store, { text: name, ...over, handoff: { role: 'received', transfer_id: transfer, from_root: '/x/alpha', from_name: 'alpha', from_item_id: tracker } });
+      trackers.push({ id: tracker, handoff: sent(b.root, transfer, item.id) });
+      idOf[name] = tracker;
+    }
+    b.store.remove(removed.id, NOW);
+    b.store.close();
+    const out = resolveSentHandoffs(trackers);
+    assert.deepEqual(out.get(idOf.userReason), { state: 'needs_user', text: 'needs user in beta: pick a colour' });
+    assert.deepEqual(out.get(idOf.grill), { state: 'needs_user', text: 'needs user in beta' });
+    assert.deepEqual(out.get(idOf.blocked), { state: 'blocked', text: 'blocked in beta' });
+    assert.deepEqual(out.get(idOf.stale), { state: 'open', text: 'open in beta' }, 'a removed blocker is closed');
+    assert.deepEqual(out.get(idOf.investigation), { state: 'open', text: 'open in beta' });
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('resolveSentHandoffs: the time budget running out during the blocker lookup reads unknown, never open', () => {
+  const b = receiver();
+  try {
+    mk(b.store, { text: 'Live blocker', slug: 'live-blocker' });
+    const tracker = randomUUID();
+    const transfer = randomUUID();
+    const item = mk(b.store, { text: 'Blocked there', blocked_by: ['live-blocker'], handoff: { role: 'received', transfer_id: transfer, from_root: '/x/alpha', from_name: 'alpha', from_item_id: tracker } });
+    b.store.close();
+    // clock calls: start, the receiver check, the lookup check, the blocker check (past the budget)
+    let t = 0;
+    const out = resolveSentHandoffs([{ id: tracker, handoff: sent(b.root, transfer, item.id) }], { budgetMs: 250, clock: () => (t += 100) });
+    assert.equal(out.get(tracker)?.state, 'unknown');
+    assert.match(out.get(tracker)?.text ?? '', /^status unknown: time budget exhausted \(250 ms\) before beta's blocker live-blocker was read$/);
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('resolveSentHandoffs: unknown keys on the receiver row and its handoff are tolerated; an invalid known field reads unknown', () => {
+  const b = receiver();
+  try {
+    const tracker = randomUUID();
+    const transfer = randomUUID();
+    const item = mk(b.store, { text: 'There', handoff: { role: 'received', transfer_id: transfer, from_root: '/x/alpha', from_name: 'alpha', from_item_id: tracker } });
+    b.store.close();
+    const db = new DatabaseSync(join(b.root, '.sterling', 'sterling.db'));
+    const patchBody = (over: Record<string, unknown>, handoffOver: Record<string, unknown> = {}) => {
+      const row = db.prepare('SELECT body FROM records WHERE id = ?').get(item.id) as { body: string };
+      const body = JSON.parse(row.body);
+      db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify({ ...body, ...over, handoff: { ...body.handoff, ...handoffOver } }), item.id);
+    };
+    const read = () => resolveSentHandoffs([{ id: tracker, handoff: sent(b.root, transfer, item.id) }]).get(tracker);
+    patchBody({ future_field: 1 }, { future_key: 'x' });
+    assert.deepEqual(read(), { state: 'open', text: 'open in beta' });
+    patchBody({ needs: 'someday' });
+    assert.match(read()?.text ?? '', /^status unknown: beta's item .* cannot be read: its needs value "someday"/);
+    patchBody({ needs: 'user', blocked_by: 'not-a-list' });
+    assert.match(read()?.text ?? '', /its blocked_by is not a list of slugs/);
+    patchBody({ blocked_by: [] }, { transfer_id: randomUUID() });
+    assert.match(read()?.text ?? '', /different transfer/);
+    db.close();
+  } finally {
+    b.cleanup();
+  }
+});

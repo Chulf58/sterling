@@ -653,26 +653,30 @@ export const TODO_USER_ONLY_FIELDS = { blocked_by: 'orders', needs: 'marks' } as
  * not accept it and board_update refuses it by name, so no generic edit can
  * strip or change it.
  */
-export const todoHandoffSchema = z.discriminatedUnion('role', [
-  z
-    .object({
-      role: z.literal('received'),
-      transfer_id: z.string().uuid(),
-      from_root: z.string().min(1),
-      from_name: z.string().min(1),
-      from_item_id: z.string().uuid(),
-    })
-    .strict(),
-  z
-    .object({
-      role: z.literal('sent'),
-      transfer_id: z.string().uuid(),
-      to_root: z.string().min(1),
-      to_name: z.string().min(1),
-      to_item_id: z.string().uuid().nullable(),
-    })
-    .strict(),
-]);
+const receivedHandoffShape = z.object({
+  role: z.literal('received'),
+  transfer_id: z.string().uuid(),
+  from_root: z.string().min(1),
+  from_name: z.string().min(1),
+  from_item_id: z.string().uuid(),
+});
+const sentHandoffShape = z.object({
+  role: z.literal('sent'),
+  transfer_id: z.string().uuid(),
+  to_root: z.string().min(1),
+  to_name: z.string().min(1),
+  to_item_id: z.string().uuid().nullable(),
+});
+export const todoHandoffSchema = z.discriminatedUnion('role', [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
+
+/**
+ * The same handoff shape for READING another project's row or one's own
+ * tracker (decision handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe):
+ * unknown keys are dropped instead of refused, so a newer Sterling's extra key
+ * never turns a status into "unknown", while every known field is still
+ * checked and identity is compared by the caller. Writes keep the strict form.
+ */
+export const todoHandoffReadSchema = z.discriminatedUnion('role', [receivedHandoffShape, sentHandoffShape]);
 
 export type TodoHandoff = z.infer<typeof todoHandoffSchema>;
 
@@ -753,11 +757,19 @@ export const todoSchema = base
     // 'grill' wait for the user. Not a progress status: `status` keeps meaning
     // supersession only. Absent means nothing beyond the blockers.
     needs: z.enum(BOARD_NEEDS).optional(),
+    // Why a user item waits for the user (GitHub issue #107, decision
+    // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
+    // only with needs 'user' or 'grill' on a source:'user' item. A sender's
+    // tracker shows it as "needs user in <project>: <reason>".
+    needs_reason: z.string().min(1).refine((v) => v.trim().length > 0, 'needs_reason must not be blank').optional(),
     // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
     handoff: todoHandoffSchema.optional(),
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);
+    if (rec.needs_reason !== undefined && (rec.source !== 'user' || (rec.needs !== 'user' && rec.needs !== 'grill'))) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['needs_reason'], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
+    }
     if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['handoff'], message: `handoff marks source:'user' board tasks only — maintenance-queue items are never handed to another project` });
     }
@@ -1868,6 +1880,7 @@ function recordFieldConditions(type: string): [path: string, text: string][] {
       for (const field of TODO_SYSTEM_REQUIRES) out.push([field, `Required when source is '${TODO_SYSTEM_SOURCE}'.`]);
       for (const field of userOnly) out.push([field, `Refused when source is '${TODO_SYSTEM_SOURCE}'.`]);
       out.push(['blocked_by', "An item cannot list its own slug."]);
+      out.push(['needs_reason', "Accepted only when needs is 'user' or 'grill' on a source 'user' item."]);
       return out;
     }
     case 'open_question':

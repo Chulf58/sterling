@@ -288,7 +288,7 @@ export type BoardProjection = Projection | 'headline' | 'text';
  */
 export const BOARD_TEXT_CLIP = 240;
 
-const BOARD_TEXT_FIELDS = ['id', 'slug', 'objective', 'source', 'system_reason', 'status', 'priority', 'feature_link', 'blocked_by', 'needs', 'updated_at'] as const;
+const BOARD_TEXT_FIELDS = ['id', 'slug', 'objective', 'source', 'system_reason', 'status', 'priority', 'feature_link', 'blocked_by', 'needs', 'needs_reason', 'updated_at'] as const;
 
 function textRowRecord(record: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -11223,7 +11223,7 @@ export class SterlingTools {
    * changed nothing the caller asked for. An empty patch is refused for the
    * same reason: nothing to update is not a no-op success.
    */
-  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective', 'measured_at_head', 'blocked_by', 'needs'] as const;
+  private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective', 'measured_at_head', 'blocked_by', 'needs', 'needs_reason'] as const;
 
   boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord & { claims_check?: string } {
     // Resolves through the SAME ladder as knowledge_get/board_get (full uuid,
@@ -11253,6 +11253,22 @@ export class SterlingTools {
       patch = { ...patch, blocked_by: this.resolveBlockedBy(patch.blocked_by, 'board_update', old.id) };
     }
     if ('needs' in patch && (old as unknown as { source?: string }).source === 'system') throw SterlingTools.needsSystemRefusal('board_update');
+    // needs_reason (GitHub issue #107): why the item waits for the user. It goes
+    // only with needs 'user' or 'grill', is cleared by '' and by any change of
+    // needs that does not give a new reason in the same call.
+    if ('needs_reason' in patch) {
+      const reason = patch.needs_reason;
+      if (typeof reason !== 'string') throw new Error(`board_update: needs_reason must be a string ('' clears it). Nothing was updated.`);
+      if (reason.trim().length > 0) {
+        const needsAfter = 'needs' in patch ? patch.needs : (old as unknown as { needs?: string }).needs;
+        if ((old as unknown as { source?: string }).source !== 'user' || (needsAfter !== 'user' && needsAfter !== 'grill')) {
+          throw new Error(
+            `board_update: needs_reason says why an item waits for the user, so it goes only with needs 'user' or 'grill' on a source:'user' board task; this item's needs would be ${needsAfter === undefined || needsAfter === '' ? 'absent' : `'${String(needsAfter)}'`}. Nothing was updated.`
+          );
+        }
+        patch = { ...patch, needs_reason: reason.trim() };
+      }
+    }
     // board-provenance-measured-at-head: a text/file_keys rewrite carries new
     // evidence, so it re-stamps measured_at_head to the CURRENT HEAD — unless
     // the caller explicitly named a measured_at_head in this same patch, which
@@ -11289,6 +11305,7 @@ export class SterlingTools {
     if (Array.isArray(next.blocked_by) && next.blocked_by.length === 0) delete next.blocked_by;
     // needs:'' clears the field to absent, the same way.
     if (next.needs === '') delete next.needs;
+    if (next.needs_reason === '' || ('needs' in patch && !('needs_reason' in patch))) delete next.needs_reason;
     // old.id (the resolved canonical id), not the caller's possibly-short
     // citation — a mounted domain store's routing (storeHolding) keys off the
     // real id, and a bare prefix would not resolve there.

@@ -170,24 +170,26 @@ test('feature_article current_ac and live_test_refs: an empty array is refused o
 test('todo source: the conditions name the fields the validator requires and refuses on a system item', () => {
   const sources = enumValues('todo', 'source');
   const userOnly = Object.keys(TODO_USER_ONLY_FIELDS);
+  // needs_reason goes only with needs user or grill, so it leaves with needs.
+  const withNeeds = [...userOnly, 'needs_reason'];
   const samples: Rec = { blocked_by: ['another-item'], needs: 'user' };
-  const plain = withoutKeys(base('todo'), [...TODO_SYSTEM_REQUIRES, ...userOnly]);
+  const plain = withoutKeys(base('todo'), [...TODO_SYSTEM_REQUIRES, ...withNeeds]);
 
   const requiring = sources.filter((source) => !accepts('todo', { ...plain, source }));
   assert.deepEqual(requiring, [TODO_SYSTEM_SOURCE], 'only a system item is refused without its required fields');
   const system = { ...base('todo'), source: TODO_SYSTEM_SOURCE };
-  assert.ok(accepts('todo', withoutKeys(system, userOnly)), 'a system item with its required fields and no user-only field is accepted');
+  assert.ok(accepts('todo', withoutKeys(system, withNeeds)), 'a system item with its required fields and no user-only field is accepted');
 
   const sourceCondition = conditionAt('todo', 'source');
   assert.deepEqual(quoted(sourceCondition, sources), [TODO_SYSTEM_SOURCE]);
   for (const field of TODO_SYSTEM_REQUIRES) {
-    assert.ok(!accepts('todo', withoutKeys(system, [...userOnly, field])), `a system item without ${field} is refused`);
+    assert.ok(!accepts('todo', withoutKeys(system, [...withNeeds, field])), `a system item without ${field} is refused`);
     assert.match(sourceCondition, new RegExp(`requires.*\\b${field}\\b`));
     assert.match(conditionAt('todo', field), /Required when source is 'system'/);
   }
   for (const field of userOnly) {
     for (const source of sources) {
-      const refused = !accepts('todo', { ...withoutKeys(base('todo'), userOnly), source, [field]: samples[field] });
+      const refused = !accepts('todo', { ...withoutKeys(base('todo'), withNeeds), source, [field]: samples[field] });
       assert.equal(refused, source === TODO_SYSTEM_SOURCE, `${field} on source '${source}'`);
     }
     assert.match(sourceCondition, new RegExp(`refuses.*\\b${field}\\b`));
@@ -196,7 +198,7 @@ test('todo source: the conditions name the fields the validator requires and ref
 });
 
 test('todo blocked_by: an item listing its own slug is refused, and the condition says so', () => {
-  const item = { ...withoutKeys(base('todo'), ['needs']), source: 'user', slug: 'this-item' };
+  const item = { ...withoutKeys(base('todo'), ['needs', 'needs_reason']), source: 'user', slug: 'this-item' };
   for (const blocked_by of [['another-item'], ['this-item'], ['another-item', 'this-item']]) {
     const self = todoBlocksItself({ slug: 'this-item', blocked_by });
     assert.equal(accepts('todo', { ...item, blocked_by }), !self, `blocked_by ${JSON.stringify(blocked_by)}`);
@@ -365,4 +367,14 @@ test('a record map prints the type of its values', () => {
     'record<string, {attested_at, item_id, head_commit, sha256}>'
   );
   assert.equal(fieldShapeAt(fieldsOf('reference_material'), 'absence_attestations')?.type, 'record<string, {attested_at, item_id, head_commit}>');
+});
+
+test('todo needs_reason: accepted only with needs user or grill on a user item, and the condition says so', () => {
+  const item = withoutKeys(base('todo'), [...TODO_SYSTEM_REQUIRES, 'needs', 'needs_reason', 'blocked_by']);
+  for (const needs of [undefined, 'investigation', 'user', 'grill']) {
+    const accepted = accepts('todo', { ...item, source: 'user', ...(needs ? { needs } : {}), needs_reason: 'pick a colour' });
+    assert.equal(accepted, needs === 'user' || needs === 'grill', `needs_reason with needs ${String(needs)}`);
+  }
+  assert.ok(!accepts('todo', { ...item, source: 'user', needs: 'user', needs_reason: '  ' }), 'a blank reason is refused');
+  assert.match(conditionAt('todo', 'needs_reason'), /needs is 'user' or 'grill' on a source 'user' item/);
 });

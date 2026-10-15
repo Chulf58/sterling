@@ -4310,7 +4310,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, todoHandoffSchema, handoffClosureSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, handoffClosureSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4708,22 +4708,22 @@ var init_records = __esm({
     TODO_SYSTEM_SOURCE = "system";
     TODO_SYSTEM_REQUIRES = ["system_reason"];
     TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
-    todoHandoffSchema = external_exports.discriminatedUnion("role", [
-      external_exports.object({
-        role: external_exports.literal("received"),
-        transfer_id: external_exports.string().uuid(),
-        from_root: external_exports.string().min(1),
-        from_name: external_exports.string().min(1),
-        from_item_id: external_exports.string().uuid()
-      }).strict(),
-      external_exports.object({
-        role: external_exports.literal("sent"),
-        transfer_id: external_exports.string().uuid(),
-        to_root: external_exports.string().min(1),
-        to_name: external_exports.string().min(1),
-        to_item_id: external_exports.string().uuid().nullable()
-      }).strict()
-    ]);
+    receivedHandoffShape = external_exports.object({
+      role: external_exports.literal("received"),
+      transfer_id: external_exports.string().uuid(),
+      from_root: external_exports.string().min(1),
+      from_name: external_exports.string().min(1),
+      from_item_id: external_exports.string().uuid()
+    });
+    sentHandoffShape = external_exports.object({
+      role: external_exports.literal("sent"),
+      transfer_id: external_exports.string().uuid(),
+      to_root: external_exports.string().min(1),
+      to_name: external_exports.string().min(1),
+      to_item_id: external_exports.string().uuid().nullable()
+    });
+    todoHandoffSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
+    todoHandoffReadSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape, sentHandoffShape]);
     handoffClosureSchema = external_exports.object({
       transfer_id: external_exports.string().uuid(),
       item_id: external_exports.string().uuid(),
@@ -4778,10 +4778,18 @@ var init_records = __esm({
       // 'grill' wait for the user. Not a progress status: `status` keeps meaning
       // supersession only. Absent means nothing beyond the blockers.
       needs: external_exports.enum(BOARD_NEEDS).optional(),
+      // Why a user item waits for the user (GitHub issue #107, decision
+      // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
+      // only with needs 'user' or 'grill' on a source:'user' item. A sender's
+      // tracker shows it as "needs user in <project>: <reason>".
+      needs_reason: external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank").optional(),
       // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
       handoff: todoHandoffSchema.optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
+      if (rec.needs_reason !== void 0 && (rec.source !== "user" || rec.needs !== "user" && rec.needs !== "grill")) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
+      }
       if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
       }
@@ -7853,7 +7861,7 @@ import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 function sentHandoffOf(rec) {
   if (rec.handoff === void 0)
     return void 0;
-  const parsed = todoHandoffSchema.safeParse(rec.handoff);
+  const parsed = todoHandoffReadSchema.safeParse(rec.handoff);
   return parsed.success && parsed.data.role === "sent" ? parsed.data : void 0;
 }
 var init_handoff = __esm({

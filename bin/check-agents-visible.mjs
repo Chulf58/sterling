@@ -4549,22 +4549,22 @@ var SYSTEM_REASONS = [
 var TODO_SYSTEM_SOURCE = "system";
 var TODO_SYSTEM_REQUIRES = ["system_reason"];
 var TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
-var todoHandoffSchema = external_exports.discriminatedUnion("role", [
-  external_exports.object({
-    role: external_exports.literal("received"),
-    transfer_id: external_exports.string().uuid(),
-    from_root: external_exports.string().min(1),
-    from_name: external_exports.string().min(1),
-    from_item_id: external_exports.string().uuid()
-  }).strict(),
-  external_exports.object({
-    role: external_exports.literal("sent"),
-    transfer_id: external_exports.string().uuid(),
-    to_root: external_exports.string().min(1),
-    to_name: external_exports.string().min(1),
-    to_item_id: external_exports.string().uuid().nullable()
-  }).strict()
-]);
+var receivedHandoffShape = external_exports.object({
+  role: external_exports.literal("received"),
+  transfer_id: external_exports.string().uuid(),
+  from_root: external_exports.string().min(1),
+  from_name: external_exports.string().min(1),
+  from_item_id: external_exports.string().uuid()
+});
+var sentHandoffShape = external_exports.object({
+  role: external_exports.literal("sent"),
+  transfer_id: external_exports.string().uuid(),
+  to_root: external_exports.string().min(1),
+  to_name: external_exports.string().min(1),
+  to_item_id: external_exports.string().uuid().nullable()
+});
+var todoHandoffSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape.strict(), sentHandoffShape.strict()]);
+var todoHandoffReadSchema = external_exports.discriminatedUnion("role", [receivedHandoffShape, sentHandoffShape]);
 var handoffClosureSchema = external_exports.object({
   transfer_id: external_exports.string().uuid(),
   item_id: external_exports.string().uuid(),
@@ -4622,10 +4622,18 @@ var todoSchema = base.extend({
   // 'grill' wait for the user. Not a progress status: `status` keeps meaning
   // supersession only. Absent means nothing beyond the blockers.
   needs: external_exports.enum(BOARD_NEEDS).optional(),
+  // Why a user item waits for the user (GitHub issue #107, decision
+  // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
+  // only with needs 'user' or 'grill' on a source:'user' item. A sender's
+  // tracker shows it as "needs user in <project>: <reason>".
+  needs_reason: external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank").optional(),
   // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
   handoff: todoHandoffSchema.optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
+  if (rec.needs_reason !== void 0 && (rec.source !== "user" || rec.needs !== "user" && rec.needs !== "grill")) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
+  }
   if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
   }

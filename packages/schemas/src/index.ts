@@ -26,6 +26,7 @@ export {
   featureArticleSchema,
   todoSchema,
   todoHandoffSchema,
+  todoHandoffReadSchema,
   type TodoHandoff,
   HANDOFFS_DIR_REL,
   handoffClosureSchema,
