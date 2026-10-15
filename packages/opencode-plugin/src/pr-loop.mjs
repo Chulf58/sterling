@@ -2,13 +2,13 @@
 // sterling-is-fully-standalone-on-opencode-2-full-parity-with-claude-code,
 // parity P9). H10 carries it on Claude Code: it blocks one Stop per session per
 // arming and reminds on every other Stop until pr-review-wait.mjs --settle
-// changes .sterling/transient/pr-loop.json. OpenCode has no stop block, so each
-// execution end raises the same text as a notice: the full next-action text the
-// first time per arming in this plugin process, the short reminder after that.
+// settles it. OpenCode has no stop block, so each execution end raises the same
+// text as a notice for every owed PR: the full next-action text the first time
+// per PR and arming in this plugin process, the short reminder after that.
 // The rule (work mode only, status 'owed', an unreadable state disclosed) is
 // scripts/hooks/lib/pr-loop-duty.mjs, shared with H10.
 import { join } from 'node:path';
-import { evaluatePrLoop, prLoopNext, prLoopOwedText, prLoopReminderText } from '../../../scripts/hooks/lib/pr-loop-duty.mjs';
+import { evaluatePrLoops, prLoopNext, prLoopOwedText, prLoopReminderText } from '../../../scripts/hooks/lib/pr-loop-duty.mjs';
 import { sterlingRoot } from './layer.mjs';
 import { addNotice } from './notices.mjs';
 
@@ -17,18 +17,20 @@ export function createPrLoopNotice({ now, pluginRoot } = {}) {
   const stamp = now ?? (() => new Date().toISOString());
   const announced = new Set();
   return function notify(root) {
-    const { state, degraded } = evaluatePrLoop(root);
+    const { states, degraded } = evaluatePrLoops(root);
     const at = stamp();
     if (degraded) addNotice(root, degraded, at);
-    if (!state) return;
-    // One key per PR and arming: the full text and every reminder say the same thing, so
-    // the conductor sees it once per session, and a re-arm is a new key (notices.mjs).
-    const key = `pr-loop-owed:${state.pr_number}:${state.armed_at}`;
-    if (announced.has(state.armed_at)) {
-      addNotice(root, prLoopReminderText(state), at, key);
-      return;
+    // One notice per owed PR (GitHub issue #104): concurrent PRs each keep their own loop.
+    for (const state of states) {
+      // One key per PR and arming: the full text and every reminder say the same thing, so
+      // the conductor sees it once per session, and a re-arm is a new key (notices.mjs).
+      const key = `pr-loop-owed:${state.pr_number}:${state.armed_at}`;
+      if (announced.has(key)) {
+        addNotice(root, prLoopReminderText(state), at, key);
+        continue;
+      }
+      announced.add(key);
+      addNotice(root, prLoopOwedText(state, prLoopNext(state, join(pluginRoot ?? sterlingRoot(), 'bin', 'pr-review-wait.mjs'), { host: 'opencode' })), at, key);
     }
-    announced.add(state.armed_at);
-    addNotice(root, prLoopOwedText(state, prLoopNext(state, join(pluginRoot ?? sterlingRoot(), 'bin', 'pr-review-wait.mjs'))), at, key);
   };
 }

@@ -4310,7 +4310,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, todoHandoffSchema, handoffClosureSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, RECORD_TYPES, NAME_CLIP, clipName, displayHandle;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -4708,6 +4708,28 @@ var init_records = __esm({
     TODO_SYSTEM_SOURCE = "system";
     TODO_SYSTEM_REQUIRES = ["system_reason"];
     TODO_USER_ONLY_FIELDS = { blocked_by: "orders", needs: "marks" };
+    todoHandoffSchema = external_exports.discriminatedUnion("role", [
+      external_exports.object({
+        role: external_exports.literal("received"),
+        transfer_id: external_exports.string().uuid(),
+        from_root: external_exports.string().min(1),
+        from_name: external_exports.string().min(1),
+        from_item_id: external_exports.string().uuid()
+      }).strict(),
+      external_exports.object({
+        role: external_exports.literal("sent"),
+        transfer_id: external_exports.string().uuid(),
+        to_root: external_exports.string().min(1),
+        to_name: external_exports.string().min(1),
+        to_item_id: external_exports.string().uuid().nullable()
+      }).strict()
+    ]);
+    handoffClosureSchema = external_exports.object({
+      transfer_id: external_exports.string().uuid(),
+      item_id: external_exports.string().uuid(),
+      closed_at: external_exports.string().min(1),
+      note: external_exports.string().min(1).optional()
+    }).strict();
     todoSchema = base.extend({
       type: external_exports.literal("todo"),
       // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -4755,9 +4777,14 @@ var init_records = __esm({
       // 'investigation' still auto-starts, as a researcher lane; 'user' and
       // 'grill' wait for the user. Not a progress status: `status` keeps meaning
       // supersession only. Absent means nothing beyond the blockers.
-      needs: external_exports.enum(BOARD_NEEDS).optional()
+      needs: external_exports.enum(BOARD_NEEDS).optional(),
+      // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
+      handoff: todoHandoffSchema.optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
+      if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
+      }
       if (rec.source === TODO_SYSTEM_SOURCE) {
         for (const field of TODO_SYSTEM_REQUIRES) {
           if (!rec[field]) {
@@ -7821,8 +7848,23 @@ var init_registry2 = __esm({
   }
 });
 
-// packages/store/dist/sqlite-driver.js
+// packages/store/dist/handoff.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
+function sentHandoffOf(rec) {
+  if (rec.handoff === void 0)
+    return void 0;
+  const parsed = todoHandoffSchema.safeParse(rec.handoff);
+  return parsed.success && parsed.data.role === "sent" ? parsed.data : void 0;
+}
+var init_handoff = __esm({
+  "packages/store/dist/handoff.js"() {
+    "use strict";
+    init_dist();
+  }
+});
+
+// packages/store/dist/sqlite-driver.js
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { realpathSync } from "node:fs";
 import { dirname as dirname2, basename, join as join4, resolve as resolvePath } from "node:path";
 function journalDemotionRequired(absPath, platform = process.platform) {
@@ -8000,7 +8042,7 @@ CREATE TABLE IF NOT EXISTS store_meta (
         }
         this.busyTimeoutMs = busyTimeoutMs;
         this.dbPath = resolvePath(path);
-        this.db = new DatabaseSync2(path);
+        this.db = new DatabaseSync3(path);
         let classifiedPath = this.dbPath;
         try {
           classifiedPath = join4(realpathSync(dirname2(this.dbPath)), basename(this.dbPath));
@@ -8461,8 +8503,10 @@ var init_dist2 = __esm({
     init_shares();
     init_domain_fit();
     init_registry2();
+    init_handoff();
     init_axis();
     init_axis();
+    init_handoff();
     init_sqlite_driver();
     init_pg_bridge();
     init_pg_driver();
@@ -9837,7 +9881,8 @@ var init_dist2 = __esm({
                 blockersOpen.push(boardItemHandle(holder));
             }
             const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-            const state = t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+            const sent = sentHandoffOf(t);
+            const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
             return {
               id: t.id,
               ...t.slug ? { slug: t.slug } : {},
@@ -9849,7 +9894,8 @@ var init_dist2 = __esm({
               blockers,
               blockers_open: blockersOpen,
               unblocks,
-              state
+              state,
+              ...sent ? { handoff: sent } : {}
             };
           });
         });
@@ -10761,7 +10807,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync as readFileSync4, existsSync as existsSync4, mkdtempSync, rmSync as rmSync2 } from "node:fs";
 init_dist();
 init_dist2();
-import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
+import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 
 // packages/store/dist/routing.js
 init_dist();
@@ -11707,7 +11753,7 @@ function isForeignTree(record, root) {
 }
 
 // scripts/hooks/lib/session-events.mjs
-import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
+import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 import { dirname as dirname6, join as join11 } from "node:path";
 var SESSION_EVENTS_REL = join11(".sterling", "transient", "session-events.json");
 
@@ -12226,7 +12272,7 @@ init_dist2();
 
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync9, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync7, linkSync, mkdirSync as mkdirSync5, readdirSync as readdirSync3, readFileSync as readFileSync9, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { delimiter, dirname as dirname9, join as join16 } from "node:path";
 var PR_ATTRIBUTION = "\u{1F916} Generated with [Claude Code](https://claude.com/claude-code)";
 function gh(cwd, args) {
@@ -12335,8 +12381,18 @@ ${c.body}` : `## ${c.subject}`);
   return { title: branch2, body: [...sections, PR_ATTRIBUTION].join("\n\n") };
 }
 function findOpenPr(cwd, repo, branch2, base2) {
-  const r = gh(cwd, ["pr", "list", "--repo", repo, "--head", branch2, "--base", base2, "--state", "open", "--json", "url,number,headRefName,baseRefName"]);
-  if (r.status !== 0) throw new Error(`gh pr list --repo ${repo} --head ${branch2} --base ${base2} failed (exit ${r.status}): ${streams(r)}`);
+  const matches = openPrsForHead(cwd, repo, branch2, base2);
+  if (matches.length > 1) {
+    throw new Error(
+      `${matches.length} open PRs in ${repo} from ${branch2} into ${base2} (${matches.map((pr) => `#${pr.number} ${pr.url}`).join(", ")}) \u2014 refusing to pick one. Close the duplicates on GitHub, then rerun.`
+    );
+  }
+  return matches.length ? { url: matches[0].url, number: matches[0].number } : null;
+}
+function openPrsForHead(cwd, repo, branch2, base2) {
+  const baseArgs = base2 === void 0 ? [] : ["--base", base2];
+  const r = gh(cwd, ["pr", "list", "--repo", repo, "--head", branch2, ...baseArgs, "--state", "open", "--json", "url,number,headRefName,baseRefName"]);
+  if (r.status !== 0) throw new Error(`gh pr list --repo ${repo} --head ${branch2}${base2 === void 0 ? "" : ` --base ${base2}`} failed (exit ${r.status}): ${streams(r)}`);
   let prs;
   try {
     prs = JSON.parse(r.stdout);
@@ -12349,13 +12405,7 @@ function findOpenPr(cwd, repo, branch2, base2) {
       throw new Error(`gh pr list returned an entry without url/number/headRefName/baseRefName: ${JSON.stringify(pr)}`);
     }
   }
-  const matches = prs.filter((pr) => pr.headRefName === branch2 && pr.baseRefName === base2);
-  if (matches.length > 1) {
-    throw new Error(
-      `${matches.length} open PRs in ${repo} from ${branch2} into ${base2} (${matches.map((pr) => `#${pr.number} ${pr.url}`).join(", ")}) \u2014 refusing to pick one. Close the duplicates on GitHub, then rerun.`
-    );
-  }
-  return matches.length ? { url: matches[0].url, number: matches[0].number } : null;
+  return prs.filter((pr) => pr.headRefName === branch2 && (base2 === void 0 || pr.baseRefName === base2)).map(({ url, number, headRefName, baseRefName }) => ({ url, number, headRefName, baseRefName }));
 }
 function pushWithWindowsRetry(cwd, pushArgs, log) {
   const tryPush = (cmd) => spawnSync7(cmd, ["push", ...pushArgs], {
@@ -12535,24 +12585,84 @@ function shipAsPr({ cwd, repo, branch: branch2, base: base2, mergeBase: mergeBas
   return null;
 }
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
+var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
+var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
 var prLoopPath = (root) => join16(root, PR_LOOP_REL);
+var prLoopFile = (root, prNumber) => join16(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
 function writeAtomic(file, value) {
   mkdirSync5(dirname9(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync2(tmp, JSON.stringify(value, null, 2) + "\n");
   renameSync2(tmp, file);
 }
-function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE__ */ new Date()).toISOString() }) {
+function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE__ */ new Date()).toISOString(), beforeLegacyPublish = null }) {
   const state = { pr_url, pr_number, repo, head_sha, armed_at: now, status: "owed" };
-  writeAtomic(prLoopPath(root), state);
+  writeAtomic(prLoopFile(root, pr_number), state);
+  const legacy = prLoopPath(root);
+  if (existsSync7(legacy)) {
+    let old = null;
+    try {
+      old = parsePrLoopFile(legacy, PR_LOOP_REL);
+    } catch {
+      old = null;
+    }
+    if (old) {
+      if (old.pr_number !== pr_number) writeExclusive(prLoopFile(root, old.pr_number), old, { beforePublish: beforeLegacyPublish });
+      try {
+        unlinkSync2(legacy);
+      } catch (e) {
+        if (e?.code !== "ENOENT") throw e;
+      }
+    }
+  }
   return state;
+}
+function writeExclusive(file, value, { beforePublish = null } = {}) {
+  mkdirSync5(dirname9(file), { recursive: true });
+  const tmp = `${file}.excl-${process.pid}`;
+  writeFileSync2(tmp, JSON.stringify(value, null, 2) + "\n");
+  try {
+    if (beforePublish) beforePublish(value);
+    linkSync(tmp, file);
+    return true;
+  } catch (e) {
+    if (e?.code === "EEXIST") return false;
+    throw e;
+  } finally {
+    unlinkSync2(tmp);
+  }
+}
+function parsePrLoopFile(file, rel) {
+  try {
+    return parsePrLoopFileOrThrow(file, rel);
+  } catch (e) {
+    e.rel = rel;
+    throw e;
+  }
+}
+function parsePrLoopFileOrThrow(file, rel) {
+  let s2;
+  try {
+    s2 = JSON.parse(readFileSync9(file, "utf8"));
+  } catch (e) {
+    throw new Error(`${rel} is not valid JSON (${e.message})`);
+  }
+  const str = (v) => typeof v === "string" && v.length > 0;
+  if (!s2 || typeof s2 !== "object" || Array.isArray(s2) || !str(s2.pr_url) || !Number.isInteger(s2.pr_number) || !str(s2.repo) || !str(s2.head_sha) || !str(s2.armed_at)) {
+    throw new Error(`${rel} lacks pr_url/pr_number/repo/head_sha/armed_at: ${JSON.stringify(s2)}`);
+  }
+  if (s2.status !== "owed" && !PR_LOOP_OUTCOMES.includes(s2.status)) {
+    throw new Error(`${rel} has status ${JSON.stringify(s2.status)} \u2014 it must be exactly owed, ${PR_LOOP_OUTCOMES.join(", ")}`);
+  }
+  if (s2.status !== "owed" && !str(s2.settled_at)) throw new Error(`${rel} is settled '${s2.status}' without settled_at`);
+  return s2;
 }
 
 // scripts/lib/attestation-inspection.mjs
 init_dist();
 import { existsSync as existsSync8, readFileSync as readFileSync10 } from "node:fs";
 import { join as join17 } from "node:path";
-import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
+import { DatabaseSync as DatabaseSync6 } from "node:sqlite";
 var EXAMPLE_CAP = 5;
 var EXAMPLE_PRIORITY = ["rejected", "needs_rework", "uncovered", "approved"];
 var VERDICTS = ["approved", "rejected", "needs_rework"];
@@ -12600,7 +12710,7 @@ function readAttestationGlobs(projectRoot2) {
   }
 }
 function readOnlyProbe(dbPath, fn) {
-  const db = new DatabaseSync5(dbPath, { readOnly: true });
+  const db = new DatabaseSync6(dbPath, { readOnly: true });
   try {
     return fn(db);
   } finally {
@@ -12832,7 +12942,37 @@ if (shipsPr) {
   workRepo = pre.repo;
 }
 stage("branch");
-var into = arg("--into") ?? defaultBranch(target);
+var hasRef = (ref) => spawnSync8("git", ["rev-parse", "--verify", "--quiet", ref], { cwd: target, encoding: "utf8", timeout: 3e4 }).status === 0;
+function workDefaultBranch() {
+  try {
+    return { base: defaultBranch(target) };
+  } catch (e) {
+    const remote = ["main", "master"].find((b) => hasRef(`refs/remotes/origin/${b}`));
+    if (remote) return { base: remote };
+    return {
+      error: `direct-merge: ${e?.message ?? e}; work mode also found no origin/main or origin/master, and the branch has no open PR to take a base from \u2014 run 'git fetch origin' and 'git remote set-head origin -a', or pass --into`
+    };
+  }
+}
+var into = arg("--into") ?? (shipsPr ? null : defaultBranch(target));
+function openPrBase(head) {
+  let prs;
+  try {
+    prs = openPrsForHead(target, workRepo, head);
+  } catch (e) {
+    fail2(`direct-merge: could not look up open PRs for ${head} \u2014 nothing pushed, nothing created. ${e?.message ?? e}
+Pass --into <base> to name the base.`);
+  }
+  if (new Set(prs.map((pr) => pr.baseRefName)).size > 1) {
+    fail2(
+      `direct-merge: ${prs.length} open PRs in ${workRepo} from ${head} (${prs.map((pr) => `#${pr.number} into ${pr.baseRefName} ${pr.url}`).join(", ")}) \u2014 refusing to pick a base. Rerun with --into <base> naming the PR to update. Nothing pushed.`,
+      2
+    );
+  }
+  if (prs.length === 0) return null;
+  console.error(`direct-merge: work mode \u2014 ${head} has an open PR into '${prs[0].baseRefName}' (${prs.map((pr) => `#${pr.number} ${pr.url}`).join(", ")}); using that as the base (--into overrides).`);
+  return prs[0].baseRefName;
+}
 var symbolic = spawnSync8("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: target, encoding: "utf8", timeout: 6e4 });
 if (symbolic.error || symbolic.status !== 0 && !(symbolic.status === 1 && !(symbolic.stderr ?? "").trim())) {
   fail2(
@@ -12856,6 +12996,11 @@ The consistency battery (npm run check) validates the checked-out tree, so it ca
 Check out '${branch}' and rerun (with or without --branch).`,
     2
   );
+}
+if (shipsPr && into === null) {
+  const fallback = workDefaultBranch();
+  if (fallback.base !== void 0 && branch === fallback.base) into = fallback.base;
+  else into = openPrBase(branch) ?? fallback.base ?? fail2(fallback.error, 2);
 }
 if (branch === into) {
   fail2(
@@ -12911,7 +13056,8 @@ var resolveSha = (ref, label) => {
   if (r.status !== 0) fail2(`direct-merge: git rev-parse ${label} ('${ref}') failed: ${(r.stderr || "").trim()}`);
   return r.stdout.trim();
 };
-var intoTip = resolveSha(into, "into");
+var intoRef = shipsPr && !hasRef(`refs/heads/${into}`) && hasRef(`refs/remotes/origin/${into}`) ? `refs/remotes/origin/${into}` : into;
+var intoTip = resolveSha(intoRef, "into");
 var branchTip = resolveSha(branch, "branch");
 var mergeBaseR = spawnSync8("git", ["merge-base", intoTip, branchTip], { cwd: target, encoding: "utf8", timeout: 3e4 });
 if (mergeBaseR.status !== 0) fail2(`direct-merge: git merge-base ${intoTip} ${branchTip} failed: ${(mergeBaseR.stderr || "").trim()}`);
@@ -13094,7 +13240,7 @@ if (existsSync9(join18(target, pluginManifestRel))) {
     const pkgPath = join18(target, "package.json");
     const branchPlugin = readVersion(readFileSync11(join18(target, pluginManifestRel), "utf8"), pluginManifestRel);
     const branchPkg = existsSync9(pkgPath) ? readVersion(readFileSync11(pkgPath, "utf8"), "package.json") : null;
-    const baseShow = spawnSync8("git", ["show", `${into}:${pluginManifestRel}`], { cwd: target, encoding: "utf8", timeout: 3e4 });
+    const baseShow = spawnSync8("git", ["show", `${intoTip}:${pluginManifestRel}`], { cwd: target, encoding: "utf8", timeout: 3e4 });
     const basePlugin = baseShow.status === 0 ? readVersion(baseShow.stdout, `${into}:${pluginManifestRel}`) : null;
     if (branchPkg !== null && branchPlugin !== branchPkg) {
       fail2(
@@ -13150,9 +13296,9 @@ if (shipsPr) {
   if (shipped) work.fail(shipped.error, shipped.exitCode);
   try {
     armPrLoop(storeRoot, { pr_url: work.state.pr_url, pr_number: work.state.pr_number, repo: workRepo, head_sha: branchTip });
-    console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} \u2014 run the pr-review-loop skill (armed in ${PR_LOOP_REL}).`);
+    console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} \u2014 run the pr-review-loop skill (armed in ${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json).`);
   } catch (e) {
-    console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOP_REL}: ${e?.message ?? e}) \u2014 H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
+    console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json: ${e?.message ?? e}) \u2014 H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
   }
   work.succeed();
 }

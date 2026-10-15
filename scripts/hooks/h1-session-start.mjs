@@ -21,7 +21,7 @@ import { renderUnavailable } from './lib/undeclared-source.mjs';
 import { noOriginRemote } from '../lib/work-pr.mjs';
 import { handoffFilesLine, machineRoleLine, mountedDomainLines, pendingIssueReportsLine, projectModeLine, readProjectConfig, sterlingRootLine, storageLine, tddPostureLine } from './lib/operating-state.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
-import { SUPPORTED_SCHEMA_VERSION } from '@sterling/store';
+import { SUPPORTED_SCHEMA_VERSION, resolveSentHandoffs } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths, isLocallyModified, loadRegistry, sha256 } from '../lib/agent-distribution.mjs';
 import { gitTouches, writeInitialGitSettled } from './lib/settlement.mjs';
@@ -914,11 +914,18 @@ try {
   store.close();
 }
 
+// Trackers for tasks handed to another project (GitHub issue #105) are
+// delegated; their status is read from each receiving project's store,
+// read-only and under the helper's own time budget. resolveSentHandoffs never
+// throws for one receiver: an unreadable one reads "status unknown: <reason>".
+const delegated = boardReadiness.filter((r) => r.state === 'delegated');
+const handoffStatus = delegated.length ? resolveSentHandoffs(delegated.map((r) => ({ id: r.id, handoff: r.handoff })), { budgetMs: 500 }) : undefined;
+
 // The board readiness block: what the conductor fills free lanes from, up to the
 // existing delegation.max_concurrent ceiling (lib/board-ready.mjs).
 const boardReadinessText = boardReadinessError
   ? `BOARD READINESS UNAVAILABLE (${boardReadinessError}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this session; read the board with board_query.`
-  : renderBoardReadiness({ readiness: boardReadiness, live: liveLanes(input.cwd, input.session_id), ceiling: laneCeiling(config) });
+  : renderBoardReadiness({ readiness: boardReadiness, live: liveLanes(input.cwd, input.session_id), ceiling: laneCeiling(config), handoffStatus });
 const boardReadinessContext = boardReadinessText ? `\n\n${boardReadinessText}` : '';
 
 // DEEP-QUEUE SIGNAL TO THE CONDUCTOR (config.maintenance_queue.deep_threshold): the

@@ -25,7 +25,7 @@ import { releaseAfterMerge } from './lib/opencode-release.mjs';
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { SterlingStore } from '@sterling/store';
 import { readProjectMode } from './lib/handoff-projection.mjs';
-import { workPreflight, shipAsPr, pushWithWindowsRetry, localBranchRefusal, installWorkResult, armPrLoop, noOriginRemote, NO_ORIGIN_LOCAL_MERGE_NOTICE, PR_LOOP_REL } from './lib/work-pr.mjs';
+import { workPreflight, shipAsPr, openPrsForHead, pushWithWindowsRetry, localBranchRefusal, installWorkResult, armPrLoop, noOriginRemote, NO_ORIGIN_LOCAL_MERGE_NOTICE, PR_LOOPS_DIR_REL } from './lib/work-pr.mjs';
 // Attestation disclosure
 // (decision attestation-staleness-disclosure-only-never-a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
 // block above the merge action.
@@ -158,7 +158,53 @@ if (shipsPr) {
 }
 
 stage('branch');
-const into = arg('--into') ?? defaultBranch(target);
+// WORK mode never checks out, merges into or pushes the base, so it needs only
+// origin's copy of it (GitHub issue #99): a clone with no origin/HEAD symref and
+// no local main still has origin/main. defaultBranch (origin/HEAD, then a local
+// main/master) is asked first; work mode then falls back to origin/main and
+// origin/master. Hobby merges into a local base and keeps defaultBranch as is.
+const hasRef = (ref) => spawnSync('git', ['rev-parse', '--verify', '--quiet', ref], { cwd: target, encoding: 'utf8', timeout: 30_000 }).status === 0;
+// Returns { base } or { error } so the caller can try an open PR's base first
+// (issue #103) and refuse only when neither names a base.
+function workDefaultBranch() {
+  try {
+    return { base: defaultBranch(target) };
+  } catch (e) {
+    const remote = ['main', 'master'].find((b) => hasRef(`refs/remotes/origin/${b}`));
+    if (remote) return { base: remote };
+    return {
+      error: `direct-merge: ${e?.message ?? e}; work mode also found no origin/main or origin/master, and the branch has no open PR to take a base from — run 'git fetch origin' and 'git remote set-head origin -a', or pass --into`,
+    };
+  }
+}
+// Work mode without --into picks its base once the branch is known (below), so
+// an open PR for the branch can name it; hobby resolves it here, as before.
+let into = arg('--into') ?? (shipsPr ? null : defaultBranch(target));
+// A STACKED PR (GitHub issue #103, user-ruled 2026-10-15 "Reuse the open PR's
+// base"): when the branch already has an open PR, whatever its base, that base is
+// the merge base for the whole run (battery, version check, push, PR reuse), so
+// rerunning never opens a second PR against the default branch. Several open
+// PRs for the head refuse; none falls through to the default branch.
+function openPrBase(head) {
+  let prs;
+  try {
+    prs = openPrsForHead(target, workRepo, head);
+  } catch (e) {
+    fail(`direct-merge: could not look up open PRs for ${head} — nothing pushed, nothing created. ${e?.message ?? e}\nPass --into <base> to name the base.`);
+  }
+  // Several PRs into ONE base leave the base unambiguous; the PR lookup in
+  // shipAsPr then refuses the duplicates by number (exit 1), as before.
+  if (new Set(prs.map((pr) => pr.baseRefName)).size > 1) {
+    fail(
+      `direct-merge: ${prs.length} open PRs in ${workRepo} from ${head} (${prs.map((pr) => `#${pr.number} into ${pr.baseRefName} ${pr.url}`).join(', ')}) — ` +
+        `refusing to pick a base. Rerun with --into <base> naming the PR to update. Nothing pushed.`,
+      2
+    );
+  }
+  if (prs.length === 0) return null;
+  console.error(`direct-merge: work mode — ${head} has an open PR into '${prs[0].baseRefName}' (${prs.map((pr) => `#${pr.number} ${pr.url}`).join(', ')}); using that as the base (--into overrides).`);
+  return prs[0].baseRefName;
+}
 // `git rev-parse --abbrev-ref HEAD` prints the literal 'HEAD' when detached, which
 // would equal a defaulted --branch and merge the base into itself. symbolic-ref
 // names the checked-out branch or fails when there is none.
@@ -191,6 +237,15 @@ if (branch !== checkedOut) {
       `Check out '${branch}' and rerun (with or without --branch).`,
     2
   );
+}
+if (shipsPr && into === null) {
+  // The open PR's base comes FIRST (Sol review of #103): a stack-only clone with
+  // origin/release but no origin/HEAD, main or master still ships its PR. The
+  // default base is resolved without refusing, only to keep the base branch
+  // itself out of the lookup: on it, the refusal below names it.
+  const fallback = workDefaultBranch();
+  if (fallback.base !== undefined && branch === fallback.base) into = fallback.base;
+  else into = openPrBase(branch) ?? fallback.base ?? fail(fallback.error, 2);
 }
 if (branch === into) {
   fail(
@@ -271,7 +326,10 @@ const resolveSha = (ref, label) => {
   if (r.status !== 0) fail(`direct-merge: git rev-parse ${label} ('${ref}') failed: ${(r.stderr || '').trim()}`);
   return r.stdout.trim();
 };
-const intoTip = resolveSha(into, 'into');
+// Work mode reads the base from origin when there is no local branch of that
+// name (GitHub issue #99); a local base, when present, is used as before.
+const intoRef = shipsPr && !hasRef(`refs/heads/${into}`) && hasRef(`refs/remotes/origin/${into}`) ? `refs/remotes/origin/${into}` : into;
+const intoTip = resolveSha(intoRef, 'into');
 const branchTip = resolveSha(branch, 'branch');
 const mergeBaseR = spawnSync('git', ['merge-base', intoTip, branchTip], { cwd: target, encoding: 'utf8', timeout: 30_000 });
 if (mergeBaseR.status !== 0) fail(`direct-merge: git merge-base ${intoTip} ${branchTip} failed: ${(mergeBaseR.stderr || '').trim()}`);
@@ -600,7 +658,7 @@ if (existsSync(join(target, pluginManifestRel))) {
     const pkgPath = join(target, 'package.json');
     const branchPlugin = readVersion(readFileSync(join(target, pluginManifestRel), 'utf8'), pluginManifestRel);
     const branchPkg = existsSync(pkgPath) ? readVersion(readFileSync(pkgPath, 'utf8'), 'package.json') : null;
-    const baseShow = spawnSync('git', ['show', `${into}:${pluginManifestRel}`], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+    const baseShow = spawnSync('git', ['show', `${intoTip}:${pluginManifestRel}`], { cwd: target, encoding: 'utf8', timeout: 30_000 });
     const basePlugin = baseShow.status === 0 ? readVersion(baseShow.stdout, `${into}:${pluginManifestRel}`) : null;
     if (branchPkg !== null && branchPlugin !== branchPkg) {
       fail(
@@ -711,9 +769,9 @@ if (shipsPr) {
   // write never fails the ship — it is announced loudly instead (P5).
   try {
     armPrLoop(storeRoot, { pr_url: work.state.pr_url, pr_number: work.state.pr_number, repo: workRepo, head_sha: branchTip });
-    console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} — run the pr-review-loop skill (armed in ${PR_LOOP_REL}).`);
+    console.error(`direct-merge: PR review loop owed for ${work.state.pr_url} — run the pr-review-loop skill (armed in ${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json).`);
   } catch (e) {
-    console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOP_REL}: ${e?.message ?? e}) — H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
+    console.error(`direct-merge: the PR is shipped, but the PR review loop duty could NOT be armed (${PR_LOOPS_DIR_REL}/${work.state.pr_number}.json: ${e?.message ?? e}) — H10 will not remind you; run the pr-review-loop skill for ${work.state.pr_url} anyway.`);
   }
   work.succeed();
 }

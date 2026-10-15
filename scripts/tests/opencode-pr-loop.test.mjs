@@ -48,8 +48,34 @@ test('an owed loop raises a notice with the PR link, the wait command and the se
     const [text, ...rest] = noticeTexts(p.dir);
     assert.equal(rest.length, 0);
     assert.match(text, /PR review loop owed \(work mode\): PR #7 https:\/\/github\.com\/acme\/widget\/pull\/7/);
-    assert.match(text, /node "\/opt\/sterling\/bin\/pr-review-wait\.mjs" https:\/\/github\.com\/acme\/widget\/pull\/7 \(background\)/);
+    // GitHub issue #100: a bare "(background)" read as "detach the wait" on OpenCode;
+    // the user ruled (2026-10-15) the wait runs with the shell tool's background: true.
+    assert.match(text, /node "\/opt\/sterling\/bin\/pr-review-wait\.mjs" https:\/\/github\.com\/acme\/widget\/pull\/7 \(add --request-copilot on the first wait after a push\) started with the shell tool's background: true, which notifies you when it ends; never detach it with nohup or &/);
+    assert.doesNotMatch(text, /\(background\)/);
     assert.match(text, /--settle <clean\|capped\|escalated> --pr 7/);
+  } finally {
+    p.cleanup();
+  }
+});
+
+// GitHub issue #104: concurrent PRs each keep their own armed loop, and each owed one is announced.
+test('issue #104: two PRs armed by /sterling:merge from two worktrees each raise their own notice; settling one leaves the other owed', async () => {
+  const p = makeProject('work');
+  try {
+    const { armPrLoop, settlePrLoop } = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'work-pr.mjs')).href);
+    armPrLoop(p.dir, { pr_url: PR_URL, pr_number: 7, repo: 'github.com/acme/widget', head_sha: 'a'.repeat(40), now: '2026-10-01T10:00:00.000Z' });
+    armPrLoop(p.dir, { pr_url: 'https://github.com/acme/widget/pull/8', pr_number: 8, repo: 'github.com/acme/widget', head_sha: 'b'.repeat(40), now: '2026-10-01T11:00:00.000Z' });
+    const notify = prLoop.createPrLoopNotice({ now: () => NOW, pluginRoot: '/opt/sterling' });
+    notify(p.dir);
+    const texts = noticeTexts(p.dir);
+    assert.equal(texts.length, 2, texts.join('\n'));
+    assert.match(texts[0], /PR review loop owed \(work mode\): PR #7 /);
+    assert.match(texts[1], /PR review loop owed \(work mode\): PR #8 /);
+    settlePrLoop(p.dir, 'clean', '7', { originRepo: 'github.com/acme/widget', now: NOW });
+    markShown(p.dir);
+    notify(p.dir);
+    const fresh = JSON.parse(readFileSync(join(p.dir, server.NOTICES_REL), 'utf8')).filter((n) => !n.shown_at);
+    assert.deepEqual(fresh.map((n) => n.text.match(/PR #(\d+)/)[1]), ['8'], 'only the still-owed PR 8 is reminded');
   } finally {
     p.cleanup();
   }

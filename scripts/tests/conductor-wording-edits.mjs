@@ -193,6 +193,27 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: '(GitHub issue #87; finding `why-do-the-codex-mcp-tools-vanish-for-the-rest-of-a-claude-c`). A practice, not a hook',
     after: '(GitHub issues #87 and #90; finding `why-do-the-codex-mcp-tools-vanish-for-the-rest-of-a-claude-c`). Every `codex` call also passes `config: {features: {view_image: false}}`, because an image result can push one MCP message past Claude Code\'s 16 MB stdio limit, and Claude Code then drops the server for the rest of the session (GitHub issue #90); `tools.view_image` does not remove the tool on 0.153.4. A practice, not a hook',
   },
+  {
+    commit: '599e946b',
+    date: '2026-10-15',
+    reason: 'a clean Copilot review loop with the auto-merge switch on ends in a squash-merge of the work-mode PR, so the hobby-merge bullet no longer says a human always merges (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean)',
+    before: 'Work mode is unchanged: a human merges the PR.',
+    after: 'In a WORK project, /sterling:merge opens the PR; when the Copilot review loop ends clean and the auto-merge switch is on (the default), you squash-merge it as the `pr-review-loop` skill says, and otherwise a human merges it (decision `work-mode-pr-auto-merge-when-copilot-loop-ends-clean`).',
+  },
+  {
+    commit: '599e946b',
+    date: '2026-10-15',
+    reason: 'the context-pressure paragraph says a work-mode PR is merged only at the end of a clean review loop with the auto-merge switch on (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean)',
+    before: "with the PR's status reported — never merged; a human merges the PR.",
+    after: "with the PR's status reported. The PR is merged only at the end of a clean review loop with the auto-merge switch on (the `pr-review-loop` skill); otherwise a human merges it.",
+  },
+  {
+    commit: 'board 5ff6acd8',
+    date: '2026-10-15',
+    reason: 'an ask meant for another project goes onto that project\'s board through board_add with target_project, and this board keeps the tracker (decision hand-a-board-task-to-a-sibling-project-board-add-target-proj; user-ruled 2026-10-15)',
+    before: 'A question answered only in chat is not boarded. The todo list stays',
+    after: 'A question answered only in chat is not boarded. An ask meant for another project on this machine goes onto that project\'s board through `board_add` with `target_project` (its registry name), not onto this one; this board keeps the tracker, which shows when the other project has finished it (decision `hand-a-board-task-to-a-sibling-project-board-add-target-proj`). The todo list stays',
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

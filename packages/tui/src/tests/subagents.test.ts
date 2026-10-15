@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -1214,6 +1214,39 @@ test('opencode: a turn committed only to the -wal is read even when the -shm is 
     const wal = readFileSync(join(crashed, 'opencode.db-wal'));
     assert.equal(readOpenCodeContext(join(crashed, 'opencode.db'), ['ses_a'], null).usage.get('ses_a')?.tokens, 400_000);
     assert.ok(readFileSync(join(crashed, 'opencode.db-wal')).equals(wal), 'the -wal is not checkpointed or truncated');
+  } finally {
+    writer.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('opencode: a rollback-journal (DELETE mode) database under a live write transaction never shows its uncommitted delete', () => {
+  const root = project();
+  const path = openCodeDb(root, { messages: [['ses_a', 1, 'assistant', turn(100_000, 0, 0)]], catalog: CATALOG });
+  const convert = new DatabaseSync(path);
+  convert.exec('PRAGMA journal_mode = DELETE');
+  convert.close();
+  const writer = new DatabaseSync(path);
+  try {
+    writer.exec('CREATE TABLE pad(id INTEGER PRIMARY KEY, v TEXT)');
+    const ins = writer.prepare('INSERT INTO pad(v) VALUES (?)');
+    writer.exec('BEGIN');
+    for (let i = 0; i < 2000; i++) ins.run('y'.repeat(500));
+    writer.exec('COMMIT');
+    // A tiny page cache makes the open transaction spill its uncommitted
+    // delete into the main file, with the original pages in the -journal.
+    writer.exec('PRAGMA cache_size=1; BEGIN');
+    writer.prepare("DELETE FROM session_message WHERE session_id = 'ses_a'").run();
+    writer.exec(`UPDATE pad SET v = '${'z'.repeat(500)}'`);
+    assert.equal(existsSync(`${path}-journal`), true, 'precondition: the writer holds a rollback journal');
+    let tokens: number | null | undefined;
+    try {
+      tokens = readOpenCodeContext(path, ['ses_a'], null).usage.get('ses_a')?.tokens ?? null;
+    } catch (e) {
+      assert.match((e as Error).message, /locked|busy/i, 'the only acceptable failure is waiting on the writer\'s lock');
+    }
+    assert.ok(tokens === undefined || tokens === 100_000, `the uncommitted delete must not be read as "no turns", got ${tokens}`);
+    writer.exec('ROLLBACK');
   } finally {
     writer.close();
     rmSync(root, { recursive: true, force: true });

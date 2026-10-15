@@ -22,7 +22,12 @@ import { deliverySessionDir } from './delivery.mjs';
 export const BOARD_GROUP_CAP = 8;
 const DECISION = 'decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start';
 
-/** The three printed groups, each in the one listing order (priority, then most recently updated). Blocked items are counted apart. */
+/**
+ * The printed groups, each in the one listing order (priority, then most
+ * recently updated). Blocked items are counted apart. Delegated items are
+ * trackers for tasks handed to another project (GitHub issue #105): never
+ * READY, never WAITING ON YOU, listed apart with their remote status.
+ */
 export function boardGroups(readiness) {
   const sorted = [...readiness].sort(compareBoardReadiness);
   return {
@@ -30,6 +35,7 @@ export function boardGroups(readiness) {
     research: sorted.filter((r) => r.state === 'research'),
     waiting: sorted.filter((r) => r.state === 'waiting'),
     blocked: sorted.filter((r) => r.state === 'blocked').length,
+    delegated: sorted.filter((r) => r.state === 'delegated'),
   };
 }
 
@@ -89,12 +95,15 @@ function groupLines(title, items, cap, render) {
 }
 
 /**
- * The H1 / OpenCode block, or '' when no user item is ready, waiting or
- * blocked. `live` is {count, availability}; `ceiling` is laneCeiling's result.
+ * The H1 / OpenCode block, or '' when no user item is ready, waiting, blocked
+ * or delegated. `live` is {count, availability}; `ceiling` is laneCeiling's
+ * result. `handoffStatus` maps a delegated item's id to the store's
+ * resolveSentHandoffs status; a caller that did not read the other projects
+ * passes none, and each delegated line says its status was not read.
  */
-export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP }) {
+export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus }) {
   const g = boardGroups(readiness);
-  if (!g.ready.length && !g.research.length && !g.waiting.length && !g.blocked) return '';
+  if (!g.ready.length && !g.research.length && !g.waiting.length && !g.blocked && !g.delegated.length) return '';
   const marks = overlapMarks(g.ready);
   const blockedNote = g.blocked ? `; ${g.blocked} blocked` : '';
   const header =
@@ -111,8 +120,16 @@ export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GRO
     }),
     ...groupLines('READY FOR RESEARCH ({n}, researcher lanes only)', g.research, cap, (r) => `- ${r.name}${r.priority && r.priority !== 'normal' ? ` [${r.priority}]` : ''}`),
     ...groupLines('WAITING ON YOU ({n})', g.waiting, cap, (r) => `- ${r.name} — needs ${r.needs}${r.blockers_open?.length ? ` (also blocked by ${r.blockers_open.join(', ')})` : ''}`),
+    ...groupLines('DELEGATED TO OTHER PROJECTS ({n}, not run here)', g.delegated, cap, (r) => `- ${r.name} — ${delegatedStatus(r, handoffStatus)}`),
   ];
   return lines.join('\n');
+}
+
+/** A delegated item's status line: the resolved remote status, or a statement that it was not read. */
+function delegatedStatus(r, handoffStatus) {
+  const to = r.handoff?.to_name ? `project '${r.handoff.to_name}'` : 'another project';
+  const status = handoffStatus?.get?.(r.id);
+  return status ? `${to}: ${status.text}` : `${to}: status not read here (board_query shows it)`;
 }
 
 /** True when `id` (as its 8-char prefix or full form) or `slug` appears in the brief as a whole token. */
