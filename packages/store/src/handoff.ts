@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { closeSync, existsSync, openSync, readFileSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { HANDOFFS_DIR_REL, handoffClosureReadSchema, handoffEvidenceFileReadSchema, todoHandoffReadSchema, todoWaitFieldsReadSchema, type HandoffEvidence, type TodoHandoff } from '@sterling/schemas';
+import { HANDOFFS_DIR_REL, handoffClosureReadSchema, handoffEvidenceFileReadSchema, todoBoardItemReadSchema, todoHandoffReadSchema, todoWaitFieldsReadSchema, type HandoffEvidence, type TodoHandoff } from '@sterling/schemas';
 
 export type SentHandoff = Extract<TodoHandoff, { role: 'sent' }>;
 
@@ -355,4 +355,113 @@ export function resolveSentHandoffs(
     if (status && milestone) out.set(t.id, { ...status, milestone });
   }
   return out;
+}
+
+export interface ReadForeignBoardOptions {
+  /** SQLite busy timeout, capped to what is left of the budget (default 250 ms) */
+  busyTimeoutMs?: number;
+  /** total time for the read; running out stops the scan and is disclosed as truncation (default 1500 ms) */
+  budgetMs?: number;
+  /** injectable clock for the budget, in ms */
+  clock?: () => number;
+  /** the most user items kept, as the local board scan is bounded (default 1000) */
+  scanCap?: number;
+  /** the deadline is checked once per this many rows (default 50) */
+  checkEvery?: number;
+}
+
+export interface ForeignBoardRead {
+  /** the live user board items, in board order (updated_at DESC, id DESC), unknown keys kept */
+  items: Record<string, unknown>[];
+  /** live user-board rows (or rows whose source cannot be read) that failed the tolerant parse, by id; never dropped silently */
+  unreadable: { id: string; reason: string }[];
+  /** every live todo carrying a slug, either source: the open-blocker test */
+  slugHolders: Map<string, { id: string; text?: string; slug: string }>;
+  /** the store's PRAGMA user_version */
+  schemaVersion: number;
+  /** set when the time budget ran out before the scan finished: the read is partial */
+  truncated?: string;
+  /** more user items than scanCap were live: the read kept the first scanCap */
+  scanTruncated: boolean;
+}
+
+/**
+ * Another project's user board, read-only (decision
+ * read-another-projects-board-board-query-target-project-read-only): raw SQL on
+ * openForeignDbReadOnly, so nothing is written there (no pragma write, no
+ * DDL, no -wal/-shm), and no SterlingStore is opened on it. Each body is
+ * checked with the tolerant read schemas, so a newer Sterling's extra fields
+ * pass through and a body this build cannot read is listed in `unreadable`.
+ * Bounded by a total time budget: the deadline is checked before the scan and
+ * once per `checkEvery` rows, and the busy timeout is capped to what is left;
+ * running out returns what was read with `truncated` set, never a short board
+ * read as complete. An open or query failure is thrown with its reason.
+ */
+export function readForeignBoard(dbPath: string, opts: ReadForeignBoardOptions = {}): ForeignBoardRead {
+  const busy = opts.busyTimeoutMs ?? 250;
+  const budget = opts.budgetMs ?? 1500;
+  const clock = opts.clock ?? Date.now;
+  const scanCap = opts.scanCap ?? 1000;
+  const checkEvery = Math.max(1, opts.checkEvery ?? 50);
+  const started = clock();
+  const remaining = () => budget - (clock() - started);
+  const out: ForeignBoardRead = { items: [], unreadable: [], slugHolders: new Map(), schemaVersion: 0, scanTruncated: false };
+  const exhausted = (rows: number) => `time budget exhausted (${budget} ms) after ${rows} board rows were read`;
+  if (remaining() <= 0) {
+    out.truncated = exhausted(0);
+    return out;
+  }
+  const db = openForeignDbReadOnly(dbPath, Math.min(busy, remaining()));
+  try {
+    out.schemaVersion = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
+    setBusyTimeout(db, Math.min(busy, Math.max(0, remaining())));
+    const stmt = db.prepare(
+      `SELECT id, body, json_valid(body) AS ok,
+         CASE WHEN json_valid(body) THEN json_extract(body, '$.source') END AS source,
+         CASE WHEN json_valid(body) THEN json_extract(body, '$.slug') END AS slug,
+         CASE WHEN json_valid(body) THEN json_extract(body, '$.text') END AS text
+       FROM records WHERE type = 'todo' AND status != 'superseded'
+       ORDER BY updated_at DESC, id DESC`
+    );
+    let rows = 0;
+    let users = 0;
+    for (const row of stmt.iterate() as Iterable<{ id: string; body: string; ok: number; source: unknown; slug: unknown; text: unknown }>) {
+      if (rows % checkEvery === 0 && remaining() <= 0) {
+        out.truncated = exhausted(rows);
+        break;
+      }
+      rows++;
+      if (!row.ok) {
+        out.unreadable.push({ id: row.id, reason: 'the stored body is not valid JSON' });
+        continue;
+      }
+      if (typeof row.slug === 'string' && row.slug.length > 0) {
+        out.slugHolders.set(row.slug, { id: row.id, slug: row.slug, ...(typeof row.text === 'string' ? { text: row.text } : {}) });
+      }
+      if (row.source === 'system') continue;
+      if (users >= scanCap) {
+        out.scanTruncated = true;
+        continue;
+      }
+      users++;
+      const reason = parseForeignItem(row.id, row.body);
+      if (typeof reason === 'string') out.unreadable.push({ id: row.id, reason });
+      else out.items.push(reason);
+    }
+  } finally {
+    db.close();
+  }
+  return out;
+}
+
+/** The parsed board item, or why this build cannot read it. */
+function parseForeignItem(id: string, body: string): Record<string, unknown> | string {
+  const raw = JSON.parse(body) as unknown;
+  const item = todoBoardItemReadSchema.safeParse(raw);
+  const issues = (e: { issues: { path: (string | number)[]; message: string }[] }) => e.issues.map((i) => `${i.path.join('.') || '(body)'}: ${i.message}`).join('; ');
+  if (!item.success) return issues(item.error);
+  if (item.data.id !== id) return `the body's id ${item.data.id} differs from the row id`;
+  const wait = todoWaitFieldsReadSchema.safeParse(raw);
+  if (!wait.success) return issues(wait.error);
+  return item.data;
 }

@@ -16,7 +16,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SterlingStore, resolveSentHandoffs } from '../index.js';
+import { SterlingStore, readForeignBoard, resolveSentHandoffs } from '../index.js';
 
 const NOW = '2026-10-15T12:00:00.000Z';
 
@@ -401,5 +401,124 @@ test('resolveSentHandoffs: a receiver row carrying needs_reason without needs us
     assert.match(out.get(tracker)?.text ?? '', /cannot be read: needs_reason: needs_reason goes only with needs 'user' or 'grill'/);
   } finally {
     b.cleanup();
+  }
+});
+
+// ------------------- readForeignBoard: another project's user board, read-only -------------------
+// Decision read-another-projects-board-board-query-target-project-read-only:
+// raw SQL on openForeignDbReadOnly, tolerant parse, a total time budget, and
+// nothing written beside or into the other store.
+
+/** Insert a raw todo row, bypassing the store's validation, as an older or newer Sterling might have written it. */
+function rawTodo(db: string, id: string, body: string, updated_at = NOW): void {
+  const w = new DatabaseSync(db);
+  try {
+    w.prepare(`INSERT INTO records (id, type, status, scope, created_at, updated_at, author, body) VALUES (?, 'todo', 'active', 'project', ?, ?, 'conductor', ?)`).run(id, NOW, updated_at, body);
+  } finally {
+    w.close();
+  }
+}
+
+test('readForeignBoard: user items only, in board order, with live slugs of either source; system items are never returned', () => {
+  const b = receiver();
+  try {
+    const one = mk(b.store, { text: 'One', slug: 'one', updated_at: '2026-10-15T12:00:01.000Z' });
+    const two = mk(b.store, { text: 'Two', slug: 'two', updated_at: '2026-10-15T12:00:02.000Z' });
+    mk(b.store, { text: 'Queue item', slug: 'queue-item', source: 'system', system_reason: 'reconcile_needed' });
+    b.store.close();
+    const read = readForeignBoard(join(b.root, '.sterling', 'sterling.db'));
+    assert.deepEqual(read.items.map((i) => i.id), [two.id, one.id]);
+    assert.deepEqual([...read.slugHolders.keys()].sort(), ['one', 'queue-item', 'two']);
+    assert.equal(read.truncated, undefined);
+    assert.equal(read.scanTruncated, false);
+    assert.deepEqual(read.unreadable, []);
+    assert.equal(read.schemaVersion, 2);
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard: a body that fails the tolerant parse is listed as unreadable by id, never dropped; unknown keys pass through', () => {
+  const b = receiver();
+  try {
+    const good = mk(b.store, { text: 'Readable' });
+    b.store.close();
+    const db = join(b.root, '.sterling', 'sterling.db');
+    const notJson = randomUUID();
+    const badWait = randomUUID();
+    const newer = randomUUID();
+    rawTodo(db, notJson, '{not json');
+    rawTodo(db, badWait, JSON.stringify({ ...envelope(), id: badWait, source: 'user', text: 'x', needs_reason: 'why' }));
+    rawTodo(db, newer, JSON.stringify({ ...envelope(), id: newer, source: 'user', text: 'From a newer Sterling', future_field: { a: 1 } }));
+    const read = readForeignBoard(db);
+    assert.deepEqual(read.items.map((i) => i.id).sort(), [good.id, newer].sort());
+    assert.deepEqual((read.items.find((i) => i.id === newer) as Record<string, unknown>).future_field, { a: 1 });
+    const unreadable = new Map(read.unreadable.map((u) => [u.id, u.reason]));
+    assert.deepEqual([...unreadable.keys()].sort(), [badWait, notJson].sort());
+    assert.match(unreadable.get(notJson) ?? '', /not valid JSON/);
+    assert.match(unreadable.get(badWait) ?? '', /needs_reason/);
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard: the time budget is checked per N rows; running out is disclosed as truncation with the rows read so far', () => {
+  const b = receiver();
+  try {
+    for (let i = 0; i < 6; i++) mk(b.store, { text: `Item ${i}` });
+    b.store.close();
+    const db = join(b.root, '.sterling', 'sterling.db');
+    let t = 0;
+    const read = readForeignBoard(db, { budgetMs: 650, checkEvery: 1, clock: () => (t += 100) });
+    assert.ok(read.truncated, 'the read says it was cut short');
+    assert.match(read.truncated ?? '', /^time budget exhausted \(650 ms\) after \d+ board rows were read$/);
+    assert.ok(read.items.length > 0 && read.items.length < 6, `a partial read, got ${read.items.length}`);
+    const none = readForeignBoard(db, { budgetMs: 0 });
+    assert.equal(none.items.length, 0);
+    assert.match(none.truncated ?? '', /after 0 board rows/);
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard: the PRAGMA user_version is reported as read', () => {
+  const b = receiver();
+  try {
+    mk(b.store, { text: 'One' });
+    b.store.close();
+    const db = join(b.root, '.sterling', 'sterling.db');
+    const w = new DatabaseSync(db);
+    w.exec('PRAGMA user_version=7');
+    w.close();
+    assert.equal(readForeignBoard(db).schemaVersion, 7);
+  } finally {
+    b.cleanup();
+  }
+});
+
+test('readForeignBoard: leaves no litter — a WAL store with no -wal and a rollback-journal store keep their files and bytes', () => {
+  const hash = (p: string) => createHash('sha256').update(readFileSync(p)).digest('hex');
+  for (const mode of ['wal', 'delete'] as const) {
+    const b = receiver();
+    try {
+      mk(b.store, { text: 'One' });
+      b.store.close();
+      const dir = join(b.root, '.sterling');
+      const db = join(dir, 'sterling.db');
+      if (mode === 'delete') {
+        const w = new DatabaseSync(db);
+        w.exec('PRAGMA journal_mode=DELETE');
+        w.close();
+      }
+      assert.equal(existsSync(`${db}-wal`), false, `precondition (${mode}): no -wal`);
+      const before = readdirSync(dir).sort();
+      const main = hash(db);
+      const read = readForeignBoard(db);
+      assert.equal(read.items.length, 1, mode);
+      assert.deepEqual(readdirSync(dir).sort(), before, `${mode}: no -wal, -shm or -journal was left beside the store`);
+      assert.equal(hash(db), main, `${mode}: the main file is byte-identical`);
+    } finally {
+      b.cleanup();
+    }
   }
 });

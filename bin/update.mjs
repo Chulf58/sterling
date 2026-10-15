@@ -4896,7 +4896,7 @@ function validateRecord(input) {
   }
   return entry.schema.parse(input);
 }
-var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, DRAIN_VERBS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, DIGEST_CLIP, clipped, RECORD_TYPES, HEADLINE_CLIP, NAME_CLIP, clipName, displayHandle, EXAMPLE_MAX_DEPTH, EXAMPLE_MAX_CHARS, REPO_PATH_FORMAT, REPO_PATH_REFUSALS, OMIT_EXAMPLE;
+var verifiableAt, base, decisionSchema, notApplicableExemptionSchema, ARTICLE_KINDS, NOT_APPLICABLE_EXEMPT_KINDS, ARTICLE_STATE_REQUIRES, currentAcItemSchema, liveTestRefItemSchema, baselineAttestationsSchema, absenceAttestationsSchema, featureArticleSchema, isoDate, antiPatternSchema, researchFindingSchema, modelsCatalogSchema, referenceMaterialSchema, disconfirmedHypothesisSchema, OPEN_QUESTION_CLOSED, OPEN_QUESTION_TERMINUS_FIELD, openQuestionSchema, attestationSchema, BOARD_NEEDS, SYSTEM_REASONS, DRAIN_VERBS, TODO_SYSTEM_SOURCE, TODO_SYSTEM_REQUIRES, TODO_USER_ONLY_FIELDS, HANDOFF_MILESTONE_MAX, receivedHandoffShape, sentHandoffShape, todoHandoffSchema, todoHandoffReadSchema, HANDOFFS_DIR_REL, handoffClosureSchema, handoffClosureReadSchema, handoffEvidenceShape, hasEvidence, EVIDENCE_EMPTY, handoffEvidenceSchema, handoffEvidenceFileSchema, handoffEvidenceFileReadSchema, needsReasonField, todoWaitFieldsReadSchema, todoBoardItemReadSchema, todoSchema, briefSchema, AGENT_MODEL_KEY, REVIEWER_ROLES, s, DIGEST_CLIP, clipped, RECORD_TYPES, HEADLINE_CLIP, NAME_CLIP, clipName, displayHandle, EXAMPLE_MAX_DEPTH, EXAMPLE_MAX_CHARS, REPO_PATH_FORMAT, REPO_PATH_REFUSALS, OMIT_EXAMPLE;
 var init_records = __esm({
   "packages/schemas/dist/records.js"() {
     "use strict";
@@ -5376,6 +5376,16 @@ var init_records = __esm({
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
       }
     });
+    todoBoardItemReadSchema = external_exports.object({
+      id: external_exports.string().min(1),
+      type: external_exports.literal("todo"),
+      source: external_exports.enum(["user", "system"]),
+      updated_at: external_exports.string().min(1),
+      text: external_exports.string().optional(),
+      slug: external_exports.string().min(1).optional(),
+      objective: external_exports.string().optional(),
+      file_keys: external_exports.array(external_exports.string()).optional()
+    }).passthrough();
     todoSchema = base.extend({
       type: external_exports.literal("todo"),
       // Human-readable handle (decision human-readable-ids-for-board-items, S1) —
@@ -6741,6 +6751,7 @@ __export(dist_exports, {
   stalenessVerdict: () => stalenessVerdict,
   toRepoRelative: () => toRepoRelative,
   todoBlocksItself: () => todoBlocksItself,
+  todoBoardItemReadSchema: () => todoBoardItemReadSchema,
   todoHandoffReadSchema: () => todoHandoffReadSchema,
   todoHandoffSchema: () => todoHandoffSchema,
   todoSchema: () => todoSchema,
@@ -9556,6 +9567,76 @@ function resolveSentHandoffs(trackers, opts2 = {}) {
   }
   return out;
 }
+function readForeignBoard(dbPath, opts2 = {}) {
+  const busy = opts2.busyTimeoutMs ?? 250;
+  const budget = opts2.budgetMs ?? 1500;
+  const clock = opts2.clock ?? Date.now;
+  const scanCap = opts2.scanCap ?? 1e3;
+  const checkEvery = Math.max(1, opts2.checkEvery ?? 50);
+  const started = clock();
+  const remaining = () => budget - (clock() - started);
+  const out = { items: [], unreadable: [], slugHolders: /* @__PURE__ */ new Map(), schemaVersion: 0, scanTruncated: false };
+  const exhausted = (rows) => `time budget exhausted (${budget} ms) after ${rows} board rows were read`;
+  if (remaining() <= 0) {
+    out.truncated = exhausted(0);
+    return out;
+  }
+  const db = openForeignDbReadOnly(dbPath, Math.min(busy, remaining()));
+  try {
+    out.schemaVersion = Number(db.prepare("PRAGMA user_version").get().user_version);
+    setBusyTimeout(db, Math.min(busy, Math.max(0, remaining())));
+    const stmt = db.prepare(`SELECT id, body, json_valid(body) AS ok,
+         CASE WHEN json_valid(body) THEN json_extract(body, '$.source') END AS source,
+         CASE WHEN json_valid(body) THEN json_extract(body, '$.slug') END AS slug,
+         CASE WHEN json_valid(body) THEN json_extract(body, '$.text') END AS text
+       FROM records WHERE type = 'todo' AND status != 'superseded'
+       ORDER BY updated_at DESC, id DESC`);
+    let rows = 0;
+    let users = 0;
+    for (const row of stmt.iterate()) {
+      if (rows % checkEvery === 0 && remaining() <= 0) {
+        out.truncated = exhausted(rows);
+        break;
+      }
+      rows++;
+      if (!row.ok) {
+        out.unreadable.push({ id: row.id, reason: "the stored body is not valid JSON" });
+        continue;
+      }
+      if (typeof row.slug === "string" && row.slug.length > 0) {
+        out.slugHolders.set(row.slug, { id: row.id, slug: row.slug, ...typeof row.text === "string" ? { text: row.text } : {} });
+      }
+      if (row.source === "system")
+        continue;
+      if (users >= scanCap) {
+        out.scanTruncated = true;
+        continue;
+      }
+      users++;
+      const reason = parseForeignItem(row.id, row.body);
+      if (typeof reason === "string")
+        out.unreadable.push({ id: row.id, reason });
+      else
+        out.items.push(reason);
+    }
+  } finally {
+    db.close();
+  }
+  return out;
+}
+function parseForeignItem(id, body) {
+  const raw = JSON.parse(body);
+  const item = todoBoardItemReadSchema.safeParse(raw);
+  const issues = (e) => e.issues.map((i) => `${i.path.join(".") || "(body)"}: ${i.message}`).join("; ");
+  if (!item.success)
+    return issues(item.error);
+  if (item.data.id !== id)
+    return `the body's id ${item.data.id} differs from the row id`;
+  const wait = todoWaitFieldsReadSchema.safeParse(raw);
+  if (!wait.success)
+    return issues(wait.error);
+  return item.data;
+}
 var EVIDENCE_LABELS, statusText;
 var init_handoff = __esm({
   "packages/store/dist/handoff.js"() {
@@ -10034,6 +10115,7 @@ __export(dist_exports2, {
   axisHits: () => axisHits,
   axisNarrowText: () => axisNarrowText,
   axisTitleText: () => axisTitleText,
+  boardReadinessOf: () => boardReadinessOf,
   buildPgConnectionConfig: () => buildPgConnectionConfig,
   buildReconcileText: () => buildReconcileText,
   catalogStatus: () => catalogStatus,
@@ -10061,6 +10143,7 @@ __export(dist_exports2, {
   pgSearchQuery: () => pgSearchQuery,
   rankTermDedupeKey: () => rankTermDedupeKey,
   rankTerms: () => rankTerms,
+  readForeignBoard: () => readForeignBoard,
   readPgCredentials: () => readPgCredentials,
   recordCentralTerms: () => recordCentralTerms,
   recordCentralityHits: () => recordCentralityHits,
@@ -10154,6 +10237,45 @@ function deepReplaceString(value, from, to) {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
   }
   return value;
+}
+function boardReadinessOf(targets, live, openBlocker) {
+  const dependents = /* @__PURE__ */ new Map();
+  for (const t of live) {
+    for (const slug of new Set(t.blocked_by ?? [])) {
+      const list = dependents.get(slug);
+      if (list)
+        list.push(t);
+      else
+        dependents.set(slug, [t]);
+    }
+  }
+  return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
+    const blockers = [];
+    const blockersOpen = [];
+    for (const slug of t.blocked_by ?? []) {
+      const holder = openBlocker(slug);
+      blockers.push({ slug, state: holder ? "open" : "closed" });
+      if (holder)
+        blockersOpen.push(boardItemHandle(holder));
+    }
+    const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
+    const sent = sentHandoffOf(t);
+    const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+    return {
+      id: t.id,
+      ...t.slug ? { slug: t.slug } : {},
+      name: boardItemHandle(t),
+      ...t.priority ? { priority: t.priority } : {},
+      updated_at: t.updated_at,
+      file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
+      ...t.needs ? { needs: t.needs } : {},
+      blockers,
+      blockers_open: blockersOpen,
+      unblocks,
+      state,
+      ...sent ? { handoff: sent } : {}
+    };
+  });
 }
 function compareBoardReadiness(a, b) {
   const pa = PRIORITY_RANK[a.priority ?? "normal"] ?? 1;
@@ -11707,45 +11829,8 @@ var init_dist2 = __esm({
           for (const t of live)
             if (t.slug)
               bySlug.set(t.slug, t);
-          const dependents = /* @__PURE__ */ new Map();
-          for (const t of live) {
-            for (const slug of new Set(t.blocked_by ?? [])) {
-              const list = dependents.get(slug);
-              if (list)
-                list.push(t);
-              else
-                dependents.set(slug, [t]);
-            }
-          }
           const openBlocker = (slug) => bySlug.get(slug) ?? this.recordsBySlug(slug).find((r) => r.type === "todo");
-          const targets = items ?? live;
-          return targets.filter((t) => t.type === "todo" && t.source === "user").map((t) => {
-            const blockers = [];
-            const blockersOpen = [];
-            for (const slug of t.blocked_by ?? []) {
-              const holder = openBlocker(slug);
-              blockers.push({ slug, state: holder ? "open" : "closed" });
-              if (holder)
-                blockersOpen.push(boardItemHandle(holder));
-            }
-            const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-            const sent = sentHandoffOf(t);
-            const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
-            return {
-              id: t.id,
-              ...t.slug ? { slug: t.slug } : {},
-              name: boardItemHandle(t),
-              ...t.priority ? { priority: t.priority } : {},
-              updated_at: t.updated_at,
-              file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
-              ...t.needs ? { needs: t.needs } : {},
-              blockers,
-              blockers_open: blockersOpen,
-              unblocks,
-              state,
-              ...sent ? { handoff: sent } : {}
-            };
-          });
+          return boardReadinessOf(items ?? live, live, openBlocker);
         });
       }
       /**
