@@ -412,7 +412,9 @@ export function blockedByLine(openNames: readonly string[]): string | undefined 
 /** A delegated tracker's card line: `delegated to <project>: <status>`; undefined for any other item. */
 export function delegatedLine(r: BoardItemReadiness | undefined, statuses: ReadonlyMap<string, HandoffStatus>): string | undefined {
   if (!r || r.state !== 'delegated' || !r.handoff) return undefined;
-  return `delegated to ${r.handoff.to_name}: ${statuses.get(r.id)?.text ?? 'status not read'}`;
+  const status = statuses.get(r.id);
+  // The receiver's current registry name when the status carries one (GitHub issue #120), else the stored label.
+  return `delegated to ${status?.to_name ?? r.handoff.to_name}: ${status?.text ?? 'status not read'}`;
 }
 
 export function todoCards(store: SterlingStore, expanded: string[] = []): Card[] {

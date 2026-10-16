@@ -468,20 +468,46 @@ export function dirtyPaths(root, paths, spawnSync = nodeSpawnSync, prefix = '') 
 // created_at) is only a guess: a record is often settled before its files are
 // committed, and folded items keep the oldest created_at. The queue item
 // carries no commit of its own (settlement mints reconcile_needed without a
-// measured_at_head). When no commit matches, the item says so ("no diff
-// available") instead of falling back to a guessed base. Only the item's own
-// file_keys are diffed, each as a literal pathspec; each item's text is
-// capped at DIFF_ITEM_MAX_CHARS and the run at DIFF_RUN_MAX_CHARS, headers and
-// notes included; git stops once the budget is spent, and a cut says so and
-// names the paths left out (a bounded list).
-// The launcher records each item's baselines in eligible.json, queue_snapshot
-// included, so a chained launch (which has no store) still has them.
+// measured_at_head). The verified base is therefore never replaced by a
+// guess. But when no verified base exists (no commit matches the baseline, the
+// target holds no baseline for the path, or none was recorded at launch; a
+// path no commit touches at all stays "no diff available"), the item still
+// gets history, under a
+// heading that says it is a GUESS BY TIME (decision
+// maintenance-worker-gets-commit-log-diffstat-time-fallback-and-may-close-rename-refreshes,
+// which reverses the earlier refusal of guessed bases: a labelled guess beats
+// a hand-back, and the prompt makes the worker Read the file before it calls
+// the item paid): the last FALLBACK_LOG_LINES commit subjects per path and a
+// diffstat since the target's updated_at. Where a base does resolve, the item
+// also gets the commit subjects (at most DIFF_LOG_MAX_LINES) and the diffstat
+// since it. All git calls are argument arrays, never a shell.
+// Only the item's own file_keys are diffed, each as a literal pathspec; each
+// item's text is capped at DIFF_ITEM_MAX_CHARS and the run at
+// DIFF_RUN_MAX_CHARS, headers and notes included. Inside an item's cap the
+// paths share what is left (so one large file cannot starve the others) and the
+// history gets a reserve; git stops once the budget is spent, and a cut says
+// so and names the paths left out (a bounded list).
+// The launcher records each item's baselines and its target's updated_at in
+// eligible.json, queue_snapshot included, so a chained launch (which has no
+// store) still has them.
 export const DIFF_LANES = ['reconcile_needed', 'state_review'];
 export const DIFF_ITEM_MAX_CHARS = 4_000;
 export const DIFF_RUN_MAX_CHARS = 24_000;
 export const DIFF_BASE_WALK = 50;
 /** A note naming paths or items lists at most this many chars of names. */
 export const DIFF_NOTE_LIST_CHARS = 160;
+/** Commit subjects shown per item from a resolved base, and per path in the fallback. */
+export const DIFF_LOG_MAX_LINES = 20;
+export const FALLBACK_LOG_LINES = 20;
+/** One subject line and a diffstat are clipped to these. */
+const DIFF_LOG_LINE_CHARS = 72;
+export const DIFF_STAT_MAX_CHARS = 800;
+/** Below this item budget the paths are not split and nothing is reserved: the item-level cut applies as before. */
+export const DIFF_SPLIT_MIN_BUDGET = 1_000;
+/** A cut path diff shorter than this is not a useful hunk: the path gets a one-line summary instead. */
+export const DIFF_PATH_USEFUL_SHARE = 400;
+/** A one-line summary is at most this long, and every path is guaranteed room for one. */
+export const DIFF_SUMMARY_MAX = 200;
 
 /** The target's baselines for the item's own file_keys, read at launch (the
  *  runner has no store), or undefined when the item gets no diff from it. */
@@ -490,6 +516,13 @@ function itemBaselines(store, t) {
   const all = store.get(t.feature_link)?.file_baselines;
   const own = (t.file_keys ?? []).filter((k) => typeof all?.[k] === 'string');
   return Object.fromEntries(own.map((k) => [k, all[k]]));
+}
+
+/** The target's updated_at, read at launch, for the by-time fallback; undefined when unknown. */
+function itemTargetUpdatedAt(store, t) {
+  if (!store || !DIFF_LANES.includes(t.system_reason) || !t.feature_link) return undefined;
+  const at = store.get(t.feature_link)?.updated_at;
+  return typeof at === 'string' ? at : undefined;
 }
 
 const gitFail = (r) => (r.error ? r.error.code ?? r.error.message : `exit ${r.status}: ${String(r.stderr ?? '').trim().slice(0, 120)}`);
@@ -518,39 +551,162 @@ export function resolveDiffBase(root, path, baseline, prefix = '', spawnSync = n
     at += size + 1;
     if (hash === baseline) return { base: commit };
   }
-  return { base: null, why: `none of the last ${commits.length} commits touching it holds the content the target was settled against` };
+  return { base: null, unmatched: true, why: `none of the last ${commits.length} commits touching it holds the content the target was settled against` };
 }
 
 /** A path as a literal git pathspec, so `foo[1].ts` never matches `foo1.ts`. */
 const literalPathspec = (path) => `:(literal)${path}`;
 
+/** `text` cut to `max` chars, the last of them a note saying how much was kept. */
+function clipTo(text, max, what) {
+  if (text.length <= max) return text;
+  const note = (n) => `\n[${what} cut: ${n} of ${text.length} chars shown]`;
+  const keep = Math.max(0, max - note(text.length).length);
+  return text.slice(0, keep) + note(keep);
+}
+
+const gitText = (r) => String(r.stdout ?? '').trimEnd();
+const clipLine = (l) => (l.length > DIFF_LOG_LINE_CHARS ? `${l.slice(0, DIFF_LOG_LINE_CHARS - 1)}…` : l);
+const gitOpts = { encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024 };
+
+/** The commit subjects and diffstat since each resolved base, for the paths
+ *  that resolved it (one git log and one git diff --stat per distinct base),
+ *  as {subjects, stat} text blocks, or null when no path resolved a base. At
+ *  most DIFF_LOG_MAX_LINES subjects in all; a failed git call is named, not
+ *  hidden. The two blocks are budgeted apart so a long log cannot push out the
+ *  diffstat. */
+function historyText(root, byBase, spawnSync) {
+  if (!byBase.size) return null;
+  const lines = [];
+  let moreLog = false;
+  const stats = [];
+  const fails = [];
+  for (const [base, paths] of byBase) {
+    const specs = paths.map(literalPathspec);
+    const log = spawnSync('git', ['-C', root, 'log', '--oneline', '--no-color', '-n', String(DIFF_LOG_MAX_LINES + 1), `${base}..HEAD`, '--', ...specs], gitOpts);
+    if (log.error || log.status !== 0) fails.push(`git log failed (${gitFail(log)})`);
+    else for (const l of gitText(log).split('\n').filter(Boolean)) {
+      if (lines.length < DIFF_LOG_MAX_LINES) lines.push(clipLine(l));
+      else moreLog = true;
+    }
+    const stat = spawnSync('git', ['-C', root, 'diff', '--stat', '--no-color', '--no-ext-diff', base, 'HEAD', '--', ...specs], gitOpts);
+    if (stat.error || stat.status !== 0) fails.push(`git diff --stat failed (${gitFail(stat)})`);
+    else if (gitText(stat)) stats.push(gitText(stat));
+  }
+  const subjects = `commits since the base (${lines.length}${moreLog ? '+, older ones not shown' : ''}):\n${lines.length ? lines.join('\n') : 'none touch these paths'}`;
+  const stat = ['diffstat since the base:', stats.length ? stats.join('\n') : 'unchanged', ...(fails.length ? [`history incomplete: ${fails.join('; ')}`] : [])].join('\n');
+  return { subjects, stat };
+}
+
+/** The by-time fallback's diffstat for `paths` since `updatedAt`: the oldest
+ *  commit touching them at or after that time, then the stat from its parent. */
+function fallbackStat(root, paths, updatedAt, spawnSync) {
+  const label = `FALLBACK diffstat (guessed by time, not a verified base), since the target's updated_at ${updatedAt ?? 'unknown'}:`;
+  if (!Number.isFinite(Date.parse(updatedAt ?? ''))) return `${label}\nskipped: no updated_at was recorded for the target at launch`;
+  const specs = paths.map(literalPathspec);
+  const log = spawnSync('git', ['-C', root, 'log', `--since=${updatedAt}`, '--reverse', '--format=%H %P', '--', ...specs], gitOpts);
+  if (log.error || log.status !== 0) return `${label}\nskipped: git log failed (${gitFail(log)})`;
+  const [oldest, parent] = (gitText(log).split('\n').find((l) => /^[0-9a-f]{40,64}\b/.test(l)) ?? '').split(' ');
+  if (!oldest) return `${label}\nno commit touching these paths since then`;
+  // A root commit has no parent to diff from, so its parent side is the empty tree (hashed by this repo's own algorithm).
+  let from = `${oldest}^`;
+  if (!parent) {
+    const empty = spawnSync('git', ['-C', root, 'hash-object', '-t', 'tree', '--stdin'], { encoding: 'utf8', input: '', timeout: 30_000 });
+    if (empty.error || empty.status !== 0) return `${label}\nskipped: git hash-object failed (${gitFail(empty)})`;
+    from = gitText(empty);
+  }
+  const stat = spawnSync('git', ['-C', root, 'diff', '--stat', '--no-color', '--no-ext-diff', from, 'HEAD', '--', ...specs], gitOpts);
+  if (stat.error || stat.status !== 0) return `${label}\nskipped: git diff --stat failed (${gitFail(stat)})`;
+  return `${label}\n${clipTo(gitText(stat) || 'unchanged', DIFF_STAT_MAX_CHARS, 'diffstat')}`;
+}
+
+/** A path's one-line stand-in when its share of the budget is too small for a useful hunk: its heading plus what was cut, at most DIFF_SUMMARY_MAX chars. */
+function pathSummary(r) {
+  const [head, ...rest] = r.text.split('\n');
+  const tag = r.base
+    ? `+${rest.filter((l) => l.startsWith('+') && !l.startsWith('+++')).length} -${rest.filter((l) => l.startsWith('-') && !l.startsWith('---')).length} lines, diff cut`
+    : r.guessed ? 'commit subjects cut' : 'cut';
+  const room = DIFF_SUMMARY_MAX - tag.length - 4;
+  return `${head.length > room ? `${head.slice(0, room - 1)}…` : head} [${tag}]`;
+}
+
 /** One item's diff: per path, the diff from its resolved base to HEAD, or a
- *  "no diff available" line saying why, as {text, notDiffed}. It stops calling
- *  git once `text` reaches `budget` chars, and `notDiffed` names the paths it
- *  left out for that reason. */
+ *  "no diff available" line saying why there is none, or a labelled GUESS BY
+ *  TIME with the last commit subjects when there is no verified base; then the
+ *  commit log and diffstat since the base and the fallback diffstat. It returns
+ *  {text, notDiffed}. From DIFF_SPLIT_MIN_BUDGET up, the budget is split: the
+ *  history (subjects and diffstat, each clipped on its own so a long log cannot
+ *  push out the stat) gets at least 40% and whatever the diffs do not need; the
+ *  rest is divided across ALL paths by shortest-first fair share, so a short
+ *  diff leaves its unused space to the others and no path is dropped. A path
+ *  whose share is under DIFF_PATH_USEFUL_SHARE gets a one-line summary. Only a
+ *  count of paths too large for one summary each is cut off (`notDiffed` names
+ *  them). Below the minimum budget, git stops once the diffs reach `budget`
+ *  chars and the caller's item-level cut applies. */
 export function itemDiffText(root, item, prefix = '', spawnSync = nodeSpawnSync, budget = Infinity) {
   const keys = [...(item.file_keys ?? [])].map(String).sort();
   if (!keys.length) return { text: 'no diff available: the item names no files', notDiffed: [] };
-  if (!item.baselines || typeof item.baselines !== 'object') return { text: 'no diff available: no settled baseline was recorded for this item at launch', notDiffed: [] };
-  const parts = [];
+  const baselines = item.baselines && typeof item.baselines === 'object' ? item.baselines : null;
+  const split = Number.isFinite(budget) && budget >= DIFF_SPLIT_MIN_BUDGET;
+  const maxPaths = split ? Math.max(1, Math.floor((budget * 0.6) / (DIFF_SUMMARY_MAX + 1))) : keys.length;
+  const results = [];
+  const byBase = new Map();
+  const guessed = [];
+  let notDiffed = [];
   let length = 0;
   for (let i = 0; i < keys.length; i++) {
-    if (length >= budget) return { text: parts.join('\n'), notDiffed: keys.slice(i) };
-    const part = pathDiffText(root, keys[i], item.baselines[keys[i]], prefix, spawnSync);
-    length += part.length + (parts.length ? 1 : 0);
-    parts.push(part);
+    if (split ? i >= maxPaths : length >= budget) {
+      notDiffed = keys.slice(i);
+      break;
+    }
+    const r = pathDiff(root, keys[i], baselines?.[keys[i]], prefix, spawnSync, baselines ? 'no saved baseline for this path' : 'no saved baseline was recorded for this item at launch');
+    if (r.base) byBase.set(r.base, [...(byBase.get(r.base) ?? []), keys[i]]);
+    if (r.guessed) guessed.push(keys[i]);
+    length += r.text.length + 1;
+    results.push(r);
   }
-  return { text: parts.join('\n'), notDiffed: [] };
+  const history = historyText(root, byBase, spawnSync);
+  const fallback = guessed.length ? fallbackStat(root, guessed, item.target_updated_at, spawnSync) : '';
+  if (!split) return { text: [...results.map((r) => r.text), ...(history ? [history.subjects, history.stat] : []), ...(fallback ? [fallback] : [])].join('\n'), notDiffed };
+  const full = results.reduce((n, r) => n + r.text.length + 1, 0);
+  const historyBudget = Math.max(Math.floor(budget * 0.4), budget - full - fallback.length - 2);
+  const room = Math.max(0, historyBudget - fallback.length - 1);
+  const stat = history ? clipTo(history.stat, Math.min(DIFF_STAT_MAX_CHARS, Math.floor(room / 2)), 'diffstat') : '';
+  const subjects = history ? clipTo(history.subjects, Math.max(0, room - stat.length - 1), 'commit log') : '';
+  const tail = [subjects, stat, fallback].filter(Boolean).join('\n');
+  let remaining = budget - (tail ? tail.length + 1 : 0) - (results.length - 1);
+  const texts = new Array(results.length);
+  let left = results.length;
+  for (const i of results.map((_, j) => j).sort((x, y) => results[x].text.length - results[y].text.length)) {
+    const fair = Math.floor(remaining / left);
+    const r = results[i];
+    texts[i] = r.text.length <= fair ? r.text : fair < DIFF_PATH_USEFUL_SHARE ? pathSummary(r) : clipTo(r.text, fair, 'path diff');
+    remaining -= texts[i].length;
+    left--;
+  }
+  return { text: [...texts, ...(tail ? [tail] : [])].join('\n'), notDiffed };
 }
 
-function pathDiffText(root, path, baseline, prefix, spawnSync) {
-  if (typeof baseline !== 'string') return `--- ${path}: no diff available: the target holds no baseline for this path`;
-  const { base, why } = resolveDiffBase(root, path, baseline, prefix, spawnSync);
-  if (!base) return `--- ${path}: no diff available: ${why}`;
-  const d = spawnSync('git', ['-C', root, 'diff', '--no-color', '--no-ext-diff', base, 'HEAD', '--', literalPathspec(path)], { encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
-  if (d.error || d.status !== 0) return `--- ${path}: no diff available: git diff failed (${gitFail(d)})`;
-  const body = String(d.stdout ?? '').trimEnd();
-  return `--- ${path}: base ${base.slice(0, 12)} (the commit matching the target's baseline)\n${body || 'unchanged since that base'}`;
+/** The by-time fallback for one path, as {text, guessed?}: `lead` says why there is no verified base. A path no commit touches has nothing to guess from, so it stays "no diff available". */
+function fallbackPath(root, path, lead, spawnSync) {
+  const log = spawnSync('git', ['-C', root, 'log', '-n', String(FALLBACK_LOG_LINES), '--oneline', '--no-color', '--', literalPathspec(path)], gitOpts);
+  const head = `--- ${path}: ${lead}; FALLBACK (guessed by time, not a verified base)`;
+  if (log.error || log.status !== 0) return { text: `${head}\nno commit subjects: git log failed (${gitFail(log)})`, guessed: true };
+  const subjects = gitText(log).split('\n').filter(Boolean).map(clipLine);
+  if (!subjects.length) return { text: `--- ${path}: no diff available: no commit touches it` };
+  return { text: `${head}\nlast ${subjects.length} commit subjects touching it:\n${subjects.join('\n')}`, guessed: true };
+}
+
+/** One path's diff block as {text, base?, guessed?}: `base` when its diff ran from a verified base, `guessed` when the text is the by-time fallback. `noBaseLead` is the fallback's lead-in when the target has no baseline for the path. */
+function pathDiff(root, path, baseline, prefix, spawnSync, noBaseLead) {
+  if (typeof baseline !== 'string') return fallbackPath(root, path, noBaseLead, spawnSync);
+  const { base, why, unmatched } = resolveDiffBase(root, path, baseline, prefix, spawnSync);
+  if (!base && unmatched) return fallbackPath(root, path, `no commit matches the saved baseline (${why})`, spawnSync);
+  if (!base) return { text: `--- ${path}: no diff available: ${why}` };
+  const d = spawnSync('git', ['-C', root, 'diff', '--no-color', '--no-ext-diff', base, 'HEAD', '--', literalPathspec(path)], gitOpts);
+  if (d.error || d.status !== 0) return { text: `--- ${path}: no diff available: git diff failed (${gitFail(d)})` };
+  const body = gitText(d);
+  return { text: `--- ${path}: base ${base.slice(0, 12)} (the commit matching the target's baseline)\n${body || 'unchanged since that base'}`, base };
 }
 
 /** `list` joined with ', ' in at most DIFF_NOTE_LIST_CHARS chars, then
@@ -583,7 +739,7 @@ export function itemDiffSection(root, items, { spawnSync = nodeSpawnSync, itemMa
   if (!diffItems.length) return '';
   const needsGit = diffItems.some((t) => t.baselines && Object.keys(t.baselines).length);
   const git = needsGit ? gitState(root, spawnSync) : { prefix: '' };
-  const head = `\nDIFFS (from the runner: for each reconcile_needed and state_review item, the git diff of the item's own file_keys from the commit whose copy of each file matches the target's file_baselines, to HEAD; "no diff available" says why there is none):\n`;
+  const head = `\nDIFFS (from the runner: for each reconcile_needed and state_review item, the git diff of the item's own file_keys from the commit whose copy of each file matches the target's file_baselines, to HEAD, then the commit subjects and a diffstat since that base; a path with no verified base (no matching commit, or no saved baseline) shows a FALLBACK that is a guess by time; "no diff available" says why there is none):\n`;
   const omittedPrefix = (n) => `[diff omitted for ${n} item(s): the diff budget (${itemMax} chars per item, ${runMax} per run) has no room for them: `;
   const omittedLine = (ids) => `${omittedPrefix(ids.length)}${boundedList(ids)}]`;
   // Each block costs its length plus one newline; keep room for the longest
@@ -989,9 +1145,11 @@ function launchWorker(opts) {
       // has one, else carried on the item itself: a chained launch gets only
       // queue_snapshot items, which carry them forward for the later batches.
       const baselinesById = new Map(eligible.map((t) => [t.id, opts.store ? itemBaselines(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.baselines : undefined]));
+      const updatedAtById = new Map(eligible.map((t) => [t.id, opts.store ? itemTargetUpdatedAt(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.target_updated_at : undefined]));
       const withBaselines = (t) => {
         const baselines = baselinesById.get(t.id);
-        return baselines && typeof baselines === 'object' ? { baselines } : {};
+        const updatedAt = updatedAtById.get(t.id);
+        return { ...(baselines && typeof baselines === 'object' ? { baselines } : {}), ...(typeof updatedAt === 'string' ? { target_updated_at: updatedAt } : {}) };
       };
       const chainAttempted = opts.trigger === 'chain' && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
       writeFileSync(

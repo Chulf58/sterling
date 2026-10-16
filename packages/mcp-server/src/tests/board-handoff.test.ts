@@ -625,7 +625,7 @@ test('a receiver renamed in the registry stays followable: the tracker resolves 
     };
     assert.equal(registry.renameIfUnique(h.beta, 'Beta Renamed').status, 'renamed');
 
-    assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'open', text: 'open in beta' }, 'the live status is read through to_root');
+    assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'open', text: 'open in Beta Renamed', to_name: 'Beta Renamed' }, 'the live status is read through to_root and names the receiver by its current name (GitHub issue #120)');
     const got = h.tools.foreignBoardGet(d.delivered.id, 'beta');
     assert.equal(got.id, d.delivered.id);
     assert.equal(got.source_project, 'Beta Renamed', 'the read names the receiver by its current registry name');
@@ -901,6 +901,32 @@ test('a new project registered at the old path: a pre-move tracker still resolve
     assert.deepEqual(statusOf(h.tools, after.tracker.id), { state: 'open', text: 'open in newcomer' });
   } finally {
     laterStore.close();
+    registry.close();
+    h.cleanup();
+  }
+});
+
+// GitHub issue #120: a receiver renamed in the registry reads under its
+// CURRENT name in the status text; the stored to_name is never rewritten.
+test('a receiver renamed in the registry reads under its current name in handoff_status, whichever state it is in; the stored to_name is unchanged (GitHub issue #120)', () => {
+  const h = harness();
+  const registry = new ProjectRegistry(h.reg);
+  try {
+    const open = handOver(h);
+    const done = handOver(h);
+    const closed = h.betaTools();
+    try {
+      closed.tools.boardRemove(done.delivered.id, 'shipped');
+    } finally {
+      closed.close();
+    }
+    assert.equal(registry.renameIfUnique(h.beta, 'Beta Renamed').status, 'renamed');
+
+    assert.deepEqual(statusOf(h.tools, open.tracker.id), { state: 'open', text: 'open in Beta Renamed', to_name: 'Beta Renamed' });
+    assert.deepEqual(statusOf(h.tools, done.tracker.id), { state: 'done', text: `DONE in Beta Renamed ${NOW}: shipped`, closed_at: NOW, note: 'shipped', to_name: 'Beta Renamed' });
+    assert.equal((h.tools.boardGet(open.tracker.id) as unknown as Loose).readiness, 'delegated');
+    assert.deepEqual((h.tools.boardGet(open.tracker.id) as unknown as Loose).handoff, { role: 'sent', transfer_id: open.transfer_id, to_root: h.beta, to_name: 'beta', to_item_id: open.delivered.id }, 'the stored tracker is never rewritten');
+  } finally {
     registry.close();
     h.cleanup();
   }

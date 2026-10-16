@@ -2241,9 +2241,10 @@ test('[diffs] the section diffs only the paths the item names, with a loud no-di
     const block = (id) => section.split('\n### ').find((b) => b.startsWith(`${id}\n`)) ?? '';
     assert.match(block('named'), /NEW_FLAG/);
     assert.doesNotMatch(section, /other\.mjs/, 'a path the item does not name is never diffed, even when the target holds its baseline');
-    assert.match(block('nomatch'), /--- src\/a\.mjs: no diff available: none of the last 3 commits touching it holds the content the target was settled against/);
-    assert.match(block('nobase'), /^nobase\nno diff available: no settled baseline was recorded for this item at launch$/);
-    assert.match(block('nopath'), /--- src\/a\.mjs: no diff available: the target holds no baseline for this path/);
+    assert.match(block('nomatch'), /--- src\/a\.mjs: no commit matches the saved baseline \(none of the last 3 commits touching it holds the content the target was settled against\); FALLBACK \(guessed by time, not a verified base\)\nlast 3 commit subjects touching it:\n[0-9a-f]+ v3\n[0-9a-f]+ v2\n[0-9a-f]+ v1/);
+    assert.doesNotMatch(block('nomatch'), /no diff available/, 'a guess by time replaces the no-diff line when commits touch the path');
+    assert.match(block('nobase'), /^nobase\n--- src\/a\.mjs: no saved baseline was recorded for this item at launch; FALLBACK \(guessed by time, not a verified base\)\nlast 3 commit subjects touching it:\n[0-9a-f]+ v3\n[0-9a-f]+ v2\n[0-9a-f]+ v1\n/);
+    assert.match(block('nopath'), /--- src\/a\.mjs: no saved baseline for this path; FALLBACK \(guessed by time, not a verified base\)\nlast 3 commit subjects touching it:/);
     assert.doesNotMatch(section, /### web\n/, 'only reconcile_needed and state_review items get a diff');
     assert.equal(itemDiffSection(repo.root, [items[4]], { spawnSync: realSpawnSync }), '', 'a batch with no diff lane adds no section');
   } finally {
@@ -2261,7 +2262,7 @@ test('[diffs] an item over its cap is cut and says so, items past the run budget
     const full = itemDiffText(repo.root, item('x'), 'proj/', realSpawnSync).text;
     assert.ok(full.length > 200 && full.length < DIFF_ITEM_MAX_CHARS, 'fixture: a short diff under the default cap');
     const itemMax = 200;
-    const runMax = 900;
+    const runMax = 1000; // was 900 before the DIFFS heading grew by the history and FALLBACK wording
     const section = itemDiffSection(repo.root, [item('one'), item('two'), item('three')], { spawnSync: realSpawnSync, itemMax, runMax });
     assert.ok(section.length <= runMax, `the section (${section.length} chars) stays within runMax ${runMax}`);
     const blocks = diffBlocks(section);
@@ -2271,7 +2272,7 @@ test('[diffs] an item over its cap is cut and says so, items past the run budget
     assert.match(blocks.two, new RegExp(`\\n\\[diff truncated: \\d+ of ${full.length} chars shown\\]$`), 'the second item gets what is left of the run budget');
     assert.ok(blocks.two.length < itemMax);
     assert.equal(blocks.three, undefined);
-    assert.match(section, /\n\[diff omitted for 1 item\(s\): the diff budget \(200 chars per item, 900 per run\) has no room for them: three\]\n$/);
+    assert.match(section, /\n\[diff omitted for 1 item\(s\): the diff budget \(200 chars per item, 1000 per run\) has no room for them: three\]\n$/);
     assert.doesNotMatch(itemDiffSection(repo.root, [item('whole')], { spawnSync: realSpawnSync }), /truncated|omitted/, 'under the caps nothing is cut');
   } finally {
     repo.cleanup();
@@ -2296,7 +2297,7 @@ test('[diffs] the launcher records the target baselines for the item own file_ke
 
     const prompt = workerPrompt(fx.plugin, fx.project, eligible, itemDiffSection(fx.project, eligible.items, { spawnSync: CLEAN_GIT }));
     assert.ok(prompt.indexOf('\nDIFFS (') > prompt.indexOf('\nELIGIBLE ('), 'the diffs follow the batch');
-    assert.match(prompt, /### r2\n--- src\/a\.mjs: no diff available: the target holds no baseline for this path/);
+    assert.match(prompt, /### r2\n--- src\/a\.mjs: no diff available: no commit touches it/, 'no baseline and no commit touches the path: nothing to guess from');
   } finally {
     fx.cleanup();
   }
@@ -2394,7 +2395,7 @@ test('[diffs] git stops once the budget is spent: a 100-path item diffs one path
   const keys = Array.from({ length: 100 }, (_, i) => `src/p${String(i).padStart(3, '0')}.mjs`);
   const item = { id: 'many', lane: 'reconcile_needed', file_keys: keys, baselines: Object.fromEntries(keys.map((k) => [k, sha(blob)])) };
   const section = itemDiffSection('/repo', [item], { spawnSync: fake, itemMax: 400, runMax: 1000 });
-  assert.equal(calls.length, 4, 'one HEAD probe, then log, cat-file and diff for the first path only');
+  assert.equal(calls.length, 6, 'one HEAD probe, then log, cat-file and diff for the first path only, then its commit log and diffstat');
   assert.match(section, /\[diff truncated: \d+ of \d+ chars shown; not diffed, budget spent: src\/p001\.mjs, src\/p002\.mjs, [^\]]*, and \d+ more\]/);
   assert.ok(calls.filter((a) => a.includes('log') || a.includes('diff')).every((a) => a.at(-1) === ':(literal)src/p000.mjs'), 'only the first path reached git, as a literal pathspec');
   assert.ok(section.length <= 1000, `the section (${section.length} chars) stays within runMax`);
@@ -2408,4 +2409,230 @@ test('[diffs] git stops once the budget is spent: a 100-path item diffs one path
   assert.ok(crowded.length <= 1200, `a crowded section (${crowded.length} chars) stays within runMax`);
   assert.match(crowded, /\[diff omitted for \d+ item\(s\)[^\]]*, and \d+ more\]\n$/);
   for (const [id, block] of Object.entries(diffBlocks(crowded))) assert.ok(block.length <= 400, `${id}'s block stays within itemMax`);
+});
+
+// ------------------------------------------------------------ commit history and the by-time fallback
+// (decision maintenance-worker-gets-commit-log-diffstat-time-fallback-and-may-close-rename-refreshes)
+
+/** A top-level temp repo built from [{files, msg, date}] commits, committed at `date`. */
+function datedRepo(commits) {
+  const root = mkdtempSync(join(tmpdir(), 'sterling-mworker-hist-'));
+  const git = (date, ...args) => {
+    const r = realSpawnSync('git', ['-C', root, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } });
+    assert.equal(r.status, 0, `fixture setup: git ${args[0]} failed: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  realSpawnSync('git', ['init', '-q', root], { encoding: 'utf8' });
+  mkdirSync(join(root, 'src'));
+  const heads = commits.map(({ files, msg, date }) => {
+    for (const [p, text] of Object.entries(files)) writeFileSync(join(root, p), text);
+    git(date, 'add', '-A');
+    git(date, 'commit', '-q', '-m', msg);
+    return git(date, 'rev-parse', 'HEAD');
+  });
+  return { root, heads, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+test('[history] an item with a resolvable base also shows the commit subjects and the diffstat since it', () => {
+  const repo = diffRepo();
+  try {
+    const { text, notDiffed } = itemDiffText(repo.root, { id: 'i', file_keys: ['src/a.mjs'], baselines: { 'src/a.mjs': sha(repo.v1) } }, 'proj/', realSpawnSync);
+    assert.deepEqual(notDiffed, []);
+    assert.match(text, /commits since the base \(2\):\n[0-9a-f]+ v3\n[0-9a-f]+ v2\n/, 'the subjects of the commits after the base, not the base itself');
+    assert.doesNotMatch(text, / v1\n/);
+    assert.match(text, /diffstat since the base:\n proj\/src\/a\.mjs \| \d+ \++-*\n 1 file changed/, 'the stat names the file');
+    assert.ok(text.indexOf('commits since the base') > text.indexOf('NEW_FLAG'), 'the history follows the diff');
+    assert.doesNotMatch(text, /FALLBACK/, 'a verified base is not labelled a guess');
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('[history] the commit log is capped at 20 lines per item', () => {
+  const commits = [{ files: { 'src/a.mjs': 'v0\n' }, msg: 'base', date: '2026-01-01T00:00:00Z' }];
+  for (let i = 1; i <= 25; i++) commits.push({ files: { 'src/a.mjs': `v${i}\n` }, msg: `change ${i}`, date: '2026-01-02T00:00:00Z' });
+  const repo = datedRepo(commits);
+  try {
+    const { text } = itemDiffText(repo.root, { id: 'i', file_keys: ['src/a.mjs'], baselines: { 'src/a.mjs': sha('v0\n') } }, '', realSpawnSync);
+    const log = text.split('diffstat since the base:')[0].split('\n').filter((l) => / change \d+$/.test(l));
+    assert.equal(log.length, 20);
+    assert.match(text, /commits since the base \(20\+, older ones not shown\):/);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('[history] the item cap is split across paths: a huge diff on one file leaves the other file its diff and the history', () => {
+  const big = (n) => Array.from({ length: 600 }, (_, i) => `export const line${i} = ${n};`).join('\n') + '\n';
+  const repo = datedRepo([
+    { files: { 'src/a.mjs': big(1), 'src/b.mjs': 'export const b = 1;\n' }, msg: 'settled', date: '2026-01-01T00:00:00Z' },
+    { files: { 'src/a.mjs': big(2), 'src/b.mjs': 'export const b = 2; // RENAMED_B\n' }, msg: 'rewrite both', date: '2026-01-02T00:00:00Z' },
+  ]);
+  try {
+    const item = { id: 'two', lane: 'reconcile_needed', file_keys: ['src/a.mjs', 'src/b.mjs'], baselines: { 'src/a.mjs': sha(big(1)), 'src/b.mjs': sha('export const b = 1;\n') } };
+    const section = itemDiffSection(repo.root, [item], { spawnSync: realSpawnSync });
+    const block = diffBlocks(section).two;
+    assert.ok(block.length <= DIFF_ITEM_MAX_CHARS, `the item block (${block.length} chars) stays within the per-item cap`);
+    assert.match(block, /\[path diff cut: \d+ of \d+ chars shown\]/, 'the huge file is cut at its share');
+    assert.match(block, /--- src\/b\.mjs: base [0-9a-f]{12} [^\n]*\n[\s\S]*\+export const b = 2; \/\/ RENAMED_B/, 'the small file still shows its diff');
+    assert.match(block, /commits since the base \(1\):\n[0-9a-f]+ rewrite both/, 'the history survives the cut');
+    assert.match(block, /diffstat since the base:\n src\/a\.mjs/);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('[fallback] an item with no matching baseline gets a labelled time-based guess: subjects per path and a diffstat since updated_at, never "no diff available"', () => {
+  const repo = datedRepo([
+    { files: { 'src/seed.txt': 'seed\n' }, msg: 'seed before the record was settled', date: '2026-01-01T00:00:00Z' },
+    { files: { 'src/a.mjs': 'export const old_name = 1;\n' }, msg: 'add a under the old name', date: '2026-01-02T00:00:00Z' },
+    { files: { 'src/a.mjs': 'export const new_name = 1;\n' }, msg: 'rename old_name to new_name', date: '2026-01-10T00:00:00Z' },
+  ]);
+  try {
+    const item = { id: 'guess', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], baselines: { 'src/a.mjs': sha('settled against a file that was never committed\n') }, target_updated_at: '2026-01-05T00:00:00.000Z' };
+    const section = itemDiffSection(repo.root, [item], { spawnSync: realSpawnSync });
+    const block = diffBlocks(section).guess;
+    assert.match(block, /--- src\/a\.mjs: no commit matches the saved baseline \([^)]*\); FALLBACK \(guessed by time, not a verified base\)\nlast 2 commit subjects touching it:\n[0-9a-f]+ rename old_name to new_name\n[0-9a-f]+ add a under the old name\n/);
+    assert.match(block, /FALLBACK diffstat \(guessed by time, not a verified base\), since the target's updated_at 2026-01-05T00:00:00\.000Z:\n src\/a\.mjs \| 2 \+-\n 1 file changed/, 'the stat starts at the first commit since updated_at, so it shows the rename only');
+    assert.doesNotMatch(block, /no diff available/);
+    assert.doesNotMatch(block, /commits since the base/, 'no verified base, so no verified history');
+    assert.match(section, /a path with no verified base \(no matching commit, or no saved baseline\) shows a FALLBACK that is a guess by time/, 'the section heading explains the label');
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('[fallback] a path the target holds no baseline for gets the labelled guess with the "no saved baseline for this path" lead-in', () => {
+  const repo = datedRepo([
+    { files: { 'src/a.mjs': 'one\n' }, msg: 'add a', date: '2026-01-02T00:00:00Z' },
+    { files: { 'src/a.mjs': 'two\n' }, msg: 'change a', date: '2026-01-10T00:00:00Z' },
+  ]);
+  try {
+    const item = { id: 'nopath', file_keys: ['src/a.mjs', 'src/untouched.mjs'], baselines: { 'src/other.mjs': sha('x') }, target_updated_at: '2026-01-05T00:00:00.000Z' };
+    const { text } = itemDiffText(repo.root, item, '', realSpawnSync);
+    assert.match(text, /--- src\/a\.mjs: no saved baseline for this path; FALLBACK \(guessed by time, not a verified base\)\nlast 2 commit subjects touching it:\n[0-9a-f]+ change a\n[0-9a-f]+ add a\n/);
+    assert.match(text, /FALLBACK diffstat \(guessed by time, not a verified base\), since the target's updated_at 2026-01-05T00:00:00\.000Z:\n src\/a\.mjs \| 2 \+-/);
+    assert.match(text, /--- src\/untouched\.mjs: no diff available: no commit touches it/, 'a path no commit touches keeps the no-diff line');
+    assert.doesNotMatch(text, /the target holds no baseline/, 'the old no-diff wording is gone');
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('[fallback] an item with no baselines recorded at launch gets the labelled guess with the "recorded for this item at launch" lead-in', () => {
+  const repo = datedRepo([{ files: { 'src/a.mjs': 'one\n' }, msg: 'add a', date: '2026-01-02T00:00:00Z' }]);
+  try {
+    const { text, notDiffed } = itemDiffText(repo.root, { id: 'norecord', file_keys: ['src/a.mjs'], target_updated_at: '2026-01-01T00:00:00.000Z' }, '', realSpawnSync);
+    assert.deepEqual(notDiffed, []);
+    assert.match(text, /--- src\/a\.mjs: no saved baseline was recorded for this item at launch; FALLBACK \(guessed by time, not a verified base\)\nlast 1 commit subjects touching it:\n[0-9a-f]+ add a\n/);
+    assert.match(text, /since the target's updated_at 2026-01-01T00:00:00\.000Z:\n src\/a\.mjs \| 1 \+\n/);
+    assert.equal(itemDiffText(repo.root, { id: 'nofiles', file_keys: [] }, '', realSpawnSync).text, 'no diff available: the item names no files');
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('[fallback] without a recorded updated_at the guess says the diffstat was skipped, and a path no commit touches stays "no diff available"', () => {
+  const repo = datedRepo([{ files: { 'src/a.mjs': 'x\n' }, msg: 'one', date: '2026-01-01T00:00:00Z' }]);
+  try {
+    const stale = { id: 'a', file_keys: ['src/a.mjs'], baselines: { 'src/a.mjs': sha('other\n') } };
+    assert.match(itemDiffText(repo.root, stale, '', realSpawnSync).text, /FALLBACK diffstat[^\n]*unknown:\nskipped: no updated_at was recorded for the target at launch/);
+    const absent = { id: 'b', file_keys: ['src/missing.mjs'], baselines: { 'src/missing.mjs': sha('other\n') } };
+    assert.match(itemDiffText(repo.root, absent, '', realSpawnSync).text, /--- src\/missing\.mjs: no diff available: no commit touches it/);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('[fallback] the launcher carries the target updated_at for diff-lane items, chain launches keep it, and the section reads it from the item', () => {
+  const fx = fixture();
+  try {
+    const store = { get: (id) => (id === 'art-1' ? { id, file_baselines: { 'src/a.mjs': 'h-a' }, updated_at: '2026-01-05T00:00:00.000Z' } : undefined) };
+    const items = [{ ...ITEM('r1'), feature_link: 'art-1' }, { ...laneItem('s1', 'stale_research', 1), feature_link: 'art-1' }];
+    assert.equal(launch(fx, { spawn: fakeSpawn().fn, items, store }).launched, true);
+    const eligible = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    const byId = Object.fromEntries(eligible.items.map((t) => [t.id, t]));
+    assert.equal(byId.r1.target_updated_at, '2026-01-05T00:00:00.000Z');
+    assert.equal('target_updated_at' in byId.s1, false, 'a lane without diffs records none');
+    const snap = eligible.queue_snapshot.find((t) => t.id === 'r1');
+    assert.equal(snap.target_updated_at, '2026-01-05T00:00:00.000Z');
+    assert.equal(launch(fx, { spawn: fakeSpawn().fn, items: [snap], trigger: 'chain' }).launched, true);
+    assert.equal(JSON.parse(readFileSync(fx.paths.eligible, 'utf8')).items[0].target_updated_at, '2026-01-05T00:00:00.000Z', 'a chained launch has no store and still has it');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[prompt] a rename-only reconcile drift is a factual refresh the worker closes, and the FALLBACK section is a guess it must Read the file against', () => {
+  const prompt = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'templates', 'maintenance-worker-prompt.md'), 'utf8');
+  assert.match(prompt, /A reconcile_needed item whose only drift is an old name or path, where the diff or the log shows the rename, is a factual refresh: replace the old name or path with the new one in the fields you may write, then close it with `resolves`/);
+  assert.match(prompt, /That is not "unsure"\./);
+  assert.match(prompt, /A path whose heading says FALLBACK has no verified base/);
+  assert.match(prompt, /That section is a GUESS BY TIME, so you must Read the file before you call such an item paid/);
+  assert.match(prompt, /When you are unsure otherwise, it is NOT PAID\./);
+});
+
+test('[history] ten large path diffs at the default cap all appear within it: none is left out, long ones fall back to a one-line summary', () => {
+  const big = (n) => Array.from({ length: 200 }, (_, i) => `export const line${i} = ${n};`).join('\n') + '\n';
+  const keys = Array.from({ length: 10 }, (_, i) => `src/p${i}.mjs`);
+  const repo = datedRepo([
+    { files: Object.fromEntries(keys.map((k) => [k, big(1)])), msg: 'settled', date: '2026-01-01T00:00:00Z' },
+    { files: Object.fromEntries(keys.map((k) => [k, big(2)])), msg: 'rewrite all', date: '2026-01-02T00:00:00Z' },
+  ]);
+  try {
+    const item = { id: 'ten', lane: 'reconcile_needed', file_keys: keys, baselines: Object.fromEntries(keys.map((k) => [k, sha(big(1))])) };
+    const { text, notDiffed } = itemDiffText(repo.root, item, '', realSpawnSync, DIFF_ITEM_MAX_CHARS - 'ten'.length - 5);
+    assert.deepEqual(notDiffed, [], 'no path is reported as not diffed');
+    for (const k of keys) assert.match(text, new RegExp(`--- ${k.replace('.', '\\.')}: base [0-9a-f]{12} `), `${k} appears`);
+    const summaries = (text.match(/\[\+200 -200 lines, diff cut\]/g) ?? []).length;
+    const cuts = (text.match(/\[path diff cut: \d+ of \d+ chars shown\]/g) ?? []).length;
+    assert.ok(summaries >= 1, 'a share too small for a useful hunk becomes a one-line summary of the change');
+    assert.equal(summaries + cuts, 10, 'every path is either a summary or a cut diff; none is whole and none is missing');
+    assert.match(text, /commits since the base \(1\):\n[0-9a-f]+ rewrite all/, 'the history is still there');
+    assert.match(text, /diffstat since the base:\n/);
+    const section = itemDiffSection(repo.root, [item], { spawnSync: realSpawnSync });
+    assert.ok(diffBlocks(section).ten.length <= DIFF_ITEM_MAX_CHARS, 'the whole block stays within the item cap');
+    assert.doesNotMatch(section, /not diffed/);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('[history] short diffs leave their unused share to a longer one, so a mid-sized diff is shown whole beside tiny ones', () => {
+  const mid = Array.from({ length: 25 }, (_, i) => `export const mid${i} = 1;`).join('\n') + '\n';
+  const files = (a, b, c) => ({ 'src/a.mjs': a, 'src/b.mjs': b, 'src/c.mjs': c });
+  const repo = datedRepo([
+    { files: files('a1\n', 'b1\n', 'c1\n'), msg: 'settled', date: '2026-01-01T00:00:00Z' },
+    { files: files('a2\n', mid, 'c2\n'), msg: 'change', date: '2026-01-02T00:00:00Z' },
+  ]);
+  try {
+    const item = { id: 'mix', file_keys: ['src/a.mjs', 'src/b.mjs', 'src/c.mjs'], baselines: { 'src/a.mjs': sha('a1\n'), 'src/b.mjs': sha('b1\n'), 'src/c.mjs': sha('c1\n') } };
+    const { text } = itemDiffText(repo.root, item, '', realSpawnSync, 1600);
+    assert.match(text, /\+export const mid24 = 1;/, 'the mid-sized diff is whole: it is over an even third of the budget but the tiny diffs gave theirs up');
+    assert.doesNotMatch(text, /cut\]/);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('[history] twenty long commit subjects cannot push the diffstat out of the item block', () => {
+  const long = 'x'.repeat(140);
+  const commits = [{ files: { 'src/a.mjs': 'v0\n' }, msg: 'base', date: '2026-01-01T00:00:00Z' }];
+  for (let i = 1; i <= 22; i++) commits.push({ files: { 'src/a.mjs': `v${i}\n` }, msg: `change ${i} ${long}`, date: '2026-01-02T00:00:00Z' });
+  const repo = datedRepo(commits);
+  try {
+    const item = { id: 'long', lane: 'reconcile_needed', file_keys: ['src/a.mjs'], baselines: { 'src/a.mjs': sha('v0\n') } };
+    const section = itemDiffSection(repo.root, [item], { spawnSync: realSpawnSync });
+    const block = diffBlocks(section).long;
+    assert.ok(block.length <= DIFF_ITEM_MAX_CHARS, `the block (${block.length} chars) stays within the item cap`);
+    assert.match(block, /commits since the base \(20\+, older ones not shown\):\n[0-9a-f]+ change 22 /, 'the newest subjects are listed');
+    assert.match(block, /diffstat since the base:\n src\/a\.mjs \| 2 \+-\n 1 file changed, 1 insertion\(\+\), 1 deletion\(-\)/, 'the diffstat is present and whole');
+    // Tight budget: the stat is budgeted on its own, so the log is what gets cut.
+    const { text } = itemDiffText(repo.root, item, '', realSpawnSync, 1200);
+    assert.ok(text.length <= 1200, `the text (${text.length} chars) stays within the budget`);
+    assert.match(text, /commit log cut: \d+ of \d+ chars shown\]/);
+    assert.match(text, /diffstat since the base:\n src\/a\.mjs \| 2 \+-/);
+  } finally {
+    repo.cleanup();
+  }
 });

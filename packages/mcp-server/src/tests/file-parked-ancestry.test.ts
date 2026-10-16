@@ -61,7 +61,12 @@ const mkArticle = (tools: SterlingTools, slug: string, path: string) =>
     live_test_refs: [],
   }).record;
 
-test('AC1: deleted on the current (feature) branch but still present on base (main) is file_parked — deletion has not reached base', () => {
+// GitHub #121 reversed AC1's original verdict. It used to park against main
+// ("the deletion has not reached base"), but main is the merge TARGET: it never
+// merges into the work branch, and when the work branch lands the deletion
+// lands with it. The park therefore never closed and forbade the right fix.
+// Sabotage: drop the inherited-copy check in parkedOnRef and this goes red.
+test('AC1 (#121): deleted on the current (feature) branch but still present on base (main) is NOT parked — the deletion lands on main with the branch, so the drop signal fires', () => {
   const { dir, tools, git, cleanup } = gitRepo();
   try {
     mkdirSync(join(dir, 'src'), { recursive: true });
@@ -80,13 +85,13 @@ test('AC1: deleted on the current (feature) branch but still present on base (ma
 
     const queue = systemQueue(tools);
     assert.equal(
-      queue.filter((t) => t.system_reason === 'reconcile_needed').length,
+      queue.filter((t) => t.system_reason === 'file_parked').length,
       0,
-      'the deletion has not reached base — this must not read as an out-of-band deletion'
+      'main only holds the copy this branch deleted — no DO NOT DROP park'
     );
-    const parked = queue.filter((t) => t.system_reason === 'file_parked');
-    assert.equal(parked.length, 1, 'base still holds the file, so it parks');
-    assert.match(parked[0].text, /main/, 'names the branch that still holds it (base)');
+    const reconciles = queue.filter((t) => t.system_reason === 'reconcile_needed');
+    assert.equal(reconciles.length, 1, 'the normal drop signal fires instead');
+    assert.match(reconciles[0].text, /src\/thing\.ts no longer exists/);
   } finally {
     cleanup();
   }
@@ -190,6 +195,166 @@ test('AC5 (regression): file present in the working tree — no park, no deletio
     const queue = systemQueue(tools);
     assert.equal(queue.filter((t) => t.system_reason === 'file_parked').length, 0, 'the file is right there — nothing to park');
     assert.equal(queue.filter((t) => t.system_reason === 'reconcile_needed').length, 0, 'and nothing missing to reconcile');
+  } finally {
+    cleanup();
+  }
+});
+
+// GitHub #121, stale backup: a backup branch cut before the deletion carries
+// its own commit, so it is not an ancestor of base and the old ancestry filter
+// let it park the path forever (a backup never merges). The path was in the
+// merge base of HEAD and the backup, so the backup only kept an inherited copy.
+// Sabotage: drop the inherited-copy check in parkedOnRef and this goes red.
+test('AC6 (#121): alive only on a stale non-ancestor backup branch does NOT park — the backup kept an inherited copy and never merges', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'old.ts'), 'export const o = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed with old.ts');
+
+    git('checkout', '-q', '-b', 'backup/before-cleanup');
+    writeFileSync(join(dir, 'notes.txt'), 'backup only\n');
+    git('add', '-A');
+    git('commit', '-qm', 'backup commit, never merged');
+    git('checkout', '-q', 'main');
+    git('rm', '-q', 'src/old.ts');
+    git('commit', '-qm', 'delete old.ts on purpose');
+
+    mkArticle(tools, 'ac6-old', 'src/old.ts');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+
+    const queue = systemQueue(tools);
+    assert.equal(queue.filter((t) => t.system_reason === 'file_parked').length, 0, 'a backup holding an inherited copy must not park the path');
+    const reconciles = queue.filter((t) => t.system_reason === 'reconcile_needed');
+    assert.equal(reconciles.length, 1, 'the normal drop signal fires instead');
+    assert.match(reconciles[0].text, /src\/old\.ts no longer exists/);
+  } finally {
+    cleanup();
+  }
+});
+
+// Control for the fail-safe direction: when base ADDED the path after this
+// branch diverged, the copy on base is new work that reaches this branch only
+// when base is merged in. That is a real park and must stay one.
+test('AC7: added on base after this branch diverged still parks against base — only an inherited copy is released', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    writeFileSync(join(dir, 'seed.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+    git('checkout', '-q', '-b', 'feat/behind');
+    git('checkout', '-q', 'main');
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'new.ts'), 'export const n = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'add new.ts on main');
+    git('checkout', '-q', 'feat/behind');
+
+    mkArticle(tools, 'ac7-new', 'src/new.ts');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+
+    const queue = systemQueue(tools);
+    assert.equal(queue.filter((t) => t.system_reason === 'reconcile_needed').length, 0, 'never tell a reader to drop a path main just added');
+    const parked = queue.filter((t) => t.system_reason === 'file_parked');
+    assert.equal(parked.length, 1);
+    assert.match(parked[0].text, /ALIVE on 'main'/);
+  } finally {
+    cleanup();
+  }
+});
+
+// GitHub #121 (c): a park that remains must say how to release it, naming the
+// branch so the reader can act without reading the code.
+test('AC8 (#121): a legitimate park (added on another branch, absent here) still parks and its text says how to release it', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    writeFileSync(join(dir, 'seed.txt'), 'x\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed');
+    git('checkout', '-q', '-b', 'feat/active');
+    mkdirSync(join(dir, 'game'), { recursive: true });
+    writeFileSync(join(dir, 'game', 'terrain.gd'), 'extends Node\n');
+    git('add', '-A');
+    git('commit', '-qm', 'terrain on a branch');
+    git('checkout', '-q', 'main');
+
+    mkArticle(tools, 'ac8-terrain', 'game/terrain.gd');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+
+    const parked = systemQueue(tools).filter((t) => t.system_reason === 'file_parked');
+    assert.equal(parked.length, 1, 'a path added on another branch still parks');
+    assert.match(parked[0].text, /ALIVE on 'feat\/active'/);
+    assert.match(parked[0].text, /DO NOT DROP game\/terrain\.gd/);
+    assert.match(parked[0].text, /TO RELEASE IT/, 'says how to release the park');
+    assert.match(parked[0].text, /git branch -D feat\/active/, 'names the branch to delete when it will never merge');
+    assert.match(parked[0].text, /maintenance_remove/, 'and how the item itself is closed');
+  } finally {
+    cleanup();
+  }
+});
+
+// Sol review fix round (#121): presence at the merge base does not make a
+// branch's copy inherited. A copy CHANGED after the split is live work that
+// conflicts with this branch's deletion, so it must keep the park. Sabotage:
+// compare only presence at the merge base (not the tree entry) and both of
+// the tests below go red.
+test('AC9 (#121): HEAD deleted the path but another branch MODIFIED it after the split — still parks against that branch', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'live.ts'), 'export const v = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed with live.ts');
+
+    git('checkout', '-q', '-b', 'feat/edits');
+    writeFileSync(join(dir, 'src', 'live.ts'), 'export const v = 2;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'modify live.ts on a branch');
+    git('checkout', '-q', 'main');
+    git('rm', '-q', 'src/live.ts');
+    git('commit', '-qm', 'delete live.ts on main');
+
+    mkArticle(tools, 'ac9-live', 'src/live.ts');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+
+    const queue = systemQueue(tools);
+    assert.equal(queue.filter((t) => t.system_reason === 'reconcile_needed').length, 0, 'never tell a reader to drop a path another branch is still changing');
+    const parked = queue.filter((t) => t.system_reason === 'file_parked');
+    assert.equal(parked.length, 1);
+    assert.match(parked[0].text, /ALIVE on 'feat\/edits'/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC10 (#121): HEAD deleted the path but another branch deleted and RE-ADDED it with other content — still parks against that branch', () => {
+  const { dir, tools, git, cleanup } = gitRepo();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'readd.ts'), 'export const r = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'seed with readd.ts');
+
+    git('checkout', '-q', '-b', 'feat/readd');
+    git('rm', '-q', 'src/readd.ts');
+    git('commit', '-qm', 'drop readd.ts');
+    mkdirSync(join(dir, 'src'), { recursive: true }); // git rm removed the emptied directory
+    writeFileSync(join(dir, 'src', 'readd.ts'), 'export const r = 99;\n');
+    git('add', '-A');
+    git('commit', '-qm', 're-add readd.ts with new content');
+    git('checkout', '-q', 'main');
+    git('rm', '-q', 'src/readd.ts');
+    git('commit', '-qm', 'delete readd.ts on main');
+
+    mkArticle(tools, 'ac10-readd', 'src/readd.ts');
+    tools.knowledgeQuery({ types: ['feature_article'] });
+
+    const queue = systemQueue(tools);
+    assert.equal(queue.filter((t) => t.system_reason === 'reconcile_needed').length, 0);
+    const parked = queue.filter((t) => t.system_reason === 'file_parked');
+    assert.equal(parked.length, 1);
+    assert.match(parked[0].text, /ALIVE on 'feat\/readd'/);
   } finally {
     cleanup();
   }

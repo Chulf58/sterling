@@ -127,8 +127,10 @@ export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GRO
 
 /** A delegated item's status line: the resolved remote status, or a statement that it was not read. */
 function delegatedStatus(r, handoffStatus) {
-  const to = r.handoff?.to_name ? `project '${r.handoff.to_name}'` : 'another project';
   const status = handoffStatus?.get?.(r.id);
+  // The receiver's current registry name when the status carries one (GitHub issue #120), else the stored label.
+  const name = status?.to_name ?? r.handoff?.to_name;
+  const to = name ? `project '${name}'` : 'another project';
   return status ? `${to}: ${status.text}` : `${to}: status not read here (board_query shows it)`;
 }
 
