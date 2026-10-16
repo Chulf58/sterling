@@ -6887,7 +6887,7 @@ var require_dist = __commonJS({
 });
 
 // packages/mcp-server/dist/main.js
-import { dirname as dirname10, isAbsolute as isAbsolute2, join as join16, resolve as resolve5 } from "node:path";
+import { dirname as dirname11, isAbsolute as isAbsolute2, join as join16, resolve as resolve5 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
@@ -13012,7 +13012,7 @@ var StdioServerTransport = class {
 };
 
 // packages/store/dist/routing.js
-import { lstatSync as lstatSync3, readFileSync as readFileSync4 } from "node:fs";
+import { lstatSync as lstatSync3, readFileSync as readFileSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join10, resolve as resolve2 } from "node:path";
 
@@ -19379,13 +19379,14 @@ function parseStoreFence(value) {
 }
 
 // packages/store/dist/index.js
-import { mkdirSync as mkdirSync3, existsSync as existsSync3, statSync as statSync2 } from "node:fs";
-import { dirname as dirname5, join as join8, resolve as resolvePath2 } from "node:path";
-import { randomUUID } from "node:crypto";
+import { mkdirSync as mkdirSync4, existsSync as existsSync3, statSync as statSync3 } from "node:fs";
+import { dirname as dirname6, join as join8, resolve as resolvePath2 } from "node:path";
+import { randomUUID as randomUUID3 } from "node:crypto";
 
 // packages/store/dist/mounted.js
-import { mkdirSync, existsSync, rmSync, openSync, closeSync } from "node:fs";
-import { dirname as dirname2, join as join4 } from "node:path";
+import { mkdirSync as mkdirSync2, existsSync, rmSync as rmSync2, openSync, closeSync } from "node:fs";
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { dirname as dirname3, join as join4 } from "node:path";
 import { homedir as homedir2 } from "node:os";
 
 // packages/store/dist/shares.js
@@ -19427,9 +19428,161 @@ function allocateShares(perSourceCounts, cap, projectShare = DEFAULT_PROJECT_SHA
   return alloc;
 }
 
+// packages/store/dist/move-lock.js
+import { hostname as hostname2 } from "node:os";
+import { createHash, randomUUID } from "node:crypto";
+import { linkSync, mkdirSync, readFileSync as readFileSync2, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname as dirname2 } from "node:path";
+var MoveLockBusyError = class extends Error {
+  path;
+  owner;
+  takeover;
+  constructor(path, owner, waitedMs, takeover = false) {
+    super(takeover ? `knowledge_move lock ${path} was left by a process that is gone, and another process is taking it over now; waited ${waitedMs} ms. Nothing was written; retry in a moment.` : `knowledge_move lock ${path} is held by ${owner ? `pid ${owner.pid} on ${owner.hostname} since ${owner.started_at}` : "a process that wrote it some other way (unreadable content)"}; waited ${waitedMs} ms. A move or a move recovery is running. Nothing was written; retry when it ends.`);
+    this.path = path;
+    this.owner = owner;
+    this.takeover = takeover;
+    this.name = "MoveLockBusyError";
+  }
+};
+function pidIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0)
+    return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function procStartTime(pid) {
+  try {
+    const stat = readFileSync2(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
+    return fields[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+function readOwner(path) {
+  let raw;
+  let mtimeMs;
+  try {
+    raw = readFileSync2(path, "utf8");
+    mtimeMs = statSync(path).mtimeMs;
+  } catch (e) {
+    if (e.code === "ENOENT")
+      return void 0;
+    throw e;
+  }
+  try {
+    const v = JSON.parse(raw);
+    if (Number.isInteger(v.pid) && typeof v.token === "string" && typeof v.hostname === "string")
+      return { raw, owner: v, mtimeMs };
+  } catch {
+  }
+  return { raw, mtimeMs };
+}
+var UNPARSEABLE_GRACE_MS = 1e4;
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function createWithContent(path, content) {
+  const tmp = `${path}.tmp-${randomUUID()}`;
+  writeFileSync(tmp, content, { flag: "wx" });
+  try {
+    linkSync(tmp, path);
+    return true;
+  } catch (e) {
+    if (e.code === "EEXIST")
+      return false;
+    throw e;
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+function ownerGone(seen, probe) {
+  const o = seen.owner;
+  if (!o)
+    return probe.now() - seen.mtimeMs >= UNPARSEABLE_GRACE_MS;
+  if (o.hostname !== probe.host)
+    return false;
+  if (!probe.isAlive(o.pid))
+    return true;
+  if (o.proc_start === null)
+    return false;
+  const cur = probe.startTimeOf(o.pid);
+  return cur !== null && cur !== o.proc_start;
+}
+function takeOverStale(path, staleRaw, me, probe) {
+  let key = staleRaw;
+  const dead = [];
+  for (let depth = 0; depth < 16; depth++) {
+    const ticket = `${path}.takeover-${createHash("sha256").update(key).digest("hex").slice(0, 32)}`;
+    if (createWithContent(ticket, JSON.stringify(me))) {
+      try {
+        if (readOwner(path)?.raw === staleRaw)
+          rmSync(path, { force: true });
+        return "removed";
+      } finally {
+        rmSync(ticket, { force: true });
+        for (const d of dead)
+          rmSync(d, { force: true });
+      }
+    }
+    const t = readOwner(ticket);
+    if (!t)
+      return "retry";
+    if (!ownerGone(t, probe))
+      return "taker-busy";
+    dead.push(ticket);
+    key = `${key}\0${t.raw}`;
+  }
+  return "taker-busy";
+}
+function acquireMoveLock(path, opts = {}) {
+  const isAlive = opts.isAlive ?? pidIsAlive;
+  const startTimeOf = opts.startTimeOf ?? procStartTime;
+  const pid = opts.pid ?? process.pid;
+  const timeoutMs2 = opts.timeoutMs ?? 5e3;
+  const pollMs = opts.pollMs ?? 25;
+  const host = hostname2();
+  const procStart = startTimeOf(pid);
+  const me = { pid, proc_start: procStart, hostname: host, started_at: (/* @__PURE__ */ new Date()).toISOString(), token: randomUUID() };
+  const warning = procStart === null ? `knowledge_move lock: this platform gives no process start time (/proc/${pid}/stat unreadable), so a lock left by a dead process whose pid was reused is honoured until that process exits.` : void 0;
+  const probe = { isAlive, startTimeOf, host, now: () => Date.now() };
+  mkdirSync(dirname2(path), { recursive: true });
+  const started = Date.now();
+  for (; ; ) {
+    if (createWithContent(path, JSON.stringify(me)))
+      return { path, token: me.token, ...warning ? { warning } : {} };
+    const seen = readOwner(path);
+    if (!seen)
+      continue;
+    let takeover = false;
+    if (ownerGone(seen, probe)) {
+      const r = takeOverStale(path, seen.raw, me, probe);
+      if (r !== "taker-busy")
+        continue;
+      takeover = true;
+    }
+    const waited = Date.now() - started;
+    if (waited >= timeoutMs2)
+      throw new MoveLockBusyError(path, takeover ? void 0 : seen.owner, waited, takeover);
+    sleep(Math.min(pollMs, Math.max(1, timeoutMs2 - waited)));
+  }
+}
+function releaseMoveLock(handle) {
+  const seen = readOwner(handle.path);
+  if (!seen?.owner || seen.owner.token !== handle.token)
+    return false;
+  rmSync(handle.path, { force: true });
+  return true;
+}
+
 // packages/store/dist/pg-bridge.js
 import { MessageChannel, Worker, receiveMessageOnPort } from "node:worker_threads";
-import { readFileSync as readFileSync2, statSync } from "node:fs";
+import { readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
 import { homedir } from "node:os";
 import { join as join3 } from "node:path";
 var STATE_WAITING = 0;
@@ -19553,7 +19706,7 @@ function buildPgConnectionConfig(creds) {
 function readPgCredentials(path = DEFAULT_PG_CREDENTIALS_PATH) {
   let mode;
   try {
-    mode = statSync(path).mode;
+    mode = statSync2(path).mode;
   } catch (e) {
     throw new PgConfigError(`Postgres credentials file '${path}' cannot be read: ${e.code ?? String(e)}`);
   }
@@ -19562,7 +19715,7 @@ function readPgCredentials(path = DEFAULT_PG_CREDENTIALS_PATH) {
   }
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync2(path, "utf8"));
+    parsed = JSON.parse(readFileSync3(path, "utf8"));
   } catch (e) {
     throw new PgConfigError(`Postgres credentials file '${path}' is not valid JSON: ${e.message}`);
   }
@@ -20439,11 +20592,17 @@ COMMIT`);
 function resolveDomainMounts(config2) {
   return config2.stack_tags.map((name) => ({
     name,
-    dbPath: config2.domain_paths[name] ?? join4(homedir2(), ".sterling", "domains", name, "sterling.db")
+    dbPath: config2.domain_paths[name] ?? join4(domainsHome(), name, "sterling.db")
   }));
 }
+function domainsHome() {
+  return join4(homedir2(), ".sterling", "domains");
+}
+function defaultMoveLockPath() {
+  return join4(domainsHome(), ".move.lock");
+}
 function open(dbPath) {
-  mkdirSync(dirname2(dbPath), { recursive: true });
+  mkdirSync2(dirname3(dbPath), { recursive: true });
   return new SterlingStore(dbPath);
 }
 var PROBE_ID = "00000000-0000-0000-0000-000000000000";
@@ -20572,6 +20731,9 @@ var MountedStores = class {
   mountedNames = [];
   /** Set for Postgres storage; see MountedStoresOptions.work. */
   work;
+  /** The knowledge_move lock file, and this instance's hold on it (reentrant). */
+  moveLockPath;
+  moveLockHeld;
   /** The project store is opened, and created when absent; a failure to open
    *  it throws. A domain store is only ever OPENED here, never created, and one
    *  that exists but cannot be opened is listed on unreadableDomains instead of
@@ -20589,6 +20751,7 @@ var MountedStores = class {
    *  with every handle opened so far closed. */
   constructor(projectDbPath, mounts = [], options) {
     this.work = options?.work;
+    this.moveLockPath = options?.moveLockPath ?? defaultMoveLockPath();
     if (this.work) {
       this.project = this.work.openProject();
       try {
@@ -21263,6 +21426,164 @@ var MountedStores = class {
   drainLogEntry(...args2) {
     return this.mutatingProject("drainLogEntry").drainLogEntry(...args2);
   }
+  /**
+   * Run `fn` holding the machine-level knowledge_move lock (move-lock.ts). Reentrant on this
+   * instance, so knowledge_move holds one lock across its recovery run and its move. `fn` gets the
+   * lock's platform warning, if any. Throws MoveLockBusyError when another live process holds it
+   * past `timeoutMs`.
+   */
+  withMoveLock(fn, opts = {}) {
+    if (this.moveLockHeld)
+      return fn(this.moveLockHeld.warning);
+    const handle = acquireMoveLock(this.moveLockPath, { timeoutMs: opts.timeoutMs });
+    this.moveLockHeld = handle;
+    try {
+      return fn(handle.warning);
+    } finally {
+      this.moveLockHeld = void 0;
+      releaseMoveLock(handle);
+    }
+  }
+  /**
+   * Move one record from the domain store that holds it into another mounted domain store under
+   * the SAME id (decision move-a-record-between-domains-with-knowledge-move-same-id;
+   * [stable-identity-design-v2] item 6). It keeps the slug, version history, aliases and outbound
+   * relations; inbound edges stay with their source records.
+   *
+   * THE INVARIANT. Moves and recovery runs never interleave: each holds the machine-level move lock
+   * (withMoveLock, move-lock.ts) for its whole duration, so whatever recovery reads from the
+   * journal is the state a finished or crashed move left, never one a move is still writing.
+   * A move is owned by one random token, and its state lives only in two token-bearing journal
+   * entries: the CLAIM `move_out:<id>` in the source (state 'claimed', then 'done' once the source
+   * rows are gone) and the MARKER `move_in:<id>` beside the copy in the destination. Each mount is
+   * its own connection, so the move is five single-store transactions:
+   *   0. source: write the claim (refused if the source holds any move entry for the id);
+   *   1. destination: write the copy and its marker (refused if it holds any entry for the id);
+   *   2. source: delete the rows and mark the claim 'done' (requires the claim's token);
+   *   3. destination: drop the marker (requires the token);
+   *   4. source: drop the 'done' claim (requires the token).
+   * Every ordinary write path of either store refuses a record that carries an entry (the
+   * store-level move fence, which does not take the lock), and every removal of an entry names its
+   * token, so the entries a crash leaves are settled only by recovery, from the entries alone:
+   * a 'done' claim means finish; a 'claimed' claim with no marker means undo; a marker with no
+   * claim of its token means undo the copy; a 'claimed' claim beside its marker means finish.
+   * Whether a record is present in a store is never evidence.
+   *
+   * WHAT IT DOES NOT GUARANTEE. The lock is one file beside the per-user domain stores, judged by
+   * pid, process start time and hostname: it excludes every process on this machine, and nothing
+   * else. Two machines sharing the same domain files (a network mount, or a future Postgres
+   * backend) are not excluded, and a lock written on another host is honoured until the timeout,
+   * never taken over. Where /proc cannot be read, a dead owner whose pid was reused looks alive
+   * until that process exits (acquireMoveLock reports this as a warning). The cross-store steps are
+   * not atomic: between them the id can be held by two stores. Every route that resolves one
+   * holder (storeHolding: writes, scopeOfHolder, withTransactionForRecord) refuses it then, but the
+   * fanned reads do not refuse it: get() answers from the first store that holds it, and query()
+   * reads each store on its own, so during that window a moved record can appear twice in its results. An entry whose peer domain is not mounted
+   * where recovery runs stays 'pending' until a project that mounts both runs it. Writes outside
+   * the store's own paths (raw SQL, a restored file) during a move are neither prevented nor
+   * detected: recovery finishes or undoes from the journal entries whatever the rows then hold.
+   */
+  moveRecordBetweenDomains(id, targetDomain, at, opts = {}) {
+    const op = "moveRecordBetweenDomains";
+    if (this.activeTransactionStore !== void 0) {
+      throw new Error(`${op}: refused inside a transaction \u2014 a move commits on two mounts in turn, so it cannot join one. Nothing was written.`);
+    }
+    return this.withMoveLock(() => {
+      const source = this.storeHolding(id);
+      const from = this.mountNameOf(source);
+      if (source === this.project) {
+        throw new Error(`${op}: record '${id}' is held by the project store, not a domain. A project record goes to a domain through knowledge_promote. Nothing was written.`);
+      }
+      this.assertWritable(targetDomain);
+      const target = this.domains.get(targetDomain);
+      if (!target)
+        throw new Error(`${op}: domain '${targetDomain}' is not mounted in this project. Nothing was written.`);
+      const to = `domain:${targetDomain}`;
+      if (target === source)
+        throw new Error(`${op}: record '${id}' already lives in ${to}. Nothing was written.`);
+      const token = randomUUID2();
+      const bundle = source.claimMoveOut(id, { token, target: targetDomain, at, expected_version: opts.expected_version });
+      try {
+        target.importMoveBundle(bundle, to, { source: from.slice("domain:".length), at, token });
+      } catch (e) {
+        source.releaseMoveOut(id, token);
+        throw e;
+      }
+      source.relinquishMovedRecord(id, token, at, "moved out");
+      target.clearMoveIn(id, token);
+      source.deleteDoneClaim(id, token);
+      return { id, from, to };
+    });
+  }
+  /**
+   * Finish or undo every interrupted move, holding the move lock (so no move is running) and
+   * deciding only from the token-bearing journal entries (the invariant above). Entries are
+   * grouped by token across every readable domain store:
+   *  - the peer domain an entry names is not mounted or cannot be read here: 'pending';
+   *  - 'done' claim: drop the marker if there is one, then the claim: 'completed';
+   *  - 'claimed' claim, no marker: release the claim: 'rolled_back';
+   *  - marker, no claim of its token: delete the copy with its marker: 'rolled_back';
+   *  - 'claimed' claim beside its marker: relinquish the source, drop marker and claim: 'completed'.
+   * With no journal entry in any readable domain it returns at once without taking the lock: a
+   * move that starts afterwards writes entries a later run will find. Idempotent. Refused inside
+   * a transaction, like a move.
+   */
+  recoverMoves(at, opts = {}) {
+    if (this.activeTransactionStore !== void 0) {
+      throw new Error("recoverMoves: refused inside a transaction \u2014 recovery commits on two mounts in turn. Nothing was written.");
+    }
+    if (!this.moveLockHeld && !this.readableDomains().some(([, store]) => store.moveMarkers().length > 0))
+      return [];
+    return this.withMoveLock(() => this.recoverMovesLocked(at), { timeoutMs: opts.lockTimeoutMs });
+  }
+  readableDomains() {
+    return [...this.domains].filter(([name]) => !this.isUnreadable(name));
+  }
+  recoverMovesLocked(at) {
+    const moves = /* @__PURE__ */ new Map();
+    for (const [name, store] of this.readableDomains()) {
+      for (const entry of store.moveMarkers()) {
+        const m = moves.get(entry.token) ?? { id: entry.id };
+        m[entry.kind] = { store, name, entry };
+        moves.set(entry.token, m);
+      }
+    }
+    const readable = (name) => this.domains.get(name) !== void 0 && !this.isUnreadable(name);
+    const out = [];
+    for (const [token, m] of moves) {
+      const fromName = m.out?.name ?? m.in.entry.peer;
+      const toName = m.in?.name ?? m.out.entry.peer;
+      const from = `domain:${fromName}`;
+      const to = `domain:${toName}`;
+      const report = (outcome, reason) => out.push({ id: m.id, from, to, outcome, ...reason ? { reason } : {} });
+      if (!readable(fromName) || !readable(toName)) {
+        report("pending", `${!readable(fromName) ? from : to} is not mounted or cannot be read here`);
+        continue;
+      }
+      const source = this.domains.get(fromName);
+      const target = this.domains.get(toName);
+      const claim = m.out?.entry;
+      const marker = m.in?.entry;
+      if (claim?.state === "done") {
+        if (marker)
+          target.clearMoveIn(m.id, token);
+        source.deleteDoneClaim(m.id, token);
+        report("completed");
+      } else if (claim && !marker) {
+        source.releaseMoveOut(m.id, token);
+        report("rolled_back", "the move stopped before its copy was written");
+      } else if (!claim && marker) {
+        target.rollbackMoveCopy(m.id, token, at);
+        report("rolled_back", `the move was undone in ${from} after its copy was written`);
+      } else if (claim && marker) {
+        source.relinquishMovedRecord(m.id, token, at, "moved out");
+        target.clearMoveIn(m.id, token);
+        source.deleteDoneClaim(m.id, token);
+        report("completed");
+      }
+    }
+    return out;
+  }
   /** knowledge_split's multi-record write (decision
    *  compaction-tooling-windowed-read-plus-split) targets the PROJECT store
    *  only — feature_article is always project-scoped (§3.3), so the split's
@@ -21697,9 +22018,9 @@ function fitDomains(recordText, domains, opts = {}) {
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync as mkdirSync2 } from "node:fs";
+import { mkdirSync as mkdirSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname3, join as join5 } from "node:path";
+import { dirname as dirname4, join as join5 } from "node:path";
 var REGISTRY_DDL = `
 CREATE TABLE IF NOT EXISTS projects (
   repo_path TEXT PRIMARY KEY,
@@ -21717,7 +22038,7 @@ function registryPath() {
 var ProjectRegistry = class {
   db;
   constructor(path = registryPath()) {
-    mkdirSync2(dirname3(path), { recursive: true });
+    mkdirSync3(dirname4(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA busy_timeout=5000");
     this.db.exec("PRAGMA journal_mode=WAL");
@@ -21749,6 +22070,39 @@ var ProjectRegistry = class {
   updateStackTags(repoPath2, stackTags) {
     return this.db.prepare("UPDATE projects SET stack_tags = ? WHERE repo_path = ?").run(JSON.stringify(stackTags), repoPath2).changes > 0;
   }
+  /** Rename (config.json project_name changed, or /sterling:projects --rename):
+   *  replace the name of an EXISTING row and nothing else, only when no other row
+   *  carries the name. The check and the UPDATE run in one BEGIN IMMEDIATE
+   *  transaction, so two projects renaming to the same name at once cannot both
+   *  win: the second sees the first's row and gets 'conflict'. `selfPaths` are
+   *  the repo_paths that count as this project (rows that spell one folder
+   *  differently); a row there never conflicts. Never creates a row.
+   *  'unchanged' = the row already has the name; 'missing' = no row at repoPath. */
+  renameIfUnique(repoPath2, name, selfPaths = [repoPath2]) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const own = this.db.prepare("SELECT name FROM projects WHERE repo_path = ?").get(repoPath2);
+      let result;
+      if (!own)
+        result = { status: "missing" };
+      else if (own.name === name)
+        result = { status: "unchanged" };
+      else {
+        const taken = this.db.prepare("SELECT repo_path FROM projects WHERE name = ?").all(name).find((r) => !selfPaths.includes(r.repo_path));
+        if (taken)
+          result = { status: "conflict", conflict_path: taken.repo_path };
+        else {
+          this.db.prepare("UPDATE projects SET name = ? WHERE repo_path = ?").run(name, repoPath2);
+          result = { status: "renamed" };
+        }
+      }
+      this.db.exec("COMMIT");
+      return result;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
   /** All registered projects, name-ordered. Stale-at-read (existence of
    *  repo_path) is the caller's lazy check — the registry stores no liveness. */
   list() {
@@ -21770,7 +22124,7 @@ var ProjectRegistry = class {
 
 // packages/store/dist/handoff.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { closeSync as closeSync2, existsSync as existsSync2, openSync as openSync2, readFileSync as readFileSync3, readSync } from "node:fs";
+import { closeSync as closeSync2, existsSync as existsSync2, openSync as openSync2, readFileSync as readFileSync4, readSync } from "node:fs";
 import { join as join6 } from "node:path";
 import { pathToFileURL } from "node:url";
 function sentHandoffOf(rec) {
@@ -21817,7 +22171,7 @@ function setBusyTimeout(db, ms) {
 }
 function readIfPresent(p) {
   try {
-    return readFileSync3(p, "utf8");
+    return readFileSync4(p, "utf8");
   } catch (e) {
     if (e?.code === "ENOENT")
       return void 0;
@@ -22208,7 +22562,7 @@ function parseForeignItem(id, body) {
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { realpathSync } from "node:fs";
-import { dirname as dirname4, basename, join as join7, resolve as resolvePath } from "node:path";
+import { dirname as dirname5, basename, join as join7, resolve as resolvePath } from "node:path";
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -22383,7 +22737,7 @@ var SqliteDriver = class {
     this.db = new DatabaseSync3(path);
     let classifiedPath = this.dbPath;
     try {
-      classifiedPath = join7(realpathSync(dirname4(this.dbPath)), basename(this.dbPath));
+      classifiedPath = join7(realpathSync(dirname5(this.dbPath)), basename(this.dbPath));
     } catch {
     }
     this.classifiedPath = classifiedPath;
@@ -22596,7 +22950,7 @@ var SqliteDriver = class {
 var storeDriverFactory;
 function classifyClaimPath(repoRoot, path) {
   try {
-    return statSync2(join8(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
+    return statSync3(join8(repoRoot, path)).isDirectory() ? "real_directory" : "leaf";
   } catch (err) {
     const code = err?.code;
     if (code === "ENOENT")
@@ -22627,6 +22981,45 @@ function decodeLiveRecordRow(op, row) {
 }
 var SUPPORTED_SCHEMA_VERSION = 2;
 var MODELS_CATALOG_LOCATION = ".sterling/models-catalog";
+var MOVE_OUT_PREFIX = "move_out:";
+var MOVE_IN_PREFIX = "move_in:";
+function moveKey(rel, target) {
+  return `${rel}\0${target}`;
+}
+function rescopeMoveBundle(bundle, scope) {
+  const body = JSON.parse(bundle.record.body);
+  body.scope = scope;
+  return { ...bundle, record: { ...bundle.record, scope, body: JSON.stringify(body) } };
+}
+function parseMoveMarker(key, value) {
+  const kind = key.startsWith(MOVE_OUT_PREFIX) ? "out" : "in";
+  const v = JSON.parse(value);
+  const ok = ["token", "peer", "at"].every((k) => typeof v[k] === "string") && (v.state === "claimed" || v.state === "done");
+  if (!ok)
+    throw new Error(`move journal entry '${key}' is malformed (${value}); repair it before any move or recovery runs.`);
+  const id = key.slice(kind === "out" ? MOVE_OUT_PREFIX.length : MOVE_IN_PREFIX.length);
+  return { kind, id, token: v.token, peer: v.peer, at: v.at, state: v.state };
+}
+var MoveInFlightError = class extends Error {
+  op;
+  record_id;
+  constructor(op, record_id) {
+    super(`${op}: refused \u2014 record '${record_id}' is part of an unfinished knowledge_move (a move_out claim or move_in marker in this store). Writing it now could be lost when the move finishes or is undone. Nothing was written. Run knowledge_move in a project that mounts both domains (or restart its server) to finish the move, then retry.`);
+    this.op = op;
+    this.record_id = record_id;
+    this.name = "MoveInFlightError";
+  }
+};
+var MoveClaimLostError = class extends Error {
+  record_id;
+  token;
+  constructor(record_id, token) {
+    super(`record '${record_id}': no 'claimed' move claim with token ${token} in this store. Nothing was deleted.`);
+    this.record_id = record_id;
+    this.token = token;
+    this.name = "MoveClaimLostError";
+  }
+};
 var OperationRepeatedError = class extends Error {
   operation_id;
   original_id;
@@ -23617,6 +24010,7 @@ var SterlingStore = class _SterlingStore {
     this.assertWritable(op);
     let served;
     this.tx(() => {
+      this.assertNoMoveInFlight(op, [id]);
       const current = this.get(id);
       if (!current)
         throw new Error(`${op}: no record '${id}'`);
@@ -24542,6 +24936,7 @@ var SterlingStore = class _SterlingStore {
       updated_at: newRecord.updated_at
     });
     this.tx(() => {
+      this.assertNoMoveInFlight("supersede", [oldId]);
       this.refuseRepeatedOperation(operationId);
       this.insertRecord(newRecord, operationId);
       const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
@@ -24603,6 +24998,7 @@ var SterlingStore = class _SterlingStore {
     this.assertWritable("retireInFavorOf");
     let stored;
     this.tx(() => {
+      this.assertNoMoveInFlight("retireInFavorOf", [id, replacementId]);
       const record2 = this.get(id);
       if (!record2)
         throw new Error(`retireInFavorOf: no record '${id}'`);
@@ -24635,6 +25031,7 @@ var SterlingStore = class _SterlingStore {
   remove(id, drainedAt) {
     this.assertWritable("remove");
     this.tx(() => {
+      this.assertNoMoveInFlight("remove", [id]);
       const record2 = this.get(id);
       const isSystemDrain = record2 && record2.type === "todo" && record2.source === "system";
       if (isSystemDrain && record2) {
@@ -24653,6 +25050,238 @@ var SterlingStore = class _SterlingStore {
       this.db.prepare("DELETE FROM record_aliases WHERE canonical_id = ?").run(id);
       this.db.prepare("DELETE FROM records_fts WHERE record_id = ?").run(id);
     });
+  }
+  // -- same-id MOVE primitives (decision move-a-record-between-domains-with-knowledge-move-same-id;
+  // [stable-identity-design-v2] item 6). MountedStores.moveRecordBetweenDomains drives them:
+  // export from the source, import into the destination with a journal marker in the SAME
+  // transaction, verify, relinquish the source, clear the marker.
+  /** Every row one record owns in this store, read in one snapshot, arrays sorted so two
+   *  exports compare by value. undefined when this store does not hold `id`. The search index
+   *  row is not carried: it is derived from the body and rebuilt on import. */
+  exportMoveBundle(id) {
+    return this.readTx(() => {
+      const record2 = this.db.prepare(`SELECT id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author,
+                  derived_unconfirmed, body, operation_id FROM records WHERE id = ?`).get(id);
+      if (!record2)
+        return void 0;
+      const col = (sql, key) => this.db.prepare(sql).all(id).map((r) => r[key]).sort();
+      return {
+        record: { ...record2, version: Number(record2.version), derived_unconfirmed: Number(record2.derived_unconfirmed) },
+        stack_tags: col("SELECT tag FROM record_stack_tags WHERE record_id = ?", "tag"),
+        file_keys: col("SELECT path FROM record_file_keys WHERE record_id = ?", "path"),
+        relations: this.db.prepare("SELECT rel, target_id, created_at FROM record_relations WHERE source_id = ?").all(id).map((r) => ({ rel: r.rel, target_id: r.target_id, created_at: r.created_at })).sort((a, b) => moveKey(a.rel, a.target_id).localeCompare(moveKey(b.rel, b.target_id))),
+        versions: this.db.prepare("SELECT version, archived_at, body FROM record_versions WHERE record_id = ?").all(id).map((v) => ({ version: Number(v.version), archived_at: v.archived_at, body: v.body })).sort((a, b) => a.version - b.version),
+        aliases: this.db.prepare("SELECT historical_id, archived_version, created_at FROM record_aliases WHERE canonical_id = ?").all(id).map((a) => ({ historical_id: a.historical_id, archived_version: Number(a.archived_version), created_at: a.created_at })).sort((a, b) => a.historical_id.localeCompare(b.historical_id))
+      };
+    });
+  }
+  // The move journal (see MountedStores.moveRecordBetweenDomains for the protocol and its
+  // invariant). Every entry carries its move's token, and every removal below names the token
+  // it removes: no path here clears another move's entry.
+  moveEntry(prefix, id) {
+    const row = this.db.prepare("SELECT key, value FROM store_meta WHERE key = ?").get(`${prefix}${id}`);
+    return row ? parseMoveMarker(row.key, row.value) : void 0;
+  }
+  writeMoveEntry(prefix, id, entry) {
+    this.db.prepare("INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(`${prefix}${id}`, JSON.stringify({ token: entry.token, peer: entry.peer, at: entry.at, state: entry.state }), entry.at);
+  }
+  /** Delete one journal entry, only when it carries `token` (and `state`, when given). */
+  dropMoveEntry(prefix, id, token, state) {
+    const e = this.moveEntry(prefix, id);
+    if (!e || e.token !== token || state && e.state !== state)
+      return false;
+    this.db.prepare("DELETE FROM store_meta WHERE key = ?").run(`${prefix}${id}`);
+    return true;
+  }
+  /**
+   * Phase 0, in the SOURCE: claim `id` for the move holding `token`, in ONE transaction, and
+   * return the bundle the claim covers. Refused when this store does not hold the record, when
+   * any move entry for the id is here already (an unfinished move in or out), or when
+   * `expected_version` differs from the stored version. From the claim on, the store's write
+   * paths refuse the record (assertNoMoveInFlight).
+   */
+  claimMoveOut(id, claim) {
+    this.assertWritable("claimMoveOut");
+    let bundle;
+    this.tx(() => {
+      this.assertNoMoveInFlight("claimMoveOut", [id]);
+      const b = this.exportMoveBundle(id);
+      if (!b)
+        throw new Error(`claimMoveOut: no record '${id}' in this store. Nothing was written.`);
+      if (claim.expected_version !== void 0 && b.record.version !== claim.expected_version) {
+        throw new Error(`version conflict \u2014 expected_version ${claim.expected_version} but record '${id}' is at version ${b.record.version}. Nothing was written.`);
+      }
+      this.writeMoveEntry(MOVE_OUT_PREFIX, id, { token: claim.token, peer: claim.target, at: claim.at, state: "claimed" });
+      bundle = b;
+    });
+    return bundle;
+  }
+  /**
+   * Phase 1, in the DESTINATION: write `bundle` under `scope` (column and body), byte-exact
+   * otherwise, with the move_in marker for `token`, in ONE transaction.
+   *
+   * Refused, with nothing written, when this store already answers for any identity the bundle
+   * carries. A store's resolvable-id namespace is records.id UNION record_aliases.historical_id,
+   * and record_versions is keyed independently (anti_pattern
+   * an-identity-or-containment-proof-over-the-primary-table-alon), so all three tables are
+   * checked against the whole incoming identity set: the record id and every historical id it
+   * brings. A live record here already using the incoming slug refuses too, and so does any move
+   * entry for the id (in or out).
+   */
+  importMoveBundle(bundle, scope, marker) {
+    this.assertWritable("importMoveBundle");
+    const id = bundle.record.id;
+    const row = rescopeMoveBundle(bundle, scope).record;
+    const body = JSON.parse(row.body);
+    const entry = RECORD_TYPES[row.type];
+    if (!entry)
+      throw new Error(`importMoveBundle: record '${id}' has unregistered type '${row.type}'; nothing was written.`);
+    this.tx(() => {
+      const ids = [id, ...bundle.aliases.map((a) => a.historical_id)];
+      const marks = ids.map(() => "?").join(",");
+      const found = [];
+      for (const r of this.db.prepare(`SELECT id FROM records WHERE id IN (${marks})`).all(...ids))
+        found.push(`record '${r.id}'`);
+      for (const r of this.db.prepare(`SELECT historical_id FROM record_aliases WHERE historical_id IN (${marks})`).all(...ids)) {
+        found.push(`alias '${r.historical_id}'`);
+      }
+      for (const r of this.db.prepare(`SELECT historical_id FROM record_aliases WHERE canonical_id IN (${marks})`).all(...ids)) {
+        found.push(`alias '${r.historical_id}' naming an incoming id`);
+      }
+      for (const r of this.db.prepare(`SELECT record_id, version FROM record_versions WHERE record_id IN (${marks})`).all(...ids)) {
+        found.push(`version ${r.version} keyed by '${r.record_id}'`);
+      }
+      if (this.moveEntry(MOVE_IN_PREFIX, id) || this.moveEntry(MOVE_OUT_PREFIX, id))
+        found.push(`an unfinished move entry for '${id}'`);
+      if (typeof body.slug === "string" && body.slug.length > 0) {
+        const holders = this.db.prepare(`SELECT id FROM records WHERE status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?`).all(body.slug);
+        for (const r of holders)
+          found.push(`slug '${body.slug}' on live record '${r.id}'`);
+      }
+      if (found.length) {
+        throw new Error(`importMoveBundle: refused \u2014 the destination already holds ${[...new Set(found)].join(", ")}. One id or slug must name one record, so the copy would give it two meanings. Nothing was written.`);
+      }
+      this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author,
+                                derived_unconfirmed, body, operation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(row.id, row.type, row.status, row.superseded_by, row.lifecycle, row.freshness, row.version, row.scope, row.created_at, row.updated_at, row.author, row.derived_unconfirmed, row.body, row.operation_id);
+      for (const tag of bundle.stack_tags)
+        this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(id, tag);
+      for (const path of bundle.file_keys)
+        this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
+      for (const r of bundle.relations) {
+        this.db.prepare(this.db.dialect.insertIgnore("record_relations", ["source_id", "rel", "target_id", "created_at"])).run(id, r.rel, r.target_id, r.created_at);
+      }
+      for (const v of bundle.versions) {
+        this.db.prepare("INSERT INTO record_versions (record_id, version, archived_at, body) VALUES (?, ?, ?, ?)").run(id, v.version, v.archived_at, v.body);
+      }
+      for (const a of bundle.aliases) {
+        this.db.prepare("INSERT INTO record_aliases (historical_id, canonical_id, archived_version, created_at) VALUES (?, ?, ?, ?)").run(a.historical_id, id, a.archived_version, a.created_at);
+      }
+      this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(id, this.db.dialect.searchText(entry.fts(body)));
+      this.writeMoveEntry(MOVE_IN_PREFIX, id, { token: marker.token, peer: marker.source, at: marker.at, state: "claimed" });
+      this.logActivity("moved in", decodeLiveRecordRow("importMoveBundle", row), marker.at);
+    });
+  }
+  /**
+   * The rows `id` owns in this store: the record, its tags, file keys, search row, versions,
+   * aliases and outbound relations. NOT remove(): inbound edges belong to their source records
+   * and stay where they are, and the record is not dead, it lives on in another store.
+   *
+   * One kind of outbound edge stays: a 'supersedes' edge whose TARGET this store holds. A
+   * retired record's served superseded_by is derived from the supersedes edges in its OWN store
+   * (hydrateAll), so deleting that edge would orphan the tombstone. Keeping it beside the
+   * tombstone is the shape promotion already writes (retireInFavorOf). Runs inside tx() only.
+   */
+  deleteOwnRows(id) {
+    this.db.prepare("DELETE FROM records WHERE id = ?").run(id);
+    this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
+    this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
+    this.db.prepare(`DELETE FROM record_relations WHERE source_id = ? AND NOT (rel = 'supersedes' AND target_id IN (SELECT id FROM records))`).run(id);
+    this.db.prepare("DELETE FROM record_versions WHERE record_id = ?").run(id);
+    this.db.prepare("DELETE FROM record_aliases WHERE canonical_id = ?").run(id);
+    this.db.prepare("DELETE FROM records_fts WHERE record_id = ?").run(id);
+  }
+  /**
+   * Phase 2, in the SOURCE: delete the record's own rows and turn the claim for `token` to
+   * 'done', in ONE transaction. Throws MoveClaimLostError, deleting nothing, when no 'claimed'
+   * claim for `token` is here.
+   */
+  relinquishMovedRecord(id, token, at, verb) {
+    this.assertWritable("relinquishMovedRecord");
+    this.tx(() => {
+      const claim = this.moveEntry(MOVE_OUT_PREFIX, id);
+      if (!claim || claim.token !== token || claim.state !== "claimed")
+        throw new MoveClaimLostError(id, token);
+      const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
+      if (row)
+        this.logActivity(verb, decodeLiveRecordRow("relinquishMovedRecord", row), at);
+      this.deleteOwnRows(id);
+      this.writeMoveEntry(MOVE_OUT_PREFIX, id, { ...claim, at, state: "done" });
+    });
+  }
+  /** Undo phase 0: drop the 'claimed' claim for `token`; the record stays here, writable again. */
+  releaseMoveOut(id, token) {
+    this.assertWritable("releaseMoveOut");
+    let done = false;
+    this.tx(() => {
+      done = this.dropMoveEntry(MOVE_OUT_PREFIX, id, token, "claimed");
+    });
+    return done;
+  }
+  /** The last step: drop the 'done' claim for `token` once the destination marker is gone. */
+  deleteDoneClaim(id, token) {
+    this.assertWritable("deleteDoneClaim");
+    let done = false;
+    this.tx(() => {
+      done = this.dropMoveEntry(MOVE_OUT_PREFIX, id, token, "done");
+    });
+    return done;
+  }
+  /** Undo phase 1: delete the copy and its move_in marker together, only while the marker
+   *  carries `token`. Returns whether it did. */
+  rollbackMoveCopy(id, token, at) {
+    this.assertWritable("rollbackMoveCopy");
+    let done = false;
+    this.tx(() => {
+      const mark = this.moveEntry(MOVE_IN_PREFIX, id);
+      if (!mark || mark.token !== token)
+        return;
+      const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
+      if (row)
+        this.logActivity("move rolled back", decodeLiveRecordRow("rollbackMoveCopy", row), at);
+      this.deleteOwnRows(id);
+      done = this.dropMoveEntry(MOVE_IN_PREFIX, id, token);
+    });
+    return done;
+  }
+  /** Phase 3: drop the move_in marker for `token`; the copy becomes an ordinary record. */
+  clearMoveIn(id, token) {
+    this.assertWritable("clearMoveIn");
+    let done = false;
+    this.tx(() => {
+      done = this.dropMoveEntry(MOVE_IN_PREFIX, id, token);
+    });
+    return done;
+  }
+  /**
+   * THE MOVE FENCE: a record with a move_out claim or a move_in marker in this store belongs to an
+   * unfinished move, and every ordinary write path refuses it inside its own transaction, so a
+   * project that mounts only one of the two domains cannot change what the move is carrying.
+   * The fenced paths: applyInPlace (updateRecord, updateRecordMetadata, editRecordField,
+   * appendRecordField, updateTodo, renameFileKey), supersede, retireInFavorOf (both ids),
+   * remove, addLink (the edge's source) and claimMoveOut. The move's own steps above pass it only
+   * by naming their token.
+   */
+  assertNoMoveInFlight(op, ids) {
+    const keys = ids.flatMap((id) => [`${MOVE_IN_PREFIX}${id}`, `${MOVE_OUT_PREFIX}${id}`]);
+    const row = this.db.prepare(`SELECT key FROM store_meta WHERE key IN (${keys.map(() => "?").join(",")})`).get(...keys);
+    if (!row)
+      return;
+    throw new MoveInFlightError(op, row.key.slice(row.key.indexOf(":") + 1));
+  }
+  /** Every move journal entry in this store, claims and markers. */
+  moveMarkers() {
+    const rows = this.db.prepare("SELECT key, value FROM store_meta WHERE key LIKE ? OR key LIKE ?").all(`${MOVE_OUT_PREFIX}%`, `${MOVE_IN_PREFIX}%`);
+    return rows.map((r) => parseMoveMarker(r.key, r.value));
   }
   /** Newest-first drained queue items (§3.2.7 drain log) — the TUI's completed section. */
   listQueueDrain(limit = 15) {
@@ -24702,7 +25331,7 @@ var SterlingStore = class _SterlingStore {
     if (existsSync3(target)) {
       throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
     }
-    mkdirSync3(dirname5(target), { recursive: true });
+    mkdirSync4(dirname6(target), { recursive: true });
     this.db.snapshot(target);
   }
   close() {
@@ -24825,6 +25454,7 @@ var SterlingStore = class _SterlingStore {
     const at = (/* @__PURE__ */ new Date()).toISOString();
     const stored = _SterlingStore.storableBody(updated);
     this.tx(() => {
+      this.assertNoMoveInFlight("addLink", [sourceId]);
       this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(stored), sourceId);
       this.insertRelation(sourceId, parsedRel, targetId, at);
       this.logActivity("linked", updated, at);
@@ -24872,7 +25502,7 @@ var SterlingStore = class _SterlingStore {
     }
     const dateStr = nowISO.slice(0, 10);
     this.create({
-      id: randomUUID(),
+      id: randomUUID3(),
       type: "reference_material",
       created_at: nowISO,
       updated_at: nowISO,
@@ -24891,7 +25521,7 @@ var SterlingStore = class _SterlingStore {
       catalog: {
         entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
       }
-    }, { operation_id: randomUUID() });
+    }, { operation_id: randomUUID3() });
   }
   /**
    * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
@@ -24912,7 +25542,7 @@ var SterlingStore = class _SterlingStore {
       return;
     const catalogs = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
     const todo = {
-      id: randomUUID(),
+      id: randomUUID3(),
       type: "todo",
       created_at: nowISO,
       updated_at: nowISO,
@@ -24929,7 +25559,7 @@ var SterlingStore = class _SterlingStore {
     if (catalogs.length > 0) {
       todo.feature_link = catalogs[0].id;
     }
-    this.create(todo, { operation_id: randomUUID() });
+    this.create(todo, { operation_id: randomUUID3() });
   }
   /**
    * The one row-insert. Since S2 ([stable-identity-design-v2]) the stored BODY
@@ -25124,8 +25754,8 @@ var SterlingStore = class _SterlingStore {
 };
 
 // packages/store/dist/broker-runtime.js
-import { createHash } from "node:crypto";
-import { closeSync as closeSync3, constants as FS, fstatSync, lstatSync as lstatSync2, mkdirSync as mkdirSync4, openSync as openSync3, readdirSync, readSync as readSync2, realpathSync as realpathSync2, renameSync, rmSync as rmSync2, writeFileSync } from "node:fs";
+import { createHash as createHash2 } from "node:crypto";
+import { closeSync as closeSync3, constants as FS, fstatSync, lstatSync as lstatSync2, mkdirSync as mkdirSync5, openSync as openSync3, readdirSync, readSync as readSync2, realpathSync as realpathSync2, renameSync, rmSync as rmSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join9 } from "node:path";
 var BrokerRuntimeDirError = class extends Error {
   constructor(message) {
@@ -25174,13 +25804,13 @@ function brokerDir({ create, env = process.env }) {
       throw new BrokerRuntimeDirError(`broker directory ${dir} cannot be read (${e.message})`);
     if (!create)
       return void 0;
-    mkdirSync4(dir, { mode: 448 });
+    mkdirSync5(dir, { mode: 448 });
   }
   assertPrivate(dir, "directory");
   return dir;
 }
 function brokerProjectKey(root) {
-  return createHash("sha256").update(realpathSync2(root)).digest("hex").slice(0, 16);
+  return createHash2("sha256").update(realpathSync2(root)).digest("hex").slice(0, 16);
 }
 function brokerSocketPath(dir, instanceId) {
   return join9(dir, `${instanceId}.sock`);
@@ -25191,13 +25821,13 @@ function brokerRegistrationPath(dir, root, instanceId) {
 function publishBrokerRegistration(dir, root, reg) {
   const path = brokerRegistrationPath(dir, root, reg.instance_id);
   const tmp = join9(dir, `.${reg.instance_id}.json.tmp`);
-  writeFileSync(tmp, JSON.stringify(brokerRegistrationSchema.parse(reg)), { mode: 384 });
+  writeFileSync2(tmp, JSON.stringify(brokerRegistrationSchema.parse(reg)), { mode: 384 });
   renameSync(tmp, path);
   return path;
 }
 function removeOwnBrokerFiles(dir, root, instanceId) {
-  rmSync2(brokerRegistrationPath(dir, root, instanceId), { force: true });
-  rmSync2(brokerSocketPath(dir, instanceId), { force: true });
+  rmSync3(brokerRegistrationPath(dir, root, instanceId), { force: true });
+  rmSync3(brokerSocketPath(dir, instanceId), { force: true });
 }
 function brokerStorageIdentity(route) {
   const c = readPgCredentials(route.credentialsPath);
@@ -25245,7 +25875,7 @@ function readConfig(root) {
   }
   let raw;
   try {
-    raw = JSON.parse(readFileSync4(path, "utf8"));
+    raw = JSON.parse(readFileSync5(path, "utf8"));
   } catch (e) {
     throw new StoreSettingsError(`malformed ${path}: ${e.message}. Nothing was opened.`);
   }
@@ -29579,8 +30209,8 @@ var EMPTY_COMPLETION_RESULT = {
 };
 
 // packages/mcp-server/dist/server.js
-import { readFileSync as readFileSync9, existsSync as existsSync8 } from "node:fs";
-import { join as join15, dirname as dirname8 } from "node:path";
+import { readFileSync as readFileSync10, existsSync as existsSync8 } from "node:fs";
+import { join as join15, dirname as dirname9 } from "node:path";
 
 // packages/mcp-server/dist/held-stores.js
 function holdRoutedStores(opened, reopen, announce) {
@@ -29631,7 +30261,7 @@ function holdRoutedStores(opened, reopen, announce) {
 }
 
 // packages/mcp-server/dist/worker-policy.js
-import { readFileSync as readFileSync5 } from "node:fs";
+import { readFileSync as readFileSync6 } from "node:fs";
 import { posix } from "node:path";
 var WORKER_STAMP_KEY = "worker_stamp";
 var WORKER_FIELD_ALLOW_LIST = {
@@ -29691,7 +30321,7 @@ var WorkerGuard = class {
   load(tool) {
     let raw;
     try {
-      raw = readFileSync5(this.args.path, "utf8");
+      raw = readFileSync6(this.args.path, "utf8");
     } catch (e) {
       throw new WorkerPolicyRefusal(tool, "policy_unreadable", `the policy file ${this.args.path} could not be read (${e.message})`);
     }
@@ -29868,9 +30498,9 @@ function guardWorkerTools(server, guard) {
 
 // packages/mcp-server/dist/tools.js
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync as existsSync7, lstatSync as lstatSync5, mkdirSync as mkdirSync6, readFileSync as readFileSync8, readdirSync as readdirSync3, realpathSync as realpathSync4, renameSync as renameSync3, statSync as statSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { basename as basename3, dirname as dirname7, isAbsolute, join as join14, relative, sep } from "node:path";
+import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
+import { appendFileSync, chmodSync, existsSync as existsSync7, lstatSync as lstatSync5, mkdirSync as mkdirSync7, readFileSync as readFileSync9, readdirSync as readdirSync3, realpathSync as realpathSync4, renameSync as renameSync3, statSync as statSync4, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { basename as basename3, dirname as dirname8, isAbsolute, join as join14, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 // packages/mcp-server/dist/handoff-target.js
@@ -29944,7 +30574,7 @@ function resolveHandoffTarget(name, selfRoot, regPath = registryPath(), use = "b
 
 // packages/mcp-server/dist/attestation-proof.js
 import { spawnSync } from "node:child_process";
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { closeSync as closeSync4, constants as fsConstants, fstatSync as fstatSync2, lstatSync as lstatSync4, openSync as openSync4, readSync as readSync3 } from "node:fs";
 import { resolve as resolve4 } from "node:path";
 var AttestationRefusal = class extends Error {
@@ -30120,7 +30750,7 @@ function collectAttestationEvidence(opts) {
     if (actual !== blob) {
       throw new AttestationRefusal(`the worktree bytes are not the content committed in ${head} (git hash-object of the bytes read is ${actual}, the tree entry is ${blob}) \u2014 an uncommitted or modified file cannot be attested`, key);
     }
-    perPath[key] = { kind: "present", sha256: createHash2("sha256").update(bytes).digest("hex"), blob };
+    perPath[key] = { kind: "present", sha256: createHash3("sha256").update(bytes).digest("hex"), blob };
   }
   return { head_commit: head, perPath };
 }
@@ -30137,7 +30767,7 @@ function readHeadFile(root, key) {
 }
 
 // packages/mcp-server/dist/entry-reachability.js
-import { existsSync as existsSync5, readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
+import { existsSync as existsSync5, readdirSync as readdirSync2, readFileSync as readFileSync7 } from "node:fs";
 import { join as join12 } from "node:path";
 var MCP_TOOL_FILES = /* @__PURE__ */ new Set(["packages/mcp-server/src/server.ts", "packages/mcp-server/src/tools.ts"]);
 var TOOL_NAME_TOKEN = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
@@ -30364,7 +30994,7 @@ var EntryReachability = class {
       return notReached(`${spawner} does not exist`);
     let text;
     try {
-      text = readFileSync6(join12(this.root, spawner), "utf8");
+      text = readFileSync7(join12(this.root, spawner), "utf8");
     } catch (err) {
       return notReached(`${spawner} could not be read (${err.message})`);
     }
@@ -30379,7 +31009,7 @@ var EntryReachability = class {
     const out = /* @__PURE__ */ new Map();
     const add = (rel) => {
       try {
-        out.set(rel, readFileSync6(join12(this.root, rel), "utf8"));
+        out.set(rel, readFileSync7(join12(this.root, rel), "utf8"));
       } catch (err) {
         const code = err.code;
         if (code !== "ENOENT" && code !== "EISDIR")
@@ -30439,7 +31069,7 @@ var EntryReachability = class {
     if (!existsSync5(abs))
       return { ok: false, why: `${rel} is missing` };
     try {
-      return { ok: true, value: parse3(readFileSync6(abs, "utf8")) };
+      return { ok: true, value: parse3(readFileSync7(abs, "utf8")) };
     } catch (err) {
       return { ok: false, why: `${rel} could not be parsed (${err.message})` };
     }
@@ -30447,19 +31077,19 @@ var EntryReachability = class {
 };
 
 // scripts/hooks/lib/session-events.mjs
-import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync7, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync8, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
-import { dirname as dirname6, join as join13 } from "node:path";
+import { dirname as dirname7, join as join13 } from "node:path";
 var SESSION_EVENTS_REL = join13(".sterling", "transient", "session-events.json");
 function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
-  mkdirSync5(dirname6(eventsPath), { recursive: true });
+  mkdirSync6(dirname7(eventsPath), { recursive: true });
   withSessionEventsLock(
     eventsPath,
     () => {
-      const events = existsSync6(eventsPath) ? JSON.parse(readFileSync7(eventsPath, "utf8")) : [];
+      const events = existsSync6(eventsPath) ? JSON.parse(readFileSync8(eventsPath, "utf8")) : [];
       events.push(...newEvents);
       const tmp = `${eventsPath}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
-      writeFileSync2(tmp, JSON.stringify(events), { flag: "wx" });
+      writeFileSync3(tmp, JSON.stringify(events), { flag: "wx" });
       try {
         renameSync2(tmp, eventsPath);
       } catch (e) {
@@ -30527,7 +31157,10 @@ function mountedDomainSurface(stores) {
     missing: () => stores.missingDomains.map((m) => m.name),
     unreadable: () => stores.unreadableDomains.map((d) => ({ name: d.name, error: d.error, note: d.note })),
     slugHolders: (slug) => stores.slugHolders(slug),
-    articleSlugHolders: (slug) => stores.articleSlugHolders(slug)
+    articleSlugHolders: (slug) => stores.articleSlugHolders(slug),
+    moveRecord: (id, domain, at, expectedVersion) => stores.moveRecordBetweenDomains(id, domain, at, expectedVersion === void 0 ? {} : { expected_version: expectedVersion }),
+    recoverMoves: (at) => stores.recoverMoves(at),
+    withMoveLock: (fn) => stores.withMoveLock(fn)
   };
 }
 var UNPROMOTABLE_TYPES = ["feature_article", "todo", "attestation"];
@@ -30733,11 +31366,11 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     if (!fileLst.isFile()) {
       throw new Error(`config_set: .sterling/config.json is not a regular file \u2014 refusing. Nothing was written.`);
     }
-    currentBytes = readFileSync8(configPath);
+    currentBytes = readFileSync9(configPath);
   } else {
     currentBytes = Buffer.alloc(0);
   }
-  const currentDigest = createHash3("sha256").update(currentBytes).digest("hex");
+  const currentDigest = createHash4("sha256").update(currentBytes).digest("hex");
   if (expectedDigest !== void 0 && expectedDigest !== currentDigest) {
     throw new Error(`config_set: expected_digest ${expectedDigest} does not match the current config.json digest ${currentDigest} \u2014 it changed since you read it. Nothing was written; re-read and retry.`);
   }
@@ -30797,8 +31430,8 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 ${issues}. Nothing was written.`);
   }
   const serialized = JSON.stringify(mutated, null, 2) + "\n";
-  const tmpPath = join14(configDir, `config.json.tmp-${randomUUID2()}`);
-  writeFileSync3(tmpPath, serialized);
+  const tmpPath = join14(configDir, `config.json.tmp-${randomUUID4()}`);
+  writeFileSync4(tmpPath, serialized);
   let renamed = false;
   try {
     if (fileLst) {
@@ -30809,11 +31442,11 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     }
     let raceBytes;
     try {
-      raceBytes = readFileSync8(configPath);
+      raceBytes = readFileSync9(configPath);
     } catch {
       raceBytes = Buffer.alloc(0);
     }
-    const raceDigest = createHash3("sha256").update(raceBytes).digest("hex");
+    const raceDigest = createHash4("sha256").update(raceBytes).digest("hex");
     if (raceDigest !== currentDigest) {
       throw new Error(`config_set: config.json changed on disk while this write was in flight (a concurrent writer) \u2014 read digest ${currentDigest}, now ${raceDigest}. Nothing was written; re-read and retry.`);
     }
@@ -30827,7 +31460,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
       }
     }
   }
-  const digest = createHash3("sha256").update(serialized).digest("hex");
+  const digest = createHash4("sha256").update(serialized).digest("hex");
   const warnings = unreadKeyWarnings(path, unreadConfigKeys(mutated));
   return warnings.length > 0 ? { path, previous_value: previousValue, value, digest, warnings } : { path, previous_value: previousValue, value, digest };
 }
@@ -30844,7 +31477,7 @@ function busyRefusal(op, e, safeToResend) {
   const next = safeToResend ? "This call wrote nothing, so it is safe to re-send." : "An earlier write in this call may have landed; check before re-sending.";
   return new Error(`${op}: ${e.message} ${next}`, { cause: e });
 }
-var PROCESS_KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/${knowledgeWritesProcessFile(process.pid, randomUUID2())}`;
+var PROCESS_KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/${knowledgeWritesProcessFile(process.pid, randomUUID4())}`;
 var SterlingTools = class _SterlingTools {
   store;
   config;
@@ -30860,7 +31493,7 @@ var SterlingTools = class _SterlingTools {
     this.store = deps.store;
     this.config = deps.config ?? parseConfig({});
     this.now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
-    this.newId = deps.newId ?? randomUUID2;
+    this.newId = deps.newId ?? randomUUID4;
     this.repoRoot = deps.repoRoot;
     this.domains = deps.domains ?? (deps.store instanceof MountedStores ? mountedDomainSurface(deps.store) : void 0);
   }
@@ -31748,7 +32381,7 @@ var SterlingTools = class _SterlingTools {
     if (!root)
       return void 0;
     try {
-      return createHash3("sha256").update(readFileSync8(join14(root, rel))).digest("hex");
+      return createHash4("sha256").update(readFileSync9(join14(root, rel))).digest("hex");
     } catch {
       return void 0;
     }
@@ -31812,7 +32445,7 @@ var SterlingTools = class _SterlingTools {
     const baseline = ctx.baselines?.[rel];
     let stat;
     try {
-      stat = statSync3(join14(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
+      stat = statSync4(join14(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? void 0;
     } catch (err) {
       const code = err?.code;
       return { verdict: { kind: "unavailable", reason: `stat_failed_${String(code ?? "unknown").toLowerCase()}` } };
@@ -32498,7 +33131,7 @@ var SterlingTools = class _SterlingTools {
     this.refuseServerOwnedFields(fields, "knowledge_create");
     const ts = this.now();
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, version: smuggledVersion, ...body } = fields;
-    const operationId = randomUUID2();
+    const operationId = randomUUID4();
     const candidate = {
       id: this.newId(),
       type,
@@ -32760,14 +33393,14 @@ var SterlingTools = class _SterlingTools {
           }
         };
       }
-      if (record2.type === "reference_material" && record2.kind === "doc" && this.repoRoot && record2.location !== MODELS_CATALOG_LOCATION) {
+      if (record2.type === "reference_material" && record2.kind === "doc" && this.repoRoot && record2.location !== MODELS_CATALOG_LOCATION && this.store.projectStoreHolds(record2.id)) {
         const r = record2;
         const rel = repoPathOfLocation(r.location);
         const tree = rel === void 0 ? void 0 : this.treeRootFor(record2);
         if (tree?.unresolved)
           return { ...record2, verify_before_use: true };
         if (rel && tree?.root) {
-          const stat = statSync3(join14(tree.root, rel), { throwIfNoEntry: false });
+          const stat = statSync4(join14(tree.root, rel), { throwIfNoEntry: false });
           if (!stat && this.parkedOnRef(rel, tree.root).status !== "parked") {
             const mintFailed = this.mintAtRead({
               reason: "refresh_reference",
@@ -35526,7 +36159,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         if (expectedVersion !== void 0 && previousVersion !== void 0 && expectedVersion !== previousVersion) {
           throw new Error(`${toolName}: stale expected_version \u2014 the caller supplied expected_version ${expectedVersion} but record '${old.id}' is at version ${previousVersion}. Nothing was written; re-read the record and retry against version ${previousVersion}.`);
         }
-        updated = this.store.supersede(old.id, next, void 0, { operation_id: randomUUID2() });
+        updated = this.store.supersede(old.id, next, void 0, { operation_id: randomUUID4() });
         for (const claim of claims) {
           const atRemoval = this.store.get(claim.id);
           this.store.remove(claim.id, ts);
@@ -36100,7 +36733,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         superseded_by: null,
         scope: `domain:${domain}`,
         links: [{ rel: "informed_by", target_id: originalId }]
-      }, { operation_id: randomUUID2() });
+      }, { operation_id: randomUUID4() });
     } catch (err) {
       if (err instanceof ZodError2)
         throw this.renderValidationFailure(err, original.type, "knowledge_promote");
@@ -36138,6 +36771,69 @@ ${JSON.stringify(value, null, 2)}` : void 0;
       domain_description: domainDescription,
       warnings
     };
+  }
+  /**
+   * knowledge_move (GitHub issue #110, decision
+   * move-a-record-between-domains-with-knowledge-move-same-id): move a record from the mounted
+   * domain store that holds it into another mounted domain store under the SAME id, keeping its
+   * slug, version history, aliases and outbound relations. The store layer runs the journaled
+   * move (MountedStores.moveRecordBetweenDomains); this layer owns the policy refusals.
+   *
+   * The id goes through the shared ladder, as knowledge_promote and knowledge_retire do: a move
+   * keeps the record alive under its id and can be undone by moving it back, so a wrong target
+   * is recoverable, unlike a hard delete (anti_pattern
+   * no-bounded-trail-guard-for-destructive-addressing). The ladder refuses an ambiguous prefix.
+   *
+   * Every call first finishes or undoes any move a crash interrupted, and reports it.
+   */
+  knowledgeMove(id, domain, expectedVersion) {
+    const op = "knowledge_move";
+    if (!this.domains)
+      throw new Error(`${op}: this server mounts no domain stores, so there is nothing to move between. Nothing was written.`);
+    const domains = this.domains;
+    return domains.withMoveLock((lockWarning) => this.knowledgeMoveLocked(domains, id, domain, expectedVersion, lockWarning));
+  }
+  knowledgeMoveLocked(domains, id, domain, expectedVersion, lockWarning) {
+    const op = "knowledge_move";
+    const ts = this.now();
+    const recovered = domains.recoverMoves(ts);
+    const original = this.resolveRecordId(id, op);
+    const recordId = original.id;
+    const from = this.store.scopeOfHolder(recordId);
+    if (from === "project") {
+      throw new Error(`${op}: record '${recordId}' is held by the project store. A project record goes to a domain through knowledge_promote. Nothing was written.`);
+    }
+    const to = `domain:${domain}`;
+    if (!domains.names().includes(domain)) {
+      throw new Error(`${op}: domain '${domain}' is not mounted in this project (mounted: ${domains.names().join(", ") || "none"}). Nothing was written.`);
+    }
+    if (from === to)
+      throw new Error(`${op}: record '${recordId}' already lives in ${to}. Nothing was written.`);
+    if (original.status !== "active") {
+      throw new Error(`${op}: record '${recordId}' is not active (status ${original.status}); only an active record moves. Nothing was written.`);
+    }
+    if (UNPROMOTABLE_TYPES.includes(original.type)) {
+      throw new Error(`${op}: ${original.type} belongs in the project store and never sits in a shared domain store, so it does not move between domains. Nothing was written.`);
+    }
+    const slug = original.slug;
+    if (typeof slug === "string" && slug.length > 0) {
+      const clash = this.slugHolders(slug).filter((r) => r.id !== recordId && this.store.scopeOfHolder(r.id) === to);
+      if (clash.length) {
+        throw new Error(`${op}: slug '${slug}' is already used in ${to} by ${clash.map((r) => `'${r.id}'`).join(", ")}. Nothing was written.`);
+      }
+    }
+    domains.moveRecord(recordId, domain, ts, expectedVersion);
+    const moved = this.store.get(recordId);
+    if (!moved)
+      throw new Error(`${op}: record '${recordId}' cannot be read back after the move to ${to}.`);
+    const warnings = lockWarning ? [lockWarning] : [];
+    const ledgerWarning = this.logDomainWrite(to, moved);
+    if (ledgerWarning)
+      warnings.push(ledgerWarning);
+    for (const r of recovered.filter((o) => o.outcome === "pending")) {
+      warnings.push(`an interrupted move of '${r.id}' from ${r.from} to ${r.to} is still pending: ${r.reason}`);
+    }
+    return { record: moved, from, to, recovered_moves: recovered, warnings };
   }
   /**
    * knowledge_promote's warn-only scan (board ff07e314 (c)) over a record's
@@ -36258,7 +36954,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
       if (!existsSync7(join14(this.repoRoot, ".sterling")))
         throw new Error(`${this.repoRoot} has no .sterling directory`);
       ledgerPath = join14(this.repoRoot, PROCESS_KNOWLEDGE_WRITES_REL);
-      mkdirSync6(dirname7(ledgerPath), { recursive: true });
+      mkdirSync7(dirname8(ledgerPath), { recursive: true });
       const entry = knowledgeWriteSchema.parse({ id: record2.id, type: record2.type, at: this.now() });
       appendFileSync(ledgerPath, `
 ${JSON.stringify(entry)}
@@ -36292,9 +36988,9 @@ ${JSON.stringify(entry)}
    */
   compactDomainWrites(ledgerPath) {
     const MIN_LINE_BYTES = 30;
-    if (statSync3(ledgerPath).size <= KNOWLEDGE_WRITES_COMPACT_LINES * MIN_LINE_BYTES)
+    if (statSync4(ledgerPath).size <= KNOWLEDGE_WRITES_COMPACT_LINES * MIN_LINE_BYTES)
       return;
-    const lines = readFileSync8(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
+    const lines = readFileSync9(ledgerPath, "utf8").split("\n").filter((line) => line !== "");
     if (lines.length <= KNOWLEDGE_WRITES_COMPACT_LINES)
       return;
     const latest = /* @__PURE__ */ new Map();
@@ -36312,9 +37008,9 @@ ${JSON.stringify(entry)}
       latest.set(ok.data.id, ok.data);
     }
     const kept = [...latest.values()].slice(-KNOWLEDGE_WRITES_KEEP_IDS);
-    const tmp = join14(dirname7(ledgerPath), knowledgeWritesTempFile(basename3(ledgerPath), process.pid, randomUUID2()));
+    const tmp = join14(dirname8(ledgerPath), knowledgeWritesTempFile(basename3(ledgerPath), process.pid, randomUUID4()));
     try {
-      writeFileSync3(tmp, kept.map((e) => `${JSON.stringify(e)}
+      writeFileSync4(tmp, kept.map((e) => `${JSON.stringify(e)}
 `).join(""));
       renameSync3(tmp, ledgerPath);
     } catch (err) {
@@ -36384,7 +37080,7 @@ ${JSON.stringify(entry)}
       const path = join14(dir, name);
       let mtimeMs;
       try {
-        mtimeMs = statSync3(path).mtimeMs;
+        mtimeMs = statSync4(path).mtimeMs;
       } catch (err) {
         if (!gone(err))
           failed.push(`${name}: ${err?.code ?? "unknown error"}`);
@@ -38177,8 +38873,8 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const file = { transfer_id: transferId, item_id: itemId, evidence };
     const tmp = `${path}.${process.pid}.tmp`;
     try {
-      mkdirSync6(dir, { recursive: true });
-      writeFileSync3(tmp, JSON.stringify(file, null, 2) + "\n");
+      mkdirSync7(dir, { recursive: true });
+      writeFileSync4(tmp, JSON.stringify(file, null, 2) + "\n");
       renameSync3(tmp, path);
     } catch (e) {
       try {
@@ -38205,8 +38901,8 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const closure = { transfer_id: transferId, item_id: itemId, closed_at: this.now(), ...note !== void 0 ? { note } : {} };
     const tmp = `${path}.${process.pid}.tmp`;
     try {
-      mkdirSync6(dir, { recursive: true });
-      writeFileSync3(tmp, JSON.stringify(closure, null, 2) + "\n");
+      mkdirSync7(dir, { recursive: true });
+      writeFileSync4(tmp, JSON.stringify(closure, null, 2) + "\n");
       renameSync3(tmp, path);
     } catch (e) {
       try {
@@ -38572,7 +39268,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       }
     }
     const ts = this.now();
-    const operationId = randomUUID2();
+    const operationId = randomUUID4();
     const candidate = {
       id: this.newId(),
       type,
@@ -38862,13 +39558,13 @@ var StoreArgInPostgresStorageError = class extends Error {
   }
 };
 function openStoreArg(storePath2) {
-  const configPath = join15(dirname8(storePath2), "config.json");
-  const raw = existsSync8(configPath) ? JSON.parse(readFileSync9(configPath, "utf8")) : {};
+  const configPath = join15(dirname9(storePath2), "config.json");
+  const raw = existsSync8(configPath) ? JSON.parse(readFileSync10(configPath, "utf8")) : {};
   const config2 = parseConfig(raw);
   if (raw.storage === "postgres")
     throw new StoreArgInPostgresStorageError(configPath);
   const store = new MountedStores(storePath2, resolveDomainMounts(config2), { skipMissing: true });
-  return { store, config: config2, repoRoot: dirname8(dirname8(storePath2)) };
+  return { store, config: config2, repoRoot: dirname9(dirname9(storePath2)) };
 }
 function createSterlingServer(target, opts = {}) {
   let opened;
@@ -38889,6 +39585,16 @@ function createSterlingServer(target, opts = {}) {
   const ledgerRemoval = tools.removeExpiredDomainWriteLedgers();
   if (ledgerRemoval)
     process.stderr.write(ledgerRemoval + "\n");
+  try {
+    for (const r of store.recoverMoves((/* @__PURE__ */ new Date()).toISOString(), { lockTimeoutMs: 0 })) {
+      process.stderr.write(`knowledge_move recovery: record '${r.id}' ${r.from} -> ${r.to}: ${r.outcome}${r.reason ? ` (${r.reason})` : ""}
+`);
+    }
+  } catch (e) {
+    process.stderr.write(e instanceof MoveLockBusyError ? `knowledge_move recovery skipped at server start: the move lock is busy (${e.message}); it runs at the next knowledge_move.
+` : `knowledge_move recovery did not run at server start (${e instanceof Error ? e.message : String(e)}); the next knowledge_move call retries it.
+`);
+  }
   const bootDomains = store.domainNames().map((name) => {
     let description;
     try {
@@ -39072,6 +39778,15 @@ function createSterlingServer(target, opts = {}) {
     description: 'Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article, todo and attestation never promote; only a project-scoped record the project store holds does; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The receipt carries domain_description, the target domain\'s description. The echo (`promoted`) defaults to a digest; projection:"full" returns the whole record.',
     inputSchema: strict({ id: external_exports.string().describe(ID_LADDER), domain: external_exports.string(), projection: external_exports.enum(["full", "digest"]).optional() })
   }, ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection)));
+  server.registerTool("knowledge_move", {
+    description: 'Move a record from the mounted domain store that holds it into another mounted domain store, keeping its id, slug, version history, aliases and outbound links (scope becomes domain:<name>). Links other records hold to it stay with those records and still resolve. Refused, with nothing written, for a project-held record (use knowledge_promote), an unmounted or identical target domain, a record that is not active, feature_article/todo/attestation, a stale expected_version, and an id, alias, version history or slug the target already holds. The move is journaled: each call first finishes or undoes any move a crash interrupted and reports it as recovered_moves. Projects that mount only the old domain stop seeing the record. The echo (`record`) defaults to a digest; projection:"full" returns the whole record.',
+    inputSchema: strict({
+      id: external_exports.string().describe(ID_LADDER),
+      domain: external_exports.string().describe("the mounted domain to move the record into, by name (no domain: prefix)"),
+      expected_version: external_exports.number().int().positive().optional().describe("the version you read; a different current version refuses with nothing written"),
+      projection: external_exports.enum(["full", "digest"]).optional()
+    })
+  }, ({ id, domain, expected_version, projection }) => json(tools.writeProjected(tools.knowledgeMove(id, domain, expected_version), projection)));
   server.registerTool("board_add", {
     description: `Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare \`objective\`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane); absent means nothing. measured_at_head is stamped to HEAD unless you pass a full 40-character lowercase hex SHA that is a commit in this repo (an abbreviated or otherwise malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). target_project (user items only) hands the task to another project registered on this machine, by its registry name: the item is written into that project's board with this project's name and the requester's words, and a tracker stays on this board (readiness 'delegated', never READY) whose board_query/board_get handoff_status reads open, needs user in <project> (with the reason when one is set), blocked in <project> (a blocker there is still on its board), DONE (with the closing note), gone (completion unverified), status unknown, or delivery unconfirmed. It is refused, with nothing written, when the name is unknown or ambiguous, names this project, or the target has no SQLite store; with it only text, source, objective (the tracker's), priority, needs (the target item's) and milestone are accepted. milestone (at most 80 characters) says what the target should reach before closing: it is kept on the tracker and written into the target item's text; a DONE status then shows the receiver's evidence, or 'unverified' when none came back. The receipt's handoff_delivery names both items. The echo defaults to a digest; projection:"full" returns the stored record.`,
     inputSchema: strict({
@@ -39201,21 +39916,21 @@ function createSterlingServer(target, opts = {}) {
 }
 
 // packages/mcp-server/dist/runtime.js
-import { readFileSync as readFileSync10, mkdirSync as mkdirSync7, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname9 } from "node:path";
+import { readFileSync as readFileSync11, mkdirSync as mkdirSync8, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname10 } from "node:path";
 function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */ new Date()).toISOString()) {
   try {
     let buildId = "unknown";
     try {
-      const raw = readFileSync10(buildIdPath(serverDir), "utf8").trim();
+      const raw = readFileSync11(buildIdPath(serverDir), "utf8").trim();
       if (raw)
         buildId = raw;
     } catch {
     }
     const marker = runtimeMarkerSchema.parse({ build_id: buildId, pid: process.pid, booted_at: now() });
     const markerPath = runtimeMarkerPath(storePath2);
-    mkdirSync7(dirname9(markerPath), { recursive: true });
-    writeFileSync4(markerPath, JSON.stringify(marker));
+    mkdirSync8(dirname10(markerPath), { recursive: true });
+    writeFileSync5(markerPath, JSON.stringify(marker));
     return marker;
   } catch {
     return null;
@@ -39225,10 +39940,10 @@ function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */
 // packages/mcp-server/dist/broker.js
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { chmodSync as chmodSync2, readFileSync as readFileSync11, realpathSync as realpathSync5 } from "node:fs";
+import { chmodSync as chmodSync2, readFileSync as readFileSync12, realpathSync as realpathSync5 } from "node:fs";
 function buildIdOf(serverDir) {
   try {
-    return readFileSync11(buildIdPath(serverDir), "utf8").trim() || "unknown";
+    return readFileSync12(buildIdPath(serverDir), "utf8").trim() || "unknown";
   } catch {
     return "unknown";
   }
@@ -39425,13 +40140,13 @@ try {
   console.error(`sterling-mcp: ${err?.constructor?.name ?? err?.name ?? "Error"}: ${err?.message ?? String(e)}`);
   process.exit(1);
 }
-recordRuntimeMarker(storePath, dirname10(fileURLToPath(import.meta.url)));
+recordRuntimeMarker(storePath, dirname11(fileURLToPath(import.meta.url)));
 await created.server.connect(new StdioServerTransport());
 if (projectRoot !== void 0) {
   const route = resolveStoreRoute(projectRoot);
   if (route?.storage === "postgres") {
     try {
-      const broker = await startHookBroker({ stores: created.store, route, serverDir: dirname10(fileURLToPath(import.meta.url)) });
+      const broker = await startHookBroker({ stores: created.store, route, serverDir: dirname11(fileURLToPath(import.meta.url)) });
       if (broker === null) {
         console.error("sterling-mcp: the hook store broker is not available on this platform (no Unix sockets with uids); hooks connect to Postgres directly.");
       } else {

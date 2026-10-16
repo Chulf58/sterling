@@ -13,7 +13,7 @@ import { MAX_RANK_TERMS } from '@sterling/store';
 import { loadConfig, repoRel } from './common.mjs';
 import { extractPathCandidates, stripSterlingDeliveryLine } from './dispatch-prompt.mjs';
 import { readLock as readPlanLock, sanitizeForContext, sterlingDirOf } from './plan-lock.mjs';
-import { isForeignTree } from './working-tree.mjs';
+import { ownsHere } from './working-tree.mjs';
 import { readProjectConfig, tddPostureLine as renderTddPostureLine } from './operating-state.mjs';
 import {
   AXIS_MIN_DISCRIMINATING_HITS,
@@ -156,7 +156,7 @@ export function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingCh
   // staged. No candidates is not an early exit — the SUBJECT channel below
   // (relevance slice 3, board 8f3141d4) can deliver on a pathless brief, which
   // is exactly the case path-scoping is structurally blind to.
-  const owners = rels.length ? store.query({ types: ['feature_article', 'reference_material'], file_keys: rels, cap: 100 }).filter((r) => !isForeignTree(r, cwd)) : [];
+  const owners = rels.length ? store.query({ types: ['feature_article', 'reference_material'], file_keys: rels, cap: 100 }).filter(ownsHere(cwd)) : [];
   const hazards = rels.length ? store.query({ types: ['anti_pattern'], file_keys: rels, cap: 100 }) : [];
   // Each decision carries its inbound supersedes edges (board 7e4850cf (c)),
   // so a record another one supersedes is never rendered as [standing]. The

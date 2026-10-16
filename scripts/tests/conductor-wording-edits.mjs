@@ -329,6 +329,13 @@ export const IMPLEMENTOR_WORDING_EDITS = [
     before: 'goes back to the conductor as an open question in your report; never ask the user yourself and never pick a default for a gate.\n',
     after: 'goes back to the conductor as an open question in your report; never ask the user yourself and never pick a default for a gate.\n\nA design choice your brief states as settled (a form, placement, colour, name, structure) is a claim, not a ruling: run `knowledge_preflight` on it in the file\'s own terms before building it. A standing record that contradicts the brief is a blocker you report, not something you build.\n',
   },
+  {
+    commit: 'issue #110',
+    date: '2026-10-16',
+    reason: 'new MCP tool knowledge_move (decision move-a-record-between-domains-with-knowledge-move-same-id) is denied to the implementor under both prefixes; store writes stay the conductor\'s',
+    before: 'mcp__plugin_sterling_sterling__knowledge_promote, mcp__sterling__knowledge_link',
+    after: 'mcp__plugin_sterling_sterling__knowledge_promote, mcp__sterling__knowledge_move, mcp__plugin_sterling_sterling__knowledge_move, mcp__sterling__knowledge_link',
+  },
 ];
 
 const occurrences = (text, needle) => text.split(needle).length - 1;

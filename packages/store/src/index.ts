@@ -29,10 +29,11 @@ import {
   type Freshness,
 } from '@sterling/schemas';
 
-export { MountedStores, MixedScoreScaleError, type DomainMount, resolveDomainMounts, createDomain, DomainNotCreatedError, DomainRenamedError, DOMAIN_DESCRIPTION_KEY, missingDomainWarning } from './mounted.js';
+export { MountedStores, domainsHome, defaultMoveLockPath, type MoveRecoveryOutcome, MixedScoreScaleError, type DomainMount, resolveDomainMounts, createDomain, DomainNotCreatedError, DomainRenamedError, DOMAIN_DESCRIPTION_KEY, missingDomainWarning } from './mounted.js';
 export { allocateShares, DEFAULT_PROJECT_SHARE } from './shares.js';
+export { acquireMoveLock, releaseMoveLock, MoveLockBusyError, pidIsAlive, procStartTime, type MoveLockHandle, type MoveLockOptions, type MoveLockOwner } from './move-lock.js';
 export { fitDomains, DOMAIN_FIT_MIN_TERMS } from './domain-fit.js';
-export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
+export { ProjectRegistry, registryPath, type RegisterInput, type RenameResult } from './registry.js';
 export { resolveSentHandoffs, sentHandoffOf, openForeignDbReadOnly, readForeignBoard, getForeignBoardItem, type ForeignReadHooks, type ForeignBoardRead, type ForeignBoardLookup, type BoardOrderKey, type ReadForeignBoardOptions, type SentHandoff, type HandoffStatus, type HandoffStatusState, type ResolveSentHandoffsOptions } from './handoff.js';
 export * from './axis.js';
 import { AXIS_MAX_TERM_LEN } from './axis.js';
@@ -213,6 +214,98 @@ export const MODELS_CATALOG_LOCATION = '.sterling/models-catalog';
  */
 export interface WriteOptions {
   operation_id?: string;
+}
+
+/** One `records` row, every column a move carries (decision move-a-record-between-domains-with-knowledge-move-same-id). */
+export interface RecordMoveRow {
+  id: string;
+  type: string;
+  status: string;
+  superseded_by: string | null;
+  lifecycle: string;
+  freshness: string;
+  version: number;
+  scope: string;
+  created_at: string;
+  updated_at: string;
+  author: string;
+  derived_unconfirmed: number;
+  body: string;
+  operation_id: string | null;
+}
+
+/** Everything one record owns in one store, as SterlingStore.exportMoveBundle reads it. Internal to
+ *  the store package's move protocol; it never crosses the tool boundary. */
+export interface RecordMoveBundle {
+  record: RecordMoveRow;
+  stack_tags: string[];
+  file_keys: string[];
+  /** Outbound edges (source_id is the record). */
+  relations: { rel: string; target_id: string; created_at: string }[];
+  /** record_versions rows, byte-exact. */
+  versions: { version: number; archived_at: string; body: string }[];
+  /** record_aliases rows whose canonical_id is the record. */
+  aliases: { historical_id: string; archived_version: number; created_at: string }[];
+}
+
+/** store_meta key prefixes of a move's two journal entries: the CLAIM in the source store and
+ *  the MARKER beside the copy in the destination. */
+export const MOVE_OUT_PREFIX = 'move_out:';
+export const MOVE_IN_PREFIX = 'move_in:';
+function moveKey(rel: string, target: string): string {
+  return `${rel}\u0000${target}`;
+}
+
+/** The bundle as the destination must hold it: the scope column and the body's `scope` set to
+ *  `scope`, every other byte unchanged. Version snapshots keep whatever scope they stored. */
+export function rescopeMoveBundle(bundle: RecordMoveBundle, scope: string): RecordMoveBundle {
+  const body = JSON.parse(bundle.record.body) as Record<string, unknown>;
+  body.scope = scope;
+  return { ...bundle, record: { ...bundle.record, scope, body: JSON.stringify(body) } };
+}
+
+/**
+ * One journal entry of a move, as one store holds it. kind 'out' is the source's claim: `peer` is
+ * the target domain and `state` says whether the source rows are still there ('claimed') or were
+ * relinquished ('done'). kind 'in' is the destination's marker: `peer` is the source domain,
+ * `state` always 'claimed'.
+ */
+export interface MoveMarker {
+  kind: 'out' | 'in';
+  id: string;
+  token: string;
+  peer: string;
+  at: string;
+  state: 'claimed' | 'done';
+}
+
+function parseMoveMarker(key: string, value: string): MoveMarker {
+  const kind = key.startsWith(MOVE_OUT_PREFIX) ? 'out' : 'in';
+  const v = JSON.parse(value) as Record<string, unknown>;
+  const ok = ['token', 'peer', 'at'].every((k) => typeof v[k] === 'string') && (v.state === 'claimed' || v.state === 'done');
+  if (!ok) throw new Error(`move journal entry '${key}' is malformed (${value}); repair it before any move or recovery runs.`);
+  const id = key.slice(kind === 'out' ? MOVE_OUT_PREFIX.length : MOVE_IN_PREFIX.length);
+  return { kind, id, token: v.token as string, peer: v.peer as string, at: v.at as string, state: v.state as 'claimed' | 'done' };
+}
+
+/** A write reached a record a move holds a claim or marker on in this store. Nothing was written. */
+export class MoveInFlightError extends Error {
+  constructor(readonly op: string, readonly record_id: string) {
+    super(
+      `${op}: refused — record '${record_id}' is part of an unfinished knowledge_move (a move_out claim or move_in marker in this store). ` +
+        `Writing it now could be lost when the move finishes or is undone. Nothing was written. Run knowledge_move in a project that mounts ` +
+        `both domains (or restart its server) to finish the move, then retry.`
+    );
+    this.name = 'MoveInFlightError';
+  }
+}
+
+/** No 'claimed' claim for `token` in the source. Nothing was deleted. */
+export class MoveClaimLostError extends Error {
+  constructor(readonly record_id: string, readonly token: string) {
+    super(`record '${record_id}': no 'claimed' move claim with token ${token} in this store. Nothing was deleted.`);
+    this.name = 'MoveClaimLostError';
+  }
 }
 
 /** A create, enqueue or supersede reused an operation_id that already wrote a record. Nothing was written. */
@@ -2254,6 +2347,7 @@ export class SterlingStore {
     this.assertWritable(op);
     let served!: DurableRecord;
     this.tx(() => {
+      this.assertNoMoveInFlight(op, [id]);
       const current = this.get(id);
       if (!current) throw new Error(`${op}: no record '${id}'`);
       const identity = this.identityOf(id);
@@ -3586,6 +3680,7 @@ export class SterlingStore {
       updated_at: newRecord.updated_at,
     });
     this.tx(() => {
+      this.assertNoMoveInFlight('supersede', [oldId]);
       // insertRecord writes the candidate's links into record_relations, so the
       // authoritative (new -> supersedes -> old) edge lands here (contract 6);
       // the served superseded_by on the old record materializes from it.
@@ -3678,6 +3773,7 @@ export class SterlingStore {
     // forwarding to each other. The lifecycle guard on the UPDATE stays as a
     // backstop for the retiree.
     this.tx(() => {
+      this.assertNoMoveInFlight('retireInFavorOf', [id, replacementId]);
       const record = this.get(id);
       if (!record) throw new Error(`retireInFavorOf: no record '${id}'`);
       const identity = this.identityOf(id);
@@ -3733,6 +3829,7 @@ export class SterlingStore {
   remove(id: string, drainedAt?: string): void {
     this.assertWritable('remove');
     this.tx(() => {
+      this.assertNoMoveInFlight('remove', [id]);
       const record = this.get(id) as (DurableRecord & { source?: string; system_reason?: string; text?: string; file_keys?: string[] }) | undefined;
       const isSystemDrain = record && record.type === 'todo' && record.source === 'system';
       if (isSystemDrain && record) {
@@ -3772,6 +3869,270 @@ export class SterlingStore {
       this.db.prepare('DELETE FROM record_aliases WHERE canonical_id = ?').run(id);
       this.db.prepare('DELETE FROM records_fts WHERE record_id = ?').run(id);
     });
+  }
+
+  // -- same-id MOVE primitives (decision move-a-record-between-domains-with-knowledge-move-same-id;
+  // [stable-identity-design-v2] item 6). MountedStores.moveRecordBetweenDomains drives them:
+  // export from the source, import into the destination with a journal marker in the SAME
+  // transaction, verify, relinquish the source, clear the marker.
+
+  /** Every row one record owns in this store, read in one snapshot, arrays sorted so two
+   *  exports compare by value. undefined when this store does not hold `id`. The search index
+   *  row is not carried: it is derived from the body and rebuilt on import. */
+  exportMoveBundle(id: string): RecordMoveBundle | undefined {
+    return this.readTx(() => {
+      const record = this.db
+        .prepare(
+          `SELECT id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author,
+                  derived_unconfirmed, body, operation_id FROM records WHERE id = ?`
+        )
+        .get(id) as RecordMoveRow | undefined;
+      if (!record) return undefined;
+      const col = (sql: string, key: string) => (this.db.prepare(sql).all(id) as Record<string, string>[]).map((r) => r[key]).sort();
+      return {
+        record: { ...record, version: Number(record.version), derived_unconfirmed: Number(record.derived_unconfirmed) },
+        stack_tags: col('SELECT tag FROM record_stack_tags WHERE record_id = ?', 'tag'),
+        file_keys: col('SELECT path FROM record_file_keys WHERE record_id = ?', 'path'),
+        relations: (this.db.prepare('SELECT rel, target_id, created_at FROM record_relations WHERE source_id = ?').all(id) as RecordMoveBundle['relations'])
+          .map((r) => ({ rel: r.rel, target_id: r.target_id, created_at: r.created_at }))
+          .sort((a, b) => moveKey(a.rel, a.target_id).localeCompare(moveKey(b.rel, b.target_id))),
+        versions: (this.db.prepare('SELECT version, archived_at, body FROM record_versions WHERE record_id = ?').all(id) as RecordMoveBundle['versions'])
+          .map((v) => ({ version: Number(v.version), archived_at: v.archived_at, body: v.body }))
+          .sort((a, b) => a.version - b.version),
+        aliases: (this.db.prepare('SELECT historical_id, archived_version, created_at FROM record_aliases WHERE canonical_id = ?').all(id) as RecordMoveBundle['aliases'])
+          .map((a) => ({ historical_id: a.historical_id, archived_version: Number(a.archived_version), created_at: a.created_at }))
+          .sort((a, b) => a.historical_id.localeCompare(b.historical_id)),
+      };
+    });
+  }
+
+  // The move journal (see MountedStores.moveRecordBetweenDomains for the protocol and its
+  // invariant). Every entry carries its move's token, and every removal below names the token
+  // it removes: no path here clears another move's entry.
+
+  private moveEntry(prefix: string, id: string): MoveMarker | undefined {
+    const row = this.db.prepare('SELECT key, value FROM store_meta WHERE key = ?').get(`${prefix}${id}`) as { key: string; value: string } | undefined;
+    return row ? parseMoveMarker(row.key, row.value) : undefined;
+  }
+
+  private writeMoveEntry(prefix: string, id: string, entry: Omit<MoveMarker, 'kind' | 'id'>): void {
+    this.db
+      .prepare('INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at')
+      .run(`${prefix}${id}`, JSON.stringify({ token: entry.token, peer: entry.peer, at: entry.at, state: entry.state }), entry.at);
+  }
+
+  /** Delete one journal entry, only when it carries `token` (and `state`, when given). */
+  private dropMoveEntry(prefix: string, id: string, token: string, state?: 'claimed' | 'done'): boolean {
+    const e = this.moveEntry(prefix, id);
+    if (!e || e.token !== token || (state && e.state !== state)) return false;
+    this.db.prepare('DELETE FROM store_meta WHERE key = ?').run(`${prefix}${id}`);
+    return true;
+  }
+
+  /**
+   * Phase 0, in the SOURCE: claim `id` for the move holding `token`, in ONE transaction, and
+   * return the bundle the claim covers. Refused when this store does not hold the record, when
+   * any move entry for the id is here already (an unfinished move in or out), or when
+   * `expected_version` differs from the stored version. From the claim on, the store's write
+   * paths refuse the record (assertNoMoveInFlight).
+   */
+  claimMoveOut(id: string, claim: { token: string; target: string; at: string; expected_version?: number }): RecordMoveBundle {
+    this.assertWritable('claimMoveOut');
+    let bundle!: RecordMoveBundle;
+    this.tx(() => {
+      this.assertNoMoveInFlight('claimMoveOut', [id]);
+      const b = this.exportMoveBundle(id);
+      if (!b) throw new Error(`claimMoveOut: no record '${id}' in this store. Nothing was written.`);
+      if (claim.expected_version !== undefined && b.record.version !== claim.expected_version) {
+        throw new Error(`version conflict — expected_version ${claim.expected_version} but record '${id}' is at version ${b.record.version}. Nothing was written.`);
+      }
+      this.writeMoveEntry(MOVE_OUT_PREFIX, id, { token: claim.token, peer: claim.target, at: claim.at, state: 'claimed' });
+      bundle = b;
+    });
+    return bundle;
+  }
+
+  /**
+   * Phase 1, in the DESTINATION: write `bundle` under `scope` (column and body), byte-exact
+   * otherwise, with the move_in marker for `token`, in ONE transaction.
+   *
+   * Refused, with nothing written, when this store already answers for any identity the bundle
+   * carries. A store's resolvable-id namespace is records.id UNION record_aliases.historical_id,
+   * and record_versions is keyed independently (anti_pattern
+   * an-identity-or-containment-proof-over-the-primary-table-alon), so all three tables are
+   * checked against the whole incoming identity set: the record id and every historical id it
+   * brings. A live record here already using the incoming slug refuses too, and so does any move
+   * entry for the id (in or out).
+   */
+  importMoveBundle(bundle: RecordMoveBundle, scope: string, marker: { source: string; at: string; token: string }): void {
+    this.assertWritable('importMoveBundle');
+    const id = bundle.record.id;
+    const row = rescopeMoveBundle(bundle, scope).record;
+    const body = JSON.parse(row.body) as Record<string, unknown>;
+    const entry = RECORD_TYPES[row.type as keyof typeof RECORD_TYPES];
+    if (!entry) throw new Error(`importMoveBundle: record '${id}' has unregistered type '${row.type}'; nothing was written.`);
+    this.tx(() => {
+      const ids = [id, ...bundle.aliases.map((a) => a.historical_id)];
+      const marks = ids.map(() => '?').join(',');
+      const found: string[] = [];
+      for (const r of this.db.prepare(`SELECT id FROM records WHERE id IN (${marks})`).all(...ids) as { id: string }[]) found.push(`record '${r.id}'`);
+      for (const r of this.db.prepare(`SELECT historical_id FROM record_aliases WHERE historical_id IN (${marks})`).all(...ids) as { historical_id: string }[]) {
+        found.push(`alias '${r.historical_id}'`);
+      }
+      for (const r of this.db.prepare(`SELECT historical_id FROM record_aliases WHERE canonical_id IN (${marks})`).all(...ids) as { historical_id: string }[]) {
+        found.push(`alias '${r.historical_id}' naming an incoming id`);
+      }
+      for (const r of this.db.prepare(`SELECT record_id, version FROM record_versions WHERE record_id IN (${marks})`).all(...ids) as { record_id: string; version: number }[]) {
+        found.push(`version ${r.version} keyed by '${r.record_id}'`);
+      }
+      if (this.moveEntry(MOVE_IN_PREFIX, id) || this.moveEntry(MOVE_OUT_PREFIX, id)) found.push(`an unfinished move entry for '${id}'`);
+      if (typeof body.slug === 'string' && body.slug.length > 0) {
+        const holders = this.db
+          .prepare(`SELECT id FROM records WHERE status != 'superseded' AND ${this.db.dialect.jsonText('body', 'slug')} = ?`)
+          .all(body.slug) as { id: string }[];
+        for (const r of holders) found.push(`slug '${body.slug}' on live record '${r.id}'`);
+      }
+      if (found.length) {
+        throw new Error(
+          `importMoveBundle: refused — the destination already holds ${[...new Set(found)].join(', ')}. One id or slug must name one record, so the ` +
+            `copy would give it two meanings. Nothing was written.`
+        );
+      }
+      this.db
+        .prepare(
+          `INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author,
+                                derived_unconfirmed, body, operation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          row.id, row.type, row.status, row.superseded_by, row.lifecycle, row.freshness, row.version, row.scope,
+          row.created_at, row.updated_at, row.author, row.derived_unconfirmed, row.body, row.operation_id
+        );
+      for (const tag of bundle.stack_tags) this.db.prepare('INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)').run(id, tag);
+      for (const path of bundle.file_keys) this.db.prepare('INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)').run(id, path);
+      for (const r of bundle.relations) {
+        this.db.prepare(this.db.dialect.insertIgnore('record_relations', ['source_id', 'rel', 'target_id', 'created_at'])).run(id, r.rel, r.target_id, r.created_at);
+      }
+      for (const v of bundle.versions) {
+        this.db.prepare('INSERT INTO record_versions (record_id, version, archived_at, body) VALUES (?, ?, ?, ?)').run(id, v.version, v.archived_at, v.body);
+      }
+      for (const a of bundle.aliases) {
+        this.db
+          .prepare('INSERT INTO record_aliases (historical_id, canonical_id, archived_version, created_at) VALUES (?, ?, ?, ?)')
+          .run(a.historical_id, id, a.archived_version, a.created_at);
+      }
+      this.db.prepare('INSERT INTO records_fts (record_id, text) VALUES (?, ?)').run(id, this.db.dialect.searchText(entry.fts(body)));
+      this.writeMoveEntry(MOVE_IN_PREFIX, id, { token: marker.token, peer: marker.source, at: marker.at, state: 'claimed' });
+      this.logActivity('moved in', decodeLiveRecordRow('importMoveBundle', row), marker.at);
+    });
+  }
+
+  /**
+   * The rows `id` owns in this store: the record, its tags, file keys, search row, versions,
+   * aliases and outbound relations. NOT remove(): inbound edges belong to their source records
+   * and stay where they are, and the record is not dead, it lives on in another store.
+   *
+   * One kind of outbound edge stays: a 'supersedes' edge whose TARGET this store holds. A
+   * retired record's served superseded_by is derived from the supersedes edges in its OWN store
+   * (hydrateAll), so deleting that edge would orphan the tombstone. Keeping it beside the
+   * tombstone is the shape promotion already writes (retireInFavorOf). Runs inside tx() only.
+   */
+  private deleteOwnRows(id: string): void {
+    this.db.prepare('DELETE FROM records WHERE id = ?').run(id);
+    this.db.prepare('DELETE FROM record_stack_tags WHERE record_id = ?').run(id);
+    this.db.prepare('DELETE FROM record_file_keys WHERE record_id = ?').run(id);
+    this.db
+      .prepare(`DELETE FROM record_relations WHERE source_id = ? AND NOT (rel = 'supersedes' AND target_id IN (SELECT id FROM records))`)
+      .run(id);
+    this.db.prepare('DELETE FROM record_versions WHERE record_id = ?').run(id);
+    this.db.prepare('DELETE FROM record_aliases WHERE canonical_id = ?').run(id);
+    this.db.prepare('DELETE FROM records_fts WHERE record_id = ?').run(id);
+  }
+
+  /**
+   * Phase 2, in the SOURCE: delete the record's own rows and turn the claim for `token` to
+   * 'done', in ONE transaction. Throws MoveClaimLostError, deleting nothing, when no 'claimed'
+   * claim for `token` is here.
+   */
+  relinquishMovedRecord(id: string, token: string, at: string, verb: string): void {
+    this.assertWritable('relinquishMovedRecord');
+    this.tx(() => {
+      const claim = this.moveEntry(MOVE_OUT_PREFIX, id);
+      if (!claim || claim.token !== token || claim.state !== 'claimed') throw new MoveClaimLostError(id, token);
+      const row = this.db.prepare('SELECT body, scope FROM records WHERE id = ?').get(id) as { body: string; scope: string } | undefined;
+      if (row) this.logActivity(verb, decodeLiveRecordRow('relinquishMovedRecord', row), at);
+      this.deleteOwnRows(id);
+      this.writeMoveEntry(MOVE_OUT_PREFIX, id, { ...claim, at, state: 'done' });
+    });
+  }
+
+  /** Undo phase 0: drop the 'claimed' claim for `token`; the record stays here, writable again. */
+  releaseMoveOut(id: string, token: string): boolean {
+    this.assertWritable('releaseMoveOut');
+    let done = false;
+    this.tx(() => {
+      done = this.dropMoveEntry(MOVE_OUT_PREFIX, id, token, 'claimed');
+    });
+    return done;
+  }
+
+  /** The last step: drop the 'done' claim for `token` once the destination marker is gone. */
+  deleteDoneClaim(id: string, token: string): boolean {
+    this.assertWritable('deleteDoneClaim');
+    let done = false;
+    this.tx(() => {
+      done = this.dropMoveEntry(MOVE_OUT_PREFIX, id, token, 'done');
+    });
+    return done;
+  }
+
+  /** Undo phase 1: delete the copy and its move_in marker together, only while the marker
+   *  carries `token`. Returns whether it did. */
+  rollbackMoveCopy(id: string, token: string, at: string): boolean {
+    this.assertWritable('rollbackMoveCopy');
+    let done = false;
+    this.tx(() => {
+      const mark = this.moveEntry(MOVE_IN_PREFIX, id);
+      if (!mark || mark.token !== token) return;
+      const row = this.db.prepare('SELECT body, scope FROM records WHERE id = ?').get(id) as { body: string; scope: string } | undefined;
+      if (row) this.logActivity('move rolled back', decodeLiveRecordRow('rollbackMoveCopy', row), at);
+      this.deleteOwnRows(id);
+      done = this.dropMoveEntry(MOVE_IN_PREFIX, id, token);
+    });
+    return done;
+  }
+
+  /** Phase 3: drop the move_in marker for `token`; the copy becomes an ordinary record. */
+  clearMoveIn(id: string, token: string): boolean {
+    this.assertWritable('clearMoveIn');
+    let done = false;
+    this.tx(() => {
+      done = this.dropMoveEntry(MOVE_IN_PREFIX, id, token);
+    });
+    return done;
+  }
+
+  /**
+   * THE MOVE FENCE: a record with a move_out claim or a move_in marker in this store belongs to an
+   * unfinished move, and every ordinary write path refuses it inside its own transaction, so a
+   * project that mounts only one of the two domains cannot change what the move is carrying.
+   * The fenced paths: applyInPlace (updateRecord, updateRecordMetadata, editRecordField,
+   * appendRecordField, updateTodo, renameFileKey), supersede, retireInFavorOf (both ids),
+   * remove, addLink (the edge's source) and claimMoveOut. The move's own steps above pass it only
+   * by naming their token.
+   */
+  private assertNoMoveInFlight(op: string, ids: string[]): void {
+    const keys = ids.flatMap((id) => [`${MOVE_IN_PREFIX}${id}`, `${MOVE_OUT_PREFIX}${id}`]);
+    const row = this.db.prepare(`SELECT key FROM store_meta WHERE key IN (${keys.map(() => '?').join(',')})`).get(...keys) as { key: string } | undefined;
+    if (!row) return;
+    throw new MoveInFlightError(op, row.key.slice(row.key.indexOf(':') + 1));
+  }
+
+  /** Every move journal entry in this store, claims and markers. */
+  moveMarkers(): MoveMarker[] {
+    const rows = this.db
+      .prepare('SELECT key, value FROM store_meta WHERE key LIKE ? OR key LIKE ?')
+      .all(`${MOVE_OUT_PREFIX}%`, `${MOVE_IN_PREFIX}%`) as { key: string; value: string }[];
+    return rows.map((r) => parseMoveMarker(r.key, r.value));
   }
 
   /** Newest-first drained queue items (§3.2.7 drain log) — the TUI's completed section. */
@@ -4014,6 +4375,7 @@ export class SterlingStore {
     const at = new Date().toISOString();
     const stored = SterlingStore.storableBody(updated as unknown as Record<string, unknown>);
     this.tx(() => {
+      this.assertNoMoveInFlight('addLink', [sourceId]);
       this.db.prepare('UPDATE records SET body = ? WHERE id = ?').run(JSON.stringify(stored), sourceId);
       // record_relations is the authoritative edge home (contract 6); the body
       // copy is a convenience the read materialization overwrites anyway.

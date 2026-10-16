@@ -57,6 +57,9 @@ const SERVED_TOOLS = [
   // 0b33c27b-f36c-4d66-b92d-83885dbb1725 (ADDENDUM 08-14-2045).
   'knowledge_supersede',
   'knowledge_promote',
+  // Same-id move between two mounted domain stores (issue #110, decision
+  // move-a-record-between-domains-with-knowledge-move-same-id).
+  'knowledge_move',
   'knowledge_link',
   // H20/H19 relevance slice 4 (board 5fac3459): the conductor-callable analog
   // of the H20 delivery floors — verify the brief against store targets BEFORE

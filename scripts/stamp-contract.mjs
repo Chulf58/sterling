@@ -10,6 +10,10 @@
 //   - a tracked SECTION (TARGET_SECTIONS: a heading plus its bullets) that a sibling lacks
 //     entirely is inserted whole before the heading it sits ahead of in the template; a
 //     sibling with no such heading is refused, and its bullets are then not reported one by one.
+//   - an absent bullet is NOT inserted when the project already states the rule under its own
+//     bullet (SUBJECT_MARKERS in scripts/lib/contract-bullets.mjs, matched against other
+//     bullets' bold leads): one SIMILAR_BULLET_KEPT info line names that bullet, exit stays 0
+//     (decision stamp-contract-skips-insert-when-project-bullet-covers-the-rule, issue #111).
 //   - dry-run by default; --apply writes.
 //   - a write touches only a file whose text changed. A file that cannot be written is that
 //     project's refusal (WRITE_FAILED_REFUSED, exit 2), naming the path and the error; its
@@ -45,6 +49,8 @@ import {
   extractTemplateBlock,
   headingIndex,
   readTemplateBullets,
+  findCoveringBullet,
+  INSERT_AFTER,
 } from './lib/contract-bullets.mjs';
 
 const APPLY = process.argv.includes('--apply');
@@ -62,36 +68,8 @@ for (let i = 2; i < process.argv.length; i++) {
 // path (sourceIdentityPlugin in scripts/lib/bundled-artifacts.mjs).
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 // The tracked leads, the template files and block extraction live in
-// scripts/lib/contract-bullets.mjs, shared with build:bin's bin/contract-history.json.
-//
-// Insertable bullets: lead → the anchor lead(s) it goes after, tried in order. A lead
-// absent from a sibling (and not renamed) is inserted after the FIRST anchor the sibling
-// carries; with no anchor present it is ANCHOR_MISSING_REFUSED. Declared per lead, so
-// reordering TARGET_LEADS no longer retargets an insert (the old index-pinned hazard).
-// READY TO CLEAR sits after the Codex bullet in the template; when the Codex bullet is
-// refused (e.g. present only in the wrong layer) the Knowledge bullet is the fallback.
-const INSERT_AFTER = new Map([
-  ['- **Concept articles — capture design the moment it settles', ['- **Reconcile _every affected_ article, not just the primary one**']],
-  ['- **Codex runs through the MCP tool, never the shell.**', ['- **Knowledge is born structured.**']],
-  ['- **Say `READY TO CLEAR` plainly when it is time.**', ['- **Codex runs through the MCP tool, never the shell.**', '- **Knowledge is born structured.**']],
-  ['- **Instruction-file proposals replace memory.**', ["- **Ask, don't guess — through the AskUserQuestion tool.**"]],
-  ['- **Lint and tests before done.**', ['- **No false action claims:**', '- **Anti-speculation:**']],
-  ['- **Write plainly; no AI tells.**', ['- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
-  ['- **Start every subagent in the background.**', ['- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
-  ['- **Finish what you start.**', ['- **Start every subagent in the background.**', '- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
-  ['- **Resolve a review thread once its finding is handled.**', ['- **Finish what you start.**', '- **Start every subagent in the background.**', '- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
-  ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', ['- **Instruction-file proposals replace memory.**', "- **Ask, don't guess — through the AskUserQuestion tool.**"]],
-  ["- **Solve, don't board.**", ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', '- **Instruction-file proposals replace memory.**', "- **Ask, don't guess — through the AskUserQuestion tool.**"]],
-  ['- **Close-on-commit: a commit that fulfils a board item pays it**', ["- **Solve, don't board.**"]],
-]);
-// A section bullet missing from a sibling that has the section goes after the nearest
-// section bullet above it. The first bullet has no anchor: without it the section's start is
-// unknown, and that is ANCHOR_MISSING_REFUSED.
-for (const section of TARGET_SECTIONS) {
-  section.leads.forEach((lead, i) => {
-    if (i > 0) INSERT_AFTER.set(lead, section.leads.slice(0, i).reverse());
-  });
-}
+// scripts/lib/contract-bullets.mjs, shared with build:bin's bin/contract-history.json, and
+// so do SUBJECT_MARKERS and INSERT_AFTER (the insertable leads and their anchors).
 
 // LINE ENDINGS. Comparisons run on a CR-stripped copy, so a CRLF sibling is never spuriously
 // treated as hand-tuned (the recorded stamp-contract CRLF hazard). A write puts every line
@@ -209,6 +187,11 @@ function record(r) {
   }
   console.log(`${r.actions.some((a) => a.action.includes('REFUSED')) ? '✗' : '•'} ${r.project} (${r.file})`);
   for (const a of VERBOSE ? r.actions : notable) {
+    // An info action (SIMILAR_BULLET_KEPT) is one line: the lead and what was kept.
+    if (a.info) {
+      console.log(`    ${a.action}  ${a.lead.slice(0, 60)}… — ${a.detail}`);
+      continue;
+    }
     console.log(`    ${a.action}  ${a.lead.slice(0, 60)}…`);
     if (a.detail) console.log(`      ${a.detail}`);
     if (a.have) console.log(`      sibling text (hand-tuned, NOT touched):\n      ${a.have.split('\n').join('\n      ')}`);
@@ -353,6 +336,21 @@ for (const p of projects) {
       break;
     }
     if (renamed) continue;
+    // The project may already state the rule under its own bullet (a different lead, maybe under
+    // another heading): keep it and insert nothing. Information, not a refusal and not drift.
+    const covering = [...siblingFiles.entries()]
+      .map(([rel, f]) => ({ rel, hit: findCoveringBullet(f.text, lead) }))
+      .find((c) => c.hit);
+    if (covering) {
+      actions.push({
+        lead,
+        action: 'SIMILAR_BULLET_KEPT',
+        file: layerFileName(home),
+        info: true,
+        detail: `kept the project's own bullet in ${layerFileName(covering.rel)}, nothing inserted: ${covering.hit.bullet.slice(0, 100)}`,
+      });
+      continue;
+    }
     // An insertable bullet goes after the first anchor in its chain that validated this run,
     // past that anchor's whole list item; everything else missing = drift.
     const anchor = (INSERT_AFTER.get(lead) ?? [])

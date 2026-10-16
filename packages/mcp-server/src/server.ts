@@ -7,7 +7,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { z, ZodError } from 'zod';
 import { parseConfig, type SterlingConfig, NO_CAPTURE_LANES, RECORD_TYPES, objectShapeFor, BOARD_NEEDS, handoffEvidenceSchema } from '@sterling/schemas';
-import { MountedStores, StoreBusyError, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
+import { MountedStores, MoveLockBusyError, StoreBusyError, resolveDomainMounts, missingDomainWarning } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { holdRoutedStores } from './held-stores.js';
 import { WorkerGuard, guardWorkerTools, type WorkerPolicyArgs } from './worker-policy.js';
@@ -347,6 +347,22 @@ export function createSterlingServer(
   // file that could not be removed is announced once here and never fails boot.
   const ledgerRemoval = tools.removeExpiredDomainWriteLedgers();
   if (ledgerRemoval) process.stderr.write(ledgerRemoval + '\n');
+  // Server start finishes or undoes any knowledge_move a crash interrupted
+  // (MountedStores.recoverMoves); every knowledge_move call runs it again first,
+  // so a failure here is announced and never fails boot.
+  // It takes the machine-level move lock without waiting: when a move or another recovery holds
+  // it, this one is skipped with one line and runs again at the next knowledge_move.
+  try {
+    for (const r of store.recoverMoves(new Date().toISOString(), { lockTimeoutMs: 0 })) {
+      process.stderr.write(`knowledge_move recovery: record '${r.id}' ${r.from} -> ${r.to}: ${r.outcome}${r.reason ? ` (${r.reason})` : ''}\n`);
+    }
+  } catch (e) {
+    process.stderr.write(
+      e instanceof MoveLockBusyError
+        ? `knowledge_move recovery skipped at server start: the move lock is busy (${e.message}); it runs at the next knowledge_move.\n`
+        : `knowledge_move recovery did not run at server start (${e instanceof Error ? e.message : String(e)}); the next knowledge_move call retries it.\n`
+    );
+  }
   // knowledge_create's description names the domains mounted at boot (Domains
   // D2). Each create receipt lists them live as mounted_domains, so a
   // description changed later through domain_describe shows there. A
@@ -717,6 +733,21 @@ export function createSterlingServer(
       inputSchema: strict({ id: z.string().describe(ID_LADDER), domain: z.string(), projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection))
+  );
+
+  server.registerTool(
+    'knowledge_move',
+    {
+      description:
+        "Move a record from the mounted domain store that holds it into another mounted domain store, keeping its id, slug, version history, aliases and outbound links (scope becomes domain:<name>). Links other records hold to it stay with those records and still resolve. Refused, with nothing written, for a project-held record (use knowledge_promote), an unmounted or identical target domain, a record that is not active, feature_article/todo/attestation, a stale expected_version, and an id, alias, version history or slug the target already holds. The move is journaled: each call first finishes or undoes any move a crash interrupted and reports it as recovered_moves. Projects that mount only the old domain stop seeing the record. The echo (`record`) defaults to a digest; projection:\"full\" returns the whole record.",
+      inputSchema: strict({
+        id: z.string().describe(ID_LADDER),
+        domain: z.string().describe('the mounted domain to move the record into, by name (no domain: prefix)'),
+        expected_version: z.number().int().positive().optional().describe('the version you read; a different current version refuses with nothing written'),
+        projection: z.enum(['full', 'digest']).optional(),
+      }),
+    },
+    ({ id, domain, expected_version, projection }) => json(tools.writeProjected(tools.knowledgeMove(id, domain, expected_version), projection))
   );
 
   server.registerTool(

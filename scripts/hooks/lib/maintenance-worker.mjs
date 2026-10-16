@@ -187,7 +187,7 @@ export const WORKER_DISALLOWED_TOOLS = [
 /** Short names of the knowledge writes whose successful receipt must carry this
  *  run's stamp. The denied ones are listed too: if one ever succeeded, it is
  *  an unpoliced write. */
-export const KNOWLEDGE_WRITE_TOOLS = [...WRITE_GRANT, 'knowledge_line_ref_fix', 'knowledge_create', 'knowledge_retire', 'knowledge_supersede', 'knowledge_split', 'knowledge_extract', 'knowledge_promote', 'knowledge_link'];
+export const KNOWLEDGE_WRITE_TOOLS = [...WRITE_GRANT, 'knowledge_line_ref_fix', 'knowledge_create', 'knowledge_retire', 'knowledge_supersede', 'knowledge_split', 'knowledge_extract', 'knowledge_promote', 'knowledge_move', 'knowledge_link'];
 
 /** The two runner hosts (board item Parity P8). The launcher records the one its
  *  caller chose in eligible.json; H1/H10/H19 run on Claude Code and pass none,

@@ -9,7 +9,7 @@
 import { statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { gitIgnored, repoRel } from '../../../scripts/hooks/lib/common.mjs';
-import { isForeignTree } from '../../../scripts/hooks/lib/working-tree.mjs';
+import { ownsHere } from '../../../scripts/hooks/lib/working-tree.mjs';
 import {
   BASH_POINTER_PATH_CAP,
   assembleDelivery,
@@ -70,7 +70,7 @@ function governedRel(raw, root, directory) {
  * multi-file build can share one guard (buildPatchDelivery).
  */
 function buildDelivery(store, root, rel, sessionID, guard = readGuard(guardPath(root, undefined, sessionID))) {
-  const owners = store.query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, root));
+  const owners = store.query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 }).filter(ownsHere(root));
   const hazards = store.query({ types: ['anti_pattern'], file_keys: [rel], cap: 100 });
   // Inbound supersedes edges ride each decision (board 7e4850cf (c)), as in H19.
   const decisions = store.query({ types: ['decision'], file_keys: [rel], cap: 100 }).map((r) => withInboundSupersedes(store, r));
@@ -135,7 +135,7 @@ function buildShellDelivery(store, root, command, directory, sessionID) {
       throw e;
     }
     if (!isFile) continue;
-    const owners = store.query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, root));
+    const owners = store.query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 }).filter(ownsHere(root));
     const hazards = store.query({ types: ['anti_pattern'], file_keys: [rel], cap: 100 });
     if (owners.length || hazards.length) entries.push({ rel, owners, hazards });
   }

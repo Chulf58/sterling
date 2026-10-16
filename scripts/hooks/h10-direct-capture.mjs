@@ -45,7 +45,6 @@ import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy, fileEntriesO
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
 import { publishNotice } from './lib/delivery.mjs';
-import { isForeignTree } from './lib/working-tree.mjs';
 import { evaluatePrLoop, prLoopNext, prLoopOwedText, prLoopReminderText } from './lib/pr-loop-duty.mjs';
 import { maybeLaunchMaintenanceWorker } from './lib/maintenance-worker.mjs';
 import {
@@ -63,6 +62,7 @@ import {
   openDutyRecords,
   paysSince,
   ownershipJoin,
+  foreignTreeOwnersText,
   researchCapturedSince,
   researchOwedText,
   systemTodo,
@@ -1922,20 +1922,20 @@ try {
   // rather than a bigger guess; total 0 skips the second call entirely. Store
   // failures still propagate exactly as before — the duty gate's own catch owns
   // the fail-loud direction, and the cap was never what made it safe.
-  const { ownerRows, isUnowned } = ownershipJoin(store, input.cwd);
+  const { ownerRows, isUnowned, isForeign, foreignOnlyOwners } = ownershipJoin(store, input.cwd, config.working_trees);
   // What the join actually SAW for one demanded path — so a false demand is
   // diagnosable from the deny text alone instead of by re-running the query by
   // hand. "none" is the ordinary case; a row the count EXCLUDED (its
   // working_tree names another tree, whose copy of this path it owns) is tagged
-  // EXCLUDED, using the same isForeignTree(row, input.cwd) test ownershipJoin's
-  // isUnowned applies, so the note never lists a non-counting row as an owner
+  // EXCLUDED, using the same isForeign test (config.working_trees honoured)
+  // ownershipJoin's isUnowned applies, so the note never lists a non-counting row as an owner
   // (GitHub issue #83).
   const ownerRowsNote = (p) => {
     const rows = ownerRows(p);
     if (!rows.length) return 'none';
     return rows
       .map((r) => {
-        const excluded = isForeignTree(r, input.cwd) ? ', EXCLUDED: working_tree names another tree' : '';
+        const excluded = isForeign(r) ? ', EXCLUDED: working_tree names another tree' : '';
         return `${r.slug ?? r.title ?? r.type} (${String(r.id).slice(0, 8)}${r.working_tree ? `, working_tree=${r.working_tree}` : ''}${excluded})`;
       })
       .join('; ');
@@ -2719,12 +2719,14 @@ try {
       // "none" says the join found nothing at all, while a listed row says it
       // found an owner and EXCLUDED it (working_tree), which is a different bug
       // with a different fix.
+      const foreignOwners = foreignTreeOwnersText(unowned, foreignOnlyOwners);
       const ownerEvidence = unowned.slice(0, 5).map((p) => `${p} → owners seen: ${ownerRowsNote(p)}`);
       parts.push(
         `• articles: article demand — ${unowned.length} touched file(s) no owner (feature_article or repo-located reference doc)` +
           `${newUnowned.length ? ` (${newUnowned.length} new)` : ''}: ${capList(unowned)} → knowledge_create type feature_article (reference_material kind doc for a governing document)` +
           `\n  ownership join (uncapped, types feature_article+reference_material, excluding records whose working_tree names a different tree): ${ownerEvidence.join(' | ')}` +
-          `${unowned.length > 5 ? ` | +${unowned.length - 5} more path(s) not detailed` : ''}`
+          `${unowned.length > 5 ? ` | +${unowned.length - 5} more path(s) not detailed` : ''}` +
+          `${foreignOwners ? `\n  ${foreignOwners}` : ''}`
       );
     }
 

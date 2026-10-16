@@ -13,13 +13,44 @@
 // "Code: self-root = own"). packages/mcp-server/src/tools.ts asks the same
 // question in its private declaresForeignTree, through the same
 // sameLocationAnyHost.
-import { sameLocationAnyHost } from '@sterling/schemas';
+//
+// A NAME MAPPED in config.working_trees resolves to its mapped path first —
+// absolute as given, relative joined onto the root — exactly as the MCP
+// server's treeRootFor does (decision a0fc8743), so a name mapped to the root
+// owns root paths at every hook site as it already does on the server (GitHub
+// issues #112, #115). Every caller passes the project's working_trees; a site
+// that only knows the root reads them with workingTreesAt.
+import { join } from 'node:path';
+import { isAbsolutePathAnyHost, sameLocationAnyHost } from '@sterling/schemas';
+import { loadConfig } from './common.mjs';
 
 /** True when `record` declares a working_tree that is NOT `root`. No
- *  working_tree → false (a root record). No `root` to compare against → any
- *  declared working_tree stays foreign, the pre-existing direction. */
-export function isForeignTree(record, root) {
+ *  working_tree → false (a root record). A name mapped in `workingTrees`
+ *  compares by its resolved path; an unmapped one by its own spelling. No
+ *  `root` to compare against → any declared working_tree stays foreign, the
+ *  pre-existing direction. */
+export function isForeignTree(record, root, workingTrees) {
   const wt = record?.working_tree;
   if (!wt) return false;
-  return !(root && sameLocationAnyHost(String(wt), root));
+  if (!root) return true;
+  // An empty or non-string mapping counts as no mapping, as treeRootFor's
+  // `if (!mapped)` does: the name is compared as itself, never joined onto the
+  // root (join(root, '') IS the root).
+  const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : undefined;
+  const mapped = typeof raw === 'string' && raw ? raw : undefined;
+  const location = mapped === undefined ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join(root, mapped);
+  return !sameLocationAnyHost(location, root);
+}
+
+/** The project's config.working_trees map ({} when unset). A corrupt
+ *  config.json throws, as loadConfig does at every other read. */
+export function workingTreesAt(root) {
+  const trees = root ? loadConfig(root)?.working_trees : undefined;
+  return trees && typeof trees === 'object' ? trees : {};
+}
+
+/** The ownership filter every hook site applies: keeps a record unless it
+ *  names a foreign tree. Reads config.working_trees once per call. */
+export function ownsHere(root, workingTrees = workingTreesAt(root)) {
+  return (record) => !isForeignTree(record, root, workingTrees);
 }
