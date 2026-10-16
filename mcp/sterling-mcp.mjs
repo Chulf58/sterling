@@ -22498,6 +22498,7 @@ function resolveSentHandoffs(trackers, opts = {}) {
   const out = /* @__PURE__ */ new Map();
   const groups = /* @__PURE__ */ new Map();
   let snapshot;
+  const currentNames = /* @__PURE__ */ new Map();
   const locate = (h, createdAt) => {
     const regPath = opts.registryPath;
     if (regPath === void 0)
@@ -22519,7 +22520,7 @@ function resolveSentHandoffs(trackers, opts = {}) {
     if ("failed" in snapshot)
       return { reason: snapshot.failed };
     const found = resolveReceiverLocation(h, createdAt, snapshot);
-    return "row" in found ? { root: found.row.repo_path } : { reason: `${h.to_name}'s project cannot be located: ${found.reason}` };
+    return "row" in found ? { root: found.row.repo_path, name: found.row.name } : { reason: `${h.to_name}'s project cannot be located: ${found.reason}` };
   };
   for (const t of trackers) {
     if (t.handoff === void 0)
@@ -22538,8 +22539,12 @@ function resolveSentHandoffs(trackers, opts = {}) {
       out.set(t.id, unknown2(where.reason));
       continue;
     }
+    const renamed = where.name !== void 0 && where.name !== h.to_name;
+    const named2 = renamed ? { ...h, to_name: where.name } : h;
+    if (renamed)
+      currentNames.set(t.id, where.name);
     const list = groups.get(where.root) ?? [];
-    list.push({ id: t.id, h });
+    list.push({ id: t.id, h: named2 });
     groups.set(where.root, list);
   }
   for (const [root, list] of groups) {
@@ -22591,8 +22596,9 @@ function resolveSentHandoffs(trackers, opts = {}) {
   for (const t of trackers) {
     const status = out.get(t.id);
     const milestone = status && sentHandoffOf(t)?.milestone;
-    if (status && milestone)
-      out.set(t.id, { ...status, milestone });
+    const to_name = currentNames.get(t.id);
+    if (status && (milestone || to_name !== void 0))
+      out.set(t.id, { ...status, ...milestone ? { milestone } : {}, ...to_name !== void 0 ? { to_name } : {} });
   }
   return out;
 }
@@ -32049,6 +32055,11 @@ var SterlingTools = class _SterlingTools {
    * is NOT YET merged into base. A blob surviving ONLY on branches that are
    * fully-merged ancestors of base does NOT park — the deletion reading (base
    * no longer has it, and no unmerged work holds it either) applies instead.
+   * NOR does a branch (base included) whose copy is INHERITED: if the merge
+   * base of HEAD and that branch held the path with the same tree entry (mode
+   * and blob id) the branch holds now, this checkout's line
+   * deleted it and the deletion lands when this branch merges, so the files[]
+   * entry is owed a drop, not a wait (GitHub #121).
    * Returns the first qualifying ref that holds it, or undefined if none does.
    *
    * ONLY CALLED ON THE ALREADY-RARE MISSING-FILE PATH, never on the hot read
@@ -32117,6 +32128,26 @@ var SterlingTools = class _SterlingTools {
       const r = run(["merge-base", "--is-ancestor", branch, base2]);
       return r?.status === 0;
     };
+    const treeEntry = (ref) => {
+      const r = run(["ls-tree", "--full-tree", ref, "--", rel]);
+      if (r?.status !== 0 || typeof r.stdout !== "string")
+        return void 0;
+      const line = r.stdout.split("\n")[0] ?? "";
+      const tab = line.indexOf("	");
+      return tab > 0 ? line.slice(0, tab) : void 0;
+    };
+    const inheritedFromMergeBase = (branch) => {
+      const mb = run(["merge-base", "HEAD", branch]);
+      if (mb?.status !== 0 || typeof mb.stdout !== "string")
+        return false;
+      const sha = mb.stdout.trim();
+      if (!sha)
+        return false;
+      const atBase = treeEntry(sha);
+      if (atBase === void 0)
+        return false;
+      return treeEntry(branch) === atBase;
+    };
     try {
       if (has("HEAD"))
         return { status: "parked", ref: "HEAD" };
@@ -32125,21 +32156,14 @@ var SterlingTools = class _SterlingTools {
         return { status: "probe_failed" };
       const branches = refs.stdout.split("\n").map((s2) => s2.trim()).filter(Boolean).slice(0, PARKED_REF_PROBE_CAP);
       const base2 = resolveBase();
-      if (base2 === void 0) {
-        for (const b of branches) {
-          if (has(b))
-            return { status: "parked", ref: b };
-        }
-      } else {
-        for (const b of branches) {
-          if (!has(b))
-            continue;
-          if (b === base2)
-            return { status: "parked", ref: b };
-          if (isMergedIntoBase(b, base2))
-            continue;
-          return { status: "parked", ref: b };
-        }
+      for (const b of branches) {
+        if (!has(b))
+          continue;
+        if (base2 !== void 0 && b !== base2 && isMergedIntoBase(b, base2))
+          continue;
+        if (inheritedFromMergeBase(b))
+          continue;
+        return { status: "parked", ref: b };
       }
       const history = run(["rev-list", "--all", "--", rel]);
       if (history?.status !== 0 || typeof history.stdout !== "string")
@@ -33740,7 +33764,7 @@ var SterlingTools = class _SterlingTools {
         for (const p of parkedFiles.slice(0, DRIFT_ITEMS_PER_READ)) {
           featureMint({
             reason: "file_parked",
-            text: `article '${a.slug}' \u2014 owned file ${p.path} is absent from the working tree but ALIVE on '${p.ref}'. INFORMATIONAL: no reconcile is owed and the article is correct as written. DO NOT DROP ${p.path} FROM THIS ARTICLE'S files[] \u2014 the path becomes valid again when that branch merges. This item closes when the branch lands (the merge gate sweeps it), not by a write.`,
+            text: `article '${a.slug}' \u2014 owned file ${p.path} is absent from the working tree but ALIVE on '${p.ref}'. INFORMATIONAL: no reconcile is owed and the article is correct as written. DO NOT DROP ${p.path} FROM THIS ARTICLE'S files[] \u2014 the path becomes valid again when that branch merges. This item closes when the branch lands (the merge gate sweeps it), not by a write. ` + (p.ref === "HEAD" ? `TO RELEASE IT: restore the file (git checkout -- ${p.path}) or commit its deletion; after a committed deletion the next read reports a normal deletion instead, and this item is closed with maintenance_remove.` : `TO RELEASE IT if '${p.ref}' will never merge (abandoned, or a backup): delete that branch (git branch -D ${p.ref}); the next read then reports a normal deletion that drops the path, and this item is closed with maintenance_remove.`),
             file_keys: [p.path],
             feature_link: a.id
           });

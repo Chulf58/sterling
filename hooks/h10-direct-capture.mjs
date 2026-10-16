@@ -13433,6 +13433,12 @@ function itemBaselines(store2, t) {
   const own = (t.file_keys ?? []).filter((k) => typeof all?.[k] === "string");
   return Object.fromEntries(own.map((k) => [k, all[k]]));
 }
+function itemTargetUpdatedAt(store2, t) {
+  if (!store2 || !DIFF_LANES.includes(t.system_reason) || !t.feature_link) return void 0;
+  const at = store2.get(t.feature_link)?.updated_at;
+  return typeof at === "string" ? at : void 0;
+}
+var gitOpts = { encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 };
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -13624,9 +13630,11 @@ function launchWorker(opts) {
       const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
       const batch = selectBatch(eligible);
       const baselinesById = new Map(eligible.map((t) => [t.id, opts.store ? itemBaselines(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.baselines : void 0]));
+      const updatedAtById = new Map(eligible.map((t) => [t.id, opts.store ? itemTargetUpdatedAt(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.target_updated_at : void 0]));
       const withBaselines = (t) => {
         const baselines = baselinesById.get(t.id);
-        return baselines && typeof baselines === "object" ? { baselines } : {};
+        const updatedAt = updatedAtById.get(t.id);
+        return { ...baselines && typeof baselines === "object" ? { baselines } : {}, ...typeof updatedAt === "string" ? { target_updated_at: updatedAt } : {} };
       };
       const chainAttempted = opts.trigger === "chain" && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
       writeFileSync7(

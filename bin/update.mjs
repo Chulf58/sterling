@@ -10048,6 +10048,7 @@ function resolveSentHandoffs(trackers, opts2 = {}) {
   const out = /* @__PURE__ */ new Map();
   const groups = /* @__PURE__ */ new Map();
   let snapshot;
+  const currentNames = /* @__PURE__ */ new Map();
   const locate = (h, createdAt) => {
     const regPath = opts2.registryPath;
     if (regPath === void 0)
@@ -10069,7 +10070,7 @@ function resolveSentHandoffs(trackers, opts2 = {}) {
     if ("failed" in snapshot)
       return { reason: snapshot.failed };
     const found = resolveReceiverLocation(h, createdAt, snapshot);
-    return "row" in found ? { root: found.row.repo_path } : { reason: `${h.to_name}'s project cannot be located: ${found.reason}` };
+    return "row" in found ? { root: found.row.repo_path, name: found.row.name } : { reason: `${h.to_name}'s project cannot be located: ${found.reason}` };
   };
   for (const t of trackers) {
     if (t.handoff === void 0)
@@ -10088,8 +10089,12 @@ function resolveSentHandoffs(trackers, opts2 = {}) {
       out.set(t.id, unknown(where.reason));
       continue;
     }
+    const renamed = where.name !== void 0 && where.name !== h.to_name;
+    const named = renamed ? { ...h, to_name: where.name } : h;
+    if (renamed)
+      currentNames.set(t.id, where.name);
     const list = groups.get(where.root) ?? [];
-    list.push({ id: t.id, h });
+    list.push({ id: t.id, h: named });
     groups.set(where.root, list);
   }
   for (const [root, list] of groups) {
@@ -10141,8 +10146,9 @@ function resolveSentHandoffs(trackers, opts2 = {}) {
   for (const t of trackers) {
     const status = out.get(t.id);
     const milestone = status && sentHandoffOf(t)?.milestone;
-    if (status && milestone)
-      out.set(t.id, { ...status, milestone });
+    const to_name = currentNames.get(t.id);
+    if (status && (milestone || to_name !== void 0))
+      out.set(t.id, { ...status, ...milestone ? { milestone } : {}, ...to_name !== void 0 ? { to_name } : {} });
   }
   return out;
 }

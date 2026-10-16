@@ -9055,6 +9055,7 @@ function resolveSentHandoffs(trackers, opts = {}) {
   const out = /* @__PURE__ */ new Map();
   const groups = /* @__PURE__ */ new Map();
   let snapshot;
+  const currentNames = /* @__PURE__ */ new Map();
   const locate = (h, createdAt) => {
     const regPath = opts.registryPath;
     if (regPath === void 0)
@@ -9076,7 +9077,7 @@ function resolveSentHandoffs(trackers, opts = {}) {
     if ("failed" in snapshot)
       return { reason: snapshot.failed };
     const found = resolveReceiverLocation(h, createdAt, snapshot);
-    return "row" in found ? { root: found.row.repo_path } : { reason: `${h.to_name}'s project cannot be located: ${found.reason}` };
+    return "row" in found ? { root: found.row.repo_path, name: found.row.name } : { reason: `${h.to_name}'s project cannot be located: ${found.reason}` };
   };
   for (const t of trackers) {
     if (t.handoff === void 0)
@@ -9095,8 +9096,12 @@ function resolveSentHandoffs(trackers, opts = {}) {
       out.set(t.id, unknown(where.reason));
       continue;
     }
+    const renamed = where.name !== void 0 && where.name !== h.to_name;
+    const named = renamed ? { ...h, to_name: where.name } : h;
+    if (renamed)
+      currentNames.set(t.id, where.name);
     const list = groups.get(where.root) ?? [];
-    list.push({ id: t.id, h });
+    list.push({ id: t.id, h: named });
     groups.set(where.root, list);
   }
   for (const [root, list] of groups) {
@@ -9148,8 +9153,9 @@ function resolveSentHandoffs(trackers, opts = {}) {
   for (const t of trackers) {
     const status = out.get(t.id);
     const milestone = status && sentHandoffOf(t)?.milestone;
-    if (status && milestone)
-      out.set(t.id, { ...status, milestone });
+    const to_name = currentNames.get(t.id);
+    if (status && (milestone || to_name !== void 0))
+      out.set(t.id, { ...status, ...milestone ? { milestone } : {}, ...to_name !== void 0 ? { to_name } : {} });
   }
   return out;
 }
@@ -18661,6 +18667,12 @@ function itemBaselines(store, t) {
   const own = (t.file_keys ?? []).filter((k) => typeof all?.[k] === "string");
   return Object.fromEntries(own.map((k) => [k, all[k]]));
 }
+function itemTargetUpdatedAt(store, t) {
+  if (!store || !DIFF_LANES.includes(t.system_reason) || !t.feature_link) return void 0;
+  const at = store.get(t.feature_link)?.updated_at;
+  return typeof at === "string" ? at : void 0;
+}
+var gitOpts = { encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 };
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -18852,9 +18864,11 @@ function launchWorker(opts) {
       const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
       const batch = selectBatch(eligible);
       const baselinesById = new Map(eligible.map((t) => [t.id, opts.store ? itemBaselines(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.baselines : void 0]));
+      const updatedAtById = new Map(eligible.map((t) => [t.id, opts.store ? itemTargetUpdatedAt(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.target_updated_at : void 0]));
       const withBaselines = (t) => {
         const baselines = baselinesById.get(t.id);
-        return baselines && typeof baselines === "object" ? { baselines } : {};
+        const updatedAt = updatedAtById.get(t.id);
+        return { ...baselines && typeof baselines === "object" ? { baselines } : {}, ...typeof updatedAt === "string" ? { target_updated_at: updatedAt } : {} };
       };
       const chainAttempted = opts.trigger === "chain" && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
       writeFileSync9(
@@ -19205,8 +19219,9 @@ function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP,
   return lines.join("\n");
 }
 function delegatedStatus(r, handoffStatus) {
-  const to = r.handoff?.to_name ? `project '${r.handoff.to_name}'` : "another project";
   const status = handoffStatus?.get?.(r.id);
+  const name = status?.to_name ?? r.handoff?.to_name;
+  const to = name ? `project '${name}'` : "another project";
   return status ? `${to}: ${status.text}` : `${to}: status not read here (board_query shows it)`;
 }
 
