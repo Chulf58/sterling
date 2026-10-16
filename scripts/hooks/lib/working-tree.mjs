@@ -33,7 +33,11 @@ export function isForeignTree(record, root, workingTrees) {
   const wt = record?.working_tree;
   if (!wt) return false;
   if (!root) return true;
-  const mapped = workingTrees && Object.hasOwn(workingTrees, wt) ? String(workingTrees[wt]) : undefined;
+  // An empty or non-string mapping counts as no mapping, as treeRootFor's
+  // `if (!mapped)` does: the name is compared as itself, never joined onto the
+  // root (join(root, '') IS the root).
+  const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : undefined;
+  const mapped = typeof raw === 'string' && raw ? raw : undefined;
   const location = mapped === undefined ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join(root, mapped);
   return !sameLocationAnyHost(location, root);
 }

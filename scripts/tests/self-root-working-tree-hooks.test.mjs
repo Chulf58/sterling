@@ -146,3 +146,16 @@ test('ownershipJoin: a mapped-to-root owner owns; a foreign-only owner is unowne
     cleanup();
   }
 });
+
+// The MCP server's treeRootFor treats a falsy mapping as no mapping (`if
+// (!mapped)`), so an empty value never resolves to the root: the name is
+// compared as itself. The hook side follows the same rule, and a non-string
+// value (a raw, unparsed config) is treated the same way.
+test('isForeignTree: an empty, whitespace-only or non-string mapping never grants root ownership', () => {
+  const ROOT = '/home/u/proj';
+  const trees = { empty: '', blank: '   ', num: 0, obj: {}, nul: null, [ROOT]: '' };
+  for (const name of ['empty', 'blank', 'num', 'obj', 'nul']) {
+    assert.equal(isForeignTree({ working_tree: name }, ROOT, trees), true, name);
+  }
+  assert.equal(isForeignTree({ working_tree: ROOT }, ROOT, trees), false, 'an empty mapping falls back to the name itself, which here is the root (as treeRootFor does)');
+});
