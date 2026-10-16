@@ -11,16 +11,17 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, renameSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 let SterlingStore;
+let ProjectRegistry;
 let lib;
 before(async () => {
-  ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
+  ({ SterlingStore, ProjectRegistry } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
   lib = await import(pathToFileURL(join(root, 'scripts', 'hooks', 'lib', 'board-ready.mjs')).href);
 });
 
@@ -40,6 +41,42 @@ function mk(store, over) {
   });
 }
 const h = (text, rec) => `${text} (${rec.id.slice(0, 8)})`;
+
+/** A temp project registry, made the process's (STERLING_REGISTRY_DB) for the case so no test reads the machine's own. */
+async function withTempRegistry(fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-board-ready-registry-'));
+  const path = join(dir, 'registry.db');
+  const prev = process.env.STERLING_REGISTRY_DB;
+  process.env.STERLING_REGISTRY_DB = path;
+  const registry = new ProjectRegistry(path);
+  const register = (name, repo_path, at = '2026-10-01T00:00:00.000Z') => registry.register({ repo_path, name, stack_tags: [], toolchains: [], sterling_version: null, at });
+  try {
+    return await fn({ path, registry, register });
+  } finally {
+    registry.close();
+    if (prev === undefined) delete process.env.STERLING_REGISTRY_DB;
+    else process.env.STERLING_REGISTRY_DB = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** A receiver project with one received item, and a tracker for it on `p`'s board; returns the tracker id. */
+function handOff(p, beta) {
+  const transfer = randomUUID();
+  const trackerId = randomUUID();
+  const remote = mk(beta.store, { text: 'Do it there', handoff: { role: 'received', transfer_id: transfer, from_root: p.dir, from_name: 'alpha', from_item_id: trackerId } });
+  beta.store.close();
+  mk(p.store, { id: trackerId, text: "Handed to project 'beta': Do it there", handoff: { role: 'sent', transfer_id: transfer, to_root: beta.dir, to_name: 'beta', to_item_id: remote.id } });
+  return trackerId;
+}
+
+/** Move the receiver's folder and repoint the registry row, as list-projects --move does. */
+function moveReceiver(registry, beta) {
+  const moved = `${beta.dir}-moved`;
+  renameSync(beta.dir, moved);
+  assert.equal(registry.moveProject(beta.dir, moved, '2026-10-05T00:00:00.000Z').status, 'moved');
+  return moved;
+}
 
 test('renderBoardReadiness: three groups in order, needs shown on WAITING, blocked items left out, live lanes k/N', () => {
   const p = project();
@@ -263,6 +300,32 @@ test('H1 end to end: the board readiness block reaches additionalContext', () =>
   }
 });
 
+test('H1 end to end: a delegated tracker whose receiver was moved with --move shows its real status, not the old path (GitHub issue #119)', async () => {
+  const p = project();
+  const beta = project();
+  let moved;
+  try {
+    await withTempRegistry(async ({ path, registry, register }) => {
+      register('beta', beta.dir);
+      const trackerId = handOff(p, beta);
+      p.store.close();
+      moved = moveReceiver(registry, beta);
+      const res = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(root, 'scripts', 'hooks', 'h1-session-start.mjs')], {
+        input: JSON.stringify({ session_id: 'sess-board-moved', cwd: p.dir, hook_event_name: 'SessionStart', source: 'startup' }),
+        encoding: 'utf8',
+        env: { ...process.env, CLAUDE_PROJECT_DIR: p.dir, STERLING_REGISTRY_DB: path },
+        timeout: 120_000,
+      });
+      assert.equal(res.status, 0, res.stderr);
+      const ctx = JSON.parse(res.stdout).hookSpecificOutput.additionalContext;
+      assert.ok(ctx.includes(`- ${h("Handed to project 'beta': Do it there", { id: trackerId })} — project 'beta': open in beta`), ctx.slice(0, 3000));
+    });
+  } finally {
+    rmSync(p.dir, { recursive: true, force: true });
+    rmSync(moved ?? beta.dir, { recursive: true, force: true });
+  }
+});
+
 test('H20 end to end: one BOARD READY line on an Agent dispatch, silent on the repeat even with a different brief', () => {
   const p = project();
   try {
@@ -340,6 +403,8 @@ test('OpenCode: a delegated tracker shows the status read from the receiving pro
   const p = project();
   const beta = project();
   try {
+    await withTempRegistry(async ({ register }) => {
+    register('beta', beta.dir);
     const transfer = randomUUID();
     const trackerId = randomUUID();
     const remote = mk(beta.store, { text: 'Do it there', handoff: { role: 'received', transfer_id: transfer, from_root: p.dir, from_name: 'alpha', from_item_id: trackerId } });
@@ -351,9 +416,28 @@ test('OpenCode: a delegated tracker shows the status read from the receiving pro
     assert.ok(text.includes(`- ${h("Handed to project 'beta': Do it there", { id: trackerId })} — project 'beta': open in beta`), text.slice(-1500));
     assert.match(text, /Pending \([0-9a-f]{8}\) — project 'beta': delivery unconfirmed/);
     assert.doesNotMatch(text, /status not read here/);
+    });
   } finally {
     p.cleanup();
     rmSync(beta.dir, { recursive: true, force: true });
+  }
+});
+
+test('OpenCode: a delegated tracker whose receiver was moved with --move shows its real status (GitHub issue #119)', async () => {
+  const p = project();
+  const beta = project();
+  let moved;
+  try {
+    await withTempRegistry(async ({ registry, register }) => {
+      register('beta', beta.dir);
+      const trackerId = handOff(p, beta);
+      moved = moveReceiver(registry, beta);
+      const text = await ocContext(p);
+      assert.ok(text.includes(`- ${h("Handed to project 'beta': Do it there", { id: trackerId })} — project 'beta': open in beta`), text.slice(-1500));
+    });
+  } finally {
+    p.cleanup();
+    rmSync(moved ?? beta.dir, { recursive: true, force: true });
   }
 });
 

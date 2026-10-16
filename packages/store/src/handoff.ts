@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { closeSync, existsSync, openSync, readFileSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { resolveReceiverLocation, type LocatorRow, type RegistryOccupancy, type RegistrySnapshot } from './registry.js';
 import { HANDOFFS_DIR_REL, handoffClosureReadSchema, handoffEvidenceFileReadSchema, todoBoardItemReadSchema, todoHandoffReadSchema, todoWaitFieldsReadSchema, type HandoffEvidence, type TodoHandoff } from '@sterling/schemas';
 
 export type SentHandoff = Extract<TodoHandoff, { role: 'sent' }>;
@@ -120,10 +121,10 @@ function evidenceText(e: HandoffEvidence): string {
  * malformed or other hand-off's sidecar is no evidence, never proof and never
  * a reason to doubt the closure. Blank values are dropped.
  */
-function readEvidence(h: SentHandoff & { to_item_id: string }): HandoffEvidence | undefined {
+function readEvidence(h: SentHandoff & { to_item_id: string }, root: string): HandoffEvidence | undefined {
   let parsed;
   try {
-    const text = readIfPresent(join(h.to_root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
+    const text = readIfPresent(join(root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
     if (text === undefined) return undefined;
     parsed = handoffEvidenceFileReadSchema.safeParse(JSON.parse(text));
   } catch {
@@ -169,8 +170,8 @@ function receiverStorage(root: string): string | undefined {
   return typeof raw.storage === 'string' ? raw.storage : undefined;
 }
 
-function closureStatus(h: SentHandoff & { to_item_id: string }): HandoffStatus {
-  const p = join(h.to_root, HANDOFFS_DIR_REL, `${h.transfer_id}.json`);
+function closureStatus(h: SentHandoff & { to_item_id: string }, root: string): HandoffStatus {
+  const p = join(root, HANDOFFS_DIR_REL, `${h.transfer_id}.json`);
   // Read directly: only ENOENT means there is no closure file. A permission
   // error must not read as "gone", because the file may be there.
   let text: string | undefined;
@@ -187,7 +188,7 @@ function closureStatus(h: SentHandoff & { to_item_id: string }): HandoffStatus {
   if (c.transfer_id !== h.transfer_id || c.item_id !== h.to_item_id) {
     return unknown(`the closure file ${p} names transfer ${c.transfer_id} item ${c.item_id}, not transfer ${h.transfer_id} item ${h.to_item_id}`);
   }
-  const evidence = readEvidence(h);
+  const evidence = readEvidence(h, root);
   return {
     state: 'done',
     text: statusText.done(h.to_name, c.closed_at, c.note, h.milestone, evidence),
@@ -209,9 +210,9 @@ function closureStatus(h: SentHandoff & { to_item_id: string }): HandoffStatus {
  * timeout, and is checked again after it; running out reads unknown, never
  * open or blocked.
  */
-function rowStatus(db: DatabaseSync, trackerId: string, h: SentHandoff & { to_item_id: string }, budget: LookupBudget): HandoffStatus {
+function rowStatus(db: DatabaseSync, root: string, trackerId: string, h: SentHandoff & { to_item_id: string }, budget: LookupBudget): HandoffStatus {
   const row = db.prepare('SELECT body, status FROM records WHERE id = ?').get(h.to_item_id) as { body: string; status: string } | undefined;
-  if (!row) return closureStatus(h);
+  if (!row) return closureStatus(h, root);
   let body: Record<string, unknown>;
   try {
     body = JSON.parse(row.body) as Record<string, unknown>;
@@ -263,6 +264,44 @@ export interface ResolveSentHandoffsOptions {
   budgetMs?: number;
   /** injectable clock for the budget, in ms */
   clock?: () => number;
+  /**
+   * The machine's project registry (GitHub issue #119). When given, each
+   * tracker's receiver is located through it (resolveReceiverLocation: the
+   * project that occupied to_root when the tracker was created, wherever it is
+   * now; else the row at to_root, then to_name), and that one root is used for
+   * every read. A registry that is
+   * missing or unreadable, or a receiver it does not locate, reads unknown.
+   * When absent, to_root is read as stored.
+   */
+  registryPath?: string;
+}
+
+/**
+ * The registry's rows (repo_path, name, project_key) and occupancy history,
+ * read read-only. A registry no writer has migrated yet (no project_key
+ * column, no occupancy table) reads keyless rows and no history, so trackers
+ * resolve by their root's current row, then by name.
+ */
+function readRegistrySnapshotReadOnly(path: string, busyTimeoutMs: number): RegistrySnapshot {
+  const db = openForeignDbReadOnly(path, busyTimeoutMs);
+  try {
+    db.exec('BEGIN');
+    try {
+      const keyed = (db.prepare('PRAGMA table_info(projects)').all() as { name: string }[]).some((c) => c.name === 'project_key');
+      const rows = (db.prepare(`SELECT repo_path, name, ${keyed ? 'project_key' : 'NULL AS project_key'} FROM projects`).all() as unknown as LocatorRow[]).map((r) => ({
+        repo_path: r.repo_path,
+        name: r.name,
+        project_key: r.project_key,
+      }));
+      const hasHistory = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_occupancy'`).get() !== undefined;
+      const occupancy = hasHistory ? (db.prepare('SELECT path, project_key, from_at, to_at FROM project_occupancy').all() as unknown as RegistryOccupancy[]) : [];
+      return { rows, occupancy };
+    } finally {
+      db.exec('COMMIT');
+    }
+  } finally {
+    db.close();
+  }
 }
 
 /**
@@ -274,7 +313,7 @@ export interface ResolveSentHandoffsOptions {
  * receiver's failure: that receiver's trackers read "status unknown: <reason>".
  */
 export function resolveSentHandoffs(
-  trackers: readonly { id: string; handoff?: unknown }[],
+  trackers: readonly { id: string; handoff?: unknown; created_at?: string }[],
   opts: ResolveSentHandoffsOptions = {}
 ): Map<string, HandoffStatus> {
   const busy = opts.busyTimeoutMs ?? 250;
@@ -286,6 +325,28 @@ export function resolveSentHandoffs(
   const exhausted = (where: string) => `time budget exhausted (${budget} ms) before ${where} was read`;
   const out = new Map<string, HandoffStatus>();
   const groups = new Map<string, { id: string; h: SentHandoff & { to_item_id: string } }[]>();
+  // The registry is read once, lazily, inside the budget, and only when a
+  // tracker needs a receiver located.
+  let snapshot: RegistrySnapshot | { failed: string } | undefined;
+  const locate = (h: SentHandoff, createdAt: string | undefined): { root: string } | { reason: string } => {
+    const regPath = opts.registryPath;
+    if (regPath === undefined) return { root: h.to_root };
+    if (snapshot === undefined) {
+      const left = remaining();
+      if (left <= 0) snapshot = { failed: exhausted(`the project registry ${regPath}`) };
+      else if (!existsSync(regPath)) snapshot = { failed: `there is no project registry at ${regPath}, so the receiver cannot be located` };
+      else {
+        try {
+          snapshot = readRegistrySnapshotReadOnly(regPath, Math.min(busy, left));
+        } catch (e) {
+          snapshot = { failed: `the project registry ${regPath} could not be read (${errText(e)})` };
+        }
+      }
+    }
+    if ('failed' in snapshot) return { reason: snapshot.failed };
+    const found = resolveReceiverLocation(h, createdAt, snapshot);
+    return 'row' in found ? { root: found.row.repo_path } : { reason: `${h.to_name}'s project cannot be located: ${found.reason}` };
+  };
   for (const t of trackers) {
     if (t.handoff === undefined) continue;
     const h = sentHandoffOf(t);
@@ -297,9 +358,14 @@ export function resolveSentHandoffs(
       out.set(t.id, { state: 'unconfirmed', text: statusText.unconfirmed() });
       continue;
     }
-    const list = groups.get(h.to_root) ?? [];
+    const where = locate(h, t.created_at);
+    if ('reason' in where) {
+      out.set(t.id, unknown(where.reason));
+      continue;
+    }
+    const list = groups.get(where.root) ?? [];
     list.push({ id: t.id, h: h as SentHandoff & { to_item_id: string } });
-    groups.set(h.to_root, list);
+    groups.set(where.root, list);
   }
   for (const [root, list] of groups) {
     const fail = (reason: string) => {
@@ -339,7 +405,7 @@ export function resolveSentHandoffs(
         }
         try {
           setBusyTimeout(db, Math.min(busy, now));
-          out.set(id, rowStatus(db, id, h, { remaining, exhausted, busy }));
+          out.set(id, rowStatus(db, root, id, h, { remaining, exhausted, busy }));
         } catch (e) {
           out.set(id, unknown(`${h.to_name}'s database could not be read (${errText(e)})`));
         }

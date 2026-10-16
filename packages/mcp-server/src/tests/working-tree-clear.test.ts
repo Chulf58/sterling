@@ -1,0 +1,105 @@
+// GitHub #118: the article-missing settlement notice tells the operator to clear
+// a merged branch's working_tree through knowledge_update, but the field's schema
+// (string, min 1, optional) refused both null and ''. knowledge_update now takes
+// working_tree: null as the explicit unset; '' stays refused, and so does a null
+// on any other field.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SterlingStore } from '@sterling/store';
+import { SterlingTools } from '../tools.js';
+
+const NOW = '2026-10-16T12:00:00.000Z';
+
+function harness() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-wt-clear-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'a.mjs'), 'x');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, repoRoot: dir, now: () => NOW });
+  const cleanup = () => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  return { store, tools, cleanup };
+}
+
+function articleFields(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    slug: `art-${randomUUID().slice(0, 8)}`,
+    title: 'an article',
+    what_it_does: 'x',
+    intended_behavior: 'x',
+    files: [{ path: 'src/a.mjs', role: 'impl' }],
+    current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'active',
+    history: [{ date: NOW, event: 'seed' }],
+    live_test_refs: [],
+    ...overrides,
+  };
+}
+
+type Stored = { id: string; working_tree?: string; title: string; version?: number };
+
+test('knowledge_update working_tree:null clears the field; the record reads back without it and other fields are untouched', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const created = tools.knowledgeCreate('feature_article', articleFields({ working_tree: 'merged-branch' })).record as Stored;
+    assert.equal((store.get(created.id) as unknown as Stored).working_tree, 'merged-branch');
+
+    tools.knowledgeUpdate(created.id, { working_tree: null });
+
+    const after = store.get(created.id) as unknown as Stored & Record<string, unknown>;
+    assert.equal('working_tree' in after, false, 'the key is gone, not stored as null');
+    assert.equal(after.title, 'an article');
+    assert.deepEqual(after.files, [{ path: 'src/a.mjs', role: 'impl' }]);
+    assert.equal(after.version, 2, 'a versioned write');
+
+    // Cleared again (already absent) is a no-op write, not a refusal.
+    tools.knowledgeUpdate(created.id, { working_tree: null, title: 'renamed' });
+    const again = store.get(created.id) as unknown as Stored;
+    assert.equal('working_tree' in again, false);
+    assert.equal(again.title, 'renamed');
+  } finally {
+    cleanup();
+  }
+});
+
+test("knowledge_update working_tree:'' is still refused and writes nothing", () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const created = tools.knowledgeCreate('feature_article', articleFields({ working_tree: 'merged-branch' })).record as Stored;
+    assert.throws(() => tools.knowledgeUpdate(created.id, { working_tree: '' }), /working_tree/);
+    const after = store.get(created.id) as unknown as Stored;
+    assert.equal(after.working_tree, 'merged-branch');
+    assert.equal(after.version, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('knowledge_create still refuses working_tree:null and working_tree:""', () => {
+  const { tools, cleanup } = harness();
+  try {
+    assert.throws(() => tools.knowledgeCreate('feature_article', articleFields({ working_tree: null })), /working_tree/);
+    assert.throws(() => tools.knowledgeCreate('feature_article', articleFields({ working_tree: '' })), /working_tree/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('null stays refused on every other field of the update path', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const created = tools.knowledgeCreate('feature_article', articleFields({ working_tree: 'merged-branch' })).record as Stored;
+    assert.throws(() => tools.knowledgeUpdate(created.id, { concept_family: null }), /concept_family/);
+    assert.equal((store.get(created.id) as unknown as Stored).working_tree, 'merged-branch');
+  } finally {
+    cleanup();
+  }
+});

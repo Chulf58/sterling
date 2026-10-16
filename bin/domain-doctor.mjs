@@ -15,14 +15,14 @@ import {
   openSync as openSync2,
   readSync,
   closeSync as closeSync2,
-  realpathSync as realpathSync4,
+  realpathSync as realpathSync5,
   statSync as statSync2,
   rmSync,
   linkSync,
   writeFileSync,
   renameSync
 } from "node:fs";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { randomUUID as randomUUID3 } from "node:crypto";
 import { homedir as homedir4 } from "node:os";
 import { basename as basename3, dirname as dirname6, join as join10 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,7 +31,7 @@ import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 // packages/store/dist/index.js
 import { mkdirSync as mkdirSync2, existsSync, statSync } from "node:fs";
 import { dirname as dirname4, join as join5, resolve as resolvePath2 } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5767,9 +5767,10 @@ var AXIS_MAX_TERM_LEN = 64;
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, realpathSync } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname2, join as join3 } from "node:path";
+import { dirname as dirname2, join as join3, resolve } from "node:path";
 var REGISTRY_DDL = `
 CREATE TABLE IF NOT EXISTS projects (
   repo_path TEXT PRIMARY KEY,
@@ -5781,6 +5782,16 @@ CREATE TABLE IF NOT EXISTS projects (
   last_init_at TEXT NOT NULL,
   last_seen_at TEXT
 );`;
+var OCCUPANCY_DDL = `
+CREATE TABLE IF NOT EXISTS project_occupancy (
+  path TEXT NOT NULL,
+  project_key TEXT NOT NULL,
+  from_at TEXT NOT NULL,
+  to_at TEXT
+);
+CREATE INDEX IF NOT EXISTS project_occupancy_path ON project_occupancy (path);
+CREATE INDEX IF NOT EXISTS project_occupancy_key ON project_occupancy (project_key);`;
+var MIGRATED_FROM = "";
 function registryPath() {
   return process.env.STERLING_REGISTRY_DB ?? join3(homedir3(), ".sterling", "registry.db");
 }
@@ -5791,20 +5802,66 @@ var ProjectRegistry = class {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA busy_timeout=5000");
     this.db.exec("PRAGMA journal_mode=WAL");
-    this.db.exec(REGISTRY_DDL);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec(REGISTRY_DDL);
+      this.migrateIdentity();
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      this.db.close();
+      throw e;
+    }
+  }
+  /** Idempotent, inside the constructor's transaction: the project_key
+   *  column, the occupancy table, a key and an open MIGRATED_FROM interval for
+   *  every row without a key. The path-alias table an unreleased build of
+   *  this branch wrote is dropped (it never shipped). */
+  migrateIdentity() {
+    const cols = this.db.prepare("PRAGMA table_info(projects)").all();
+    if (!cols.some((c) => c.name === "project_key"))
+      this.db.exec("ALTER TABLE projects ADD COLUMN project_key TEXT");
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS projects_project_key ON projects (project_key)");
+    this.db.exec(OCCUPANCY_DDL);
+    this.db.exec("DROP TABLE IF EXISTS project_path_aliases");
+    const unkeyed = this.db.prepare("SELECT repo_path FROM projects WHERE project_key IS NULL").all();
+    for (const { repo_path } of unkeyed) {
+      const key = randomUUID();
+      this.db.prepare("UPDATE projects SET project_key = ? WHERE repo_path = ?").run(key, repo_path);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(repo_path, key, MIGRATED_FROM);
+    }
+  }
+  /** Run `fn` in one BEGIN IMMEDIATE transaction. */
+  tx(fn) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const out = fn();
+      this.db.exec("COMMIT");
+      return out;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
   }
   /** Upsert by repo_path (init event, P4): create on first init
-   *  (first_init_at = last_init_at = at), refresh the mutable fields + last_init_at
-   *  on re-init while preserving first_init_at. */
+   *  (first_init_at = last_init_at = at, a new project_key, an occupancy
+   *  interval opened at `at`), refresh the mutable fields + last_init_at on
+   *  re-init while preserving first_init_at and the key. */
   register(input) {
-    this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
-         ON CONFLICT(repo_path) DO UPDATE SET
-           name = excluded.name,
-           stack_tags = excluded.stack_tags,
-           toolchains = excluded.toolchains,
-           sterling_version = excluded.sterling_version,
-           last_init_at = excluded.last_init_at`).run(input.repo_path, input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.at);
+    this.tx(() => {
+      const own = this.db.prepare("SELECT project_key FROM projects WHERE repo_path = ?").get(input.repo_path);
+      if (own) {
+        this.db.prepare("UPDATE projects SET name = ?, stack_tags = ?, toolchains = ?, sterling_version = ?, last_init_at = ? WHERE repo_path = ?").run(input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.repo_path);
+        const open = this.db.prepare("SELECT 1 FROM project_occupancy WHERE path = ? AND project_key = ? AND to_at IS NULL").get(input.repo_path, own.project_key);
+        if (!open)
+          this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(input.repo_path, own.project_key, input.at);
+        return;
+      }
+      const key = randomUUID();
+      this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at, project_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`).run(input.repo_path, input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.at, key);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(input.repo_path, key, input.at);
+    });
   }
   /** Session-activity touch (H1 SessionStart): update last_seen_at for an
    *  EXISTING row only — never create (registration is init's job). Returns
@@ -5861,10 +5918,71 @@ var ProjectRegistry = class {
       toolchains: JSON.parse(r.toolchains)
     }));
   }
+  /** The whole occupancy history, oldest interval first. */
+  occupancy() {
+    return this.db.prepare("SELECT path, project_key, from_at, to_at FROM project_occupancy ORDER BY from_at, path").all().map((o) => ({
+      path: o.path,
+      project_key: o.project_key,
+      from_at: o.from_at,
+      to_at: o.to_at
+    }));
+  }
+  /** The project_key of the row at repoPath, or undefined. */
+  keyOf(repoPath2) {
+    return this.db.prepare("SELECT project_key FROM projects WHERE repo_path = ?").get(repoPath2)?.project_key;
+  }
+  /** Rows (repo_path, name, project_key) and the occupancy history in one read transaction. */
+  snapshot() {
+    this.db.exec("BEGIN");
+    try {
+      const rows = this.db.prepare("SELECT repo_path, name, project_key FROM projects ORDER BY name").all().map((r) => ({
+        repo_path: r.repo_path,
+        name: r.name,
+        project_key: r.project_key
+      }));
+      const snap = { rows, occupancy: this.occupancy() };
+      this.db.exec("COMMIT");
+      return snap;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+  /** Folder move (/sterling:projects --move, GitHub issue #119): repoint the
+   *  row at `fromPath` to `toPath`, keeping its project_key; the key's interval
+   *  at `fromPath` closes at `at` and one at `toPath` opens. The conflict check
+   *  (another row at `toPath`), the row update and the interval writes run in
+   *  one BEGIN IMMEDIATE transaction. Touches nothing on disk. */
+  moveProject(fromPath, toPath, at) {
+    if (fromPath === toPath)
+      return { status: "unchanged" };
+    return this.tx(() => {
+      const key = this.keyOf(fromPath);
+      if (key === void 0)
+        return { status: "missing" };
+      const taken = this.db.prepare("SELECT repo_path FROM projects WHERE repo_path = ?").get(toPath);
+      if (taken)
+        return { status: "conflict", conflict_path: taken.repo_path };
+      this.db.prepare("UPDATE projects SET repo_path = ? WHERE repo_path = ?").run(toPath, fromPath);
+      this.db.prepare("UPDATE project_occupancy SET to_at = ? WHERE project_key = ? AND to_at IS NULL").run(at, key);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(toPath, key, at);
+      return { status: "moved" };
+    });
+  }
   /** Human-gated removal (the /sterling:projects prune of a missing project) —
-   *  never automatic. Returns whether a row was removed. */
-  remove(repoPath2) {
-    return this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2).changes > 0;
+   *  never automatic. Returns whether a row was removed. The key's open
+   *  interval closes at `at` and stays as its tombstone, so a tracker created
+   *  while the project was registered reads "no longer registered" and never
+   *  resolves to a project that registers at the path later. */
+  remove(repoPath2, at = (/* @__PURE__ */ new Date()).toISOString()) {
+    return this.tx(() => {
+      const key = this.keyOf(repoPath2);
+      if (key === void 0)
+        return false;
+      this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2);
+      this.db.prepare("UPDATE project_occupancy SET to_at = ? WHERE project_key = ? AND to_at IS NULL").run(at, key);
+      return true;
+    });
   }
   close() {
     this.db.close();
@@ -5882,7 +6000,7 @@ function sentHandoffOf(rec) {
 
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
-import { realpathSync } from "node:fs";
+import { realpathSync as realpathSync2 } from "node:fs";
 import { dirname as dirname3, basename, join as join4, resolve as resolvePath } from "node:path";
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
@@ -6058,7 +6176,7 @@ var SqliteDriver = class {
     this.db = new DatabaseSync3(path);
     let classifiedPath = this.dbPath;
     try {
-      classifiedPath = join4(realpathSync(dirname3(this.dbPath)), basename(this.dbPath));
+      classifiedPath = join4(realpathSync2(dirname3(this.dbPath)), basename(this.dbPath));
     } catch {
     }
     this.classifiedPath = classifiedPath;
@@ -6497,7 +6615,7 @@ function boardReadinessOf(targets, live, openBlocker) {
       blockers_open: blockersOpen,
       unblocks,
       state,
-      ...sent ? { handoff: sent } : {}
+      ...sent ? { handoff: sent, ...typeof t.created_at === "string" ? { created_at: t.created_at } : {} } : {}
     };
   });
 }
@@ -8814,7 +8932,7 @@ var SterlingStore = class _SterlingStore {
     }
     const dateStr = nowISO.slice(0, 10);
     this.create({
-      id: randomUUID(),
+      id: randomUUID2(),
       type: "reference_material",
       created_at: nowISO,
       updated_at: nowISO,
@@ -8833,7 +8951,7 @@ var SterlingStore = class _SterlingStore {
       catalog: {
         entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
       }
-    }, { operation_id: randomUUID() });
+    }, { operation_id: randomUUID2() });
   }
   /**
    * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
@@ -8854,7 +8972,7 @@ var SterlingStore = class _SterlingStore {
       return;
     const catalogs = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
     const todo = {
-      id: randomUUID(),
+      id: randomUUID2(),
       type: "todo",
       created_at: nowISO,
       updated_at: nowISO,
@@ -8871,7 +8989,7 @@ var SterlingStore = class _SterlingStore {
     if (catalogs.length > 0) {
       todo.feature_link = catalogs[0].id;
     }
-    this.create(todo, { operation_id: randomUUID() });
+    this.create(todo, { operation_id: randomUUID2() });
   }
   /**
    * The one row-insert. Since S2 ([stable-identity-design-v2]) the stored BODY
@@ -9085,7 +9203,7 @@ function buildResolver(store) {
     if (!byPrefix.has(p)) byPrefix.set(p, []);
     byPrefix.get(p).push(r);
   }
-  function resolve5(id) {
+  function resolve6(id) {
     if (id.length > 8) return fullIds.has(id) ? byId.get(id) : void 0;
     const hits = byPrefix.get(id);
     if (!hits || hits.length === 0) return void 0;
@@ -9099,15 +9217,15 @@ function buildResolver(store) {
     }
     return slugHits.get(slug);
   };
-  return { resolve: resolve5, resolveSlug, getById, size: index.length };
+  return { resolve: resolve6, resolveSlug, getById, size: index.length };
 }
 
 // scripts/lib/project.mjs
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 
 // scripts/lib/store-path.mjs
-import { lstatSync, realpathSync as realpathSync2 } from "node:fs";
-import { join as join6, resolve, sep } from "node:path";
+import { lstatSync, realpathSync as realpathSync3 } from "node:fs";
+import { join as join6, resolve as resolve2, sep } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target } = {}) {
     super(message);
@@ -9130,8 +9248,8 @@ function resolveStoreWritePath(root, ...segments) {
       );
     }
   }
-  const rootResolved = resolve(root);
-  const target = resolve(rootResolved, ...segments);
+  const rootResolved = resolve2(root);
+  const target = resolve2(rootResolved, ...segments);
   for (const raw of segments) {
     if (isAbsoluteSegment(raw)) {
       throw new StorePathContainmentError(
@@ -9172,13 +9290,13 @@ function resolveStoreWritePath(root, ...segments) {
     if (st.isSymbolicLink()) {
       let resolvedRoot;
       try {
-        resolvedRoot = realpathSync2(rootResolved);
+        resolvedRoot = realpathSync3(rootResolved);
       } catch {
         resolvedRoot = rootResolved;
       }
       let resolvedEscape;
       try {
-        resolvedEscape = realpathSync2(next);
+        resolvedEscape = realpathSync3(next);
       } catch {
         resolvedEscape = null;
       }
@@ -9192,7 +9310,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   let realRoot;
   try {
-    realRoot = realpathSync2(rootResolved);
+    realRoot = realpathSync3(rootResolved);
   } catch (e) {
     if (e && e.code === "ENOENT") {
       realRoot = rootResolved;
@@ -9208,7 +9326,7 @@ function resolveStoreWritePath(root, ...segments) {
     realDeepest = realRoot;
   } else {
     try {
-      realDeepest = realpathSync2(deepestExisting);
+      realDeepest = realpathSync3(deepestExisting);
     } catch (e) {
       throw new StorePathContainmentError(
         `resolveStoreWritePath: could not realpath '${deepestExisting}' while walking toward '${target}' (${e && e.code || e && e.message || e}) \u2014 refusing rather than trusting an unverified ancestor`,
@@ -9282,15 +9400,15 @@ function hasFlag(name, argv = process.argv.slice(2)) {
 
 // scripts/lib/hobby-only.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync2, realpathSync as realpathSync3 } from "node:fs";
-import { basename as basename2, dirname as dirname5, join as join9, resolve as resolve4 } from "node:path";
+import { existsSync as existsSync2, realpathSync as realpathSync4 } from "node:fs";
+import { basename as basename2, dirname as dirname5, join as join9, resolve as resolve5 } from "node:path";
 
 // scripts/lib/handoff-projection.mjs
-import { join as join8, resolve as resolve3 } from "node:path";
+import { join as join8, resolve as resolve4 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
 import { lstatSync as lstatSync2, readFileSync, readdirSync, mkdirSync as mkdirSync3, openSync, writeSync, closeSync, unlinkSync, constants } from "node:fs";
-import { join as join7, resolve as resolve2 } from "node:path";
+import { join as join7, resolve as resolve3 } from "node:path";
 var ContainmentError = class extends Error {
   constructor(message) {
     super(message);
@@ -9308,7 +9426,7 @@ var lstatOrNull = (p) => {
 function containedPath(root, rel, leaf) {
   const segments = rel.split("/").filter(Boolean);
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
-  let cursor = resolve2(root);
+  let cursor = resolve3(root);
   for (const [index, part] of segments.entries()) {
     cursor = join7(cursor, part);
     const st = lstatOrNull(cursor);
@@ -9338,7 +9456,7 @@ var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 var fwd = (p) => p.replace(/\\/g, "/");
 var CONFIG_REL = ".sterling/config.json";
 function readRawConfig(root, ErrorClass, subject) {
-  const where = `${fwd(resolve3(root))}/${CONFIG_REL}`;
+  const where = `${fwd(resolve4(root))}/${CONFIG_REL}`;
   if (!existsContained(root, CONFIG_REL, "file")) return { where, parsed: void 0 };
   let parsed;
   try {
@@ -9382,8 +9500,8 @@ function invokingRoot(cwd = process.cwd()) {
   if (r.error || r.status !== 0) return cwd;
   const [gitDir, commonDir] = r.stdout.split("\n").map((l) => l.trim());
   if (!gitDir || !commonDir) return cwd;
-  const commonReal = realpathSync3(resolve4(cwd, commonDir));
-  if (realpathSync3(resolve4(cwd, gitDir)) === commonReal || basename2(commonReal) !== ".git") return cwd;
+  const commonReal = realpathSync4(resolve5(cwd, commonDir));
+  if (realpathSync4(resolve5(cwd, gitDir)) === commonReal || basename2(commonReal) !== ".git") return cwd;
   return dirname5(commonReal);
 }
 function refuseOnPostgresStorage(root, scriptName) {
@@ -9618,11 +9736,11 @@ function sameFile(a, b) {
   let ra;
   let rb;
   try {
-    ra = realpathSync4(a);
+    ra = realpathSync5(a);
   } catch {
   }
   try {
-    rb = realpathSync4(b);
+    rb = realpathSync5(b);
   } catch {
   }
   if (ra !== void 0 && ra === rb) return true;
@@ -10158,7 +10276,7 @@ function adoptCreateOnly(from, to) {
       `refusing: the destination directory '${destDir}' could not be created (${e.message}). Nothing was published and no destination was created at '${to}'.`
     );
   }
-  const snapshot = POSIX(join10(destDir, `.adopt-snapshot-${process.pid}-${randomUUID2()}.tmp`));
+  const snapshot = POSIX(join10(destDir, `.adopt-snapshot-${process.pid}-${randomUUID3()}.tmp`));
   pendingSnapshot = snapshot;
   console.log(`adopt --apply --create-only ${from} \u2192 ${to}`);
   vacuumIntoSnapshot(from, snapshot);
@@ -10580,7 +10698,7 @@ function physicalKey(dbPath) {
   } catch {
   }
   try {
-    return `real:${POSIX(realpathSync4(dbPath))}`;
+    return `real:${POSIX(realpathSync5(dbPath))}`;
   } catch {
     return `path:${POSIX(dbPath)}`;
   }
@@ -11148,7 +11266,7 @@ function rewriteConfigCas(dir, configPath, oldName, newName, newPath) {
     const next = renamedConfig(JSON.parse(text), oldName, newName, newPath);
     if (next === null) return { changed: false, raw: JSON.parse(text) };
     parseConfig(next);
-    const tmp = resolveStoreWritePath(dir, ".sterling", `config.json.rename-${process.pid}-${randomUUID2()}.tmp`);
+    const tmp = resolveStoreWritePath(dir, ".sterling", `config.json.rename-${process.pid}-${randomUUID3()}.tmp`);
     writeFileSync(tmp, JSON.stringify(next, null, 2) + (text.endsWith("\n") ? "\n" : ""));
     if (readFileSync2(configPath, "utf8") !== text) {
       rmSync(tmp, { force: true });
@@ -11229,7 +11347,7 @@ function validateRenamedCopy(oldPath, copyPath, oldName, newName, operationId, r
 function renameCopy(oldPath, newPath, oldName, newName, operationId, retag = false) {
   const destDir = dirname6(newPath);
   mkdirSync4(destDir, { recursive: true });
-  const temp = POSIX(join10(destDir, `.rename-${operationId}-${process.pid}-${randomUUID2()}.tmp`));
+  const temp = POSIX(join10(destDir, `.rename-${operationId}-${process.pid}-${randomUUID3()}.tmp`));
   pendingSnapshot = temp;
   vacuumIntoSnapshot(oldPath, temp);
   const db = new DatabaseSync5(temp);
@@ -11503,7 +11621,7 @@ Fix or unregister them, then rerun. Nothing was written.`
     return;
   }
   if (!resuming) {
-    fence = { kind: "rename", operation_id: randomUUID2(), from_domain: oldName, to_domain: newName, to_path: newPath, fenced_at: (/* @__PURE__ */ new Date()).toISOString() };
+    fence = { kind: "rename", operation_id: randomUUID3(), from_domain: oldName, to_domain: newName, to_path: newPath, fenced_at: (/* @__PURE__ */ new Date()).toISOString() };
     const err = writeRenameFence(oldPath, fence, oldName);
     if (err) fail(`refusing: ${err}. The fence was not written and nothing else was changed.`);
     console.log(`  fenced the old store (operation ${fence.operation_id}): writes to it are refused from now on`);
@@ -11560,11 +11678,11 @@ Fix them and rerun 'rename ${oldName} ${newName} --apply'; it resumes from the r
 function invokedAsCli() {
   try {
     if (!process.argv[1]) return true;
-    const launched = realpathSync4(process.argv[1]);
+    const launched = realpathSync5(process.argv[1]);
     const entries = [fileURLToPath(new URL("../scripts/domain-doctor.mjs", import.meta.url).href), fileURLToPath(new URL("../bin/domain-doctor.mjs", new URL("../scripts/domain-doctor.mjs", import.meta.url).href))];
     return entries.some((entry) => {
       try {
-        return realpathSync4(entry) === launched;
+        return realpathSync5(entry) === launched;
       } catch {
         return false;
       }

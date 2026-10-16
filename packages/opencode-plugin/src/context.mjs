@@ -10,7 +10,7 @@
 // out": a system prompt that changed every turn re-wrote the whole conversation to the
 // provider's prompt cache; finding why-is-the-prompt-cache-hit-rate-lower-on-opencode-codeburn).
 import { join } from 'node:path';
-import { SUPPORTED_SCHEMA_VERSION, resolveSentHandoffs } from '@sterling/store';
+import { SUPPORTED_SCHEMA_VERSION, registryPath, resolveSentHandoffs } from '@sterling/store';
 import { probeSchemaVersion } from '../../../scripts/lib/update.mjs';
 import { opencodeHostTail, renderSterlingLayer, sterlingRoot } from './layer.mjs';
 import { errText, logLine } from './log.mjs';
@@ -211,7 +211,8 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
     const delegated = readiness.filter((r) => r.state === 'delegated');
     if (!delegated.length) return undefined;
     try {
-      return resolveSentHandoffs(delegated.map((r) => ({ id: r.id, handoff: r.handoff })), { budgetMs: 500 });
+      // Located through the project registry as of each tracker's created_at (GitHub issue #119).
+      return resolveSentHandoffs(delegated.map((r) => ({ id: r.id, handoff: r.handoff, created_at: r.created_at })), { budgetMs: 500, registryPath: registryPath() });
     } catch (e) {
       logLine(root, `context: delegated board item status unreadable: ${errText(e)}`);
       return undefined;

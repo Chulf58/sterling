@@ -13,13 +13,13 @@ import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 
 // packages/tui/dist/controller.js
 import { readFileSync as readFileSync14, writeFileSync as writeFileSync6, existsSync as existsSync10 } from "node:fs";
-import { basename as basename2, dirname as dirname6, join as join17 } from "node:path";
+import { basename as basename2, dirname as dirname7, join as join18 } from "node:path";
 import { randomUUID as randomUUID7 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
 // packages/store/dist/index.js
-import { mkdirSync as mkdirSync3, existsSync as existsSync3, statSync as statSync3 } from "node:fs";
-import { dirname as dirname4, join as join6, resolve as resolvePath2 } from "node:path";
+import { mkdirSync as mkdirSync4, existsSync as existsSync3, statSync as statSync3 } from "node:fs";
+import { dirname as dirname5, join as join7, resolve as resolvePath2 } from "node:path";
 import { randomUUID as randomUUID3 } from "node:crypto";
 
 // node_modules/zod/v3/external.js
@@ -8001,11 +8001,50 @@ var AXIS_MAX_TERM_LEN = 64;
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
+import { mkdirSync as mkdirSync3, realpathSync } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { dirname as dirname3, join as join4, resolve as resolve2 } from "node:path";
+function canonicalPath(p) {
+  const abs = resolve2(p);
+  try {
+    return realpathSync(abs);
+  } catch {
+    return abs;
+  }
+}
+function resolveReceiverLocation(ref, createdAt, snapshot) {
+  const root = canonicalPath(ref.to_root);
+  if (createdAt !== void 0) {
+    const then = snapshot.occupancy.find((o) => o.from_at <= createdAt && (o.to_at === null || createdAt < o.to_at) && canonicalPath(o.path) === root);
+    if (then) {
+      const row = snapshot.rows.find((r) => r.project_key === then.project_key);
+      if (row)
+        return { row, via: "history" };
+      const last = snapshot.occupancy.filter((o) => o.project_key === then.project_key).sort((a, b) => a.from_at < b.from_at ? 1 : -1)[0];
+      return {
+        reason: `the project at ${ref.to_root} when this tracker was created is no longer registered (it was last registered at ${last.path}${last.to_at ? ` until ${last.to_at}` : ""})`
+      };
+    }
+  }
+  const byRoot = snapshot.rows.find((r) => canonicalPath(r.repo_path) === root);
+  if (byRoot)
+    return { row: byRoot, via: "root" };
+  const byName = snapshot.rows.filter((r) => r.name === ref.to_name);
+  const roots = new Set(byName.map((r) => r.repo_path));
+  if (roots.size === 1)
+    return { row: byName[0], via: "name" };
+  if (roots.size > 1)
+    return { reason: `no registered project has its root ${ref.to_root}, and its name '${ref.to_name}' is ambiguous (${roots.size} registered roots carry it)` };
+  return { reason: `no registered project has its root ${ref.to_root} or its name '${ref.to_name}'` };
+}
+function registryPath() {
+  return process.env.STERLING_REGISTRY_DB ?? join4(homedir3(), ".sterling", "registry.db");
+}
 
 // packages/store/dist/handoff.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
 import { closeSync as closeSync2, existsSync as existsSync2, openSync as openSync2, readFileSync as readFileSync4, readSync } from "node:fs";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 import { pathToFileURL } from "node:url";
 function sentHandoffOf(rec) {
   if (rec.handoff === void 0)
@@ -8062,10 +8101,10 @@ var EVIDENCE_LABELS = [["commit", "commit"], ["pr", "PR"], ["deploy", "deploy"],
 function evidenceText(e) {
   return EVIDENCE_LABELS.filter(([k]) => e[k] !== void 0).map(([k, label]) => `${label} ${e[k]}`).join(", ");
 }
-function readEvidence(h) {
+function readEvidence(h, root) {
   let parsed;
   try {
-    const text = readIfPresent(join4(h.to_root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
+    const text = readIfPresent(join5(root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
     if (text === void 0)
       return void 0;
     parsed = handoffEvidenceFileReadSchema.safeParse(JSON.parse(text));
@@ -8102,14 +8141,14 @@ function errText(e) {
   return e?.message ?? String(e);
 }
 function receiverStorage(root) {
-  const text = readIfPresent(join4(root, ".sterling", "config.json"));
+  const text = readIfPresent(join5(root, ".sterling", "config.json"));
   if (text === void 0)
     return void 0;
   const raw = JSON.parse(text);
   return typeof raw.storage === "string" ? raw.storage : void 0;
 }
-function closureStatus(h) {
-  const p = join4(h.to_root, HANDOFFS_DIR_REL, `${h.transfer_id}.json`);
+function closureStatus(h, root) {
+  const p = join5(root, HANDOFFS_DIR_REL, `${h.transfer_id}.json`);
   let text;
   let parsed;
   try {
@@ -8126,7 +8165,7 @@ function closureStatus(h) {
   if (c.transfer_id !== h.transfer_id || c.item_id !== h.to_item_id) {
     return unknown(`the closure file ${p} names transfer ${c.transfer_id} item ${c.item_id}, not transfer ${h.transfer_id} item ${h.to_item_id}`);
   }
-  const evidence = readEvidence(h);
+  const evidence = readEvidence(h, root);
   return {
     state: "done",
     text: statusText.done(h.to_name, c.closed_at, c.note, h.milestone, evidence),
@@ -8135,10 +8174,10 @@ function closureStatus(h) {
     ...evidence ? { evidence } : {}
   };
 }
-function rowStatus(db, trackerId, h, budget) {
+function rowStatus(db, root, trackerId, h, budget) {
   const row = db.prepare("SELECT body, status FROM records WHERE id = ?").get(h.to_item_id);
   if (!row)
-    return closureStatus(h);
+    return closureStatus(h, root);
   let body;
   try {
     body = JSON.parse(row.body);
@@ -8179,6 +8218,27 @@ function rowStatus(db, trackerId, h, budget) {
   }
   return { state: "open", text: statusText.open(h.to_name) };
 }
+function readRegistrySnapshotReadOnly(path, busyTimeoutMs) {
+  const db = openForeignDbReadOnly(path, busyTimeoutMs);
+  try {
+    db.exec("BEGIN");
+    try {
+      const keyed = db.prepare("PRAGMA table_info(projects)").all().some((c) => c.name === "project_key");
+      const rows = db.prepare(`SELECT repo_path, name, ${keyed ? "project_key" : "NULL AS project_key"} FROM projects`).all().map((r) => ({
+        repo_path: r.repo_path,
+        name: r.name,
+        project_key: r.project_key
+      }));
+      const hasHistory = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_occupancy'`).get() !== void 0;
+      const occupancy = hasHistory ? db.prepare("SELECT path, project_key, from_at, to_at FROM project_occupancy").all() : [];
+      return { rows, occupancy };
+    } finally {
+      db.exec("COMMIT");
+    }
+  } finally {
+    db.close();
+  }
+}
 function resolveSentHandoffs(trackers, opts = {}) {
   const busy = opts.busyTimeoutMs ?? 250;
   const budget = opts.budgetMs ?? 1500;
@@ -8188,6 +8248,30 @@ function resolveSentHandoffs(trackers, opts = {}) {
   const exhausted = (where) => `time budget exhausted (${budget} ms) before ${where} was read`;
   const out = /* @__PURE__ */ new Map();
   const groups = /* @__PURE__ */ new Map();
+  let snapshot;
+  const locate = (h, createdAt) => {
+    const regPath = opts.registryPath;
+    if (regPath === void 0)
+      return { root: h.to_root };
+    if (snapshot === void 0) {
+      const left = remaining();
+      if (left <= 0)
+        snapshot = { failed: exhausted(`the project registry ${regPath}`) };
+      else if (!existsSync2(regPath))
+        snapshot = { failed: `there is no project registry at ${regPath}, so the receiver cannot be located` };
+      else {
+        try {
+          snapshot = readRegistrySnapshotReadOnly(regPath, Math.min(busy, left));
+        } catch (e) {
+          snapshot = { failed: `the project registry ${regPath} could not be read (${errText(e)})` };
+        }
+      }
+    }
+    if ("failed" in snapshot)
+      return { reason: snapshot.failed };
+    const found = resolveReceiverLocation(h, createdAt, snapshot);
+    return "row" in found ? { root: found.row.repo_path } : { reason: `${h.to_name}'s project cannot be located: ${found.reason}` };
+  };
   for (const t of trackers) {
     if (t.handoff === void 0)
       continue;
@@ -8200,9 +8284,14 @@ function resolveSentHandoffs(trackers, opts = {}) {
       out.set(t.id, { state: "unconfirmed", text: statusText.unconfirmed() });
       continue;
     }
-    const list = groups.get(h.to_root) ?? [];
+    const where = locate(h, t.created_at);
+    if ("reason" in where) {
+      out.set(t.id, unknown(where.reason));
+      continue;
+    }
+    const list = groups.get(where.root) ?? [];
     list.push({ id: t.id, h });
-    groups.set(h.to_root, list);
+    groups.set(where.root, list);
   }
   for (const [root, list] of groups) {
     const fail = (reason) => {
@@ -8227,7 +8316,7 @@ function resolveSentHandoffs(trackers, opts = {}) {
     }
     let db;
     try {
-      db = openForeignDbReadOnly(join4(root, ".sterling", "sterling.db"), Math.min(busy, left));
+      db = openForeignDbReadOnly(join5(root, ".sterling", "sterling.db"), Math.min(busy, left));
     } catch (e) {
       fail(errText(e));
       continue;
@@ -8241,7 +8330,7 @@ function resolveSentHandoffs(trackers, opts = {}) {
         }
         try {
           setBusyTimeout(db, Math.min(busy, now));
-          out.set(id, rowStatus(db, id, h, { remaining, exhausted, busy }));
+          out.set(id, rowStatus(db, root, id, h, { remaining, exhausted, busy }));
         } catch (e) {
           out.set(id, unknown(`${h.to_name}'s database could not be read (${errText(e)})`));
         }
@@ -8261,8 +8350,8 @@ function resolveSentHandoffs(trackers, opts = {}) {
 
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
-import { realpathSync } from "node:fs";
-import { dirname as dirname3, basename, join as join5, resolve as resolvePath } from "node:path";
+import { realpathSync as realpathSync2 } from "node:fs";
+import { dirname as dirname4, basename, join as join6, resolve as resolvePath } from "node:path";
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -8437,7 +8526,7 @@ var SqliteDriver = class {
     this.db = new DatabaseSync3(path);
     let classifiedPath = this.dbPath;
     try {
-      classifiedPath = join5(realpathSync(dirname3(this.dbPath)), basename(this.dbPath));
+      classifiedPath = join6(realpathSync2(dirname4(this.dbPath)), basename(this.dbPath));
     } catch {
     }
     this.classifiedPath = classifiedPath;
@@ -8885,7 +8974,7 @@ function boardReadinessOf(targets, live, openBlocker) {
       blockers_open: blockersOpen,
       unblocks,
       state,
-      ...sent ? { handoff: sent } : {}
+      ...sent ? { handoff: sent, ...typeof t.created_at === "string" ? { created_at: t.created_at } : {} } : {}
     };
   });
 }
@@ -11031,7 +11120,7 @@ var SterlingStore = class _SterlingStore {
     if (existsSync3(target)) {
       throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
     }
-    mkdirSync3(dirname4(target), { recursive: true });
+    mkdirSync4(dirname5(target), { recursive: true });
     this.db.snapshot(target);
   }
   close() {
@@ -11455,8 +11544,8 @@ var SterlingStore = class _SterlingStore {
 
 // packages/store/dist/routing.js
 import { lstatSync as lstatSync2, readFileSync as readFileSync5 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join7, resolve as resolve2 } from "node:path";
+import { homedir as homedir4 } from "node:os";
+import { join as join8, resolve as resolve3 } from "node:path";
 var ROUTED_CONNECT_TIMEOUT_MS = 2e3;
 var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
 var STORAGE_BACKENDS = ["sqlite", "postgres"];
@@ -11484,10 +11573,10 @@ var PostgresStoreNotMovedError = class extends PgStoreMissingError {
   }
 };
 function routedCredentialsPath() {
-  return join7(homedir3(), ".sterling", "credentials", "served.json");
+  return join8(homedir4(), ".sterling", "credentials", "served.json");
 }
 function readConfig(root) {
-  const path = join7(root, CONFIG_REL);
+  const path = join8(root, CONFIG_REL);
   try {
     lstatSync2(path);
   } catch (e) {
@@ -11540,13 +11629,13 @@ function pgStoreNames(projectId, stackTags) {
   return { metaSchema, projectSchema, domains };
 }
 function resolveStoreRoute(root) {
-  const absRoot = resolve2(root);
+  const absRoot = resolve3(root);
   const read = readConfig(absRoot);
   if (read === null)
     return null;
   const { config } = read;
   if (read.raw.storage !== "postgres") {
-    return { storage: "sqlite", root: absRoot, config, projectDbPath: join7(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
+    return { storage: "sqlite", root: absRoot, config, projectDbPath: join8(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
   }
   const shown = absRoot.replace(/\\/g, "/");
   const identity = readProjectIdentity(absRoot);
@@ -11736,8 +11825,8 @@ function routeOrDefault(root) {
   if (route !== null)
     return route;
   const config = parseConfig({});
-  const absRoot = resolve2(root);
-  return { storage: "sqlite", root: absRoot, config, projectDbPath: join7(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
+  const absRoot = resolve3(root);
+  return { storage: "sqlite", root: absRoot, config, projectDbPath: join8(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config) };
 }
 function openRoutedStores(root, opts = {}) {
   const route = routeOrDefault(root);
@@ -12025,7 +12114,8 @@ function todoCards(store, expanded = []) {
   const todos = store.query({ types: ["todo"], source: "user", cap: 500 });
   const readiness = new Map(store.boardReadiness(todos).map((r) => [r.id, r]));
   const delegated = [...readiness.values()].filter((r) => r.state === "delegated");
-  const handoffStatus = delegated.length ? resolveSentHandoffs(delegated.map((r) => ({ id: r.id, handoff: r.handoff })), { busyTimeoutMs: 50, budgetMs: 200 }) : /* @__PURE__ */ new Map();
+  const createdAt = new Map(todos.map((t) => [t.id, t.created_at]));
+  const handoffStatus = delegated.length ? resolveSentHandoffs(delegated.map((r) => ({ id: r.id, handoff: r.handoff, created_at: createdAt.get(r.id) })), { busyTimeoutMs: 50, budgetMs: 200, registryPath: registryPath() }) : /* @__PURE__ */ new Map();
   for (const t of todos) {
     const todo = t;
     const label = boardDisplayLabel(todo.text, todo.slug);
@@ -13447,9 +13537,9 @@ function runEffects(store, effects, now = () => (/* @__PURE__ */ new Date()).toI
 
 // packages/tui/dist/config-writeback.js
 import { readFileSync as readFileSync6, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 function configPath(explicit) {
-  return explicit ?? join8(process.cwd(), ".sterling", "config.json");
+  return explicit ?? join9(process.cwd(), ".sterling", "config.json");
 }
 var MOVE_STORE = '`node "<Sterling root>/bin/move-store.mjs" --to pg|sqlite`';
 var StorageTransitionRequiredError = class extends Error {
@@ -13572,7 +13662,7 @@ function openDataVersionProbe(paths) {
 
 // scripts/lib/agent-distribution.mjs
 import { createHash as createHash2, randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync7, writeFileSync as writeFileSync3, readdirSync, existsSync as existsSync5, mkdirSync as mkdirSync4, statSync as statSync4, lstatSync as lstatSync3, unlinkSync, renameSync, linkSync as linkSync2 } from "node:fs";
+import { readFileSync as readFileSync7, writeFileSync as writeFileSync3, readdirSync, existsSync as existsSync5, mkdirSync as mkdirSync5, statSync as statSync4, lstatSync as lstatSync3, unlinkSync, renameSync, linkSync as linkSync2 } from "node:fs";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -13811,10 +13901,10 @@ var RESTART_INSTRUCTION = [
 
 // scripts/lib/codex-mcp.mjs
 import { readFileSync as readFileSync8 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { join as join9 } from "node:path";
-function userScopeCodexServer({ env = process.env, home = homedir4(), readFile = readFileSync8 } = {}) {
-  const path = join9(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+import { homedir as homedir5 } from "node:os";
+import { join as join10 } from "node:path";
+function userScopeCodexServer({ env = process.env, home = homedir5(), readFile = readFileSync8 } = {}) {
+  const path = join10(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
   let raw;
   try {
     raw = readFile(path, "utf8");
@@ -13834,15 +13924,15 @@ function userScopeCodexServer({ env = process.env, home = homedir4(), readFile =
 // scripts/lib/handoff-projection.mjs
 import { spawnSync } from "node:child_process";
 import { existsSync as existsSync6 } from "node:fs";
-import { join as join12, resolve as resolve5 } from "node:path";
+import { join as join13, resolve as resolve6 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync5, readFileSync as readFileSync9, readdirSync as readdirSync2, mkdirSync as mkdirSync5, openSync as openSync3, writeSync, closeSync as closeSync3, unlinkSync as unlinkSync2, constants } from "node:fs";
-import { join as join11, resolve as resolve4 } from "node:path";
+import { lstatSync as lstatSync5, readFileSync as readFileSync9, readdirSync as readdirSync2, mkdirSync as mkdirSync6, openSync as openSync3, writeSync, closeSync as closeSync3, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { join as join12, resolve as resolve5 } from "node:path";
 
 // scripts/lib/store-path.mjs
-import { lstatSync as lstatSync4, realpathSync as realpathSync2 } from "node:fs";
-import { join as join10, resolve as resolve3, sep } from "node:path";
+import { lstatSync as lstatSync4, realpathSync as realpathSync3 } from "node:fs";
+import { join as join11, resolve as resolve4, sep } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target } = {}) {
     super(message);
@@ -13865,8 +13955,8 @@ function resolveStoreWritePath(root, ...segments) {
       );
     }
   }
-  const rootResolved = resolve3(root);
-  const target = resolve3(rootResolved, ...segments);
+  const rootResolved = resolve4(root);
+  const target = resolve4(rootResolved, ...segments);
   for (const raw of segments) {
     if (isAbsoluteSegment(raw)) {
       throw new StorePathContainmentError(
@@ -13885,7 +13975,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   if (target !== rootResolved && !target.startsWith(rootResolved + sep)) {
     throw new StorePathContainmentError(
-      `resolveStoreWritePath: '${join10(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
+      `resolveStoreWritePath: '${join11(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
       { root: rootResolved, target }
     );
   }
@@ -13893,7 +13983,7 @@ function resolveStoreWritePath(root, ...segments) {
   let cursor = rootResolved;
   let deepestExisting = rootResolved;
   for (const part of relParts) {
-    const next = join10(cursor, part);
+    const next = join11(cursor, part);
     let st;
     try {
       st = lstatSync4(next);
@@ -13907,13 +13997,13 @@ function resolveStoreWritePath(root, ...segments) {
     if (st.isSymbolicLink()) {
       let resolvedRoot;
       try {
-        resolvedRoot = realpathSync2(rootResolved);
+        resolvedRoot = realpathSync3(rootResolved);
       } catch {
         resolvedRoot = rootResolved;
       }
       let resolvedEscape;
       try {
-        resolvedEscape = realpathSync2(next);
+        resolvedEscape = realpathSync3(next);
       } catch {
         resolvedEscape = null;
       }
@@ -13927,7 +14017,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   let realRoot;
   try {
-    realRoot = realpathSync2(rootResolved);
+    realRoot = realpathSync3(rootResolved);
   } catch (e) {
     if (e && e.code === "ENOENT") {
       realRoot = rootResolved;
@@ -13943,7 +14033,7 @@ function resolveStoreWritePath(root, ...segments) {
     realDeepest = realRoot;
   } else {
     try {
-      realDeepest = realpathSync2(deepestExisting);
+      realDeepest = realpathSync3(deepestExisting);
     } catch (e) {
       throw new StorePathContainmentError(
         `resolveStoreWritePath: could not realpath '${deepestExisting}' while walking toward '${target}' (${e && e.code || e && e.message || e}) \u2014 refusing rather than trusting an unverified ancestor`,
@@ -13958,7 +14048,7 @@ function resolveStoreWritePath(root, ...segments) {
     );
   }
   const suffix = target.slice(deepestExisting.length);
-  const reconstructed = suffix ? join10(realDeepest, suffix) : realDeepest;
+  const reconstructed = suffix ? join11(realDeepest, suffix) : realDeepest;
   if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target}') resolves outside the project \u2014 refusing, nothing was written`,
@@ -13986,9 +14076,9 @@ var lstatOrNull = (p) => {
 function containedPath(root, rel, leaf) {
   const segments = rel.split("/").filter(Boolean);
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
-  let cursor = resolve4(root);
+  let cursor = resolve5(root);
   for (const [index, part] of segments.entries()) {
-    cursor = join11(cursor, part);
+    cursor = join12(cursor, part);
     const st = lstatOrNull(cursor);
     if (!st) break;
     const isLeaf = index === segments.length - 1;
@@ -14038,7 +14128,7 @@ function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
   if (!existsSync6(root)) return { files: [], unknown: null };
   const inside = run(["rev-parse", "--is-inside-work-tree"]);
   if (inside.failed) {
-    if (inside.notARepo && !existsSync6(join12(root, ".git"))) return { files: [], unknown: null };
+    if (inside.notARepo && !existsSync6(join13(root, ".git"))) return { files: [], unknown: null };
     return { files: [], unknown: inside.failed };
   }
   if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
@@ -14088,14 +14178,14 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { createHash as createHash3, randomUUID as randomUUID5 } from "node:crypto";
-import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync11, readdirSync as readdirSync4, realpathSync as realpathSync4, renameSync as renameSync2, rmSync as rmSync3, statSync as statSync5, unlinkSync as unlinkSync3, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname5, isAbsolute, join as join14, resolve as resolve7 } from "node:path";
+import { existsSync as existsSync8, mkdirSync as mkdirSync7, readFileSync as readFileSync11, readdirSync as readdirSync4, realpathSync as realpathSync5, renameSync as renameSync2, rmSync as rmSync3, statSync as statSync5, unlinkSync as unlinkSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname6, isAbsolute, join as join15, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync7, readFileSync as readFileSync10, readdirSync as readdirSync3, realpathSync as realpathSync3 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
-import { join as join13, resolve as resolve6, sep as sep2 } from "node:path";
+import { existsSync as existsSync7, readFileSync as readFileSync10, readdirSync as readdirSync3, realpathSync as realpathSync4 } from "node:fs";
+import { homedir as homedir6 } from "node:os";
+import { join as join14, resolve as resolve7, sep as sep2 } from "node:path";
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
@@ -14239,7 +14329,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync7, readFileSync10, readdirSync3, join13, homedir5);
+)(existsSync7, readFileSync10, readdirSync3, join14, homedir6);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -14346,10 +14436,10 @@ var FULL_PERMISSIONS = {
 };
 var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
 function storeWriteTools(pluginRoot = sterlingRootFrom()) {
-  const fm = normalize3(readFileSync11(join14(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
+  const fm = normalize3(readFileSync11(join15(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
   const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
   const tools = [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))].map((t) => `sterling_${t}`);
-  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(join14(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
+  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(join15(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
   return tools;
 }
 function opencodeModelRef(model) {
@@ -14364,10 +14454,10 @@ function opencodeModelFor({ model, opencodeModel } = {}) {
   return opencodeModel;
 }
 function sterlingRootFrom(moduleUrl = new URL("../../scripts/lib/opencode-install.mjs", import.meta.url).href) {
-  const start = dirname5(fileURLToPath(moduleUrl));
-  for (let dir = start; ; dir = dirname5(dir)) {
-    if (existsSync8(join14(dir, "agent-templates", "registry.json"))) return dir;
-    if (dirname5(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
+  const start = dirname6(fileURLToPath(moduleUrl));
+  for (let dir = start; ; dir = dirname6(dir)) {
+    if (existsSync8(join15(dir, "agent-templates", "registry.json"))) return dir;
+    if (dirname6(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
 function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, mode, model, writeTools, vars = {} } = {}) {
@@ -14449,13 +14539,13 @@ function fullAgentTargets(registry) {
   return targets;
 }
 function planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models = {} }) {
-  const registry = loadRegistry(join14(pluginRoot, "agent-templates", "registry.json"));
+  const registry = loadRegistry(join15(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const vars = { PROJECT_DIR: fwd2(projectDir2), STERLING_ROOT: fwd2(pluginRoot) };
   const rows = [];
   for (const { name, entry, rel, primary, mode } of fullAgentTargets(registry)) {
-    const path = join14(projectDir2, rel);
-    const templateContent = readFileSync11(join14(pluginRoot, "agent-templates", entry.file), "utf8");
+    const path = join15(projectDir2, rel);
+    const templateContent = readFileSync11(join15(pluginRoot, "agent-templates", entry.file), "utf8");
     const unsafe = usesInstallVars(templateContent, entry.opencode_full?.permission) ? INSTALL_VARS.filter((v) => !isShellSafePath(vars[v])) : [];
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
@@ -14497,7 +14587,7 @@ function planFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models =
   return rows;
 }
 function swapFullAgentModel({ projectDir: projectDir2, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync8(join14(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync8(join15(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir2, ["ls-files", "--", ".opencode"]);
@@ -14505,7 +14595,7 @@ function swapFullAgentModel({ projectDir: projectDir2, pluginRoot, agents, model
   return { rows: ensureFullAgents({ projectDir: projectDir2, pluginRoot, tracked, models }) };
 }
 function stageFullAgentModel({ projectDir: projectDir2, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync8(join14(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync8(join15(projectDir2, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir2, ["ls-files", "--", ".opencode"]);
@@ -14526,7 +14616,7 @@ function writeFullAgentFiles(writes, fs = {}) {
   const done = [];
   try {
     for (const w of writes) {
-      mkdirSync6(dirname5(w.path), { recursive: true });
+      mkdirSync7(dirname6(w.path), { recursive: true });
       writeFileAtomic(w.path, w.content, fs);
       done.push(w);
     }
@@ -14554,14 +14644,14 @@ function restoreFullAgentFiles(writes, fs = {}) {
 
 // scripts/hooks/lib/store-backend.mjs
 import { existsSync as existsSync9, readFileSync as readFileSync12 } from "node:fs";
-import { join as join15 } from "node:path";
-var CONFIG_REL3 = join15(".sterling", "config.json");
-var STORE_DB_REL = join15(".sterling", "sterling.db");
+import { join as join16 } from "node:path";
+var CONFIG_REL3 = join16(".sterling", "config.json");
+var STORE_DB_REL = join16(".sterling", "sterling.db");
 function storeBackend(root) {
-  const dbExists = () => existsSync9(join15(root, STORE_DB_REL));
+  const dbExists = () => existsSync9(join16(root, STORE_DB_REL));
   let text;
   try {
-    text = readFileSync12(join15(root, CONFIG_REL3), "utf8");
+    text = readFileSync12(join16(root, CONFIG_REL3), "utf8");
   } catch (e) {
     if (e?.code === "ENOENT") return "sqlite";
     return dbExists() ? "sqlite" : "routed";
@@ -14576,17 +14666,17 @@ function storeBackend(root) {
 }
 
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync7, readFileSync as readFileSync13, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { mkdirSync as mkdirSync8, readFileSync as readFileSync13, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { hostname as hostname2 } from "node:os";
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 import { randomUUID as randomUUID6 } from "node:crypto";
 function selectionFilePath(root, host = hostname2()) {
   const safeHost = String(host).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
-  return join16(root, ".sterling", "transient", `selection.${safeHost}.json`);
+  return join17(root, ".sterling", "transient", `selection.${safeHost}.json`);
 }
 function writeSelectionFile(root, type, recordId, at) {
   const path = selectionFilePath(root);
-  mkdirSync7(join16(root, ".sterling", "transient"), { recursive: true });
+  mkdirSync8(join17(root, ".sterling", "transient"), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${randomUUID6()}`;
   writeFileSync5(tmp, JSON.stringify({ type, record_id: recordId, at }));
   renameSync3(tmp, path);
@@ -14596,9 +14686,9 @@ function writeSelectionFile(root, type, recordId, at) {
 var DASHBOARD_BUSY_TIMEOUT_MS = 250;
 function openDashboard(storePath, options = {}) {
   const disabled = options.disabledEffects ?? {};
-  const configPath2 = join17(dirname6(storePath), "config.json");
-  const projectRoot = dirname6(dirname6(storePath));
-  const agentsDir = join17(projectRoot, ".claude", "agents");
+  const configPath2 = join18(dirname7(storePath), "config.json");
+  const projectRoot = dirname7(dirname7(storePath));
+  const agentsDir = join18(projectRoot, ".claude", "agents");
   function resolveProjectHeadSha() {
     try {
       const sha = execFileSync2("git", ["rev-parse", "HEAD"], {
@@ -14755,7 +14845,7 @@ function openDashboard(storePath, options = {}) {
   let roster;
   function readInstalledModelEffort(name) {
     try {
-      const content = readFileSync14(join17(agentsDir, `${name}.md`), "utf8");
+      const content = readFileSync14(join18(agentsDir, `${name}.md`), "utf8");
       const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
       const block = fm ? fm[1] : "";
       return {
@@ -14844,7 +14934,7 @@ function openDashboard(storePath, options = {}) {
     const mode = readRawMode();
     const handoff = readHandoff();
     const codexWired = probeCodexWired();
-    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync10(join17(agentsDir, `${name}.md`))).map((name) => {
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync10(join18(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
       return { name, installedModel: v.model, installedEffort: v.effort };
     });
@@ -14893,7 +14983,7 @@ function openDashboard(storePath, options = {}) {
       writeFileSync6(configPath2, JSON.stringify(raw, null, 2) + "\n");
       const opencodeModel = typeof prev.opencode_model === "string" ? prev.opencode_model : void 0;
       for (const name of e.agents) {
-        const p = join17(agentsDir, `${name}.md`);
+        const p = join18(agentsDir, `${name}.md`);
         if (!existsSync10(p))
           continue;
         const content = readFileSync14(p, "utf8");
@@ -17507,7 +17597,7 @@ function frameAt(tick2, phase, running) {
 
 // opencode/sterling-tui/view.ts
 import { existsSync as existsSync11 } from "node:fs";
-import { dirname as dirname7, join as join18 } from "node:path";
+import { dirname as dirname8, join as join19 } from "node:path";
 var SIDEBAR_WIDTH = 34;
 var TOP_TASKS = 5;
 var QUEUE_CAP = 1e3;
@@ -17710,9 +17800,9 @@ function findStorePath(start, env) {
   if (env.STERLING_STORE) return env.STERLING_STORE;
   let dir = start;
   for (; ; ) {
-    const candidate = join18(dir, ".sterling", "sterling.db");
-    if (existsSync11(candidate) || existsSync11(join18(dir, ".sterling", "config.json")) && storeBackend(dir) === "routed") return candidate;
-    const parent = dirname7(dir);
+    const candidate = join19(dir, ".sterling", "sterling.db");
+    if (existsSync11(candidate) || existsSync11(join19(dir, ".sterling", "config.json")) && storeBackend(dir) === "routed") return candidate;
+    const parent = dirname8(dir);
     if (parent === dir) return void 0;
     dir = parent;
   }

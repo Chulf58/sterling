@@ -1516,7 +1516,7 @@ test('settlement article notice: a foreign-tree owner is named with its working_
     const nag = noticeTexts(p.dir).join('\n');
     assert.match(nag, /article missing: 2 changed file\(s\) nothing owns \(2 newly created\): src\/n1\.mjs, src\/n3\.mjs\./, 'the mapped owner owns src/n2.mjs');
     assert.ok(
-      nag.includes(`1 of these file(s) are listed only by an article on another working tree, which owns no file in this root: 'stale-owner' (${stale.id.slice(0, 8)}, working_tree 'gone-branch') lists src/n1.mjs. If that branch is merged, clear working_tree on the article (knowledge_update); if it is a real separate tree, map the name in config.working_trees.`),
+      nag.includes(`1 of these file(s) are listed only by an article on another working tree, which owns no file in this root: 'stale-owner' (${stale.id.slice(0, 8)}, working_tree 'gone-branch') lists src/n1.mjs. If that branch is merged, clear working_tree on the article (knowledge_update with working_tree: null); if it is a real separate tree, map the name in config.working_trees.`),
       nag
     );
     await cleanup?.();
