@@ -7,7 +7,7 @@ var __export = (target, all) => {
 };
 
 // scripts/list-projects.mjs
-import { existsSync as existsSync5 } from "node:fs";
+import { existsSync as existsSync6 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5591,9 +5591,10 @@ var AXIS_MAX_TERM_LEN = 64;
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, realpathSync } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname2, join as join3 } from "node:path";
+import { dirname as dirname2, join as join3, resolve } from "node:path";
 var REGISTRY_DDL = `
 CREATE TABLE IF NOT EXISTS projects (
   repo_path TEXT PRIMARY KEY,
@@ -5605,6 +5606,16 @@ CREATE TABLE IF NOT EXISTS projects (
   last_init_at TEXT NOT NULL,
   last_seen_at TEXT
 );`;
+var OCCUPANCY_DDL = `
+CREATE TABLE IF NOT EXISTS project_occupancy (
+  path TEXT NOT NULL,
+  project_key TEXT NOT NULL,
+  from_at TEXT NOT NULL,
+  to_at TEXT
+);
+CREATE INDEX IF NOT EXISTS project_occupancy_path ON project_occupancy (path);
+CREATE INDEX IF NOT EXISTS project_occupancy_key ON project_occupancy (project_key);`;
+var MIGRATED_FROM = "";
 function registryPath() {
   return process.env.STERLING_REGISTRY_DB ?? join3(homedir3(), ".sterling", "registry.db");
 }
@@ -5615,20 +5626,66 @@ var ProjectRegistry = class {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA busy_timeout=5000");
     this.db.exec("PRAGMA journal_mode=WAL");
-    this.db.exec(REGISTRY_DDL);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec(REGISTRY_DDL);
+      this.migrateIdentity();
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      this.db.close();
+      throw e;
+    }
+  }
+  /** Idempotent, inside the constructor's transaction: the project_key
+   *  column, the occupancy table, a key and an open MIGRATED_FROM interval for
+   *  every row without a key. The path-alias table an unreleased build of
+   *  this branch wrote is dropped (it never shipped). */
+  migrateIdentity() {
+    const cols = this.db.prepare("PRAGMA table_info(projects)").all();
+    if (!cols.some((c) => c.name === "project_key"))
+      this.db.exec("ALTER TABLE projects ADD COLUMN project_key TEXT");
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS projects_project_key ON projects (project_key)");
+    this.db.exec(OCCUPANCY_DDL);
+    this.db.exec("DROP TABLE IF EXISTS project_path_aliases");
+    const unkeyed = this.db.prepare("SELECT repo_path FROM projects WHERE project_key IS NULL").all();
+    for (const { repo_path } of unkeyed) {
+      const key = randomUUID();
+      this.db.prepare("UPDATE projects SET project_key = ? WHERE repo_path = ?").run(key, repo_path);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(repo_path, key, MIGRATED_FROM);
+    }
+  }
+  /** Run `fn` in one BEGIN IMMEDIATE transaction. */
+  tx(fn) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const out = fn();
+      this.db.exec("COMMIT");
+      return out;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
   }
   /** Upsert by repo_path (init event, P4): create on first init
-   *  (first_init_at = last_init_at = at), refresh the mutable fields + last_init_at
-   *  on re-init while preserving first_init_at. */
+   *  (first_init_at = last_init_at = at, a new project_key, an occupancy
+   *  interval opened at `at`), refresh the mutable fields + last_init_at on
+   *  re-init while preserving first_init_at and the key. */
   register(input) {
-    this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
-         ON CONFLICT(repo_path) DO UPDATE SET
-           name = excluded.name,
-           stack_tags = excluded.stack_tags,
-           toolchains = excluded.toolchains,
-           sterling_version = excluded.sterling_version,
-           last_init_at = excluded.last_init_at`).run(input.repo_path, input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.at);
+    this.tx(() => {
+      const own = this.db.prepare("SELECT project_key FROM projects WHERE repo_path = ?").get(input.repo_path);
+      if (own) {
+        this.db.prepare("UPDATE projects SET name = ?, stack_tags = ?, toolchains = ?, sterling_version = ?, last_init_at = ? WHERE repo_path = ?").run(input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.repo_path);
+        const open = this.db.prepare("SELECT 1 FROM project_occupancy WHERE path = ? AND project_key = ? AND to_at IS NULL").get(input.repo_path, own.project_key);
+        if (!open)
+          this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(input.repo_path, own.project_key, input.at);
+        return;
+      }
+      const key = randomUUID();
+      this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at, project_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`).run(input.repo_path, input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.at, key);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(input.repo_path, key, input.at);
+    });
   }
   /** Session-activity touch (H1 SessionStart): update last_seen_at for an
    *  EXISTING row only — never create (registration is init's job). Returns
@@ -5685,10 +5742,71 @@ var ProjectRegistry = class {
       toolchains: JSON.parse(r.toolchains)
     }));
   }
+  /** The whole occupancy history, oldest interval first. */
+  occupancy() {
+    return this.db.prepare("SELECT path, project_key, from_at, to_at FROM project_occupancy ORDER BY from_at, path").all().map((o) => ({
+      path: o.path,
+      project_key: o.project_key,
+      from_at: o.from_at,
+      to_at: o.to_at
+    }));
+  }
+  /** The project_key of the row at repoPath, or undefined. */
+  keyOf(repoPath2) {
+    return this.db.prepare("SELECT project_key FROM projects WHERE repo_path = ?").get(repoPath2)?.project_key;
+  }
+  /** Rows (repo_path, name, project_key) and the occupancy history in one read transaction. */
+  snapshot() {
+    this.db.exec("BEGIN");
+    try {
+      const rows = this.db.prepare("SELECT repo_path, name, project_key FROM projects ORDER BY name").all().map((r) => ({
+        repo_path: r.repo_path,
+        name: r.name,
+        project_key: r.project_key
+      }));
+      const snap = { rows, occupancy: this.occupancy() };
+      this.db.exec("COMMIT");
+      return snap;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+  /** Folder move (/sterling:projects --move, GitHub issue #119): repoint the
+   *  row at `fromPath` to `toPath`, keeping its project_key; the key's interval
+   *  at `fromPath` closes at `at` and one at `toPath` opens. The conflict check
+   *  (another row at `toPath`), the row update and the interval writes run in
+   *  one BEGIN IMMEDIATE transaction. Touches nothing on disk. */
+  moveProject(fromPath, toPath, at) {
+    if (fromPath === toPath)
+      return { status: "unchanged" };
+    return this.tx(() => {
+      const key = this.keyOf(fromPath);
+      if (key === void 0)
+        return { status: "missing" };
+      const taken = this.db.prepare("SELECT repo_path FROM projects WHERE repo_path = ?").get(toPath);
+      if (taken)
+        return { status: "conflict", conflict_path: taken.repo_path };
+      this.db.prepare("UPDATE projects SET repo_path = ? WHERE repo_path = ?").run(toPath, fromPath);
+      this.db.prepare("UPDATE project_occupancy SET to_at = ? WHERE project_key = ? AND to_at IS NULL").run(at, key);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(toPath, key, at);
+      return { status: "moved" };
+    });
+  }
   /** Human-gated removal (the /sterling:projects prune of a missing project) —
-   *  never automatic. Returns whether a row was removed. */
-  remove(repoPath2) {
-    return this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2).changes > 0;
+   *  never automatic. Returns whether a row was removed. The key's open
+   *  interval closes at `at` and stays as its tombstone, so a tracker created
+   *  while the project was registered reads "no longer registered" and never
+   *  resolves to a project that registers at the path later. */
+  remove(repoPath2, at = (/* @__PURE__ */ new Date()).toISOString()) {
+    return this.tx(() => {
+      const key = this.keyOf(repoPath2);
+      if (key === void 0)
+        return false;
+      this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2);
+      this.db.prepare("UPDATE project_occupancy SET to_at = ? WHERE project_key = ? AND to_at IS NULL").run(at, key);
+      return true;
+    });
   }
   close() {
     this.db.close();
@@ -5762,13 +5880,13 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
 }).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 
 // scripts/lib/project-remove.mjs
-import { cpSync, existsSync as existsSync3, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, readdirSync as readdirSync2, readlinkSync, realpathSync as realpathSync2, rmSync, statSync } from "node:fs";
-import { basename, isAbsolute, join as join5, relative, resolve as resolve2, sep as sep2 } from "node:path";
+import { cpSync, existsSync as existsSync3, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, readdirSync as readdirSync2, readlinkSync, realpathSync as realpathSync3, rmSync, statSync } from "node:fs";
+import { basename, isAbsolute, join as join5, relative, resolve as resolve3, sep as sep2 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync2, readFileSync as readFileSync2, readdirSync, realpathSync } from "node:fs";
+import { existsSync as existsSync2, readFileSync as readFileSync2, readdirSync, realpathSync as realpathSync2 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join4, resolve, sep } from "node:path";
+import { join as join4, resolve as resolve2, sep } from "node:path";
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
@@ -5986,7 +6104,7 @@ function isWithin(p, dir) {
 function pathForms(p) {
   const forms = [p];
   try {
-    forms.push(realpathSync2(p));
+    forms.push(realpathSync3(p));
   } catch (e) {
     if (e?.code !== "ENOENT") throw e;
   }
@@ -6080,14 +6198,14 @@ function utcStamp(d) {
 }
 function inspect(ctx, input, stamp) {
   const refusals = [];
-  const abs = resolve2(input);
+  const abs = resolve3(input);
   const t = { input, path: abs, refusals };
   const st = lstatOrUndefined(abs);
   if (!st) refusals.push(`${abs} does not exist`);
   else if (st.isSymbolicLink()) refusals.push(`${abs} is a symlink; pass the real directory`);
   else if (!st.isDirectory()) refusals.push(`${abs} is not a directory`);
   else {
-    const real = realpathSync2(abs);
+    const real = realpathSync3(abs);
     if (real !== abs) refusals.push(`${abs} resolves through a symlink to ${real}; pass the canonical path`);
     t.real = real;
   }
@@ -6095,7 +6213,7 @@ function inspect(ctx, input, stamp) {
     if (sameLocationAnyHost(r.repo_path, abs) || t.real && sameLocationAnyHost(r.repo_path, t.real)) return true;
     if (!t.real) return false;
     try {
-      return realpathSync2(r.repo_path) === t.real;
+      return realpathSync3(r.repo_path) === t.real;
     } catch (e) {
       if (e?.code === "ENOENT") return false;
       throw e;
@@ -6128,7 +6246,7 @@ function inspect(ctx, input, stamp) {
     if (typeof raw?.backup_path !== "string" || !raw.backup_path.trim()) {
       refusals.push(`no backup_path in ${cfgPath}; the backup cannot be skipped`);
     } else {
-      t.backupRoot = resolve2(t.real, raw.backup_path);
+      t.backupRoot = resolve3(t.real, raw.backup_path);
       const safe = t.name.replace(/[^A-Za-z0-9._-]+/g, "-");
       t.backupDest = join5(t.backupRoot, `removed-${safe}-${stamp}`);
       if (pathForms(t.backupRoot).some((p) => isWithin(p, dir))) refusals.push(`backup_path ${t.backupRoot} is inside ${dir}; the backup would be deleted with it`);
@@ -6153,7 +6271,7 @@ function inspect(ctx, input, stamp) {
       continue;
     }
     for (const m of mounts) {
-      const p = resolve2(other.repo_path, m.dbPath);
+      const p = resolve3(other.repo_path, m.dbPath);
       if (pathForms(p).some((f) => isWithin(f, dir))) refusals.push(`registered project ${other.name} (${other.repo_path}) mounts domain '${m.name}' at ${p}, inside ${dir}`);
     }
   }
@@ -6251,7 +6369,7 @@ function tree(dir, rel = "", out = /* @__PURE__ */ new Map()) {
 function applyRemove(ctx, input) {
   const stamp = utcStamp(/* @__PURE__ */ new Date());
   const steps = [];
-  const result = { remove: resolve2(input), apply: true, steps, ok: false };
+  const result = { remove: resolve3(input), apply: true, steps, ok: false };
   const finish = (code) => {
     result.ok = code === 0;
     ctx.log(JSON.stringify(result, null, 2));
@@ -6328,8 +6446,8 @@ function removeProject(registry2, input, { apply = false, procRoot = "/proc", be
 }
 
 // scripts/lib/project-rename.mjs
-import { existsSync as existsSync4, readFileSync as readFileSync4, realpathSync as realpathSync3, renameSync, writeFileSync } from "node:fs";
-import { join as join6, resolve as resolve3 } from "node:path";
+import { existsSync as existsSync4, readFileSync as readFileSync4, realpathSync as realpathSync4, renameSync, writeFileSync } from "node:fs";
+import { join as join6, resolve as resolve4 } from "node:path";
 function writeProjectName(cfgPath, raw, obj, name) {
   const indent = raw.match(/^([ \t]+)\S/m)?.[1] ?? "  ";
   const text = `${JSON.stringify({ ...obj, project_name: name }, null, indent)}${raw.endsWith("\n") ? "\n" : ""}`;
@@ -6338,11 +6456,11 @@ function writeProjectName(cfgPath, raw, obj, name) {
   renameSync(tmp, cfgPath);
 }
 function renameProject(registry2, input, newNameInput, { apply = false, log = console.log } = {}) {
-  const abs = resolve3(input);
+  const abs = resolve4(input);
   const name = typeof newNameInput === "string" ? newNameInput.trim() : "";
   const refusals = [];
   if (!name) refusals.push("the new name is empty");
-  const real = existsSync4(abs) ? realpathSync3(abs) : void 0;
+  const real = existsSync4(abs) ? realpathSync4(abs) : void 0;
   const rows = registry2.list();
   const mine = rows.filter((r) => sameLocationAnyHost(r.repo_path, abs) || real !== void 0 && sameLocationAnyHost(r.repo_path, real));
   let row;
@@ -6409,14 +6527,84 @@ Renamed ${row.name} -> ${name}: config.json project_name and the registry row ar
   return 0;
 }
 
+// scripts/lib/project-move.mjs
+import { existsSync as existsSync5, realpathSync as realpathSync5, statSync as statSync2 } from "node:fs";
+import { join as join7, resolve as resolve5 } from "node:path";
+function moveProject(registry2, from, toInput, { apply = false, log = console.log, now = () => (/* @__PURE__ */ new Date()).toISOString() } = {}) {
+  const refusals = [];
+  const rows = registry2.list();
+  const fromAbs = resolve5(from);
+  const fromReal = existsSync5(fromAbs) ? realpathSync5(fromAbs) : void 0;
+  let mine = rows.filter((r) => sameLocationAnyHost(r.repo_path, fromAbs) || fromReal !== void 0 && sameLocationAnyHost(r.repo_path, fromReal));
+  if (mine.length === 0) mine = rows.filter((r) => r.name === from);
+  let row;
+  if (mine.length === 0) refusals.push(`no registered project is at ${fromAbs} or is named '${from}'; run list-projects.mjs to see the registered projects`);
+  else if (mine.length > 1) refusals.push(`${mine.length} registry rows match '${from}' (${mine.map((r) => `${r.name} at ${r.repo_path}`).join("; ")}); give the registered path instead`);
+  else row = mine[0];
+  const toAbs = resolve5(toInput);
+  let to;
+  if (!existsSync5(toAbs) || !statSync2(toAbs).isDirectory()) refusals.push(`the new path ${toAbs} is not a directory; move the folder first, then run this`);
+  else {
+    to = realpathSync5(toAbs);
+    if (!existsSync5(join7(to, ".sterling", "config.json"))) refusals.push(`${to} has no .sterling/config.json, so it is not an initialized Sterling project`);
+    const taken = rows.find((r) => r !== row && sameLocationAnyHost(r.repo_path, to));
+    if (taken) refusals.push(`${to} is already registered as the project '${taken.name}'; two rows cannot share a path`);
+  }
+  log(apply ? "Move\n" : "Move preview (dry run; nothing is changed)\n");
+  if (row) {
+    log(`Project: ${row.name}`);
+    log(`Registry path: ${row.repo_path} -> ${to ?? toAbs}`);
+    log(`The registry keeps the record that the project was at ${row.repo_path}, so hand-off trackers created before this move still find it.`);
+  }
+  if (refusals.length) {
+    log(`
+--move ${apply ? "REFUSED" : "--apply would REFUSE"}:`);
+    for (const r of refusals) log(`  - ${r}`);
+    return 1;
+  }
+  if (row.repo_path === to) {
+    log(`
+Nothing to change: the registry already has '${row.name}' at ${to}.`);
+    return 0;
+  }
+  const scope = "This repairs the registry only. It moves no files and changes nothing inside any project; regenerate Sterling's generated agent files in the moved project with sync-agents rather than rewriting their paths.";
+  if (!apply) {
+    log(`
+--apply would repoint the registry row and record the move. ${scope}`);
+    return 0;
+  }
+  try {
+    const moved = registry2.moveProject(row.repo_path, to, now());
+    if (moved.status === "conflict") {
+      log(`
+--move REFUSED:
+  - ${to} is already registered (${moved.conflict_path}); two rows cannot share a path. Nothing was written.`);
+      return 1;
+    }
+    if (moved.status === "missing") {
+      log(`
+--move REFUSED:
+  - the registry row at ${row.repo_path} is gone since it was read. Nothing was written.`);
+      return 1;
+    }
+  } catch (e) {
+    log(`
+Move FAILED: ${e.message}. The registry transaction was rolled back; nothing was written.`);
+    return 1;
+  }
+  log(`
+Moved ${row.name}: ${row.repo_path} -> ${to}. ${scope}`);
+  return 0;
+}
+
 // scripts/list-projects.mjs
 function usage(msg) {
   console.error(`list-projects REFUSED: ${msg}
-usage: list-projects.mjs [--prune-missing] | --remove <path> [--apply] | --rename <path> <new-name> [--apply]`);
+usage: list-projects.mjs [--prune-missing] | --remove <path> [--apply] | --rename <path> <new-name> [--apply] | --move <name|old-path> <new-path> [--apply]`);
   process.exit(2);
 }
 function parseArgs(argv) {
-  const out = { prune: false, remove: void 0, rename: void 0, newName: void 0, apply: false };
+  const out = { prune: false, remove: void 0, rename: void 0, newName: void 0, move: void 0, moveTo: void 0, apply: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--prune-missing") out.prune = true;
@@ -6433,18 +6621,26 @@ function parseArgs(argv) {
       if (out.rename !== void 0) usage("--rename given more than once");
       out.rename = p;
       out.newName = n;
+    } else if (a === "--move") {
+      const f = argv[++i];
+      const t = argv[++i];
+      if (f === void 0 || f.startsWith("--") || t === void 0 || t.startsWith("--")) usage("--move needs a project (name or old path) and a new path");
+      if (out.move !== void 0) usage("--move given more than once");
+      out.move = f;
+      out.moveTo = t;
     } else usage(`unknown argument '${a}'`);
   }
-  if (out.apply && out.remove === void 0 && out.rename === void 0) usage("--apply needs --remove <path> or --rename <path> <new-name>");
-  if (out.remove !== void 0 && out.rename !== void 0) usage("--remove and --rename cannot be combined");
-  if (out.prune && (out.remove !== void 0 || out.rename !== void 0)) usage("--prune-missing cannot be combined with --remove or --rename");
+  const actions = [out.remove, out.rename, out.move].filter((v) => v !== void 0).length;
+  if (out.apply && actions === 0) usage("--apply needs --remove <path>, --rename <path> <new-name> or --move <name|old-path> <new-path>");
+  if (actions > 1) usage("--remove, --rename and --move cannot be combined");
+  if (out.prune && actions > 0) usage("--prune-missing cannot be combined with --remove, --rename or --move");
   return out;
 }
 function listProjects(prune) {
   if (prune) {
     let removed = 0;
     for (const p of registry.list()) {
-      if (!existsSync5(p.repo_path)) {
+      if (!existsSync6(p.repo_path)) {
         registry.remove(p.repo_path);
         removed++;
       }
@@ -6460,7 +6656,7 @@ function listProjects(prune) {
   console.log(`${rows.length} registered Sterling project${rows.length === 1 ? "" : "s"}:
 `);
   for (const p of rows) {
-    const live = existsSync5(p.repo_path);
+    const live = existsSync6(p.repo_path);
     const tags = p.stack_tags.length ? p.stack_tags.join(", ") : "\u2014";
     const tools = p.toolchains.length ? p.toolchains.join(", ") : "\u2014";
     const seen = p.last_seen_at ? p.last_seen_at.slice(0, 10) : "never";
@@ -6468,7 +6664,7 @@ function listProjects(prune) {
     console.log(`    domains/tags: [${tags}]   toolchains: [${tools}]   sterling: ${p.sterling_version ?? "?"}`);
     console.log(`    first init: ${p.first_init_at.slice(0, 10)}   last init: ${p.last_init_at.slice(0, 10)}   last seen: ${seen}`);
   }
-  const missing = rows.filter((p) => !existsSync5(p.repo_path)).length;
+  const missing = rows.filter((p) => !existsSync6(p.repo_path)).length;
   if (missing && !prune) {
     console.log(`
 ${missing} project${missing === 1 ? "" : "s"} MISSING (path gone). Prune with: node "<Sterling root>/bin/list-projects.mjs" --prune-missing`);
@@ -6479,6 +6675,7 @@ var registry = new ProjectRegistry(registryPath());
 try {
   if (args.remove !== void 0) process.exitCode = removeProject(registry, args.remove, { apply: args.apply });
   else if (args.rename !== void 0) process.exitCode = renameProject(registry, args.rename, args.newName, { apply: args.apply });
+  else if (args.move !== void 0) process.exitCode = moveProject(registry, args.move, args.moveTo, { apply: args.apply });
   else listProjects(args.prune);
 } finally {
   registry.close();

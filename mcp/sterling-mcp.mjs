@@ -2981,7 +2981,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve6.call(this, root, ref);
+      let _sch = resolve7.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -3008,7 +3008,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve6(root, ref) {
+    function resolve7(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3639,7 +3639,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve6(baseURI, relativeURI, options) {
+    function resolve7(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
@@ -3897,7 +3897,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve6,
+      resolve: resolve7,
       resolveComponent,
       equal,
       serialize,
@@ -6887,7 +6887,7 @@ var require_dist = __commonJS({
 });
 
 // packages/mcp-server/dist/main.js
-import { dirname as dirname11, isAbsolute as isAbsolute2, join as join16, resolve as resolve5 } from "node:path";
+import { dirname as dirname11, isAbsolute as isAbsolute2, join as join16, resolve as resolve6 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
@@ -13000,12 +13000,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve6) => {
+    return new Promise((resolve7) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve6();
+        resolve7();
       } else {
-        this._stdout.once("drain", resolve6);
+        this._stdout.once("drain", resolve7);
       }
     });
   }
@@ -13014,7 +13014,7 @@ var StdioServerTransport = class {
 // packages/store/dist/routing.js
 import { lstatSync as lstatSync3, readFileSync as readFileSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join10, resolve as resolve2 } from "node:path";
+import { join as join10, resolve as resolve3 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -19381,7 +19381,7 @@ function parseStoreFence(value) {
 // packages/store/dist/index.js
 import { mkdirSync as mkdirSync4, existsSync as existsSync3, statSync as statSync3 } from "node:fs";
 import { dirname as dirname6, join as join8, resolve as resolvePath2 } from "node:path";
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 
 // packages/store/dist/mounted.js
 import { mkdirSync as mkdirSync2, existsSync, rmSync as rmSync2, openSync, closeSync } from "node:fs";
@@ -22035,9 +22035,10 @@ function fitDomains(recordText, domains, opts = {}) {
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync as mkdirSync3 } from "node:fs";
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { mkdirSync as mkdirSync3, realpathSync } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname4, join as join5 } from "node:path";
+import { dirname as dirname4, join as join5, resolve as resolve2 } from "node:path";
 var REGISTRY_DDL = `
 CREATE TABLE IF NOT EXISTS projects (
   repo_path TEXT PRIMARY KEY,
@@ -22049,6 +22050,49 @@ CREATE TABLE IF NOT EXISTS projects (
   last_init_at TEXT NOT NULL,
   last_seen_at TEXT
 );`;
+var OCCUPANCY_DDL = `
+CREATE TABLE IF NOT EXISTS project_occupancy (
+  path TEXT NOT NULL,
+  project_key TEXT NOT NULL,
+  from_at TEXT NOT NULL,
+  to_at TEXT
+);
+CREATE INDEX IF NOT EXISTS project_occupancy_path ON project_occupancy (path);
+CREATE INDEX IF NOT EXISTS project_occupancy_key ON project_occupancy (project_key);`;
+var MIGRATED_FROM = "";
+function canonicalPath(p) {
+  const abs = resolve2(p);
+  try {
+    return realpathSync(abs);
+  } catch {
+    return abs;
+  }
+}
+function resolveReceiverLocation(ref, createdAt, snapshot) {
+  const root = canonicalPath(ref.to_root);
+  if (createdAt !== void 0) {
+    const then = snapshot.occupancy.find((o) => o.from_at <= createdAt && (o.to_at === null || createdAt < o.to_at) && canonicalPath(o.path) === root);
+    if (then) {
+      const row = snapshot.rows.find((r) => r.project_key === then.project_key);
+      if (row)
+        return { row, via: "history" };
+      const last = snapshot.occupancy.filter((o) => o.project_key === then.project_key).sort((a, b) => a.from_at < b.from_at ? 1 : -1)[0];
+      return {
+        reason: `the project at ${ref.to_root} when this tracker was created is no longer registered (it was last registered at ${last.path}${last.to_at ? ` until ${last.to_at}` : ""})`
+      };
+    }
+  }
+  const byRoot = snapshot.rows.find((r) => canonicalPath(r.repo_path) === root);
+  if (byRoot)
+    return { row: byRoot, via: "root" };
+  const byName = snapshot.rows.filter((r) => r.name === ref.to_name);
+  const roots = new Set(byName.map((r) => r.repo_path));
+  if (roots.size === 1)
+    return { row: byName[0], via: "name" };
+  if (roots.size > 1)
+    return { reason: `no registered project has its root ${ref.to_root}, and its name '${ref.to_name}' is ambiguous (${roots.size} registered roots carry it)` };
+  return { reason: `no registered project has its root ${ref.to_root} or its name '${ref.to_name}'` };
+}
 function registryPath() {
   return process.env.STERLING_REGISTRY_DB ?? join5(homedir3(), ".sterling", "registry.db");
 }
@@ -22059,20 +22103,66 @@ var ProjectRegistry = class {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA busy_timeout=5000");
     this.db.exec("PRAGMA journal_mode=WAL");
-    this.db.exec(REGISTRY_DDL);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec(REGISTRY_DDL);
+      this.migrateIdentity();
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      this.db.close();
+      throw e;
+    }
+  }
+  /** Idempotent, inside the constructor's transaction: the project_key
+   *  column, the occupancy table, a key and an open MIGRATED_FROM interval for
+   *  every row without a key. The path-alias table an unreleased build of
+   *  this branch wrote is dropped (it never shipped). */
+  migrateIdentity() {
+    const cols = this.db.prepare("PRAGMA table_info(projects)").all();
+    if (!cols.some((c) => c.name === "project_key"))
+      this.db.exec("ALTER TABLE projects ADD COLUMN project_key TEXT");
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS projects_project_key ON projects (project_key)");
+    this.db.exec(OCCUPANCY_DDL);
+    this.db.exec("DROP TABLE IF EXISTS project_path_aliases");
+    const unkeyed = this.db.prepare("SELECT repo_path FROM projects WHERE project_key IS NULL").all();
+    for (const { repo_path } of unkeyed) {
+      const key = randomUUID3();
+      this.db.prepare("UPDATE projects SET project_key = ? WHERE repo_path = ?").run(key, repo_path);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(repo_path, key, MIGRATED_FROM);
+    }
+  }
+  /** Run `fn` in one BEGIN IMMEDIATE transaction. */
+  tx(fn) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const out = fn();
+      this.db.exec("COMMIT");
+      return out;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
   }
   /** Upsert by repo_path (init event, P4): create on first init
-   *  (first_init_at = last_init_at = at), refresh the mutable fields + last_init_at
-   *  on re-init while preserving first_init_at. */
+   *  (first_init_at = last_init_at = at, a new project_key, an occupancy
+   *  interval opened at `at`), refresh the mutable fields + last_init_at on
+   *  re-init while preserving first_init_at and the key. */
   register(input) {
-    this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
-         ON CONFLICT(repo_path) DO UPDATE SET
-           name = excluded.name,
-           stack_tags = excluded.stack_tags,
-           toolchains = excluded.toolchains,
-           sterling_version = excluded.sterling_version,
-           last_init_at = excluded.last_init_at`).run(input.repo_path, input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.at);
+    this.tx(() => {
+      const own = this.db.prepare("SELECT project_key FROM projects WHERE repo_path = ?").get(input.repo_path);
+      if (own) {
+        this.db.prepare("UPDATE projects SET name = ?, stack_tags = ?, toolchains = ?, sterling_version = ?, last_init_at = ? WHERE repo_path = ?").run(input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.repo_path);
+        const open2 = this.db.prepare("SELECT 1 FROM project_occupancy WHERE path = ? AND project_key = ? AND to_at IS NULL").get(input.repo_path, own.project_key);
+        if (!open2)
+          this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(input.repo_path, own.project_key, input.at);
+        return;
+      }
+      const key = randomUUID3();
+      this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at, project_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`).run(input.repo_path, input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.at, key);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(input.repo_path, key, input.at);
+    });
   }
   /** Session-activity touch (H1 SessionStart): update last_seen_at for an
    *  EXISTING row only — never create (registration is init's job). Returns
@@ -22129,10 +22219,71 @@ var ProjectRegistry = class {
       toolchains: JSON.parse(r.toolchains)
     }));
   }
+  /** The whole occupancy history, oldest interval first. */
+  occupancy() {
+    return this.db.prepare("SELECT path, project_key, from_at, to_at FROM project_occupancy ORDER BY from_at, path").all().map((o) => ({
+      path: o.path,
+      project_key: o.project_key,
+      from_at: o.from_at,
+      to_at: o.to_at
+    }));
+  }
+  /** The project_key of the row at repoPath, or undefined. */
+  keyOf(repoPath2) {
+    return this.db.prepare("SELECT project_key FROM projects WHERE repo_path = ?").get(repoPath2)?.project_key;
+  }
+  /** Rows (repo_path, name, project_key) and the occupancy history in one read transaction. */
+  snapshot() {
+    this.db.exec("BEGIN");
+    try {
+      const rows = this.db.prepare("SELECT repo_path, name, project_key FROM projects ORDER BY name").all().map((r) => ({
+        repo_path: r.repo_path,
+        name: r.name,
+        project_key: r.project_key
+      }));
+      const snap = { rows, occupancy: this.occupancy() };
+      this.db.exec("COMMIT");
+      return snap;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+  /** Folder move (/sterling:projects --move, GitHub issue #119): repoint the
+   *  row at `fromPath` to `toPath`, keeping its project_key; the key's interval
+   *  at `fromPath` closes at `at` and one at `toPath` opens. The conflict check
+   *  (another row at `toPath`), the row update and the interval writes run in
+   *  one BEGIN IMMEDIATE transaction. Touches nothing on disk. */
+  moveProject(fromPath, toPath, at) {
+    if (fromPath === toPath)
+      return { status: "unchanged" };
+    return this.tx(() => {
+      const key = this.keyOf(fromPath);
+      if (key === void 0)
+        return { status: "missing" };
+      const taken = this.db.prepare("SELECT repo_path FROM projects WHERE repo_path = ?").get(toPath);
+      if (taken)
+        return { status: "conflict", conflict_path: taken.repo_path };
+      this.db.prepare("UPDATE projects SET repo_path = ? WHERE repo_path = ?").run(toPath, fromPath);
+      this.db.prepare("UPDATE project_occupancy SET to_at = ? WHERE project_key = ? AND to_at IS NULL").run(at, key);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(toPath, key, at);
+      return { status: "moved" };
+    });
+  }
   /** Human-gated removal (the /sterling:projects prune of a missing project) —
-   *  never automatic. Returns whether a row was removed. */
-  remove(repoPath2) {
-    return this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2).changes > 0;
+   *  never automatic. Returns whether a row was removed. The key's open
+   *  interval closes at `at` and stays as its tombstone, so a tracker created
+   *  while the project was registered reads "no longer registered" and never
+   *  resolves to a project that registers at the path later. */
+  remove(repoPath2, at = (/* @__PURE__ */ new Date()).toISOString()) {
+    return this.tx(() => {
+      const key = this.keyOf(repoPath2);
+      if (key === void 0)
+        return false;
+      this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2);
+      this.db.prepare("UPDATE project_occupancy SET to_at = ? WHERE project_key = ? AND to_at IS NULL").run(at, key);
+      return true;
+    });
   }
   close() {
     this.db.close();
@@ -22199,10 +22350,10 @@ var EVIDENCE_LABELS = [["commit", "commit"], ["pr", "PR"], ["deploy", "deploy"],
 function evidenceText(e) {
   return EVIDENCE_LABELS.filter(([k]) => e[k] !== void 0).map(([k, label]) => `${label} ${e[k]}`).join(", ");
 }
-function readEvidence(h) {
+function readEvidence(h, root) {
   let parsed;
   try {
-    const text = readIfPresent(join6(h.to_root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
+    const text = readIfPresent(join6(root, HANDOFFS_DIR_REL, `${h.transfer_id}.evidence.json`));
     if (text === void 0)
       return void 0;
     parsed = handoffEvidenceFileReadSchema.safeParse(JSON.parse(text));
@@ -22245,8 +22396,8 @@ function receiverStorage(root) {
   const raw = JSON.parse(text);
   return typeof raw.storage === "string" ? raw.storage : void 0;
 }
-function closureStatus(h) {
-  const p = join6(h.to_root, HANDOFFS_DIR_REL, `${h.transfer_id}.json`);
+function closureStatus(h, root) {
+  const p = join6(root, HANDOFFS_DIR_REL, `${h.transfer_id}.json`);
   let text;
   let parsed;
   try {
@@ -22263,7 +22414,7 @@ function closureStatus(h) {
   if (c.transfer_id !== h.transfer_id || c.item_id !== h.to_item_id) {
     return unknown2(`the closure file ${p} names transfer ${c.transfer_id} item ${c.item_id}, not transfer ${h.transfer_id} item ${h.to_item_id}`);
   }
-  const evidence = readEvidence(h);
+  const evidence = readEvidence(h, root);
   return {
     state: "done",
     text: statusText.done(h.to_name, c.closed_at, c.note, h.milestone, evidence),
@@ -22272,10 +22423,10 @@ function closureStatus(h) {
     ...evidence ? { evidence } : {}
   };
 }
-function rowStatus(db, trackerId, h, budget) {
+function rowStatus(db, root, trackerId, h, budget) {
   const row = db.prepare("SELECT body, status FROM records WHERE id = ?").get(h.to_item_id);
   if (!row)
-    return closureStatus(h);
+    return closureStatus(h, root);
   let body;
   try {
     body = JSON.parse(row.body);
@@ -22316,6 +22467,27 @@ function rowStatus(db, trackerId, h, budget) {
   }
   return { state: "open", text: statusText.open(h.to_name) };
 }
+function readRegistrySnapshotReadOnly(path, busyTimeoutMs) {
+  const db = openForeignDbReadOnly(path, busyTimeoutMs);
+  try {
+    db.exec("BEGIN");
+    try {
+      const keyed = db.prepare("PRAGMA table_info(projects)").all().some((c) => c.name === "project_key");
+      const rows = db.prepare(`SELECT repo_path, name, ${keyed ? "project_key" : "NULL AS project_key"} FROM projects`).all().map((r) => ({
+        repo_path: r.repo_path,
+        name: r.name,
+        project_key: r.project_key
+      }));
+      const hasHistory = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_occupancy'`).get() !== void 0;
+      const occupancy = hasHistory ? db.prepare("SELECT path, project_key, from_at, to_at FROM project_occupancy").all() : [];
+      return { rows, occupancy };
+    } finally {
+      db.exec("COMMIT");
+    }
+  } finally {
+    db.close();
+  }
+}
 function resolveSentHandoffs(trackers, opts = {}) {
   const busy = opts.busyTimeoutMs ?? 250;
   const budget = opts.budgetMs ?? 1500;
@@ -22325,6 +22497,30 @@ function resolveSentHandoffs(trackers, opts = {}) {
   const exhausted = (where) => `time budget exhausted (${budget} ms) before ${where} was read`;
   const out = /* @__PURE__ */ new Map();
   const groups = /* @__PURE__ */ new Map();
+  let snapshot;
+  const locate = (h, createdAt) => {
+    const regPath = opts.registryPath;
+    if (regPath === void 0)
+      return { root: h.to_root };
+    if (snapshot === void 0) {
+      const left = remaining();
+      if (left <= 0)
+        snapshot = { failed: exhausted(`the project registry ${regPath}`) };
+      else if (!existsSync2(regPath))
+        snapshot = { failed: `there is no project registry at ${regPath}, so the receiver cannot be located` };
+      else {
+        try {
+          snapshot = readRegistrySnapshotReadOnly(regPath, Math.min(busy, left));
+        } catch (e) {
+          snapshot = { failed: `the project registry ${regPath} could not be read (${errText(e)})` };
+        }
+      }
+    }
+    if ("failed" in snapshot)
+      return { reason: snapshot.failed };
+    const found = resolveReceiverLocation(h, createdAt, snapshot);
+    return "row" in found ? { root: found.row.repo_path } : { reason: `${h.to_name}'s project cannot be located: ${found.reason}` };
+  };
   for (const t of trackers) {
     if (t.handoff === void 0)
       continue;
@@ -22337,9 +22533,14 @@ function resolveSentHandoffs(trackers, opts = {}) {
       out.set(t.id, { state: "unconfirmed", text: statusText.unconfirmed() });
       continue;
     }
-    const list = groups.get(h.to_root) ?? [];
+    const where = locate(h, t.created_at);
+    if ("reason" in where) {
+      out.set(t.id, unknown2(where.reason));
+      continue;
+    }
+    const list = groups.get(where.root) ?? [];
     list.push({ id: t.id, h });
-    groups.set(h.to_root, list);
+    groups.set(where.root, list);
   }
   for (const [root, list] of groups) {
     const fail = (reason) => {
@@ -22378,7 +22579,7 @@ function resolveSentHandoffs(trackers, opts = {}) {
         }
         try {
           setBusyTimeout(db, Math.min(busy, now));
-          out.set(id, rowStatus(db, id, h, { remaining, exhausted, busy }));
+          out.set(id, rowStatus(db, root, id, h, { remaining, exhausted, busy }));
         } catch (e) {
           out.set(id, unknown2(`${h.to_name}'s database could not be read (${errText(e)})`));
         }
@@ -22578,7 +22779,7 @@ function parseForeignItem(id, body) {
 
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
-import { realpathSync } from "node:fs";
+import { realpathSync as realpathSync2 } from "node:fs";
 import { dirname as dirname5, basename, join as join7, resolve as resolvePath } from "node:path";
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
@@ -22754,7 +22955,7 @@ var SqliteDriver = class {
     this.db = new DatabaseSync3(path);
     let classifiedPath = this.dbPath;
     try {
-      classifiedPath = join7(realpathSync(dirname5(this.dbPath)), basename(this.dbPath));
+      classifiedPath = join7(realpathSync2(dirname5(this.dbPath)), basename(this.dbPath));
     } catch {
     }
     this.classifiedPath = classifiedPath;
@@ -23203,7 +23404,7 @@ function boardReadinessOf(targets, live, openBlocker) {
       blockers_open: blockersOpen,
       unblocks,
       state,
-      ...sent ? { handoff: sent } : {}
+      ...sent ? { handoff: sent, ...typeof t.created_at === "string" ? { created_at: t.created_at } : {} } : {}
     };
   });
 }
@@ -25520,7 +25721,7 @@ var SterlingStore = class _SterlingStore {
     }
     const dateStr = nowISO.slice(0, 10);
     this.create({
-      id: randomUUID3(),
+      id: randomUUID4(),
       type: "reference_material",
       created_at: nowISO,
       updated_at: nowISO,
@@ -25539,7 +25740,7 @@ var SterlingStore = class _SterlingStore {
       catalog: {
         entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
       }
-    }, { operation_id: randomUUID3() });
+    }, { operation_id: randomUUID4() });
   }
   /**
    * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
@@ -25560,7 +25761,7 @@ var SterlingStore = class _SterlingStore {
       return;
     const catalogs = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
     const todo = {
-      id: randomUUID3(),
+      id: randomUUID4(),
       type: "todo",
       created_at: nowISO,
       updated_at: nowISO,
@@ -25577,7 +25778,7 @@ var SterlingStore = class _SterlingStore {
     if (catalogs.length > 0) {
       todo.feature_link = catalogs[0].id;
     }
-    this.create(todo, { operation_id: randomUUID3() });
+    this.create(todo, { operation_id: randomUUID4() });
   }
   /**
    * The one row-insert. Since S2 ([stable-identity-design-v2]) the stored BODY
@@ -25773,7 +25974,7 @@ var SterlingStore = class _SterlingStore {
 
 // packages/store/dist/broker-runtime.js
 import { createHash as createHash2 } from "node:crypto";
-import { closeSync as closeSync3, constants as FS, fstatSync, lstatSync as lstatSync2, mkdirSync as mkdirSync5, openSync as openSync3, readdirSync, readSync as readSync2, realpathSync as realpathSync2, renameSync, rmSync as rmSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { closeSync as closeSync3, constants as FS, fstatSync, lstatSync as lstatSync2, mkdirSync as mkdirSync5, openSync as openSync3, readdirSync, readSync as readSync2, realpathSync as realpathSync3, renameSync, rmSync as rmSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join9 } from "node:path";
 var BrokerRuntimeDirError = class extends Error {
   constructor(message) {
@@ -25828,7 +26029,7 @@ function brokerDir({ create, env = process.env }) {
   return dir;
 }
 function brokerProjectKey(root) {
-  return createHash2("sha256").update(realpathSync2(root)).digest("hex").slice(0, 16);
+  return createHash2("sha256").update(realpathSync3(root)).digest("hex").slice(0, 16);
 }
 function brokerSocketPath(dir, instanceId) {
   return join9(dir, `${instanceId}.sock`);
@@ -25936,7 +26137,7 @@ function pgStoreNames(projectId, stackTags) {
   return { metaSchema, projectSchema, domains };
 }
 function resolveStoreRoute(root) {
-  const absRoot = resolve2(root);
+  const absRoot = resolve3(root);
   const read = readConfig(absRoot);
   if (read === null)
     return null;
@@ -26132,7 +26333,7 @@ function routeOrDefault(root) {
   if (route !== null)
     return route;
   const config2 = parseConfig({});
-  const absRoot = resolve2(root);
+  const absRoot = resolve3(root);
   return { storage: "sqlite", root: absRoot, config: config2, projectDbPath: join10(absRoot, ".sterling", "sterling.db"), domains: resolveDomainMounts(config2) };
 }
 function openRoutedStores(root, opts = {}) {
@@ -28197,7 +28398,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
+        await new Promise((resolve7) => setTimeout(resolve7, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -28214,7 +28415,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve6, reject) => {
+    return new Promise((resolve7, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -28292,7 +28493,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve6(parseResult.data);
+            resolve7(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -28553,12 +28754,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve6, reject) => {
+    return new Promise((resolve7, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve6, interval);
+      const timeoutId = setTimeout(resolve7, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -29658,7 +29859,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
+      await new Promise((resolve7) => setTimeout(resolve7, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -30516,18 +30717,18 @@ function guardWorkerTools(server, guard) {
 
 // packages/mcp-server/dist/tools.js
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync as existsSync7, lstatSync as lstatSync5, mkdirSync as mkdirSync7, readFileSync as readFileSync9, readdirSync as readdirSync3, realpathSync as realpathSync4, renameSync as renameSync3, statSync as statSync4, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { createHash as createHash4, randomUUID as randomUUID5 } from "node:crypto";
+import { appendFileSync, chmodSync, existsSync as existsSync7, lstatSync as lstatSync5, mkdirSync as mkdirSync7, readFileSync as readFileSync9, readdirSync as readdirSync3, realpathSync as realpathSync5, renameSync as renameSync3, statSync as statSync4, unlinkSync as unlinkSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { basename as basename3, dirname as dirname8, isAbsolute, join as join14, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 // packages/mcp-server/dist/handoff-target.js
-import { existsSync as existsSync4, realpathSync as realpathSync3 } from "node:fs";
-import { basename as basename2, join as join11, resolve as resolve3 } from "node:path";
+import { existsSync as existsSync4, realpathSync as realpathSync4 } from "node:fs";
+import { basename as basename2, join as join11, resolve as resolve4 } from "node:path";
 function canonical(p) {
-  const abs = resolve3(p);
+  const abs = resolve4(p);
   try {
-    return realpathSync3(abs);
+    return realpathSync4(abs);
   } catch {
     return abs;
   }
@@ -30546,7 +30747,7 @@ var READ_WORDING = {
   sqliteOnly: "another project's board is read from SQLite stores only",
   neverCreates: "a read never creates one"
 };
-function resolveHandoffTarget(name, selfRoot, regPath = registryPath(), use = "board_add") {
+function resolveHandoffTarget(name, selfRoot, regPath = registryPath(), use = "board_add", trackers) {
   const w = use === "board_add" ? WRITE_WORDING : READ_WORDING;
   const refuse = (why) => new Error(`${use}: target_project '${name}' is refused: ${why}. ${w.nothing}`);
   if (!selfRoot)
@@ -30554,22 +30755,43 @@ function resolveHandoffTarget(name, selfRoot, regPath = registryPath(), use = "b
   if (!existsSync4(regPath))
     throw refuse(`there is no project registry at ${regPath} (projects are registered by /sterling:init)`);
   const registry2 = new ProjectRegistry(regPath);
-  let rows;
+  let snapshot;
   try {
-    rows = registry2.list();
+    snapshot = registry2.snapshot();
   } finally {
     registry2.close();
   }
+  const rows = snapshot.rows;
   const self = canonical(selfRoot);
   const selfRow = rows.find((r) => canonical(r.repo_path) === self);
   const selfName = selfRow?.name ?? basename2(self);
   const roots = [...new Set(rows.filter((r) => r.name === name).map((r) => r.repo_path))];
-  if (roots.length === 0) {
-    throw refuse(`no registered project has that name; registered: ${rows.length ? [...new Set(rows.map((r) => r.name))].join(", ") : "(none)"}`);
-  }
   if (roots.length > 1)
     throw refuse(`the name is ambiguous, ${roots.length} registered roots carry it: ${roots.join(", ")}`);
-  const root = roots[0];
+  let root = roots[0];
+  let resolvedName = name;
+  if (root === void 0) {
+    const unknownName = `no registered project has that name; registered: ${rows.length ? [...new Set(rows.map((r) => r.name))].join(", ") : "(none)"}`;
+    const named2 = use === "board_add" || !trackers ? [] : trackers().filter((t) => t.to_name === name);
+    if (named2.length === 0)
+      throw refuse(unknownName);
+    const found = /* @__PURE__ */ new Map();
+    const reasons = /* @__PURE__ */ new Set();
+    for (const t of named2) {
+      const r = resolveReceiverLocation(t, t.created_at, snapshot);
+      if ("row" in r)
+        found.set(r.row.repo_path, r.row);
+      else
+        reasons.add(r.reason);
+    }
+    if (found.size === 0)
+      throw refuse(`${unknownName}; this board's hand-off trackers to '${name}' resolve to no registered project: ${[...reasons].join("; ")}`);
+    if (found.size > 1)
+      throw refuse(`${unknownName}; this board's hand-off trackers to '${name}' point at ${found.size} registered projects: ${[...found.values()].map((r) => `'${r.name}' (${r.repo_path})`).join(", ")}`);
+    const row = [...found.values()][0];
+    root = row.repo_path;
+    resolvedName = row.name;
+  }
   if (canonical(root) === self)
     throw refuse(w.self);
   if (!existsSync4(root))
@@ -30587,14 +30809,14 @@ function resolveHandoffTarget(name, selfRoot, regPath = registryPath(), use = "b
   const dbPath = join11(root, ".sterling", "sterling.db");
   if (!existsSync4(dbPath))
     throw refuse(`it has no store at ${dbPath}, and ${w.neverCreates}`);
-  return { name, root, dbPath, selfName };
+  return { name: resolvedName, root, dbPath, selfName };
 }
 
 // packages/mcp-server/dist/attestation-proof.js
 import { spawnSync } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
 import { closeSync as closeSync4, constants as fsConstants, fstatSync as fstatSync2, lstatSync as lstatSync4, openSync as openSync4, readSync as readSync3 } from "node:fs";
-import { resolve as resolve4 } from "node:path";
+import { resolve as resolve5 } from "node:path";
 var AttestationRefusal = class extends Error {
   path;
   reason;
@@ -30704,7 +30926,7 @@ function fsStep(key, what, fn) {
   }
 }
 function readOwnedFile(root, key, remainingBytes, maxTotalBytes) {
-  const abs = resolve4(root, ...key.split("/"));
+  const abs = resolve5(root, ...key.split("/"));
   const pre = fsStep(key, "lstat", () => lstatSync4(abs, { throwIfNoEntry: false }));
   if (!pre)
     throw new AttestationRefusal("the path does not exist in the worktree", key);
@@ -31361,8 +31583,8 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
   if (dirLst.isSymbolicLink()) {
     throw new Error(`config_set: .sterling is a symlink at the project root \u2014 refusing a structured write beneath a linked directory. Nothing was written.`);
   }
-  const realDir = realpathSync4(configDir);
-  const realRoot = realpathSync4(repoRoot);
+  const realDir = realpathSync5(configDir);
+  const realRoot = realpathSync5(repoRoot);
   const relDir = relative(realRoot, realDir);
   if (relDir === ".." || relDir.startsWith(`..${sep}`) || isAbsolute(relDir)) {
     throw new Error(`config_set: .sterling resolves outside the project root (${realDir}) \u2014 refusing. Nothing was written.`);
@@ -31448,7 +31670,7 @@ function configSetImpl(repoRoot, path, value, expectedDigest) {
     throw new Error(`config_set: the resulting config.json would fail schema validation \u2014 ${issues}. Nothing was written.`);
   }
   const serialized = JSON.stringify(mutated, null, 2) + "\n";
-  const tmpPath = join14(configDir, `config.json.tmp-${randomUUID4()}`);
+  const tmpPath = join14(configDir, `config.json.tmp-${randomUUID5()}`);
   writeFileSync4(tmpPath, serialized);
   let renamed = false;
   try {
@@ -31495,7 +31717,7 @@ function busyRefusal(op, e, safeToResend) {
   const next = safeToResend ? "This call wrote nothing, so it is safe to re-send." : "An earlier write in this call may have landed; check before re-sending.";
   return new Error(`${op}: ${e.message} ${next}`, { cause: e });
 }
-var PROCESS_KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/${knowledgeWritesProcessFile(process.pid, randomUUID4())}`;
+var PROCESS_KNOWLEDGE_WRITES_REL = `${KNOWLEDGE_WRITES_DIR_REL}/${knowledgeWritesProcessFile(process.pid, randomUUID5())}`;
 var SterlingTools = class _SterlingTools {
   store;
   config;
@@ -31511,7 +31733,7 @@ var SterlingTools = class _SterlingTools {
     this.store = deps.store;
     this.config = deps.config ?? parseConfig({});
     this.now = deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString());
-    this.newId = deps.newId ?? randomUUID4;
+    this.newId = deps.newId ?? randomUUID5;
     this.repoRoot = deps.repoRoot;
     this.domains = deps.domains ?? (deps.store instanceof MountedStores ? mountedDomainSurface(deps.store) : void 0);
   }
@@ -33149,7 +33371,7 @@ var SterlingTools = class _SterlingTools {
     this.refuseServerOwnedFields(fields, "knowledge_create");
     const ts = this.now();
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, version: smuggledVersion, ...body } = fields;
-    const operationId = randomUUID4();
+    const operationId = randomUUID5();
     const candidate = {
       id: this.newId(),
       type,
@@ -36134,6 +36356,8 @@ ${JSON.stringify(value, null, 2)}` : void 0;
       updated_at: ts,
       ...replaced ? { status: "active", superseded_by: null } : {}
     };
+    if (overrides.working_tree === null)
+      delete next.working_tree;
     if (relationRemoval) {
       const links = next.links;
       if (!Array.isArray(links)) {
@@ -36177,7 +36401,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         if (expectedVersion !== void 0 && previousVersion !== void 0 && expectedVersion !== previousVersion) {
           throw new Error(`${toolName}: stale expected_version \u2014 the caller supplied expected_version ${expectedVersion} but record '${old.id}' is at version ${previousVersion}. Nothing was written; re-read the record and retry against version ${previousVersion}.`);
         }
-        updated = this.store.supersede(old.id, next, void 0, { operation_id: randomUUID4() });
+        updated = this.store.supersede(old.id, next, void 0, { operation_id: randomUUID5() });
         for (const claim of claims) {
           const atRemoval = this.store.get(claim.id);
           this.store.remove(claim.id, ts);
@@ -36751,7 +36975,7 @@ ${JSON.stringify(value, null, 2)}` : void 0;
         superseded_by: null,
         scope: `domain:${domain}`,
         links: [{ rel: "informed_by", target_id: originalId }]
-      }, { operation_id: randomUUID4() });
+      }, { operation_id: randomUUID5() });
     } catch (err) {
       if (err instanceof ZodError2)
         throw this.renderValidationFailure(err, original.type, "knowledge_promote");
@@ -37026,7 +37250,7 @@ ${JSON.stringify(entry)}
       latest.set(ok.data.id, ok.data);
     }
     const kept = [...latest.values()].slice(-KNOWLEDGE_WRITES_KEEP_IDS);
-    const tmp = join14(dirname8(ledgerPath), knowledgeWritesTempFile(basename3(ledgerPath), process.pid, randomUUID4()));
+    const tmp = join14(dirname8(ledgerPath), knowledgeWritesTempFile(basename3(ledgerPath), process.pid, randomUUID5()));
     try {
       writeFileSync4(tmp, kept.map((e) => `${JSON.stringify(e)}
 `).join(""));
@@ -37323,7 +37547,8 @@ ${JSON.stringify(entry)}
     if (!users.length)
       return out;
     const readiness = this.store.boardReadiness(users);
-    const statuses = resolveSentHandoffs(readiness.filter((r) => r.handoff).map((r) => ({ id: r.id, handoff: r.handoff })));
+    const createdAt = new Map(users.map((u) => [u.id, u.created_at]));
+    const statuses = resolveSentHandoffs(readiness.filter((r) => r.handoff).map((r) => ({ id: r.id, handoff: r.handoff, created_at: createdAt.get(r.id) })), { registryPath: this.registryPath ?? registryPath() });
     for (const r of readiness) {
       const status = statuses.get(r.id);
       out.set(r.id, {
@@ -38038,7 +38263,11 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
    * is written there. Returns the read with the target it came from.
    */
   readForeignTarget(target_project, tool, read) {
-    const target = resolveHandoffTarget(target_project, this.repoRoot, this.registryPath, tool);
+    const trackers = () => this.store.query({ types: ["todo"], cap: BOARD_SCAN_CAP }).flatMap((t) => {
+      const h = sentHandoffOf(t);
+      return h ? [{ to_root: h.to_root, to_name: h.to_name, created_at: t.created_at }] : [];
+    });
+    const target = resolveHandoffTarget(target_project, this.repoRoot, this.registryPath, tool, trackers);
     let result;
     try {
       result = read(target.dbPath);
@@ -39286,7 +39515,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       }
     }
     const ts = this.now();
-    const operationId = randomUUID4();
+    const operationId = randomUUID5();
     const candidate = {
       id: this.newId(),
       type,
@@ -39645,7 +39874,7 @@ function createSterlingServer(target, opts = {}) {
   toolWrappers.push("busy_refusal");
   const json = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
   const ID_LADDER = "full uuid, exact slug, or unambiguous 8-char prefix";
-  const FOREIGN_BOARD_READ = "a project name from this machine's project registry (/sterling:projects); reads that project's user board read-only instead of this one";
+  const FOREIGN_BOARD_READ = "a project name from this machine's project registry (/sterling:projects); reads that project's user board read-only instead of this one. A name that is no longer registered is followed through this board's hand-off trackers to the project their receiver is now (renamed, or moved with list-projects.mjs --move); refused when no registered project matches";
   const ID_EXACT_DESTROY = "the EXACT full uuid: this call destroys, so a slug or an 8-char prefix is refused";
   const RESOLVES_FULL_IDS = "full uuids only; a slug or an 8-char prefix is refused because claimed items are hard-deleted";
   server.registerTool("knowledge_create", {
@@ -39741,7 +39970,7 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ old_id, fields, orphans_acknowledged, type, resolves }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged, { type, resolves })));
   server.registerTool("knowledge_update", {
-    description: "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body \u2014 pass only changed mutable fields; omitted fields are kept (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
+    description: "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body \u2014 pass only changed mutable fields; omitted fields are kept; working_tree: null clears a feature_article's or reference_material's working_tree (a null on any other field is refused) (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused, and so is a NEW links entry with rel 'supersedes' (nothing is written; use knowledge_supersede, which retires the old record, or rel 'cites' for a partial override; a supersedes edge the record already holds is kept); a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed, refresh_reference, stale_research or state_review items keyed to this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
       body: passthrough,
@@ -39825,7 +40054,7 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ projection, ...args2 }) => json(tools.writeProjected(tools.boardAdd(args2), projection)));
   server.registerTool("board_query", {
-    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, unblocks (live items waiting on this one, as \`name (id8)\`), readiness:'delegated' with handoff_status {state, text} on a tracker for a task handed to another project, updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:"system" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.`,
+    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, unblocks (live items waiting on this one, as \`name (id8)\`), readiness:'delegated' with handoff_status {state, text} on a tracker for a task handed to another project (the receiver is located through the project registry, so a folder moved with list-projects.mjs --move keeps resolving at its new path; a receiver it cannot locate reads status unknown), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:"system" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.`,
     inputSchema: strict({
       source: external_exports.enum(["user", "system"]).optional(),
       objective: external_exports.string().optional(),
@@ -39958,7 +40187,7 @@ function recordRuntimeMarker(storePath2, serverDir, now = () => (/* @__PURE__ */
 // packages/mcp-server/dist/broker.js
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
-import { chmodSync as chmodSync2, readFileSync as readFileSync12, realpathSync as realpathSync5 } from "node:fs";
+import { chmodSync as chmodSync2, readFileSync as readFileSync12, realpathSync as realpathSync6 } from "node:fs";
 function buildIdOf(serverDir) {
   try {
     return readFileSync12(buildIdPath(serverDir), "utf8").trim() || "unknown";
@@ -39992,7 +40221,7 @@ async function startHookBroker({ stores, route, serverDir, env = process.env }) 
   if (dir === void 0)
     return null;
   const instanceId = randomBytes(16).toString("hex");
-  const root = realpathSync5(route.root);
+  const root = realpathSync6(route.root);
   const identity = {
     instance_id: instanceId,
     protocol: BROKER_PROTOCOL,
@@ -40148,8 +40377,8 @@ if (pathArg.includes("${")) {
   console.error(`sterling-mcp: ${flagName} path contains an unexpanded placeholder: '${pathArg}' \u2014 refusing to create a phantom store (P5). In --mcp-config or project-scope configs use \${CLAUDE_PROJECT_DIR:-.} (plugin-scope configs expand the bare form).`);
   process.exit(2);
 }
-var projectRoot = projectArg !== void 0 ? resolve5(projectArg) : void 0;
-var storePath = projectRoot !== void 0 ? join16(projectRoot, ".sterling", "sterling.db") : resolve5(pathArg);
+var projectRoot = projectArg !== void 0 ? resolve6(projectArg) : void 0;
+var storePath = projectRoot !== void 0 ? join16(projectRoot, ".sterling", "sterling.db") : resolve6(pathArg);
 var created;
 try {
   created = createSterlingServer(projectRoot !== void 0 ? { projectRoot } : storePath, { workerPolicy });

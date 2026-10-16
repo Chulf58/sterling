@@ -7,8 +7,8 @@ var __export = (target, all) => {
 };
 
 // scripts/stamp-contract.mjs
-import { readFileSync as readFileSync4, writeFileSync, existsSync as existsSync3, realpathSync as realpathSync2 } from "node:fs";
-import { join as join7, dirname as dirname2, resolve as resolve2 } from "node:path";
+import { readFileSync as readFileSync4, writeFileSync, existsSync as existsSync3, realpathSync as realpathSync3 } from "node:fs";
+import { join as join7, dirname as dirname2, resolve as resolve3 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // node_modules/zod/v3/external.js
@@ -5518,9 +5518,10 @@ var AXIS_MAX_TERM_LEN = 64;
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, realpathSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { dirname, join as join2 } from "node:path";
+import { dirname, join as join2, resolve } from "node:path";
 var REGISTRY_DDL = `
 CREATE TABLE IF NOT EXISTS projects (
   repo_path TEXT PRIMARY KEY,
@@ -5532,6 +5533,16 @@ CREATE TABLE IF NOT EXISTS projects (
   last_init_at TEXT NOT NULL,
   last_seen_at TEXT
 );`;
+var OCCUPANCY_DDL = `
+CREATE TABLE IF NOT EXISTS project_occupancy (
+  path TEXT NOT NULL,
+  project_key TEXT NOT NULL,
+  from_at TEXT NOT NULL,
+  to_at TEXT
+);
+CREATE INDEX IF NOT EXISTS project_occupancy_path ON project_occupancy (path);
+CREATE INDEX IF NOT EXISTS project_occupancy_key ON project_occupancy (project_key);`;
+var MIGRATED_FROM = "";
 function registryPath() {
   return process.env.STERLING_REGISTRY_DB ?? join2(homedir2(), ".sterling", "registry.db");
 }
@@ -5542,20 +5553,66 @@ var ProjectRegistry = class {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA busy_timeout=5000");
     this.db.exec("PRAGMA journal_mode=WAL");
-    this.db.exec(REGISTRY_DDL);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec(REGISTRY_DDL);
+      this.migrateIdentity();
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      this.db.close();
+      throw e;
+    }
+  }
+  /** Idempotent, inside the constructor's transaction: the project_key
+   *  column, the occupancy table, a key and an open MIGRATED_FROM interval for
+   *  every row without a key. The path-alias table an unreleased build of
+   *  this branch wrote is dropped (it never shipped). */
+  migrateIdentity() {
+    const cols = this.db.prepare("PRAGMA table_info(projects)").all();
+    if (!cols.some((c) => c.name === "project_key"))
+      this.db.exec("ALTER TABLE projects ADD COLUMN project_key TEXT");
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS projects_project_key ON projects (project_key)");
+    this.db.exec(OCCUPANCY_DDL);
+    this.db.exec("DROP TABLE IF EXISTS project_path_aliases");
+    const unkeyed = this.db.prepare("SELECT repo_path FROM projects WHERE project_key IS NULL").all();
+    for (const { repo_path } of unkeyed) {
+      const key = randomUUID();
+      this.db.prepare("UPDATE projects SET project_key = ? WHERE repo_path = ?").run(key, repo_path);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(repo_path, key, MIGRATED_FROM);
+    }
+  }
+  /** Run `fn` in one BEGIN IMMEDIATE transaction. */
+  tx(fn) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const out = fn();
+      this.db.exec("COMMIT");
+      return out;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
   }
   /** Upsert by repo_path (init event, P4): create on first init
-   *  (first_init_at = last_init_at = at), refresh the mutable fields + last_init_at
-   *  on re-init while preserving first_init_at. */
+   *  (first_init_at = last_init_at = at, a new project_key, an occupancy
+   *  interval opened at `at`), refresh the mutable fields + last_init_at on
+   *  re-init while preserving first_init_at and the key. */
   register(input) {
-    this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
-         ON CONFLICT(repo_path) DO UPDATE SET
-           name = excluded.name,
-           stack_tags = excluded.stack_tags,
-           toolchains = excluded.toolchains,
-           sterling_version = excluded.sterling_version,
-           last_init_at = excluded.last_init_at`).run(input.repo_path, input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.at);
+    this.tx(() => {
+      const own = this.db.prepare("SELECT project_key FROM projects WHERE repo_path = ?").get(input.repo_path);
+      if (own) {
+        this.db.prepare("UPDATE projects SET name = ?, stack_tags = ?, toolchains = ?, sterling_version = ?, last_init_at = ? WHERE repo_path = ?").run(input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.repo_path);
+        const open = this.db.prepare("SELECT 1 FROM project_occupancy WHERE path = ? AND project_key = ? AND to_at IS NULL").get(input.repo_path, own.project_key);
+        if (!open)
+          this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(input.repo_path, own.project_key, input.at);
+        return;
+      }
+      const key = randomUUID();
+      this.db.prepare(`INSERT INTO projects (repo_path, name, stack_tags, toolchains, sterling_version, first_init_at, last_init_at, last_seen_at, project_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`).run(input.repo_path, input.name, JSON.stringify(input.stack_tags), JSON.stringify(input.toolchains), input.sterling_version, input.at, input.at, key);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(input.repo_path, key, input.at);
+    });
   }
   /** Session-activity touch (H1 SessionStart): update last_seen_at for an
    *  EXISTING row only — never create (registration is init's job). Returns
@@ -5612,10 +5669,71 @@ var ProjectRegistry = class {
       toolchains: JSON.parse(r.toolchains)
     }));
   }
+  /** The whole occupancy history, oldest interval first. */
+  occupancy() {
+    return this.db.prepare("SELECT path, project_key, from_at, to_at FROM project_occupancy ORDER BY from_at, path").all().map((o) => ({
+      path: o.path,
+      project_key: o.project_key,
+      from_at: o.from_at,
+      to_at: o.to_at
+    }));
+  }
+  /** The project_key of the row at repoPath, or undefined. */
+  keyOf(repoPath2) {
+    return this.db.prepare("SELECT project_key FROM projects WHERE repo_path = ?").get(repoPath2)?.project_key;
+  }
+  /** Rows (repo_path, name, project_key) and the occupancy history in one read transaction. */
+  snapshot() {
+    this.db.exec("BEGIN");
+    try {
+      const rows = this.db.prepare("SELECT repo_path, name, project_key FROM projects ORDER BY name").all().map((r) => ({
+        repo_path: r.repo_path,
+        name: r.name,
+        project_key: r.project_key
+      }));
+      const snap = { rows, occupancy: this.occupancy() };
+      this.db.exec("COMMIT");
+      return snap;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+  /** Folder move (/sterling:projects --move, GitHub issue #119): repoint the
+   *  row at `fromPath` to `toPath`, keeping its project_key; the key's interval
+   *  at `fromPath` closes at `at` and one at `toPath` opens. The conflict check
+   *  (another row at `toPath`), the row update and the interval writes run in
+   *  one BEGIN IMMEDIATE transaction. Touches nothing on disk. */
+  moveProject(fromPath, toPath, at) {
+    if (fromPath === toPath)
+      return { status: "unchanged" };
+    return this.tx(() => {
+      const key = this.keyOf(fromPath);
+      if (key === void 0)
+        return { status: "missing" };
+      const taken = this.db.prepare("SELECT repo_path FROM projects WHERE repo_path = ?").get(toPath);
+      if (taken)
+        return { status: "conflict", conflict_path: taken.repo_path };
+      this.db.prepare("UPDATE projects SET repo_path = ? WHERE repo_path = ?").run(toPath, fromPath);
+      this.db.prepare("UPDATE project_occupancy SET to_at = ? WHERE project_key = ? AND to_at IS NULL").run(at, key);
+      this.db.prepare("INSERT INTO project_occupancy (path, project_key, from_at, to_at) VALUES (?, ?, ?, NULL)").run(toPath, key, at);
+      return { status: "moved" };
+    });
+  }
   /** Human-gated removal (the /sterling:projects prune of a missing project) —
-   *  never automatic. Returns whether a row was removed. */
-  remove(repoPath2) {
-    return this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2).changes > 0;
+   *  never automatic. Returns whether a row was removed. The key's open
+   *  interval closes at `at` and stays as its tombstone, so a tracker created
+   *  while the project was registered reads "no longer registered" and never
+   *  resolves to a project that registers at the path later. */
+  remove(repoPath2, at = (/* @__PURE__ */ new Date()).toISOString()) {
+    return this.tx(() => {
+      const key = this.keyOf(repoPath2);
+      if (key === void 0)
+        return false;
+      this.db.prepare("DELETE FROM projects WHERE repo_path = ?").run(repoPath2);
+      this.db.prepare("UPDATE project_occupancy SET to_at = ? WHERE project_key = ? AND to_at IS NULL").run(at, key);
+      return true;
+    });
   }
   close() {
     this.db.close();
@@ -5661,9 +5779,9 @@ import { homedir as homedir4 } from "node:os";
 import { join as join4 } from "node:path";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync as realpathSync2 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { join as join3, resolve, sep } from "node:path";
+import { join as join3, resolve as resolve2, sep } from "node:path";
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
@@ -5818,9 +5936,9 @@ var sterlingInstallRemedy = api.sterlingInstallRemedy;
 var sterlingNotFoundMessage = api.sterlingNotFoundMessage;
 function canonical(p) {
   try {
-    return realpathSync(p);
+    return realpathSync2(p);
   } catch (err) {
-    if (err?.code === "ENOENT") return resolve(p);
+    if (err?.code === "ENOENT") return resolve2(p);
     throw err;
   }
 }
@@ -6229,7 +6347,7 @@ var WRITE_INSERTS = APPLY || APPLY_INSERTS;
 var VERBOSE = process.argv.includes("--verbose");
 var onlyProjects = [];
 for (let i = 2; i < process.argv.length; i++) {
-  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve2(process.argv[++i]));
+  if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve3(process.argv[++i]));
 }
 var repoRoot = join7(dirname2(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
 var normalizeEol = (text) => text.replace(/\r\n/g, "\n");
@@ -6300,7 +6418,7 @@ try {
 } finally {
   registry.close();
 }
-var selfPath = realpathSync2(repoRoot);
+var selfPath = realpathSync3(repoRoot);
 var results = [];
 var drift = 0;
 var inSync = 0;
@@ -6330,12 +6448,12 @@ function record(r) {
 var UNWRITTEN = { updated: "would_update", inserted: "would_insert", renamed: "would_rename", section_inserted: "would_insert_section" };
 for (const p of projects) {
   const repo = p.repo_path;
-  if (onlyProjects.length && !onlyProjects.includes(resolve2(repo))) continue;
+  if (onlyProjects.length && !onlyProjects.includes(resolve3(repo))) continue;
   if (!existsSync3(repo)) {
     record({ project: p.name, status: "missing_path", detail: repo });
     continue;
   }
-  if (realpathSync2(repo) === selfPath) continue;
+  if (realpathSync3(repo) === selfPath) continue;
   const agentsMd = join7(repo, "AGENTS.md");
   const claudeMd = join7(repo, "CLAUDE.md");
   if (!existsSync3(agentsMd)) {

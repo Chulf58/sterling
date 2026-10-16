@@ -2,7 +2,7 @@
 // every tab is a live view; nothing here mutates anything.
 import { DRAIN_VERBS, RECORD_TYPES, displayHandle, boardDisplayLabel } from '@sterling/schemas';
 import type { SterlingStore, MountedStores, BoardItemReadiness, HandoffStatus } from '@sterling/store';
-import { resolveSentHandoffs } from '@sterling/store';
+import { registryPath, resolveSentHandoffs } from '@sterling/store';
 
 export interface Card {
   id: string;
@@ -427,7 +427,13 @@ export function todoCards(store: SterlingStore, expanded: string[] = []): Card[]
   // where it went and its status, read-only from that project's store under a
   // short budget (this runs on the 1 Hz tick).
   const delegated = [...readiness.values()].filter((r) => r.state === 'delegated');
-  const handoffStatus = delegated.length ? resolveSentHandoffs(delegated.map((r) => ({ id: r.id, handoff: r.handoff })), { busyTimeoutMs: 50, budgetMs: 200 }) : new Map();
+  // The receiver is located through the project registry by the tracker's own
+  // created_at, the path board_get takes, so a folder moved with
+  // list-projects --move shows its real status (GitHub issue #119).
+  const createdAt = new Map(todos.map((t) => [t.id, t.created_at]));
+  const handoffStatus = delegated.length
+    ? resolveSentHandoffs(delegated.map((r) => ({ id: r.id, handoff: r.handoff, created_at: createdAt.get(r.id) })), { busyTimeoutMs: 50, budgetMs: 200, registryPath: registryPath() })
+    : new Map();
   for (const t of todos) {
     const todo = t as unknown as { id: string; text: string; slug?: string; priority?: string; file_keys?: string[]; objective?: string; needs?: string };
     // `name (id8)` where a LABEL EXISTS (decision foreign_2e8c30e4; board 081508d0

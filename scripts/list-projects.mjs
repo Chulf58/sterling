@@ -9,21 +9,27 @@
 // `--rename <path> <new-name>` previews, and with `--apply` performs, renaming the project:
 // config.json project_name and the registry row together (decision
 // config-project-name-decides-the-registry-name, GitHub #113).
+// `--move <name|old-path> <new-path>` previews, and with `--apply` performs, repointing the
+// registry row of a project whose folder was moved, keeping its project key and a record of the old path for
+// hand-off trackers (decision moving-a-project-folder-repoints-the-registry-and-keeps-old-paths-as-aliases,
+// GitHub #119). It repairs the registration only; it moves no files.
 //   node scripts/list-projects.mjs [--prune-missing]
 //   node scripts/list-projects.mjs --remove <path> [--apply]
 //   node scripts/list-projects.mjs --rename <path> <new-name> [--apply]
+//   node scripts/list-projects.mjs --move <name|old-path> <new-path> [--apply]
 import { existsSync } from 'node:fs';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { removeProject } from './lib/project-remove.mjs';
 import { renameProject } from './lib/project-rename.mjs';
+import { moveProject } from './lib/project-move.mjs';
 
 function usage(msg) {
-  console.error(`list-projects REFUSED: ${msg}\nusage: list-projects.mjs [--prune-missing] | --remove <path> [--apply] | --rename <path> <new-name> [--apply]`);
+  console.error(`list-projects REFUSED: ${msg}\nusage: list-projects.mjs [--prune-missing] | --remove <path> [--apply] | --rename <path> <new-name> [--apply] | --move <name|old-path> <new-path> [--apply]`);
   process.exit(2);
 }
 
 function parseArgs(argv) {
-  const out = { prune: false, remove: undefined, rename: undefined, newName: undefined, apply: false };
+  const out = { prune: false, remove: undefined, rename: undefined, newName: undefined, move: undefined, moveTo: undefined, apply: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--prune-missing') out.prune = true;
@@ -40,11 +46,19 @@ function parseArgs(argv) {
       if (out.rename !== undefined) usage('--rename given more than once');
       out.rename = p;
       out.newName = n;
+    } else if (a === '--move') {
+      const f = argv[++i];
+      const t = argv[++i];
+      if (f === undefined || f.startsWith('--') || t === undefined || t.startsWith('--')) usage('--move needs a project (name or old path) and a new path');
+      if (out.move !== undefined) usage('--move given more than once');
+      out.move = f;
+      out.moveTo = t;
     } else usage(`unknown argument '${a}'`);
   }
-  if (out.apply && out.remove === undefined && out.rename === undefined) usage('--apply needs --remove <path> or --rename <path> <new-name>');
-  if (out.remove !== undefined && out.rename !== undefined) usage('--remove and --rename cannot be combined');
-  if (out.prune && (out.remove !== undefined || out.rename !== undefined)) usage('--prune-missing cannot be combined with --remove or --rename');
+  const actions = [out.remove, out.rename, out.move].filter((v) => v !== undefined).length;
+  if (out.apply && actions === 0) usage('--apply needs --remove <path>, --rename <path> <new-name> or --move <name|old-path> <new-path>');
+  if (actions > 1) usage('--remove, --rename and --move cannot be combined');
+  if (out.prune && actions > 0) usage('--prune-missing cannot be combined with --remove, --rename or --move');
   return out;
 }
 
@@ -89,6 +103,7 @@ try {
   // The real /proc and no callback: no environment variable changes the safety checks.
   if (args.remove !== undefined) process.exitCode = removeProject(registry, args.remove, { apply: args.apply });
   else if (args.rename !== undefined) process.exitCode = renameProject(registry, args.rename, args.newName, { apply: args.apply });
+  else if (args.move !== undefined) process.exitCode = moveProject(registry, args.move, args.moveTo, { apply: args.apply });
   else listProjects(args.prune);
 } finally {
   registry.close();

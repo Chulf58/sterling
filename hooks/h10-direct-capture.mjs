@@ -8705,7 +8705,7 @@ function boardReadinessOf(targets, live, openBlocker) {
       blockers_open: blockersOpen,
       unblocks,
       state,
-      ...sent ? { handoff: sent } : {}
+      ...sent ? { handoff: sent, ...typeof t.created_at === "string" ? { created_at: t.created_at } : {} } : {}
     };
   });
 }
@@ -13912,7 +13912,7 @@ function foreignTreeOwnersText(paths, foreignOnlyOwners) {
   if (!byArticle.size) return "";
   const list = (arr) => arr.length > 5 ? `${arr.slice(0, 5).join(", ")} +${arr.length - 5} more` : arr.join(", ");
   const owners = [...byArticle.values()].map(({ r, paths: ps }) => `'${r.slug ?? r.title ?? r.id}' (${String(r.id).slice(0, 8)}, working_tree '${r.working_tree}') lists ${list(ps)}`);
-  return `${named.size} of these file(s) are listed only by an article on another working tree, which owns no file in this root: ${owners.join("; ")}. If that branch is merged, clear working_tree on the article (knowledge_update); if it is a real separate tree, map the name in config.working_trees.`;
+  return `${named.size} of these file(s) are listed only by an article on another working tree, which owns no file in this root: ${owners.join("; ")}. If that branch is merged, clear working_tree on the article (knowledge_update with working_tree: null); if it is a real separate tree, map the name in config.working_trees.`;
 }
 function demandExemption(config, generatedProjections) {
   const ignoreGlobs = config.article_demand.ignore_globs;

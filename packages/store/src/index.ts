@@ -33,7 +33,7 @@ export { MountedStores, domainsHome, defaultMoveLockPath, type MoveRecoveryOutco
 export { allocateShares, DEFAULT_PROJECT_SHARE } from './shares.js';
 export { acquireMoveLock, releaseMoveLock, MoveLockBusyError, pidIsAlive, procStartTime, type MoveLockHandle, type MoveLockOptions, type MoveLockOwner } from './move-lock.js';
 export { fitDomains, DOMAIN_FIT_MIN_TERMS } from './domain-fit.js';
-export { ProjectRegistry, registryPath, type RegisterInput, type RenameResult } from './registry.js';
+export { ProjectRegistry, registryPath, resolveReceiverLocation, type RegisterInput, type RenameResult, type MoveResult, type RegistryOccupancy, type RegistrySnapshot, type ReceiverRef, type LocatorRow, MIGRATED_FROM } from './registry.js';
 export { resolveSentHandoffs, sentHandoffOf, openForeignDbReadOnly, readForeignBoard, getForeignBoardItem, type ForeignReadHooks, type ForeignBoardRead, type ForeignBoardLookup, type BoardOrderKey, type ReadForeignBoardOptions, type SentHandoff, type HandoffStatus, type HandoffStatusState, type ResolveSentHandoffsOptions } from './handoff.js';
 export * from './axis.js';
 import { AXIS_MAX_TERM_LEN } from './axis.js';
@@ -622,6 +622,8 @@ export interface BoardItemReadiness {
   state: BoardReadinessState;
   /** a 'delegated' item's sent-handoff metadata, for resolveSentHandoffs */
   handoff?: SentHandoff;
+  /** a 'delegated' item's created_at, for resolveSentHandoffs to locate its receiver as of then */
+  created_at?: string;
 }
 
 /** The board-item fields boardReadinessOf reads; unknown keys are ignored. */
@@ -637,6 +639,8 @@ export interface BoardReadinessInput {
   needs?: BoardNeeds;
   blocked_by?: string[];
   handoff?: unknown;
+  /** the record's creation time; kept on a delegated item so its receiver is located as of then (GitHub issue #119) */
+  created_at?: string;
 }
 
 /**
@@ -697,7 +701,7 @@ export function boardReadinessOf(
         blockers_open: blockersOpen,
         unblocks,
         state,
-        ...(sent ? { handoff: sent } : {}),
+        ...(sent ? { handoff: sent, ...(typeof t.created_at === 'string' ? { created_at: t.created_at } : {}) } : {}),
       };
     });
 }
