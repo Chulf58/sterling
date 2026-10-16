@@ -1012,7 +1012,7 @@ const UNRELATED_WORDING = new Map([
   [BACKGROUND_LEAD, ['- **Run the development server in the background.** Ours.', '- **Start everything in the background when the host can notify you.** Ours.']],
   [FINISH_LEAD, ['- **Never stop the dev server with unfinished migrations pending.** Ours.', '- **Glossy finish for buttons.** Ours.']],
   [RESOLVE_LEAD, ['- **Resolve thread pool starvation first.** Ours.']],
-  ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', ['- **Spell-check prose deliverables.** Ours.']],
+  ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', ['- **Spell-check prose deliverables.** Ours.', '- **AI-writing tools require approval.** Do not send customer data to them.']],
   [SOLVE_LEAD, ['- **Every user ask goes to the support board.** Ours.']],
   [CLOSE_LEAD, ['- **Close-on-commit for support tickets.** Ours.']],
 ]);

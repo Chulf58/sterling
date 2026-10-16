@@ -201,7 +201,7 @@ export const SUBJECT_MARKERS = new Map([
     /^(?=.*\b(work|tasks?)\b)(?=.*\bhalf[- ]done\b)/i,
   ]],
   ['- **Resolve a review thread once its finding is handled.**', [/^(?=.*\bresolve\b)(?=.*\b(threads?|conversations?)\b)(?=.*\b(review|pr|pull request|copilot)\b)/i]],
-  ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', [/\bde-?ai\b/i, /\bai[- ]writing\b/i]],
+  ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', [/\bde-?ai\b/i]],
   ["- **Solve, don't board.**", [/\bsolve,? don'?t board\b/i, /\bevery user ask is boarded\b/i]],
   ['- **Close-on-commit: a commit that fulfils a board item pays it**', [/^(?=.*\bclose[- ]on[- ]commit\b)(?=.*\bboard\b)/i, /^(?=.*\bcommit\b)(?=.*\bboard item\b)/i]],
 ]);
