@@ -7510,15 +7510,32 @@ var MountedStores = class {
   supersededRecordsBySlug(slug) {
     return this.fanValues((s2) => s2.supersededRecordsBySlug(slug)).flat().sort((a, b) => a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
   }
-  /** Cross-store terminus resolution (decision foreign_de1a7329): a record lives in
-   *  exactly one store (same reasoning as get()), so this tries each mounted
-   *  store project-first and returns the first hit. */
+  /** Cross-store terminus resolution (decision foreign_de1a7329): follows
+   *  superseded_by edge by edge, looking each record up through get(), which
+   *  spans the mounted stores (a record lives in exactly one) and skips a domain
+   *  that cannot answer. A store's own walk cannot see another store, so the
+   *  project tombstone knowledge_promote leaves would stop at itself. Every stop
+   *  that is not a live record (successor already visited, the 32-hop cap, or a
+   *  successor no readable store holds) returns the last record reached with
+   *  truncated:true, so an unreached end is never claimed. Unknown id -> null. */
   resolveTerminus(id) {
-    for (const { value } of this.fanRead((s2) => s2.resolveTerminus(id))) {
-      if (value)
-        return value;
+    const first = this.get(id);
+    if (!first)
+      return null;
+    let current = first;
+    const visited = /* @__PURE__ */ new Set([current.id]);
+    let hops = 0;
+    for (; ; ) {
+      const succ = current.superseded_by;
+      if (current.status !== "superseded" || !succ)
+        return { id: current.id, status: current.status, hops };
+      const next = visited.has(succ) || hops === MAX_TERMINUS_HOPS ? void 0 : this.get(succ);
+      if (!next)
+        return { id: current.id, status: current.status, hops, truncated: true };
+      visited.add(next.id);
+      current = next;
+      hops += 1;
     }
-    return null;
   }
   /** Cross-store fan of inboundSupersedes (board c6e3561f part (a)): an edge
    *  lives with its SOURCE record (addLink routes by source), so a record's
@@ -8660,6 +8677,7 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
   return deduped;
 }).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 var DEFAULT_QUERY_CAP = 20;
+var MAX_TERMINUS_HOPS = 32;
 var MAX_BODY_COMPARE_DEPTH = 64;
 var COMPARE_WORK_BUDGET = 1e7;
 var COMPARE_OUTPUT_BUDGET = 5e4;
@@ -10097,7 +10115,7 @@ var SterlingStore = class _SterlingStore {
    */
   resolveTerminus(id) {
     return this.readTx(() => {
-      const MAX_HOPS = 32;
+      const MAX_HOPS = MAX_TERMINUS_HOPS;
       const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
       const row = stmt.get(id);
       if (!row)
