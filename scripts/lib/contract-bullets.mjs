@@ -45,7 +45,7 @@ export const TARGET_LEADS = [
   // any other index gets ANCHOR_MISSING_REFUSED, so folding was still the right
   // call for THIS bullet — but for that reason, not the one first written down.
   // [2026-09-26: the index pinning is gone — inserts are now declared per lead in
-  // INSERT_AFTER (scripts/stamp-contract.mjs), the {lead, insertAfter} generalization this
+  // INSERT_AFTER (below), the {lead, insertAfter} generalization this
   // note once tracked.]
   '- **Stage retrieval before acting**',
   // Added 2026-07-27. The mirror rule says the template is the SOURCE, but the two
@@ -64,7 +64,7 @@ export const TARGET_LEADS = [
   // template-descended guard as the normal replace path.
   '- **Knowledge is born structured.**',
   // 2026-09-26: the Codex and READY TO CLEAR bullets are NEW to older siblings, so they
-  // arrive through the insert path — see INSERT_AFTER in scripts/stamp-contract.mjs. Codex
+  // arrive through the insert path — see INSERT_AFTER below. Codex
   // stays BEFORE READY TO CLEAR here: leads are processed in order, and READY TO CLEAR
   // anchors on the Codex bullet, so a sibling missing both gets them back in template order.
   '- **Codex runs through the MCP tool, never the shell.**',
@@ -81,7 +81,7 @@ export const TARGET_LEADS = [
   //
   // The AGENTS.md conduct bullets are listed in TEMPLATE ORDER (lint, plain-writing, background
   // subagents), because leads are processed in this order and each anchors on the one before it
-  // (see INSERT_AFTER in scripts/stamp-contract.mjs): a sibling missing any combination of them
+  // (see INSERT_AFTER below): a sibling missing any combination of them
   // gets them back in template order.
   // 2026-10-05: lint and tests before a code change is reported done (user-ruled through the
   // question form). NEW to every sibling, anchored on the two bullets above it in the template,
@@ -130,6 +130,35 @@ export const TARGET_LEADS = [
 // were deleted on purpose. See headingIndex for how the two headings are matched.
 export const TARGET_SECTIONS = [{ heading: '## Domains', before: '## Conventions', leads: DOMAINS_LEADS }];
 
+// Insertable bullets: lead → the anchor lead(s) it goes after, tried in order. A lead
+// absent from a sibling (and not renamed) is inserted after the FIRST anchor the sibling
+// carries; with no anchor present it is ANCHOR_MISSING_REFUSED. Declared per lead, so
+// reordering TARGET_LEADS no longer retargets an insert (the old index-pinned hazard).
+// READY TO CLEAR sits after the Codex bullet in the template; when the Codex bullet is
+// refused (e.g. present only in the wrong layer) the Knowledge bullet is the fallback.
+export const INSERT_AFTER = new Map([
+  ['- **Concept articles — capture design the moment it settles', ['- **Reconcile _every affected_ article, not just the primary one**']],
+  ['- **Codex runs through the MCP tool, never the shell.**', ['- **Knowledge is born structured.**']],
+  ['- **Say `READY TO CLEAR` plainly when it is time.**', ['- **Codex runs through the MCP tool, never the shell.**', '- **Knowledge is born structured.**']],
+  ['- **Instruction-file proposals replace memory.**', ["- **Ask, don't guess — through the AskUserQuestion tool.**"]],
+  ['- **Lint and tests before done.**', ['- **No false action claims:**', '- **Anti-speculation:**']],
+  ['- **Write plainly; no AI tells.**', ['- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
+  ['- **Start every subagent in the background.**', ['- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
+  ['- **Finish what you start.**', ['- **Start every subagent in the background.**', '- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
+  ['- **Resolve a review thread once its finding is handled.**', ['- **Finish what you start.**', '- **Start every subagent in the background.**', '- **Write plainly; no AI tells.**', '- **Lint and tests before done.**', '- **No false action claims:**', '- **Anti-speculation:**']],
+  ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', ['- **Instruction-file proposals replace memory.**', "- **Ask, don't guess — through the AskUserQuestion tool.**"]],
+  ["- **Solve, don't board.**", ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', '- **Instruction-file proposals replace memory.**', "- **Ask, don't guess — through the AskUserQuestion tool.**"]],
+  ['- **Close-on-commit: a commit that fulfils a board item pays it**', ["- **Solve, don't board.**"]],
+]);
+// A section bullet missing from a sibling that has the section goes after the nearest
+// section bullet above it. The first bullet has no anchor: without it the section's start is
+// unknown, and that is ANCHOR_MISSING_REFUSED.
+for (const section of TARGET_SECTIONS) {
+  section.leads.forEach((lead, i) => {
+    if (i > 0) INSERT_AFTER.set(lead, section.leads.slice(0, i).reverse());
+  });
+}
+
 // Renamed bullets: new lead → the old lead(s) it replaced. When the new lead is
 // absent from a sibling, a block under an old lead is replaced by the new bullet
 // ONLY if it matches a historical template variant of that old lead (P5 — a
@@ -145,6 +174,54 @@ export const RENAMED_LEADS = new Map([
   // 2026-10-10: the auto-report bullet's lead said "stamp the version" while the rule is to file the issue.
   ["- **Report Sterling defects to its GitHub issues without asking.**", ["- **Stamp Sterling's version when reporting on Sterling.**"]],
 ]);
+
+// Subject markers (decision stamp-contract-skips-insert-when-project-bullet-covers-the-rule,
+// GitHub issue #111): a lead absent from a sibling is normally inserted, but a project that
+// already states the rule under its OWN wording (a different bold lead, often under another
+// heading) would gain a duplicate. Each insertable lead lists regexes over the bold lead text
+// of the sibling's other top-level bullets; a hit means the project covers the rule, so
+// stamp-contract keeps its bullet and inserts nothing.
+//
+// A miss is safe (the template bullet is inserted, as before this check existed); a false hit
+// silently withholds a rule. So every marker must name the rule's actual SUBJECT, never a
+// generic word alone ('background', 'memory', 'prose deliverables', 'resolve'): a regex with
+// lookaheads requires every subject term at once, in any order. Declared, never fuzzy.
+export const SUBJECT_MARKERS = new Map([
+  ['- **Concept articles — capture design the moment it settles', [/^(?=.*\bconcept (articles?|famil(y|ies))\b)(?=.*\b(capture|design|knowledge|record|settles?)\b)/i]],
+  ['- **Codex runs through the MCP tool, never the shell.**', [/^(?=.*\bcodex\b)(?=.*\bmcp\b)/i, /^(?=.*\bcodex\b)(?=.*\b(never|not)\b)(?=.*\bshell\b)/i]],
+  // Case-sensitive on purpose: the rule is the literal capitalised line, and 'ready to clear' alone is ordinary English.
+  ['- **Say `READY TO CLEAR` plainly when it is time.**', [/\bREADY (TO CLEAR|FOR NEW SESSION)\b/]],
+  ['- **Instruction-file proposals replace memory.**', [/\binstruction[- ]file proposals?\b/i, /^(?=.*\bmemory\b)(?=.*(\binstruction[- ]files?\b|\bCLAUDE\.md\b|\bAGENTS\.md\b))/i]],
+  ['- **Lint and tests before done.**', [/^(?=.*\blint\b)(?=.*\btests?\b)(?=.*\b(before|done|reporting|finished|complete)\b)/i]],
+  ['- **Write plainly; no AI tells.**', [/\bwrit(e|ing) plainly\b/i, /\bai tells\b/i, /\bsigns of ai\b/i]],
+  ['- **Start every subagent in the background.**', [/^(?=.*\bbackground\b)(?=.*\b(subagents?|agents?|lanes?)\b)/i]],
+  ['- **Finish what you start.**', [
+    /\bfinish what you start\b/i,
+    /^(?=.*\b(never|don'?t|do not)\b)(?=.*\b(stop|end|quit)\b)(?=.*\b(work|tasks?)\b)(?=.*\b(half|unfinished|incomplete)\b)/i,
+    /^(?=.*\b(work|tasks?)\b)(?=.*\bhalf[- ]done\b)/i,
+  ]],
+  ['- **Resolve a review thread once its finding is handled.**', [/^(?=.*\bresolve\b)(?=.*\b(threads?|conversations?)\b)(?=.*\b(review|pr|pull request|copilot)\b)/i]],
+  ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', [/\bde-?ai\b/i]],
+  ["- **Solve, don't board.**", [/\bsolve,? don'?t board\b/i, /\bevery user ask is boarded\b/i]],
+  ['- **Close-on-commit: a commit that fulfils a board item pays it**', [/^(?=.*\bclose[- ]on[- ]commit\b)(?=.*\bboard\b)/i, /^(?=.*\bcommit\b)(?=.*\bboard item\b)/i]],
+]);
+
+// The first top-level bullet of `text` (outside every fence, and not itself a tracked lead)
+// whose bold lead matches a SUBJECT_MARKERS entry for `lead`; null when none does.
+// → { bullet: the bullet's first line, trimmed, marker: the regex source }.
+export function findCoveringBullet(text, lead) {
+  const markers = SUBJECT_MARKERS.get(lead);
+  if (!markers) return null;
+  const lines = text.split('\n');
+  for (const i of unfencedLineIndexes(lines)) {
+    if (TARGET_LEADS.some((t) => lines[i].startsWith(t))) continue;
+    const bold = /^- \*\*(.+?)\*\*/.exec(lines[i]);
+    if (!bold) continue;
+    const marker = markers.find((m) => m.test(bold[1]));
+    if (marker) return { bullet: lines[i].trim(), marker: marker.source };
+  }
+  return null;
+}
 
 // Every lead whose historical variants are collected: the tracked leads plus the old
 // leads of renamed bullets.
