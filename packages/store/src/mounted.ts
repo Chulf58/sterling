@@ -13,7 +13,7 @@ import { mkdirSync, existsSync, rmSync, openSync, closeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { SterlingStore, SchemaMigrationRequiredError, StoreRowDecodeError, UnsupportedSchemaVersionError, DEFAULT_QUERY_CAP, assertNoFieldLoss, type MoveMarker, type QueryOptions, type BoardItemReadiness, type WriteOptions } from './index.js';
+import { SterlingStore, SchemaMigrationRequiredError, StoreRowDecodeError, UnsupportedSchemaVersionError, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, assertNoFieldLoss, type MoveMarker, type QueryOptions, type BoardItemReadiness, type WriteOptions } from './index.js';
 import { validateRecord, parseStoreFence, STORE_FENCE_KEY, type DurableRecord, type RenameFence, type SterlingConfig } from '@sterling/schemas';
 import { allocateShares } from './shares.js';
 import { acquireMoveLock, releaseMoveLock, type MoveLockHandle } from './move-lock.js';
@@ -827,13 +827,46 @@ export class MountedStores {
   }
 
   /** Cross-store terminus resolution (decision foreign_de1a7329): a record lives in
-   *  exactly one store (same reasoning as get()), so this tries each mounted
-   *  store project-first and returns the first hit. */
+   *  exactly one store (same reasoning as get()), so the first hit, project-first,
+   *  is its store's walk. That walk cannot see another store: it ends truncated
+   *  at a tombstone whose superseded_by is held elsewhere (the project tombstone
+   *  knowledge_promote leaves). So while the walk ends on a truncated superseded
+   *  record, its successor is looked up in the OTHER mounted stores and the walk
+   *  continues there. Hops add across segments and the whole walk shares the
+   *  store's cap; a visited set of segment ids stops a cross-store cycle. Any
+   *  stop (no successor, successor in no readable store, revisit, cap) returns
+   *  the last record reached, truncated, so an unreached end is never claimed. */
   resolveTerminus(id: string): ReturnType<SterlingStore['resolveTerminus']> {
-    for (const { value } of this.fanRead((s) => s.resolveTerminus(id))) {
-      if (value) return value;
+    let hit: { store: SterlingStore; value: NonNullable<ReturnType<SterlingStore['resolveTerminus']>> } | undefined;
+    for (const r of this.fanRead((s) => s.resolveTerminus(id))) {
+      if (r.value) {
+        hit = { store: r.store, value: r.value };
+        break;
+      }
     }
-    return null;
+    if (!hit) return null;
+
+    let { store, value } = hit;
+    const visited = new Set<string>([id, value.id]);
+    while (value.status === 'superseded' && value.truncated) {
+      const succ = store.get(value.id)?.superseded_by;
+      if (!succ || visited.has(succ) || value.hops + 1 > MAX_TERMINUS_HOPS) break;
+      let next: { store: SterlingStore; value: NonNullable<ReturnType<SterlingStore['resolveTerminus']>> } | undefined;
+      for (const r of this.fanRead((s) => (s === store ? null : s.resolveTerminus(succ)))) {
+        if (r.value) {
+          next = { store: r.store, value: r.value };
+          break;
+        }
+      }
+      if (!next) break;
+      const hops = value.hops + 1 + next.value.hops;
+      if (hops > MAX_TERMINUS_HOPS) break;
+      visited.add(succ);
+      visited.add(next.value.id);
+      store = next.store;
+      value = { ...next.value, hops };
+    }
+    return value;
   }
 
   /** Cross-store fan of inboundSupersedes (board c6e3561f part (a)): an edge

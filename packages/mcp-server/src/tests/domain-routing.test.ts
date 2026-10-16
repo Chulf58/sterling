@@ -165,6 +165,19 @@ test('§3.3 knowledge_promote: moves a project record into the domain store as a
   }
 });
 
+test('knowledge_promote: the project tombstone discloses its live domain copy as the terminus, and a stale write names it as the live head', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const ref = tools.knowledgeCreate('reference_material', fittingRef('project')).record;
+    const out = tools.knowledgePromote(ref.id, 'genesys');
+
+    assert.deepEqual((tools.knowledgeGet(ref.id) as { terminus?: unknown }).terminus, { id: out.promoted.id, status: 'active', hops: 1 });
+    assert.throws(() => tools.knowledgeUpdate(ref.id, { summary: 'stale write' }), new RegExp(`live head is ${out.promoted.id}`));
+  } finally {
+    cleanup();
+  }
+});
+
 test('knowledge_promote refuses what §3.3 forbids: non-project scope, unpromotable type, unmounted domain (atomic)', () => {
   const { tools, cleanup } = harness();
   try {

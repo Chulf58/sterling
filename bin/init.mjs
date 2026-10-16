@@ -7877,14 +7877,49 @@ var init_mounted = __esm({
         return this.fanValues((s2) => s2.supersededRecordsBySlug(slug)).flat().sort((a, b) => a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
       }
       /** Cross-store terminus resolution (decision foreign_de1a7329): a record lives in
-       *  exactly one store (same reasoning as get()), so this tries each mounted
-       *  store project-first and returns the first hit. */
+       *  exactly one store (same reasoning as get()), so the first hit, project-first,
+       *  is its store's walk. That walk cannot see another store: it ends truncated
+       *  at a tombstone whose superseded_by is held elsewhere (the project tombstone
+       *  knowledge_promote leaves). So while the walk ends on a truncated superseded
+       *  record, its successor is looked up in the OTHER mounted stores and the walk
+       *  continues there. Hops add across segments and the whole walk shares the
+       *  store's cap; a visited set of segment ids stops a cross-store cycle. Any
+       *  stop (no successor, successor in no readable store, revisit, cap) returns
+       *  the last record reached, truncated, so an unreached end is never claimed. */
       resolveTerminus(id) {
-        for (const { value } of this.fanRead((s2) => s2.resolveTerminus(id))) {
-          if (value)
-            return value;
+        let hit;
+        for (const r of this.fanRead((s2) => s2.resolveTerminus(id))) {
+          if (r.value) {
+            hit = { store: r.store, value: r.value };
+            break;
+          }
         }
-        return null;
+        if (!hit)
+          return null;
+        let { store, value } = hit;
+        const visited = /* @__PURE__ */ new Set([id, value.id]);
+        while (value.status === "superseded" && value.truncated) {
+          const succ = store.get(value.id)?.superseded_by;
+          if (!succ || visited.has(succ) || value.hops + 1 > MAX_TERMINUS_HOPS)
+            break;
+          let next;
+          for (const r of this.fanRead((s2) => s2 === store ? null : s2.resolveTerminus(succ))) {
+            if (r.value) {
+              next = { store: r.store, value: r.value };
+              break;
+            }
+          }
+          if (!next)
+            break;
+          const hops = value.hops + 1 + next.value.hops;
+          if (hops > MAX_TERMINUS_HOPS)
+            break;
+          visited.add(succ);
+          visited.add(next.value.id);
+          store = next.store;
+          value = { ...next.value, hops };
+        }
+        return value;
       }
       /** Cross-store fan of inboundSupersedes (board c6e3561f part (a)): an edge
        *  lives with its SOURCE record (addLink routes by source), so a record's
@@ -9721,6 +9756,7 @@ __export(dist_exports, {
   GENERIC_DEV_TERMS: () => GENERIC_DEV_TERMS,
   JournalDemotionRefusedError: () => JournalDemotionRefusedError,
   MAX_RANK_TERMS: () => MAX_RANK_TERMS,
+  MAX_TERMINUS_HOPS: () => MAX_TERMINUS_HOPS,
   MODELS_CATALOG_LOCATION: () => MODELS_CATALOG_LOCATION,
   MOVE_IN_PREFIX: () => MOVE_IN_PREFIX,
   MOVE_OUT_PREFIX: () => MOVE_OUT_PREFIX,
@@ -10135,7 +10171,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -10288,6 +10324,7 @@ var init_dist2 = __esm({
       return deduped;
     }).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
     DEFAULT_QUERY_CAP = 20;
+    MAX_TERMINUS_HOPS = 32;
     MAX_BODY_COMPARE_DEPTH = 64;
     COMPARE_WORK_BUDGET = 1e7;
     COMPARE_OUTPUT_BUDGET = 5e4;
@@ -11561,7 +11598,7 @@ var init_dist2 = __esm({
        */
       resolveTerminus(id) {
         return this.readTx(() => {
-          const MAX_HOPS = 32;
+          const MAX_HOPS = MAX_TERMINUS_HOPS;
           const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
           const row = stmt.get(id);
           if (!row)
