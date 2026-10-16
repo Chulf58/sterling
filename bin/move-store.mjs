@@ -7457,6 +7457,7 @@ var rankTerms = external_exports.array(external_exports.string().regex(new RegEx
   return deduped;
 }).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 var DEFAULT_QUERY_CAP = 20;
+var MAX_TERMINUS_HOPS = 32;
 var MAX_BODY_COMPARE_DEPTH = 64;
 var COMPARE_WORK_BUDGET = 1e7;
 var COMPARE_OUTPUT_BUDGET = 5e4;
@@ -8894,7 +8895,7 @@ var SterlingStore = class _SterlingStore {
    */
   resolveTerminus(id) {
     return this.readTx(() => {
-      const MAX_HOPS = 32;
+      const MAX_HOPS = MAX_TERMINUS_HOPS;
       const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
       const row = stmt.get(id);
       if (!row)

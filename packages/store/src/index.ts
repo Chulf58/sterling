@@ -788,6 +788,9 @@ export const rankTerms = z
 // boundary, is TOLD so.
 export const DEFAULT_QUERY_CAP = 20;
 
+/** Supersession-chain hop cap for resolveTerminus; MountedStores applies it to the whole cross-store walk. */
+export const MAX_TERMINUS_HOPS = 32;
+
 /**
  * Options every in-place write shares ([stable-identity-design-v2]).
  *
@@ -3316,7 +3319,7 @@ export class SterlingStore {
    */
   resolveTerminus(id: string): { id: string; status: string; hops: number; truncated?: boolean } | null {
     return this.readTx(() => {
-      const MAX_HOPS = 32;
+      const MAX_HOPS = MAX_TERMINUS_HOPS;
       const stmt = this.db.prepare('SELECT id, status, superseded_by FROM records WHERE id = ?');
       const row = stmt.get(id) as { id: string; status: string; superseded_by: string | null } | undefined;
       if (!row) return null;

@@ -7715,15 +7715,32 @@ var init_mounted = __esm({
       supersededRecordsBySlug(slug) {
         return this.fanValues((s2) => s2.supersededRecordsBySlug(slug)).flat().sort((a, b) => a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0);
       }
-      /** Cross-store terminus resolution (decision foreign_de1a7329): a record lives in
-       *  exactly one store (same reasoning as get()), so this tries each mounted
-       *  store project-first and returns the first hit. */
+      /** Cross-store terminus resolution (decision foreign_de1a7329): follows
+       *  superseded_by edge by edge, looking each record up through get(), which
+       *  spans the mounted stores (a record lives in exactly one) and skips a domain
+       *  that cannot answer. A store's own walk cannot see another store, so the
+       *  project tombstone knowledge_promote leaves would stop at itself. Every stop
+       *  that is not a live record (successor already visited, the 32-hop cap, or a
+       *  successor no readable store holds) returns the last record reached with
+       *  truncated:true, so an unreached end is never claimed. Unknown id -> null. */
       resolveTerminus(id) {
-        for (const { value } of this.fanRead((s2) => s2.resolveTerminus(id))) {
-          if (value)
-            return value;
+        const first = this.get(id);
+        if (!first)
+          return null;
+        let current = first;
+        const visited = /* @__PURE__ */ new Set([current.id]);
+        let hops = 0;
+        for (; ; ) {
+          const succ = current.superseded_by;
+          if (current.status !== "superseded" || !succ)
+            return { id: current.id, status: current.status, hops };
+          const next = visited.has(succ) || hops === MAX_TERMINUS_HOPS ? void 0 : this.get(succ);
+          if (!next)
+            return { id: current.id, status: current.status, hops, truncated: true };
+          visited.add(next.id);
+          current = next;
+          hops += 1;
         }
-        return null;
       }
       /** Cross-store fan of inboundSupersedes (board c6e3561f part (a)): an edge
        *  lives with its SOURCE record (addLink routes by source), so a record's
@@ -8933,7 +8950,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -9084,6 +9101,7 @@ var init_dist2 = __esm({
       return deduped;
     }).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
     DEFAULT_QUERY_CAP = 20;
+    MAX_TERMINUS_HOPS = 32;
     MAX_BODY_COMPARE_DEPTH = 64;
     COMPARE_WORK_BUDGET = 1e7;
     COMPARE_OUTPUT_BUDGET = 5e4;
@@ -10357,7 +10375,7 @@ var init_dist2 = __esm({
        */
       resolveTerminus(id) {
         return this.readTx(() => {
-          const MAX_HOPS = 32;
+          const MAX_HOPS = MAX_TERMINUS_HOPS;
           const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
           const row = stmt.get(id);
           if (!row)
