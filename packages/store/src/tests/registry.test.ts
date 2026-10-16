@@ -119,3 +119,18 @@ test('updateStackTags: changes only stack_tags of an existing row; never creates
     cleanup();
   }
 });
+
+test('updateName: changes only the name of an existing row; never creates one (GitHub #113)', () => {
+  const { reg, cleanup } = harness();
+  try {
+    reg.register(base());
+    reg.touchLastSeen('C:/Users/x/ProjA', '2026-06-18T09:00:00.000Z');
+    const before = reg.list()[0];
+    assert.equal(reg.updateName('C:/Users/x/ProjA', 'ProjA-new'), true);
+    assert.deepEqual(reg.list()[0], { ...before, name: 'ProjA-new' });
+    assert.equal(reg.updateName('C:/Users/x/Unknown', 'x'), false);
+    assert.equal(reg.list().length, 1);
+  } finally {
+    cleanup();
+  }
+});

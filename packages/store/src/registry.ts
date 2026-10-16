@@ -93,6 +93,14 @@ export class ProjectRegistry {
     return this.db.prepare('UPDATE projects SET stack_tags = ? WHERE repo_path = ?').run(JSON.stringify(stackTags), repoPath).changes > 0;
   }
 
+  /** Rename (config.json project_name changed, or /sterling:projects --rename):
+   *  replace the name of an EXISTING row and nothing else. Never creates a row
+   *  and does not check for another row with the same name; that refusal is the
+   *  caller's. Returns whether a row was updated. */
+  updateName(repoPath: string, name: string): boolean {
+    return this.db.prepare('UPDATE projects SET name = ? WHERE repo_path = ?').run(name, repoPath).changes > 0;
+  }
+
   /** All registered projects, name-ordered. Stale-at-read (existence of
    *  repo_path) is the caller's lazy check — the registry stores no liveness. */
   list(): ProjectRegistration[] {

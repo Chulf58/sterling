@@ -671,6 +671,60 @@ test("a root session refreshes this project's registry row (last-seen and stack 
   }
 });
 
+test("a root session renames the registry row to config.json project_name, and shows a notice when another project holds the name (GitHub #113)", async () => {
+  const { ProjectRegistry } = await import(pathToFileURL(join(repo, 'packages', 'store', 'dist', 'index.js')).href);
+  const scratch = mkdtempSync(join(tmpdir(), 'sterling-oc-registry-name-'));
+  const saved = process.env.STERLING_REGISTRY_DB;
+  process.env.STERLING_REGISTRY_DB = join(scratch, 'registry.db');
+  const dirs = [];
+  const nameOf = (dir) => {
+    const registry = new ProjectRegistry(process.env.STERLING_REGISTRY_DB);
+    try {
+      return registry.list().find((p) => p.repo_path === dir.replace(/\\/g, '/'))?.name;
+    } finally {
+      registry.close();
+    }
+  };
+  const turn = (dir) =>
+    asTurn(contextMod.createContextHandler({
+      openStore: (p) => new SterlingStore(p),
+      now: () => NOW,
+      rootOf: () => dir,
+      fenced: async (_name, _root, fn) => fn(),
+      rotationRestore: async () => '',
+      sessionSync: async () => {},
+      pluginRoot: join(dir, 'no-such-plugin-root'),
+      getSession: () => ({ get: async ({ sessionID }) => ({ id: sessionID }) }),
+      env: { ...process.env, STERLING_MAINTENANCE_WORKER: '' },
+    }));
+  try {
+    const renamed = makeProject({ project_name: 'fresh-name', stack_tags: [] });
+    const clash = makeProject({ project_name: 'taken-name', stack_tags: [] });
+    dirs.push(renamed, clash);
+    const registry = new ProjectRegistry(process.env.STERLING_REGISTRY_DB);
+    try {
+      for (const [dir, name] of [[renamed, 'old-name'], [clash, 'clash-old']]) registry.register({ repo_path: dir.replace(/\\/g, '/'), name, stack_tags: [], toolchains: [], sterling_version: '0.0.0', at: '2026-10-01T00:00:00.000Z' });
+      registry.register({ repo_path: '/elsewhere/taken', name: 'taken-name', stack_tags: [], toolchains: [], sterling_version: null, at: '2026-10-01T00:00:00.000Z' });
+    } finally {
+      registry.close();
+    }
+    const ok = input('ses_root');
+    await turn(renamed).onContext(ok);
+    assert.equal(nameOf(renamed), 'fresh-name', 'the row follows config.json project_name');
+    assert.doesNotMatch(textOf(ok), /PROJECT NAME NOT APPLIED/);
+
+    const dup = input('ses_root');
+    await turn(clash).onContext(dup);
+    assert.equal(nameOf(clash), 'clash-old', 'a name another project holds is not applied');
+    assert.match(textOf(dup), /STERLING PROJECT NAME NOT APPLIED: config\.json project_name 'taken-name' is already registered for \/elsewhere\/taken/);
+  } finally {
+    if (saved === undefined) delete process.env.STERLING_REGISTRY_DB;
+    else process.env.STERLING_REGISTRY_DB = saved;
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
 // ---- the PLAN LOCK section (board 6766ec3e, GitHub #76 part 1) -------------
 
 function writePlanLock(dir, body) {

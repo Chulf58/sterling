@@ -767,3 +767,22 @@ test('board_get target_project (review #2): an 8-char prefix shared by a readabl
     h.cleanup();
   }
 });
+
+test('board_add target_project resolves by the registry name after a rename; the old name is refused (GitHub #113)', () => {
+  const h = harness();
+  try {
+    const registry = new ProjectRegistry(h.reg);
+    try {
+      assert.equal(registry.updateName(h.beta, 'beta-renamed'), true);
+    } finally {
+      registry.close();
+    }
+    const add = (target_project: string) => h.tools.boardAdd({ text: 'Do the thing\nsee src/a.ts:1', source: 'user', target_project });
+    assert.throws(() => add('beta'), /target_project 'beta' is refused: no registered project has that name; registered: alpha, beta-renamed\./);
+    const res = add('beta-renamed') as unknown as Loose;
+    assert.equal((res.handoff_delivery as { delivered: { project: string; root: string } }).delivered.project, 'beta-renamed');
+    assert.equal((res.handoff_delivery as { delivered: { root: string } }).delivered.root, h.beta);
+  } finally {
+    h.cleanup();
+  }
+});
