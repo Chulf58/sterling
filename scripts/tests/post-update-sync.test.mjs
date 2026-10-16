@@ -350,6 +350,20 @@ test('postUpdateSync: stamp-contract exit 2 with some projects processed is stil
   assert.equal(markerOf(project), `${VERSION}\n`);
 });
 
+test('postUpdateSync: a SIMILAR_BULLET_KEPT line from stamp-contract is named in the context as kept, and is never reported as an insert', async () => {
+  const plugin = makePluginRoot();
+  const project = makeProject({ marker: '0.0.1', store: false });
+  const kept = "- **Finish what you start.**… — kept the project's own bullet in AGENTS.md, nothing inserted: - **Never stop with work half done.** Our own wording.";
+  const out = `• ${project} (AGENTS.md + CLAUDE.md)\n    SIMILAR_BULLET_KEPT  ${kept}\n\nINSERTS APPLIED (new text only; existing wording is never replaced without --apply) — 1 project(s) processed, 0 already in sync, 0 refusal(s).\n`;
+  const runStep = async (root, name) =>
+    name === 'sync-agents.mjs' ? { status: 0, error: null, out: '', tail: '' } : { status: 0, error: null, out, tail: '' };
+  const r = await postUpdateSync({ root: plugin, project, host: 'opencode', runStep });
+  assert.equal(r.outcome, 'synced', r.context);
+  assert.ok(r.context.includes(`stamp-contract kept the project's own bullets where they already state a Sterling rule, inserting nothing: ${kept}.`), r.context);
+  assert.doesNotMatch(r.context, /stamp-contract inserted/);
+  assert.doesNotMatch(r.warning, /gained new Sterling text/);
+});
+
 // CLONE AGENT SYNC (user-ruled 2026-10-06, "Sync at session start (Recommended)"): the
 // same two steps on a git clone, triggered by H1's agent-currency hash compare and
 // never recorded in the version marker. The H1 end of it, with the real syncAgents, is

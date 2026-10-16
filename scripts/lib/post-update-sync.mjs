@@ -194,7 +194,13 @@ export async function runPostUpdateSteps(root, project, runStep) {
     .map((l) => /^\s*(section_inserted|inserted) {2}(.+)$/.exec(l))
     .filter(Boolean)
     .map((m) => `${m[1]} ${m[2].trim()}`);
-  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted };
+  // SIMILAR_BULLET_KEPT: the project's own bullet already states a rule, so nothing was inserted.
+  const kept = contract.out
+    .split('\n')
+    .map((l) => /^\s*SIMILAR_BULLET_KEPT {2}(.+)$/.exec(l))
+    .filter(Boolean)
+    .map((m) => m[1].trim());
+  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted, kept };
 }
 
 /**
@@ -282,6 +288,7 @@ export async function postUpdateSync({ root, project, host = 'claude', runStep =
       `\n\nPOST-UPDATE SYNC (${t.label}): ${hop} — ${restartLine}.` +
       (result.restart ? ` ${t.restartLong}` : '') +
       (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md/CLAUDE.md (text that was entirely absent; no existing wording was replaced): ${inserted.join('; ')}.` : '') +
+      ((result.kept ?? []).length ? ` stamp-contract kept the project's own bullets where they already state a Sterling rule, inserting nothing: ${result.kept.join('; ')}.` : '') +
       (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : ''),
   };
 }

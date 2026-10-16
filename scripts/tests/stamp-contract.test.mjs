@@ -11,6 +11,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ProjectRegistry } from '@sterling/store';
 import { renderClaudeText } from '../lib/agent-fences.mjs';
+import { INSERT_AFTER, SUBJECT_MARKERS, TARGET_LEADS, TARGET_SECTIONS, findCoveringBullet } from '../lib/contract-bullets.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -545,7 +546,7 @@ test('stamp-contract: a CLAUDE.md with the report bullet under its OLD lead is r
 const DOMAINS_SECTION = /## Domains\n[\s\S]*?(?=## Conventions)/;
 const DOMAIN_DESCRIPTION_LEAD = '- **A domain needs a description**';
 
-function sectionFixture(name, mutateAgents) {
+function sectionFixture(name, mutateAgents, mutateClaude = (text) => text) {
   const scratch = mkdtempSync(join(tmpdir(), 'sterling-stamp-'));
   const regDb = join(scratch, 'registry.db');
   const dir = mkdtempSync(join(tmpdir(), `sterling-stamp-${name}-`));
@@ -553,6 +554,7 @@ function sectionFixture(name, mutateAgents) {
   const complete = { agents: readFileSync(join(dir, 'AGENTS.md'), 'utf8'), claude: readFileSync(join(dir, 'CLAUDE.md'), 'utf8') };
   assert.match(complete.agents, DOMAINS_SECTION, 'fixture sanity: the rendered template carries the Domains section');
   writeFileSync(join(dir, 'AGENTS.md'), mutateAgents(complete.agents));
+  writeFileSync(join(dir, 'CLAUDE.md'), mutateClaude(complete.claude));
   const registry = new ProjectRegistry(regDb);
   try {
     registry.register({ repo_path: dir, name, stack_tags: [], toolchains: [], sterling_version: null, at: new Date().toISOString() });
@@ -888,6 +890,121 @@ test('stamp-contract: a hand-tuned finish bullet is refused and left alone, and 
   } finally {
     f.cleanup();
   }
+});
+
+// GitHub issue #111: a project that states a rule under its OWN bullet (a different bold lead, under
+// its own heading) keeps it; stamp-contract inserts no template copy, prints one info line and exits 0.
+const OWN_HEADING = '\n## Our rules\n\n';
+const withOwnBullet = (text, own) => `${text.replace(/\n*$/, '\n')}${OWN_HEADING}${own}\n`;
+// Drops `lead` from the text if the text carries it, and appends the project's own bullet instead;
+// the file that does not carry the lead is returned unchanged.
+const swapLead = (lead, own) => (text) => (text.split('\n').some((l) => l.startsWith(lead)) ? withOwnBullet(dropBlock(text, lead), own) : text);
+
+for (const [lead, own, label] of [
+  [BACKGROUND_LEAD, '- **Start everything in the background when the host can notify you.** Our own wording, longer than the template.', 'background'],
+  [FINISH_LEAD, '- **Never stop with work half done.** Our own wording.', 'finish'],
+]) {
+  test(`stamp-contract (#111): a project's own ${label} bullet under another heading is kept, nothing is inserted, one info line, exit 0`, () => {
+    const f = sectionFixture(`similar-${label}`, swapLead(lead, own));
+    try {
+      const before = f.read();
+      assert.ok(!before.agents.includes(lead) && before.agents.includes(own), 'fixture: the template bullet is gone and the project bullet is there');
+      for (const args of [[], ['--apply-inserts'], ['--apply', '--verbose']]) {
+        const r = runStampContract(f.regDb, args);
+        assert.equal(r.status, 0, `${args.join(' ')}: ${r.stdout}\n${r.stderr}`);
+        const info = r.stdout.split('\n').filter((l) => l.includes('SIMILAR_BULLET_KEPT'));
+        assert.equal(info.length, 1, `exactly one info line:\n${r.stdout}`);
+        assert.ok(info[0].includes(own.slice(0, 40)), `the info line names the project's bullet: ${info[0]}`);
+        assert.ok(!/(^|\s)(would_)?insert(ed)?\s/.test(r.stdout.replace(info[0], '')), `nothing inserted:\n${r.stdout}`);
+        assert.ok(!/REFUSED/.test(r.stdout), `not a refusal:\n${r.stdout}`);
+        assert.deepEqual(f.read(), before, `${args.join(' ')}: nothing written, project line untouched`);
+      }
+    } finally {
+      f.cleanup();
+    }
+  });
+}
+
+test("stamp-contract (#111): an unrelated bullet whose lead says 'finish' in another sense does not stop the finish bullet from being inserted", () => {
+  const own = '- **Glossy finish for buttons.** Our UI rule.';
+  const f = sectionFixture('finish-decoy', swapLead(FINISH_LEAD, own));
+  try {
+    const r = runStampContract(f.regDb, ['--apply-inserts']);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.ok(!r.stdout.includes('SIMILAR_BULLET_KEPT'), r.stdout);
+    assert.match(r.stdout, /inserted {2}- \*\*Finish what you start\.\*\*/);
+    const lines = f.read().agents.split('\n');
+    assert.equal(lines.filter((l) => l.startsWith(FINISH_LEAD)).length, 1, 'the template bullet is inserted once');
+    assert.ok(lines.includes(own), 'the project bullet is untouched');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// One project wording per insertable lead, each hitting a marker. The home layer differs per lead
+// (AGENTS.md or CLAUDE.md), so swapLead acts on whichever file carries the template bullet.
+const OWN_WORDING = new Map([
+  ['- **Concept articles — capture design the moment it settles', '- **Concept articles for recurring ideas.** Ours.'],
+  [CODEX_LEAD, '- **Use the Codex MCP tool, not the shell.** Ours.'],
+  [READY_LEAD, '- **Print READY TO CLEAR when done.** Ours.'],
+  ['- **Instruction-file proposals replace memory.**', '- **Propose instruction-file changes instead of memory.** Ours.'],
+  [LINT_LEAD, '- **Run lint and tests first.** Ours.'],
+  [WRITE_PLAINLY_LEAD, '- **Plain writing in docs.** Ours.'],
+  [BACKGROUND_LEAD, '- **Run long jobs in the background.** Ours.'],
+  [FINISH_LEAD, '- **Never stop with work half done.** Ours.'],
+  [RESOLVE_LEAD, '- **Resolve review threads when handled.** Ours.'],
+  ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', '- **Run the de-ai-writing pass on prose.** Ours.'],
+  [SOLVE_LEAD, '- **Every user ask is boarded at intake.** Ours.'],
+  [CLOSE_LEAD, '- **Close-on-commit for board items.** Ours.'],
+]);
+
+// The Domains leads arrive through TARGET_SECTIONS (the whole section is inserted, or a bullet is
+// re-inserted after the one before it), and a marker there could withhold a section bullet, so
+// they carry no subject marker on purpose. Every other insertable lead must have one.
+const MARKERLESS_SECTION_LEADS = [
+  '- **A domain is a shared knowledge store for one subject.**',
+  '- **Mount every subject the project works with, its own subject included.**',
+  '- **What not to do:** a Salesforce project',
+  '- **A domain needs a description**',
+  '- **Run `/sterling:domains` to see and change mounts.**',
+];
+
+test('stamp-contract (#111): a NEW insertable lead without a SUBJECT_MARKERS entry fails, unless it is one of the Domains section leads', () => {
+  assert.deepEqual(
+    MARKERLESS_SECTION_LEADS,
+    TARGET_SECTIONS.flatMap((section) => section.leads),
+    'the exemption list is exactly the TARGET_SECTIONS leads',
+  );
+  const unmarked = [...INSERT_AFTER.keys()].filter((lead) => !SUBJECT_MARKERS.has(lead) && !MARKERLESS_SECTION_LEADS.includes(lead));
+  assert.deepEqual(unmarked, [], 'add a SUBJECT_MARKERS entry (and an OWN_WORDING case below) for each insertable lead');
+});
+
+test('stamp-contract (#111): every SUBJECT_MARKERS lead is a tracked lead with a positive case, and each case is kept rather than inserted', () => {
+  assert.deepEqual([...OWN_WORDING.keys()].sort(), [...SUBJECT_MARKERS.keys()].sort(), 'a positive case per marker entry');
+  for (const lead of SUBJECT_MARKERS.keys()) assert.ok(TARGET_LEADS.includes(lead), `${lead} is a tracked lead`);
+  for (const [lead, own] of OWN_WORDING) {
+    const f = sectionFixture('marker-each', swapLead(lead, own), swapLead(lead, own));
+    try {
+      const before = f.read();
+      assert.ok(`${before.agents}\n${before.claude}`.includes(own), `fixture: ${own} placed`);
+      const r = runStampContract(f.regDb, ['--apply-inserts']);
+      assert.equal(r.status, 0, `${lead}: ${r.stdout}\n${r.stderr}`);
+      assert.match(r.stdout, /SIMILAR_BULLET_KEPT/, lead);
+      assert.ok(!/(^|\s)inserted\s/.test(r.stdout), `${lead}: nothing inserted\n${r.stdout}`);
+      assert.deepEqual(f.read(), before, `${lead}: nothing written`);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('stamp-contract (#111): findCoveringBullet ignores fenced examples and tracked template bullets, and reads only the bold lead', () => {
+  const fenced = '```\n- **Never stop with work half done.**\n```\n';
+  assert.equal(findCoveringBullet(fenced, FINISH_LEAD), null, 'a bullet inside a fence is an example');
+  assert.equal(findCoveringBullet('- **Write plainly; no AI tells.** Never stop with work half done.\n', FINISH_LEAD), null, 'the body text is not the lead');
+  assert.equal(findCoveringBullet('  - **Never stop with work half done.**\n', FINISH_LEAD), null, 'only top-level bullets');
+  assert.equal(findCoveringBullet('- **Never stop with work half done.**\n', "- **Solve, don't board.**"), null, 'markers are per lead');
+  assert.ok(findCoveringBullet('- **Never stop with work half done.**\n', FINISH_LEAD));
 });
 
 test('stamp-contract: a hand-tuned "No false action claims" bullet is not an anchor, so the lint bullet falls back to "Anti-speculation"', () => {
