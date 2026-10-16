@@ -180,21 +180,30 @@ export const RENAMED_LEADS = new Map([
 // already states the rule under its OWN wording (a different bold lead, often under another
 // heading) would gain a duplicate. Each insertable lead lists regexes over the bold lead text
 // of the sibling's other top-level bullets; a hit means the project covers the rule, so
-// stamp-contract keeps its bullet and inserts nothing. Declared, never fuzzy: keep each marker
-// narrow, because a false hit silently withholds a template bullet.
+// stamp-contract keeps its bullet and inserts nothing.
+//
+// A miss is safe (the template bullet is inserted, as before this check existed); a false hit
+// silently withholds a rule. So every marker must name the rule's actual SUBJECT, never a
+// generic word alone ('background', 'memory', 'prose deliverables', 'resolve'): a regex with
+// lookaheads requires every subject term at once, in any order. Declared, never fuzzy.
 export const SUBJECT_MARKERS = new Map([
-  ['- **Concept articles — capture design the moment it settles', [/\bconcept (articles?|famil(y|ies))\b/i]],
-  ['- **Codex runs through the MCP tool, never the shell.**', [/\bcodex\b.*\b(mcp|shell)\b/i, /\bcodex\b.*\bthrough\b.*\btool\b/i]],
-  ['- **Say `READY TO CLEAR` plainly when it is time.**', [/\bready to clear\b/i, /\bready for new session\b/i]],
-  ['- **Instruction-file proposals replace memory.**', [/\binstruction[- ]file proposals?\b/i, /\b(instead of|replaces?|no|off) (auto[- ])?memory\b/i]],
-  ['- **Lint and tests before done.**', [/\blint\b.*\btests?\b/i, /\btests?\b.*\blint\b/i]],
-  ['- **Write plainly; no AI tells.**', [/\bwrit(e|ing) plain(ly)?\b/i, /\bplain writing\b/i, /\bai tells\b/i, /\bsigns of ai\b/i]],
-  ['- **Start every subagent in the background.**', [/\bin the background\b/i, /\bsubagents?\b.*\bbackground\b/i, /\bbackground\b.*\bsubagents?\b/i]],
-  ['- **Finish what you start.**', [/\bfinish what you start\b/i, /\b(never|don'?t|do not) (stop|end|quit)\b.*\b(half|unfinished|incomplete)\b/i, /\bhalf[- ]done\b/i, /\bfinish\b.*\b(started|begun)\b/i]],
-  ['- **Resolve a review thread once its finding is handled.**', [/\bresolve\b.*\b(review )?(threads?|conversations?)\b/i]],
-  ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', [/\bde-?ai[- ]writing\b/i, /\bprose deliverables\b/i]],
+  ['- **Concept articles — capture design the moment it settles', [/^(?=.*\bconcept (articles?|famil(y|ies))\b)(?=.*\b(capture|design|knowledge|record|settles?)\b)/i]],
+  ['- **Codex runs through the MCP tool, never the shell.**', [/^(?=.*\bcodex\b)(?=.*\bmcp\b)/i, /^(?=.*\bcodex\b)(?=.*\b(never|not)\b)(?=.*\bshell\b)/i]],
+  // Case-sensitive on purpose: the rule is the literal capitalised line, and 'ready to clear' alone is ordinary English.
+  ['- **Say `READY TO CLEAR` plainly when it is time.**', [/\bREADY (TO CLEAR|FOR NEW SESSION)\b/]],
+  ['- **Instruction-file proposals replace memory.**', [/\binstruction[- ]file proposals?\b/i, /^(?=.*\bmemory\b)(?=.*(\binstruction[- ]files?\b|\bCLAUDE\.md\b|\bAGENTS\.md\b))/i]],
+  ['- **Lint and tests before done.**', [/^(?=.*\blint\b)(?=.*\btests?\b)(?=.*\b(before|done|reporting|finished|complete)\b)/i]],
+  ['- **Write plainly; no AI tells.**', [/\bwrit(e|ing) plainly\b/i, /\bai tells\b/i, /\bsigns of ai\b/i]],
+  ['- **Start every subagent in the background.**', [/^(?=.*\bbackground\b)(?=.*\b(subagents?|agents?|lanes?)\b)/i]],
+  ['- **Finish what you start.**', [
+    /\bfinish what you start\b/i,
+    /^(?=.*\b(never|don'?t|do not)\b)(?=.*\b(stop|end|quit)\b)(?=.*\b(work|tasks?)\b)(?=.*\b(half|unfinished|incomplete)\b)/i,
+    /^(?=.*\b(work|tasks?)\b)(?=.*\bhalf[- ]done\b)/i,
+  ]],
+  ['- **Resolve a review thread once its finding is handled.**', [/^(?=.*\bresolve\b)(?=.*\b(threads?|conversations?)\b)(?=.*\b(review|pr|pull request|copilot)\b)/i]],
+  ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', [/\bde-?ai\b/i, /\bai[- ]writing\b/i]],
   ["- **Solve, don't board.**", [/\bsolve,? don'?t board\b/i, /\bevery user ask is boarded\b/i]],
-  ['- **Close-on-commit: a commit that fulfils a board item pays it**', [/\bclose[- ]on[- ]commit\b/i]],
+  ['- **Close-on-commit: a commit that fulfils a board item pays it**', [/^(?=.*\bclose[- ]on[- ]commit\b)(?=.*\bboard\b)/i, /^(?=.*\bcommit\b)(?=.*\bboard item\b)/i]],
 ]);
 
 // The first top-level bullet of `text` (outside every fence, and not itself a tracked lead)

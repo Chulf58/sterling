@@ -901,7 +901,7 @@ const withOwnBullet = (text, own) => `${text.replace(/\n*$/, '\n')}${OWN_HEADING
 const swapLead = (lead, own) => (text) => (text.split('\n').some((l) => l.startsWith(lead)) ? withOwnBullet(dropBlock(text, lead), own) : text);
 
 for (const [lead, own, label] of [
-  [BACKGROUND_LEAD, '- **Start everything in the background when the host can notify you.** Our own wording, longer than the template.', 'background'],
+  [BACKGROUND_LEAD, '- **Start every subagent in the background when the host can notify you.** Our own wording, longer than the template.', 'background'],
   [FINISH_LEAD, '- **Never stop with work half done.** Our own wording.', 'finish'],
 ]) {
   test(`stamp-contract (#111): a project's own ${label} bullet under another heading is kept, nothing is inserted, one info line, exit 0`, () => {
@@ -944,13 +944,13 @@ test("stamp-contract (#111): an unrelated bullet whose lead says 'finish' in ano
 // One project wording per insertable lead, each hitting a marker. The home layer differs per lead
 // (AGENTS.md or CLAUDE.md), so swapLead acts on whichever file carries the template bullet.
 const OWN_WORDING = new Map([
-  ['- **Concept articles — capture design the moment it settles', '- **Concept articles for recurring ideas.** Ours.'],
+  ['- **Concept articles — capture design the moment it settles', '- **Capture design as concept articles.** Ours.'],
   [CODEX_LEAD, '- **Use the Codex MCP tool, not the shell.** Ours.'],
   [READY_LEAD, '- **Print READY TO CLEAR when done.** Ours.'],
   ['- **Instruction-file proposals replace memory.**', '- **Propose instruction-file changes instead of memory.** Ours.'],
-  [LINT_LEAD, '- **Run lint and tests first.** Ours.'],
-  [WRITE_PLAINLY_LEAD, '- **Plain writing in docs.** Ours.'],
-  [BACKGROUND_LEAD, '- **Run long jobs in the background.** Ours.'],
+  [LINT_LEAD, '- **Run lint and tests before reporting done.** Ours.'],
+  [WRITE_PLAINLY_LEAD, '- **Write plainly in docs; no AI tells.** Ours.'],
+  [BACKGROUND_LEAD, '- **Run subagents in the background.** Ours.'],
   [FINISH_LEAD, '- **Never stop with work half done.** Ours.'],
   [RESOLVE_LEAD, '- **Resolve review threads when handled.** Ours.'],
   ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', '- **Run the de-ai-writing pass on prose.** Ours.'],
@@ -994,6 +994,46 @@ test('stamp-contract (#111): every SUBJECT_MARKERS lead is a tracked lead with a
       assert.deepEqual(f.read(), before, `${lead}: nothing written`);
     } finally {
       f.cleanup();
+    }
+  }
+});
+
+// Unrelated bullets that share a generic word with a marker's subject (Sol review of ae858d1b): a false
+// hit silently withholds a rule, so each must still get the template bullet inserted. At least one per
+// SUBJECT_MARKERS entry; the issue's own 'Start everything in the background when the host can notify
+// you.' is ambiguous (no agent, subagent or lane named) and is inserted over, a safe miss.
+const UNRELATED_WORDING = new Map([
+  ['- **Concept articles — capture design the moment it settles', ['- **Concept articles for the marketing blog.** Ours.']],
+  [CODEX_LEAD, ['- **Codex style guide: keep shell scripts short.** Ours.']],
+  [READY_LEAD, ['- **Ready to clear the backlog before release.** Ours.']],
+  ['- **Instruction-file proposals replace memory.**', ['- **Turn off memory profiling.** Ours.']],
+  [LINT_LEAD, ['- **Lint config lives next to the tests.** Ours.']],
+  [WRITE_PLAINLY_LEAD, ['- **Write plain SQL migrations.** Ours.']],
+  [BACKGROUND_LEAD, ['- **Run the development server in the background.** Ours.', '- **Start everything in the background when the host can notify you.** Ours.']],
+  [FINISH_LEAD, ['- **Never stop the dev server with unfinished migrations pending.** Ours.', '- **Glossy finish for buttons.** Ours.']],
+  [RESOLVE_LEAD, ['- **Resolve thread pool starvation first.** Ours.']],
+  ['- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**', ['- **Spell-check prose deliverables.** Ours.']],
+  [SOLVE_LEAD, ['- **Every user ask goes to the support board.** Ours.']],
+  [CLOSE_LEAD, ['- **Close-on-commit for support tickets.** Ours.']],
+]);
+
+test('stamp-contract (#111): an unrelated bullet that shares a generic word with a marker never withholds the template bullet, for every marker entry', () => {
+  assert.deepEqual([...UNRELATED_WORDING.keys()].sort(), [...SUBJECT_MARKERS.keys()].sort(), 'a negative case per marker entry');
+  for (const [lead, owns] of UNRELATED_WORDING) {
+    for (const own of owns) {
+      const f = sectionFixture('marker-negative', swapLead(lead, own), swapLead(lead, own));
+      try {
+        const before = f.read();
+        assert.ok(`${before.agents}\n${before.claude}`.includes(own), `fixture: ${own} placed`);
+        const r = runStampContract(f.regDb, ['--apply-inserts']);
+        assert.equal(r.status, 0, `${own}: ${r.stdout}\n${r.stderr}`);
+        assert.ok(!r.stdout.includes('SIMILAR_BULLET_KEPT'), `${own} must not count as covering ${lead}:\n${r.stdout}`);
+        assert.ok(r.stdout.includes(`inserted  ${lead.slice(0, 60)}`), `${own}: the template bullet is inserted:\n${r.stdout}`);
+        const after = f.read();
+        assert.ok(`${after.agents}\n${after.claude}`.includes(own), `${own}: the project bullet is untouched`);
+      } finally {
+        f.cleanup();
+      }
     }
   }
 });
