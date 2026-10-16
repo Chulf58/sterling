@@ -4453,7 +4453,14 @@ export class SterlingTools {
       // its location is a synthetic name and nothing writes a file there, so
       // there is nothing to stat (issue #57). Only that seeded location is
       // exempt: a catalog reference pointing at a real repo doc stays file-backed.
-      if (record.type === 'reference_material' && (record as unknown as { kind: string }).kind === 'doc' && this.repoRoot && (record as unknown as { location?: unknown }).location !== MODELS_CATALOG_LOCATION) {
+      // ONLY A PROJECT-HELD RECORD IS CHECKED AGAINST THIS REPO (GitHub #114): a
+      // reference held in a mounted DOMAIN store is shared by every project that
+      // mounts the domain, so its repo-relative location ('CLAUDE.md') names a
+      // file in the repo that wrote it, and matching it here against THIS repo's
+      // file of the same name mints a false refresh_reference. Which store holds
+      // the record is the storage layer's answer (projectStoreHolds), never the
+      // body `scope` (anti_pattern a61cbdf3-c8ca-46cb-b7ed-6dd513a634f6).
+      if (record.type === 'reference_material' && (record as unknown as { kind: string }).kind === 'doc' && this.repoRoot && (record as unknown as { location?: unknown }).location !== MODELS_CATALOG_LOCATION && this.store.projectStoreHolds(record.id)) {
         const r = record as unknown as { id: string; title: string; location: string; source_date: string; file_baselines?: Record<string, string> };
         // ONLY A REPO PATH IS A FILE (issue #13): a URL or prose location, and
         // an absolute/escaping path, is not repo-located — nothing to stat, no
