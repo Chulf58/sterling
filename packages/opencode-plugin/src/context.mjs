@@ -373,15 +373,19 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
           logLine(root, `context: ${line}`);
         }
       }
-      // H1's registry step, once per root session: last-seen and the row's stack tags
+      // H1's registry step, once per root session: last-seen and the row's stack tags and name
       // (scripts/hooks/lib/registry-refresh.mjs). Never in the worker child, whose
       // session is not the user's (the former ruling 'opencode-session-boundary-code-runs-in-the-maintenance-worker-child' (not in the current store)).
       if (!inWorkerChild(env) && registrySeen.get(root) !== sessionID) {
         registrySeen.set(root, sessionID);
         try {
-          refreshRegistryRow(root, { config: state.config, at: now() });
+          const refreshed = refreshRegistryRow(root, { config: state.config, at: now() });
+          if (refreshed?.notice) {
+            holdLine(`${root}\0registry-name`, refreshed.notice);
+            logLine(root, `context: ${refreshed.notice}`);
+          }
         } catch (e) {
-          holdLine(`${root}\0registry`, `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time and stack tags in the shared registry were not updated, so other projects may list its old mounts.`);
+          holdLine(`${root}\0registry`, `STERLING PROJECT REGISTRY REFRESH FAILED (${errText(e)}): this project's last-seen time, stack tags and name in the shared registry were not updated, so other projects may list its old mounts or name.`);
           logLine(root, `context: project registry refresh failed: ${errText(e)}`);
         }
       }

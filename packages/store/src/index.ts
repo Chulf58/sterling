@@ -33,7 +33,7 @@ export { MountedStores, domainsHome, defaultMoveLockPath, type MoveRecoveryOutco
 export { allocateShares, DEFAULT_PROJECT_SHARE } from './shares.js';
 export { acquireMoveLock, releaseMoveLock, MoveLockBusyError, pidIsAlive, procStartTime, type MoveLockHandle, type MoveLockOptions, type MoveLockOwner } from './move-lock.js';
 export { fitDomains, DOMAIN_FIT_MIN_TERMS } from './domain-fit.js';
-export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
+export { ProjectRegistry, registryPath, type RegisterInput, type RenameResult } from './registry.js';
 export { resolveSentHandoffs, sentHandoffOf, openForeignDbReadOnly, readForeignBoard, getForeignBoardItem, type ForeignReadHooks, type ForeignBoardRead, type ForeignBoardLookup, type BoardOrderKey, type ReadForeignBoardOptions, type SentHandoff, type HandoffStatus, type HandoffStatusState, type ResolveSentHandoffsOptions } from './handoff.js';
 export * from './axis.js';
 import { AXIS_MAX_TERM_LEN } from './axis.js';

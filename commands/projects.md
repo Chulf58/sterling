@@ -8,6 +8,18 @@ It reads the machine-global project registry (`~/.sterling/registry.db`) — eve
 
 Projects whose repo path no longer exists are flagged **MISSING** (stale-at-read; the registry stores no liveness, by design — no background sweep). Removal is human-gated, never automatic: to drop only the missing entries, run `node "${CLAUDE_PLUGIN_ROOT}/bin/list-projects.mjs" --prune-missing` (it never removes a live project).
 
+## Renaming a project
+
+A project's registry name follows `project_name` in its `.sterling/config.json`: each session start (H1 on Claude Code, the server plugin on OpenCode) renames the registry row to the configured name, and a config without `project_name` leaves the row's name alone. If another registered project already has that name, the row keeps its old name and the session shows a "PROJECT NAME NOT APPLIED" line, because `target_project` resolves by name and two projects must not share one.
+
+To rename a project from here, which writes the config and the registry row together:
+
+1. Run the dry run: `node "${CLAUDE_PLUGIN_ROOT}/bin/list-projects.mjs" --rename <path> <new-name>`. It changes nothing. It prints the current and new `project_name` in the config and in the registry row, and every reason `--apply` would refuse: no registry row at the path (the path must be the registered project folder), several rows for the path, no readable `.sterling/config.json`, an empty name, or a name another project already uses. It exits 0 only when `--apply` would proceed or there is nothing to change.
+2. Show the user that output and ask through the question form whether to rename. Do not run `--apply` without that answer.
+3. Run `node "${CLAUDE_PLUGIN_ROOT}/bin/list-projects.mjs" --rename <path> <new-name> --apply`. It sets `project_name` in `config.json` (the rest of the file is kept as it was) and renames the registry row. If it stops between the two writes, re-run the same command to finish.
+
+Other projects' boards and notes that mention the old name are not rewritten.
+
 ## Removing a project's store
 
 To delete a project's knowledge store (`<path>/.sterling`) while its folder stays, registered or not:
