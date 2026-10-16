@@ -41,6 +41,12 @@ export interface RegisterInput {
   at: string; // ISO timestamp
 }
 
+/** What renameIfUnique did: wrote the name, found it already set, found another
+ *  project holding it (conflict_path), or found no row at the path. */
+export type RenameResult =
+  | { status: 'renamed' | 'unchanged' | 'missing' }
+  | { status: 'conflict'; conflict_path: string };
+
 export class ProjectRegistry {
   private db: DatabaseSync;
 
@@ -94,11 +100,34 @@ export class ProjectRegistry {
   }
 
   /** Rename (config.json project_name changed, or /sterling:projects --rename):
-   *  replace the name of an EXISTING row and nothing else. Never creates a row
-   *  and does not check for another row with the same name; that refusal is the
-   *  caller's. Returns whether a row was updated. */
-  updateName(repoPath: string, name: string): boolean {
-    return this.db.prepare('UPDATE projects SET name = ? WHERE repo_path = ?').run(name, repoPath).changes > 0;
+   *  replace the name of an EXISTING row and nothing else, only when no other row
+   *  carries the name. The check and the UPDATE run in one BEGIN IMMEDIATE
+   *  transaction, so two projects renaming to the same name at once cannot both
+   *  win: the second sees the first's row and gets 'conflict'. `selfPaths` are
+   *  the repo_paths that count as this project (rows that spell one folder
+   *  differently); a row there never conflicts. Never creates a row.
+   *  'unchanged' = the row already has the name; 'missing' = no row at repoPath. */
+  renameIfUnique(repoPath: string, name: string, selfPaths: string[] = [repoPath]): RenameResult {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const own = this.db.prepare('SELECT name FROM projects WHERE repo_path = ?').get(repoPath) as { name: string } | undefined;
+      let result: RenameResult;
+      if (!own) result = { status: 'missing' };
+      else if (own.name === name) result = { status: 'unchanged' };
+      else {
+        const taken = (this.db.prepare('SELECT repo_path FROM projects WHERE name = ?').all(name) as { repo_path: string }[]).find((r) => !selfPaths.includes(r.repo_path));
+        if (taken) result = { status: 'conflict', conflict_path: taken.repo_path };
+        else {
+          this.db.prepare('UPDATE projects SET name = ? WHERE repo_path = ?').run(name, repoPath);
+          result = { status: 'renamed' };
+        }
+      }
+      this.db.exec('COMMIT');
+      return result;
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
   }
 
   /** All registered projects, name-ordered. Stale-at-read (existence of

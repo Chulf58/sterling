@@ -955,7 +955,14 @@ const reconcileContext = backlog.line ? `\n\n${backlog.line}` : '';
 // notice line, shown here so the conflict is not silent.
 let registryContext = '';
 {
-  const refreshed = refreshRegistryRow(input.cwd, { config, configUnreadable });
+  // A registry that cannot be read or written costs this one line, never the rest of the
+  // startup context (P5: the degraded state is said, not swallowed).
+  let refreshed = null;
+  try {
+    refreshed = refreshRegistryRow(input.cwd, { config, configUnreadable });
+  } catch (e) {
+    registryContext = `\n\nSTERLING PROJECT REGISTRY REFRESH FAILED (${e?.message ?? e}): this project's last-seen time, stack tags and name in the shared registry were not updated, and its sibling projects could not be listed this session.`;
+  }
   const siblings = (refreshed?.siblings ?? []).filter((p) => existsSync(p.repo_path));
   if (siblings.length) {
     registryContext =

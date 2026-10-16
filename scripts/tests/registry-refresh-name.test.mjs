@@ -69,12 +69,21 @@ test('refresh with no project_name leaves the row\'s name alone', () => {
   assert.equal(rowOf(SELF).name, 'old-name');
 });
 
-test('refresh ignores an empty or whitespace project_name and an unreadable config', () => {
+test('refresh ignores an empty or whitespace project_name', () => {
   setup();
   assert.equal(refreshRegistryRow(SELF, { config: { project_name: '   ', stack_tags: [] }, at: NOW }).notice, null);
   assert.equal(rowOf(SELF).name, 'old-name');
-  assert.equal(refreshRegistryRow(SELF, { config: { project_name: 'x' }, configUnreadable: true, at: NOW }).notice, null);
-  assert.equal(rowOf(SELF).name, 'old-name');
+});
+
+test('refresh with an unreadable config writes nothing (last_seen, stack_tags, name unchanged) and still returns the siblings', () => {
+  setup();
+  const res = refreshRegistryRow(SELF, { config: { project_name: 'x', stack_tags: ['genesys'] }, configUnreadable: true, at: NOW });
+  assert.equal(res.notice, null);
+  assert.deepEqual(res.siblings.map((p) => p.name), ['sibling']);
+  const row = rowOf(SELF);
+  assert.equal(row.name, 'old-name');
+  assert.deepEqual(row.stack_tags, ['node']);
+  assert.equal(row.last_seen_at, null);
 });
 
 test('refresh with a name another project already holds skips the rename and returns a notice', () => {

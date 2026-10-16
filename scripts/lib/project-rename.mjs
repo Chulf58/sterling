@@ -75,9 +75,17 @@ export function renameProject(registry, input, newNameInput, { apply = false, lo
     log(`\n--apply would write ${cfgPath} and rename the registry row. Other projects' trackers that mention '${row.name}' are not rewritten.`);
     return 0;
   }
+  // The row goes first: its check-and-write is one transaction, so a name taken since the
+  // preview refuses here with nothing written. A config write that then fails leaves the
+  // row renamed; re-running the same command finishes it.
   try {
+    const renamed = registry.renameIfUnique(row.repo_path, name, mine.map((r) => r.repo_path));
+    if (renamed.status === 'conflict') {
+      log(`\n--rename REFUSED:\n  - the name '${name}' is already used by the project at ${renamed.conflict_path}; two projects cannot share a name. Nothing was written.`);
+      return 1;
+    }
+    if (renamed.status === 'missing') throw new Error(`no registry row for ${row.repo_path} was found to rename`);
     if (cfg.project_name !== name) writeProjectName(cfgPath, raw, cfg, name);
-    if (!registry.updateName(row.repo_path, name)) throw new Error(`no registry row for ${row.repo_path} was found to rename`);
   } catch (e) {
     log(`\nRename FAILED: ${e.message}. config.json and the registry row may disagree now; re-run the same command to finish it.`);
     return 1;

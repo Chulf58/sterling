@@ -11,7 +11,9 @@
 // name and last-seen change; the row's init dates and version stay init's. A config with no
 // project_name leaves the row's name alone. When another project's row already carries the
 // configured name the rename is skipped and a notice line is returned for the caller to
-// show, because target_project resolves by name and two projects must not share one. The row is matched with
+// show, because target_project resolves by name and two projects must not share one; the
+// check and the write are one registry transaction (renameIfUnique). A config that could
+// not be read writes nothing at all: only the sibling read runs. The row is matched with
 // sameLocationAnyHost, as scripts/domains.mjs matches it, so a row a Windows host spelled
 // with backslashes or a drive letter is the same row.
 import { existsSync } from 'node:fs';
@@ -45,15 +47,17 @@ export function refreshRegistryRow(cwd, { config, configUnreadable = false, at =
     const rows = registry.list();
     const siblings = rows.filter((p) => !isThisProject(p));
     let notice = null;
-    for (const row of rows.filter(isThisProject)) {
+    // A config that could not be read says nothing about this project, so nothing is written.
+    if (configUnreadable) return { siblings, notice };
+    const own = rows.filter(isThisProject);
+    const ownPaths = own.map((p) => p.repo_path);
+    for (const row of own) {
       registry.touchLastSeen(row.repo_path, at);
       if (mounts && JSON.stringify(row.stack_tags) !== JSON.stringify(mounts)) registry.updateStackTags(row.repo_path, mounts);
-      if (projectName !== null && projectName !== row.name) {
-        const taken = siblings.find((p) => p.name === projectName);
-        if (taken) {
-          notice = `STERLING PROJECT NAME NOT APPLIED: config.json project_name '${projectName}' is already registered for ${taken.repo_path}, so this project stays registered as '${row.name}'. Two projects cannot share a name; pick another with node "<Sterling root>/bin/list-projects.mjs" --rename <this project's path> <new-name> --apply.`;
-        } else {
-          registry.updateName(row.repo_path, projectName);
+      if (projectName !== null) {
+        const renamed = registry.renameIfUnique(row.repo_path, projectName, ownPaths);
+        if (renamed.status === 'conflict') {
+          notice = `STERLING PROJECT NAME NOT APPLIED: config.json project_name '${projectName}' is already registered for ${renamed.conflict_path}, so this project stays registered as '${row.name}'. Two projects cannot share a name; pick another with node "<Sterling root>/bin/list-projects.mjs" --rename <this project's path> <new-name> --apply.`;
         }
       }
     }

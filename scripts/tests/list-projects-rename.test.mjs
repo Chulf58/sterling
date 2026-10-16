@@ -15,9 +15,11 @@ const SCRIPT = join(root, 'scripts', 'list-projects.mjs');
 const T = '2026-10-15T10:00:00.000Z';
 
 let ProjectRegistry;
+let renameProject;
 let tmp;
 before(async () => {
   ({ ProjectRegistry } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
+  ({ renameProject } = await import(pathToFileURL(join(root, 'scripts', 'lib', 'project-rename.mjs')).href));
   tmp = mkdtempSync(join(tmpdir(), 'sterling-list-projects-rename-'));
 });
 after(() => rmSync(tmp, { recursive: true, force: true }));
@@ -130,4 +132,23 @@ test('--rename argument errors exit 2', () => {
   assert.equal(run(s.registryDb, '--rename', s.alpha).code, 2);
   assert.equal(run(s.registryDb, '--apply').code, 2);
   assert.equal(run(s.registryDb, '--rename', s.alpha, 'x', '--remove', s.beta).code, 2);
+});
+
+test('--rename --apply: a name taken after the preview read is refused by the registry transaction, nothing written', () => {
+  const s = sandbox();
+  const real = new ProjectRegistry(s.registryDb);
+  try {
+    const stale = real.list();
+    // beta takes 'alpha-two' after rename read the rows but before it writes
+    real.renameIfUnique(s.beta, 'alpha-two');
+    const before = cfgText(s.alpha);
+    const lines = [];
+    const racing = { list: () => stale, renameIfUnique: (...a) => real.renameIfUnique(...a) };
+    assert.equal(renameProject(racing, s.alpha, 'alpha-two', { apply: true, log: (l) => lines.push(l) }), 1);
+    assert.match(lines.join('\n'), /already used by the project at .*beta.*Nothing was written/s);
+    assert.equal(cfgText(s.alpha), before);
+    assert.equal(real.list().find((r) => r.repo_path === s.alpha).name, 'alpha');
+  } finally {
+    real.close();
+  }
 });

@@ -120,17 +120,54 @@ test('updateStackTags: changes only stack_tags of an existing row; never creates
   }
 });
 
-test('updateName: changes only the name of an existing row; never creates one (GitHub #113)', () => {
+test('renameIfUnique: renames an existing row only; unchanged, missing and conflict write nothing (GitHub #113)', () => {
   const { reg, cleanup } = harness();
   try {
     reg.register(base());
+    reg.register(base({ repo_path: 'C:/Users/x/ProjB', name: 'ProjB' }));
     reg.touchLastSeen('C:/Users/x/ProjA', '2026-06-18T09:00:00.000Z');
-    const before = reg.list()[0];
-    assert.equal(reg.updateName('C:/Users/x/ProjA', 'ProjA-new'), true);
-    assert.deepEqual(reg.list()[0], { ...before, name: 'ProjA-new' });
-    assert.equal(reg.updateName('C:/Users/x/Unknown', 'x'), false);
-    assert.equal(reg.list().length, 1);
+    const before = reg.list().find((r) => r.name === 'ProjA')!;
+    assert.deepEqual(reg.renameIfUnique('C:/Users/x/ProjA', 'ProjA'), { status: 'unchanged' });
+    assert.deepEqual(reg.renameIfUnique('C:/Users/x/ProjA', 'ProjB'), { status: 'conflict', conflict_path: 'C:/Users/x/ProjB' });
+    assert.equal(reg.list().find((r) => r.repo_path === 'C:/Users/x/ProjA')!.name, 'ProjA', 'a conflict writes nothing');
+    assert.deepEqual(reg.renameIfUnique('C:/Users/x/Unknown', 'free'), { status: 'missing' });
+    assert.equal(reg.list().length, 2, 'never creates a row');
+    assert.deepEqual(reg.renameIfUnique('C:/Users/x/ProjA', 'ProjA-new'), { status: 'renamed' });
+    assert.deepEqual(reg.list().find((r) => r.repo_path === 'C:/Users/x/ProjA'), { ...before, name: 'ProjA-new' });
   } finally {
     cleanup();
+  }
+});
+
+test('renameIfUnique: a row listed in selfPaths never conflicts (one folder spelled two ways)', () => {
+  const { reg, cleanup } = harness();
+  try {
+    reg.register(base({ repo_path: 'C:/p/a', name: 'a' }));
+    reg.register(base({ repo_path: 'C:\\p\\a', name: 'shared' }));
+    assert.deepEqual(reg.renameIfUnique('C:/p/a', 'shared', ['C:/p/a', 'C:\\p\\a']), { status: 'renamed' });
+  } finally {
+    cleanup();
+  }
+});
+
+test('renameIfUnique: two connections racing for one name — the check and the write are one transaction, so only one wins (GitHub #113)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-registry-race-'));
+  const path = join(dir, 'registry.db');
+  const a = new ProjectRegistry(path);
+  const b = new ProjectRegistry(path);
+  try {
+    a.register(base({ repo_path: 'C:/p/a', name: 'a' }));
+    a.register(base({ repo_path: 'C:/p/b', name: 'b' }));
+    // B reads the registry first (the old check-then-write shape), A then takes the name,
+    // and B's rename still runs on its stale read.
+    const staleRows = b.list();
+    assert.ok(!staleRows.some((r) => r.name === 'taken'), 'B saw the name as free');
+    assert.deepEqual(a.renameIfUnique('C:/p/a', 'taken'), { status: 'renamed' });
+    assert.deepEqual(b.renameIfUnique('C:/p/b', 'taken'), { status: 'conflict', conflict_path: 'C:/p/a' });
+    assert.deepEqual(a.list().map((r) => r.name).sort(), ['b', 'taken']);
+  } finally {
+    a.close();
+    b.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

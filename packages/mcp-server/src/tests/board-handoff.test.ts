@@ -773,7 +773,7 @@ test('board_add target_project resolves by the registry name after a rename; the
   try {
     const registry = new ProjectRegistry(h.reg);
     try {
-      assert.equal(registry.updateName(h.beta, 'beta-renamed'), true);
+      assert.deepEqual(registry.renameIfUnique(h.beta, 'beta-renamed'), { status: 'renamed' });
     } finally {
       registry.close();
     }
