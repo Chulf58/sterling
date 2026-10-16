@@ -8,7 +8,7 @@
 // time. Every refusal writes nothing.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -615,6 +615,41 @@ test('board_query/board_get target_project: unknown and self refused with read w
   }
 });
 
+test('a receiver renamed in the registry stays followable: the tracker resolves through to_root, and the old name still reads its board (GitHub issue #117)', () => {
+  const h = harness();
+  const registry = new ProjectRegistry(h.reg);
+  try {
+    const d = (h.tools.boardAdd({ text: 'Do it there', source: 'user', target_project: 'beta' }) as unknown as Loose).handoff_delivery as {
+      tracker: { id: string };
+      delivered: { id: string };
+    };
+    assert.equal(registry.renameIfUnique(h.beta, 'Beta Renamed').status, 'renamed');
+
+    assert.deepEqual(statusOf(h.tools, d.tracker.id), { state: 'open', text: 'open in beta' }, 'the live status is read through to_root');
+    const got = h.tools.foreignBoardGet(d.delivered.id, 'beta');
+    assert.equal(got.id, d.delivered.id);
+    assert.equal(got.source_project, 'Beta Renamed', 'the read names the receiver by its current registry name');
+    assert.ok(h.tools.foreignBoardQuery({ target_project: 'beta' }).records.some((r) => r.id === d.delivered.id));
+    assert.equal(h.tools.foreignBoardGet(d.delivered.id, 'Beta Renamed').id, d.delivered.id, 'the new name reads it too');
+    assert.throws(
+      () => h.tools.boardAdd({ text: 'again', source: 'user', target_project: 'beta' }),
+      /board_add: target_project 'beta' is refused: no registered project has that name; registered: (alpha, Beta Renamed|Beta Renamed, alpha)\. Nothing was written\./,
+      'a write never follows a tracker to a renamed receiver'
+    );
+
+    // The receiver is unregistered: refused loud, saying it is no longer registered.
+    const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.equal(registry.remove(h.beta), true);
+    assert.throws(
+      () => h.tools.foreignBoardGet(d.delivered.id, 'beta'),
+      new RegExp(`^Error: board_get: target_project 'beta' is refused: no registered project has that name; registered: alpha; this board's hand-off trackers to 'beta' resolve to no registered project: the project at ${esc(h.beta)} when this tracker was created is no longer registered \\(it was last registered at ${esc(h.beta)} until [0-9T:.Z-]+\\)\\. Nothing was read\\.$`)
+    );
+  } finally {
+    registry.close();
+    h.cleanup();
+  }
+});
+
 test('board_query/board_get target_project: blocked_by_state and unblocks against the other board; its tracker reads handoff_status unavailable', () => {
   const h = harness();
   try {
@@ -783,6 +818,90 @@ test('board_add target_project resolves by the registry name after a rename; the
     assert.equal((res.handoff_delivery as { delivered: { project: string; root: string } }).delivered.project, 'beta-renamed');
     assert.equal((res.handoff_delivery as { delivered: { root: string } }).delivered.root, h.beta);
   } finally {
+    h.cleanup();
+  }
+});
+
+// GitHub issue #119: a receiver whose folder was moved and repointed with
+// list-projects --move (ProjectRegistry.moveProject) keeps resolving at its
+// new path, for status, closure and evidence alike; a project that registers
+// at the old path later does not capture trackers created before the move.
+const MOVED_AT = '2026-10-16T09:00:00.000Z';
+const LATER = '2026-10-17T09:00:00.000Z';
+
+function moveBeta(h: ReturnType<typeof harness>, registry: ProjectRegistry): string {
+  const moved = join(h.base, 'beta-moved');
+  renameSync(h.beta, moved);
+  assert.equal(registry.moveProject(h.beta, moved, MOVED_AT).status, 'moved');
+  return moved;
+}
+
+/** A tools instance on the receiver at `root`, as its own server would be. */
+function receiverTools(root: string) {
+  const s = new SterlingStore(join(root, '.sterling', 'sterling.db'));
+  return { tools: new SterlingTools({ store: s, repoRoot: root, now: () => NOW }), close: () => s.close() };
+}
+
+test('a receiver moved with --move resolves at its new path: open stays open, closed reads DONE with its note and evidence (GitHub issue #119)', () => {
+  const h = harness();
+  const registry = new ProjectRegistry(h.reg);
+  try {
+    const open = handOver(h);
+    const noted = handOver(h);
+    const evidenced = handOver(h, { milestone: 'merged' });
+    const moved = moveBeta(h, registry);
+
+    assert.deepEqual(statusOf(h.tools, open.tracker.id), { state: 'open', text: 'open in beta' });
+    const b = receiverTools(moved);
+    try {
+      assert.equal(b.tools.boardRemove(noted.delivered.id, 'shipped in 1a2b3c').handoff_closure, join(moved, '.sterling', 'handoffs', `${noted.transfer_id}.json`));
+      b.tools.boardRemove(evidenced.delivered.id, undefined, { commit: '1a2b3c' });
+    } finally {
+      b.close();
+    }
+    assert.deepEqual(statusOf(h.tools, open.tracker.id), { state: 'open', text: 'open in beta' });
+    assert.deepEqual(statusOf(h.tools, noted.tracker.id), { state: 'done', text: `DONE in beta ${NOW}: shipped in 1a2b3c`, closed_at: NOW, note: 'shipped in 1a2b3c' });
+    assert.deepEqual(statusOf(h.tools, evidenced.tracker.id), {
+      state: 'done',
+      text: `DONE in beta ${NOW} (merged): commit 1a2b3c`,
+      closed_at: NOW,
+      evidence: { commit: '1a2b3c' },
+      milestone: 'merged',
+    });
+    assert.equal((h.tools.boardGet(open.tracker.id) as unknown as Loose).handoff_status !== undefined, true);
+    assert.deepEqual((h.tools.boardGet(open.tracker.id) as unknown as Loose).handoff, { role: 'sent', transfer_id: open.transfer_id, to_root: h.beta, to_name: 'beta', to_item_id: open.delivered.id }, 'the stored tracker is never rewritten');
+  } finally {
+    registry.close();
+    h.cleanup();
+  }
+});
+
+test('a new project registered at the old path: a pre-move tracker still resolves to the moved project, a later tracker to the new one; nothing located reads unknown (GitHub issue #119)', () => {
+  const h = harness();
+  const registry = new ProjectRegistry(h.reg);
+  const laterStore = new SterlingStore(join(h.alpha, '.sterling', 'sterling.db'));
+  try {
+    const before = handOver(h);
+    moveBeta(h, registry);
+    projectDir(h.base, 'beta');
+    h.register('newcomer', h.beta);
+
+    const later = new SterlingTools({ store: laterStore, repoRoot: h.alpha, registryPath: h.reg, now: () => LATER });
+    const after = (later.boardAdd({ text: 'For the newcomer', source: 'user', target_project: 'newcomer' }) as unknown as Loose).handoff_delivery as Delivery;
+    assert.equal((h.tools.boardGet(after.tracker.id) as unknown as Loose).created_at, LATER);
+
+    assert.deepEqual(statusOf(h.tools, before.tracker.id), { state: 'open', text: 'open in beta' }, 'the pre-move tracker follows the alias');
+    assert.deepEqual(statusOf(h.tools, after.tracker.id), { state: 'open', text: 'open in newcomer' }, 'the later tracker reads the project now at that path');
+
+    // The moved project is unregistered: its key's history stays and the pre-move tracker reads unknown, never the newcomer's board.
+    assert.equal(registry.remove(join(h.base, 'beta-moved')), true);
+    const lost = statusOf(h.tools, before.tracker.id);
+    assert.equal(lost?.state, 'unknown');
+    assert.match(String(lost?.text), /^status unknown: beta's project cannot be located: the project at .*\/beta when this tracker was created is no longer registered \(it was last registered at .*\/beta-moved until [0-9T:.Z-]+\)$/);
+    assert.deepEqual(statusOf(h.tools, after.tracker.id), { state: 'open', text: 'open in newcomer' });
+  } finally {
+    laterStore.close();
+    registry.close();
     h.cleanup();
   }
 });

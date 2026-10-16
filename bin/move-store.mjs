@@ -9,7 +9,7 @@ var __export = (target, all) => {
 
 // scripts/move-store.mjs
 import { existsSync as existsSync3 } from "node:fs";
-import { dirname as dirname6, join as join9, resolve as resolve4 } from "node:path";
+import { dirname as dirname6, join as join9, resolve as resolve5 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // packages/store/dist/index.js
@@ -6797,7 +6797,7 @@ var AXIS_MAX_TERM_LEN = 64;
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname2, join as join4 } from "node:path";
+import { dirname as dirname2, join as join4, resolve as resolve2 } from "node:path";
 function registryPath() {
   return process.env.STERLING_REGISTRY_DB ?? join4(homedir3(), ".sterling", "registry.db");
 }
@@ -7428,7 +7428,7 @@ function boardReadinessOf(targets, live, openBlocker) {
       blockers_open: blockersOpen,
       unblocks,
       state,
-      ...sent ? { handoff: sent } : {}
+      ...sent ? { handoff: sent, ...typeof t.created_at === "string" ? { created_at: t.created_at } : {} } : {}
     };
   });
 }
@@ -9998,7 +9998,7 @@ var SterlingStore = class _SterlingStore {
 
 // packages/store/dist/routing.js
 import { homedir as homedir4 } from "node:os";
-import { join as join7, resolve as resolve2 } from "node:path";
+import { join as join7, resolve as resolve3 } from "node:path";
 var PG_TEST_NAMESPACE_ENV = "STERLING_TEST_PG_NAMESPACE";
 var StoreSettingsError = class extends Error {
   constructor(message) {
@@ -10043,7 +10043,7 @@ import { createHash, randomUUID as randomUUID2 } from "node:crypto";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { existsSync as existsSync2, mkdirSync as mkdirSync2, mkdtempSync, readFileSync as readFileSync3, realpathSync as realpathSync2, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname as dirname5, join as join8, resolve as resolve3 } from "node:path";
+import { dirname as dirname5, join as join8, resolve as resolve4 } from "node:path";
 var MOVE_FENCE_KEY = STORE_FENCE_KEY;
 var MOVE_RECEIPT_KEY = "move_receipt";
 var MOVE_CONTROL_KEYS = [MOVE_FENCE_KEY, MOVE_RECEIPT_KEY];
@@ -10238,7 +10238,7 @@ function parseReceipt(value, where) {
   }
   throw new MoveSchemaError(`${where}: a move receipt is not readable (${value.slice(0, 80)}); refusing to guess`);
 }
-var sqliteLabel = (path) => `sqlite:${resolve3(path).replace(/\\/g, "/")}`;
+var sqliteLabel = (path) => `sqlite:${resolve4(path).replace(/\\/g, "/")}`;
 var pgLabel = (schema) => `postgres:${schema}`;
 function searchTextFor(type, body, fold, where) {
   const entry = RECORD_TYPES[type];
@@ -10919,7 +10919,7 @@ function result(direction, identity, source, target, outcome, moveId, manifest, 
 }
 var CONFIG_REL2 = ".sterling/config.json";
 function canonicalPath(p) {
-  const abs = resolve3(p);
+  const abs = resolve4(p);
   try {
     return realpathSync2(abs);
   } catch {
@@ -10937,7 +10937,7 @@ function readConfigOf(root) {
   }
 }
 function planMove(input) {
-  const root = resolve3(input.root);
+  const root = resolve4(input.root);
   const config = readConfigOf(root);
   if (config === null)
     throw new MoveConfigMissingError(`${root}/${CONFIG_REL2} does not exist; run the move inside a Sterling project. Nothing was moved.`);
@@ -10961,7 +10961,7 @@ function planMove(input) {
   const skipped = [];
   const unreadable = [];
   for (const repo of input.registeredProjects) {
-    const other = resolve3(repo);
+    const other = resolve4(repo);
     if (canonicalPath(other) === canonicalPath(root))
       continue;
     if (!existsSync2(join8(other, CONFIG_REL2))) {
@@ -11008,7 +11008,7 @@ function readRegisteredProjects(registryDbPath) {
 var PROJECT_STORAGES = ["sqlite", "postgres"];
 function readConfigObject(root) {
   readProjectMode(root);
-  const path = join8(resolve3(root), CONFIG_REL2);
+  const path = join8(resolve4(root), CONFIG_REL2);
   return { path, parsed: JSON.parse(readFileSync3(path, "utf8")) };
 }
 function readProjectStorage(root) {
@@ -11228,11 +11228,11 @@ function parseArgs(argv) {
   return out;
 }
 function findProjectRoot(start) {
-  let dir = resolve4(start);
+  let dir = resolve5(start);
   for (; ; ) {
     if (existsSync3(join9(dir, ".sterling", "config.json"))) return dir;
     const up = dirname6(dir);
-    if (up === dir) return resolve4(start);
+    if (up === dir) return resolve5(start);
     dir = up;
   }
 }
@@ -11383,7 +11383,7 @@ function main() {
     process.exit(1);
   }
 }
-var launchedAs = process.argv[1] && resolve4(process.argv[1]);
+var launchedAs = process.argv[1] && resolve5(process.argv[1]);
 if (launchedAs === fileURLToPath(new URL("../scripts/move-store.mjs", import.meta.url).href) || launchedAs === fileURLToPath(new URL("../bin/move-store.mjs", new URL("../scripts/move-store.mjs", import.meta.url).href))) main();
 export {
   MovePostgresOffError,

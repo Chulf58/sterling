@@ -27,6 +27,7 @@ import {
   StoreBusyError,
   allocateShares,
   resolveSentHandoffs,
+  registryPath,
   sentHandoffOf,
   readForeignBoard,
   getForeignBoardItem,
@@ -8686,6 +8687,12 @@ export class SterlingTools {
       updated_at: ts,
       ...(replaced ? { status: 'active', superseded_by: null } : {}),
     };
+    // working_tree: null is the explicit UNSET (GitHub #118): the settlement
+    // notice tells the operator to clear it once a branch merges, and the field's
+    // schema (string, min 1, optional) accepts neither null nor ''. Only a type
+    // that declares working_tree reaches here with the key — refuseUnknownFields
+    // above already refused it for every other type.
+    if (overrides.working_tree === null) delete next.working_tree;
     if (relationRemoval) {
       // The relation row is authoritative, but keep the stored body honest as
       // well. This removes only the selected existing edge and deliberately
@@ -10509,7 +10516,13 @@ export class SterlingTools {
     // A tracker for a task handed to another project (GitHub issue #105) is
     // 'delegated'; its status is read from the receiving project at read time.
     const readiness = this.store.boardReadiness(users);
-    const statuses = resolveSentHandoffs(readiness.filter((r) => r.handoff).map((r) => ({ id: r.id, handoff: r.handoff })));
+    // Each tracker's receiver is located through the registry (a moved folder,
+    // GitHub issue #119) by the tracker's own created_at.
+    const createdAt = new Map(users.map((u) => [u.id, u.created_at]));
+    const statuses = resolveSentHandoffs(
+      readiness.filter((r) => r.handoff).map((r) => ({ id: r.id, handoff: r.handoff, created_at: createdAt.get(r.id) })),
+      { registryPath: this.registryPath ?? registryPath() }
+    );
     for (const r of readiness) {
       const status = statuses.get(r.id);
       out.set(r.id, {
@@ -11557,7 +11570,17 @@ export class SterlingTools {
    * is written there. Returns the read with the target it came from.
    */
   private readForeignTarget<T>(target_project: string, tool: 'board_query' | 'board_get', read: (dbPath: string) => T): { source: ForeignSource; result: T } {
-    const target = resolveHandoffTarget(target_project, this.repoRoot, this.registryPath, tool);
+    // This board's hand-off trackers, read only when the name is not a current
+    // registry name: a receiver renamed since the hand-off stays readable under
+    // the name its trackers carry (GitHub issue #117).
+    const trackers = () =>
+      this.store
+        .query({ types: ['todo'], cap: BOARD_SCAN_CAP })
+        .flatMap((t) => {
+          const h = sentHandoffOf(t as { handoff?: unknown });
+          return h ? [{ to_root: h.to_root, to_name: h.to_name, created_at: t.created_at }] : [];
+        });
+    const target = resolveHandoffTarget(target_project, this.repoRoot, this.registryPath, tool, trackers);
     let result: T;
     try {
       result = read(target.dbPath);

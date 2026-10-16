@@ -386,7 +386,7 @@ export function foreignTreeOwnersText(paths, foreignOnlyOwners) {
   const owners = [...byArticle.values()].map(({ r, paths: ps }) => `'${r.slug ?? r.title ?? r.id}' (${String(r.id).slice(0, 8)}, working_tree '${r.working_tree}') lists ${list(ps)}`);
   return (
     `${named.size} of these file(s) are listed only by an article on another working tree, which owns no file in this root: ${owners.join('; ')}. ` +
-    `If that branch is merged, clear working_tree on the article (knowledge_update); if it is a real separate tree, map the name in config.working_trees.`
+    `If that branch is merged, clear working_tree on the article (knowledge_update with working_tree: null); if it is a real separate tree, map the name in config.working_trees.`
   );
 }
 

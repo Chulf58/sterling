@@ -116,7 +116,7 @@ test('article demand: a path listed only by a foreign-tree article names that ar
       text.includes(`1 of these file(s) are listed only by an article on another working tree, which owns no file in this root: 'stale-tree-owner' (${stale.id.slice(0, 8)}, working_tree 'main (merged 035f27c, 2026-10-15)') lists src/a.mjs`),
       text
     );
-    assert.match(text, /If that branch is merged, clear working_tree on the article \(knowledge_update\); if it is a real separate tree, map the name in config\.working_trees\./);
+    assert.match(text, /If that branch is merged, clear working_tree on the article \(knowledge_update with working_tree: null\); if it is a real separate tree, map the name in config\.working_trees\./);
   } finally {
     cleanup();
   }

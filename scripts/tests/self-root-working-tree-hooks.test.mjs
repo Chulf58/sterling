@@ -140,7 +140,7 @@ test('ownershipJoin: a mapped-to-root owner owns; a foreign-only owner is unowne
     const text = foreignTreeOwnersText(['src/s.mjs', 'src/none.mjs'], foreignOnlyOwners);
     assert.match(text, /^1 of these file\(s\) are listed only by an article on another working tree/);
     assert.ok(text.includes(`'stale-owner' (${stale.id.slice(0, 8)}, working_tree 'main (merged 035f27c, 2026-10-15)') lists src/s.mjs`), text);
-    assert.match(text, /clear working_tree on the article \(knowledge_update\).*map the name in config\.working_trees/);
+    assert.match(text, /clear working_tree on the article \(knowledge_update with working_tree: null\).*map the name in config\.working_trees/);
     assert.equal(foreignTreeOwnersText(['src/none.mjs'], foreignOnlyOwners), '', 'nothing lists the path: no line');
   } finally {
     cleanup();
