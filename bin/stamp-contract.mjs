@@ -5570,6 +5570,39 @@ var ProjectRegistry = class {
   updateStackTags(repoPath2, stackTags) {
     return this.db.prepare("UPDATE projects SET stack_tags = ? WHERE repo_path = ?").run(JSON.stringify(stackTags), repoPath2).changes > 0;
   }
+  /** Rename (config.json project_name changed, or /sterling:projects --rename):
+   *  replace the name of an EXISTING row and nothing else, only when no other row
+   *  carries the name. The check and the UPDATE run in one BEGIN IMMEDIATE
+   *  transaction, so two projects renaming to the same name at once cannot both
+   *  win: the second sees the first's row and gets 'conflict'. `selfPaths` are
+   *  the repo_paths that count as this project (rows that spell one folder
+   *  differently); a row there never conflicts. Never creates a row.
+   *  'unchanged' = the row already has the name; 'missing' = no row at repoPath. */
+  renameIfUnique(repoPath2, name, selfPaths = [repoPath2]) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const own = this.db.prepare("SELECT name FROM projects WHERE repo_path = ?").get(repoPath2);
+      let result;
+      if (!own)
+        result = { status: "missing" };
+      else if (own.name === name)
+        result = { status: "unchanged" };
+      else {
+        const taken = this.db.prepare("SELECT repo_path FROM projects WHERE name = ?").all(name).find((r) => !selfPaths.includes(r.repo_path));
+        if (taken)
+          result = { status: "conflict", conflict_path: taken.repo_path };
+        else {
+          this.db.prepare("UPDATE projects SET name = ? WHERE repo_path = ?").run(name, repoPath2);
+          result = { status: "renamed" };
+        }
+      }
+      this.db.exec("COMMIT");
+      return result;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
   /** All registered projects, name-ordered. Stale-at-read (existence of
    *  repo_path) is the caller's lazy check — the registry stores no liveness. */
   list() {
@@ -6001,7 +6034,7 @@ var TARGET_LEADS = [
   // any other index gets ANCHOR_MISSING_REFUSED, so folding was still the right
   // call for THIS bullet — but for that reason, not the one first written down.
   // [2026-09-26: the index pinning is gone — inserts are now declared per lead in
-  // INSERT_AFTER (scripts/stamp-contract.mjs), the {lead, insertAfter} generalization this
+  // INSERT_AFTER (below), the {lead, insertAfter} generalization this
   // note once tracked.]
   "- **Stage retrieval before acting**",
   // Added 2026-07-27. The mirror rule says the template is the SOURCE, but the two
@@ -6020,7 +6053,7 @@ var TARGET_LEADS = [
   // template-descended guard as the normal replace path.
   "- **Knowledge is born structured.**",
   // 2026-09-26: the Codex and READY TO CLEAR bullets are NEW to older siblings, so they
-  // arrive through the insert path — see INSERT_AFTER in scripts/stamp-contract.mjs. Codex
+  // arrive through the insert path — see INSERT_AFTER below. Codex
   // stays BEFORE READY TO CLEAR here: leads are processed in order, and READY TO CLEAR
   // anchors on the Codex bullet, so a sibling missing both gets them back in template order.
   "- **Codex runs through the MCP tool, never the shell.**",
@@ -6037,7 +6070,7 @@ var TARGET_LEADS = [
   //
   // The AGENTS.md conduct bullets are listed in TEMPLATE ORDER (lint, plain-writing, background
   // subagents), because leads are processed in this order and each anchors on the one before it
-  // (see INSERT_AFTER in scripts/stamp-contract.mjs): a sibling missing any combination of them
+  // (see INSERT_AFTER below): a sibling missing any combination of them
   // gets them back in template order.
   // 2026-10-05: lint and tests before a code change is reported done (user-ruled through the
   // question form). NEW to every sibling, anchored on the two bullets above it in the template,
@@ -6077,6 +6110,25 @@ var TARGET_LEADS = [
   ...DOMAINS_LEADS
 ];
 var TARGET_SECTIONS = [{ heading: "## Domains", before: "## Conventions", leads: DOMAINS_LEADS }];
+var INSERT_AFTER = /* @__PURE__ */ new Map([
+  ["- **Concept articles \u2014 capture design the moment it settles", ["- **Reconcile _every affected_ article, not just the primary one**"]],
+  ["- **Codex runs through the MCP tool, never the shell.**", ["- **Knowledge is born structured.**"]],
+  ["- **Say `READY TO CLEAR` plainly when it is time.**", ["- **Codex runs through the MCP tool, never the shell.**", "- **Knowledge is born structured.**"]],
+  ["- **Instruction-file proposals replace memory.**", ["- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
+  ["- **Lint and tests before done.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Write plainly; no AI tells.**", ["- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Start every subagent in the background.**", ["- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Finish what you start.**", ["- **Start every subagent in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Resolve a review thread once its finding is handled.**", ["- **Finish what you start.**", "- **Start every subagent in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
+  ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", ["- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
+  ["- **Solve, don't board.**", ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", "- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
+  ["- **Close-on-commit: a commit that fulfils a board item pays it**", ["- **Solve, don't board.**"]]
+]);
+for (const section of TARGET_SECTIONS) {
+  section.leads.forEach((lead, i) => {
+    if (i > 0) INSERT_AFTER.set(lead, section.leads.slice(0, i).reverse());
+  });
+}
 var RENAMED_LEADS = /* @__PURE__ */ new Map([
   ["- **Knowledge is born structured.**", ["- **Notes are the user's surface.**"]],
   // 2026-10-01: Sterling's own CLAUDE.md carried these two bullets under shorter leads
@@ -6088,6 +6140,38 @@ var RENAMED_LEADS = /* @__PURE__ */ new Map([
   // 2026-10-10: the auto-report bullet's lead said "stamp the version" while the rule is to file the issue.
   ["- **Report Sterling defects to its GitHub issues without asking.**", ["- **Stamp Sterling's version when reporting on Sterling.**"]]
 ]);
+var SUBJECT_MARKERS = /* @__PURE__ */ new Map([
+  ["- **Concept articles \u2014 capture design the moment it settles", [/^(?=.*\bconcept (articles?|famil(y|ies))\b)(?=.*\b(capture|design|knowledge|record|settles?)\b)/i]],
+  ["- **Codex runs through the MCP tool, never the shell.**", [/^(?=.*\bcodex\b)(?=.*\bmcp\b)/i, /^(?=.*\bcodex\b)(?=.*\b(never|not)\b)(?=.*\bshell\b)/i]],
+  // Case-sensitive on purpose: the rule is the literal capitalised line, and 'ready to clear' alone is ordinary English.
+  ["- **Say `READY TO CLEAR` plainly when it is time.**", [/\bREADY (TO CLEAR|FOR NEW SESSION)\b/]],
+  ["- **Instruction-file proposals replace memory.**", [/\binstruction[- ]file proposals?\b/i, /^(?=.*\bmemory\b)(?=.*(\binstruction[- ]files?\b|\bCLAUDE\.md\b|\bAGENTS\.md\b))/i]],
+  ["- **Lint and tests before done.**", [/^(?=.*\blint\b)(?=.*\btests?\b)(?=.*\b(before|done|reporting|finished|complete)\b)/i]],
+  ["- **Write plainly; no AI tells.**", [/\bwrit(e|ing) plainly\b/i, /\bai tells\b/i, /\bsigns of ai\b/i]],
+  ["- **Start every subagent in the background.**", [/^(?=.*\bbackground\b)(?=.*\b(subagents?|agents?|lanes?)\b)/i]],
+  ["- **Finish what you start.**", [
+    /\bfinish what you start\b/i,
+    /^(?=.*\b(never|don'?t|do not)\b)(?=.*\b(stop|end|quit)\b)(?=.*\b(work|tasks?)\b)(?=.*\b(half|unfinished|incomplete)\b)/i,
+    /^(?=.*\b(work|tasks?)\b)(?=.*\bhalf[- ]done\b)/i
+  ]],
+  ["- **Resolve a review thread once its finding is handled.**", [/^(?=.*\bresolve\b)(?=.*\b(threads?|conversations?)\b)(?=.*\b(review|pr|pull request|copilot)\b)/i]],
+  ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", [/\bde-?ai\b/i]],
+  ["- **Solve, don't board.**", [/\bsolve,? don'?t board\b/i, /\bevery user ask is boarded\b/i]],
+  ["- **Close-on-commit: a commit that fulfils a board item pays it**", [/^(?=.*\bclose[- ]on[- ]commit\b)(?=.*\bboard\b)/i, /^(?=.*\bcommit\b)(?=.*\bboard item\b)/i]]
+]);
+function findCoveringBullet(text, lead) {
+  const markers = SUBJECT_MARKERS.get(lead);
+  if (!markers) return null;
+  const lines = text.split("\n");
+  for (const i of unfencedLineIndexes(lines)) {
+    if (TARGET_LEADS.some((t) => lines[i].startsWith(t))) continue;
+    const bold = /^- \*\*(.+?)\*\*/.exec(lines[i]);
+    if (!bold) continue;
+    const marker = markers.find((m) => m.test(bold[1]));
+    if (marker) return { bullet: lines[i].trim(), marker: marker.source };
+  }
+  return null;
+}
 var HISTORY_LEADS = [...TARGET_LEADS, ...[...RENAMED_LEADS.values()].flat()];
 var FENCE = /^\s*(```|~~~)/;
 function fenceSpans(lines) {
@@ -6148,25 +6232,6 @@ for (let i = 2; i < process.argv.length; i++) {
   if (process.argv[i] === "--project" && process.argv[i + 1]) onlyProjects.push(resolve2(process.argv[++i]));
 }
 var repoRoot = join7(dirname2(fileURLToPath(new URL("../scripts/stamp-contract.mjs", import.meta.url).href)), "..");
-var INSERT_AFTER = /* @__PURE__ */ new Map([
-  ["- **Concept articles \u2014 capture design the moment it settles", ["- **Reconcile _every affected_ article, not just the primary one**"]],
-  ["- **Codex runs through the MCP tool, never the shell.**", ["- **Knowledge is born structured.**"]],
-  ["- **Say `READY TO CLEAR` plainly when it is time.**", ["- **Codex runs through the MCP tool, never the shell.**", "- **Knowledge is born structured.**"]],
-  ["- **Instruction-file proposals replace memory.**", ["- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
-  ["- **Lint and tests before done.**", ["- **No false action claims:**", "- **Anti-speculation:**"]],
-  ["- **Write plainly; no AI tells.**", ["- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
-  ["- **Start every subagent in the background.**", ["- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
-  ["- **Finish what you start.**", ["- **Start every subagent in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
-  ["- **Resolve a review thread once its finding is handled.**", ["- **Finish what you start.**", "- **Start every subagent in the background.**", "- **Write plainly; no AI tells.**", "- **Lint and tests before done.**", "- **No false action claims:**", "- **Anti-speculation:**"]],
-  ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", ["- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
-  ["- **Solve, don't board.**", ["- **Run `sterling:de-ai-writing` on prose deliverables before they ship.**", "- **Instruction-file proposals replace memory.**", "- **Ask, don't guess \u2014 through the AskUserQuestion tool.**"]],
-  ["- **Close-on-commit: a commit that fulfils a board item pays it**", ["- **Solve, don't board.**"]]
-]);
-for (const section of TARGET_SECTIONS) {
-  section.leads.forEach((lead, i) => {
-    if (i > 0) INSERT_AFTER.set(lead, section.leads.slice(0, i).reverse());
-  });
-}
 var normalizeEol = (text) => text.replace(/\r\n/g, "\n");
 function withOriginalEols(raw, finalLf) {
   const pieces = raw.split("\n");
@@ -6252,6 +6317,10 @@ function record(r) {
   }
   console.log(`${r.actions.some((a) => a.action.includes("REFUSED")) ? "\u2717" : "\u2022"} ${r.project} (${r.file})`);
   for (const a of VERBOSE ? r.actions : notable) {
+    if (a.info) {
+      console.log(`    ${a.action}  ${a.lead.slice(0, 60)}\u2026 \u2014 ${a.detail}`);
+      continue;
+    }
     console.log(`    ${a.action}  ${a.lead.slice(0, 60)}\u2026`);
     if (a.detail) console.log(`      ${a.detail}`);
     if (a.have) console.log(`      sibling text (hand-tuned, NOT touched):
@@ -6380,6 +6449,17 @@ for (const p of projects) {
       break;
     }
     if (renamed) continue;
+    const covering = [...siblingFiles.entries()].map(([rel, f]) => ({ rel, hit: findCoveringBullet(f.text, lead) })).find((c) => c.hit);
+    if (covering) {
+      actions.push({
+        lead,
+        action: "SIMILAR_BULLET_KEPT",
+        file: layerFileName(home),
+        info: true,
+        detail: `kept the project's own bullet in ${layerFileName(covering.rel)}, nothing inserted: ${covering.hit.bullet.slice(0, 100)}`
+      });
+      continue;
+    }
     const anchor = (INSERT_AFTER.get(lead) ?? []).filter((a) => VALID_ANCHOR.has(outcome(a))).map((a) => extractBlock(target.text, a) ?? (RENAMED_LEADS.get(a) ?? []).map((old) => extractBlock(target.text, old)).find(Boolean)).find(Boolean);
     if (anchor) {
       const lines = target.text.split("\n");

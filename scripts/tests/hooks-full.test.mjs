@@ -525,6 +525,22 @@ test('H1: shared project registry — touches this project last_seen + makes the
   }
 });
 
+test('H1: a registry that cannot be opened costs one STERLING PROJECT REGISTRY REFRESH FAILED line, never the rest of the startup context (GitHub #113)', () => {
+  const { dir, cleanup } = makeProject();
+  const regPath = join(dir, 'registry.db');
+  try {
+    writeFileSync(regPath, 'this is not a sqlite database, so opening the registry throws');
+    const r = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1', STERLING_REGISTRY_DB: regPath });
+    assert.equal(r.code, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    const ctx = out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /STERLING PROJECT REGISTRY REFRESH FAILED \(/);
+    assert.match(out.systemMessage, /pending$/, 'the rest of startup still ran');
+  } finally {
+    cleanup();
+  }
+});
+
 test('H1 machine-activation guard: unresolvable baked hook node warns human + conductor; resolvable or foreign installs stay quiet (anti_pattern foreign_60e8463d)', () => {
   const { dir, cleanup } = makeProject();
   try {

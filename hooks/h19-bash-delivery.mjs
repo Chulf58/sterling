@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/lib/common.mjs
-import { readFileSync as readFileSync5, existsSync as existsSync4 } from "node:fs";
-import { dirname as dirname4, join as join9, resolve as resolve3 } from "node:path";
+import { readFileSync as readFileSync6, existsSync as existsSync4 } from "node:fs";
+import { dirname as dirname5, join as join9, resolve as resolve3 } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5745,13 +5745,14 @@ function parseStoreFence(value) {
 }
 
 // packages/store/dist/index.js
-import { mkdirSync as mkdirSync2, existsSync as existsSync2, statSync as statSync2 } from "node:fs";
-import { dirname as dirname3, join as join5, resolve as resolvePath2 } from "node:path";
-import { randomUUID } from "node:crypto";
+import { mkdirSync as mkdirSync3, existsSync as existsSync2, statSync as statSync3 } from "node:fs";
+import { dirname as dirname4, join as join5, resolve as resolvePath2 } from "node:path";
+import { randomUUID as randomUUID3 } from "node:crypto";
 
 // packages/store/dist/mounted.js
-import { mkdirSync, existsSync, rmSync, openSync, closeSync } from "node:fs";
-import { dirname, join as join3 } from "node:path";
+import { mkdirSync as mkdirSync2, existsSync, rmSync as rmSync2, openSync, closeSync } from "node:fs";
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { dirname as dirname2, join as join3 } from "node:path";
 import { homedir as homedir2 } from "node:os";
 
 // packages/store/dist/shares.js
@@ -5793,9 +5794,161 @@ function allocateShares(perSourceCounts, cap, projectShare = DEFAULT_PROJECT_SHA
   return alloc;
 }
 
+// packages/store/dist/move-lock.js
+import { hostname } from "node:os";
+import { createHash, randomUUID } from "node:crypto";
+import { linkSync, mkdirSync, readFileSync as readFileSync2, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+var MoveLockBusyError = class extends Error {
+  path;
+  owner;
+  takeover;
+  constructor(path, owner, waitedMs, takeover = false) {
+    super(takeover ? `knowledge_move lock ${path} was left by a process that is gone, and another process is taking it over now; waited ${waitedMs} ms. Nothing was written; retry in a moment.` : `knowledge_move lock ${path} is held by ${owner ? `pid ${owner.pid} on ${owner.hostname} since ${owner.started_at}` : "a process that wrote it some other way (unreadable content)"}; waited ${waitedMs} ms. A move or a move recovery is running. Nothing was written; retry when it ends.`);
+    this.path = path;
+    this.owner = owner;
+    this.takeover = takeover;
+    this.name = "MoveLockBusyError";
+  }
+};
+function pidIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0)
+    return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function procStartTime(pid) {
+  try {
+    const stat = readFileSync2(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
+    return fields[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+function readOwner(path) {
+  let raw;
+  let mtimeMs;
+  try {
+    raw = readFileSync2(path, "utf8");
+    mtimeMs = statSync(path).mtimeMs;
+  } catch (e) {
+    if (e.code === "ENOENT")
+      return void 0;
+    throw e;
+  }
+  try {
+    const v = JSON.parse(raw);
+    if (Number.isInteger(v.pid) && typeof v.token === "string" && typeof v.hostname === "string")
+      return { raw, owner: v, mtimeMs };
+  } catch {
+  }
+  return { raw, mtimeMs };
+}
+var UNPARSEABLE_GRACE_MS = 1e4;
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function createWithContent(path, content) {
+  const tmp = `${path}.tmp-${randomUUID()}`;
+  writeFileSync(tmp, content, { flag: "wx" });
+  try {
+    linkSync(tmp, path);
+    return true;
+  } catch (e) {
+    if (e.code === "EEXIST")
+      return false;
+    throw e;
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+function ownerGone(seen, probe) {
+  const o = seen.owner;
+  if (!o)
+    return probe.now() - seen.mtimeMs >= UNPARSEABLE_GRACE_MS;
+  if (o.hostname !== probe.host)
+    return false;
+  if (!probe.isAlive(o.pid))
+    return true;
+  if (o.proc_start === null)
+    return false;
+  const cur = probe.startTimeOf(o.pid);
+  return cur !== null && cur !== o.proc_start;
+}
+function takeOverStale(path, staleRaw, me, probe) {
+  let key = staleRaw;
+  const dead = [];
+  for (let depth = 0; depth < 16; depth++) {
+    const ticket = `${path}.takeover-${createHash("sha256").update(key).digest("hex").slice(0, 32)}`;
+    if (createWithContent(ticket, JSON.stringify(me))) {
+      try {
+        if (readOwner(path)?.raw === staleRaw)
+          rmSync(path, { force: true });
+        return "removed";
+      } finally {
+        rmSync(ticket, { force: true });
+        for (const d of dead)
+          rmSync(d, { force: true });
+      }
+    }
+    const t = readOwner(ticket);
+    if (!t)
+      return "retry";
+    if (!ownerGone(t, probe))
+      return "taker-busy";
+    dead.push(ticket);
+    key = `${key}\0${t.raw}`;
+  }
+  return "taker-busy";
+}
+function acquireMoveLock(path, opts = {}) {
+  const isAlive = opts.isAlive ?? pidIsAlive;
+  const startTimeOf = opts.startTimeOf ?? procStartTime;
+  const pid = opts.pid ?? process.pid;
+  const timeoutMs2 = opts.timeoutMs ?? 5e3;
+  const pollMs = opts.pollMs ?? 25;
+  const host = hostname();
+  const procStart = startTimeOf(pid);
+  const me = { pid, proc_start: procStart, hostname: host, started_at: (/* @__PURE__ */ new Date()).toISOString(), token: randomUUID() };
+  const warning = procStart === null ? `knowledge_move lock: this platform gives no process start time (/proc/${pid}/stat unreadable), so a lock left by a dead process whose pid was reused is honoured until that process exits.` : void 0;
+  const probe = { isAlive, startTimeOf, host, now: () => Date.now() };
+  mkdirSync(dirname(path), { recursive: true });
+  const started = Date.now();
+  for (; ; ) {
+    if (createWithContent(path, JSON.stringify(me)))
+      return { path, token: me.token, ...warning ? { warning } : {} };
+    const seen = readOwner(path);
+    if (!seen)
+      continue;
+    let takeover = false;
+    if (ownerGone(seen, probe)) {
+      const r = takeOverStale(path, seen.raw, me, probe);
+      if (r !== "taker-busy")
+        continue;
+      takeover = true;
+    }
+    const waited = Date.now() - started;
+    if (waited >= timeoutMs2)
+      throw new MoveLockBusyError(path, takeover ? void 0 : seen.owner, waited, takeover);
+    sleep(Math.min(pollMs, Math.max(1, timeoutMs2 - waited)));
+  }
+}
+function releaseMoveLock(handle) {
+  const seen = readOwner(handle.path);
+  if (!seen?.owner || seen.owner.token !== handle.token)
+    return false;
+  rmSync(handle.path, { force: true });
+  return true;
+}
+
 // packages/store/dist/pg-bridge.js
 import { MessageChannel, Worker, receiveMessageOnPort } from "node:worker_threads";
-import { readFileSync as readFileSync2, statSync } from "node:fs";
+import { readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
 import { homedir } from "node:os";
 import { join as join2 } from "node:path";
 var STATE_WAITING = 0;
@@ -5919,7 +6072,7 @@ function buildPgConnectionConfig(creds) {
 function readPgCredentials(path = DEFAULT_PG_CREDENTIALS_PATH) {
   let mode;
   try {
-    mode = statSync(path).mode;
+    mode = statSync2(path).mode;
   } catch (e) {
     throw new PgConfigError(`Postgres credentials file '${path}' cannot be read: ${e.code ?? String(e)}`);
   }
@@ -5928,7 +6081,7 @@ function readPgCredentials(path = DEFAULT_PG_CREDENTIALS_PATH) {
   }
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync2(path, "utf8"));
+    parsed = JSON.parse(readFileSync3(path, "utf8"));
   } catch (e) {
     throw new PgConfigError(`Postgres credentials file '${path}' is not valid JSON: ${e.message}`);
   }
@@ -6805,11 +6958,17 @@ COMMIT`);
 function resolveDomainMounts(config) {
   return config.stack_tags.map((name) => ({
     name,
-    dbPath: config.domain_paths[name] ?? join3(homedir2(), ".sterling", "domains", name, "sterling.db")
+    dbPath: config.domain_paths[name] ?? join3(domainsHome(), name, "sterling.db")
   }));
 }
+function domainsHome() {
+  return join3(homedir2(), ".sterling", "domains");
+}
+function defaultMoveLockPath() {
+  return join3(domainsHome(), ".move.lock");
+}
 function open(dbPath) {
-  mkdirSync(dirname(dbPath), { recursive: true });
+  mkdirSync2(dirname2(dbPath), { recursive: true });
   return new SterlingStore(dbPath);
 }
 var PROBE_ID = "00000000-0000-0000-0000-000000000000";
@@ -6935,6 +7094,9 @@ var MountedStores = class {
   mountedNames = [];
   /** Set for Postgres storage; see MountedStoresOptions.work. */
   work;
+  /** The knowledge_move lock file, and this instance's hold on it (reentrant). */
+  moveLockPath;
+  moveLockHeld;
   /** The project store is opened, and created when absent; a failure to open
    *  it throws. A domain store is only ever OPENED here, never created, and one
    *  that exists but cannot be opened is listed on unreadableDomains instead of
@@ -6952,6 +7114,7 @@ var MountedStores = class {
    *  with every handle opened so far closed. */
   constructor(projectDbPath, mounts = [], options) {
     this.work = options?.work;
+    this.moveLockPath = options?.moveLockPath ?? defaultMoveLockPath();
     if (this.work) {
       this.project = this.work.openProject();
       try {
@@ -7626,6 +7789,164 @@ var MountedStores = class {
   drainLogEntry(...args) {
     return this.mutatingProject("drainLogEntry").drainLogEntry(...args);
   }
+  /**
+   * Run `fn` holding the machine-level knowledge_move lock (move-lock.ts). Reentrant on this
+   * instance, so knowledge_move holds one lock across its recovery run and its move. `fn` gets the
+   * lock's platform warning, if any. Throws MoveLockBusyError when another live process holds it
+   * past `timeoutMs`.
+   */
+  withMoveLock(fn, opts = {}) {
+    if (this.moveLockHeld)
+      return fn(this.moveLockHeld.warning);
+    const handle = acquireMoveLock(this.moveLockPath, { timeoutMs: opts.timeoutMs });
+    this.moveLockHeld = handle;
+    try {
+      return fn(handle.warning);
+    } finally {
+      this.moveLockHeld = void 0;
+      releaseMoveLock(handle);
+    }
+  }
+  /**
+   * Move one record from the domain store that holds it into another mounted domain store under
+   * the SAME id (decision move-a-record-between-domains-with-knowledge-move-same-id;
+   * [stable-identity-design-v2] item 6). It keeps the slug, version history, aliases and outbound
+   * relations; inbound edges stay with their source records.
+   *
+   * THE INVARIANT. Moves and recovery runs never interleave: each holds the machine-level move lock
+   * (withMoveLock, move-lock.ts) for its whole duration, so whatever recovery reads from the
+   * journal is the state a finished or crashed move left, never one a move is still writing.
+   * A move is owned by one random token, and its state lives only in two token-bearing journal
+   * entries: the CLAIM `move_out:<id>` in the source (state 'claimed', then 'done' once the source
+   * rows are gone) and the MARKER `move_in:<id>` beside the copy in the destination. Each mount is
+   * its own connection, so the move is five single-store transactions:
+   *   0. source: write the claim (refused if the source holds any move entry for the id);
+   *   1. destination: write the copy and its marker (refused if it holds any entry for the id);
+   *   2. source: delete the rows and mark the claim 'done' (requires the claim's token);
+   *   3. destination: drop the marker (requires the token);
+   *   4. source: drop the 'done' claim (requires the token).
+   * Every ordinary write path of either store refuses a record that carries an entry (the
+   * store-level move fence, which does not take the lock), and every removal of an entry names its
+   * token, so the entries a crash leaves are settled only by recovery, from the entries alone:
+   * a 'done' claim means finish; a 'claimed' claim with no marker means undo; a marker with no
+   * claim of its token means undo the copy; a 'claimed' claim beside its marker means finish.
+   * Whether a record is present in a store is never evidence.
+   *
+   * WHAT IT DOES NOT GUARANTEE. The lock is one file beside the per-user domain stores, judged by
+   * pid, process start time and hostname: it excludes every process on this machine, and nothing
+   * else. Two machines sharing the same domain files (a network mount, or a future Postgres
+   * backend) are not excluded, and a lock written on another host is honoured until the timeout,
+   * never taken over. Where /proc cannot be read, a dead owner whose pid was reused looks alive
+   * until that process exits (acquireMoveLock reports this as a warning). The cross-store steps are
+   * not atomic: between them the id can be held by two stores. Every route that resolves one
+   * holder (storeHolding: writes, scopeOfHolder, withTransactionForRecord) refuses it then, but the
+   * fanned reads do not refuse it: get() answers from the first store that holds it, and query()
+   * reads each store on its own, so during that window a moved record can appear twice in its results. An entry whose peer domain is not mounted
+   * where recovery runs stays 'pending' until a project that mounts both runs it. Writes outside
+   * the store's own paths (raw SQL, a restored file) during a move are neither prevented nor
+   * detected: recovery finishes or undoes from the journal entries whatever the rows then hold.
+   */
+  moveRecordBetweenDomains(id, targetDomain, at, opts = {}) {
+    const op = "moveRecordBetweenDomains";
+    if (this.activeTransactionStore !== void 0) {
+      throw new Error(`${op}: refused inside a transaction \u2014 a move commits on two mounts in turn, so it cannot join one. Nothing was written.`);
+    }
+    return this.withMoveLock(() => {
+      const source = this.storeHolding(id);
+      const from = this.mountNameOf(source);
+      if (source === this.project) {
+        throw new Error(`${op}: record '${id}' is held by the project store, not a domain. A project record goes to a domain through knowledge_promote. Nothing was written.`);
+      }
+      this.assertWritable(targetDomain);
+      const target = this.domains.get(targetDomain);
+      if (!target)
+        throw new Error(`${op}: domain '${targetDomain}' is not mounted in this project. Nothing was written.`);
+      const to = `domain:${targetDomain}`;
+      if (target === source)
+        throw new Error(`${op}: record '${id}' already lives in ${to}. Nothing was written.`);
+      const token = randomUUID2();
+      const bundle = source.claimMoveOut(id, { token, target: targetDomain, at, expected_version: opts.expected_version });
+      try {
+        target.importMoveBundle(bundle, to, { source: from.slice("domain:".length), at, token });
+      } catch (e) {
+        source.releaseMoveOut(id, token);
+        throw e;
+      }
+      source.relinquishMovedRecord(id, token, at, "moved out");
+      target.clearMoveIn(id, token);
+      source.deleteDoneClaim(id, token);
+      return { id, from, to };
+    });
+  }
+  /**
+   * Finish or undo every interrupted move, holding the move lock (so no move is running) and
+   * deciding only from the token-bearing journal entries (the invariant above). Entries are
+   * grouped by token across every readable domain store:
+   *  - the peer domain an entry names is not mounted or cannot be read here: 'pending';
+   *  - 'done' claim: drop the marker if there is one, then the claim: 'completed';
+   *  - 'claimed' claim, no marker: release the claim: 'rolled_back';
+   *  - marker, no claim of its token: delete the copy with its marker: 'rolled_back';
+   *  - 'claimed' claim beside its marker: relinquish the source, drop marker and claim: 'completed'.
+   * With no journal entry in any readable domain it returns at once without taking the lock: a
+   * move that starts afterwards writes entries a later run will find. Idempotent. Refused inside
+   * a transaction, like a move.
+   */
+  recoverMoves(at, opts = {}) {
+    if (this.activeTransactionStore !== void 0) {
+      throw new Error("recoverMoves: refused inside a transaction \u2014 recovery commits on two mounts in turn. Nothing was written.");
+    }
+    if (!this.moveLockHeld && !this.readableDomains().some(([, store]) => store.moveMarkers().length > 0))
+      return [];
+    return this.withMoveLock(() => this.recoverMovesLocked(at), { timeoutMs: opts.lockTimeoutMs });
+  }
+  readableDomains() {
+    return [...this.domains].filter(([name]) => !this.isUnreadable(name));
+  }
+  recoverMovesLocked(at) {
+    const moves = /* @__PURE__ */ new Map();
+    for (const [name, store] of this.readableDomains()) {
+      for (const entry of store.moveMarkers()) {
+        const m = moves.get(entry.token) ?? { id: entry.id };
+        m[entry.kind] = { store, name, entry };
+        moves.set(entry.token, m);
+      }
+    }
+    const readable = (name) => this.domains.get(name) !== void 0 && !this.isUnreadable(name);
+    const out = [];
+    for (const [token, m] of moves) {
+      const fromName = m.out?.name ?? m.in.entry.peer;
+      const toName = m.in?.name ?? m.out.entry.peer;
+      const from = `domain:${fromName}`;
+      const to = `domain:${toName}`;
+      const report = (outcome, reason) => out.push({ id: m.id, from, to, outcome, ...reason ? { reason } : {} });
+      if (!readable(fromName) || !readable(toName)) {
+        report("pending", `${!readable(fromName) ? from : to} is not mounted or cannot be read here`);
+        continue;
+      }
+      const source = this.domains.get(fromName);
+      const target = this.domains.get(toName);
+      const claim = m.out?.entry;
+      const marker = m.in?.entry;
+      if (claim?.state === "done") {
+        if (marker)
+          target.clearMoveIn(m.id, token);
+        source.deleteDoneClaim(m.id, token);
+        report("completed");
+      } else if (claim && !marker) {
+        source.releaseMoveOut(m.id, token);
+        report("rolled_back", "the move stopped before its copy was written");
+      } else if (!claim && marker) {
+        target.rollbackMoveCopy(m.id, token, at);
+        report("rolled_back", `the move was undone in ${from} after its copy was written`);
+      } else if (claim && marker) {
+        source.relinquishMovedRecord(m.id, token, at, "moved out");
+        target.clearMoveIn(m.id, token);
+        source.deleteDoneClaim(m.id, token);
+        report("completed");
+      }
+    }
+    return out;
+  }
   /** knowledge_split's multi-record write (decision
    *  compaction-tooling-windowed-read-plus-split) targets the PROJECT store
    *  only — feature_article is always project-scoped (§3.3), so the split's
@@ -7715,7 +8036,7 @@ function sentHandoffOf(rec) {
 // packages/store/dist/sqlite-driver.js
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { realpathSync } from "node:fs";
-import { dirname as dirname2, basename, join as join4, resolve as resolvePath } from "node:path";
+import { dirname as dirname3, basename, join as join4, resolve as resolvePath } from "node:path";
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -7890,7 +8211,7 @@ var SqliteDriver = class {
     this.db = new DatabaseSync3(path);
     let classifiedPath = this.dbPath;
     try {
-      classifiedPath = join4(realpathSync(dirname2(this.dbPath)), basename(this.dbPath));
+      classifiedPath = join4(realpathSync(dirname3(this.dbPath)), basename(this.dbPath));
     } catch {
     }
     this.classifiedPath = classifiedPath;
@@ -8124,6 +8445,45 @@ function decodeLiveRecordRow(op, row) {
 }
 var SUPPORTED_SCHEMA_VERSION = 2;
 var MODELS_CATALOG_LOCATION = ".sterling/models-catalog";
+var MOVE_OUT_PREFIX = "move_out:";
+var MOVE_IN_PREFIX = "move_in:";
+function moveKey(rel, target) {
+  return `${rel}\0${target}`;
+}
+function rescopeMoveBundle(bundle, scope) {
+  const body = JSON.parse(bundle.record.body);
+  body.scope = scope;
+  return { ...bundle, record: { ...bundle.record, scope, body: JSON.stringify(body) } };
+}
+function parseMoveMarker(key, value) {
+  const kind = key.startsWith(MOVE_OUT_PREFIX) ? "out" : "in";
+  const v = JSON.parse(value);
+  const ok = ["token", "peer", "at"].every((k) => typeof v[k] === "string") && (v.state === "claimed" || v.state === "done");
+  if (!ok)
+    throw new Error(`move journal entry '${key}' is malformed (${value}); repair it before any move or recovery runs.`);
+  const id = key.slice(kind === "out" ? MOVE_OUT_PREFIX.length : MOVE_IN_PREFIX.length);
+  return { kind, id, token: v.token, peer: v.peer, at: v.at, state: v.state };
+}
+var MoveInFlightError = class extends Error {
+  op;
+  record_id;
+  constructor(op, record_id) {
+    super(`${op}: refused \u2014 record '${record_id}' is part of an unfinished knowledge_move (a move_out claim or move_in marker in this store). Writing it now could be lost when the move finishes or is undone. Nothing was written. Run knowledge_move in a project that mounts both domains (or restart its server) to finish the move, then retry.`);
+    this.op = op;
+    this.record_id = record_id;
+    this.name = "MoveInFlightError";
+  }
+};
+var MoveClaimLostError = class extends Error {
+  record_id;
+  token;
+  constructor(record_id, token) {
+    super(`record '${record_id}': no 'claimed' move claim with token ${token} in this store. Nothing was deleted.`);
+    this.record_id = record_id;
+    this.token = token;
+    this.name = "MoveClaimLostError";
+  }
+};
 var OperationRepeatedError = class extends Error {
   operation_id;
   original_id;
@@ -9114,6 +9474,7 @@ var SterlingStore = class _SterlingStore {
     this.assertWritable(op);
     let served;
     this.tx(() => {
+      this.assertNoMoveInFlight(op, [id]);
       const current = this.get(id);
       if (!current)
         throw new Error(`${op}: no record '${id}'`);
@@ -10039,6 +10400,7 @@ var SterlingStore = class _SterlingStore {
       updated_at: newRecord.updated_at
     });
     this.tx(() => {
+      this.assertNoMoveInFlight("supersede", [oldId]);
       this.refuseRepeatedOperation(operationId);
       this.insertRecord(newRecord, operationId);
       const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
@@ -10100,6 +10462,7 @@ var SterlingStore = class _SterlingStore {
     this.assertWritable("retireInFavorOf");
     let stored;
     this.tx(() => {
+      this.assertNoMoveInFlight("retireInFavorOf", [id, replacementId]);
       const record = this.get(id);
       if (!record)
         throw new Error(`retireInFavorOf: no record '${id}'`);
@@ -10132,6 +10495,7 @@ var SterlingStore = class _SterlingStore {
   remove(id, drainedAt) {
     this.assertWritable("remove");
     this.tx(() => {
+      this.assertNoMoveInFlight("remove", [id]);
       const record = this.get(id);
       const isSystemDrain = record && record.type === "todo" && record.source === "system";
       if (isSystemDrain && record) {
@@ -10150,6 +10514,238 @@ var SterlingStore = class _SterlingStore {
       this.db.prepare("DELETE FROM record_aliases WHERE canonical_id = ?").run(id);
       this.db.prepare("DELETE FROM records_fts WHERE record_id = ?").run(id);
     });
+  }
+  // -- same-id MOVE primitives (decision move-a-record-between-domains-with-knowledge-move-same-id;
+  // [stable-identity-design-v2] item 6). MountedStores.moveRecordBetweenDomains drives them:
+  // export from the source, import into the destination with a journal marker in the SAME
+  // transaction, verify, relinquish the source, clear the marker.
+  /** Every row one record owns in this store, read in one snapshot, arrays sorted so two
+   *  exports compare by value. undefined when this store does not hold `id`. The search index
+   *  row is not carried: it is derived from the body and rebuilt on import. */
+  exportMoveBundle(id) {
+    return this.readTx(() => {
+      const record = this.db.prepare(`SELECT id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author,
+                  derived_unconfirmed, body, operation_id FROM records WHERE id = ?`).get(id);
+      if (!record)
+        return void 0;
+      const col = (sql, key) => this.db.prepare(sql).all(id).map((r) => r[key]).sort();
+      return {
+        record: { ...record, version: Number(record.version), derived_unconfirmed: Number(record.derived_unconfirmed) },
+        stack_tags: col("SELECT tag FROM record_stack_tags WHERE record_id = ?", "tag"),
+        file_keys: col("SELECT path FROM record_file_keys WHERE record_id = ?", "path"),
+        relations: this.db.prepare("SELECT rel, target_id, created_at FROM record_relations WHERE source_id = ?").all(id).map((r) => ({ rel: r.rel, target_id: r.target_id, created_at: r.created_at })).sort((a, b) => moveKey(a.rel, a.target_id).localeCompare(moveKey(b.rel, b.target_id))),
+        versions: this.db.prepare("SELECT version, archived_at, body FROM record_versions WHERE record_id = ?").all(id).map((v) => ({ version: Number(v.version), archived_at: v.archived_at, body: v.body })).sort((a, b) => a.version - b.version),
+        aliases: this.db.prepare("SELECT historical_id, archived_version, created_at FROM record_aliases WHERE canonical_id = ?").all(id).map((a) => ({ historical_id: a.historical_id, archived_version: Number(a.archived_version), created_at: a.created_at })).sort((a, b) => a.historical_id.localeCompare(b.historical_id))
+      };
+    });
+  }
+  // The move journal (see MountedStores.moveRecordBetweenDomains for the protocol and its
+  // invariant). Every entry carries its move's token, and every removal below names the token
+  // it removes: no path here clears another move's entry.
+  moveEntry(prefix, id) {
+    const row = this.db.prepare("SELECT key, value FROM store_meta WHERE key = ?").get(`${prefix}${id}`);
+    return row ? parseMoveMarker(row.key, row.value) : void 0;
+  }
+  writeMoveEntry(prefix, id, entry) {
+    this.db.prepare("INSERT INTO store_meta (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(`${prefix}${id}`, JSON.stringify({ token: entry.token, peer: entry.peer, at: entry.at, state: entry.state }), entry.at);
+  }
+  /** Delete one journal entry, only when it carries `token` (and `state`, when given). */
+  dropMoveEntry(prefix, id, token, state) {
+    const e = this.moveEntry(prefix, id);
+    if (!e || e.token !== token || state && e.state !== state)
+      return false;
+    this.db.prepare("DELETE FROM store_meta WHERE key = ?").run(`${prefix}${id}`);
+    return true;
+  }
+  /**
+   * Phase 0, in the SOURCE: claim `id` for the move holding `token`, in ONE transaction, and
+   * return the bundle the claim covers. Refused when this store does not hold the record, when
+   * any move entry for the id is here already (an unfinished move in or out), or when
+   * `expected_version` differs from the stored version. From the claim on, the store's write
+   * paths refuse the record (assertNoMoveInFlight).
+   */
+  claimMoveOut(id, claim) {
+    this.assertWritable("claimMoveOut");
+    let bundle;
+    this.tx(() => {
+      this.assertNoMoveInFlight("claimMoveOut", [id]);
+      const b = this.exportMoveBundle(id);
+      if (!b)
+        throw new Error(`claimMoveOut: no record '${id}' in this store. Nothing was written.`);
+      if (claim.expected_version !== void 0 && b.record.version !== claim.expected_version) {
+        throw new Error(`version conflict \u2014 expected_version ${claim.expected_version} but record '${id}' is at version ${b.record.version}. Nothing was written.`);
+      }
+      this.writeMoveEntry(MOVE_OUT_PREFIX, id, { token: claim.token, peer: claim.target, at: claim.at, state: "claimed" });
+      bundle = b;
+    });
+    return bundle;
+  }
+  /**
+   * Phase 1, in the DESTINATION: write `bundle` under `scope` (column and body), byte-exact
+   * otherwise, with the move_in marker for `token`, in ONE transaction.
+   *
+   * Refused, with nothing written, when this store already answers for any identity the bundle
+   * carries. A store's resolvable-id namespace is records.id UNION record_aliases.historical_id,
+   * and record_versions is keyed independently (anti_pattern
+   * an-identity-or-containment-proof-over-the-primary-table-alon), so all three tables are
+   * checked against the whole incoming identity set: the record id and every historical id it
+   * brings. A live record here already using the incoming slug refuses too, and so does any move
+   * entry for the id (in or out).
+   */
+  importMoveBundle(bundle, scope, marker) {
+    this.assertWritable("importMoveBundle");
+    const id = bundle.record.id;
+    const row = rescopeMoveBundle(bundle, scope).record;
+    const body = JSON.parse(row.body);
+    const entry = RECORD_TYPES[row.type];
+    if (!entry)
+      throw new Error(`importMoveBundle: record '${id}' has unregistered type '${row.type}'; nothing was written.`);
+    this.tx(() => {
+      const ids = [id, ...bundle.aliases.map((a) => a.historical_id)];
+      const marks = ids.map(() => "?").join(",");
+      const found = [];
+      for (const r of this.db.prepare(`SELECT id FROM records WHERE id IN (${marks})`).all(...ids))
+        found.push(`record '${r.id}'`);
+      for (const r of this.db.prepare(`SELECT historical_id FROM record_aliases WHERE historical_id IN (${marks})`).all(...ids)) {
+        found.push(`alias '${r.historical_id}'`);
+      }
+      for (const r of this.db.prepare(`SELECT historical_id FROM record_aliases WHERE canonical_id IN (${marks})`).all(...ids)) {
+        found.push(`alias '${r.historical_id}' naming an incoming id`);
+      }
+      for (const r of this.db.prepare(`SELECT record_id, version FROM record_versions WHERE record_id IN (${marks})`).all(...ids)) {
+        found.push(`version ${r.version} keyed by '${r.record_id}'`);
+      }
+      if (this.moveEntry(MOVE_IN_PREFIX, id) || this.moveEntry(MOVE_OUT_PREFIX, id))
+        found.push(`an unfinished move entry for '${id}'`);
+      if (typeof body.slug === "string" && body.slug.length > 0) {
+        const holders = this.db.prepare(`SELECT id FROM records WHERE status != 'superseded' AND ${this.db.dialect.jsonText("body", "slug")} = ?`).all(body.slug);
+        for (const r of holders)
+          found.push(`slug '${body.slug}' on live record '${r.id}'`);
+      }
+      if (found.length) {
+        throw new Error(`importMoveBundle: refused \u2014 the destination already holds ${[...new Set(found)].join(", ")}. One id or slug must name one record, so the copy would give it two meanings. Nothing was written.`);
+      }
+      this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author,
+                                derived_unconfirmed, body, operation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(row.id, row.type, row.status, row.superseded_by, row.lifecycle, row.freshness, row.version, row.scope, row.created_at, row.updated_at, row.author, row.derived_unconfirmed, row.body, row.operation_id);
+      for (const tag of bundle.stack_tags)
+        this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(id, tag);
+      for (const path of bundle.file_keys)
+        this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
+      for (const r of bundle.relations) {
+        this.db.prepare(this.db.dialect.insertIgnore("record_relations", ["source_id", "rel", "target_id", "created_at"])).run(id, r.rel, r.target_id, r.created_at);
+      }
+      for (const v of bundle.versions) {
+        this.db.prepare("INSERT INTO record_versions (record_id, version, archived_at, body) VALUES (?, ?, ?, ?)").run(id, v.version, v.archived_at, v.body);
+      }
+      for (const a of bundle.aliases) {
+        this.db.prepare("INSERT INTO record_aliases (historical_id, canonical_id, archived_version, created_at) VALUES (?, ?, ?, ?)").run(a.historical_id, id, a.archived_version, a.created_at);
+      }
+      this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(id, this.db.dialect.searchText(entry.fts(body)));
+      this.writeMoveEntry(MOVE_IN_PREFIX, id, { token: marker.token, peer: marker.source, at: marker.at, state: "claimed" });
+      this.logActivity("moved in", decodeLiveRecordRow("importMoveBundle", row), marker.at);
+    });
+  }
+  /**
+   * The rows `id` owns in this store: the record, its tags, file keys, search row, versions,
+   * aliases and outbound relations. NOT remove(): inbound edges belong to their source records
+   * and stay where they are, and the record is not dead, it lives on in another store.
+   *
+   * One kind of outbound edge stays: a 'supersedes' edge whose TARGET this store holds. A
+   * retired record's served superseded_by is derived from the supersedes edges in its OWN store
+   * (hydrateAll), so deleting that edge would orphan the tombstone. Keeping it beside the
+   * tombstone is the shape promotion already writes (retireInFavorOf). Runs inside tx() only.
+   */
+  deleteOwnRows(id) {
+    this.db.prepare("DELETE FROM records WHERE id = ?").run(id);
+    this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
+    this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
+    this.db.prepare(`DELETE FROM record_relations WHERE source_id = ? AND NOT (rel = 'supersedes' AND target_id IN (SELECT id FROM records))`).run(id);
+    this.db.prepare("DELETE FROM record_versions WHERE record_id = ?").run(id);
+    this.db.prepare("DELETE FROM record_aliases WHERE canonical_id = ?").run(id);
+    this.db.prepare("DELETE FROM records_fts WHERE record_id = ?").run(id);
+  }
+  /**
+   * Phase 2, in the SOURCE: delete the record's own rows and turn the claim for `token` to
+   * 'done', in ONE transaction. Throws MoveClaimLostError, deleting nothing, when no 'claimed'
+   * claim for `token` is here.
+   */
+  relinquishMovedRecord(id, token, at, verb) {
+    this.assertWritable("relinquishMovedRecord");
+    this.tx(() => {
+      const claim = this.moveEntry(MOVE_OUT_PREFIX, id);
+      if (!claim || claim.token !== token || claim.state !== "claimed")
+        throw new MoveClaimLostError(id, token);
+      const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
+      if (row)
+        this.logActivity(verb, decodeLiveRecordRow("relinquishMovedRecord", row), at);
+      this.deleteOwnRows(id);
+      this.writeMoveEntry(MOVE_OUT_PREFIX, id, { ...claim, at, state: "done" });
+    });
+  }
+  /** Undo phase 0: drop the 'claimed' claim for `token`; the record stays here, writable again. */
+  releaseMoveOut(id, token) {
+    this.assertWritable("releaseMoveOut");
+    let done = false;
+    this.tx(() => {
+      done = this.dropMoveEntry(MOVE_OUT_PREFIX, id, token, "claimed");
+    });
+    return done;
+  }
+  /** The last step: drop the 'done' claim for `token` once the destination marker is gone. */
+  deleteDoneClaim(id, token) {
+    this.assertWritable("deleteDoneClaim");
+    let done = false;
+    this.tx(() => {
+      done = this.dropMoveEntry(MOVE_OUT_PREFIX, id, token, "done");
+    });
+    return done;
+  }
+  /** Undo phase 1: delete the copy and its move_in marker together, only while the marker
+   *  carries `token`. Returns whether it did. */
+  rollbackMoveCopy(id, token, at) {
+    this.assertWritable("rollbackMoveCopy");
+    let done = false;
+    this.tx(() => {
+      const mark = this.moveEntry(MOVE_IN_PREFIX, id);
+      if (!mark || mark.token !== token)
+        return;
+      const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
+      if (row)
+        this.logActivity("move rolled back", decodeLiveRecordRow("rollbackMoveCopy", row), at);
+      this.deleteOwnRows(id);
+      done = this.dropMoveEntry(MOVE_IN_PREFIX, id, token);
+    });
+    return done;
+  }
+  /** Phase 3: drop the move_in marker for `token`; the copy becomes an ordinary record. */
+  clearMoveIn(id, token) {
+    this.assertWritable("clearMoveIn");
+    let done = false;
+    this.tx(() => {
+      done = this.dropMoveEntry(MOVE_IN_PREFIX, id, token);
+    });
+    return done;
+  }
+  /**
+   * THE MOVE FENCE: a record with a move_out claim or a move_in marker in this store belongs to an
+   * unfinished move, and every ordinary write path refuses it inside its own transaction, so a
+   * project that mounts only one of the two domains cannot change what the move is carrying.
+   * The fenced paths: applyInPlace (updateRecord, updateRecordMetadata, editRecordField,
+   * appendRecordField, updateTodo, renameFileKey), supersede, retireInFavorOf (both ids),
+   * remove, addLink (the edge's source) and claimMoveOut. The move's own steps above pass it only
+   * by naming their token.
+   */
+  assertNoMoveInFlight(op, ids) {
+    const keys = ids.flatMap((id) => [`${MOVE_IN_PREFIX}${id}`, `${MOVE_OUT_PREFIX}${id}`]);
+    const row = this.db.prepare(`SELECT key FROM store_meta WHERE key IN (${keys.map(() => "?").join(",")})`).get(...keys);
+    if (!row)
+      return;
+    throw new MoveInFlightError(op, row.key.slice(row.key.indexOf(":") + 1));
+  }
+  /** Every move journal entry in this store, claims and markers. */
+  moveMarkers() {
+    const rows = this.db.prepare("SELECT key, value FROM store_meta WHERE key LIKE ? OR key LIKE ?").all(`${MOVE_OUT_PREFIX}%`, `${MOVE_IN_PREFIX}%`);
+    return rows.map((r) => parseMoveMarker(r.key, r.value));
   }
   /** Newest-first drained queue items (§3.2.7 drain log) — the TUI's completed section. */
   listQueueDrain(limit = 15) {
@@ -10199,7 +10795,7 @@ var SterlingStore = class _SterlingStore {
     if (existsSync2(target)) {
       throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
     }
-    mkdirSync2(dirname3(target), { recursive: true });
+    mkdirSync3(dirname4(target), { recursive: true });
     this.db.snapshot(target);
   }
   close() {
@@ -10322,6 +10918,7 @@ var SterlingStore = class _SterlingStore {
     const at = (/* @__PURE__ */ new Date()).toISOString();
     const stored = _SterlingStore.storableBody(updated);
     this.tx(() => {
+      this.assertNoMoveInFlight("addLink", [sourceId]);
       this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(stored), sourceId);
       this.insertRelation(sourceId, parsedRel, targetId, at);
       this.logActivity("linked", updated, at);
@@ -10369,7 +10966,7 @@ var SterlingStore = class _SterlingStore {
     }
     const dateStr = nowISO.slice(0, 10);
     this.create({
-      id: randomUUID(),
+      id: randomUUID3(),
       type: "reference_material",
       created_at: nowISO,
       updated_at: nowISO,
@@ -10388,7 +10985,7 @@ var SterlingStore = class _SterlingStore {
       catalog: {
         entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
       }
-    }, { operation_id: randomUUID() });
+    }, { operation_id: randomUUID3() });
   }
   /**
    * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
@@ -10409,7 +11006,7 @@ var SterlingStore = class _SterlingStore {
       return;
     const catalogs = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
     const todo = {
-      id: randomUUID(),
+      id: randomUUID3(),
       type: "todo",
       created_at: nowISO,
       updated_at: nowISO,
@@ -10426,7 +11023,7 @@ var SterlingStore = class _SterlingStore {
     if (catalogs.length > 0) {
       todo.feature_link = catalogs[0].id;
     }
-    this.create(todo, { operation_id: randomUUID() });
+    this.create(todo, { operation_id: randomUUID3() });
   }
   /**
    * The one row-insert. Since S2 ([stable-identity-design-v2]) the stored BODY
@@ -10621,13 +11218,13 @@ var SterlingStore = class _SterlingStore {
 };
 
 // packages/store/dist/routing.js
-import { lstatSync as lstatSync3, readFileSync as readFileSync3 } from "node:fs";
+import { lstatSync as lstatSync3, readFileSync as readFileSync4 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join7, resolve as resolve2 } from "node:path";
 
 // packages/store/dist/broker-runtime.js
-import { createHash } from "node:crypto";
-import { closeSync as closeSync2, constants as FS, fstatSync, lstatSync as lstatSync2, mkdirSync as mkdirSync3, openSync as openSync2, readdirSync, readSync, realpathSync as realpathSync2, renameSync, rmSync as rmSync2, writeFileSync } from "node:fs";
+import { createHash as createHash2 } from "node:crypto";
+import { closeSync as closeSync2, constants as FS, fstatSync, lstatSync as lstatSync2, mkdirSync as mkdirSync4, openSync as openSync2, readdirSync, readSync, realpathSync as realpathSync2, renameSync, rmSync as rmSync3, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join6 } from "node:path";
 var BrokerRuntimeDirError = class extends Error {
   constructor(message) {
@@ -10676,13 +11273,13 @@ function brokerDir({ create, env = process.env }) {
       throw new BrokerRuntimeDirError(`broker directory ${dir} cannot be read (${e.message})`);
     if (!create)
       return void 0;
-    mkdirSync3(dir, { mode: 448 });
+    mkdirSync4(dir, { mode: 448 });
   }
   assertPrivate(dir, "directory");
   return dir;
 }
 function brokerProjectKey(root) {
-  return createHash("sha256").update(realpathSync2(root)).digest("hex").slice(0, 16);
+  return createHash2("sha256").update(realpathSync2(root)).digest("hex").slice(0, 16);
 }
 function brokerSocketPath(dir, instanceId) {
   return join6(dir, `${instanceId}.sock`);
@@ -10772,7 +11369,7 @@ function readConfig(root) {
   }
   let raw;
   try {
-    raw = JSON.parse(readFileSync3(path, "utf8"));
+    raw = JSON.parse(readFileSync4(path, "utf8"));
   } catch (e) {
     throw new StoreSettingsError(`malformed ${path}: ${e.message}. Nothing was opened.`);
   }
@@ -11345,7 +11942,7 @@ function openRoutedForHook(root, { mount = false } = {}) {
 }
 
 // scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync3, readFileSync as readFileSync4 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync5 } from "node:fs";
 import { join as join8 } from "node:path";
 var CONFIG_REL2 = join8(".sterling", "config.json");
 var STORE_DB_REL = join8(".sterling", "sterling.db");
@@ -11356,7 +11953,7 @@ function storeBackend(root) {
   const dbExists = () => existsSync3(join8(root, STORE_DB_REL));
   let text;
   try {
-    text = readFileSync4(join8(root, CONFIG_REL2), "utf8");
+    text = readFileSync5(join8(root, CONFIG_REL2), "utf8");
   } catch (e) {
     if (e?.code === "ENOENT") return "sqlite";
     return dbExists() ? "sqlite" : "routed";
@@ -11376,13 +11973,13 @@ function projectRoot(from) {
   let dir = resolve3(String(from));
   for (; ; ) {
     if (isSterlingRoot(dir)) return dir;
-    const parent = dirname4(dir);
+    const parent = dirname5(dir);
     if (parent === dir) return null;
     dir = parent;
   }
 }
 function readStdin() {
-  const input2 = JSON.parse(readFileSync5(0, "utf8"));
+  const input2 = JSON.parse(readFileSync6(0, "utf8"));
   const root = projectRoot(input2.cwd);
   if (root) input2.cwd = root;
   return input2;
@@ -11495,7 +12092,7 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
 });
 function loadConfig(cwd) {
   const p = join9(cwd, ".sterling", "config.json");
-  return existsSync4(p) ? JSON.parse(readFileSync5(p, "utf8")) : null;
+  return existsSync4(p) ? JSON.parse(readFileSync6(p, "utf8")) : null;
 }
 function openStore(cwd) {
   if (storeBackend(cwd) === "routed") {
@@ -11534,21 +12131,33 @@ function repoRel(toolPath, cwd) {
 }
 
 // scripts/hooks/lib/working-tree.mjs
-function isForeignTree(record, root) {
+import { join as join10 } from "node:path";
+function isForeignTree(record, root, workingTrees) {
   const wt = record?.working_tree;
   if (!wt) return false;
-  return !(root && sameLocationAnyHost(String(wt), root));
+  if (!root) return true;
+  const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : void 0;
+  const mapped = typeof raw === "string" && raw ? raw : void 0;
+  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join10(root, mapped);
+  return !sameLocationAnyHost(location, root);
+}
+function workingTreesAt(root) {
+  const trees = root ? loadConfig(root)?.working_trees : void 0;
+  return trees && typeof trees === "object" ? trees : {};
+}
+function ownsHere(root, workingTrees = workingTreesAt(root)) {
+  return (record) => !isForeignTree(record, root, workingTrees);
 }
 
 // scripts/hooks/lib/hazard-lane-mode.mjs
-import { readFileSync as readFileSync7 } from "node:fs";
-import { join as join11 } from "node:path";
+import { readFileSync as readFileSync8 } from "node:fs";
+import { join as join12 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync4, readFileSync as readFileSync6, writeFileSync as writeFileSync2, rmSync as rmSync3, rmdirSync, renameSync as renameSync2, existsSync as existsSync5, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync4, chmodSync } from "node:fs";
-import { join as join10, resolve as resolve4, dirname as dirname5, isAbsolute } from "node:path";
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync3, rmSync as rmSync4, rmdirSync, renameSync as renameSync2, existsSync as existsSync5, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync4, chmodSync } from "node:fs";
+import { join as join11, resolve as resolve4, dirname as dirname6, isAbsolute } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
-import { randomBytes, createHash as createHash2 } from "node:crypto";
+import { randomBytes, createHash as createHash3 } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
 var CODES = /* @__PURE__ */ new Set([
@@ -11668,7 +12277,7 @@ function deliveryPolicyNotice(policy) {
 
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
-  return join10(root, ".sterling", "transient", "dispatch-register.json");
+  return join11(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -11693,7 +12302,7 @@ function readRawArray(root) {
   if (!existsSync5(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
-    raw = readFileSync6(p, "utf8");
+    raw = readFileSync7(p, "utf8");
   } catch {
     return { availability: "corrupt", arr: [] };
   }
@@ -11724,7 +12333,7 @@ var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function dispatchStateDir(root) {
-  return join10(root, ".sterling", "transient", "dispatch-state");
+  return join11(root, ".sterling", "transient", "dispatch-state");
 }
 var LIVE_PREFIX = "live-";
 var DONE_PREFIX = "done-";
@@ -11738,7 +12347,7 @@ function liveFileName(key) {
   return `${LIVE_PREFIX}${key}.json`;
 }
 function agentIdHash(agentId) {
-  return createHash2("sha256").update(String(agentId), "utf8").digest("base64url");
+  return createHash3("sha256").update(String(agentId), "utf8").digest("base64url");
 }
 function recordAgentIds(record) {
   return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
@@ -11777,7 +12386,7 @@ function warnStateFile(file, text) {
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
-  return `sha256-${createHash2("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+  return `sha256-${createHash3("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
 }
 function isNonEmptyString(v) {
   return typeof v === "string" && v !== "";
@@ -11807,7 +12416,7 @@ function validateRecordShape(r) {
   if (typeof r.prompt_sha256 !== "string") return { ok: false, reason: "prompt_sha256" };
   if (typeof r.prompt === "string") {
     const bytes = Buffer.byteLength(r.prompt, "utf8");
-    const sha = createHash2("sha256").update(r.prompt, "utf8").digest("hex");
+    const sha = createHash3("sha256").update(r.prompt, "utf8").digest("hex");
     if (bytes !== r.prompt_bytes || sha !== r.prompt_sha256) return { ok: false, reason: "prompt-hash-mismatch" };
   } else if (r.prompt !== null) {
     return { ok: false, reason: "prompt-type" };
@@ -11830,7 +12439,7 @@ function classifyRecordFile(file) {
   if (!st.isFile()) return { exists: true, poisoned: true, reason: "non-regular-file" };
   let buf;
   try {
-    buf = readFileSync6(file);
+    buf = readFileSync7(file);
   } catch {
     return { exists: true, poisoned: true, reason: "unreadable" };
   }
@@ -11854,7 +12463,7 @@ function checkDispatchStateContainment(root, { create }) {
   } catch (e) {
     if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
     if (!create) return { ok: true, availability: "absent" };
-    mkdirSync4(dir, { recursive: true });
+    mkdirSync5(dir, { recursive: true });
     return { ok: true, availability: "ok" };
   }
   if (st.isSymbolicLink() || !st.isDirectory()) {
@@ -11868,7 +12477,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync4(join10(dir, to));
+    lstatSync4(join11(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;
@@ -11878,7 +12487,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync2(join10(dir, from), join10(dir, to));
+    renameSync2(join11(dir, from), join11(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -11896,7 +12505,7 @@ function listStateDir(root) {
   }
 }
 function validateNamedRecord(dir, name, parsed) {
-  const classified = classifyRecordFile(join10(dir, name));
+  const classified = classifyRecordFile(join11(dir, name));
   if (!classified.exists || classified.poisoned) return classified;
   const record = classified.record;
   if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
@@ -11971,7 +12580,7 @@ function scanLiveState(root, { repair }) {
       done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
       continue;
     }
-    const classified = classifyRecordFile(join10(dir, name));
+    const classified = classifyRecordFile(join11(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
@@ -12042,7 +12651,7 @@ function hazardLaneMode(input2, root) {
     if (!input2 || typeof input2.agent_id !== "string" || !input2.agent_id) return "whole";
     const type = laneAgentType(input2, root);
     if (!type || !PLAIN_AGENT_NAME.test(type)) return "whole";
-    const tools = frontmatterTools(readFileSync7(join11(root, ".claude", "agents", `${type}.md`), "utf8"));
+    const tools = frontmatterTools(readFileSync8(join12(root, ".claude", "agents", `${type}.md`), "utf8"));
     if (!tools) return "whole";
     return tools.every((t) => READ_ONLY_TOOLS.has(t)) ? "pointer" : "whole";
   } catch {
@@ -12051,14 +12660,14 @@ function hazardLaneMode(input2, root) {
 }
 
 // scripts/hooks/h19-bash-delivery.mjs
-import { statSync as statSync4 } from "node:fs";
+import { statSync as statSync5 } from "node:fs";
 import { spawn } from "node:child_process";
 
 // scripts/hooks/lib/maintenance-worker.mjs
-import { createHash as createHash3, randomUUID as randomUUID2 } from "node:crypto";
+import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync as closeSync3, existsSync as existsSync6, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync8, renameSync as renameSync3, rmSync as rmSync4, rmdirSync as rmdirSync2, statSync as statSync3, writeFileSync as writeFileSync3, appendFileSync } from "node:fs";
-import { dirname as dirname6, isAbsolute as isAbsolute2, join as join12, resolve as resolve5, sep } from "node:path";
+import { closeSync as closeSync3, existsSync as existsSync6, mkdirSync as mkdirSync6, openSync as openSync3, readFileSync as readFileSync9, renameSync as renameSync3, rmSync as rmSync5, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync4, appendFileSync } from "node:fs";
+import { dirname as dirname7, isAbsolute as isAbsolute2, join as join13, resolve as resolve5, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
@@ -12115,34 +12724,34 @@ var WORKER_DISALLOWED_TOOLS = [
   "Edit",
   "Bash"
 ];
-var KNOWLEDGE_WRITE_TOOLS = [...WRITE_GRANT, "knowledge_line_ref_fix", "knowledge_create", "knowledge_retire", "knowledge_supersede", "knowledge_split", "knowledge_extract", "knowledge_promote", "knowledge_link"];
+var KNOWLEDGE_WRITE_TOOLS = [...WRITE_GRANT, "knowledge_line_ref_fix", "knowledge_create", "knowledge_retire", "knowledge_supersede", "knowledge_split", "knowledge_extract", "knowledge_promote", "knowledge_move", "knowledge_link"];
 var WORKER_HOSTS = ["claude", "opencode"];
 var OPENCODE_MODEL_KEY = "opencode_model";
 var opencodeModelOf = (config) => config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
 var OPENCODE_MODEL_UNSET = `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
 function workerPaths(root) {
-  const sterling = join12(root, ".sterling");
+  const sterling = join13(root, ".sterling");
   return {
-    lock: join12(sterling, "transient", "maintenance-worker.lock"),
-    takeover: join12(sterling, "transient", "maintenance-worker.lock.takeover"),
-    lastLaunch: join12(sterling, "transient", "maintenance-worker.last-launch"),
-    eligible: join12(sterling, "transient", "maintenance-worker.eligible.json"),
-    state: join12(sterling, "transient", "maintenance-worker.state.json"),
-    log: join12(sterling, "maintenance-worker.log"),
-    journal: join12(sterling, "maintenance-worker.jsonl")
+    lock: join13(sterling, "transient", "maintenance-worker.lock"),
+    takeover: join13(sterling, "transient", "maintenance-worker.lock.takeover"),
+    lastLaunch: join13(sterling, "transient", "maintenance-worker.last-launch"),
+    eligible: join13(sterling, "transient", "maintenance-worker.eligible.json"),
+    state: join13(sterling, "transient", "maintenance-worker.state.json"),
+    log: join13(sterling, "maintenance-worker.log"),
+    journal: join13(sterling, "maintenance-worker.jsonl")
   };
 }
 function pluginRootFrom(moduleUrl = import.meta.url) {
-  let dir = dirname6(fileURLToPath(moduleUrl));
+  let dir = dirname7(fileURLToPath(moduleUrl));
   for (let i = 0; i < 5; i++) {
-    if (existsSync6(join12(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname6(dir);
+    if (existsSync6(join13(dir, ".claude-plugin", "plugin.json"))) return dir;
+    dir = dirname7(dir);
   }
   return null;
 }
 function readJson(path) {
   try {
-    return JSON.parse(readFileSync8(path, "utf8"));
+    return JSON.parse(readFileSync9(path, "utf8"));
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     return { unreadable: String(e?.message ?? e) };
@@ -12150,7 +12759,7 @@ function readJson(path) {
 }
 function rotateIfLarge(path, limit = ROTATE_BYTES) {
   try {
-    if (statSync3(path).size > limit) renameSync3(path, `${path}.1`);
+    if (statSync4(path).size > limit) renameSync3(path, `${path}.1`);
   } catch (e) {
     if (e?.code !== "ENOENT") throw e;
   }
@@ -12162,7 +12771,7 @@ function journalLines(root, files = null) {
   for (const path of files ?? [`${journal}.1`, journal]) {
     let text;
     try {
-      text = readFileSync8(path, "utf8");
+      text = readFileSync9(path, "utf8");
     } catch (e) {
       if (e?.code === "ENOENT") continue;
       throw e;
@@ -12267,11 +12876,11 @@ function lockState(lock, nowMs, isAlive = pidAlive) {
   return isAlive(lock.pid) ? "live" : "stale";
 }
 function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
-  const token = randomUUID2();
+  const token = randomUUID4();
   const body = JSON.stringify({ ...content, token });
   const tryCreate = () => {
     try {
-      writeFileSync3(paths.lock, body, { flag: "wx" });
+      writeFileSync4(paths.lock, body, { flag: "wx" });
       return true;
     } catch (e) {
       if (e?.code === "EEXIST") return false;
@@ -12281,12 +12890,12 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
   if (!tryCreate()) {
     if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
     try {
-      mkdirSync5(paths.takeover);
+      mkdirSync6(paths.takeover);
     } catch (e) {
       if (e?.code !== "EEXIST") throw e;
       let age = 0;
       try {
-        age = Date.now() - statSync3(paths.takeover).mtimeMs;
+        age = Date.now() - statSync4(paths.takeover).mtimeMs;
       } catch {
       }
       if (age > TAKEOVER_STALE_MS) rmdirSync2(paths.takeover);
@@ -12294,7 +12903,7 @@ function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
     }
     try {
       if (lockState(readJson(paths.lock), nowMs, isAlive) !== "stale") return null;
-      rmSync4(paths.lock, { force: true });
+      rmSync5(paths.lock, { force: true });
       if (!tryCreate()) return null;
     } finally {
       rmdirSync2(paths.takeover);
@@ -12306,10 +12915,10 @@ function resolveMcpConfig(pluginRoot, projectRoot2, policy = null) {
   if (policy && (typeof policy.token !== "string" || !policy.token || typeof policy.path !== "string" || !isAbsolute2(policy.path))) {
     throw new Error(`the worker policy needs an absolute eligible.json path and a non-empty token (got path ${JSON.stringify(policy.path)})`);
   }
-  const path = join12(pluginRoot, ".claude-plugin", "sterling-mcp.json");
+  const path = join13(pluginRoot, ".claude-plugin", "sterling-mcp.json");
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync8(path, "utf8"));
+    parsed = JSON.parse(readFileSync9(path, "utf8"));
   } catch (e) {
     throw new Error(`cannot read the plugin MCP wiring ${path} (${e?.code ?? e?.message ?? e}) \u2014 it ships committed with the plugin, so this plugin tree is incomplete: restore it (git checkout -- .claude-plugin/sterling-mcp.json in a clone) or reinstall the plugin`);
   }
@@ -12322,9 +12931,9 @@ function resolveMcpConfig(pluginRoot, projectRoot2, policy = null) {
   return JSON.stringify({ mcpServers: { [SERVER2]: { ...entry, command: bind(entry.command), args: [...entry.args.map(bind), ...policyArgs] } } });
 }
 function readWorkerPrompt(pluginRoot) {
-  const path = join12(pluginRoot, "templates", "maintenance-worker-prompt.md");
+  const path = join13(pluginRoot, "templates", "maintenance-worker-prompt.md");
   try {
-    return readFileSync8(path, "utf8");
+    return readFileSync9(path, "utf8");
   } catch (e) {
     throw new Error(`cannot read the worker prompt ${path} (${e?.code ?? e?.message ?? e})`);
   }
@@ -12335,12 +12944,12 @@ function readState(root) {
 }
 function writeLastRun(root, lastRun) {
   const { state } = workerPaths(root);
-  mkdirSync5(dirname6(state), { recursive: true });
-  writeFileSync3(state, JSON.stringify({ last_run: lastRun }));
+  mkdirSync6(dirname7(state), { recursive: true });
+  writeFileSync4(state, JSON.stringify({ last_run: lastRun }));
 }
 function logLauncherNote(root, reason, detail) {
   const { log } = workerPaths(root);
-  mkdirSync5(dirname6(log), { recursive: true });
+  mkdirSync6(dirname7(log), { recursive: true });
   rotateIfLarge(log);
   appendFileSync(log, `maintenance-worker: ${(/* @__PURE__ */ new Date()).toISOString()} ${reason}: ${detail}
 `);
@@ -12427,9 +13036,9 @@ function launchWorker(opts) {
     if (!pluginRoot) return { launched: false, reason: "error", detail: failDetail("plugin root not found above the hook") };
     resolveMcpConfig(pluginRoot, opts.root);
     readWorkerPrompt(pluginRoot);
-    const runner = join12(pluginRoot, "scripts", "maintenance-worker-run.mjs");
+    const runner = join13(pluginRoot, "scripts", "maintenance-worker-run.mjs");
     if (!existsSync6(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
-    mkdirSync5(dirname6(paths.lock), { recursive: true });
+    mkdirSync6(dirname7(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
     const token = acquireLock(paths, { pid: process.pid, started_at: startedAt, trigger: opts.trigger, stage: "launching" }, nowMs, opts.isAlive);
     if (!token) return { launched: false, reason: "already_running" };
@@ -12437,7 +13046,7 @@ function launchWorker(opts) {
     let stage = "write the launch files";
     let logFd;
     try {
-      writeFileSync3(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
+      writeFileSync4(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
       const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
       const batch = selectBatch(eligible);
       const baselinesById = new Map(eligible.map((t) => [t.id, opts.store ? itemBaselines(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.baselines : void 0]));
@@ -12446,7 +13055,7 @@ function launchWorker(opts) {
         return baselines && typeof baselines === "object" ? { baselines } : {};
       };
       const chainAttempted = opts.trigger === "chain" && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
-      writeFileSync3(
+      writeFileSync4(
         paths.eligible,
         JSON.stringify({
           token,
@@ -12454,7 +13063,7 @@ function launchWorker(opts) {
           ...runnerHost,
           items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t), ...withBaselines(t) })),
           policy_version: POLICY_VERSION,
-          run_id: randomUUID2(),
+          run_id: randomUUID4(),
           policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
           queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? "", ...withBaselines(t) })),
           chain_attempted: chainAttempted
@@ -12472,7 +13081,7 @@ function launchWorker(opts) {
       child.unref?.();
       launched = true;
       stage = "record the running lock";
-      writeFileSync3(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
+      writeFileSync4(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
       return { launched: true, reason: "launched", pid: child.pid, items: batch.length, eligible: eligible.length, host };
     } catch (e) {
       return { launched: false, reason: "error", detail: failDetail(`${stage}: ${e?.message ?? e}`) };
@@ -12485,7 +13094,7 @@ function launchWorker(opts) {
   }
 }
 function releaseLock(paths, token) {
-  if (readJson(paths.lock)?.token === token) rmSync4(paths.lock, { force: true });
+  if (readJson(paths.lock)?.token === token) rmSync5(paths.lock, { force: true });
 }
 function ageText(iso, nowMs = Date.now()) {
   const ms = nowMs - Date.parse(iso ?? "");
@@ -12503,19 +13112,19 @@ var TOOLS_MISSING_RE = new RegExp(
 );
 
 // scripts/hooks/h19-bash-delivery.mjs
-import { join as join14 } from "node:path";
+import { join as join15 } from "node:path";
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync9, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, existsSync as existsSync7, renameSync as renameSync4, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
-import { join as join13, dirname as dirname7 } from "node:path";
+import { readFileSync as readFileSync10, writeFileSync as writeFileSync5, mkdirSync as mkdirSync7, existsSync as existsSync7, renameSync as renameSync4, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
+import { join as join14, dirname as dirname8 } from "node:path";
 function deliveryDir(cwd) {
-  return join13(cwd, ".sterling", "transient", "delivery");
+  return join14(cwd, ".sterling", "transient", "delivery");
 }
 function claimLegacyInjectionRungNotice(cwd, rawRung) {
   if (rawRung === "read") return null;
-  const transient = join13(cwd, ".sterling", "transient");
-  const marker = join13(transient, "legacy-injection-rung-noticed");
-  mkdirSync6(transient, { recursive: true });
+  const transient = join14(cwd, ".sterling", "transient");
+  const marker = join14(transient, "legacy-injection-rung-noticed");
+  mkdirSync7(transient, { recursive: true });
   try {
     const fd = openSync4(marker, "wx");
     closeSync4(fd);
@@ -12547,11 +13156,11 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join13(deliveryDir(cwd), component);
+  return join14(deliveryDir(cwd), component);
 }
 function guardPath(cwd, agentId, sessionId) {
   const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join13(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+  return dir ? join14(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -12603,7 +13212,7 @@ function readGuard(path) {
   if (!path) return emptyDeliveryGuard();
   try {
     if (!existsSync7(path)) return emptyDeliveryGuard();
-    const parsed = JSON.parse(readFileSync9(path, "utf8"));
+    const parsed = JSON.parse(readFileSync10(path, "utf8"));
     if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
     return { ...emptyDeliveryGuard(), ...parsed };
   } catch {
@@ -12614,9 +13223,9 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   if (!path) return;
-  mkdirSync6(dirname7(path), { recursive: true });
+  mkdirSync7(dirname8(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync4(tmp, JSON.stringify(guard));
+  writeFileSync5(tmp, JSON.stringify(guard));
   renameSync4(tmp, path);
 }
 function statusBracket(record) {
@@ -13252,13 +13861,13 @@ function main(input2) {
       if (guard.pointer_files.includes(rel)) continue;
       let isFile;
       try {
-        isFile = statSync4(join14(input2.cwd, rel)).isFile();
+        isFile = statSync5(join15(input2.cwd, rel)).isFile();
       } catch (e) {
         if (e?.code === "ENOENT" || e?.code === "ENOTDIR" || e?.code === "ENAMETOOLONG") continue;
         throw e;
       }
       if (!isFile) continue;
-      const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, input2.cwd));
+      const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter(ownsHere(input2.cwd));
       const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
       if (!owners.length && !hazards.length) continue;
       entries.push({ rel, owners, hazards });

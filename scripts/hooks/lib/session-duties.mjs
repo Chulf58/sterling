@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_REL, knowledgeWriteSchema, matchesGlob } from '@sterling/schemas';
 import { SterlingStore, resolveDomainMounts } from '@sterling/store';
 import { openRoutedForHook } from './broker-client.mjs';
-import { isForeignTree } from './working-tree.mjs';
+import { isForeignTree, workingTreesAt } from './working-tree.mjs';
 
 // Register timestamps are compared LEXICALLY, so only a canonical ISO stamp is
 // comparable (see the isValidAt note in h10-direct-capture.mjs).
@@ -342,9 +342,14 @@ export function unmetConceptFamilies(store, conceptFamilies, earliestSessionAt) 
 /**
  * The ownership join (feature_article and reference_material, minus records
  * naming a foreign working tree), over the whole matched set rather than a
- * capped window. `ownerRows(p)` is memoized per join.
+ * capped window. `ownerRows(p)` is memoized per join. `workingTrees` is the
+ * project's config.working_trees, read from `root` when not passed, so a name
+ * mapped to the root owns here as it does on the MCP server.
+ * `foreignOnlyOwners(p)` is the rows of an unowned path that matched but were
+ * excluded as foreign, so a caller can say who lists the path instead of
+ * reporting that nothing does (GitHub issues #112, #115).
  */
-export function ownershipJoin(store, root) {
+export function ownershipJoin(store, root, workingTrees = workingTreesAt(root)) {
   const ownersSeen = new Map();
   const ownerRows = (p) => {
     if (ownersSeen.has(p)) return ownersSeen.get(p);
@@ -354,8 +359,35 @@ export function ownershipJoin(store, root) {
     ownersSeen.set(p, rows);
     return rows;
   };
-  const isUnowned = (p) => !ownerRows(p).some((r) => !isForeignTree(r, root));
-  return { ownerRows, isUnowned };
+  const isForeign = (r) => isForeignTree(r, root, workingTrees);
+  const isUnowned = (p) => !ownerRows(p).some((r) => !isForeign(r));
+  const foreignOnlyOwners = (p) => (isUnowned(p) ? ownerRows(p) : []);
+  return { ownerRows, isUnowned, isForeign, foreignOnlyOwners };
+}
+
+/**
+ * The line that explains an unowned path some article DOES list, on another
+ * working tree (decision a0fc8743: such an article owns no file in this root).
+ * '' when no path in `paths` has a foreign-only owner. Shared by H10's article
+ * demand and OpenCode settlement's article notice.
+ */
+export function foreignTreeOwnersText(paths, foreignOnlyOwners) {
+  const byArticle = new Map();
+  const named = new Set();
+  for (const p of paths) {
+    for (const r of foreignOnlyOwners(p)) {
+      if (!byArticle.has(r.id)) byArticle.set(r.id, { r, paths: [] });
+      byArticle.get(r.id).paths.push(p);
+      named.add(p);
+    }
+  }
+  if (!byArticle.size) return '';
+  const list = (arr) => (arr.length > 5 ? `${arr.slice(0, 5).join(', ')} +${arr.length - 5} more` : arr.join(', '));
+  const owners = [...byArticle.values()].map(({ r, paths: ps }) => `'${r.slug ?? r.title ?? r.id}' (${String(r.id).slice(0, 8)}, working_tree '${r.working_tree}') lists ${list(ps)}`);
+  return (
+    `${named.size} of these file(s) are listed only by an article on another working tree, which owns no file in this root: ${owners.join('; ')}. ` +
+    `If that branch is merged, clear working_tree on the article (knowledge_update); if it is a real separate tree, map the name in config.working_trees.`
+  );
 }
 
 /** A path the article demand never names: a generated projection, or a per-project ignore glob. */

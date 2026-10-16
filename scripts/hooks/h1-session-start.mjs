@@ -950,10 +950,19 @@ const reconcileContext = backlog.line ? `\n\n${backlog.line}` : '';
 // The row's stack tags are refreshed from the project's config too, so a mount added by
 // a config edit reaches other projects' sibling lists by this project's next session
 // start. The touch and the refresh live in scripts/hooks/lib/registry-refresh.mjs, which
-// the OpenCode server plugin calls for its root sessions too.
+// the OpenCode server plugin calls for its root sessions too. The same refresh renames the
+// row to config.json project_name; a name another project already holds comes back as a
+// notice line, shown here so the conflict is not silent.
 let registryContext = '';
 {
-  const refreshed = refreshRegistryRow(input.cwd, { config, configUnreadable });
+  // A registry that cannot be read or written costs this one line, never the rest of the
+  // startup context (P5: the degraded state is said, not swallowed).
+  let refreshed = null;
+  try {
+    refreshed = refreshRegistryRow(input.cwd, { config, configUnreadable });
+  } catch (e) {
+    registryContext = `\n\nSTERLING PROJECT REGISTRY REFRESH FAILED (${e?.message ?? e}): this project's last-seen time, stack tags and name in the shared registry were not updated, and its sibling projects could not be listed this session.`;
+  }
   const siblings = (refreshed?.siblings ?? []).filter((p) => existsSync(p.repo_path));
   if (siblings.length) {
     registryContext =
@@ -961,6 +970,7 @@ let registryContext = '';
       'knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n' +
       siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(', ') || '(no domains)'}`).join('\n');
   }
+  if (refreshed?.notice) registryContext += `\n\n${refreshed.notice}`;
 }
 
 /** Is the process that wrote the marker still alive — and actually the WRITER?

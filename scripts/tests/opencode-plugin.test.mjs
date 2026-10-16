@@ -1496,3 +1496,39 @@ test('live: OpenCode 2.0.21 shows the model the injected layer and an edit deliv
   assert.match(r.stdout, /DELIVERY-SEEN: yes/);
   assert.match(r.stdout, /BIN-CALLED-BY-ROOT: yes/, 'the model ran a bin script by the root the layer names');
 });
+
+// GitHub issues #112, #115: settlement's article notice names an article that
+// lists a changed file from another working tree, with the remedy, instead of
+// an unexplained "nothing owns"; a working_tree name mapped to the root in
+// config.working_trees owns its file, as it does on the MCP server.
+test('settlement article notice: a foreign-tree owner is named with its working_tree and remedy; a name mapped to the root owns', async () => {
+  const p = makeProject();
+  try {
+    writeFileSync(join(p.dir, '.sterling', 'config.json'), JSON.stringify({ project_name: 'fixture-proj', working_trees: { main: '.' } }));
+    const stale = withStoreAt(p.dir, (s) => {
+      s.create({ ...addArticleShape('mapped-owner', 'src/n2.mjs'), working_tree: 'main' });
+      return s.create({ ...addArticleShape('stale-owner', 'src/n1.mjs'), working_tree: 'gone-branch' });
+    });
+    const { plugin, cleanup } = await setupPlugin(p.dir, { now: isoNow });
+    await plugin.handlers.event(succeeded);
+    for (const n of ['n1', 'n2', 'n3']) writeFileSync(join(p.dir, 'src', `${n}.mjs`), `export const ${n} = 1;\n`);
+    await plugin.handlers.event(succeeded);
+    const nag = noticeTexts(p.dir).join('\n');
+    assert.match(nag, /article missing: 2 changed file\(s\) nothing owns \(2 newly created\): src\/n1\.mjs, src\/n3\.mjs\./, 'the mapped owner owns src/n2.mjs');
+    assert.ok(
+      nag.includes(`1 of these file(s) are listed only by an article on another working tree, which owns no file in this root: 'stale-owner' (${stale.id.slice(0, 8)}, working_tree 'gone-branch') lists src/n1.mjs. If that branch is merged, clear working_tree on the article (knowledge_update); if it is a real separate tree, map the name in config.working_trees.`),
+      nag
+    );
+    await cleanup?.();
+  } finally {
+    p.cleanup();
+  }
+});
+
+function addArticleShape(slug, path) {
+  return {
+    ...envelope('feature_article'), slug, title: `${slug} title`, what_it_does: 'x', intended_behavior: 'x',
+    files: [{ path, role: 'impl' }], current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+    dependencies: { relies_on: [], relied_by: [] }, state: 'active', version: 1, history: [{ date: NOW, event: 'seed' }], live_test_refs: [],
+  };
+}

@@ -31,6 +31,7 @@ import {
   conceptArticleMissingText,
   conceptFamiliesFrom,
   demandExemption,
+  foreignTreeOwnersText,
   dischargedByCutoff,
   hasOpenSystemTodo,
   isValidAt,
@@ -84,13 +85,15 @@ function newSince(root, base, paths) {
 }
 
 /**
- * The article demand over `paths`: { unowned, newly } when it fires, else null.
+ * The article demand over `paths`: { unowned, newly, foreign } when it fires,
+ * else null. `foreign` explains the unowned paths an article on another
+ * working tree lists ('' when none do).
  * `degraded` collects what could not be checked (the demand then leans toward
  * signaling, as H10's does).
  */
 function articleDemand(store, root, config, paths, base, degraded) {
   const exempt = demandExemption(config, loadGeneratedProjections(root));
-  const { isUnowned } = ownershipJoin(store, root);
+  const { isUnowned, foreignOnlyOwners } = ownershipJoin(store, root, config.working_trees);
   let unowned = paths.filter((p) => existsSync(join(root, p)) && !exempt(p) && isUnowned(p));
   if (unowned.length) {
     const ignored = gitIgnored(unowned, root);
@@ -102,12 +105,12 @@ function articleDemand(store, root, config, paths, base, degraded) {
     degraded.push(`git ls-tree ${base} failed, so newly created files were not told apart`);
     newly = [];
   }
-  return unowned.length && (unowned.length >= config.article_demand.min_unowned_files || newly.length > 0) ? { unowned, newly } : null;
+  return unowned.length && (unowned.length >= config.article_demand.min_unowned_files || newly.length > 0) ? { unowned, newly, foreign: foreignTreeOwnersText(unowned, foreignOnlyOwners) } : null;
 }
 
 const describe = (d) => {
   if (d.duty === 'capture') return `capture owed: ${d.paths.length} changed file(s) and no knowledge record written since ${d.since} (${d.paths.slice(0, 5).join(', ')}${d.paths.length > 5 ? ', ...' : ''}). Capture what the turn learned (knowledge_create or knowledge_update), or declare no_capture if nothing durable was learned.`;
-  if (d.duty === 'article') return `article missing: ${d.paths.length} changed file(s) nothing owns${d.newly.length ? ` (${d.newly.length} newly created)` : ''}: ${d.paths.join(', ')}. Create the owning feature_article, or add the files to an existing one (knowledge_append files[]).`;
+  if (d.duty === 'article') return `article missing: ${d.paths.length} changed file(s) nothing owns${d.newly.length ? ` (${d.newly.length} newly created)` : ''}: ${d.paths.join(', ')}. Create the owning feature_article, or add the files to an existing one (knowledge_append files[]).${d.foreign ? ` ${d.foreign}` : ''}`;
   if (d.duty === 'concept') return `concept article missing: concept_designed was registered for concept_family '${d.family}' and no feature_article with that concept_family was written. Create or update it.`;
   return `research owed: research ran (${d.details.join('; ')}) and no research_finding, decision or anti_pattern was written since ${d.since}. Capture the finding, or declare no_capture with lane research.`;
 };
@@ -203,7 +206,7 @@ function weighDuties(store, records, config, root, at, git) {
     owed.push({ duty: 'capture', since: windowStart, last: ats.at(-1) ?? at, paths: touched.map((c) => c.path) });
   }
   const demand = articleDemand(store, root, config, changed.map((c) => c.path), base, degraded);
-  if (demand) owed.push({ duty: 'article', paths: demand.unowned, newly: demand.newly });
+  if (demand) owed.push({ duty: 'article', paths: demand.unowned, newly: demand.newly, foreign: demand.foreign });
 
   const weighed = new Set(state.weighed);
   const fresh = events.filter((e) => WEIGHED_KINDS.has(e.kind) && !weighed.has(eventKey(e)));

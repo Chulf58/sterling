@@ -56,7 +56,9 @@ export function harnessMounted(domains: string[], opts: MountedHarnessOptions): 
   const domainDbPath = (name: string) => join(dir, 'domains', name, 'sterling.db');
   const mounts = domains.map((name) => ({ name, dbPath: domainDbPath(name) }));
   for (const m of mounts) createDomain(m.name, `test domain ${m.name}`, m.dbPath);
-  const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), mounts);
+  // The knowledge_move lock goes beside this harness's own domains, never the machine's real
+  // ~/.sterling/domains (a test owns every input its verdict depends on).
+  const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), mounts, { moveLockPath: join(dir, 'domains', '.move.lock') });
   const config = parseConfig({ stack_tags: domains });
   const tools = new SterlingTools({ store, config, now: () => opts.now, newId: randomUUID });
   return {
