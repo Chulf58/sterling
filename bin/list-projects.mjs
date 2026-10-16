@@ -5579,8 +5579,11 @@ var pgDialect = pgDialectFor(DEFAULT_PG_RANKING);
 function resolveDomainMounts(config) {
   return config.stack_tags.map((name) => ({
     name,
-    dbPath: config.domain_paths[name] ?? join2(homedir2(), ".sterling", "domains", name, "sterling.db")
+    dbPath: config.domain_paths[name] ?? join2(domainsHome(), name, "sterling.db")
   }));
+}
+function domainsHome() {
+  return join2(homedir2(), ".sterling", "domains");
 }
 
 // packages/store/dist/axis.js

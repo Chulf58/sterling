@@ -10,13 +10,24 @@
 // per §12): composition over SQLite ATTACH — each store is a self-contained,
 // already-tested SterlingStore; this layer only mounts, routes, and merges.
 import { mkdirSync, existsSync, rmSync, openSync, closeSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { SterlingStore, SchemaMigrationRequiredError, StoreRowDecodeError, UnsupportedSchemaVersionError, DEFAULT_QUERY_CAP, assertNoFieldLoss, type QueryOptions, type BoardItemReadiness, type WriteOptions } from './index.js';
+import { SterlingStore, SchemaMigrationRequiredError, StoreRowDecodeError, UnsupportedSchemaVersionError, DEFAULT_QUERY_CAP, assertNoFieldLoss, type MoveMarker, type QueryOptions, type BoardItemReadiness, type WriteOptions } from './index.js';
 import { validateRecord, parseStoreFence, STORE_FENCE_KEY, type DurableRecord, type RenameFence, type SterlingConfig } from '@sterling/schemas';
 import { allocateShares } from './shares.js';
+import { acquireMoveLock, releaseMoveLock, type MoveLockHandle } from './move-lock.js';
 import { PgBridgeClosedError, PgBridgeTimeoutError, PgQueryError, PgWorkerDiedError } from './pg-bridge.js';
 import { PgLockTimeoutError, PgNulCharacterError, PgStatementTimeoutError, PgStoreMissingError } from './pg-driver.js';
+
+/** What recoverMoves did with one journal marker. */
+export interface MoveRecoveryOutcome {
+  id: string;
+  from: string;
+  to: string;
+  outcome: 'completed' | 'rolled_back' | 'pending';
+  reason?: string;
+}
 
 /** A domain store to mount: its manifest name + its already-resolved DB path. */
 export interface DomainMount {
@@ -46,8 +57,18 @@ export interface UnreadableDomain {
 export function resolveDomainMounts(config: SterlingConfig): DomainMount[] {
   return config.stack_tags.map((name) => ({
     name,
-    dbPath: config.domain_paths[name] ?? join(homedir(), '.sterling', 'domains', name, 'sterling.db'),
+    dbPath: config.domain_paths[name] ?? join(domainsHome(), name, 'sterling.db'),
   }));
+}
+
+/** The per-user directory that holds the domain stores (each at <domainsHome>/<name>/sterling.db). */
+export function domainsHome(): string {
+  return join(homedir(), '.sterling', 'domains');
+}
+
+/** The machine-level knowledge_move lock: beside the domain stores, never in a project. */
+export function defaultMoveLockPath(): string {
+  return join(domainsHome(), '.move.lock');
 }
 
 /** Open a store at dbPath, creating the file and its parent dir when absent.
@@ -136,6 +157,8 @@ export interface MountedStoresOptions {
   skipMissing?: boolean;
   /** Postgres storage (routing.ts): open through these, never create a store, and throw DomainUnavailableError wherever the SQLite path would skip or drop a domain. */
   work?: WorkStoreOpeners;
+  /** The machine-level knowledge_move lock file. Absent: <domainsHome()>/.move.lock. */
+  moveLockPath?: string;
 }
 
 /** The store_meta key that holds a domain's description. */
@@ -327,6 +350,10 @@ export class MountedStores {
   /** Set for Postgres storage; see MountedStoresOptions.work. */
   private readonly work: WorkStoreOpeners | undefined;
 
+  /** The knowledge_move lock file, and this instance's hold on it (reentrant). */
+  private readonly moveLockPath: string;
+  private moveLockHeld: MoveLockHandle | undefined;
+
   /** The project store is opened, and created when absent; a failure to open
    *  it throws. A domain store is only ever OPENED here, never created, and one
    *  that exists but cannot be opened is listed on unreadableDomains instead of
@@ -344,6 +371,7 @@ export class MountedStores {
    *  with every handle opened so far closed. */
   constructor(projectDbPath: string, mounts: DomainMount[] = [], options?: MountedStoresOptions) {
     this.work = options?.work;
+    this.moveLockPath = options?.moveLockPath ?? defaultMoveLockPath();
     if (this.work) {
       this.project = this.work.openProject();
       try {
@@ -1108,6 +1136,166 @@ export class MountedStores {
   drainLogEntry(...args: Parameters<SterlingStore['drainLogEntry']>): ReturnType<SterlingStore['drainLogEntry']> {
     return this.mutatingProject('drainLogEntry').drainLogEntry(...args);
   }
+  /**
+   * Run `fn` holding the machine-level knowledge_move lock (move-lock.ts). Reentrant on this
+   * instance, so knowledge_move holds one lock across its recovery run and its move. `fn` gets the
+   * lock's platform warning, if any. Throws MoveLockBusyError when another live process holds it
+   * past `timeoutMs`.
+   */
+  withMoveLock<T>(fn: (warning?: string) => T, opts: { timeoutMs?: number } = {}): T {
+    if (this.moveLockHeld) return fn(this.moveLockHeld.warning);
+    const handle = acquireMoveLock(this.moveLockPath, { timeoutMs: opts.timeoutMs });
+    this.moveLockHeld = handle;
+    try {
+      return fn(handle.warning);
+    } finally {
+      this.moveLockHeld = undefined;
+      releaseMoveLock(handle);
+    }
+  }
+
+  /**
+   * Move one record from the domain store that holds it into another mounted domain store under
+   * the SAME id (decision move-a-record-between-domains-with-knowledge-move-same-id;
+   * [stable-identity-design-v2] item 6). It keeps the slug, version history, aliases and outbound
+   * relations; inbound edges stay with their source records.
+   *
+   * THE INVARIANT. Moves and recovery runs never interleave: each holds the machine-level move lock
+   * (withMoveLock, move-lock.ts) for its whole duration, so whatever recovery reads from the
+   * journal is the state a finished or crashed move left, never one a move is still writing.
+   * A move is owned by one random token, and its state lives only in two token-bearing journal
+   * entries: the CLAIM `move_out:<id>` in the source (state 'claimed', then 'done' once the source
+   * rows are gone) and the MARKER `move_in:<id>` beside the copy in the destination. Each mount is
+   * its own connection, so the move is five single-store transactions:
+   *   0. source: write the claim (refused if the source holds any move entry for the id);
+   *   1. destination: write the copy and its marker (refused if it holds any entry for the id);
+   *   2. source: delete the rows and mark the claim 'done' (requires the claim's token);
+   *   3. destination: drop the marker (requires the token);
+   *   4. source: drop the 'done' claim (requires the token).
+   * Every ordinary write path of either store refuses a record that carries an entry (the
+   * store-level move fence, which does not take the lock), and every removal of an entry names its
+   * token, so the entries a crash leaves are settled only by recovery, from the entries alone:
+   * a 'done' claim means finish; a 'claimed' claim with no marker means undo; a marker with no
+   * claim of its token means undo the copy; a 'claimed' claim beside its marker means finish.
+   * Whether a record is present in a store is never evidence.
+   *
+   * WHAT IT DOES NOT GUARANTEE. The lock is one file beside the per-user domain stores, judged by
+   * pid, process start time and hostname: it excludes every process on this machine, and nothing
+   * else. Two machines sharing the same domain files (a network mount, or a future Postgres
+   * backend) are not excluded, and a lock written on another host is honoured until the timeout,
+   * never taken over. Where /proc cannot be read, a dead owner whose pid was reused looks alive
+   * until that process exits (acquireMoveLock reports this as a warning). The cross-store steps are
+   * not atomic: between them the id can be held by two stores. Every route that resolves one
+   * holder (storeHolding: writes, scopeOfHolder, withTransactionForRecord) refuses it then, but the
+   * fanned reads do not refuse it: get() answers from the first store that holds it, and query()
+   * reads each store on its own, so during that window a moved record can appear twice in its results. An entry whose peer domain is not mounted
+   * where recovery runs stays 'pending' until a project that mounts both runs it. Writes outside
+   * the store's own paths (raw SQL, a restored file) during a move are neither prevented nor
+   * detected: recovery finishes or undoes from the journal entries whatever the rows then hold.
+   */
+  moveRecordBetweenDomains(id: string, targetDomain: string, at: string, opts: { expected_version?: number } = {}): { id: string; from: string; to: string } {
+    const op = 'moveRecordBetweenDomains';
+    if (this.activeTransactionStore !== undefined) {
+      throw new Error(`${op}: refused inside a transaction — a move commits on two mounts in turn, so it cannot join one. Nothing was written.`);
+    }
+    return this.withMoveLock(() => {
+      const source = this.storeHolding(id);
+      const from = this.mountNameOf(source);
+      if (source === this.project) {
+        throw new Error(`${op}: record '${id}' is held by the project store, not a domain. A project record goes to a domain through knowledge_promote. Nothing was written.`);
+      }
+      this.assertWritable(targetDomain);
+      const target = this.domains.get(targetDomain);
+      if (!target) throw new Error(`${op}: domain '${targetDomain}' is not mounted in this project. Nothing was written.`);
+      const to = `domain:${targetDomain}`;
+      if (target === source) throw new Error(`${op}: record '${id}' already lives in ${to}. Nothing was written.`);
+      const token = randomUUID();
+
+      const bundle = source.claimMoveOut(id, { token, target: targetDomain, at, expected_version: opts.expected_version });
+      try {
+        target.importMoveBundle(bundle, to, { source: from.slice('domain:'.length), at, token });
+      } catch (e) {
+        source.releaseMoveOut(id, token);
+        throw e;
+      }
+      source.relinquishMovedRecord(id, token, at, 'moved out');
+      target.clearMoveIn(id, token);
+      source.deleteDoneClaim(id, token);
+      return { id, from, to };
+    });
+  }
+
+  /**
+   * Finish or undo every interrupted move, holding the move lock (so no move is running) and
+   * deciding only from the token-bearing journal entries (the invariant above). Entries are
+   * grouped by token across every readable domain store:
+   *  - the peer domain an entry names is not mounted or cannot be read here: 'pending';
+   *  - 'done' claim: drop the marker if there is one, then the claim: 'completed';
+   *  - 'claimed' claim, no marker: release the claim: 'rolled_back';
+   *  - marker, no claim of its token: delete the copy with its marker: 'rolled_back';
+   *  - 'claimed' claim beside its marker: relinquish the source, drop marker and claim: 'completed'.
+   * With no journal entry in any readable domain it returns at once without taking the lock: a
+   * move that starts afterwards writes entries a later run will find. Idempotent. Refused inside
+   * a transaction, like a move.
+   */
+  recoverMoves(at: string, opts: { lockTimeoutMs?: number } = {}): MoveRecoveryOutcome[] {
+    if (this.activeTransactionStore !== undefined) {
+      throw new Error('recoverMoves: refused inside a transaction — recovery commits on two mounts in turn. Nothing was written.');
+    }
+    if (!this.moveLockHeld && !this.readableDomains().some(([, store]) => store.moveMarkers().length > 0)) return [];
+    return this.withMoveLock(() => this.recoverMovesLocked(at), { timeoutMs: opts.lockTimeoutMs });
+  }
+
+  private readableDomains(): [string, SterlingStore][] {
+    return [...this.domains].filter(([name]) => !this.isUnreadable(name));
+  }
+
+  private recoverMovesLocked(at: string): MoveRecoveryOutcome[] {
+    type Side = { store: SterlingStore; name: string; entry: MoveMarker };
+    const moves = new Map<string, { id: string; out?: Side; in?: Side }>();
+    for (const [name, store] of this.readableDomains()) {
+      for (const entry of store.moveMarkers()) {
+        const m = moves.get(entry.token) ?? { id: entry.id };
+        m[entry.kind] = { store, name, entry };
+        moves.set(entry.token, m);
+      }
+    }
+    const readable = (name: string) => this.domains.get(name) !== undefined && !this.isUnreadable(name);
+    const out: MoveRecoveryOutcome[] = [];
+    for (const [token, m] of moves) {
+      const fromName = m.out?.name ?? m.in!.entry.peer;
+      const toName = m.in?.name ?? m.out!.entry.peer;
+      const from = `domain:${fromName}`;
+      const to = `domain:${toName}`;
+      const report = (outcome: MoveRecoveryOutcome['outcome'], reason?: string) => out.push({ id: m.id, from, to, outcome, ...(reason ? { reason } : {}) });
+      if (!readable(fromName) || !readable(toName)) {
+        report('pending', `${!readable(fromName) ? from : to} is not mounted or cannot be read here`);
+        continue;
+      }
+      const source = this.domains.get(fromName)!;
+      const target = this.domains.get(toName)!;
+      const claim = m.out?.entry;
+      const marker = m.in?.entry;
+      if (claim?.state === 'done') {
+        if (marker) target.clearMoveIn(m.id, token);
+        source.deleteDoneClaim(m.id, token);
+        report('completed');
+      } else if (claim && !marker) {
+        source.releaseMoveOut(m.id, token);
+        report('rolled_back', 'the move stopped before its copy was written');
+      } else if (!claim && marker) {
+        target.rollbackMoveCopy(m.id, token, at);
+        report('rolled_back', `the move was undone in ${from} after its copy was written`);
+      } else if (claim && marker) {
+        source.relinquishMovedRecord(m.id, token, at, 'moved out');
+        target.clearMoveIn(m.id, token);
+        source.deleteDoneClaim(m.id, token);
+        report('completed');
+      }
+    }
+    return out;
+  }
+
   /** knowledge_split's multi-record write (decision
    *  compaction-tooling-windowed-read-plus-split) targets the PROJECT store
    *  only — feature_article is always project-scoped (§3.3), so the split's

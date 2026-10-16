@@ -35,6 +35,7 @@ import {
   type ForeignBoardRead,
   type ReadForeignBoardOptions,
   type HandoffStatus,
+  type MoveRecoveryOutcome,
   type QueryOptions,
   type ToolStore,
 } from '@sterling/store';
@@ -802,6 +803,12 @@ export interface DomainSurface {
   slugHolders(slug: string): DurableRecord[];
   /** The feature_article counterpart of slugHolders. */
   articleSlugHolders(slug: string): DurableRecord[];
+  /** knowledge_move's store-level move (MountedStores.moveRecordBetweenDomains). */
+  moveRecord(id: string, domain: string, at: string, expectedVersion?: number): { id: string; from: string; to: string };
+  /** Finish or undo moves a crash interrupted (MountedStores.recoverMoves). */
+  recoverMoves(at: string): MoveRecoveryOutcome[];
+  /** Run `fn` holding the machine-level move lock (MountedStores.withMoveLock). */
+  withMoveLock<T>(fn: (warning?: string) => T): T;
 }
 
 /** The DomainSurface over a MountedStores: every read and the one write go
@@ -816,6 +823,10 @@ export function mountedDomainSurface(stores: MountedStores): DomainSurface {
     unreadable: () => stores.unreadableDomains.map((d) => ({ name: d.name, error: d.error, note: d.note })),
     slugHolders: (slug) => stores.slugHolders(slug),
     articleSlugHolders: (slug) => stores.articleSlugHolders(slug),
+    moveRecord: (id, domain, at, expectedVersion) =>
+      stores.moveRecordBetweenDomains(id, domain, at, expectedVersion === undefined ? {} : { expected_version: expectedVersion }),
+    recoverMoves: (at) => stores.recoverMoves(at),
+    withMoveLock: (fn) => stores.withMoveLock(fn),
   };
 }
 
@@ -9920,6 +9931,85 @@ export class SterlingTools {
       domain_description: domainDescription,
       warnings,
     };
+  }
+
+  /**
+   * knowledge_move (GitHub issue #110, decision
+   * move-a-record-between-domains-with-knowledge-move-same-id): move a record from the mounted
+   * domain store that holds it into another mounted domain store under the SAME id, keeping its
+   * slug, version history, aliases and outbound relations. The store layer runs the journaled
+   * move (MountedStores.moveRecordBetweenDomains); this layer owns the policy refusals.
+   *
+   * The id goes through the shared ladder, as knowledge_promote and knowledge_retire do: a move
+   * keeps the record alive under its id and can be undone by moving it back, so a wrong target
+   * is recoverable, unlike a hard delete (anti_pattern
+   * no-bounded-trail-guard-for-destructive-addressing). The ladder refuses an ambiguous prefix.
+   *
+   * Every call first finishes or undoes any move a crash interrupted, and reports it.
+   */
+  knowledgeMove(
+    id: string,
+    domain: string,
+    expectedVersion?: number
+  ): { record: DurableRecord; from: string; to: string; recovered_moves: MoveRecoveryOutcome[]; warnings: string[] } {
+    const op = 'knowledge_move';
+    if (!this.domains) throw new Error(`${op}: this server mounts no domain stores, so there is nothing to move between. Nothing was written.`);
+    const domains = this.domains;
+    // One machine-level move lock across the recovery run and the move (MountedStores.withMoveLock),
+    // so recovery never reads the journal while a move is writing it.
+    return domains.withMoveLock((lockWarning) => this.knowledgeMoveLocked(domains, id, domain, expectedVersion, lockWarning));
+  }
+
+  private knowledgeMoveLocked(
+    domains: DomainSurface,
+    id: string,
+    domain: string,
+    expectedVersion: number | undefined,
+    lockWarning: string | undefined
+  ): { record: DurableRecord; from: string; to: string; recovered_moves: MoveRecoveryOutcome[]; warnings: string[] } {
+    const op = 'knowledge_move';
+    const ts = this.now();
+    const recovered = domains.recoverMoves(ts);
+    const original = this.resolveRecordId(id, op);
+    const recordId = original.id;
+    // Which store holds the record is asked of the storage layer, never read off the body's
+    // scope (anti_pattern [record-body-scope-is-not-physical-store-identity]).
+    const from = this.store.scopeOfHolder(recordId);
+    if (from === 'project') {
+      throw new Error(`${op}: record '${recordId}' is held by the project store. A project record goes to a domain through knowledge_promote. Nothing was written.`);
+    }
+    const to = `domain:${domain}`;
+    if (!domains.names().includes(domain)) {
+      throw new Error(`${op}: domain '${domain}' is not mounted in this project (mounted: ${domains.names().join(', ') || 'none'}). Nothing was written.`);
+    }
+    if (from === to) throw new Error(`${op}: record '${recordId}' already lives in ${to}. Nothing was written.`);
+    // Active only, as knowledge_promote: a retired record's successor edge lives in its own
+    // store and would not follow it, and a flagged_stale record owes a refresh first.
+    if (original.status !== 'active') {
+      throw new Error(`${op}: record '${recordId}' is not active (status ${original.status}); only an active record moves. Nothing was written.`);
+    }
+    if (UNPROMOTABLE_TYPES.includes(original.type)) {
+      throw new Error(`${op}: ${original.type} belongs in the project store and never sits in a shared domain store, so it does not move between domains. Nothing was written.`);
+    }
+    const slug = (original as unknown as { slug?: unknown }).slug;
+    if (typeof slug === 'string' && slug.length > 0) {
+      const clash = this.slugHolders(slug).filter((r) => r.id !== recordId && this.store.scopeOfHolder(r.id) === to);
+      if (clash.length) {
+        throw new Error(`${op}: slug '${slug}' is already used in ${to} by ${clash.map((r) => `'${r.id}'`).join(', ')}. Nothing was written.`);
+      }
+    }
+    // expected_version is checked inside the source's claim transaction, against the rows the move
+    // copies; from the claim on, no ordinary write can change them until the move ends.
+    domains.moveRecord(recordId, domain, ts, expectedVersion);
+    const moved = this.store.get(recordId);
+    if (!moved) throw new Error(`${op}: record '${recordId}' cannot be read back after the move to ${to}.`);
+    const warnings: string[] = lockWarning ? [lockWarning] : [];
+    const ledgerWarning = this.logDomainWrite(to, moved);
+    if (ledgerWarning) warnings.push(ledgerWarning);
+    for (const r of recovered.filter((o) => o.outcome === 'pending')) {
+      warnings.push(`an interrupted move of '${r.id}' from ${r.from} to ${r.to} is still pending: ${r.reason}`);
+    }
+    return { record: moved, from, to, recovered_moves: recovered, warnings };
   }
 
   /**
