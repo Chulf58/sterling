@@ -16,7 +16,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { MAX_RANK_TERMS, allocateShares } from '@sterling/store';
 import { loadConfig } from './common.mjs';
-import { isForeignTree } from './working-tree.mjs';
+import { ownsHere } from './working-tree.mjs';
 import {
   extractAxisTerms,
   axisHits,
@@ -749,7 +749,7 @@ export function outputAxisReadGated(store, rel, root) {
   if (rel) {
     const owners = store
       .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
-      .filter((r) => !isForeignTree(r, root));
+      .filter(ownsHere(root));
     if (owners.length) return true;
   }
   return false;

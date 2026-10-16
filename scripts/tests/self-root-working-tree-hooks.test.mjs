@@ -12,6 +12,7 @@ import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { isForeignTree } from '../hooks/lib/working-tree.mjs';
 import { mintSettlementReconcile } from '../hooks/lib/settlement.mjs';
+import { ownershipJoin, foreignTreeOwnersText } from '../hooks/lib/session-duties.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const NOW = '2026-09-28T12:00:00.000Z';
@@ -75,6 +76,72 @@ test('settlement: a drifted path owned only by a FOREIGN branch-name tree articl
     drifted(store, dir, 'foreign', 'src/f.mjs', 'chore/retire-knowledge-skills');
     mintSettlementReconcile(store, dir, ['src/f.mjs'], NOW);
     assert.equal(reconcileItems(store).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+// config.working_trees (GitHub issues #112, #115): a name mapped to the root —
+// absolute, or relative joined onto the root as the MCP server's treeRootFor
+// does — owns root paths at every hook site; an unmapped name, or one mapped to
+// another tree, stays foreign.
+test('isForeignTree: a working_tree name mapped in config.working_trees resolves through the map first', () => {
+  const ROOT = '/home/u/proj';
+  const trees = { main: ROOT, here: '.', winRoot: 'C:/Users/u/proj', copy: '/home/u/proj-copy', sub: 'sub' };
+  assert.equal(isForeignTree({ working_tree: 'main' }, ROOT, trees), false, 'mapped to the absolute root');
+  assert.equal(isForeignTree({ working_tree: 'here' }, ROOT, trees), false, 'mapped relative, joined onto the root');
+  assert.equal(isForeignTree({ working_tree: 'copy' }, ROOT, trees), true, 'mapped to another tree');
+  assert.equal(isForeignTree({ working_tree: 'sub' }, ROOT, trees), true, 'relative mapping below the root is another tree');
+  assert.equal(isForeignTree({ working_tree: 'winRoot' }, '/mnt/c/Users/u/proj', trees), false, 'mapped Windows spelling of a WSL root');
+  assert.equal(isForeignTree({ working_tree: 'unmapped' }, ROOT, trees), true, 'an unmapped name stays foreign');
+  assert.equal(isForeignTree({ working_tree: 'main' }, ROOT), true, 'no map passed: the name is compared as itself, as before');
+});
+
+function withWorkingTrees(dir, working_trees) {
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ working_trees }));
+}
+
+test('settlement: a drifted path owned by an article whose working_tree name is MAPPED to the root mints its reconcile item', async () => {
+  const { dir, store, cleanup } = await project();
+  try {
+    withWorkingTrees(dir, { main: '.' });
+    const a = drifted(store, dir, 'mapped-root', 'src/m.mjs', 'main');
+    mintSettlementReconcile(store, dir, ['src/m.mjs'], NOW);
+    const items = reconcileItems(store);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].feature_link, a.id);
+  } finally {
+    cleanup();
+  }
+});
+
+test('settlement: an UNMAPPED working_tree name still mints nothing when config.working_trees maps other names', async () => {
+  const { dir, store, cleanup } = await project();
+  try {
+    withWorkingTrees(dir, { main: '.' });
+    drifted(store, dir, 'unmapped', 'src/u.mjs', 'main (merged 035f27c, 2026-10-15)');
+    mintSettlementReconcile(store, dir, ['src/u.mjs'], NOW);
+    assert.equal(reconcileItems(store).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('ownershipJoin: a mapped-to-root owner owns; a foreign-only owner is unowned and is named by foreignTreeOwnersText', async () => {
+  const { dir, store, cleanup } = await project();
+  try {
+    withWorkingTrees(dir, { main: dir });
+    drifted(store, dir, 'mapped-owner', 'src/m.mjs', 'main');
+    const stale = drifted(store, dir, 'stale-owner', 'src/s.mjs', 'main (merged 035f27c, 2026-10-15)');
+    const { isUnowned, foreignOnlyOwners } = ownershipJoin(store, dir);
+    assert.equal(isUnowned('src/m.mjs'), false, 'config.working_trees is read from the root when not passed');
+    assert.equal(isUnowned('src/s.mjs'), true);
+    assert.deepEqual(foreignOnlyOwners('src/m.mjs'), []);
+    const text = foreignTreeOwnersText(['src/s.mjs', 'src/none.mjs'], foreignOnlyOwners);
+    assert.match(text, /^1 of these file\(s\) are listed only by an article on another working tree/);
+    assert.ok(text.includes(`'stale-owner' (${stale.id.slice(0, 8)}, working_tree 'main (merged 035f27c, 2026-10-15)') lists src/s.mjs`), text);
+    assert.match(text, /clear working_tree on the article \(knowledge_update\).*map the name in config\.working_trees/);
+    assert.equal(foreignTreeOwnersText(['src/none.mjs'], foreignOnlyOwners), '', 'nothing lists the path: no line');
   } finally {
     cleanup();
   }

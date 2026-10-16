@@ -10,7 +10,7 @@
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStoreOrDegrade, loadConfig, repoRel, gitIgnored } from './lib/common.mjs';
-import { isForeignTree } from './lib/working-tree.mjs';
+import { ownsHere } from './lib/working-tree.mjs';
 import { hazardLaneMode } from './lib/hazard-lane-mode.mjs';
 import { readDeliveryPolicy } from '../lib/dispatch-register.mjs';
 import { deliveryPolicyNotice } from './lib/dispatch-prompt.mjs';
@@ -84,7 +84,7 @@ function main(input) {
 
     const owners = store
       .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
-      .filter((r) => !isForeignTree(r, input.cwd));
+      .filter(ownsHere(input.cwd));
 
     // HAZARDS AND RATIONALE FOR THIS PATH (decision foreign_ca23c811). Articles answer
     // "what is this and how must it behave"; they do NOT answer "what must I not
