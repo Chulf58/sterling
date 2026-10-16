@@ -8318,6 +8318,39 @@ CREATE TABLE IF NOT EXISTS projects (
       updateStackTags(repoPath2, stackTags) {
         return this.db.prepare("UPDATE projects SET stack_tags = ? WHERE repo_path = ?").run(JSON.stringify(stackTags), repoPath2).changes > 0;
       }
+      /** Rename (config.json project_name changed, or /sterling:projects --rename):
+       *  replace the name of an EXISTING row and nothing else, only when no other row
+       *  carries the name. The check and the UPDATE run in one BEGIN IMMEDIATE
+       *  transaction, so two projects renaming to the same name at once cannot both
+       *  win: the second sees the first's row and gets 'conflict'. `selfPaths` are
+       *  the repo_paths that count as this project (rows that spell one folder
+       *  differently); a row there never conflicts. Never creates a row.
+       *  'unchanged' = the row already has the name; 'missing' = no row at repoPath. */
+      renameIfUnique(repoPath2, name, selfPaths = [repoPath2]) {
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+          const own = this.db.prepare("SELECT name FROM projects WHERE repo_path = ?").get(repoPath2);
+          let result;
+          if (!own)
+            result = { status: "missing" };
+          else if (own.name === name)
+            result = { status: "unchanged" };
+          else {
+            const taken = this.db.prepare("SELECT repo_path FROM projects WHERE name = ?").all(name).find((r) => !selfPaths.includes(r.repo_path));
+            if (taken)
+              result = { status: "conflict", conflict_path: taken.repo_path };
+            else {
+              this.db.prepare("UPDATE projects SET name = ? WHERE repo_path = ?").run(name, repoPath2);
+              result = { status: "renamed" };
+            }
+          }
+          this.db.exec("COMMIT");
+          return result;
+        } catch (e) {
+          this.db.exec("ROLLBACK");
+          throw e;
+        }
+      }
       /** All registered projects, name-ordered. Stale-at-read (existence of
        *  repo_path) is the caller's lazy check — the registry stores no liveness. */
       list() {
@@ -15443,7 +15476,8 @@ async function runPostUpdateSteps(root, project, runStep) {
     return { ok: false, restart, detail: `stamp-contract checked NOTHING for ${project} (0 project(s) processed) \u2014 the project is not reachable through the project registry; run /sterling:init here to register it` };
   }
   const inserted = contract.out.split("\n").map((l) => /^\s*(section_inserted|inserted) {2}(.+)$/.exec(l)).filter(Boolean).map((m) => `${m[1]} ${m[2].trim()}`);
-  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted };
+  const kept = contract.out.split("\n").map((l) => /^\s*SIMILAR_BULLET_KEPT {2}(.+)$/.exec(l)).filter(Boolean).map((m) => m[1].trim());
+  return { ok: true, restart, drift: contract.status === 2, driftOut: contract.tail, inserted, kept };
 }
 function postUpdateApplies(root, project) {
   return Boolean(root) && !samePath2(project, root) && isInstalledCopy(root) && existsSync15(join28(project, ".sterling", "config.json"));
@@ -15517,7 +15551,7 @@ POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker 
     warning,
     context: `
 
-POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart ? ` ${t.restartLong}` : "") + (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md/CLAUDE.md (text that was entirely absent; no existing wording was replaced): ${inserted.join("; ")}.` : "") + (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : "")
+POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart ? ` ${t.restartLong}` : "") + (inserted.length ? ` stamp-contract inserted new text into this project's AGENTS.md/CLAUDE.md (text that was entirely absent; no existing wording was replaced): ${inserted.join("; ")}.` : "") + ((result.kept ?? []).length ? ` stamp-contract kept the project's own bullets where they already state a Sterling rule, inserting nothing: ${result.kept.join("; ")}.` : "") + (result.drift ? ` Contract drift in this project (stamp-contract, tolerated): ${result.driftOut}` : "")
   };
 }
 function cloneAgentSyncApplies(root, project) {
@@ -16008,19 +16042,35 @@ function refreshRegistryRow(cwd, { config: config2, configUnreadable: configUnre
   const cwdPosix = cwd.replace(/\\/g, "/");
   const isThisProject = (p) => sameLocationAnyHost(p.repo_path, cwdPosix);
   let mounts = null;
+  let projectName = null;
   try {
-    if (config2 && !configUnreadable2) mounts = parseConfig(config2).stack_tags;
+    if (config2 && !configUnreadable2) {
+      const parsed = parseConfig(config2);
+      mounts = parsed.stack_tags;
+      if (typeof parsed.project_name === "string" && parsed.project_name.trim()) projectName = parsed.project_name;
+    }
   } catch {
   }
   let registry;
   try {
     registry = new ProjectRegistry(registryPath());
     const rows = registry.list();
-    for (const row of rows.filter(isThisProject)) {
+    const siblings = rows.filter((p) => !isThisProject(p));
+    let notice = null;
+    if (configUnreadable2) return { siblings, notice };
+    const own = rows.filter(isThisProject);
+    const ownPaths = own.map((p) => p.repo_path);
+    for (const row of own) {
       registry.touchLastSeen(row.repo_path, at);
       if (mounts && JSON.stringify(row.stack_tags) !== JSON.stringify(mounts)) registry.updateStackTags(row.repo_path, mounts);
+      if (projectName !== null) {
+        const renamed = registry.renameIfUnique(row.repo_path, projectName, ownPaths);
+        if (renamed.status === "conflict") {
+          notice = `STERLING PROJECT NAME NOT APPLIED: config.json project_name '${projectName}' is already registered for ${renamed.conflict_path}, so this project stays registered as '${row.name}'. Two projects cannot share a name; pick another with node "<Sterling root>/bin/list-projects.mjs" --rename <this project's path> <new-name> --apply.`;
+        }
+      }
     }
-    return { siblings: rows.filter((p) => !isThisProject(p)) };
+    return { siblings, notice };
   } finally {
     registry?.close();
   }
@@ -16820,11 +16870,21 @@ var reconcileContext = backlog.line ? `
 ${backlog.line}` : "";
 var registryContext = "";
 {
-  const refreshed = refreshRegistryRow(input.cwd, { config, configUnreadable });
+  let refreshed = null;
+  try {
+    refreshed = refreshRegistryRow(input.cwd, { config, configUnreadable });
+  } catch (e) {
+    registryContext = `
+
+STERLING PROJECT REGISTRY REFRESH FAILED (${e?.message ?? e}): this project's last-seen time, stack tags and name in the shared registry were not updated, and its sibling projects could not be listed this session.`;
+  }
   const siblings = (refreshed?.siblings ?? []).filter((p) => existsSync20(p.repo_path));
   if (siblings.length) {
     registryContext = "\n\nSibling Sterling projects on this machine (shared project registry) \u2014 other initialized projects; knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n" + siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(", ") || "(no domains)"}`).join("\n");
   }
+  if (refreshed?.notice) registryContext += `
+
+${refreshed.notice}`;
 }
 function markerWriterAlive(pid) {
   if (!Number.isInteger(pid)) return null;

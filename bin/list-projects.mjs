@@ -7,7 +7,7 @@ var __export = (target, all) => {
 };
 
 // scripts/list-projects.mjs
-import { existsSync as existsSync4 } from "node:fs";
+import { existsSync as existsSync5 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -5643,6 +5643,39 @@ var ProjectRegistry = class {
   updateStackTags(repoPath2, stackTags) {
     return this.db.prepare("UPDATE projects SET stack_tags = ? WHERE repo_path = ?").run(JSON.stringify(stackTags), repoPath2).changes > 0;
   }
+  /** Rename (config.json project_name changed, or /sterling:projects --rename):
+   *  replace the name of an EXISTING row and nothing else, only when no other row
+   *  carries the name. The check and the UPDATE run in one BEGIN IMMEDIATE
+   *  transaction, so two projects renaming to the same name at once cannot both
+   *  win: the second sees the first's row and gets 'conflict'. `selfPaths` are
+   *  the repo_paths that count as this project (rows that spell one folder
+   *  differently); a row there never conflicts. Never creates a row.
+   *  'unchanged' = the row already has the name; 'missing' = no row at repoPath. */
+  renameIfUnique(repoPath2, name, selfPaths = [repoPath2]) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const own = this.db.prepare("SELECT name FROM projects WHERE repo_path = ?").get(repoPath2);
+      let result;
+      if (!own)
+        result = { status: "missing" };
+      else if (own.name === name)
+        result = { status: "unchanged" };
+      else {
+        const taken = this.db.prepare("SELECT repo_path FROM projects WHERE name = ?").all(name).find((r) => !selfPaths.includes(r.repo_path));
+        if (taken)
+          result = { status: "conflict", conflict_path: taken.repo_path };
+        else {
+          this.db.prepare("UPDATE projects SET name = ? WHERE repo_path = ?").run(name, repoPath2);
+          result = { status: "renamed" };
+        }
+      }
+      this.db.exec("COMMIT");
+      return result;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
   /** All registered projects, name-ordered. Stale-at-read (existence of
    *  repo_path) is the caller's lazy check — the registry stores no liveness. */
   list() {
@@ -6294,14 +6327,96 @@ function removeProject(registry2, input, { apply = false, procRoot = "/proc", be
   return apply ? applyRemove(ctx, input) : dryRunRemove(ctx, input);
 }
 
+// scripts/lib/project-rename.mjs
+import { existsSync as existsSync4, readFileSync as readFileSync4, realpathSync as realpathSync3, renameSync, writeFileSync } from "node:fs";
+import { join as join6, resolve as resolve3 } from "node:path";
+function writeProjectName(cfgPath, raw, obj, name) {
+  const indent = raw.match(/^([ \t]+)\S/m)?.[1] ?? "  ";
+  const text = `${JSON.stringify({ ...obj, project_name: name }, null, indent)}${raw.endsWith("\n") ? "\n" : ""}`;
+  const tmp = `${cfgPath}.rename-${process.pid}.tmp`;
+  writeFileSync(tmp, text);
+  renameSync(tmp, cfgPath);
+}
+function renameProject(registry2, input, newNameInput, { apply = false, log = console.log } = {}) {
+  const abs = resolve3(input);
+  const name = typeof newNameInput === "string" ? newNameInput.trim() : "";
+  const refusals = [];
+  if (!name) refusals.push("the new name is empty");
+  const real = existsSync4(abs) ? realpathSync3(abs) : void 0;
+  const rows = registry2.list();
+  const mine = rows.filter((r) => sameLocationAnyHost(r.repo_path, abs) || real !== void 0 && sameLocationAnyHost(r.repo_path, real));
+  let row;
+  if (mine.length === 0) refusals.push(`no registered project is at ${abs}; run list-projects.mjs to see the registered paths`);
+  else if (mine.length > 1) refusals.push(`${mine.length} registry rows match ${abs} (${mine.map((r) => `${r.name} at ${r.repo_path}`).join("; ")}); the target is ambiguous`);
+  else row = mine[0];
+  const taken = name ? rows.find((r) => r !== row && r.name === name) : void 0;
+  if (taken) refusals.push(`the name '${name}' is already used by the project at ${taken.repo_path}; two projects cannot share a name`);
+  const cfgPath = join6(abs, ".sterling", "config.json");
+  let raw;
+  let cfg;
+  if (row) {
+    try {
+      raw = readFileSync4(cfgPath, "utf8");
+      cfg = JSON.parse(raw);
+      if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) {
+        refusals.push(`${cfgPath} is not a JSON object`);
+        cfg = void 0;
+      }
+    } catch (e) {
+      refusals.push(e?.code === "ENOENT" ? `no ${cfgPath}; this is not an initialized Sterling project` : `${cfgPath} is unreadable: ${e.message}`);
+    }
+  }
+  log(apply ? "Rename\n" : "Rename preview (dry run; nothing is changed)\n");
+  if (row) {
+    log(`Project: ${row.name} (${row.repo_path})`);
+    log(`New name: ${name || "(empty)"}`);
+    if (cfg) log(`config.json project_name: ${typeof cfg.project_name === "string" ? cfg.project_name : "(not set)"} -> ${name}`);
+    log(`Registry row name: ${row.name} -> ${name}`);
+  }
+  if (refusals.length) {
+    log(`
+--rename ${apply ? "REFUSED" : "--apply would REFUSE"}:`);
+    for (const r of refusals) log(`  - ${r}`);
+    return 1;
+  }
+  if (cfg.project_name === name && row.name === name) {
+    log(`
+Nothing to change: the config and the registry already say '${name}'.`);
+    return 0;
+  }
+  if (!apply) {
+    log(`
+--apply would write ${cfgPath} and rename the registry row. Other projects' trackers that mention '${row.name}' are not rewritten.`);
+    return 0;
+  }
+  try {
+    const renamed = registry2.renameIfUnique(row.repo_path, name, mine.map((r) => r.repo_path));
+    if (renamed.status === "conflict") {
+      log(`
+--rename REFUSED:
+  - the name '${name}' is already used by the project at ${renamed.conflict_path}; two projects cannot share a name. Nothing was written.`);
+      return 1;
+    }
+    if (renamed.status === "missing") throw new Error(`no registry row for ${row.repo_path} was found to rename`);
+    if (cfg.project_name !== name) writeProjectName(cfgPath, raw, cfg, name);
+  } catch (e) {
+    log(`
+Rename FAILED: ${e.message}. config.json and the registry row may disagree now; re-run the same command to finish it.`);
+    return 1;
+  }
+  log(`
+Renamed ${row.name} -> ${name}: config.json project_name and the registry row are both updated.`);
+  return 0;
+}
+
 // scripts/list-projects.mjs
 function usage(msg) {
   console.error(`list-projects REFUSED: ${msg}
-usage: list-projects.mjs [--prune-missing] | --remove <path> [--apply]`);
+usage: list-projects.mjs [--prune-missing] | --remove <path> [--apply] | --rename <path> <new-name> [--apply]`);
   process.exit(2);
 }
 function parseArgs(argv) {
-  const out = { prune: false, remove: void 0, apply: false };
+  const out = { prune: false, remove: void 0, rename: void 0, newName: void 0, apply: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--prune-missing") out.prune = true;
@@ -6311,17 +6426,25 @@ function parseArgs(argv) {
       if (v === void 0 || v.startsWith("--")) usage("--remove needs a path");
       if (out.remove !== void 0) usage("--remove given more than once");
       out.remove = v;
+    } else if (a === "--rename") {
+      const p = argv[++i];
+      const n = argv[++i];
+      if (p === void 0 || p.startsWith("--") || n === void 0 || n.startsWith("--")) usage("--rename needs a path and a new name");
+      if (out.rename !== void 0) usage("--rename given more than once");
+      out.rename = p;
+      out.newName = n;
     } else usage(`unknown argument '${a}'`);
   }
-  if (out.apply && out.remove === void 0) usage("--apply needs --remove <path>");
-  if (out.prune && out.remove !== void 0) usage("--prune-missing and --remove cannot be combined");
+  if (out.apply && out.remove === void 0 && out.rename === void 0) usage("--apply needs --remove <path> or --rename <path> <new-name>");
+  if (out.remove !== void 0 && out.rename !== void 0) usage("--remove and --rename cannot be combined");
+  if (out.prune && (out.remove !== void 0 || out.rename !== void 0)) usage("--prune-missing cannot be combined with --remove or --rename");
   return out;
 }
 function listProjects(prune) {
   if (prune) {
     let removed = 0;
     for (const p of registry.list()) {
-      if (!existsSync4(p.repo_path)) {
+      if (!existsSync5(p.repo_path)) {
         registry.remove(p.repo_path);
         removed++;
       }
@@ -6337,7 +6460,7 @@ function listProjects(prune) {
   console.log(`${rows.length} registered Sterling project${rows.length === 1 ? "" : "s"}:
 `);
   for (const p of rows) {
-    const live = existsSync4(p.repo_path);
+    const live = existsSync5(p.repo_path);
     const tags = p.stack_tags.length ? p.stack_tags.join(", ") : "\u2014";
     const tools = p.toolchains.length ? p.toolchains.join(", ") : "\u2014";
     const seen = p.last_seen_at ? p.last_seen_at.slice(0, 10) : "never";
@@ -6345,7 +6468,7 @@ function listProjects(prune) {
     console.log(`    domains/tags: [${tags}]   toolchains: [${tools}]   sterling: ${p.sterling_version ?? "?"}`);
     console.log(`    first init: ${p.first_init_at.slice(0, 10)}   last init: ${p.last_init_at.slice(0, 10)}   last seen: ${seen}`);
   }
-  const missing = rows.filter((p) => !existsSync4(p.repo_path)).length;
+  const missing = rows.filter((p) => !existsSync5(p.repo_path)).length;
   if (missing && !prune) {
     console.log(`
 ${missing} project${missing === 1 ? "" : "s"} MISSING (path gone). Prune with: node "<Sterling root>/bin/list-projects.mjs" --prune-missing`);
@@ -6355,6 +6478,7 @@ var args = parseArgs(process.argv.slice(2));
 var registry = new ProjectRegistry(registryPath());
 try {
   if (args.remove !== void 0) process.exitCode = removeProject(registry, args.remove, { apply: args.apply });
+  else if (args.rename !== void 0) process.exitCode = renameProject(registry, args.rename, args.newName, { apply: args.apply });
   else listProjects(args.prune);
 } finally {
   registry.close();

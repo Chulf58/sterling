@@ -12131,19 +12131,31 @@ function repoRel(toolPath, cwd) {
 }
 
 // scripts/hooks/lib/working-tree.mjs
-function isForeignTree(record, root) {
+import { join as join10 } from "node:path";
+function isForeignTree(record, root, workingTrees) {
   const wt = record?.working_tree;
   if (!wt) return false;
-  return !(root && sameLocationAnyHost(String(wt), root));
+  if (!root) return true;
+  const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : void 0;
+  const mapped = typeof raw === "string" && raw ? raw : void 0;
+  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join10(root, mapped);
+  return !sameLocationAnyHost(location, root);
+}
+function workingTreesAt(root) {
+  const trees = root ? loadConfig(root)?.working_trees : void 0;
+  return trees && typeof trees === "object" ? trees : {};
+}
+function ownsHere(root, workingTrees = workingTreesAt(root)) {
+  return (record) => !isForeignTree(record, root, workingTrees);
 }
 
 // scripts/hooks/lib/hazard-lane-mode.mjs
 import { readFileSync as readFileSync8 } from "node:fs";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync3, rmSync as rmSync4, rmdirSync, renameSync as renameSync2, existsSync as existsSync5, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync4, chmodSync } from "node:fs";
-import { join as join10, resolve as resolve4, dirname as dirname6, isAbsolute } from "node:path";
+import { join as join11, resolve as resolve4, dirname as dirname6, isAbsolute } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash3 } from "node:crypto";
 
@@ -12265,7 +12277,7 @@ function deliveryPolicyNotice(policy) {
 
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
-  return join10(root, ".sterling", "transient", "dispatch-register.json");
+  return join11(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -12321,7 +12333,7 @@ var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function dispatchStateDir(root) {
-  return join10(root, ".sterling", "transient", "dispatch-state");
+  return join11(root, ".sterling", "transient", "dispatch-state");
 }
 var LIVE_PREFIX = "live-";
 var DONE_PREFIX = "done-";
@@ -12465,7 +12477,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync4(join10(dir, to));
+    lstatSync4(join11(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;
@@ -12475,7 +12487,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync2(join10(dir, from), join10(dir, to));
+    renameSync2(join11(dir, from), join11(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -12493,7 +12505,7 @@ function listStateDir(root) {
   }
 }
 function validateNamedRecord(dir, name, parsed) {
-  const classified = classifyRecordFile(join10(dir, name));
+  const classified = classifyRecordFile(join11(dir, name));
   if (!classified.exists || classified.poisoned) return classified;
   const record = classified.record;
   if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
@@ -12568,7 +12580,7 @@ function scanLiveState(root, { repair }) {
       done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
       continue;
     }
-    const classified = classifyRecordFile(join10(dir, name));
+    const classified = classifyRecordFile(join11(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
@@ -12639,7 +12651,7 @@ function hazardLaneMode(input2, root) {
     if (!input2 || typeof input2.agent_id !== "string" || !input2.agent_id) return "whole";
     const type = laneAgentType(input2, root);
     if (!type || !PLAIN_AGENT_NAME.test(type)) return "whole";
-    const tools = frontmatterTools(readFileSync8(join11(root, ".claude", "agents", `${type}.md`), "utf8"));
+    const tools = frontmatterTools(readFileSync8(join12(root, ".claude", "agents", `${type}.md`), "utf8"));
     if (!tools) return "whole";
     return tools.every((t) => READ_ONLY_TOOLS.has(t)) ? "pointer" : "whole";
   } catch {
@@ -12655,7 +12667,7 @@ import { spawn } from "node:child_process";
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { closeSync as closeSync3, existsSync as existsSync6, mkdirSync as mkdirSync6, openSync as openSync3, readFileSync as readFileSync9, renameSync as renameSync3, rmSync as rmSync5, rmdirSync as rmdirSync2, statSync as statSync4, writeFileSync as writeFileSync4, appendFileSync } from "node:fs";
-import { dirname as dirname7, isAbsolute as isAbsolute2, join as join12, resolve as resolve5, sep } from "node:path";
+import { dirname as dirname7, isAbsolute as isAbsolute2, join as join13, resolve as resolve5, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/maintenance-worker-opencode.mjs
@@ -12718,21 +12730,21 @@ var OPENCODE_MODEL_KEY = "opencode_model";
 var opencodeModelOf = (config) => config?.maintenance_worker?.[OPENCODE_MODEL_KEY] ?? null;
 var OPENCODE_MODEL_UNSET = `config maintenance_worker.${OPENCODE_MODEL_KEY} is not set, so the OpenCode maintenance worker does not start (it never falls back to OpenCode's default model). Set it to a provider/model in .sterling/config.json, or drain by hand with /sterling:drain`;
 function workerPaths(root) {
-  const sterling = join12(root, ".sterling");
+  const sterling = join13(root, ".sterling");
   return {
-    lock: join12(sterling, "transient", "maintenance-worker.lock"),
-    takeover: join12(sterling, "transient", "maintenance-worker.lock.takeover"),
-    lastLaunch: join12(sterling, "transient", "maintenance-worker.last-launch"),
-    eligible: join12(sterling, "transient", "maintenance-worker.eligible.json"),
-    state: join12(sterling, "transient", "maintenance-worker.state.json"),
-    log: join12(sterling, "maintenance-worker.log"),
-    journal: join12(sterling, "maintenance-worker.jsonl")
+    lock: join13(sterling, "transient", "maintenance-worker.lock"),
+    takeover: join13(sterling, "transient", "maintenance-worker.lock.takeover"),
+    lastLaunch: join13(sterling, "transient", "maintenance-worker.last-launch"),
+    eligible: join13(sterling, "transient", "maintenance-worker.eligible.json"),
+    state: join13(sterling, "transient", "maintenance-worker.state.json"),
+    log: join13(sterling, "maintenance-worker.log"),
+    journal: join13(sterling, "maintenance-worker.jsonl")
   };
 }
 function pluginRootFrom(moduleUrl = import.meta.url) {
   let dir = dirname7(fileURLToPath(moduleUrl));
   for (let i = 0; i < 5; i++) {
-    if (existsSync6(join12(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync6(join13(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname7(dir);
   }
   return null;
@@ -12903,7 +12915,7 @@ function resolveMcpConfig(pluginRoot, projectRoot2, policy = null) {
   if (policy && (typeof policy.token !== "string" || !policy.token || typeof policy.path !== "string" || !isAbsolute2(policy.path))) {
     throw new Error(`the worker policy needs an absolute eligible.json path and a non-empty token (got path ${JSON.stringify(policy.path)})`);
   }
-  const path = join12(pluginRoot, ".claude-plugin", "sterling-mcp.json");
+  const path = join13(pluginRoot, ".claude-plugin", "sterling-mcp.json");
   let parsed;
   try {
     parsed = JSON.parse(readFileSync9(path, "utf8"));
@@ -12919,7 +12931,7 @@ function resolveMcpConfig(pluginRoot, projectRoot2, policy = null) {
   return JSON.stringify({ mcpServers: { [SERVER2]: { ...entry, command: bind(entry.command), args: [...entry.args.map(bind), ...policyArgs] } } });
 }
 function readWorkerPrompt(pluginRoot) {
-  const path = join12(pluginRoot, "templates", "maintenance-worker-prompt.md");
+  const path = join13(pluginRoot, "templates", "maintenance-worker-prompt.md");
   try {
     return readFileSync9(path, "utf8");
   } catch (e) {
@@ -13024,7 +13036,7 @@ function launchWorker(opts) {
     if (!pluginRoot) return { launched: false, reason: "error", detail: failDetail("plugin root not found above the hook") };
     resolveMcpConfig(pluginRoot, opts.root);
     readWorkerPrompt(pluginRoot);
-    const runner = join12(pluginRoot, "scripts", "maintenance-worker-run.mjs");
+    const runner = join13(pluginRoot, "scripts", "maintenance-worker-run.mjs");
     if (!existsSync6(runner)) return { launched: false, reason: "error", detail: failDetail(`runner missing: ${runner}`) };
     mkdirSync6(dirname7(paths.lock), { recursive: true });
     const startedAt = new Date(nowMs).toISOString();
@@ -13100,18 +13112,18 @@ var TOOLS_MISSING_RE = new RegExp(
 );
 
 // scripts/hooks/h19-bash-delivery.mjs
-import { join as join14 } from "node:path";
+import { join as join15 } from "node:path";
 
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync10, writeFileSync as writeFileSync5, mkdirSync as mkdirSync7, existsSync as existsSync7, renameSync as renameSync4, openSync as openSync4, closeSync as closeSync4 } from "node:fs";
-import { join as join13, dirname as dirname8 } from "node:path";
+import { join as join14, dirname as dirname8 } from "node:path";
 function deliveryDir(cwd) {
-  return join13(cwd, ".sterling", "transient", "delivery");
+  return join14(cwd, ".sterling", "transient", "delivery");
 }
 function claimLegacyInjectionRungNotice(cwd, rawRung) {
   if (rawRung === "read") return null;
-  const transient = join13(cwd, ".sterling", "transient");
-  const marker = join13(transient, "legacy-injection-rung-noticed");
+  const transient = join14(cwd, ".sterling", "transient");
+  const marker = join14(transient, "legacy-injection-rung-noticed");
   mkdirSync7(transient, { recursive: true });
   try {
     const fd = openSync4(marker, "wx");
@@ -13144,11 +13156,11 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join13(deliveryDir(cwd), component);
+  return join14(deliveryDir(cwd), component);
 }
 function guardPath(cwd, agentId, sessionId) {
   const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join13(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+  return dir ? join14(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -13849,13 +13861,13 @@ function main(input2) {
       if (guard.pointer_files.includes(rel)) continue;
       let isFile;
       try {
-        isFile = statSync5(join14(input2.cwd, rel)).isFile();
+        isFile = statSync5(join15(input2.cwd, rel)).isFile();
       } catch (e) {
         if (e?.code === "ENOENT" || e?.code === "ENOTDIR" || e?.code === "ENAMETOOLONG") continue;
         throw e;
       }
       if (!isFile) continue;
-      const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, input2.cwd));
+      const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter(ownsHere(input2.cwd));
       const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
       if (!owners.length && !hazards.length) continue;
       entries.push({ rel, owners, hazards });

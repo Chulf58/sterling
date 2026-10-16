@@ -12410,17 +12410,29 @@ function repoRel(toolPath, cwd) {
 
 // scripts/hooks/lib/subject-fan.mjs
 import { existsSync as existsSync6 } from "node:fs";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync7, writeFileSync as writeFileSync3, mkdirSync as mkdirSync5, existsSync as existsSync5, renameSync as renameSync2, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
-import { join as join10, dirname as dirname6 } from "node:path";
+import { join as join11, dirname as dirname6 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs
-function isForeignTree(record, root) {
+import { join as join10 } from "node:path";
+function isForeignTree(record, root, workingTrees) {
   const wt = record?.working_tree;
   if (!wt) return false;
-  return !(root && sameLocationAnyHost(String(wt), root));
+  if (!root) return true;
+  const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : void 0;
+  const mapped = typeof raw === "string" && raw ? raw : void 0;
+  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join10(root, mapped);
+  return !sameLocationAnyHost(location, root);
+}
+function workingTreesAt(root) {
+  const trees = root ? loadConfig(root)?.working_trees : void 0;
+  return trees && typeof trees === "object" ? trees : {};
+}
+function ownsHere(root, workingTrees = workingTreesAt(root)) {
+  return (record) => !isForeignTree(record, root, workingTrees);
 }
 
 // scripts/hooks/lib/dispatch-prompt.mjs
@@ -12443,7 +12455,7 @@ function deliveryPolicyNotice(policy) {
 
 // scripts/hooks/lib/delivery.mjs
 function deliveryDir(cwd) {
-  return join10(cwd, ".sterling", "transient", "delivery");
+  return join11(cwd, ".sterling", "transient", "delivery");
 }
 var HEADER_TERM_CAP = 6;
 function boundedTermClause(terms, cap = HEADER_TERM_CAP) {
@@ -12475,11 +12487,11 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join10(deliveryDir(cwd), component);
+  return join11(deliveryDir(cwd), component);
 }
 function guardPath(cwd, agentId, sessionId) {
   const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join10(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+  return dir ? join11(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -12608,7 +12620,7 @@ function pointerLine(store, kind, slug, root) {
   let head = "(not in store)";
   let annotation = "";
   try {
-    const match = store.articlesBySlug(slug).find((r) => !isForeignTree(r, root));
+    const match = store.articlesBySlug(slug).find(ownsHere(root));
     if (match) {
       head = clip(match.what_it_does, 140);
       annotation = statusAnnotation(match);
@@ -13235,7 +13247,7 @@ var tag = (records, source) => records.map((r) => ({ ...r, source_store: source 
 var errorText2 = (e) => String(e && e.message || e);
 function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
   if (storeBackend(cwd) === "routed") return openRoutedSubjectFan(cwd);
-  const projectPath = join11(cwd, ".sterling", "sterling.db");
+  const projectPath = join12(cwd, ".sterling", "sterling.db");
   if (!existsSync6(projectPath)) return null;
   let mounts = [];
   let configError = null;
@@ -13408,11 +13420,11 @@ function warnFanDegraded(fan, who) {
 
 // scripts/hooks/lib/hazard-lane-mode.mjs
 import { readFileSync as readFileSync9 } from "node:fs";
-import { join as join13 } from "node:path";
+import { join as join14 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync4, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync7, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync4, chmodSync } from "node:fs";
-import { join as join12, resolve as resolve4, dirname as dirname7, isAbsolute } from "node:path";
+import { join as join13, resolve as resolve4, dirname as dirname7, isAbsolute } from "node:path";
 import { hostname as hostname2 } from "node:os";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash3 } from "node:crypto";
@@ -13534,10 +13546,10 @@ function render(x) {
 
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
-  return join12(root, ".sterling", "transient", "dispatch-register.json");
+  return join13(root, ".sterling", "transient", "dispatch-register.json");
 }
 function legacyRegisterLockDir(root) {
-  return join12(root, ".sterling", "transient", "dispatch-register.lock");
+  return join13(root, ".sterling", "transient", "dispatch-register.lock");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -13600,7 +13612,7 @@ function registerLockRoot() {
   if (typeof xdg === "string" && isAbsolute(xdg)) {
     try {
       const st = lstatSync4(xdg);
-      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid2) return join12(xdg, "sterling-locks");
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid2) return join13(xdg, "sterling-locks");
     } catch (e) {
       if (!["ENOENT", "ENOTDIR", "EACCES"].includes(e?.code)) throw e;
     }
@@ -13609,7 +13621,7 @@ function registerLockRoot() {
 }
 function registerLockPath(root) {
   const hash = createHash3("sha256").update(realpathSync4(resolve4(root))).digest("hex");
-  return join12(registerLockRoot(), `${hash}.db`);
+  return join13(registerLockRoot(), `${hash}.db`);
 }
 function ensureLockRoot(dir) {
   mkdirSync6(dir, { recursive: true, mode: 448 });
@@ -13646,7 +13658,7 @@ function isPidAlive(pid) {
 }
 function readLegacyOwner(legacy) {
   try {
-    return JSON.parse(readFileSync8(join12(legacy, "owner.json"), "utf8"));
+    return JSON.parse(readFileSync8(join13(legacy, "owner.json"), "utf8"));
   } catch (e) {
     if (e?.code === "ENOENT" || e instanceof SyntaxError) return null;
     throw e;
@@ -13751,7 +13763,7 @@ function retryBudgetFor(verdict) {
   return verdict === "siblings-retry" ? DERIVE_SIBLINGS_BUDGET_MS : DERIVE_LOCK_HELD_BUDGET_MS;
 }
 function dispatchStateDir(root) {
-  return join12(root, ".sterling", "transient", "dispatch-state");
+  return join13(root, ".sterling", "transient", "dispatch-state");
 }
 var LIVE_PREFIX = "live-";
 var DONE_PREFIX = "done-";
@@ -13905,8 +13917,8 @@ function writeRecordAtomic(root, fileName, record) {
       `dispatch-state write refused \u2014 ${dir} is ${containment.reason === "symlink" ? "a SYMLINK" : "not a real directory"}, never mkdir'd or written through`
     );
   }
-  const file = join12(dir, fileName);
-  const tmp = join12(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
+  const file = join13(dir, fileName);
+  const tmp = join13(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
   writeFileSync4(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
   renameSync3(tmp, file);
 }
@@ -13920,7 +13932,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync4(join12(dir, to));
+    lstatSync4(join13(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;
@@ -13930,7 +13942,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync3(join12(dir, from), join12(dir, to));
+    renameSync3(join13(dir, from), join13(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -13948,7 +13960,7 @@ function listStateDir(root) {
   }
 }
 function validateNamedRecord(dir, name, parsed) {
-  const classified = classifyRecordFile(join12(dir, name));
+  const classified = classifyRecordFile(join13(dir, name));
   if (!classified.exists || classified.poisoned) return classified;
   const record = classified.record;
   if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
@@ -14026,7 +14038,7 @@ function scanLiveState(root, { repair }) {
       done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
       continue;
     }
-    const classified = classifyRecordFile(join12(dir, name));
+    const classified = classifyRecordFile(join13(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
@@ -14238,7 +14250,7 @@ function hazardLaneMode(input2, root) {
     if (!input2 || typeof input2.agent_id !== "string" || !input2.agent_id) return "whole";
     const type = laneAgentType(input2, root);
     if (!type || !PLAIN_AGENT_NAME.test(type)) return "whole";
-    const tools = frontmatterTools(readFileSync9(join13(root, ".claude", "agents", `${type}.md`), "utf8"));
+    const tools = frontmatterTools(readFileSync9(join14(root, ".claude", "agents", `${type}.md`), "utf8"));
     if (!tools) return "whole";
     return tools.every((t) => READ_ONLY_TOOLS.has(t)) ? "pointer" : "whole";
   } catch {
@@ -14248,7 +14260,7 @@ function hazardLaneMode(input2, root) {
 
 // scripts/hooks/lib/plan-lock.mjs
 import { closeSync as closeSync4, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync7, openSync as openSync4, readSync as readSync2, renameSync as renameSync4, unlinkSync, writeFileSync as writeFileSync5 } from "node:fs";
-import { join as join14 } from "node:path";
+import { join as join15 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
 var MARKER_MAX_BYTES = 64 * 1024;
@@ -14258,7 +14270,7 @@ function isAbsolutePlanPath(p) {
   return typeof p === "string" && (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p));
 }
 function sterlingDirOf(cwd) {
-  return join14(cwd, ".sterling");
+  return join15(cwd, ".sterling");
 }
 function sanitizeForContext(value, max) {
   if (typeof value !== "string") return "";
@@ -14338,7 +14350,7 @@ function invalidReason(l) {
   return null;
 }
 function readLock(sterlingDir) {
-  const read = readStoreFileBounded(join14(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  const read = readStoreFileBounded(join15(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
   if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
   const raw = read.text;
   let parsed;
@@ -14434,7 +14446,7 @@ function stageBrief({ store, cwd, prompts, guardId, hazardMode, leadingChrome = 
   const rels = [...new Set(candidates.map((c) => repoRel(c, cwd)).filter(Boolean))].filter(
     (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/")
   );
-  const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !isForeignTree(r, cwd)) : [];
+  const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter(ownsHere(cwd)) : [];
   const hazards = rels.length ? store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 }) : [];
   const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }).map((r) => withInboundSupersedes(store, r)) : [];
   const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));

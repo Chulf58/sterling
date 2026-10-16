@@ -11462,8 +11462,8 @@ var init_dist2 = __esm({
 
 // scripts/direct-merge.mjs
 import { spawnSync as spawnSync8 } from "node:child_process";
-import { existsSync as existsSync9, readFileSync as readFileSync12, realpathSync as realpathSync5 } from "node:fs";
-import { join as join18, resolve as resolve8 } from "node:path";
+import { existsSync as existsSync10, readFileSync as readFileSync13, realpathSync as realpathSync5 } from "node:fs";
+import { join as join19, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/project.mjs
@@ -12403,27 +12403,181 @@ var DOMAIN_MAP_PENDING_REL = join10(".sterling", "domain-map-pending");
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash2, randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync8, writeFileSync as writeFileSync2, mkdirSync as mkdirSync5, rmSync as rmSync4, statSync as statSync4, renameSync } from "node:fs";
+import { readFileSync as readFileSync10, writeFileSync as writeFileSync2, mkdirSync as mkdirSync5, rmSync as rmSync4, statSync as statSync4, renameSync } from "node:fs";
 init_dist2();
-import { join as join12, dirname as dirname8 } from "node:path";
+import { join as join15, dirname as dirname9 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs
 init_dist();
-function isForeignTree(record, root) {
+import { join as join13 } from "node:path";
+
+// scripts/hooks/lib/common.mjs
+import { readFileSync as readFileSync9, existsSync as existsSync7 } from "node:fs";
+import { dirname as dirname7, join as join12, resolve as resolve6 } from "node:path";
+init_dist();
+init_dist2();
+
+// scripts/hooks/lib/broker-client.mjs
+init_dist();
+
+// scripts/hooks/lib/store-backend.mjs
+import { existsSync as existsSync6, readFileSync as readFileSync8 } from "node:fs";
+import { join as join11 } from "node:path";
+var CONFIG_REL3 = join11(".sterling", "config.json");
+var STORE_DB_REL = join11(".sterling", "sterling.db");
+function isSterlingRoot(dir) {
+  return typeof dir === "string" && (existsSync6(join11(dir, CONFIG_REL3)) || existsSync6(join11(dir, STORE_DB_REL)));
+}
+
+// scripts/hooks/lib/common.mjs
+function projectRoot(from) {
+  if (!from) return null;
+  let dir = resolve6(String(from));
+  for (; ; ) {
+    if (isSterlingRoot(dir)) return dir;
+    const parent = dirname7(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+function makeExitHelpers({ stdout, stderr, exit }) {
+  let stdoutWritten = false;
+  let pending = 0;
+  let exitCode = 0;
+  let finished = false;
+  const note = (message) => {
+    try {
+      stderr.write(message);
+    } catch {
+    }
+  };
+  function finish() {
+    if (finished) return;
+    finished = true;
+    exit(exitCode);
+  }
+  function exitAfterWrite2(payload, code, { onWritten } = {}) {
+    const text = typeof payload === "string" ? payload : String(payload ?? "");
+    if (!text) {
+      if (pending > 0) return;
+      exitCode = code;
+      finish();
+      return;
+    }
+    if (stdoutWritten) {
+      note(
+        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
+      );
+      if (pending === 0) finish();
+      return;
+    }
+    stdoutWritten = true;
+    exitCode = code;
+    pending += 1;
+    let settled = false;
+    const settle = (err) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (typeof stdout.removeListener === "function") {
+          try {
+            stdout.removeListener("error", onError);
+          } catch {
+          }
+        }
+        if (err) {
+          if (exitCode === 0) exitCode = 1;
+          note(
+            `hook stdout: the payload could NOT be written (${err && err.message || err}) \u2014 exiting ${exitCode}; the envelope was not delivered and any delivery bookkeeping was skipped, so its records stay eligible.`
+          );
+        } else if (typeof onWritten === "function") {
+          try {
+            onWritten();
+          } catch (e) {
+            note(
+              `hook stdout: post-write bookkeeping threw (${e && e.message || e}) \u2014 the payload above STANDS and the exit code is unchanged.`
+            );
+          }
+        }
+      } finally {
+        pending -= 1;
+        finish();
+      }
+    };
+    const onError = (err) => settle(err || new Error("stdout error"));
+    if (typeof stdout.once === "function") stdout.once("error", onError);
+    try {
+      stdout.write(text, (err) => settle(err || null));
+    } catch (e) {
+      settle(e || new Error("stdout write threw"));
+    }
+  }
+  function allow2() {
+    return exitAfterWrite2("", 0);
+  }
+  function deny2(message) {
+    if (pending > 0) {
+      note(
+        `hook stdout: a BLOCKING denial was issued while a stdout write was still in flight \u2014 that payload is TRUNCATED by design (a block is never lowered, and stdout is ignored on exit 2).
+`
+      );
+    }
+    note(message);
+    finished = true;
+    exit(2);
+  }
+  function warnNonBlocking2(message) {
+    if (pending > 0) {
+      note(
+        `${message}
+hook stdout: the above is DISCLOSED ONLY \u2014 a stdout payload is already in flight and its own exit (${exitCode}) carries, because a delivered envelope outranks an advisory failure.
+`
+      );
+      return;
+    }
+    note(message);
+    finished = true;
+    exit(1);
+  }
+  return { exitAfterWrite: exitAfterWrite2, allow: allow2, deny: deny2, warnNonBlocking: warnNonBlocking2 };
+}
+var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
+  stdout: process.stdout,
+  stderr: process.stderr,
+  exit: (code) => process.exit(code)
+});
+function loadConfig(cwd) {
+  const p = join12(cwd, ".sterling", "config.json");
+  return existsSync7(p) ? JSON.parse(readFileSync9(p, "utf8")) : null;
+}
+
+// scripts/hooks/lib/working-tree.mjs
+function isForeignTree(record, root, workingTrees) {
   const wt = record?.working_tree;
   if (!wt) return false;
-  return !(root && sameLocationAnyHost(String(wt), root));
+  if (!root) return true;
+  const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : void 0;
+  const mapped = typeof raw === "string" && raw ? raw : void 0;
+  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join13(root, mapped);
+  return !sameLocationAnyHost(location, root);
+}
+function workingTreesAt(root) {
+  const trees = root ? loadConfig(root)?.working_trees : void 0;
+  return trees && typeof trees === "object" ? trees : {};
+}
+function ownsHere(root, workingTrees = workingTreesAt(root)) {
+  return (record) => !isForeignTree(record, root, workingTrees);
 }
 
 // scripts/hooks/lib/session-events.mjs
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { dirname as dirname7, join as join11 } from "node:path";
-var SESSION_EVENTS_REL = join11(".sterling", "transient", "session-events.json");
+import { dirname as dirname8, join as join14 } from "node:path";
+var SESSION_EVENTS_REL = join14(".sterling", "transient", "session-events.json");
 
 // scripts/hooks/lib/settlement.mjs
 function hashFile(root, rel) {
   try {
-    return createHash2("sha256").update(readFileSync8(join12(root, rel))).digest("hex");
+    return createHash2("sha256").update(readFileSync10(join15(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -12437,7 +12591,7 @@ function contentChangedAgainstBaseline(root, rel, baselines) {
 }
 function loadGeneratedProjections(root) {
   try {
-    const raw = readFileSync8(join12(root, ".sterling", "config.json"), "utf8");
+    const raw = readFileSync10(join15(root, ".sterling", "config.json"), "utf8");
     const parsed = JSON.parse(raw);
     const list = parsed?.generated_projections;
     return new Set(Array.isArray(list) ? list : []);
@@ -12469,8 +12623,9 @@ function mintSettlementReconcile(store, root, candidatePaths, now = (/* @__PURE_
   const paths = [...new Set((candidatePaths ?? []).filter(Boolean))].filter((rel) => !exempt.has(rel));
   if (!paths.length) return [];
   const byArticle = /* @__PURE__ */ new Map();
+  const ownedHere = ownsHere(root);
   for (const rel of paths) {
-    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, root));
+    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter(ownedHere);
     for (const article of owners) {
       if (!byArticle.has(article.id)) byArticle.set(article.id, { article, freshPaths: /* @__PURE__ */ new Set() });
       byArticle.get(article.id).freshPaths.add(rel);
@@ -12604,146 +12759,11 @@ function isVersionOnlyBetweenCommits(root, baseSha, tipSha, path) {
   return isVersionOnlyText(path, showBlobText(root, baseSha, path), showBlobText(root, tipSha, path));
 }
 
-// scripts/hooks/lib/common.mjs
-import { dirname as dirname9, join as join14, resolve as resolve6 } from "node:path";
-init_dist();
-init_dist2();
-
-// scripts/hooks/lib/broker-client.mjs
-init_dist();
-
-// scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync6, readFileSync as readFileSync9 } from "node:fs";
-import { join as join13 } from "node:path";
-var CONFIG_REL3 = join13(".sterling", "config.json");
-var STORE_DB_REL = join13(".sterling", "sterling.db");
-function isSterlingRoot(dir) {
-  return typeof dir === "string" && (existsSync6(join13(dir, CONFIG_REL3)) || existsSync6(join13(dir, STORE_DB_REL)));
-}
-
-// scripts/hooks/lib/common.mjs
-function projectRoot(from) {
-  if (!from) return null;
-  let dir = resolve6(String(from));
-  for (; ; ) {
-    if (isSterlingRoot(dir)) return dir;
-    const parent = dirname9(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
-}
-function makeExitHelpers({ stdout, stderr, exit }) {
-  let stdoutWritten = false;
-  let pending = 0;
-  let exitCode = 0;
-  let finished = false;
-  const note = (message) => {
-    try {
-      stderr.write(message);
-    } catch {
-    }
-  };
-  function finish() {
-    if (finished) return;
-    finished = true;
-    exit(exitCode);
-  }
-  function exitAfterWrite2(payload, code, { onWritten } = {}) {
-    const text = typeof payload === "string" ? payload : String(payload ?? "");
-    if (!text) {
-      if (pending > 0) return;
-      exitCode = code;
-      finish();
-      return;
-    }
-    if (stdoutWritten) {
-      note(
-        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
-      );
-      if (pending === 0) finish();
-      return;
-    }
-    stdoutWritten = true;
-    exitCode = code;
-    pending += 1;
-    let settled = false;
-    const settle = (err) => {
-      if (settled) return;
-      settled = true;
-      try {
-        if (typeof stdout.removeListener === "function") {
-          try {
-            stdout.removeListener("error", onError);
-          } catch {
-          }
-        }
-        if (err) {
-          if (exitCode === 0) exitCode = 1;
-          note(
-            `hook stdout: the payload could NOT be written (${err && err.message || err}) \u2014 exiting ${exitCode}; the envelope was not delivered and any delivery bookkeeping was skipped, so its records stay eligible.`
-          );
-        } else if (typeof onWritten === "function") {
-          try {
-            onWritten();
-          } catch (e) {
-            note(
-              `hook stdout: post-write bookkeeping threw (${e && e.message || e}) \u2014 the payload above STANDS and the exit code is unchanged.`
-            );
-          }
-        }
-      } finally {
-        pending -= 1;
-        finish();
-      }
-    };
-    const onError = (err) => settle(err || new Error("stdout error"));
-    if (typeof stdout.once === "function") stdout.once("error", onError);
-    try {
-      stdout.write(text, (err) => settle(err || null));
-    } catch (e) {
-      settle(e || new Error("stdout write threw"));
-    }
-  }
-  function allow2() {
-    return exitAfterWrite2("", 0);
-  }
-  function deny2(message) {
-    if (pending > 0) {
-      note(
-        `hook stdout: a BLOCKING denial was issued while a stdout write was still in flight \u2014 that payload is TRUNCATED by design (a block is never lowered, and stdout is ignored on exit 2).
-`
-      );
-    }
-    note(message);
-    finished = true;
-    exit(2);
-  }
-  function warnNonBlocking2(message) {
-    if (pending > 0) {
-      note(
-        `${message}
-hook stdout: the above is DISCLOSED ONLY \u2014 a stdout payload is already in flight and its own exit (${exitCode}) carries, because a delivered envelope outranks an advisory failure.
-`
-      );
-      return;
-    }
-    note(message);
-    finished = true;
-    exit(1);
-  }
-  return { exitAfterWrite: exitAfterWrite2, allow: allow2, deny: deny2, warnNonBlocking: warnNonBlocking2 };
-}
-var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
-  stdout: process.stdout,
-  stderr: process.stderr,
-  exit: (code) => process.exit(code)
-});
-
 // scripts/lib/opencode-release.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { mkdtempSync as mkdtempSync2, rmSync as rmSync5 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as join15, resolve as resolve7 } from "node:path";
+import { join as join16, resolve as resolve7 } from "node:path";
 var RELEASE_PACKAGE = "@chulf58/sterling";
 var RELEASE_BRANCH = "opencode-release";
 var BUILD_CLASS_SCRIPTS = ["postinstall", "build", "preinstall", "install", "prepack", "prepare"];
@@ -12804,9 +12824,9 @@ function must(r, what) {
   return r.stdout.trim();
 }
 function buildReleaseTree(target2, headSha, pkgText) {
-  const tmp = mkdtempSync2(join15(tmpdir(), "sterling-release-index-"));
+  const tmp = mkdtempSync2(join16(tmpdir(), "sterling-release-index-"));
   try {
-    const env = { GIT_INDEX_FILE: join15(tmp, "index") };
+    const env = { GIT_INDEX_FILE: join16(tmp, "index") };
     must(git2(target2, ["read-tree", headSha], { env }), `git read-tree ${headSha}`);
     const blob = must(git2(target2, ["hash-object", "-w", "--stdin"], { input: releasePackageJson(pkgText) }), "git hash-object");
     must(git2(target2, ["update-index", "--cacheinfo", `100644,${blob},package.json`], { env }), "git update-index");
@@ -12816,7 +12836,7 @@ function buildReleaseTree(target2, headSha, pkgText) {
   }
 }
 function rerunCommand(target2, ref) {
-  return `node ${quote(join15(resolve7(target2), "scripts", "opencode-release.mjs"))} --target ${quote(resolve7(target2))} --ref ${quote(ref)}`;
+  return `node ${quote(join16(resolve7(target2), "scripts", "opencode-release.mjs"))} --target ${quote(resolve7(target2))} --ref ${quote(ref)}`;
 }
 function releaseVersion({ target: target2, into: into2, headSha, version, pkgText, remoteGit, log, prefix }) {
   const tag = `v${version}`;
@@ -12935,8 +12955,8 @@ init_dist2();
 
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync7, linkSync as linkSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync3, readFileSync as readFileSync10, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { delimiter, dirname as dirname10, join as join16 } from "node:path";
+import { existsSync as existsSync8, linkSync as linkSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync3, readFileSync as readFileSync11, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { delimiter, dirname as dirname10, join as join17 } from "node:path";
 var PR_ATTRIBUTION = "\u{1F916} Generated with [Claude Code](https://claude.com/claude-code)";
 function gh(cwd, args) {
   return spawnSync7("gh", args, { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
@@ -12947,8 +12967,8 @@ function resolveGhPath() {
   for (const dir of String(process.env.PATH ?? "").split(delimiter)) {
     if (!dir) continue;
     for (const name of names) {
-      const candidate = join16(dir, name);
-      if (existsSync7(candidate)) return candidate;
+      const candidate = join17(dir, name);
+      if (existsSync8(candidate)) return candidate;
     }
   }
   return null;
@@ -13250,8 +13270,8 @@ function shipAsPr({ cwd, repo, branch: branch2, base: base2, mergeBase: mergeBas
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
 var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
-var prLoopPath = (root) => join16(root, PR_LOOP_REL);
-var prLoopFile = (root, prNumber) => join16(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
+var prLoopPath = (root) => join17(root, PR_LOOP_REL);
+var prLoopFile = (root, prNumber) => join17(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
 function writeAtomic(file, value) {
   mkdirSync6(dirname10(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
@@ -13262,7 +13282,7 @@ function armPrLoop(root, { pr_url, pr_number, repo, head_sha, now = (/* @__PURE_
   const state = { pr_url, pr_number, repo, head_sha, armed_at: now, status: "owed" };
   writeAtomic(prLoopFile(root, pr_number), state);
   const legacy = prLoopPath(root);
-  if (existsSync7(legacy)) {
+  if (existsSync8(legacy)) {
     let old = null;
     try {
       old = parsePrLoopFile(legacy, PR_LOOP_REL);
@@ -13306,7 +13326,7 @@ function parsePrLoopFile(file, rel) {
 function parsePrLoopFileOrThrow(file, rel) {
   let s2;
   try {
-    s2 = JSON.parse(readFileSync10(file, "utf8"));
+    s2 = JSON.parse(readFileSync11(file, "utf8"));
   } catch (e) {
     throw new Error(`${rel} is not valid JSON (${e.message})`);
   }
@@ -13323,8 +13343,8 @@ function parsePrLoopFileOrThrow(file, rel) {
 
 // scripts/lib/attestation-inspection.mjs
 init_dist();
-import { existsSync as existsSync8, readFileSync as readFileSync11 } from "node:fs";
-import { join as join17 } from "node:path";
+import { existsSync as existsSync9, readFileSync as readFileSync12 } from "node:fs";
+import { join as join18 } from "node:path";
 import { DatabaseSync as DatabaseSync6 } from "node:sqlite";
 var EXAMPLE_CAP = 5;
 var EXAMPLE_PRIORITY = ["rejected", "needs_rework", "uncovered", "approved"];
@@ -13340,9 +13360,9 @@ function parseNulPathList(stdout) {
 function readAttestationGlobs(projectRoot2) {
   const dropped = { invalid_container: false, non_string: 0, empty: 0, duplicates: [] };
   try {
-    const configPath = join17(projectRoot2, ".sterling", "config.json");
-    if (!existsSync8(configPath)) return { globs: [], dropped };
-    const raw = JSON.parse(readFileSync11(configPath, "utf8"));
+    const configPath = join18(projectRoot2, ".sterling", "config.json");
+    if (!existsSync9(configPath)) return { globs: [], dropped };
+    const raw = JSON.parse(readFileSync12(configPath, "utf8"));
     const declared = raw && typeof raw === "object" ? raw.attestation_path_globs : void 0;
     if (declared !== void 0 && !Array.isArray(declared)) {
       dropped.invalid_container = true;
@@ -13411,8 +13431,8 @@ function inspectAttestations({ projectRoot: projectRoot2, touchedPaths, declared
       return { available: false, reason: `could not read attestations from ${label}: ${e?.message ?? e}` };
     }
   } else {
-    const dbPath = join17(projectRoot2, ".sterling", "sterling.db");
-    if (!existsSync8(dbPath)) {
+    const dbPath = join18(projectRoot2, ".sterling", "sterling.db");
+    if (!existsSync9(dbPath)) {
       return { available: false, reason: `no Sterling store at ${dbPath} \u2014 nothing to compare against` };
     }
     try {
@@ -13557,19 +13577,19 @@ function fail2(message, code = 1) {
 }
 stage("git-repo");
 if (!isGitRepo(target)) fail2(`direct-merge: not a git repository: '${target}'`);
-if (linkedWorktree && !existsSync9(join18(storeRoot, CONFIG_REL4))) {
+if (linkedWorktree && !existsSync10(join19(storeRoot, CONFIG_REL4))) {
   fail2(
-    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its project mode cannot be read \u2014 there is no ${CONFIG_REL4} at '${join18(linkedWorktree.worktree, CONFIG_REL4)}' or at the main checkout '${join18(linkedWorktree.mainRoot, CONFIG_REL4)}'. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+    `direct-merge: '${linkedWorktree.worktree}' is a linked git worktree and its project mode cannot be read \u2014 there is no ${CONFIG_REL4} at '${join19(linkedWorktree.worktree, CONFIG_REL4)}' or at the main checkout '${join19(linkedWorktree.mainRoot, CONFIG_REL4)}'. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
 Run it from the main checkout, or restore its ${CONFIG_REL4}.`,
     2
   );
 }
-if (!linkedWorktree && !existsSync9(join18(target, CONFIG_REL4))) {
+if (!linkedWorktree && !existsSync10(join19(target, CONFIG_REL4))) {
   const dirs = spawnSync8("git", ["rev-parse", "--git-dir", "--git-common-dir"], { cwd: target, encoding: "utf8", timeout: 6e4 });
   const [gitDir, commonDir] = dirs.status === 0 ? dirs.stdout.split("\n").map((l) => l.trim()) : [];
   if (gitDir && commonDir && realpathSync5(resolve8(target, gitDir)) !== realpathSync5(resolve8(target, commonDir))) {
     fail2(
-      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync5(resolve8(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join18(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
+      `direct-merge: '${target}' is a linked git worktree whose main repository ('${realpathSync5(resolve8(target, commonDir))}') has no main checkout to read ${CONFIG_REL4} from, and '${join19(target, CONFIG_REL4)}' does not exist in the worktree. A linked worktree is never defaulted to hobby \u2014 refusing; nothing was run.
 Run it from a checkout of the project.`,
       2
     );
@@ -13890,7 +13910,7 @@ direct-merge: RECONCILE DEBT DISCLOSED \u2014 ${headline} cover files this branc
 stage("version");
 var GENERATED_ONLY = loadGeneratedProjections(storeRoot);
 var pluginManifestRel = ".claude-plugin/plugin.json";
-if (existsSync9(join18(target, pluginManifestRel))) {
+if (existsSync10(join19(target, pluginManifestRel))) {
   const substantive = [...changed].filter((f) => !GENERATED_ONLY.has(f));
   if (substantive.length > 0 && !process.argv.includes("--allow-same-version")) {
     const readVersion = (raw, label) => {
@@ -13900,9 +13920,9 @@ if (existsSync9(join18(target, pluginManifestRel))) {
         fail2(`direct-merge: could not parse ${label} while checking the version bump`);
       }
     };
-    const pkgPath = join18(target, "package.json");
-    const branchPlugin = readVersion(readFileSync12(join18(target, pluginManifestRel), "utf8"), pluginManifestRel);
-    const branchPkg = existsSync9(pkgPath) ? readVersion(readFileSync12(pkgPath, "utf8"), "package.json") : null;
+    const pkgPath = join19(target, "package.json");
+    const branchPlugin = readVersion(readFileSync13(join19(target, pluginManifestRel), "utf8"), pluginManifestRel);
+    const branchPkg = existsSync10(pkgPath) ? readVersion(readFileSync13(pkgPath, "utf8"), "package.json") : null;
     const baseShow = spawnSync8("git", ["show", `${intoTip}:${pluginManifestRel}`], { cwd: target, encoding: "utf8", timeout: 3e4 });
     const basePlugin = baseShow.status === 0 ? readVersion(baseShow.stdout, `${into}:${pluginManifestRel}`) : null;
     if (branchPkg !== null && branchPlugin !== branchPkg) {
@@ -13920,8 +13940,8 @@ The version is the clone-currency signal consumers read: bump BOTH ${pluginManif
   }
 }
 stage("battery");
-var pkgJsonPath = join18(target, "package.json");
-var hasCheck = existsSync9(pkgJsonPath) && !!JSON.parse(readFileSync12(pkgJsonPath, "utf8")).scripts?.check;
+var pkgJsonPath = join19(target, "package.json");
+var hasCheck = existsSync10(pkgJsonPath) && !!JSON.parse(readFileSync13(pkgJsonPath, "utf8")).scripts?.check;
 if (hasCheck) {
   console.error("direct-merge: running the consistency-check battery (npm run check)\u2026");
   const check = defaultExec("npm", ["run", "check"], { cwd: target, timeout: 3e5 });
@@ -13975,8 +13995,8 @@ try {
 merged.attestation_disclosure = attestationDisclosure;
 try {
   if (changed.size > 0) {
-    const dbPath = join18(storeRoot, ".sterling", "sterling.db");
-    if (!existsSync9(dbPath)) throw new Error(`no Sterling store at ${dbPath}`);
+    const dbPath = join19(storeRoot, ".sterling", "sterling.db");
+    if (!existsSync10(dbPath)) throw new Error(`no Sterling store at ${dbPath}`);
     const nudgeStore = new SterlingStore(dbPath);
     let items;
     try {
@@ -14015,8 +14035,8 @@ try {
   );
   emit({ ...merged, branches_swept: null, sweep_failed: true }, 1);
 }
-var bundleChecker = join18(target, "scripts", "check-bundles-fresh.mjs");
-if (existsSync9(bundleChecker)) {
+var bundleChecker = join19(target, "scripts", "check-bundles-fresh.mjs");
+if (existsSync10(bundleChecker)) {
   console.error("direct-merge: rebuilding packages so the post-merge bundle check compares against MERGED source\u2026");
   const rebuilt = defaultExec("npm", ["run", "build"], { cwd: target, timeout: 6e5 });
   if (rebuilt.status !== 0) {
@@ -14058,7 +14078,7 @@ try {
     for (const t of post.query({ types: ["todo"], cap: 1e3 })) {
       if (t.source !== "system" || t.system_reason !== "file_parked") continue;
       const paths = t.file_keys ?? [];
-      if (parkedItemResolved(paths, deletedSet, (k) => existsSync9(join18(target, k)))) {
+      if (parkedItemResolved(paths, deletedSet, (k) => existsSync10(join19(target, k)))) {
         post.remove(t.id, (/* @__PURE__ */ new Date()).toISOString());
         parkedClosed += 1;
       }

@@ -5819,6 +5819,39 @@ var ProjectRegistry = class {
   updateStackTags(repoPath2, stackTags) {
     return this.db.prepare("UPDATE projects SET stack_tags = ? WHERE repo_path = ?").run(JSON.stringify(stackTags), repoPath2).changes > 0;
   }
+  /** Rename (config.json project_name changed, or /sterling:projects --rename):
+   *  replace the name of an EXISTING row and nothing else, only when no other row
+   *  carries the name. The check and the UPDATE run in one BEGIN IMMEDIATE
+   *  transaction, so two projects renaming to the same name at once cannot both
+   *  win: the second sees the first's row and gets 'conflict'. `selfPaths` are
+   *  the repo_paths that count as this project (rows that spell one folder
+   *  differently); a row there never conflicts. Never creates a row.
+   *  'unchanged' = the row already has the name; 'missing' = no row at repoPath. */
+  renameIfUnique(repoPath2, name, selfPaths = [repoPath2]) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const own = this.db.prepare("SELECT name FROM projects WHERE repo_path = ?").get(repoPath2);
+      let result;
+      if (!own)
+        result = { status: "missing" };
+      else if (own.name === name)
+        result = { status: "unchanged" };
+      else {
+        const taken = this.db.prepare("SELECT repo_path FROM projects WHERE name = ?").all(name).find((r) => !selfPaths.includes(r.repo_path));
+        if (taken)
+          result = { status: "conflict", conflict_path: taken.repo_path };
+        else {
+          this.db.prepare("UPDATE projects SET name = ? WHERE repo_path = ?").run(name, repoPath2);
+          result = { status: "renamed" };
+        }
+      }
+      this.db.exec("COMMIT");
+      return result;
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
   /** All registered projects, name-ordered. Stale-at-read (existence of
    *  repo_path) is the caller's lazy check — the registry stores no liveness. */
   list() {

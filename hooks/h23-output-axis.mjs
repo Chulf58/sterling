@@ -12431,17 +12431,29 @@ function repoRel(toolPath, cwd) {
 
 // scripts/hooks/lib/subject-fan.mjs
 import { existsSync as existsSync6 } from "node:fs";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync7, writeFileSync as writeFileSync3, mkdirSync as mkdirSync5, existsSync as existsSync5, renameSync as renameSync2, openSync as openSync3, closeSync as closeSync3 } from "node:fs";
-import { join as join10, dirname as dirname6 } from "node:path";
+import { join as join11, dirname as dirname6 } from "node:path";
 
 // scripts/hooks/lib/working-tree.mjs
-function isForeignTree(record, root) {
+import { join as join10 } from "node:path";
+function isForeignTree(record, root, workingTrees) {
   const wt = record?.working_tree;
   if (!wt) return false;
-  return !(root && sameLocationAnyHost(String(wt), root));
+  if (!root) return true;
+  const raw = workingTrees && Object.hasOwn(workingTrees, wt) ? workingTrees[wt] : void 0;
+  const mapped = typeof raw === "string" && raw ? raw : void 0;
+  const location = mapped === void 0 ? String(wt) : isAbsolutePathAnyHost(mapped) ? mapped : join10(root, mapped);
+  return !sameLocationAnyHost(location, root);
+}
+function workingTreesAt(root) {
+  const trees = root ? loadConfig(root)?.working_trees : void 0;
+  return trees && typeof trees === "object" ? trees : {};
+}
+function ownsHere(root, workingTrees = workingTreesAt(root)) {
+  return (record) => !isForeignTree(record, root, workingTrees);
 }
 
 // scripts/hooks/lib/dispatch-prompt.mjs
@@ -12455,7 +12467,7 @@ function deliveryPolicyNotice(policy) {
 
 // scripts/hooks/lib/delivery.mjs
 function deliveryDir(cwd) {
-  return join10(cwd, ".sterling", "transient", "delivery");
+  return join11(cwd, ".sterling", "transient", "delivery");
 }
 function sanitizeSessionId(sessionId) {
   let encoded;
@@ -12478,11 +12490,11 @@ function deliverySessionDir(cwd, sessionId) {
     process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
     return null;
   }
-  return join10(deliveryDir(cwd), component);
+  return join11(deliveryDir(cwd), component);
 }
 function guardPath(cwd, agentId, sessionId) {
   const dir = deliverySessionDir(cwd, sessionId);
-  return dir ? join10(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
+  return dir ? join11(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -12540,7 +12552,7 @@ var tag = (records, source) => records.map((r) => ({ ...r, source_store: source 
 var errorText2 = (e) => String(e && e.message || e);
 function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
   if (storeBackend(cwd) === "routed") return openRoutedSubjectFan(cwd);
-  const projectPath = join11(cwd, ".sterling", "sterling.db");
+  const projectPath = join12(cwd, ".sterling", "sterling.db");
   if (!existsSync6(projectPath)) return null;
   let mounts = [];
   let configError = null;
@@ -12713,23 +12725,23 @@ function warnFanDegraded(fan, who) {
 
 // scripts/hooks/lib/advisory-counter.mjs
 import { appendFileSync, existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync8 } from "node:fs";
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 function recordAdvisoryFire(root, hook, sessionId) {
   try {
     if (!root || !hook) return;
-    if (!existsSync7(join12(root, ".sterling"))) return;
-    const dir = join12(root, ".sterling", "transient");
+    if (!existsSync7(join13(root, ".sterling"))) return;
+    const dir = join13(root, ".sterling", "transient");
     mkdirSync6(dir, { recursive: true });
     let session = typeof sessionId === "string" && sessionId ? sessionId : null;
     if (!session) {
       try {
-        const parsed = JSON.parse(readFileSync8(join12(dir, "session.json"), "utf8"));
+        const parsed = JSON.parse(readFileSync8(join13(dir, "session.json"), "utf8"));
         session = typeof parsed?.session_id === "string" ? parsed.session_id : null;
       } catch {
       }
     }
     appendFileSync(
-      join12(dir, "advisory-fires.ndjson"),
+      join13(dir, "advisory-fires.ndjson"),
       JSON.stringify({ hook, session, at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n"
     );
   } catch {
@@ -12776,7 +12788,7 @@ function outputAxisReadGated(store, rel, root) {
   if (rel === ".git" || rel?.startsWith(".git/")) return true;
   if (rel?.startsWith(".sterling/")) return true;
   if (rel) {
-    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !isForeignTree(r, root));
+    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter(ownsHere(root));
     if (owners.length) return true;
   }
   return false;
@@ -12806,7 +12818,7 @@ function composeOutputAxis(store, { content, guardFor }) {
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync7, readFileSync as readFileSync9, writeFileSync as writeFileSync4, rmSync as rmSync4, rmdirSync, renameSync as renameSync3, existsSync as existsSync8, lstatSync as lstatSync4, readdirSync as readdirSync2, realpathSync as realpathSync4, chmodSync } from "node:fs";
-import { join as join13, resolve as resolve4, dirname as dirname7, isAbsolute } from "node:path";
+import { join as join14, resolve as resolve4, dirname as dirname7, isAbsolute } from "node:path";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
 import { randomBytes, createHash as createHash3 } from "node:crypto";
 
@@ -12924,7 +12936,7 @@ var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function dispatchStateDir(root) {
-  return join13(root, ".sterling", "transient", "dispatch-state");
+  return join14(root, ".sterling", "transient", "dispatch-state");
 }
 var LIVE_PREFIX = "live-";
 var DONE_PREFIX = "done-";
@@ -13068,7 +13080,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync4(join13(dir, to));
+    lstatSync4(join14(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;
@@ -13078,7 +13090,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync3(join13(dir, from), join13(dir, to));
+    renameSync3(join14(dir, from), join14(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -13096,7 +13108,7 @@ function listStateDir(root) {
   }
 }
 function validateNamedRecord(dir, name, parsed) {
-  const classified = classifyRecordFile(join13(dir, name));
+  const classified = classifyRecordFile(join14(dir, name));
   if (!classified.exists || classified.poisoned) return classified;
   const record = classified.record;
   if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
@@ -13171,7 +13183,7 @@ function scanLiveState(root, { repair }) {
       done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
       continue;
     }
-    const classified = classifyRecordFile(join13(dir, name));
+    const classified = classifyRecordFile(join14(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
