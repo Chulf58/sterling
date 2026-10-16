@@ -77,3 +77,19 @@ test('todoCards: a receiver moved with list-projects --move shows its real statu
     }
   });
 });
+
+test('todoCards: a receiver renamed in the registry shows its current name; the stored to_name is unchanged (GitHub issue #120)', () => {
+  withSandbox(({ base, beta, registry, trackerId, transfer, remoteId }) => {
+    const a = new SterlingStore(join(base, 'alpha.db'));
+    try {
+      const handoff = { role: 'sent', transfer_id: transfer, to_root: beta, to_name: 'beta', to_item_id: remoteId };
+      create(a, { id: trackerId, text: "Handed to project 'beta': Do it there", handoff });
+      assert.equal(registry.renameIfUnique(beta, 'Beta Renamed').status, 'renamed');
+      const cards = new Map(todoCards(a).map((c) => [c.id, c]));
+      assert.equal(cards.get(trackerId)?.detail, 'delegated to Beta Renamed: open in Beta Renamed');
+      assert.deepEqual((a.get(trackerId) as unknown as { handoff: unknown }).handoff, handoff, 'the stored tracker is never rewritten');
+    } finally {
+      a.close();
+    }
+  });
+});

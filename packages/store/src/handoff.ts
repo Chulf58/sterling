@@ -32,6 +32,8 @@ export interface HandoffStatus {
   note?: string;
   /** the milestone the hand-off named (GitHub issue #108), on every state */
   milestone?: string;
+  /** the receiver's CURRENT registry name, present only when the registry located it under a name other than the tracker's stored to_name (GitHub issue #120); a caller labelling the receiver prefers it to the stored one */
+  to_name?: string;
   /** what the receiver said it did when it closed the item; only on done, and only from a valid sidecar for this hand-off */
   evidence?: HandoffEvidence;
 }
@@ -328,7 +330,12 @@ export function resolveSentHandoffs(
   // The registry is read once, lazily, inside the budget, and only when a
   // tracker needs a receiver located.
   let snapshot: RegistrySnapshot | { failed: string } | undefined;
-  const locate = (h: SentHandoff, createdAt: string | undefined): { root: string } | { reason: string } => {
+  // The receiver's CURRENT registry name, per tracker the registry located under a new name:
+  // the stored to_name is a label from hand-off time and is never rewritten,
+  // so every text built here names the receiver by this instead (GitHub issue
+  // #120). A tracker the registry did not locate keeps its stored name.
+  const currentNames = new Map<string, string>();
+  const locate = (h: SentHandoff, createdAt: string | undefined): { root: string; name?: string } | { reason: string } => {
     const regPath = opts.registryPath;
     if (regPath === undefined) return { root: h.to_root };
     if (snapshot === undefined) {
@@ -345,7 +352,7 @@ export function resolveSentHandoffs(
     }
     if ('failed' in snapshot) return { reason: snapshot.failed };
     const found = resolveReceiverLocation(h, createdAt, snapshot);
-    return 'row' in found ? { root: found.row.repo_path } : { reason: `${h.to_name}'s project cannot be located: ${found.reason}` };
+    return 'row' in found ? { root: found.row.repo_path, name: found.row.name } : { reason: `${h.to_name}'s project cannot be located: ${found.reason}` };
   };
   for (const t of trackers) {
     if (t.handoff === undefined) continue;
@@ -363,8 +370,11 @@ export function resolveSentHandoffs(
       out.set(t.id, unknown(where.reason));
       continue;
     }
+    const renamed = where.name !== undefined && where.name !== h.to_name;
+    const named = renamed ? { ...h, to_name: where.name! } : h;
+    if (renamed) currentNames.set(t.id, where.name!);
     const list = groups.get(where.root) ?? [];
-    list.push({ id: t.id, h: h as SentHandoff & { to_item_id: string } });
+    list.push({ id: t.id, h: named as SentHandoff & { to_item_id: string } });
     groups.set(where.root, list);
   }
   for (const [root, list] of groups) {
@@ -418,7 +428,8 @@ export function resolveSentHandoffs(
   for (const t of trackers) {
     const status = out.get(t.id);
     const milestone = status && sentHandoffOf(t)?.milestone;
-    if (status && milestone) out.set(t.id, { ...status, milestone });
+    const to_name = currentNames.get(t.id);
+    if (status && (milestone || to_name !== undefined)) out.set(t.id, { ...status, ...(milestone ? { milestone } : {}), ...(to_name !== undefined ? { to_name } : {}) });
   }
   return out;
 }

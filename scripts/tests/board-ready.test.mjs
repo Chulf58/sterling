@@ -326,6 +326,37 @@ test('H1 end to end: a delegated tracker whose receiver was moved with --move sh
   }
 });
 
+test('H1 end to end: a delegated tracker whose receiver was renamed in the registry shows its current name, the stored to_name unchanged (GitHub issue #120)', async () => {
+  const p = project();
+  const beta = project();
+  try {
+    await withTempRegistry(async ({ path, registry, register }) => {
+      register('beta', beta.dir);
+      const trackerId = handOff(p, beta);
+      assert.equal(registry.renameIfUnique(beta.dir, 'Beta Renamed').status, 'renamed');
+      p.store.close();
+      const res = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(root, 'scripts', 'hooks', 'h1-session-start.mjs')], {
+        input: JSON.stringify({ session_id: 'sess-board-renamed', cwd: p.dir, hook_event_name: 'SessionStart', source: 'startup' }),
+        encoding: 'utf8',
+        env: { ...process.env, CLAUDE_PROJECT_DIR: p.dir, STERLING_REGISTRY_DB: path },
+        timeout: 120_000,
+      });
+      assert.equal(res.status, 0, res.stderr);
+      const ctx = JSON.parse(res.stdout).hookSpecificOutput.additionalContext;
+      assert.ok(ctx.includes(`- ${h("Handed to project 'beta': Do it there", { id: trackerId })} — project 'Beta Renamed': open in Beta Renamed`), ctx.slice(0, 3000));
+      const store = new SterlingStore(join(p.dir, '.sterling', 'sterling.db'));
+      try {
+        assert.equal(store.get(trackerId).handoff.to_name, 'beta', 'the stored tracker is never rewritten');
+      } finally {
+        store.close();
+      }
+    });
+  } finally {
+    rmSync(p.dir, { recursive: true, force: true });
+    rmSync(beta.dir, { recursive: true, force: true });
+  }
+});
+
 test('H20 end to end: one BOARD READY line on an Agent dispatch, silent on the repeat even with a different brief', () => {
   const p = project();
   try {
@@ -438,6 +469,24 @@ test('OpenCode: a delegated tracker whose receiver was moved with --move shows i
   } finally {
     p.cleanup();
     rmSync(moved ?? beta.dir, { recursive: true, force: true });
+  }
+});
+
+test('OpenCode: a delegated tracker whose receiver was renamed in the registry shows its current name (GitHub issue #120)', async () => {
+  const p = project();
+  const beta = project();
+  try {
+    await withTempRegistry(async ({ registry, register }) => {
+      register('beta', beta.dir);
+      const trackerId = handOff(p, beta);
+      assert.equal(registry.renameIfUnique(beta.dir, 'Beta Renamed').status, 'renamed');
+      const text = await ocContext(p);
+      assert.ok(text.includes(`- ${h("Handed to project 'beta': Do it there", { id: trackerId })} — project 'Beta Renamed': open in Beta Renamed`), text.slice(-1500));
+      assert.doesNotMatch(text, /open in beta/);
+    });
+  } finally {
+    p.cleanup();
+    rmSync(beta.dir, { recursive: true, force: true });
   }
 });
 

@@ -2245,6 +2245,11 @@ export class SterlingTools {
    * is NOT YET merged into base. A blob surviving ONLY on branches that are
    * fully-merged ancestors of base does NOT park — the deletion reading (base
    * no longer has it, and no unmerged work holds it either) applies instead.
+   * NOR does a branch (base included) whose copy is INHERITED: if the merge
+   * base of HEAD and that branch held the path with the same tree entry (mode
+   * and blob id) the branch holds now, this checkout's line
+   * deleted it and the deletion lands when this branch merges, so the files[]
+   * entry is owed a drop, not a wait (GitHub #121).
    * Returns the first qualifying ref that holds it, or undefined if none does.
    *
    * ONLY CALLED ON THE ALREADY-RARE MISSING-FILE PATH, never on the hot read
@@ -2315,6 +2320,37 @@ export class SterlingTools {
       const r = run(['merge-base', '--is-ancestor', branch, base]);
       return r?.status === 0;
     };
+    // INHERITED COPY, NOT A PARK (GitHub #121). If the merge base of HEAD and
+    // the branch already held the path, the branch only kept the copy this
+    // checkout's line of history deleted: the deletion is the newer change on
+    // the shared line and travels with this branch when it merges, so waiting
+    // for that branch to "land" waits forever (main never merges into the work
+    // branch, a backup branch never merges at all). Only a branch that ADDED
+    // the path after the two lines diverged brings it back on merge, so only
+    // that branch parks. INHERITED MEANS UNCHANGED: the branch's tree entry
+    // (mode, type and blob id) must equal the merge base's. A branch that
+    // modified the path after the split, or deleted and re-added it with
+    // other content, holds live work that conflicts with this deletion, so
+    // it still parks. An unresolvable merge base (unrelated histories), an
+    // entry that cannot be read, or any git failure also keeps the park: the
+    // doubt goes to keeping the files[] entry, never to telling a reader to
+    // drop it.
+    const treeEntry = (ref: string): string | undefined => {
+      const r = run(['ls-tree', '--full-tree', ref, '--', rel]);
+      if (r?.status !== 0 || typeof r.stdout !== 'string') return undefined;
+      const line = r.stdout.split('\n')[0] ?? '';
+      const tab = line.indexOf('\t');
+      return tab > 0 ? line.slice(0, tab) : undefined; // "<mode> <type> <object id>"
+    };
+    const inheritedFromMergeBase = (branch: string): boolean => {
+      const mb = run(['merge-base', 'HEAD', branch]);
+      if (mb?.status !== 0 || typeof mb.stdout !== 'string') return false;
+      const sha = mb.stdout.trim();
+      if (!sha) return false;
+      const atBase = treeEntry(sha);
+      if (atBase === undefined) return false;
+      return treeEntry(branch) === atBase;
+    };
     try {
       if (has('HEAD')) return { status: 'parked', ref: 'HEAD' };
       const refs = run(['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
@@ -2325,17 +2361,11 @@ export class SterlingTools {
         .filter(Boolean)
         .slice(0, PARKED_REF_PROBE_CAP);
       const base = resolveBase();
-      if (base === undefined) {
-        for (const b of branches) {
-          if (has(b)) return { status: 'parked', ref: b };
-        }
-      } else {
-        for (const b of branches) {
-          if (!has(b)) continue;
-          if (b === base) return { status: 'parked', ref: b }; // case (a): base itself still has it
-          if (isMergedIntoBase(b, base)) continue; // fully merged into base — not a park
-          return { status: 'parked', ref: b }; // case (b): unmerged branch still holds it
-        }
+      for (const b of branches) {
+        if (!has(b)) continue;
+        if (base !== undefined && b !== base && isMergedIntoBase(b, base)) continue; // fully merged into base — not a park
+        if (inheritedFromMergeBase(b)) continue; // deleted on this line of history — the deletion lands with it (#121)
+        return { status: 'parked', ref: b }; // base or an unmerged branch added it after the lines diverged
       }
       // NOT parked on any ref TIP scanned. A tip-only scan cannot tell "deleted,
       // but real git history exists" (confirmed_absent — the classic, closeable
@@ -4716,7 +4746,10 @@ export class SterlingTools {
               `article '${a.slug}' — owned file ${p.path} is absent from the working tree but ALIVE on '${p.ref}'. ` +
               `INFORMATIONAL: no reconcile is owed and the article is correct as written. ` +
               `DO NOT DROP ${p.path} FROM THIS ARTICLE'S files[] — the path becomes valid again when that branch merges. ` +
-              `This item closes when the branch lands (the merge gate sweeps it), not by a write.`,
+              `This item closes when the branch lands (the merge gate sweeps it), not by a write. ` +
+              (p.ref === 'HEAD'
+                ? `TO RELEASE IT: restore the file (git checkout -- ${p.path}) or commit its deletion; after a committed deletion the next read reports a normal deletion instead, and this item is closed with maintenance_remove.`
+                : `TO RELEASE IT if '${p.ref}' will never merge (abandoned, or a backup): delete that branch (git branch -D ${p.ref}); the next read then reports a normal deletion that drops the path, and this item is closed with maintenance_remove.`),
             file_keys: [p.path],
             feature_link: a.id,
           });
