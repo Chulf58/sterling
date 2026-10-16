@@ -826,47 +826,29 @@ export class MountedStores {
       .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
   }
 
-  /** Cross-store terminus resolution (decision foreign_de1a7329): a record lives in
-   *  exactly one store (same reasoning as get()), so the first hit, project-first,
-   *  is its store's walk. That walk cannot see another store: it ends truncated
-   *  at a tombstone whose superseded_by is held elsewhere (the project tombstone
-   *  knowledge_promote leaves). So while the walk ends on a truncated superseded
-   *  record, its successor is looked up in the OTHER mounted stores and the walk
-   *  continues there. Hops add across segments and the whole walk shares the
-   *  store's cap; a visited set of segment ids stops a cross-store cycle. Any
-   *  stop (no successor, successor in no readable store, revisit, cap) returns
-   *  the last record reached, truncated, so an unreached end is never claimed. */
+  /** Cross-store terminus resolution (decision foreign_de1a7329): follows
+   *  superseded_by edge by edge, looking each record up through get(), which
+   *  spans the mounted stores (a record lives in exactly one) and skips a domain
+   *  that cannot answer. A store's own walk cannot see another store, so the
+   *  project tombstone knowledge_promote leaves would stop at itself. Every stop
+   *  that is not a live record (successor already visited, the 32-hop cap, or a
+   *  successor no readable store holds) returns the last record reached with
+   *  truncated:true, so an unreached end is never claimed. Unknown id -> null. */
   resolveTerminus(id: string): ReturnType<SterlingStore['resolveTerminus']> {
-    let hit: { store: SterlingStore; value: NonNullable<ReturnType<SterlingStore['resolveTerminus']>> } | undefined;
-    for (const r of this.fanRead((s) => s.resolveTerminus(id))) {
-      if (r.value) {
-        hit = { store: r.store, value: r.value };
-        break;
-      }
+    const first = this.get(id);
+    if (!first) return null;
+    let current: DurableRecord = first;
+    const visited = new Set<string>([current.id]);
+    let hops = 0;
+    for (;;) {
+      const succ = current.superseded_by;
+      if (current.status !== 'superseded' || !succ) return { id: current.id, status: current.status, hops };
+      const next = visited.has(succ) || hops === MAX_TERMINUS_HOPS ? undefined : this.get(succ);
+      if (!next) return { id: current.id, status: current.status, hops, truncated: true };
+      visited.add(next.id);
+      current = next;
+      hops += 1;
     }
-    if (!hit) return null;
-
-    let { store, value } = hit;
-    const visited = new Set<string>([id, value.id]);
-    while (value.status === 'superseded' && value.truncated) {
-      const succ = store.get(value.id)?.superseded_by;
-      if (!succ || visited.has(succ) || value.hops + 1 > MAX_TERMINUS_HOPS) break;
-      let next: { store: SterlingStore; value: NonNullable<ReturnType<SterlingStore['resolveTerminus']>> } | undefined;
-      for (const r of this.fanRead((s) => (s === store ? null : s.resolveTerminus(succ)))) {
-        if (r.value) {
-          next = { store: r.store, value: r.value };
-          break;
-        }
-      }
-      if (!next) break;
-      const hops = value.hops + 1 + next.value.hops;
-      if (hops > MAX_TERMINUS_HOPS) break;
-      visited.add(succ);
-      visited.add(next.value.id);
-      store = next.store;
-      value = { ...next.value, hops };
-    }
-    return value;
   }
 
   /** Cross-store fan of inboundSupersedes (board c6e3561f part (a)): an edge

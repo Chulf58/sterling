@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -92,6 +93,58 @@ test('a chain longer than 32 hops that alternates between stores truncates at 32
 
     // one hop shorter: the live node 33 is reachable at exactly 32 hops, so it is reported.
     assert.deepEqual(h.stores.resolveTerminus(nodes[1].id), { id: nodes[33].id, status: 'active', hops: 32 });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('the cap counts hops across stores, not per-store segments: a project node followed by 33 domain-held nodes stops at hop 32', { skip: sqliteOnly('mounted routing') }, () => {
+  const h = harness();
+  try {
+    // node 0 in the project store, nodes 1..33 in the domain; node 33 is live.
+    const nodes = Array.from({ length: 34 }, (_, i) => h.stores.create(ref(i === 0 ? 'project' : 'domain:alpha', `n${i}`)));
+    for (let i = 0; i < 33; i++) h.stores.retireInFavorOf(nodes[i].id, nodes[i + 1].id, NOW);
+
+    assert.deepEqual(h.stores.resolveTerminus(nodes[0].id), { id: nodes[32].id, status: 'superseded', hops: 32, truncated: true });
+    assert.deepEqual(h.stores.resolveTerminus(nodes[1].id), { id: nodes[33].id, status: 'active', hops: 32 });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a cycle that closes on an interior node of an earlier segment stops at the revisit', { skip: sqliteOnly('mounted routing') }, () => {
+  const h = harness();
+  try {
+    // project A -> B -> C, then C -> D (domain), then D -> B: B is interior to the first segment.
+    const [a, b, c] = [h.stores.create(ref('project', 'A')), h.stores.create(ref('project', 'B')), h.stores.create(ref('project', 'C'))];
+    const d = h.stores.create(ref('domain:alpha', 'D'));
+    h.stores.retireInFavorOf(a.id, b.id, NOW);
+    h.stores.retireInFavorOf(b.id, c.id, NOW);
+    h.stores.retireInFavorOf(c.id, d.id, NOW);
+    h.stores.retireInFavorOf(d.id, b.id, NOW);
+
+    assert.deepEqual(h.stores.resolveTerminus(a.id), { id: d.id, status: 'superseded', hops: 3, truncated: true });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a domain that breaks after mount is skipped by the walk: the tombstone is returned truncated and the domain is listed unreadable', { skip: sqliteOnly('mounted routing') }, () => {
+  const h = harness(['alpha', 'beta']);
+  try {
+    const p = h.stores.create(ref('project', 'P'));
+    const a = h.stores.create(ref('domain:alpha', 'A'));
+    const b = h.stores.create(ref('domain:beta', 'B'));
+    h.stores.retireInFavorOf(p.id, a.id, NOW, 'promoted');
+    h.stores.retireInFavorOf(a.id, b.id, NOW);
+    assert.deepEqual(h.stores.resolveTerminus(p.id), { id: b.id, status: 'active', hops: 2 });
+
+    const raw = new DatabaseSync(h.mounts[0].dbPath);
+    raw.exec('DROP TABLE record_relations');
+    raw.close();
+
+    assert.deepEqual(h.stores.resolveTerminus(p.id), { id: p.id, status: 'superseded', hops: 0, truncated: true });
+    assert.deepEqual(h.stores.unreadableDomains.map((d) => d.name), ['alpha']);
   } finally {
     h.cleanup();
   }
