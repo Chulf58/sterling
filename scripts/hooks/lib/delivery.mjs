@@ -6,7 +6,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, openSync, closeSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { loadConfig } from './common.mjs';
-import { isForeignTree } from './working-tree.mjs';
+import { ownsHere } from './working-tree.mjs';
 import { stripSterlingDeliveryLine } from './dispatch-prompt.mjs';
 
 export function deliveryDir(cwd) {
@@ -605,7 +605,7 @@ function pointerLine(store, kind, slug, root) {
   let head = '(not in store)';
   let annotation = '';
   try {
-    const match = store.articlesBySlug(slug).find((r) => !isForeignTree(r, root));
+    const match = store.articlesBySlug(slug).find(ownsHere(root));
     if (match) {
       head = clip(match.what_it_does, 140);
       annotation = statusAnnotation(match);

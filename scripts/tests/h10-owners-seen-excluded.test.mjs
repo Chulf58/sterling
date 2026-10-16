@@ -101,3 +101,37 @@ test('owners seen: an article whose working_tree is the project root counts as a
     cleanup();
   }
 });
+
+// GitHub issues #112, #115: an article that lists a demanded path from another
+// working tree is named with its working_tree and the two remedies, so the
+// demand is not an unexplained "no owner"; a name mapped to the root in
+// config.working_trees owns, as it does on the MCP server.
+test('article demand: a path listed only by a foreign-tree article names that article, its working_tree and the remedy', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const stale = ownerArticle(store, 'stale-tree-owner', 'src/a.mjs', 'main (merged 035f27c, 2026-10-15)');
+    const text = stopWithTouches(dir, store, ['src/a.mjs']);
+    assert.match(text, /article demand — 1 touched file\(s\) no owner/);
+    assert.ok(
+      text.includes(`1 of these file(s) are listed only by an article on another working tree, which owns no file in this root: 'stale-tree-owner' (${stale.id.slice(0, 8)}, working_tree 'main (merged 035f27c, 2026-10-15)') lists src/a.mjs`),
+      text
+    );
+    assert.match(text, /If that branch is merged, clear working_tree on the article \(knowledge_update\); if it is a real separate tree, map the name in config\.working_trees\./);
+  } finally {
+    cleanup();
+  }
+});
+
+test('article demand: a working_tree name mapped to the root in config.working_trees owns its path', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ ...CONFIG, working_trees: { main: '.' } }));
+    ownerArticle(store, 'mapped-owner', 'src/a.mjs', 'main');
+    const text = stopWithTouches(dir, store, ['src/a.mjs', 'src/b.mjs']);
+    assert.match(text, /article demand — 1 touched file\(s\) no owner/, 'only src/b.mjs is demanded');
+    assert.ok(!text.includes(EXCLUDED), 'the mapped owner is not tagged excluded');
+    assert.ok(!text.includes('listed only by an article on another working tree'), 'no foreign-owner line');
+  } finally {
+    cleanup();
+  }
+});
