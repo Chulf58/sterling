@@ -96,7 +96,7 @@ if (path === 'graphql') {
     const n = existsSync(countFile) ? Number(readFileSync(countFile, 'utf8')) : 0;
     writeFileSync(countFile, String(n + 1));
     const file = join(state, 'merge_pages.json');
-    const pages = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : [{ mergeStateStatus: 'CLEAN', reviewDecision: null, reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } }];
+    const pages = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : [{ mergeStateStatus: 'CLEAN', reviewDecision: null, commits: { nodes: [{ commit: { statusCheckRollup: null } }] }, reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } }];
     process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: pages[Math.min(n, pages.length - 1)] } } }));
     process.exit(0);
   }
@@ -932,6 +932,172 @@ test('previously_missed_unparsed (issue #102): a section whose findings cannot b
   }
 });
 
+// GitHub issues #124, #125, #126, #127 and #130: Copilot writes the heading
+// with the count first ("2 previously missed issues", "1 previously missed
+// issue"), with a subtitle, and each nested finding's <summary> starts with a
+// severity <picture>. The parser looked only for a heading that STARTS with
+// "Previously missed", so it never found the section: previously_missed [] and
+// previously_missed_unparsed false, which reads as clean.
+const SEVERITY = '<picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/images/sev-medium-dark.svg"><img alt="Medium" src="https://github.com/images/sev-medium.svg"></picture>';
+const COUNT_FIRST_BODY = [
+  '## Pull request overview',
+  '',
+  'Copilot reviewed 2 out of 2 changed files in this pull request and generated no new comments.',
+  '',
+  '<details>',
+  '<summary><strong>2 previously missed issues</strong></summary>',
+  '',
+  "<sub>In code that hasn't changed since last review</sub>",
+  '',
+  '<details>',
+  `<summary>${SEVERITY} Retry loop never backs off</summary>`,
+  '',
+  '`src/send.ts:41`',
+  '',
+  'Every failure retries at once and floods the API.',
+  '</details>',
+  '',
+  '<details>',
+  `<summary>${SEVERITY} Token logged on error</summary>`,
+  '',
+  '`src/auth.ts:12-14`',
+  '',
+  'The bearer token is written to the log.',
+  '</details>',
+  '',
+  '</details>',
+].join('\n');
+const COUNT_FIRST_ITEMS = [
+  'Retry loop never backs off (src/send.ts:41): Every failure retries at once and floods the API.',
+  'Token logged on error (src/auth.ts:12-14): The bearer token is written to the log.',
+];
+
+test('previously_missed (issues #124-#127): a "2 previously missed issues" <summary> heading with nested severity-picture findings and no inline comments yields both findings, not unparsed', () => {
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(710, { body: COUNT_FIRST_BODY })]]);
+    const r = run(f, ['7', ...FAST]);
+    assert.equal(r.out.status, 'review', oneLine(r.stdout));
+    assert.deepEqual(r.out.comments, []);
+    assert.deepEqual(r.out.previously_missed, COUNT_FIRST_ITEMS);
+    assert.equal(r.out.previously_missed_unparsed, false);
+    assert.equal(r.out.body_findings_without_comments, true);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('previously_missed (issues #124, #130): the singular "1 previously missed issue" under a "No open issues" overview is read, and still read when inline comments are present', () => {
+  const body = [
+    '## Pull request overview',
+    '',
+    'No open issues.',
+    '',
+    '<details><summary><strong>1 previously missed issue</strong><br>In code that hasn\'t changed since last review</summary>',
+    '',
+    '<details>',
+    `<summary>${SEVERITY} Missing await on save</summary>`,
+    '',
+    '`src/store.ts:88`',
+    '',
+    'The promise is dropped, so a failed save is never seen.',
+    '</details>',
+    '</details>',
+  ].join('\n');
+  const f = makeFixture();
+  try {
+    f.put('reviews', 0, [[review(711, { body })]]);
+    let r = run(f, ['7', ...FAST]);
+    assert.deepEqual(r.out.previously_missed, ['Missing await on save (src/store.ts:88): The promise is dropped, so a failed save is never seen.']);
+    assert.equal(r.out.previously_missed_unparsed, false);
+    f.put('comments', 0, [[comment(1, 711), comment(2, 711)]]);
+    r = run(f, ['7', ...FAST]);
+    assert.equal(r.out.comments.length, 2);
+    assert.equal(r.out.body_findings_without_comments, false, 'inline comments present, so only previously_missed points at the body finding');
+    assert.deepEqual(r.out.previously_missed, ['Missing await on save (src/store.ts:88): The promise is dropped, so a failed save is never seen.']);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('previously_missed (issues #124-#127, #130): a count-first heading whose N exceeds the findings read is unparsed, never clean; a <summary> spanning lines is still read', () => {
+  const f = makeFixture();
+  try {
+    const short = COUNT_FIRST_BODY.replace('<summary><strong>2 previously missed issues', '<summary><strong>3 previously missed issues');
+    f.put('reviews', 0, [[review(712, { body: short })]]);
+    let r = run(f, ['7', ...FAST]);
+    assert.deepEqual(r.out.previously_missed, COUNT_FIRST_ITEMS);
+    assert.equal(r.out.previously_missed_unparsed, true, 'heading says 3, two read');
+    const unreadable = ['<details>', '<summary><strong>2 previously missed issues</strong></summary>', '', 'Findings in a shape nobody parses.', '</details>'].join('\n');
+    f.put('reviews', 0, [[review(712, { body: unreadable })]]);
+    r = run(f, ['7', ...FAST]);
+    assert.deepEqual(r.out.previously_missed, []);
+    assert.equal(r.out.previously_missed_unparsed, true, 'heading says 2, none read');
+    const multiline = COUNT_FIRST_BODY.replace(`<summary>${SEVERITY} Retry loop`, `<summary>\n${SEVERITY.replace('<img', '\n<img')}\nRetry loop`);
+    assert.notEqual(multiline, COUNT_FIRST_BODY);
+    f.put('reviews', 0, [[review(712, { body: multiline })]]);
+    r = run(f, ['7', ...FAST]);
+    assert.deepEqual(r.out.previously_missed, COUNT_FIRST_ITEMS);
+    assert.equal(r.out.previously_missed_unparsed, false);
+    f.put('reviews', 0, [[review(712, { body: 'We fixed 2 previously missed issues in the last push.' })]]);
+    r = run(f, ['7', ...FAST]);
+    assert.equal(r.out.previously_missed_unparsed, false, 'prose that mentions the phrase is not a heading');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('previously_missed (Sol review): an empty or never-closed nested block is not a finding and makes the section unparsed, even when the count matches', () => {
+  const f = makeFixture();
+  try {
+    const empty = ['<details>', '<summary><strong>1 previously missed issue</strong></summary>', '', '<details>', '', '</details>', '</details>'].join('\n');
+    f.put('reviews', 0, [[review(713, { body: empty })]]);
+    let r = run(f, ['7', ...FAST]);
+    assert.deepEqual(r.out.previously_missed, [], 'an empty block is never returned as an empty-string finding');
+    assert.equal(r.out.previously_missed_unparsed, true, 'heading says 1, the only block is empty');
+    const emptySummary = ['<details>', '<summary><strong>2 previously missed issues</strong></summary>', '', '<details><summary></summary></details>', '', '<details>', `<summary>${SEVERITY} Real one</summary>`, '`src/a.ts:1`', 'Text.', '</details>', '', '<details>', '<summary>Third</summary>', '`src/b.ts:2`', 'More.', '</details>', '</details>'].join('\n');
+    f.put('reviews', 0, [[review(713, { body: emptySummary })]]);
+    r = run(f, ['7', ...FAST]);
+    assert.deepEqual(r.out.previously_missed, ['Real one (src/a.ts:1): Text.', 'Third (src/b.ts:2): More.']);
+    assert.equal(r.out.previously_missed_unparsed, true, 'two real findings match the count, but an empty block is still malformed');
+    const unclosed = ['<details>', '<summary><strong>1 previously missed issue</strong></summary>', '', '<details>', `<summary>${SEVERITY} Cut off</summary>`, '`src/c.ts:9`', 'The body ends here'].join('\n');
+    f.put('reviews', 0, [[review(713, { body: unclosed })]]);
+    r = run(f, ['7', ...FAST]);
+    assert.deepEqual(r.out.previously_missed, ['Cut off (src/c.ts:9): The body ends here'], 'what was read is still returned');
+    assert.equal(r.out.previously_missed_unparsed, true, 'a block never closed is not trusted');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('previously_missed (Sol review): the count-first heading must be exactly "N previously missed issue(s)"; a longer label is not the section', () => {
+  const f = makeFixture();
+  try {
+    for (const body of [
+      ['## 2 previously missed issue formats', '- not a finding', '- nor this'].join('\n'),
+      ['<details><summary><strong>2 previously missed issues fixed</strong></summary>', '- not a finding', '</details>'].join('\n'),
+      ['**2 previously missed issues were addressed**', '- not a finding'].join('\n'),
+    ]) {
+      f.put('reviews', 0, [[review(714, { body })]]);
+      const r = run(f, ['7', ...FAST]);
+      assert.deepEqual(r.out.previously_missed, [], body);
+      assert.equal(r.out.previously_missed_unparsed, false, body);
+    }
+    for (const body of [
+      ['## 2 previously missed issues', '- one', '- two'].join('\n'),
+      ['**1 previously missed issue**', '- one'].join('\n'),
+      ['<details><summary>2 previously missed issues<br>In code that hasn\'t changed since last review</summary>', '- one', '- two', '</details>'].join('\n'),
+    ]) {
+      f.put('reviews', 0, [[review(714, { body })]]);
+      const r = run(f, ['7', ...FAST]);
+      assert.ok(r.out.previously_missed.length > 0, body);
+      assert.equal(r.out.previously_missed_unparsed, false, body);
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('previously_missed is [] when the section is absent; body_findings_without_comments is true for any non-empty body without comments, false with comments or an empty body', () => {
   const f = makeFixture();
   try {
@@ -1033,7 +1199,9 @@ test('--request-copilot: a missing node id (jq prints null) is a recorded failur
 // ------------------------------------------- settle clean vs GitHub's merge state
 
 const thread = (id, over = {}) => ({ id, isResolved: false, isOutdated: false, path: 'src/a.mjs', comments: { nodes: [{ databaseId: 900, url: `https://github.com/acme/widget/pull/7#discussion_r${id}` }] }, ...over });
-const mergePage = (status, nodes = [], over = {}) => ({ mergeStateStatus: status, reviewDecision: null, reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes }, ...over });
+// The default page carries an EXPLICIT `statusCheckRollup: null` (the head has
+// no checks): a page with no commits subtree is a malformed answer and blocks.
+const mergePage = (status, nodes = [], over = {}) => ({ mergeStateStatus: status, reviewDecision: null, commits: { nodes: [{ commit: { statusCheckRollup: null } }] }, reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes }, ...over });
 const putMerge = (f, pages) => writeFileSync(join(f.state, 'merge_pages.json'), JSON.stringify(pages));
 const mergeCalls = (f) => calls(f).filter((a) => a.some((x) => x.startsWith('query=') && x.includes('reviewThreads')));
 
@@ -1382,6 +1550,88 @@ for (const [rollup, grants] of [['SUCCESS', true], [null, true], ['FAILURE', fal
     }
   });
 }
+
+// GitHub issue #131: a check that is not required can fail while GitHub
+// reports UNSTABLE, which is mergeable, so the settle printed auto_merge true
+// for a PR with a failing test check.
+for (const [status, rollup, autoMerge] of [['UNSTABLE', 'FAILURE', false], ['UNSTABLE', 'PENDING', false], ['CLEAN', 'ERROR', false], ['CLEAN', 'EXPECTED', false], ['UNSTABLE', 'SUCCESS', true], ['CLEAN', null, true]]) {
+  test(`--settle clean (issue #131): ${status} with check rollup ${rollup} settles clean with auto_merge ${autoMerge}${autoMerge ? '' : ', naming the rollup'}`, () => {
+    const f = makeFixture();
+    try {
+      arm(f);
+      putMerge(f, [mergePage(status, [thread('PRRT_done', { isResolved: true })], withRollup(rollup))]);
+      const r = run(f, ['--settle', 'clean', '--pr', '7']);
+      assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+      assert.equal(r.out.status, 'clean');
+      assert.equal(r.out.check_rollup, rollup);
+      assert.equal(r.out.auto_merge_on_clean, true);
+      assert.equal(r.out.auto_merge, autoMerge);
+      if (autoMerge) assert.equal(r.out.auto_merge_withheld, null);
+      else assert.ok(r.out.auto_merge_withheld.includes(`check rollup is ${rollup}`), r.out.auto_merge_withheld);
+      assert.equal(JSON.parse(readFileSync(loopPath(f), 'utf8')).status, 'clean');
+    } finally {
+      f.cleanup();
+    }
+  });
+}
+
+// Sol review of the #131 fix: a missing or malformed commits subtree used to
+// collapse to the same null as "no checks", so CLEAN or UNSTABLE with a broken
+// answer still printed auto_merge true. Only an explicit statusCheckRollup null
+// is "no checks"; anything else blocks the clean settle, like an UNKNOWN state.
+for (const [label, over] of [
+  ['no commits subtree', { commits: undefined }],
+  ['commits.nodes missing', { commits: {} }],
+  ['commits.nodes empty', { commits: { nodes: [] } }],
+  ['node without commit', { commits: { nodes: [{}] } }],
+  ['commit without statusCheckRollup', { commits: { nodes: [{ commit: {} }] } }],
+  ['statusCheckRollup without state', { commits: { nodes: [{ commit: { statusCheckRollup: {} } }] } }],
+  ['statusCheckRollup state not a string', { commits: { nodes: [{ commit: { statusCheckRollup: { state: 5 } } }] } }],
+]) {
+  for (const [status, extra] of [['CLEAN', {}], ['UNSTABLE', {}], ['BLOCKED', { reviewDecision: 'REVIEW_REQUIRED' }]]) {
+    test(`--settle clean: a malformed merge-state answer (${label}) on ${status} blocks the settle, names the unreadable checks and never auto-merges`, () => {
+      const f = makeFixture();
+      try {
+        arm(f);
+        putMerge(f, [mergePage(status, [thread('PRRT_done', { isResolved: true })], { ...extra, ...over })]);
+        const r = run(f, ['--settle', 'clean', '--pr', '7']);
+        assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+        assert.equal(r.out.status, 'blocked');
+        assert.equal(r.out.auto_merge, false);
+        assert.equal(r.out.mergeable_now, false);
+        assert.equal(r.out.awaiting_human_review, false);
+        assert.ok(r.out.blockers.some((b) => b.includes("head's checks cannot be read")), JSON.stringify(r.out.blockers));
+        assert.equal(JSON.parse(readFileSync(loopPath(f), 'utf8')).status, 'owed');
+      } finally {
+        f.cleanup();
+      }
+    });
+  }
+}
+
+test('--settle clean: auto_merge_withheld names the switch and the awaited human review', () => {
+  const f = makeFixture();
+  try {
+    writeConfig(f, { pr_review: { auto_merge_on_clean: false } });
+    arm(f);
+    putMerge(f, [mergePage('CLEAN')]);
+    const off = run(f, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(off.out.auto_merge, false);
+    assert.ok(off.out.auto_merge_withheld.includes('auto_merge_on_clean is off'), off.out.auto_merge_withheld);
+  } finally {
+    f.cleanup();
+  }
+  const g = makeFixture();
+  try {
+    arm(g);
+    putMerge(g, [mergePage('BLOCKED', [], { reviewDecision: 'REVIEW_REQUIRED' })]);
+    const waiting = run(g, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(waiting.out.auto_merge, false);
+    assert.ok(waiting.out.auto_merge_withheld.includes('awaits a required human review'), waiting.out.auto_merge_withheld);
+  } finally {
+    g.cleanup();
+  }
+});
 
 test('--settle clean: the merge-state query asks for the head commit statusCheckRollup', () => {
   const f = makeFixture();

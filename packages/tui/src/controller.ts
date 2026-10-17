@@ -7,10 +7,10 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { MountedStores, SterlingStore, StoreBusyError, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
+import { MountedStores, SterlingStore, StoreBusyError, DEFAULT_BUSY_TIMEOUT_MS, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { parseConfig, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE } from '@sterling/schemas';
-import { buildDashboardFrame, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect } from './state.js';
+import { buildDashboardFrame, clipEllipsis, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect } from './state.js';
 import { applyAutoMergeToggle, applyHandoffToggle, applyModeToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
 import { AutoMergeSettingError, autoMergeOnCleanOf } from '../../../scripts/lib/work-pr.mjs';
 import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
@@ -40,6 +40,9 @@ export interface DashboardOptions {
   profile?: boolean;
   /** Replaces the data_version probe; tests use it to make a read fail. */
   dataVersionProbe?: (paths: string[]) => DataVersionProbe;
+  /** Milliseconds now, for how long the probe has met a held lock; tests use
+   *  it to age a lock. Default Date.now. */
+  clock?: () => number;
   /** the `r` key (a github_refresh effect): the host's GitHub poller polls now */
   onGithubRefresh?: () => void;
   /** The file operations the OpenCode-override config.json write uses; tests
@@ -53,6 +56,12 @@ export interface DashboardOptions {
  *  event loop. Only their own connection (writeStore) uses it. With
  *  deferWrites a write that times out stays queued for the next flush. */
 export const DASHBOARD_BUSY_TIMEOUT_MS = 250;
+
+/** How long the data_version probe may keep meeting a held lock before the
+ *  dashboard says the store is locked. It is the store's own busy timeout:
+ *  by then every other Sterling connection waiting on that lock has given up
+ *  too, so it is no longer an ordinary commit (GitHub #129). */
+export const LOCK_NOTICE_AFTER_MS = DEFAULT_BUSY_TIMEOUT_MS;
 
 /** Counters for the profile log; cumulative since openDashboard. */
 export interface DashboardStats {
@@ -172,6 +181,23 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   // there every call rebuilds, as before, and stats() says so.
   let probe: DataVersionProbe | undefined;
   let changeDetection = 'data_version';
+  /** A SQLITE_BUSY or SQLITE_LOCKED error: another connection holds the lock. */
+  const isBusy = (err: unknown): boolean => {
+    if (err instanceof StoreBusyError) return true;
+    const code = (err as { errcode?: unknown } | null)?.errcode;
+    return code === 5 || code === 6 || /database is (locked|busy)|SQLITE_BUSY|SQLITE_LOCKED/i.test((err as Error | null)?.message ?? '');
+  };
+
+  const clock = options.clock ?? Date.now;
+  /** when the probe first met the lock it is still meeting; undefined after a read succeeds */
+  let busySince: number | undefined;
+  /** set once that lock has been held for LOCK_NOTICE_AFTER_MS */
+  let lockNotice: string | undefined;
+  /** The lock notice goes on the notice row of the frame handed out, never
+   *  into UiState: a ui change would rebuild through the same lock. The row
+   *  is always reserved (render.ts), so the layout and hit-test do not move. */
+  const withLockNotice = (built: DashboardFrame, width: number): DashboardFrame =>
+    lockNotice === undefined ? built : { ...built, state: { ...built.state, notice: clipEllipsis(`⚠ ${lockNotice}`, width) } };
   let degradeSaid = false;
   /** Change detection failed: rebuild on every call (correct, only slower),
    *  record why in stats(), and say it once on screen. */
@@ -184,7 +210,8 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   if (routed) changeDetection = 'none: Postgres storage has no data_version';
   else {
     try {
-      probe = (options.dataVersionProbe ?? openDataVersionProbe)([storePath, ...mounts.map((m) => m.dbPath)]);
+      const paths = [storePath, ...mounts.map((m) => m.dbPath)];
+      probe = options.dataVersionProbe ? options.dataVersionProbe(paths) : openDataVersionProbe(paths, { busyTimeoutMs: DASHBOARD_BUSY_TIMEOUT_MS });
     } catch (err) {
       degrade(`data_version probe failed to open — ${(err as Error).message}`);
     }
@@ -196,20 +223,40 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   const today = (): string => new Date().toDateString();
   function currentFrame(vp: ControllerViewport): DashboardFrame {
     let dataVersion: string | undefined;
+    // A store mid-commit (a lock held past the probe's busy timeout) is not
+    // degraded detection: the next read after the commit returns a new
+    // version and rebuilds then. Until then the last frame stands, so the
+    // redraw does not wait on the same lock (GitHub #129). A lock still held
+    // after LOCK_NOTICE_AFTER_MS is said on the notice row and in stats(),
+    // until a read succeeds.
+    let midCommit = false;
     if (probe) {
       try {
         dataVersion = probe.read();
+        busySince = undefined;
+        lockNotice = undefined;
+        if (changeDetection.startsWith('locked: ')) changeDetection = 'data_version';
       } catch (err) {
-        degrade(`data_version read failed — ${(err as Error).message}`);
+        if (isBusy(err)) {
+          midCommit = true;
+          const now = clock();
+          busySince ??= now;
+          const held = now - busySince;
+          if (held >= LOCK_NOTICE_AFTER_MS) {
+            lockNotice = `store locked by another connection for ${Math.round(held / 1000)} s (${(err as Error).message}); showing the last frame until it is released`;
+            if (changeDetection === 'data_version' || changeDetection.startsWith('locked: ')) changeDetection = `locked: ${lockNotice}`;
+          }
+        } else degrade(`data_version read failed — ${(err as Error).message}`);
       }
     }
     const key = vpKey(vp);
     const day = today();
-    if (frame && dataVersion !== undefined && frame.dataVersion === dataVersion && frame.ui === ui && frame.roster === roster && frame.vp === key && frame.day === day) return frame.built;
+    const storeUnchanged = midCommit || (dataVersion !== undefined && frame?.dataVersion === dataVersion);
+    if (frame && storeUnchanged && frame.ui === ui && frame.roster === roster && frame.vp === key && frame.day === day) return withLockNotice(frame.built, vp.width);
     builds++;
     const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height, vp.github, vp.agentsLines);
     frame = { vp: key, viewport: vp, day, ui, roster, dataVersion, built };
-    return built;
+    return withLockNotice(built, vp.width);
   }
 
   // Profile counters: every project-store method call (both connections),
@@ -246,11 +293,6 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   // OpenCode dashboard), so it is dropped with a notice like any other failure.
   let pending: (SelectEffect | BoardEditEffect)[] = [];
   let retryNotice: string | undefined;
-  const isBusy = (err: unknown): boolean => {
-    if (err instanceof StoreBusyError) return true;
-    const code = (err as { errcode?: unknown } | null)?.errcode;
-    return code === 5 || code === 6 || /database is (locked|busy)|SQLITE_BUSY|SQLITE_LOCKED/i.test((err as Error | null)?.message ?? '');
-  };
   function flush(): boolean {
     if (!pending.length) return false;
     const batch = pending;

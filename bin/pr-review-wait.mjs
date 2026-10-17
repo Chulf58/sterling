@@ -163,6 +163,17 @@ var splitRepo = (repo) => {
   const [host, owner2, name2] = String(repo).split("/");
   return { host, owner: owner2, name: name2 };
 };
+function readCheckRollup(pull) {
+  const nodes = pull?.commits?.nodes;
+  const commit = Array.isArray(nodes) && nodes.length > 0 ? nodes[nodes.length - 1]?.commit : void 0;
+  if (commit === null || typeof commit !== "object" || !("statusCheckRollup" in commit)) {
+    return { state: null, error: "GitHub's answer has no head commit statusCheckRollup, so the head's checks cannot be read" };
+  }
+  const rollup = commit.statusCheckRollup;
+  if (rollup === null) return { state: null, error: null };
+  if (typeof rollup === "object" && typeof rollup.state === "string" && rollup.state !== "") return { state: rollup.state, error: null };
+  return { state: null, error: `GitHub's answer has a malformed head commit statusCheckRollup (${JSON.stringify(rollup)}), so the head's checks cannot be read` };
+}
 function fetchPrMergeState(cwd, repo, number) {
   const { host, owner: owner2, name: name2 } = splitRepo(repo);
   const threads = [];
@@ -175,7 +186,10 @@ function fetchPrMergeState(cwd, repo, number) {
     if (!pull || typeof pull.mergeStateStatus !== "string" || !Array.isArray(pull.reviewThreads?.nodes)) {
       throw new Error(`GraphQL returned no mergeStateStatus/reviewThreads for ${repo}#${number}`);
     }
-    state ??= { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: pull.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? null };
+    if (!state) {
+      const rollup = readCheckRollup(pull);
+      state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: rollup.state, check_rollup_error: rollup.error };
+    }
     for (const t of pull.reviewThreads.nodes) {
       const comments = t?.comments?.nodes ?? [];
       threads.push({ id: t.id, resolved: t.isResolved === true, outdated: t.isOutdated === true, path: t.path ?? null, url: comments[0]?.url ?? null, comment_ids: comments.map((c) => c.databaseId) });
@@ -202,13 +216,15 @@ function mergeBlockers(state) {
   if (!MERGEABLE_STATES.has(status)) {
     const rollup = state.check_rollup ?? null;
     if (status === "BLOCKED" && unresolved.length === 0 && state.review_decision === "REVIEW_REQUIRED") {
-      if (rollup === null || rollup === "SUCCESS") awaiting = true;
+      if (state.check_rollup_error) blockers.push(`mergeStateStatus is BLOCKED (reviewDecision REVIEW_REQUIRED) and the head commit's checks are unknown`);
+      else if (rollup === null || rollup === "SUCCESS") awaiting = true;
       else blockers.push(`mergeStateStatus is BLOCKED and the head commit's checks are ${rollup}, not only a required human review`);
     } else if (status === "UNKNOWN") blockers.push("mergeStateStatus is UNKNOWN (GitHub is still computing mergeability; retry shortly)");
     else if (status === "BLOCKED" && unresolved.length > 0) blockers.push("mergeStateStatus is BLOCKED");
     else if (status === "BLOCKED") blockers.push(`mergeStateStatus is BLOCKED (reviewDecision ${state.review_decision ?? "none"}) with no unresolved thread: a ruleset or required check blocks the merge`);
     else blockers.push(`mergeStateStatus is ${status}`);
   }
+  if (state.check_rollup_error) blockers.push(state.check_rollup_error);
   return { mergeable_now: blockers.length === 0 && !awaiting, blockers, unresolved_threads: unresolved, awaiting_human_review: awaiting };
 }
 var AutoMergeSettingError = class extends Error {
@@ -363,7 +379,13 @@ if (argv.includes("--settle")) {
     const guard = (armed) => {
       const state = fetchSettledMergeState(target, originRepo, armed.pr_number, { retryDelayMs: retryDelayMs() });
       const verdict = mergeBlockers(state);
-      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: autoMergeOnClean === true && verdict.mergeable_now === true, head_sha: armed.head_sha };
+      const rollup = state.check_rollup ?? null;
+      const withheld = [];
+      if (autoMergeOnClean !== true) withheld.push("the auto-merge switch pr_review.auto_merge_on_clean is off");
+      if (verdict.awaiting_human_review) withheld.push("the PR awaits a required human review");
+      else if (verdict.mergeable_now !== true) withheld.push("GitHub does not report the PR mergeable now");
+      if (rollup !== null && rollup !== "SUCCESS") withheld.push(`the head commit's check rollup is ${rollup}, not SUCCESS: fix the failing or pending check, push, and run the loop again`);
+      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: withheld.length === 0, auto_merge_withheld: withheld.length ? withheld.join("; ") : null, head_sha: armed.head_sha };
       if (verdict.blockers.length) {
         const err = new Error(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join("; ")} \u2014 resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`);
         err.blocked = { ...merge, blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads };
@@ -445,20 +467,29 @@ function parsePreviouslyMissed(body) {
   let depth = 0;
   let base2 = 0;
   let nested = null;
+  let malformed = false;
   const finishNested = () => {
     const title = nested.title ?? "";
-    const text = nested.text.join(" ");
-    items.push(`${title}${nested.loc ? `${title ? " " : ""}(${nested.loc})` : ""}${text ? `${title || nested.loc ? ": " : ""}${text}` : ""}`);
+    const text2 = nested.text.join(" ");
+    const finding = `${title}${nested.loc ? `${title ? " " : ""}(${nested.loc})` : ""}${text2 ? `${title || nested.loc ? ": " : ""}${text2}` : ""}`;
+    if (finding) items.push(finding);
+    else malformed = true;
     nested = null;
   };
+  const labelOf = (line) => {
+    const strong = line.match(/<strong\b[^>]*>([\s\S]*?)<\/strong\s*>/i);
+    return (strong ? strong[1] : line.split(/<br\s*\/?>/i)[0]).replace(/<[^>]*>/g, "").replace(/^[\s#*_]+|[\s#*_]+$/g, "");
+  };
   const stripTags = (s) => s.replace(/<[^>]*>/g, "").trim();
-  for (const line of String(body ?? "").split(/\r?\n/)) {
+  const text = String(body ?? "").replace(/<summary\b[^>]*>[\s\S]*?<\/summary\s*>/gi, (m) => m.replace(/\s*\r?\n\s*/g, " "));
+  for (const line of text.split(/\r?\n/)) {
     const isHeading = /^\s{0,3}#{1,6}\s/.test(line);
     if (!found) {
       const plain = line.replace(/<[^>]*>/g, "").replace(/^[\s#*_]+/, "");
-      if (/^previously missed/i.test(plain) && (isHeading || /^\s*(\*\*|__|<summary|<details)/i.test(line))) {
+      const countFirst = labelOf(line).match(/^(\d+)\s+previously missed issues?$/i);
+      if ((countFirst || /^previously missed/i.test(plain)) && (isHeading || /^\s*(\*\*|__|<summary|<details)/i.test(line))) {
         found = true;
-        const count = plain.match(/^previously missed\s*\((\d+)\)/i);
+        const count = countFirst ?? plain.match(/^previously missed\s*\((\d+)\)/i);
         declared = count ? Number(count[1]) : null;
         base2 = /<summary|<details/i.test(line) ? 1 : 0;
         depth = base2;
@@ -499,8 +530,11 @@ function parsePreviouslyMissed(body) {
     if (item) items.push(item[1]);
     else if (items.length && /^\s+\S/.test(rest)) items[items.length - 1] += ` ${rest.trim()}`;
   }
-  if (nested) finishNested();
-  const unparsed = found && (declared === null ? items.length === 0 : declared !== items.length);
+  if (nested) {
+    malformed = true;
+    finishNested();
+  }
+  const unparsed = found && (malformed || (declared === null ? items.length === 0 : declared !== items.length));
   return { items, unparsed };
 }
 function requestCopilotReview() {

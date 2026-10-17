@@ -251,6 +251,18 @@ test('web tools: the researcher allowlist carries WebSearch and WebFetch; scout 
   for (const write of ['Edit', 'Write', 'NotebookEdit']) assert.ok(!researcher.includes(write), `researcher.md stays read-only — no ${write}`);
 });
 
+// GitHub #128: the conductor hands the librarian drafted board and queue
+// mutations, and a partial text change is board_edit. Without that grant the
+// librarian returned blocked on ten drafted edits and the conductor applied them.
+test('the librarian holds every board and queue mutation tool under both prefixes, board_edit included', () => {
+  const tools = fmOf(readFileSync(join(TPL, 'librarian.md'), 'utf8')).match(/^tools:\s*(.+)$/m)[1].split(',').map((t) => t.trim());
+  for (const name of ['board_add', 'board_update', 'board_edit', 'board_remove', 'maintenance_remove']) {
+    for (const prefix of ['mcp__sterling__', 'mcp__plugin_sterling_sterling__']) {
+      assert.ok(tools.includes(prefix + name), `librarian.md grants ${prefix}${name}`);
+    }
+  }
+});
+
 // Decision reviewer-agent-is-the-one-review-rubric-for-claude-and-codex
 // (user-ruled 2026-09-30): the reviewer is read-only BY TOOL GRANT. Review lanes
 // ran as general-purpose, which grants every tool, so read-only was only

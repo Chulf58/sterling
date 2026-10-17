@@ -21,13 +21,18 @@ export interface DataVersionProbe {
 
 /** Open the probe over the given store files. A file that does not exist is
  *  skipped (the dashboard skips a missing domain the same way). An open
- *  failure throws: the caller decides how to degrade. */
-export function openDataVersionProbe(paths: string[]): DataVersionProbe {
+ *  failure throws: the caller decides how to degrade.
+ *
+ *  `busyTimeoutMs` is how long a read waits for another connection's lock.
+ *  A store in journal_mode=DELETE (the 9p demotion, which is sticky) takes
+ *  an exclusive lock for every commit, and a read with no wait fails with
+ *  'database is locked' during it (GitHub #129). */
+export function openDataVersionProbe(paths: string[], options: { busyTimeoutMs?: number } = {}): DataVersionProbe {
   const conns: { db: DatabaseSync; stmt: StatementSync }[] = [];
   try {
     for (const path of paths) {
       if (!existsSync(path)) continue;
-      const db = new DatabaseSync(path, { readOnly: true });
+      const db = new DatabaseSync(path, { readOnly: true, timeout: options.busyTimeoutMs ?? 0 });
       conns.push({ db, stmt: db.prepare('PRAGMA data_version') });
     }
   } catch (err) {

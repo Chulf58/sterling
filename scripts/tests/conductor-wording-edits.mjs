@@ -10,6 +10,7 @@
 //
 // The same holds for implementor.md, which scripts/tests/portable-agents.test.mjs pins to
 // 201a0bc (IMPLEMENTOR_WORDING_EDITS below).
+// librarian.md is pinned there to c7c0d012 (LIBRARIAN_WORDING_EDITS below).
 //
 // The next deliberate edit to either template that reaches the Claude render adds an
 // entry to that template's list: [before, after] with the commit sha and a one-line
@@ -221,6 +222,34 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: 'which shows when the other project has finished it (decision `hand-a-board-task-to-a-sibling-project-board-add-target-proj`). The todo list stays',
     after: "which shows when the other project has finished it (decision `hand-a-board-task-to-a-sibling-project-board-add-target-proj`). When a later task here depends on the other project's work, name the point it must reach with `milestone` (for example `merged` or `deployed:test`); its tracker then reads `unverified` if the work is closed without evidence. A task handed TO this project arrives with the sender's words: when it is stuck on the user, set `needs: user` with `needs_reason` saying what must be decided, so the sender's tracker shows it; close it with `board_remove` and a `note`, plus `evidence` (`commit`, `pr`, `deploy` or `url`) whenever the item names a milestone (decision `handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe`). The todo list stays",
   },
+  {
+    commit: 'work-mode-3-to-5-parallel-sol-reviewers',
+    date: '2026-10-17',
+    reason: "work mode runs 3 to 5 parallel Sol reviewers, so the one-reviewer sentence names the work-mode exception (decision work-mode-3-to-5-parallel-sol-reviewers-before-copilot-loop; user-stated 2026-10-17)",
+    before: "dispatch **one** reviewer over the **riskiest part** of the whole branch's diff (runtime code under `packages/`, hooks, config, permissions, credentials, migration), never every file.",
+    after: "dispatch **one** reviewer (work mode: 3 to 5 in parallel, see \"Work mode\" below) over the **riskiest part** of the whole branch's diff (runtime code under `packages/`, hooks, config, permissions, credentials, migration), never every file.",
+  },
+  {
+    commit: 'work-mode-3-to-5-parallel-sol-reviewers',
+    date: '2026-10-17',
+    reason: "the one-review, one-fix-round, one-re-check cap is scoped to hobby mode; work mode has its own shape (same decision)",
+    before: "Cap the loop at **one review, one fix round, one re-check by the same warm reviewer**; what is left at MEDIUM or below becomes recorded residual risk.",
+    after: "In hobby mode cap the loop at **one review, one fix round, one re-check by the same warm reviewer**; what is left at MEDIUM or below becomes recorded residual risk. Work mode has its own shape below.",
+  },
+  {
+    commit: 'work-mode-3-to-5-parallel-sol-reviewers',
+    date: '2026-10-17',
+    reason: "the Work mode paragraph: 3 to 5 parallel Sol reviewers over the whole branch before the PR, same rubric, count by risk, merge, one fix round, one warm re-check; supersedes the count of the 2026-09-29 one-Sol ruling (same decision)",
+    before: "When the task is done, Sol reviews the whole branch ONCE, then the PR is opened and goes through the Copilot review loop on GitHub (user-ruled 2026-09-29 through the question form, \"One Sol at task end\" over \"Copilot only\": *\"It isnt needed to have sol review every loop. Just review when we are done with the task and make a PR\"*, because Copilot already reviews the PR, so a Sol pass per commit is duplicate review). Sol-before-PR takes precedence over the Terra\u2192Opus pairing above: in work mode Sol is the one mandatory pre-PR review, Terra-executed work included, so there are never two.",
+    after: "When the task is done and before the PR opens, run **3 to 5 Sol reviewers in parallel**, then open the PR and run the Copilot review loop on GitHub. Decision `work-mode-3-to-5-parallel-sol-reviewers-before-copilot-loop` (user-stated 2026-10-17, verbatim: *\"For Work project I want to use more than just 1 cross vendor reviewer before the Copilot loop starts. I want 3-5 reivewers in parallel to run on a work project before the copilot loop starts\"*, because hobby projects accept the risk of one review while a work project has the Copilot loop after it and warrants more eyes first), settled through the question form as 'Same rubric, all Sol', 'Scale by risk, 3-5' and 'Merge, fix, one re-check'. This supersedes the count in the 2026-09-29 ruling \"One Sol at task end\" over \"Copilot only\" (*\"It isnt needed to have sol review every loop. Just review when we are done with the task and make a PR\"*, because Copilot already reviews the PR, so a Sol pass per commit is duplicate review); that ruling still stands for never reviewing per commit or per loop round.\n- **Same rubric, all Sol, whole branch.** Every reviewer gets the one rubric in the `reviewer` agent's body and the same brief over the whole branch's diff, and each runs on the Sol route named in the pairing paragraph above. Do not split them by angle and do not mix models. Start them all in the background in one message.\n- **Count by risk.** 3 for a small or low-risk diff; up to 5 when the diff touches runtime code, permissions, credentials or migrations. This is your judgement, not a setting.\n- **Merge, fix once, re-check once.** Merge and de-duplicate the findings, adjudicate each on evidence, run one fix round, then have one warm Sol reviewer re-check the fixes (the fix a review causes is not covered by that review). Findings left at MEDIUM or below become recorded residual risk. Then open the PR.\n\nSol-before-PR takes precedence over the Terra\u2192Opus pairing above: in work mode the Sol reviewers are the mandatory pre-PR review, Terra-executed work included, so there is no separate Opus review.",
+  },
+  {
+    commit: 'work-mode-3-to-5-parallel-sol-reviewers',
+    date: '2026-10-17',
+    reason: "the Copilot-loop sentence says the Sol reviewers, not one Sol review, stay before the PR (same decision)",
+    before: "and the one Sol review stays where it is, before the PR is opened.",
+    after: "and the Sol reviewers stay where they are, before the PR is opened.",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
@@ -338,6 +367,23 @@ export const IMPLEMENTOR_WORDING_EDITS = [
   },
 ];
 
+export const LIBRARIAN_WORDING_EDITS = [
+  {
+    commit: 'issue #128',
+    date: '2026-10-17',
+    reason: 'the librarian applies conductor-drafted board edits, so it holds board_edit under both prefixes; without it a partial text edit had to go back to the conductor',
+    before: 'mcp__plugin_sterling_sterling__board_update, mcp__sterling__board_remove',
+    after: 'mcp__plugin_sterling_sterling__board_update, mcp__sterling__board_edit, mcp__plugin_sterling_sterling__board_edit, mcp__sterling__board_remove',
+  },
+  {
+    commit: 'issue #128',
+    date: '2026-10-17',
+    reason: 'the body lists board_edit among the board mutations the librarian performs, matching its grant',
+    before: '(`board_add`/`board_update`/`board_remove`, `maintenance_remove`)',
+    after: '(`board_add`/`board_update`/`board_edit`/`board_remove`, `maintenance_remove`)',
+  },
+];
+
 const occurrences = (text, needle) => text.split(needle).length - 1;
 
 // Applies a list of edits to a baseline template. Throws if an entry's `before` does not
@@ -353,3 +399,4 @@ function applyWordingEdits(edits, baselineText) {
 
 export const applyConductorWordingEdits = (baselineText) => applyWordingEdits(CONDUCTOR_WORDING_EDITS, baselineText);
 export const applyImplementorWordingEdits = (baselineText) => applyWordingEdits(IMPLEMENTOR_WORDING_EDITS, baselineText);
+export const applyLibrarianWordingEdits = (baselineText) => applyWordingEdits(LIBRARIAN_WORDING_EDITS, baselineText);

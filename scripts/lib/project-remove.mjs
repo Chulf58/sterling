@@ -1,7 +1,7 @@
 // list-projects --remove <path> [--apply] (decision
 // remove-a-project-store-list-projects-remove-backup-first-refuse-if-open, GitHub #109).
 // The CLI (scripts/list-projects.mjs) calls removeProject with the real /proc and no
-// callback. procRoot and beforeStoreRead are injected by tests only; nothing in this
+// callback. procRoot, beforeStoreRead and beforeNameRead are injected by tests only; nothing in this
 // module reads an environment variable that could change a safety check or run code.
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -65,6 +65,18 @@ function ownedByMe(pid, proc) {
   }
 }
 
+/** Is /proc/<pid> gone (ENOENT/ESRCH)? A process that no longer exists holds
+ *  nothing open. Any other error is thrown, as in ownedByMe. */
+function goneNow(pid, proc) {
+  try {
+    lstatSync(`${proc}/${pid}`);
+    return false;
+  } catch (e) {
+    if (vanished(e)) return true;
+    throw e;
+  }
+}
+
 /** The command name from /proc/<pid>/comm, else the basename of argv[0] from
  *  cmdline; undefined when neither can be read. */
 function nameOf(pid, proc) {
@@ -109,10 +121,12 @@ function commOf(pid, proc) {
  * rest. A same-uid process may be uninspectable for unrelated reasons, e.g.
  * (sd-pam), fusermount3 and browser sandboxes;
  * as the user. Other users' uninspectable processes are only counted. A pid
- * that vanishes (ENOENT/ESRCH) is skipped. Returns { ran: false, reason } when
- * /proc cannot be listed, so the caller refuses instead of claiming the check ran.
+ * that vanishes (ENOENT/ESRCH) is skipped, including one whose /proc entry is gone
+ * once its name has been read; a blind process still present always counts.
+ * Returns { ran: false, reason } when /proc cannot be listed, so the caller
+ * refuses instead of claiming the check ran.
  */
-function openHolders(files, proc) {
+function openHolders(files, proc, beforeNameRead) {
   let pids;
   try {
     pids = readdirSync(proc).filter((d) => /^\d+$/.test(d));
@@ -127,7 +141,9 @@ function openHolders(files, proc) {
     const mine = ownedByMe(pid, proc);
     if (mine === undefined) return;
     if (mine) {
+      beforeNameRead?.(Number(pid));
       const name = nameOf(pid, proc);
+      if (goneNow(pid, proc)) return;
       sameUserBlind.push({ pid: Number(pid), command: name ?? 'unknown', possiblySterling: couldBeSterling(name), reason: e.code ?? e.message });
     }
     else otherUserBlind++;
@@ -151,7 +167,7 @@ function openHolders(files, proc) {
         break;
       }
       const file = link.endsWith(' (deleted)') ? link.slice(0, -' (deleted)'.length) : link;
-      if (wanted.has(file)) holders.push({ pid: Number(pid), command: commOf(pid), file });
+      if (wanted.has(file)) holders.push({ pid: Number(pid), command: commOf(pid, proc), file });
     }
   }
   return { ran: true, holders, sameUserBlind, otherUserBlind };
@@ -256,7 +272,7 @@ function inspect(ctx, input, stamp) {
   }
 
   t.storeFiles = STORE_FILES.map((f) => join(dir, f));
-  const open = openHolders(t.storeFiles, ctx.procRoot);
+  const open = openHolders(t.storeFiles, ctx.procRoot, ctx.beforeNameRead);
   if (!open.ran) refusals.push(`the open-store check could not run: ${open.reason}`);
   else {
     for (const h of open.holders) refusals.push(`process ${h.pid} (${h.command}) has ${h.file} open; close that session first`);
@@ -445,7 +461,7 @@ function unregister(ctx, t, steps) {
  * `beforeStoreRead` exist for tests (a fake /proc; a callback run after the
  * sidecar checks and before the store read); the CLI never passes them.
  */
-export function removeProject(registry, input, { apply = false, procRoot = '/proc', beforeStoreRead, log = console.log } = {}) {
-  const ctx = { registry, procRoot, beforeStoreRead, log };
+export function removeProject(registry, input, { apply = false, procRoot = '/proc', beforeStoreRead, beforeNameRead, log = console.log } = {}) {
+  const ctx = { registry, procRoot, beforeStoreRead, beforeNameRead, log };
   return apply ? applyRemove(ctx, input) : dryRunRemove(ctx, input);
 }
