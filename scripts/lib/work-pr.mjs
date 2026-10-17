@@ -690,10 +690,28 @@ const splitRepo = (repo) => {
   return { host, owner, name };
 };
 
+/** The head commit's check rollup state from a pullRequest answer: null only
+ * for an explicit `statusCheckRollup: null` (the head has no checks). A missing
+ * or malformed commits subtree is NOT "no checks": it comes back as
+ * { error } so mergeBlockers blocks on it instead of reading it as green. */
+function readCheckRollup(pull) {
+  const nodes = pull?.commits?.nodes;
+  const commit = Array.isArray(nodes) && nodes.length > 0 ? nodes[nodes.length - 1]?.commit : undefined;
+  if (commit === null || typeof commit !== 'object' || !('statusCheckRollup' in commit)) {
+    return { state: null, error: "GitHub's answer has no head commit statusCheckRollup, so the head's checks cannot be read" };
+  }
+  const rollup = commit.statusCheckRollup;
+  if (rollup === null) return { state: null, error: null };
+  if (typeof rollup === 'object' && typeof rollup.state === 'string' && rollup.state !== '') return { state: rollup.state, error: null };
+  return { state: null, error: `GitHub's answer has a malformed head commit statusCheckRollup (${JSON.stringify(rollup)}), so the head's checks cannot be read` };
+}
+
 /** The PR's mergeStateStatus, reviewDecision, the head commit's check rollup
- * state (null when the head has no checks) and EVERY review thread (paged), as
- * { merge_state_status, review_decision, check_rollup, threads: [{id, resolved,
- * outdated, path, url, comment_ids}] }. `repo` is 'host/owner/repo'. */
+ * state (null when the head has no checks; check_rollup_error set when the
+ * answer does not say) and EVERY review thread (paged), as
+ * { merge_state_status, review_decision, check_rollup, check_rollup_error,
+ * threads: [{id, resolved, outdated, path, url, comment_ids}] }. `repo` is
+ * 'host/owner/repo'. */
 export function fetchPrMergeState(cwd, repo, number) {
   const { host, owner, name } = splitRepo(repo);
   const threads = [];
@@ -706,7 +724,10 @@ export function fetchPrMergeState(cwd, repo, number) {
     if (!pull || typeof pull.mergeStateStatus !== 'string' || !Array.isArray(pull.reviewThreads?.nodes)) {
       throw new Error(`GraphQL returned no mergeStateStatus/reviewThreads for ${repo}#${number}`);
     }
-    state ??= { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: pull.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? null };
+    if (!state) {
+      const rollup = readCheckRollup(pull);
+      state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: rollup.state, check_rollup_error: rollup.error };
+    }
     for (const t of pull.reviewThreads.nodes) {
       const comments = t?.comments?.nodes ?? [];
       threads.push({ id: t.id, resolved: t.isResolved === true, outdated: t.isOutdated === true, path: t.path ?? null, url: comments[0]?.url ?? null, comment_ids: comments.map((c) => c.databaseId) });
@@ -741,7 +762,9 @@ export function fetchSettledMergeState(cwd, repo, number, { retryDelayMs = 3000,
  * only when the head's check rollup is SUCCESS or absent (a failing or pending
  * required check also shows as BLOCKED, so any other rollup blocks and is
  * named). Every other state outside CLEAN/HAS_HOOKS/UNSTABLE blocks, unknown
- * ones included; UNKNOWN says to retry shortly. */
+ * ones included; UNKNOWN says to retry shortly. A check rollup the answer did
+ * not carry (check_rollup_error) blocks in every state, like an unknown state:
+ * it never reads as "no checks". */
 export function mergeBlockers(state) {
   const unresolved = state.threads.filter((t) => !t.resolved).map(({ id, path, url }) => ({ id, path, url }));
   const blockers = unresolved.map((t) => `unresolved review thread ${t.id}${t.path ? ` on ${t.path}` : ''}${t.url ? ` (${t.url})` : ''}`);
@@ -750,7 +773,8 @@ export function mergeBlockers(state) {
   if (!MERGEABLE_STATES.has(status)) {
     const rollup = state.check_rollup ?? null;
     if (status === 'BLOCKED' && unresolved.length === 0 && state.review_decision === 'REVIEW_REQUIRED') {
-      if (rollup === null || rollup === 'SUCCESS') awaiting = true;
+      if (state.check_rollup_error) blockers.push(`mergeStateStatus is BLOCKED (reviewDecision REVIEW_REQUIRED) and the head commit's checks are unknown`);
+      else if (rollup === null || rollup === 'SUCCESS') awaiting = true;
       else blockers.push(`mergeStateStatus is BLOCKED and the head commit's checks are ${rollup}, not only a required human review`);
     }
     else if (status === 'UNKNOWN') blockers.push('mergeStateStatus is UNKNOWN (GitHub is still computing mergeability; retry shortly)');
@@ -758,6 +782,7 @@ export function mergeBlockers(state) {
     else if (status === 'BLOCKED') blockers.push(`mergeStateStatus is BLOCKED (reviewDecision ${state.review_decision ?? 'none'}) with no unresolved thread: a ruleset or required check blocks the merge`);
     else blockers.push(`mergeStateStatus is ${status}`);
   }
+  if (state.check_rollup_error) blockers.push(state.check_rollup_error);
   return { mergeable_now: blockers.length === 0 && !awaiting, blockers, unresolved_threads: unresolved, awaiting_human_review: awaiting };
 }
 

@@ -6126,6 +6126,15 @@ function ownedByMe(pid, proc) {
     throw e;
   }
 }
+function goneNow(pid, proc) {
+  try {
+    lstatSync(`${proc}/${pid}`);
+    return false;
+  } catch (e) {
+    if (vanished(e)) return true;
+    throw e;
+  }
+}
 function nameOf(pid, proc) {
   try {
     const comm = readFileSync3(`${proc}/${pid}/comm`, "utf8").trim();
@@ -6150,7 +6159,7 @@ function commOf(pid, proc) {
     return "?";
   }
 }
-function openHolders(files, proc) {
+function openHolders(files, proc, beforeNameRead) {
   let pids;
   try {
     pids = readdirSync2(proc).filter((d) => /^\d+$/.test(d));
@@ -6165,7 +6174,9 @@ function openHolders(files, proc) {
     const mine = ownedByMe(pid, proc);
     if (mine === void 0) return;
     if (mine) {
+      beforeNameRead?.(Number(pid));
       const name = nameOf(pid, proc);
+      if (goneNow(pid, proc)) return;
       sameUserBlind.push({ pid: Number(pid), command: name ?? "unknown", possiblySterling: couldBeSterling(name), reason: e.code ?? e.message });
     } else otherUserBlind++;
   };
@@ -6188,7 +6199,7 @@ function openHolders(files, proc) {
         break;
       }
       const file = link.endsWith(" (deleted)") ? link.slice(0, -" (deleted)".length) : link;
-      if (wanted.has(file)) holders.push({ pid: Number(pid), command: commOf(pid), file });
+      if (wanted.has(file)) holders.push({ pid: Number(pid), command: commOf(pid, proc), file });
     }
   }
   return { ran: true, holders, sameUserBlind, otherUserBlind };
@@ -6276,7 +6287,7 @@ function inspect(ctx, input, stamp) {
     }
   }
   t.storeFiles = STORE_FILES.map((f) => join5(dir, f));
-  const open = openHolders(t.storeFiles, ctx.procRoot);
+  const open = openHolders(t.storeFiles, ctx.procRoot, ctx.beforeNameRead);
   if (!open.ran) refusals.push(`the open-store check could not run: ${open.reason}`);
   else {
     for (const h of open.holders) refusals.push(`process ${h.pid} (${h.command}) has ${h.file} open; close that session first`);
@@ -6440,8 +6451,8 @@ function unregister(ctx, t, steps) {
     return 1;
   }
 }
-function removeProject(registry2, input, { apply = false, procRoot = "/proc", beforeStoreRead, log = console.log } = {}) {
-  const ctx = { registry: registry2, procRoot, beforeStoreRead, log };
+function removeProject(registry2, input, { apply = false, procRoot = "/proc", beforeStoreRead, beforeNameRead, log = console.log } = {}) {
+  const ctx = { registry: registry2, procRoot, beforeStoreRead, beforeNameRead, log };
   return apply ? applyRemove(ctx, input) : dryRunRemove(ctx, input);
 }
 

@@ -1,8 +1,13 @@
 // list-projects --remove <path> [--apply] (decision
 // remove-a-project-store-list-projects-remove-backup-first-refuse-if-open, GitHub #109).
-// Every case spawns the script against temp dirs with STERLING_REGISTRY_DB isolated, so the
+// Every case runs against temp dirs with STERLING_REGISTRY_DB isolated, so the
 // real ~/.sterling is never touched. OPENCODE and OPENCODE_SESSION_ID are cleared in the
 // child env (anti_pattern ddf7ad45).
+// A case that expects --remove to PROCEED calls removeProject with an empty fake /proc:
+// over the real /proc, any same-uid process the open check cannot read (another test's
+// child exiting mid-scan, under parallel load) makes it refuse, so the outcome would
+// depend on the machine (board b1d5434b). The real /proc scan is still exercised by the
+// spawned-CLI cases that expect a refusal; their assertions hold whatever else is running.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -99,7 +104,7 @@ function direct(s, target, deps = {}, apply = false) {
 
 test('dry run lists target, registration, counts, other entries, leftovers and backup; exits 0; changes nothing', () => {
   const s = sandbox();
-  const r = run(s.registryDb, '--remove', s.project);
+  const r = direct(s, s.project, { procRoot: fakeProc() });
   assert.equal(r.code, 0, r.out);
   assert.ok(r.out.includes(`Directory to delete: ${s.sterling}`), r.out);
   assert.ok(r.out.includes(`registered under demo (${s.project})`), r.out);
@@ -118,7 +123,7 @@ test('dry run lists target, registration, counts, other entries, leftovers and b
 
 test('dry run on an unregistered store says "not registered"', () => {
   const s = sandbox({ register: false });
-  const r = run(s.registryDb, '--remove', s.project);
+  const r = direct(s, s.project, { procRoot: fakeProc() });
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /Registry: not registered/, r.out);
   assert.match(r.out, /Backup destination: .*removed-demo-/, r.out);
@@ -288,7 +293,7 @@ test('--apply on a registered store: verified backup, .sterling gone, row gone, 
   mkdirSync(otherRow);
   reg(s.registryDb, otherRow, 'keep');
   const dbBytes = readFileSync(join(s.sterling, 'sterling.db'));
-  const r = run(s.registryDb, '--remove', s.project, '--apply');
+  const r = direct(s, s.project, { procRoot: fakeProc() }, true);
   assert.equal(r.code, 0, r.out);
   const res = JSON.parse(r.stdout);
   assert.equal(res.ok, true);
@@ -306,7 +311,7 @@ test('--apply on a registered store: verified backup, .sterling gone, row gone, 
 
 test('--apply on an unregistered store deletes it and skips unregister', () => {
   const s = sandbox({ register: false });
-  const r = run(s.registryDb, '--remove', s.project, '--apply');
+  const r = direct(s, s.project, { procRoot: fakeProc() }, true);
   assert.equal(r.code, 0, r.out);
   const res = JSON.parse(r.stdout);
   assert.equal(res.ok, true);
@@ -321,7 +326,7 @@ test('a backup failure (unwritable backup_path) deletes nothing and keeps the ro
   mkdirSync(s.backups);
   chmodSync(s.backups, 0o500);
   try {
-    const r = run(s.registryDb, '--remove', s.project, '--apply');
+    const r = direct(s, s.project, { procRoot: fakeProc() }, true);
     assert.equal(r.code, 1, r.out);
     const res = JSON.parse(r.stdout);
     assert.deepEqual(res.steps.map((x) => [x.step, x.ok]), [['validate', true], ['backup', false]]);
@@ -358,7 +363,7 @@ test('the dry run never deletes a -wal that appears after its sidecar checks', (
 test('the dry run skips the counts when a -wal has no -shm, creating nothing', () => {
   const s = sandbox();
   writeFileSync(join(s.sterling, 'sterling.db-wal'), '');
-  const r = run(s.registryDb, '--remove', s.project);
+  const r = direct(s, s.project, { procRoot: fakeProc() });
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /Records: could not be read \(a -wal exists without a -shm/, r.out);
   assert.ok(!existsSync(join(s.sterling, 'sterling.db-shm')), 'no -shm was created');
@@ -452,6 +457,51 @@ test('open check: a same-uid uninspectable process whose name contains "sterling
   const restore = blindPid(proc, 999996, process.getuid(), 'sterling-mcp');
   try {
     expectRefusal(s, s.project, /process 999996 \(sterling-mcp\) runs as this user, could hold a Sterling store/, { procRoot: proc });
+  } finally {
+    restore();
+  }
+});
+
+test('open check: a holder found through the fake /proc is named by its real command, not "?"', () => {
+  const s = sandbox();
+  const proc = fakeProc();
+  const d = join(proc, '999997');
+  mkdirSync(join(d, 'fd'), { recursive: true });
+  writeFileSync(join(d, 'comm'), 'node\n');
+  symlinkSync(join(s.sterling, 'sterling.db'), join(d, 'fd', '3'));
+  expectRefusal(s, s.project, /process 999997 \(node\) has .*sterling\.db open/, { procRoot: proc });
+});
+
+test('open check: a same-uid blind process whose /proc entry is gone by the name read is skipped', () => {
+  const s = sandbox();
+  const proc = fakeProc();
+  const restore = blindPid(proc, 999998, process.getuid(), 'node');
+  const seen = [];
+  // The process exits after the fd read failed and its owner was read, before its name is read.
+  const vanish = (pid) => {
+    seen.push(pid);
+    restore();
+    rmSync(join(proc, String(pid)), { recursive: true, force: true });
+  };
+  const r = direct(s, s.project, { procRoot: proc, beforeNameRead: vanish });
+  assert.deepEqual(seen, [999998], 'the scan classified the pid blind before the name read');
+  assert.equal(r.code, 0, r.out);
+  assert.doesNotMatch(r.out, /999998/, r.out);
+});
+
+test('open check: a same-uid blind process still present after the name read refuses even when its name is unreadable', () => {
+  const s = sandbox();
+  const proc = fakeProc();
+  const restore = blindPid(proc, 999999, process.getuid(), 'hidden');
+  const seen = [];
+  // Present but nameless at the name read: comm becomes unreadable, the /proc entry stays.
+  const hide = (pid) => {
+    seen.push(pid);
+    chmodSync(join(proc, String(pid), 'comm'), 0o000);
+  };
+  try {
+    expectRefusal(s, s.project, /process 999999 \(unknown\) runs as this user, could hold a Sterling store/, { procRoot: proc, beforeNameRead: hide });
+    assert.deepEqual(seen, [999999, 999999], 'the dry run and --apply both reached the name read');
   } finally {
     restore();
   }
