@@ -52888,13 +52888,13 @@ function autoMergeOnCleanOf(cfg) {
 // packages/tui/dist/data-version.js
 import { existsSync as existsSync5 } from "node:fs";
 import { DatabaseSync as DatabaseSync4 } from "node:sqlite";
-function openDataVersionProbe(paths) {
+function openDataVersionProbe(paths, options = {}) {
   const conns = [];
   try {
     for (const path of paths) {
       if (!existsSync5(path))
         continue;
-      const db = new DatabaseSync4(path, { readOnly: true });
+      const db = new DatabaseSync4(path, { readOnly: true, timeout: options.busyTimeoutMs ?? 0 });
       conns.push({ db, stmt: db.prepare("PRAGMA data_version") });
     }
   } catch (err) {
@@ -53937,6 +53937,7 @@ function writeSelectionFile(root, type, recordId, at) {
 
 // packages/tui/dist/controller.js
 var DASHBOARD_BUSY_TIMEOUT_MS = 250;
+var LOCK_NOTICE_AFTER_MS = DEFAULT_BUSY_TIMEOUT_MS;
 function openDashboard(storePath2, options = {}) {
   const disabled = options.disabledEffects ?? {};
   const configPath2 = join19(dirname8(storePath2), "config.json");
@@ -53979,6 +53980,16 @@ function openDashboard(storePath2, options = {}) {
   let ui = initialUi;
   let probe;
   let changeDetection = "data_version";
+  const isBusy = (err) => {
+    if (err instanceof StoreBusyError)
+      return true;
+    const code = err?.errcode;
+    return code === 5 || code === 6 || /database is (locked|busy)|SQLITE_BUSY|SQLITE_LOCKED/i.test(err?.message ?? "");
+  };
+  const clock = options.clock ?? Date.now;
+  let busySince;
+  let lockNotice;
+  const withLockNotice = (built, width) => lockNotice === void 0 ? built : { ...built, state: { ...built.state, notice: clipEllipsis(`\u26A0 ${lockNotice}`, width) } };
   let degradeSaid = false;
   function degrade(reason) {
     changeDetection = `degraded: ${reason}`;
@@ -53991,7 +54002,8 @@ function openDashboard(storePath2, options = {}) {
     changeDetection = "none: Postgres storage has no data_version";
   else {
     try {
-      probe = (options.dataVersionProbe ?? openDataVersionProbe)([storePath2, ...mounts.map((m) => m.dbPath)]);
+      const paths = [storePath2, ...mounts.map((m) => m.dbPath)];
+      probe = options.dataVersionProbe ? options.dataVersionProbe(paths) : openDataVersionProbe(paths, { busyTimeoutMs: DASHBOARD_BUSY_TIMEOUT_MS });
     } catch (err) {
       degrade(`data_version probe failed to open \u2014 ${err.message}`);
     }
@@ -54002,21 +54014,38 @@ function openDashboard(storePath2, options = {}) {
   const today = () => (/* @__PURE__ */ new Date()).toDateString();
   function currentFrame(vp) {
     let dataVersion;
+    let midCommit = false;
     if (probe) {
       try {
         dataVersion = probe.read();
+        busySince = void 0;
+        lockNotice = void 0;
+        if (changeDetection.startsWith("locked: "))
+          changeDetection = "data_version";
       } catch (err) {
-        degrade(`data_version read failed \u2014 ${err.message}`);
+        if (isBusy(err)) {
+          midCommit = true;
+          const now = clock();
+          busySince ??= now;
+          const held = now - busySince;
+          if (held >= LOCK_NOTICE_AFTER_MS) {
+            lockNotice = `store locked by another connection for ${Math.round(held / 1e3)} s (${err.message}); showing the last frame until it is released`;
+            if (changeDetection === "data_version" || changeDetection.startsWith("locked: "))
+              changeDetection = `locked: ${lockNotice}`;
+          }
+        } else
+          degrade(`data_version read failed \u2014 ${err.message}`);
       }
     }
     const key = vpKey(vp);
     const day = today();
-    if (frame && dataVersion !== void 0 && frame.dataVersion === dataVersion && frame.ui === ui && frame.roster === roster && frame.vp === key && frame.day === day)
-      return frame.built;
+    const storeUnchanged = midCommit || dataVersion !== void 0 && frame?.dataVersion === dataVersion;
+    if (frame && storeUnchanged && frame.ui === ui && frame.roster === roster && frame.vp === key && frame.day === day)
+      return withLockNotice(frame.built, vp.width);
     builds++;
     const built = buildDashboardFrame(store, ui, vp.width, vp.maxBodyLines, projectName, vp.showBanner, stores, roster, vp.agents, vp.height, vp.github, vp.agentsLines);
     frame = { vp: key, viewport: vp, day, ui, roster, dataVersion, built };
-    return built;
+    return withLockNotice(built, vp.width);
   }
   let storeCalls = 0;
   const countCalls = (target) => {
@@ -54042,12 +54071,6 @@ function openDashboard(storePath2, options = {}) {
   }
   let pending = [];
   let retryNotice;
-  const isBusy = (err) => {
-    if (err instanceof StoreBusyError)
-      return true;
-    const code = err?.errcode;
-    return code === 5 || code === 6 || /database is (locked|busy)|SQLITE_BUSY|SQLITE_LOCKED/i.test(err?.message ?? "");
-  };
   function flush() {
     if (!pending.length)
       return false;

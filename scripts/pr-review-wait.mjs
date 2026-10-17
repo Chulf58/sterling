@@ -73,10 +73,11 @@
 //    body_findings_without_comments,
 //    copilot_request:null|{requested, error?}, copilot_review_pending,
 //    observed_copilot_login, stale_review, identity_confirmed[, error]}
-// previously_missed is the findings under a "Previously missed" heading of the
-// review body, as list items or as nested <details> blocks ([] when absent);
+// previously_missed is the findings under a "Previously missed" (or "N
+// previously missed issues") heading of the review body, as list items or as
+// nested <details> blocks ([] when absent);
 // previously_missed_unparsed is true when that section exists but the findings
-// read do not match it (none, or not the "(N)" its heading declares), so the
+// read do not match it (none, or not the N its heading declares), so the
 // body must be read by hand. body_findings_without_comments is true for any
 // non-blank body with no inline comments, because the body format is Copilot's
 // and may change: such a review is not clean until the body has been read.
@@ -110,9 +111,13 @@
 // and awaiting_human_review. A gh failure refuses too.
 // A clean output also carries auto_merge_on_clean (config
 // pr_review.auto_merge_on_clean, absent = on) and auto_merge, which is true only
-// when the switch is on AND mergeable_now: the skill's cue to squash-merge the PR,
-// pinned to head_sha (the armed, reviewed head)
-// (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean). The switch is
+// when the switch is on AND mergeable_now AND the head's check rollup is SUCCESS
+// or absent: the skill's cue to squash-merge the PR, pinned to head_sha (the
+// armed, reviewed head) (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean).
+// UNSTABLE is mergeable to GitHub even when a check that is not required fails
+// (GitHub issue #131), so a FAILURE, PENDING or any other rollup withholds the
+// merge. auto_merge_withheld names every reason auto_merge is false (null when
+// it is true). The switch is
 // read before anything is asked or written; a value that is not a boolean
 // refuses the clean settle, so a typo never decides a merge.
 import { spawnSync } from 'node:child_process';
@@ -242,7 +247,15 @@ if (argv.includes('--settle')) {
     const guard = (armed) => {
       const state = fetchSettledMergeState(target, originRepo, armed.pr_number, { retryDelayMs: retryDelayMs() });
       const verdict = mergeBlockers(state);
-      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: autoMergeOnClean === true && verdict.mergeable_now === true, head_sha: armed.head_sha };
+      // A clean settle may still carry a failing or pending check that is not
+      // required (UNSTABLE); only a green or absent rollup lets it auto-merge.
+      const rollup = state.check_rollup ?? null;
+      const withheld = [];
+      if (autoMergeOnClean !== true) withheld.push('the auto-merge switch pr_review.auto_merge_on_clean is off');
+      if (verdict.awaiting_human_review) withheld.push('the PR awaits a required human review');
+      else if (verdict.mergeable_now !== true) withheld.push('GitHub does not report the PR mergeable now');
+      if (rollup !== null && rollup !== 'SUCCESS') withheld.push(`the head commit's check rollup is ${rollup}, not SUCCESS: fix the failing or pending check, push, and run the loop again`);
+      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: withheld.length === 0, auto_merge_withheld: withheld.length ? withheld.join('; ') : null, head_sha: armed.head_sha };
       if (verdict.blockers.length) {
         const err = new Error(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join('; ')} — resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`);
         err.blocked = { ...merge, blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads };
@@ -333,8 +346,14 @@ function ghApi(path, { paginate = false, extra = [] } = {}) {
  * ccr-overview-v2 body writes them (GitHub issue #102): the block's <summary>
  * is the title, a line that is only a backticked `path:line` is the location,
  * and the remaining lines are the text, joined as "title (path:line): text".
+ * The heading also matches with the count first, when its label (the
+ * <strong> text, else the text before a <br>, else the whole heading) is
+ * exactly "N previously missed issue(s)", as Copilot writes it (GitHub issues
+ * #124-#127, #130); a <summary> that spans lines is read as one line.
  * `unparsed` is true when a section was found but the findings read do not
- * match it: none read, or fewer or more than the "(N)" its heading declares.
+ * match it: none read, fewer or more than the N its heading declares ("(N)"
+ * after the phrase, or N before it), or a nested block that is empty or never
+ * closed (an empty block is not counted as a finding).
  * { items: [], unparsed: false } when the section is absent. */
 function parsePreviouslyMissed(body) {
   const items = [];
@@ -343,20 +362,31 @@ function parsePreviouslyMissed(body) {
   let depth = 0; // <details> nesting relative to the body, counted inside the section
   let base = 0; // the depth of the section itself: 1 when it is a <details> block
   let nested = null; // the finding block being read: { title, loc, text[] }
+  let malformed = false; // a nested block was empty or never closed
   const finishNested = () => {
     const title = nested.title ?? '';
     const text = nested.text.join(' ');
-    items.push(`${title}${nested.loc ? `${title ? ' ' : ''}(${nested.loc})` : ''}${text ? `${title || nested.loc ? ': ' : ''}${text}` : ''}`);
+    const finding = `${title}${nested.loc ? `${title ? ' ' : ''}(${nested.loc})` : ''}${text ? `${title || nested.loc ? ': ' : ''}${text}` : ''}`;
+    if (finding) items.push(finding);
+    else malformed = true;
     nested = null;
   };
+  // The label of a count-first heading: the <strong> text, else the text before
+  // a <br>, else the whole line, without tags or markdown emphasis.
+  const labelOf = (line) => {
+    const strong = line.match(/<strong\b[^>]*>([\s\S]*?)<\/strong\s*>/i);
+    return (strong ? strong[1] : line.split(/<br\s*\/?>/i)[0]).replace(/<[^>]*>/g, '').replace(/^[\s#*_]+|[\s#*_]+$/g, '');
+  };
   const stripTags = (s) => s.replace(/<[^>]*>/g, '').trim();
-  for (const line of String(body ?? '').split(/\r?\n/)) {
+  const text = String(body ?? '').replace(/<summary\b[^>]*>[\s\S]*?<\/summary\s*>/gi, (m) => m.replace(/\s*\r?\n\s*/g, ' '));
+  for (const line of text.split(/\r?\n/)) {
     const isHeading = /^\s{0,3}#{1,6}\s/.test(line);
     if (!found) {
       const plain = line.replace(/<[^>]*>/g, '').replace(/^[\s#*_]+/, '');
-      if (/^previously missed/i.test(plain) && (isHeading || /^\s*(\*\*|__|<summary|<details)/i.test(line))) {
+      const countFirst = labelOf(line).match(/^(\d+)\s+previously missed issues?$/i);
+      if ((countFirst || /^previously missed/i.test(plain)) && (isHeading || /^\s*(\*\*|__|<summary|<details)/i.test(line))) {
         found = true;
-        const count = plain.match(/^previously missed\s*\((\d+)\)/i);
+        const count = countFirst ?? plain.match(/^previously missed\s*\((\d+)\)/i);
         declared = count ? Number(count[1]) : null;
         base = /<summary|<details/i.test(line) ? 1 : 0;
         depth = base;
@@ -397,8 +427,11 @@ function parsePreviouslyMissed(body) {
     if (item) items.push(item[1]);
     else if (items.length && /^\s+\S/.test(rest)) items[items.length - 1] += ` ${rest.trim()}`;
   }
-  if (nested) finishNested();
-  const unparsed = found && (declared === null ? items.length === 0 : declared !== items.length);
+  if (nested) {
+    malformed = true; // never closed: what was read is kept, but the section is not trusted
+    finishNested();
+  }
+  const unparsed = found && (malformed || (declared === null ? items.length === 0 : declared !== items.length));
   return { items, unparsed };
 }
 

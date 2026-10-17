@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { SterlingStore } from '@sterling/store';
-import { openDashboard, type DashboardController, type DashboardOptions } from '../controller.js';
+import { openDashboard, LOCK_NOTICE_AFTER_MS, type DashboardController, type DashboardOptions } from '../controller.js';
 import { buildDashboardState, TASKS_TAB } from '../state.js';
 
 // GitHub #35 (board 7b1e2e9d): a click built the dashboard three times, wrote
@@ -351,6 +351,123 @@ test('busy timeout without deferWrites (the OpenCode host, which never flushes a
     assert.match(ctl.ui().notice ?? '', /^selection not handed to the next prompt — the store was locked by another connection for longer than 250 ms; .*\(SQLITE_BUSY, database is locked\)/);
   } finally {
     locker.exec('ROLLBACK');
+    locker.close();
+    ctl.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// GitHub #129: a store in journal_mode=DELETE (the sticky 9p demotion) takes
+// an exclusive lock for every commit. The probe read used no busy timeout, so
+// any commit that overlapped a redraw threw 'database is locked', put up the
+// degraded notice and rebuilt the dashboard through the same lock.
+
+/** A store with one todo, demoted to journal_mode=DELETE the way a 9p open leaves it. */
+function deleteModeFixture(): { dir: string; storePath: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-click-lag-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), '{}\n');
+  const storePath = join(dir, '.sterling', 'sterling.db');
+  const seed = new SterlingStore(storePath);
+  todo(seed, 'item');
+  seed.close();
+  const raw = new DatabaseSync(storePath);
+  assert.equal((raw.prepare('PRAGMA journal_mode=DELETE').get() as { journal_mode: string }).journal_mode, 'delete');
+  raw.close();
+  return { dir, storePath };
+}
+
+test('change detection (#129): a lock held through the redraw on a DELETE-mode store is not degraded detection; the last frame stands and the commit rebuilds once', async () => {
+  const { dir, storePath } = deleteModeFixture();
+  const ctl = openDashboard(storePath, { deferWrites: true });
+  const locker = new DatabaseSync(storePath);
+  try {
+    const first = ctl.state(VP);
+    const b0 = ctl.stats().builds;
+    locker.exec('BEGIN EXCLUSIVE');
+    locker.exec("INSERT INTO store_meta (key, value, updated_at) VALUES ('probe', 'x', 'now')");
+    assert.equal(ctl.state(VP), first, 'the redraw keeps the last frame instead of waiting on the lock');
+    assert.equal(ctl.stats().builds - b0, 0, 'no rebuild while the commit is in flight');
+    assert.equal(ctl.stats().changeDetection, 'data_version', 'a held lock is not degraded detection');
+    assert.equal(ctl.ui().notice, undefined, 'no degraded notice');
+    locker.exec('COMMIT');
+    ctl.state(VP);
+    assert.equal(ctl.stats().builds - b0, 1, 'the commit is seen on the next read and rebuilds once');
+    ctl.state(VP);
+    assert.equal(ctl.stats().builds - b0, 1, 'then the frame is reused again');
+  } finally {
+    locker.close();
+    ctl.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('change detection (#129): the probe waits out a short commit lock on a DELETE-mode store and sees that commit at once', async () => {
+  const { dir, storePath } = deleteModeFixture();
+  const ctl = openDashboard(storePath, { deferWrites: true });
+  try {
+    ctl.state(VP);
+    const b0 = ctl.stats().builds;
+    // another process takes the exclusive lock, writes, and commits after 100 ms
+    const child = spawn(process.execPath, [
+      '--input-type=module',
+      '-e',
+      `const { DatabaseSync } = await import('node:sqlite');
+       const db = new DatabaseSync(${JSON.stringify(storePath)});
+       db.exec('BEGIN EXCLUSIVE');
+       db.exec("INSERT INTO store_meta (key, value, updated_at) VALUES ('probe', 'x', 'now')");
+       process.stdout.write('locked\\n');
+       setTimeout(() => { db.exec('COMMIT'); db.close(); }, 100);`,
+    ]);
+    const exited = new Promise<void>((resolve) => child.on('exit', () => resolve()));
+    await new Promise<void>((resolve, reject) => {
+      child.stdout.on('data', (d: Buffer) => d.toString().includes('locked') && resolve());
+      child.on('error', reject);
+    });
+    ctl.state(VP);
+    assert.equal(ctl.stats().builds - b0, 1, 'the read waited for the commit, saw the new version and rebuilt');
+    assert.equal(ctl.stats().changeDetection, 'data_version');
+    assert.equal(ctl.ui().notice, undefined);
+    await exited;
+  } finally {
+    ctl.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('change detection (#129): a lock held past LOCK_NOTICE_AFTER_MS is said on the notice row and in stats(), over the last frame, and clears once a read succeeds', async () => {
+  const { dir, storePath } = deleteModeFixture();
+  let now = 0;
+  const ctl = openDashboard(storePath, { deferWrites: true, clock: () => now });
+  const locker = new DatabaseSync(storePath);
+  try {
+    const first = ctl.state(VP);
+    assert.equal(first.notice, undefined);
+    const b0 = ctl.stats().builds;
+    locker.exec('BEGIN EXCLUSIVE');
+    locker.exec("INSERT INTO store_meta (key, value, updated_at) VALUES ('probe', 'x', 'now')");
+    assert.equal(ctl.state(VP), first, 'the first busy read starts the window');
+    now = LOCK_NOTICE_AFTER_MS - 1;
+    assert.equal(ctl.state(VP), first, 'inside the window: the last frame, unchanged');
+    assert.equal(ctl.stats().changeDetection, 'data_version');
+    now = LOCK_NOTICE_AFTER_MS;
+    const locked = ctl.state(VP);
+    assert.match(locked.notice ?? '', /^⚠ store locked by another connection for 5 s \(database is locked\); showing the last frame/);
+    assert.match(ctl.stats().changeDetection, /^locked: store locked by another connection/);
+    assert.deepEqual(locked.rows, first.rows, 'the body is the last frame');
+    assert.equal(ctl.stats().builds - b0, 0, 'saying it does not rebuild through the lock');
+    assert.equal(ctl.ui().notice, undefined, 'the lock notice is not a UiState notice');
+    locker.exec('COMMIT');
+    const after = ctl.state(VP);
+    assert.equal(after.notice, undefined, 'the notice clears once a read succeeds');
+    assert.equal(ctl.stats().changeDetection, 'data_version');
+    assert.equal(ctl.stats().builds - b0, 1, 'the commit rebuilds once');
+    // a later lock starts a fresh window
+    locker.exec('BEGIN EXCLUSIVE');
+    now += 1;
+    assert.equal(ctl.state(VP).notice, undefined, 'a new lock is inside its own window again');
+    locker.exec('ROLLBACK');
+  } finally {
     locker.close();
     ctl.close();
     rmSync(dir, { recursive: true, force: true });

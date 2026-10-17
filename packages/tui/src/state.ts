@@ -858,7 +858,7 @@ export function wrapText(text: string, width: number): string[] {
   return out;
 }
 
-const clipEllipsis = (s: string, width: number): string =>
+export const clipEllipsis = (s: string, width: number): string =>
   Number.isFinite(width) && s.length > width ? `${s.slice(0, Math.max(1, width) - 1)}…` : s;
 
 /**
