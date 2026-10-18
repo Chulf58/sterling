@@ -669,6 +669,38 @@ test('postUpdateSync, host opencode: the async runner syncs and the text names O
   }
 });
 
+test('postUpdateSync, host opencode: a refreshed Sterling-full agent is a change that owes the relaunch, never "none changed"', async () => {
+  const plugin = makePluginRoot({ syncOut: 'OpenCode matches: .opencode/opencode.json\nOpenCode refreshed: .opencode/agents/sterling/conductor.md\n' });
+  const project = makeProject({ marker: '0.0.1', store: false });
+  process.env.FIXTURE_LOG = join(tmp('sterling-pus-log-'), 'calls.log');
+  try {
+    const r = await postUpdateSync({ root: plugin, project, host: 'opencode', runStep: (root, name, args) => runStepAsync(root, name, args, { nodeBin: process.execPath }) });
+    assert.equal(r.outcome, 'synced');
+    assert.match(r.context, /RESTART REQUIRED — agents load when OpenCode starts/);
+    assert.doesNotMatch(r.context, /none changed/);
+  } finally {
+    delete process.env.FIXTURE_LOG;
+  }
+});
+
+test('postUpdateSync, host opencode: sync-agents skipping the OpenCode setup fails the sync and writes no marker; on Claude Code the same output still syncs', async () => {
+  const skip = 'OpenCode: OpenCode not installed (no `opencode` on PATH or in ~/.opencode/bin) — Sterling on OpenCode SKIPPED; install OpenCode 2, then run /sterling:update\n';
+  process.env.FIXTURE_LOG = join(tmp('sterling-pus-log-'), 'calls.log');
+  try {
+    const plugin = makePluginRoot({ syncOut: skip });
+    const project = makeProject({ marker: '0.0.1', store: false });
+    const r = await postUpdateSync({ root: plugin, project, host: 'opencode', runStep: (root, name, args) => runStepAsync(root, name, args, { nodeBin: process.execPath }) });
+    assert.equal(r.outcome, 'failed');
+    assert.match(r.context, /did not refresh the OpenCode agents \(OpenCode: OpenCode not installed/);
+    assert.equal(markerOf(project), '0.0.1\n');
+    const claudeProject = makeProject({ marker: '0.0.1', store: false });
+    const c = await postUpdateSync({ root: plugin, project: claudeProject, host: 'claude', runStep: (root, name, args) => runStepAsync(root, name, args, { nodeBin: process.execPath }) });
+    assert.equal(c.outcome, 'synced');
+  } finally {
+    delete process.env.FIXTURE_LOG;
+  }
+});
+
 test('runStepAsync: a step past its exit code reports the status and the tail; a missing node binary is an error, not a hang', async () => {
   const plugin = makePluginRoot();
   process.env.FIXTURE_LOG = join(tmp('sterling-pus-log-'), 'calls.log');

@@ -101,10 +101,17 @@ export function mcpLauncherPath({ home = homedir() } = {}) {
   return join(home, '.sterling', 'opencode', 'sterling-mcp.mjs');
 }
 
-/** `opencode --version` → { installed, version, major } or { installed: false, reason }. */
-export function probeOpenCode({ env = process.env } = {}) {
-  const r = spawnSync('opencode', ['--version'], { encoding: 'utf8', env, timeout: 20_000 });
-  if (r.error) return { installed: false, reason: r.error.code === 'ENOENT' ? 'no `opencode` on PATH' : `opencode --version could not run (${r.error.message})` };
+/**
+ * `opencode --version` → { installed, version, major } or { installed: false, reason }.
+ * Looks on PATH, then at ~/.opencode/bin/opencode, where OpenCode's installer puts it and
+ * where the launchers start it from (launcherTools in launchers.mjs uses the same rule):
+ * a process OpenCode started need not have that directory on PATH.
+ */
+export function probeOpenCode({ env = process.env, home = homedir() } = {}) {
+  let r = spawnSync('opencode', ['--version'], { encoding: 'utf8', env, timeout: 20_000 });
+  const homeBin = join(home, '.opencode', 'bin', 'opencode');
+  if (r.error?.code === 'ENOENT' && existsSync(homeBin)) r = spawnSync(homeBin, ['--version'], { encoding: 'utf8', env, timeout: 20_000 });
+  if (r.error) return { installed: false, reason: r.error.code === 'ENOENT' ? 'no `opencode` on PATH or in ~/.opencode/bin' : `opencode --version could not run (${r.error.message})` };
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
   if (r.status !== 0 || !m) return { installed: false, reason: `opencode --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
   return { installed: true, version: m[0], major: Number(m[1]) };
@@ -1393,7 +1400,7 @@ export function setupOpenCode({ projectDir, pluginRoot, env = process.env, home 
   if (!isAbsolute(projectDir)) throw new TypeError(`setupOpenCode: projectDir must be absolute, got ${projectDir}`);
   // The test preload sets this so a test run never touches the real ~/.config/opencode.
   if (env.STERLING_OPENCODE_SETUP_DISABLE === '1') return { skipped: 'Sterling on OpenCode SKIPPED (STERLING_OPENCODE_SETUP_DISABLE=1)' };
-  const oc = probe({ env });
+  const oc = probe({ env, home });
   if (!oc.installed) return { skipped: `OpenCode not installed (${oc.reason}) — Sterling on OpenCode SKIPPED; install OpenCode 2, then run /sterling:update` };
   if (oc.major < 2) return { skipped: `OpenCode ${oc.version} found, but Sterling on OpenCode needs 2.x — SKIPPED; upgrade OpenCode (opencode upgrade), then run /sterling:update` };
   const isInstalled = installed ?? isInstalledCopy(pluginRoot, { env, home });
