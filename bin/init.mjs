@@ -15893,9 +15893,11 @@ function opencodeConfigDir({ env = process.env, home = homedir9() } = {}) {
 function mcpLauncherPath({ home = homedir9() } = {}) {
   return join25(home, ".sterling", "opencode", "sterling-mcp.mjs");
 }
-function probeOpenCode({ env = process.env } = {}) {
-  const r = spawnSync7("opencode", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
-  if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `opencode` on PATH" : `opencode --version could not run (${r.error.message})` };
+function probeOpenCode({ env = process.env, home = homedir9() } = {}) {
+  let r = spawnSync7("opencode", ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  const homeBin = join25(home, ".opencode", "bin", "opencode");
+  if (r.error?.code === "ENOENT" && existsSync13(homeBin)) r = spawnSync7(homeBin, ["--version"], { encoding: "utf8", env, timeout: 2e4 });
+  if (r.error) return { installed: false, reason: r.error.code === "ENOENT" ? "no `opencode` on PATH or in ~/.opencode/bin" : `opencode --version could not run (${r.error.message})` };
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(`${r.stdout}${r.stderr}`);
   if (r.status !== 0 || !m) return { installed: false, reason: `opencode --version exited ${r.status} without a version: ${`${r.stdout}${r.stderr}`.trim().slice(0, 200)}` };
   return { installed: true, version: m[0], major: Number(m[1]) };
@@ -16832,7 +16834,7 @@ function restoreFullAgentFiles(writes, fs = {}) {
 function setupOpenCode({ projectDir, pluginRoot: pluginRoot2, env = process.env, home = homedir9(), installed, probe = probeOpenCode }) {
   if (!isAbsolute(projectDir)) throw new TypeError(`setupOpenCode: projectDir must be absolute, got ${projectDir}`);
   if (env.STERLING_OPENCODE_SETUP_DISABLE === "1") return { skipped: "Sterling on OpenCode SKIPPED (STERLING_OPENCODE_SETUP_DISABLE=1)" };
-  const oc = probe({ env });
+  const oc = probe({ env, home });
   if (!oc.installed) return { skipped: `OpenCode not installed (${oc.reason}) \u2014 Sterling on OpenCode SKIPPED; install OpenCode 2, then run /sterling:update` };
   if (oc.major < 2) return { skipped: `OpenCode ${oc.version} found, but Sterling on OpenCode needs 2.x \u2014 SKIPPED; upgrade OpenCode (opencode upgrade), then run /sterling:update` };
   const isInstalled = installed ?? isInstalledCopy(pluginRoot2, { env, home });
