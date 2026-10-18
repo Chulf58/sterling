@@ -170,12 +170,17 @@ export function runStepAsync(root, name, args, { nodeBin = process.execPath } = 
  * AGENTS.md/CLAUDE.md are hand-tuned, not stamped from templates, and it never stamps the
  * clone running it.
  */
-export async function runPostUpdateSteps(root, project, runStep) {
+export async function runPostUpdateSteps(root, project, runStep, host = 'claude') {
   const sync = await runStep(root, 'sync-agents.mjs', ['--target', project]);
   if (sync.error) return { ok: false, detail: `sync-agents did not run (${sync.error})` };
   if (sync.status === 2) return { ok: false, detail: `sync-agents REFUSED (exit 2 — a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
   if (sync.status !== 0) return { ok: false, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
-  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
+  // On OpenCode the agents that matter are the Sterling-full ones setupOpenCode writes
+  // ("OpenCode created|refreshed: .opencode/agents/..."); a skipped setup ("OpenCode: ...")
+  // means none of them was checked, which a running OpenCode contradicts (P5).
+  const openCodeSkip = host === 'opencode' ? /^OpenCode: .*$/m.exec(sync.out) : null;
+  if (openCodeSkip) return { ok: false, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
+  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out) || (host === 'opencode' && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out));
   // From here sync-agents has already run: a later failure still carries `restart`,
   // so the user is told agents changed even though the step as a whole failed.
   if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: '', inserted: [] };
@@ -258,7 +263,7 @@ export async function postUpdateSync({ root, project, host = 'claude', runStep =
     };
   }
   const hop = `Sterling ${previous ?? '(never synced)'}→${current}`;
-  const result = await runPostUpdateSteps(root, project, runStep);
+  const result = await runPostUpdateSteps(root, project, runStep, host);
   if (!result.ok) {
     // sync-agents may have refreshed agents before a later step failed: the
     // restart is owed regardless, so it is never hidden behind the failure.

@@ -19694,12 +19694,14 @@ function runStepAsync(root, name, args, { nodeBin = process.execPath } = {}) {
     child.on("close", (status, signal) => finish({ error: spawnError ? spawnError.message : signal ? `killed by ${signal}` : null, status, stdout, stderr }));
   });
 }
-async function runPostUpdateSteps(root, project, runStep) {
+async function runPostUpdateSteps(root, project, runStep, host = "claude") {
   const sync = await runStep(root, "sync-agents.mjs", ["--target", project]);
   if (sync.error) return { ok: false, detail: `sync-agents did not run (${sync.error})` };
   if (sync.status === 2) return { ok: false, detail: `sync-agents REFUSED (exit 2 \u2014 a locally modified agent, an unsafe path, a foreign or malformed .claude/settings.json, or a project mode or handoff setting it could not read): ${sync.tail}` };
   if (sync.status !== 0) return { ok: false, detail: `sync-agents exited ${sync.status}: ${sync.tail}` };
-  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out);
+  const openCodeSkip = host === "opencode" ? /^OpenCode: .*$/m.exec(sync.out) : null;
+  if (openCodeSkip) return { ok: false, detail: `sync-agents did not refresh the OpenCode agents (${openCodeSkip[0]})` };
+  const restart = /RESTART REQUIRED|EXIT AND RELAUNCH/.test(sync.out) || host === "opencode" && /^OpenCode (created|refreshed): \.opencode\/agents\//m.test(sync.out);
   if (sameRealPath(project, root) || looksLikeSterlingSourceTree(project)) return { ok: true, restart, drift: false, driftOut: "", inserted: [] };
   const contract = await runStep(root, "stamp-contract.mjs", ["--apply-inserts", "--project", project]);
   if (contract.error) return { ok: false, restart, detail: `stamp-contract did not run (${contract.error})` };
@@ -19758,7 +19760,7 @@ POST-UPDATE SYNC REFUSED (${t.label}): this Sterling copy is ${current}, older t
     };
   }
   const hop = `Sterling ${previous ?? "(never synced)"}\u2192${current}`;
-  const result = await runPostUpdateSteps(root, project, runStep);
+  const result = await runPostUpdateSteps(root, project, runStep, host);
   if (!result.ok) {
     const restartOwed = result.restart ? ` ${t.restartShort}.` : "";
     return {
