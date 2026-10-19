@@ -326,9 +326,28 @@ const resolveSha = (ref, label) => {
   if (r.status !== 0) fail(`direct-merge: git rev-parse ${label} ('${ref}') failed: ${(r.stderr || '').trim()}`);
   return r.stdout.trim();
 };
-// Work mode reads the base from origin when there is no local branch of that
-// name (GitHub issue #99); a local base, when present, is used as before.
-const intoRef = shipsPr && !hasRef(`refs/heads/${into}`) && hasRef(`refs/remotes/origin/${into}`) ? `refs/remotes/origin/${into}` : into;
+// Work mode reads the base from ORIGIN, fetched first: the PR is opened against
+// origin's base, so a stale local base (or a stale origin/<base>) would inflate
+// mergeBase..branchTip with commits already on origin, and the PR body built
+// from that range went over GitHub's size limit (GitHub issue #149). A local
+// base is used only when origin has no such branch (GitHub issue #99 kept).
+// A failed fetch is announced, and the last-fetched origin/<base> is used.
+let intoRef = into;
+if (shipsPr) {
+  const fetched = spawnSync('git', ['fetch', '--no-tags', 'origin', `+refs/heads/${into}:refs/remotes/origin/${into}`], {
+    cwd: target,
+    encoding: 'utf8',
+    timeout: 120_000,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+  });
+  if (fetched.status !== 0) {
+    console.error(
+      `direct-merge: WARNING — could not fetch origin's ${into} (git fetch exit ${fetched.status ?? fetched.error?.message}): ${(fetched.stderr || '').trim()}\n` +
+        `  The PR title, body and changed-file list use the last-fetched origin/${into}, which may be behind origin.`
+    );
+  }
+  if (hasRef(`refs/remotes/origin/${into}`)) intoRef = `refs/remotes/origin/${into}`;
+}
 const intoTip = resolveSha(intoRef, 'into');
 const branchTip = resolveSha(branch, 'branch');
 const mergeBaseR = spawnSync('git', ['merge-base', intoTip, branchTip], { cwd: target, encoding: 'utf8', timeout: 30_000 });

@@ -10004,6 +10004,86 @@ function renderDomainMap(map, { applyCommand = "/sterling:domains" } = {}) {
   return out.join("\n");
 }
 
+// scripts/lib/agents-md-facts.mjs
+var STACK_TAGS_LABEL = "- Stack tags (= domain mount manifest): ";
+var DOMAINS_LABEL = "- Domain stores (one shared store per stack tag): ";
+var DOMAINS_SUFFIX = " \u2014 each created by init with a description of what belongs in it (\xA72.3)";
+var DOMAINS_NONE = "(none \u2014 declare stack tags to mount domain stores)";
+var HISTORICAL_DOMAINS_SUFFIXES = [DOMAINS_SUFFIX, " \u2014 created lazily on first need (\xA72.3)"];
+var HISTORICAL_DOMAINS_NONE = [DOMAINS_NONE, "(none mounted yet \u2014 created lazily on first need)"];
+var renderStackTags = (stackTags) => stackTags.join(", ");
+var renderDomains = (stackTags, domainPaths = {}) => stackTags.length ? stackTags.map((t) => domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(", ") + DOMAINS_SUFFIX : DOMAINS_NONE;
+var ENTRY = /^[^\s,`*[\]()<>]+$/;
+var isEntryList = (value) => value.length > 0 && value.split(", ").every((e) => ENTRY.test(e));
+var isGeneratedStackTags = (value) => value === "" || isEntryList(value);
+function isDomainEntryList(value, configuredPaths) {
+  const memo = /* @__PURE__ */ new Map();
+  const from = (pos) => {
+    if (!memo.has(pos)) memo.set(pos, judge(pos));
+    return memo.get(pos);
+  };
+  const judge = (pos) => {
+    for (const p of configuredPaths) {
+      if (!p || !value.startsWith(p, pos)) continue;
+      const end = pos + p.length;
+      if (end === value.length || value.startsWith(", ", end) && from(end + 2)) return true;
+    }
+    const comma = value.indexOf(", ", pos);
+    const entry = value.slice(pos, comma === -1 ? void 0 : comma);
+    if (!ENTRY.test(entry)) return false;
+    return comma === -1 || from(comma + 2);
+  };
+  return value.length > 0 && from(0);
+}
+var isGeneratedDomains = (value, configuredPaths) => HISTORICAL_DOMAINS_NONE.includes(value) || HISTORICAL_DOMAINS_SUFFIXES.some((s2) => value.endsWith(s2) && isDomainEntryList(value.slice(0, -s2.length), configuredPaths));
+function refreshAgentsMdFacts(text, { stackTags, domainPaths = {} }) {
+  const lines = [];
+  const re = /\r\n|\n/g;
+  let start = 0;
+  let m;
+  while (m = re.exec(text)) {
+    lines.push({ content: text.slice(start, m.index), eol: m[0] });
+    start = re.lastIndex;
+  }
+  lines.push({ content: text.slice(start), eol: "" });
+  const refreshed = [];
+  const kept = [];
+  const absent = [];
+  const facts = [
+    { name: "Stack tags", label: STACK_TAGS_LABEL, want: renderStackTags(stackTags), generated: isGeneratedStackTags },
+    { name: "Domain stores", label: DOMAINS_LABEL, want: renderDomains(stackTags, domainPaths), generated: (v) => isGeneratedDomains(v, Object.values(domainPaths)) }
+  ];
+  for (const f of facts) {
+    const hits = lines.filter((l) => l.content.startsWith(f.label));
+    if (!hits.length) {
+      absent.push(f.name);
+      continue;
+    }
+    if (hits.length > 1) {
+      kept.push({ name: f.name, reason: `the line appears ${hits.length} times` });
+      continue;
+    }
+    const value = hits[0].content.slice(f.label.length);
+    if (value === f.want) continue;
+    if (!f.generated(value)) {
+      kept.push({ name: f.name, reason: "the line was edited by hand" });
+      continue;
+    }
+    hits[0].content = f.label + f.want;
+    refreshed.push(f.name);
+  }
+  return { text: lines.map((l) => l.content + l.eol).join(""), refreshed, kept, absent };
+}
+function describeAgentsMdRefresh({ refreshed, kept }, { stackTags, domainPaths = {} }) {
+  const parts = [];
+  if (refreshed.length) parts.push(`rewrote the ${refreshed.join(" and ")} line${refreshed.length > 1 ? "s" : ""} from .sterling/config.json`);
+  for (const k of kept) {
+    const want = k.name === "Stack tags" ? renderStackTags(stackTags) : renderDomains(stackTags, domainPaths);
+    parts.push(`left the ${k.name} line alone (${k.reason}); config says: ${want}`);
+  }
+  return parts.join("; ");
+}
+
 // scripts/domains.mjs
 var fwd2 = (p) => p.replace(/\\/g, "/");
 var USAGE = "usage: domains.mjs [--target <dir>] [--json] | --apply --add <domain> [--add <domain> ...] [--description <domain>=<text> ...]";
@@ -10324,6 +10404,18 @@ if (toAdd.length) {
     }
     done.push("updated this project's tags in the project registry");
   } else done.push("this project has no registry row, so the registry was not changed (run /sterling:init to register it)");
+  const agentsMdPath = join10(project.dir, "AGENTS.md");
+  if (existsSync4(agentsMdPath)) {
+    const facts = { stackTags: next, domainPaths: project.config.domain_paths ?? {} };
+    const refresh = refreshAgentsMdFacts(readFileSync4(agentsMdPath, "utf8"), facts);
+    if (refresh.refreshed.length) {
+      const tmpPath = `${agentsMdPath}.tmp-${process.pid}`;
+      writeFileSync(tmpPath, refresh.text);
+      renameSync(tmpPath, agentsMdPath);
+    }
+    if (refresh.refreshed.length || refresh.kept.length) done.push(`AGENTS.md: ${describeAgentsMdRefresh(refresh, facts)}`);
+    for (const k of refresh.kept) notes.push(`AGENTS.md's ${k.name} line was not rewritten (${k.reason}); update it by hand.`);
+  } else done.push("this project has no AGENTS.md, so no Stack tags or Domain stores line was updated");
 }
 console.log(`Applied to ${projectName} (${currentPath}):`);
 for (const line of done) console.log(`  ${line}`);
@@ -10331,5 +10423,4 @@ for (const note of notes) console.log(`Note: ${note}`);
 if (toAdd.length || created) {
   console.log("");
   console.log("Restart the session for the new mount to load: the Sterling MCP server mounts domains once, when it starts, so knowledge_query and knowledge_create do not see a new domain until then.");
-  if (toAdd.length) console.log('AGENTS.md is not rewritten: update its "Stack tags" and "Domain stores" lines by hand to match.');
 }

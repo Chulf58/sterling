@@ -31,8 +31,20 @@ function resolveStoreRoot(target2, linkedWorktree = resolveLinkedWorktree(target
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync2, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname as dirname2, join as join2 } from "node:path";
-function gh(cwd, args) {
-  return spawnSync2("gh", args, { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
+function gh(cwd, args, timeoutMs = 12e4) {
+  return spawnSync2("gh", args, { cwd, encoding: "utf8", timeout: timeoutMs, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
+}
+var DeadlineReachedError = class extends Error {
+  constructor(message = "the deadline was reached before the read finished") {
+    super(message);
+    this.name = "DeadlineReachedError";
+  }
+};
+function callTimeoutMs(deadline2) {
+  if (deadline2 === null) return 12e4;
+  const remaining = deadline2 - Date.now();
+  if (remaining <= 0) throw new DeadlineReachedError();
+  return Math.min(12e4, remaining);
 }
 var streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? "")).trim();
 function parseOriginRepo(url) {
@@ -139,16 +151,21 @@ function settlePrLoop(root, outcome, prRef, { originRepo, now = (/* @__PURE__ */
   if (ref.repo !== null && ref.repo !== s.repo) {
     throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} \u2014 nothing settled (${unstick(entry)})`);
   }
-  if (s.status !== "owed") throw new Error(`the loop for ${s.pr_url} is already settled '${s.status}' (${s.settled_at}); only an owed loop can be settled`);
-  if (guard) guard(s);
-  const next = { ...s, status: outcome, settled_at: now };
+  const resettle = s.status === "clean" && outcome === "clean" && guard !== null;
+  if (s.status !== "owed" && !resettle) {
+    throw new Error(`the loop for ${s.pr_url} is already settled '${s.status}' (${s.settled_at}); only an owed loop can be settled (a loop settled clean can be settled clean again, to re-run the merge decision on its unchanged head)`);
+  }
+  const checked = guard ? guard(s, { resettle }) : null;
+  if (resettle) return { ...s, resettle: true };
+  const next = { ...s, status: outcome, settled_at: now, ...typeof checked?.head_sha === "string" ? { settled_head_sha: checked.head_sha } : {} };
   writeAtomic(entry.file, next);
   return next;
 }
 var MERGEABLE_STATES = /* @__PURE__ */ new Set(["CLEAN", "HAS_HOOKS", "UNSTABLE"]);
-function ghGraphql(cwd, host, query) {
+function ghGraphql(cwd, host, query, deadline2 = null) {
   const args = ["api", "--hostname", host, "graphql", "-f", `query=${query}`];
-  const r = gh(cwd, args);
+  const r = gh(cwd, args, callTimeoutMs(deadline2));
+  if (deadline2 !== null && r.error?.code === "ETIMEDOUT" && Date.now() >= deadline2) throw new DeadlineReachedError();
   if (r.error || r.status !== 0) throw new Error(`gh api graphql failed (${r.error ? r.error.message : `exit ${r.status}`}): ${streams(r)}`);
   let reply;
   try {
@@ -174,21 +191,22 @@ function readCheckRollup(pull) {
   if (typeof rollup === "object" && typeof rollup.state === "string" && rollup.state !== "") return { state: rollup.state, error: null };
   return { state: null, error: `GitHub's answer has a malformed head commit statusCheckRollup (${JSON.stringify(rollup)}), so the head's checks cannot be read` };
 }
-function fetchPrMergeState(cwd, repo, number) {
+function fetchPrMergeState(cwd, repo, number, { deadline: deadline2 = null } = {}) {
   const { host, owner: owner2, name: name2 } = splitRepo(repo);
   const threads = [];
   let after = null;
   let state = null;
   for (; ; ) {
     const page = after ? `, after:"${after}"` : "";
-    const query = `query { repository(owner:"${owner2}", name:"${name2}") { pullRequest(number:${number}) { mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
-    const pull = ghGraphql(cwd, host, query)?.repository?.pullRequest;
-    if (!pull || typeof pull.mergeStateStatus !== "string" || !Array.isArray(pull.reviewThreads?.nodes)) {
-      throw new Error(`GraphQL returned no mergeStateStatus/reviewThreads for ${repo}#${number}`);
+    const query = `query { repository(owner:"${owner2}", name:"${name2}") { pullRequest(number:${number}) { state merged headRefOid mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
+    const pull = ghGraphql(cwd, host, query, deadline2)?.repository?.pullRequest;
+    if (!pull || typeof pull.mergeStateStatus !== "string" || !Array.isArray(pull.reviewThreads?.nodes) || typeof pull.state !== "string" || typeof pull.merged !== "boolean" || typeof pull.headRefOid !== "string" || !Array.isArray(pull.reviews?.nodes)) {
+      throw new Error(`GraphQL returned no mergeStateStatus/reviewThreads/state/merged/headRefOid/reviews for ${repo}#${number}`);
     }
     if (!state) {
       const rollup = readCheckRollup(pull);
-      state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: rollup.state, check_rollup_error: rollup.error };
+      const reviews = pull.reviews.nodes.map((r) => ({ id: r?.databaseId ?? null, state: r?.state ?? null, login: r?.author?.login ?? null, bot: r?.author?.__typename === "Bot", commit: r?.commit?.oid ?? null }));
+      state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: rollup.state, check_rollup_error: rollup.error, pr_state: pull.state, merged: pull.merged, head_sha: pull.headRefOid, reviews };
     }
     for (const t of pull.reviewThreads.nodes) {
       const comments = t?.comments?.nodes ?? [];
@@ -202,11 +220,12 @@ function fetchPrMergeState(cwd, repo, number) {
   return { ...state, threads };
 }
 var sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-function fetchSettledMergeState(cwd, repo, number, { retryDelayMs: retryDelayMs2 = 3e3, sleep: sleep2 = sleepMs } = {}) {
-  const first = fetchPrMergeState(cwd, repo, number);
-  if (first.merge_state_status !== "UNKNOWN") return first;
+function fetchSettledMergeState(cwd, repo, number, { retryDelayMs: retryDelayMs2 = 3e3, sleep: sleep2 = sleepMs, deadline: deadline2 = null } = {}) {
+  const first = fetchPrMergeState(cwd, repo, number, { deadline: deadline2 });
+  if (first.merge_state_status !== "UNKNOWN" || first.merged) return first;
+  if (deadline2 !== null && deadline2 - Date.now() <= retryDelayMs2) throw new DeadlineReachedError();
   sleep2(retryDelayMs2);
-  return fetchPrMergeState(cwd, repo, number);
+  return fetchPrMergeState(cwd, repo, number, { deadline: deadline2 });
 }
 function mergeBlockers(state) {
   const unresolved = state.threads.filter((t) => !t.resolved).map(({ id, path, url }) => ({ id, path, url }));
@@ -298,6 +317,10 @@ var DEFAULT_TIMEOUT_S = 540;
 var DEFAULT_INTERVAL_S = 30;
 var MAX_INTERVAL_S = 120;
 var DEFAULT_RECHECK_DELAY_S = 10;
+var DEFAULT_CHECKS_TIMEOUT_S = 540;
+var DEFAULT_CHECKS_INTERVAL_S = 30;
+var PENDING_ROLLUPS = /* @__PURE__ */ new Set(["PENDING", "EXPECTED"]);
+var sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 var result = { status: "error", head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
@@ -370,27 +393,113 @@ function readAutoMergeOnClean() {
   }
   return autoMergeOnCleanOf(cfg);
 }
+function checksWaitMs() {
+  const read = (name2, dflt, zeroOk) => {
+    const raw = flag(name2);
+    if (raw === void 0) return dflt * 1e3;
+    const n = Number(raw);
+    if (raw.trim() === "" || !Number.isFinite(n) || n < 0 || n === 0 && !zeroOk) throw new Error(`${name2} must be a number of seconds ${zeroOk ? ">= 0" : "> 0"}, got '${raw}'`);
+    return n * 1e3;
+  };
+  return { timeoutMs: read("--checks-timeout", DEFAULT_CHECKS_TIMEOUT_S, true), intervalMs: read("--checks-interval", DEFAULT_CHECKS_INTERVAL_S, false) };
+}
+function lastCopilotReview(reviews, pinned) {
+  const copilot = reviews.filter(
+    (r) => r.bot && typeof r.login === "string" && Number.isInteger(r.id) && COMPLETED_STATES.has(r.state) && (pinned.length ? pinned.includes(r.login) || pinned.includes(`${r.login}[bot]`) : COPILOT_LOGIN.test(r.login))
+  );
+  return copilot.length ? copilot.reduce((a, b) => b.id > a.id ? b : a) : null;
+}
 if (argv.includes("--settle")) {
   let merge = null;
   try {
     const originRepo = originRepoOrThrow();
     const outcome = flag("--settle");
     const autoMergeOnClean = outcome === "clean" ? readAutoMergeOnClean() : null;
-    const guard = (armed) => {
-      const state = fetchSettledMergeState(target, originRepo, armed.pr_number, { retryDelayMs: retryDelayMs() });
+    const checksWait = outcome === "clean" ? checksWaitMs() : null;
+    const pinnedLogins2 = outcome === "clean" ? readPinnedLogins() : [];
+    const guard = (armed, { resettle = false } = {}) => {
+      const blocked = (message, extra) => {
+        const err = new Error(message);
+        err.blocked = { ...merge, ...extra };
+        return err;
+      };
+      const started = Date.now();
+      let state;
+      let reviewedHead = null;
+      let timedOut = false;
+      const bounded = checksWait.timeoutMs > 0;
+      const deadline2 = started + checksWait.timeoutMs;
+      let pinnedAt = null;
+      for (; ; ) {
+        const firstRead = pinnedAt === null;
+        try {
+          state = fetchSettledMergeState(target, originRepo, armed.pr_number, { retryDelayMs: retryDelayMs(), deadline: bounded ? deadline2 : null });
+        } catch (e) {
+          if (!(e instanceof DeadlineReachedError)) throw e;
+          if (firstRead) {
+            throw new Error(`GitHub's merge state could not be read within --checks-timeout (${checksWait.timeoutMs / 1e3}s; an UNKNOWN state is re-read after --unknown-retry-delay inside it), so nothing is known about the PR \u2014 settle again, with a longer --checks-timeout if GitHub is slow; nothing settled`);
+          }
+          timedOut = true;
+          break;
+        }
+        if (state.merged || state.pr_state !== "OPEN") break;
+        const settledHead = armed.settled_head_sha ?? armed.head_sha;
+        if (resettle && state.head_sha !== settledHead) {
+          throw new Error(`the PR head moved from ${settledHead} (settled clean) to ${state.head_sha}, so its new commits are unreviewed \u2014 a merge-only re-settle needs the unchanged head; rerun /sterling:merge to push and re-arm the loop; nothing settled`);
+        }
+        const last = lastCopilotReview(state.reviews, pinnedLogins2);
+        if (firstRead) pinnedAt = { head: state.head_sha, review: last?.id ?? null };
+        else if (state.head_sha !== pinnedAt.head || (last?.id ?? null) !== pinnedAt.review) {
+          throw blocked(
+            state.head_sha !== pinnedAt.head ? `the PR head moved from ${pinnedAt.head} to ${state.head_sha} while the settle waited for the checks, so the loop's clean judgment does not cover it and the loop is NOT clean: wait for and disposition the review of the new head, then settle again; nothing settled` : `a new Copilot review (${last?.id ?? "none"}, was ${pinnedAt.review}) arrived while the settle waited for the checks, so it is not dispositioned and the loop is NOT clean: disposition it, then settle again; nothing settled`,
+            { head_sha: state.head_sha, settle_start_head_sha: pinnedAt.head, reviewed_head_sha: last?.commit ?? null, armed_head_sha: armed.head_sha }
+          );
+        }
+        reviewedHead = last?.commit ?? null;
+        if (reviewedHead !== state.head_sha) {
+          throw blocked(
+            `the PR head ${state.head_sha} is not the head Copilot last reviewed (${reviewedHead ?? "no completed Copilot review on the PR"}), so its newest commits are unreviewed and the loop is NOT clean: run the wait with --request-copilot, disposition that review, then settle again; nothing settled`,
+            { head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha }
+          );
+        }
+        if (bounded && Date.now() > deadline2) {
+          timedOut = true;
+          break;
+        }
+        const pending = PENDING_ROLLUPS.has(state.check_rollup) && !state.check_rollup_error && state.threads.every((t) => t.resolved);
+        if (!pending) break;
+        const remaining = deadline2 - Date.now();
+        if (remaining <= 0) {
+          timedOut = true;
+          break;
+        }
+        process.stderr.write(`pr-review-wait: the head's check rollup is ${state.check_rollup}; waiting for the checks to finish (up to ${Math.ceil(remaining / 1e3)}s more)
+`);
+        sleep(Math.min(checksWait.intervalMs, remaining));
+      }
+      const checksWaitedS = Math.round((Date.now() - started) / 1e3);
+      if (state.merged) {
+        merge = { pr_state: state.pr_state, already_merged: true, merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: false, awaiting_human_review: false, auto_merge_on_clean: autoMergeOnClean, auto_merge: false, auto_merge_withheld: "the PR is already merged: there is nothing left to merge", head_sha: state.head_sha, armed_head_sha: armed.head_sha, ...resettle ? { resettle: true } : {} };
+        return { head_sha: state.head_sha };
+      }
+      if (state.pr_state !== "OPEN") {
+        merge = { pr_state: state.pr_state, already_merged: false, head_sha: state.head_sha, armed_head_sha: armed.head_sha };
+        throw blocked(`the PR is ${state.pr_state}, not open and not merged, so the loop is NOT clean: reopen it and settle again, or settle escalated; nothing settled`, { blockers: [`the PR is ${state.pr_state}`], unresolved_threads: [] });
+      }
       const verdict = mergeBlockers(state);
       const rollup = state.check_rollup ?? null;
       const withheld = [];
       if (autoMergeOnClean !== true) withheld.push("the auto-merge switch pr_review.auto_merge_on_clean is off");
       if (verdict.awaiting_human_review) withheld.push("the PR awaits a required human review");
       else if (verdict.mergeable_now !== true) withheld.push("GitHub does not report the PR mergeable now");
-      if (rollup !== null && rollup !== "SUCCESS") withheld.push(`the head commit's check rollup is ${rollup}, not SUCCESS: fix the failing or pending check, push, and run the loop again`);
-      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: withheld.length === 0, auto_merge_withheld: withheld.length ? withheld.join("; ") : null, head_sha: armed.head_sha };
+      if (timedOut && PENDING_ROLLUPS.has(rollup)) withheld.push(`the head commit's check rollup is ${rollup}, still not SUCCESS after waiting ${checksWaitedS}s: once the checks finish, run --settle clean again on this unchanged head (it re-runs only the merge decision)`);
+      else if (timedOut) withheld.push(`the head commit's check rollup reached ${rollup} only after --checks-timeout ran out (${checksWaitedS}s): run --settle clean again on this unchanged head (it re-runs only the merge decision)`);
+      else if (rollup !== null && rollup !== "SUCCESS") withheld.push(`the head commit's check rollup is ${rollup}, not SUCCESS: fix the failing check, push, and run the loop again`);
+      merge = { pr_state: state.pr_state, already_merged: false, merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, checks_waited_s: checksWaitedS, checks_timed_out: timedOut, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: withheld.length === 0, auto_merge_withheld: withheld.length ? withheld.join("; ") : null, head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha, ...resettle ? { resettle: true } : {} };
       if (verdict.blockers.length) {
-        const err = new Error(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join("; ")} \u2014 resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`);
-        err.blocked = { ...merge, blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads };
-        throw err;
+        throw blocked(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join("; ")} \u2014 resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`, { blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads });
       }
+      return { head_sha: state.head_sha };
     };
     const s = settlePrLoop(storeRoot, outcome, flag("--pr"), { originRepo, guard: outcome === "clean" ? guard : null });
     process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at, ...merge ?? {} }) + "\n");
@@ -628,7 +737,6 @@ function poll(recheckAbsent = true) {
   };
 }
 if (requestCopilot) requestCopilotReview();
-var sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 for (; ; ) {
   let found;
   try {

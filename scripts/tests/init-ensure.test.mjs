@@ -595,7 +595,7 @@ test('ensure outcome 3 — leave-and-report: hand-edited config, CLAUDE.md, and 
     const rerun = init(dir);
     assert.equal(rerun.code, 0, rerun.stderr);
     assert.match(rerun.stdout, /^\.sterling\/config\.json\s+differs\s+left untouched/m);
-    assert.match(rerun.stdout, /^AGENTS\.md\s+ok\s+present — project-editable, never compared byte-for-byte/m);
+    assert.match(rerun.stdout, /^AGENTS\.md\s+ok\s+present — project-editable; the Stack tags and Domain stores lines match \.sterling\/config\.json$/m);
     assert.match(rerun.stdout, /^CLAUDE\.md\s+differs\s+left untouched — merge the Sterling layer by hand/m);
     assert.match(rerun.stdout, /^\.claude\/agents\/librarian\.md\s+differs\s+locally modified/m);
     assert.deepEqual(snapshot(dir), before, 'hand-edited files untouched');
