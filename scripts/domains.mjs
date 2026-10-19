@@ -47,6 +47,7 @@ import { resolveLinkedWorktree } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
 import { DEFAULT_DOMAIN_DESCRIPTIONS } from './lib/domain-defaults.mjs';
 import { buildDomainMap, renderDomainMap, UNIVERSAL_DOMAIN } from './lib/domain-map.mjs';
+import { refreshAgentsMdFacts, describeAgentsMdRefresh } from './lib/agents-md-facts.mjs';
 
 const fwd = (p) => p.replace(/\\/g, '/');
 const USAGE = 'usage: domains.mjs [--target <dir>] [--json] | --apply --add <domain> [--add <domain> ...] [--description <domain>=<text> ...]';
@@ -440,6 +441,20 @@ if (toAdd.length) {
     }
     done.push('updated this project\'s tags in the project registry');
   } else done.push('this project has no registry row, so the registry was not changed (run /sterling:init to register it)');
+
+  // The two AGENTS.md lines that name the tags follow them, unless edited by hand (GitHub #158).
+  const agentsMdPath = join(project.dir, 'AGENTS.md');
+  if (existsSync(agentsMdPath)) {
+    const facts = { stackTags: next, domainPaths: project.config.domain_paths ?? {} };
+    const refresh = refreshAgentsMdFacts(readFileSync(agentsMdPath, 'utf8'), facts);
+    if (refresh.refreshed.length) {
+      const tmpPath = `${agentsMdPath}.tmp-${process.pid}`;
+      writeFileSync(tmpPath, refresh.text);
+      renameSync(tmpPath, agentsMdPath);
+    }
+    if (refresh.refreshed.length || refresh.kept.length) done.push(`AGENTS.md: ${describeAgentsMdRefresh(refresh, facts)}`);
+    for (const k of refresh.kept) notes.push(`AGENTS.md's ${k.name} line was not rewritten (${k.reason}); update it by hand.`);
+  } else done.push('this project has no AGENTS.md, so no Stack tags or Domain stores line was updated');
 }
 
 console.log(`Applied to ${projectName} (${currentPath}):`);
@@ -448,5 +463,4 @@ for (const note of notes) console.log(`Note: ${note}`);
 if (toAdd.length || created) {
   console.log('');
   console.log('Restart the session for the new mount to load: the Sterling MCP server mounts domains once, when it starts, so knowledge_query and knowledge_create do not see a new domain until then.');
-  if (toAdd.length) console.log('AGENTS.md is not rewritten: update its "Stack tags" and "Domain stores" lines by hand to match.');
 }

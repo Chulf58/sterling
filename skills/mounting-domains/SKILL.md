@@ -55,7 +55,7 @@ Never hand-edit `stack_tags` when the CLI can make the change: a hand edit skips
 The Sterling MCP server mounts domains once, when it starts (verified in `packages/mcp-server/src/server.ts`: the mounted set is built at boot from the config). So the new domain is not readable or writable in the running session. Tell the user to restart the session.
 
 Then:
-- Update the "Stack tags" and "Domain stores" lines in the project's `AGENTS.md`. Init writes them once and does not rewrite an existing `AGENTS.md`.
+- Check the "Stack tags" and "Domain stores" lines in the project's `AGENTS.md`. `domains.mjs --apply` and a re-run of `/sterling:init` rewrite them when they still have the shape init writes; a line edited by hand is kept and reported with a warning, so update that one yourself.
 - Re-run the map and confirm the domain lists this project under "mounted by", and that the proposal for this project is empty or holds only what the user declined.
 
 ## 7. The other side

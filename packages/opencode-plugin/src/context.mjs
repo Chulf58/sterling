@@ -367,7 +367,7 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
           line = await sweepStale(root);
         } catch (e) {
           // A failed sweep costs its own line, not the rest of the context.
-          line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
+          line = `STERLING DISPATCH SWEEP FAILED (${errText(e)}): dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
         }
         if (line) {
           holdLine(`${root}\0sweep`, line);

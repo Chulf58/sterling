@@ -1,5 +1,6 @@
 export { normalizeRepoPath, repoPath, toRepoRelative, matchesGlob, samePath, isAbsolutePathAnyHost, sameLocationAnyHost, isUnderLocationAnyHost, classifyLocation, repoPathOfLocation, normalizeLocation, isCollapsedUrlLocation } from './paths.js';
 export type { LocationKind } from './paths.js';
+export { SOURCE_EXTENSIONS, sourceExtensionOf, isSourcePath } from './source-extensions.js';
 export {
   LINK_RELS,
   WRITE_REFUSED_LINK_RELS,

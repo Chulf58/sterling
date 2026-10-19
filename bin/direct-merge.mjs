@@ -4232,6 +4232,13 @@ var init_paths = __esm({
   }
 });
 
+// packages/schemas/dist/source-extensions.js
+var init_source_extensions = __esm({
+  "packages/schemas/dist/source-extensions.js"() {
+    "use strict";
+  }
+});
+
 // packages/schemas/dist/envelope.js
 function refineSupersession(rec, ctx) {
   if (rec.status === "superseded" && rec.superseded_by === null) {
@@ -5881,6 +5888,7 @@ var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
     "use strict";
     init_paths();
+    init_source_extensions();
     init_envelope();
     init_records();
     init_transient();
@@ -12977,8 +12985,8 @@ import { spawnSync as spawnSync7 } from "node:child_process";
 import { existsSync as existsSync8, linkSync as linkSync2, mkdirSync as mkdirSync6, readdirSync as readdirSync3, readFileSync as readFileSync11, renameSync as renameSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
 import { delimiter, dirname as dirname10, join as join17 } from "node:path";
 var PR_ATTRIBUTION = "\u{1F916} Generated with [Claude Code](https://claude.com/claude-code)";
-function gh(cwd, args) {
-  return spawnSync7("gh", args, { cwd, encoding: "utf8", timeout: 12e4, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
+function gh(cwd, args, timeoutMs2 = 12e4) {
+  return spawnSync7("gh", args, { cwd, encoding: "utf8", timeout: timeoutMs2, env: { ...process.env, GH_PROMPT_DISABLED: "1" } });
 }
 var streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? "")).trim();
 function resolveGhPath() {
@@ -13061,6 +13069,22 @@ function localBranchRefusal(cwd, branch2) {
   if (fmt.status === 0 && ref.status === 0) return null;
   return `direct-merge: '${branch2}' is not a local branch (no refs/heads/${branch2}) \u2014 work mode pushes a local branch to open its PR. Check out the branch, or pass --branch <local branch>.`;
 }
+var PR_BODY_MAX_CHARS = 6e4;
+function capPrBody(text, range) {
+  const full = [text, PR_ATTRIBUTION].filter(Boolean).join("\n\n");
+  if (full.length <= PR_BODY_MAX_CHARS) return full;
+  const note = `
+
+---
+**PR body truncated by /sterling:merge:** GitHub accepts at most 65536 characters, and the commit messages come to ${text.length}. The full text is in the commit messages: \`git log ${range}\``;
+  const tail = `
+
+${PR_ATTRIBUTION}`;
+  let keep = PR_BODY_MAX_CHARS - note.length - tail.length;
+  const code = text.charCodeAt(keep - 1);
+  if (code >= 55296 && code <= 56319) keep -= 1;
+  return `${text.slice(0, keep)}${note}${tail}`;
+}
 function prTextFromCommits(cwd, mergeBase2, branchTip2, branch2) {
   const log = spawnSync7("git", ["log", "--no-merges", "--reverse", "--format=%s%x1f%b%x1e", `${mergeBase2}..${branchTip2}`], {
     cwd,
@@ -13073,14 +13097,15 @@ function prTextFromCommits(cwd, mergeBase2, branchTip2, branch2) {
     return { subject: subject.trim(), body: body.trim() };
   });
   if (commits.length === 0) return null;
+  const range = `${mergeBase2.slice(0, 12)}..${branch2}`;
   if (commits.length === 1) {
     const [only] = commits;
-    return { title: only.subject, body: [only.body, PR_ATTRIBUTION].filter(Boolean).join("\n\n") };
+    return { title: only.subject, body: capPrBody(only.body, range) };
   }
   const sections = commits.map((c) => c.body ? `## ${c.subject}
 
 ${c.body}` : `## ${c.subject}`);
-  return { title: branch2, body: [...sections, PR_ATTRIBUTION].join("\n\n") };
+  return { title: branch2, body: capPrBody(sections.join("\n\n"), range) };
 }
 function findOpenPr(cwd, repo, branch2, base2) {
   const matches = openPrsForHead(cwd, repo, branch2, base2);
@@ -13758,7 +13783,22 @@ var resolveSha = (ref, label) => {
   if (r.status !== 0) fail2(`direct-merge: git rev-parse ${label} ('${ref}') failed: ${(r.stderr || "").trim()}`);
   return r.stdout.trim();
 };
-var intoRef = shipsPr && !hasRef(`refs/heads/${into}`) && hasRef(`refs/remotes/origin/${into}`) ? `refs/remotes/origin/${into}` : into;
+var intoRef = into;
+if (shipsPr) {
+  const fetched = spawnSync8("git", ["fetch", "--no-tags", "origin", `+refs/heads/${into}:refs/remotes/origin/${into}`], {
+    cwd: target,
+    encoding: "utf8",
+    timeout: 12e4,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
+  });
+  if (fetched.status !== 0) {
+    console.error(
+      `direct-merge: WARNING \u2014 could not fetch origin's ${into} (git fetch exit ${fetched.status ?? fetched.error?.message}): ${(fetched.stderr || "").trim()}
+  The PR title, body and changed-file list use the last-fetched origin/${into}, which may be behind origin.`
+    );
+  }
+  if (hasRef(`refs/remotes/origin/${into}`)) intoRef = `refs/remotes/origin/${into}`;
+}
 var intoTip = resolveSha(intoRef, "into");
 var branchTip = resolveSha(branch, "branch");
 var mergeBaseR = spawnSync8("git", ["merge-base", intoTip, branchTip], { cwd: target, encoding: "utf8", timeout: 3e4 });

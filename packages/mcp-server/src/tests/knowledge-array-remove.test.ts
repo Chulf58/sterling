@@ -185,15 +185,15 @@ test('AC8: a selector matching MORE THAN ONE element is REFUSED naming the count
   const { tools, cleanup } = harness();
   try {
     const original = [
-      { path: 'src/dup.ts', role: 'first duplicate' },
-      { path: 'src/dup.ts', role: 'second duplicate' },
+      { path: 'src/a.ts', role: 'shared role' },
+      { path: 'src/b.ts', role: 'shared role' },
       { path: 'src/c.ts', role: 'unrelated' },
     ];
     const article = mkArticle(tools, 'ambiguous-match', original);
     const before = getArticle(tools, article.id as string);
 
     assert.throws(
-      () => remover(tools).knowledgeArrayRemove(article.id as string, 'files[path=src/dup.ts]', article.version as number),
+      () => remover(tools).knowledgeArrayRemove(article.id as string, 'files[role=shared role]', article.version as number),
       /matches 2 element/i,
       'an ambiguous selector is refused naming the count — a blind delete inside an array too large to read is exactly the unreviewable write this grammar exists to prevent'
     );
@@ -1915,20 +1915,67 @@ test('DUP3: identity is by content, not key order — entries whose fields are s
   }
 });
 
-test('DUP4: two entries with the SAME path but DIFFERENT roles are still REFUSED, naming the count; record UNCHANGED', () => {
+// GitHub #155: a path is the ownership key, so files[path=X] on an article that
+// holds X twice (roles differing, even only in letter case) disowns every entry
+// for X — no other route removes a dead duplicated path. Sabotage: drop the
+// `duplicatedOwnedPath` branch in knowledgeArrayRemove and DUP4/DUP5 go red with
+// "exactly one is required".
+test('DUP4: two entries with the SAME path but DIFFERENT roles — the selector on the path removes BOTH (#155); siblings untouched, receipt says so', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const original = [
+      { path: 'src/dup.ts', role: 'First role' },
+      { path: 'src/keep.ts', role: 'unrelated' },
+      { path: 'src/dup.ts', role: 'first role' },
+    ];
+    const article = mkArticle(tools, 'same-path-different-role', original);
+
+    const result = remover(tools).knowledgeArrayRemove(article.id as string, 'files[path=src/dup.ts]', article.version as number) as ArrayRemoveResult & {
+      removed: { note?: string };
+    };
+
+    assert.deepEqual((result.record as unknown as { files: Loose[] }).files, [original[1]], 'every entry for the path is gone, the sibling survives');
+    assert.match(String(result.removed.note), /removed all 2 files\[\] entries for path src\/dup\.ts/);
+    const reread = getArticle(tools, article.id as string);
+    assert.deepEqual(reread.files, [original[1]], 'the removal is PERSISTED');
+    assert.equal(reread.version, (article.version as number) + 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DUP5: a path held three times with mixed identical and differing roles — all three removed (#155)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const original = [
+      { path: 'src/dup.ts', role: 'the seam' },
+      { path: 'src/dup.ts', role: 'the seam' },
+      { path: 'src/dup.ts', role: 'a different seam' },
+      { path: 'src/keep.ts', role: 'unrelated' },
+    ];
+    const article = mkArticle(tools, 'two-identical-one-different', original);
+
+    const result = remover(tools).knowledgeArrayRemove(article.id as string, 'files[path=src/dup.ts]', article.version as number);
+
+    assert.deepEqual((result.record as unknown as { files: Loose[] }).files, [original[3]]);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DUP5b: removing every entry of a duplicated path is still REFUSED when it would empty files[] (last-file floor); record UNCHANGED', () => {
   const { tools, cleanup } = harness();
   try {
     const original = [
       { path: 'src/dup.ts', role: 'first role' },
       { path: 'src/dup.ts', role: 'second role' },
     ];
-    const article = mkArticle(tools, 'same-path-different-role', original);
+    const article = mkArticle(tools, 'duplicated-path-is-the-only-file', original);
     const before = getArticle(tools, article.id as string);
 
     assert.throws(
       () => remover(tools).knowledgeArrayRemove(article.id as string, 'files[path=src/dup.ts]', article.version as number),
-      /matches 2 element.*exactly one is required/is,
-      'elements that differ in any field keep the existing refusal'
+      /LAST entry of feature_article\.files/
     );
 
     const after = getArticle(tools, article.id as string);
@@ -1939,25 +1986,23 @@ test('DUP4: two entries with the SAME path but DIFFERENT roles are still REFUSED
   }
 });
 
-test('DUP5: two identical entries plus a THIRD that matches but differs — REFUSED (all hits must be deep-equal, not just some); record UNCHANGED', () => {
+test('DUP5c: a non-path selector matching differing elements is still REFUSED — only the path (ownership key) widens; record UNCHANGED', () => {
   const { tools, cleanup } = harness();
   try {
     const original = [
-      { path: 'src/dup.ts', role: 'the seam' },
-      { path: 'src/dup.ts', role: 'the seam' },
-      { path: 'src/dup.ts', role: 'a different seam' },
+      { path: 'src/a.ts', role: 'the seam' },
+      { path: 'src/b.ts', role: 'the seam' },
+      { path: 'src/c.ts', role: 'other' },
     ];
-    const article = mkArticle(tools, 'two-identical-one-different', original);
+    const article = mkArticle(tools, 'role-selector-multi-match', original);
     const before = getArticle(tools, article.id as string);
 
     assert.throws(
-      () => remover(tools).knowledgeArrayRemove(article.id as string, 'files[path=src/dup.ts]', article.version as number),
-      /matches 3 element.*exactly one is required/is
+      () => remover(tools).knowledgeArrayRemove(article.id as string, 'files[role=the seam]', article.version as number),
+      /matches 2 element.*exactly one is required/is
     );
 
-    const after = getArticle(tools, article.id as string);
-    assert.deepEqual(after.files, before.files);
-    assert.equal(after.version, before.version);
+    assert.deepEqual(getArticle(tools, article.id as string).files, before.files);
   } finally {
     cleanup();
   }

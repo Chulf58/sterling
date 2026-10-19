@@ -4210,6 +4210,13 @@ var init_paths = __esm({
   }
 });
 
+// packages/schemas/dist/source-extensions.js
+var init_source_extensions = __esm({
+  "packages/schemas/dist/source-extensions.js"() {
+    "use strict";
+  }
+});
+
 // packages/schemas/dist/envelope.js
 function refineSupersession(rec, ctx) {
   if (rec.status === "superseded" && rec.superseded_by === null) {
@@ -5573,6 +5580,7 @@ var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
     "use strict";
     init_paths();
+    init_source_extensions();
     init_envelope();
     init_records();
     init_transient();

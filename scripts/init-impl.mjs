@@ -54,6 +54,7 @@ import { setupOpenCode } from './lib/opencode-install.mjs';
 import { describeShellUnsafePath, unsafeChars, SHELL_SAFE_CHARS_TEXT } from './lib/shell-safe-path.mjs';
 import { probeClaude } from './lib/claude-probe.mjs';
 import { renderClaudeText } from './lib/agent-fences.mjs';
+import { renderStackTags, renderDomains, refreshAgentsMdFacts, describeAgentsMdRefresh } from './lib/agents-md-facts.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -543,13 +544,13 @@ const assertNoDeadTerms = (label, content) => {
 // so the lint judges only what Sterling ships, and `renderAgentsMd` itself never re-checks.
 const agentsMdTemplateRaw = readFileSync(join(pluginRoot, 'templates', 'target-agents-md.md'), 'utf8')
   .replaceAll('{{PROJECT_NAME}}', eff.projectName)
-  .replaceAll('{{STACK_TAGS}}', eff.stackTags.join(', '))
+  .replaceAll('{{STACK_TAGS}}', renderStackTags(eff.stackTags))
   // Each glob goes in a code span: unquoted, GitHub reads `**/*.mjs, **/*.ts` as bold markup
   // (GitHub issue #96). A glob holding a backtick would end the span early, so it stays plain text.
   .replaceAll('{{TOOLCHAINS}}', baked.map((t) => `${t.adapter} (${t.path_globs.map((g) => (g.includes('`') ? g : `\`${g}\``)).join(', ')})`).join('; '))
   // Filled from a toolchain's `lint` and `format` run commands. No registered adapter declares
-  // either today, so the line asks the project to record its own; an existing AGENTS.md is
-  // never rewritten, so what the project writes there stays.
+  // either today, so the line asks the project to record its own; in an existing AGENTS.md only
+  // the Stack tags and Domain stores lines are ever refreshed, so what the project writes here stays.
   .replaceAll('{{LINT_COMMAND}}', baked
     .flatMap((t) => [t.run_commands?.lint, t.run_commands?.format].filter(Boolean).map((cmd) => {
       // One line in a Markdown list: whitespace (newlines included) collapses so a recorded command
@@ -558,9 +559,7 @@ const agentsMdTemplateRaw = readFileSync(join(pluginRoot, 'templates', 'target-a
       return `${oneLine.includes('`') ? oneLine : `\`${oneLine}\``} (${t.adapter})`;
     }))
     .join('; ') || 'not recorded yet; add it here')
-  .replaceAll('{{DOMAINS}}', eff.stackTags.length
-    ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(', ') + ' — each created by init with a description of what belongs in it (§2.3)'
-    : '(none — declare stack tags to mount domain stores)')
+  .replaceAll('{{DOMAINS}}', renderDomains(eff.stackTags, eff.domainPaths))
   // WHETHER backups are on is a project fact; WHERE they go is a machine fact, and this file
   // is tracked — see the CLAUDE.md-era comment this carries forward (`update.mjs` refuses on a
   // dirty tracked file before doing anything; config holds the value, this states the fact).
@@ -826,7 +825,22 @@ if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
     writeAtomic(agentsMdPath, expectedAgentsMd);
     items.push({ item: 'AGENTS.md', status: 'created', detail: 'from templates/target-agents-md.md' });
   } else {
-    items.push({ item: 'AGENTS.md', status: 'ok', detail: 'present — project-editable, never compared byte-for-byte' });
+    // Project-editable, never compared byte-for-byte; only the Stack tags and Domain stores lines
+    // follow .sterling/config.json, and only while they still hold a generated value (GitHub #158).
+    const agentsMdRaw = readFileSync(agentsMdPath, 'utf8');
+    const facts = { stackTags: eff.stackTags, domainPaths: eff.domainPaths };
+    const refresh = refreshAgentsMdFacts(agentsMdRaw, facts);
+    if (refresh.refreshed.length) writeAtomic(agentsMdPath, refresh.text);
+    if (refresh.kept.length) {
+      items.push({ item: 'AGENTS.md', status: 'kept', detail: describeAgentsMdRefresh(refresh, facts) });
+      warns.push(`\n⚠ AGENTS.md: ${describeAgentsMdRefresh({ refreshed: [], kept: refresh.kept }, facts)}. Update ${refresh.kept.length > 1 ? 'those lines' : 'that line'} by hand.`);
+    } else if (refresh.refreshed.length) {
+      items.push({ item: 'AGENTS.md', status: 'refreshed', detail: describeAgentsMdRefresh(refresh, facts) });
+    } else if (refresh.absent.length) {
+      items.push({ item: 'AGENTS.md', status: 'ok', detail: `present — project-editable; no ${refresh.absent.join(' or ')} line to keep in step with .sterling/config.json` });
+    } else {
+      items.push({ item: 'AGENTS.md', status: 'ok', detail: 'present — project-editable; the Stack tags and Domain stores lines match .sterling/config.json' });
+    }
   }
 
   if (!claudeMdExists) {

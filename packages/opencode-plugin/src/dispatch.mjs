@@ -24,9 +24,10 @@
 // ends before its call's execute.after binds it is ended at that bind: the
 // server notes every execution end (noteExecutionEnd) before the gate reads the
 // register, and the bind checks for an end at or after the call's own Pre.
-// Records a dead process left live are terminalized by sweepStaleDispatches at
+// Records a previous process left live are terminalized by sweepStaleDispatches at
 // the first root request of the next process, as H1's sessionBoundarySweep does
-// on Claude Code. TaskStop has no OpenCode equivalent and is not handled.
+// on Claude Code. That is bookkeeping, not proof the subagents ended: they can
+// keep running across a restart, so the notice says so (GitHub #156). TaskStop has no OpenCode equivalent and is not handled.
 //
 // Every state write goes through scripts/lib/dispatch-register.mjs, the one owner
 // of the record shape and the lock. Its disclosures go to the plugin log, as H22's
@@ -179,15 +180,16 @@ export async function sweepStaleDispatches(root) {
     const lines = [];
     if (terminated) {
       lines.push(
-        `DEAD-DISPATCH RESIDUE (OpenCode process start): ${terminated} dispatch record(s) a previous OpenCode process left live were ended (session-boundary) and the dispatch register was cleared. ` +
-          'Those subagents belonged to that process and cannot be resumed from this one: check git status for files they may have left half-written, and re-dispatch if the work is still needed.'
+        `DEAD-DISPATCH RESIDUE (OpenCode process start): ${terminated} dispatch record(s) a previous OpenCode process left live were closed in Sterling's register (session-boundary) and the dispatch register was cleared. ` +
+          'NOT PROOF THAT THESE DISPATCHES ENDED: a subagent can keep running across an OpenCode restart and still report back into this session. ' +
+          'Wait for their completion reports, check git status and git log for files they may still be writing, and do not re-dispatch a writer lane over the same files until it is known dead.'
       );
     }
     if (refused) lines.push(`STERLING DISPATCH SWEEP: ${refused}`);
     return lines.join('\n\n');
   } catch (e) {
     if (e?.code !== 'register_lock_held') throw e;
-    return `STERLING DISPATCH SWEEP SKIPPED: ${render(e)}. Dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
+    return `STERLING DISPATCH SWEEP SKIPPED: ${render(e)}. Dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
   }
 }
 

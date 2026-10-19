@@ -2577,6 +2577,42 @@ test('a small file does NOT raise it — a scaffolded placeholder is legitimatel
   }
 });
 
+test('a markdown API contract does NOT count as code — planned over a large .md plus a small stub raises nothing, and a read never re-mints (GitHub #139)', () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    mkdirSync(join(dir, 'docs'), { recursive: true });
+    writeFileSync(join(dir, 'docs', 'api.md'), '# API contract\n'.repeat(1000));
+    writeFileSync(join(dir, 'src', 'housing.ts'), '// TODO: build housing\n');
+    shippedArticle(tools, {
+      files: [
+        { path: 'docs/api.md', role: 'API contract written before the code' },
+        { path: 'src/housing.ts', role: 'impl' },
+      ],
+    });
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(stateReviews(tools).length, 0, 'documentation bytes are not "code on disk"');
+
+    // The same bytes in a source file still count: the check is by extension, not switched off.
+    writeFileSync(join(dir, 'src', 'farm.ts'), 'export const x = 1;\n'.repeat(300));
+    shippedArticle(tools, {
+      slug: 'farm',
+      title: 'farm',
+      files: [
+        { path: 'docs/api.md', role: 'API contract' },
+        { path: 'src/farm.ts', role: 'impl' },
+      ],
+    });
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const items = stateReviews(tools);
+    assert.equal(items.length, 1, 'only the article owning real source is flagged');
+    const reported = Number(/hold (\d+) bytes of code/.exec(items[0].text)?.[1]);
+    assert.equal(reported, 'export const x = 1;\n'.length * 300, 'the reported byte count is the source file alone');
+  } finally {
+    cleanup();
+  }
+});
+
 test("an 'active' article over real code raises nothing — the metadata is honest", () => {
   const { dir, tools, cleanup } = stateProject();
   try {

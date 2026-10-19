@@ -4258,6 +4258,42 @@ var init_paths = __esm({
   }
 });
 
+// packages/schemas/dist/source-extensions.js
+function sourceExtensionOf(path) {
+  const base2 = String(path).split("/").pop() ?? "";
+  const idx = base2.lastIndexOf(".");
+  if (idx <= 0)
+    return null;
+  return base2.slice(idx + 1).toLowerCase();
+}
+function isSourcePath(path) {
+  const ext = sourceExtensionOf(path);
+  return ext !== null && SOURCE_EXTENSIONS.has(ext);
+}
+var SOURCE_EXTENSIONS;
+var init_source_extensions = __esm({
+  "packages/schemas/dist/source-extensions.js"() {
+    "use strict";
+    SOURCE_EXTENSIONS = /* @__PURE__ */ new Set([
+      "ts",
+      "js",
+      "mjs",
+      "cjs",
+      "tsx",
+      "jsx",
+      "py",
+      "go",
+      "rs",
+      "java",
+      "rb",
+      "cs",
+      "sh",
+      "gd",
+      "lua"
+    ]);
+  }
+});
+
 // packages/schemas/dist/envelope.js
 function refineSupersession(rec, ctx) {
   if (rec.status === "superseded" && rec.superseded_by === null) {
@@ -6668,6 +6704,7 @@ __export(dist_exports, {
   REPO_PATH_REFUSALS: () => REPO_PATH_REFUSALS,
   REVIEWER_ROLES: () => REVIEWER_ROLES,
   SCOPE_RE: () => SCOPE_RE,
+  SOURCE_EXTENSIONS: () => SOURCE_EXTENSIONS,
   STORE_FENCE_KEY: () => STORE_FENCE_KEY,
   SYSTEM_REASONS: () => SYSTEM_REASONS,
   TODO_SYSTEM_REQUIRES: () => TODO_SYSTEM_REQUIRES,
@@ -6712,6 +6749,7 @@ __export(dist_exports, {
   isBrokerOperation: () => isBrokerOperation,
   isCollapsedUrlLocation: () => isCollapsedUrlLocation,
   isProjectId: () => isProjectId,
+  isSourcePath: () => isSourcePath,
   isUnderLocationAnyHost: () => isUnderLocationAnyHost,
   knowledgeWriteSchema: () => knowledgeWriteSchema,
   knowledgeWritesOwnerPid: () => knowledgeWritesOwnerPid,
@@ -6748,6 +6786,7 @@ __export(dist_exports, {
   samePath: () => samePath,
   schemaFor: () => schemaFor,
   sessionEventSchema: () => sessionEventSchema,
+  sourceExtensionOf: () => sourceExtensionOf,
   stalenessVerdict: () => stalenessVerdict,
   toRepoRelative: () => toRepoRelative,
   todoBlocksItself: () => todoBlocksItself,
@@ -6768,6 +6807,7 @@ var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
     "use strict";
     init_paths();
+    init_source_extensions();
     init_envelope();
     init_records();
     init_transient();

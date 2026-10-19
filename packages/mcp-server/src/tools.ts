@@ -41,6 +41,7 @@ import {
   type ToolStore,
 } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
+import { isSourcePath } from '@sterling/schemas';
 import { HANDOFF_MILESTONE_MAX, HANDOFFS_DIR_REL, handoffEvidenceSchema, todoHandoffSchema, type HandoffClosure, type HandoffEvidence, type HandoffEvidenceFile } from '@sterling/schemas';
 import { resolveHandoffTarget } from './handoff-target.js';
 import { AttestationRefusal, collectAttestationEvidence, readHeadFile, type AttestationEvidence } from './attestation-proof.js';
@@ -1139,6 +1140,9 @@ const DRIFT_ITEMS_PER_READ = 3;
 // nag about a stub someone scaffolded five minutes ago. A whole file under this
 // is plausibly still a placeholder; several hundred lines is not.
 const PLANNED_CREDIBLE_BYTES = 2000;
+// Only SOURCE files (isSourcePath, the one list shared with the undeclared-source
+// disclosure) count toward that byte total (GitHub #139): a markdown API contract
+// written before the code is documentation, and 'planned' over it is honest.
 
 // TRUTH AT READ (decision queue-truth-at-read-annotation-design): the PER-CALL
 // budget the reconcile_needed re-check may spend on a board_query/
@@ -4602,7 +4606,7 @@ export class SterlingTools {
         // FILE" describes this loop's calls, never the resulting queue depth.
         const drifts: { path: string; missing: boolean; neverTracked?: boolean }[] = [];
         const parkedFiles: { path: string; ref: string }[] = [];
-        // Owned bytes that actually exist — the evidence for the state check below.
+        // Owned SOURCE bytes that actually exist — the evidence for the state check below.
         // Free here: the stat is already being taken for the drift comparison.
         let liveBytes = 0;
         for (const f of a.files ?? []) {
@@ -4623,7 +4627,7 @@ export class SterlingTools {
           });
           // Owned bytes that actually exist, for the state-honesty check below —
           // free, because the classifier already took the stat.
-          if (size !== undefined) liveBytes += size;
+          if (size !== undefined && isSourcePath(f.path)) liveBytes += size;
           if (verdict.kind === 'parked') {
             // The article is CORRECT — the path returns on merge (board 1d6a721a).
             parkedFiles.push({ path: f.path, ref: verdict.ref });
@@ -5734,7 +5738,16 @@ export class SterlingTools {
     // key-order independent. Any hit that differs in any field falls through to
     // the refusal unchanged.
     const identicalDuplicates = hits.length > 1 && hits.every((h) => isDeepStrictEqual(h, hits[0]));
-    if (hits.length !== 1 && !identicalDuplicates) {
+    // DUPLICATED OWNED PATH (GitHub #155): files[path=X] names a PATH, and a
+    // path is the ownership key — an article owns it once. Two entries sharing
+    // the path (roles differing, e.g. only in letter case) are one ownership
+    // claim written twice, so a selector on the path is unambiguous about what
+    // to disown: every entry for it goes, otherwise a dead path stays owned and
+    // the article stays stale with no tool route to fix it. Every other
+    // non-identical multi-match keeps the refusal below.
+    const duplicatedOwnedPath =
+      hits.length > 1 && !identicalDuplicates && old.type === 'feature_article' && base === 'files' && key === 'path';
+    if (hits.length !== 1 && !identicalDuplicates && !duplicatedOwnedPath) {
       throw new Error(
         `knowledge_array_remove: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required, ` +
           `nothing was written. ` +
@@ -5749,7 +5762,7 @@ export class SterlingTools {
     // article would silently become un-ownable territory — the floor has to be
     // stated here, as knowledge_split states it, and for the same reason (full
     // donation is retire-and-replace, rejected by decision foreign_8b87efcb).
-    if (old.type === 'feature_article' && base === 'files' && arr.length === 1) {
+    if (old.type === 'feature_article' && base === 'files' && arr.length === (duplicatedOwnedPath ? hits.length : 1)) {
       throw new Error(
         `knowledge_array_remove: this would remove the LAST entry of feature_article.files — the article must retain at least one owned file ` +
           `(an empty files[] leaves the code it describes unowned; emptying an article is retire-and-replace, not a removal, and knowledge_split ` +
@@ -5792,7 +5805,7 @@ export class SterlingTools {
     // identity filter would drop every occurrence should two slots ever share
     // one object reference.
     const removeAt = arr.indexOf(el);
-    const nextArr = arr.filter((_, i) => i !== removeAt);
+    const nextArr = duplicatedOwnedPath ? arr.filter((x) => !hits.includes(x)) : arr.filter((_, i) => i !== removeAt);
     // links[] is materialized from record_relations, not from the JSON body.
     // Keep the ordinary update path additive, and pass this one explicit graph
     // deletion through its versioned transaction instead. Crucially, do NOT
@@ -5819,6 +5832,9 @@ export class SterlingTools {
         selector,
         element: el,
         ...(identicalDuplicates ? { note: `removed 1 of ${hits.length} identical elements; ${hits.length - 1} identical remain` } : {}),
+        ...(duplicatedOwnedPath
+          ? { note: `removed all ${hits.length} files[] entries for path ${value} (one ownership claim written ${hits.length} times); element is the first of them` }
+          : {}),
       },
       warnings: [...ledger_warnings, ...this.articleOversizeWarnings(record), ...this.openReconcileLaneWarnings(this.supersedeChain(old))],
     };

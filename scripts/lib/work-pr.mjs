@@ -17,8 +17,25 @@ import { delimiter, dirname, join } from 'node:path';
 
 export const PR_ATTRIBUTION = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
 
-function gh(cwd, args) {
-  return spawnSync('gh', args, { cwd, encoding: 'utf8', timeout: 120_000, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+function gh(cwd, args, timeoutMs = 120_000) {
+  return spawnSync('gh', args, { cwd, encoding: 'utf8', timeout: timeoutMs, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+}
+
+/** Thrown when a read bounded by an absolute `deadline` (ms since the epoch)
+ * would start, or is still running, after it. */
+export class DeadlineReachedError extends Error {
+  constructor(message = 'the deadline was reached before the read finished') {
+    super(message);
+    this.name = 'DeadlineReachedError';
+  }
+}
+
+/** The timeout for one gh call under `deadline` (null = no deadline: 120s). */
+function callTimeoutMs(deadline) {
+  if (deadline === null) return 120_000;
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new DeadlineReachedError();
+  return Math.min(120_000, remaining);
 }
 
 const streams = (r) => (r.stderr || r.stdout || String(r.error?.message ?? '')).trim();
@@ -135,11 +152,31 @@ export function localBranchRefusal(cwd, branch) {
   return `direct-merge: '${branch}' is not a local branch (no refs/heads/${branch}) — work mode pushes a local branch to open its PR. Check out the branch, or pass --branch <local branch>.`;
 }
 
+/** The longest PR body prTextFromCommits writes, in JS string length (UTF-16
+ * code units, never fewer than characters). GitHub refuses a body over 65536
+ * characters with HTTP 422 (GitHub issues #149, #159); the margin leaves room
+ * for any difference in how GitHub counts. */
+export const PR_BODY_MAX_CHARS = 60_000;
+
+/** `text` plus the attribution line, cut to PR_BODY_MAX_CHARS with a visible
+ * note naming where the full text is (the commit messages of `range`). */
+function capPrBody(text, range) {
+  const full = [text, PR_ATTRIBUTION].filter(Boolean).join('\n\n');
+  if (full.length <= PR_BODY_MAX_CHARS) return full;
+  const note = `\n\n---\n**PR body truncated by /sterling:merge:** GitHub accepts at most 65536 characters, and the commit messages come to ${text.length}. The full text is in the commit messages: \`git log ${range}\``;
+  const tail = `\n\n${PR_ATTRIBUTION}`;
+  let keep = PR_BODY_MAX_CHARS - note.length - tail.length;
+  const code = text.charCodeAt(keep - 1);
+  if (code >= 0xd800 && code <= 0xdbff) keep -= 1; // never split a surrogate pair
+  return `${text.slice(0, keep)}${note}${tail}`;
+}
+
 /** Title and body from the branch's own commits, oldest first. One commit:
  * its subject and body. Several: the branch name as title and every commit's
  * subject and body in the body (gh's own --fill semantics). The body always
- * ends with the PR attribution line. Returns null when the branch has no
- * commits beyond the base. */
+ * ends with the PR attribution line, and is cut to PR_BODY_MAX_CHARS with a
+ * truncation note when the commit messages are longer. Returns null when the
+ * branch has no commits beyond the base. */
 export function prTextFromCommits(cwd, mergeBase, branchTip, branch) {
   const log = spawnSync('git', ['log', '--no-merges', '--reverse', '--format=%s%x1f%b%x1e', `${mergeBase}..${branchTip}`], {
     cwd,
@@ -156,12 +193,13 @@ export function prTextFromCommits(cwd, mergeBase, branchTip, branch) {
       return { subject: subject.trim(), body: body.trim() };
     });
   if (commits.length === 0) return null;
+  const range = `${mergeBase.slice(0, 12)}..${branch}`;
   if (commits.length === 1) {
     const [only] = commits;
-    return { title: only.subject, body: [only.body, PR_ATTRIBUTION].filter(Boolean).join('\n\n') };
+    return { title: only.subject, body: capPrBody(only.body, range) };
   }
   const sections = commits.map((c) => (c.body ? `## ${c.subject}\n\n${c.body}` : `## ${c.subject}`));
-  return { title: branch, body: [...sections, PR_ATTRIBUTION].join('\n\n') };
+  return { title: branch, body: capPrBody(sections.join('\n\n'), range) };
 }
 
 /** The open PR in `repo` from `branch` into `base`, or null. Filters by head
@@ -625,10 +663,13 @@ export function parsePrUrl(url) {
  * review): the armed state must be coherent (pr_url, repo and pr_number
  * agree), its repo must be `originRepo` (the current origin), `prRef` must
  * name that same PR, and the loop must still be OWED — a settled loop is never
- * re-settled. `guard`, when given, runs last with the armed state and throws
- * to refuse (the clean outcome uses it to check that GitHub would let the PR
- * merge). Throws (nothing written) otherwise. Other PRs' loops are never
- * read for the decision or written. */
+ * re-settled, except a clean one settled clean again with a guard, which
+ * re-runs only the guard's merge decision and writes nothing (returned with
+ * resettle: true). `guard`, when given, runs last as guard(state, {resettle})
+ * and throws to refuse (the clean outcome uses it to check that GitHub would
+ * let the PR merge); a {head_sha} it returns is recorded as settled_head_sha.
+ * Throws (nothing written) otherwise. Other PRs' loops are never read for the
+ * decision or written. */
 export function settlePrLoop(root, outcome, prRef, { originRepo, now = new Date().toISOString(), guard = null }) {
   if (!PR_LOOP_OUTCOMES.includes(outcome)) throw new Error(`--settle must be one of ${PR_LOOP_OUTCOMES.join('|')}, got '${outcome}'`);
   const ref = /^\d+$/.test(String(prRef ?? '')) ? { repo: null, number: Number(prRef) } : parsePrUrl(prRef);
@@ -654,9 +695,21 @@ export function settlePrLoop(root, outcome, prRef, { originRepo, now = new Date(
   if (ref.repo !== null && ref.repo !== s.repo) {
     throw new Error(`the armed loop is for PR #${s.pr_number} (${s.pr_url}), not ${prRef} — nothing settled (${unstick(entry)})`);
   }
-  if (s.status !== 'owed') throw new Error(`the loop for ${s.pr_url} is already settled '${s.status}' (${s.settled_at}); only an owed loop can be settled`);
-  if (guard) guard(s);
-  const next = { ...s, status: outcome, settled_at: now };
+  // MERGE-ONLY RE-SETTLE (decision
+  // pr-settle-clean-waits-for-pending-checks-then-decides-merge, GitHub issue
+  // #150): a loop already settled clean may be settled clean again so the
+  // guard re-runs the merge decision (checks that were still PENDING have
+  // finished). The guard refuses unless the PR head is still the settled one;
+  // nothing is written, the first settle stands.
+  const resettle = s.status === 'clean' && outcome === 'clean' && guard !== null;
+  if (s.status !== 'owed' && !resettle) {
+    throw new Error(`the loop for ${s.pr_url} is already settled '${s.status}' (${s.settled_at}); only an owed loop can be settled (a loop settled clean can be settled clean again, to re-run the merge decision on its unchanged head)`);
+  }
+  const checked = guard ? guard(s, { resettle }) : null;
+  if (resettle) return { ...s, resettle: true };
+  // The head the guard read from GitHub is the one this settle vouches for; a
+  // later merge-only re-settle is held to it.
+  const next = { ...s, status: outcome, settled_at: now, ...(typeof checked?.head_sha === 'string' ? { settled_head_sha: checked.head_sha } : {}) };
   writeAtomic(entry.file, next);
   return next;
 }
@@ -671,9 +724,10 @@ export function settlePrLoop(root, outcome, prRef, { originRepo, now = new Date(
 
 const MERGEABLE_STATES = new Set(['CLEAN', 'HAS_HOOKS', 'UNSTABLE']);
 
-function ghGraphql(cwd, host, query) {
+function ghGraphql(cwd, host, query, deadline = null) {
   const args = ['api', '--hostname', host, 'graphql', '-f', `query=${query}`];
-  const r = gh(cwd, args);
+  const r = gh(cwd, args, callTimeoutMs(deadline));
+  if (deadline !== null && r.error?.code === 'ETIMEDOUT' && Date.now() >= deadline) throw new DeadlineReachedError();
   if (r.error || r.status !== 0) throw new Error(`gh api graphql failed (${r.error ? r.error.message : `exit ${r.status}`}): ${streams(r)}`);
   let reply;
   try {
@@ -708,25 +762,37 @@ function readCheckRollup(pull) {
 
 /** The PR's mergeStateStatus, reviewDecision, the head commit's check rollup
  * state (null when the head has no checks; check_rollup_error set when the
- * answer does not say) and EVERY review thread (paged), as
- * { merge_state_status, review_decision, check_rollup, check_rollup_error,
- * threads: [{id, resolved, outdated, path, url, comment_ids}] }. `repo` is
- * 'host/owner/repo'. */
-export function fetchPrMergeState(cwd, repo, number) {
+ * answer does not say), its state (OPEN, CLOSED, MERGED), merged flag, current
+ * head SHA (headRefOid), its last 100 reviews and EVERY review thread (paged),
+ * as { merge_state_status, review_decision, check_rollup, check_rollup_error,
+ * pr_state, merged, head_sha, reviews: [{id, state, login, bot, commit}],
+ * threads: [{id, resolved, outdated, path, url, comment_ids}] }. A review's
+ * login is GraphQL's, which names a Bot without the REST '[bot]' suffix.
+ * `repo` is 'host/owner/repo'. */
+export function fetchPrMergeState(cwd, repo, number, { deadline = null } = {}) {
   const { host, owner, name } = splitRepo(repo);
   const threads = [];
   let after = null;
   let state = null;
   for (;;) {
     const page = after ? `, after:"${after}"` : '';
-    const query = `query { repository(owner:"${owner}", name:"${name}") { pullRequest(number:${number}) { mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
-    const pull = ghGraphql(cwd, host, query)?.repository?.pullRequest;
-    if (!pull || typeof pull.mergeStateStatus !== 'string' || !Array.isArray(pull.reviewThreads?.nodes)) {
-      throw new Error(`GraphQL returned no mergeStateStatus/reviewThreads for ${repo}#${number}`);
+    const query = `query { repository(owner:"${owner}", name:"${name}") { pullRequest(number:${number}) { state merged headRefOid mergeStateStatus reviewDecision commits(last:1) { nodes { commit { statusCheckRollup { state } } } } reviews(last:100) { nodes { databaseId state author { __typename login } commit { oid } } } reviewThreads(first:100${page}) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated path comments(first:50) { nodes { databaseId url } } } } } } }`;
+    const pull = ghGraphql(cwd, host, query, deadline)?.repository?.pullRequest;
+    if (
+      !pull ||
+      typeof pull.mergeStateStatus !== 'string' ||
+      !Array.isArray(pull.reviewThreads?.nodes) ||
+      typeof pull.state !== 'string' ||
+      typeof pull.merged !== 'boolean' ||
+      typeof pull.headRefOid !== 'string' ||
+      !Array.isArray(pull.reviews?.nodes)
+    ) {
+      throw new Error(`GraphQL returned no mergeStateStatus/reviewThreads/state/merged/headRefOid/reviews for ${repo}#${number}`);
     }
     if (!state) {
       const rollup = readCheckRollup(pull);
-      state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: rollup.state, check_rollup_error: rollup.error };
+      const reviews = pull.reviews.nodes.map((r) => ({ id: r?.databaseId ?? null, state: r?.state ?? null, login: r?.author?.login ?? null, bot: r?.author?.__typename === 'Bot', commit: r?.commit?.oid ?? null }));
+      state = { merge_state_status: pull.mergeStateStatus, review_decision: pull.reviewDecision ?? null, check_rollup: rollup.state, check_rollup_error: rollup.error, pr_state: pull.state, merged: pull.merged, head_sha: pull.headRefOid, reviews };
     }
     for (const t of pull.reviewThreads.nodes) {
       const comments = t?.comments?.nodes ?? [];
@@ -745,12 +811,16 @@ const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0
 /** fetchPrMergeState, read again ONCE after `retryDelayMs` when GitHub answers
  * UNKNOWN: it computes mergeability lazily, so a first read right after a push
  * or a resolve is often UNKNOWN. A second UNKNOWN is returned as it is and
- * mergeBlockers blocks on it. */
-export function fetchSettledMergeState(cwd, repo, number, { retryDelayMs = 3000, sleep = sleepMs } = {}) {
-  const first = fetchPrMergeState(cwd, repo, number);
-  if (first.merge_state_status !== 'UNKNOWN') return first;
+ * mergeBlockers blocks on it. With `deadline` (ms since the epoch), every gh
+ * call (each page included) and the retry wait end by it, and
+ * DeadlineReachedError is thrown when they cannot. A merged PR is returned at once: GitHub keeps
+ * UNKNOWN for it for good (GitHub issue #152). */
+export function fetchSettledMergeState(cwd, repo, number, { retryDelayMs = 3000, sleep = sleepMs, deadline = null } = {}) {
+  const first = fetchPrMergeState(cwd, repo, number, { deadline });
+  if (first.merge_state_status !== 'UNKNOWN' || first.merged) return first;
+  if (deadline !== null && deadline - Date.now() <= retryDelayMs) throw new DeadlineReachedError();
   sleep(retryDelayMs);
-  return fetchPrMergeState(cwd, repo, number);
+  return fetchPrMergeState(cwd, repo, number, { deadline });
 }
 
 /** What blocks a human from merging, from fetchPrMergeState's result:
