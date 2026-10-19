@@ -12,20 +12,12 @@
 // here rather than reimplemented: packages/schemas' matchesGlob (paths.ts:47)
 // is THE one glob matcher this codebase already uses everywhere else, including
 // from scripts/init-impl.mjs (unbundled, resolved via the npm workspace link).
-import { matchesGlob } from '@sterling/schemas';
+import { matchesGlob, SOURCE_EXTENSIONS, sourceExtensionOf as extensionOf } from '@sterling/schemas';
 
-/** Lowercase extensions, no leading dot. */
-export const SOURCE_EXTENSIONS = new Set([
-  'ts', 'js', 'mjs', 'cjs', 'tsx', 'jsx', 'py', 'go', 'rs', 'java', 'rb', 'cs', 'sh', 'gd', 'lua',
-]);
-
-/** basename's extension, lowercased, or null for no-extension/dotfile-only names (never participates, v1: no shebang sniff). */
-function extensionOf(path) {
-  const base = String(path).split('/').pop() ?? '';
-  const idx = base.lastIndexOf('.');
-  if (idx <= 0) return null; // no '.', or a dotfile whose whole name is the "extension" (idx===0)
-  return base.slice(idx + 1).toLowerCase();
-}
+// The known-source extension allowlist lives in packages/schemas (shared with
+// the state_review check in packages/mcp-server); re-exported for the callers
+// and tests that import it from here.
+export { SOURCE_EXTENSIONS };
 
 /**
  * LOW-2 (roster review, fix-round item 4; ASYMMETRY refined in the final-pass

@@ -95,8 +95,10 @@ if (path === 'graphql') {
     const countFile = join(state, 'count_merge');
     const n = existsSync(countFile) ? Number(readFileSync(countFile, 'utf8')) : 0;
     writeFileSync(countFile, String(n + 1));
+    const delays = existsSync(join(state, 'merge_delay.json')) ? JSON.parse(readFileSync(join(state, 'merge_delay.json'), 'utf8')) : [];
+    if (delays.length) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delays[Math.min(n, delays.length - 1)]);
     const file = join(state, 'merge_pages.json');
-    const pages = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : [{ mergeStateStatus: 'CLEAN', reviewDecision: null, commits: { nodes: [{ commit: { statusCheckRollup: null } }] }, reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } }];
+    const pages = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : [{ state: 'OPEN', merged: false, headRefOid: '${HEAD}', reviews: { nodes: [{ databaseId: 100, state: 'COMMENTED', author: { __typename: 'Bot', login: 'copilot-pull-request-reviewer' }, commit: { oid: '${HEAD}' } }] }, mergeStateStatus: 'CLEAN', reviewDecision: null, commits: { nodes: [{ commit: { statusCheckRollup: null } }] }, reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } }];
     process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: pages[Math.min(n, pages.length - 1)] } } }));
     process.exit(0);
   }
@@ -1201,7 +1203,12 @@ test('--request-copilot: a missing node id (jq prints null) is a recorded failur
 const thread = (id, over = {}) => ({ id, isResolved: false, isOutdated: false, path: 'src/a.mjs', comments: { nodes: [{ databaseId: 900, url: `https://github.com/acme/widget/pull/7#discussion_r${id}` }] }, ...over });
 // The default page carries an EXPLICIT `statusCheckRollup: null` (the head has
 // no checks): a page with no commits subtree is a malformed answer and blocks.
-const mergePage = (status, nodes = [], over = {}) => ({ mergeStateStatus: status, reviewDecision: null, commits: { nodes: [{ commit: { statusCheckRollup: null } }] }, reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes }, ...over });
+// Every page also carries what the settle reads since GitHub issues #152 and
+// #154: the PR state, merged flag, current head and a completed Copilot review
+// of that head (GraphQL names the bot without the REST '[bot]' suffix).
+const gqlReview = (id, commit = HEAD, { login = 'copilot-pull-request-reviewer', typename = 'Bot', state = 'COMMENTED' } = {}) => ({ databaseId: id, state, author: { __typename: typename, login }, commit: { oid: commit } });
+const PR_FIELDS = { state: 'OPEN', merged: false, headRefOid: HEAD, reviews: { nodes: [gqlReview(100)] } };
+const mergePage = (status, nodes = [], over = {}) => ({ ...PR_FIELDS, mergeStateStatus: status, reviewDecision: null, commits: { nodes: [{ commit: { statusCheckRollup: null } }] }, reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes }, ...over });
 const putMerge = (f, pages) => writeFileSync(join(f.state, 'merge_pages.json'), JSON.stringify(pages));
 const mergeCalls = (f) => calls(f).filter((a) => a.some((x) => x.startsWith('query=') && x.includes('reviewThreads')));
 
@@ -1391,7 +1398,7 @@ test('--settle clean reads EVERY page of review threads: an unresolved thread on
   try {
     arm(f);
     putMerge(f, [
-      { mergeStateStatus: 'CLEAN', reviewDecision: null, reviewThreads: { pageInfo: { hasNextPage: true, endCursor: 'CUR1' }, nodes: [thread('PRRT_p1', { isResolved: true })] } },
+      { ...PR_FIELDS, mergeStateStatus: 'CLEAN', reviewDecision: null, reviewThreads: { pageInfo: { hasNextPage: true, endCursor: 'CUR1' }, nodes: [thread('PRRT_p1', { isResolved: true })] } },
       mergePage('CLEAN', [thread('PRRT_p2')]),
     ]);
     const r = run(f, ['--settle', 'clean', '--pr', '7']);
@@ -1529,7 +1536,8 @@ for (const [rollup, grants] of [['SUCCESS', true], [null, true], ['FAILURE', fal
     try {
       arm(f);
       putMerge(f, [mergePage('BLOCKED', [], { reviewDecision: 'REVIEW_REQUIRED', ...withRollup(rollup) })]);
-      const r = run(f, ['--settle', 'clean', '--pr', '7']);
+      // --checks-timeout 0: no wait for a PENDING rollup here (the wait has its own tests below)
+      const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-timeout', '0']);
       if (grants) {
         assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
         assert.equal(r.out.status, 'clean');
@@ -1560,7 +1568,8 @@ for (const [status, rollup, autoMerge] of [['UNSTABLE', 'FAILURE', false], ['UNS
     try {
       arm(f);
       putMerge(f, [mergePage(status, [thread('PRRT_done', { isResolved: true })], withRollup(rollup))]);
-      const r = run(f, ['--settle', 'clean', '--pr', '7']);
+      // --checks-timeout 0: no wait for a PENDING or EXPECTED rollup here (the wait has its own tests below)
+      const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-timeout', '0']);
       assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
       assert.equal(r.out.status, 'clean');
       assert.equal(r.out.check_rollup, rollup);
@@ -1693,6 +1702,310 @@ test('--settle clean: a GraphQL errors payload on the merge-state query fails lo
     assert.equal(readFileSync(loopPath(f), 'utf8'), before);
   } finally {
     f.cleanup();
+  }
+});
+
+// ------------------------- settle head, merged PR, PENDING wait, re-settle (#154, #152, #150)
+
+const loopNow = (f) => JSON.parse(readFileSync(loopPath(f), 'utf8'));
+const resetMergeCount = (f) => rmSync(join(f.state, 'count_merge'), { force: true });
+
+test('issue #154: --settle clean prints the PR\'s CURRENT head (the one Copilot reviewed after a fix push), not the armed head, and records it as settled_head_sha', () => {
+  const f = makeFixture();
+  try {
+    writeConfig(f, { pr_review: { copilot_logins: [COPILOT] } }); // a pinned REST login ('[bot]') matches GraphQL's bare login
+    arm(f); // armed at HEAD
+    putMerge(f, [mergePage('CLEAN', [], { headRefOid: NEW_HEAD, reviews: { nodes: [gqlReview(100, HEAD), gqlReview(101, NEW_HEAD)] } })]);
+    const r = run(f, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.head_sha, NEW_HEAD, 'the merge is pinned to the current, reviewed head');
+    assert.equal(r.out.reviewed_head_sha, NEW_HEAD);
+    assert.equal(r.out.armed_head_sha, HEAD);
+    assert.equal(r.out.auto_merge, true);
+    assert.equal(loopNow(f).settled_head_sha, NEW_HEAD);
+    assert.ok(mergeCalls(f)[0].some((a) => a.includes('headRefOid') && a.includes('reviews(last:100)')), 'the query reads headRefOid and the reviews');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('issue #154: a PR head that Copilot\'s last completed review did not cover is NOT clean: blocked, both heads named, nothing written', () => {
+  for (const [label, reviews] of [
+    ['last review on the old head', [gqlReview(100, HEAD)]],
+    ['no Copilot review at all (only a human)', [gqlReview(100, NEW_HEAD, { login: 'alice', typename: 'User' })]],
+    ['the newer review is still PENDING', [gqlReview(100, HEAD), gqlReview(101, NEW_HEAD, { state: 'PENDING' })]],
+  ]) {
+    const f = makeFixture();
+    try {
+      arm(f);
+      const before = readFileSync(loopPath(f), 'utf8');
+      putMerge(f, [mergePage('CLEAN', [], { headRefOid: NEW_HEAD, reviews: { nodes: reviews } })]);
+      const r = run(f, ['--settle', 'clean', '--pr', '7']);
+      assert.equal(r.code, 1, `${label}: ${oneLine(r.stdout + r.stderr)}`);
+      assert.equal(r.out.status, 'blocked', label);
+      assert.equal(r.out.head_sha, NEW_HEAD, label);
+      assert.ok(r.out.error.includes(NEW_HEAD) && /not the head Copilot last reviewed/.test(r.out.error), `${label}: ${r.out.error}`);
+      assert.match(r.out.error, /--request-copilot/, label);
+      assert.notEqual(r.out.auto_merge, true, label);
+      assert.equal(readFileSync(loopPath(f), 'utf8'), before, `${label}: the loop stays owed`);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('issue #152: an already MERGED PR (GitHub keeps mergeStateStatus UNKNOWN) settles clean with already_merged, auto_merge false and no UNKNOWN re-read', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('UNKNOWN', [], { state: 'MERGED', merged: true })]);
+    const r = run(f, ['--settle', 'clean', '--pr', '7']); // default --unknown-retry-delay: a re-read would cost 3s and a second call
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'clean');
+    assert.equal(r.out.already_merged, true);
+    assert.equal(r.out.pr_state, 'MERGED');
+    assert.equal(r.out.auto_merge, false, 'nothing left to merge');
+    assert.match(r.out.auto_merge_withheld, /already merged/);
+    assert.equal(mergeCalls(f).length, 1, 'a merged PR is not re-read for UNKNOWN');
+    assert.equal(loopNow(f).status, 'clean');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('a CLOSED (not merged) PR is not clean: blocked, nothing written', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    const before = readFileSync(loopPath(f), 'utf8');
+    putMerge(f, [mergePage('UNKNOWN', [], { state: 'CLOSED', merged: false })]);
+    const r = run(f, ['--settle', 'clean', '--pr', '7', '--unknown-retry-delay', '0']);
+    assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'blocked');
+    assert.match(r.out.error, /CLOSED/);
+    assert.equal(readFileSync(loopPath(f), 'utf8'), before);
+  } finally {
+    f.cleanup();
+  }
+});
+
+for (const [final, autoMerge] of [['SUCCESS', true], ['FAILURE', false]]) {
+  test(`issue #150: --settle clean WAITS on a PENDING rollup; PENDING then ${final} ${autoMerge ? 'authorizes auto_merge' : 'withholds it, naming the failure'}`, () => {
+    const f = makeFixture();
+    try {
+      arm(f);
+      const done = thread('PRRT_done', { isResolved: true });
+      putMerge(f, [mergePage('UNSTABLE', [done], withRollup('PENDING')), mergePage('UNSTABLE', [done], withRollup('PENDING')), mergePage(final === 'SUCCESS' ? 'CLEAN' : 'UNSTABLE', [done], withRollup(final))]);
+      const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-interval', '0.05', '--checks-timeout', '20']);
+      assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+      assert.equal(mergeCalls(f).length, 3, 'read until the rollup finished');
+      assert.equal(r.out.check_rollup, final);
+      assert.equal(r.out.checks_timed_out, false);
+      assert.equal(r.out.auto_merge, autoMerge);
+      if (autoMerge) assert.equal(r.out.auto_merge_withheld, null);
+      else assert.match(r.out.auto_merge_withheld, /check rollup is FAILURE/);
+      assert.match(r.stderr, /waiting for the checks to finish/);
+      assert.equal(loopNow(f).status, 'clean');
+    } finally {
+      f.cleanup();
+    }
+  });
+}
+
+test('issue #150: a rollup still PENDING when --checks-timeout runs out settles clean, withholds the merge and says to settle again on the unchanged head', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('UNSTABLE', [thread('PRRT_done', { isResolved: true })], withRollup('PENDING'))]);
+    // The window covers the first read too (it is bounded by the same deadline), so it is not tiny.
+    const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-interval', '0.5', '--checks-timeout', '3']);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'clean');
+    assert.equal(r.out.checks_timed_out, true);
+    assert.equal(r.out.auto_merge, false);
+    assert.match(r.out.auto_merge_withheld, /check rollup is PENDING, still not SUCCESS after waiting/);
+    assert.match(r.out.auto_merge_withheld, /run --settle clean again on this unchanged head/);
+    assert.ok(mergeCalls(f).length >= 2, 'it read the rollup again before giving up');
+    assert.equal(loopNow(f).status, 'clean');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Sol review of the #150 wait: the head and Copilot's newest review seen by the
+// settle's first read are pinned for the whole wait; a push or a new review
+// that lands meanwhile was never judged by the conductor, so it never merges.
+for (const [label, later] of [
+  ['the head moves to a new commit that Copilot then reviews', { headRefOid: NEW_HEAD, reviews: { nodes: [gqlReview(100, HEAD), gqlReview(101, NEW_HEAD)] } }],
+  ['a new Copilot review of the same head lands', { reviews: { nodes: [gqlReview(100, HEAD), gqlReview(101, HEAD)] } }],
+]) {
+  test(`issue #150 (Sol): during the PENDING wait ${label} — the settle is refused (blocked), never auto-merged, nothing written`, () => {
+    const f = makeFixture();
+    try {
+      arm(f);
+      const before = readFileSync(loopPath(f), 'utf8');
+      putMerge(f, [mergePage('UNSTABLE', [], withRollup('PENDING')), mergePage('CLEAN', [], { ...withRollup('SUCCESS'), ...later })]);
+      const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-interval', '0.05', '--checks-timeout', '20']);
+      assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+      assert.equal(r.out.status, 'blocked');
+      assert.notEqual(r.out.auto_merge, true);
+      assert.match(r.out.error, /while the settle waited for the checks/);
+      assert.equal(r.out.settle_start_head_sha, HEAD);
+      assert.equal(readFileSync(loopPath(f), 'utf8'), before);
+    } finally {
+      f.cleanup();
+    }
+  });
+}
+
+// Sol review of the #150 wait: --checks-timeout is ONE absolute deadline. A
+// re-read still running when it passes is cut off, and its late SUCCESS never
+// authorizes the merge.
+test('issue #150 (Sol): a re-read that would end after --checks-timeout is cut off at the deadline; the late SUCCESS never authorizes auto_merge', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('UNSTABLE', [], withRollup('PENDING')), mergePage('CLEAN', [], withRollup('SUCCESS'))]);
+    writeFileSync(join(f.state, 'merge_delay.json'), JSON.stringify([0, 15000]));
+    // The window covers the first read too (same deadline), so it is not tiny.
+    const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-interval', '0.1', '--checks-timeout', '3']);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'clean');
+    assert.equal(r.out.checks_timed_out, true);
+    assert.equal(r.out.auto_merge, false);
+    assert.equal(r.out.check_rollup, 'PENDING', 'the last complete read stands');
+    assert.ok(r.ms < 9000, `the 15s read was cut at the 3s deadline, not awaited: ${r.ms}ms`);
+  } finally {
+    f.cleanup();
+  }
+});
+
+// Sol re-check: the deadline bounds the FIRST read too. Only an explicit
+// --checks-timeout 0 is an unbounded single snapshot.
+test('issue #150 (Sol re-check): a FIRST read slower than a positive --checks-timeout is cut off — nothing is known, so the settle is refused, never auto-merged, nothing written', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    const before = readFileSync(loopPath(f), 'utf8');
+    putMerge(f, [mergePage('CLEAN', [], withRollup('SUCCESS'))]);
+    writeFileSync(join(f.state, 'merge_delay.json'), JSON.stringify([1500]));
+    const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-timeout', '0.5']);
+    assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+    assert.notEqual(r.out.auto_merge, true);
+    assert.match(r.out.error, /could not be read within --checks-timeout/);
+    assert.equal(readFileSync(loopPath(f), 'utf8'), before);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('issue #150 (Sol re-check): an UNKNOWN first read whose retry would end after a positive --checks-timeout is refused; --checks-timeout 0 keeps the unbounded snapshot and its retry', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    const before = readFileSync(loopPath(f), 'utf8');
+    putMerge(f, [mergePage('UNKNOWN'), mergePage('CLEAN', [], withRollup('SUCCESS'))]);
+    const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-timeout', '0.5', '--unknown-retry-delay', '1']);
+    assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+    assert.notEqual(r.out.auto_merge, true);
+    assert.match(r.out.error, /could not be read within --checks-timeout/);
+    assert.equal(readFileSync(loopPath(f), 'utf8'), before);
+  } finally {
+    f.cleanup();
+  }
+  const g = makeFixture();
+  try {
+    arm(g);
+    putMerge(g, [mergePage('UNKNOWN'), mergePage('CLEAN', [], withRollup('SUCCESS'))]);
+    const r = run(g, ['--settle', 'clean', '--pr', '7', '--checks-timeout', '0', '--unknown-retry-delay', '0.2']);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.auto_merge, true);
+    assert.equal(r.out.checks_timed_out, false);
+  } finally {
+    g.cleanup();
+  }
+});
+
+test('issue #150: a PENDING rollup with an unresolved thread is blocked at once, without waiting for the checks', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('UNSTABLE', [thread('PRRT_open')], withRollup('PENDING'))]);
+    const r = run(f, ['--settle', 'clean', '--pr', '7', '--checks-interval', '5', '--checks-timeout', '60']);
+    assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+    assert.equal(r.out.status, 'blocked');
+    assert.equal(mergeCalls(f).length, 1);
+    assert.ok(r.ms < 5000, `no wait: ${r.ms}ms`);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('issue #150: a loop settled clean can be settled clean AGAIN on the unchanged head — only the merge decision re-runs, nothing is written', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('UNSTABLE', [], withRollup('PENDING'))]);
+    const first = run(f, ['--settle', 'clean', '--pr', '7', '--checks-timeout', '0']);
+    assert.equal(first.code, 0, oneLine(first.stdout + first.stderr));
+    assert.equal(first.out.auto_merge, false);
+    const settled = readFileSync(loopPath(f), 'utf8');
+    assert.equal(JSON.parse(settled).settled_head_sha, HEAD);
+
+    resetMergeCount(f);
+    putMerge(f, [mergePage('CLEAN', [], withRollup('SUCCESS'))]);
+    const again = run(f, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(again.code, 0, oneLine(again.stdout + again.stderr));
+    assert.equal(again.out.status, 'clean');
+    assert.equal(again.out.resettle, true);
+    assert.equal(again.out.auto_merge, true, 'the checks finished green: the merge is authorized now');
+    assert.equal(again.out.head_sha, HEAD);
+    assert.equal(readFileSync(loopPath(f), 'utf8'), settled, 'a merge-only re-settle writes nothing');
+
+    for (const outcome of ['capped', 'escalated']) {
+      const other = run(f, ['--settle', outcome, '--pr', '7']);
+      assert.equal(other.code, 1, `${outcome} after clean is still refused: ${oneLine(other.stdout)}`);
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('issue #150: a merge-only re-settle is REFUSED when the PR head moved since the clean settle, even if Copilot reviewed the new head', () => {
+  const f = makeFixture();
+  try {
+    arm(f);
+    putMerge(f, [mergePage('UNSTABLE', [], withRollup('PENDING'))]);
+    assert.equal(run(f, ['--settle', 'clean', '--pr', '7', '--checks-timeout', '0']).code, 0);
+    const settled = readFileSync(loopPath(f), 'utf8');
+
+    resetMergeCount(f);
+    putMerge(f, [mergePage('CLEAN', [], { ...withRollup('SUCCESS'), headRefOid: NEW_HEAD, reviews: { nodes: [gqlReview(100, HEAD), gqlReview(101, NEW_HEAD)] } })]);
+    const again = run(f, ['--settle', 'clean', '--pr', '7']);
+    assert.equal(again.code, 1, oneLine(again.stdout + again.stderr));
+    assert.notEqual(again.out.auto_merge, true);
+    assert.match(again.out.error, /PR head moved from a+ \(settled clean\) to c+/);
+    assert.match(again.out.error, /rerun \/sterling:merge/);
+    assert.equal(readFileSync(loopPath(f), 'utf8'), settled);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('--settle clean refuses a bad --checks-timeout or --checks-interval before any gh call, loop untouched', () => {
+  for (const args of [['--checks-timeout', '-1'], ['--checks-timeout', 'x'], ['--checks-interval', '0'], ['--checks-interval', '']]) {
+    const f = makeFixture();
+    try {
+      arm(f);
+      const before = readFileSync(loopPath(f), 'utf8');
+      const r = run(f, ['--settle', 'clean', '--pr', '7', ...args]);
+      assert.equal(r.code, 1, `${JSON.stringify(args)}: ${oneLine(r.stdout + r.stderr)}`);
+      assert.match(r.out.error, new RegExp(args[0]));
+      assert.equal(calls(f).length, 0);
+      assert.equal(readFileSync(loopPath(f), 'utf8'), before);
+    } finally {
+      f.cleanup();
+    }
   }
 });
 

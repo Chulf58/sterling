@@ -551,6 +551,61 @@ test('work: no origin/HEAD and no local main, only origin/main — the base reso
   }
 });
 
+// GitHub issue #149: a local main (and origin/main) many commits behind origin
+// made mergeBase..branchTip carry commits already on origin, and the PR body
+// built from them went over GitHub's limit. Work mode now fetches origin's base
+// first and takes the range from it.
+test('work (issue #149): a STALE local main and origin/main do not inflate the PR text — the base is fetched from origin and only the branch\'s own commit is listed', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    const env = { ...process.env, ...p.ssh };
+    git(p.dir, ['checkout', 'main']);
+    for (const n of [1, 2, 3]) {
+      writeFileSync(join(p.dir, 'src', `upstream${n}.mjs`), `export const u${n} = ${n};\n`);
+      git(p.dir, ['add', '-A']);
+      git(p.dir, ['commit', '-m', `upstream work ${n}`, '-m', `Upstream body ${n}.`]);
+    }
+    git(p.dir, ['push', 'origin', 'main'], env);
+    const upstreamTip = git(p.dir, ['rev-parse', 'main']);
+    git(p.dir, ['checkout', p.branchName]);
+    git(p.dir, ['rebase', 'main']);
+    // Make the clone stale: local main and the remote-tracking ref back at the old base.
+    git(p.dir, ['branch', '-f', 'main', p.mainSha]);
+    git(p.dir, ['update-ref', 'refs/remotes/origin/main', p.mainSha]);
+
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `must ship — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const [c] = createCalls(p.gh.state);
+    assert.equal(c.fields.title, 'feat: widget sprockets', 'one commit beyond origin\'s main: its subject is the title');
+    assert.ok(!c.fields.body.includes('upstream work') && !c.fields.body.includes('Upstream body'), `commits already on origin are not in the body: ${oneLine(c.fields.body)}`);
+    assert.equal(git(p.dir, ['rev-parse', 'refs/remotes/origin/main']), upstreamTip, 'origin/main was fetched');
+    assert.equal(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'the local main is never moved');
+  } finally {
+    p.cleanup();
+  }
+});
+
+// GitHub issue #159: one commit whose message alone is over GitHub's 65536-
+// character PR body limit. The body is cut below it with a visible note.
+test('work (issue #159): a commit body over GitHub\'s 65536-character limit is truncated below it with a note, and the PR is created', () => {
+  const huge = Array.from({ length: 1500 }, (_, i) => `line ${i}: ${'x'.repeat(60)}`).join('\n');
+  assert.ok(huge.length > 70_000, 'fixture: the body alone is over the limit');
+  const p = makeProject({ mode: 'work', commits: [{ subject: 'feat: big generated change', body: huge }] });
+  try {
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `must ship — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const [c] = createCalls(p.gh.state);
+    const body = c.fields.body;
+    assert.ok(body.length <= 60_000, `body is ${body.length} characters`);
+    assert.ok(body.startsWith('line 0: '), 'the start of the message is kept');
+    assert.match(body, /PR body truncated by \/sterling:merge/);
+    assert.match(body, /git log [0-9a-f]{12}\.\.feat\/sprockets/, 'the note names where the full text is');
+    assert.ok(body.trimEnd().endsWith(ATTRIBUTION), 'the attribution line survives the cut');
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('work: MORE THAN ONE open PR for the same repo/head/base fails closed with exit 1 — nothing pushed, nothing created', () => {
   const p = makeProject({ mode: 'work' });
   try {

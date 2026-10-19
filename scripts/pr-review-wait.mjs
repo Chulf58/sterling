@@ -7,7 +7,8 @@
 //        [--since-review <id>] [--head <sha>] [--timeout <s>] [--interval <s>]
 //        [--request-copilot] [--recheck-delay <s>] [--target <dir>]
 //   node scripts/pr-review-wait.mjs --resolve-threads <comment-id,...> --pr <n|pr-url> [--target <dir>]
-//   node scripts/pr-review-wait.mjs --settle <clean|capped|escalated> --pr <n|pr-url> [--unknown-retry-delay <s>] [--target <dir>]
+//   node scripts/pr-review-wait.mjs --settle <clean|capped|escalated> --pr <n|pr-url> [--unknown-retry-delay <s>]
+//        [--checks-timeout <s>] [--checks-interval <s>] [--target <dir>]
 //
 // WAIT: the repo is bound to origin exactly as work-mode /sterling:merge binds
 // it (parseOriginRepo over origin's fetch URL); a PR URL or --repo naming any
@@ -113,18 +114,38 @@
 // pr_review.auto_merge_on_clean, absent = on) and auto_merge, which is true only
 // when the switch is on AND mergeable_now AND the head's check rollup is SUCCESS
 // or absent: the skill's cue to squash-merge the PR, pinned to head_sha (the
-// armed, reviewed head) (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean).
+// current, reviewed head) (decision work-mode-pr-auto-merge-when-copilot-loop-ends-clean).
 // UNSTABLE is mergeable to GitHub even when a check that is not required fails
 // (GitHub issue #131), so a FAILURE, PENDING or any other rollup withholds the
 // merge. auto_merge_withheld names every reason auto_merge is false (null when
 // it is true). The switch is
 // read before anything is asked or written; a value that is not a boolean
 // refuses the clean settle, so a typo never decides a merge.
+// head_sha is the PR's CURRENT head (headRefOid), never the armed one (GitHub
+// issue #154: a review-fix push moves the head after arming); armed_head_sha
+// and reviewed_head_sha (the commit of Copilot's newest completed review) are
+// printed beside it, and a head Copilot's last review did not cover refuses
+// the clean settle (status 'blocked'). A MERGED PR settles clean at once with
+// already_merged true and auto_merge false (GitHub issue #152); a CLOSED one is
+// blocked. A PENDING or EXPECTED rollup with nothing else blocking is read
+// again every --checks-interval seconds (default 30) for up to
+// --checks-timeout seconds (default 540) until it finishes (decision
+// pr-settle-clean-waits-for-pending-checks-then-decides-merge, GitHub issue
+// #150); a timeout withholds the merge and says so (checks_timed_out).
+// --checks-timeout is one absolute deadline over every read (the first one
+// too), page, retry and sleep, and a late SUCCESS is timed out too; a first
+// read that cannot finish by it refuses the settle; only --checks-timeout 0 is
+// one unbounded read. The head and Copilot's
+// newest review seen by the first read are pinned: either changing during the
+// wait refuses the settle (status 'blocked'). A loop
+// already settled clean may be settled clean again: that re-runs only the
+// merge decision, writes nothing, prints resettle true, and is refused when
+// the PR head is no longer the settled one (settled_head_sha).
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { resolveStoreRoot } from './lib/worktree-root.mjs';
-import { autoMergeOnCleanOf, fetchSettledMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
+import { autoMergeOnCleanOf, DeadlineReachedError, fetchSettledMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (name) => {
@@ -145,6 +166,11 @@ const DEFAULT_TIMEOUT_S = 540; // under a 10-minute background Bash window
 const DEFAULT_INTERVAL_S = 30;
 const MAX_INTERVAL_S = 120;
 const DEFAULT_RECHECK_DELAY_S = 10; // the review_requested event showed within 10s (finding in the header)
+const DEFAULT_CHECKS_TIMEOUT_S = 540; // the settle's PENDING-checks wait, under a 10-minute background shell window like the review wait
+const DEFAULT_CHECKS_INTERVAL_S = 30;
+const PENDING_ROLLUPS = new Set(['PENDING', 'EXPECTED']); // checks still running, or a required one not reported yet
+
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
 function finish(status, extra = {}) {
@@ -237,15 +263,123 @@ function readAutoMergeOnClean() {
   return autoMergeOnCleanOf(cfg);
 }
 
+// --checks-timeout <s> / --checks-interval <s>: how long a clean settle waits
+// for a PENDING check rollup to finish, and how often it reads it meanwhile.
+function checksWaitMs() {
+  const read = (name, dflt, zeroOk) => {
+    const raw = flag(name);
+    if (raw === undefined) return dflt * 1000;
+    const n = Number(raw);
+    if (raw.trim() === '' || !Number.isFinite(n) || n < 0 || (n === 0 && !zeroOk)) throw new Error(`${name} must be a number of seconds ${zeroOk ? '>= 0' : '> 0'}, got '${raw}'`);
+    return n * 1000;
+  };
+  return { timeoutMs: read('--checks-timeout', DEFAULT_CHECKS_TIMEOUT_S, true), intervalMs: read('--checks-interval', DEFAULT_CHECKS_INTERVAL_S, false) };
+}
+
+// The newest completed Copilot review in fetchPrMergeState's reviews, or null.
+// GraphQL names the bot without the REST '[bot]' suffix the pinned logins carry.
+function lastCopilotReview(reviews, pinned) {
+  const copilot = reviews.filter(
+    (r) => r.bot && typeof r.login === 'string' && Number.isInteger(r.id) && COMPLETED_STATES.has(r.state) && (pinned.length ? pinned.includes(r.login) || pinned.includes(`${r.login}[bot]`) : COPILOT_LOGIN.test(r.login))
+  );
+  return copilot.length ? copilot.reduce((a, b) => (b.id > a.id ? b : a)) : null;
+}
+
 if (argv.includes('--settle')) {
   let merge = null;
   try {
     const originRepo = originRepoOrThrow();
     const outcome = flag('--settle');
     const autoMergeOnClean = outcome === 'clean' ? readAutoMergeOnClean() : null;
+    const checksWait = outcome === 'clean' ? checksWaitMs() : null;
+    const pinnedLogins = outcome === 'clean' ? readPinnedLogins() : [];
     // Only a clean outcome claims the PR is ready for a human, so only it asks GitHub.
-    const guard = (armed) => {
-      const state = fetchSettledMergeState(target, originRepo, armed.pr_number, { retryDelayMs: retryDelayMs() });
+    const guard = (armed, { resettle = false } = {}) => {
+      const blocked = (message, extra) => {
+        const err = new Error(message);
+        err.blocked = { ...merge, ...extra };
+        return err;
+      };
+      const started = Date.now();
+      let state;
+      let reviewedHead = null;
+      let timedOut = false;
+      // PENDING WAIT (decision pr-settle-clean-waits-for-pending-checks-then-decides-merge,
+      // GitHub issue #150): while the head's checks are still running and
+      // nothing else blocks, read the merge state again until they finish or
+      // --checks-timeout runs out. ONE absolute deadline bounds every re-read
+      // (each gh call, page and UNKNOWN retry) and every sleep, the FIRST read
+      // included; only an explicit --checks-timeout 0 is one unbounded
+      // snapshot. A read that ends after the deadline counts as timed out
+      // whatever it says (Sol re-check); a first read that cannot finish by it
+      // refuses the settle, since nothing is known. The head and Copilot's newest review seen by the first read are
+      // pinned: a push or a new review during the wait is unreviewed by the
+      // conductor, so it refuses the settle (Sol review).
+      const bounded = checksWait.timeoutMs > 0;
+      const deadline = started + checksWait.timeoutMs;
+      let pinnedAt = null;
+      for (;;) {
+        const firstRead = pinnedAt === null;
+        try {
+          state = fetchSettledMergeState(target, originRepo, armed.pr_number, { retryDelayMs: retryDelayMs(), deadline: bounded ? deadline : null });
+        } catch (e) {
+          if (!(e instanceof DeadlineReachedError)) throw e;
+          if (firstRead) {
+            throw new Error(`GitHub's merge state could not be read within --checks-timeout (${checksWait.timeoutMs / 1000}s; an UNKNOWN state is re-read after --unknown-retry-delay inside it), so nothing is known about the PR — settle again, with a longer --checks-timeout if GitHub is slow; nothing settled`);
+          }
+          timedOut = true; // the last complete read (state) stands
+          break;
+        }
+        if (state.merged || state.pr_state !== 'OPEN') break;
+        // A merge-only re-settle is held to the head the clean settle vouched for.
+        const settledHead = armed.settled_head_sha ?? armed.head_sha;
+        if (resettle && state.head_sha !== settledHead) {
+          throw new Error(`the PR head moved from ${settledHead} (settled clean) to ${state.head_sha}, so its new commits are unreviewed — a merge-only re-settle needs the unchanged head; rerun /sterling:merge to push and re-arm the loop; nothing settled`);
+        }
+        // GitHub issue #154: the head to merge is the PR's CURRENT head, and
+        // only when Copilot's last completed review covered it.
+        const last = lastCopilotReview(state.reviews, pinnedLogins);
+        if (firstRead) pinnedAt = { head: state.head_sha, review: last?.id ?? null };
+        else if (state.head_sha !== pinnedAt.head || (last?.id ?? null) !== pinnedAt.review) {
+          throw blocked(
+            state.head_sha !== pinnedAt.head
+              ? `the PR head moved from ${pinnedAt.head} to ${state.head_sha} while the settle waited for the checks, so the loop's clean judgment does not cover it and the loop is NOT clean: wait for and disposition the review of the new head, then settle again; nothing settled`
+              : `a new Copilot review (${last?.id ?? 'none'}, was ${pinnedAt.review}) arrived while the settle waited for the checks, so it is not dispositioned and the loop is NOT clean: disposition it, then settle again; nothing settled`,
+            { head_sha: state.head_sha, settle_start_head_sha: pinnedAt.head, reviewed_head_sha: last?.commit ?? null, armed_head_sha: armed.head_sha }
+          );
+        }
+        reviewedHead = last?.commit ?? null;
+        if (reviewedHead !== state.head_sha) {
+          throw blocked(
+            `the PR head ${state.head_sha} is not the head Copilot last reviewed (${reviewedHead ?? 'no completed Copilot review on the PR'}), so its newest commits are unreviewed and the loop is NOT clean: run the wait with --request-copilot, disposition that review, then settle again; nothing settled`,
+            { head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha }
+          );
+        }
+        if (bounded && Date.now() > deadline) {
+          timedOut = true; // finished, but not within --checks-timeout
+          break;
+        }
+        const pending = PENDING_ROLLUPS.has(state.check_rollup) && !state.check_rollup_error && state.threads.every((t) => t.resolved);
+        if (!pending) break;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          timedOut = true;
+          break;
+        }
+        process.stderr.write(`pr-review-wait: the head's check rollup is ${state.check_rollup}; waiting for the checks to finish (up to ${Math.ceil(remaining / 1000)}s more)\n`);
+        sleep(Math.min(checksWait.intervalMs, remaining));
+      }
+      const checksWaitedS = Math.round((Date.now() - started) / 1000);
+      // GitHub issue #152: a PR merged before the settle is clean with nothing
+      // left to merge; GitHub keeps its merge state UNKNOWN for good.
+      if (state.merged) {
+        merge = { pr_state: state.pr_state, already_merged: true, merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: false, awaiting_human_review: false, auto_merge_on_clean: autoMergeOnClean, auto_merge: false, auto_merge_withheld: 'the PR is already merged: there is nothing left to merge', head_sha: state.head_sha, armed_head_sha: armed.head_sha, ...(resettle ? { resettle: true } : {}) };
+        return { head_sha: state.head_sha };
+      }
+      if (state.pr_state !== 'OPEN') {
+        merge = { pr_state: state.pr_state, already_merged: false, head_sha: state.head_sha, armed_head_sha: armed.head_sha };
+        throw blocked(`the PR is ${state.pr_state}, not open and not merged, so the loop is NOT clean: reopen it and settle again, or settle escalated; nothing settled`, { blockers: [`the PR is ${state.pr_state}`], unresolved_threads: [] });
+      }
       const verdict = mergeBlockers(state);
       // A clean settle may still carry a failing or pending check that is not
       // required (UNSTABLE); only a green or absent rollup lets it auto-merge.
@@ -254,13 +388,14 @@ if (argv.includes('--settle')) {
       if (autoMergeOnClean !== true) withheld.push('the auto-merge switch pr_review.auto_merge_on_clean is off');
       if (verdict.awaiting_human_review) withheld.push('the PR awaits a required human review');
       else if (verdict.mergeable_now !== true) withheld.push('GitHub does not report the PR mergeable now');
-      if (rollup !== null && rollup !== 'SUCCESS') withheld.push(`the head commit's check rollup is ${rollup}, not SUCCESS: fix the failing or pending check, push, and run the loop again`);
-      merge = { merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: withheld.length === 0, auto_merge_withheld: withheld.length ? withheld.join('; ') : null, head_sha: armed.head_sha };
+      if (timedOut && PENDING_ROLLUPS.has(rollup)) withheld.push(`the head commit's check rollup is ${rollup}, still not SUCCESS after waiting ${checksWaitedS}s: once the checks finish, run --settle clean again on this unchanged head (it re-runs only the merge decision)`);
+      else if (timedOut) withheld.push(`the head commit's check rollup reached ${rollup} only after --checks-timeout ran out (${checksWaitedS}s): run --settle clean again on this unchanged head (it re-runs only the merge decision)`);
+      else if (rollup !== null && rollup !== 'SUCCESS') withheld.push(`the head commit's check rollup is ${rollup}, not SUCCESS: fix the failing check, push, and run the loop again`);
+      merge = { pr_state: state.pr_state, already_merged: false, merge_state_status: state.merge_state_status, review_decision: state.review_decision, check_rollup: state.check_rollup, checks_waited_s: checksWaitedS, checks_timed_out: timedOut, mergeable_now: verdict.mergeable_now, awaiting_human_review: verdict.awaiting_human_review, auto_merge_on_clean: autoMergeOnClean, auto_merge: withheld.length === 0, auto_merge_withheld: withheld.length ? withheld.join('; ') : null, head_sha: state.head_sha, reviewed_head_sha: reviewedHead, armed_head_sha: armed.head_sha, ...(resettle ? { resettle: true } : {}) };
       if (verdict.blockers.length) {
-        const err = new Error(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join('; ')} — resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`);
-        err.blocked = { ...merge, blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads };
-        throw err;
+        throw blocked(`GitHub still blocks the merge, so the loop is NOT clean: ${verdict.blockers.join('; ')} — resolve the threads (--resolve-threads) or fix the blocker, then settle again; nothing settled`, { blockers: verdict.blockers, unresolved_threads: verdict.unresolved_threads });
       }
+      return { head_sha: state.head_sha };
     };
     const s = settlePrLoop(storeRoot, outcome, flag('--pr'), { originRepo, guard: outcome === 'clean' ? guard : null });
     process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at, ...(merge ?? {}) }) + '\n');
@@ -551,7 +686,6 @@ function poll(recheckAbsent = true) {
 
 if (requestCopilot) requestCopilotReview();
 
-const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 for (;;) {
   let found;
   try {

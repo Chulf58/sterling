@@ -4246,6 +4246,38 @@ var init_paths = __esm({
   }
 });
 
+// packages/schemas/dist/source-extensions.js
+function sourceExtensionOf(path) {
+  const base2 = String(path).split("/").pop() ?? "";
+  const idx = base2.lastIndexOf(".");
+  if (idx <= 0)
+    return null;
+  return base2.slice(idx + 1).toLowerCase();
+}
+var SOURCE_EXTENSIONS;
+var init_source_extensions = __esm({
+  "packages/schemas/dist/source-extensions.js"() {
+    "use strict";
+    SOURCE_EXTENSIONS = /* @__PURE__ */ new Set([
+      "ts",
+      "js",
+      "mjs",
+      "cjs",
+      "tsx",
+      "jsx",
+      "py",
+      "go",
+      "rs",
+      "java",
+      "rb",
+      "cs",
+      "sh",
+      "gd",
+      "lua"
+    ]);
+  }
+});
+
 // packages/schemas/dist/envelope.js
 function refineSupersession(rec, ctx) {
   if (rec.status === "superseded" && rec.superseded_by === null) {
@@ -5932,6 +5964,7 @@ var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
     "use strict";
     init_paths();
+    init_source_extensions();
     init_envelope();
     init_records();
     init_transient();
@@ -19231,29 +19264,6 @@ import { spawnSync as spawnSync3 } from "node:child_process";
 
 // scripts/hooks/lib/undeclared-source.mjs
 init_dist();
-var SOURCE_EXTENSIONS = /* @__PURE__ */ new Set([
-  "ts",
-  "js",
-  "mjs",
-  "cjs",
-  "tsx",
-  "jsx",
-  "py",
-  "go",
-  "rs",
-  "java",
-  "rb",
-  "cs",
-  "sh",
-  "gd",
-  "lua"
-]);
-function extensionOf(path) {
-  const base2 = String(path).split("/").pop() ?? "";
-  const idx = base2.lastIndexOf(".");
-  if (idx <= 0) return null;
-  return base2.slice(idx + 1).toLowerCase();
-}
 function globMatchesEither(path, glob) {
   if (matchesGlob(path, glob)) return true;
   return matchesGlob(path.toLowerCase(), glob.toLowerCase());
@@ -19265,7 +19275,7 @@ function classifyCoverage(filePaths, pathGlobs, excludeGlobs = []) {
   for (const path of filePaths ?? []) {
     if (seen.has(path)) continue;
     seen.add(path);
-    const ext = extensionOf(path);
+    const ext = sourceExtensionOf(path);
     if (!ext || !SOURCE_EXTENSIONS.has(ext)) continue;
     if ((excludeGlobs ?? []).some((g) => matchesGlob(path, g))) continue;
     if ((pathGlobs ?? []).some((g) => globMatchesEither(path, g))) covered.push(path);
@@ -20293,14 +20303,14 @@ async function sweepStaleDispatches(root) {
     const lines = [];
     if (terminated) {
       lines.push(
-        `DEAD-DISPATCH RESIDUE (OpenCode process start): ${terminated} dispatch record(s) a previous OpenCode process left live were ended (session-boundary) and the dispatch register was cleared. Those subagents belonged to that process and cannot be resumed from this one: check git status for files they may have left half-written, and re-dispatch if the work is still needed.`
+        `DEAD-DISPATCH RESIDUE (OpenCode process start): ${terminated} dispatch record(s) a previous OpenCode process left live were closed in Sterling's register (session-boundary) and the dispatch register was cleared. NOT PROOF THAT THESE DISPATCHES ENDED: a subagent can keep running across an OpenCode restart and still report back into this session. Wait for their completion reports, check git status and git log for files they may still be writing, and do not re-dispatch a writer lane over the same files until it is known dead.`
       );
     }
     if (refused) lines.push(`STERLING DISPATCH SWEEP: ${refused}`);
     return lines.join("\n\n");
   } catch (e) {
     if (e?.code !== "register_lock_held") throw e;
-    return `STERLING DISPATCH SWEEP SKIPPED: ${render(e)}. Dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
+    return `STERLING DISPATCH SWEEP SKIPPED: ${render(e)}. Dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
   }
 }
 function regularFiles(root, files) {
@@ -20907,7 +20917,7 @@ ${opencodeHostTail(pluginRoot)}`;
         try {
           line = await sweepStale(root);
         } catch (e) {
-          line = `STERLING DISPATCH SWEEP FAILED (${errText2(e)}): dispatch records a dead OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
+          line = `STERLING DISPATCH SWEEP FAILED (${errText2(e)}): dispatch records a previous OpenCode process left live were not swept, so they can hold the settled snapshot; restart OpenCode to retry the sweep.`;
         }
         if (line) {
           holdLine(`${root}\0sweep`, line);

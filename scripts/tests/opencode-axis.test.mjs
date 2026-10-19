@@ -577,7 +577,13 @@ test('the first root context of a process sweeps dispatch records a dead process
     const root2 = { sessionID: 'ses_root2', agent: 'build', system: [], messages: [], tools: {} };
     await seeTurn(second.ctx, root2);
     assert.ok(stateRecords(p.dir).every((r) => r.terminal), 'the stale record is terminal after the sweep');
-    assert.match([...root2.system.map((x) => x.text), root2.prompt.text].join('\n'), /DEAD-DISPATCH RESIDUE \(OpenCode process start\): 1 dispatch record/, 'the sweep says how many records it ended');
+    const sweepText = [...root2.system.map((x) => x.text), root2.prompt.text].join('\n');
+    assert.match(sweepText, /DEAD-DISPATCH RESIDUE \(OpenCode process start\): 1 dispatch record/, 'the sweep says how many records it closed');
+    // GitHub #156: the subagents may still be running; the notice must not call them ended or tell the conductor to re-dispatch.
+    assert.match(sweepText, /NOT PROOF THAT THESE DISPATCHES ENDED/, 'the notice carries the not-proof caveat');
+    assert.match(sweepText, /do not re-dispatch a writer lane over the same files until it is known dead/, 'the notice forbids a blind re-dispatch');
+    assert.doesNotMatch(sweepText, /cannot be resumed/, 'the notice does not call the subagents unresumable');
+    assert.doesNotMatch(sweepText, /re-dispatch if the work is still needed/, 'the notice gives no re-dispatch instruction');
     assert.equal(existsSync(join(p.dir, '.sterling', 'transient', 'dispatch-register.json')), false, 'the register is cleared, as H1 clears it');
     assert.equal(server.liveDispatch(p.dir).live, false);
     await second.cleanup?.();

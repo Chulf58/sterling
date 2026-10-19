@@ -17139,6 +17139,36 @@ function normalizeLocation(location) {
   return repoPathOfLocation(location) ?? location;
 }
 
+// packages/schemas/dist/source-extensions.js
+var SOURCE_EXTENSIONS = /* @__PURE__ */ new Set([
+  "ts",
+  "js",
+  "mjs",
+  "cjs",
+  "tsx",
+  "jsx",
+  "py",
+  "go",
+  "rs",
+  "java",
+  "rb",
+  "cs",
+  "sh",
+  "gd",
+  "lua"
+]);
+function sourceExtensionOf(path) {
+  const base2 = String(path).split("/").pop() ?? "";
+  const idx = base2.lastIndexOf(".");
+  if (idx <= 0)
+    return null;
+  return base2.slice(idx + 1).toLowerCase();
+}
+function isSourcePath(path) {
+  const ext = sourceExtensionOf(path);
+  return ext !== null && SOURCE_EXTENSIONS.has(ext);
+}
+
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
 var WRITE_REFUSED_LINK_RELS = ["supersedes"];
@@ -33712,7 +33742,7 @@ var SterlingTools = class _SterlingTools {
             attestedPaths,
             absenceAttestedPaths
           });
-          if (size !== void 0)
+          if (size !== void 0 && isSourcePath(f.path))
             liveBytes += size;
           if (verdict.kind === "parked") {
             parkedFiles.push({ path: f.path, ref: verdict.ref });
@@ -34426,10 +34456,11 @@ var SterlingTools = class _SterlingTools {
     }
     const hits = arr.filter((el2) => elementOwnsScalar(el2, key) && String(el2[key]) === value);
     const identicalDuplicates = hits.length > 1 && hits.every((h) => isDeepStrictEqual(h, hits[0]));
-    if (hits.length !== 1 && !identicalDuplicates) {
+    const duplicatedOwnedPath = hits.length > 1 && !identicalDuplicates && old.type === "feature_article" && base2 === "files" && key === "path";
+    if (hits.length !== 1 && !identicalDuplicates && !duplicatedOwnedPath) {
       throw new Error(`knowledge_array_remove: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base2} \u2014 exactly one is required, nothing was written. ` + (hits.length === 0 ? `Confirm the ${key} value against the live array.` : `A blind delete inside an array too large to read is exactly the unreviewable write this grammar exists to prevent \u2014 select on a key whose value is unique in the array.`));
     }
-    if (old.type === "feature_article" && base2 === "files" && arr.length === 1) {
+    if (old.type === "feature_article" && base2 === "files" && arr.length === (duplicatedOwnedPath ? hits.length : 1)) {
       throw new Error(`knowledge_array_remove: this would remove the LAST entry of feature_article.files \u2014 the article must retain at least one owned file (an empty files[] leaves the code it describes unowned; emptying an article is retire-and-replace, not a removal, and knowledge_split refuses a full donation for the same reason). Nothing was written.`);
     }
     if (base2 === "history" && arr.length === 1) {
@@ -34437,7 +34468,7 @@ var SterlingTools = class _SterlingTools {
     }
     const el = hits[0];
     const removeAt = arr.indexOf(el);
-    const nextArr = arr.filter((_, i) => i !== removeAt);
+    const nextArr = duplicatedOwnedPath ? arr.filter((x) => !hits.includes(x)) : arr.filter((_, i) => i !== removeAt);
     const relationRemoval = base2 === "links" ? { rel: el.rel, target_id: el.target_id } : void 0;
     const { record: record2, claims_check, ledger_warnings } = this.splitSameSubject(this.knowledgeUpdate(old.id, relationRemoval ? {} : { [base2]: nextArr }, resolves, expectedVersion, "knowledge_array_remove", void 0, relationRemoval));
     return {
@@ -34446,7 +34477,8 @@ var SterlingTools = class _SterlingTools {
       removed: {
         selector,
         element: el,
-        ...identicalDuplicates ? { note: `removed 1 of ${hits.length} identical elements; ${hits.length - 1} identical remain` } : {}
+        ...identicalDuplicates ? { note: `removed 1 of ${hits.length} identical elements; ${hits.length - 1} identical remain` } : {},
+        ...duplicatedOwnedPath ? { note: `removed all ${hits.length} files[] entries for path ${value} (one ownership claim written ${hits.length} times); element is the first of them` } : {}
       },
       warnings: [...ledger_warnings, ...this.articleOversizeWarnings(record2), ...this.openReconcileLaneWarnings(this.supersedeChain(old))]
     };

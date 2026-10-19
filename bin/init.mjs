@@ -4245,6 +4245,38 @@ var init_paths = __esm({
   }
 });
 
+// packages/schemas/dist/source-extensions.js
+function sourceExtensionOf(path) {
+  const base2 = String(path).split("/").pop() ?? "";
+  const idx = base2.lastIndexOf(".");
+  if (idx <= 0)
+    return null;
+  return base2.slice(idx + 1).toLowerCase();
+}
+var SOURCE_EXTENSIONS;
+var init_source_extensions = __esm({
+  "packages/schemas/dist/source-extensions.js"() {
+    "use strict";
+    SOURCE_EXTENSIONS = /* @__PURE__ */ new Set([
+      "ts",
+      "js",
+      "mjs",
+      "cjs",
+      "tsx",
+      "jsx",
+      "py",
+      "go",
+      "rs",
+      "java",
+      "rb",
+      "cs",
+      "sh",
+      "gd",
+      "lua"
+    ]);
+  }
+});
+
 // packages/schemas/dist/envelope.js
 function refineSupersession(rec, ctx) {
   if (rec.status === "superseded" && rec.superseded_by === null) {
@@ -5941,6 +5973,7 @@ var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
     "use strict";
     init_paths();
+    init_source_extensions();
     init_envelope();
     init_records();
     init_transient();
@@ -15657,29 +15690,6 @@ function cloneCleanupLines(paths, liveProjectPaths2) {
 
 // scripts/hooks/lib/undeclared-source.mjs
 init_dist();
-var SOURCE_EXTENSIONS = /* @__PURE__ */ new Set([
-  "ts",
-  "js",
-  "mjs",
-  "cjs",
-  "tsx",
-  "jsx",
-  "py",
-  "go",
-  "rs",
-  "java",
-  "rb",
-  "cs",
-  "sh",
-  "gd",
-  "lua"
-]);
-function extensionOf(path) {
-  const base2 = String(path).split("/").pop() ?? "";
-  const idx = base2.lastIndexOf(".");
-  if (idx <= 0) return null;
-  return base2.slice(idx + 1).toLowerCase();
-}
 function globMatchesEither(path, glob) {
   if (matchesGlob(path, glob)) return true;
   return matchesGlob(path.toLowerCase(), glob.toLowerCase());
@@ -15691,7 +15701,7 @@ function classifyCoverage(filePaths, pathGlobs, excludeGlobs = []) {
   for (const path of filePaths ?? []) {
     if (seen.has(path)) continue;
     seen.add(path);
-    const ext = extensionOf(path);
+    const ext = sourceExtensionOf(path);
     if (!ext || !SOURCE_EXTENSIONS.has(ext)) continue;
     if ((excludeGlobs ?? []).some((g) => matchesGlob(path, g))) continue;
     if ((pathGlobs ?? []).some((g) => globMatchesEither(path, g))) covered.push(path);
@@ -16880,6 +16890,86 @@ function probeClaude({ env = process.env } = {}) {
   return { installed: true, version: m[0], major: Number(m[1]) };
 }
 
+// scripts/lib/agents-md-facts.mjs
+var STACK_TAGS_LABEL = "- Stack tags (= domain mount manifest): ";
+var DOMAINS_LABEL = "- Domain stores (one shared store per stack tag): ";
+var DOMAINS_SUFFIX = " \u2014 each created by init with a description of what belongs in it (\xA72.3)";
+var DOMAINS_NONE = "(none \u2014 declare stack tags to mount domain stores)";
+var HISTORICAL_DOMAINS_SUFFIXES = [DOMAINS_SUFFIX, " \u2014 created lazily on first need (\xA72.3)"];
+var HISTORICAL_DOMAINS_NONE = [DOMAINS_NONE, "(none mounted yet \u2014 created lazily on first need)"];
+var renderStackTags = (stackTags) => stackTags.join(", ");
+var renderDomains = (stackTags, domainPaths = {}) => stackTags.length ? stackTags.map((t) => domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(", ") + DOMAINS_SUFFIX : DOMAINS_NONE;
+var ENTRY = /^[^\s,`*[\]()<>]+$/;
+var isEntryList = (value) => value.length > 0 && value.split(", ").every((e) => ENTRY.test(e));
+var isGeneratedStackTags = (value) => value === "" || isEntryList(value);
+function isDomainEntryList(value, configuredPaths) {
+  const memo = /* @__PURE__ */ new Map();
+  const from = (pos) => {
+    if (!memo.has(pos)) memo.set(pos, judge(pos));
+    return memo.get(pos);
+  };
+  const judge = (pos) => {
+    for (const p of configuredPaths) {
+      if (!p || !value.startsWith(p, pos)) continue;
+      const end = pos + p.length;
+      if (end === value.length || value.startsWith(", ", end) && from(end + 2)) return true;
+    }
+    const comma = value.indexOf(", ", pos);
+    const entry = value.slice(pos, comma === -1 ? void 0 : comma);
+    if (!ENTRY.test(entry)) return false;
+    return comma === -1 || from(comma + 2);
+  };
+  return value.length > 0 && from(0);
+}
+var isGeneratedDomains = (value, configuredPaths) => HISTORICAL_DOMAINS_NONE.includes(value) || HISTORICAL_DOMAINS_SUFFIXES.some((s2) => value.endsWith(s2) && isDomainEntryList(value.slice(0, -s2.length), configuredPaths));
+function refreshAgentsMdFacts(text, { stackTags, domainPaths = {} }) {
+  const lines = [];
+  const re = /\r\n|\n/g;
+  let start = 0;
+  let m;
+  while (m = re.exec(text)) {
+    lines.push({ content: text.slice(start, m.index), eol: m[0] });
+    start = re.lastIndex;
+  }
+  lines.push({ content: text.slice(start), eol: "" });
+  const refreshed = [];
+  const kept = [];
+  const absent = [];
+  const facts = [
+    { name: "Stack tags", label: STACK_TAGS_LABEL, want: renderStackTags(stackTags), generated: isGeneratedStackTags },
+    { name: "Domain stores", label: DOMAINS_LABEL, want: renderDomains(stackTags, domainPaths), generated: (v) => isGeneratedDomains(v, Object.values(domainPaths)) }
+  ];
+  for (const f of facts) {
+    const hits = lines.filter((l) => l.content.startsWith(f.label));
+    if (!hits.length) {
+      absent.push(f.name);
+      continue;
+    }
+    if (hits.length > 1) {
+      kept.push({ name: f.name, reason: `the line appears ${hits.length} times` });
+      continue;
+    }
+    const value = hits[0].content.slice(f.label.length);
+    if (value === f.want) continue;
+    if (!f.generated(value)) {
+      kept.push({ name: f.name, reason: "the line was edited by hand" });
+      continue;
+    }
+    hits[0].content = f.label + f.want;
+    refreshed.push(f.name);
+  }
+  return { text: lines.map((l) => l.content + l.eol).join(""), refreshed, kept, absent };
+}
+function describeAgentsMdRefresh({ refreshed, kept }, { stackTags, domainPaths = {} }) {
+  const parts = [];
+  if (refreshed.length) parts.push(`rewrote the ${refreshed.join(" and ")} line${refreshed.length > 1 ? "s" : ""} from .sterling/config.json`);
+  for (const k of kept) {
+    const want = k.name === "Stack tags" ? renderStackTags(stackTags) : renderDomains(stackTags, domainPaths);
+    parts.push(`left the ${k.name} line alone (${k.reason}); config says: ${want}`);
+  }
+  return parts.join("; ");
+}
+
 // scripts/hooks/lib/undeclared-source-scan.mjs
 init_dist();
 import { spawnSync as spawnSync9 } from "node:child_process";
@@ -17298,10 +17388,10 @@ var assertNoDeadTerms = (label, content) => {
   if (hits.length) fail(`init dead-term check FAILED in generated ${label}: ${hits.map((h) => h.match).join(", ")}`, 1);
   return content;
 };
-var agentsMdTemplateRaw = readFileSync19(join26(pluginRoot, "templates", "target-agents-md.md"), "utf8").replaceAll("{{PROJECT_NAME}}", eff.projectName).replaceAll("{{STACK_TAGS}}", eff.stackTags.join(", ")).replaceAll("{{TOOLCHAINS}}", baked.map((t) => `${t.adapter} (${t.path_globs.map((g) => g.includes("`") ? g : `\`${g}\``).join(", ")})`).join("; ")).replaceAll("{{LINT_COMMAND}}", baked.flatMap((t) => [t.run_commands?.lint, t.run_commands?.format].filter(Boolean).map((cmd) => {
+var agentsMdTemplateRaw = readFileSync19(join26(pluginRoot, "templates", "target-agents-md.md"), "utf8").replaceAll("{{PROJECT_NAME}}", eff.projectName).replaceAll("{{STACK_TAGS}}", renderStackTags(eff.stackTags)).replaceAll("{{TOOLCHAINS}}", baked.map((t) => `${t.adapter} (${t.path_globs.map((g) => g.includes("`") ? g : `\`${g}\``).join(", ")})`).join("; ")).replaceAll("{{LINT_COMMAND}}", baked.flatMap((t) => [t.run_commands?.lint, t.run_commands?.format].filter(Boolean).map((cmd) => {
   const oneLine = cmd.replace(/\s+/g, " ").trim();
   return `${oneLine.includes("`") ? oneLine : `\`${oneLine}\``} (${t.adapter})`;
-})).join("; ") || "not recorded yet; add it here").replaceAll("{{DOMAINS}}", eff.stackTags.length ? eff.stackTags.map((t) => eff.domainPaths[t] ?? `~/.sterling/domains/${t}/`).join(", ") + " \u2014 each created by init with a description of what belongs in it (\xA72.3)" : "(none \u2014 declare stack tags to mount domain stores)").replaceAll("{{BACKUP_PATH}}", eff.backupPath ? "configured \u2014 see `.sterling/config.json` \u2192 `backup_path` (machine-local, deliberately not restated here)" : "(opted out \u2014 recorded)");
+})).join("; ") || "not recorded yet; add it here").replaceAll("{{DOMAINS}}", renderDomains(eff.stackTags, eff.domainPaths)).replaceAll("{{BACKUP_PATH}}", eff.backupPath ? "configured \u2014 see `.sterling/config.json` \u2192 `backup_path` (machine-local, deliberately not restated here)" : "(opted out \u2014 recorded)");
 var CONVENTIONS_TOKEN = "{{CONVENTIONS_SECTION}}";
 var agentsMdConventionsIdx = agentsMdTemplateRaw.indexOf(CONVENTIONS_TOKEN);
 if (agentsMdConventionsIdx === -1) fail("templates/target-agents-md.md lost its {{CONVENTIONS_SECTION}} placeholder \u2014 refusing (P5)", 1);
@@ -17500,7 +17590,21 @@ if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
     writeAtomic(agentsMdPath, expectedAgentsMd);
     items.push({ item: "AGENTS.md", status: "created", detail: "from templates/target-agents-md.md" });
   } else {
-    items.push({ item: "AGENTS.md", status: "ok", detail: "present \u2014 project-editable, never compared byte-for-byte" });
+    const agentsMdRaw = readFileSync19(agentsMdPath, "utf8");
+    const facts = { stackTags: eff.stackTags, domainPaths: eff.domainPaths };
+    const refresh = refreshAgentsMdFacts(agentsMdRaw, facts);
+    if (refresh.refreshed.length) writeAtomic(agentsMdPath, refresh.text);
+    if (refresh.kept.length) {
+      items.push({ item: "AGENTS.md", status: "kept", detail: describeAgentsMdRefresh(refresh, facts) });
+      warns.push(`
+\u26A0 AGENTS.md: ${describeAgentsMdRefresh({ refreshed: [], kept: refresh.kept }, facts)}. Update ${refresh.kept.length > 1 ? "those lines" : "that line"} by hand.`);
+    } else if (refresh.refreshed.length) {
+      items.push({ item: "AGENTS.md", status: "refreshed", detail: describeAgentsMdRefresh(refresh, facts) });
+    } else if (refresh.absent.length) {
+      items.push({ item: "AGENTS.md", status: "ok", detail: `present \u2014 project-editable; no ${refresh.absent.join(" or ")} line to keep in step with .sterling/config.json` });
+    } else {
+      items.push({ item: "AGENTS.md", status: "ok", detail: "present \u2014 project-editable; the Stack tags and Domain stores lines match .sterling/config.json" });
+    }
   }
   if (!claudeMdExists) {
     writeAtomic(claudeMdPath, expectedClaudeMd);

@@ -4231,6 +4231,38 @@ var init_paths = __esm({
   }
 });
 
+// packages/schemas/dist/source-extensions.js
+function sourceExtensionOf(path) {
+  const base2 = String(path).split("/").pop() ?? "";
+  const idx = base2.lastIndexOf(".");
+  if (idx <= 0)
+    return null;
+  return base2.slice(idx + 1).toLowerCase();
+}
+var SOURCE_EXTENSIONS;
+var init_source_extensions = __esm({
+  "packages/schemas/dist/source-extensions.js"() {
+    "use strict";
+    SOURCE_EXTENSIONS = /* @__PURE__ */ new Set([
+      "ts",
+      "js",
+      "mjs",
+      "cjs",
+      "tsx",
+      "jsx",
+      "py",
+      "go",
+      "rs",
+      "java",
+      "rb",
+      "cs",
+      "sh",
+      "gd",
+      "lua"
+    ]);
+  }
+});
+
 // packages/schemas/dist/envelope.js
 function refineSupersession(rec, ctx) {
   if (rec.status === "superseded" && rec.superseded_by === null) {
@@ -5914,6 +5946,7 @@ var init_dist = __esm({
   "packages/schemas/dist/index.js"() {
     "use strict";
     init_paths();
+    init_source_extensions();
     init_envelope();
     init_records();
     init_transient();
@@ -14511,29 +14544,6 @@ ROTATION RESTORE (H1, source=${source}): a rotation note was prepared before thi
 
 // scripts/hooks/lib/undeclared-source.mjs
 init_dist();
-var SOURCE_EXTENSIONS = /* @__PURE__ */ new Set([
-  "ts",
-  "js",
-  "mjs",
-  "cjs",
-  "tsx",
-  "jsx",
-  "py",
-  "go",
-  "rs",
-  "java",
-  "rb",
-  "cs",
-  "sh",
-  "gd",
-  "lua"
-]);
-function extensionOf(path) {
-  const base2 = String(path).split("/").pop() ?? "";
-  const idx = base2.lastIndexOf(".");
-  if (idx <= 0) return null;
-  return base2.slice(idx + 1).toLowerCase();
-}
 function globMatchesEither(path, glob) {
   if (matchesGlob(path, glob)) return true;
   return matchesGlob(path.toLowerCase(), glob.toLowerCase());
@@ -14545,7 +14555,7 @@ function classifyCoverage(filePaths, pathGlobs, excludeGlobs = []) {
   for (const path of filePaths ?? []) {
     if (seen.has(path)) continue;
     seen.add(path);
-    const ext = extensionOf(path);
+    const ext = sourceExtensionOf(path);
     if (!ext || !SOURCE_EXTENSIONS.has(ext)) continue;
     if ((excludeGlobs ?? []).some((g) => matchesGlob(path, g))) continue;
     if ((pathGlobs ?? []).some((g) => globMatchesEither(path, g))) covered.push(path);
