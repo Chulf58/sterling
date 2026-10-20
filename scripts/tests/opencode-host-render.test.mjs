@@ -142,24 +142,24 @@ test('the OpenCode conductor carries the progress rule; the Claude conductor doe
 });
 
 // Board 52a82da8 (user-stated 2026-10-05: "we should use the newest 6.1 one of it is the same
-// price"): Sol is gpt-6.1-sol on OpenCode. GitHub issue #165 (decision
-// claude-code-sol-route-defaults-to-gpt-6-1-sol-with-loud-fallback, user-ruled 2026-10-20): the
-// Claude Code route uses gpt-6.1-sol too, retries once on gpt-5.6-sol when a ChatGPT-account
-// Codex refuses, then reviews on Opus and says so; the old "Claude Code stays on gpt-5.6-sol"
-// rationale (measured once, 2026-10-05) is gone.
-test('Sol is gpt-6.1-sol on both conductors; the Claude conductor falls back loudly to gpt-5.6-sol, then Opus', () => {
+// price"): Sol is gpt-6.1-sol on OpenCode. GitHub issue #169 (decision
+// claude-code-sol-route-uses-gpt-5-6-sol-because-mcp-route-is-frozen-at-0-153-4, user-ruled
+// 2026-10-20, reversing the #165 ruling): the Claude Code route stays on gpt-5.6-sol because the
+// Codex MCP route is frozen at client 0.153.4 and cannot reach gpt-6.1-sol; a refusal is reported
+// and the review runs on Opus, with no retry on another Sol id.
+test('Sol is gpt-6.1-sol on the OpenCode conductor and gpt-5.6-sol on the Claude conductor, which falls back loudly to Opus', () => {
   const opencode = fullRender('conductor');
   assert.ok(opencode.includes('openai/gpt-6.1-sol#high'), 'OpenCode conductor pins the new Sol id');
   assert.ok(opencode.includes('**Sol** (`gpt-6.1-sol`)'), 'the OpenCode pairing paragraph names the new Sol id');
   assert.ok(!opencode.includes('openai/gpt-5.6-sol'), 'OpenCode conductor no longer dispatches the old Sol id');
-  assert.ok(opencode.includes('Claude Code\'s `codex` MCP route uses the same `gpt-6.1-sol`; when a ChatGPT-account Codex answers HTTP 400'), 'the OpenCode conductor says the Claude Code route uses the same id with a fallback');
-  assert.ok(!opencode.includes('refuses the 6.x Sol models'), 'the OpenCode conductor no longer carries the stale refusal rationale');
-  assert.equal(opencode.split('gpt-5.6-sol').length - 1, 1, 'the old id is named once on OpenCode, as the Claude Code fallback');
+  assert.ok(opencode.includes('Claude Code\'s `codex` MCP route stays on `gpt-5.6-sol`, because the Codex MCP route is frozen at client 0.153.4, which cannot reach `gpt-6.1-sol`; a refusal there is reported and the review runs on Opus'), 'the OpenCode conductor says why the Claude Code route stays on gpt-5.6-sol');
+  assert.ok(!opencode.includes('refuses the 6.x Sol models') && !opencode.includes('retries once'), 'the OpenCode conductor carries neither the stale refusal rationale nor the retry');
+  assert.equal(opencode.split('gpt-5.6-sol').length - 1, 1, 'the old id is named once on OpenCode, in the Claude Code route sentence');
 
   const claude = renderClaudeText(read('agent-templates/conductor.md'), 'conductor.md');
-  assert.ok(claude.includes('Codex **Sol** (`gpt-6.1-sol`, dispatched through the `codex` MCP tool at `sandbox: read-only`)'), 'Claude conductor names gpt-6.1-sol for the codex route');
-  assert.ok(claude.includes('say so, retry once with `model: gpt-5.6-sol`, and if that is refused too, review on Opus and tell the user to check the Codex login (API key versus ChatGPT plan); never fall back silently'), 'Claude conductor carries the loud fallback');
-  assert.ok(!claude.includes('Codex **Sol** (`gpt-5.6-sol`'), 'Claude conductor no longer pins gpt-5.6-sol as the Sol default');
+  assert.ok(claude.includes('Codex **Sol** (`gpt-5.6-sol`, dispatched through the `codex` MCP tool at `sandbox: read-only`)'), 'Claude conductor names gpt-5.6-sol for the codex route');
+  assert.ok(claude.includes('say so, review on Opus, and tell the user to check the Codex login (API key versus ChatGPT plan; a lapsed or free account was the earlier cause); do not retry on another Sol id, and never fall back silently'), 'Claude conductor carries the loud Opus fallback');
+  assert.ok(!claude.includes('Codex **Sol** (`gpt-6.1-sol`') && !claude.includes('retry once'), 'Claude conductor does not default to gpt-6.1-sol or retry on another Sol id');
   assert.ok(!claude.includes('refuses the 6.x Sol models'), 'Claude conductor no longer carries the stale refusal rationale');
 });
 

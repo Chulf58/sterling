@@ -278,6 +278,20 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "through the `review-brief` skill. When a `codex` call returns \"Connection closed\"",
     after: "through the `review-brief` skill. When Codex answers HTTP 400 \"not supported when using Codex with a ChatGPT account\", say so, retry once with `model: gpt-5.6-sol`, and if that is refused too, review on Opus and tell the user to check the Codex login (API key versus ChatGPT plan); never fall back silently (decision `claude-code-sol-route-defaults-to-gpt-6-1-sol-with-loud-fallback`, user-ruled 2026-10-20 on GitHub issue #165, because the refusal depends on account, plan and sign-in, so no single Sol id is safe). When a `codex` call returns \"Connection closed\"",
   },
+  {
+    commit: 'claude-code-sol-route-uses-gpt-5-6-sol-because-mcp-route-is-frozen-at-0-153-4',
+    date: '2026-10-20',
+    reason: "GitHub issue #169 reverses the #165 ruling: the Claude Code Sol pairing names gpt-5.6-sol again, because the Codex MCP route is frozen at client 0.153.4 and cannot reach gpt-6.1-sol (user-ruled 2026-10-20)",
+    before: "Codex **Sol** (`gpt-6.1-sol`, dispatched through the `codex` MCP tool at `sandbox: read-only`)",
+    after: "Codex **Sol** (`gpt-5.6-sol`, dispatched through the `codex` MCP tool at `sandbox: read-only`)",
+  },
+  {
+    commit: 'claude-code-sol-route-uses-gpt-5-6-sol-because-mcp-route-is-frozen-at-0-153-4',
+    date: '2026-10-20',
+    reason: "the loud fallback loses its gpt-5.6-sol retry: on the ChatGPT-account refusal say so, review on Opus, tell the user to check the Codex login; never silent (same decision)",
+    before: "When Codex answers HTTP 400 \"not supported when using Codex with a ChatGPT account\", say so, retry once with `model: gpt-5.6-sol`, and if that is refused too, review on Opus and tell the user to check the Codex login (API key versus ChatGPT plan); never fall back silently (decision `claude-code-sol-route-defaults-to-gpt-6-1-sol-with-loud-fallback`, user-ruled 2026-10-20 on GitHub issue #165, because the refusal depends on account, plan and sign-in, so no single Sol id is safe).",
+    after: "When Codex answers HTTP 400 \"not supported when using Codex with a ChatGPT account\", say so, review on Opus, and tell the user to check the Codex login (API key versus ChatGPT plan; a lapsed or free account was the earlier cause); do not retry on another Sol id, and never fall back silently (decision `claude-code-sol-route-uses-gpt-5-6-sol-because-mcp-route-is-frozen-at-0-153-4`, user-ruled 2026-10-20 on GitHub issue #169, because the Codex MCP route is frozen at client 0.153.4, which cannot reach `gpt-6.1-sol`).",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
