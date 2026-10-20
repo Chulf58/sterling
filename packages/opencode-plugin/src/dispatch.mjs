@@ -36,6 +36,7 @@ import { mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { briefTerritory } from '../../../scripts/hooks/lib/dispatch-overlap.mjs';
 import { parseReviewTerritory } from '../../../scripts/hooks/lib/dispatch-prompt.mjs';
+import { OPENCODE_DEAD_LANE_CHECK } from '../../../scripts/hooks/lib/rotation-restore.mjs';
 import {
   finishDispatchAndRegisterEnd,
   readDispatchState,
@@ -182,7 +183,8 @@ export async function sweepStaleDispatches(root) {
       lines.push(
         `DEAD-DISPATCH RESIDUE (OpenCode process start): ${terminated} dispatch record(s) a previous OpenCode process left live were closed in Sterling's register (session-boundary) and the dispatch register was cleared. ` +
           'NOT PROOF THAT THESE DISPATCHES ENDED: a subagent can keep running across an OpenCode restart and still report back into this session. ' +
-          'Wait for their completion reports, check git status and git log for files they may still be writing, and do not re-dispatch a writer lane over the same files until it is known dead.'
+          'Wait for their completion reports, check git status and git log for files they may still be writing, and do not re-dispatch a writer lane over the same files until it is known dead. ' +
+          `To ${OPENCODE_DEAD_LANE_CHECK}.`
       );
     }
     if (refused) lines.push(`STERLING DISPATCH SWEEP: ${refused}`);

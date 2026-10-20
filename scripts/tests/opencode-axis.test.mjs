@@ -582,6 +582,9 @@ test('the first root context of a process sweeps dispatch records a dead process
     // GitHub #156: the subagents may still be running; the notice must not call them ended or tell the conductor to re-dispatch.
     assert.match(sweepText, /NOT PROOF THAT THESE DISPATCHES ENDED/, 'the notice carries the not-proof caveat');
     assert.match(sweepText, /do not re-dispatch a writer lane over the same files until it is known dead/, 'the notice forbids a blind re-dispatch');
+    // GitHub #173: it also says how to tell a lane is dead.
+    assert.match(sweepText, /send the old sessionID a STOP-and-report message \(a live lane stops, a dead one only replies\)/, 'the notice says how to probe a lane');
+    assert.match(sweepText, /watch the lane's files, running test processes and external resources for several minutes/, 'the notice names the passive check');
     assert.doesNotMatch(sweepText, /cannot be resumed/, 'the notice does not call the subagents unresumable');
     assert.doesNotMatch(sweepText, /re-dispatch if the work is still needed/, 'the notice gives no re-dispatch instruction');
     assert.equal(existsSync(join(p.dir, '.sterling', 'transient', 'dispatch-register.json')), false, 'the register is cleared, as H1 clears it');

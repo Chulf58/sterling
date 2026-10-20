@@ -8,6 +8,7 @@ import type { SterlingStore } from '@sterling/store';
 import { KNOWLEDGE_TAB, type DashboardState, type UiEvent, type UiState } from '@sterling/tui/dist/state.js';
 import { assign, frameAt, phaseFor, tileCells, POOL_SIZE, SPRITE_ROWS, TILE_COLS, DONE_FADE, fadeToTile, type AssignState } from '@sterling/tui/dist/avatars/index.js';
 import { storeBackend } from '../../scripts/hooks/lib/store-backend.mjs';
+import { liveChildInRegister } from '../../packages/opencode-plugin/src/dispatch.mjs';
 
 /** OpenCode 2.0.21's sidebar content width, measured: a session title wraps at 34 columns. */
 export const SIDEBAR_WIDTH = 34;
@@ -198,6 +199,16 @@ function contextText(tokens: TokenUsageLike | undefined, model: ModelRefLike | u
   if (typeof limit === 'string') return `ctx: ${limit}`;
   if (!limit || limit <= 0) return 'ctx: no limit';
   return `${Math.round((contextFill(tokens) / limit) * 100)}% ctx`;
+}
+
+/** A child is active when OpenCode reports it running OR the dispatch register in `root` shows it
+ *  unended, so the sidebar and the board readiness line share one definition of a live lane
+ *  (GitHub #174; decision opencode-live-lane-count-separate-line-and-tui-counts-from-register). */
+export function isActiveChild(start: string, env: Record<string, string | undefined>, running: (id: string) => boolean): (id: string) => boolean {
+  // The register lives under the project that holds the store, which may be above `start`.
+  const storePath = findStorePath(start, env);
+  const root = storePath ? dirname(dirname(storePath)) : start;
+  return (id) => running(id) || liveChildInRegister(root, id);
 }
 
 /** Sub-agent rows for the session tree under `rootID`, running ones first. */

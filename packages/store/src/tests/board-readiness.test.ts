@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SterlingStore, compareBoardReadiness } from '../index.js';
+import { SterlingStore, boardWaitAge, boardWriteOverlaps, compareBoardReadiness } from '../index.js';
 
 const NOW = '2026-10-03T12:00:00.000Z';
 
@@ -132,4 +132,41 @@ test('compareBoardReadiness: priority high > normal (absent) > low, then most re
   } finally {
     cleanup();
   }
+});
+
+// GitHub issue #175: needs 'external' waits on an outside party. Its state stays
+// 'waiting' (readiness says what can run; needs says why not), and the shared
+// result carries needs_reason and needs_set_at so every surface can word it.
+test('boardReadiness: needs external is waiting whatever the blockers, with its reason and needs_set_at carried through', () => {
+  const { store, cleanup } = fixture();
+  try {
+    const blocker = mk(store, { text: 'Blocker', slug: 'blocker' });
+    const e = mk(store, { text: 'Vendor', slug: 'vendor', needs: 'external', needs_reason: 'vendor reply', needs_set_at: NOW, blocked_by: ['blocker'] });
+    const r = store.boardReadiness().find((x) => x.id === e.id);
+    assert.equal(r?.state, 'waiting');
+    assert.equal(r?.needs, 'external');
+    assert.equal(r?.needs_reason, 'vendor reply');
+    assert.equal(r?.needs_set_at, NOW);
+    assert.deepEqual(r?.blockers_open, [handle('Blocker', blocker.id)]);
+    assert.equal('needs_reason' in (store.boardReadiness().find((x) => x.id === blocker.id) ?? {}), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test('boardWriteOverlaps: each item maps to the other items sharing a file_keys path; an item sharing none is absent', () => {
+  const marks = boardWriteOverlaps([
+    { id: 'a', name: 'A', file_keys: ['x.ts', 'y.ts'] },
+    { id: 'b', name: 'B', file_keys: ['y.ts'] },
+    { id: 'c', name: 'C', file_keys: ['z.ts'] },
+  ]);
+  assert.deepEqual([...marks.entries()], [['a', ['B']], ['b', ['A']]]);
+});
+
+test('boardWaitAge: date and days or hours from needs_set_at; since unknown without a valid stamp', () => {
+  const now = Date.parse('2026-10-20T12:00:00.000Z');
+  assert.equal(boardWaitAge('2026-10-18T09:00:00.000Z', now), 'since 2026-10-18, 2d ago');
+  assert.equal(boardWaitAge('2026-10-20T07:30:00.000Z', now), 'since 2026-10-20, 4h ago');
+  assert.equal(boardWaitAge(undefined, now), 'since unknown');
+  assert.equal(boardWaitAge('not a date', now), 'since unknown');
 });

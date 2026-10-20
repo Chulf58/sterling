@@ -174,15 +174,71 @@ test('the board block is not re-delivered when only the live-lane count changed,
     addTodo(dir, 'first ask');
     const reg = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'dispatch-register.mjs')).href);
     const h = handler(dir);
-    assert.match(await appended(h, 'ses_root'), /live lanes 0\/\d+.*\n[\s\S]*READY \(1\):\n- first ask/);
+    const opening = await appended(h, 'ses_root');
+    assert.match(opening, /BOARD READINESS[^\n]*lane ceiling \d+[\s\S]*READY \(1\):\n- first ask/, 'the block names the ceiling');
+    assert.doesNotMatch(opening.match(/BOARD READINESS[^\n]*/)[0], /live lanes/, 'the block carries no live count');
+    assert.match(opening, /live lanes 0\/\d+/, 'the count is its own line');
     await reg.registerStart(dir, { agent_id: 'lane-a', agent_type: 'implementor', session_id: 'ses_root', files: [], tool_use_id: null, at: new Date().toISOString() });
     h.resetStatus(dir);
-    assert.doesNotMatch(await appended(h, 'ses_root'), /BOARD READINESS/, 'a lane start alone sends no board block');
+    const started = await appended(h, 'ses_root');
+    assert.doesNotMatch(started, /BOARD READINESS/, 'a lane start alone sends no board block');
+    assert.match(started, /live lanes 1\/\d+/, 'a lane start sends the new count');
+    assert.equal(started.match(/live lanes/g).length, 1);
+    h.resetStatus(dir);
+    assert.equal(await appended(h, 'ses_root'), '', 'an unchanged count is not sent again');
     addTodo(dir, 'second ask');
     h.resetStatus(dir);
     const changed = await appended(h, 'ses_root');
-    assert.match(changed, /live lanes 1\/\d+/, 'a changed list is sent with the current lane count');
+    assert.doesNotMatch(changed, /live lanes/, 'a changed list is sent without a lane count when the count did not change');
+    assert.match(changed, /lane ceiling \d+/);
     assert.match(changed, /READY \(2\):/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The lane line does not depend on the board: lanes start and end on an empty board too.
+test('with an empty board, a lane start and its end each send the live-lane line, and an unchanged count sends nothing', async () => {
+  const dir = makeProject();
+  try {
+    const reg = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'dispatch-register.mjs')).href);
+    const h = handler(dir);
+    const opening = await appended(h, 'ses_root');
+    assert.match(opening, /live lanes 0\/\d+/);
+    assert.doesNotMatch(opening, /BOARD READINESS/, 'no board item, no board block');
+    await reg.registerStart(dir, { agent_id: 'lane-a', agent_type: 'implementor', session_id: 'ses_root', files: [], tool_use_id: null, at: new Date().toISOString() });
+    h.resetStatus(dir);
+    const started = await appended(h, 'ses_root');
+    assert.match(started, /live lanes 1\/\d+/);
+    assert.doesNotMatch(started, /BOARD READINESS/);
+    h.resetStatus(dir);
+    assert.equal(await appended(h, 'ses_root'), '', 'an unchanged count sends nothing');
+    await reg.registerEnd(dir, 'lane-a', 'SubagentStop');
+    h.resetStatus(dir);
+    assert.match(await appended(h, 'ses_root'), /live lanes 0\/\d+/, 'the end of the lane sends the new count');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the board block is not re-delivered as an external wait grows older, and is when its reason changes', async (t) => {
+  const dir = makeProject();
+  try {
+    const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+    const wait = store.create({
+      id: randomUUID(), type: 'todo', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [],
+      text: 'Vendor reply', source: 'user', needs: 'external', needs_reason: 'mail to Kim', needs_set_at: '2026-10-12T09:00:00.000Z',
+    });
+    t.mock.timers.enable({ apis: ['Date'], now: Date.parse(NOW) });
+    const h = handler(dir);
+    assert.match(await appended(h, 'ses_root'), /Vendor reply \(\w+\) — mail to Kim \(since 2026-10-12, 3h ago\)/);
+    t.mock.timers.tick(5 * 3600 * 1000);
+    h.resetStatus(dir);
+    assert.equal(await appended(h, 'ses_root'), '', 'only time passed: nothing is sent');
+    store.updateTodo(wait.id, { ...store.get(wait.id), needs_reason: 'mail to Lee' });
+    h.resetStatus(dir);
+    assert.match(await appended(h, 'ses_root'), /Vendor reply \(\w+\) — mail to Lee \(since 2026-10-12, 8h ago\)/, 'a changed reason is sent, with the current age');
+    store.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

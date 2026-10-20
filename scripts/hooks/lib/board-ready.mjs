@@ -13,7 +13,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { compareBoardReadiness } from '@sterling/store';
+import { boardWaitAge as waitAge, boardWriteOverlaps, compareBoardReadiness } from '@sterling/store';
 import { configSchema } from '@sterling/schemas';
 import { presumedActiveEntries, readDispatchState } from '../../lib/dispatch-register.mjs';
 import { deliverySessionDir } from './delivery.mjs';
@@ -34,6 +34,9 @@ export function boardGroups(readiness) {
     ready: sorted.filter((r) => r.state === 'ready'),
     research: sorted.filter((r) => r.state === 'research'),
     waiting: sorted.filter((r) => r.state === 'waiting'),
+    // WAITING ON YOU (needs user or grill) and WAITING ON OTHERS (needs external, GitHub issue #175).
+    waitingOnYou: sorted.filter((r) => r.state === 'waiting' && r.needs !== 'external'),
+    waitingOnOthers: sorted.filter((r) => r.state === 'waiting' && r.needs === 'external'),
     blocked: sorted.filter((r) => r.state === 'blocked').length,
     delegated: sorted.filter((r) => r.state === 'delegated'),
   };
@@ -70,28 +73,27 @@ export function liveLanes(root, sessionId) {
   return { availability, count: entries.length, descriptions };
 }
 
-function lanesText(live, ceiling) {
-  const k = live.availability === 'ok' ? String(live.count) : `? (dispatch register ${live.availability})`;
+export function lanesText(live, ceiling, { showCount = true } = {}) {
   const n = ceiling.error ? `? (delegation.max_concurrent unreadable: ${ceiling.error})` : String(ceiling.value);
+  if (!showCount) return `lane ceiling ${n}`;
+  const k = live.availability === 'ok' ? String(live.count) : `? (dispatch register ${live.availability})`;
   return `live lanes ${k}/${n}`;
 }
 
-/** For each READY item, the other READY items that declare a file_keys path in common (the lane_advisory proxy for a write-set). */
-function overlapMarks(ready) {
-  const marks = new Map();
-  for (const a of ready) {
-    const keys = new Set(a.file_keys);
-    const others = ready.filter((b) => b.id !== a.id && b.file_keys.some((k) => keys.has(k))).map((b) => b.name);
-    if (others.length) marks.set(a.id, others);
-  }
-  return marks;
-}
-
-function groupLines(title, items, cap, render) {
+function groupLines(title, items, cap, render, moreNote = () => '') {
   if (!items.length) return [];
   const out = [`${title.replace('{n}', String(items.length))}:`, ...items.slice(0, cap).map(render)];
-  if (items.length > cap) out.push(`  … ${items.length - cap} more ${title.split(' (')[0]} (board_query)`);
+  if (items.length > cap) out.push(`  … ${items.length - cap} more ${title.split(' (')[0]}${moreNote(items.slice(cap))} (board_query)`);
   return out;
+}
+
+/** The omitted external waits' oldest age, so a capped list never hides a stale wait. */
+function oldestOmittedWait(omitted, now) {
+  const stamped = omitted.map((r) => r.needs_set_at).filter((v) => typeof v === 'string' && !Number.isNaN(Date.parse(v)));
+  if (!stamped.length) return ', oldest since unknown';
+  const oldest = stamped.reduce((a, b) => (Date.parse(a) <= Date.parse(b) ? a : b));
+  const unknown = stamped.length < omitted.length ? ` (${omitted.length - stamped.length} since unknown)` : '';
+  return `, oldest ${waitAge(oldest, now)}${unknown}`;
 }
 
 /**
@@ -100,16 +102,19 @@ function groupLines(title, items, cap, render) {
  * result. `handoffStatus` maps a delegated item's id to the store's
  * resolveSentHandoffs status; a caller that did not read the other projects
  * passes none, and each delegated line says its status was not read.
+ * `showLaneCount: false` (the OpenCode plugin) names only the ceiling: the live
+ * count goes stale in a block that is not re-sent, so the plugin sends it as its
+ * own `live lanes k/n` line when it changes (GitHub #174).
  */
-export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus }) {
+export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus, showLaneCount = true, now = Date.now() }) {
   const g = boardGroups(readiness);
   if (!g.ready.length && !g.research.length && !g.waiting.length && !g.blocked && !g.delegated.length) return '';
-  const marks = overlapMarks(g.ready);
+  const marks = boardWriteOverlaps(g.ready);
   const blockedNote = g.blocked ? `; ${g.blocked} blocked` : '';
   const header =
-    `BOARD READINESS (${DECISION}) — ${lanesText(live, ceiling)}${blockedNote}. ` +
+    `BOARD READINESS (${DECISION}) — ${lanesText(live, ceiling, { showCount: showLaneCount })}${blockedNote}. ` +
     `At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling (a ceiling, never a quota). ` +
-    `READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill). ` +
+    `READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill); WAITING ON OTHERS items wait on an outside party (needs external): recheck one when its evidence arrives, never clear it because time passed. ` +
     `Items marked ⚠ share a write path: their implementation lanes run one at a time.`;
   const lines = [
     header,
@@ -119,7 +124,14 @@ export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GRO
       return `- ${r.name}${pri}${mark ? ` ⚠ shares a write path with ${mark.join(', ')}` : ''}`;
     }),
     ...groupLines('READY FOR RESEARCH ({n}, researcher lanes only)', g.research, cap, (r) => `- ${r.name}${r.priority && r.priority !== 'normal' ? ` [${r.priority}]` : ''}`),
-    ...groupLines('WAITING ON YOU ({n})', g.waiting, cap, (r) => `- ${r.name} — needs ${r.needs}${r.blockers_open?.length ? ` (also blocked by ${r.blockers_open.join(', ')})` : ''}`),
+    ...groupLines('WAITING ON YOU ({n})', g.waitingOnYou, cap, (r) => `- ${r.name} — needs ${r.needs}${r.blockers_open?.length ? ` (also blocked by ${r.blockers_open.join(', ')})` : ''}`),
+    ...groupLines(
+      'WAITING ON OTHERS ({n})',
+      g.waitingOnOthers,
+      cap,
+      (r) => `- ${r.name} — ${r.needs_reason ?? 'no reason recorded'} (${waitAge(r.needs_set_at, now)})${r.blockers_open?.length ? ` (also blocked by ${r.blockers_open.join(', ')})` : ''}`,
+      (omitted) => oldestOmittedWait(omitted, now)
+    ),
     ...groupLines('DELEGATED TO OTHER PROJECTS ({n}, not run here)', g.delegated, cap, (r) => `- ${r.name} — ${delegatedStatus(r, handoffStatus)}`),
   ];
   return lines.join('\n');

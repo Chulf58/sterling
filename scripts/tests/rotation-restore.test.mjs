@@ -148,6 +148,40 @@ test('read leaves the note in place; consume deletes it before returning; no not
   }
 });
 
+test("host 'opencode' does not call old lanes unresumable and says how to tell a lane is dead; Claude Code keeps its text (GitHub #173)", () => {
+  const dir = project(null);
+  try {
+    const note = {
+      next_slice: 'go on',
+      live_dispatches: [{ agent_type: 'implementor', agent_id: 'a1', territory: ['src/a.mjs'] }],
+      uncertain_dispatches: [{ agent_type: 'scout', agent_id: 's9', reason: 'lease expired' }],
+    };
+    const check = /STOP-and-report message \(a live lane stops, a dead one only replies\), or watch the lane's files, running test processes and external resources for several minutes/;
+    const oc = renderRotationRestore(note, { cwd: dir, host: 'opencode' });
+    assert.match(oc, /may still be running/);
+    assert.match(oc, check);
+    assert.match(oc, /s9 — ownership uncertain \(lease expired\); belongs to the previous session and may still be running/);
+    assert.doesNotMatch(oc, /cannot be resumed|re-dispatch fresh/);
+    const unreadable = renderRotationRestore({ next_slice: 'go on', live_dispatches: null }, { cwd: dir, host: 'opencode' });
+    assert.match(unreadable, check);
+    assert.doesNotMatch(unreadable, /cannot be resumed|re-dispatch fresh/);
+    const cc = renderRotationRestore(note, { cwd: dir, source: 'clear', host: 'claude' });
+    assert.match(cc, /cannot be resumed from this one \(agent lookup is scoped to the current session\); re-dispatch fresh/);
+    assert.doesNotMatch(cc, /STOP-and-report/);
+    // The lane hand-off line and the way back: an OpenCode-written note names the check and the old session, never "reachable only by returning".
+    const lanes = { next_slice: 'go on', session_id: 'ses_abc', session_host: 'opencode', lanes: ['lane a'] };
+    const ocLanes = renderRotationRestore(lanes, { cwd: dir, host: 'opencode' });
+    assert.match(ocLanes, /Subagents of the previous session may still be running: re-dispatch a lane worth continuing only once it is known dead/);
+    assert.match(ocLanes, /Before re-dispatching, tell whether a lane is dead: send the old sessionID a STOP-and-report message[^\n]*several minutes\. The old session is `opencode --session ses_abc`\./);
+    assert.match(renderRotationRestore({ ...lanes, session_id: undefined }, { cwd: dir, host: 'opencode' }), /several minutes\. The note recorded no session id for the old session\./);
+    assert.doesNotMatch(ocLanes, /not continued|reachable only by returning|re-dispatch each lane/);
+    // Claude Code's lane line and way back stay as before.
+    assert.match(renderRotationRestore({ ...lanes, session_host: undefined }, { cwd: dir, source: 'clear', host: 'claude' }), /cannot be resumed with SendMessage[^\n]*The old agents are reachable only by returning to the old session: `claude --resume ses_abc`/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("host 'opencode' names the new session and OpenCode's relaunch; the way back follows the note's session_host", () => {
   const dir = project(null);
   try {

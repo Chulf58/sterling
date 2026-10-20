@@ -423,7 +423,9 @@ test('OpenCode: a root session context carries the board readiness block', async
   try {
     const a = mk(p.store, { text: 'Ready on OpenCode' });
     const text = await ocContext(p);
-    assert.match(text, /BOARD READINESS .*live lanes 0\/2/);
+    assert.match(text, /BOARD READINESS .*lane ceiling 2/, 'the block names the ceiling');
+    assert.doesNotMatch(text.match(/BOARD READINESS .*/)[0], /live lanes/, 'and not the live count');
+    assert.match(text, /live lanes 0\/2/, 'the count is its own line');
     assert.ok(text.includes(`- ${h('Ready on OpenCode', a)}`), text.slice(-1500));
   } finally {
     p.cleanup();
@@ -513,6 +515,43 @@ test('OpenCode: the readiness cache is per root but the live-lane count is per s
     // ses_b already has 0/4 in its conversation, so an unchanged block is not appended again;
     // had it inherited ses_a's lane, the changed block (1/4) would be appended here.
     assert.doesNotMatch(await ocText(handler, 'ses_b'), /live lanes [1-9]/, 'and the first session does not inherit it');
+  } finally {
+    p.cleanup();
+  }
+});
+
+// GitHub issue #175: needs external waits on an outside party, listed apart as WAITING ON OTHERS.
+test('renderBoardReadiness: WAITING ON YOU holds user and grill, WAITING ON OTHERS holds external with its reason and age', () => {
+  const p = project();
+  try {
+    const u = mk(p.store, { text: 'Pick a colour', needs: 'user', needs_reason: 'which blue' });
+    const e = mk(p.store, { text: 'Vendor reply', needs: 'external', needs_reason: 'mail to Kim on 10-18', needs_set_at: '2026-10-18T09:00:00.000Z' });
+    const legacy = mk(p.store, { text: 'Old wait', needs: 'external', needs_reason: 'branch owned by Ana', updated_at: '2026-10-02T12:00:00.000Z' });
+    const now = Date.parse('2026-10-20T12:00:00.000Z');
+    const out = lib.renderBoardReadiness({ readiness: p.store.boardReadiness(), live: { availability: 'ok', count: 0 }, ceiling: { value: 3 }, now });
+    const lines = out.split('\n');
+    assert.ok(lines[0].includes('WAITING ON OTHERS items wait on an outside party (needs external): recheck one when its evidence arrives, never clear it because time passed.'), lines[0]);
+    const you = lines.indexOf('WAITING ON YOU (1):');
+    const others = lines.indexOf('WAITING ON OTHERS (2):');
+    assert.ok(you > 0 && others > you, out);
+    assert.equal(lines[you + 1], `- ${h('Pick a colour', u)} — needs user`);
+    assert.equal(lines[others + 1], `- ${h('Vendor reply', e)} — mail to Kim on 10-18 (since 2026-10-18, 2d ago)`);
+    assert.equal(lines[others + 2], `- ${h('Old wait', legacy)} — branch owned by Ana (since unknown)`);
+    assert.equal(p.store.boardReadiness().find((r) => r.id === e.id)?.state, 'waiting', 'readiness stays waiting');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('renderBoardReadiness: a capped WAITING ON OTHERS list discloses the oldest omitted wait', () => {
+  const p = project();
+  try {
+    for (let i = 0; i < 3; i++) {
+      mk(p.store, { text: `Wait ${i}`, needs: 'external', needs_reason: `reason ${i}`, needs_set_at: `2026-10-1${i}T00:00:00.000Z`, updated_at: `2026-10-1${i}T00:00:00.000Z` });
+    }
+    const now = Date.parse('2026-10-20T00:00:00.000Z');
+    const out = lib.renderBoardReadiness({ readiness: p.store.boardReadiness(), live: { availability: 'ok', count: 0 }, ceiling: { value: 3 }, cap: 1, now });
+    assert.ok(out.includes('  … 2 more WAITING ON OTHERS, oldest since 2026-10-10, 10d ago (board_query)'), out);
   } finally {
     p.cleanup();
   }

@@ -556,7 +556,7 @@ export const attestationSchema = base
   .superRefine(refineSupersession);
 
 /** A user board item's `needs` values (decision board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start). */
-export const BOARD_NEEDS = ['user', 'grill', 'investigation'] as const;
+export const BOARD_NEEDS = ['user', 'grill', 'investigation', 'external'] as const;
 export type BoardNeeds = (typeof BOARD_NEEDS)[number];
 
 export const SYSTEM_REASONS = [
@@ -751,9 +751,21 @@ export type HandoffEvidenceFile = z.infer<typeof handoffEvidenceFileSchema>;
 /** A board item's needs_reason: non-blank text (GitHub issue #107). */
 const needsReasonField = z.string().min(1).refine((v) => v.trim().length > 0, 'needs_reason must not be blank');
 
-/** needs_reason goes only with needs 'user' or 'grill' (GitHub issue #107). */
+/**
+ * needs_reason goes only with needs 'user', 'grill' or 'external' (GitHub
+ * issues #107, #175).
+ */
 export function needsReasonAllowed(needs: string | undefined): boolean {
-  return needs === 'user' || needs === 'grill';
+  return needs === 'user' || needs === 'grill' || needs === 'external';
+}
+
+/**
+ * needs 'external' requires a needs_reason naming what is awaited and what
+ * lets the work resume (GitHub issue #175, decision
+ * board-needs-external-waits-on-outside-party-and-board-query-exposes-readiness).
+ */
+export function needsReasonRequired(needs: string | undefined): boolean {
+  return needs === 'external';
 }
 
 /**
@@ -770,7 +782,7 @@ export const todoWaitFieldsReadSchema = z
   })
   .superRefine((rec, ctx) => {
     if (rec.needs_reason !== undefined && !needsReasonAllowed(rec.needs)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['needs_reason'], message: `needs_reason goes only with needs 'user' or 'grill'` });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['needs_reason'], message: `needs_reason goes only with needs 'user', 'grill' or 'external'` });
     }
   });
 
@@ -851,21 +863,35 @@ export const todoSchema = base
     // What a user item waits on besides its blockers (decision
     // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
     // 'investigation' still auto-starts, as a researcher lane; 'user' and
-    // 'grill' wait for the user. Not a progress status: `status` keeps meaning
-    // supersession only. Absent means nothing beyond the blockers.
+    // 'grill' wait for the user; 'external' waits on an outside party (a mail
+    // reply, a meeting, a branch someone else owns; GitHub issue #175). Not a
+    // progress status: `status` keeps meaning supersession only. Absent means
+    // nothing beyond the blockers.
     needs: z.enum(BOARD_NEEDS).optional(),
-    // Why a user item waits for the user (GitHub issue #107, decision
+    // Why a user item waits (GitHub issue #107, decision
     // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
-    // only with needs 'user' or 'grill' on a source:'user' item. A sender's
-    // tracker shows it as "needs user in <project>: <reason>".
+    // only with needs 'user', 'grill' or 'external' on a source:'user' item,
+    // and required with 'external'. A sender's tracker shows it as
+    // "needs user in <project>: <reason>".
     needs_reason: needsReasonField.optional(),
+    // When `needs` last changed value (GitHub issue #175). Server-stamped by
+    // board_add/board_update, kept through other edits, removed with needs.
+    // The age of an external wait is read from it, never from updated_at,
+    // which any unrelated edit resets.
+    needs_set_at: z.string().datetime().optional(),
     // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
     handoff: todoHandoffSchema.optional(),
   })
   .superRefine((rec, ctx) => {
     refineSupersession(rec, ctx);
     if (rec.needs_reason !== undefined && (rec.source !== 'user' || !needsReasonAllowed(rec.needs))) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['needs_reason'], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['needs_reason'], message: `needs_reason goes only with needs 'user', 'grill' or 'external' on a source:'user' board task` });
+    }
+    if (rec.source === 'user' && needsReasonRequired(rec.needs) && rec.needs_reason === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['needs_reason'], message: `needs 'external' requires a needs_reason naming what is awaited and what lets the work resume` });
+    }
+    if (rec.needs_set_at !== undefined && rec.needs === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['needs_set_at'], message: `needs_set_at goes only with needs` });
     }
     if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['handoff'], message: `handoff marks source:'user' board tasks only — maintenance-queue items are never handed to another project` });
@@ -1977,7 +2003,8 @@ function recordFieldConditions(type: string): [path: string, text: string][] {
       for (const field of TODO_SYSTEM_REQUIRES) out.push([field, `Required when source is '${TODO_SYSTEM_SOURCE}'.`]);
       for (const field of userOnly) out.push([field, `Refused when source is '${TODO_SYSTEM_SOURCE}'.`]);
       out.push(['blocked_by', "An item cannot list its own slug."]);
-      out.push(['needs_reason', "Accepted only when needs is 'user' or 'grill' on a source 'user' item."]);
+      out.push(['needs_reason', "Accepted only when needs is 'user', 'grill' or 'external' on a source 'user' item; required with 'external'."]);
+      out.push(['needs_set_at', 'Accepted only when needs is set.']);
       return out;
     }
     case 'open_question':

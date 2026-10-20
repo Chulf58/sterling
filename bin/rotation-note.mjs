@@ -4495,7 +4495,7 @@ var attestationSchema = base.extend({
   notes: external_exports.string().optional(),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
-var BOARD_NEEDS = ["user", "grill", "investigation"];
+var BOARD_NEEDS = ["user", "grill", "investigation", "external"];
 var SYSTEM_REASONS = [
   "reconcile_needed",
   "stale_research",
@@ -4600,7 +4600,10 @@ var handoffEvidenceFileReadSchema = external_exports.object({
 });
 var needsReasonField = external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank");
 function needsReasonAllowed(needs) {
-  return needs === "user" || needs === "grill";
+  return needs === "user" || needs === "grill" || needs === "external";
+}
+function needsReasonRequired(needs) {
+  return needs === "external";
 }
 var todoWaitFieldsReadSchema = external_exports.object({
   needs: external_exports.enum(BOARD_NEEDS).optional(),
@@ -4608,7 +4611,7 @@ var todoWaitFieldsReadSchema = external_exports.object({
   blocked_by: external_exports.array(external_exports.string().min(1)).optional()
 }).superRefine((rec, ctx) => {
   if (rec.needs_reason !== void 0 && !needsReasonAllowed(rec.needs)) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user', 'grill' or 'external'` });
   }
 });
 var todoBoardItemReadSchema = external_exports.object({
@@ -4669,20 +4672,34 @@ var todoSchema = base.extend({
   // What a user item waits on besides its blockers (decision
   // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
   // 'investigation' still auto-starts, as a researcher lane; 'user' and
-  // 'grill' wait for the user. Not a progress status: `status` keeps meaning
-  // supersession only. Absent means nothing beyond the blockers.
+  // 'grill' wait for the user; 'external' waits on an outside party (a mail
+  // reply, a meeting, a branch someone else owns; GitHub issue #175). Not a
+  // progress status: `status` keeps meaning supersession only. Absent means
+  // nothing beyond the blockers.
   needs: external_exports.enum(BOARD_NEEDS).optional(),
-  // Why a user item waits for the user (GitHub issue #107, decision
+  // Why a user item waits (GitHub issue #107, decision
   // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
-  // only with needs 'user' or 'grill' on a source:'user' item. A sender's
-  // tracker shows it as "needs user in <project>: <reason>".
+  // only with needs 'user', 'grill' or 'external' on a source:'user' item,
+  // and required with 'external'. A sender's tracker shows it as
+  // "needs user in <project>: <reason>".
   needs_reason: needsReasonField.optional(),
+  // When `needs` last changed value (GitHub issue #175). Server-stamped by
+  // board_add/board_update, kept through other edits, removed with needs.
+  // The age of an external wait is read from it, never from updated_at,
+  // which any unrelated edit resets.
+  needs_set_at: external_exports.string().datetime().optional(),
   // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
   handoff: todoHandoffSchema.optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user', 'grill' or 'external' on a source:'user' board task` });
+  }
+  if (rec.source === "user" && needsReasonRequired(rec.needs) && rec.needs_reason === void 0) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs 'external' requires a needs_reason naming what is awaited and what lets the work resume` });
+  }
+  if (rec.needs_set_at !== void 0 && rec.needs === void 0) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_set_at"], message: `needs_set_at goes only with needs` });
   }
   if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
@@ -5500,6 +5517,7 @@ var STORE_DB_REL = join2(".sterling", "sterling.db");
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
 var MARKER_MAX_BYTES = 64 * 1024;
+var PATH_MAX = 512;
 var LOCK_FILE = "plan-lock.json";
 var HEX64 = /^[0-9a-f]{64}$/i;
 function isAbsolutePlanPath(p) {
@@ -5586,6 +5604,10 @@ function readLock(sterlingDir) {
   if (reason2) return { malformed: reason2, raw };
   return { lock: parsed, raw };
 }
+
+// scripts/hooks/lib/rotation-restore.mjs
+var LIVE_TERRITORY_LINE_MAX = PATH_MAX * 4;
+var OPENCODE_DEAD_LANE_CHECK = "tell whether a lane is dead: send the old sessionID a STOP-and-report message (a live lane stops, a dead one only replies), or watch the lane's files, running test processes and external resources for several minutes";
 
 // scripts/lib/project.mjs
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
@@ -6054,10 +6076,11 @@ lanes: ${lanes.length}
 `) + (note.branch ? `anchored: ${note.branch} @ ${note.head_sha?.slice(0, 8) ?? "?"}
 ` : "anchored: no git (drift disclosure unavailable)\n") + (note.commits_ahead !== null ? `commits_ahead: ${note.commits_ahead} (vs ${note.base_branch})
 ` : "commits_ahead: unavailable (no origin/HEAD, main, or master to diff against \u2014 pass --into to a future version if this recurs)\n") + // Silent when the set is a confirmed zero (P1 — nothing to check).
-  (liveDispatches === null ? classified.availability === "absent" ? "live_dispatches: none recorded \u2014 no dispatch register on this host\n" : `live_dispatches: UNKNOWN \u2014 the dispatch register is ${classified.availability} (it exists but could not be read or parsed); any subagent from this session cannot be resumed after ${boundary} \u2014 re-dispatch fresh if still needed
-` : liveDispatches.length ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? "agent"}:${d.agent_id ?? "?"}`).join(", ")}) \u2014 still running across ${boundary} but cannot be resumed from the new session: re-dispatch fresh if still needed (pass a --lane hand-off for each worth continuing)
-` : "") + (uncertainDispatches && uncertainDispatches.length ? `uncertain_dispatches: ${uncertainDispatches.length} (${uncertainDispatches.map((d) => `${d.agent_type ?? "agent"}:${d.agent_id ?? "?"}`).join(", ")}) \u2014 lease expired, not confirmed dead; cannot be resumed from the new session either: re-dispatch fresh if still needed
-` : "") + (host === "opencode" ? note.reason === "code-reload" ? `CODE RELOAD REQUIRED (--reason=code-reload) \u2014 a new session alone will NOT load it (OpenCode loads plugins and MCP servers at startup). The sequence is:
+  (liveDispatches === null ? classified.availability === "absent" ? "live_dispatches: none recorded \u2014 no dispatch register on this host\n" : host === "opencode" ? `live_dispatches: UNKNOWN \u2014 the dispatch register is ${classified.availability} (it exists but could not be read or parsed); any subagent from this session may still be running after ${boundary} \u2014 before re-dispatching, ${OPENCODE_DEAD_LANE_CHECK}
+` : `live_dispatches: UNKNOWN \u2014 the dispatch register is ${classified.availability} (it exists but could not be read or parsed); any subagent from this session cannot be resumed after ${boundary} \u2014 re-dispatch fresh if still needed
+` : liveDispatches.length ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? "agent"}:${d.agent_id ?? "?"}`).join(", ")}) \u2014 ` + (host === "opencode" ? `still running across ${boundary}; whether the new session can reach them is not shown. Before re-dispatching, ${OPENCODE_DEAD_LANE_CHECK} (pass a --lane hand-off for each worth continuing)
+` : `still running across ${boundary} but cannot be resumed from the new session: re-dispatch fresh if still needed (pass a --lane hand-off for each worth continuing)
+`) : "") + (uncertainDispatches && uncertainDispatches.length ? `uncertain_dispatches: ${uncertainDispatches.length} (${uncertainDispatches.map((d) => `${d.agent_type ?? "agent"}:${d.agent_id ?? "?"}`).join(", ")}) \u2014 lease expired, not confirmed dead; ` + (host === "opencode" ? "may still be running: check it is dead (as above) before re-dispatching\n" : "cannot be resumed from the new session either: re-dispatch fresh if still needed\n") : "") + (host === "opencode" ? note.reason === "code-reload" ? `CODE RELOAD REQUIRED (--reason=code-reload) \u2014 a new session alone will NOT load it (OpenCode loads plugins and MCP servers at startup). The sequence is:
   1. exit and relaunch OpenCode now
   2. THEN start a new session (/new) \u2014 the Sterling OpenCode plugin restores and consumes this note in that session's first turn
 ` : `Tell the user READY FOR NEW SESSION \u2014 on /new, the Sterling OpenCode plugin restores and consumes this note in the new session's first turn, single-shot.
