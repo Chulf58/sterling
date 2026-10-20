@@ -36470,8 +36470,12 @@ ${JSON.stringify(value, null, 2)}` : void 0;
       if (next.needs === void 0 || next.needs === "") {
         delete next.needs;
         delete next.needs_set_at;
-      } else if (next.needs !== old.needs) {
-        next.needs_set_at = ts;
+        delete next.needs_reason;
+      } else {
+        if (next.needs !== old.needs)
+          next.needs_set_at = ts;
+        if (!("needs_reason" in overrides) && next.needs !== "external")
+          delete next.needs_reason;
       }
     }
     if (relationRemoval) {

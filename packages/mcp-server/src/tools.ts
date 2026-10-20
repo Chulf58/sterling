@@ -8794,12 +8794,17 @@ export class SterlingTools {
     if (overrides.working_tree === null) delete next.working_tree;
     // needs_set_at on a board item (GitHub issue #175), the rule board_update
     // applies: stamped when needs changes value, removed with needs.
+    // needs_reason follows board_update's rule too: cleared with needs, and
+    // cleared by a needs change that gives no new reason, except a change to
+    // 'external', which keeps the existing one.
     if (old.type === 'todo' && 'needs' in overrides) {
       if (next.needs === undefined || next.needs === '') {
         delete next.needs;
         delete next.needs_set_at;
-      } else if (next.needs !== (old as unknown as { needs?: unknown }).needs) {
-        next.needs_set_at = ts;
+        delete next.needs_reason;
+      } else {
+        if (next.needs !== (old as unknown as { needs?: unknown }).needs) next.needs_set_at = ts;
+        if (!('needs_reason' in overrides) && next.needs !== 'external') delete next.needs_reason;
       }
     }
     if (relationRemoval) {

@@ -299,3 +299,24 @@ test('needs_set_at on the generic routes: knowledge_create stamps it, knowledge_
     cleanup();
   }
 });
+
+test('knowledge_update needs "" on an external wait with a reason clears needs, needs_reason and needs_set_at, and the write succeeds', () => {
+  const { tools, cleanup } = clockHarness();
+  try {
+    const a = userItem(tools, 'Vendor wait', { needs: 'external', needs_reason: 'reply from the supplier' });
+    const res = tools.knowledgeUpdate(a.id as string, { needs: '' }) as unknown as Loose;
+    assert.equal(res.id, a.id, 'the write succeeded');
+    const after = item(tools, a.id);
+    assert.equal('needs' in after, false);
+    assert.equal('needs_reason' in after, false);
+    assert.equal('needs_set_at' in after, false);
+    // A change away from user/grill/external without a new reason clears it too; a change to external keeps it.
+    const b = userItem(tools, 'User wait', { needs: 'user', needs_reason: 'mail from Kim' });
+    tools.knowledgeUpdate(b.id as string, { needs: 'external' });
+    assert.equal(item(tools, b.id).needs_reason, 'mail from Kim');
+    tools.knowledgeUpdate(b.id as string, { needs: 'investigation' });
+    assert.equal('needs_reason' in item(tools, b.id), false);
+  } finally {
+    cleanup();
+  }
+});
