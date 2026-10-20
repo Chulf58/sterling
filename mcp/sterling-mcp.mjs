@@ -22421,6 +22421,7 @@ function readEvidence(h, root) {
 var statusText = {
   open: (to) => `open in ${to}`,
   needs_user: (to, reason) => `needs user in ${to}${reason ? `: ${reason}` : ""}`,
+  waiting_external: (to, reason) => `waiting on others in ${to}${reason ? `: ${reason}` : ""}`,
   blocked: (to) => `blocked in ${to}`,
   done: (to, closedAt, note, milestone, evidence) => {
     const head = milestone === void 0 ? `DONE in ${to} ${closedAt}` : evidence ? `DONE in ${to} ${closedAt} (${milestone})` : `DONE in ${to} ${closedAt}, unverified (${milestone})`;
@@ -22498,6 +22499,8 @@ function rowStatus(db, root, trackerId, h, budget) {
   const wait = waitParsed.data;
   if (wait.needs === "user" || wait.needs === "grill")
     return { state: "needs_user", text: statusText.needs_user(h.to_name, wait.needs_reason?.trim()) };
+  if (wait.needs === "external")
+    return { state: "waiting_external", text: statusText.waiting_external(h.to_name, wait.needs_reason?.trim()) };
   if (wait.blocked_by?.length) {
     const live = db.prepare(`SELECT 1 FROM records WHERE type = 'todo' AND status != 'superseded' AND json_extract(body, '$.slug') = ? LIMIT 1`);
     for (const slug of new Set(wait.blocked_by)) {
@@ -31603,7 +31606,11 @@ var WRITE_REFUSED_FIELDS = [
   // human's attestation into.
   "baseline_attestations",
   // A separate, byte-free proof that HEAD had no exact tree entry for the path.
-  "absence_attestations"
+  "absence_attestations",
+  // A board item's wait clock (GitHub issue #175): stamped by the server when
+  // `needs` changes value, removed with it. A caller-set value would fake how
+  // long an outside party has been waited on.
+  "needs_set_at"
 ];
 var SERVER_OWNED_FIELDS = [...WRITE_REFUSED_FIELDS, "version"];
 var CREATE_DEFAULTED_FIELDS = ["author", "links", "scope", "stack_tags"];
@@ -33221,7 +33228,7 @@ var SterlingTools = class _SterlingTools {
       return;
     }
     const retiring = attempted.includes("status") || attempted.includes("superseded_by");
-    throw new Error(`${op}: ${attempted.map((k) => `'${k}'`).join(", ")} ${attempted.length === 1 ? "is" : "are"} SERVER-OWNED and cannot be assigned by a caller \u2014 the value would have been discarded and the write reported success. ` + (retiring ? `status/superseded_by are set only by supersession: knowledge_update writes a NEW version and retires the prior one automatically. To correct a WRONG record, knowledge_update it in place (the correction supersedes the error); do NOT create a second record under the same slug. The one retirement path is knowledge_retire(id, in_favor_of), and it is NARROW: it is for a genuine DUPLICATE whose reader must be sent to the survivor, never for a record that is merely wrong \u2014 /sterling:cleanup never hard-deletes knowledge either.` : `id and the clocks are assigned at write; type is fixed at create; lifecycle/freshness are derived by the store; file_baselines is computed server-side at create/reconcile; baseline_attestations is drift PROVENANCE minted only when a reconcile_needed item is closed as already-paid (board_remove / maintenance_remove), from hashes the server takes itself.`));
+    throw new Error(`${op}: ${attempted.map((k) => `'${k}'`).join(", ")} ${attempted.length === 1 ? "is" : "are"} SERVER-OWNED and cannot be assigned by a caller \u2014 the value would have been discarded and the write reported success. ` + (retiring ? `status/superseded_by are set only by supersession: knowledge_update writes a NEW version and retires the prior one automatically. To correct a WRONG record, knowledge_update it in place (the correction supersedes the error); do NOT create a second record under the same slug. The one retirement path is knowledge_retire(id, in_favor_of), and it is NARROW: it is for a genuine DUPLICATE whose reader must be sent to the survivor, never for a record that is merely wrong \u2014 /sterling:cleanup never hard-deletes knowledge either.` : `id and the clocks are assigned at write; type is fixed at create; lifecycle/freshness are derived by the store; file_baselines is computed server-side at create/reconcile; baseline_attestations is drift PROVENANCE minted only when a reconcile_needed item is closed as already-paid (board_remove / maintenance_remove), from hashes the server takes itself; needs_set_at is stamped by the server when a board item's needs changes value and removed with it.`));
   }
   /**
    * `scope` IS CREATION-ONLY (decision
@@ -33491,6 +33498,8 @@ var SterlingTools = class _SterlingTools {
       version: 1
     };
     candidate.links = this.resolveLinksTargets(candidate.links, "knowledge_create") ?? [];
+    if (type === "todo" && candidate.needs !== void 0)
+      candidate.needs_set_at = ts;
     const dedupOverride = candidate[DEDUP_OVERRIDE_FIELD] === true;
     delete candidate[DEDUP_OVERRIDE_FIELD];
     const registered = RECORD_TYPES[type];
@@ -36457,6 +36466,14 @@ ${JSON.stringify(value, null, 2)}` : void 0;
     };
     if (overrides.working_tree === null)
       delete next.working_tree;
+    if (old.type === "todo" && "needs" in overrides) {
+      if (next.needs === void 0 || next.needs === "") {
+        delete next.needs;
+        delete next.needs_set_at;
+      } else if (next.needs !== old.needs) {
+        next.needs_set_at = ts;
+      }
+    }
     if (relationRemoval) {
       const links = next.links;
       if (!Array.isArray(links)) {
@@ -37778,8 +37795,6 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       throw _SterlingTools.blockedBySystemRefusal("board_add");
     if (needs !== void 0 && source === "system")
       throw _SterlingTools.needsSystemRefusal("board_add");
-    if ("needs_set_at" in rest)
-      throw new Error(`board_add: needs_set_at is server-owned \u2014 it is stamped when needs is set. Nothing was saved.`);
     if (needs === "external" && (typeof rest.needs_reason !== "string" || rest.needs_reason.trim().length === 0)) {
       throw new Error(`board_add: needs 'external' requires a needs_reason naming what is awaited and what lets the work resume. Nothing was saved.`);
     }
@@ -37807,7 +37822,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
         ...normalized !== void 0 ? { objective: normalized } : {},
         ...stampedHead !== void 0 ? { measured_at_head: stampedHead } : {},
         ...blockers.length ? { blocked_by: blockers } : {},
-        ...needs !== void 0 ? { needs, needs_set_at: this.now() } : {},
+        ...needs !== void 0 ? { needs } : {},
         ...rest
       },
       // Forwarded, never derived from `args`: a board_add from the TOOL SURFACE
@@ -40189,7 +40204,7 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ id, domain, expected_version, projection }) => json(tools.writeProjected(tools.knowledgeMove(id, domain, expected_version), projection)));
   server.registerTool("board_add", {
-    description: `Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare \`objective\`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane), external (waits on an outside party such as a mail reply, a meeting or a branch someone else owns; needs_reason is required with it, naming what is awaited and what lets the work resume); absent means nothing. needs_set_at is stamped by the server when needs is set. needs_reason says why a user, grill or external item waits. measured_at_head is stamped to HEAD unless you pass a full 40-character lowercase hex SHA that is a commit in this repo (an abbreviated or otherwise malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). target_project (user items only) hands the task to another project registered on this machine, by its registry name: the item is written into that project's board with this project's name and the requester's words, and a tracker stays on this board (readiness 'delegated', never READY) whose board_query/board_get handoff_status reads open, needs user in <project> (with the reason when one is set), blocked in <project> (a blocker there is still on its board), DONE (with the closing note), gone (completion unverified), status unknown, or delivery unconfirmed. It is refused, with nothing written, when the name is unknown or ambiguous, names this project, or the target has no SQLite store; with it only text, source, objective (the tracker's), priority, needs (the target item's) and milestone are accepted. milestone (at most 80 characters) says what the target should reach before closing: it is kept on the tracker and written into the target item's text; a DONE status then shows the receiver's evidence, or 'unverified' when none came back. The receipt's handoff_delivery names both items. The echo defaults to a digest; projection:"full" returns the stored record.`,
+    description: `Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare \`objective\`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane), external (waits on an outside party such as a mail reply, a meeting or a branch someone else owns; needs_reason is required with it, naming what is awaited and what lets the work resume); absent means nothing. needs_set_at is stamped by the server when needs is set. needs_reason says why a user, grill or external item waits. measured_at_head is stamped to HEAD unless you pass a full 40-character lowercase hex SHA that is a commit in this repo (an abbreviated or otherwise malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). target_project (user items only) hands the task to another project registered on this machine, by its registry name: the item is written into that project's board with this project's name and the requester's words, and a tracker stays on this board (readiness 'delegated', never READY) whose board_query/board_get handoff_status reads open, needs user in <project> (with the reason when one is set), waiting on others in <project>: <reason> (needs external there), blocked in <project> (a blocker there is still on its board), DONE (with the closing note), gone (completion unverified), status unknown, or delivery unconfirmed. It is refused, with nothing written, when the name is unknown or ambiguous, names this project, or the target has no SQLite store; with it only text, source, objective (the tracker's), priority, needs (the target item's) and milestone are accepted. milestone (at most 80 characters) says what the target should reach before closing: it is kept on the tracker and written into the target item's text; a DONE status then shows the receiver's evidence, or 'unverified' when none came back. The receipt's handoff_delivery names both items. The echo defaults to a digest; projection:"full" returns the stored record.`,
     inputSchema: strict({
       text: external_exports.string(),
       source: external_exports.enum(["user", "system"]),

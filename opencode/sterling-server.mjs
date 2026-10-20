@@ -9057,6 +9057,8 @@ function rowStatus(db, root, trackerId, h, budget) {
   const wait = waitParsed.data;
   if (wait.needs === "user" || wait.needs === "grill")
     return { state: "needs_user", text: statusText.needs_user(h.to_name, wait.needs_reason?.trim()) };
+  if (wait.needs === "external")
+    return { state: "waiting_external", text: statusText.waiting_external(h.to_name, wait.needs_reason?.trim()) };
   if (wait.blocked_by?.length) {
     const live = db.prepare(`SELECT 1 FROM records WHERE type = 'todo' AND status != 'superseded' AND json_extract(body, '$.slug') = ? LIMIT 1`);
     for (const slug of new Set(wait.blocked_by)) {
@@ -9219,6 +9221,7 @@ var init_handoff = __esm({
     statusText = {
       open: (to) => `open in ${to}`,
       needs_user: (to, reason) => `needs user in ${to}${reason ? `: ${reason}` : ""}`,
+      waiting_external: (to, reason) => `waiting on others in ${to}${reason ? `: ${reason}` : ""}`,
       blocked: (to) => `blocked in ${to}`,
       done: (to, closedAt, note, milestone, evidence) => {
         const head = milestone === void 0 ? `DONE in ${to} ${closedAt}` : evidence ? `DONE in ${to} ${closedAt} (${milestone})` : `DONE in ${to} ${closedAt}, unverified (${milestone})`;
@@ -21063,11 +21066,20 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       const live = liveLanes(root, sessionID);
       const ceiling = laneCeiling(config);
       const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus, showLaneCount: false });
-      return { text, sig: text, lanes: text ? lanesText(live, ceiling) : "" };
+      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus, showLaneCount: false, now: 0 }) : "";
+      return { text, sig };
     } catch (e) {
       logLine(root, `context: board readiness unreadable: ${errText2(e)}`);
       const text = `BOARD READINESS UNAVAILABLE (${errText2(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
       return { text, sig: text };
+    }
+  }
+  function laneLine(root, config, sessionID) {
+    try {
+      return lanesText(liveLanes(root, sessionID), laneCeiling(config));
+    } catch (e) {
+      logLine(root, `context: live lanes unreadable: ${errText2(e)}`);
+      return `live lanes ? (unreadable: ${errText2(e)})`;
     }
   }
   function resolvePluginRoot() {
@@ -21158,9 +21170,8 @@ ${opencodeHostTail(pluginRoot)}`;
       }
       out.push({ key: "undeclared", text: undeclaredBlock(root, state.config), cleared: "UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies." });
       if (!inWorkerChild(env)) {
-        const { lanes, ...board } = boardBlock(root, state.config, sessionID);
-        out.push({ key: "board", ...board, cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
-        out.push({ key: "lanes", text: lanes ?? "" });
+        out.push({ key: "board", ...boardBlock(root, state.config, sessionID), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
+        out.push({ key: "lanes", text: laneLine(root, state.config, sessionID) });
       }
     }
     out.push({ key: "restore", text: await rotationRestore(root, sessionID) });

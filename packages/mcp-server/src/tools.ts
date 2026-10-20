@@ -1485,6 +1485,10 @@ export const WRITE_REFUSED_FIELDS: readonly string[] = [
   'baseline_attestations',
   // A separate, byte-free proof that HEAD had no exact tree entry for the path.
   'absence_attestations',
+  // A board item's wait clock (GitHub issue #175): stamped by the server when
+  // `needs` changes value, removed with it. A caller-set value would fake how
+  // long an outside party has been waited on.
+  'needs_set_at',
 ];
 
 /**
@@ -3738,7 +3742,8 @@ export class SterlingTools {
             `The one retirement path is knowledge_retire(id, in_favor_of), and it is NARROW: it is for a genuine DUPLICATE whose reader must be sent to the survivor, ` +
             `never for a record that is merely wrong — /sterling:cleanup never hard-deletes knowledge either.`
           : `id and the clocks are assigned at write; type is fixed at create; lifecycle/freshness are derived by the store; file_baselines is computed server-side at create/reconcile; ` +
-            `baseline_attestations is drift PROVENANCE minted only when a reconcile_needed item is closed as already-paid (board_remove / maintenance_remove), from hashes the server takes itself.`)
+            `baseline_attestations is drift PROVENANCE minted only when a reconcile_needed item is closed as already-paid (board_remove / maintenance_remove), from hashes the server takes itself; ` +
+            `needs_set_at is stamped by the server when a board item's needs changes value and removed with it.`)
     );
   }
 
@@ -4123,6 +4128,8 @@ export class SterlingTools {
     // inside `body`) does not silently reintroduce its own unresolved
     // target_id past this resolution.
     candidate.links = this.resolveLinksTargets(candidate.links, 'knowledge_create') ?? [];
+    // needs_set_at is server-owned (refused above): a board item born with needs is stamped now.
+    if (type === 'todo' && candidate.needs !== undefined) candidate.needs_set_at = ts;
     // dedup_override is a create-time directive, never a stored field
     const dedupOverride = candidate[DEDUP_OVERRIDE_FIELD] === true;
     delete candidate[DEDUP_OVERRIDE_FIELD];
@@ -8785,6 +8792,16 @@ export class SterlingTools {
     // that declares working_tree reaches here with the key — refuseUnknownFields
     // above already refused it for every other type.
     if (overrides.working_tree === null) delete next.working_tree;
+    // needs_set_at on a board item (GitHub issue #175), the rule board_update
+    // applies: stamped when needs changes value, removed with needs.
+    if (old.type === 'todo' && 'needs' in overrides) {
+      if (next.needs === undefined || next.needs === '') {
+        delete next.needs;
+        delete next.needs_set_at;
+      } else if (next.needs !== (old as unknown as { needs?: unknown }).needs) {
+        next.needs_set_at = ts;
+      }
+    }
     if (relationRemoval) {
       // The relation row is authoritative, but keep the stored body honest as
       // well. This removes only the selected existing edge and deliberately
@@ -10772,8 +10789,6 @@ export class SterlingTools {
     }
     if (blocked_by !== undefined && source === 'system') throw SterlingTools.blockedBySystemRefusal('board_add');
     if (needs !== undefined && source === 'system') throw SterlingTools.needsSystemRefusal('board_add');
-    // needs_set_at is server-owned (GitHub issue #175): stamped here, never taken from the caller.
-    if ('needs_set_at' in rest) throw new Error(`board_add: needs_set_at is server-owned — it is stamped when needs is set. Nothing was saved.`);
     if (needs === 'external' && (typeof rest.needs_reason !== 'string' || rest.needs_reason.trim().length === 0)) {
       throw new Error(`board_add: needs 'external' requires a needs_reason naming what is awaited and what lets the work resume. Nothing was saved.`);
     }
@@ -10829,7 +10844,7 @@ export class SterlingTools {
         ...(normalized !== undefined ? { objective: normalized } : {}),
         ...(stampedHead !== undefined ? { measured_at_head: stampedHead } : {}),
         ...(blockers.length ? { blocked_by: blockers } : {}),
-        ...(needs !== undefined ? { needs, needs_set_at: this.now() } : {}),
+        ...(needs !== undefined ? { needs } : {}),
         ...rest,
       },
       // Forwarded, never derived from `args`: a board_add from the TOOL SURFACE

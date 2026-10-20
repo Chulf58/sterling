@@ -948,6 +948,12 @@ test("board_query handoff_to_item_id (#175): finds the tracker by the receiver's
     } finally {
       b.close();
     }
+    // The sender's tracker keeps the reason, in its own delegated group (decision handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe).
+    const waitingText = { state: 'waiting_external', text: 'waiting on others in beta: reply from the supplier' };
+    assert.deepEqual(statusOf(h.tools, d.tracker.id), waitingText, 'board_get');
+    const trackerRow = (h.tools.boardQueryResult({ source: 'user' }).records as Loose[]).find((r) => r.id === d.tracker.id) as Loose;
+    assert.deepEqual(trackerRow.handoff_status, waitingText, 'board_query');
+    assert.equal(trackerRow.readiness, 'delegated');
     const foreign = h.tools.foreignBoardQuery({ target_project: 'beta' }).records as Loose[];
     const row = foreign.find((r) => r.id === d.delivered.id) as Loose;
     assert.equal(row.readiness, 'waiting');

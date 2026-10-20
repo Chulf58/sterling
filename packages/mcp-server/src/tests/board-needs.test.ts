@@ -134,7 +134,7 @@ test('board_add needs external: refused without a needs_reason, nothing written;
   try {
     assert.throws(() => userItem(tools, 'Wait on vendor', { needs: 'external' }), /board_add: needs 'external' requires a needs_reason/);
     assert.throws(() => userItem(tools, 'Wait on vendor', { needs: 'external', needs_reason: '  ' }), /requires a needs_reason/);
-    assert.throws(() => userItem(tools, 'Wait on vendor', { needs: 'user', needs_set_at: at() }), /needs_set_at is server-owned/);
+    assert.throws(() => userItem(tools, 'Wait on vendor', { needs: 'user', needs_set_at: at() }), /'needs_set_at' is SERVER-OWNED/);
     assert.equal(tools.boardQuery({ source: 'user' }).length, 0, 'nothing was saved');
     const e = userItem(tools, 'Wait on vendor', { needs: 'external', needs_reason: 'vendor reply to the 10-18 mail' });
     assert.equal(e.needs_set_at, at());
@@ -251,6 +251,50 @@ test('board_query paging: a blocker outside the page keeps the item blocked, and
     assert.deepEqual((tools.boardQueryResult({ source: 'user', readiness: ['ready'], cap: 5, cursor: next }).records as Loose[]).map((r) => r.id), [sharer.id, blocker.id]);
     assert.throws(() => tools.boardQueryResult({ source: 'user', cap: 5, cursor: next }), /readiness/, 'the readiness filter is part of the cursor identity');
     assert.deepEqual((tools.boardQueryResult({ source: 'user', readiness: ['blocked', 'waiting'] }).records as Loose[]).map((r) => r.id), [blocked.id]);
+  } finally {
+    cleanup();
+  }
+});
+
+test('needs_set_at is server-owned on the generic routes: knowledge_update, knowledge_edit and knowledge_create refuse it and change nothing; knowledge_schema marks it', () => {
+  const { tools, clock, cleanup } = clockHarness();
+  try {
+    const a = userItem(tools, 'Vendor', { needs: 'external', needs_reason: 'vendor reply' });
+    const stamped = item(tools, a.id).needs_set_at as string;
+    const versionBefore = item(tools, a.id).version;
+    clock.tick();
+    assert.throws(() => tools.knowledgeUpdate(a.id as string, { needs_set_at: '2099-01-01T00:00:00.000Z' }), /'needs_set_at' is SERVER-OWNED/);
+    assert.throws(() => tools.knowledgeEdit(a.id as string, 'needs_set_at', stamped.slice(0, 4), '2099'), /'needs_set_at' is SERVER-OWNED/);
+    assert.equal(item(tools, a.id).needs_set_at, stamped, 'nothing changed');
+    assert.equal(item(tools, a.id).version, versionBefore);
+    const before = tools.boardQuery({ source: 'user' }).length;
+    assert.throws(
+      () => tools.knowledgeCreate('todo', { text: 'Forged\nsee src/a.ts:1', source: 'user', needs: 'user', needs_set_at: '2000-01-01T00:00:00.000Z' }),
+      /'needs_set_at' is SERVER-OWNED/
+    );
+    assert.equal(tools.boardQuery({ source: 'user' }).length, before, 'nothing was created');
+    const field = tools.knowledgeSchema('todo').fields.find((f) => f.name === 'needs_set_at');
+    assert.equal(field?.server_owned, true);
+    assert.ok(!tools.knowledgeSchema('todo').optional.includes('needs_set_at'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('needs_set_at on the generic routes: knowledge_create stamps it, knowledge_update re-stamps on a needs change, keeps it otherwise, removes it with needs', () => {
+  const { tools, clock, at, cleanup } = clockHarness();
+  try {
+    const created = tools.knowledgeCreate('todo', { text: 'Generic\nsee src/a.ts:1', source: 'user', needs: 'user' }).record as unknown as Loose;
+    assert.equal(created.needs_set_at, at());
+    const first = at();
+    clock.tick();
+    tools.knowledgeUpdate(created.id as string, { priority: 'high' });
+    assert.equal(item(tools, created.id).needs_set_at, first);
+    tools.knowledgeUpdate(created.id as string, { needs: 'grill' });
+    assert.equal(item(tools, created.id).needs_set_at, at());
+    tools.knowledgeUpdate(created.id as string, { needs: '' });
+    assert.equal('needs' in item(tools, created.id), false);
+    assert.equal('needs_set_at' in item(tools, created.id), false);
   } finally {
     cleanup();
   }

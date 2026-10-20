@@ -255,15 +255,32 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       const ceiling = laneCeiling(config);
       // The block names only the lane ceiling. The live count goes stale in a block that is
       // not re-sent for every lane that starts or ends (GitHub #93), so it travels as its own
-      // `live lanes k/n` line, delivered when it changes (GitHub #174; decision
-      // opencode-live-lane-count-separate-line-and-tui-counts-from-register). An unreadable
-      // dispatch register shows in that line; the ceiling and its errors stay in the block.
+      // `live lanes k/n` line (laneLine). The ceiling and its errors stay in the block.
       const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus, showLaneCount: false });
-      return { text, sig: text, lanes: text ? lanesText(live, ceiling) : '' };
+      // The delivery key is the text with elapsed time held constant: an external wait's
+      // "Nh ago" grows by itself, and re-sending the board for that is the noise GitHub #93
+      // reported. now: 0 pins every age to 0h; the since-date, reason and the rest stay.
+      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus, showLaneCount: false, now: 0 }) : '';
+      return { text, sig };
     } catch (e) {
       logLine(root, `context: board readiness unreadable: ${errText(e)}`);
       const text = `BOARD READINESS UNAVAILABLE (${errText(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
       return { text, sig: text };
+    }
+  }
+
+  /**
+   * The session's live-lane count as its own one-line `live lanes k/n` block, delivered when
+   * it changes (GitHub #174; decision opencode-live-lane-count-separate-line-and-tui-counts-from-register).
+   * It does not depend on the board block: lanes start and end on an empty board too. An
+   * unreadable dispatch register shows in the line, never as zero.
+   */
+  function laneLine(root, config, sessionID) {
+    try {
+      return lanesText(liveLanes(root, sessionID), laneCeiling(config));
+    } catch (e) {
+      logLine(root, `context: live lanes unreadable: ${errText(e)}`);
+      return `live lanes ? (unreadable: ${errText(e)})`;
     }
   }
 
@@ -395,10 +412,9 @@ export function createContextHandler({ openStore, now, rootOf, fenced, rotationR
       // Root sessions only, and never inside the maintenance worker's own child
       // (the former ruling 'opencode-session-boundary-code-runs-in-the-maintenance-worker-child' (not in the current store)): the worker is not the conductor filling lanes.
       if (!inWorkerChild(env)) {
-        const { lanes, ...board } = boardBlock(root, state.config, sessionID);
-        out.push({ key: 'board', ...board, cleared: 'BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply.' });
+        out.push({ key: 'board', ...boardBlock(root, state.config, sessionID), cleared: 'BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply.' });
         // The live-lane count, a line of its own so it can change without re-sending the board.
-        out.push({ key: 'lanes', text: lanes ?? '' });
+        out.push({ key: 'lanes', text: laneLine(root, state.config, sessionID) });
       }
     }
     out.push({ key: 'restore', text: await rotationRestore(root, sessionID) });

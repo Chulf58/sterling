@@ -40,3 +40,10 @@ test('renderBoardReadiness: without resolved statuses a delegated line says its 
 test('boardReadyNotice: a delegated item never reaches the BOARD READY line', () => {
   assert.equal(lib.boardReadyNotice([item('dddddddd-1', 'delegated', { handoff })], '', live, ceiling), null);
 });
+
+test('renderBoardReadiness: a tracker whose receiver waits on an outside party stays delegated and shows the reason (GitHub issue #175)', () => {
+  const d = item('dddddddd-1', 'delegated', { handoff });
+  const text = lib.renderBoardReadiness({ readiness: [d], live, ceiling, handoffStatus: new Map([[d.id, { state: 'waiting_external', text: 'waiting on others in beta: reply from the supplier' }]]) });
+  assert.match(text, /DELEGATED TO OTHER PROJECTS \(1, not run here\):\n- dddddddd-1 item \(dddddddd\) — project 'beta': waiting on others in beta: reply from the supplier/);
+  assert.doesNotMatch(text, /WAITING ON OTHERS \(/);
+});

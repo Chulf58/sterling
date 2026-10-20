@@ -47201,6 +47201,7 @@ function readEvidence(h, root) {
 var statusText = {
   open: (to) => `open in ${to}`,
   needs_user: (to, reason) => `needs user in ${to}${reason ? `: ${reason}` : ""}`,
+  waiting_external: (to, reason) => `waiting on others in ${to}${reason ? `: ${reason}` : ""}`,
   blocked: (to) => `blocked in ${to}`,
   done: (to, closedAt, note, milestone, evidence) => {
     const head = milestone === void 0 ? `DONE in ${to} ${closedAt}` : evidence ? `DONE in ${to} ${closedAt} (${milestone})` : `DONE in ${to} ${closedAt}, unverified (${milestone})`;
@@ -47278,6 +47279,8 @@ function rowStatus(db, root, trackerId, h, budget) {
   const wait = waitParsed.data;
   if (wait.needs === "user" || wait.needs === "grill")
     return { state: "needs_user", text: statusText.needs_user(h.to_name, wait.needs_reason?.trim()) };
+  if (wait.needs === "external")
+    return { state: "waiting_external", text: statusText.waiting_external(h.to_name, wait.needs_reason?.trim()) };
   if (wait.blocked_by?.length) {
     const live = db.prepare(`SELECT 1 FROM records WHERE type = 'todo' AND status != 'superseded' AND json_extract(body, '$.slug') = ? LIMIT 1`);
     for (const slug of new Set(wait.blocked_by)) {
