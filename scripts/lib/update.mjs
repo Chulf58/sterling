@@ -43,8 +43,15 @@ import { installHostOf, sterlingUpdateRemedy } from './sterling-roots.mjs';
 // ~19s, check ~12s, tests ~87s), so the ceiling is generous — a timeout here
 // would abort a healthy update, which is worse than waiting.
 const STEP_TIMEOUT_MS = 900_000;
+// The test battery alone ran past 10 min on a slow WSL drive (GitHub #177), and a
+// timeout kills the battery before it prints a summary, so its ceiling is 45 min.
+const TEST_STEP_TIMEOUT_MS = 2_700_000;
 
-/** Real command runner. Never throws — every caller inspects `status` (P5: no silent path). */
+/** Real command runner. Never throws — every caller inspects `status` (P5: no silent path).
+ *  `signal` and `errorCode` say WHY a null-status child ended (ETIMEDOUT, ENOBUFS, a signal),
+ *  because `status` alone folds all of them into 1. maxBuffer is lifted: spawnSync's 1 MiB
+ *  default SIGTERMs a child whose piped output passes it, and a full `npm test` writes more
+ *  than that (GitHub #177; same lift as branch-manager.mjs). */
 export function defaultExec(cmd, args, { cwd, timeout = STEP_TIMEOUT_MS } = {}) {
   // npm resolves through a .cmd shim on native Windows, which spawn cannot exec
   // directly; the revived native launcher (decision foreign_a756e5d9) means this script
@@ -52,12 +59,24 @@ export function defaultExec(cmd, args, { cwd, timeout = STEP_TIMEOUT_MS } = {}) 
   // project paths on this box genuinely contain spaces.
   const shell = process.platform === 'win32';
   const q = (s) => (shell && /[\s"]/.test(s) ? `"${s}"` : s);
-  const r = spawnSync(q(cmd), args.map(q), { cwd, encoding: 'utf8', timeout, shell });
+  const r = spawnSync(q(cmd), args.map(q), { cwd, encoding: 'utf8', timeout, shell, maxBuffer: Infinity });
   return {
     status: r.error ? 1 : (r.status ?? 1),
     stdout: r.stdout ?? '',
-    stderr: r.stderr ?? (r.error ? String(r.error.message) : ''),
+    stderr: r.stderr || (r.error ? String(r.error.message) : ''),
+    signal: r.signal ?? null,
+    errorCode: r.error?.code ?? null,
   };
+}
+
+/** Why a step ended without an exit code of its own, or null when it ran to an exit.
+ *  A bare "exit 1" for a killed command reads as a failed test (GitHub #177). */
+function unfinishedReason(r, timeout) {
+  if (r.errorCode === 'ETIMEDOUT') return `timed out after ${Math.round(timeout / 1000)} s (ETIMEDOUT)`;
+  if (r.errorCode === 'ENOBUFS') return `killed by ${r.signal ?? 'SIGTERM'}: output exceeded the buffer (ENOBUFS)`;
+  if (r.signal) return `killed by ${r.signal}`;
+  if (r.errorCode) return `could not run (${r.errorCode})`;
+  return null;
 }
 
 /** git wrapper over an injected exec: trimmed stdout, or '' when allowFail and git errored. */
@@ -915,15 +934,18 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
 
   // A step: loud on failure (full output), one line on success. A failure stops
   // the sequence — half-updating quietly is the failure mode this replaces.
-  const step = (label, cmd, args, { cwd: stepCwd = cwd, tolerate = false, show = false } = {}) => {
+  const step = (label, cmd, args, { cwd: stepCwd = cwd, tolerate = false, show = false, timeout = STEP_TIMEOUT_MS } = {}) => {
     log(`\n▸ ${label}`);
-    const r = exec(cmd, args, { cwd: stepCwd });
+    const r = exec(cmd, args, { cwd: stepCwd, timeout });
     const out = `${r.stdout}${r.stderr}`.trim();
     report.steps.push({ label, cmd: `${cmd} ${args.join(' ')}`, status: r.status });
     if (r.status !== 0) {
       log(out || '(no output)');
       if (!tolerate) {
-        log(`\n✗ ${label} FAILED (exit ${r.status}) — stopping. The fast-forward stands; fix the failure and rerun.`);
+        const unfinished = unfinishedReason(r, timeout);
+        log(unfinished
+          ? `\n✗ ${label} DID NOT FINISH (${unfinished}) — this is not a test or check failure, the command was cut off — stopping. The fast-forward stands; rerun.`
+          : `\n✗ ${label} FAILED (exit ${r.status}) — stopping. The fast-forward stands; fix the failure and rerun.`);
         report.exit = 1;
       } else {
         log(`  (non-fatal — continuing)`);
@@ -1308,7 +1330,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // swallowed, never a `return`.
   let testFailed = false;
   if (opts.test !== false) {
-    if (!step('test battery (npm test)', 'npm', ['test']).ok) {
+    if (!step('test battery (npm test)', 'npm', ['test'], { timeout: TEST_STEP_TIMEOUT_MS }).ok) {
       testFailed = true;
       log(
         '\n✗ TEST BATTERY FAILED — store migration is SKIPPED below (schema changes are the one irreversible step, and this is code the battery has just called suspect). Agent sync still runs, because the hooks from this pull are already live in every project via --plugin-dir. This run exits non-zero and will NOT write the completion marker — rerun after fixing the battery, or the next /sterling:update resumes from here instead of reporting "Already current".'

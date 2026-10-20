@@ -15288,15 +15288,25 @@ function ensureLauncherIgnores(target2) {
 
 // scripts/lib/update.mjs
 var STEP_TIMEOUT_MS = 9e5;
+var TEST_STEP_TIMEOUT_MS = 27e5;
 function defaultExec(cmd, args, { cwd, timeout = STEP_TIMEOUT_MS } = {}) {
   const shell = process.platform === "win32";
   const q = (s2) => shell && /[\s"]/.test(s2) ? `"${s2}"` : s2;
-  const r = spawnSync3(q(cmd), args.map(q), { cwd, encoding: "utf8", timeout, shell });
+  const r = spawnSync3(q(cmd), args.map(q), { cwd, encoding: "utf8", timeout, shell, maxBuffer: Infinity });
   return {
     status: r.error ? 1 : r.status ?? 1,
     stdout: r.stdout ?? "",
-    stderr: r.stderr ?? (r.error ? String(r.error.message) : "")
+    stderr: r.stderr || (r.error ? String(r.error.message) : ""),
+    signal: r.signal ?? null,
+    errorCode: r.error?.code ?? null
   };
+}
+function unfinishedReason(r, timeout) {
+  if (r.errorCode === "ETIMEDOUT") return `timed out after ${Math.round(timeout / 1e3)} s (ETIMEDOUT)`;
+  if (r.errorCode === "ENOBUFS") return `killed by ${r.signal ?? "SIGTERM"}: output exceeded the buffer (ENOBUFS)`;
+  if (r.signal) return `killed by ${r.signal}`;
+  if (r.errorCode) return `could not run (${r.errorCode})`;
+  return null;
 }
 function gitFrom(exec, cwd) {
   return (args, { allowFail = false } = {}) => {
@@ -15807,16 +15817,18 @@ ${handoffOut.split("\n").map((l) => `          ${l}`).join("\n")}`);
     }
     return failures;
   };
-  const step = (label, cmd, args, { cwd: stepCwd = cwd, tolerate = false, show = false } = {}) => {
+  const step = (label, cmd, args, { cwd: stepCwd = cwd, tolerate = false, show = false, timeout = STEP_TIMEOUT_MS } = {}) => {
     log(`
 \u25B8 ${label}`);
-    const r = exec(cmd, args, { cwd: stepCwd });
+    const r = exec(cmd, args, { cwd: stepCwd, timeout });
     const out = `${r.stdout}${r.stderr}`.trim();
     report2.steps.push({ label, cmd: `${cmd} ${args.join(" ")}`, status: r.status });
     if (r.status !== 0) {
       log(out || "(no output)");
       if (!tolerate) {
-        log(`
+        const unfinished = unfinishedReason(r, timeout);
+        log(unfinished ? `
+\u2717 ${label} DID NOT FINISH (${unfinished}) \u2014 this is not a test or check failure, the command was cut off \u2014 stopping. The fast-forward stands; rerun.` : `
 \u2717 ${label} FAILED (exit ${r.status}) \u2014 stopping. The fast-forward stands; fix the failure and rerun.`);
         report2.exit = 1;
       } else {
@@ -16094,7 +16106,7 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   if (!step("consistency checks (npm run check)", "npm", ["run", "check"], { show: true }).ok) return report2;
   let testFailed = false;
   if (opts2.test !== false) {
-    if (!step("test battery (npm test)", "npm", ["test"]).ok) {
+    if (!step("test battery (npm test)", "npm", ["test"], { timeout: TEST_STEP_TIMEOUT_MS }).ok) {
       testFailed = true;
       log(
         '\n\u2717 TEST BATTERY FAILED \u2014 store migration is SKIPPED below (schema changes are the one irreversible step, and this is code the battery has just called suspect). Agent sync still runs, because the hooks from this pull are already live in every project via --plugin-dir. This run exits non-zero and will NOT write the completion marker \u2014 rerun after fixing the battery, or the next /sterling:update resumes from here instead of reporting "Already current".'
