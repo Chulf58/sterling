@@ -259,7 +259,7 @@ test('[finding 2a] an item with an uncommitted change to any file_key is not lau
     const statusCalls = dirtyA.calls.filter((c) => c.args.includes('status'));
     assert.equal(statusCalls.length, 1, 'ONE status call');
     assert.equal(statusCalls[0].cmd, 'git');
-    assert.deepEqual(statusCalls[0].args, ['-C', fx.project, 'status', '--porcelain', '-z', '--untracked-files=all', '--', 'src/a.mjs', 'src/b.mjs']);
+    assert.deepEqual(statusCalls[0].args, ['-C', fx.project, '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all', '--', 'src/a.mjs', 'src/b.mjs']);
     assert.equal(statusCalls[0].opts.shell, undefined, 'no shell');
     assert.equal(sp.calls.length, 0);
 

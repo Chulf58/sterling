@@ -199,6 +199,7 @@ test('a NEW Copilot review on the CURRENT head is returned with its comments (pa
       ],
       observed_copilot_login: COPILOT,
       stale_review: false,
+      awaiting_head_review: false,
       identity_confirmed: false,
       previously_missed: [],
       previously_missed_unparsed: false,
@@ -244,6 +245,30 @@ test('an OLD-head Copilot review is RETURNED with its comments and stale_review 
     assert.equal(r.out.head_sha, HEAD);
   } finally {
     f.cleanup();
+  }
+});
+
+test('awaiting_head_review (GitHub issue #162): true only for a stale review while a Copilot request is still pending', () => {
+  const cases = [
+    { name: 'stale review, request pending', commit: OLD_HEAD, requests: null, expected: true },
+    { name: 'stale review, no request pending', commit: OLD_HEAD, requests: [], expected: false },
+    { name: 'current-head review, request pending', commit: HEAD, requests: null, expected: false },
+  ];
+  for (const c of cases) {
+    const f = makeFixture();
+    try {
+      f.put('reviews', 0, [[review(200, { commit: c.commit })]]);
+      f.put('comments', 0, [[comment(9, 200)]]);
+      if (c.requests) writeFileSync(join(f.state, 'review_requests.0.json'), JSON.stringify(c.requests));
+      const r = run(f, ['7', ...FAST]);
+      assert.equal(r.code, 0, `${c.name}: ${oneLine(r.stdout + r.stderr)}`);
+      assert.equal(r.out.status, 'review', c.name);
+      assert.equal(r.out.stale_review, c.commit === OLD_HEAD, c.name);
+      assert.equal(r.out.copilot_review_pending, c.requests === null, c.name);
+      assert.equal(r.out.awaiting_head_review, c.expected, c.name);
+    } finally {
+      f.cleanup();
+    }
   }
 });
 

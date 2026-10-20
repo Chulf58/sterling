@@ -12078,7 +12078,9 @@ function git(cwd, args, { allowFail = false, treeWrite = false } = {}) {
   });
   if (r.status !== 0 && !allowFail) {
     const spawnState = r.error ? `spawn-error ${r.error.code ?? r.error.message}` : r.signal ? `killed by ${r.signal}` : `exit ${r.status}`;
-    throw new Error(`git ${args.join(" ")} failed (${spawnState}): ${(r.stderr || r.stdout || "").trim()}`);
+    const detail = (r.stderr || r.stdout || "").trim();
+    const lockHint = /index\.lock/.test(detail) ? "\nThe index lock (.git/index.lock in this repository, or in its git dir) may be stale from a git that was killed; if no git process is running, remove it by hand and rerun." : "";
+    throw new Error(`git ${args.join(" ")} failed (${spawnState}): ${detail}${lockHint}`);
   }
   return (r.stdout ?? "").trim();
 }
@@ -12107,7 +12109,7 @@ function repoStateReport({ cwd, branch: branch2, step }) {
   const head = headR?.status === 0 ? headR.stdout.trim() : null;
   const mergeR = read(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]);
   const mergeHead = mergeR?.status === 0 ? true : mergeR?.status === 1 ? false : null;
-  const statusR = read(["status", "--porcelain"]);
+  const statusR = read(["--no-optional-locks", "status", "--porcelain"]);
   const changed2 = statusR?.status === 0 ? statusR.stdout.split("\n").filter(Boolean).length : null;
   const unknown = "unknown (git could not answer)";
   const lines = [
@@ -12150,7 +12152,7 @@ function repoStateReport({ cwd, branch: branch2, step }) {
   return lines.join("\n");
 }
 function mergeBranchInto({ cwd, branch: branch2, into: into2, message }) {
-  const status = git(cwd, ["status", "--porcelain"]);
+  const status = git(cwd, ["--no-optional-locks", "status", "--porcelain"]);
   if (status) {
     const lines = status.split("\n").filter(Boolean);
     const untracked = lines.filter((l) => l.startsWith("??"));
@@ -13742,7 +13744,7 @@ if (shipsPr) {
   if (notBranch) fail2(notBranch, 2);
 }
 stage("dirty-tree");
-var dirtyCheck = spawnSync8("git", ["status", "--porcelain"], { cwd: target, encoding: "utf8", timeout: 6e4 });
+var dirtyCheck = spawnSync8("git", ["--no-optional-locks", "status", "--porcelain"], { cwd: target, encoding: "utf8", timeout: 6e4 });
 if (dirtyCheck.status !== 0) {
   fail2(`direct-merge: git status --porcelain failed (${dirtyCheck.status}): ${(dirtyCheck.stderr || dirtyCheck.stdout || "").trim()}`);
 }

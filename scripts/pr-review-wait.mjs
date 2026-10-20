@@ -73,7 +73,8 @@
 //    previously_missed:[string], previously_missed_unparsed,
 //    body_findings_without_comments,
 //    copilot_request:null|{requested, error?}, copilot_review_pending,
-//    observed_copilot_login, stale_review, identity_confirmed[, error]}
+//    observed_copilot_login, stale_review, awaiting_head_review,
+//    identity_confirmed[, error]}
 // previously_missed is the findings under a "Previously missed" (or "N
 // previously missed issues") heading of the review body, as list items or as
 // nested <details> blocks ([] when absent);
@@ -83,6 +84,9 @@
 // non-blank body with no inline comments, because the body format is Copilot's
 // and may change: such a review is not clean until the body has been read.
 // copilot_review_pending is what the last poll read (null before any poll).
+// awaiting_head_review is true when the returned review is stale AND a Copilot
+// request is still pending: a review of the current head is still on its way
+// (a hint only; GitHub issue #162, behaviour unchanged).
 // Exit 0 = review, 2 = timeout, 3 = no_review_requested, 1 = error. None but
 // a review of the current head (stale_review false) is ever clean.
 //
@@ -172,7 +176,7 @@ const PENDING_ROLLUPS = new Set(['PENDING', 'EXPECTED']); // checks still runnin
 
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
+const result = { status: 'error', head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, awaiting_head_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
   process.stdout.write(JSON.stringify(out) + '\n');
@@ -678,6 +682,7 @@ function poll(recheckAbsent = true) {
     review: { id: review.id, commit_id: review.commit_id, author: review.user.login, state: review.state, body },
     comments,
     stale_review: stale,
+    awaiting_head_review: stale && pending,
     previously_missed: missed.items,
     previously_missed_unparsed: missed.unparsed,
     body_findings_without_comments: body.trim() !== '' && comments.length === 0,

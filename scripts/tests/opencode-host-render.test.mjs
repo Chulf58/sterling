@@ -142,20 +142,25 @@ test('the OpenCode conductor carries the progress rule; the Claude conductor doe
 });
 
 // Board 52a82da8 (user-stated 2026-10-05: "we should use the newest 6.1 one of it is the same
-// price"): Sol is gpt-6.1-sol on OpenCode. Claude Code stays on gpt-5.6-sol, because Codex on a
-// ChatGPT account refuses the 6.x Sol models (finding
-// gpt-6-1-sol-price-and-serving-codex-chatgpt-account-refuses-opencode-serves-october-2026).
-test('Sol is gpt-6.1-sol on the OpenCode conductor and stays gpt-5.6-sol on the Claude conductor', () => {
+// price"): Sol is gpt-6.1-sol on OpenCode. GitHub issue #165 (decision
+// claude-code-sol-route-defaults-to-gpt-6-1-sol-with-loud-fallback, user-ruled 2026-10-20): the
+// Claude Code route uses gpt-6.1-sol too, retries once on gpt-5.6-sol when a ChatGPT-account
+// Codex refuses, then reviews on Opus and says so; the old "Claude Code stays on gpt-5.6-sol"
+// rationale (measured once, 2026-10-05) is gone.
+test('Sol is gpt-6.1-sol on both conductors; the Claude conductor falls back loudly to gpt-5.6-sol, then Opus', () => {
   const opencode = fullRender('conductor');
   assert.ok(opencode.includes('openai/gpt-6.1-sol#high'), 'OpenCode conductor pins the new Sol id');
   assert.ok(opencode.includes('**Sol** (`gpt-6.1-sol`)'), 'the OpenCode pairing paragraph names the new Sol id');
   assert.ok(!opencode.includes('openai/gpt-5.6-sol'), 'OpenCode conductor no longer dispatches the old Sol id');
-  assert.ok(opencode.includes('Claude Code stays on `gpt-5.6-sol` because Codex on a ChatGPT account refuses the 6.x Sol models'), 'the OpenCode conductor says why the hosts differ');
-  assert.equal(opencode.split('gpt-5.6-sol').length - 1, 1, 'the old id is named once on OpenCode, in that sentence');
+  assert.ok(opencode.includes('Claude Code\'s `codex` MCP route uses the same `gpt-6.1-sol`; when a ChatGPT-account Codex answers HTTP 400'), 'the OpenCode conductor says the Claude Code route uses the same id with a fallback');
+  assert.ok(!opencode.includes('refuses the 6.x Sol models'), 'the OpenCode conductor no longer carries the stale refusal rationale');
+  assert.equal(opencode.split('gpt-5.6-sol').length - 1, 1, 'the old id is named once on OpenCode, as the Claude Code fallback');
 
   const claude = renderClaudeText(read('agent-templates/conductor.md'), 'conductor.md');
-  assert.ok(!claude.includes('gpt-6.1-sol'), 'Claude conductor does not name gpt-6.1-sol');
-  assert.ok(claude.includes('Codex **Sol** (`gpt-5.6-sol`, dispatched through the `codex` MCP tool at `sandbox: read-only`)'), 'Claude conductor still names gpt-5.6-sol');
+  assert.ok(claude.includes('Codex **Sol** (`gpt-6.1-sol`, dispatched through the `codex` MCP tool at `sandbox: read-only`)'), 'Claude conductor names gpt-6.1-sol for the codex route');
+  assert.ok(claude.includes('say so, retry once with `model: gpt-5.6-sol`, and if that is refused too, review on Opus and tell the user to check the Codex login (API key versus ChatGPT plan); never fall back silently'), 'Claude conductor carries the loud fallback');
+  assert.ok(!claude.includes('Codex **Sol** (`gpt-5.6-sol`'), 'Claude conductor no longer pins gpt-5.6-sol as the Sol default');
+  assert.ok(!claude.includes('refuses the 6.x Sol models'), 'Claude conductor no longer carries the stale refusal rationale');
 });
 
 // Board b43ddc10 (user-ruled 2026-10-05 through the question form, "Reviewer checks reuse",

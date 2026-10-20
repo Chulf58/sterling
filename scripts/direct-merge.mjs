@@ -269,7 +269,7 @@ if (shipsPr) {
 // whose disposition is a user decision, so tracked and untracked are separated
 // and untracked files are named as a choice rather than an obstacle.
 stage('dirty-tree');
-const dirtyCheck = spawnSync('git', ['status', '--porcelain'], { cwd: target, encoding: 'utf8', timeout: 60_000 });
+const dirtyCheck = spawnSync('git', ['--no-optional-locks', 'status', '--porcelain'], { cwd: target, encoding: 'utf8', timeout: 60_000 });
 if (dirtyCheck.status !== 0) {
   fail(`direct-merge: git status --porcelain failed (${dirtyCheck.status}): ${(dirtyCheck.stderr || dirtyCheck.stdout || '').trim()}`);
 }

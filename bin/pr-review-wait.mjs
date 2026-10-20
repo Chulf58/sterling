@@ -321,7 +321,7 @@ var DEFAULT_CHECKS_TIMEOUT_S = 540;
 var DEFAULT_CHECKS_INTERVAL_S = 30;
 var PENDING_ROLLUPS = /* @__PURE__ */ new Set(["PENDING", "EXPECTED"]);
 var sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-var result = { status: "error", head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
+var result = { status: "error", head_sha: null, review: null, comments: [], observed_copilot_login: null, stale_review: false, awaiting_head_review: false, identity_confirmed: false, previously_missed: [], previously_missed_unparsed: false, body_findings_without_comments: false, copilot_request: null, copilot_review_pending: null };
 function finish(status, extra = {}) {
   const out = { ...result, status, ...extra };
   process.stdout.write(JSON.stringify(out) + "\n");
@@ -731,6 +731,7 @@ function poll(recheckAbsent = true) {
     review: { id: review.id, commit_id: review.commit_id, author: review.user.login, state: review.state, body },
     comments,
     stale_review: stale,
+    awaiting_head_review: stale && pending,
     previously_missed: missed.items,
     previously_missed_unparsed: missed.unparsed,
     body_findings_without_comments: body.trim() !== "" && comments.length === 0

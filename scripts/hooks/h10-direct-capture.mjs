@@ -454,7 +454,7 @@ try {
   const dirtyPaths = (() => {
     if (pressure.level !== 'soft' && pressure.level !== 'hard') return 0;
     try {
-      const st = spawnSync('git', ['status', '--porcelain'], { cwd: input.cwd, encoding: 'utf8', timeout: 15_000 });
+      const st = spawnSync('git', ['--no-optional-locks', 'status', '--porcelain'], { cwd: input.cwd, encoding: 'utf8', timeout: 15_000 });
       if (st.status !== 0) {
         store.recordCheckSkipped('conductor-pressure', 'boundary_no_git', undefined, now);
         return 0;

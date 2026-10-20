@@ -267,14 +267,16 @@ test('review-brief, grill and delegating-to-subagents: the OpenCode render names
     const unfenced = source.replace(/<!-- opencode-only -->\n[\s\S]*?<!-- \/opencode-only -->\n/g, '').replace(/^<!-- \/?claude-only -->\n/gm, '');
     assert.equal(claude, unfenced, `${rel}: the Claude render is the source without the fences`);
   }
-  // Board 52a82da8: Sol is gpt-6.1-sol on OpenCode only; Codex on a ChatGPT account refuses it.
+  // Board 52a82da8 and GitHub issue #165: Sol is gpt-6.1-sol on both hosts; the Claude render
+  // carries the loud fallback (gpt-5.6-sol once, then Opus), the OpenCode render does not.
   const briefSource = readFileSync(join(repo, 'skills/review-brief/SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
   const briefOpenCode = cfg.hostMapText(briefSource, '/r', 'skills/review-brief/SKILL.md');
   assert.ok(briefOpenCode.includes('**Sol** (`gpt-6.1-sol`) for Claude-executed work'), 'review-brief: the OpenCode render names the new Sol id in the pairing line');
   assert.ok(!briefOpenCode.includes('gpt-5.6-sol'), 'review-brief: the OpenCode render no longer names the old Sol id');
   const briefClaude = renderClaudeText(briefSource, 'skills/review-brief/SKILL.md');
-  assert.ok(briefClaude.includes('Codex **Sol** (`gpt-5.6-sol`) for Claude-executed work'), 'review-brief: the Claude render still names gpt-5.6-sol');
-  assert.ok(!briefClaude.includes('gpt-6.1-sol'), 'review-brief: the Claude render does not name gpt-6.1-sol');
+  assert.ok(briefClaude.includes('Codex **Sol** (`gpt-6.1-sol`) for Claude-executed work'), 'review-brief: the Claude render names gpt-6.1-sol in the pairing line');
+  assert.ok(briefClaude.includes('retry once with `model: gpt-5.6-sol`, and if that is refused too, review on Opus and tell the user to check the Codex login (API key versus ChatGPT plan); never fall back silently'), 'review-brief: the Claude render carries the loud fallback');
+  assert.ok(!briefClaude.includes('Codex **Sol** (`gpt-5.6-sol`)'), 'review-brief: the Claude render no longer pins gpt-5.6-sol as the default');
 });
 
 test('dashboard.md: sterling:dashboard is not registered on OpenCode; the OpenCode render points at /sterling; the Claude render is the unfenced text', async (t) => {
