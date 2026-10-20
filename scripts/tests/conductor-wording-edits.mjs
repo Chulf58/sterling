@@ -250,6 +250,20 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "and the one Sol review stays where it is, before the PR is opened.",
     after: "and the Sol reviewers stay where they are, before the PR is opened.",
   },
+  {
+    commit: 'implementor-defaults-to-sonnet-opus-only-for-mechanism-design-or-unknown-cause',
+    date: '2026-10-20',
+    reason: "the implementor tier rule narrows: Opus only for a new mechanism or store schema, a fail-closed decision changed across several sites, an unknown root cause, or after a Sonnet fix round; a single-area safety fix stays on Sonnet; the old trigger 'fail-closed or safety logic' fit nearly every lane (22 of 50 lanes on Opus, finding how-often-do-implementor-lanes-run-on-opus-vs-sonnet-and-why); the dead citation subagent-defaults-sonnet-5-5-opus-5-5-as-pin is replaced (user-ruled 2026-10-20)",
+    before: "(Sonnet 5.5 by default; pin **Opus 5.5** on a dispatch when a Sonnet lane would likely need a second pass: a cross-cutting change applying one rule across many sites, open design choices in the brief, fail-closed or safety logic (parsers, permissions, locks, concurrency, migrations, store schema), debugging an unknown root cause, or a lane that already needed a fix round on Sonnet; name the reason in the brief. Everything well-scoped stays on Sonnet — decision `subagent-defaults-sonnet-5-5-opus-5-5-as-pin`) — the default",
+    after: "(Sonnet 5.5 by default; pin **Opus 5.5** only when the lane designs a new mechanism or store schema, changes a fail-closed decision itself across several sites, debugs an unknown root cause, or follows a Sonnet lane that already needed a fix round. A single-area fix inside safety code (a hook, a permission rule, store code) stays on Sonnet: touching safety code is not by itself a reason. Open every implementor brief with a `Tier reason:` line naming the model and why, so the split can be re-measured — decision `implementor-defaults-to-sonnet-opus-only-for-mechanism-design-or-unknown-cause`, user-ruled 2026-10-20) — the default",
+  },
+  {
+    commit: 'implementor-defaults-to-sonnet-opus-only-for-mechanism-design-or-unknown-cause',
+    date: '2026-10-20',
+    reason: "the brief-contents list gains the implementor's Tier reason line (same decision)",
+    before: "**Return** (the exact shape you want). **Territory**",
+    after: "**Return** (the exact shape you want); an implementor brief also opens with its `Tier reason:` line. **Territory**",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [
