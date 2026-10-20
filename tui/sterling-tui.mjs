@@ -43565,7 +43565,7 @@ var attestationSchema = base.extend({
   notes: external_exports.string().optional(),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
-var BOARD_NEEDS = ["user", "grill", "investigation"];
+var BOARD_NEEDS = ["user", "grill", "investigation", "external"];
 var SYSTEM_REASONS = [
   "reconcile_needed",
   "stale_research",
@@ -43695,7 +43695,10 @@ var handoffEvidenceFileReadSchema = external_exports.object({
 });
 var needsReasonField = external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank");
 function needsReasonAllowed(needs) {
-  return needs === "user" || needs === "grill";
+  return needs === "user" || needs === "grill" || needs === "external";
+}
+function needsReasonRequired(needs) {
+  return needs === "external";
 }
 var todoWaitFieldsReadSchema = external_exports.object({
   needs: external_exports.enum(BOARD_NEEDS).optional(),
@@ -43703,7 +43706,7 @@ var todoWaitFieldsReadSchema = external_exports.object({
   blocked_by: external_exports.array(external_exports.string().min(1)).optional()
 }).superRefine((rec, ctx) => {
   if (rec.needs_reason !== void 0 && !needsReasonAllowed(rec.needs)) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user', 'grill' or 'external'` });
   }
 });
 var todoBoardItemReadSchema = external_exports.object({
@@ -43764,20 +43767,34 @@ var todoSchema = base.extend({
   // What a user item waits on besides its blockers (decision
   // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
   // 'investigation' still auto-starts, as a researcher lane; 'user' and
-  // 'grill' wait for the user. Not a progress status: `status` keeps meaning
-  // supersession only. Absent means nothing beyond the blockers.
+  // 'grill' wait for the user; 'external' waits on an outside party (a mail
+  // reply, a meeting, a branch someone else owns; GitHub issue #175). Not a
+  // progress status: `status` keeps meaning supersession only. Absent means
+  // nothing beyond the blockers.
   needs: external_exports.enum(BOARD_NEEDS).optional(),
-  // Why a user item waits for the user (GitHub issue #107, decision
+  // Why a user item waits (GitHub issue #107, decision
   // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
-  // only with needs 'user' or 'grill' on a source:'user' item. A sender's
-  // tracker shows it as "needs user in <project>: <reason>".
+  // only with needs 'user', 'grill' or 'external' on a source:'user' item,
+  // and required with 'external'. A sender's tracker shows it as
+  // "needs user in <project>: <reason>".
   needs_reason: needsReasonField.optional(),
+  // When `needs` last changed value (GitHub issue #175). Server-stamped by
+  // board_add/board_update, kept through other edits, removed with needs.
+  // The age of an external wait is read from it, never from updated_at,
+  // which any unrelated edit resets.
+  needs_set_at: external_exports.string().datetime().optional(),
   // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
   handoff: todoHandoffSchema.optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user', 'grill' or 'external' on a source:'user' board task` });
+  }
+  if (rec.source === "user" && needsReasonRequired(rec.needs) && rec.needs_reason === void 0) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs 'external' requires a needs_reason naming what is awaited and what lets the work resume` });
+  }
+  if (rec.needs_set_at !== void 0 && rec.needs === void 0) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_set_at"], message: `needs_set_at goes only with needs` });
   }
   if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
@@ -47184,6 +47201,7 @@ function readEvidence(h, root) {
 var statusText = {
   open: (to) => `open in ${to}`,
   needs_user: (to, reason) => `needs user in ${to}${reason ? `: ${reason}` : ""}`,
+  waiting_external: (to, reason) => `waiting on others in ${to}${reason ? `: ${reason}` : ""}`,
   blocked: (to) => `blocked in ${to}`,
   done: (to, closedAt, note, milestone, evidence) => {
     const head = milestone === void 0 ? `DONE in ${to} ${closedAt}` : evidence ? `DONE in ${to} ${closedAt} (${milestone})` : `DONE in ${to} ${closedAt}, unverified (${milestone})`;
@@ -47261,6 +47279,8 @@ function rowStatus(db, root, trackerId, h, budget) {
   const wait = waitParsed.data;
   if (wait.needs === "user" || wait.needs === "grill")
     return { state: "needs_user", text: statusText.needs_user(h.to_name, wait.needs_reason?.trim()) };
+  if (wait.needs === "external")
+    return { state: "waiting_external", text: statusText.waiting_external(h.to_name, wait.needs_reason?.trim()) };
   if (wait.blocked_by?.length) {
     const live = db.prepare(`SELECT 1 FROM records WHERE type = 'todo' AND status != 'superseded' AND json_extract(body, '$.slug') = ? LIMIT 1`);
     for (const slug of new Set(wait.blocked_by)) {
@@ -48027,7 +48047,7 @@ function boardReadinessOf(targets, live, openBlocker) {
     }
     const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
     const sent = sentHandoffOf(t);
-    const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+    const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" || t.needs === "external" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
     return {
       id: t.id,
       ...t.slug ? { slug: t.slug } : {},
@@ -48036,6 +48056,8 @@ function boardReadinessOf(targets, live, openBlocker) {
       updated_at: t.updated_at,
       file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
       ...t.needs ? { needs: t.needs } : {},
+      ...t.needs && typeof t.needs_reason === "string" ? { needs_reason: t.needs_reason } : {},
+      ...t.needs && typeof t.needs_set_at === "string" ? { needs_set_at: t.needs_set_at } : {},
       blockers,
       blockers_open: blockersOpen,
       unblocks,
@@ -48043,6 +48065,15 @@ function boardReadinessOf(targets, live, openBlocker) {
       ...sent ? { handoff: sent, ...typeof t.created_at === "string" ? { created_at: t.created_at } : {} } : {}
     };
   });
+}
+var DAY_MS = 864e5;
+function boardWaitAge(setAt, now = Date.now()) {
+  const t = typeof setAt === "string" ? Date.parse(setAt) : NaN;
+  if (Number.isNaN(t))
+    return "since unknown";
+  const ms = Math.max(0, now - t);
+  const ago = ms >= DAY_MS ? `${Math.floor(ms / DAY_MS)}d ago` : `${Math.floor(ms / 36e5)}h ago`;
+  return `since ${setAt.slice(0, 10)}, ${ago}`;
 }
 function boardItemHandle(rec) {
   const label = boardDisplayLabel(rec.text, rec.slug);
@@ -51175,6 +51206,13 @@ function delegatedLine(r, statuses) {
   const status = statuses.get(r.id);
   return `delegated to ${status?.to_name ?? r.handoff.to_name}: ${status?.text ?? "status not read"}`;
 }
+function needsLine(todo, now = Date.now()) {
+  if (!todo.needs)
+    return void 0;
+  if (todo.needs !== "external")
+    return `needs: ${todo.needs}`;
+  return `waiting on others: ${todo.needs_reason ?? "no reason recorded"} (${boardWaitAge(todo.needs_set_at, now)})`;
+}
 function todoCards(store, expanded = []) {
   const groups = /* @__PURE__ */ new Map();
   const flat = [];
@@ -51196,7 +51234,7 @@ function todoCards(store, expanded = []) {
       detail: [
         delegatedLine(readiness.get(todo.id), handoffStatus),
         todo.priority && `priority: ${todo.priority}`,
-        todo.needs && `needs: ${todo.needs}`,
+        needsLine(todo),
         todo.file_keys?.length && `files: ${todo.file_keys.join(", ")}`
       ].filter(Boolean).join(" \xB7 ")
     };

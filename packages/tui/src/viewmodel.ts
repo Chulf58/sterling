@@ -2,7 +2,7 @@
 // every tab is a live view; nothing here mutates anything.
 import { DRAIN_VERBS, RECORD_TYPES, displayHandle, boardDisplayLabel } from '@sterling/schemas';
 import type { SterlingStore, MountedStores, BoardItemReadiness, HandoffStatus } from '@sterling/store';
-import { registryPath, resolveSentHandoffs } from '@sterling/store';
+import { boardWaitAge, registryPath, resolveSentHandoffs } from '@sterling/store';
 
 export interface Card {
   id: string;
@@ -417,6 +417,17 @@ export function delegatedLine(r: BoardItemReadiness | undefined, statuses: Reado
   return `delegated to ${status?.to_name ?? r.handoff.to_name}: ${status?.text ?? 'status not read'}`;
 }
 
+/**
+ * A card's needs line. An external wait shows as `waiting on others: <reason>
+ * (since <date>, <age>)` so it reads apart from the user's own waits (GitHub
+ * issue #175); any other needs value shows as `needs: <value>`.
+ */
+export function needsLine(todo: { needs?: string; needs_reason?: string; needs_set_at?: string }, now: number = Date.now()): string | undefined {
+  if (!todo.needs) return undefined;
+  if (todo.needs !== 'external') return `needs: ${todo.needs}`;
+  return `waiting on others: ${todo.needs_reason ?? 'no reason recorded'} (${boardWaitAge(todo.needs_set_at, now)})`;
+}
+
 export function todoCards(store: SterlingStore, expanded: string[] = []): Card[] {
   const groups = new Map<string, Card[]>();
   const flat: Card[] = [];
@@ -437,7 +448,7 @@ export function todoCards(store: SterlingStore, expanded: string[] = []): Card[]
     ? resolveSentHandoffs(delegated.map((r) => ({ id: r.id, handoff: r.handoff, created_at: createdAt.get(r.id) })), { busyTimeoutMs: 50, budgetMs: 200, registryPath: registryPath() })
     : new Map();
   for (const t of todos) {
-    const todo = t as unknown as { id: string; text: string; slug?: string; priority?: string; file_keys?: string[]; objective?: string; needs?: string };
+    const todo = t as unknown as { id: string; text: string; slug?: string; priority?: string; file_keys?: string[]; objective?: string; needs?: string; needs_reason?: string; needs_set_at?: string };
     // `name (id8)` where a LABEL EXISTS (decision foreign_2e8c30e4; board 081508d0
     // review round 2). Gated on the derived LABEL, NOT on whether a slug was
     // ever minted (review round 2, HIGH finding): a legacy pre-mint item has
@@ -461,7 +472,7 @@ export function todoCards(store: SterlingStore, expanded: string[] = []): Card[]
       detail: [
         delegatedLine(readiness.get(todo.id), handoffStatus),
         todo.priority && `priority: ${todo.priority}`,
-        todo.needs && `needs: ${todo.needs}`,
+        needsLine(todo),
         todo.file_keys?.length && `files: ${todo.file_keys.join(', ')}`,
       ]
         .filter(Boolean)

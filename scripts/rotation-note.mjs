@@ -14,6 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname } from 'node:path';
 import { classifyRegister } from './lib/dispatch-register.mjs';
 import { readLock } from './hooks/lib/plan-lock.mjs';
+import { OPENCODE_DEAD_LANE_CHECK } from './hooks/lib/rotation-restore.mjs';
 import { arg as sharedArg, fail as sharedFail } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
 
@@ -295,12 +296,20 @@ process.stdout.write(
     (liveDispatches === null
       ? classified.availability === 'absent'
         ? 'live_dispatches: none recorded — no dispatch register on this host\n'
-        : `live_dispatches: UNKNOWN — the dispatch register is ${classified.availability} (it exists but could not be read or parsed); any subagent from this session cannot be resumed after ${boundary} — re-dispatch fresh if still needed\n`
+        : host === 'opencode'
+          ? `live_dispatches: UNKNOWN — the dispatch register is ${classified.availability} (it exists but could not be read or parsed); any subagent from this session may still be running after ${boundary} — before re-dispatching, ${OPENCODE_DEAD_LANE_CHECK}\n`
+          : `live_dispatches: UNKNOWN — the dispatch register is ${classified.availability} (it exists but could not be read or parsed); any subagent from this session cannot be resumed after ${boundary} — re-dispatch fresh if still needed\n`
       : liveDispatches.length
-        ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — still running across ${boundary} but cannot be resumed from the new session: re-dispatch fresh if still needed (pass a --lane hand-off for each worth continuing)\n`
+        ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — ` +
+          (host === 'opencode'
+            ? `still running across ${boundary}; whether the new session can reach them is not shown. Before re-dispatching, ${OPENCODE_DEAD_LANE_CHECK} (pass a --lane hand-off for each worth continuing)\n`
+            : `still running across ${boundary} but cannot be resumed from the new session: re-dispatch fresh if still needed (pass a --lane hand-off for each worth continuing)\n`)
         : '') +
     (uncertainDispatches && uncertainDispatches.length
-      ? `uncertain_dispatches: ${uncertainDispatches.length} (${uncertainDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — lease expired, not confirmed dead; cannot be resumed from the new session either: re-dispatch fresh if still needed\n`
+      ? `uncertain_dispatches: ${uncertainDispatches.length} (${uncertainDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — lease expired, not confirmed dead; ` +
+        (host === 'opencode'
+          ? 'may still be running: check it is dead (as above) before re-dispatching\n'
+          : 'cannot be resumed from the new session either: re-dispatch fresh if still needed\n')
       : '') +
     (host === 'opencode'
       ? (note.reason === 'code-reload'

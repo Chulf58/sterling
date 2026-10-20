@@ -170,8 +170,8 @@ test('feature_article current_ac and live_test_refs: an empty array is refused o
 test('todo source: the conditions name the fields the validator requires and refuses on a system item', () => {
   const sources = enumValues('todo', 'source');
   const userOnly = Object.keys(TODO_USER_ONLY_FIELDS);
-  // needs_reason goes only with needs user or grill, so it leaves with needs.
-  const withNeeds = [...userOnly, 'needs_reason'];
+  // needs_reason and needs_set_at go only with needs, so they leave with it.
+  const withNeeds = [...userOnly, 'needs_reason', 'needs_set_at'];
   const samples: Rec = { blocked_by: ['another-item'], needs: 'user' };
   const plain = withoutKeys(base('todo'), [...TODO_SYSTEM_REQUIRES, ...withNeeds]);
 
@@ -198,7 +198,7 @@ test('todo source: the conditions name the fields the validator requires and ref
 });
 
 test('todo blocked_by: an item listing its own slug is refused, and the condition says so', () => {
-  const item = { ...withoutKeys(base('todo'), ['needs', 'needs_reason']), source: 'user', slug: 'this-item' };
+  const item = { ...withoutKeys(base('todo'), ['needs', 'needs_reason', 'needs_set_at']), source: 'user', slug: 'this-item' };
   for (const blocked_by of [['another-item'], ['this-item'], ['another-item', 'this-item']]) {
     const self = todoBlocksItself({ slug: 'this-item', blocked_by });
     assert.equal(accepts('todo', { ...item, blocked_by }), !self, `blocked_by ${JSON.stringify(blocked_by)}`);
@@ -369,12 +369,21 @@ test('a record map prints the type of its values', () => {
   assert.equal(fieldShapeAt(fieldsOf('reference_material'), 'absence_attestations')?.type, 'record<string, {attested_at, item_id, head_commit}>');
 });
 
-test('todo needs_reason: accepted only with needs user or grill on a user item, and the condition says so', () => {
-  const item = withoutKeys(base('todo'), [...TODO_SYSTEM_REQUIRES, 'needs', 'needs_reason', 'blocked_by']);
-  for (const needs of [undefined, 'investigation', 'user', 'grill']) {
+test('todo needs_reason: accepted only with needs user, grill or external on a user item, required with external, and the condition says so', () => {
+  const item = withoutKeys(base('todo'), [...TODO_SYSTEM_REQUIRES, 'needs', 'needs_reason', 'needs_set_at', 'blocked_by']);
+  for (const needs of [undefined, 'investigation', 'user', 'grill', 'external']) {
     const accepted = accepts('todo', { ...item, source: 'user', ...(needs ? { needs } : {}), needs_reason: 'pick a colour' });
-    assert.equal(accepted, needs === 'user' || needs === 'grill', `needs_reason with needs ${String(needs)}`);
+    assert.equal(accepted, needs === 'user' || needs === 'grill' || needs === 'external', `needs_reason with needs ${String(needs)}`);
   }
   assert.ok(!accepts('todo', { ...item, source: 'user', needs: 'user', needs_reason: '  ' }), 'a blank reason is refused');
-  assert.match(conditionAt('todo', 'needs_reason'), /needs is 'user' or 'grill' on a source 'user' item/);
+  assert.ok(!accepts('todo', { ...item, source: 'user', needs: 'external' }), 'external without a reason is refused');
+  assert.ok(!accepts('todo', { ...item, source: 'user', needs: 'external', needs_reason: '  ' }), 'external with a blank reason is refused');
+  assert.match(conditionAt('todo', 'needs_reason'), /needs is 'user', 'grill' or 'external' on a source 'user' item; required with 'external'/);
+});
+
+test('todo needs_set_at: accepted only with needs, and the condition says so', () => {
+  const item = withoutKeys(base('todo'), [...TODO_SYSTEM_REQUIRES, 'needs', 'needs_reason', 'needs_set_at', 'blocked_by']);
+  assert.ok(accepts('todo', { ...item, source: 'user', needs: 'investigation', needs_set_at: '2026-10-20T10:00:00.000Z' }));
+  assert.ok(!accepts('todo', { ...item, source: 'user', needs_set_at: '2026-10-20T10:00:00.000Z' }), 'needs_set_at without needs is refused');
+  assert.match(conditionAt('todo', 'needs_set_at'), /only when needs is set/);
 });

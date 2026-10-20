@@ -348,6 +348,20 @@ test('writer: CLI output for unreadable, live and uncertain dispatches says re-d
     assert.match(both.stdout, /live_dispatches: 1[^\n]*cannot be resumed[^\n]*re-dispatch fresh/);
     assert.match(both.stdout, /uncertain_dispatches: 1[^\n]*cannot be resumed[^\n]*re-dispatch fresh/);
     assert.doesNotMatch(unreadable.stdout + both.stdout, /ListAgents/);
+
+    // GitHub #173: on OpenCode the same three lines say the lanes may still be running and how to check; Claude Code's text above is unchanged.
+    const oc = { OPENCODE: '1', OPENCODE_SESSION_ID: 'ses_oc1' };
+    writeFileSync(regPath, '{not valid json,,,\n');
+    const ocUnreadable = runRotationNote(dir, ['--next-slice', 's'], oc);
+    assert.match(ocUnreadable.stdout, /live_dispatches: UNKNOWN[^\n]*may still be running after the new session[^\n]*STOP-and-report/);
+    writeFileSync(regPath, JSON.stringify([entry('agent-live', 1_000), entry('agent-stale', 5 * 60 * 60 * 1000)]));
+    const ocBoth = runRotationNote(dir, ['--next-slice', 's'], oc);
+    assert.match(ocBoth.stdout, /live_dispatches: 1[^\n]*still running across the new session; whether the new session can reach them is not shown\. Before re-dispatching,[^\n]*STOP-and-report/);
+    assert.match(ocBoth.stdout, /uncertain_dispatches: 1[^\n]*may still be running: check it is dead \(as above\) before re-dispatching/);
+    for (const out of [ocUnreadable.stdout, ocBoth.stdout]) {
+      assert.match(out, /STOP-and-report message \(a live lane stops, a dead one only replies\), or watch the lane's files, running test processes and external resources for several minutes/);
+      assert.doesNotMatch(out, /cannot be resumed|re-dispatch fresh/);
+    }
   } finally {
     cleanup();
   }

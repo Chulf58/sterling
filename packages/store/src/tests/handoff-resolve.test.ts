@@ -296,6 +296,7 @@ test('resolveSentHandoffs: needs user or grill, then a live blocker, then open; 
       blocked: { needs: 'investigation', blocked_by: ['removed-blocker', 'live-blocker'] },
       stale: { blocked_by: ['removed-blocker'] },
       investigation: { needs: 'investigation' },
+      external: { needs: 'external', needs_reason: 'reply from the supplier', blocked_by: ['live-blocker'] },
     };
     const trackers: { id: string; handoff: unknown }[] = [];
     const idOf: Record<string, string> = {};
@@ -314,6 +315,8 @@ test('resolveSentHandoffs: needs user or grill, then a live blocker, then open; 
     assert.deepEqual(out.get(idOf.blocked), { state: 'blocked', text: 'blocked in beta' });
     assert.deepEqual(out.get(idOf.stale), { state: 'open', text: 'open in beta' }, 'a removed blocker is closed');
     assert.deepEqual(out.get(idOf.investigation), { state: 'open', text: 'open in beta' });
+    // GitHub issue #175: an outside-party wait keeps its reason on the sender's tracker, ahead of a live blocker.
+    assert.deepEqual(out.get(idOf.external), { state: 'waiting_external', text: 'waiting on others in beta: reply from the supplier' });
   } finally {
     b.cleanup();
   }
@@ -385,7 +388,7 @@ test('resolveSentHandoffs: a deadline crossed DURING the last blocker query read
   }
 });
 
-test('resolveSentHandoffs: a receiver row carrying needs_reason without needs user or grill reads unknown', () => {
+test('resolveSentHandoffs: a receiver row carrying needs_reason without needs user, grill or external reads unknown', () => {
   const b = receiver();
   try {
     const tracker = randomUUID();
@@ -398,7 +401,7 @@ test('resolveSentHandoffs: a receiver row carrying needs_reason without needs us
     db.close();
     const out = resolveSentHandoffs([{ id: tracker, handoff: sent(b.root, transfer, item.id) }]);
     assert.equal(out.get(tracker)?.state, 'unknown');
-    assert.match(out.get(tracker)?.text ?? '', /cannot be read: needs_reason: needs_reason goes only with needs 'user' or 'grill'/);
+    assert.match(out.get(tracker)?.text ?? '', /cannot be read: needs_reason: needs_reason goes only with needs 'user', 'grill' or 'external'/);
   } finally {
     b.cleanup();
   }

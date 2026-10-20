@@ -16,13 +16,14 @@ import { HANDOFFS_DIR_REL, handoffClosureReadSchema, handoffEvidenceFileReadSche
 export type SentHandoff = Extract<TodoHandoff, { role: 'sent' }>;
 
 /** open: the item is on the receiver's board. needs_user: it is there and
- *  marked needs 'user' or 'grill'. blocked: it is there and at least one of its
+ *  marked needs 'user' or 'grill'. waiting_external: it is there and marked
+ *  needs 'external', waiting on an outside party (GitHub issue #175). blocked: it is there and at least one of its
  *  blockers is still a live board item in the receiver's store. done: it was
  *  removed and its closure file says so. gone: removed with no closure file (an older
  *  receiver, or a hand delete), so completion is unverified. unknown: the
  *  receiver could not be read or its row does not match. unconfirmed: the
  *  receiver's item id was never recorded (delivery did not finish). */
-export type HandoffStatusState = 'open' | 'needs_user' | 'blocked' | 'done' | 'gone' | 'unknown' | 'unconfirmed';
+export type HandoffStatusState = 'open' | 'needs_user' | 'waiting_external' | 'blocked' | 'done' | 'gone' | 'unknown' | 'unconfirmed';
 
 export interface HandoffStatus {
   state: HandoffStatusState;
@@ -145,6 +146,7 @@ function readEvidence(h: SentHandoff & { to_item_id: string }, root: string): Ha
 const statusText = {
   open: (to: string) => `open in ${to}`,
   needs_user: (to: string, reason?: string) => `needs user in ${to}${reason ? `: ${reason}` : ''}`,
+  waiting_external: (to: string, reason?: string) => `waiting on others in ${to}${reason ? `: ${reason}` : ''}`,
   blocked: (to: string) => `blocked in ${to}`,
   done: (to: string, closedAt: string, note?: string, milestone?: string, evidence?: HandoffEvidence) => {
     const head = milestone === undefined ? `DONE in ${to} ${closedAt}` : evidence ? `DONE in ${to} ${closedAt} (${milestone})` : `DONE in ${to} ${closedAt}, unverified (${milestone})`;
@@ -203,7 +205,8 @@ function closureStatus(h: SentHandoff & { to_item_id: string }, root: string): H
 /**
  * One tracker's status against an already-open receiver database. Precedence
  * (decision handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe):
- * needs 'user' or 'grill' first, then a blocker that is still a live board
+ * needs 'user' or 'grill' first, then needs 'external' (waiting on others,
+ * GitHub issue #175), then a blocker that is still a live board
  * item there (blocked_by keeps the slugs of removed blockers, so a slug no live
  * todo carries is closed, the rule board readiness uses), then open. needs
  * 'investigation' reads open. The fields are read through the shared
@@ -236,6 +239,7 @@ function rowStatus(db: DatabaseSync, root: string, trackerId: string, h: SentHan
   }
   const wait = waitParsed.data;
   if (wait.needs === 'user' || wait.needs === 'grill') return { state: 'needs_user', text: statusText.needs_user(h.to_name, wait.needs_reason?.trim()) };
+  if (wait.needs === 'external') return { state: 'waiting_external', text: statusText.waiting_external(h.to_name, wait.needs_reason?.trim()) };
   if (wait.blocked_by?.length) {
     const live = db.prepare(`SELECT 1 FROM records WHERE type = 'todo' AND status != 'superseded' AND json_extract(body, '$.slug') = ? LIMIT 1`);
     for (const slug of new Set(wait.blocked_by)) {

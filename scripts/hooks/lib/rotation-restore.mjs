@@ -58,6 +58,12 @@ const NOTE_FIELD_MAX = {
 // injection than that per lane (the lane COUNT stays exact, see below).
 const LANE_HANDOFF_MAX = 1000;
 
+// How to tell whether a lane from before a rotation or restart is dead, shown on
+// OpenCode, where it is not shown that an old lane is unreachable (GitHub #173;
+// anti-pattern bdef2a77). Claude Code's measured "cannot be resumed" stays as is.
+export const OPENCODE_DEAD_LANE_CHECK =
+  "tell whether a lane is dead: send the old sessionID a STOP-and-report message (a live lane stops, a dead one only replies), or watch the lane's files, running test processes and external resources for several minutes";
+
 export function rotationNotePath(cwd) {
   return join(cwd, '.sterling', 'transient', 'rotation-note.json');
 }
@@ -232,14 +238,18 @@ export function renderRotationRestore(note, { cwd, source, host = 'claude', plan
       .join('\n');
     const omitted = liveDispatches.length - Math.min(liveDispatches.length, LIVE_DISPATCH_MAX);
     liveLine =
-      `\n${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and cannot be resumed from this one (agent lookup is scoped to the current session); re-dispatch fresh if the work is still needed, and mind the territory below, which they may still be writing:\n${rendered}` +
+      (host === 'opencode'
+        ? `\n${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and may still be running; whether this session can reach them is not shown. Before re-dispatching, ${OPENCODE_DEAD_LANE_CHECK}. Mind the territory below, which they may still be writing:\n${rendered}`
+        : `\n${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and cannot be resumed from this one (agent lookup is scoped to the current session); re-dispatch fresh if the work is still needed, and mind the territory below, which they may still be writing:\n${rendered}`) +
       (omitted > 0 ? `\n… (+${omitted} more)` : '');
   } else if (liveDispatches === null) {
     liveLine = `\n${render(
       disclosure(
         'register_unavailable',
         {},
-        'dispatch register unavailable — the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed, and check git status for files it may still be writing.'
+        host === 'opencode'
+          ? `dispatch register unavailable — the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and may still be running. Before re-dispatching, ${OPENCODE_DEAD_LANE_CHECK}, and check git status for files it may still be writing.`
+          : 'dispatch register unavailable — the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed, and check git status for files it may still be writing.'
       )
     )}`;
   }
@@ -258,7 +268,13 @@ export function renderRotationRestore(note, { cwd, source, host = 'claude', plan
         const id = planLockClean(String(d?.agent_id ?? 'unknown id'), PLAN_LOCK_PATH_MAX) || 'unknown id';
         const reason = planLockClean(String(d?.reason ?? 'unknown'), PLAN_LOCK_PATH_MAX) || 'unknown';
         return render(
-          disclosure('dispatch_status_unknown', {}, `${type}:${id} — ownership uncertain (${reason}); belongs to the previous session and cannot be resumed from this one — re-dispatch fresh if still needed`)
+          disclosure(
+            'dispatch_status_unknown',
+            {},
+            host === 'opencode'
+              ? `${type}:${id} — ownership uncertain (${reason}); belongs to the previous session and may still be running — check it is dead (as above) before re-dispatching`
+              : `${type}:${id} — ownership uncertain (${reason}); belongs to the previous session and cannot be resumed from this one — re-dispatch fresh if still needed`
+          )
         );
       })
       .join('\n');
@@ -295,16 +311,15 @@ export function renderRotationRestore(note, { cwd, source, host = 'claude', plan
     // means Claude Code, the only writer before OpenCode support), not the host
     // restoring it: an OpenCode session id is resumed with `opencode --session`.
     const wayBack = note.session_host === 'opencode'
-      ? (noteSession
-          ? `The old agents are reachable only by returning to the old session: \`opencode --session ${noteSession}\`.`
-          : `The old agents are reachable only by returning to the old session; the note recorded no session id.`)
+      ? `Before re-dispatching, ${OPENCODE_DEAD_LANE_CHECK}. ` +
+        (noteSession ? `The old session is \`opencode --session ${noteSession}\`.` : `The note recorded no session id for the old session.`)
       : (noteSession
           ? `The old agents are reachable only by returning to the old session: \`claude --resume ${noteSession}\`, or the rewind menu's previous-session entry.`
           : `The old agents are reachable only by returning to the old session (the rewind menu's previous-session entry); the note recorded no session id.`);
     lanesLine =
       (host === 'claude'
         ? `\n${noteLanes.length} lane hand-off(s) carried across the rotation. Pre-clear subagents cannot be resumed with SendMessage after a /clear or restart ("No transcript found for agent ID"): re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. `
-        : `\n${noteLanes.length} lane hand-off(s) carried across the rotation. Subagents of the previous session are not continued from this one: re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. `) +
+        : `\n${noteLanes.length} lane hand-off(s) carried across the rotation. Subagents of the previous session may still be running: re-dispatch a lane worth continuing only once it is known dead, with its hand-off below in the brief. `) +
       wayBack +
       `\n${renderedLanes}` +
       (omittedLanes > 0 ? `\n… (+${omittedLanes} more)` : '');
