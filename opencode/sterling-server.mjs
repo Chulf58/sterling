@@ -18678,7 +18678,7 @@ function gitState(root, spawnSync11 = nodeSpawnSync) {
 }
 function dirtyPaths(root, paths, spawnSync11 = nodeSpawnSync, prefix = "") {
   if (!paths.length) return /* @__PURE__ */ new Set();
-  const r = spawnSync11("git", ["-C", root, "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync11("git", ["-C", root, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--", ...paths], { encoding: "utf8", timeout: 3e4 });
   if (r.error || r.status !== 0) return null;
   const dirty = /* @__PURE__ */ new Set();
   const add = (p) => {

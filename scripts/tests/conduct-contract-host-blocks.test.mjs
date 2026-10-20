@@ -58,7 +58,11 @@ const TEMPLATE = join(repo, 'templates', 'target-claude-md.md');
 // config, with the reason (an image result can push one MCP message past Claude Code's 16 MB stdio limit
 // and Claude Code then drops the server) and the note that `tools.view_image` does not work on 0.153.4
 // (GitHub issue #90).
-const PRE_BLOCKS_CLAUDE_RENDER_SHA = '35f1120fa3dd1e23c7b365dbbd859720f06f9296de297269823c2282a03a3495';
+// Moved 2026-10-20 (from 35f1120f…): the same bullet reviews on `gpt-6.1-sol` and gains the loud
+// fallback, on the ChatGPT-account 400 say so, retry once on `gpt-5.6-sol`, then review on Opus and
+// tell the user to check the Codex login (decision
+// claude-code-sol-route-defaults-to-gpt-6-1-sol-with-loud-fallback; GitHub issue #165).
+const PRE_BLOCKS_CLAUDE_RENDER_SHA = '5614a34512cb78eda97aae0401de8ce8985e06ae612f7cb34d0a1210113c77d1';
 // What the OpenCode model can never act on. An unmapped /sterling:<name> is checked separately.
 const CLAUDE_ONLY = ['${CLAUDE_PLUGIN_ROOT}', 'READY TO CLEAR', '/clear', 'AskUserQuestion'];
 const MARKERS = Object.values(FENCE_KINDS).flatMap((f) => [f.open, f.close]);
@@ -141,7 +145,7 @@ test('every mapping the old phrase map carried has its OpenCode text in the rend
       'native-implement': 'agent `sterling/implementor` with `model` `openai/gpt-5.6-terra` to implement',
       'native-no-sandbox': 'do not modify the worktree',
       'native-model-pinned': 'The user pins which model runs these lanes (user-asked 2026-10-03',
-      'claude-code-stays-on-5.6-sol': 'Claude Code stays on `gpt-5.6-sol` because Codex on a ChatGPT account refuses the 6.x Sol models',
+      'claude-code-route-6.1-sol-loud-fallback': 'Claude Code\'s `codex` MCP route uses the same `gpt-6.1-sol`; when a ChatGPT-account Codex answers HTTP 400 "not supported when using Codex with a ChatGPT account", it retries once on `gpt-5.6-sol`, then reviews on Opus, saying so each time',
       'codex-claude-code-only': 'The `codex` MCP tool is the Claude Code route only',
       'codex-ruling-2026-09-20': '*"Add that to all instruction files, that we use the codex mcp over whatever you were doing"*',
       'codex-ruling-2026-10-05': 'narrowed to Claude Code on 2026-10-05',
@@ -159,7 +163,12 @@ test('every mapping the old phrase map carried has its OpenCode text in the rend
     const claude = renderClaudeText(template(), 'target-claude-md.md');
     assert.ok(claude.includes('uses the `codex` MCP tool (the pinned Codex 0.153.4 MCP server is the one supported route'), 'the Claude render keeps the codex MCP route');
     assert.ok(!claude.includes('openai/') && !claude.includes('sterling/reviewer'), 'the native OpenCode route does not reach the Claude render');
-    assert.ok(!claude.includes('gpt-6.1-sol'), 'the Claude render of the template does not name gpt-6.1-sol');
+    // GitHub issue #165 (decision claude-code-sol-route-defaults-to-gpt-6-1-sol-with-loud-fallback):
+    // the Claude route reviews on gpt-6.1-sol and falls back loudly, in the Claude render only.
+    assert.ok(claude.includes('`gpt-6.1-sol` to review'), 'the Claude render of the template names gpt-6.1-sol for review');
+    assert.ok(claude.includes('retry once with `model: gpt-5.6-sol`') && claude.includes('run the review on Opus and tell the user to check the Codex login (API key versus ChatGPT plan); never a silent fallback'), 'the Claude render of the template carries the loud fallback');
+    assert.ok(!claude.includes('`gpt-5.6-sol` to review'), 'the Claude render of the template no longer pins gpt-5.6-sol as the review default');
+    assert.ok(!claude.includes('refuses the 6.x Sol models'), 'the Claude render no longer carries the stale refusal rationale');
   } finally {
     p.cleanup();
   }
@@ -173,7 +182,7 @@ test("this repo's CLAUDE.md: the OpenCode render names the native route, the Cla
   const p = project(own);
   try {
     const out = layer.renderSterlingLayer(p.dir, layer.sterlingRoot());
-    for (const text of ['sterling/reviewer', 'openai/gpt-6.1-sol#high', 'openai/gpt-6-astra#high', 'sterling/implementor', 'openai/gpt-5.6-terra', 'The `codex` MCP tool is the Claude Code route only', 'narrowed to Claude Code on 2026-10-05', 'do not modify the worktree', 'Claude Code stays on `gpt-5.6-sol` because Codex on a ChatGPT account refuses the 6.x Sol models']) {
+    for (const text of ['sterling/reviewer', 'openai/gpt-6.1-sol#high', 'openai/gpt-6-astra#high', 'sterling/implementor', 'openai/gpt-5.6-terra', 'The `codex` MCP tool is the Claude Code route only', 'narrowed to Claude Code on 2026-10-05', 'do not modify the worktree', 'Claude Code\'s `codex` MCP route uses the same `gpt-6.1-sol`; when a ChatGPT-account Codex answers HTTP 400']) {
       assert.ok(out.includes(text), `OpenCode render of CLAUDE.md lacks ${JSON.stringify(text)}`);
     }
     for (const codexRoute of ['uses the `codex` MCP tool', 'only when a `codex` MCP server is configured', '`sandbox` (`read-only`']) {
@@ -184,8 +193,10 @@ test("this repo's CLAUDE.md: the OpenCode render names the native route, the Cla
     assert.ok(claude.includes('uses the `codex` MCP tool (the pinned Codex 0.153.4 MCP server is the one supported route'), 'the Claude render keeps the codex MCP route');
     assert.ok(!claude.includes('openai/gpt-'), 'the native OpenCode route does not reach the Claude render');
     assert.ok(!out.includes('openai/gpt-5.6-sol'), 'the OpenCode render no longer dispatches the old Sol id');
-    assert.ok(!claude.includes('gpt-6.1-sol'), 'the Claude render does not name gpt-6.1-sol');
-    assert.ok(claude.includes('`gpt-5.6-sol` to review'), 'the Claude render still names gpt-5.6-sol');
+    assert.ok(claude.includes('`gpt-6.1-sol` to review'), 'the Claude render names gpt-6.1-sol for review');
+    assert.ok(!claude.includes('`gpt-5.6-sol` to review'), 'the Claude render no longer pins gpt-5.6-sol as the review default');
+    assert.ok(claude.includes('retry once with `model: gpt-5.6-sol`') && claude.includes('check the Codex login (API key versus ChatGPT plan); never a silent fallback'), 'the Claude render carries the loud fallback');
+    assert.ok(!claude.includes('refuses the 6.x Sol models'), 'the Claude render no longer carries the stale refusal rationale');
   } finally {
     p.cleanup();
   }
