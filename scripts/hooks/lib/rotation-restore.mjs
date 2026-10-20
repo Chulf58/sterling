@@ -311,16 +311,15 @@ export function renderRotationRestore(note, { cwd, source, host = 'claude', plan
     // means Claude Code, the only writer before OpenCode support), not the host
     // restoring it: an OpenCode session id is resumed with `opencode --session`.
     const wayBack = note.session_host === 'opencode'
-      ? (noteSession
-          ? `The old agents are reachable only by returning to the old session: \`opencode --session ${noteSession}\`.`
-          : `The old agents are reachable only by returning to the old session; the note recorded no session id.`)
+      ? `Before re-dispatching, ${OPENCODE_DEAD_LANE_CHECK}. ` +
+        (noteSession ? `The old session is \`opencode --session ${noteSession}\`.` : `The note recorded no session id for the old session.`)
       : (noteSession
           ? `The old agents are reachable only by returning to the old session: \`claude --resume ${noteSession}\`, or the rewind menu's previous-session entry.`
           : `The old agents are reachable only by returning to the old session (the rewind menu's previous-session entry); the note recorded no session id.`);
     lanesLine =
       (host === 'claude'
         ? `\n${noteLanes.length} lane hand-off(s) carried across the rotation. Pre-clear subagents cannot be resumed with SendMessage after a /clear or restart ("No transcript found for agent ID"): re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. `
-        : `\n${noteLanes.length} lane hand-off(s) carried across the rotation. Subagents of the previous session are not continued from this one: re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. `) +
+        : `\n${noteLanes.length} lane hand-off(s) carried across the rotation. Subagents of the previous session may still be running: re-dispatch a lane worth continuing only once it is known dead, with its hand-off below in the brief. `) +
       wayBack +
       `\n${renderedLanes}` +
       (omittedLanes > 0 ? `\n… (+${omittedLanes} more)` : '');

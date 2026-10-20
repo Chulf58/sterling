@@ -229,7 +229,7 @@ test('needs_reason (#107): set with needs user, shown on the sender tracker; cle
     const b = h.betaTools();
     try {
       const item = () => b.tools.boardGet(d.delivered.id) as unknown as Loose;
-      assert.throws(() => b.tools.boardUpdate(d.delivered.id, { needs_reason: 'pick a colour' }), /needs_reason says why an item waits for the user, .* this item's needs would be absent\. Nothing was updated\./);
+      assert.throws(() => b.tools.boardUpdate(d.delivered.id, { needs_reason: 'pick a colour' }), /needs_reason says why an item waits, .* this item's needs would be absent\. Nothing was updated\./);
       assert.throws(() => b.tools.boardUpdate(d.delivered.id, { needs: 'investigation', needs_reason: 'pick a colour' }), /this item's needs would be 'investigation'/);
       assert.equal('needs_reason' in item(), false);
 
@@ -259,7 +259,7 @@ test('needs_reason (#107): set with needs user, shown on the sender tracker; cle
       b.close();
     }
     const sys = h.tools.boardAdd({ text: 'Queue item', source: 'system', system_reason: 'reconcile_needed' }).record.id;
-    assert.throws(() => h.tools.boardUpdate(sys, { needs_reason: 'x' }), /goes only with needs 'user' or 'grill' on a source:'user' board task/);
+    assert.throws(() => h.tools.boardUpdate(sys, { needs_reason: 'x' }), /goes only with needs 'user', 'grill' or 'external' on a source:'user' board task/);
   } finally {
     h.cleanup();
   }
@@ -928,6 +928,34 @@ test('a receiver renamed in the registry reads under its current name in handoff
     assert.deepEqual((h.tools.boardGet(open.tracker.id) as unknown as Loose).handoff, { role: 'sent', transfer_id: open.transfer_id, to_root: h.beta, to_name: 'beta', to_item_id: open.delivered.id }, 'the stored tracker is never rewritten');
   } finally {
     registry.close();
+    h.cleanup();
+  }
+});
+
+test("board_query handoff_to_item_id (#175): finds the tracker by the receiver's item id; foreign rows carry readiness", () => {
+  const h = harness();
+  try {
+    const d = handOver(h);
+    handOver(h);
+    const found = h.tools.boardQueryResult({ source: 'user', handoff_to_item_id: d.delivered.id }).records as Loose[];
+    assert.deepEqual(found.map((r) => r.id), [d.tracker.id]);
+    assert.equal(found[0].readiness, 'delegated');
+    assert.deepEqual(h.tools.boardQueryResult({ source: 'user', handoff_to_item_id: '00000000-0000-4000-8000-000000000000' }).records, []);
+    assert.throws(() => handOver(h, { needs: 'external' }), /needs 'external' cannot go with target_project/);
+    const b = h.betaTools();
+    try {
+      b.tools.boardUpdate(d.delivered.id, { needs: 'external', needs_reason: 'reply from the supplier' });
+    } finally {
+      b.close();
+    }
+    const foreign = h.tools.foreignBoardQuery({ target_project: 'beta' }).records as Loose[];
+    const row = foreign.find((r) => r.id === d.delivered.id) as Loose;
+    assert.equal(row.readiness, 'waiting');
+    assert.equal(row.needs, 'external');
+    const waiting = h.tools.foreignBoardQuery({ target_project: 'beta', readiness: ['waiting'] }).records as Loose[];
+    assert.deepEqual(waiting.map((r) => r.id), [d.delivered.id]);
+    assert.ok(foreign.filter((r) => r.readiness === 'ready').length >= 1, 'the other handed-over item is ready there');
+  } finally {
     h.cleanup();
   }
 });

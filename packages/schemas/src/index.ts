@@ -31,6 +31,7 @@ export {
   todoWaitFieldsReadSchema,
   todoBoardItemReadSchema,
   needsReasonAllowed,
+  needsReasonRequired,
   type TodoHandoff,
   HANDOFFS_DIR_REL,
   handoffClosureSchema,

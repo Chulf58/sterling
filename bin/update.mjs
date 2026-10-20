@@ -4351,7 +4351,10 @@ var init_envelope = __esm({
 
 // packages/schemas/dist/records.js
 function needsReasonAllowed(needs) {
-  return needs === "user" || needs === "grill";
+  return needs === "user" || needs === "grill" || needs === "external";
+}
+function needsReasonRequired(needs) {
+  return needs === "external";
 }
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
@@ -4837,7 +4840,8 @@ function recordFieldConditions(type) {
       for (const field of userOnly)
         out.push([field, `Refused when source is '${TODO_SYSTEM_SOURCE}'.`]);
       out.push(["blocked_by", "An item cannot list its own slug."]);
-      out.push(["needs_reason", "Accepted only when needs is 'user' or 'grill' on a source 'user' item."]);
+      out.push(["needs_reason", "Accepted only when needs is 'user', 'grill' or 'external' on a source 'user' item; required with 'external'."]);
+      out.push(["needs_set_at", "Accepted only when needs is set."]);
       return out;
     }
     case "open_question":
@@ -5274,7 +5278,7 @@ var init_records = __esm({
       notes: external_exports.string().optional(),
       file_keys: external_exports.array(repoPath).optional()
     }).superRefine(refineSupersession);
-    BOARD_NEEDS = ["user", "grill", "investigation"];
+    BOARD_NEEDS = ["user", "grill", "investigation", "external"];
     SYSTEM_REASONS = [
       "reconcile_needed",
       "stale_research",
@@ -5409,7 +5413,7 @@ var init_records = __esm({
       blocked_by: external_exports.array(external_exports.string().min(1)).optional()
     }).superRefine((rec, ctx) => {
       if (rec.needs_reason !== void 0 && !needsReasonAllowed(rec.needs)) {
-        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user', 'grill' or 'external'` });
       }
     });
     todoBoardItemReadSchema = external_exports.object({
@@ -5467,20 +5471,34 @@ var init_records = __esm({
       // What a user item waits on besides its blockers (decision
       // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
       // 'investigation' still auto-starts, as a researcher lane; 'user' and
-      // 'grill' wait for the user. Not a progress status: `status` keeps meaning
-      // supersession only. Absent means nothing beyond the blockers.
+      // 'grill' wait for the user; 'external' waits on an outside party (a mail
+      // reply, a meeting, a branch someone else owns; GitHub issue #175). Not a
+      // progress status: `status` keeps meaning supersession only. Absent means
+      // nothing beyond the blockers.
       needs: external_exports.enum(BOARD_NEEDS).optional(),
-      // Why a user item waits for the user (GitHub issue #107, decision
+      // Why a user item waits (GitHub issue #107, decision
       // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
-      // only with needs 'user' or 'grill' on a source:'user' item. A sender's
-      // tracker shows it as "needs user in <project>: <reason>".
+      // only with needs 'user', 'grill' or 'external' on a source:'user' item,
+      // and required with 'external'. A sender's tracker shows it as
+      // "needs user in <project>: <reason>".
       needs_reason: needsReasonField.optional(),
+      // When `needs` last changed value (GitHub issue #175). Server-stamped by
+      // board_add/board_update, kept through other edits, removed with needs.
+      // The age of an external wait is read from it, never from updated_at,
+      // which any unrelated edit resets.
+      needs_set_at: external_exports.string().datetime().optional(),
       // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
       handoff: todoHandoffSchema.optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
       if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
-        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user', 'grill' or 'external' on a source:'user' board task` });
+      }
+      if (rec.source === "user" && needsReasonRequired(rec.needs) && rec.needs_reason === void 0) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs 'external' requires a needs_reason naming what is awaited and what lets the work resume` });
+      }
+      if (rec.needs_set_at !== void 0 && rec.needs === void 0) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_set_at"], message: `needs_set_at goes only with needs` });
       }
       if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
@@ -6762,6 +6780,7 @@ __export(dist_exports, {
   modelsCatalogSchema: () => modelsCatalogSchema,
   moveFenceSchema: () => moveFenceSchema,
   needsReasonAllowed: () => needsReasonAllowed,
+  needsReasonRequired: () => needsReasonRequired,
   noCaptureLaneSchema: () => noCaptureLaneSchema,
   normalizeLocation: () => normalizeLocation,
   normalizeRawConfig: () => normalizeRawConfig,
@@ -10860,6 +10879,8 @@ __export(dist_exports2, {
   axisNarrowText: () => axisNarrowText,
   axisTitleText: () => axisTitleText,
   boardReadinessOf: () => boardReadinessOf,
+  boardWaitAge: () => boardWaitAge,
+  boardWriteOverlaps: () => boardWriteOverlaps,
   buildPgConnectionConfig: () => buildPgConnectionConfig,
   buildReconcileText: () => buildReconcileText,
   catalogStatus: () => catalogStatus,
@@ -11029,7 +11050,7 @@ function boardReadinessOf(targets, live, openBlocker) {
     }
     const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
     const sent = sentHandoffOf(t);
-    const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+    const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" || t.needs === "external" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
     return {
       id: t.id,
       ...t.slug ? { slug: t.slug } : {},
@@ -11038,6 +11059,8 @@ function boardReadinessOf(targets, live, openBlocker) {
       updated_at: t.updated_at,
       file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
       ...t.needs ? { needs: t.needs } : {},
+      ...t.needs && typeof t.needs_reason === "string" ? { needs_reason: t.needs_reason } : {},
+      ...t.needs && typeof t.needs_set_at === "string" ? { needs_set_at: t.needs_set_at } : {},
       blockers,
       blockers_open: blockersOpen,
       unblocks,
@@ -11045,6 +11068,24 @@ function boardReadinessOf(targets, live, openBlocker) {
       ...sent ? { handoff: sent, ...typeof t.created_at === "string" ? { created_at: t.created_at } : {} } : {}
     };
   });
+}
+function boardWriteOverlaps(ready) {
+  const marks = /* @__PURE__ */ new Map();
+  for (const a of ready) {
+    const keys = new Set(a.file_keys);
+    const others = ready.filter((b) => b.id !== a.id && b.file_keys.some((k) => keys.has(k))).map((b) => b.name);
+    if (others.length)
+      marks.set(a.id, others);
+  }
+  return marks;
+}
+function boardWaitAge(setAt, now = Date.now()) {
+  const t = typeof setAt === "string" ? Date.parse(setAt) : NaN;
+  if (Number.isNaN(t))
+    return "since unknown";
+  const ms = Math.max(0, now - t);
+  const ago = ms >= DAY_MS ? `${Math.floor(ms / DAY_MS)}d ago` : `${Math.floor(ms / 36e5)}h ago`;
+  return `since ${setAt.slice(0, 10)}, ${ago}`;
 }
 function compareBoardReadiness(a, b) {
   const pa = PRIORITY_RANK[a.priority ?? "normal"] ?? 1;
@@ -11230,7 +11271,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, CATALOG_DAY_MS, DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -11368,6 +11409,7 @@ var init_dist2 = __esm({
       }
     };
     CATALOG_DAY_MS = 864e5;
+    DAY_MS = 864e5;
     PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
     MAX_RANK_TERMS = 16;
     rankTerms = external_exports.array(external_exports.string().regex(new RegExp(`^\\S{1,${AXIS_MAX_TERM_LEN}}$`), `rank_terms must be single keywords (no whitespace, \u2264${AXIS_MAX_TERM_LEN} chars)`)).transform((terms) => {

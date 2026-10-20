@@ -17553,7 +17553,7 @@ var attestationSchema = base.extend({
   notes: external_exports.string().optional(),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
-var BOARD_NEEDS = ["user", "grill", "investigation"];
+var BOARD_NEEDS = ["user", "grill", "investigation", "external"];
 var SYSTEM_REASONS = [
   "reconcile_needed",
   "stale_research",
@@ -17659,7 +17659,10 @@ var handoffEvidenceFileReadSchema = external_exports.object({
 });
 var needsReasonField = external_exports.string().min(1).refine((v) => v.trim().length > 0, "needs_reason must not be blank");
 function needsReasonAllowed(needs) {
-  return needs === "user" || needs === "grill";
+  return needs === "user" || needs === "grill" || needs === "external";
+}
+function needsReasonRequired(needs) {
+  return needs === "external";
 }
 var todoWaitFieldsReadSchema = external_exports.object({
   needs: external_exports.enum(BOARD_NEEDS).optional(),
@@ -17667,7 +17670,7 @@ var todoWaitFieldsReadSchema = external_exports.object({
   blocked_by: external_exports.array(external_exports.string().min(1)).optional()
 }).superRefine((rec, ctx) => {
   if (rec.needs_reason !== void 0 && !needsReasonAllowed(rec.needs)) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user', 'grill' or 'external'` });
   }
 });
 var todoBoardItemReadSchema = external_exports.object({
@@ -17728,20 +17731,34 @@ var todoSchema = base.extend({
   // What a user item waits on besides its blockers (decision
   // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
   // 'investigation' still auto-starts, as a researcher lane; 'user' and
-  // 'grill' wait for the user. Not a progress status: `status` keeps meaning
-  // supersession only. Absent means nothing beyond the blockers.
+  // 'grill' wait for the user; 'external' waits on an outside party (a mail
+  // reply, a meeting, a branch someone else owns; GitHub issue #175). Not a
+  // progress status: `status` keeps meaning supersession only. Absent means
+  // nothing beyond the blockers.
   needs: external_exports.enum(BOARD_NEEDS).optional(),
-  // Why a user item waits for the user (GitHub issue #107, decision
+  // Why a user item waits (GitHub issue #107, decision
   // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
-  // only with needs 'user' or 'grill' on a source:'user' item. A sender's
-  // tracker shows it as "needs user in <project>: <reason>".
+  // only with needs 'user', 'grill' or 'external' on a source:'user' item,
+  // and required with 'external'. A sender's tracker shows it as
+  // "needs user in <project>: <reason>".
   needs_reason: needsReasonField.optional(),
+  // When `needs` last changed value (GitHub issue #175). Server-stamped by
+  // board_add/board_update, kept through other edits, removed with needs.
+  // The age of an external wait is read from it, never from updated_at,
+  // which any unrelated edit resets.
+  needs_set_at: external_exports.string().datetime().optional(),
   // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
   handoff: todoHandoffSchema.optional()
 }).superRefine((rec, ctx) => {
   refineSupersession(rec, ctx);
   if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
-    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user', 'grill' or 'external' on a source:'user' board task` });
+  }
+  if (rec.source === "user" && needsReasonRequired(rec.needs) && rec.needs_reason === void 0) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs 'external' requires a needs_reason naming what is awaited and what lets the work resume` });
+  }
+  if (rec.needs_set_at !== void 0 && rec.needs === void 0) {
+    ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_set_at"], message: `needs_set_at goes only with needs` });
   }
   if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
@@ -18450,7 +18467,8 @@ function recordFieldConditions(type) {
       for (const field of userOnly)
         out.push([field, `Refused when source is '${TODO_SYSTEM_SOURCE}'.`]);
       out.push(["blocked_by", "An item cannot list its own slug."]);
-      out.push(["needs_reason", "Accepted only when needs is 'user' or 'grill' on a source 'user' item."]);
+      out.push(["needs_reason", "Accepted only when needs is 'user', 'grill' or 'external' on a source 'user' item; required with 'external'."]);
+      out.push(["needs_set_at", "Accepted only when needs is set."]);
       return out;
     }
     case "open_question":
@@ -23427,7 +23445,7 @@ function boardReadinessOf(targets, live, openBlocker) {
     }
     const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
     const sent = sentHandoffOf(t);
-    const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+    const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" || t.needs === "external" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
     return {
       id: t.id,
       ...t.slug ? { slug: t.slug } : {},
@@ -23436,6 +23454,8 @@ function boardReadinessOf(targets, live, openBlocker) {
       updated_at: t.updated_at,
       file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
       ...t.needs ? { needs: t.needs } : {},
+      ...t.needs && typeof t.needs_reason === "string" ? { needs_reason: t.needs_reason } : {},
+      ...t.needs && typeof t.needs_set_at === "string" ? { needs_set_at: t.needs_set_at } : {},
       blockers,
       blockers_open: blockersOpen,
       unblocks,
@@ -23443,6 +23463,16 @@ function boardReadinessOf(targets, live, openBlocker) {
       ...sent ? { handoff: sent, ...typeof t.created_at === "string" ? { created_at: t.created_at } : {} } : {}
     };
   });
+}
+function boardWriteOverlaps(ready) {
+  const marks = /* @__PURE__ */ new Map();
+  for (const a of ready) {
+    const keys = new Set(a.file_keys);
+    const others = ready.filter((b) => b.id !== a.id && b.file_keys.some((k) => keys.has(k))).map((b) => b.name);
+    if (others.length)
+      marks.set(a.id, others);
+  }
+  return marks;
 }
 function boardItemHandle(rec) {
   const label = boardDisplayLabel(rec.text, rec.slug);
@@ -31410,8 +31440,17 @@ function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
 }
 
 // packages/mcp-server/dist/tools.js
+var BOARD_READINESS_STATES = ["ready", "research", "waiting", "blocked", "delegated"];
+function readinessFields(r, overlaps) {
+  const shares = r.state === "ready" ? overlaps.get(r.id) : void 0;
+  return {
+    readiness: r.state,
+    ...r.blockers_open.length ? { blockers_open: r.blockers_open } : {},
+    ...shares?.length ? { shares_write_path_with: shares } : {}
+  };
+}
 var BOARD_TEXT_CLIP = 240;
-var BOARD_TEXT_FIELDS = ["id", "slug", "objective", "source", "system_reason", "status", "priority", "feature_link", "blocked_by", "needs", "needs_reason", "updated_at"];
+var BOARD_TEXT_FIELDS = ["id", "slug", "objective", "source", "system_reason", "status", "priority", "feature_link", "blocked_by", "needs", "needs_reason", "needs_set_at", "updated_at"];
 function textRowRecord(record2) {
   const out = {};
   for (const f of BOARD_TEXT_FIELDS) {
@@ -31489,6 +31528,10 @@ function boardCursorIdentity(surface, filter) {
     identity.feature_slug = filter.feature_slug;
   if (filter.target_project !== void 0)
     identity.target_project = filter.target_project;
+  if (filter.readiness !== void 0 && filter.readiness.length > 0)
+    identity.readiness = [...new Set(filter.readiness)].sort();
+  if (filter.handoff_to_item_id !== void 0)
+    identity.handoff_to_item_id = filter.handoff_to_item_id;
   return identity;
 }
 function describeIdentityMismatch(minted, current) {
@@ -37602,7 +37645,11 @@ ${JSON.stringify(entry)}
     const users = records.filter((r) => r.source === "user");
     if (!users.length)
       return out;
-    const readiness = this.store.boardReadiness(users);
+    const whole = this.store.boardReadiness();
+    const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === "ready"));
+    const byId = new Map(whole.map((r) => [r.id, r]));
+    const missing = users.filter((u) => !byId.has(u.id));
+    const readiness = [...users.flatMap((u) => byId.get(u.id) ?? []), ...missing.length ? this.store.boardReadiness(missing) : []];
     const createdAt = new Map(users.map((u) => [u.id, u.created_at]));
     const statuses = resolveSentHandoffs(readiness.filter((r) => r.handoff).map((r) => ({ id: r.id, handoff: r.handoff, created_at: createdAt.get(r.id) })), { registryPath: this.registryPath ?? registryPath() });
     for (const r of readiness) {
@@ -37610,7 +37657,7 @@ ${JSON.stringify(entry)}
       out.set(r.id, {
         ...r.blockers.length ? { blocked_by_state: r.blockers } : {},
         ...r.unblocks.length ? { unblocks: r.unblocks } : {},
-        ...r.state === "delegated" ? { readiness: "delegated" } : {},
+        ...readinessFields(r, overlaps),
         ...status ? { handoff_status: status } : {}
       });
     }
@@ -37650,6 +37697,8 @@ ${JSON.stringify(entry)}
       throw new Error(`board_add: target_project must be a registered project name. Nothing was written.`);
     if (typeof text !== "string" || text.trim().length === 0)
       throw new Error(`board_add: text is required. Nothing was written.`);
+    if (needs === "external")
+      throw new Error(`board_add: needs 'external' cannot go with target_project \u2014 it requires a needs_reason, which a handoff does not carry; set it on the receiver's item with board_update. Nothing was written.`);
     let milestone;
     if (args2.milestone !== void 0) {
       milestone = typeof args2.milestone === "string" ? args2.milestone.trim() : "";
@@ -37729,6 +37778,11 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       throw _SterlingTools.blockedBySystemRefusal("board_add");
     if (needs !== void 0 && source === "system")
       throw _SterlingTools.needsSystemRefusal("board_add");
+    if ("needs_set_at" in rest)
+      throw new Error(`board_add: needs_set_at is server-owned \u2014 it is stamped when needs is set. Nothing was saved.`);
+    if (needs === "external" && (typeof rest.needs_reason !== "string" || rest.needs_reason.trim().length === 0)) {
+      throw new Error(`board_add: needs 'external' requires a needs_reason naming what is awaited and what lets the work resume. Nothing was saved.`);
+    }
     const blockers = blocked_by !== void 0 ? this.resolveBlockedBy(blocked_by, "board_add") : [];
     const normalized = objective === "standalone" ? void 0 : objective;
     let stampedHead;
@@ -37753,7 +37807,7 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
         ...normalized !== void 0 ? { objective: normalized } : {},
         ...stampedHead !== void 0 ? { measured_at_head: stampedHead } : {},
         ...blockers.length ? { blocked_by: blockers } : {},
-        ...needs !== void 0 ? { needs } : {},
+        ...needs !== void 0 ? { needs, needs_set_at: this.now() } : {},
         ...rest
       },
       // Forwarded, never derived from `args`: a board_add from the TOOL SURFACE
@@ -37797,6 +37851,18 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     if (filter.feature_slug !== void 0) {
       const chain = this.articleChainIds(filter.feature_slug);
       filtered = chain ? filtered.filter((t) => chain.has(t.feature_link ?? "")) : [];
+    }
+    if (filter.readiness !== void 0 && filter.readiness.length > 0) {
+      const wanted = new Set(filter.readiness);
+      const states = new Map(this.store.boardReadiness().map((r) => [r.id, r.state]));
+      filtered = filtered.filter((t) => wanted.has(states.get(t.id) ?? ""));
+    }
+    if (filter.handoff_to_item_id !== void 0) {
+      const wanted = filter.handoff_to_item_id;
+      filtered = filtered.filter((t) => {
+        const h = t.handoff;
+        return h?.role === "sent" && h.to_item_id === wanted;
+      });
     }
     filtered = [...filtered].sort((a, b) => {
       const rec = (r) => r;
@@ -38235,16 +38301,23 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     }
     if ("needs" in patch && old.source === "system")
       throw _SterlingTools.needsSystemRefusal("board_update");
+    const oldWait = old;
+    const needsAfter = "needs" in patch ? patch.needs : oldWait.needs;
     if ("needs_reason" in patch) {
       const reason = patch.needs_reason;
       if (typeof reason !== "string")
         throw new Error(`board_update: needs_reason must be a string ('' clears it). Nothing was updated.`);
       if (reason.trim().length > 0) {
-        const needsAfter = "needs" in patch ? patch.needs : old.needs;
-        if (old.source !== "user" || needsAfter !== "user" && needsAfter !== "grill") {
-          throw new Error(`board_update: needs_reason says why an item waits for the user, so it goes only with needs 'user' or 'grill' on a source:'user' board task; this item's needs would be ${needsAfter === void 0 || needsAfter === "" ? "absent" : `'${String(needsAfter)}'`}. Nothing was updated.`);
+        if (oldWait.source !== "user" || !needsReasonAllowed(typeof needsAfter === "string" ? needsAfter : void 0)) {
+          throw new Error(`board_update: needs_reason says why an item waits, so it goes only with needs 'user', 'grill' or 'external' on a source:'user' board task; this item's needs would be ${needsAfter === void 0 || needsAfter === "" ? "absent" : `'${String(needsAfter)}'`}. Nothing was updated.`);
         }
         patch = { ...patch, needs_reason: reason.trim() };
+      }
+    }
+    if (needsAfter === "external") {
+      const reasonAfter = "needs_reason" in patch ? String(patch.needs_reason).trim() : oldWait.needs_reason;
+      if (!reasonAfter) {
+        throw new Error(`board_update: needs 'external' requires a needs_reason naming what is awaited and what lets the work resume; ${"needs_reason" in patch ? "this call clears it" : "this item has none and this call gives none"}. Pass needs_reason in the same call. Nothing was updated.`);
       }
     }
     if ("measured_at_head" in patch) {
@@ -38267,8 +38340,13 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
       delete next.blocked_by;
     if (next.needs === "")
       delete next.needs;
-    if (next.needs_reason === "" || "needs" in patch && !("needs_reason" in patch))
+    const keepReason = patch.needs === "external" && !("needs_reason" in patch);
+    if (next.needs_reason === "" || next.needs === void 0 || "needs" in patch && !("needs_reason" in patch) && !keepReason)
       delete next.needs_reason;
+    if (next.needs === void 0)
+      delete next.needs_set_at;
+    else if ("needs" in patch && patch.needs !== oldWait.needs)
+      next.needs_set_at = this.now();
     const claimsCheck = this.assertClaimedPaths("board_update", next);
     try {
       const updated = this.store.updateTodo(old.id, next, old.version !== void 0 ? { expected_version: old.version } : {});
@@ -38359,12 +38437,16 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     const out = /* @__PURE__ */ new Map();
     if (read.truncated)
       return out;
-    const readiness = boardReadinessOf(page, read.items, (slug) => read.slugHolders.get(slug));
+    const holder = (slug) => read.slugHolders.get(slug);
+    const readiness = boardReadinessOf(page, read.items, holder);
+    const whole = boardReadinessOf(read.items, read.items, holder);
+    const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === "ready"));
     for (const r of readiness) {
       out.set(r.id, {
         ...r.blockers.length ? { blocked_by_state: r.blockers } : {},
         ...r.unblocks.length ? { unblocks: r.unblocks } : {},
-        ...r.state === "delegated" ? { readiness: "delegated", handoff_status: FOREIGN_UNAVAILABLE } : {}
+        ...readinessFields(r, overlaps),
+        ...r.state === "delegated" ? { handoff_status: FOREIGN_UNAVAILABLE } : {}
       });
     }
     return out;
@@ -38395,6 +38477,22 @@ ${milestone !== void 0 ? `Milestone to reach before closing: ${milestone}
     if (filter.file_keys && filter.file_keys.length > 0) {
       const wanted = new Set(filter.file_keys.map(normalizeRepoPath));
       matching = matching.filter((t) => Array.isArray(t.file_keys) && t.file_keys.some((k) => typeof k === "string" && wanted.has(k)));
+    }
+    if (filter.readiness !== void 0 && filter.readiness.length > 0) {
+      if (read.truncated) {
+        throw new Error(`board_query: readiness cannot be computed for project '${filter.target_project}' \u2014 its board was read only in part, so a blocker outside the read could make an item look ready. Read it without the readiness filter. Nothing was returned.`);
+      }
+      const all = read.items;
+      const wanted = new Set(filter.readiness);
+      const states = new Map(boardReadinessOf(all, all, (slug) => read.slugHolders.get(slug)).map((r) => [r.id, r.state]));
+      matching = matching.filter((t) => wanted.has(states.get(String(t.id)) ?? ""));
+    }
+    if (filter.handoff_to_item_id !== void 0) {
+      const wanted = filter.handoff_to_item_id;
+      matching = matching.filter((t) => {
+        const h = t.handoff;
+        return h?.role === "sent" && h.to_item_id === wanted;
+      });
     }
     const ordered = [...matching].sort((a, b) => compareBoardOrder(String(a.updated_at), String(a.id), String(b.updated_at), String(b.id)));
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;
@@ -40091,7 +40189,7 @@ function createSterlingServer(target, opts = {}) {
     })
   }, ({ id, domain, expected_version, projection }) => json(tools.writeProjected(tools.knowledgeMove(id, domain, expected_version), projection)));
   server.registerTool("board_add", {
-    description: `Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare \`objective\`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane); absent means nothing. measured_at_head is stamped to HEAD unless you pass a full 40-character lowercase hex SHA that is a commit in this repo (an abbreviated or otherwise malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). target_project (user items only) hands the task to another project registered on this machine, by its registry name: the item is written into that project's board with this project's name and the requester's words, and a tracker stays on this board (readiness 'delegated', never READY) whose board_query/board_get handoff_status reads open, needs user in <project> (with the reason when one is set), blocked in <project> (a blocker there is still on its board), DONE (with the closing note), gone (completion unverified), status unknown, or delivery unconfirmed. It is refused, with nothing written, when the name is unknown or ambiguous, names this project, or the target has no SQLite store; with it only text, source, objective (the tracker's), priority, needs (the target item's) and milestone are accepted. milestone (at most 80 characters) says what the target should reach before closing: it is kept on the tracker and written into the target item's text; a DONE status then shows the receiver's evidence, or 'unverified' when none came back. The receipt's handoff_delivery names both items. The echo defaults to a digest; projection:"full" returns the stored record.`,
+    description: `Add a task to the board (source:"user") or the maintenance queue (source:"system", requires system_reason). User items declare \`objective\`: the shared name of the larger objective a slice belongs to, or "standalone" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. blocked_by (user items only) lists the board items this one waits on \u2014 slug, full id or 8-char prefix, each must name an open user board item and is stored as its slug; an unresolvable entry or a self-block is refused with nothing written. needs (user items only) says what the item waits on besides its blockers: user or grill (waits for the user), investigation (ready for a researcher lane), external (waits on an outside party such as a mail reply, a meeting or a branch someone else owns; needs_reason is required with it, naming what is awaited and what lets the work resume); absent means nothing. needs_set_at is stamped by the server when needs is set. needs_reason says why a user, grill or external item waits. measured_at_head is stamped to HEAD unless you pass a full 40-character lowercase hex SHA that is a commit in this repo (an abbreviated or otherwise malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). target_project (user items only) hands the task to another project registered on this machine, by its registry name: the item is written into that project's board with this project's name and the requester's words, and a tracker stays on this board (readiness 'delegated', never READY) whose board_query/board_get handoff_status reads open, needs user in <project> (with the reason when one is set), blocked in <project> (a blocker there is still on its board), DONE (with the closing note), gone (completion unverified), status unknown, or delivery unconfirmed. It is refused, with nothing written, when the name is unknown or ambiguous, names this project, or the target has no SQLite store; with it only text, source, objective (the tracker's), priority, needs (the target item's) and milestone are accepted. milestone (at most 80 characters) says what the target should reach before closing: it is kept on the tracker and written into the target item's text; a DONE status then shows the receiver's evidence, or 'unverified' when none came back. The receipt's handoff_delivery names both items. The echo defaults to a digest; projection:"full" returns the stored record.`,
     inputSchema: strict({
       text: external_exports.string(),
       source: external_exports.enum(["user", "system"]),
@@ -40104,13 +40202,14 @@ function createSterlingServer(target, opts = {}) {
       measured_at_head: external_exports.string().optional(),
       blocked_by: external_exports.array(external_exports.string()).describe(`open user board items this one waits on, each by ${ID_LADDER}`).optional(),
       needs: external_exports.enum(BOARD_NEEDS).optional(),
+      needs_reason: external_exports.string().describe("why the item waits; only with needs user, grill or external, and required with external").optional(),
       target_project: external_exports.string().describe("a project name from this machine's project registry (/sterling:projects); hands the task to that project and keeps a tracker here").optional(),
       milestone: external_exports.string().describe("with target_project only: what the other project should reach before closing, at most 80 characters").optional(),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ projection, ...args2 }) => json(tools.writeProjected(tools.boardAdd(args2), projection)));
   server.registerTool("board_query", {
-    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, unblocks (live items waiting on this one, as \`name (id8)\`), readiness:'delegated' with handoff_status {state, text} on a tracker for a task handed to another project (the receiver is located through the project registry, so a folder moved with list-projects.mjs --move keeps resolving at its new path; a receiver it cannot locate reads status unknown), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:"system" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.`,
+    description: `List open board items. source:"user" is the board, source:"system" the maintenance queue. Filters (AND): objective (exact; "standalone" selects ungrouped items), file_keys, contains (case-insensitive literal substring), readiness (a list of states, computed over the whole board before paging, so a blocker outside the page still counts), handoff_to_item_id (the tracker for the handoff whose receiver item has that id). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched \u2014 raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: "text" (default) \u2014 id, slug, objective, source, system_reason, status, priority, feature_link, blocked_by with blocked_by_state (each blocker open or closed; a removed blocker is closed), needs, needs_reason, needs_set_at (when needs last changed), unblocks (live items waiting on this one, as \`name (id8)\`), readiness (ready, research, waiting, blocked or delegated, the same rule as the session-start lists), blockers_open (open blockers as names, omitted when none), shares_write_path_with (READY items only: other READY items sharing a file_keys path, over the whole board), handoff_status {state, text} on a delegated tracker for a task handed to another project (the receiver is located through the project registry, so a folder moved with list-projects.mjs --move keeps resolving at its new path; a receiver it cannot locate reads status unknown), updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; "headline" \u2014 id, name, priority, objective/system_reason, 80-char text; "digest" \u2014 one clipped line per item; "full" \u2014 whole records with file_keys, blocked_by_state, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id \u2014 a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane. target_project reads another registered project's user board, read-only (nothing is written there): the same filters, order, projections and paging (a cursor never crosses between projects); source:"system" is refused; every record and the envelope carry source_project and source_root; blocked_by_state and unblocks are computed against that board; provenance, reconcile_provenance, artifact_evidence_provenance, lane_advisory and a tracker's handoff_status read 'unavailable:other_project'; target_schema_version (when it differs from this Sterling's), unreadable (rows this Sterling cannot parse, by id) and truncated (the time budget ran out, so the board shown is partial) are disclosed.`,
     inputSchema: strict({
       source: external_exports.enum(["user", "system"]).optional(),
       objective: external_exports.string().optional(),
@@ -40120,7 +40219,9 @@ function createSterlingServer(target, opts = {}) {
       offset: external_exports.number().int().nonnegative().optional(),
       cursor: external_exports.string().optional(),
       projection: external_exports.enum(["text", "full", "digest", "headline"]).optional(),
-      target_project: external_exports.string().describe(FOREIGN_BOARD_READ).optional()
+      target_project: external_exports.string().describe(FOREIGN_BOARD_READ).optional(),
+      readiness: external_exports.array(external_exports.enum(BOARD_READINESS_STATES)).min(1).describe("user items in these readiness states only, computed over the whole board before paging").optional(),
+      handoff_to_item_id: external_exports.string().describe("the receiver's item id: finds this board's tracker for that handoff").optional()
     })
   }, ({ target_project, ...args2 }) => json(target_project !== void 0 ? tools.foreignBoardQuery({ ...args2, target_project }) : tools.boardQueryResult(args2)));
   server.registerTool("board_remove", {
@@ -40136,7 +40237,7 @@ function createSterlingServer(target, opts = {}) {
     inputSchema: strict({ id: external_exports.string().describe(ID_EXACT_DESTROY) })
   }, ({ id }) => json(tools.maintenanceRemove(id)));
   server.registerTool("board_update", {
-    description: `Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation (user items only; "" clears it). needs_reason says why a user or grill item waits ("" clears it; changing needs clears it unless a new reason is given); a sending project's tracker shows it. A text or file_keys change re-stamps measured_at_head to HEAD; pass a full 40-character lowercase hex SHA that is a commit in this repo to set it explicitly (an abbreviated or malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:"full" returns the stored record.`,
+    description: `Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head, blocked_by. Never closes an item (use board_remove). objective (re)groups a task; "standalone" ungroups it. blocked_by replaces the list, checked as on board_add (user items only; [] clears it). needs sets user|grill|investigation|external (user items only; "" clears it, with needs_reason and needs_set_at). needs_reason says why a user, grill or external item waits ("" clears it; changing needs clears it unless a new reason is given, except a change to external, which keeps the existing reason); external requires a reason, so setting it on an item with none and no reason in the call is refused. needs_set_at is stamped when needs changes value and kept through other edits; a sending project's tracker shows the reason. A text or file_keys change re-stamps measured_at_head to HEAD; pass a full 40-character lowercase hex SHA that is a commit in this repo to set it explicitly (an abbreviated or malformed value is refused for its shape, a well-shaped one that is not a commit is refused as unresolvable). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:"full" returns the stored record.`,
     inputSchema: strict({
       id: external_exports.string().describe(ID_LADDER),
       text: external_exports.string().optional(),
@@ -40146,7 +40247,7 @@ function createSterlingServer(target, opts = {}) {
       measured_at_head: external_exports.string().optional(),
       blocked_by: external_exports.array(external_exports.string()).describe(`replaces the list: open user board items, each by ${ID_LADDER}; [] clears it`).optional(),
       needs: external_exports.union([external_exports.enum(BOARD_NEEDS), external_exports.literal("")]).optional(),
-      needs_reason: external_exports.string().describe("why the item waits for the user; only with needs user or grill; '' clears it, and a needs change clears it unless a new reason is given").optional(),
+      needs_reason: external_exports.string().describe("why the item waits; only with needs user, grill or external, and required with external; '' clears it, and a needs change clears it unless a new reason is given (a change to external keeps it)").optional(),
       projection: external_exports.enum(["full", "digest"]).optional()
     })
   }, ({ id, projection, ...patch }) => json(tools.writeProjected(tools.boardUpdate(id, patch), projection)));

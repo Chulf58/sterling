@@ -292,6 +292,13 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "When Codex answers HTTP 400 \"not supported when using Codex with a ChatGPT account\", say so, retry once with `model: gpt-5.6-sol`, and if that is refused too, review on Opus and tell the user to check the Codex login (API key versus ChatGPT plan); never fall back silently (decision `claude-code-sol-route-defaults-to-gpt-6-1-sol-with-loud-fallback`, user-ruled 2026-10-20 on GitHub issue #165, because the refusal depends on account, plan and sign-in, so no single Sol id is safe).",
     after: "When Codex answers HTTP 400 \"not supported when using Codex with a ChatGPT account\", say so, review on Opus, and tell the user to check the Codex login (API key versus ChatGPT plan; a lapsed or free account was the earlier cause); do not retry on another Sol id, and never fall back silently (decision `claude-code-sol-route-uses-gpt-5-6-sol-because-mcp-route-is-frozen-at-0-153-4`, user-ruled 2026-10-20 on GitHub issue #169, because the Codex MCP route is frozen at client 0.153.4, which cannot reach `gpt-6.1-sol`).",
   },
+  {
+    commit: 'board-needs-external-waits-on-outside-party-and-board-query-exposes-readiness',
+    date: '2026-10-20',
+    reason: "needs gains external, waiting on an outside party with a required needs_reason, rechecked when evidence arrives and never cleared because time passed; H1 prints a fourth group, WAITING ON OTHERS (GitHub issue #175, user-ruled 2026-10-20)",
+    before: "`user` and `grill` wait for the user; absent means nothing. Set `needs` at intake when an item cannot start on its own, and clear it (`needs: \"\"`) once the user has answered. H1 prints three groups at session start and after a clear (READY, READY FOR RESEARCH, WAITING ON YOU)",
+    after: "`user` and `grill` wait for the user; `external` waits on an outside party (a mail reply, a meeting, a branch someone else owns) and needs a `needs_reason` saying what is awaited and what lets the work resume; recheck it when that evidence arrives, never clear it because time passed; absent means nothing. Set `needs` at intake when an item cannot start on its own, and clear it (`needs: \"\"`) once the user has answered. H1 prints four groups at session start and after a clear (READY, READY FOR RESEARCH, WAITING ON YOU, WAITING ON OTHERS)",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

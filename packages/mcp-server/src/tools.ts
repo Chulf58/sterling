@@ -32,7 +32,10 @@ import {
   readForeignBoard,
   getForeignBoardItem,
   boardReadinessOf,
+  boardWriteOverlaps,
   SUPPORTED_SCHEMA_VERSION,
+  type BoardItemReadiness,
+  type BoardReadinessState,
   type ForeignBoardRead,
   type ReadForeignBoardOptions,
   type HandoffStatus,
@@ -41,7 +44,7 @@ import {
   type ToolStore,
 } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
-import { isSourcePath } from '@sterling/schemas';
+import { isSourcePath, needsReasonAllowed } from '@sterling/schemas';
 import { HANDOFF_MILESTONE_MAX, HANDOFFS_DIR_REL, handoffEvidenceSchema, todoHandoffSchema, type HandoffClosure, type HandoffEvidence, type HandoffEvidenceFile } from '@sterling/schemas';
 import { resolveHandoffTarget } from './handoff-target.js';
 import { AttestationRefusal, collectAttestationEvidence, readHeadFile, type AttestationEvidence } from './attestation-proof.js';
@@ -64,7 +67,32 @@ export interface SkippedCheck {
  * dedup as a fresh insert.
  */
 /** board_query/board_get's read-time board fields for one item. */
-type BoardDerivedFields = { blocked_by_state?: BlockerState[]; unblocks?: string[]; readiness?: 'delegated'; handoff_status?: HandoffStatus };
+type BoardDerivedFields = {
+  blocked_by_state?: BlockerState[];
+  unblocks?: string[];
+  readiness?: BoardReadinessState;
+  blockers_open?: string[];
+  shares_write_path_with?: string[];
+  handoff_status?: HandoffStatus;
+};
+
+/** Every readiness state, for the board_query readiness filter (GitHub issue #175). */
+export const BOARD_READINESS_STATES = ['ready', 'research', 'waiting', 'blocked', 'delegated'] as const satisfies readonly BoardReadinessState[];
+
+/**
+ * One item's readiness fields for board_query/board_get (GitHub issue #175):
+ * its state, its open blockers (omitted when none) and, for a READY item, the
+ * other READY items sharing a file_keys path. `overlaps` comes from
+ * boardWriteOverlaps over the WHOLE ready set, never one page.
+ */
+function readinessFields(r: BoardItemReadiness, overlaps: Map<string, string[]>): Pick<BoardDerivedFields, 'readiness' | 'blockers_open' | 'shares_write_path_with'> {
+  const shares = r.state === 'ready' ? overlaps.get(r.id) : undefined;
+  return {
+    readiness: r.state,
+    ...(r.blockers_open.length ? { blockers_open: r.blockers_open } : {}),
+    ...(shares?.length ? { shares_write_path_with: shares } : {}),
+  };
+}
 
 /** board_add target_project's receipt: both ends of a cross-project handoff (GitHub issue #105). */
 export interface HandoffDelivery {
@@ -245,6 +273,19 @@ export interface BoardFilter {
    */
   cursor?: string;
   /**
+   * Narrow to user items in these readiness states (GitHub issue #175).
+   * Computed over the WHOLE board before any other narrowing and before
+   * paging, so a blocker outside the page can never make an item read as
+   * ready. Part of the cursor identity. System items never match.
+   */
+  readiness?: BoardReadinessState[];
+  /**
+   * Find the sender's tracker for a handoff by the RECEIVER's item id
+   * (handoff.role 'sent', handoff.to_item_id; GitHub issue #175). Part of the
+   * cursor identity.
+   */
+  handoff_to_item_id?: string;
+  /**
    * board_query only: read ANOTHER registered project's user board, read-only
    * (decision read-another-projects-board-board-query-target-project-read-only).
    * Served by foreignBoardQuery, never by boardQueryResult; part of the cursor
@@ -304,7 +345,7 @@ export type BoardProjection = Projection | 'headline' | 'text';
  */
 export const BOARD_TEXT_CLIP = 240;
 
-const BOARD_TEXT_FIELDS = ['id', 'slug', 'objective', 'source', 'system_reason', 'status', 'priority', 'feature_link', 'blocked_by', 'needs', 'needs_reason', 'updated_at'] as const;
+const BOARD_TEXT_FIELDS = ['id', 'slug', 'objective', 'source', 'system_reason', 'status', 'priority', 'feature_link', 'blocked_by', 'needs', 'needs_reason', 'needs_set_at', 'updated_at'] as const;
 
 function textRowRecord(record: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -1029,6 +1070,8 @@ function boardCursorIdentity(surface: BoardSurface, filter: BoardFilter): Record
   if (filter.contains) identity.contains = filter.contains.toLowerCase();
   if (filter.feature_slug !== undefined) identity.feature_slug = filter.feature_slug;
   if (filter.target_project !== undefined) identity.target_project = filter.target_project;
+  if (filter.readiness !== undefined && filter.readiness.length > 0) identity.readiness = [...new Set(filter.readiness)].sort();
+  if (filter.handoff_to_item_id !== undefined) identity.handoff_to_item_id = filter.handoff_to_item_id;
   return identity;
 }
 
@@ -10564,7 +10607,15 @@ export class SterlingTools {
     if (!users.length) return out;
     // A tracker for a task handed to another project (GitHub issue #105) is
     // 'delegated'; its status is read from the receiving project at read time.
-    const readiness = this.store.boardReadiness(users);
+    // Readiness of the WHOLE board, so the write-path overlaps of a READY item
+    // count READY items on other pages too (GitHub issue #175); the page's own
+    // rows are picked from it, and any row the whole-board read did not return
+    // is computed directly rather than left without fields.
+    const whole = this.store.boardReadiness();
+    const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === 'ready'));
+    const byId = new Map(whole.map((r) => [r.id, r]));
+    const missing = users.filter((u) => !byId.has(u.id));
+    const readiness = [...users.flatMap((u) => byId.get(u.id) ?? []), ...(missing.length ? this.store.boardReadiness(missing) : [])];
     // Each tracker's receiver is located through the registry (a moved folder,
     // GitHub issue #119) by the tracker's own created_at.
     const createdAt = new Map(users.map((u) => [u.id, u.created_at]));
@@ -10577,7 +10628,7 @@ export class SterlingTools {
       out.set(r.id, {
         ...(r.blockers.length ? { blocked_by_state: r.blockers } : {}),
         ...(r.unblocks.length ? { unblocks: r.unblocks } : {}),
-        ...(r.state === 'delegated' ? { readiness: 'delegated' as const } : {}),
+        ...readinessFields(r, overlaps),
         ...(status ? { handoff_status: status } : {}),
       });
     }
@@ -10619,6 +10670,8 @@ export class SterlingTools {
     const { target_project, text, objective, priority, needs } = args;
     if (typeof target_project !== 'string' || target_project.length === 0) throw new Error(`board_add: target_project must be a registered project name. Nothing was written.`);
     if (typeof text !== 'string' || text.trim().length === 0) throw new Error(`board_add: text is required. Nothing was written.`);
+    // A handoff carries no needs_reason, and needs 'external' requires one (GitHub issue #175).
+    if (needs === 'external') throw new Error(`board_add: needs 'external' cannot go with target_project — it requires a needs_reason, which a handoff does not carry; set it on the receiver's item with board_update. Nothing was written.`);
     let milestone: string | undefined;
     if (args.milestone !== undefined) {
       milestone = typeof args.milestone === 'string' ? args.milestone.trim() : '';
@@ -10719,6 +10772,11 @@ export class SterlingTools {
     }
     if (blocked_by !== undefined && source === 'system') throw SterlingTools.blockedBySystemRefusal('board_add');
     if (needs !== undefined && source === 'system') throw SterlingTools.needsSystemRefusal('board_add');
+    // needs_set_at is server-owned (GitHub issue #175): stamped here, never taken from the caller.
+    if ('needs_set_at' in rest) throw new Error(`board_add: needs_set_at is server-owned — it is stamped when needs is set. Nothing was saved.`);
+    if (needs === 'external' && (typeof rest.needs_reason !== 'string' || rest.needs_reason.trim().length === 0)) {
+      throw new Error(`board_add: needs 'external' requires a needs_reason naming what is awaited and what lets the work resume. Nothing was saved.`);
+    }
     // Resolved BEFORE the write, so a refused entry leaves nothing behind.
     const blockers = blocked_by !== undefined ? this.resolveBlockedBy(blocked_by, 'board_add') : [];
     // 'standalone' (exact lowercase) is the declared answer for "not a slice";
@@ -10771,7 +10829,7 @@ export class SterlingTools {
         ...(normalized !== undefined ? { objective: normalized } : {}),
         ...(stampedHead !== undefined ? { measured_at_head: stampedHead } : {}),
         ...(blockers.length ? { blocked_by: blockers } : {}),
-        ...(needs !== undefined ? { needs } : {}),
+        ...(needs !== undefined ? { needs, needs_set_at: this.now() } : {}),
         ...rest,
       },
       // Forwarded, never derived from `args`: a board_add from the TOOL SURFACE
@@ -10861,6 +10919,19 @@ export class SterlingTools {
     if (filter.feature_slug !== undefined) {
       const chain = this.articleChainIds(filter.feature_slug);
       filtered = chain ? filtered.filter((t) => chain.has((t as { feature_link?: string }).feature_link ?? '')) : [];
+    }
+    if (filter.readiness !== undefined && filter.readiness.length > 0) {
+      // The whole board's readiness, read before paging (GitHub issue #175).
+      const wanted = new Set<string>(filter.readiness);
+      const states = new Map(this.store.boardReadiness().map((r) => [r.id, r.state]));
+      filtered = filtered.filter((t) => wanted.has(states.get(t.id) ?? ''));
+    }
+    if (filter.handoff_to_item_id !== undefined) {
+      const wanted = filter.handoff_to_item_id;
+      filtered = filtered.filter((t) => {
+        const h = (t as { handoff?: { role?: string; to_item_id?: string | null } }).handoff;
+        return h?.role === 'sent' && h.to_item_id === wanted;
+      });
     }
     // DETERMINISTIC TOTAL ORDER (board abafbd48, Codex-adjudicated, upgrading
     // b786a84f, PAGING): the store's own order for a rank_terms-less query() is
@@ -11481,20 +11552,31 @@ export class SterlingTools {
       patch = { ...patch, blocked_by: this.resolveBlockedBy(patch.blocked_by, 'board_update', old.id) };
     }
     if ('needs' in patch && (old as unknown as { source?: string }).source === 'system') throw SterlingTools.needsSystemRefusal('board_update');
-    // needs_reason (GitHub issue #107): why the item waits for the user. It goes
-    // only with needs 'user' or 'grill', is cleared by '' and by any change of
-    // needs that does not give a new reason in the same call.
+    // needs_reason (GitHub issues #107, #175): why the item waits. It goes only
+    // with needs 'user', 'grill' or 'external', is cleared by '' and by any
+    // change of needs that does not give a new reason in the same call, except
+    // a change to 'external', which keeps the existing reason (external
+    // requires one, so a call with neither is refused).
+    const oldWait = old as unknown as { source?: string; needs?: string; needs_reason?: string; needs_set_at?: string };
+    const needsAfter = 'needs' in patch ? patch.needs : oldWait.needs;
     if ('needs_reason' in patch) {
       const reason = patch.needs_reason;
       if (typeof reason !== 'string') throw new Error(`board_update: needs_reason must be a string ('' clears it). Nothing was updated.`);
       if (reason.trim().length > 0) {
-        const needsAfter = 'needs' in patch ? patch.needs : (old as unknown as { needs?: string }).needs;
-        if ((old as unknown as { source?: string }).source !== 'user' || (needsAfter !== 'user' && needsAfter !== 'grill')) {
+        if (oldWait.source !== 'user' || !needsReasonAllowed(typeof needsAfter === 'string' ? needsAfter : undefined)) {
           throw new Error(
-            `board_update: needs_reason says why an item waits for the user, so it goes only with needs 'user' or 'grill' on a source:'user' board task; this item's needs would be ${needsAfter === undefined || needsAfter === '' ? 'absent' : `'${String(needsAfter)}'`}. Nothing was updated.`
+            `board_update: needs_reason says why an item waits, so it goes only with needs 'user', 'grill' or 'external' on a source:'user' board task; this item's needs would be ${needsAfter === undefined || needsAfter === '' ? 'absent' : `'${String(needsAfter)}'`}. Nothing was updated.`
           );
         }
         patch = { ...patch, needs_reason: reason.trim() };
+      }
+    }
+    if (needsAfter === 'external') {
+      const reasonAfter = 'needs_reason' in patch ? String(patch.needs_reason).trim() : oldWait.needs_reason;
+      if (!reasonAfter) {
+        throw new Error(
+          `board_update: needs 'external' requires a needs_reason naming what is awaited and what lets the work resume; ${'needs_reason' in patch ? 'this call clears it' : 'this item has none and this call gives none'}. Pass needs_reason in the same call. Nothing was updated.`
+        );
       }
     }
     // board-provenance-measured-at-head: a text/file_keys rewrite carries new
@@ -11533,7 +11615,13 @@ export class SterlingTools {
     if (Array.isArray(next.blocked_by) && next.blocked_by.length === 0) delete next.blocked_by;
     // needs:'' clears the field to absent, the same way.
     if (next.needs === '') delete next.needs;
-    if (next.needs_reason === '' || ('needs' in patch && !('needs_reason' in patch))) delete next.needs_reason;
+    // A change to 'external' keeps the existing reason (checked above); clearing needs clears the reason too.
+    const keepReason = patch.needs === 'external' && !('needs_reason' in patch);
+    if (next.needs_reason === '' || next.needs === undefined || ('needs' in patch && !('needs_reason' in patch) && !keepReason)) delete next.needs_reason;
+    // needs_set_at (GitHub issue #175): server-owned, stamped when needs changes
+    // value, kept through every other edit, removed with needs.
+    if (next.needs === undefined) delete next.needs_set_at;
+    else if ('needs' in patch && patch.needs !== oldWait.needs) next.needs_set_at = this.now();
     // old.id (the resolved canonical id), not the caller's possibly-short
     // citation — a mounted domain store's routing (storeHolding) keys off the
     // real id, and a bare prefix would not resolve there.
@@ -11673,12 +11761,16 @@ export class SterlingTools {
     const out = new Map<string, Record<string, unknown>>();
     if (read.truncated) return out;
     type Input = Parameters<typeof boardReadinessOf>[0][number];
-    const readiness = boardReadinessOf(page as unknown as Input[], read.items as unknown as Input[], (slug) => read.slugHolders.get(slug));
+    const holder = (slug: string) => read.slugHolders.get(slug);
+    const readiness = boardReadinessOf(page as unknown as Input[], read.items as unknown as Input[], holder);
+    const whole = boardReadinessOf(read.items as unknown as Input[], read.items as unknown as Input[], holder);
+    const overlaps = boardWriteOverlaps(whole.filter((r) => r.state === 'ready'));
     for (const r of readiness) {
       out.set(r.id, {
         ...(r.blockers.length ? { blocked_by_state: r.blockers } : {}),
         ...(r.unblocks.length ? { unblocks: r.unblocks } : {}),
-        ...(r.state === 'delegated' ? { readiness: 'delegated', handoff_status: FOREIGN_UNAVAILABLE } : {}),
+        ...readinessFields(r, overlaps),
+        ...(r.state === 'delegated' ? { handoff_status: FOREIGN_UNAVAILABLE } : {}),
       });
     }
     return out;
@@ -11716,6 +11808,26 @@ export class SterlingTools {
     if (filter.file_keys && filter.file_keys.length > 0) {
       const wanted = new Set(filter.file_keys.map(normalizeRepoPath));
       matching = matching.filter((t) => Array.isArray(t.file_keys) && t.file_keys.some((k) => typeof k === 'string' && wanted.has(k)));
+    }
+    if (filter.readiness !== undefined && filter.readiness.length > 0) {
+      // Readiness needs every live item of that board; a partial read cannot give it.
+      if (read.truncated) {
+        throw new Error(
+          `board_query: readiness cannot be computed for project '${filter.target_project}' — its board was read only in part, so a blocker outside the read could make an item look ready. Read it without the readiness filter. Nothing was returned.`
+        );
+      }
+      type Input = Parameters<typeof boardReadinessOf>[0][number];
+      const all = read.items as unknown as Input[];
+      const wanted = new Set<string>(filter.readiness);
+      const states = new Map(boardReadinessOf(all, all, (slug) => read.slugHolders.get(slug)).map((r) => [r.id, r.state]));
+      matching = matching.filter((t) => wanted.has(states.get(String(t.id)) ?? ''));
+    }
+    if (filter.handoff_to_item_id !== undefined) {
+      const wanted = filter.handoff_to_item_id;
+      matching = matching.filter((t) => {
+        const h = t.handoff as { role?: string; to_item_id?: string | null } | undefined;
+        return h?.role === 'sent' && h.to_item_id === wanted;
+      });
     }
     const ordered = [...matching].sort((a, b) => compareBoardOrder(String(a.updated_at), String(a.id), String(b.updated_at), String(b.id)));
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;

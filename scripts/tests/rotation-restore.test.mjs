@@ -168,6 +168,15 @@ test("host 'opencode' does not call old lanes unresumable and says how to tell a
     const cc = renderRotationRestore(note, { cwd: dir, source: 'clear', host: 'claude' });
     assert.match(cc, /cannot be resumed from this one \(agent lookup is scoped to the current session\); re-dispatch fresh/);
     assert.doesNotMatch(cc, /STOP-and-report/);
+    // The lane hand-off line and the way back: an OpenCode-written note names the check and the old session, never "reachable only by returning".
+    const lanes = { next_slice: 'go on', session_id: 'ses_abc', session_host: 'opencode', lanes: ['lane a'] };
+    const ocLanes = renderRotationRestore(lanes, { cwd: dir, host: 'opencode' });
+    assert.match(ocLanes, /Subagents of the previous session may still be running: re-dispatch a lane worth continuing only once it is known dead/);
+    assert.match(ocLanes, /Before re-dispatching, tell whether a lane is dead: send the old sessionID a STOP-and-report message[^\n]*several minutes\. The old session is `opencode --session ses_abc`\./);
+    assert.match(renderRotationRestore({ ...lanes, session_id: undefined }, { cwd: dir, host: 'opencode' }), /several minutes\. The note recorded no session id for the old session\./);
+    assert.doesNotMatch(ocLanes, /not continued|reachable only by returning|re-dispatch each lane/);
+    // Claude Code's lane line and way back stay as before.
+    assert.match(renderRotationRestore({ ...lanes, session_host: undefined }, { cwd: dir, source: 'clear', host: 'claude' }), /cannot be resumed with SendMessage[^\n]*The old agents are reachable only by returning to the old session: `claude --resume ses_abc`/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

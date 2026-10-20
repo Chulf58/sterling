@@ -594,7 +594,7 @@ export interface BoardBlockerState {
 /**
  * A live user board item's readiness (decision
  * board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start).
- * `state`: 'waiting' for needs user|grill whatever the blockers, else
+ * `state`: 'waiting' for needs user|grill|external whatever the blockers, else
  * 'blocked' while any blocker is open, else 'research' for needs investigation
  * (a researcher lane, never an implementor), else 'ready'. A tracker for a
  * task handed to another project (todo handoff.role 'sent', GitHub issue #105)
@@ -613,6 +613,10 @@ export interface BoardItemReadiness {
   updated_at: string;
   file_keys: string[];
   needs?: BoardNeeds;
+  /** why the item waits (needs user, grill or external) */
+  needs_reason?: string;
+  /** when needs last changed value; absent on items stamped before GitHub issue #175 */
+  needs_set_at?: string;
   /** each stored blocked_by slug with its current state, in stored order */
   blockers: BoardBlockerState[];
   /** the open blockers, as item names */
@@ -637,6 +641,8 @@ export interface BoardReadinessInput {
   updated_at: string;
   file_keys?: string[];
   needs?: BoardNeeds;
+  needs_reason?: string;
+  needs_set_at?: string;
   blocked_by?: string[];
   handoff?: unknown;
   /** the record's creation time; kept on a delegated item so its receiver is located as of then (GitHub issue #119) */
@@ -674,7 +680,8 @@ export function boardReadinessOf(
         if (holder) blockersOpen.push(boardItemHandle(holder));
       }
       const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
-      // 'user' and 'grill' items wait for the user whatever their blockers (the ruling),
+      // 'user' and 'grill' items wait for the user, and 'external' items for an
+      // outside party (GitHub issue #175), whatever their blockers (the ruling),
       // so WAITING is shown every session; an open blocker still wins over
       // investigation and over no needs.
       // A sent tracker is delegated before anything else: its work is in the
@@ -682,7 +689,7 @@ export function boardReadinessOf(
       const sent = sentHandoffOf(t);
       const state: BoardReadinessState = sent
         ? 'delegated'
-        : t.needs === 'user' || t.needs === 'grill'
+        : t.needs === 'user' || t.needs === 'grill' || t.needs === 'external'
           ? 'waiting'
           : blockersOpen.length
             ? 'blocked'
@@ -697,6 +704,8 @@ export function boardReadinessOf(
         updated_at: t.updated_at,
         file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
         ...(t.needs ? { needs: t.needs } : {}),
+        ...(t.needs && typeof t.needs_reason === 'string' ? { needs_reason: t.needs_reason } : {}),
+        ...(t.needs && typeof t.needs_set_at === 'string' ? { needs_set_at: t.needs_set_at } : {}),
         blockers,
         blockers_open: blockersOpen,
         unblocks,
@@ -704,6 +713,38 @@ export function boardReadinessOf(
         ...(sent ? { handoff: sent, ...(typeof t.created_at === 'string' ? { created_at: t.created_at } : {}) } : {}),
       };
     });
+}
+
+/**
+ * For each READY item, the other READY items that declare a file_keys path in
+ * common (the lane_advisory proxy for a write-set), as item names. Pure; the
+ * caller passes the WHOLE ready set, never one page of it. H1 and board_query
+ * both read it (GitHub issue #175).
+ */
+export function boardWriteOverlaps(ready: readonly { id: string; name: string; file_keys: readonly string[] }[]): Map<string, string[]> {
+  const marks = new Map<string, string[]>();
+  for (const a of ready) {
+    const keys = new Set(a.file_keys);
+    const others = ready.filter((b) => b.id !== a.id && b.file_keys.some((k) => keys.has(k))).map((b) => b.name);
+    if (others.length) marks.set(a.id, others);
+  }
+  return marks;
+}
+
+const DAY_MS = 86_400_000;
+
+/**
+ * An external wait's age from needs_set_at (GitHub issue #175): 'since
+ * 2026-10-18, 2d ago', or 'since unknown' when the item carries no valid
+ * stamp (set before the field existed). Never read from updated_at, which any
+ * edit resets. H1, the OpenCode plugin and the TUI all word it this way.
+ */
+export function boardWaitAge(setAt: unknown, now: number = Date.now()): string {
+  const t = typeof setAt === 'string' ? Date.parse(setAt) : NaN;
+  if (Number.isNaN(t)) return 'since unknown';
+  const ms = Math.max(0, now - t);
+  const ago = ms >= DAY_MS ? `${Math.floor(ms / DAY_MS)}d ago` : `${Math.floor(ms / 3_600_000)}h ago`;
+  return `since ${(setAt as string).slice(0, 10)}, ${ago}`;
 }
 
 const PRIORITY_RANK: Record<string, number> = { high: 0, normal: 1, low: 2 };

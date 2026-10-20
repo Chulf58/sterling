@@ -4334,7 +4334,10 @@ var init_envelope = __esm({
 
 // packages/schemas/dist/records.js
 function needsReasonAllowed(needs) {
-  return needs === "user" || needs === "grill";
+  return needs === "user" || needs === "grill" || needs === "external";
+}
+function needsReasonRequired(needs) {
+  return needs === "external";
 }
 function todoBlocksItself(rec) {
   return rec.slug !== void 0 && rec.blocked_by?.includes(rec.slug) === true;
@@ -4701,7 +4704,7 @@ var init_records = __esm({
       notes: external_exports.string().optional(),
       file_keys: external_exports.array(repoPath).optional()
     }).superRefine(refineSupersession);
-    BOARD_NEEDS = ["user", "grill", "investigation"];
+    BOARD_NEEDS = ["user", "grill", "investigation", "external"];
     SYSTEM_REASONS = [
       "reconcile_needed",
       "stale_research",
@@ -4812,7 +4815,7 @@ var init_records = __esm({
       blocked_by: external_exports.array(external_exports.string().min(1)).optional()
     }).superRefine((rec, ctx) => {
       if (rec.needs_reason !== void 0 && !needsReasonAllowed(rec.needs)) {
-        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill'` });
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user', 'grill' or 'external'` });
       }
     });
     todoBoardItemReadSchema = external_exports.object({
@@ -4870,20 +4873,34 @@ var init_records = __esm({
       // What a user item waits on besides its blockers (decision
       // board-items-carry-a-needs-field-and-h1-lists-ready-items-for-auto-start):
       // 'investigation' still auto-starts, as a researcher lane; 'user' and
-      // 'grill' wait for the user. Not a progress status: `status` keeps meaning
-      // supersession only. Absent means nothing beyond the blockers.
+      // 'grill' wait for the user; 'external' waits on an outside party (a mail
+      // reply, a meeting, a branch someone else owns; GitHub issue #175). Not a
+      // progress status: `status` keeps meaning supersession only. Absent means
+      // nothing beyond the blockers.
       needs: external_exports.enum(BOARD_NEEDS).optional(),
-      // Why a user item waits for the user (GitHub issue #107, decision
+      // Why a user item waits (GitHub issue #107, decision
       // handoff-needs-user-blocked-milestone-evidence-pull-only-skew-safe): valid
-      // only with needs 'user' or 'grill' on a source:'user' item. A sender's
-      // tracker shows it as "needs user in <project>: <reason>".
+      // only with needs 'user', 'grill' or 'external' on a source:'user' item,
+      // and required with 'external'. A sender's tracker shows it as
+      // "needs user in <project>: <reason>".
       needs_reason: needsReasonField.optional(),
+      // When `needs` last changed value (GitHub issue #175). Server-stamped by
+      // board_add/board_update, kept through other edits, removed with needs.
+      // The age of an external wait is read from it, never from updated_at,
+      // which any unrelated edit resets.
+      needs_set_at: external_exports.string().datetime().optional(),
       // Cross-project handoff (GitHub issue #105): see todoHandoffSchema.
       handoff: todoHandoffSchema.optional()
     }).superRefine((rec, ctx) => {
       refineSupersession(rec, ctx);
       if (rec.needs_reason !== void 0 && (rec.source !== "user" || !needsReasonAllowed(rec.needs))) {
-        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user' or 'grill' on a source:'user' board task` });
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs_reason goes only with needs 'user', 'grill' or 'external' on a source:'user' board task` });
+      }
+      if (rec.source === "user" && needsReasonRequired(rec.needs) && rec.needs_reason === void 0) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_reason"], message: `needs 'external' requires a needs_reason naming what is awaited and what lets the work resume` });
+      }
+      if (rec.needs_set_at !== void 0 && rec.needs === void 0) {
+        ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["needs_set_at"], message: `needs_set_at goes only with needs` });
       }
       if (rec.source === TODO_SYSTEM_SOURCE && rec.handoff !== void 0) {
         ctx.addIssue({ code: external_exports.ZodIssueCode.custom, path: ["handoff"], message: `handoff marks source:'user' board tasks only \u2014 maintenance-queue items are never handed to another project` });
@@ -9709,7 +9726,7 @@ function boardReadinessOf(targets, live, openBlocker) {
     }
     const unblocks = t.slug ? (dependents.get(t.slug) ?? []).filter((d) => d.id !== t.id).map(boardItemHandle) : [];
     const sent = sentHandoffOf(t);
-    const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
+    const state = sent ? "delegated" : t.needs === "user" || t.needs === "grill" || t.needs === "external" ? "waiting" : blockersOpen.length ? "blocked" : t.needs === "investigation" ? "research" : "ready";
     return {
       id: t.id,
       ...t.slug ? { slug: t.slug } : {},
@@ -9718,6 +9735,8 @@ function boardReadinessOf(targets, live, openBlocker) {
       updated_at: t.updated_at,
       file_keys: Array.isArray(t.file_keys) ? [...t.file_keys] : [],
       ...t.needs ? { needs: t.needs } : {},
+      ...t.needs && typeof t.needs_reason === "string" ? { needs_reason: t.needs_reason } : {},
+      ...t.needs && typeof t.needs_set_at === "string" ? { needs_set_at: t.needs_set_at } : {},
       blockers,
       blockers_open: blockersOpen,
       unblocks,
@@ -9725,6 +9744,24 @@ function boardReadinessOf(targets, live, openBlocker) {
       ...sent ? { handoff: sent, ...typeof t.created_at === "string" ? { created_at: t.created_at } : {} } : {}
     };
   });
+}
+function boardWriteOverlaps(ready) {
+  const marks = /* @__PURE__ */ new Map();
+  for (const a of ready) {
+    const keys = new Set(a.file_keys);
+    const others = ready.filter((b) => b.id !== a.id && b.file_keys.some((k) => keys.has(k))).map((b) => b.name);
+    if (others.length)
+      marks.set(a.id, others);
+  }
+  return marks;
+}
+function boardWaitAge(setAt, now = Date.now()) {
+  const t = typeof setAt === "string" ? Date.parse(setAt) : NaN;
+  if (Number.isNaN(t))
+    return "since unknown";
+  const ms = Math.max(0, now - t);
+  const ago = ms >= DAY_MS ? `${Math.floor(ms / DAY_MS)}d ago` : `${Math.floor(ms / 36e5)}h ago`;
+  return `since ${setAt.slice(0, 10)}, ${ago}`;
 }
 function compareBoardReadiness(a, b) {
   const pa = PRIORITY_RANK[a.priority ?? "normal"] ?? 1;
@@ -9910,7 +9947,7 @@ function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
 }
-var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
+var storeDriverFactory, StoreRowDecodeError, SUPPORTED_SCHEMA_VERSION, MODELS_CATALOG_LOCATION, MOVE_OUT_PREFIX, MOVE_IN_PREFIX, MoveInFlightError, MoveClaimLostError, OperationRepeatedError, StoreMovedError, SQLITE_BUSY_EXTENDED, StoreBusyError, StoreOutcomeUncertainError, UnsupportedSchemaVersionError, SchemaMigrationRequiredError, DAY_MS, PRIORITY_RANK, MAX_RANK_TERMS, rankTerms, DEFAULT_QUERY_CAP, MAX_TERMINUS_HOPS, MAX_BODY_COMPARE_DEPTH, COMPARE_WORK_BUDGET, COMPARE_OUTPUT_BUDGET, COMPARE_PATH_LENGTH_BUDGET, ComparisonBudgetExceededError, DECLARED_CAPTURE_OWED_PREFIX, DECLARED_CAPTURE_TARGET_TRAILER, SterlingStore;
 var init_dist2 = __esm({
   "packages/store/dist/index.js"() {
     "use strict";
@@ -10047,6 +10084,7 @@ var init_dist2 = __esm({
         this.db_path = dbPath;
       }
     };
+    DAY_MS = 864e5;
     PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
     MAX_RANK_TERMS = 16;
     rankTerms = external_exports.array(external_exports.string().regex(new RegExp(`^\\S{1,${AXIS_MAX_TERM_LEN}}$`), `rank_terms must be single keywords (no whitespace, \u2264${AXIS_MAX_TERM_LEN} chars)`)).transform((terms) => {
@@ -19190,6 +19228,9 @@ function boardGroups(readiness) {
     ready: sorted.filter((r) => r.state === "ready"),
     research: sorted.filter((r) => r.state === "research"),
     waiting: sorted.filter((r) => r.state === "waiting"),
+    // WAITING ON YOU (needs user or grill) and WAITING ON OTHERS (needs external, GitHub issue #175).
+    waitingOnYou: sorted.filter((r) => r.state === "waiting" && r.needs !== "external"),
+    waitingOnOthers: sorted.filter((r) => r.state === "waiting" && r.needs === "external"),
     blocked: sorted.filter((r) => r.state === "blocked").length,
     delegated: sorted.filter((r) => r.state === "delegated")
   };
@@ -19218,27 +19259,25 @@ function lanesText(live, ceiling, { showCount = true } = {}) {
   const k = live.availability === "ok" ? String(live.count) : `? (dispatch register ${live.availability})`;
   return `live lanes ${k}/${n}`;
 }
-function overlapMarks(ready) {
-  const marks = /* @__PURE__ */ new Map();
-  for (const a of ready) {
-    const keys = new Set(a.file_keys);
-    const others = ready.filter((b) => b.id !== a.id && b.file_keys.some((k) => keys.has(k))).map((b) => b.name);
-    if (others.length) marks.set(a.id, others);
-  }
-  return marks;
-}
-function groupLines(title, items, cap, render3) {
+function groupLines(title, items, cap, render3, moreNote = () => "") {
   if (!items.length) return [];
   const out = [`${title.replace("{n}", String(items.length))}:`, ...items.slice(0, cap).map(render3)];
-  if (items.length > cap) out.push(`  \u2026 ${items.length - cap} more ${title.split(" (")[0]} (board_query)`);
+  if (items.length > cap) out.push(`  \u2026 ${items.length - cap} more ${title.split(" (")[0]}${moreNote(items.slice(cap))} (board_query)`);
   return out;
 }
-function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus, showLaneCount = true }) {
+function oldestOmittedWait(omitted, now) {
+  const stamped = omitted.map((r) => r.needs_set_at).filter((v) => typeof v === "string" && !Number.isNaN(Date.parse(v)));
+  if (!stamped.length) return ", oldest since unknown";
+  const oldest = stamped.reduce((a, b) => Date.parse(a) <= Date.parse(b) ? a : b);
+  const unknown2 = stamped.length < omitted.length ? ` (${omitted.length - stamped.length} since unknown)` : "";
+  return `, oldest ${boardWaitAge(oldest, now)}${unknown2}`;
+}
+function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus, showLaneCount = true, now = Date.now() }) {
   const g = boardGroups(readiness);
   if (!g.ready.length && !g.research.length && !g.waiting.length && !g.blocked && !g.delegated.length) return "";
-  const marks = overlapMarks(g.ready);
+  const marks = boardWriteOverlaps(g.ready);
   const blockedNote = g.blocked ? `; ${g.blocked} blocked` : "";
-  const header = `BOARD READINESS (${DECISION}) \u2014 ${lanesText(live, ceiling, { showCount: showLaneCount })}${blockedNote}. At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling (a ceiling, never a quota). READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill). Items marked \u26A0 share a write path: their implementation lanes run one at a time.`;
+  const header = `BOARD READINESS (${DECISION}) \u2014 ${lanesText(live, ceiling, { showCount: showLaneCount })}${blockedNote}. At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling (a ceiling, never a quota). READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill); WAITING ON OTHERS items wait on an outside party (needs external): recheck one when its evidence arrives, never clear it because time passed. Items marked \u26A0 share a write path: their implementation lanes run one at a time.`;
   const lines = [
     header,
     ...groupLines("READY ({n})", g.ready, cap, (r) => {
@@ -19247,7 +19286,14 @@ function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP,
       return `- ${r.name}${pri}${mark ? ` \u26A0 shares a write path with ${mark.join(", ")}` : ""}`;
     }),
     ...groupLines("READY FOR RESEARCH ({n}, researcher lanes only)", g.research, cap, (r) => `- ${r.name}${r.priority && r.priority !== "normal" ? ` [${r.priority}]` : ""}`),
-    ...groupLines("WAITING ON YOU ({n})", g.waiting, cap, (r) => `- ${r.name} \u2014 needs ${r.needs}${r.blockers_open?.length ? ` (also blocked by ${r.blockers_open.join(", ")})` : ""}`),
+    ...groupLines("WAITING ON YOU ({n})", g.waitingOnYou, cap, (r) => `- ${r.name} \u2014 needs ${r.needs}${r.blockers_open?.length ? ` (also blocked by ${r.blockers_open.join(", ")})` : ""}`),
+    ...groupLines(
+      "WAITING ON OTHERS ({n})",
+      g.waitingOnOthers,
+      cap,
+      (r) => `- ${r.name} \u2014 ${r.needs_reason ?? "no reason recorded"} (${boardWaitAge(r.needs_set_at, now)})${r.blockers_open?.length ? ` (also blocked by ${r.blockers_open.join(", ")})` : ""}`,
+      (omitted) => oldestOmittedWait(omitted, now)
+    ),
     ...groupLines("DELEGATED TO OTHER PROJECTS ({n}, not run here)", g.delegated, cap, (r) => `- ${r.name} \u2014 ${delegatedStatus(r, handoffStatus)}`)
   ];
   return lines.join("\n");
@@ -20369,10 +20415,10 @@ ${renderedUncertain}` + (omittedUncertain > 0 ? `
     const noteSession = noteSessionId;
     const renderedLanes = noteLanes.slice(0, LIVE_DISPATCH_MAX).map((l) => `- ${l}`).join("\n");
     const omittedLanes = noteLanes.length - Math.min(noteLanes.length, LIVE_DISPATCH_MAX);
-    const wayBack = note.session_host === "opencode" ? noteSession ? `The old agents are reachable only by returning to the old session: \`opencode --session ${noteSession}\`.` : `The old agents are reachable only by returning to the old session; the note recorded no session id.` : noteSession ? `The old agents are reachable only by returning to the old session: \`claude --resume ${noteSession}\`, or the rewind menu's previous-session entry.` : `The old agents are reachable only by returning to the old session (the rewind menu's previous-session entry); the note recorded no session id.`;
+    const wayBack = note.session_host === "opencode" ? `Before re-dispatching, ${OPENCODE_DEAD_LANE_CHECK}. ` + (noteSession ? `The old session is \`opencode --session ${noteSession}\`.` : `The note recorded no session id for the old session.`) : noteSession ? `The old agents are reachable only by returning to the old session: \`claude --resume ${noteSession}\`, or the rewind menu's previous-session entry.` : `The old agents are reachable only by returning to the old session (the rewind menu's previous-session entry); the note recorded no session id.`;
     lanesLine = (host === "claude" ? `
 ${noteLanes.length} lane hand-off(s) carried across the rotation. Pre-clear subagents cannot be resumed with SendMessage after a /clear or restart ("No transcript found for agent ID"): re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. ` : `
-${noteLanes.length} lane hand-off(s) carried across the rotation. Subagents of the previous session are not continued from this one: re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. `) + wayBack + `
+${noteLanes.length} lane hand-off(s) carried across the rotation. Subagents of the previous session may still be running: re-dispatch a lane worth continuing only once it is known dead, with its hand-off below in the brief. `) + wayBack + `
 ${renderedLanes}` + (omittedLanes > 0 ? `
 \u2026 (+${omittedLanes} more)` : "");
   }
@@ -20774,7 +20820,7 @@ function planLockSection(ctx) {
   const PATH_MAX2 = PATH_MAX;
   const REASON_MAX2 = REASON_MAX;
   const STALE_DAYS = 14;
-  const DAY_MS = 24 * 60 * 60 * 1e3;
+  const DAY_MS2 = 24 * 60 * 60 * 1e3;
   const clean = sanitizeForContext;
   const sterlingDir = join39(ctx.cwd, ".sterling");
   const transientDir = join39(sterlingDir, "transient");
@@ -20863,9 +20909,9 @@ function planLockSection(ctx) {
       );
     }
     const ageMs = Date.now() - Date.parse(clean(lock.approved_at, 40));
-    if (Number.isFinite(ageMs) && ageMs > STALE_DAYS * DAY_MS) {
+    if (Number.isFinite(ageMs) && ageMs > STALE_DAYS * DAY_MS2) {
       blocks.push(
-        `STALE: approved ~${Math.round(ageMs / DAY_MS)} days ago. Staleness is a DISCLOSURE, never a clear \u2014 only a later approval or plan-lock.mjs --release clears a lock.`
+        `STALE: approved ~${Math.round(ageMs / DAY_MS2)} days ago. Staleness is a DISCLOSURE, never a clear \u2014 only a later approval or plan-lock.mjs --release clears a lock.`
       );
     }
   }

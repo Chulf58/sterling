@@ -36,8 +36,8 @@ const systemTodo = (extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 
-test('BOARD_NEEDS is exactly user, grill, investigation', () => {
-  assert.deepEqual([...BOARD_NEEDS], ['user', 'grill', 'investigation']);
+test('BOARD_NEEDS is exactly user, grill, investigation, external', () => {
+  assert.deepEqual([...BOARD_NEEDS], ['user', 'grill', 'investigation', 'external']);
 });
 
 test('todo.needs: OPTIONAL — an item without it round-trips with no invented field', () => {
@@ -47,7 +47,9 @@ test('todo.needs: OPTIONAL — an item without it round-trips with no invented f
 
 test('todo.needs: a user item accepts each enum value', () => {
   for (const needs of BOARD_NEEDS) {
-    assert.equal((todoSchema.parse(userTodo({ needs })) as { needs?: string }).needs, needs);
+    // external requires a reason (GitHub issue #175); the others take none.
+    const reason = needs === 'external' ? { needs_reason: 'reply from the vendor' } : {};
+    assert.equal((todoSchema.parse(userTodo({ needs, ...reason })) as { needs?: string }).needs, needs);
   }
 });
 
@@ -61,4 +63,17 @@ test('todo.needs: a system item carrying it is refused, naming the field', () =>
   const issue = r.success ? undefined : r.error.issues.find((i) => i.path[0] === 'needs');
   assert.ok(issue, 'the refusal names needs');
   assert.match(issue!.message, /source:'user' board tasks only/);
+});
+
+test('todo.needs external: needs_reason is required and must not be blank (GitHub issue #175)', () => {
+  const missing = todoSchema.safeParse(userTodo({ needs: 'external' }));
+  assert.equal(missing.success, false);
+  assert.match(JSON.stringify(missing.error?.issues), /needs 'external' requires a needs_reason/);
+  assert.equal(todoSchema.safeParse(userTodo({ needs: 'external', needs_reason: '   ' })).success, false);
+  const ok = todoSchema.parse(userTodo({ needs: 'external', needs_reason: 'reply from the vendor', needs_set_at: NOW })) as { needs_set_at?: string };
+  assert.equal(ok.needs_set_at, NOW);
+});
+
+test('todo.needs_set_at: refused without needs', () => {
+  assert.equal(todoSchema.safeParse(userTodo({ needs_set_at: NOW })).success, false);
 });
