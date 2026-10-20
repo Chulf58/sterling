@@ -15303,7 +15303,7 @@ function readCurrency({ git }) {
     behind = Number.isFinite(b) ? b : 0;
     ahead = Number.isFinite(a) ? a : 0;
   }
-  const lines = git(["status", "--porcelain"], { allowFail: true }).split("\n").filter(Boolean);
+  const lines = git(["--no-optional-locks", "status", "--porcelain"], { allowFail: true }).split("\n").filter(Boolean);
   return {
     is_repo: true,
     branch,

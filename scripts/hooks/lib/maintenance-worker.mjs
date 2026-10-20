@@ -441,7 +441,7 @@ export function gitState(root, spawnSync = nodeSpawnSync) {
  *  root's place in it, from gitState) is stripped to match file_keys. */
 export function dirtyPaths(root, paths, spawnSync = nodeSpawnSync, prefix = '') {
   if (!paths.length) return new Set();
-  const r = spawnSync('git', ['-C', root, 'status', '--porcelain', '-z', '--untracked-files=all', '--', ...paths], { encoding: 'utf8', timeout: 30_000 });
+  const r = spawnSync('git', ['-C', root, '--no-optional-locks', 'status', '--porcelain', '-z', '--untracked-files=all', '--', ...paths], { encoding: 'utf8', timeout: 30_000 });
   if (r.error || r.status !== 0) return null;
   const dirty = new Set();
   const add = (p) => {

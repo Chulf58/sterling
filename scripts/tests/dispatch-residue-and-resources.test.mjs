@@ -90,7 +90,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -703,5 +703,58 @@ test('SPEC A (8d): H22 kill-signature SubagentStop reports residue for a dirty f
     assertResidue(out(r), { agentType: 'coder', agentId: 'killed-dir', paths: ['src/farm/crop.gd'] });
   } finally {
     cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GitHub issue #168: a read-only `git status` must not take .git/index.lock.
+// A hook SIGKILLed while git holds the lock leaves a 0-byte lock that blocks
+// the next merge; --no-optional-locks makes status skip the opportunistic
+// index refresh write, so there is nothing to leave behind.
+// ---------------------------------------------------------------------------
+
+function sourceFilesUnderScripts(dir, acc = []) {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.name === 'tests' || e.name === 'node_modules') continue;
+    const p = join(dir, e.name);
+    if (e.isDirectory()) sourceFilesUnderScripts(p, acc);
+    else if (e.name.endsWith('.mjs')) acc.push(p);
+  }
+  return acc;
+}
+
+test('#168 source sweep: every git `status` argv under scripts/ carries --no-optional-locks', () => {
+  // An array literal with 'status' as an element; gh/codex `auth status` and `login status` are not git.
+  const statusArgv = /\[[^\[\]\n]*(?:^|[\[,]\s*)['"]status['"][^\[\]\n]*\]/g;
+  const sites = [];
+  for (const file of sourceFilesUnderScripts(join(root, 'scripts'))) {
+    for (const m of readFileSync(file, 'utf8').matchAll(statusArgv)) {
+      if (/['"](?:auth|login)['"]/.test(m[0])) continue;
+      sites.push({ file: file.slice(root.length + 1), argv: m[0] });
+    }
+  }
+  const unguarded = sites.filter((s) => !s.argv.includes('--no-optional-locks')).map((s) => `${s.file}: ${s.argv}`);
+  assert.deepEqual(unguarded, [], 'git status argv without --no-optional-locks');
+  assert.ok(sites.length >= 7, `the sweep found only ${sites.length} git status argv(s); the pattern no longer matches the call sites`);
+});
+
+test('#168 behaviour: probeDirtyPaths runs git with --no-optional-locks before status', { skip: GIT_SKIP || process.platform === 'win32' }, async () => {
+  const shimDir = mkdtempSync(join(tmpdir(), 'sterling-git-shim-'));
+  const log = join(shimDir, 'argv.log');
+  const shim = join(shimDir, 'git');
+  writeFileSync(shim, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexit 0\n`);
+  chmodSync(shim, 0o755);
+  const oldPath = process.env.PATH;
+  try {
+    process.env.PATH = `${shimDir}:${oldPath}`;
+    const { probeDirtyPaths } = await import(join(HOOKS, 'lib', 'dispatch-residue.mjs'));
+    const r = probeDirtyPaths(shimDir, ['src/a.mjs']);
+    assert.equal(r.verified, true);
+    const argv = readFileSync(log, 'utf8').trim().split('\n');
+    assert.equal(argv.length, 1);
+    assert.match(argv[0], /^--no-optional-locks status --porcelain /);
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(shimDir, { recursive: true, force: true });
   }
 });

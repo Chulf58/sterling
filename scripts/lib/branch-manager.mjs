@@ -33,7 +33,13 @@ function git(cwd, args, { allowFail = false, treeWrite = false } = {}) {
     // recurrence is distinguishable from a real git nonzero exit at the message.
     const spawnState =
       r.error ? `spawn-error ${r.error.code ?? r.error.message}` : r.signal ? `killed by ${r.signal}` : `exit ${r.status}`;
-    throw new Error(`git ${args.join(' ')} failed (${spawnState}): ${(r.stderr || r.stdout || '').trim()}`);
+    const detail = (r.stderr || r.stdout || '').trim();
+    // A git killed with SIGKILL while it held the index lock leaves a 0-byte
+    // .git/index.lock behind (GitHub issue #168). Name it; never delete it here.
+    const lockHint = /index\.lock/.test(detail)
+      ? '\nThe index lock (.git/index.lock in this repository, or in its git dir) may be stale from a git that was killed; if no git process is running, remove it by hand and rerun.'
+      : '';
+    throw new Error(`git ${args.join(' ')} failed (${spawnState}): ${detail}${lockHint}`);
   }
   return (r.stdout ?? '').trim();
 }
@@ -98,7 +104,7 @@ function repoStateReport({ cwd, branch, step }) {
   // `rev-parse --verify --quiet` exits 1 for a ref that does not exist; any other
   // non-zero exit is git failing to answer, which is not "absent".
   const mergeHead = mergeR?.status === 0 ? true : mergeR?.status === 1 ? false : null;
-  const statusR = read(['status', '--porcelain']);
+  const statusR = read(['--no-optional-locks', 'status', '--porcelain']);
   const changed = statusR?.status === 0 ? statusR.stdout.split('\n').filter(Boolean).length : null;
   const unknown = 'unknown (git could not answer)';
   const lines = [
@@ -151,7 +157,7 @@ function repoStateReport({ cwd, branch, step }) {
 
 /** Conductor-direct merge: --no-ff merge `branch` into `into`, then SAFE-delete `branch`. Requires a clean tree (fail loud, never stash). */
 export function mergeBranchInto({ cwd, branch, into, message }) {
-  const status = git(cwd, ['status', '--porcelain']);
+  const status = git(cwd, ['--no-optional-locks', 'status', '--porcelain']);
   if (status) {
     // "commit or discard" is the wrong remedy for an UNTRACKED entry (?? in
     // porcelain) — on a Sterling project these are exactly the init-generated

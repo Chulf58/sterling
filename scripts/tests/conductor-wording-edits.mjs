@@ -264,6 +264,20 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "**Return** (the exact shape you want). **Territory**",
     after: "**Return** (the exact shape you want); an implementor brief also opens with its `Tier reason:` line. **Territory**",
   },
+  {
+    commit: 'claude-code-sol-route-defaults-to-gpt-6-1-sol-with-loud-fallback',
+    date: '2026-10-20',
+    reason: "the Claude Code Sol pairing names gpt-6.1-sol, matching the OpenCode route, because the ChatGPT-account refusal depends on account, plan and sign-in, so one pinned id is not safe (GitHub issue #165, user-ruled 2026-10-20)",
+    before: "Codex **Sol** (`gpt-5.6-sol`, dispatched through the `codex` MCP tool at `sandbox: read-only`)",
+    after: "Codex **Sol** (`gpt-6.1-sol`, dispatched through the `codex` MCP tool at `sandbox: read-only`)",
+  },
+  {
+    commit: 'claude-code-sol-route-defaults-to-gpt-6-1-sol-with-loud-fallback',
+    date: '2026-10-20',
+    reason: "the loud fallback: on the ChatGPT-account 400, say so, retry once on gpt-5.6-sol, then review on Opus and tell the user to check the Codex login; never silent (same decision)",
+    before: "through the `review-brief` skill. When a `codex` call returns \"Connection closed\"",
+    after: "through the `review-brief` skill. When Codex answers HTTP 400 \"not supported when using Codex with a ChatGPT account\", say so, retry once with `model: gpt-5.6-sol`, and if that is refused too, review on Opus and tell the user to check the Codex login (API key versus ChatGPT plan); never fall back silently (decision `claude-code-sol-route-defaults-to-gpt-6-1-sol-with-loud-fallback`, user-ruled 2026-10-20 on GitHub issue #165, because the refusal depends on account, plan and sign-in, so no single Sol id is safe). When a `codex` call returns \"Connection closed\"",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

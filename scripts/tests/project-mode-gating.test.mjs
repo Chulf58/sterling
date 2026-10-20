@@ -220,7 +220,7 @@ function updateExec({ behind }) {
       if (a.startsWith('symbolic-ref')) return ok('origin/main');
       if (a.startsWith('rev-parse --verify --quiet')) return ok(HEAD_B);
       if (a.startsWith('rev-list --left-right --count')) return ok(merged || !behind ? '0\t0' : `${behind}\t0`);
-      if (a === 'status --porcelain') return ok('');
+      if (a === '--no-optional-locks status --porcelain') return ok('');
       if (a.startsWith('merge --ff-only')) { merged = true; return ok('Fast-forward'); }
       return ok('');
     }

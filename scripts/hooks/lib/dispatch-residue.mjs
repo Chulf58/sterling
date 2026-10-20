@@ -80,7 +80,7 @@ export function probeDirtyPaths(projectDir, files, fileEntries = []) {
     // mis-decode, and rename records carry the new path then the old path as
     // two separate NUL-terminated fields (no ' -> ' arrow to split, which
     // could otherwise appear inside a quoted name under the non-z format).
-    r = spawnSync('git', ['status', '--porcelain', '-z', '-uall', '--', ...declared], {
+    r = spawnSync('git', ['--no-optional-locks', 'status', '--porcelain', '-z', '-uall', '--', ...declared], {
       cwd: projectDir,
       encoding: 'utf8',
       timeout: 10_000,
