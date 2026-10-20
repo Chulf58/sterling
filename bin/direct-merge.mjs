@@ -12438,11 +12438,13 @@ var STEP_TIMEOUT_MS = 9e5;
 function defaultExec(cmd, args, { cwd, timeout = STEP_TIMEOUT_MS } = {}) {
   const shell = process.platform === "win32";
   const q = (s2) => shell && /[\s"]/.test(s2) ? `"${s2}"` : s2;
-  const r = spawnSync3(q(cmd), args.map(q), { cwd, encoding: "utf8", timeout, shell });
+  const r = spawnSync3(q(cmd), args.map(q), { cwd, encoding: "utf8", timeout, shell, maxBuffer: Infinity });
   return {
     status: r.error ? 1 : r.status ?? 1,
     stdout: r.stdout ?? "",
-    stderr: r.stderr ?? (r.error ? String(r.error.message) : "")
+    stderr: r.stderr || (r.error ? String(r.error.message) : ""),
+    signal: r.signal ?? null,
+    errorCode: r.error?.code ?? null
   };
 }
 var PRE_SCALE_DOWN_MARKERS = Object.freeze(["run_signal", "run_state", "Reviewed-By-Agent", "review-ledger", "frozen-test"]);

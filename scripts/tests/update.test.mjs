@@ -581,6 +581,69 @@ test('a failing step stops the sequence loudly (exit 1) — no half-update in si
   }
 });
 
+// ── GitHub #177: a command killed by spawnSync (output over the buffer, or the
+//    timeout) used to read as a bare "exit 1" with no summary — a red test run ──
+
+async function runWithKilledBattery(killed) {
+  const cwd = scratchCwd();
+  try {
+    const base = fakeExec({ behind: 1 });
+    const seen = [];
+    const exec = (cmd, args, opts) => {
+      if (cmd === 'npm' && args[0] === 'test') {
+        seen.push(opts?.timeout);
+        return { status: 1, stdout: 'partial output', stderr: '', ...killed };
+      }
+      return base.exec(cmd, args, opts);
+    };
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (m) => lines.push(m), projects: [], opts: {} });
+    return { report, out: lines.join('\n'), seen };
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
+test('a battery killed for output over the buffer names ENOBUFS and says it did not finish, not "failed"', async () => {
+  const { report, out } = await runWithKilledBattery({ signal: 'SIGTERM', errorCode: 'ENOBUFS' });
+  assert.equal(report.exit, 1);
+  assert.match(out, /killed by SIGTERM: output exceeded the buffer \(ENOBUFS\)/);
+  assert.match(out, /DID NOT FINISH/);
+  assert.match(out, /not a test or check failure/);
+  assert.doesNotMatch(out, /FAILED \(exit 1\)/);
+  assert.match(out, /store migration is SKIPPED/, 'an unfinished battery still holds back the store migration');
+});
+
+test('a battery that hits the timeout names ETIMEDOUT and the ceiling it was given (45 min)', async () => {
+  const { report, out, seen } = await runWithKilledBattery({ signal: 'SIGTERM', errorCode: 'ETIMEDOUT' });
+  assert.equal(report.exit, 1);
+  assert.deepEqual(seen, [2_700_000], 'the test battery gets the 45 min ceiling');
+  assert.match(out, /timed out after 2700 s \(ETIMEDOUT\)/);
+  assert.match(out, /DID NOT FINISH/);
+});
+
+test('a plain red step still reads "FAILED (exit N)" — only a killed command is "did not finish"', async () => {
+  const { out } = await runWithKilledBattery({ status: 3 });
+  assert.match(out, /FAILED \(exit 3\)/);
+  assert.doesNotMatch(out, /DID NOT FINISH/);
+});
+
+test('defaultExec returns intact output past spawnSync\'s 1 MiB default buffer, with status 0 and no signal', () => {
+  const bytes = Math.round(1.5 * 1024 * 1024);
+  const r = defaultExec(process.execPath, ['-e', `process.stdout.write('x'.repeat(${bytes}))`], { cwd: tmpdir() });
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout.length, bytes);
+  assert.equal(r.signal, null);
+  assert.equal(r.errorCode, null);
+});
+
+test('defaultExec reports ETIMEDOUT and the signal when the command outlives its timeout', () => {
+  const r = defaultExec(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { cwd: tmpdir(), timeout: 300 });
+  assert.equal(r.status, 1);
+  assert.equal(r.errorCode, 'ETIMEDOUT');
+  assert.equal(r.signal, 'SIGTERM');
+});
+
 test('a failing check step still stops before the test battery and before sync (exit 1)', async () => {
   const cwd = scratchCwd();
   try {
