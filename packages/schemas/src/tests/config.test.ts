@@ -14,7 +14,7 @@ test('shipped default config parses and carries the spec defaults (§12, §7.2)'
   // (738253b2) — bumped 4.x -> 5 on 2026-07-26, so this pair is expected to change
   // on each generational bump; the assertion exists to catch an accidental drift to
   // an alias or a stale pin, not to freeze a version.
-  // all four roles -> claude-sonnet-5-5 per decision subagent-defaults-sonnet-5-5-opus-5-5-as-pin
+  // all four roles -> claude-sonnet-5-5 per decision implementor-defaults-to-sonnet-opus-only-for-mechanism-design-or-unknown-cause
   // (user-ruled 2026-09-28, replacing implementor-default-model-opus-5-5); Opus 5.5
   // stays available as a per-dispatch pin.
   assert.equal(shipped.models.implementor.model, 'claude-sonnet-5-5');
