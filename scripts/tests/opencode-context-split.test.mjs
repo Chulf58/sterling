@@ -174,14 +174,23 @@ test('the board block is not re-delivered when only the live-lane count changed,
     addTodo(dir, 'first ask');
     const reg = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'dispatch-register.mjs')).href);
     const h = handler(dir);
-    assert.match(await appended(h, 'ses_root'), /live lanes 0\/\d+.*\n[\s\S]*READY \(1\):\n- first ask/);
+    const opening = await appended(h, 'ses_root');
+    assert.match(opening, /BOARD READINESS[^\n]*lane ceiling \d+[\s\S]*READY \(1\):\n- first ask/, 'the block names the ceiling');
+    assert.doesNotMatch(opening.match(/BOARD READINESS[^\n]*/)[0], /live lanes/, 'the block carries no live count');
+    assert.match(opening, /live lanes 0\/\d+/, 'the count is its own line');
     await reg.registerStart(dir, { agent_id: 'lane-a', agent_type: 'implementor', session_id: 'ses_root', files: [], tool_use_id: null, at: new Date().toISOString() });
     h.resetStatus(dir);
-    assert.doesNotMatch(await appended(h, 'ses_root'), /BOARD READINESS/, 'a lane start alone sends no board block');
+    const started = await appended(h, 'ses_root');
+    assert.doesNotMatch(started, /BOARD READINESS/, 'a lane start alone sends no board block');
+    assert.match(started, /live lanes 1\/\d+/, 'a lane start sends the new count');
+    assert.equal(started.match(/live lanes/g).length, 1);
+    h.resetStatus(dir);
+    assert.equal(await appended(h, 'ses_root'), '', 'an unchanged count is not sent again');
     addTodo(dir, 'second ask');
     h.resetStatus(dir);
     const changed = await appended(h, 'ses_root');
-    assert.match(changed, /live lanes 1\/\d+/, 'a changed list is sent with the current lane count');
+    assert.doesNotMatch(changed, /live lanes/, 'a changed list is sent without a lane count when the count did not change');
+    assert.match(changed, /lane ceiling \d+/);
     assert.match(changed, /READY \(2\):/);
   } finally {
     rmSync(dir, { recursive: true, force: true });

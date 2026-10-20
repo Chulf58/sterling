@@ -148,6 +148,31 @@ test('read leaves the note in place; consume deletes it before returning; no not
   }
 });
 
+test("host 'opencode' does not call old lanes unresumable and says how to tell a lane is dead; Claude Code keeps its text (GitHub #173)", () => {
+  const dir = project(null);
+  try {
+    const note = {
+      next_slice: 'go on',
+      live_dispatches: [{ agent_type: 'implementor', agent_id: 'a1', territory: ['src/a.mjs'] }],
+      uncertain_dispatches: [{ agent_type: 'scout', agent_id: 's9', reason: 'lease expired' }],
+    };
+    const check = /STOP-and-report message \(a live lane stops, a dead one only replies\), or watch the lane's files, running test processes and external resources for several minutes/;
+    const oc = renderRotationRestore(note, { cwd: dir, host: 'opencode' });
+    assert.match(oc, /may still be running/);
+    assert.match(oc, check);
+    assert.match(oc, /s9 — ownership uncertain \(lease expired\); belongs to the previous session and may still be running/);
+    assert.doesNotMatch(oc, /cannot be resumed|re-dispatch fresh/);
+    const unreadable = renderRotationRestore({ next_slice: 'go on', live_dispatches: null }, { cwd: dir, host: 'opencode' });
+    assert.match(unreadable, check);
+    assert.doesNotMatch(unreadable, /cannot be resumed|re-dispatch fresh/);
+    const cc = renderRotationRestore(note, { cwd: dir, source: 'clear', host: 'claude' });
+    assert.match(cc, /cannot be resumed from this one \(agent lookup is scoped to the current session\); re-dispatch fresh/);
+    assert.doesNotMatch(cc, /STOP-and-report/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("host 'opencode' names the new session and OpenCode's relaunch; the way back follows the note's session_host", () => {
   const dir = project(null);
   try {

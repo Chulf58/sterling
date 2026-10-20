@@ -70,9 +70,10 @@ export function liveLanes(root, sessionId) {
   return { availability, count: entries.length, descriptions };
 }
 
-function lanesText(live, ceiling) {
-  const k = live.availability === 'ok' ? String(live.count) : `? (dispatch register ${live.availability})`;
+export function lanesText(live, ceiling, { showCount = true } = {}) {
   const n = ceiling.error ? `? (delegation.max_concurrent unreadable: ${ceiling.error})` : String(ceiling.value);
+  if (!showCount) return `lane ceiling ${n}`;
+  const k = live.availability === 'ok' ? String(live.count) : `? (dispatch register ${live.availability})`;
   return `live lanes ${k}/${n}`;
 }
 
@@ -100,14 +101,17 @@ function groupLines(title, items, cap, render) {
  * result. `handoffStatus` maps a delegated item's id to the store's
  * resolveSentHandoffs status; a caller that did not read the other projects
  * passes none, and each delegated line says its status was not read.
+ * `showLaneCount: false` (the OpenCode plugin) names only the ceiling: the live
+ * count goes stale in a block that is not re-sent, so the plugin sends it as its
+ * own `live lanes k/n` line when it changes (GitHub #174).
  */
-export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus }) {
+export function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus, showLaneCount = true }) {
   const g = boardGroups(readiness);
   if (!g.ready.length && !g.research.length && !g.waiting.length && !g.blocked && !g.delegated.length) return '';
   const marks = overlapMarks(g.ready);
   const blockedNote = g.blocked ? `; ${g.blocked} blocked` : '';
   const header =
-    `BOARD READINESS (${DECISION}) — ${lanesText(live, ceiling)}${blockedNote}. ` +
+    `BOARD READINESS (${DECISION}) — ${lanesText(live, ceiling, { showCount: showLaneCount })}${blockedNote}. ` +
     `At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling (a ceiling, never a quota). ` +
     `READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill). ` +
     `Items marked ⚠ share a write path: their implementation lanes run one at a time.`;

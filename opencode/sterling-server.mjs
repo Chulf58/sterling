@@ -18385,7 +18385,7 @@ function createConfigHandler(deps = {}) {
 
 // packages/opencode-plugin/src/context.mjs
 init_dist2();
-import { join as join39 } from "node:path";
+import { join as join40 } from "node:path";
 
 // scripts/lib/update.mjs
 import { closeSync as closeSync6, existsSync as existsSync18, mkdirSync as mkdirSync14, openSync as openSync6, readFileSync as readFileSync18, readdirSync as readdirSync7, readSync as readSync3, writeFileSync as writeFileSync8 } from "node:fs";
@@ -19212,9 +19212,10 @@ function liveLanes(root, sessionId) {
   }
   return { availability, count: entries.length, descriptions };
 }
-function lanesText(live, ceiling) {
-  const k = live.availability === "ok" ? String(live.count) : `? (dispatch register ${live.availability})`;
+function lanesText(live, ceiling, { showCount = true } = {}) {
   const n = ceiling.error ? `? (delegation.max_concurrent unreadable: ${ceiling.error})` : String(ceiling.value);
+  if (!showCount) return `lane ceiling ${n}`;
+  const k = live.availability === "ok" ? String(live.count) : `? (dispatch register ${live.availability})`;
   return `live lanes ${k}/${n}`;
 }
 function overlapMarks(ready) {
@@ -19232,12 +19233,12 @@ function groupLines(title, items, cap, render3) {
   if (items.length > cap) out.push(`  \u2026 ${items.length - cap} more ${title.split(" (")[0]} (board_query)`);
   return out;
 }
-function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus }) {
+function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus, showLaneCount = true }) {
   const g = boardGroups(readiness);
   if (!g.ready.length && !g.research.length && !g.waiting.length && !g.blocked && !g.delegated.length) return "";
   const marks = overlapMarks(g.ready);
   const blockedNote = g.blocked ? `; ${g.blocked} blocked` : "";
-  const header = `BOARD READINESS (${DECISION}) \u2014 ${lanesText(live, ceiling)}${blockedNote}. At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling (a ceiling, never a quota). READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill). Items marked \u26A0 share a write path: their implementation lanes run one at a time.`;
+  const header = `BOARD READINESS (${DECISION}) \u2014 ${lanesText(live, ceiling, { showCount: showLaneCount })}${blockedNote}. At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling (a ceiling, never a quota). READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill). Items marked \u26A0 share a write path: their implementation lanes run one at a time.`;
   const lines = [
     header,
     ...groupLines("READY ({n})", g.ready, cap, (r) => {
@@ -20216,8 +20217,181 @@ function remember(map, key, value, cap = SESSION_CACHE_CAP) {
 }
 
 // packages/opencode-plugin/src/dispatch.mjs
-import { mkdirSync as mkdirSync18, readdirSync as readdirSync9, rmSync as rmSync9, statSync as statSync8 } from "node:fs";
-import { basename as basename3, dirname as dirname16, join as join36 } from "node:path";
+import { mkdirSync as mkdirSync18, readdirSync as readdirSync9, rmSync as rmSync10, statSync as statSync8 } from "node:fs";
+import { basename as basename3, dirname as dirname16, join as join37 } from "node:path";
+
+// scripts/hooks/lib/rotation-restore.mjs
+import { spawnSync as spawnSync6 } from "node:child_process";
+import { existsSync as existsSync23, readFileSync as readFileSync24, rmSync as rmSync9 } from "node:fs";
+import { join as join36 } from "node:path";
+var NOTE_PROSE_MAX = 2e3;
+var LIVE_DISPATCH_MAX = 20;
+var LIVE_TERRITORY_MAX = 40;
+var LIVE_TERRITORY_LINE_MAX = PATH_MAX * 4;
+var NOTE_FIELD_MAX = {
+  objective: NOTE_PROSE_MAX,
+  next_slice: NOTE_PROSE_MAX,
+  risks: NOTE_PROSE_MAX,
+  pointers: NOTE_PROSE_MAX,
+  branch: PATH_MAX,
+  head_sha: PATH_MAX,
+  session_id: PATH_MAX,
+  at: PATH_MAX
+};
+var LANE_HANDOFF_MAX = 1e3;
+var OPENCODE_DEAD_LANE_CHECK = "tell whether a lane is dead: send the old sessionID a STOP-and-report message (a live lane stops, a dead one only replies), or watch the lane's files, running test processes and external resources for several minutes";
+function rotationNotePath(cwd) {
+  return join36(cwd, ".sterling", "transient", "rotation-note.json");
+}
+function readRotationNote(cwd) {
+  const notePath = rotationNotePath(cwd);
+  if (!existsSync23(notePath)) return null;
+  return JSON.parse(readFileSync24(notePath, "utf8"));
+}
+function consumeRotationNote(cwd) {
+  const note = readRotationNote(cwd);
+  if (note) rmSync9(rotationNotePath(cwd), { force: true });
+  return note;
+}
+function renderRotationRestore(note, { cwd, source, host = "claude", planLock = null, planLockMalformed = false }) {
+  if (host !== "claude" && host !== "opencode") throw new Error(`renderRotationRestore: unknown host '${host}'`);
+  const head = (() => {
+    try {
+      const r = spawnSync6("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", timeout: 5e3 });
+      return r.status === 0 ? (r.stdout ?? "").trim() : null;
+    } catch {
+      return null;
+    }
+  })();
+  const cautions = [];
+  if (note.head_sha && head && head !== note.head_sha) {
+    cautions.push(`HEAD has MOVED since the note (${sanitizeForContext(String(note.head_sha), PATH_MAX).slice(0, 8)} \u2192 ${head.slice(0, 8)}) \u2014 re-verify repository state before acting on it`);
+  }
+  const noteBaseBranch = sanitizeForContext(note.base_branch, PATH_MAX);
+  let commitsAheadUnverified = false;
+  if (typeof note.commits_ahead === "number") {
+    if (!note.base_branch) {
+      commitsAheadUnverified = true;
+    } else {
+      try {
+        const countR = spawnSync6("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd, encoding: "utf8", timeout: 5e3 });
+        const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
+        if (Number.isFinite(actual)) {
+          if (actual !== note.commits_ahead) {
+            cautions.push(`commits_ahead drift \u2014 note says ${note.commits_ahead}, actual is ${actual} (vs ${noteBaseBranch || "unknown base"})`);
+          }
+        } else {
+          commitsAheadUnverified = true;
+        }
+      } catch {
+        commitsAheadUnverified = true;
+      }
+    }
+  }
+  const ageMs = Date.now() - Date.parse(note.at ?? "");
+  if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1e3) {
+    cautions.push(`the note is ~${Math.round(ageMs / 36e5)}h old`);
+  }
+  const notePlanRaw = typeof note.plan_path === "string" && note.plan_path ? note.plan_path : null;
+  const livePlanRaw = typeof planLock?.plan_path === "string" && planLock.plan_path ? planLock.plan_path : null;
+  const notePlan = notePlanRaw ? sanitizeForContext(notePlanRaw, PATH_MAX) : null;
+  const livePlan = livePlanRaw ? sanitizeForContext(livePlanRaw, PATH_MAX) : null;
+  if (notePlanRaw && planLockMalformed) {
+    cautions.push(`the note names a plan (${notePlan}) but the live plan lock is MALFORMED and could not be compared against it \u2014 inspect it with \`plan-lock.mjs --show\``);
+  } else if (notePlanRaw && livePlanRaw && notePlanRaw !== livePlanRaw) {
+    cautions.push(`the note's plan_path DIFFERS from the current plan lock (note: ${notePlan}; lock now: ${livePlan}) \u2014 a new plan was approved after the note was written, and the PLAN LOCK section above is the authority`);
+  } else if (notePlanRaw && !livePlanRaw) {
+    cautions.push(`the note names a plan (${notePlan}) but no plan lock is live now \u2014 it was released, or .sterling/ was recreated`);
+  }
+  const planField = notePlanRaw ? [`- plan: ${notePlan}`] : [];
+  const noteSessionId = typeof note.session_id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(note.session_id) ? note.session_id : null;
+  const fields = planField.concat(
+    ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "session_id", "at"].map((k) => [k, k === "session_id" ? noteSessionId : note[k]]).filter(([, v]) => v).map(([k, v]) => `- ${k}: ${sanitizeForContext(String(v), NOTE_FIELD_MAX[k])}`)
+  ).concat(
+    typeof note.commits_ahead === "number" ? [`- commits_ahead: ${note.commits_ahead} (vs ${noteBaseBranch || "unknown base"})${commitsAheadUnverified ? " (unverified \u2014 base unavailable)" : ""}`] : []
+  ).join("\n");
+  const liveDispatches = note.live_dispatches;
+  let liveLine = "";
+  if (Array.isArray(liveDispatches) && liveDispatches.length) {
+    const rendered = liveDispatches.slice(0, LIVE_DISPATCH_MAX).map((d) => {
+      const entries = Array.isArray(d?.territory) ? d.territory : [];
+      let territory = "no declared territory";
+      if (entries.length) {
+        const shown = entries.slice(0, LIVE_TERRITORY_MAX).map((t) => sanitizeForContext(String(t), PATH_MAX));
+        const dropped = entries.length - shown.length;
+        let joined = shown.join(", ");
+        if (joined.length > LIVE_TERRITORY_LINE_MAX) joined = `${joined.slice(0, LIVE_TERRITORY_LINE_MAX)}\u2026`;
+        territory = dropped > 0 ? `${joined}\u2026 (+${dropped} more)` : joined;
+      }
+      return `- ${sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent"} (${sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id"}) \u2014 ${territory}`;
+    }).join("\n");
+    const omitted = liveDispatches.length - Math.min(liveDispatches.length, LIVE_DISPATCH_MAX);
+    liveLine = (host === "opencode" ? `
+${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and may still be running; whether this session can reach them is not shown. Before re-dispatching, ${OPENCODE_DEAD_LANE_CHECK}. Mind the territory below, which they may still be writing:
+${rendered}` : `
+${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and cannot be resumed from this one (agent lookup is scoped to the current session); re-dispatch fresh if the work is still needed, and mind the territory below, which they may still be writing:
+${rendered}`) + (omitted > 0 ? `
+\u2026 (+${omitted} more)` : "");
+  } else if (liveDispatches === null) {
+    liveLine = `
+${render(
+      disclosure(
+        "register_unavailable",
+        {},
+        host === "opencode" ? `dispatch register unavailable \u2014 the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and may still be running. Before re-dispatching, ${OPENCODE_DEAD_LANE_CHECK}, and check git status for files it may still be writing.` : "dispatch register unavailable \u2014 the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed, and check git status for files it may still be writing."
+      )
+    )}`;
+  }
+  const uncertainDispatches = Array.isArray(note.uncertain_dispatches) ? note.uncertain_dispatches : [];
+  let uncertainLine = "";
+  if (uncertainDispatches.length) {
+    const renderedUncertain = uncertainDispatches.slice(0, LIVE_DISPATCH_MAX).map((d) => {
+      const type = sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent";
+      const id = sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id";
+      const reason = sanitizeForContext(String(d?.reason ?? "unknown"), PATH_MAX) || "unknown";
+      return render(
+        disclosure(
+          "dispatch_status_unknown",
+          {},
+          host === "opencode" ? `${type}:${id} \u2014 ownership uncertain (${reason}); belongs to the previous session and may still be running \u2014 check it is dead (as above) before re-dispatching` : `${type}:${id} \u2014 ownership uncertain (${reason}); belongs to the previous session and cannot be resumed from this one \u2014 re-dispatch fresh if still needed`
+        )
+      );
+    }).join("\n");
+    const omittedUncertain = uncertainDispatches.length - Math.min(uncertainDispatches.length, LIVE_DISPATCH_MAX);
+    uncertainLine = `
+${uncertainDispatches.length} dispatch(es) UNCERTAIN at rotation (lease expired, not confirmed dead \u2014 never counted as live):
+${renderedUncertain}` + (omittedUncertain > 0 ? `
+\u2026 (+${omittedUncertain} more)` : "");
+  }
+  const noteLanes = (Array.isArray(note.lanes) ? note.lanes : []).filter((l) => typeof l === "string").map((l) => sanitizeForContext(l.replace(/\s+/g, " "), LANE_HANDOFF_MAX)).filter(Boolean);
+  let lanesLine = "";
+  if (noteLanes.length) {
+    const noteSession = noteSessionId;
+    const renderedLanes = noteLanes.slice(0, LIVE_DISPATCH_MAX).map((l) => `- ${l}`).join("\n");
+    const omittedLanes = noteLanes.length - Math.min(noteLanes.length, LIVE_DISPATCH_MAX);
+    const wayBack = note.session_host === "opencode" ? noteSession ? `The old agents are reachable only by returning to the old session: \`opencode --session ${noteSession}\`.` : `The old agents are reachable only by returning to the old session; the note recorded no session id.` : noteSession ? `The old agents are reachable only by returning to the old session: \`claude --resume ${noteSession}\`, or the rewind menu's previous-session entry.` : `The old agents are reachable only by returning to the old session (the rewind menu's previous-session entry); the note recorded no session id.`;
+    lanesLine = (host === "claude" ? `
+${noteLanes.length} lane hand-off(s) carried across the rotation. Pre-clear subagents cannot be resumed with SendMessage after a /clear or restart ("No transcript found for agent ID"): re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. ` : `
+${noteLanes.length} lane hand-off(s) carried across the rotation. Subagents of the previous session are not continued from this one: re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. `) + wayBack + `
+${renderedLanes}` + (omittedLanes > 0 ? `
+\u2026 (+${omittedLanes} more)` : "");
+  }
+  const body = `
+${fields}${liveLine}${uncertainLine}${lanesLine}
+Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold. `;
+  const caution = cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "";
+  if (host === "opencode") {
+    return `
+
+ROTATION RESTORE (Sterling OpenCode plugin): a rotation note was prepared before this new session; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch OpenCode, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: exit and relaunch OpenCode now.` : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED OpenCode before this new session \u2014 a new session alone never reloads code, so relaunch now if that didn't happen yet.`);
+  }
+  const isClear = source === "clear";
+  return `
+
+ROTATION RESTORE (H1, source=${source}): a rotation note was prepared before this ${isClear ? "/clear" : "restart"}; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? isClear ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.` : `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 this restore is happening at session STARTUP, which already implies the exit-and-relaunch that reloads server/hook code.` : isClear ? `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear \u2014 a /clear alone never reloads code, so relaunch now if that didn't happen yet.` : `If next_slice depends on a server/hook code change (migration, update, rebuild), this STARTUP already reloaded it.`);
+}
+
+// packages/opencode-plugin/src/dispatch.mjs
 function claudeShape(input) {
   const args = input.input && typeof input.input === "object" ? input.input : {};
   return { tool_use_id: input.id, session_id: input.sessionID, tool_input: { prompt: args.prompt, subagent_type: args.agent, description: args.description } };
@@ -20292,10 +20466,10 @@ async function sweepStaleDispatches(root) {
         const sweep = sessionBoundarySweep(root, { now: Date.now() });
         if (sweep.refused) refused = sweep.refused;
         terminated = sweep.terminated ?? 0;
-        rmSync9(registerPath(root), { force: true });
+        rmSync10(registerPath(root), { force: true });
         const registerBasename = basename3(registerPath(root));
         for (const f of readdirSync9(transientDir)) {
-          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync9(join36(transientDir, f), { force: true });
+          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync10(join37(transientDir, f), { force: true });
         }
       },
       { retryMs: 100, timeoutMs: 2e3 }
@@ -20303,7 +20477,7 @@ async function sweepStaleDispatches(root) {
     const lines = [];
     if (terminated) {
       lines.push(
-        `DEAD-DISPATCH RESIDUE (OpenCode process start): ${terminated} dispatch record(s) a previous OpenCode process left live were closed in Sterling's register (session-boundary) and the dispatch register was cleared. NOT PROOF THAT THESE DISPATCHES ENDED: a subagent can keep running across an OpenCode restart and still report back into this session. Wait for their completion reports, check git status and git log for files they may still be writing, and do not re-dispatch a writer lane over the same files until it is known dead.`
+        `DEAD-DISPATCH RESIDUE (OpenCode process start): ${terminated} dispatch record(s) a previous OpenCode process left live were closed in Sterling's register (session-boundary) and the dispatch register was cleared. NOT PROOF THAT THESE DISPATCHES ENDED: a subagent can keep running across an OpenCode restart and still report back into this session. Wait for their completion reports, check git status and git log for files they may still be writing, and do not re-dispatch a writer lane over the same files until it is known dead. To ${OPENCODE_DEAD_LANE_CHECK}.`
       );
     }
     if (refused) lines.push(`STERLING DISPATCH SWEEP: ${refused}`);
@@ -20318,7 +20492,7 @@ function regularFiles(root, files) {
   for (const f of files) {
     let st;
     try {
-      st = statSync8(join36(root, f), { throwIfNoEntry: false });
+      st = statSync8(join37(root, f), { throwIfNoEntry: false });
     } catch (e) {
       if (e?.code !== "ENOTDIR") logLine(root, `dispatch register: could not stat territory entry '${f}' (${e?.code ?? errText2(e)}); it keeps the directory prefix match`);
       continue;
@@ -20474,12 +20648,12 @@ function createDeliveryPolicy({ getSession, parents, readPolicy = readDeliveryPo
 
 // packages/opencode-plugin/src/worker.mjs
 import { spawn as spawn2 } from "node:child_process";
-import { existsSync as existsSync23 } from "node:fs";
-import { delimiter as delimiter2, join as join37 } from "node:path";
+import { existsSync as existsSync24 } from "node:fs";
+import { delimiter as delimiter2, join as join38 } from "node:path";
 function inWorkerChild(env = process.env) {
   return env?.[WORKER_ENV_FLAG] === "1";
 }
-var onPath = (name) => (process.env.PATH ?? "").split(delimiter2).some((d) => d && existsSync23(join37(d, name)));
+var onPath = (name) => (process.env.PATH ?? "").split(delimiter2).some((d) => d && existsSync24(join38(d, name)));
 function claudeOnPathDefault() {
   return onPath("claude");
 }
@@ -20534,7 +20708,7 @@ function createWorkerLaunch({
     const spawnNode = (cmd, args, opts) => spawnImpl(cmd === process.execPath ? nodeCmd : cmd, args, opts);
     let workerStore;
     try {
-      workerStore = openStore(join37(root, ".sterling", "sterling.db"));
+      workerStore = openStore(join38(root, ".sterling", "sterling.db"));
       const result = launchWorker2({ root, config, store: workerStore, trigger: "stop", spawn: spawnNode, ...runnerHost });
       if (result?.reason === "error") {
         logLine(root, `maintenance worker launch failed: ${result.detail ?? "no detail"}`);
@@ -20552,9 +20726,9 @@ function createWorkerLaunch({
 // scripts/hooks/lib/registry-refresh.mjs
 init_dist();
 init_dist2();
-import { existsSync as existsSync24 } from "node:fs";
+import { existsSync as existsSync25 } from "node:fs";
 function refreshRegistryRow(cwd, { config, configUnreadable = false, at = (/* @__PURE__ */ new Date()).toISOString() } = {}) {
-  if (!existsSync24(registryPath())) return null;
+  if (!existsSync25(registryPath())) return null;
   const cwdPosix = cwd.replace(/\\/g, "/");
   const isThisProject = (p) => sameLocationAnyHost(p.repo_path, cwdPosix);
   let mounts = null;
@@ -20593,8 +20767,8 @@ function refreshRegistryRow(cwd, { config, configUnreadable = false, at = (/* @_
 }
 
 // scripts/hooks/lib/plan-lock-section.mjs
-import { spawnSync as spawnSync6 } from "node:child_process";
-import { join as join38 } from "node:path";
+import { spawnSync as spawnSync7 } from "node:child_process";
+import { join as join39 } from "node:path";
 function planLockSection(ctx) {
   const TITLE_MAX2 = TITLE_MAX;
   const PATH_MAX2 = PATH_MAX;
@@ -20602,8 +20776,8 @@ function planLockSection(ctx) {
   const STALE_DAYS = 14;
   const DAY_MS = 24 * 60 * 60 * 1e3;
   const clean = sanitizeForContext;
-  const sterlingDir = join38(ctx.cwd, ".sterling");
-  const transientDir = join38(sterlingDir, "transient");
+  const sterlingDir = join39(ctx.cwd, ".sterling");
+  const transientDir = join39(sterlingDir, "transient");
   const blocks = [];
   const MARKERS = [
     {
@@ -20623,7 +20797,7 @@ function planLockSection(ctx) {
   for (const marker of MARKERS) {
     let raw = null;
     try {
-      raw = claimMarker(join38(transientDir, marker.file));
+      raw = claimMarker(join39(transientDir, marker.file));
     } catch {
       raw = null;
     }
@@ -20661,7 +20835,7 @@ function planLockSection(ctx) {
     }
     let branchNow = "unknown";
     try {
-      const r = spawnSync6("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.cwd, encoding: "utf8", timeout: 5e3 });
+      const r = spawnSync7("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.cwd, encoding: "utf8", timeout: 5e3 });
       const current = r.status === 0 ? (r.stdout ?? "").trim() : "";
       const approved = clean(lock.approved_branch, 120);
       if (current && approved) branchNow = current === approved ? "same" : `DIFFERENT (now ${current}, approved on ${approved})`;
@@ -20723,7 +20897,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
   function statusLine(root) {
     const hit = statusCache.get(root);
     if (hit && Date.now() - hit.at < STATUS_TTL_MS) return hit.text;
-    const dbPath = join39(root, ".sterling", "sterling.db");
+    const dbPath = join40(root, ".sterling", "sterling.db");
     let schema;
     try {
       const found = probeSchemaVersion(dbPath);
@@ -20755,7 +20929,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     }
     const brief = briefOf(input.messages);
     try {
-      const store = openStore(join39(root, ".sterling", "sterling.db"));
+      const store = openStore(join40(root, ".sterling", "sterling.db"));
       try {
         return stageChild({ store, root, sessionID: input.sessionID, agent: input.agent, brief, disclosure: brief ? "" : notStagedLine("brief-unavailable") }).text;
       } finally {
@@ -20780,7 +20954,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
       let state = null;
       let error = null;
       try {
-        const store = openStore(join39(root, ".sterling", "sterling.db"));
+        const store = openStore(join40(root, ".sterling", "sterling.db"));
         try {
           state = readMaintenanceState(store, root);
         } finally {
@@ -20821,7 +20995,7 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     let hit = boardCache.get(root);
     if (!hit || Date.now() - hit.at >= STATUS_TTL_MS) {
       try {
-        const store = openStore(join39(root, ".sterling", "sterling.db"));
+        const store = openStore(join40(root, ".sterling", "sterling.db"));
         let readiness;
         try {
           readiness = store.boardReadiness();
@@ -20842,9 +21016,8 @@ function createContextHandler({ openStore, now, rootOf, fenced, rotationRestore,
     try {
       const live = liveLanes(root, sessionID);
       const ceiling = laneCeiling(config);
-      const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus });
-      const sig = text ? renderBoardReadiness({ readiness: hit.readiness, live: live.availability === "ok" ? { ...live, count: 0 } : live, ceiling, handoffStatus: hit.handoffStatus }) : "";
-      return { text, sig };
+      const text = renderBoardReadiness({ readiness: hit.readiness, live, ceiling, handoffStatus: hit.handoffStatus, showLaneCount: false });
+      return { text, sig: text, lanes: text ? lanesText(live, ceiling) : "" };
     } catch (e) {
       logLine(root, `context: board readiness unreadable: ${errText2(e)}`);
       const text = `BOARD READINESS UNAVAILABLE (${errText2(e)}): the READY / READY FOR RESEARCH / WAITING ON YOU lists are not stated this turn; read the board with board_query.`;
@@ -20938,7 +21111,11 @@ ${opencodeHostTail(pluginRoot)}`;
         }
       }
       out.push({ key: "undeclared", text: undeclaredBlock(root, state.config), cleared: "UNDECLARED SOURCE: the undeclared-source finding shown earlier no longer applies." });
-      if (!inWorkerChild(env)) out.push({ key: "board", ...boardBlock(root, state.config, sessionID), cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
+      if (!inWorkerChild(env)) {
+        const { lanes, ...board } = boardBlock(root, state.config, sessionID);
+        out.push({ key: "board", ...board, cleared: "BOARD READINESS: no user item is ready, waiting or blocked now; the lists shown earlier no longer apply." });
+        out.push({ key: "lanes", text: lanes ?? "" });
+      }
     }
     out.push({ key: "restore", text: await rotationRestore(root, sessionID) });
     if (kind === "root" && !inWorkerChild(env)) {
@@ -21156,7 +21333,7 @@ ${text}`;
 }
 
 // packages/opencode-plugin/src/pr-loop.mjs
-import { join as join40 } from "node:path";
+import { join as join41 } from "node:path";
 
 // scripts/hooks/lib/pr-loop-duty.mjs
 var errMessage = (e) => String(e && e.message || e);
@@ -21205,7 +21382,7 @@ function createPrLoopNotice({ now, pluginRoot } = {}) {
         continue;
       }
       announced.add(key);
-      addNotice(root, prLoopOwedText(state, prLoopNext(state, join40(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"), { host: "opencode" })), at, key);
+      addNotice(root, prLoopOwedText(state, prLoopNext(state, join41(pluginRoot ?? sterlingRoot(), "bin", "pr-review-wait.mjs"), { host: "opencode" })), at, key);
     }
   };
 }
@@ -21213,172 +21390,6 @@ function createPrLoopNotice({ now, pluginRoot } = {}) {
 // packages/opencode-plugin/src/restore.mjs
 import { statSync as statSync9 } from "node:fs";
 import { join as join42 } from "node:path";
-
-// scripts/hooks/lib/rotation-restore.mjs
-import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync25, readFileSync as readFileSync24, rmSync as rmSync10 } from "node:fs";
-import { join as join41 } from "node:path";
-var NOTE_PROSE_MAX = 2e3;
-var LIVE_DISPATCH_MAX = 20;
-var LIVE_TERRITORY_MAX = 40;
-var LIVE_TERRITORY_LINE_MAX = PATH_MAX * 4;
-var NOTE_FIELD_MAX = {
-  objective: NOTE_PROSE_MAX,
-  next_slice: NOTE_PROSE_MAX,
-  risks: NOTE_PROSE_MAX,
-  pointers: NOTE_PROSE_MAX,
-  branch: PATH_MAX,
-  head_sha: PATH_MAX,
-  session_id: PATH_MAX,
-  at: PATH_MAX
-};
-var LANE_HANDOFF_MAX = 1e3;
-function rotationNotePath(cwd) {
-  return join41(cwd, ".sterling", "transient", "rotation-note.json");
-}
-function readRotationNote(cwd) {
-  const notePath = rotationNotePath(cwd);
-  if (!existsSync25(notePath)) return null;
-  return JSON.parse(readFileSync24(notePath, "utf8"));
-}
-function consumeRotationNote(cwd) {
-  const note = readRotationNote(cwd);
-  if (note) rmSync10(rotationNotePath(cwd), { force: true });
-  return note;
-}
-function renderRotationRestore(note, { cwd, source, host = "claude", planLock = null, planLockMalformed = false }) {
-  if (host !== "claude" && host !== "opencode") throw new Error(`renderRotationRestore: unknown host '${host}'`);
-  const head = (() => {
-    try {
-      const r = spawnSync7("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", timeout: 5e3 });
-      return r.status === 0 ? (r.stdout ?? "").trim() : null;
-    } catch {
-      return null;
-    }
-  })();
-  const cautions = [];
-  if (note.head_sha && head && head !== note.head_sha) {
-    cautions.push(`HEAD has MOVED since the note (${sanitizeForContext(String(note.head_sha), PATH_MAX).slice(0, 8)} \u2192 ${head.slice(0, 8)}) \u2014 re-verify repository state before acting on it`);
-  }
-  const noteBaseBranch = sanitizeForContext(note.base_branch, PATH_MAX);
-  let commitsAheadUnverified = false;
-  if (typeof note.commits_ahead === "number") {
-    if (!note.base_branch) {
-      commitsAheadUnverified = true;
-    } else {
-      try {
-        const countR = spawnSync7("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd, encoding: "utf8", timeout: 5e3 });
-        const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
-        if (Number.isFinite(actual)) {
-          if (actual !== note.commits_ahead) {
-            cautions.push(`commits_ahead drift \u2014 note says ${note.commits_ahead}, actual is ${actual} (vs ${noteBaseBranch || "unknown base"})`);
-          }
-        } else {
-          commitsAheadUnverified = true;
-        }
-      } catch {
-        commitsAheadUnverified = true;
-      }
-    }
-  }
-  const ageMs = Date.now() - Date.parse(note.at ?? "");
-  if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1e3) {
-    cautions.push(`the note is ~${Math.round(ageMs / 36e5)}h old`);
-  }
-  const notePlanRaw = typeof note.plan_path === "string" && note.plan_path ? note.plan_path : null;
-  const livePlanRaw = typeof planLock?.plan_path === "string" && planLock.plan_path ? planLock.plan_path : null;
-  const notePlan = notePlanRaw ? sanitizeForContext(notePlanRaw, PATH_MAX) : null;
-  const livePlan = livePlanRaw ? sanitizeForContext(livePlanRaw, PATH_MAX) : null;
-  if (notePlanRaw && planLockMalformed) {
-    cautions.push(`the note names a plan (${notePlan}) but the live plan lock is MALFORMED and could not be compared against it \u2014 inspect it with \`plan-lock.mjs --show\``);
-  } else if (notePlanRaw && livePlanRaw && notePlanRaw !== livePlanRaw) {
-    cautions.push(`the note's plan_path DIFFERS from the current plan lock (note: ${notePlan}; lock now: ${livePlan}) \u2014 a new plan was approved after the note was written, and the PLAN LOCK section above is the authority`);
-  } else if (notePlanRaw && !livePlanRaw) {
-    cautions.push(`the note names a plan (${notePlan}) but no plan lock is live now \u2014 it was released, or .sterling/ was recreated`);
-  }
-  const planField = notePlanRaw ? [`- plan: ${notePlan}`] : [];
-  const noteSessionId = typeof note.session_id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(note.session_id) ? note.session_id : null;
-  const fields = planField.concat(
-    ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "session_id", "at"].map((k) => [k, k === "session_id" ? noteSessionId : note[k]]).filter(([, v]) => v).map(([k, v]) => `- ${k}: ${sanitizeForContext(String(v), NOTE_FIELD_MAX[k])}`)
-  ).concat(
-    typeof note.commits_ahead === "number" ? [`- commits_ahead: ${note.commits_ahead} (vs ${noteBaseBranch || "unknown base"})${commitsAheadUnverified ? " (unverified \u2014 base unavailable)" : ""}`] : []
-  ).join("\n");
-  const liveDispatches = note.live_dispatches;
-  let liveLine = "";
-  if (Array.isArray(liveDispatches) && liveDispatches.length) {
-    const rendered = liveDispatches.slice(0, LIVE_DISPATCH_MAX).map((d) => {
-      const entries = Array.isArray(d?.territory) ? d.territory : [];
-      let territory = "no declared territory";
-      if (entries.length) {
-        const shown = entries.slice(0, LIVE_TERRITORY_MAX).map((t) => sanitizeForContext(String(t), PATH_MAX));
-        const dropped = entries.length - shown.length;
-        let joined = shown.join(", ");
-        if (joined.length > LIVE_TERRITORY_LINE_MAX) joined = `${joined.slice(0, LIVE_TERRITORY_LINE_MAX)}\u2026`;
-        territory = dropped > 0 ? `${joined}\u2026 (+${dropped} more)` : joined;
-      }
-      return `- ${sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent"} (${sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id"}) \u2014 ${territory}`;
-    }).join("\n");
-    const omitted = liveDispatches.length - Math.min(liveDispatches.length, LIVE_DISPATCH_MAX);
-    liveLine = `
-${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and cannot be resumed from this one (agent lookup is scoped to the current session); re-dispatch fresh if the work is still needed, and mind the territory below, which they may still be writing:
-${rendered}` + (omitted > 0 ? `
-\u2026 (+${omitted} more)` : "");
-  } else if (liveDispatches === null) {
-    liveLine = `
-${render(
-      disclosure(
-        "register_unavailable",
-        {},
-        "dispatch register unavailable \u2014 the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed, and check git status for files it may still be writing."
-      )
-    )}`;
-  }
-  const uncertainDispatches = Array.isArray(note.uncertain_dispatches) ? note.uncertain_dispatches : [];
-  let uncertainLine = "";
-  if (uncertainDispatches.length) {
-    const renderedUncertain = uncertainDispatches.slice(0, LIVE_DISPATCH_MAX).map((d) => {
-      const type = sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent";
-      const id = sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id";
-      const reason = sanitizeForContext(String(d?.reason ?? "unknown"), PATH_MAX) || "unknown";
-      return render(
-        disclosure("dispatch_status_unknown", {}, `${type}:${id} \u2014 ownership uncertain (${reason}); belongs to the previous session and cannot be resumed from this one \u2014 re-dispatch fresh if still needed`)
-      );
-    }).join("\n");
-    const omittedUncertain = uncertainDispatches.length - Math.min(uncertainDispatches.length, LIVE_DISPATCH_MAX);
-    uncertainLine = `
-${uncertainDispatches.length} dispatch(es) UNCERTAIN at rotation (lease expired, not confirmed dead \u2014 never counted as live):
-${renderedUncertain}` + (omittedUncertain > 0 ? `
-\u2026 (+${omittedUncertain} more)` : "");
-  }
-  const noteLanes = (Array.isArray(note.lanes) ? note.lanes : []).filter((l) => typeof l === "string").map((l) => sanitizeForContext(l.replace(/\s+/g, " "), LANE_HANDOFF_MAX)).filter(Boolean);
-  let lanesLine = "";
-  if (noteLanes.length) {
-    const noteSession = noteSessionId;
-    const renderedLanes = noteLanes.slice(0, LIVE_DISPATCH_MAX).map((l) => `- ${l}`).join("\n");
-    const omittedLanes = noteLanes.length - Math.min(noteLanes.length, LIVE_DISPATCH_MAX);
-    const wayBack = note.session_host === "opencode" ? noteSession ? `The old agents are reachable only by returning to the old session: \`opencode --session ${noteSession}\`.` : `The old agents are reachable only by returning to the old session; the note recorded no session id.` : noteSession ? `The old agents are reachable only by returning to the old session: \`claude --resume ${noteSession}\`, or the rewind menu's previous-session entry.` : `The old agents are reachable only by returning to the old session (the rewind menu's previous-session entry); the note recorded no session id.`;
-    lanesLine = (host === "claude" ? `
-${noteLanes.length} lane hand-off(s) carried across the rotation. Pre-clear subagents cannot be resumed with SendMessage after a /clear or restart ("No transcript found for agent ID"): re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. ` : `
-${noteLanes.length} lane hand-off(s) carried across the rotation. Subagents of the previous session are not continued from this one: re-dispatch each lane worth continuing fresh, with its hand-off below in the brief. `) + wayBack + `
-${renderedLanes}` + (omittedLanes > 0 ? `
-\u2026 (+${omittedLanes} more)` : "");
-  }
-  const body = `
-${fields}${liveLine}${uncertainLine}${lanesLine}
-Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold. `;
-  const caution = cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "";
-  if (host === "opencode") {
-    return `
-
-ROTATION RESTORE (Sterling OpenCode plugin): a rotation note was prepared before this new session; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch OpenCode, 2. THEN start this new session. If step 1 was skipped, the Sterling plugin and MCP server may still be stale: exit and relaunch OpenCode now.` : `If next_slice depends on a plugin or MCP-server code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED OpenCode before this new session \u2014 a new session alone never reloads code, so relaunch now if that didn't happen yet.`);
-  }
-  const isClear = source === "clear";
-  return `
-
-ROTATION RESTORE (H1, source=${source}): a rotation note was prepared before this ${isClear ? "/clear" : "restart"}; this injection CONSUMES it (single-shot).` + caution + body + (note.reason === "code-reload" ? isClear ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.` : `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 this restore is happening at session STARTUP, which already implies the exit-and-relaunch that reloads server/hook code.` : isClear ? `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear \u2014 a /clear alone never reloads code, so relaunch now if that didn't happen yet.` : `If next_slice depends on a server/hook code change (migration, update, rebuild), this STARTUP already reloaded it.`);
-}
-
-// packages/opencode-plugin/src/restore.mjs
 function createRotationRestore({ getSession, now, renderRestore = renderRotationRestore, env = process.env }) {
   const restored = /* @__PURE__ */ new Map();
   const malformedNoted = /* @__PURE__ */ new Set();

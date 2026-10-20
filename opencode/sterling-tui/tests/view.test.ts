@@ -153,6 +153,32 @@ test('subagents: only descendants of the root, active first, with status, contex
   assert.equal(rows[1].model, '-');
 });
 
+test('subagents: a child is active when OpenCode says running OR the dispatch register shows it unended (GitHub #174)', async () => {
+  const reg = await import('../../../scripts/lib/dispatch-register.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-oc-active-'));
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'sterling.db'), '');
+    const entry = (id: string) => ({ agent_id: id, agent_type: 'implementor', session_id: ROOT, files: [], tool_use_id: null, at: new Date().toISOString() });
+    await reg.registerStart(dir, entry(kid(1)));
+    await reg.registerStart(dir, entry(kid(3)));
+    await reg.registerEnd(dir, kid(3), 'SubagentStop');
+    const sessions = [{ id: ROOT }, { id: kid(1), parentID: ROOT }, { id: kid(2), parentID: ROOT }, { id: kid(3), parentID: ROOT }, { id: kid(4), parentID: ROOT }];
+    const active = (start: string) => readSubagents(source({ sessions, isRunning: view.isActiveChild(start, {}, (id) => id === kid(2)) })).filter((r) => r.status === 'active').map((r) => r.id).sort();
+    // kid(1): unended in the register; kid(2): OpenCode running; kid(3): ended in the register; kid(4): neither.
+    assert.deepEqual(active(dir), [kid(1), kid(2)].sort());
+    // the register is found at the project holding the store, from a directory below it
+    mkdirSync(join(dir, 'sub'), { recursive: true });
+    assert.deepEqual(active(join(dir, 'sub')), [kid(1), kid(2)].sort());
+    // with no register the status alone decides
+    assert.deepEqual(active(tmpdir()), [kid(2)]);
+    const rows = readSubagents(source({ sessions, isRunning: view.isActiveChild(dir, {}, () => false) }));
+    assert.equal(subagentSpanLines(rows, new Map(), 0).map(plain)[0], 'Sub-agents (1 active)');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('subagents: nested children count, and a parent cycle cannot loop', () => {
   const nested = readSubagents(source({ sessions: [{ id: ROOT }, { id: kid(1), parentID: ROOT }, { id: kid(3), parentID: kid(1), title: 'grandchild' }] }));
   assert.deepEqual(nested.map((r) => r.id).sort(), [kid(1), kid(3)].sort());

@@ -13674,9 +13674,10 @@ function liveLanes(root, sessionId) {
   }
   return { availability, count: entries.length, descriptions };
 }
-function lanesText(live, ceiling) {
-  const k = live.availability === "ok" ? String(live.count) : `? (dispatch register ${live.availability})`;
+function lanesText(live, ceiling, { showCount = true } = {}) {
   const n = ceiling.error ? `? (delegation.max_concurrent unreadable: ${ceiling.error})` : String(ceiling.value);
+  if (!showCount) return `lane ceiling ${n}`;
+  const k = live.availability === "ok" ? String(live.count) : `? (dispatch register ${live.availability})`;
   return `live lanes ${k}/${n}`;
 }
 function namedIn(text, r) {

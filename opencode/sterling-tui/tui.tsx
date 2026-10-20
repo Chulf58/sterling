@@ -18,7 +18,7 @@ import { useKeyboard, useTerminalDimensions } from '@opentui/solid';
 import { openDashboard, type DashboardController } from '@sterling/tui/dist/controller.js';
 import { TASKS_TAB, type DashboardState } from '@sterling/tui/dist/state.js';
 import { ANIMATION_MS } from '@sterling/tui/dist/avatars/index.js';
-import { SIDEBAR_WIDTH, bodyLinesFor, contextFill, emptyAvatars, escapeLeavesView, findStorePath, footerLines, guarded, keyToUiEvent, modelLimit, paintedFg, readSidebarSummary, readSubagents, sidebarLines, stepAvatars, subagentSpanLines, type AvatarState, type Guarded, type KeyLike, type ModelInfoLike, type ModelRefLike, type Span, type SpanLine, type SubagentRow, type SubagentSession, type TokenUsageLike, type Painted } from './view.ts';
+import { SIDEBAR_WIDTH, bodyLinesFor, contextFill, emptyAvatars, escapeLeavesView, findStorePath, footerLines, guarded, isActiveChild, keyToUiEvent, modelLimit, paintedFg, readSidebarSummary, readSubagents, sidebarLines, stepAvatars, subagentSpanLines, type AvatarState, type Guarded, type KeyLike, type ModelInfoLike, type ModelRefLike, type Span, type SpanLine, type SubagentRow, type SubagentSession, type TokenUsageLike, type Painted } from './view.ts';
 
 const ROUTE = 'sterling';
 /** OpenCode events that change a sub-agent row: a child appears, starts or ends a run, finishes a step. */
@@ -107,7 +107,7 @@ function subagentData(api: Api, sessionID: string): Guarded<{ rows: SubagentRow[
     const rows = readSubagents({
       sessions: d.session.list(),
       rootID,
-      isRunning: (id) => d.session.status(id) === 'running',
+      isRunning: isActiveChild(projectDir, process.env, (id) => d.session.status(id) === 'running'),
       lastTurn: (id) => {
         if (!synced.has(id)) {
           synced.add(id);

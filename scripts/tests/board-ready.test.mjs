@@ -423,7 +423,9 @@ test('OpenCode: a root session context carries the board readiness block', async
   try {
     const a = mk(p.store, { text: 'Ready on OpenCode' });
     const text = await ocContext(p);
-    assert.match(text, /BOARD READINESS .*live lanes 0\/2/);
+    assert.match(text, /BOARD READINESS .*lane ceiling 2/, 'the block names the ceiling');
+    assert.doesNotMatch(text.match(/BOARD READINESS .*/)[0], /live lanes/, 'and not the live count');
+    assert.match(text, /live lanes 0\/2/, 'the count is its own line');
     assert.ok(text.includes(`- ${h('Ready on OpenCode', a)}`), text.slice(-1500));
   } finally {
     p.cleanup();

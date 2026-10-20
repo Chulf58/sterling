@@ -14397,6 +14397,7 @@ var NOTE_FIELD_MAX = {
   at: PATH_MAX
 };
 var LANE_HANDOFF_MAX = 1e3;
+var OPENCODE_DEAD_LANE_CHECK = "tell whether a lane is dead: send the old sessionID a STOP-and-report message (a live lane stops, a dead one only replies), or watch the lane's files, running test processes and external resources for several minutes";
 function rotationNotePath(cwd) {
   return join19(cwd, ".sterling", "transient", "rotation-note.json");
 }
@@ -14483,9 +14484,11 @@ function renderRotationRestore(note, { cwd, source, host = "claude", planLock: p
       return `- ${sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent"} (${sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id"}) \u2014 ${territory}`;
     }).join("\n");
     const omitted = liveDispatches.length - Math.min(liveDispatches.length, LIVE_DISPATCH_MAX);
-    liveLine = `
+    liveLine = (host === "opencode" ? `
+${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and may still be running; whether this session can reach them is not shown. Before re-dispatching, ${OPENCODE_DEAD_LANE_CHECK}. Mind the territory below, which they may still be writing:
+${rendered}` : `
 ${liveDispatches.length} dispatch(es) were live at rotation. They belong to the previous session and cannot be resumed from this one (agent lookup is scoped to the current session); re-dispatch fresh if the work is still needed, and mind the territory below, which they may still be writing:
-${rendered}` + (omitted > 0 ? `
+${rendered}`) + (omitted > 0 ? `
 \u2026 (+${omitted} more)` : "");
   } else if (liveDispatches === null) {
     liveLine = `
@@ -14493,7 +14496,7 @@ ${render(
       disclosure(
         "register_unavailable",
         {},
-        "dispatch register unavailable \u2014 the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed, and check git status for files it may still be writing."
+        host === "opencode" ? `dispatch register unavailable \u2014 the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and may still be running. Before re-dispatching, ${OPENCODE_DEAD_LANE_CHECK}, and check git status for files it may still be writing.` : "dispatch register unavailable \u2014 the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here. Any such subagent belongs to the previous session and cannot be resumed from this one: re-dispatch fresh if the work is still needed, and check git status for files it may still be writing."
       )
     )}`;
   }
@@ -14505,7 +14508,11 @@ ${render(
       const id = sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id";
       const reason = sanitizeForContext(String(d?.reason ?? "unknown"), PATH_MAX) || "unknown";
       return render(
-        disclosure("dispatch_status_unknown", {}, `${type}:${id} \u2014 ownership uncertain (${reason}); belongs to the previous session and cannot be resumed from this one \u2014 re-dispatch fresh if still needed`)
+        disclosure(
+          "dispatch_status_unknown",
+          {},
+          host === "opencode" ? `${type}:${id} \u2014 ownership uncertain (${reason}); belongs to the previous session and may still be running \u2014 check it is dead (as above) before re-dispatching` : `${type}:${id} \u2014 ownership uncertain (${reason}); belongs to the previous session and cannot be resumed from this one \u2014 re-dispatch fresh if still needed`
+        )
       );
     }).join("\n");
     const omittedUncertain = uncertainDispatches.length - Math.min(uncertainDispatches.length, LIVE_DISPATCH_MAX);
@@ -16558,9 +16565,10 @@ function liveLanes(root, sessionId) {
   }
   return { availability, count: entries.length, descriptions };
 }
-function lanesText(live, ceiling) {
-  const k = live.availability === "ok" ? String(live.count) : `? (dispatch register ${live.availability})`;
+function lanesText(live, ceiling, { showCount = true } = {}) {
   const n = ceiling.error ? `? (delegation.max_concurrent unreadable: ${ceiling.error})` : String(ceiling.value);
+  if (!showCount) return `lane ceiling ${n}`;
+  const k = live.availability === "ok" ? String(live.count) : `? (dispatch register ${live.availability})`;
   return `live lanes ${k}/${n}`;
 }
 function overlapMarks(ready) {
@@ -16578,12 +16586,12 @@ function groupLines(title, items, cap, render2) {
   if (items.length > cap) out.push(`  \u2026 ${items.length - cap} more ${title.split(" (")[0]} (board_query)`);
   return out;
 }
-function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus: handoffStatus2 }) {
+function renderBoardReadiness({ readiness, live, ceiling, cap = BOARD_GROUP_CAP, handoffStatus: handoffStatus2, showLaneCount = true }) {
   const g = boardGroups(readiness);
   if (!g.ready.length && !g.research.length && !g.waiting.length && !g.blocked && !g.delegated.length) return "";
   const marks = overlapMarks(g.ready);
   const blockedNote = g.blocked ? `; ${g.blocked} blocked` : "";
-  const header = `BOARD READINESS (${DECISION}) \u2014 ${lanesText(live, ceiling)}${blockedNote}. At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling (a ceiling, never a quota). READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill). Items marked \u26A0 share a write path: their implementation lanes run one at a time.`;
+  const header = `BOARD READINESS (${DECISION}) \u2014 ${lanesText(live, ceiling, { showCount: showLaneCount })}${blockedNote}. At session start and each time a lane lands, fill free lanes from READY and READY FOR RESEARCH up to the ceiling (a ceiling, never a quota). READY FOR RESEARCH items take researcher lanes only, never an implementor; WAITING ON YOU items wait for the user (needs user or grill). Items marked \u26A0 share a write path: their implementation lanes run one at a time.`;
   const lines = [
     header,
     ...groupLines("READY ({n})", g.ready, cap, (r) => {
