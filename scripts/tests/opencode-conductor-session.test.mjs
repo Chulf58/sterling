@@ -52,6 +52,21 @@ test('a prompt in a root session records its id; a later root prompt replaces it
   }
 });
 
+test('two locations of one project (root and a subdirectory) keep one coherent record: A, B, A ends on A', async () => {
+  const a = setup({ sessions: { ses_rootA: {} } });
+  try {
+    const b = setup({ root: a.dir, sessions: { ses_subB: {} } });
+    await a.onPrompt(prompt('ses_rootA'));
+    await b.onPrompt(prompt('ses_subB'));
+    assert.equal(a.recorded(), 'ses_subB\n');
+    await a.onPrompt(prompt('ses_rootA'));
+    assert.equal(a.recorded(), 'ses_rootA\n', "the root location's instance writes again: the skip compares with the file, not its own last write");
+    assert.deepEqual([...a.failures, ...b.failures], []);
+  } finally {
+    a.cleanup();
+  }
+});
+
 test('a subagent (child) session prompt never replaces the conductor', async () => {
   const t = setup({ sessions: { ses_conductorA: {}, ses_child: { parentID: 'ses_conductorA' } } });
   try {

@@ -96,7 +96,7 @@ const EXECUTION_END_EVENTS = new Set(['session.execution.succeeded', 'session.ex
 
 // Per-handler budgets. The store calls are synchronous and cannot be cut off
 // mid-call; the budget bounds the awaited part and logs any overrun.
-export const BUDGET_MS = { context: 4000, delivery: 4000, axis: 4000, dispatch: 10000, research: 4000, settle: 30000, prompt: 4000, compaction: 4000, config: 4000, overpass: 4000 };
+export const BUDGET_MS = { context: 4000, delivery: 4000, axis: 4000, dispatch: 10000, research: 4000, settle: 30000, prompt: 4000, compaction: 4000, config: 4000, overpass: 4000, 'conductor-session': 4000 };
 
 
 /**

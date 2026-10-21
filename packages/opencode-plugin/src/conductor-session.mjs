@@ -6,38 +6,47 @@
 // worker's session. Only a prompt counts: the user's own prompts reach the root
 // session through this hook, the worker runs in its own `opencode run` child (skipped
 // on its env flag) and subagents run in child sessions (skipped on parentID).
-import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { writeFileAtomic } from '../../../scripts/lib/opencode-install.mjs';
 import { sessionKind } from './dispatch.mjs';
 import { inWorkerChild } from './worker.mjs';
 
 export const CONDUCTOR_SESSION_REL = '.sterling/transient/opencode-conductor-session';
 
+// Process-wide, keyed by project root: the sequence number of the latest prompt seen.
+// Several locations (a project root and a subdirectory) share one project and so one
+// record; a prompt whose root-session check finishes after a newer prompt of the same
+// project started (a slow lookup, or one the fence already timed out) writes nothing.
+const latest = new Map();
+let counter = 0;
+
 /** Returns onPrompt(input): records input.sessionID when it is a root session of this project. */
 export function createConductorSessionRecorder({ rootOf, fenced, getSession, parents, env = process.env }) {
-  let last = null;
   return async function onPrompt(input) {
     if (inWorkerChild(env)) return;
     const root = rootOf();
     if (!root) return;
     const sessionID = input?.sessionID;
-    if (typeof sessionID !== 'string' || !sessionID || `${root}\0${sessionID}` === last) return;
+    if (typeof sessionID !== 'string' || !sessionID) return;
+    const seq = ++counter;
+    latest.set(root, seq);
     await fenced('conductor-session', root, async () => {
       const kind = await sessionKind(getSession?.(), sessionID, parents);
+      if (latest.get(root) !== seq) return;
       if (kind.why) throw new Error(`conductor session not recorded: could not tell whether session ${sessionID} is a root session (${kind.why})`);
       if (kind.kind !== 'root') return;
       const path = join(root, CONDUCTOR_SESSION_REL);
-      mkdirSync(dirname(path), { recursive: true });
-      const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+      const text = `${sessionID}\n`;
+      let current = null;
       try {
-        writeFileSync(tmp, `${sessionID}\n`);
-        renameSync(tmp, path);
+        current = readFileSync(path, 'utf8');
       } catch (e) {
-        rmSync(tmp, { force: true });
-        throw e;
+        if (e?.code !== 'ENOENT') throw e;
       }
-      last = `${root}\0${sessionID}`;
+      if (current === text) return;
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileAtomic(path, text);
     });
   };
 }
