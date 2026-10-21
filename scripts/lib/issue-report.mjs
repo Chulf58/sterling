@@ -15,8 +15,9 @@
 // and every delimiter-free token holding a / or \ that is not a file
 // Sterling ships, a Sterling-owned .sterling/ name, a slash command standing
 // alone, a slash-joined list of public Claude Code tool names (WebSearch/WebFetch,
-// from a fixed allowlist) or a slash-joined pair of numbers, single letters and
-// common prose words ("3/4", "A/B", "and/or", "read/write"; GitHub issue #186).
+// from a fixed allowlist) or a slash-joined pair (exactly two parts) of short
+// numbers, single letters and common prose words ("3/4", "A/B", "and/or",
+// "read/write"; GitHub issue #186). "2024/10" and "and/or/x" stay paths.
 // That still blanks other word pairs such as "client/server" (the same shape as a
 // customer path), and a slash command or prose pair directly after a bracket,
 // comma, semicolon or pipe. What it does NOT
@@ -148,13 +149,15 @@ function isToolNameList(token) {
  * lib) stay off it. */
 const PROSE_WORDS = ['and', 'or', 'read', 'write', 'true', 'false', 'yes', 'no', 'on', 'off', 'pass', 'fail', 'success', 'failure', 'enable', 'disable', 'before', 'after', 'add', 'remove', 'get', 'set', 'push', 'pull', 'in', 'out', 'up', 'down', 'either', 'he', 'she', 'his', 'her'];
 
-/** A slash-joined pair or list that is prose or a figure, not a path: every
- * part is a number (digits with optional , . % or a leading minus, so "3/4" and
- * "1.5/2"), one letter ("A/B", "I/O") or a PROSE_WORDS word, with no empty part.
+/** A slash-joined pair that is prose or a figure, not a path: exactly two
+ * parts, each a PROSE_WORDS word, one letter ("A/B", "I/O") or a number of at
+ * most two integer digits with an optional decimal part or trailing % ("3/4",
+ * "24/7", "50%/60%"). Three parts or more, and longer numbers, are dates, ids
+ * and directory trees ("2024/10/21", "In/Out/2024"), so they stay paths.
  * Sentence punctuation after the token is ignored. */
 function isProsePair(token) {
   const parts = token.replace(/[.,:;!?]+$/, '').split('/');
-  return parts.length > 1 && parts.every((p) => /^-?\d+(?:[.,]\d+)*%?$/.test(p) || /^[A-Za-z]$/.test(p) || PROSE_WORDS.includes(p.toLowerCase()));
+  return parts.length === 2 && parts.every((p) => /^\d{1,2}(?:\.\d+)?%?$/.test(p) || /^[A-Za-z]$/.test(p) || PROSE_WORDS.includes(p.toLowerCase()));
 }
 
 /** Whether the token starting at `at` in `text` stands alone: it starts the
