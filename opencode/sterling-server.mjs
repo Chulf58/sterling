@@ -17772,6 +17772,9 @@ function readOwnership(root) {
   if (parsed.pending !== void 0 && !(isObject(parsed.pending) && isObject(parsed.pending.agent) && isObject(parsed.pending.before) && isObject(parsed.pending.after))) {
     throw new Error(`${OVERLAY_REL} has a "pending" value that is not an interrupted-update record; nothing is changed until it is fixed or removed`);
   }
+  if (parsed.pending?.notes !== void 0 && !(Array.isArray(parsed.pending.notes) && parsed.pending.notes.every((n) => typeof n === "string"))) {
+    throw new Error(`${OVERLAY_REL} has "pending.notes" that is not a list of notes; nothing is changed until it is fixed or removed`);
+  }
   return parsed;
 }
 function writeOwnership(root, own, fs) {
@@ -17792,21 +17795,24 @@ function refuseTracked(root) {
 }
 var pick = (entry, keys) => Object.fromEntries(keys.filter((k) => Object.hasOwn(entry, k)).map((k) => [k, entry[k]]));
 var ownedText = (entry) => JSON.stringify(entry === void 0 || entry === null ? null : pick(entry, OWNED_KEYS));
-var modelText = (entry) => JSON.stringify(entry === void 0 || entry === null ? null : [Object.hasOwn(entry, "model"), entry.model ?? null]);
-function landed(entry, before, after) {
-  if (ownedText(entry) === ownedText(after)) return true;
-  return modelText(after) !== modelText(before) && modelText(entry) === modelText(after);
-}
+var sameOwned = (a, b) => ownedText(a) === ownedText(b);
+var describeOwned = (fields) => (Object.hasOwn(fields ?? {}, "model") ? `model ${JSON.stringify(fields.model)}` : "no model") + (Object.hasOwn(fields ?? {}, "variant") ? `, variant ${JSON.stringify(fields.variant)}` : ", no variant");
 function settlePending(own, agents) {
-  if (!own.pending) return { own, settled: false };
+  if (!own.pending) return { own, settled: false, notes: [] };
   const { pending } = own;
   const agent = { ...own.agent };
+  const notes = [...pending.notes ?? []];
   for (const name of Object.keys(pending.after)) {
-    if (!landed(agents[name], pending.before[name], pending.after[name])) continue;
-    if (Object.hasOwn(pending.agent, name)) agent[name] = pending.agent[name];
+    const entry = agents[name];
+    if (sameOwned(entry, pending.before[name])) continue;
+    const old = agent[name];
+    const next = Object.hasOwn(pending.agent, name) ? pending.agent[name] : void 0;
+    if (next) agent[name] = next;
     else delete agent[name];
+    if (sameOwned(entry, pending.after[name]) || !old || !isObject(entry) || entry.model !== old.wrote || next?.wrote === entry.model) continue;
+    notes.push(`agent.${name} had its model or variant changed by hand while a Sterling update of it was unconfirmed, so its model ${JSON.stringify(entry.model)} is taken as yours and stays; before Overpass it had ${describeOwned(old.prior)}`);
   }
-  return { own: { agent }, settled: true };
+  return { own: { agent }, settled: true, notes };
 }
 function convergeOverlay(root, res, { fs } = {}) {
   const want = desiredOverlay(res);
@@ -17824,13 +17830,13 @@ function convergeOverlay(root, res, { fs } = {}) {
   }
   if (config.agent !== void 0 && !isObject(config.agent)) throw new Error(`${PROJECT_CONFIG_REL}: "agent" is not an object, so the Overpass agent models were not changed`);
   const agents = { ...config.agent ?? {} };
-  const { own: settledOwn, settled } = settlePending(stored, agents);
+  const { own: settledOwn, settled, notes: recoveryNotes } = settlePending(stored, agents);
+  const notes = [...recoveryNotes];
   const own = { agent: { ...settledOwn.agent } };
   const names = /* @__PURE__ */ new Set([...Object.keys(want), ...Object.keys(own.agent)]);
   let ownChanged = settled;
   const before = {};
   const after = {};
-  const notes = [];
   const touch = (name, entry) => {
     if (!Object.hasOwn(before, name)) before[name] = agents[name] === void 0 ? null : agents[name];
     if (entry === void 0) delete agents[name];
@@ -17890,7 +17896,7 @@ function convergeOverlay(root, res, { fs } = {}) {
   }
   refuseTracked(root);
   if (Object.keys(agents).length || config.agent !== void 0) config.agent = agents;
-  writeOwnership(root, { agent: settledOwn.agent, pending: { before, after, agent: own.agent } }, fs);
+  writeOwnership(root, { agent: settledOwn.agent, pending: { before, after, agent: own.agent, ...recoveryNotes.length ? { notes: recoveryNotes } : {} } }, fs);
   writeText(path, projectConfigText(config), fs);
   writeOwnership(root, own, fs);
   return { changed, notes };

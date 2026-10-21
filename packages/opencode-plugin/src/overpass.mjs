@@ -20,7 +20,8 @@
 // changed since is theirs and is left alone. A change the user makes while Overpass
 // is on is kept as the value to put back, so the latest choice returns. A write of
 // opencode.json is bracketed by a `pending` record in that file (convergeOverlay), so a
-// failed or interrupted write is retried rather than mistaken for a user's edit.
+// failed or interrupted write is retried rather than mistaken for a user's edit; how
+// that record is settled, and what it cannot tell apart, is the invariant at settlePending.
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -167,6 +168,10 @@ function readOwnership(root) {
   if (parsed.pending !== undefined && !(isObject(parsed.pending) && isObject(parsed.pending.agent) && isObject(parsed.pending.before) && isObject(parsed.pending.after))) {
     throw new Error(`${OVERLAY_REL} has a "pending" value that is not an interrupted-update record; nothing is changed until it is fixed or removed`);
   }
+  // `pending.notes` (recovery notes not yet delivered) is absent in records written before it existed.
+  if (parsed.pending?.notes !== undefined && !(Array.isArray(parsed.pending.notes) && parsed.pending.notes.every((n) => typeof n === 'string'))) {
+    throw new Error(`${OVERLAY_REL} has "pending.notes" that is not a list of notes; nothing is changed until it is fixed or removed`);
+  }
   return parsed;
 }
 
@@ -193,36 +198,53 @@ const pick = (entry, keys) => Object.fromEntries(keys.filter((k) => Object.hasOw
 // Only these decide whether a pending write landed: another key the user edits, or the
 // order JSON keeps keys in, says nothing about Sterling's write.
 const ownedText = (entry) => JSON.stringify(entry === undefined || entry === null ? null : pick(entry, OWNED_KEYS));
-const modelText = (entry) => JSON.stringify(entry === undefined || entry === null ? null : [Object.hasOwn(entry, 'model'), entry.model ?? null]);
+const sameOwned = (a, b) => ownedText(a) === ownedText(b);
+const describeOwned = (fields) => (Object.hasOwn(fields ?? {}, 'model') ? `model ${JSON.stringify(fields.model)}` : 'no model') + (Object.hasOwn(fields ?? {}, 'variant') ? `, variant ${JSON.stringify(fields.variant)}` : ', no variant');
 
+// Recovery of an interrupted overlay write (settlePending). INVARIANT: a pending record
+// holds, per agent entry the write touched, the entry before it, the entry it meant to
+// leave and the ownership to take if it landed. Settling decides per entry, from the
+// owned fields (model, variant) of the entry as it is now: when they are exactly what
+// they were before the write, the write did not land and the old ownership stands;
+// otherwise it is taken as landed and the pending ownership applies. Sterling later
+// undoes a model only while it equals the `wrote` of the ownership that stands, so an
+// entry whose owned fields changed after an unconfirmed write is undone only where its
+// model is the very one that write set; any other model there is the user's and stays.
+// When that leaves a model the old ownership would have undone, a note names the values
+// from before Overpass, so the user can put them back and nothing is dropped silently.
+// Such a note is kept in the next pending record (`pending.notes`) until a convergence
+// completes and returns it, so a later failed write cannot lose it.
+// NOT GUARANTEED: the owned fields alone cannot tell a write that never landed from one
+// that landed and was then set back by hand to exactly the old model and variant. That
+// case is decided, by ruling, as not landed: turning Overpass off then restores the
+// pre-Overpass model and variant, so that hand edit is undone, because the other reading
+// would leave a write that really failed on the gateway tier after Overpass is off. Nor
+// can they tell a hand edit to exactly the model the write meant to set (read as
+// landed). And when the write did not land and the user then changed only the variant
+// of a tier entry, the tier model stays with the note instead of being undone, because
+// that state is the same as the user choosing the tier again.
 /**
- * Whether a pending write of `name` landed, judged on the owned fields only: the entry
- * holds the `model` and `variant` the write meant to leave, or it holds the model the
- * write set when that model differed from the one before (so a `variant` the user added
- * afterwards does not hide a landed write).
- */
-function landed(entry, before, after) {
-  if (ownedText(entry) === ownedText(after)) return true;
-  return modelText(after) !== modelText(before) && modelText(entry) === modelText(after);
-}
-
-/**
- * Settles an update a failed or interrupted write left pending: per agent it names, the
- * ownership it intended is taken when opencode.json shows the write landed (landed),
- * else the ownership from before stays (the write did not land, so the update is
- * computed again from the old record, never from a half-done one). Either way the
- * record kept carries the values to put back, until a later write replaces it.
+ * Settles an update a failed or interrupted write left pending (see the invariant
+ * above). Returns { own, settled, notes }: `own` without `pending`, and the recovery
+ * notes not yet delivered: those the pending record carried, then one for each entry
+ * left to the user that the old ownership would have undone.
  */
 function settlePending(own, agents) {
-  if (!own.pending) return { own, settled: false };
+  if (!own.pending) return { own, settled: false, notes: [] };
   const { pending } = own;
   const agent = { ...own.agent };
+  const notes = [...(pending.notes ?? [])];
   for (const name of Object.keys(pending.after)) {
-    if (!landed(agents[name], pending.before[name], pending.after[name])) continue;
-    if (Object.hasOwn(pending.agent, name)) agent[name] = pending.agent[name];
+    const entry = agents[name];
+    if (sameOwned(entry, pending.before[name])) continue;
+    const old = agent[name];
+    const next = Object.hasOwn(pending.agent, name) ? pending.agent[name] : undefined;
+    if (next) agent[name] = next;
     else delete agent[name];
+    if (sameOwned(entry, pending.after[name]) || !old || !isObject(entry) || entry.model !== old.wrote || next?.wrote === entry.model) continue;
+    notes.push(`agent.${name} had its model or variant changed by hand while a Sterling update of it was unconfirmed, so its model ${JSON.stringify(entry.model)} is taken as yours and stays; before Overpass it had ${describeOwned(old.prior)}`);
   }
-  return { own: { agent }, settled: true };
+  return { own: { agent }, settled: true, notes };
 }
 
 /**
@@ -254,13 +276,13 @@ export function convergeOverlay(root, res, { fs } = {}) {
   }
   if (config.agent !== undefined && !isObject(config.agent)) throw new Error(`${PROJECT_CONFIG_REL}: "agent" is not an object, so the Overpass agent models were not changed`);
   const agents = { ...(config.agent ?? {}) };
-  const { own: settledOwn, settled } = settlePending(stored, agents);
+  const { own: settledOwn, settled, notes: recoveryNotes } = settlePending(stored, agents);
+  const notes = [...recoveryNotes];
   const own = { agent: { ...settledOwn.agent } };
   const names = new Set([...Object.keys(want), ...Object.keys(own.agent)]);
   let ownChanged = settled;
   const before = {};
   const after = {};
-  const notes = [];
   const touch = (name, entry) => {
     if (!Object.hasOwn(before, name)) before[name] = agents[name] === undefined ? null : agents[name];
     if (entry === undefined) delete agents[name];
@@ -322,7 +344,8 @@ export function convergeOverlay(root, res, { fs } = {}) {
   }
   refuseTracked(root);
   if (Object.keys(agents).length || config.agent !== undefined) config.agent = agents;
-  writeOwnership(root, { agent: settledOwn.agent, pending: { before, after, agent: own.agent } }, fs);
+  // Recovery notes ride in the pending record until this write completes, so a failure below cannot lose them.
+  writeOwnership(root, { agent: settledOwn.agent, pending: { before, after, agent: own.agent, ...(recoveryNotes.length ? { notes: recoveryNotes } : {}) } }, fs);
   writeText(path, projectConfigText(config), fs);
   writeOwnership(root, own, fs);
   return { changed, notes };
