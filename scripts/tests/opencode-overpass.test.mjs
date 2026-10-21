@@ -611,6 +611,48 @@ test('overlay: an interrupted first enable, then a hand-added variant, is still 
   }
 });
 
+/** The user sets agent `name`'s model and variant by hand. */
+function handSet(dir, name, fields) {
+  const oc = readOc(dir);
+  oc.agent[name] = { ...oc.agent[name], ...fields };
+  writeFileSync(join(dir, OC_REL), `${JSON.stringify(oc, null, 2)}\n`);
+}
+
+test('overlay: an interrupted provider change, then a hand edit back to the old tier with a variant, is the user edit on off (board 6d48a936)', () => {
+  const p = makeProject(ON, USER_OC);
+  try {
+    overpass.convergeOverlay(p.dir, resOn());
+    assert.throws(() => overpass.convergeOverlay(p.dir, OTHER, { fs: failingOwnershipAfterOc(p.dir) }), /injected ownership write failure/);
+    assert.equal(readOc(p.dir).agent['sterling/conductor'].model, 'overpass-agentic/agentic-conductor', 'the opencode.json write landed');
+    handSet(p.dir, 'sterling/conductor', { model: 'overpass/agentic-conductor', variant: 'low' });
+    const out = overpass.convergeOverlay(p.dir, resOff);
+    const conductor = readOc(p.dir).agent['sterling/conductor'];
+    assert.equal(conductor.model, 'overpass/agentic-conductor', 'the model the user set stays');
+    assert.equal(conductor.variant, 'low', 'the variant the user set stays');
+    assert.match(out.notes.join('\n'), /agent\.sterling\/conductor .*anthropic\/claude-opus-5-5.*medium/, 'the note names the model and variant from before Overpass');
+    assert.equal(readOc(p.dir).agent.plan, undefined, 'the plan entry Sterling created is still undone');
+    assert.equal(existsSync(join(p.dir, overpass.OVERLAY_REL)), false);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('overlay: a failed undo, then a hand-changed variant on the tier entry, leaves the entry to the user and names the old values', () => {
+  const p = makeProject(ON, USER_OC);
+  try {
+    overpass.convergeOverlay(p.dir, resOn());
+    assert.throws(() => overpass.convergeOverlay(p.dir, resOff, { fs: failingOcWrites(p.dir) }), /injected opencode\.json write failure/);
+    handSet(p.dir, 'sterling/conductor', { variant: 'low' });
+    const out = overpass.convergeOverlay(p.dir, resOff);
+    const conductor = readOc(p.dir).agent['sterling/conductor'];
+    assert.deepEqual([conductor.model, conductor.variant], ['overpass/agentic-conductor', 'low'], 'an owned field changed by hand after an unconfirmed write is never overwritten');
+    assert.match(out.notes.join('\n'), /agent\.sterling\/conductor .*anthropic\/claude-opus-5-5.*medium/, 'the values to put back by hand are named, not dropped silently');
+    assert.equal(readOc(p.dir).agent.plan, undefined, 'the untouched plan entry is undone as usual');
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('overlay: a git-tracked opencode.json is refused, as the installer refuses it', () => {
   const p = makeProject(ON, { agent: {} });
   try {
