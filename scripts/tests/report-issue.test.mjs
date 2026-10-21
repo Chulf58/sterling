@@ -215,6 +215,50 @@ test('scrub: a slash pair that is not wholly public tool names is still a path',
   assert.equal(scrub('AcmeCorp/BillingApp: broke', ctx), '<project-path> broke');
 });
 
+test('scrub: slash-joined figures, single letters and common prose pairs survive (GitHub issue #186)', () => {
+  assert.equal(scrub('and/or A/B read/write 3/4 24/7 1/2 1.5/2 50%/60% I/O true/false', ctx), 'and/or A/B read/write 3/4 24/7 1/2 1.5/2 50%/60% I/O true/false');
+  assert.equal(scrub('Latency 12/40 ms (and/or) "pass/fail". Try on/off, yes/no? Read/Write!', ctx), 'Latency 12/40 ms (and/or) "pass/fail". Try on/off, yes/no? Read/Write!');
+  assert.equal(scrub('title: and/or in 3/4 runs', ctx), 'title: and/or in 3/4 runs');
+});
+
+test('scrub: every real-path form stays scrubbed beside slash pairs (GitHub issue #186)', () => {
+  const real = {
+    '/home/alice/work/acme-secret/x.ts': 'absolute POSIX under the root',
+    '/var/lib/acme/db.sqlite': 'absolute POSIX elsewhere',
+    '~/notes/todo': 'home-relative',
+    'C:\\Users\\bob\\x.txt': 'Windows drive, backslashes',
+    'C:/Users/bob/x.txt': 'Windows drive, forward slashes',
+    '\\\\server\\acme\\x': 'UNC',
+    'src/billing/invoice.ts': 'project-relative',
+    'lib/x': 'two-part project-relative',
+    'Clients/Acme': 'customer-shaped pair',
+    './a/b': 'dot segment',
+    '../a/b': 'parent segment',
+    '/1/2': 'absolute path of numbers',
+    '/and/or': 'absolute path of prose words',
+    'and/or/lib': 'a prose pair that continues into a real name',
+    '3/4/acme': 'numbers that continue into a real name',
+    'a/b/': 'trailing slash makes it a directory',
+    '2024/10/21': 'three parts: a dated directory tree',
+    'In/Out/2024': 'three parts of words and a number',
+    '2024/10': 'a number of more than two digits',
+    '12345/678': 'long numbers',
+    'and/or/x': 'three parts, even all short',
+  };
+  for (const tok of Object.keys(real)) {
+    assert.equal(scrub(`saw and/or ${tok} and 3/4`, ctx), 'saw and/or <project-path> and 3/4', real[tok]);
+  }
+  assert.equal(scrub('see (and/or)/acme-billing', ctx), 'see (and/or)<project-path>', 'a pair that is the head of a longer path is cut at the bracket, the tail goes');
+});
+
+test('validateReport and renderBody: dated and word-and-year paths are scrubbed, slash pairs kept (GitHub issue #186)', () => {
+  const r = validateReport({ ...good(), observed: 'open 2024/10/21 failed, then In/Out/2024 failed; and/or 3/4 runs' }, ctx);
+  assert.equal(r.observed, 'open <project-path> failed, then <project-path> failed; and/or 3/4 runs');
+  const body = renderBody(r, { version: '0.19.91', head: null, host: 'claude-code', project: 'acme' });
+  assert.match(body, /open <project-path> failed, then <project-path> failed; and\/or 3\/4 runs/);
+  assert.doesNotMatch(body, /2024/);
+});
+
 test('scrub: real paths, a credential-bearing URL and the project root stay scrubbed beside tool names', () => {
   assert.equal(
     scrub('WebSearch/WebFetch failed on /home/alice/work/acme-secret/x.ts, /var/lib/db and https://user:pw@acme.example/x', ctx),

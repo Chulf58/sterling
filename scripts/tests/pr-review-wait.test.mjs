@@ -176,8 +176,13 @@ function calls(f) {
 // unless the test says otherwise (identity needs type 'Bot', Sol review).
 const review = (id, { login = COPILOT, type = login.endsWith('[bot]') ? 'Bot' : 'User', commit = HEAD, state = 'COMMENTED', body = `review ${id}` } = {}) => ({ id, user: { login, type }, commit_id: commit, state, body });
 const comment = (id, reviewId, extra = {}) => ({ id, pull_request_review_id: reviewId, path: 'src/a.mjs', line: 3, body: `comment ${id}`, ...extra });
-// Fast polling for tests: a 50ms first interval, a 2s bound.
-const FAST = ['--interval', '0.05', '--timeout', '2'];
+// Fast polling for tests: a 50ms first interval. FAST is for runs that END on their own
+// (a review, an error, no_review_requested) well before the budget, so its 60s bound is
+// never waited out and a loaded machine cannot turn a slow poll into a false timeout.
+// FAST_TIMEOUT is for runs that are EXPECTED to wait the whole budget out: the budget is
+// the duration, so it stays short, with room for a slow first poll.
+const FAST = ['--interval', '0.05', '--timeout', '60'];
+const FAST_TIMEOUT = ['--interval', '0.05', '--timeout', '4'];
 
 test('a NEW Copilot review on the CURRENT head is returned with its comments (paginated), the observed login and exit 0', () => {
   const f = makeFixture();
@@ -323,7 +328,7 @@ test('recheck (Sol): a request that is absent on the first read but pending on t
       f.put('pull', 0, [{ number: 7, node_id: 'PR_node_7', head: { sha: HEAD } }]);
       writeFileSync(join(f.state, 'review_requests.0.json'), '[]');
       writeFileSync(join(f.state, 'review_requests.1.json'), JSON.stringify([{ requestedReviewer: { __typename: 'Bot', login: 'copilot-pull-request-reviewer' } }]));
-      const waiting = run(f, ['7', '--recheck-delay', '0.05', ...extra, ...FAST]);
+      const waiting = run(f, ['7', '--recheck-delay', '0.05', ...extra, ...FAST_TIMEOUT]);
       assert.equal(waiting.code, 2, `${extra}: ${oneLine(waiting.stdout + waiting.stderr)}`);
       assert.equal(waiting.out.status, 'timeout', 'the wait continued, never no_review_requested');
       assert.equal(waiting.out.copilot_review_pending, true);
@@ -339,14 +344,14 @@ test('recheck (Sol): a request that is absent on the first read but pending on t
   }
 });
 
-test('recheck: the default 10s recheck stays inside the --timeout budget (a 1s budget ends in timeout, bounded), and a bad --recheck-delay is refused with no gh call', () => {
+test('recheck: the default 10s recheck stays inside the --timeout budget (a short budget ends in timeout, bounded), and a bad --recheck-delay is refused with no gh call', () => {
   const f = makeFixture();
   try {
     writeFileSync(join(f.state, 'review_requests.0.json'), '[]');
-    const r = run(f, ['7', '--interval', '0.05', '--timeout', '1']);
+    const r = run(f, ['7', ...FAST_TIMEOUT]);
     assert.equal(r.code, 2, oneLine(r.stdout + r.stderr));
     assert.equal(r.out.status, 'timeout');
-    assert.ok(r.ms < 4000, `bounded by --timeout, took ${r.ms}ms`);
+    assert.ok(r.ms < 9000, `bounded by --timeout (well under the 10s default recheck), took ${r.ms}ms`);
     rmSync(join(f.state, 'log.jsonl'));
     for (const bad of ['-1', 'soon', '']) {
       const e = run(f, ['7', '--recheck-delay', bad, ...FAST]);
@@ -421,7 +426,7 @@ test('the request is read BEFORE the reviews on every poll; a request that clear
 test('timeout: with no review at all the call is BOUNDED — it returns timeout within the window, polling more than once', () => {
   const f = makeFixture();
   try {
-    const r = run(f, ['7', '--interval', '0.05', '--timeout', '1']);
+    const r = run(f, ['7', ...FAST_TIMEOUT]);
     assert.equal(r.code, 2);
     assert.equal(r.out.status, 'timeout');
     assert.equal(r.out.observed_copilot_login, null);
@@ -450,7 +455,7 @@ test('non-Copilot reviewers only: a bot and a human on the current head end in t
   const f = makeFixture();
   try {
     f.put('reviews', 0, [[review(400, { login: 'github-actions[bot]' }), review(401, { login: 'octocat', state: 'CHANGES_REQUESTED' })]]);
-    const r = run(f, ['7', ...FAST]);
+    const r = run(f, ['7', ...FAST_TIMEOUT]);
     assert.equal(r.out.status, 'timeout');
     assert.equal(r.out.observed_copilot_login, null);
   } finally {
@@ -462,7 +467,7 @@ test('--since-review: a Copilot review at or below the consumed id is not new; t
   const f = makeFixture();
   try {
     f.put('reviews', 0, [[review(500), review(501, { state: 'PENDING' })]]);
-    const consumed = run(f, ['7', '--since-review', '500', ...FAST]);
+    const consumed = run(f, ['7', '--since-review', '500', ...FAST_TIMEOUT]);
     assert.equal(consumed.out.status, 'timeout', 'the consumed review and a PENDING one are not a new completed review');
     f.put('reviews', 0, [[review(500), review(502)]]);
     rmSync(join(f.state, 'count_reviews'), { force: true });
@@ -565,7 +570,7 @@ test('identity (Sol): a NON-bot login containing copilot is never taken for Copi
   const f = makeFixture();
   try {
     f.put('reviews', 0, [[review(800, { login: 'copilot-fan' }), review(801, { login: 'Copilot', type: 'User' })]]);
-    const r = run(f, ['7', ...FAST]);
+    const r = run(f, ['7', ...FAST_TIMEOUT]);
     assert.equal(r.out.status, 'timeout', oneLine(r.stdout));
     assert.equal(r.out.observed_copilot_login, null);
     assert.equal(r.out.identity_confirmed, false);

@@ -30,6 +30,7 @@ NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
 WORKDIR="$PWD"
 STORE="$WORKDIR/.sterling/sterling.db"
 TUI_LOCK="$WORKDIR/.sterling/transient/tui.lock"
+CONDUCTOR_SESSION="$WORKDIR/.sterling/transient/opencode-conductor-session"
 
 # --- fail loud on missing inputs (P5) ---
 [ -n "$NODE_BIN" ] || { echo "sterling-launch: 'node' not found on PATH (set NODE_BIN)" >&2; exit 1; }
@@ -139,6 +140,17 @@ case "$MODE" in
     ;;
   opencode)
     [ -n "$OPENCODE_BIN" ] || { echo "sterling-launch: 'opencode' not found on PATH or in ~/.opencode/bin (set OPENCODE_BIN)" >&2; exit 1; }
+    # A fresh tmux session means the last one ended (crash, service restart): reopen the root
+    # session the user last prompted here, recorded by the Sterling plugin
+    # (packages/opencode-plugin/src/conductor-session.mjs), instead of a blank one beside a
+    # conductor still live in the service (GitHub issue #187). Not --continue: that picks the
+    # most recently updated session, which can be a maintenance worker's. A missing or
+    # malformed record starts plain opencode. A rotation's /new is recorded on its first prompt.
+    CONDUCTOR_ID=""
+    [ ! -f "$CONDUCTOR_SESSION" ] || read -r CONDUCTOR_ID < "$CONDUCTOR_SESSION" 2>/dev/null || true
+    if [[ "$CONDUCTOR_ID" =~ ^ses_[A-Za-z0-9]+$ ]]; then
+      open_session "$SESSION-opencode" opencode "$OPENCODE_BIN" --session "$CONDUCTOR_ID"
+    fi
     open_session "$SESSION-opencode" opencode "$OPENCODE_BIN"
     ;;
   tui)

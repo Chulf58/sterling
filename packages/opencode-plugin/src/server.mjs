@@ -81,6 +81,7 @@ import { onEvaluate as storeGuard } from './store-guard.mjs';
 import { BUSY_TIMEOUT_MS, createProjectStores, openProjectStore } from './store.mjs';
 import { createSessionSync } from './sync.mjs';
 import { createWorkerLaunch, inWorkerChild } from './worker.mjs';
+import { createConductorSessionRecorder, takePromptSeq } from './conductor-session.mjs';
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
@@ -95,7 +96,7 @@ const EXECUTION_END_EVENTS = new Set(['session.execution.succeeded', 'session.ex
 
 // Per-handler budgets. The store calls are synchronous and cannot be cut off
 // mid-call; the budget bounds the awaited part and logs any overrun.
-export const BUDGET_MS = { context: 4000, delivery: 4000, axis: 4000, dispatch: 10000, research: 4000, settle: 30000, prompt: 4000, compaction: 4000, config: 4000, overpass: 4000 };
+export const BUDGET_MS = { context: 4000, delivery: 4000, axis: 4000, dispatch: 10000, research: 4000, settle: 30000, prompt: 4000, compaction: 4000, config: 4000, overpass: 4000, 'conductor-session': 4000 };
 
 
 /**
@@ -239,6 +240,8 @@ export function createSterlingServer(deps = {}) {
     }
     const onSelection = createPromptHandler({ openStore, rootOf, fenced, env });
     const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels: () => models?.list?.(), env });
+    // The root session the user last prompted, for the launcher's --session (conductor-session.mjs).
+    const recordConductorSession = createConductorSessionRecorder({ rootOf, fenced, getSession: () => session, parents, env });
     // Each session's agent and model, for the Overpass mismatch notice (overpass.mjs).
     const sessionModels = createSessionModels();
     /**
@@ -260,9 +263,12 @@ export function createSterlingServer(deps = {}) {
       return res;
     }
     async function onPrompt(input) {
+      // Before any await: the prompt's arrival order for the conductor record (conductor-session.mjs).
+      const seq = takePromptSeq();
       await onSelection(input);
       await onVolatile(input);
       await pressure.onPrompt(input);
+      await recordConductorSession(input, seq);
       const root = rootOf();
       if (!root) return;
       const res = await convergeOverpass(root);

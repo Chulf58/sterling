@@ -412,6 +412,11 @@ function isToolNameList(token) {
   const parts = token.replace(/[.,:;!?]+$/, "").split("/");
   return parts.length > 1 && parts.every((p) => TOOL_NAMES.includes(p));
 }
+var PROSE_WORDS = ["and", "or", "read", "write", "true", "false", "yes", "no", "on", "off", "pass", "fail", "success", "failure", "enable", "disable", "before", "after", "add", "remove", "get", "set", "push", "pull", "in", "out", "up", "down", "either", "he", "she", "his", "her"];
+function isProsePair(token) {
+  const parts = token.replace(/[.,:;!?]+$/, "").split("/");
+  return parts.length === 2 && parts.every((p) => /^\d{1,2}(?:\.\d+)?%?$/.test(p) || /^[A-Za-z]$/.test(p) || PROSE_WORDS.includes(p.toLowerCase()));
+}
 function standsAlone(text, at) {
   const atBoundary = (i) => i === 0 || /\s/.test(text[i - 1]);
   return atBoundary(at) || /["'`(]/.test(text[at - 1]) && atBoundary(at - 1);
@@ -429,7 +434,7 @@ function scrub(text, { projectRoot: projectRoot2, home, sterlingPathExists }) {
   for (const re of CREDENTIAL_RES) out = out.replace(re, CREDENTIAL);
   out = out.replace(TOKEN_RE, (tok, at, whole) => {
     if (!/[\\/]/.test(tok) || isSterlingPath(tok, sterlingPathExists)) return tok;
-    return (isSlashCommand(tok) || isToolNameList(tok)) && standsAlone(whole, at) ? tok : PLACEHOLDER;
+    return (isSlashCommand(tok) || isToolNameList(tok) || isProsePair(tok)) && standsAlone(whole, at) ? tok : PLACEHOLDER;
   });
   return out.replace(EMAIL_RE, EMAIL);
 }
