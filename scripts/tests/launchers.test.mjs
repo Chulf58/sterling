@@ -227,10 +227,12 @@ test('engine: no argument is claude mode — a fresh sterling-<proj>-claude sess
   assert.equal(all(calls, 'set-option').filter((c) => / -g /.test(c)).length, 0, 'never a global option');
 });
 
-test('engine: opencode mode runs a separate sterling-<proj>-opencode session with opencode and no --plugin-dir', { skip: LINUX }, () => {
+test('engine: opencode mode runs a separate sterling-<proj>-opencode session with opencode --continue and no --plugin-dir', { skip: LINUX }, () => {
   const { r, calls, root, work } = runEngine(['opencode'], { extraEnv: { OPENCODE_BIN: '/opt/oc/opencode' } });
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(first(calls, 'new-session'), `new-session -d -s sterling-demo-1a2b-opencode -c ${work} /opt/oc/opencode`);
+  // GitHub issue #187: a relaunch after a crash or service restart must reopen the project's last
+  // session, not start a blank one beside the still-live old conductor.
+  assert.equal(first(calls, 'new-session'), `new-session -d -s sterling-demo-1a2b-opencode -c ${work} /opt/oc/opencode --continue`);
   assert.ok(first(calls, 'split-window').includes('-t =sterling-demo-1a2b-opencode:'));
   assert.ok(first(calls, 'split-window').endsWith(`${root}/tui/sterling-tui.mjs --store ${work}/.sterling/sterling.db --host opencode`), `the OpenCode TUI reads subagent context from OpenCode: ${first(calls, 'split-window')}`);
   assert.equal(calls.at(-1), 'attach-session -t =sterling-demo-1a2b-opencode');
@@ -242,7 +244,7 @@ test('engine: opencode is found at run time in ~/.opencode/bin when it is not on
   script(join(home, '.opencode', 'bin', 'opencode'), '#!/bin/sh\n');
   const found = runEngine(['opencode'], { home });
   assert.equal(found.r.status, 0, found.r.stderr);
-  assert.ok(first(found.calls, 'new-session').endsWith(` ${home}/.opencode/bin/opencode`), first(found.calls, 'new-session'));
+  assert.ok(first(found.calls, 'new-session').endsWith(` ${home}/.opencode/bin/opencode --continue`), first(found.calls, 'new-session'));
 
   const missing = runEngine(['opencode']);
   assert.equal(missing.r.status, 1);

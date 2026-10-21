@@ -139,7 +139,10 @@ case "$MODE" in
     ;;
   opencode)
     [ -n "$OPENCODE_BIN" ] || { echo "sterling-launch: 'opencode' not found on PATH or in ~/.opencode/bin (set OPENCODE_BIN)" >&2; exit 1; }
-    open_session "$SESSION-opencode" opencode "$OPENCODE_BIN"
+    # A fresh tmux session means the last one ended (crash, service restart): --continue reopens the
+    # project's last OpenCode session instead of a blank one beside a conductor still live in the
+    # service (GitHub issue #187). A rotation's /new makes the new session the last one.
+    open_session "$SESSION-opencode" opencode "$OPENCODE_BIN" --continue
     ;;
   tui)
     # Inside tmux: the caller's own session. Outside: the Claude Code session,
