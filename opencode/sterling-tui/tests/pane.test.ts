@@ -90,9 +90,34 @@ test('launcherRoot: the window\'s own project wins over a foreign STERLING_STORE
   assert.equal(launcherRoot('/work/a', '/work/b/.sterling/sterling.db', has('/work/a', '/work/b')), '/work/a');
 });
 
-test('launcherRoot: the store root is used only when the window directory has no launcher', () => {
+test('launcherRoot: a window under the store\'s project uses the launcher at the store root', () => {
   const has = (...roots: string[]) => (p: string) => roots.some((r) => p === `${r}/sterling-launch.sh`);
   assert.equal(launcherRoot('/work/a/sub', '/work/a/.sterling/sterling.db', has('/work/a')), '/work/a');
+  assert.equal(launcherRoot('/work/a/../a/sub', '/work/a/.sterling/sterling.db', has('/work/a')), '/work/a');
+});
+
+test('launcherRoot: a foreign store root is never used, even when its launcher exists', () => {
+  const has = (...roots: string[]) => (p: string) => roots.some((r) => p === `${r}/sterling-launch.sh`);
+  assert.equal(launcherRoot('/work/a', '/work/b/.sterling/sterling.db', has('/work/b')), '/work/a');
+  assert.equal(launcherRoot('/work/a/sub', '/work/b/.sterling/sterling.db', has('/work/b')), '/work/a/sub');
+});
+
+test('launcherRoot: the ancestor check is by path segment, so /work/ab is not under /work/a', () => {
+  const has = (...roots: string[]) => (p: string) => roots.some((r) => p === `${r}/sterling-launch.sh`);
+  assert.equal(launcherRoot('/work/ab', '/work/a/.sterling/sterling.db', has('/work/a')), '/work/ab');
+  assert.equal(launcherRoot('/work/ab/sub', '/work/a/.sterling/sterling.db', has('/work/a')), '/work/ab/sub');
+});
+
+test('pane: foreign store and a window without a launcher warn naming the window directory, with no exec', async () => {
+  for (const window of ['/work/a', '/work/a/sub']) {
+    const calls: Call[] = [];
+    const exists = (p: string) => p === '/work/b/sterling-launch.sh';
+    const root = launcherRoot(window, '/work/b/.sterling/sterling.db', exists);
+    const toast = await reopenPane(root, deps({ exists }, calls));
+    assert.equal(toast.variant, 'warning');
+    assert.ok(toast.message.includes(window), toast.message);
+    assert.equal(calls.length, 0);
+  }
 });
 
 test('launcherRoot: with no launcher anywhere it names the window directory', () => {

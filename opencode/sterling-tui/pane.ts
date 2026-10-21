@@ -5,7 +5,7 @@
 // returned toast.
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 export type ToastVariant = 'info' | 'success' | 'warning' | 'error';
 export interface PaneToast {
@@ -28,15 +28,22 @@ export interface PaneDeps {
 export const PANE_TITLE = 'Sterling side pane';
 const EXEC_TIMEOUT_MS = 15_000;
 
+/** True when `dir` is `root` or lies under it, compared by path segment. */
+function isWithin(dir: string, root: string): boolean {
+  const rel = relative(resolve(root), resolve(dir));
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
 /** The directory whose launcher to run: the OpenCode window's own project
- *  (`dir`, api.location.directory). The root above the store is only a second
- *  choice, for a window opened in a subdirectory; a foreign STERLING_STORE
- *  must not send the command to another project's launcher. When neither has
- *  one, `dir` is returned so the missing-script warning names the window's project. */
+ *  (`dir`, api.location.directory). The root above the store is a second
+ *  choice only when the window sits at or under it (a window opened in a
+ *  subdirectory); a foreign STERLING_STORE must not send the command to another
+ *  project's launcher. Otherwise `dir` is returned, so the missing-script
+ *  warning names the window's project. */
 export function launcherRoot(dir: string, storePath: string | undefined, exists: (path: string) => boolean): string {
   if (exists(join(dir, 'sterling-launch.sh'))) return dir;
   const storeRoot = storePath && basename(dirname(storePath)) === '.sterling' ? dirname(dirname(storePath)) : undefined;
-  return storeRoot && exists(join(storeRoot, 'sterling-launch.sh')) ? storeRoot : dir;
+  return storeRoot && isWithin(dir, storeRoot) && exists(join(storeRoot, 'sterling-launch.sh')) ? storeRoot : dir;
 }
 
 /** Runs `bash <root>/sterling-launch.sh tui` (argument array, no shell) and says what to show. */
