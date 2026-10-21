@@ -1,0 +1,144 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parseConfig, resolveOverpass, judgeProjectMode, ProjectModeError } from '../index.js';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
+const shippedRaw = (): Record<string, unknown> => JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'));
+
+const on = (extra: Record<string, unknown> = {}) => ({ mode: 'work', overpass: { enabled: true, ...extra } });
+
+test('overpass: the schema default and templates/default-config.json agree, and both are off', () => {
+  const expected = { enabled: false, provider: 'overpass', conductor_bypass: false };
+  assert.deepEqual((parseConfig({}) as unknown as { overpass: unknown }).overpass, expected);
+  assert.deepEqual(shippedRaw().overpass, expected);
+});
+
+test('overpass: a missing key or missing fields resolve to the defaults, off', () => {
+  for (const cfg of [{}, { overpass: {} }, { overpass: { provider: 'acme' } }]) {
+    const r = resolveOverpass(cfg, { host: 'opencode' });
+    assert.equal(r.configured, false);
+    assert.equal(r.effective, false);
+  }
+  const d = resolveOverpass({}, { host: 'opencode' });
+  assert.equal(d.provider, 'overpass');
+  assert.equal(d.conductorModel, 'overpass/agentic-conductor');
+  assert.equal(d.laneModel, 'overpass/agentic-high');
+  assert.equal(d.conductorRouted, false);
+  assert.equal(d.reason, undefined);
+});
+
+test('overpass: the shipped default resolves off', () => {
+  const r = resolveOverpass(parseConfig(shippedRaw()), { host: 'opencode' });
+  assert.equal(r.configured, false);
+  assert.equal(r.effective, false);
+});
+
+test('overpass: effective only when enabled, work mode and the opencode host', () => {
+  const r = resolveOverpass(on(), { host: 'opencode' });
+  assert.deepEqual(r, {
+    configured: true,
+    effective: true,
+    conductorRouted: true,
+    provider: 'overpass',
+    conductorModel: 'overpass/agentic-conductor',
+    laneModel: 'overpass/agentic-high',
+  });
+});
+
+test('overpass: enabled in hobby mode (or with no mode) is configured but not effective, with a reason', () => {
+  for (const cfg of [{ mode: 'hobby', overpass: { enabled: true } }, { overpass: { enabled: true } }]) {
+    const r = resolveOverpass(cfg, { host: 'opencode' });
+    assert.equal(r.configured, true);
+    assert.equal(r.effective, false);
+    assert.match(r.reason ?? '', /work mode only/);
+  }
+});
+
+test('overpass: enabled in work mode on the claude host (or any other) is not effective, with a reason', () => {
+  for (const host of ['claude', 'codex', '']) {
+    const r = resolveOverpass(on(), { host });
+    assert.equal(r.configured, true);
+    assert.equal(r.effective, false);
+    assert.match(r.reason ?? '', /OpenCode only/);
+  }
+});
+
+test('overpass: the provider is interpolated into both model ids', () => {
+  const r = resolveOverpass(on({ provider: 'acme_ai-2.x' }), { host: 'opencode' });
+  assert.equal(r.provider, 'acme_ai-2.x');
+  assert.equal(r.conductorModel, 'acme_ai-2.x/agentic-conductor');
+  assert.equal(r.laneModel, 'acme_ai-2.x/agentic-high');
+});
+
+test('overpass: an invalid enabled throws, naming the key and the value, whatever the mode or host', () => {
+  for (const enabled of ['true', 1, null, [], {}]) {
+    for (const [mode, host] of [['work', 'opencode'], ['hobby', 'claude']]) {
+      assert.throws(
+        () => resolveOverpass({ mode, overpass: { enabled } }, { host }),
+        (err: Error) => err.message.includes('config.overpass.enabled') && err.message.includes(JSON.stringify(enabled)),
+      );
+    }
+  }
+});
+
+test('overpass: an invalid provider throws, naming the key and the value', () => {
+  for (const provider of ['', 'a/b', 'a#high', 'a b', '/x', 5, null, true, {}]) {
+    assert.throws(
+      () => resolveOverpass(on({ provider }), { host: 'opencode' }),
+      (err: Error) => err.message.includes('config.overpass.provider') && err.message.includes(JSON.stringify(provider)),
+    );
+  }
+});
+
+test('overpass: a present overpass that is not an object throws', () => {
+  for (const overpass of ['on', true, null, [], 3]) {
+    assert.throws(
+      () => resolveOverpass({ mode: 'work', overpass }, { host: 'opencode' }),
+      (err: Error) => err.message.includes('config.overpass') && err.message.includes(JSON.stringify(overpass)),
+    );
+  }
+});
+
+test('overpass: an invalid mode throws when overpass is enabled (the strict mode judge), never reads as hobby', () => {
+  assert.throws(
+    () => resolveOverpass({ mode: 'wrok', overpass: { enabled: true } }, { host: 'opencode' }),
+    ProjectModeError,
+  );
+});
+
+test('judgeProjectMode: the pure judge behind readProjectMode', () => {
+  assert.equal(judgeProjectMode(undefined, 'x'), 'hobby');
+  assert.equal(judgeProjectMode('hobby', 'x'), 'hobby');
+  assert.equal(judgeProjectMode('work', 'x'), 'work');
+  assert.throws(() => judgeProjectMode('Work', 'somewhere'), /config\.mode is "Work" in somewhere/);
+  assert.throws(() => judgeProjectMode(null, 'x'), ProjectModeError);
+});
+
+test('overpass: conductor_bypass true keeps effective but turns conductorRouted off', () => {
+  const r = resolveOverpass(on({ conductor_bypass: true }), { host: 'opencode' });
+  assert.equal(r.effective, true);
+  assert.equal(r.conductorRouted, false);
+  assert.equal(resolveOverpass(on({ conductor_bypass: false }), { host: 'opencode' }).conductorRouted, true);
+});
+
+test('overpass: conductorRouted is false whenever overpass is not effective, bypass or not', () => {
+  for (const conductor_bypass of [true, false]) {
+    assert.equal(resolveOverpass({ mode: 'hobby', overpass: { enabled: true, conductor_bypass } }, { host: 'opencode' }).conductorRouted, false);
+    assert.equal(resolveOverpass(on({ conductor_bypass }), { host: 'claude' }).conductorRouted, false);
+    assert.equal(resolveOverpass({ mode: 'work', overpass: { enabled: false, conductor_bypass } }, { host: 'opencode' }).conductorRouted, false);
+  }
+});
+
+test('overpass: a non-boolean conductor_bypass throws, naming the key and the value, even when not effective', () => {
+  for (const conductor_bypass of ['true', 1, null, [], {}]) {
+    for (const [mode, host] of [['work', 'opencode'], ['hobby', 'claude']]) {
+      assert.throws(
+        () => resolveOverpass({ mode, overpass: { enabled: true, conductor_bypass } }, { host }),
+        (err: Error) => err.message.includes('config.overpass.conductor_bypass') && err.message.includes(JSON.stringify(conductor_bypass)),
+      );
+    }
+  }
+});

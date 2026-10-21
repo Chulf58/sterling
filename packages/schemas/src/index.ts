@@ -87,13 +87,13 @@ export { sessionEventSchema, NO_CAPTURE_LANES, noCaptureLaneSchema, WORKER_POLIC
 export type { SessionEvent, NoCaptureLane, WorkerPolicyLane, WorkerPolicyItem, WorkerPolicy } from './transient.js';
 export { knowledgeWriteSchema, KNOWLEDGE_WRITES_REL, KNOWLEDGE_WRITES_DIR_REL, KNOWLEDGE_WRITES_PROCESS_FILE, KNOWLEDGE_WRITES_RETENTION_MS, KNOWLEDGE_WRITES_COMPACT_LINES, KNOWLEDGE_WRITES_KEEP_IDS, KNOWLEDGE_WRITES_TEMP_FILE, knowledgeWritesProcessFile, knowledgeWritesOwnerPid, knowledgeWritesTempFile, knowledgeWritesTempOwnerPid } from './transient.js';
 export type { KnowledgeWrite } from './transient.js';
-export { configSchema, parseConfig, normalizeRawConfig, AGENT_TOOL_NAME_RE, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, unreadConfigKeys, describeUnreadConfigKeys } from './config.js';
-export type { SterlingConfig, UnreadConfigKey } from './config.js';
+export { configSchema, parseConfig, normalizeRawConfig, AGENT_TOOL_NAME_RE, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, unreadConfigKeys, describeUnreadConfigKeys, resolveOverpass, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE } from './config.js';
+export type { SterlingConfig, UnreadConfigKey, OverpassResolution } from './config.js';
 export { projectRegistrationSchema } from './registry.js';
 export type { ProjectRegistration } from './registry.js';
 export { BUILD_ID_FILE, runtimeMarkerSchema, buildIdPath, runtimeMarkerPath, stalenessVerdict } from './staleness.js';
 export type { RuntimeMarker, StalenessVerdict } from './staleness.js';
-export { PROJECT_MODES, ProjectModeError, ProjectIdentityError, PROJECT_IDENTITY_REL, readProjectMode, readProjectIdentity, isProjectId } from './project.js';
+export { PROJECT_MODES, ProjectModeError, ProjectIdentityError, PROJECT_IDENTITY_REL, readProjectMode, judgeProjectMode, readProjectIdentity, isProjectId } from './project.js';
 export type { ProjectMode } from './project.js';
 export {
   BROKER_PROTOCOL,

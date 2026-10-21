@@ -9,9 +9,9 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { MountedStores, SterlingStore, StoreBusyError, DEFAULT_BUSY_TIMEOUT_MS, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
-import { parseConfig, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE } from '@sterling/schemas';
-import { buildDashboardFrame, clipEllipsis, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect } from './state.js';
-import { applyAutoMergeToggle, applyHandoffToggle, applyModeToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
+import { parseConfig, resolveOverpass, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE } from '@sterling/schemas';
+import { buildDashboardFrame, clipEllipsis, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect, type OverpassToggleEffect, type OverpassProviderEffect, type OverpassBypassEffect, type OverpassView } from './state.js';
+import { applyAutoMergeToggle, applyHandoffToggle, applyModeToggle, applyOverpassBypass, applyOverpassProvider, applyOverpassToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
 import { AutoMergeSettingError, autoMergeOnCleanOf } from '../../../scripts/lib/work-pr.mjs';
 import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
 // Static, so esbuild inlines both into the bundles: an installed copy has no
@@ -48,6 +48,9 @@ export interface DashboardOptions {
   /** The file operations the OpenCode-override config.json write uses; tests
    *  use it to make that write fail part-way. */
   configWriteFs?: AtomicWriteFs;
+  /** Which host opened the dashboard. 'opencode' offers the Overpass rows (in
+   *  work mode); the terminal TUI leaves it unset. */
+  host?: 'opencode';
 }
 
 /** How long the held selection and board-edit writes wait for another
@@ -453,6 +456,37 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     }
   }
 
+  /** config.overpass for the System tab's Overpass rows, read from the RAW
+   *  config. Each field is the boolean, or its JSON text when it is not one
+   *  (INVALID); an unreadable config is null (UNKNOWN, never the default).
+   *  `effective` is resolveOverpass's verdict for this host, false when the
+   *  resolver refuses the config. A present `overpass` that is not an object
+   *  sets `invalid`, so every row reads INVALID instead of the tab throwing. */
+  function readOverpass(): OverpassView {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    } catch {
+      return { enabled: null, provider: null, conductorBypass: null, effective: false };
+    }
+    const root = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? (raw as { overpass?: unknown }) : {};
+    const block = root.overpass;
+    let effective = false;
+    try {
+      effective = resolveOverpass(raw, { host: options.host ?? 'terminal' }).effective;
+    } catch {
+      // a config the resolver refuses is not effective; the rows say which field is invalid
+    }
+    if (block !== undefined && (block === null || typeof block !== 'object' || Array.isArray(block))) {
+      return { enabled: false, provider: null, conductorBypass: false, effective, invalid: JSON.stringify(block) };
+    }
+    const fields = (block ?? {}) as { enabled?: unknown; provider?: unknown; conductor_bypass?: unknown };
+    const flag = (v: unknown): boolean | string => (v === undefined ? false : typeof v === 'boolean' ? v : JSON.stringify(v));
+    const base = { enabled: flag(fields.enabled), conductorBypass: flag(fields.conductor_bypass), effective };
+    if (fields.provider !== undefined && typeof fields.provider !== 'string') return { ...base, provider: null, providerInvalid: JSON.stringify(fields.provider) };
+    return { ...base, provider: fields.provider ?? 'overpass' };
+  }
+
   /** Build the AgentRosterSnapshot at tab activation: installed frontmatter +
    *  config.models + a bootstrapped catalog with its precomputed status. Enqueues
    *  a deduped refresh when the catalog is stale (decision foreign_98064d77). */
@@ -502,7 +536,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // finding 41/43) — surface it as a visible System-tab notice instead.
       ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), ...handoff };
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), ...handoff };
   }
 
   /** Execute a sparring_model effect: config.sparring_partner.models.openai
@@ -715,6 +749,9 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     const modeToggles = effects.filter((e): e is ModeToggleEffect => e.type === 'mode_toggle');
     const handoffToggles = effects.filter((e): e is HandoffToggleEffect => e.type === 'handoff_toggle');
     const autoMergeToggles = effects.filter((e): e is AutoMergeToggleEffect => e.type === 'auto_merge_toggle');
+    const overpassToggles = effects.filter((e): e is OverpassToggleEffect => e.type === 'overpass_toggle');
+    const overpassProviders = effects.filter((e): e is OverpassProviderEffect => e.type === 'overpass_provider');
+    const overpassBypasses = effects.filter((e): e is OverpassBypassEffect => e.type === 'overpass_bypass_toggle');
     let toggleWrote = false;
     let toggleFailure: string | undefined;
     const collectFailure = (msg: string) => { toggleFailure = msg; };
@@ -726,8 +763,30 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     for (const e of handoffToggles) { if (applyHandoffToggle(e, collectFailure, configPath)) { toggleWrote = true; handoffWritten = e.enabled; } }
     let autoMergeWritten: boolean | undefined;
     for (const e of autoMergeToggles) { if (applyAutoMergeToggle(e, collectFailure, configPath)) { toggleWrote = true; autoMergeWritten = e.enabled; } }
+    let overpassNotice: string | undefined;
+    for (const e of overpassToggles) {
+      if (applyOverpassToggle(e, collectFailure, configPath)) {
+        toggleWrote = true;
+        overpassNotice = e.enabled
+          ? "Overpass turned on — the plugin routes the conductor and every lane through the provider's tiers from its next turn; per-role OpenCode models are kept but not applied while it is on."
+          : 'Overpass turned off — the conductor and the lanes return to their normal model pins from the next turn.';
+      }
+    }
+    for (const e of overpassProviders) {
+      if (applyOverpassProvider(e, collectFailure, configPath)) { toggleWrote = true; overpassNotice = `Overpass provider set to '${e.provider}' — it applies from the next turn while Overpass is on.`; }
+    }
+    for (const e of overpassBypasses) {
+      if (applyOverpassBypass(e, collectFailure, configPath)) {
+        toggleWrote = true;
+        overpassNotice = e.enabled
+          ? 'conductor bypass turned on — while Overpass is on, the conductor keeps its normal model pin and every other lane is routed.'
+          : 'conductor bypass turned off — while Overpass is on, the conductor is routed through the tier too.';
+      }
+    }
     if (toggleFailure !== undefined) {
       notice(toggleFailure);
+    } else if (overpassNotice !== undefined) {
+      notice(overpassNotice);
     } else if (autoMergeWritten !== undefined) {
       // what the switch changes, said at the moment it is made
       notice(autoMergeWritten
@@ -749,7 +808,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // that does not — restart the session to pick the new value up there.
       notice('config.json updated — hooks pick this up on their next invocation; restart the session to reload the MCP server.');
     }
-    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length) roster = loadRoster();
+    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length) roster = loadRoster();
     for (const e of effects) {
       if (e.type === 'select') pending = [...pending.filter((p) => p.type !== 'select'), e];
       else if (e.type === 'board_edit') pending.push(e);

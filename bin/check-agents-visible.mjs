@@ -5320,7 +5320,16 @@ var configSchema = external_exports.object({
   // typo never turns into a merge. Toggled in the TUI System tab. The default
   // lives twice: here and in templates/default-config.json (config.test.ts pins
   // that they agree).
-  pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true })
+  pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true }),
+  // Overpass toggle (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers
+  // and overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice):
+  // routes the conductor and every lane through the provider's tiered models.
+  // Work mode on OpenCode only. PERMISSIVE like mode: the value is preserved
+  // raw so a typo never fails every parseConfig reader; the strict judge is
+  // resolveOverpass() below, which throws on a present but invalid value. The
+  // default lives twice: here and in templates/default-config.json
+  // (config.test.ts pins that they agree).
+  overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false })
 });
 
 // packages/schemas/dist/registry.js

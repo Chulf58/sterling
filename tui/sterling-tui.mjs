@@ -44076,6 +44076,83 @@ var workerPolicySchema = external_exports.object({
   policy_items: external_exports.array(workerPolicyItemSchema)
 }).passthrough();
 
+// packages/schemas/dist/project.js
+import { lstatSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+var PROJECT_MODES = ["hobby", "work"];
+var ProjectModeError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectModeError";
+  }
+};
+var ProjectIdentityError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProjectIdentityError";
+  }
+};
+var PROJECT_IDENTITY_REL = ".sterling/project.json";
+var fwd = (p) => p.replace(/\\/g, "/");
+var UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
+function readContainedText(root, rel, ErrorClass, subject) {
+  const segments = rel.split("/");
+  let cursor = resolve(root);
+  for (const [index, part] of segments.entries()) {
+    cursor = join(cursor, part);
+    let st;
+    try {
+      st = lstatSync(cursor);
+    } catch (err) {
+      if (err?.code === "ENOENT")
+        return null;
+      throw err;
+    }
+    const shown = segments.slice(0, index + 1).join("/");
+    const isLeaf = index === segments.length - 1;
+    if (st.isSymbolicLink())
+      throw new ErrorClass(`${shown} is a symlink \u2014 refusing to follow it out of the project; ${subject} cannot be read`);
+    if (isLeaf ? !st.isFile() : !st.isDirectory()) {
+      throw new ErrorClass(`${shown} exists but is not a ${isLeaf ? "regular file" : "directory"} \u2014 ${subject} cannot be read`);
+    }
+  }
+  return readFileSync(cursor, "utf8");
+}
+function readJsonObject(root, rel, ErrorClass, subject) {
+  const where = `${fwd(resolve(root))}/${rel}`;
+  const text = readContainedText(root, rel, ErrorClass, subject);
+  if (text === null)
+    return { where, parsed: void 0 };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
+  }
+  return { where, parsed };
+}
+function judgeProjectMode(mode, where) {
+  if (mode === void 0)
+    return "hobby";
+  if (!PROJECT_MODES.includes(mode)) {
+    throw new ProjectModeError(`config.mode is ${JSON.stringify(mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+  }
+  return mode;
+}
+function readProjectIdentity(root) {
+  const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
+  if (parsed === void 0)
+    return null;
+  if (!isProjectId(parsed.project_id)) {
+    throw new ProjectIdentityError(`project_id is ${JSON.stringify(parsed.project_id)} in ${where} \u2014 it must be a UUID v4 string; fix the file by hand (init never overwrites it) or restore it from git`);
+  }
+  return { project_id: parsed.project_id };
+}
+
 // packages/schemas/dist/config.js
 var effortLevel = external_exports.enum(["low", "medium", "high", "xhigh"]);
 var modelPin = external_exports.object({
@@ -44561,8 +44638,48 @@ var configSchema = external_exports.object({
   // typo never turns into a merge. Toggled in the TUI System tab. The default
   // lives twice: here and in templates/default-config.json (config.test.ts pins
   // that they agree).
-  pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true })
+  pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true }),
+  // Overpass toggle (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers
+  // and overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice):
+  // routes the conductor and every lane through the provider's tiered models.
+  // Work mode on OpenCode only. PERMISSIVE like mode: the value is preserved
+  // raw so a typo never fails every parseConfig reader; the strict judge is
+  // resolveOverpass() below, which throws on a present but invalid value. The
+  // default lives twice: here and in templates/default-config.json
+  // (config.test.ts pins that they agree).
+  overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false })
 });
+var DEFAULT_OVERPASS_PROVIDER = "overpass";
+var OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
+function resolveOverpass(config, opts) {
+  const cfg = isPlainObject(config) ? config : {};
+  const raw = cfg.overpass;
+  if (raw !== void 0 && !isPlainObject(raw)) {
+    throw new Error(`config.overpass is ${JSON.stringify(raw)} \u2014 it must be an object like {"enabled": false, "provider": "overpass"}`);
+  }
+  const block = raw ?? {};
+  const enabled = block.enabled === void 0 ? false : block.enabled;
+  if (typeof enabled !== "boolean") {
+    throw new Error(`config.overpass.enabled is ${JSON.stringify(enabled)} \u2014 it must be true or false`);
+  }
+  const bypass = block.conductor_bypass === void 0 ? false : block.conductor_bypass;
+  if (typeof bypass !== "boolean") {
+    throw new Error(`config.overpass.conductor_bypass is ${JSON.stringify(bypass)} \u2014 it must be true or false`);
+  }
+  const provider = block.provider === void 0 ? DEFAULT_OVERPASS_PROVIDER : block.provider;
+  if (typeof provider !== "string" || !OVERPASS_PROVIDER_RE.test(provider)) {
+    throw new Error(`config.overpass.provider is ${JSON.stringify(provider)} \u2014 it must be a provider id of letters, digits, '-', '_' and '.', with no '/' or '#'`);
+  }
+  const base2 = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/agentic-high` };
+  if (!enabled)
+    return { ...base2, effective: false, conductorRouted: false };
+  const mode = judgeProjectMode(cfg.mode, "the config");
+  if (mode !== "work")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
+  if (opts.host !== "opencode")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts.host}'` };
+  return { ...base2, effective: true, conductorRouted: !bypass };
+}
 var RETIRED_MODEL_KEYS = [
   "coder",
   "coder_hard",
@@ -44628,68 +44745,6 @@ var runtimeMarkerSchema = external_exports.object({
   pid: external_exports.number().int(),
   booted_at: external_exports.string()
 }).strict();
-
-// packages/schemas/dist/project.js
-import { lstatSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-var ProjectIdentityError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "ProjectIdentityError";
-  }
-};
-var PROJECT_IDENTITY_REL = ".sterling/project.json";
-var fwd = (p) => p.replace(/\\/g, "/");
-var UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-var isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
-function readContainedText(root, rel, ErrorClass, subject) {
-  const segments = rel.split("/");
-  let cursor = resolve(root);
-  for (const [index, part] of segments.entries()) {
-    cursor = join(cursor, part);
-    let st;
-    try {
-      st = lstatSync(cursor);
-    } catch (err) {
-      if (err?.code === "ENOENT")
-        return null;
-      throw err;
-    }
-    const shown = segments.slice(0, index + 1).join("/");
-    const isLeaf = index === segments.length - 1;
-    if (st.isSymbolicLink())
-      throw new ErrorClass(`${shown} is a symlink \u2014 refusing to follow it out of the project; ${subject} cannot be read`);
-    if (isLeaf ? !st.isFile() : !st.isDirectory()) {
-      throw new ErrorClass(`${shown} exists but is not a ${isLeaf ? "regular file" : "directory"} \u2014 ${subject} cannot be read`);
-    }
-  }
-  return readFileSync(cursor, "utf8");
-}
-function readJsonObject(root, rel, ErrorClass, subject) {
-  const where = `${fwd(resolve(root))}/${rel}`;
-  const text = readContainedText(root, rel, ErrorClass, subject);
-  if (text === null)
-    return { where, parsed: void 0 };
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (err) {
-    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
-  }
-  return { where, parsed };
-}
-function readProjectIdentity(root) {
-  const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
-  if (parsed === void 0)
-    return null;
-  if (!isProjectId(parsed.project_id)) {
-    throw new ProjectIdentityError(`project_id is ${JSON.stringify(parsed.project_id)} in ${where} \u2014 it must be a UUID v4 string; fix the file by hand (init never overwrites it) or restore it from git`);
-  }
-  return { project_id: parsed.project_id };
-}
 
 // packages/schemas/dist/broker.js
 var BROKER_MAX_REQUEST_BYTES = 1024 * 1024;
@@ -51501,6 +51556,10 @@ var initialUi = { tab: 0, cursor: 0, expanded: [], searchQuery: "", scroll: 0 };
 function isOpenCodeOnlyEntry(entry) {
   return entry.vendor !== void 0 && entry.vendor !== "anthropic";
 }
+var DEFAULT_OVERPASS_VIEW = { enabled: false, provider: "overpass", conductorBypass: false, effective: false };
+function overpassOffered(snap) {
+  return snap.host === "opencode" && snap.mode === "work";
+}
 var EMPTY_ROSTER = {
   agents: [],
   configModels: {},
@@ -51675,6 +51734,7 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
   const keys = Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
   const selector = ui.selector;
   const clip2 = (s2) => clipEllipsis(s2, width);
+  const overpassEffective = overpassOffered(snap) && (snap.overpass ?? DEFAULT_OVERPASS_VIEW).effective;
   const rows = keys.map((key, i) => {
     const config = snap.configModels[key];
     const governed = snap.agents.filter((a) => AGENT_MODEL_KEY[a.name] === key);
@@ -51691,7 +51751,7 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
     for (const name of agentNames)
       lines.push({ text: clip2(`    ${name}`), kind: "body" });
     if (config.opencode_model)
-      lines.push({ text: clip2(`    OpenCode: ${config.opencode_model}`), kind: "body" });
+      lines.push({ text: clip2(`    OpenCode: ${config.opencode_model}${overpassEffective ? " (inactive: Overpass)" : ""}`), kind: "body" });
     if (selector && selector.key === key) {
       if (selector.stage === "model") {
         modelOptions(snap.catalog.entries, config).forEach((o, oi) => {
@@ -51716,8 +51776,9 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
   const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
   const handoffRows = selector ? [] : [handoffToggleRow(snap, ui, width, keys.length + 4)];
   const autoMergeRows = selector ? [] : [autoMergeToggleRow(snap, ui, width, keys.length + 5)];
+  const overpassRows = selector || !overpassOffered(snap) ? [] : overpassToggleRows(snap, ui, width, keys.length + 6);
   const storageRows = selector ? [] : [storageRow(snap, width)];
-  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, storageRows };
+  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, overpassRows, storageRows };
 }
 function catalogBanner(catalog, width) {
   const clip2 = (s2) => clipEllipsis(s2, width);
@@ -51781,6 +51842,23 @@ function autoMergeToggleRow(snap, ui, width, cursorIndex) {
   const marker = selected ? "\u203A " : "  ";
   const shown = value === null ? "UNKNOWN (config unreadable)" : value === true ? "ON" : value === false ? "OFF" : `INVALID (${value})`;
   return { id: "sys:pr_auto_merge", lines: [{ text: clip2(`${marker}Auto-merge clean PRs (work mode): ${shown}`), kind: "title", selected }] };
+}
+function overpassToggleRows(snap, ui, width, cursorBase) {
+  const clip2 = (s2) => clipEllipsis(s2, width);
+  const view = snap.overpass ?? DEFAULT_OVERPASS_VIEW;
+  const marker = (i) => ui.cursor === cursorBase + i ? "\u203A " : "  ";
+  const selected = (i) => ui.cursor === cursorBase + i;
+  const flag = (v) => view.invalid !== void 0 ? `INVALID (${view.invalid})` : v === null ? "UNKNOWN (config unreadable)" : v === true ? "ON" : v === false ? "OFF" : `INVALID (${v})`;
+  const provider = () => view.invalid !== void 0 ? `INVALID (${view.invalid})` : view.providerInvalid !== void 0 ? `INVALID (${view.providerInvalid})` : view.provider === null ? "UNKNOWN (config unreadable)" : OVERPASS_PROVIDER_RE.test(view.provider) ? view.provider : `INVALID (${JSON.stringify(view.provider)})`;
+  const editing = ui.overpassProviderEdit !== void 0 && selected(1);
+  return [
+    { id: "sys:overpass", lines: [{ text: clip2(`${marker(0)}Overpass: ${flag(view.enabled)}`), kind: "title", selected: selected(0) }] },
+    {
+      id: "sys:overpass_provider",
+      lines: [{ text: clip2(`${marker(1)}Overpass provider: ${editing ? `${ui.overpassProviderEdit}\u258C` : provider()}`), kind: "title", selected: selected(1) }]
+    },
+    { id: "sys:overpass_bypass", lines: [{ text: clip2(`${marker(2)}Conductor bypass: ${flag(view.conductorBypass)}`), kind: "title", selected: selected(2) }] }
+  ];
 }
 function storageRow(snap, width) {
   const clip2 = (s2) => clipEllipsis(s2, width);
@@ -52047,7 +52125,7 @@ function systemDashboardState(ui, width, banner, projectName, bodyTop2, tabs, ma
     rows.push({ id: sr.id, type: "system", selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
     screenRow += lines.length;
   }
-  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.storageRows]) {
+  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.overpassRows, ...view.storageRows]) {
     const lines = sr.lines.map((l) => ({
       text: l.text,
       kind: l.kind === "title" ? "title" : l.kind === "meta" ? "meta" : "body"
@@ -52302,7 +52380,7 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
   const maxBodyLines = viewport2.maxBodyLines ?? Infinity;
   const clamp = (c) => Math.max(0, Math.min(c, Math.max(0, nodes2.length - 1)));
   const effects = [];
-  const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: void 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, boardEdit: void 0 });
+  const switchTab = (index) => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: void 0, selector: void 0, notice: void 0, sparringModelEdit: void 0, overpassProviderEdit: void 0, boardEdit: void 0 });
   const reachable = visibleTabs(viewport2.agents, viewport2.github);
   const stepTab = (dir) => reachable[(reachable.indexOf(ui.tab) + dir + reachable.length) % reachable.length] ?? reachable[0];
   const buildSelf = (uiNext) => buildDashboardState(store, uiNext, viewport2.width ?? Infinity, maxBodyLines, "", viewport2.showBanner ?? false, knowledge, roster, viewport2.agents, viewport2.height, viewport2.github);
@@ -52359,7 +52437,7 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
   };
   const clickSystem = (state, index, line1) => {
     const row = state.rows[index];
-    if (row.type !== "system" || row.id === "sys:storage" || ui.sparringModelEdit !== void 0 || !roster)
+    if (row.type !== "system" || row.id === "sys:storage" || ui.sparringModelEdit !== void 0 || ui.overpassProviderEdit !== void 0 || !roster)
       return { ui, effects };
     const enter = { kind: "key", name: "ENTER" };
     const sel = ui.selector;
@@ -52457,9 +52535,11 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
       }
       if (ui.tab === SYSTEM_TAB && roster) {
         const sysKeys = Object.keys(roster.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
-        const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 6 - 1)));
+        const overpassOn = roster !== void 0 && overpassOffered(roster);
+        const sysClamp = (c) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 6 + (overpassOn ? 3 : 0) - 1)));
         const sel = ui.selector;
-        const editing = ui.sparringModelEdit !== void 0;
+        const providerEditing = ui.overpassProviderEdit !== void 0;
+        const editing = ui.sparringModelEdit !== void 0 || providerEditing;
         switch (event2.name) {
           case "UP":
           case "DOWN":
@@ -52486,16 +52566,28 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
           case "ESCAPE":
             if (sel)
               return { ui: { ...ui, selector: void 0 }, effects };
+            if (providerEditing)
+              return { ui: { ...ui, overpassProviderEdit: void 0, notice: void 0 }, effects };
             if (editing)
               return { ui: { ...ui, sparringModelEdit: void 0 }, effects };
             return { ui, effects };
           case "BACKSPACE":
+            if (providerEditing)
+              return { ui: { ...ui, overpassProviderEdit: (ui.overpassProviderEdit ?? "").slice(0, -1) }, effects };
             if (editing)
               return { ui: { ...ui, sparringModelEdit: (ui.sparringModelEdit ?? "").slice(0, -1) }, effects };
             return { ui, effects };
           case "ENTER":
           case "SPACE": {
             const cursor = sysClamp(ui.cursor);
+            if (providerEditing) {
+              const provider = (ui.overpassProviderEdit ?? "").trim();
+              if (!OVERPASS_PROVIDER_RE.test(provider)) {
+                return { ui: { ...ui, notice: `Overpass provider refused: '${provider}' is not a provider id \u2014 use letters, digits, '-', '_' and '.', with no '/' or '#'` }, effects };
+              }
+              effects.push({ type: "overpass_provider", provider });
+              return { ui: { ...ui, overpassProviderEdit: void 0, notice: void 0 }, effects };
+            }
             if (editing) {
               const committedModel = (ui.sparringModelEdit ?? "").trim();
               effects.push({ type: "sparring_model", model: committedModel });
@@ -52523,6 +52615,19 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
             }
             if (cursor === sysKeys.length + 5) {
               effects.push({ type: "auto_merge_toggle", enabled: (roster.autoMergeOnClean ?? true) === false });
+              return { ui: { ...ui, cursor, notice: void 0 }, effects };
+            }
+            if (overpassOn && cursor >= sysKeys.length + 6) {
+              const view = roster.overpass ?? DEFAULT_OVERPASS_VIEW;
+              if (cursor === sysKeys.length + 6) {
+                effects.push({ type: "overpass_toggle", enabled: view.enabled === false });
+                return { ui: { ...ui, cursor, notice: void 0 }, effects };
+              }
+              if (cursor === sysKeys.length + 7) {
+                const current = view.provider !== null && OVERPASS_PROVIDER_RE.test(view.provider) ? view.provider : "";
+                return { ui: { ...ui, cursor, overpassProviderEdit: current, notice: void 0 }, effects };
+              }
+              effects.push({ type: "overpass_bypass_toggle", enabled: view.conductorBypass === false });
               return { ui: { ...ui, cursor, notice: void 0 }, effects };
             }
             const key = sysKeys[cursor];
@@ -52631,6 +52736,9 @@ function reduceNodes(store, ui, event2, viewport2, knowledge, roster, resolveHea
         return { ui, effects };
       if (ui.tab === SYSTEM_TAB && ui.sparringModelEdit !== void 0) {
         return { ui: { ...ui, sparringModelEdit: ui.sparringModelEdit + ch }, effects };
+      }
+      if (ui.tab === SYSTEM_TAB && ui.overpassProviderEdit !== void 0) {
+        return { ui: { ...ui, overpassProviderEdit: ui.overpassProviderEdit + ch }, effects };
       }
       if (ui.tab === TASKS_TAB && ui.boardEdit) {
         return { ui: { ...ui, boardEdit: { ...ui.boardEdit, text: ui.boardEdit.text + ch } }, effects };
@@ -52807,6 +52915,41 @@ function applyAutoMergeToggle(e, onError, path) {
     return true;
   } catch (err) {
     onError?.(`auto-merge toggle failed \u2014 ${err.message}`);
+    return false;
+  }
+}
+function writeOverpassKey(field, value, path) {
+  writeConfigKey(configPath(path), "overpass", (old) => {
+    const block = old !== null && typeof old === "object" && !Array.isArray(old) ? old : {};
+    return { ...block, [field]: value };
+  });
+}
+function applyOverpassToggle(e, onError, path) {
+  try {
+    writeOverpassKey("enabled", e.enabled, path);
+    return true;
+  } catch (err) {
+    onError?.(`Overpass toggle failed \u2014 ${err.message}`);
+    return false;
+  }
+}
+function applyOverpassProvider(e, onError, path) {
+  try {
+    if (!OVERPASS_PROVIDER_RE.test(e.provider))
+      throw new Error(`'${e.provider}' is not a provider id`);
+    writeOverpassKey("provider", e.provider, path);
+    return true;
+  } catch (err) {
+    onError?.(`Overpass provider update failed \u2014 ${err.message}`);
+    return false;
+  }
+}
+function applyOverpassBypass(e, onError, path) {
+  try {
+    writeOverpassKey("conductor_bypass", e.enabled, path);
+    return true;
+  } catch (err) {
+    onError?.(`Overpass conductor bypass toggle failed \u2014 ${err.message}`);
     return false;
   }
 }
@@ -54233,6 +54376,30 @@ function openDashboard(storePath2, options = {}) {
       return JSON.stringify(block !== null && typeof block === "object" && !Array.isArray(block) ? block.auto_merge_on_clean : block);
     }
   }
+  function readOverpass() {
+    let raw;
+    try {
+      raw = JSON.parse(readFileSync15(configPath2, "utf8"));
+    } catch {
+      return { enabled: null, provider: null, conductorBypass: null, effective: false };
+    }
+    const root = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const block = root.overpass;
+    let effective = false;
+    try {
+      effective = resolveOverpass(raw, { host: options.host ?? "terminal" }).effective;
+    } catch {
+    }
+    if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
+      return { enabled: false, provider: null, conductorBypass: false, effective, invalid: JSON.stringify(block) };
+    }
+    const fields = block ?? {};
+    const flag = (v) => v === void 0 ? false : typeof v === "boolean" ? v : JSON.stringify(v);
+    const base2 = { enabled: flag(fields.enabled), conductorBypass: flag(fields.conductor_bypass), effective };
+    if (fields.provider !== void 0 && typeof fields.provider !== "string")
+      return { ...base2, provider: null, providerInvalid: JSON.stringify(fields.provider) };
+    return { ...base2, provider: fields.provider ?? "overpass" };
+  }
   function loadRoster() {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     let config;
@@ -54269,7 +54436,7 @@ function openDashboard(storePath2, options = {}) {
     } catch (err) {
       ui = { ...ui, notice: `catalog unavailable \u2014 ${err.message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), ...handoff };
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), ...handoff };
   }
   function applySparringModel(e) {
     try {
@@ -54451,6 +54618,9 @@ function openDashboard(storePath2, options = {}) {
     const modeToggles = effects.filter((e) => e.type === "mode_toggle");
     const handoffToggles = effects.filter((e) => e.type === "handoff_toggle");
     const autoMergeToggles = effects.filter((e) => e.type === "auto_merge_toggle");
+    const overpassToggles = effects.filter((e) => e.type === "overpass_toggle");
+    const overpassProviders = effects.filter((e) => e.type === "overpass_provider");
+    const overpassBypasses = effects.filter((e) => e.type === "overpass_bypass_toggle");
     let toggleWrote = false;
     let toggleFailure;
     const collectFailure = (msg) => {
@@ -54485,8 +54655,29 @@ function openDashboard(storePath2, options = {}) {
         autoMergeWritten = e.enabled;
       }
     }
+    let overpassNotice;
+    for (const e of overpassToggles) {
+      if (applyOverpassToggle(e, collectFailure, configPath2)) {
+        toggleWrote = true;
+        overpassNotice = e.enabled ? "Overpass turned on \u2014 the plugin routes the conductor and every lane through the provider's tiers from its next turn; per-role OpenCode models are kept but not applied while it is on." : "Overpass turned off \u2014 the conductor and the lanes return to their normal model pins from the next turn.";
+      }
+    }
+    for (const e of overpassProviders) {
+      if (applyOverpassProvider(e, collectFailure, configPath2)) {
+        toggleWrote = true;
+        overpassNotice = `Overpass provider set to '${e.provider}' \u2014 it applies from the next turn while Overpass is on.`;
+      }
+    }
+    for (const e of overpassBypasses) {
+      if (applyOverpassBypass(e, collectFailure, configPath2)) {
+        toggleWrote = true;
+        overpassNotice = e.enabled ? "conductor bypass turned on \u2014 while Overpass is on, the conductor keeps its normal model pin and every other lane is routed." : "conductor bypass turned off \u2014 while Overpass is on, the conductor is routed through the tier too.";
+      }
+    }
     if (toggleFailure !== void 0) {
       notice(toggleFailure);
+    } else if (overpassNotice !== void 0) {
+      notice(overpassNotice);
     } else if (autoMergeWritten !== void 0) {
       notice(autoMergeWritten ? "auto-merge turned on \u2014 in work mode, a PR whose Copilot review loop ends clean and that GitHub reports mergeable is squash-merged by the conductor and its branch deleted." : "auto-merge turned off \u2014 in work mode, a human merges every PR, a clean one included.");
     } else if (modeWritten !== void 0) {
@@ -54496,7 +54687,7 @@ function openDashboard(storePath2, options = {}) {
     } else if (toggleWrote) {
       notice("config.json updated \u2014 hooks pick this up on their next invocation; restart the session to reload the MCP server.");
     }
-    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length)
+    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length)
       roster = loadRoster();
     for (const e of effects) {
       if (e.type === "select")

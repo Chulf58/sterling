@@ -1100,7 +1100,11 @@ function launchWorker(opts) {
 
     const host = opts.host ?? 'claude';
     if (!WORKER_HOSTS.includes(host)) return { launched: false, reason: 'error', detail: failDetail(`unknown runner host '${host}'`) };
-    const model = opencodeModelOf(opts.config);
+    // `opts.workerModel` is a model the CALLER pinned (the OpenCode plugin passes
+    // the Overpass tier model while Overpass is effective): it wins over
+    // maintenance_worker.opencode_model, which stays in the config untouched.
+    // The lib stays dependency-free, so the caller resolves it.
+    const model = opts.workerModel ?? opencodeModelOf(opts.config);
     if (host === 'opencode') {
       if (typeof opts.opencodeBin !== 'string' || !opts.opencodeBin) return { launched: false, reason: 'error', detail: failDetail('the opencode host needs the path of the opencode binary') };
       if (model === null) return { launched: false, reason: 'error', detail: failDetail(OPENCODE_MODEL_UNSET) };
@@ -1129,7 +1133,7 @@ function launchWorker(opts) {
       writeFileSync(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
       // The child judges ONLY these (PARTIAL 2); the runner checks the token.
       // The runner host travels with the eligible list, bound to this launch by the token.
-      const runnerHost = host === 'opencode' ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim() } : { host };
+      const runnerHost = host === 'opencode' ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...(opts.workerModel !== undefined ? { opencode_model_pinned: true } : {}) } : { host };
       // THE BATCH POLICY (change (ii)): eligible.json is token-bound, and the
       // worker's own Sterling server reads it through --worker-policy. `items`
       // keeps its shape for the runner and the prompt; `policy_items` is the
@@ -1883,7 +1887,7 @@ export async function runWorker(opts) {
         const attempted = new Set([...(Array.isArray(eligible.chain_attempted) ? eligible.chain_attempted.map(String) : []), ...actedIds]);
         const snapshot = Array.isArray(eligible.queue_snapshot) ? eligible.queue_snapshot : [];
         const left = snapshot.filter((t) => t && !closedIds.has(t.id) && !attempted.has(t.id));
-        if (left.length) chain = { items: left, attempted: [...attempted], host: eligible.host, opencodeBin: eligible.opencode_bin };
+        if (left.length) chain = { items: left, attempted: [...attempted], host: eligible.host, opencodeBin: eligible.opencode_bin, ...(eligible.opencode_model_pinned === true ? { pinnedModel: eligible.opencode_model } : {}) };
       }
       return ok ? 0 : 1;
     })();
@@ -1919,7 +1923,9 @@ function relaunchAfterRun(opts, chain) {
       // Test seams the runner already carries; unset in a real run.
       ...(opts.now ? { now: opts.now() } : {}),
       ...(opts.spawnSync ? { spawnSync: opts.spawnSync } : {}),
-      ...(chain.host === 'opencode' ? { host: 'opencode', opencodeBin: chain.opencodeBin } : {}),
+      // A model the first launch pinned (Overpass) rides along: the chain never
+      // falls back to the config model, and it does not re-resolve the toggle.
+      ...(chain.host === 'opencode' ? { host: 'opencode', opencodeBin: chain.opencodeBin, ...(chain.pinnedModel ? { workerModel: chain.pinnedModel } : {}) } : {}),
     });
   } catch (e) {
     return { launched: false, reason: 'error', detail: `not chained: ${e?.message ?? e}` };

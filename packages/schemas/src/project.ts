@@ -92,13 +92,21 @@ function readJsonObject(root: string, rel: string, ErrorClass: ErrorClass, subje
   return { where, parsed: parsed as Record<string, unknown> };
 }
 
+// The pure half of the strict mode judge: an already-parsed `mode` value, with
+// `where` naming its source for the message. Undefined is hobby; anything but
+// 'hobby' or 'work' throws.
+export function judgeProjectMode(mode: unknown, where: string): ProjectMode {
+  if (mode === undefined) return 'hobby';
+  if (!(PROJECT_MODES as readonly unknown[]).includes(mode)) {
+    throw new ProjectModeError(`config.mode is ${JSON.stringify(mode)} in ${where} — it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+  }
+  return mode as ProjectMode;
+}
+
 export function readProjectMode(root: string): ProjectMode {
   const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, 'the project mode');
-  if (parsed === undefined || parsed.mode === undefined) return 'hobby';
-  if (!(PROJECT_MODES as readonly unknown[]).includes(parsed.mode)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} — it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
-  }
-  return parsed.mode as ProjectMode;
+  if (parsed === undefined) return 'hobby';
+  return judgeProjectMode(parsed.mode, where);
 }
 
 // The project's durable identity: `{ project_id }` from .sterling/project.json,

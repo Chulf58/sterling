@@ -65,5 +65,10 @@
   "pr_review": {
     "copilot_logins": [],
     "auto_merge_on_clean": true
+  },
+  "overpass": {
+    "enabled": false,
+    "provider": "overpass",
+    "conductor_bypass": false
   }
 }

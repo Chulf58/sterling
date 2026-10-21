@@ -10,6 +10,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
+import { resolveOverpass } from '@sterling/schemas';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { maybeLaunchMaintenanceWorker, OPENCODE_MODEL_UNSET, opencodeModelOf, WORKER_ENV_FLAG } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
 import { errText, logLine } from './log.mjs';
@@ -54,6 +55,9 @@ export function opencodeBinDefault(execPath = process.execPath) {
 export const MODEL_UNSET_TEXT =
   'Sterling: the maintenance worker did not run. config maintenance_worker.opencode_model is not set, and the OpenCode worker never falls back to OpenCode\'s default one. To enable it, add this to .sterling/config.json (any provider/model you can run): "maintenance_worker": { "opencode_model": "<provider>/<model>" }. Until then the queue drains by hand with /sterling:drain.';
 
+export const OVERPASS_NO_RUNNER_TEXT =
+  'Sterling: the maintenance worker did not run. Overpass is effective, so the worker must run through OpenCode on the Overpass model, but this plugin is not running inside an OpenCode binary. The maintenance queue drains only by hand (/sterling:drain) until it is.';
+
 export const NO_RUNNER_TEXT =
   'Sterling: the maintenance worker did not run. No maintenance runner exists on this machine: the worker runs `claude -p` or `opencode run`, and neither `claude` nor an OpenCode binary was found (this plugin is not running inside an OpenCode binary). The maintenance queue drains only by hand (/sterling:drain) until one is installed.';
 
@@ -80,18 +84,36 @@ export function createWorkerLaunch({
   }
   const findOpencode = opencodeBin ?? (() => opencodeBinDefault(execPath));
   return function launchWorkerFor(root, at) {
-    const ocBin = claudeOnPath() ? null : findOpencode();
+    const config = loadConfig(root);
+    // Overpass (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers
+    // and overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice,
+    // point (5)): while it is effective on this OpenCode host the worker runs
+    // through OpenCode on the tier lane model, even with `claude` on PATH and
+    // whatever maintenance_worker.opencode_model says. An invalid overpass
+    // block fails loud here: no launch, never a fall back to direct providers.
+    let tierModel = null;
+    try {
+      const overpass = resolveOverpass(config, { host: 'opencode' });
+      if (overpass.effective) tierModel = overpass.laneModel;
+    } catch (e) {
+      skipOnce(root, at, `maintenance worker skipped: ${errText(e)}`, `Sterling: the maintenance worker did not run. ${errText(e)}. Fix .sterling/config.json; until then the queue drains by hand with /sterling:drain.`);
+      return;
+    }
+    const ocBin = claudeOnPath() && !tierModel ? null : findOpencode();
     // No host field means 'claude', the lib's default.
-    const runnerHost = ocBin ? { host: 'opencode', opencodeBin: ocBin } : {};
+    const runnerHost = ocBin ? { host: 'opencode', opencodeBin: ocBin, ...(tierModel ? { workerModel: tierModel } : {}) } : {};
+    if (!ocBin && tierModel) {
+      skipOnce(root, at, 'maintenance worker skipped: Overpass is effective but no OpenCode binary was found to run the worker through', OVERPASS_NO_RUNNER_TEXT);
+      return;
+    }
     if (!ocBin && !claudeOnPath()) {
       skipOnce(root, at, 'maintenance worker skipped: no maintenance runner on this machine (`claude` is not on PATH and no OpenCode binary was found)', NO_RUNNER_TEXT);
       return;
     }
-    const config = loadConfig(root);
     // No model, no OpenCode run (decision
     // opencode-maintenance-worker-refuses-without-a-configured-model): one loud
     // notice per process, like the no-runner skip, never OpenCode's default model.
-    if (ocBin && opencodeModelOf(config) === null) {
+    if (ocBin && !tierModel && opencodeModelOf(config) === null) {
       skipOnce(root, at, `maintenance worker skipped: ${OPENCODE_MODEL_UNSET}`, MODEL_UNSET_TEXT);
       return;
     }

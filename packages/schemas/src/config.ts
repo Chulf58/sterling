@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { judgeProjectMode } from './project.js';
 
 // Project config (§12: default config — caps, watcher, model+effort table,
 // reviewer-selection rules, difficulty rubric thresholds — ALL TUNABLE).
@@ -596,9 +597,68 @@ export const configSchema = z.object({
   // lives twice: here and in templates/default-config.json (config.test.ts pins
   // that they agree).
   pr_review: z.unknown().default({ copilot_logins: [], auto_merge_on_clean: true }),
+  // Overpass toggle (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers
+  // and overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice):
+  // routes the conductor and every lane through the provider's tiered models.
+  // Work mode on OpenCode only. PERMISSIVE like mode: the value is preserved
+  // raw so a typo never fails every parseConfig reader; the strict judge is
+  // resolveOverpass() below, which throws on a present but invalid value. The
+  // default lives twice: here and in templates/default-config.json
+  // (config.test.ts pins that they agree).
+  overpass: z.unknown().default({ enabled: false, provider: 'overpass', conductor_bypass: false }),
 });
 
 export type SterlingConfig = z.infer<typeof configSchema>;
+
+// ── Overpass resolver ────────────────────────────────────────────────────────
+// Pure: takes an already-parsed (or raw) config object, reads nothing. The mode
+// uses the same strict judge as readProjectMode (judgeProjectMode).
+
+export const DEFAULT_OVERPASS_PROVIDER = 'overpass';
+// A provider id: letters, digits, '-', '_', '.'; no '/', no '#', non-empty. It
+// is interpolated into `<provider>/agentic-conductor` model references.
+export const OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
+
+export interface OverpassResolution {
+  /** overpass.enabled is true in the config, whatever the mode or host. */
+  configured: boolean;
+  /** configured AND mode is 'work' AND host is 'opencode'. */
+  effective: boolean;
+  /** effective AND conductor_bypass is false: the conductor itself is routed. */
+  conductorRouted: boolean;
+  provider: string;
+  conductorModel: string;
+  laneModel: string;
+  /** Why a configured overpass is not effective; absent otherwise. */
+  reason?: string;
+}
+
+export function resolveOverpass(config: unknown, opts: { host: string }): OverpassResolution {
+  const cfg = isPlainObject(config) ? config : {};
+  const raw = cfg.overpass;
+  if (raw !== undefined && !isPlainObject(raw)) {
+    throw new Error(`config.overpass is ${JSON.stringify(raw)} — it must be an object like {"enabled": false, "provider": "overpass"}`);
+  }
+  const block = raw ?? {};
+  const enabled = block.enabled === undefined ? false : block.enabled;
+  if (typeof enabled !== 'boolean') {
+    throw new Error(`config.overpass.enabled is ${JSON.stringify(enabled)} — it must be true or false`);
+  }
+  const bypass = block.conductor_bypass === undefined ? false : block.conductor_bypass;
+  if (typeof bypass !== 'boolean') {
+    throw new Error(`config.overpass.conductor_bypass is ${JSON.stringify(bypass)} — it must be true or false`);
+  }
+  const provider = block.provider === undefined ? DEFAULT_OVERPASS_PROVIDER : block.provider;
+  if (typeof provider !== 'string' || !OVERPASS_PROVIDER_RE.test(provider)) {
+    throw new Error(`config.overpass.provider is ${JSON.stringify(provider)} — it must be a provider id of letters, digits, '-', '_' and '.', with no '/' or '#'`);
+  }
+  const base = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/agentic-high` };
+  if (!enabled) return { ...base, effective: false, conductorRouted: false };
+  const mode = judgeProjectMode(cfg.mode, 'the config');
+  if (mode !== 'work') return { ...base, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
+  if (opts.host !== 'opencode') return { ...base, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts.host}'` };
+  return { ...base, effective: true, conductorRouted: !bypass };
+}
 
 // Pre-rename models keys: never read, so dropped before the parse and named by
 // unreadConfigKeys. They must stay out of `models`, which now accepts any agent

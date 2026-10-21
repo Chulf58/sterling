@@ -91,6 +91,14 @@ const FULL_HEADER_RE = /^<!-- sterling-full renderer=opencode-full\/1 template=(
 const fwd = (p) => p.replace(/\\/g, '/');
 const normalize = (s) => s.replace(/\r\n/g, '\n');
 
+/** CRLF folded to LF, as ensureProjectConfig reads .opencode/opencode.json. */
+export const normalizeConfigText = normalize;
+
+/** The text Sterling writes for a .opencode/opencode.json value: ensureProjectConfig and the plugin's Overpass overlay share it. */
+export function projectConfigText(config) {
+  return `${JSON.stringify(config, null, 2)}\n`;
+}
+
 /** OpenCode's global config dir: <XDG_CONFIG_HOME or <home>/.config>/opencode. */
 export function opencodeConfigDir({ env = process.env, home = homedir() } = {}) {
   return join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode');
@@ -972,7 +980,7 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
     if (config.default_agent === undefined) notes.push(`default_agent not set: the ${CONDUCTOR_AGENT} agent file was refused`);
   } else if (config.default_agent === undefined) config.default_agent = CONDUCTOR_AGENT;
   else if (config.default_agent !== CONDUCTOR_AGENT) notes.push(`default_agent kept as ${JSON.stringify(config.default_agent)} (yours), so OpenCode does not start in ${CONDUCTOR_AGENT}`);
-  const after = `${JSON.stringify(config, null, 2)}\n`;
+  const after = projectConfigText(config);
   if (after === before) return [{ item: rel, status: 'matches', detail: notes.join('; ') }, ...extraRows];
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, after);

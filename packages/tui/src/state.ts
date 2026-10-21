@@ -5,7 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
-import { AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE, OVERPASS_PROVIDER_RE } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 import type { GithubPr, GithubSnapshot } from './github-status.js';
@@ -104,6 +104,11 @@ export interface UiState {
    *  it, ENTER commits (empty commits as "unset"), ESCAPE cancels. Mirrors the
    *  Knowledge tab's always-visible-field idiom, scoped to one row. */
   sparringModelEdit?: string;
+  /** System tab, Overpass provider row: the edit buffer for config.overpass.provider,
+   *  the same always-capture idiom as sparringModelEdit. ENTER commits only a
+   *  valid provider id (OVERPASS_PROVIDER_RE) and otherwise keeps the buffer open
+   *  with a notice; ESCAPE cancels. */
+  overpassProviderEdit?: string;
   /** Tasks tab, board item edit-in-progress (user-ruled 2026-09-28, board
    *  f25e5547 lane J: "Add TUI edit"). Absent → the plain card is shown;
    *  present → 'e' has opened the selected todo's text for editing — every
@@ -238,6 +243,38 @@ export interface AgentRosterSnapshot {
    *  value the judge refuses (INVALID); null → the config could not be read
    *  (UNKNOWN, never the default). */
   autoMergeOnClean?: boolean | string | null;
+  /** Which host opened the dashboard ('opencode' for the OpenCode host). The
+   *  Overpass rows show only on 'opencode' (decision
+   *  overpass-toggle-work-mode-only-routes-every-lane-through-tiers). Absent →
+   *  not OpenCode. */
+  host?: string;
+  /** config.overpass as the System tab reads it (the controller fills it from the
+   *  raw config; absent → the schema defaults, off). */
+  overpass?: OverpassView;
+}
+
+/** The Overpass settings the three System-tab rows show. A boolean field is
+ *  true/false, a string is a raw value that is not a boolean (INVALID), and null
+ *  means the config could not be read (UNKNOWN, never the default). */
+export interface OverpassView {
+  enabled: boolean | string | null;
+  provider: string | null;
+  conductorBypass: boolean | string | null;
+  /** resolveOverpass's verdict for this host: enabled, work mode, OpenCode, and
+   *  the config valid. False when the resolver refuses the config. */
+  effective: boolean;
+  /** Set when config.overpass is present but not an object: every row reads INVALID. */
+  invalid?: string;
+  /** The JSON text of a provider that is not a string (INVALID); provider is then null. */
+  providerInvalid?: string;
+}
+
+const DEFAULT_OVERPASS_VIEW: OverpassView = { enabled: false, provider: 'overpass', conductorBypass: false, effective: false };
+
+/** The Overpass rows are offered only in work mode on the OpenCode host; hidden
+ *  elsewhere, and the cursor clamp follows. */
+function overpassOffered(snap: AgentRosterSnapshot): boolean {
+  return snap.host === 'opencode' && snap.mode === 'work';
 }
 
 /** A projected System-tab line (renderer prints text verbatim; kind styles it). */
@@ -287,6 +324,12 @@ export interface SystemTabView {
    *  same toggle-only shape as handoffRows, appended after it in cursor order;
    *  hidden while a config.models picker is open. */
   autoMergeRows: SystemRow[];
+  /** Overpass rows (decision overpass-toggle-work-mode-only-routes-every-lane-through-tiers):
+   *  'sys:overpass', 'sys:overpass_provider', 'sys:overpass_bypass', in that order,
+   *  after the auto-merge row in cursor order (keys.length + 6 .. + 8). Empty
+   *  unless the mode is work and the host is OpenCode; hidden while a
+   *  config.models picker is open. */
+  overpassRows: SystemRow[];
   /** storage row (board 6ca1a3c5): a single-entry READ-ONLY list drawn after the
    *  PR auto-merge row. It owns no cursor index (the cursor clamp does not count it) and
    *  no effect, because only the move-store skill writes config.storage. */
@@ -545,6 +588,22 @@ export interface AutoMergeToggleEffect {
   type: 'auto_merge_toggle';
   enabled: boolean;
 }
+/** System tab, Overpass rows (decision
+ *  overpass-toggle-work-mode-only-routes-every-lane-through-tiers): each writes one
+ *  key of config.overpass and nothing else. The plugin applies the routing on its
+ *  next turn; the TUI re-renders no agents for it. */
+export interface OverpassToggleEffect {
+  type: 'overpass_toggle';
+  enabled: boolean;
+}
+export interface OverpassProviderEffect {
+  type: 'overpass_provider';
+  provider: string;
+}
+export interface OverpassBypassEffect {
+  type: 'overpass_bypass_toggle';
+  enabled: boolean;
+}
 /** Tasks tab board-item edit commit (user-ruled 2026-09-28, board f25e5547
  *  lane J): the TUI's second write surface after the System tab. Carries the
  *  full replacement text; runEffects executes it through the same store
@@ -576,6 +635,9 @@ export type Effect =
   | ModeToggleEffect
   | HandoffToggleEffect
   | AutoMergeToggleEffect
+  | OverpassToggleEffect
+  | OverpassProviderEffect
+  | OverpassBypassEffect
   | BoardEditEffect
   | GithubRefreshEffect;
 
@@ -880,6 +942,7 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   const keys = Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
   const selector = ui.selector;
   const clip = (s: string): string => clipEllipsis(s, width);
+  const overpassEffective = overpassOffered(snap) && (snap.overpass ?? DEFAULT_OVERPASS_VIEW).effective;
 
   const rows: SystemRow[] = keys.map((key, i) => {
     const config = snap.configModels[key];
@@ -903,7 +966,8 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
       { text: clip(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? '  drift' : ''}`), kind: 'title', selected },
     ];
     for (const name of agentNames) lines.push({ text: clip(`    ${name}`), kind: 'body' });
-    if (config.opencode_model) lines.push({ text: clip(`    OpenCode: ${config.opencode_model}`), kind: 'body' });
+    // While Overpass is effective the saved override is kept but not applied
+    if (config.opencode_model) lines.push({ text: clip(`    OpenCode: ${config.opencode_model}${overpassEffective ? ' (inactive: Overpass)' : ''}`), kind: 'body' });
 
     if (selector && selector.key === key) {
       if (selector.stage === 'model') {
@@ -947,9 +1011,13 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   const handoffRows = selector ? [] : [handoffToggleRow(snap, ui, width, keys.length + 4)];
   // the PR auto-merge row follows the handoff files row, at keys.length + 5.
   const autoMergeRows = selector ? [] : [autoMergeToggleRow(snap, ui, width, keys.length + 5)];
+  // the Overpass rows follow the auto-merge row at keys.length + 6 .. + 8, drawn
+  // before the read-only storage row so draw order stays cursor order; offered
+  // in work mode on OpenCode only.
+  const overpassRows = selector || !overpassOffered(snap) ? [] : overpassToggleRows(snap, ui, width, keys.length + 6);
   // the storage row is read-only: it takes no cursor index.
   const storageRows = selector ? [] : [storageRow(snap, width)];
-  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, storageRows };
+  return { rows: shown, banner, sparringRows, tddRows, modeRows, handoffRows, autoMergeRows, overpassRows, storageRows };
 }
 
 /** The catalog-status banner: absent / current(fresh) / stale-with-date. */
@@ -1066,6 +1134,41 @@ function autoMergeToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: numbe
   const marker = selected ? '› ' : '  ';
   const shown = value === null ? 'UNKNOWN (config unreadable)' : value === true ? 'ON' : value === false ? 'OFF' : `INVALID (${value})`;
   return { id: 'sys:pr_auto_merge', lines: [{ text: clip(`${marker}Auto-merge clean PRs (work mode): ${shown}`), kind: 'title', selected }] };
+}
+
+/** Overpass rows (decision overpass-toggle-work-mode-only-routes-every-lane-through-tiers):
+ *  the on/off toggle, the provider id (edit text) and the conductor bypass toggle,
+ *  at cursorBase .. cursorBase + 2. A value the resolver refuses reads INVALID
+ *  with the raw value, an unreadable config reads UNKNOWN, and a present but
+ *  non-object block reads INVALID on every row; none is ever shown as a valid
+ *  setting. While ui.overpassProviderEdit is open the provider row shows the
+ *  buffer with a caret. */
+function overpassToggleRows(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorBase: number): SystemRow[] {
+  const clip = (s: string): string => clipEllipsis(s, width);
+  const view = snap.overpass ?? DEFAULT_OVERPASS_VIEW;
+  const marker = (i: number): string => (ui.cursor === cursorBase + i ? '› ' : '  ');
+  const selected = (i: number): boolean => ui.cursor === cursorBase + i;
+  const flag = (v: boolean | string | null): string =>
+    view.invalid !== undefined ? `INVALID (${view.invalid})` : v === null ? 'UNKNOWN (config unreadable)' : v === true ? 'ON' : v === false ? 'OFF' : `INVALID (${v})`;
+  const provider = (): string =>
+    view.invalid !== undefined
+      ? `INVALID (${view.invalid})`
+      : view.providerInvalid !== undefined
+        ? `INVALID (${view.providerInvalid})`
+        : view.provider === null
+        ? 'UNKNOWN (config unreadable)'
+        : OVERPASS_PROVIDER_RE.test(view.provider)
+          ? view.provider
+          : `INVALID (${JSON.stringify(view.provider)})`;
+  const editing = ui.overpassProviderEdit !== undefined && selected(1);
+  return [
+    { id: 'sys:overpass', lines: [{ text: clip(`${marker(0)}Overpass: ${flag(view.enabled)}`), kind: 'title', selected: selected(0) }] },
+    {
+      id: 'sys:overpass_provider',
+      lines: [{ text: clip(`${marker(1)}Overpass provider: ${editing ? `${ui.overpassProviderEdit}▌` : provider()}`), kind: 'title', selected: selected(1) }],
+    },
+    { id: 'sys:overpass_bypass', lines: [{ text: clip(`${marker(2)}Conductor bypass: ${flag(view.conductorBypass)}`), kind: 'title', selected: selected(2) }] },
+  ];
 }
 
 /** storage row (board 6ca1a3c5), READ-ONLY and never selected: SERVED POSTGRES for
@@ -1467,7 +1570,7 @@ function systemDashboardState(
   // project mode row (decision project-mode-hobby-work-toggle-decides-flow): drawn
   // after the tdd row, same row shape. The handoff files row follows it, then
   // the PR auto-merge row.
-  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.storageRows]) {
+  for (const sr of [...view.tddRows, ...view.modeRows, ...view.handoffRows, ...view.autoMergeRows, ...view.overpassRows, ...view.storageRows]) {
     const lines: RowLine[] = sr.lines.map((l) => ({
       text: l.text,
       kind: (l.kind === 'title' ? 'title' : l.kind === 'meta' ? 'meta' : 'body') as RowLine['kind'],
@@ -1816,7 +1919,7 @@ function reduceNodes(
 
   // a tab switch resets the cursor + scroll AND dismisses any open selector
   // (and any in-progress sparring-partner model edit, same discard-on-switch rule)
-  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: undefined, selector: undefined, notice: undefined, sparringModelEdit: undefined, boardEdit: undefined });
+  const switchTab = (index: number): UiState => ({ ...ui, tab: index, cursor: 0, scroll: 0, historyScroll: undefined, selector: undefined, notice: undefined, sparringModelEdit: undefined, overpassProviderEdit: undefined, boardEdit: undefined });
 
   // the tabs this host can reach, in bar order: a digit picks the n-th, left/right step through them
   const reachable = visibleTabs(viewport.agents, viewport.github);
@@ -1901,7 +2004,7 @@ function reduceNodes(
    *  model field is being typed do nothing. */
   const clickSystem = (state: DashboardState, index: number, line1: number): { ui: UiState; effects: Effect[] } => {
     const row = state.rows[index]!;
-    if (row.type !== 'system' || row.id === 'sys:storage' || ui.sparringModelEdit !== undefined || !roster) return { ui, effects };
+    if (row.type !== 'system' || row.id === 'sys:storage' || ui.sparringModelEdit !== undefined || ui.overpassProviderEdit !== undefined || !roster) return { ui, effects };
     const enter: UiEvent = { kind: 'key', name: 'ENTER' };
     const sel = ui.selector;
     if (sel) {
@@ -2063,9 +2166,13 @@ function reduceNodes(
         // + 6 since the PR auto-merge row (sysKeys.length + 5, decision
         // work-mode-pr-auto-merge-when-copilot-loop-ends-clean) joined after the
         // handoff files row.
-        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 6 - 1)));
+        // + 3 more while the Overpass rows are offered (work mode on OpenCode):
+        // they take sysKeys.length + 6 .. + 8, after every existing row.
+        const overpassOn = roster !== undefined && overpassOffered(roster);
+        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 6 + (overpassOn ? 3 : 0) - 1)));
         const sel = ui.selector;
-        const editing = ui.sparringModelEdit !== undefined;
+        const providerEditing = ui.overpassProviderEdit !== undefined;
+        const editing = ui.sparringModelEdit !== undefined || providerEditing;
         switch (event.name) {
           case 'UP':
           case 'DOWN':
@@ -2090,14 +2197,26 @@ function reduceNodes(
           }
           case 'ESCAPE':
             if (sel) return { ui: { ...ui, selector: undefined }, effects };
+            if (providerEditing) return { ui: { ...ui, overpassProviderEdit: undefined, notice: undefined }, effects };
             if (editing) return { ui: { ...ui, sparringModelEdit: undefined }, effects };
             return { ui, effects };
           case 'BACKSPACE':
+            if (providerEditing) return { ui: { ...ui, overpassProviderEdit: (ui.overpassProviderEdit ?? '').slice(0, -1) }, effects };
             if (editing) return { ui: { ...ui, sparringModelEdit: (ui.sparringModelEdit ?? '').slice(0, -1) }, effects };
             return { ui, effects };
           case 'ENTER':
           case 'SPACE': {
             const cursor = sysClamp(ui.cursor);
+            if (providerEditing) {
+              // commit the provider id: only a valid id is written; an invalid one
+              // is refused in view and the buffer stays open to be corrected
+              const provider = (ui.overpassProviderEdit ?? '').trim();
+              if (!OVERPASS_PROVIDER_RE.test(provider)) {
+                return { ui: { ...ui, notice: `Overpass provider refused: '${provider}' is not a provider id — use letters, digits, '-', '_' and '.', with no '/' or '#'` }, effects };
+              }
+              effects.push({ type: 'overpass_provider', provider });
+              return { ui: { ...ui, overpassProviderEdit: undefined, notice: undefined }, effects };
+            }
             if (editing) {
               // commit the free-text model edit — empty clears back to unset
               // (CLI default). No ^claude- floor here: the model is a FREE
@@ -2147,6 +2266,23 @@ function reduceNodes(
               // flips to OFF, the side that never merges — a visible, deliberate
               // write, never a guess.
               effects.push({ type: 'auto_merge_toggle', enabled: (roster.autoMergeOnClean ?? true) === false });
+              return { ui: { ...ui, cursor, notice: undefined }, effects };
+            }
+            if (overpassOn && cursor >= sysKeys.length + 6) {
+              const view = roster.overpass ?? DEFAULT_OVERPASS_VIEW;
+              if (cursor === sysKeys.length + 6) {
+                // Overpass row: an immediate flip. Anything that is not a plain
+                // OFF (invalid, unknown) flips to OFF, never to routing.
+                effects.push({ type: 'overpass_toggle', enabled: view.enabled === false });
+                return { ui: { ...ui, cursor, notice: undefined }, effects };
+              }
+              if (cursor === sysKeys.length + 7) {
+                // provider row: open the text edit, prefilled with a valid current id
+                const current = view.provider !== null && OVERPASS_PROVIDER_RE.test(view.provider) ? view.provider : '';
+                return { ui: { ...ui, cursor, overpassProviderEdit: current, notice: undefined }, effects };
+              }
+              // conductor bypass row: an immediate flip; invalid or unknown flips to OFF (the default)
+              effects.push({ type: 'overpass_bypass_toggle', enabled: view.conductorBypass === false });
               return { ui: { ...ui, cursor, notice: undefined }, effects };
             }
             const key = sysKeys[cursor];
@@ -2267,6 +2403,10 @@ function reduceNodes(
       // Checked FIRST so the space→ENTER routing below never fires mid-edit.
       if (ui.tab === SYSTEM_TAB && ui.sparringModelEdit !== undefined) {
         return { ui: { ...ui, sparringModelEdit: ui.sparringModelEdit + ch }, effects };
+      }
+      // the Overpass provider row's edit buffer takes the same always-capture path
+      if (ui.tab === SYSTEM_TAB && ui.overpassProviderEdit !== undefined) {
+        return { ui: { ...ui, overpassProviderEdit: ui.overpassProviderEdit + ch }, effects };
       }
       // Tasks tab board-item edit: same always-capture idiom as the two edit
       // buffers above — every printable key ('e' included) feeds the buffer
