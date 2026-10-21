@@ -1,13 +1,14 @@
 // Entry point: sterling-tui --store <path-to-sterling.db> [--host claude|opencode]
 // --host names the host whose subagents the Agents tab shows (default claude):
-// it decides where a subagent's context fill is read (subagents.ts).
+// it decides where a subagent's context fill is read (subagents.ts), and
+// --host opencode offers the Overpass rows on the System tab in work mode.
 // Exits politely on non-TTY stdout (§11). terminal-kit loads only after the
 // guard. STERLING_TUI_SMOKE=1 initializes the terminal stack and exits —
 // the bundle test uses it to prove runtime resolution works.
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { openDashboard } from './controller.js';
+import { openLaunchDashboard, parseLaunchArgs } from './launch-args.js';
 import { githubStripRows, visibleBodyLines, AGENTS_TAB, type DashboardState } from './state.js';
 import { createGithubPoller } from './github-status.js';
 import { bannerLines, scenePixels } from './banner.js';
@@ -23,15 +24,12 @@ if (!process.stdout.isTTY && !smoke) {
   process.exit(0);
 }
 
-const args = process.argv.slice(2);
-const storeIdx = args.indexOf('--store');
-const hostIdx = args.indexOf('--host');
-const host = hostIdx === -1 ? 'claude' : args[hostIdx + 1];
-if (storeIdx === -1 || !args[storeIdx + 1] || (host !== 'claude' && host !== 'opencode')) {
+const launch = parseLaunchArgs(process.argv.slice(2));
+if (!launch) {
   console.error('usage: sterling-tui --store <path-to-sterling.db> [--host claude|opencode]');
   process.exit(2);
 }
-const storePath = args[storeIdx + 1];
+const { storePath, host } = launch;
 
 const termkit = await import('terminal-kit');
 let term = termkit.default.terminal;
@@ -86,7 +84,7 @@ const profilePath = !profileEnv ? undefined : profileEnv === '1' ? join(dirname(
 // waits on it: the tick hands the latest snapshot to the state layer.
 const github = createGithubPoller({ root: dirname(dirname(storePath)) });
 // Store writes are deferred: the frame is drawn first, then the write runs.
-const ctl = openDashboard(storePath, { deferWrites: true, profile: profilePath !== undefined, onGithubRefresh: () => github.refresh() });
+const ctl = openLaunchDashboard(launch, { deferWrites: true, profile: profilePath !== undefined, onGithubRefresh: () => github.refresh() });
 if (profilePath) {
   mkdirSync(dirname(profilePath), { recursive: true });
   appendFileSync(profilePath, JSON.stringify({ at: new Date().toISOString(), start: true, pid: process.pid, changeDetection: ctl.stats().changeDetection }) + '\n');
