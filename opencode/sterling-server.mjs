@@ -23540,12 +23540,50 @@ function createSessionSync(deps = {}) {
   return syncOnce;
 }
 
+// packages/opencode-plugin/src/conductor-session.mjs
+import { mkdirSync as mkdirSync23, readFileSync as readFileSync31 } from "node:fs";
+import { dirname as dirname21, join as join51 } from "node:path";
+var CONDUCTOR_SESSION_REL = ".sterling/transient/opencode-conductor-session";
+var counter = 0;
+var takePromptSeq = () => ++counter;
+var lastWritten = /* @__PURE__ */ new Map();
+function createConductorSessionRecorder({ rootOf, fenced, getSession, parents, env = process.env }) {
+  return async function onPrompt(input, seq) {
+    if (inWorkerChild(env)) return;
+    const root = rootOf();
+    if (!root) return;
+    const sessionID = input?.sessionID;
+    if (typeof sessionID !== "string" || !sessionID) return;
+    await fenced("conductor-session", root, async () => {
+      if (!Number.isInteger(seq)) throw new Error(`conductor session not recorded: no arrival seq for session ${sessionID}`);
+      const kind = await sessionKind(getSession?.(), sessionID, parents);
+      if (kind.why) throw new Error(`conductor session not recorded: could not tell whether session ${sessionID} is a root session (${kind.why})`);
+      if (kind.kind !== "root") return;
+      if (seq <= (lastWritten.get(root) ?? 0)) return;
+      const path = join51(root, CONDUCTOR_SESSION_REL);
+      const text = `${sessionID}
+`;
+      let current = null;
+      try {
+        current = readFileSync31(path, "utf8");
+      } catch (e) {
+        if (e?.code !== "ENOENT") throw e;
+      }
+      if (current !== text) {
+        mkdirSync23(dirname21(path), { recursive: true });
+        writeFileAtomic(path, text);
+      }
+      lastWritten.set(root, seq);
+    });
+  };
+}
+
 // packages/opencode-plugin/src/server.mjs
 import { realpathSync as realpathSync10 } from "node:fs";
 import { resolve as resolve15 } from "node:path";
 var PLUGIN_ID = "sterling.server";
 var EXECUTION_END_EVENTS = /* @__PURE__ */ new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"]);
-var BUDGET_MS = { context: 4e3, delivery: 4e3, axis: 4e3, dispatch: 1e4, research: 4e3, settle: 3e4, prompt: 4e3, compaction: 4e3, config: 4e3, overpass: 4e3 };
+var BUDGET_MS = { context: 4e3, delivery: 4e3, axis: 4e3, dispatch: 1e4, research: 4e3, settle: 3e4, prompt: 4e3, compaction: 4e3, config: 4e3, overpass: 4e3, "conductor-session": 4e3 };
 function sameDirectory(a, b) {
   let unresolved = "";
   const real = (p) => {
@@ -23642,6 +23680,7 @@ function createSterlingServer(deps = {}) {
     }
     const onSelection = createPromptHandler({ openStore, rootOf, fenced, env });
     const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels: () => models?.list?.(), env });
+    const recordConductorSession = createConductorSessionRecorder({ rootOf, fenced, getSession: () => session, parents, env });
     const sessionModels = createSessionModels();
     async function convergeOverpass(root) {
       if (inWorkerChild(env)) return null;
@@ -23657,9 +23696,11 @@ function createSterlingServer(deps = {}) {
       return res;
     }
     async function onPrompt(input) {
+      const seq = takePromptSeq();
       await onSelection(input);
       await onVolatile(input);
       await pressure.onPrompt(input);
+      await recordConductorSession(input, seq);
       const root = rootOf();
       if (!root) return;
       const res = await convergeOverpass(root);
