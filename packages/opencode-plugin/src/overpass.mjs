@@ -65,13 +65,37 @@ export function overpassUnknownLine(error) {
 
 // A brief line that opts one dispatch out of the tier (decision
 // overpass-per-dispatch-bypass-a-brief-line-overpass-bypass-re). Only a line that starts
-// with the marker counts, so a brief that merely quotes it mid-sentence does not bypass.
-const BYPASS_LINE = /^[ \t]*OVERPASS-BYPASS:(.*)$/m;
+// with the marker counts, so a brief that merely quotes it mid-sentence does not bypass,
+// and a line inside a fenced code block (``` or ~~~, any info string, an unclosed fence
+// running to the end) is quoted text, not a marker.
+const BYPASS_LINE = /^[ \t]*OVERPASS-BYPASS:(.*)$/;
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
-/** The OVERPASS-BYPASS marker in a brief: null when absent, else { reason } (trimmed, possibly empty). */
+/**
+ * The OVERPASS-BYPASS marker in a brief: null when no unfenced line carries one, else
+ * { reason }. The reason is the first marker's, trimmed; it is empty when ANY unfenced
+ * marker line has no reason, so a valid first marker cannot hide an empty second one.
+ */
 export function bypassMarker(prompt) {
-  const m = typeof prompt === 'string' ? BYPASS_LINE.exec(prompt) : null;
-  return m ? { reason: m[1].trim() } : null;
+  if (typeof prompt !== 'string') return null;
+  let fence = null;
+  const reasons = [];
+  for (const line of prompt.split(/\r?\n/)) {
+    if (fence) {
+      const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+      if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = null;
+      continue;
+    }
+    const open = FENCE_OPEN.exec(line);
+    if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
+      fence = open[1];
+      continue;
+    }
+    const m = BYPASS_LINE.exec(line);
+    if (m) reasons.push(m[1].trim());
+  }
+  if (!reasons.length) return null;
+  return { reason: reasons.every(Boolean) ? reasons[0] : '' };
 }
 
 /** The message a dispatch is refused with when its OVERPASS-BYPASS marker cannot be honoured (`why` names the defect). */
@@ -96,8 +120,8 @@ export function dispatchPin(res, args) {
     if (!marker.reason) throw new Error(bypassRefusal('the marker gives no reason'));
     return {
       model: null,
-      line: `OVERPASS-BYPASS: this dispatch ran on ${named} as the call named, not on the Overpass tier ${res.laneModel}; reason: ${marker.reason}.`,
-      notice: `Sterling Overpass: a subagent dispatch bypassed Overpass and ran on ${named}, not ${res.laneModel} (reason: ${marker.reason}).`,
+      line: `OVERPASS-BYPASS: Overpass bypassed for this dispatch: it was sent to ${named} instead of ${res.laneModel} (reason: ${marker.reason}).`,
+      notice: `Sterling Overpass: Overpass bypassed for a subagent dispatch: it was sent to ${named} instead of ${res.laneModel} (reason: ${marker.reason}).`,
     };
   }
   const asked = args?.model;

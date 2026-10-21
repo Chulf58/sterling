@@ -232,10 +232,11 @@ test('bypass: a brief line keeps the model the call names, reported on the resul
   try {
     const bypassed = await s.dispatch({ model: SOL, prompt: BYPASS_BRIEF('cross-family review') });
     assert.equal(bypassed.args.model, SOL, 'the call keeps the model it named');
-    assert.match(bypassed.result, /OVERPASS-BYPASS: this dispatch ran on openai\/gpt-6\.1-sol#high as the call named, not on the Overpass tier overpass\/agentic-high; reason: cross-family review\./);
+    assert.match(bypassed.result, /OVERPASS-BYPASS: Overpass bypassed for this dispatch: it was sent to openai\/gpt-6\.1-sol#high instead of overpass\/agentic-high \(reason: cross-family review\)\./);
     assert.doesNotMatch(bypassed.result, /^OVERPASS: this dispatch ran on/m, 'not reported as a replaced model');
-    assert.match(notices(p.dir), /Sterling Overpass: a subagent dispatch bypassed Overpass and ran on openai\/gpt-6\.1-sol#high, not overpass\/agentic-high \(reason: cross-family review\)\./);
-    assert.match(await s.prompt('ses_root'), /bypassed Overpass and ran on openai\/gpt-6\.1-sol#high/, 'the conductor session is told on its next prompt');
+    assert.doesNotMatch(bypassed.result, /ran on/, 'the report states the routing choice, not a completed run');
+    assert.match(notices(p.dir), /Sterling Overpass: Overpass bypassed for a subagent dispatch: it was sent to openai\/gpt-6\.1-sol#high instead of overpass\/agentic-high \(reason: cross-family review\)\./);
+    assert.match(await s.prompt('ses_root'), /Overpass bypassed for a subagent dispatch: it was sent to openai\/gpt-6\.1-sol#high/, 'the conductor session is told on its next prompt');
   } finally {
     await s.cleanup();
     p.cleanup();
@@ -302,11 +303,68 @@ test('bypass: the marker means nothing while Overpass is off, so even a malforme
   }
 });
 
+test('bypass: a marker inside a fenced code block is quoted text, so the tier rewrite applies', async () => {
+  const p = makeProject(ON);
+  const s = await setup(p.dir);
+  try {
+    for (const [i, fence] of ['```', '```text', '~~~', '````md'].entries()) {
+      const prompt = `Explain the rule:\n${fence}\nOVERPASS-BYPASS: example reason\n${fence[0].repeat(fence.match(/^[`~]+/)[0].length)}\nThen stop.`;
+      const out = await s.dispatch({ model: SOL, prompt }, `call_f${i}`);
+      assert.equal(out.args.model, 'overpass/agentic-high', `fence ${fence}`);
+      assert.doesNotMatch(out.result, /OVERPASS-BYPASS/, `fence ${fence}`);
+    }
+    const unclosed = await s.dispatch({ model: SOL, prompt: 'Quote:\n```\nOVERPASS-BYPASS: never closed' }, 'call_u');
+    assert.equal(unclosed.args.model, 'overpass/agentic-high', 'an unclosed fence runs to the end of the brief');
+    assert.equal(notices(p.dir), '', 'no bypass notice');
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('bypass: a real marker outside a fence wins over a fenced one; a bare fenced marker with no model refuses nothing', async () => {
+  const p = makeProject(ON);
+  const s = await setup(p.dir);
+  try {
+    const prompt = '```\nOVERPASS-BYPASS: fenced example\n```\nOVERPASS-BYPASS: real reason\n';
+    const out = await s.dispatch({ model: SOL, prompt });
+    assert.equal(out.args.model, SOL);
+    assert.match(out.result, /\(reason: real reason\)/);
+    assert.doesNotMatch(out.result, /fenced example/);
+    const fencedOnly = await s.dispatch({ prompt: '```\nOVERPASS-BYPASS: x\n```' }, 'call_2');
+    assert.equal(fencedOnly.args.model, 'overpass/agentic-high', 'a fenced marker is not a bypass, so no model is not an error');
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('bypass: any unfenced marker with an empty reason refuses, even after a valid first one', async () => {
+  const p = makeProject(ON);
+  const s = await setup(p.dir);
+  try {
+    const input = { tool: 'subagent', id: 'call_m', sessionID: 'ses_root', input: { agent: 'sterling/implementor', description: 'd', model: SOL, prompt: 'OVERPASS-BYPASS: valid\nmore text\nOVERPASS-BYPASS:   \n' } };
+    await assert.rejects(s.ctx.hooks.tool['execute.before'](input), /OVERPASS-BYPASS line but the marker gives no reason/);
+    assert.equal(input.input.model, SOL);
+    assert.equal(notices(p.dir), '');
+    const fencedEmpty = await s.dispatch({ model: SOL, prompt: 'OVERPASS-BYPASS: valid\n```\nOVERPASS-BYPASS:\n```\n' }, 'call_2');
+    assert.equal(fencedEmpty.args.model, SOL, 'an empty marker inside a fence does not refuse');
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
 test('bypass: bypassMarker reads a line-start marker only, trimming the reason', () => {
   assert.deepEqual(overpass.bypassMarker('a\n  OVERPASS-BYPASS:  because \nb'), { reason: 'because' });
   assert.deepEqual(overpass.bypassMarker('OVERPASS-BYPASS:'), { reason: '' });
   assert.equal(overpass.bypassMarker('see OVERPASS-BYPASS: x'), null);
   assert.equal(overpass.bypassMarker(undefined), null);
+  assert.equal(overpass.bypassMarker('```\nOVERPASS-BYPASS: x\n```'), null);
+  assert.deepEqual(overpass.bypassMarker('```\nOVERPASS-BYPASS: a\n```\nOVERPASS-BYPASS: b'), { reason: 'b' });
+  assert.deepEqual(overpass.bypassMarker('OVERPASS-BYPASS: a\nOVERPASS-BYPASS: b'), { reason: 'a' }, 'first wins when all have reasons');
+  assert.deepEqual(overpass.bypassMarker('OVERPASS-BYPASS: a\nOVERPASS-BYPASS:'), { reason: '' });
+  assert.deepEqual(overpass.bypassMarker('~~~~\n~~~\nOVERPASS-BYPASS: in\n~~~~\nOVERPASS-BYPASS: out'), { reason: 'out' }, 'a shorter fence does not close a longer one');
 });
 
 // ── opencode.json overlay ─────────────────────────────────────────────────────
