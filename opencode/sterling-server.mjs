@@ -17698,8 +17698,45 @@ function dispatchOverpass(root) {
 function overpassUnknownLine(error) {
   return `Overpass routing UNKNOWN: .sterling/config.json could not be read (${error?.message ?? error}); dispatches are not routed through Overpass until it is fixed.`;
 }
+var BYPASS_LINE = /^[ \t]*OVERPASS-BYPASS:(.*)$/;
+var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+function bypassMarker(prompt) {
+  if (typeof prompt !== "string") return null;
+  let fence = null;
+  const reasons = [];
+  for (const line of prompt.split(/\r?\n/)) {
+    if (fence) {
+      const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+      if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = null;
+      continue;
+    }
+    const open2 = FENCE_OPEN.exec(line);
+    if (open2 && !(open2[1][0] === "`" && open2[2].includes("`"))) {
+      fence = open2[1];
+      continue;
+    }
+    const m = BYPASS_LINE.exec(line);
+    if (m) reasons.push(m[1].trim());
+  }
+  if (!reasons.length) return null;
+  return { reason: reasons.every(Boolean) ? reasons[0] : "" };
+}
+function bypassRefusal(why) {
+  return `Sterling refused this subagent dispatch: its brief carries an OVERPASS-BYPASS line but ${why}. A bypass must name the model the call should run on (the call's \`model\`) and say why on the marker line, as "OVERPASS-BYPASS: <reason>". Fix the dispatch and send it again, or drop the line to run on the Overpass tier.`;
+}
 function dispatchPin(res, args) {
   if (!res.effective) return { model: null, line: null };
+  const marker = bypassMarker(args?.prompt);
+  if (marker) {
+    const named = args?.model;
+    if (typeof named !== "string" || !named) throw new Error(bypassRefusal("the call names no model"));
+    if (!marker.reason) throw new Error(bypassRefusal("the marker gives no reason"));
+    return {
+      model: null,
+      line: `OVERPASS-BYPASS: Overpass bypassed for this dispatch: it was sent to ${named} instead of ${res.laneModel} (reason: ${marker.reason}).`,
+      notice: `Sterling Overpass: Overpass bypassed for a subagent dispatch: it was sent to ${named} instead of ${res.laneModel} (reason: ${marker.reason}).`
+    };
+  }
   const asked = args?.model;
   const replaced = typeof asked === "string" && asked && asked !== res.laneModel;
   return {
@@ -17900,11 +17937,162 @@ function logLine(root, line) {
 `);
 }
 
+// packages/opencode-plugin/src/notices.mjs
+import { randomUUID as randomUUID6 } from "node:crypto";
+import { existsSync as existsSync15, mkdirSync as mkdirSync14, readFileSync as readFileSync16, renameSync as renameSync6, rmSync as rmSync7, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname13, join as join26 } from "node:path";
+
+// scripts/hooks/lib/session-events.mjs
+import { existsSync as existsSync14, mkdirSync as mkdirSync13, readFileSync as readFileSync15, renameSync as renameSync5, unlinkSync as unlinkSync3, writeFileSync as writeFileSync6 } from "node:fs";
+import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
+import { dirname as dirname12, join as join25 } from "node:path";
+var SESSION_EVENTS_REL = join25(".sterling", "transient", "session-events.json");
+function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
+  const event = { kind: "research_tool", detail: String(detail ?? ""), at };
+  if (typeof agentId === "string" && agentId !== "") event.agent_id = agentId;
+  return event;
+}
+function appendSessionEvent(projectDir, event, lockOptions) {
+  appendSessionEventsAt(join25(projectDir, SESSION_EVENTS_REL), [event], lockOptions);
+}
+function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
+  mkdirSync13(dirname12(eventsPath), { recursive: true });
+  withSessionEventsLock(
+    eventsPath,
+    () => {
+      const events = existsSync14(eventsPath) ? JSON.parse(readFileSync15(eventsPath, "utf8")) : [];
+      events.push(...newEvents);
+      const tmp = `${eventsPath}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
+      writeFileSync6(tmp, JSON.stringify(events), { flag: "wx" });
+      try {
+        renameSync5(tmp, eventsPath);
+      } catch (e) {
+        try {
+          unlinkSync3(tmp);
+        } catch {
+        }
+        throw e;
+      }
+    },
+    lockOptions
+  );
+}
+var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
+var SQLITE_BUSY2 = 5;
+function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
+  const lockPath = `${path}.lock.db`;
+  const db = new DatabaseSync5(lockPath);
+  try {
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timeoutMs2))}`);
+    try {
+      db.exec("PRAGMA journal_mode = DELETE");
+      db.exec("BEGIN IMMEDIATE");
+    } catch (e) {
+      if ((e?.errcode & 255) !== SQLITE_BUSY2) throw e;
+      const err = new Error(`${lockPath} is held by another writer that is still running; gave up after ${timeoutMs2}ms and nothing was written`);
+      err.code = SESSION_EVENTS_LOCK_HELD;
+      throw err;
+    }
+    try {
+      return fn();
+    } finally {
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        console.error(`session-events: COMMIT of the lock at ${lockPath} failed (${e?.message ?? e}); the lock is released by closing the connection`);
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
+
+// packages/opencode-plugin/src/notices.mjs
+var NOTICES_REL = ".sterling/transient/opencode-notices.json";
+var NOTICES_LOCK_TIMEOUT_MS = 2e3;
+function withNoticesLock(root, fn) {
+  const path = join26(root, NOTICES_REL);
+  mkdirSync14(dirname13(path), { recursive: true });
+  return withSessionEventsLock(path, fn, { timeoutMs: NOTICES_LOCK_TIMEOUT_MS });
+}
+function writeJsonAtomic(path, value) {
+  mkdirSync14(dirname13(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.${randomUUID6()}.tmp`;
+  try {
+    writeFileSync7(tmp, JSON.stringify(value));
+    renameSync6(tmp, path);
+  } catch (e) {
+    rmSync7(tmp, { force: true });
+    throw e;
+  }
+}
+function readNotices(root) {
+  const p = join26(root, NOTICES_REL);
+  if (!existsSync15(p)) return [];
+  const parsed = JSON.parse(readFileSync16(p, "utf8"));
+  if (!Array.isArray(parsed)) throw new Error(`${NOTICES_REL} is not a JSON array`);
+  return parsed;
+}
+function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString(), key = void 0) {
+  withNoticesLock(root, () => {
+    const notices = readNotices(root);
+    if (notices.some((n) => !n.shown_at && (n.text === text || key !== void 0 && n.key === key))) return;
+    notices.push({ id: randomUUID6(), at: now, text, ...key === void 0 ? {} : { key } });
+    writeJsonAtomic(join26(root, NOTICES_REL), notices);
+  });
+}
+var NOTICE_CLAIM_TTL_MS = 6e4;
+var claimLive = (n, nowMs) => typeof n.claim === "string" && nowMs - Date.parse(n.claimed_at ?? "") < NOTICE_CLAIM_TTL_MS;
+function claimNotices(root, now) {
+  const nowMs = Date.parse(now);
+  const token = randomUUID6();
+  const fresh = withNoticesLock(root, () => {
+    const notices = readNotices(root);
+    const open2 = notices.filter((n) => !n.shown_at && !claimLive(n, nowMs));
+    if (!open2.length) return [];
+    for (const n of open2) Object.assign(n, { claim: token, claimed_at: now });
+    writeJsonAtomic(join26(root, NOTICES_REL), notices);
+    return open2;
+  });
+  const settle = (fn) => {
+    if (!fresh.length) return;
+    withNoticesLock(root, () => {
+      const notices = readNotices(root);
+      const mine = notices.filter((n) => n.claim === token);
+      if (!mine.length) return;
+      for (const n of mine) {
+        delete n.claim;
+        delete n.claimed_at;
+        fn(n);
+      }
+      writeJsonAtomic(join26(root, NOTICES_REL), notices);
+    });
+  };
+  return {
+    notices: fresh,
+    commit: () => settle((n) => {
+      n.shown_at = now;
+    }),
+    release: () => settle(() => {
+    })
+  };
+}
+function pruneShownNotices(root, { afterRead } = {}) {
+  withNoticesLock(root, () => {
+    const notices = readNotices(root);
+    afterRead?.();
+    const left = notices.filter((n) => !n.shown_at);
+    if (left.length === notices.length) return;
+    if (left.length) writeJsonAtomic(join26(root, NOTICES_REL), left);
+    else rmSync7(join26(root, NOTICES_REL), { force: true });
+  });
+}
+
 // scripts/hooks/lib/subject-fan.mjs
 init_dist();
 init_dist2();
-import { existsSync as existsSync14 } from "node:fs";
-import { join as join25 } from "node:path";
+import { existsSync as existsSync16 } from "node:fs";
+import { join as join27 } from "node:path";
 var defaultOpener = (dbPath) => new SterlingStore(dbPath);
 function domainMountsFromConfig(config) {
   if (config === null || config === void 0) return [];
@@ -17914,8 +18102,8 @@ var tag = (records, source) => records.map((r) => ({ ...r, source_store: source 
 var errorText2 = (e) => String(e && e.message || e);
 function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
   if (storeBackend(cwd) === "routed") return openRoutedSubjectFan(cwd);
-  const projectPath = join25(cwd, ".sterling", "sterling.db");
-  if (!existsSync14(projectPath)) return null;
+  const projectPath = join27(cwd, ".sterling", "sterling.db");
+  if (!existsSync16(projectPath)) return null;
   let mounts = [];
   let configError = null;
   try {
@@ -17936,7 +18124,7 @@ function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
     }
   };
   for (const m of mounts) {
-    if (!existsSync14(m.dbPath)) {
+    if (!existsSync16(m.dbPath)) {
       missingDomains.push({ name: m.name, dbPath: m.dbPath });
       continue;
     }
@@ -18087,7 +18275,7 @@ function warnFanDegraded(fan, who) {
 function describeMountedDomains(config, { opener = defaultOpener, root } = {}) {
   if (config?.storage === "postgres") return describeRoutedDomains(config, root);
   return domainMountsFromConfig(config).map((m) => {
-    if (!existsSync14(m.dbPath)) return { name: m.name, dbPath: m.dbPath, state: "missing" };
+    if (!existsSync16(m.dbPath)) return { name: m.name, dbPath: m.dbPath, state: "missing" };
     let store;
     try {
       store = opener(m.dbPath);
@@ -18202,9 +18390,19 @@ function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPoli
         pinLine = overpassUnknownLine(read.unreadable);
         reportOverpass(root, pinLine);
       } else {
-        const pin = dispatchPin(read.res, args);
+        let pin;
+        try {
+          pin = dispatchPin(read.res, args);
+        } catch (e) {
+          reportOverpass(root, e.message);
+          throw e;
+        }
         if (pin.model && input.input && typeof input.input === "object") input.input.model = pin.model;
         pinLine = pin.line;
+        if (pin.notice) {
+          reportOverpass(root, pin.notice);
+          await fenced("axis", root, () => addNotice(root, pin.notice));
+        }
       }
     }
     const overlap = surface === "dispatch" ? dispatchOverlapNotice({ tool_input: { subagent_type: agentRole(args.agent), prompt: args.prompt }, cwd: root, session_id: input.sessionID }) : null;
@@ -18298,7 +18496,7 @@ function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPoli
 }
 
 // packages/opencode-plugin/src/compaction.mjs
-import { rmSync as rmSync7 } from "node:fs";
+import { rmSync as rmSync8 } from "node:fs";
 function createCompactionHandler({ rootOf, fenced }) {
   return async function onCompaction(input) {
     const root = rootOf();
@@ -18306,7 +18504,7 @@ function createCompactionHandler({ rootOf, fenced }) {
     await fenced("compaction", root, () => {
       const dir = deliverySessionDir(root, input?.sessionID);
       if (!dir) throw new Error(`compaction input has no usable sessionID (${typeof input?.sessionID}); delivery receipts were not reset`);
-      rmSync7(dir, { recursive: true, force: true });
+      rmSync8(dir, { recursive: true, force: true });
     });
   };
 }
@@ -18317,8 +18515,8 @@ import { existsSync as existsSync18, readdirSync as readdirSync6, readFileSync a
 import { join as join29 } from "node:path";
 
 // packages/opencode-plugin/src/layer.mjs
-import { existsSync as existsSync15, readFileSync as readFileSync15 } from "node:fs";
-import { basename as basename2, join as join26 } from "node:path";
+import { existsSync as existsSync17, readFileSync as readFileSync17 } from "node:fs";
+import { basename as basename2, join as join28 } from "node:path";
 init_agent_fences();
 function opencodeHostTail(pluginRoot) {
   const install = pluginRoot ? `- **Sterling is installed at \`${pluginRoot}\`.** Its scripts are \`${pluginRoot}/bin/*.mjs\` (run one with \`node "${pluginRoot}/bin/<name>.mjs"\`), its commands are \`${pluginRoot}/commands/*.md\`, its skills are \`${pluginRoot}/skills/*/SKILL.md\` and its agent templates are under \`${pluginRoot}/agent-templates/\`. Those files are written for Claude Code: where one says CLAUDE_PLUGIN_ROOT, use \`${pluginRoot}\`, and read the rest with the substitutions this layer makes.` : "- **Sterling's install root could not be resolved** (the error is above), so its scripts, commands and skills are unreachable this session. Tell the user before relying on any of them.";
@@ -18337,7 +18535,7 @@ function sterlingRoot(moduleUrl = import.meta.url) {
   return sterlingRootFrom(moduleUrl);
 }
 function defaultTemplatePath(moduleUrl = import.meta.url) {
-  return join26(sterlingRoot(moduleUrl), "templates", "target-claude-md.md");
+  return join28(sterlingRoot(moduleUrl), "templates", "target-claude-md.md");
 }
 var ROOT_TOKEN = "{{STERLING_ROOT}}";
 var CLAUDE_ONLY_RESIDUE = ["${CLAUDE_PLUGIN_ROOT}", "READY TO CLEAR", "/clear", "AskUserQuestion"];
@@ -18405,20 +18603,20 @@ function unmarkedOpenCodeBlocks(source) {
   });
   return out;
 }
-function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), templatePath = join26(pluginRoot, "templates", "target-claude-md.md")) {
+function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), templatePath = join28(pluginRoot, "templates", "target-claude-md.md")) {
   const projectName = loadConfig(projectDir)?.project_name ?? basename2(projectDir);
   const named = (s2) => s2.replaceAll("{{PROJECT_NAME}}", () => projectName);
-  const templateText = readFileSync15(templatePath, "utf8");
+  const templateText = readFileSync17(templatePath, "utf8");
   const pairs = hostBlockPairs(templateText).map((p) => ({ claude: p.claude.map(named), opencode: p.opencode.map(named) }));
-  const claudeMdPath = join26(projectDir, "CLAUDE.md");
-  const source = existsSync15(claudeMdPath) ? readFileSync15(claudeMdPath, "utf8") : named(renderClaudeText(templateText, templatePath));
+  const claudeMdPath = join28(projectDir, "CLAUDE.md");
+  const source = existsSync17(claudeMdPath) ? readFileSync17(claudeMdPath, "utf8") : named(renderClaudeText(templateText, templatePath));
   const lines = renderOpenCodeFullText(source, "CLAUDE.md").split("\n");
   const plain = unfencedText(source);
   const unmatched = swapBlocks(lines, pairs).filter((first) => plain.includes(leadOf(first)));
   const missingCommands = [];
   const text = lines.join("\n").replaceAll(ROOT_TOKEN, () => pluginRoot).replaceAll("${CLAUDE_PLUGIN_ROOT}", () => pluginRoot).replace(/`?\/sterling:([a-z][a-z-]*)`?/g, (whole, name) => {
-    const file = join26(pluginRoot, "commands", `${name}.md`);
-    if (existsSync15(file)) return `${whole} (on OpenCode: follow \`${file}\`)`;
+    const file = join28(pluginRoot, "commands", `${name}.md`);
+    if (existsSync17(file)) return `${whole} (on OpenCode: follow \`${file}\`)`;
     missingCommands.push(`\`/sterling:${name}\` names a command with no file at ${file}.`);
     return whole;
   });
@@ -18437,157 +18635,6 @@ ${opencodeHostTail(pluginRoot)}`;
 ${problems.map((p) => `- ${p}`).join("\n")}
 
 ${body}`;
-}
-
-// packages/opencode-plugin/src/notices.mjs
-import { randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync17, mkdirSync as mkdirSync14, readFileSync as readFileSync17, renameSync as renameSync6, rmSync as rmSync8, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname13, join as join28 } from "node:path";
-
-// scripts/hooks/lib/session-events.mjs
-import { existsSync as existsSync16, mkdirSync as mkdirSync13, readFileSync as readFileSync16, renameSync as renameSync5, unlinkSync as unlinkSync3, writeFileSync as writeFileSync6 } from "node:fs";
-import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { dirname as dirname12, join as join27 } from "node:path";
-var SESSION_EVENTS_REL = join27(".sterling", "transient", "session-events.json");
-function researchToolEvent(detail, { at = (/* @__PURE__ */ new Date()).toISOString(), agentId } = {}) {
-  const event = { kind: "research_tool", detail: String(detail ?? ""), at };
-  if (typeof agentId === "string" && agentId !== "") event.agent_id = agentId;
-  return event;
-}
-function appendSessionEvent(projectDir, event, lockOptions) {
-  appendSessionEventsAt(join27(projectDir, SESSION_EVENTS_REL), [event], lockOptions);
-}
-function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
-  mkdirSync13(dirname12(eventsPath), { recursive: true });
-  withSessionEventsLock(
-    eventsPath,
-    () => {
-      const events = existsSync16(eventsPath) ? JSON.parse(readFileSync16(eventsPath, "utf8")) : [];
-      events.push(...newEvents);
-      const tmp = `${eventsPath}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
-      writeFileSync6(tmp, JSON.stringify(events), { flag: "wx" });
-      try {
-        renameSync5(tmp, eventsPath);
-      } catch (e) {
-        try {
-          unlinkSync3(tmp);
-        } catch {
-        }
-        throw e;
-      }
-    },
-    lockOptions
-  );
-}
-var SESSION_EVENTS_LOCK_HELD = "session_events_lock_held";
-var SQLITE_BUSY2 = 5;
-function withSessionEventsLock(path, fn, { timeoutMs: timeoutMs2 = 5e3 } = {}) {
-  const lockPath = `${path}.lock.db`;
-  const db = new DatabaseSync5(lockPath);
-  try {
-    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timeoutMs2))}`);
-    try {
-      db.exec("PRAGMA journal_mode = DELETE");
-      db.exec("BEGIN IMMEDIATE");
-    } catch (e) {
-      if ((e?.errcode & 255) !== SQLITE_BUSY2) throw e;
-      const err = new Error(`${lockPath} is held by another writer that is still running; gave up after ${timeoutMs2}ms and nothing was written`);
-      err.code = SESSION_EVENTS_LOCK_HELD;
-      throw err;
-    }
-    try {
-      return fn();
-    } finally {
-      try {
-        db.exec("COMMIT");
-      } catch (e) {
-        console.error(`session-events: COMMIT of the lock at ${lockPath} failed (${e?.message ?? e}); the lock is released by closing the connection`);
-      }
-    }
-  } finally {
-    db.close();
-  }
-}
-
-// packages/opencode-plugin/src/notices.mjs
-var NOTICES_REL = ".sterling/transient/opencode-notices.json";
-var NOTICES_LOCK_TIMEOUT_MS = 2e3;
-function withNoticesLock(root, fn) {
-  const path = join28(root, NOTICES_REL);
-  mkdirSync14(dirname13(path), { recursive: true });
-  return withSessionEventsLock(path, fn, { timeoutMs: NOTICES_LOCK_TIMEOUT_MS });
-}
-function writeJsonAtomic(path, value) {
-  mkdirSync14(dirname13(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${randomUUID6()}.tmp`;
-  try {
-    writeFileSync7(tmp, JSON.stringify(value));
-    renameSync6(tmp, path);
-  } catch (e) {
-    rmSync8(tmp, { force: true });
-    throw e;
-  }
-}
-function readNotices(root) {
-  const p = join28(root, NOTICES_REL);
-  if (!existsSync17(p)) return [];
-  const parsed = JSON.parse(readFileSync17(p, "utf8"));
-  if (!Array.isArray(parsed)) throw new Error(`${NOTICES_REL} is not a JSON array`);
-  return parsed;
-}
-function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString(), key = void 0) {
-  withNoticesLock(root, () => {
-    const notices = readNotices(root);
-    if (notices.some((n) => !n.shown_at && (n.text === text || key !== void 0 && n.key === key))) return;
-    notices.push({ id: randomUUID6(), at: now, text, ...key === void 0 ? {} : { key } });
-    writeJsonAtomic(join28(root, NOTICES_REL), notices);
-  });
-}
-var NOTICE_CLAIM_TTL_MS = 6e4;
-var claimLive = (n, nowMs) => typeof n.claim === "string" && nowMs - Date.parse(n.claimed_at ?? "") < NOTICE_CLAIM_TTL_MS;
-function claimNotices(root, now) {
-  const nowMs = Date.parse(now);
-  const token = randomUUID6();
-  const fresh = withNoticesLock(root, () => {
-    const notices = readNotices(root);
-    const open2 = notices.filter((n) => !n.shown_at && !claimLive(n, nowMs));
-    if (!open2.length) return [];
-    for (const n of open2) Object.assign(n, { claim: token, claimed_at: now });
-    writeJsonAtomic(join28(root, NOTICES_REL), notices);
-    return open2;
-  });
-  const settle = (fn) => {
-    if (!fresh.length) return;
-    withNoticesLock(root, () => {
-      const notices = readNotices(root);
-      const mine = notices.filter((n) => n.claim === token);
-      if (!mine.length) return;
-      for (const n of mine) {
-        delete n.claim;
-        delete n.claimed_at;
-        fn(n);
-      }
-      writeJsonAtomic(join28(root, NOTICES_REL), notices);
-    });
-  };
-  return {
-    notices: fresh,
-    commit: () => settle((n) => {
-      n.shown_at = now;
-    }),
-    release: () => settle(() => {
-    })
-  };
-}
-function pruneShownNotices(root, { afterRead } = {}) {
-  withNoticesLock(root, () => {
-    const notices = readNotices(root);
-    afterRead?.();
-    const left = notices.filter((n) => !n.shown_at);
-    if (left.length === notices.length) return;
-    if (left.length) writeJsonAtomic(join28(root, NOTICES_REL), left);
-    else rmSync8(join28(root, NOTICES_REL), { force: true });
-  });
 }
 
 // packages/opencode-plugin/src/config.mjs
