@@ -1565,3 +1565,36 @@ test('conductor session: a timed-out lookup never overwrites the newer prompt\'s
     p.cleanup();
   }
 });
+
+// GitHub issue #187: a prompt's place in the conductor order is fixed at prompt-hook entry, so a
+// prompt held in an EARLIER awaited handler (here the context handler's root-session lookup) that
+// resumes after a later prompt recorded cannot replace that later record.
+test('conductor session: prompt A held in an earlier handler, B arrives and records, A resumes: the record stays B', async () => {
+  const p = makeProject();
+  const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_A: {}, ses_B: {} });
+  try {
+    const get = ctx.session.get;
+    let release;
+    const gate = new Promise((r) => (release = r));
+    let heldOnce = false;
+    ctx.session.get = async (q) => {
+      if (q.sessionID === 'ses_A' && !heldOnce) {
+        heldOnce = true;
+        await gate;
+      }
+      return get(q);
+    };
+    const a = ctx.hooks.session.prompt({ ...promptInput('a'), sessionID: 'ses_A' });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(heldOnce, true, 'A is held in the lookup of a handler before the recorder');
+    await ctx.hooks.session.prompt({ ...promptInput('b'), sessionID: 'ses_B' });
+    const rec = join(p.dir, '.sterling', 'transient', 'opencode-conductor-session');
+    assert.equal(readFileSync(rec, 'utf8'), 'ses_B\n');
+    release();
+    await a;
+    assert.equal(readFileSync(rec, 'utf8'), 'ses_B\n', 'A arrived first, so it cannot replace B');
+  } finally {
+    await cleanup?.();
+    p.cleanup();
+  }
+});

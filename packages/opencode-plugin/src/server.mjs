@@ -81,7 +81,7 @@ import { onEvaluate as storeGuard } from './store-guard.mjs';
 import { BUSY_TIMEOUT_MS, createProjectStores, openProjectStore } from './store.mjs';
 import { createSessionSync } from './sync.mjs';
 import { createWorkerLaunch, inWorkerChild } from './worker.mjs';
-import { createConductorSessionRecorder } from './conductor-session.mjs';
+import { createConductorSessionRecorder, takePromptSeq } from './conductor-session.mjs';
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
@@ -263,10 +263,12 @@ export function createSterlingServer(deps = {}) {
       return res;
     }
     async function onPrompt(input) {
+      // Before any await: the prompt's arrival order for the conductor record (conductor-session.mjs).
+      const seq = takePromptSeq();
       await onSelection(input);
       await onVolatile(input);
       await pressure.onPrompt(input);
-      await recordConductorSession(input);
+      await recordConductorSession(input, seq);
       const root = rootOf();
       if (!root) return;
       const res = await convergeOverpass(root);
