@@ -40,6 +40,30 @@ export function projectOverpass(root) {
 }
 
 /**
+ * The project's Overpass resolution for a subagent dispatch: { res, unreadable }. When
+ * .sterling/config.json cannot be read or parsed, or is not a JSON object, `res` is null
+ * and `unreadable` is the error: the dispatch goes ahead unrouted with overpassUnknownLine,
+ * because a broken config must not stop every dispatch in a project that never turned
+ * Overpass on. Throws when the config reads but its overpass block is invalid
+ * (resolveOverpass), which refuses the dispatch (overpassRefusal).
+ */
+export function dispatchOverpass(root) {
+  let config;
+  try {
+    config = loadConfig(root) ?? {};
+  } catch (e) {
+    return { res: null, unreadable: e };
+  }
+  if (!isObject(config)) return { res: null, unreadable: new Error('it is not a JSON object') };
+  return { res: resolveOverpass(config, { host: 'opencode' }), unreadable: null };
+}
+
+/** The loud line a dispatch carries when .sterling/config.json could not be read (`error` from dispatchOverpass). */
+export function overpassUnknownLine(error) {
+  return `Overpass routing UNKNOWN: .sterling/config.json could not be read (${error?.message ?? error}); dispatches are not routed through Overpass until it is fixed.`;
+}
+
+/**
  * The dispatch pin for a subagent call's arguments: { model, line }. `model` is the lane
  * model while Overpass is effective (null otherwise, and the call is left alone); `line`
  * names the model a call asked for when the toggle replaced it, else null.
@@ -54,9 +78,9 @@ export function dispatchPin(res, args) {
   };
 }
 
-/** The message a subagent dispatch is refused with when the Overpass setting cannot be read (`error` from projectOverpass). */
+/** The message a subagent dispatch is refused with when the config reads but its overpass block is invalid (`error` from dispatchOverpass). */
 export function overpassRefusal(error) {
-  return `Sterling refused this subagent dispatch: the Overpass setting in .sterling/config.json could not be read (${error?.message ?? error}). While it cannot be read, a dispatch might run on a direct provider instead of through Overpass, so none runs. Fix that value in .sterling/config.json (TUI System tab), or set "overpass": {"enabled": false} to turn Overpass off, then dispatch again.`;
+  return `Sterling refused this subagent dispatch: the Overpass setting in .sterling/config.json is invalid (${error?.message ?? error}). While it is invalid, a dispatch might run on a direct provider instead of through Overpass, so none runs. Fix that value in .sterling/config.json (TUI System tab), or set "overpass": {"enabled": false} to turn Overpass off, then dispatch again.`;
 }
 
 /** The agent entries the overlay should hold: { [agent]: model }. */
@@ -111,21 +135,36 @@ function refuseTracked(root) {
 }
 
 const pick = (entry, keys) => Object.fromEntries(keys.filter((k) => Object.hasOwn(entry, k)).map((k) => [k, entry[k]]));
-// An agent entry as compared against a pending record: null stands for an absent entry.
-const entryText = (entry) => JSON.stringify(entry === undefined ? null : entry);
+// The owned fields of an agent entry, in a fixed key order, as text; an absent entry is null.
+// Only these decide whether a pending write landed: another key the user edits, or the
+// order JSON keeps keys in, says nothing about Sterling's write.
+const ownedText = (entry) => JSON.stringify(entry === undefined || entry === null ? null : pick(entry, OWNED_KEYS));
+const modelText = (entry) => JSON.stringify(entry === undefined || entry === null ? null : [Object.hasOwn(entry, 'model'), entry.model ?? null]);
+
+/**
+ * Whether a pending write of `name` landed, judged on the owned fields only: the entry
+ * holds the `model` and `variant` the write meant to leave, or it holds the model the
+ * write set when that model differed from the one before (so a `variant` the user added
+ * afterwards does not hide a landed write).
+ */
+function landed(entry, before, after) {
+  if (ownedText(entry) === ownedText(after)) return true;
+  return modelText(after) !== modelText(before) && modelText(entry) === modelText(after);
+}
 
 /**
  * Settles an update a failed or interrupted write left pending: per agent it names, the
- * ownership it intended is taken when opencode.json shows the entry it meant to write,
+ * ownership it intended is taken when opencode.json shows the write landed (landed),
  * else the ownership from before stays (the write did not land, so the update is
- * computed again from the old record, never from a half-done one).
+ * computed again from the old record, never from a half-done one). Either way the
+ * record kept carries the values to put back, until a later write replaces it.
  */
 function settlePending(own, agents) {
   if (!own.pending) return { own, settled: false };
   const { pending } = own;
   const agent = { ...own.agent };
   for (const name of Object.keys(pending.after)) {
-    if (entryText(agents[name]) !== JSON.stringify(pending.after[name])) continue;
+    if (!landed(agents[name], pending.before[name], pending.after[name])) continue;
     if (Object.hasOwn(pending.agent, name)) agent[name] = pending.agent[name];
     else delete agent[name];
   }

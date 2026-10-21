@@ -171,23 +171,49 @@ test('dispatch pin: the Claude Code host never routes (resolver), so the pin is 
 // Deliberately changed in the fix round (Sol review, CRITICAL): the earlier version of this
 // test asserted that the call went ahead on its own model with a warning line, which is
 // the direct-provider fallback the decision forbids. The call must be refused.
-test('dispatch pin: an unreadable Overpass setting refuses the dispatch, never runs it on its own model', async () => {
+// Deliberately changed again in the second fix round (Sol re-check, CRITICAL; conductor
+// ruling): a whole config that cannot be parsed no longer refuses, because that broke
+// every dispatch in hobby projects that never turned Overpass on. Only a present but
+// invalid overpass block refuses; the malformed-JSON arm moved to the test below.
+test('dispatch pin: an invalid Overpass block refuses the dispatch, never runs it on its own model', async () => {
   for (const [config, why] of [
     [{ mode: 'work', overpass: { enabled: 'yes' } }, /config\.overpass\.enabled is "yes" — it must be true or false/],
     [{ mode: 'work', overpass: { enabled: true, provider: 'a/b' } }, /config\.overpass\.provider is "a\/b"/],
-    ['{ "mode": "work", ', /could not be read \(/],
+    [{ mode: 'hobby', overpass: 'on' }, /config\.overpass is "on"/],
   ]) {
     const p = makeProject(config);
     const s = await setup(p.dir);
     try {
       const input = { tool: 'subagent', id: 'call_x', sessionID: 'ses_root', input: { agent: 'sterling/implementor', description: 'd', prompt: 'p', model: 'anthropic/claude-sonnet-5' } };
       await assert.rejects(s.ctx.hooks.tool['execute.before'](input), (e) => {
-        assert.match(e.message, /^Sterling refused this subagent dispatch: the Overpass setting in \.sterling\/config\.json could not be read/);
+        assert.match(e.message, /^Sterling refused this subagent dispatch: the Overpass setting in \.sterling\/config\.json is invalid/);
         assert.match(e.message, why);
         assert.match(e.message, /Fix that value in \.sterling\/config\.json \(TUI System tab\), or set "overpass": \{"enabled": false\}/);
         return true;
       }, JSON.stringify(config));
       assert.equal(input.input.model, 'anthropic/claude-sonnet-5', 'the call is not touched, it is stopped');
+    } finally {
+      await s.cleanup();
+      p.cleanup();
+    }
+  }
+});
+
+test('dispatch pin: a config that cannot be read or parsed lets the dispatch run unrouted, with a loud UNKNOWN line', async () => {
+  for (const [config, why] of [
+    ['{ "mode": "work", ', /could not be read \(.*JSON/],
+    ['[1, 2]', /could not be read \(it is not a JSON object\)/],
+  ]) {
+    const p = makeProject(config);
+    const s = await setup(p.dir);
+    try {
+      const named = await s.dispatch({ model: 'anthropic/claude-sonnet-5' });
+      assert.equal(named.args.model, 'anthropic/claude-sonnet-5', `the call keeps its model: ${config}`);
+      assert.match(named.result, /Overpass routing UNKNOWN: \.sterling\/config\.json could not be read \(/);
+      assert.match(named.result, why);
+      assert.match(named.result, /dispatches are not routed through Overpass until it is fixed\./);
+      const unnamed = await s.dispatch({}, 'call_2');
+      assert.equal(Object.hasOwn(unnamed.args, 'model'), false, 'no model is invented for a call that named none');
     } finally {
       await s.cleanup();
       p.cleanup();
@@ -366,6 +392,79 @@ test('overlay: an interrupted update whose opencode.json write landed is finaliz
   }
 });
 
+/** A writeFileAtomic seam that lets the opencode.json write land, then fails the ownership write after it. */
+function failingOwnershipAfterOc(dir) {
+  let ocWritten = false;
+  return {
+    writeFile: (path, content) => {
+      if (path.startsWith(join(dir, OC_REL))) ocWritten = true;
+      else if (ocWritten && path.startsWith(join(dir, overpass.OVERLAY_REL))) throw new Error('injected ownership write failure');
+      writeFileSync(path, content);
+    },
+  };
+}
+
+/** The user edits every agent entry by hand: a `description` added and the keys put in reverse order. */
+function handEditEntries(dir, extra = {}) {
+  const oc = readOc(dir);
+  for (const [name, entry] of Object.entries(oc.agent)) {
+    oc.agent[name] = Object.fromEntries([['description', `mine ${name}`], ...Object.entries({ ...entry, ...(extra[name] ?? {}) }).reverse()]);
+  }
+  writeFileSync(join(dir, OC_REL), `${JSON.stringify(oc, null, 2)}\n`);
+}
+
+const OTHER = resOn({ provider: 'overpass-agentic', laneModel: 'overpass-agentic/agentic-high', conductorModel: 'overpass-agentic/agentic-conductor' });
+
+test('overlay: an interrupted provider change, then a hand edit of other keys, still restores the user model on off', () => {
+  const p = makeProject(ON, USER_OC);
+  try {
+    overpass.convergeOverlay(p.dir, resOn());
+    assert.throws(() => overpass.convergeOverlay(p.dir, OTHER, { fs: failingOwnershipAfterOc(p.dir) }), /injected ownership write failure/);
+    handEditEntries(p.dir);
+    overpass.convergeOverlay(p.dir, resOff);
+    const oc = readOc(p.dir);
+    const conductor = oc.agent['sterling/conductor'];
+    assert.equal(conductor.model, 'anthropic/claude-opus-5-5', 'the user model is back, not a tier');
+    assert.equal(conductor.variant, 'medium', 'the user variant is back');
+    assert.equal(conductor.description, 'mine sterling/conductor', 'the hand edit stays');
+    assert.deepEqual(oc.agent.plan, { description: 'mine plan' }, 'the tier model Sterling created is gone, the hand edit stays');
+    assert.equal(existsSync(join(p.dir, overpass.OVERLAY_REL)), false);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('overlay: an interrupted first enable, then a hand edit of other keys, still restores the user model and variant on off', () => {
+  const p = makeProject(ON, USER_OC);
+  try {
+    assert.throws(() => overpass.convergeOverlay(p.dir, resOn(), { fs: failingOwnershipAfterOc(p.dir) }), /injected ownership write failure/);
+    assert.equal(readOc(p.dir).agent['sterling/conductor'].model, 'overpass/agentic-conductor', 'the opencode.json write landed');
+    handEditEntries(p.dir);
+    overpass.convergeOverlay(p.dir, resOff);
+    const oc = readOc(p.dir);
+    const conductor = oc.agent['sterling/conductor'];
+    assert.equal(conductor.model, 'anthropic/claude-opus-5-5', 'the original model is not lost');
+    assert.equal(conductor.variant, 'medium', 'the original variant is not lost');
+    assert.deepEqual(oc.agent.plan, { description: 'mine plan' });
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('overlay: an interrupted first enable, then a hand-added variant, is still read as landed on off', () => {
+  const p = makeProject(ON, USER_OC);
+  try {
+    assert.throws(() => overpass.convergeOverlay(p.dir, resOn(), { fs: failingOwnershipAfterOc(p.dir) }), /injected ownership write failure/);
+    handEditEntries(p.dir, { 'sterling/conductor': { variant: 'low' } });
+    overpass.convergeOverlay(p.dir, resOff);
+    const conductor = readOc(p.dir).agent['sterling/conductor'];
+    assert.equal(conductor.model, 'anthropic/claude-opus-5-5', 'the model Sterling wrote is undone');
+    assert.equal(conductor.variant, 'low', 'the variant chosen since is the latest choice and stays');
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('overlay: a git-tracked opencode.json is refused, as the installer refuses it', () => {
   const p = makeProject(ON, { agent: {} });
   try {
@@ -420,12 +519,15 @@ test('session line: ON, bypass, not in effect, off, invalid and unknown', () => 
   assert.match(line(null, 'opencode', true), /^Overpass: UNKNOWN — .*NOT the off default/);
 });
 
-test('session line: the OpenCode operating-state lines carry it beside Project mode', async () => {
+// Changed in the second fix round: the Overpass line sat between Project mode and Handoff
+// files, which broke handoff-setting.test.mjs's pinned order (the handoff line follows the
+// mode line). It now follows the Storage line.
+test('session line: the OpenCode operating-state lines carry it after Storage', async () => {
   const mod = await import(pathToFileURL(join(repo, 'packages', 'opencode-plugin', 'src', 'operating-state.mjs')).href);
   const p = makeProject(ON);
   try {
     const { lines } = mod.operatingStateLines(p.dir, null);
-    const i = lines.findIndex((l) => l.startsWith('Project mode:'));
+    const i = lines.findIndex((l) => l.startsWith('Storage:'));
     assert.match(lines[i + 1], /^Overpass: ON/);
   } finally {
     p.cleanup();

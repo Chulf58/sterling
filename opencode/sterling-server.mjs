@@ -16979,9 +16979,8 @@ function createDeliveryHandlers({ openStore, rootOf, directory, fenced, delivery
 // packages/opencode-plugin/src/overpass.mjs
 init_dist();
 import { execFileSync } from "node:child_process";
-import { existsSync as existsSync13, mkdirSync as mkdirSync11, readFileSync as readFileSync14, renameSync as renameSync5, rmSync as rmSync6, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync13, mkdirSync as mkdirSync11, readFileSync as readFileSync14, rmSync as rmSync6 } from "node:fs";
 import { dirname as dirname10, join as join23 } from "node:path";
-import { randomUUID as randomUUID6 } from "node:crypto";
 
 // scripts/lib/opencode-install.mjs
 import { createHash as createHash4, randomUUID as randomUUID5 } from "node:crypto";
@@ -17655,6 +17654,16 @@ function sterlingRootFrom(moduleUrl = import.meta.url) {
     if (dirname9(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
+function writeFileAtomic(path, content, { writeFile = writeFileSync5, rename = renameSync4 } = {}) {
+  const tmp = `${path}.tmp-${randomUUID5()}`;
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync5(tmp, { force: true });
+    throw err;
+  }
+}
 function formatOpenCodeRows(result) {
   if (result.skipped) return [`OpenCode: ${result.skipped}`];
   return result.rows.map((r) => `OpenCode ${r.status}: ${r.item}${r.detail ? ` \u2014 ${r.detail}` : ""}`);
@@ -17676,6 +17685,19 @@ var OWNED_KEYS = ["model", "variant"];
 function projectOverpass(root) {
   return resolveOverpass(loadConfig(root) ?? {}, { host: "opencode" });
 }
+function dispatchOverpass(root) {
+  let config;
+  try {
+    config = loadConfig(root) ?? {};
+  } catch (e) {
+    return { res: null, unreadable: e };
+  }
+  if (!isObject(config)) return { res: null, unreadable: new Error("it is not a JSON object") };
+  return { res: resolveOverpass(config, { host: "opencode" }), unreadable: null };
+}
+function overpassUnknownLine(error) {
+  return `Overpass routing UNKNOWN: .sterling/config.json could not be read (${error?.message ?? error}); dispatches are not routed through Overpass until it is fixed.`;
+}
 function dispatchPin(res, args) {
   if (!res.effective) return { model: null, line: null };
   const asked = args?.model;
@@ -17685,6 +17707,9 @@ function dispatchPin(res, args) {
     line: replaced ? `OVERPASS: this dispatch ran on ${res.laneModel}, not ${asked} as the call named; while Overpass is on every subagent lane takes the tier model (config.overpass).` : null
   };
 }
+function overpassRefusal(error) {
+  return `Sterling refused this subagent dispatch: the Overpass setting in .sterling/config.json is invalid (${error?.message ?? error}). While it is invalid, a dispatch might run on a direct provider instead of through Overpass, so none runs. Fix that value in .sterling/config.json (TUI System tab), or set "overpass": {"enabled": false} to turn Overpass off, then dispatch again.`;
+}
 function desiredOverlay(res) {
   const out = {};
   if (!res.effective) return out;
@@ -17693,16 +17718,9 @@ function desiredOverlay(res) {
   return out;
 }
 var isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-function writeJsonAtomic(path, text) {
+function writeText(path, text, fs) {
   mkdirSync11(dirname10(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${randomUUID6()}.tmp`;
-  try {
-    writeFileSync6(tmp, text);
-    renameSync5(tmp, path);
-  } catch (e) {
-    rmSync6(tmp, { force: true });
-    throw e;
-  }
+  writeFileAtomic(path, text, fs);
 }
 function readOwnership(root) {
   const path = join23(root, OVERLAY_REL);
@@ -17714,7 +17732,16 @@ function readOwnership(root) {
     throw new Error(`${OVERLAY_REL} is not valid JSON (${e.message}); it records which .opencode/opencode.json agent models Sterling wrote for Overpass, so nothing is changed until it is fixed or removed`);
   }
   if (!isObject(parsed) || !isObject(parsed.agent)) throw new Error(`${OVERLAY_REL} is not an object with an "agent" object; nothing is changed until it is fixed or removed`);
+  if (parsed.pending !== void 0 && !(isObject(parsed.pending) && isObject(parsed.pending.agent) && isObject(parsed.pending.before) && isObject(parsed.pending.after))) {
+    throw new Error(`${OVERLAY_REL} has a "pending" value that is not an interrupted-update record; nothing is changed until it is fixed or removed`);
+  }
   return parsed;
+}
+function writeOwnership(root, own, fs) {
+  const path = join23(root, OVERLAY_REL);
+  if (Object.keys(own.agent).length || own.pending) writeText(path, `${JSON.stringify(own, null, 2)}
+`, fs);
+  else rmSync6(path, { force: true });
 }
 function refuseTracked(root) {
   let out;
@@ -17727,11 +17754,27 @@ function refuseTracked(root) {
   if (out.trim()) throw new Error(`${PROJECT_CONFIG_REL} is tracked by git, and Sterling writes it only while it is untracked (decision sterling-on-opencode-installs-global-plugins-plus-untracked-project-config), so the Overpass agent models were not changed; untrack it (git rm --cached ${PROJECT_CONFIG_REL} and commit)`);
 }
 var pick = (entry, keys) => Object.fromEntries(keys.filter((k) => Object.hasOwn(entry, k)).map((k) => [k, entry[k]]));
-function convergeOverlay(root, res) {
+var ownedText = (entry) => JSON.stringify(entry === void 0 || entry === null ? null : pick(entry, OWNED_KEYS));
+var modelText = (entry) => JSON.stringify(entry === void 0 || entry === null ? null : [Object.hasOwn(entry, "model"), entry.model ?? null]);
+function landed(entry, before, after) {
+  if (ownedText(entry) === ownedText(after)) return true;
+  return modelText(after) !== modelText(before) && modelText(entry) === modelText(after);
+}
+function settlePending(own, agents) {
+  if (!own.pending) return { own, settled: false };
+  const { pending } = own;
+  const agent = { ...own.agent };
+  for (const name of Object.keys(pending.after)) {
+    if (!landed(agents[name], pending.before[name], pending.after[name])) continue;
+    if (Object.hasOwn(pending.agent, name)) agent[name] = pending.agent[name];
+    else delete agent[name];
+  }
+  return { own: { agent }, settled: true };
+}
+function convergeOverlay(root, res, { fs } = {}) {
   const want = desiredOverlay(res);
-  const own = readOwnership(root);
-  const names = /* @__PURE__ */ new Set([...Object.keys(want), ...Object.keys(own.agent)]);
-  if (!names.size) return { changed: false, notes: [] };
+  const stored = readOwnership(root);
+  if (!Object.keys(want).length && !Object.keys(stored.agent).length && !stored.pending) return { changed: false, notes: [] };
   const path = join23(root, PROJECT_CONFIG_REL);
   let config = {};
   if (existsSync13(path)) {
@@ -17744,9 +17787,19 @@ function convergeOverlay(root, res) {
   }
   if (config.agent !== void 0 && !isObject(config.agent)) throw new Error(`${PROJECT_CONFIG_REL}: "agent" is not an object, so the Overpass agent models were not changed`);
   const agents = { ...config.agent ?? {} };
-  let changed = false;
-  let ownChanged = false;
+  const { own: settledOwn, settled } = settlePending(stored, agents);
+  const own = { agent: { ...settledOwn.agent } };
+  const names = /* @__PURE__ */ new Set([...Object.keys(want), ...Object.keys(own.agent)]);
+  let ownChanged = settled;
+  const before = {};
+  const after = {};
   const notes = [];
+  const touch = (name, entry) => {
+    if (!Object.hasOwn(before, name)) before[name] = agents[name] === void 0 ? null : agents[name];
+    if (entry === void 0) delete agents[name];
+    else agents[name] = entry;
+    after[name] = entry === void 0 ? null : entry;
+  };
   for (const name of [...names].sort()) {
     const model = want[name];
     const rec = own.agent[name];
@@ -17773,8 +17826,7 @@ function convergeOverlay(root, res) {
       if (cur.model !== model || Object.hasOwn(cur, "variant") || entry === void 0) {
         const updated = { ...cur, model };
         delete updated.variant;
-        agents[name] = updated;
-        changed = true;
+        touch(name, updated);
       }
       continue;
     }
@@ -17792,21 +17844,18 @@ function convergeOverlay(root, res) {
     delete restored.model;
     if (Object.hasOwn(rec.prior ?? {}, "model")) restored.model = rec.prior.model;
     if (Object.hasOwn(rec.prior ?? {}, "variant") && !Object.hasOwn(restored, "variant")) restored.variant = rec.prior.variant;
-    if (rec.created && !Object.keys(restored).length) delete agents[name];
-    else agents[name] = restored;
-    changed = true;
+    touch(name, rec.created && !Object.keys(restored).length ? void 0 : restored);
   }
-  if (changed) {
-    refuseTracked(root);
-    if (Object.keys(agents).length || config.agent !== void 0) config.agent = agents;
+  const changed = Object.keys(after).length > 0;
+  if (!changed) {
+    if (ownChanged) writeOwnership(root, own, fs);
+    return { changed: false, notes };
   }
-  if (ownChanged) {
-    const ownPath = join23(root, OVERLAY_REL);
-    if (Object.keys(own.agent).length) writeJsonAtomic(ownPath, `${JSON.stringify(own, null, 2)}
-`);
-    else rmSync6(ownPath, { force: true });
-  }
-  if (changed) writeJsonAtomic(path, projectConfigText(config));
+  refuseTracked(root);
+  if (Object.keys(agents).length || config.agent !== void 0) config.agent = agents;
+  writeOwnership(root, { agent: settledOwn.agent, pending: { before, after, agent: own.agent } }, fs);
+  writeText(path, projectConfigText(config), fs);
+  writeOwnership(root, own, fs);
   return { changed, notes };
 }
 function expectedSessionModel(res, agent) {
@@ -17839,11 +17888,23 @@ function createSessionModels() {
   };
 }
 
+// packages/opencode-plugin/src/log.mjs
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync12 } from "node:fs";
+import { dirname as dirname11, join as join24 } from "node:path";
+var LOG_REL = ".sterling/transient/opencode-plugin.log";
+var errText2 = (e) => String(e && e.message || e);
+function logLine(root, line) {
+  const p = join24(root, LOG_REL);
+  mkdirSync12(dirname11(p), { recursive: true });
+  appendFileSync2(p, `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
+`);
+}
+
 // scripts/hooks/lib/subject-fan.mjs
 init_dist();
 init_dist2();
 import { existsSync as existsSync14 } from "node:fs";
-import { join as join24 } from "node:path";
+import { join as join25 } from "node:path";
 var defaultOpener = (dbPath) => new SterlingStore(dbPath);
 function domainMountsFromConfig(config) {
   if (config === null || config === void 0) return [];
@@ -17853,7 +17914,7 @@ var tag = (records, source) => records.map((r) => ({ ...r, source_store: source 
 var errorText2 = (e) => String(e && e.message || e);
 function openSubjectFan(cwd, { opener = defaultOpener } = {}) {
   if (storeBackend(cwd) === "routed") return openRoutedSubjectFan(cwd);
-  const projectPath = join24(cwd, ".sterling", "sterling.db");
+  const projectPath = join25(cwd, ".sterling", "sterling.db");
   if (!existsSync14(projectPath)) return null;
   let mounts = [];
   let configError = null;
@@ -18103,6 +18164,14 @@ function buildOutputAxis(store, root, { tool, args, content, sessionID, director
     }
   };
 }
+function reportOverpass(root, message) {
+  try {
+    logLine(root, `axis: ${message}`);
+  } catch (reportError) {
+    process.stderr.write(`[sterling] ${message} (and the plugin log is unwritable: ${reportError?.message ?? reportError})
+`);
+  }
+}
 function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPolicy }) {
   if (!deliveryPolicy) throw new Error("createAxisHandlers needs the deliveryPolicy tracker");
   const pending = /* @__PURE__ */ new Map();
@@ -18121,17 +18190,22 @@ function createAxisHandlers({ openStore, rootOf, directory, fenced, deliveryPoli
       });
     }
     if (surface === "dispatch") {
-      await fenced("axis", root, () => {
-        let pin;
-        try {
-          pin = dispatchPin(projectOverpass(root), args);
-        } catch (e) {
-          pinLine = `OVERPASS NOT APPLIED: the Overpass setting could not be read (${e?.message ?? e}), so this dispatch ran on the model its call or agent names, which may be a direct provider. Fix .sterling/config.json.`;
-          throw e;
-        }
+      let read;
+      try {
+        read = dispatchOverpass(root);
+      } catch (e) {
+        const message = overpassRefusal(e);
+        reportOverpass(root, message);
+        throw new Error(message, { cause: e });
+      }
+      if (read.unreadable) {
+        pinLine = overpassUnknownLine(read.unreadable);
+        reportOverpass(root, pinLine);
+      } else {
+        const pin = dispatchPin(read.res, args);
         if (pin.model && input.input && typeof input.input === "object") input.input.model = pin.model;
         pinLine = pin.line;
-      });
+      }
     }
     const overlap = surface === "dispatch" ? dispatchOverlapNotice({ tool_input: { subagent_type: agentRole(args.agent), prompt: args.prompt }, cwd: root, session_id: input.sessionID }) : null;
     let built = null;
@@ -18244,7 +18318,7 @@ import { join as join29 } from "node:path";
 
 // packages/opencode-plugin/src/layer.mjs
 import { existsSync as existsSync15, readFileSync as readFileSync15 } from "node:fs";
-import { basename as basename2, join as join25 } from "node:path";
+import { basename as basename2, join as join26 } from "node:path";
 init_agent_fences();
 function opencodeHostTail(pluginRoot) {
   const install = pluginRoot ? `- **Sterling is installed at \`${pluginRoot}\`.** Its scripts are \`${pluginRoot}/bin/*.mjs\` (run one with \`node "${pluginRoot}/bin/<name>.mjs"\`), its commands are \`${pluginRoot}/commands/*.md\`, its skills are \`${pluginRoot}/skills/*/SKILL.md\` and its agent templates are under \`${pluginRoot}/agent-templates/\`. Those files are written for Claude Code: where one says CLAUDE_PLUGIN_ROOT, use \`${pluginRoot}\`, and read the rest with the substitutions this layer makes.` : "- **Sterling's install root could not be resolved** (the error is above), so its scripts, commands and skills are unreachable this session. Tell the user before relying on any of them.";
@@ -18263,7 +18337,7 @@ function sterlingRoot(moduleUrl = import.meta.url) {
   return sterlingRootFrom(moduleUrl);
 }
 function defaultTemplatePath(moduleUrl = import.meta.url) {
-  return join25(sterlingRoot(moduleUrl), "templates", "target-claude-md.md");
+  return join26(sterlingRoot(moduleUrl), "templates", "target-claude-md.md");
 }
 var ROOT_TOKEN = "{{STERLING_ROOT}}";
 var CLAUDE_ONLY_RESIDUE = ["${CLAUDE_PLUGIN_ROOT}", "READY TO CLEAR", "/clear", "AskUserQuestion"];
@@ -18331,19 +18405,19 @@ function unmarkedOpenCodeBlocks(source) {
   });
   return out;
 }
-function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), templatePath = join25(pluginRoot, "templates", "target-claude-md.md")) {
+function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), templatePath = join26(pluginRoot, "templates", "target-claude-md.md")) {
   const projectName = loadConfig(projectDir)?.project_name ?? basename2(projectDir);
   const named = (s2) => s2.replaceAll("{{PROJECT_NAME}}", () => projectName);
   const templateText = readFileSync15(templatePath, "utf8");
   const pairs = hostBlockPairs(templateText).map((p) => ({ claude: p.claude.map(named), opencode: p.opencode.map(named) }));
-  const claudeMdPath = join25(projectDir, "CLAUDE.md");
+  const claudeMdPath = join26(projectDir, "CLAUDE.md");
   const source = existsSync15(claudeMdPath) ? readFileSync15(claudeMdPath, "utf8") : named(renderClaudeText(templateText, templatePath));
   const lines = renderOpenCodeFullText(source, "CLAUDE.md").split("\n");
   const plain = unfencedText(source);
   const unmatched = swapBlocks(lines, pairs).filter((first) => plain.includes(leadOf(first)));
   const missingCommands = [];
   const text = lines.join("\n").replaceAll(ROOT_TOKEN, () => pluginRoot).replaceAll("${CLAUDE_PLUGIN_ROOT}", () => pluginRoot).replace(/`?\/sterling:([a-z][a-z-]*)`?/g, (whole, name) => {
-    const file = join25(pluginRoot, "commands", `${name}.md`);
+    const file = join26(pluginRoot, "commands", `${name}.md`);
     if (existsSync15(file)) return `${whole} (on OpenCode: follow \`${file}\`)`;
     missingCommands.push(`\`/sterling:${name}\` names a command with no file at ${file}.`);
     return whole;
@@ -18365,25 +18439,13 @@ ${problems.map((p) => `- ${p}`).join("\n")}
 ${body}`;
 }
 
-// packages/opencode-plugin/src/log.mjs
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync12 } from "node:fs";
-import { dirname as dirname11, join as join26 } from "node:path";
-var LOG_REL = ".sterling/transient/opencode-plugin.log";
-var errText2 = (e) => String(e && e.message || e);
-function logLine(root, line) {
-  const p = join26(root, LOG_REL);
-  mkdirSync12(dirname11(p), { recursive: true });
-  appendFileSync2(p, `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
-`);
-}
-
 // packages/opencode-plugin/src/notices.mjs
-import { randomUUID as randomUUID7 } from "node:crypto";
-import { existsSync as existsSync17, mkdirSync as mkdirSync14, readFileSync as readFileSync17, renameSync as renameSync7, rmSync as rmSync8, writeFileSync as writeFileSync8 } from "node:fs";
+import { randomUUID as randomUUID6 } from "node:crypto";
+import { existsSync as existsSync17, mkdirSync as mkdirSync14, readFileSync as readFileSync17, renameSync as renameSync6, rmSync as rmSync8, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname13, join as join28 } from "node:path";
 
 // scripts/hooks/lib/session-events.mjs
-import { existsSync as existsSync16, mkdirSync as mkdirSync13, readFileSync as readFileSync16, renameSync as renameSync6, unlinkSync as unlinkSync3, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync16, mkdirSync as mkdirSync13, readFileSync as readFileSync16, renameSync as renameSync5, unlinkSync as unlinkSync3, writeFileSync as writeFileSync6 } from "node:fs";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 import { dirname as dirname12, join as join27 } from "node:path";
 var SESSION_EVENTS_REL = join27(".sterling", "transient", "session-events.json");
@@ -18403,9 +18465,9 @@ function appendSessionEventsAt(eventsPath, newEvents, lockOptions) {
       const events = existsSync16(eventsPath) ? JSON.parse(readFileSync16(eventsPath, "utf8")) : [];
       events.push(...newEvents);
       const tmp = `${eventsPath}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}.tmp`;
-      writeFileSync7(tmp, JSON.stringify(events), { flag: "wx" });
+      writeFileSync6(tmp, JSON.stringify(events), { flag: "wx" });
       try {
-        renameSync6(tmp, eventsPath);
+        renameSync5(tmp, eventsPath);
       } catch (e) {
         try {
           unlinkSync3(tmp);
@@ -18455,12 +18517,12 @@ function withNoticesLock(root, fn) {
   mkdirSync14(dirname13(path), { recursive: true });
   return withSessionEventsLock(path, fn, { timeoutMs: NOTICES_LOCK_TIMEOUT_MS });
 }
-function writeJsonAtomic2(path, value) {
+function writeJsonAtomic(path, value) {
   mkdirSync14(dirname13(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${randomUUID7()}.tmp`;
+  const tmp = `${path}.${process.pid}.${randomUUID6()}.tmp`;
   try {
-    writeFileSync8(tmp, JSON.stringify(value));
-    renameSync7(tmp, path);
+    writeFileSync7(tmp, JSON.stringify(value));
+    renameSync6(tmp, path);
   } catch (e) {
     rmSync8(tmp, { force: true });
     throw e;
@@ -18477,21 +18539,21 @@ function addNotice(root, text, now = (/* @__PURE__ */ new Date()).toISOString(),
   withNoticesLock(root, () => {
     const notices = readNotices(root);
     if (notices.some((n) => !n.shown_at && (n.text === text || key !== void 0 && n.key === key))) return;
-    notices.push({ id: randomUUID7(), at: now, text, ...key === void 0 ? {} : { key } });
-    writeJsonAtomic2(join28(root, NOTICES_REL), notices);
+    notices.push({ id: randomUUID6(), at: now, text, ...key === void 0 ? {} : { key } });
+    writeJsonAtomic(join28(root, NOTICES_REL), notices);
   });
 }
 var NOTICE_CLAIM_TTL_MS = 6e4;
 var claimLive = (n, nowMs) => typeof n.claim === "string" && nowMs - Date.parse(n.claimed_at ?? "") < NOTICE_CLAIM_TTL_MS;
 function claimNotices(root, now) {
   const nowMs = Date.parse(now);
-  const token = randomUUID7();
+  const token = randomUUID6();
   const fresh = withNoticesLock(root, () => {
     const notices = readNotices(root);
     const open2 = notices.filter((n) => !n.shown_at && !claimLive(n, nowMs));
     if (!open2.length) return [];
     for (const n of open2) Object.assign(n, { claim: token, claimed_at: now });
-    writeJsonAtomic2(join28(root, NOTICES_REL), notices);
+    writeJsonAtomic(join28(root, NOTICES_REL), notices);
     return open2;
   });
   const settle = (fn) => {
@@ -18505,7 +18567,7 @@ function claimNotices(root, now) {
         delete n.claimed_at;
         fn(n);
       }
-      writeJsonAtomic2(join28(root, NOTICES_REL), notices);
+      writeJsonAtomic(join28(root, NOTICES_REL), notices);
     });
   };
   return {
@@ -18523,7 +18585,7 @@ function pruneShownNotices(root, { afterRead } = {}) {
     afterRead?.();
     const left = notices.filter((n) => !n.shown_at);
     if (left.length === notices.length) return;
-    if (left.length) writeJsonAtomic2(join28(root, NOTICES_REL), left);
+    if (left.length) writeJsonAtomic(join28(root, NOTICES_REL), left);
     else rmSync8(join28(root, NOTICES_REL), { force: true });
   });
 }
@@ -18680,7 +18742,7 @@ init_dist2();
 import { join as join41 } from "node:path";
 
 // scripts/lib/update.mjs
-import { closeSync as closeSync6, existsSync as existsSync19, mkdirSync as mkdirSync15, openSync as openSync6, readFileSync as readFileSync19, readdirSync as readdirSync7, readSync as readSync3, writeFileSync as writeFileSync9 } from "node:fs";
+import { closeSync as closeSync6, existsSync as existsSync19, mkdirSync as mkdirSync15, openSync as openSync6, readFileSync as readFileSync19, readdirSync as readdirSync7, readSync as readSync3, writeFileSync as writeFileSync8 } from "node:fs";
 import { dirname as dirname14, join as join30 } from "node:path";
 
 // scripts/lib/project-identity.mjs
@@ -18778,9 +18840,9 @@ import { readFileSync as readFileSync21 } from "node:fs";
 import { join as join32 } from "node:path";
 
 // scripts/hooks/lib/maintenance-worker.mjs
-import { createHash as createHash5, randomUUID as randomUUID8 } from "node:crypto";
+import { createHash as createHash5, randomUUID as randomUUID7 } from "node:crypto";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { closeSync as closeSync7, existsSync as existsSync20, mkdirSync as mkdirSync16, openSync as openSync7, readFileSync as readFileSync20, renameSync as renameSync8, rmSync as rmSync9, rmdirSync as rmdirSync2, statSync as statSync6, writeFileSync as writeFileSync10, appendFileSync as appendFileSync3 } from "node:fs";
+import { closeSync as closeSync7, existsSync as existsSync20, mkdirSync as mkdirSync16, openSync as openSync7, readFileSync as readFileSync20, renameSync as renameSync7, rmSync as rmSync9, rmdirSync as rmdirSync2, statSync as statSync6, writeFileSync as writeFileSync9, appendFileSync as appendFileSync3 } from "node:fs";
 import { dirname as dirname15, isAbsolute as isAbsolute5, join as join31, resolve as resolve13, sep as sep3 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
@@ -18873,7 +18935,7 @@ function readJson(path) {
 }
 function rotateIfLarge(path, limit = ROTATE_BYTES) {
   try {
-    if (statSync6(path).size > limit) renameSync8(path, `${path}.1`);
+    if (statSync6(path).size > limit) renameSync7(path, `${path}.1`);
   } catch (e) {
     if (e?.code !== "ENOENT") throw e;
   }
@@ -19015,11 +19077,11 @@ function lockState(lock, nowMs, isAlive = pidAlive) {
   return isAlive(lock.pid) ? "live" : "stale";
 }
 function acquireLock(paths, content, nowMs, isAlive = pidAlive) {
-  const token = randomUUID8();
+  const token = randomUUID7();
   const body = JSON.stringify({ ...content, token });
   const tryCreate = () => {
     try {
-      writeFileSync10(paths.lock, body, { flag: "wx" });
+      writeFileSync9(paths.lock, body, { flag: "wx" });
       return true;
     } catch (e) {
       if (e?.code === "EEXIST") return false;
@@ -19084,7 +19146,7 @@ function readState(root) {
 function writeLastRun(root, lastRun) {
   const { state } = workerPaths(root);
   mkdirSync16(dirname15(state), { recursive: true });
-  writeFileSync10(state, JSON.stringify({ last_run: lastRun }));
+  writeFileSync9(state, JSON.stringify({ last_run: lastRun }));
 }
 function logLauncherNote(root, reason, detail) {
   const { log } = workerPaths(root);
@@ -19185,7 +19247,7 @@ function launchWorker(opts) {
     let stage = "write the launch files";
     let logFd;
     try {
-      writeFileSync10(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
+      writeFileSync9(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
       const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...opts.workerModel !== void 0 ? { opencode_model_pinned: true } : {} } : { host };
       const batch = selectBatch(eligible);
       const baselinesById = new Map(eligible.map((t) => [t.id, opts.store ? itemBaselines(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.baselines : void 0]));
@@ -19196,7 +19258,7 @@ function launchWorker(opts) {
         return { ...baselines && typeof baselines === "object" ? { baselines } : {}, ...typeof updatedAt === "string" ? { target_updated_at: updatedAt } : {} };
       };
       const chainAttempted = opts.trigger === "chain" && Array.isArray(opts.chainAttempted) ? opts.chainAttempted.map(String) : [];
-      writeFileSync10(
+      writeFileSync9(
         paths.eligible,
         JSON.stringify({
           token,
@@ -19204,7 +19266,7 @@ function launchWorker(opts) {
           ...runnerHost,
           items: batch.map((t) => ({ id: t.id, lane: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, slug: articleSlug(t), ...withBaselines(t) })),
           policy_version: POLICY_VERSION,
-          run_id: randomUUID8(),
+          run_id: randomUUID7(),
           policy_items: batch.map((t) => ({ id: t.id, lane: t.system_reason, target_id: t.feature_link ?? null, file_keys: t.file_keys ?? [] })),
           queue_snapshot: eligible.map((t) => ({ id: t.id, system_reason: t.system_reason, file_keys: t.file_keys ?? [], feature_link: t.feature_link ?? null, created_at: t.created_at ?? null, text: t.text ?? "", ...withBaselines(t) })),
           chain_attempted: chainAttempted
@@ -19222,7 +19284,7 @@ function launchWorker(opts) {
       child.unref?.();
       launched = true;
       stage = "record the running lock";
-      writeFileSync10(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
+      writeFileSync9(paths.lock, JSON.stringify({ pid: child.pid, started_at: startedAt, trigger: opts.trigger, stage: "running", token }));
       return { launched: true, reason: "launched", pid: child.pid, items: batch.length, eligible: eligible.length, host };
     } catch (e) {
       return { launched: false, reason: "error", detail: failDetail(`${stage}: ${e?.message ?? e}`) };
@@ -19927,7 +19989,7 @@ function mountedDomainLines({ config, configUnreadable, opener, root }) {
 
 // scripts/lib/post-update-sync.mjs
 import { spawn, spawnSync as spawnSync4 } from "node:child_process";
-import { existsSync as existsSync22, readFileSync as readFileSync23, realpathSync as realpathSync9, statSync as statSync7, writeFileSync as writeFileSync11 } from "node:fs";
+import { existsSync as existsSync22, readFileSync as readFileSync23, realpathSync as realpathSync9, statSync as statSync7, writeFileSync as writeFileSync10 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
 import { join as join34, resolve as resolve14 } from "node:path";
 var POST_UPDATE_STEP_TIMEOUT_MS = 6e4;
@@ -20103,7 +20165,7 @@ POST-UPDATE SYNC FAILED (${t.label}): ${hop} \u2014 ${result.detail}. No marker 
   }
   let warning = "";
   try {
-    writeFileSync11(markerPath, `${current}
+    writeFileSync10(markerPath, `${current}
 `);
   } catch (err) {
     warning = `\u2717 ${hop}: agents synced, but ${markerPath} could not be written (${err?.code ?? err?.message ?? err}) \u2014 the sync ${t.rerun} until it can. `;
@@ -20123,7 +20185,7 @@ POST-UPDATE SYNC (${t.label}): ${hop} \u2014 ${restartLine}.` + (result.restart 
 
 // scripts/lib/work-pr.mjs
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { existsSync as existsSync23, linkSync as linkSync2, mkdirSync as mkdirSync17, readdirSync as readdirSync8, readFileSync as readFileSync24, renameSync as renameSync9, unlinkSync as unlinkSync4, writeFileSync as writeFileSync12 } from "node:fs";
+import { existsSync as existsSync23, linkSync as linkSync2, mkdirSync as mkdirSync17, readdirSync as readdirSync8, readFileSync as readFileSync24, renameSync as renameSync8, unlinkSync as unlinkSync4, writeFileSync as writeFileSync11 } from "node:fs";
 import { delimiter, dirname as dirname16, join as join35 } from "node:path";
 function noOriginRemote(cwd) {
   const r = spawnSync5("git", ["remote"], { cwd, encoding: "utf8", timeout: 3e4 });
@@ -20191,7 +20253,7 @@ function prLoopStateExists(root) {
 function operatingStateLines(root, pluginRoot, { opener } = {}) {
   const { config, configUnreadable } = readProjectConfig2(root);
   const atClone = Boolean(pluginRoot && samePath2(root, pluginRoot));
-  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: "opencode" }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: config?.mode === "work" && noOriginRemote(root) }), overpassLine({ config, configUnreadable, host: "opencode" }), handoffFilesLine({ config, configUnreadable, root }), storageLine({ config, configUnreadable, root }), ...mountedDomainLines({ config, configUnreadable, opener, root }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
+  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: "opencode" }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: config?.mode === "work" && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root }), storageLine({ config, configUnreadable, root }), overpassLine({ config, configUnreadable, host: "opencode" }), ...mountedDomainLines({ config, configUnreadable, opener, root }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
   return { lines, config };
 }
 function undeclaredSourceBlock(root, config) {
@@ -20211,8 +20273,8 @@ function maintenanceLines(state, config, root) {
 init_dist2();
 
 // scripts/hooks/lib/plan-lock.mjs
-import { createHash as createHash6, randomUUID as randomUUID9 } from "node:crypto";
-import { closeSync as closeSync8, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync18, openSync as openSync8, readSync as readSync4, renameSync as renameSync10, unlinkSync as unlinkSync5, writeFileSync as writeFileSync13 } from "node:fs";
+import { createHash as createHash6, randomUUID as randomUUID8 } from "node:crypto";
+import { closeSync as closeSync8, constants as FS2, fstatSync as fstatSync2, mkdirSync as mkdirSync18, openSync as openSync8, readSync as readSync4, renameSync as renameSync9, unlinkSync as unlinkSync5, writeFileSync as writeFileSync12 } from "node:fs";
 import { join as join36 } from "node:path";
 var PLAN_MAX_BYTES = 4 * 1024 * 1024;
 var LOCK_MAX_BYTES = 64 * 1024;
@@ -20332,9 +20394,9 @@ function computeStatus(lock) {
   return { status: sha === lock.file_sha256_at_approval ? "UNCHANGED" : "MODIFIED", sha256: sha };
 }
 function claimMarker(path) {
-  const claimed = `${path}.claimed-${randomUUID9()}`;
+  const claimed = `${path}.claimed-${randomUUID8()}`;
   try {
-    renameSync10(path, claimed);
+    renameSync9(path, claimed);
   } catch {
     return null;
   }
@@ -21815,19 +21877,19 @@ function createResearchRecorder({ rootOf, fenced, now }) {
 import { join as join45 } from "node:path";
 
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync20, readFileSync as readFileSync26, renameSync as renameSync11, rmSync as rmSync12, writeFileSync as writeFileSync14 } from "node:fs";
+import { mkdirSync as mkdirSync20, readFileSync as readFileSync26, renameSync as renameSync10, rmSync as rmSync12, writeFileSync as writeFileSync13 } from "node:fs";
 import { hostname as hostname3 } from "node:os";
 import { join as join44 } from "node:path";
-import { randomUUID as randomUUID10 } from "node:crypto";
+import { randomUUID as randomUUID9 } from "node:crypto";
 function selectionFilePath(root, host = hostname3()) {
   const safeHost = String(host).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
   return join44(root, ".sterling", "transient", `selection.${safeHost}.json`);
 }
 function takeSelectionFile(root) {
   const path = selectionFilePath(root);
-  const claimed = `${path}.taken-${process.pid}-${randomUUID10()}`;
+  const claimed = `${path}.taken-${process.pid}-${randomUUID9()}`;
   try {
-    renameSync11(path, claimed);
+    renameSync10(path, claimed);
   } catch (e) {
     if (e?.code === "ENOENT") return void 0;
     throw e;
@@ -21992,14 +22054,14 @@ ${line}`;
 // packages/opencode-plugin/src/settle.mjs
 init_dist();
 import { spawnSync as spawnSync9 } from "node:child_process";
-import { randomUUID as randomUUID13 } from "node:crypto";
-import { existsSync as existsSync28, mkdirSync as mkdirSync22, readFileSync as readFileSync29, renameSync as renameSync13, rmSync as rmSync14, writeFileSync as writeFileSync16 } from "node:fs";
+import { randomUUID as randomUUID12 } from "node:crypto";
+import { existsSync as existsSync28, mkdirSync as mkdirSync22, readFileSync as readFileSync29, renameSync as renameSync12, rmSync as rmSync14, writeFileSync as writeFileSync15 } from "node:fs";
 import { dirname as dirname19, join as join48 } from "node:path";
 
 // scripts/hooks/lib/session-duties.mjs
 init_dist();
 init_dist2();
-import { randomUUID as randomUUID11 } from "node:crypto";
+import { randomUUID as randomUUID10 } from "node:crypto";
 import { existsSync as existsSync27, readFileSync as readFileSync27, readdirSync as readdirSync10 } from "node:fs";
 import { join as join46 } from "node:path";
 var ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -22239,7 +22301,7 @@ var researchOwedText = (queryTexts) => `research owed: session research not capt
 var captureOwedText = (count, clipped) => `capture owed: direct-mode session touched ${count} file(s) and ended without capture${clipped}`;
 function systemTodo(now, fields) {
   return {
-    id: randomUUID11(),
+    id: randomUUID10(),
     type: "todo",
     created_at: now,
     updated_at: now,
@@ -22259,8 +22321,8 @@ var hasOpenSystemTodo = (store, reason) => store.query({ types: ["todo"], cap: 1
 
 // scripts/hooks/lib/settlement.mjs
 init_dist2();
-import { createHash as createHash7, randomUUID as randomUUID12 } from "node:crypto";
-import { readFileSync as readFileSync28, writeFileSync as writeFileSync15, mkdirSync as mkdirSync21, rmSync as rmSync13, statSync as statSync10, renameSync as renameSync12 } from "node:fs";
+import { createHash as createHash7, randomUUID as randomUUID11 } from "node:crypto";
+import { readFileSync as readFileSync28, writeFileSync as writeFileSync14, mkdirSync as mkdirSync21, rmSync as rmSync13, statSync as statSync10, renameSync as renameSync11 } from "node:fs";
 import { spawnSync as spawnSync8 } from "node:child_process";
 import { join as join47, dirname as dirname18 } from "node:path";
 function hashFile(root, rel) {
@@ -22289,7 +22351,7 @@ function loadGeneratedProjections(root) {
 }
 function buildReconcileItem(article, fileKeys, now) {
   return {
-    id: randomUUID12(),
+    id: randomUUID11(),
     type: "todo",
     created_at: now,
     updated_at: now,
@@ -22324,7 +22386,7 @@ function mintSettlementReconcile(store, root, candidatePaths, now = (/* @__PURE_
     const drifted = [...freshPaths].filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
     if (!drifted.length) continue;
     const fileKeys = drifted.sort();
-    const { record } = store.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now), { operation_id: randomUUID12() });
+    const { record } = store.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now), { operation_id: randomUUID11() });
     minted.push({ article_id: article.id, paths: record.file_keys ?? fileKeys });
   }
   return minted;
@@ -22401,17 +22463,17 @@ function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
   mkdirSync21(dirname18(p), { recursive: true });
   if (ifAbsent) {
     try {
-      writeFileSync15(p, JSON.stringify(snapshot), { flag: "wx" });
+      writeFileSync14(p, JSON.stringify(snapshot), { flag: "wx" });
       return true;
     } catch (e) {
       if (e?.code === "EEXIST") return false;
       throw e;
     }
   }
-  const tmp = `${p}.${process.pid}.${randomUUID12()}.tmp`;
+  const tmp = `${p}.${process.pid}.${randomUUID11()}.tmp`;
   try {
-    writeFileSync15(tmp, JSON.stringify(snapshot));
-    renameSync12(tmp, p);
+    writeFileSync14(tmp, JSON.stringify(snapshot));
+    renameSync11(tmp, p);
   } catch (e) {
     rmSync13(tmp, { force: true });
     throw e;
@@ -22561,15 +22623,15 @@ ${owed.map((d) => `- ${describe(d)}`).join("\n")}`);
   if (degraded.length) notices.push(`Sterling settlement: the article demand was checked with a degraded probe: ${degraded.join("; ")}.`);
   const present = new Set(events.map(eventKey));
   const nextWeighed = [.../* @__PURE__ */ new Set([...state.weighed.filter((k) => present.has(k)), ...fresh.map(eventKey)])];
-  writeJsonAtomic3(join48(root, DUTIES_REL), { owed, weighed: nextWeighed });
+  writeJsonAtomic2(join48(root, DUTIES_REL), { owed, weighed: nextWeighed });
   return { notices };
 }
-function writeJsonAtomic3(path, value) {
+function writeJsonAtomic2(path, value) {
   mkdirSync22(dirname19(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.${randomUUID13()}.tmp`;
+  const tmp = `${path}.${process.pid}.${randomUUID12()}.tmp`;
   try {
-    writeFileSync16(tmp, JSON.stringify(value));
-    renameSync13(tmp, path);
+    writeFileSync15(tmp, JSON.stringify(value));
+    renameSync12(tmp, path);
   } catch (e) {
     rmSync14(tmp, { force: true });
     throw e;
