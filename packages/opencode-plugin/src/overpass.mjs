@@ -168,6 +168,10 @@ function readOwnership(root) {
   if (parsed.pending !== undefined && !(isObject(parsed.pending) && isObject(parsed.pending.agent) && isObject(parsed.pending.before) && isObject(parsed.pending.after))) {
     throw new Error(`${OVERLAY_REL} has a "pending" value that is not an interrupted-update record; nothing is changed until it is fixed or removed`);
   }
+  // `pending.notes` (recovery notes not yet delivered) is absent in records written before it existed.
+  if (parsed.pending?.notes !== undefined && !(Array.isArray(parsed.pending.notes) && parsed.pending.notes.every((n) => typeof n === 'string'))) {
+    throw new Error(`${OVERLAY_REL} has "pending.notes" that is not a list of notes; nothing is changed until it is fixed or removed`);
+  }
   return parsed;
 }
 
@@ -208,22 +212,28 @@ const describeOwned = (fields) => (Object.hasOwn(fields ?? {}, 'model') ? `model
 // model is the very one that write set; any other model there is the user's and stays.
 // When that leaves a model the old ownership would have undone, a note names the values
 // from before Overpass, so the user can put them back and nothing is dropped silently.
+// Such a note is kept in the next pending record (`pending.notes`) until a convergence
+// completes and returns it, so a later failed write cannot lose it.
 // NOT GUARANTEED: the owned fields alone cannot tell a write that never landed from one
-// that landed and was then set back by hand to exactly the old model and variant (read
-// as not landed, so that hand edit is undone), nor a hand edit to exactly the model the
-// write meant to set (read as landed). And when the write did not land and the user then
-// changed only the variant of a tier entry, the tier model stays with the note instead
-// of being undone, because that state is the same as the user choosing the tier again.
+// that landed and was then set back by hand to exactly the old model and variant. That
+// case is decided, by ruling, as not landed: turning Overpass off then restores the
+// pre-Overpass model and variant, so that hand edit is undone, because the other reading
+// would leave a write that really failed on the gateway tier after Overpass is off. Nor
+// can they tell a hand edit to exactly the model the write meant to set (read as
+// landed). And when the write did not land and the user then changed only the variant
+// of a tier entry, the tier model stays with the note instead of being undone, because
+// that state is the same as the user choosing the tier again.
 /**
  * Settles an update a failed or interrupted write left pending (see the invariant
- * above). Returns { own, settled, notes }: `own` without `pending`, and a note for each
- * entry left to the user that the old ownership would have undone.
+ * above). Returns { own, settled, notes }: `own` without `pending`, and the recovery
+ * notes not yet delivered: those the pending record carried, then one for each entry
+ * left to the user that the old ownership would have undone.
  */
 function settlePending(own, agents) {
   if (!own.pending) return { own, settled: false, notes: [] };
   const { pending } = own;
   const agent = { ...own.agent };
-  const notes = [];
+  const notes = [...(pending.notes ?? [])];
   for (const name of Object.keys(pending.after)) {
     const entry = agents[name];
     if (sameOwned(entry, pending.before[name])) continue;
@@ -266,7 +276,8 @@ export function convergeOverlay(root, res, { fs } = {}) {
   }
   if (config.agent !== undefined && !isObject(config.agent)) throw new Error(`${PROJECT_CONFIG_REL}: "agent" is not an object, so the Overpass agent models were not changed`);
   const agents = { ...(config.agent ?? {}) };
-  const { own: settledOwn, settled, notes } = settlePending(stored, agents);
+  const { own: settledOwn, settled, notes: recoveryNotes } = settlePending(stored, agents);
+  const notes = [...recoveryNotes];
   const own = { agent: { ...settledOwn.agent } };
   const names = new Set([...Object.keys(want), ...Object.keys(own.agent)]);
   let ownChanged = settled;
@@ -333,7 +344,8 @@ export function convergeOverlay(root, res, { fs } = {}) {
   }
   refuseTracked(root);
   if (Object.keys(agents).length || config.agent !== undefined) config.agent = agents;
-  writeOwnership(root, { agent: settledOwn.agent, pending: { before, after, agent: own.agent } }, fs);
+  // Recovery notes ride in the pending record until this write completes, so a failure below cannot lose them.
+  writeOwnership(root, { agent: settledOwn.agent, pending: { before, after, agent: own.agent, ...(recoveryNotes.length ? { notes: recoveryNotes } : {}) } }, fs);
   writeText(path, projectConfigText(config), fs);
   writeOwnership(root, own, fs);
   return { changed, notes };
