@@ -49,7 +49,9 @@ export interface DashboardOptions {
    *  use it to make that write fail part-way. */
   configWriteFs?: AtomicWriteFs;
   /** Which host opened the dashboard. 'opencode' offers the Overpass rows (in
-   *  work mode); the terminal TUI leaves it unset. */
+   *  work mode). The in-OpenCode dashboard (opencode/sterling-tui/tui.tsx)
+   *  passes 'opencode'; the tmux side pane (main.ts) passes it from
+   *  `--host opencode` through launch-args.ts, and leaves it unset otherwise. */
   host?: 'opencode';
 }
 

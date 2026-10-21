@@ -124,19 +124,19 @@ var require_Lazyness = __commonJS({
       var firstTime = true, module_;
       return new Proxy((() => {
       }), {
-        construct: (target, args2) => {
+        construct: (target, args) => {
           if (firstTime) {
             module_ = require_(moduleId);
             firstTime = false;
           }
-          return Reflect.construct(module_, args2);
+          return Reflect.construct(module_, args);
         },
-        apply: (target, thisArg, args2) => {
+        apply: (target, thisArg, args) => {
           if (firstTime) {
             module_ = require_(moduleId);
             firstTime = false;
           }
-          return Reflect.apply(module_, thisArg, args2);
+          return Reflect.apply(module_, thisArg, args);
         },
         get: (target, property) => {
           if (firstTime) {
@@ -1463,14 +1463,14 @@ var require_StringNumber = __commonJS({
       }
       return parseFloat((this.sign < 0 ? "-" : "") + "0." + this.digits.join("") + "e" + this.exposant);
     };
-    StringNumber.prototype.toString = function(...args2) {
+    StringNumber.prototype.toString = function(...args) {
       if (this.special !== null) {
         return "" + this.special;
       }
       if (this.exposant > 20 || this.exposant < -20) {
-        return this.toScientificString(...args2);
+        return this.toScientificString(...args);
       }
-      return this.toNoExpString(...args2);
+      return this.toNoExpString(...args);
     };
     StringNumber.prototype.toExponential = StringNumber.prototype.toExponentialString = function() {
       if (this.special !== null) {
@@ -1700,8 +1700,8 @@ var require_format = __commonJS({
     var unicode = require_unicode();
     var naturalSort = require_naturalSort();
     var StringNumber = require_StringNumber();
-    exports.formatMethod = function(...args2) {
-      var arg, str2 = args2[0], autoIndex = 1, length = args2.length;
+    exports.formatMethod = function(...args) {
+      var arg, str2 = args[0], autoIndex = 1, length = args.length;
       if (typeof str2 !== "string") {
         if (!str2) {
           str2 = "";
@@ -1751,7 +1751,7 @@ var require_format = __commonJS({
           if (index >= length || index < 1) {
             arg = void 0;
           } else {
-            arg = args2[index];
+            arg = args[index];
           }
           if (modes[mode]) {
             replacement = modes[mode](arg, modeArg, this);
@@ -1797,7 +1797,7 @@ var require_format = __commonJS({
                 if (index >= length || index < 1) {
                   argList[i] = void 0;
                 } else {
-                  argList[i] = args2[index];
+                  argList[i] = args[index];
                 }
               }
             }
@@ -1814,7 +1814,7 @@ var require_format = __commonJS({
       }
       if (this.extraArguments) {
         for (; autoIndex < length; autoIndex++) {
-          arg = args2[autoIndex];
+          arg = args[autoIndex];
           if (arg === null || arg === void 0) {
             continue;
           } else if (typeof arg === "string") {
@@ -3996,11 +3996,11 @@ var require_setImmediate = __commonJS({
         if (typeof callback !== "function") {
           callback = new Function("" + callback);
         }
-        var args2 = new Array(arguments.length - 1);
-        for (var i = 0; i < args2.length; i++) {
-          args2[i] = arguments[i + 1];
+        var args = new Array(arguments.length - 1);
+        for (var i = 0; i < args.length; i++) {
+          args[i] = arguments[i + 1];
         }
-        var task = { callback, args: args2 };
+        var task = { callback, args };
         tasksByHandle[nextHandle] = task;
         registerImmediate(nextHandle);
         return nextHandle++;
@@ -4010,22 +4010,22 @@ var require_setImmediate = __commonJS({
       }
       function run(task) {
         var callback = task.callback;
-        var args2 = task.args;
-        switch (args2.length) {
+        var args = task.args;
+        switch (args.length) {
           case 0:
             callback();
             break;
           case 1:
-            callback(args2[0]);
+            callback(args[0]);
             break;
           case 2:
-            callback(args2[0], args2[1]);
+            callback(args[0], args[1]);
             break;
           case 3:
-            callback(args2[0], args2[1], args2[2]);
+            callback(args[0], args[1], args[2]);
             break;
           default:
-            callback.apply(undefined2, args2);
+            callback.apply(undefined2, args);
             break;
         }
       }
@@ -4392,11 +4392,11 @@ var require_core = __commonJS({
     };
     Promise2.callbackAll = function(fn) {
       return new Promise2((resolve10, reject) => {
-        fn((error, ...args2) => {
+        fn((error, ...args) => {
           if (error) {
             reject(error);
           } else {
-            resolve10(args2);
+            resolve10(args);
           }
         });
       });
@@ -4468,9 +4468,9 @@ var require_core = __commonJS({
       promise.fn = fn;
       return promise;
     };
-    Promise2.try = function(fn, ...args2) {
+    Promise2.try = function(fn, ...args) {
       try {
-        return Promise2.resolve(fn(...args2));
+        return Promise2.resolve(fn(...args));
       } catch (error) {
         return Promise2.reject(error);
       }
@@ -5068,19 +5068,19 @@ var require_wrapper = __commonJS({
       return new Promise2((resolve10) => emitter.once(eventName, resolve10));
     };
     Promise2.onceEventAll = (emitter, eventName) => {
-      return new Promise2((resolve10) => emitter.once(eventName, (...args2) => resolve10(args2)));
+      return new Promise2((resolve10) => emitter.once(eventName, (...args) => resolve10(args)));
     };
     Promise2.onceEventOrError = (emitter, eventName, excludeEvents, _internalAllArgs = false) => {
       return new Promise2((resolve10, reject) => {
         var altRejects;
-        var resolve_ = (...args2) => {
+        var resolve_ = (...args) => {
           emitter.removeListener("error", reject_);
           if (altRejects) {
             for (let event2 in altRejects) {
               emitter.removeListener(event2, altRejects[event2]);
             }
           }
-          resolve10(_internalAllArgs ? args2 : args2[0]);
+          resolve10(_internalAllArgs ? args : args[0]);
         };
         var reject_ = (arg) => {
           emitter.removeListener(eventName, resolve_);
@@ -5099,12 +5099,12 @@ var require_wrapper = __commonJS({
           }
           altRejects = {};
           excludeEvents.forEach((event2) => {
-            var altReject = (...args2) => {
+            var altReject = (...args) => {
               emitter.removeListener("error", reject_);
               emitter.removeListener(eventName, resolve_);
               var error = new Error("Received an excluded event: " + event2);
               error.event = event2;
-              error.eventArgs = args2;
+              error.eventArgs = args;
               reject(error);
             };
             emitter.once(event2, altReject);
@@ -5127,9 +5127,9 @@ var require_decorators = __commonJS({
     var noop = () => void 0;
     Promise2.promisifyAll = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
-        return (...args2) => {
+        return (...args) => {
           return new Promise2((resolve10, reject) => {
-            nodeAsyncFn.call(thisBinding, ...args2, (error, ...cbArgs) => {
+            nodeAsyncFn.call(thisBinding, ...args, (error, ...cbArgs) => {
               if (error) {
                 if (cbArgs.length && error instanceof Error) {
                   error.args = cbArgs;
@@ -5142,9 +5142,9 @@ var require_decorators = __commonJS({
           });
         };
       }
-      return function(...args2) {
+      return function(...args) {
         return new Promise2((resolve10, reject) => {
-          nodeAsyncFn.call(this, ...args2, (error, ...cbArgs) => {
+          nodeAsyncFn.call(this, ...args, (error, ...cbArgs) => {
             if (error) {
               if (cbArgs.length && error instanceof Error) {
                 error.args = cbArgs;
@@ -5159,9 +5159,9 @@ var require_decorators = __commonJS({
     };
     Promise2.promisify = (nodeAsyncFn, thisBinding) => {
       if (thisBinding) {
-        return (...args2) => {
+        return (...args) => {
           return new Promise2((resolve10, reject) => {
-            nodeAsyncFn.call(thisBinding, ...args2, (error, cbArg) => {
+            nodeAsyncFn.call(thisBinding, ...args, (error, cbArg) => {
               if (error) {
                 if (cbArg !== void 0 && error instanceof Error) {
                   error.arg = cbArg;
@@ -5174,9 +5174,9 @@ var require_decorators = __commonJS({
           });
         };
       }
-      return function(...args2) {
+      return function(...args) {
         return new Promise2((resolve10, reject) => {
-          nodeAsyncFn.call(this, ...args2, (error, cbArg) => {
+          nodeAsyncFn.call(this, ...args, (error, cbArg) => {
             if (error) {
               if (cbArg !== void 0 && error instanceof Error) {
                 error.arg = cbArg;
@@ -5194,8 +5194,8 @@ var require_decorators = __commonJS({
         thisBinding = errorInterceptor;
         errorInterceptor = noop;
       }
-      return function(...args2) {
-        var localThis = thisBinding || this, maybePromise = asyncFn.call(localThis, ...args2);
+      return function(...args) {
+        var localThis = thisBinding || this, maybePromise = asyncFn.call(localThis, ...args);
         Promise2.resolve(maybePromise).then(
           (value) => interceptor.call(localThis, value),
           (error) => errorInterceptor.call(localThis, error)
@@ -5221,11 +5221,11 @@ var require_decorators = __commonJS({
         }
         return instance;
       };
-      return function(...args2) {
+      return function(...args) {
         var localThis = thisBinding || this, instance = getInstance(localThis);
         if (!instance.triggered) {
           instance.triggered = true;
-          instance.result = asyncFn.call(localThis, ...args2);
+          instance.result = asyncFn.call(localThis, ...args);
         }
         return instance.result;
       };
@@ -5245,10 +5245,10 @@ var require_decorators = __commonJS({
         }
         return instance;
       };
-      return function(...args2) {
+      return function(...args) {
         var localThis = thisBinding || this, instance = getInstance(localThis), promise = new Promise2();
         instance.lastPromise.finally(() => {
-          Promise2.propagate(asyncFn.call(localThis, ...args2), promise);
+          Promise2.propagate(asyncFn.call(localThis, ...args), promise);
         });
         instance.lastPromise = promise;
         return promise;
@@ -5269,12 +5269,12 @@ var require_decorators = __commonJS({
         }
         return instance;
       };
-      return function(...args2) {
+      return function(...args) {
         var localThis = thisBinding || this, instance = getInstance(localThis);
         if (instance.inProgress) {
           return instance.inProgress;
         }
-        let inProgress = instance.inProgress = asyncFn.call(localThis, ...args2);
+        let inProgress = instance.inProgress = asyncFn.call(localThis, ...args);
         Promise2.finally(inProgress, () => instance.inProgress = null);
         return inProgress;
       };
@@ -5294,12 +5294,12 @@ var require_decorators = __commonJS({
         }
         return instance;
       };
-      return function(...args2) {
+      return function(...args) {
         var localThis = thisBinding || this, instance = getInstance(localThis);
         if (instance.inProgress) {
           return instance.inProgress;
         }
-        let inProgress = instance.inProgress = asyncFn.call(localThis, ...args2);
+        let inProgress = instance.inProgress = asyncFn.call(localThis, ...args);
         Promise2.finally(inProgress, () => setTimeout(() => instance.inProgress = null, delay));
         return inProgress;
       };
@@ -5330,18 +5330,18 @@ var require_decorators = __commonJS({
         var instance = getInstance(this);
         instance.inProgress = instance.currentUpdatePromise = null;
         if (instance.nextUpdateWith) {
-          let args2 = instance.nextUpdateWith;
+          let args = instance.nextUpdateWith;
           instance.nextUpdateWith = null;
           let sharedPromise = instance.nextUpdatePromise;
           instance.nextUpdatePromise = null;
-          instance.inProgress = inWrapper.call(this, args2);
+          instance.inProgress = inWrapper.call(this, args);
           Promise2.propagate(instance.inProgress, sharedPromise);
         }
       };
-      inWrapper = function(args2) {
+      inWrapper = function(args) {
         var instance = getInstance(this);
         instance.inProgress = new Promise2();
-        instance.currentUpdateWith = args2;
+        instance.currentUpdateWith = args;
         instance.waitingNextTick = true;
         Promise2.nextTick(() => {
           instance.waitingNextTick = false;
@@ -5358,20 +5358,20 @@ var require_decorators = __commonJS({
         });
         return instance.inProgress;
       };
-      return function(...args2) {
+      return function(...args) {
         var localThis = thisBinding || this, instance = getInstance(localThis);
         if (instance.waitingNextTick) {
-          instance.currentUpdateWith = args2;
+          instance.currentUpdateWith = args;
           return instance.inProgress;
         }
         if (instance.currentUpdatePromise) {
           if (!instance.nextUpdatePromise) {
             instance.nextUpdatePromise = new Promise2();
           }
-          instance.nextUpdateWith = args2;
+          instance.nextUpdateWith = args;
           return instance.nextUpdatePromise;
         }
-        return inWrapper.call(localThis, args2);
+        return inWrapper.call(localThis, args);
       };
     };
     Promise2.debounceUpdate = (options, asyncFn, thisBinding) => {
@@ -5416,11 +5416,11 @@ var require_decorators = __commonJS({
         var instance = getInstance(this);
         instance.inProgress = instance.currentUpdatePromise = null;
         if (instance.nextUpdateWith) {
-          let args2 = instance.nextUpdateWith;
+          let args = instance.nextUpdateWith;
           instance.nextUpdateWith = null;
           let sharedPromise = instance.nextUpdatePromise;
           instance.nextUpdatePromise = null;
-          instance.inProgress = inWrapper.call(this, args2);
+          instance.inProgress = inWrapper.call(this, args);
           Promise2.propagate(instance.inProgress, sharedPromise);
         }
       };
@@ -5436,10 +5436,10 @@ var require_decorators = __commonJS({
         outWrapper = nextUpdate;
       }
       if (waitFn) {
-        inWrapper = function(args2) {
+        inWrapper = function(args) {
           var instance = getInstance(this);
           instance.inProgress = new Promise2();
-          instance.currentUpdateWith = args2;
+          instance.currentUpdateWith = args;
           instance.waitInProgress = waitFn();
           Promise2.finally(instance.waitInProgress, () => {
             instance.waitInProgress = null;
@@ -5449,38 +5449,38 @@ var require_decorators = __commonJS({
           });
           return instance.inProgress;
         };
-        return function(...args2) {
+        return function(...args) {
           var localThis = thisBinding || this, instance = getInstance(localThis);
           if (instance.waitInProgress) {
-            instance.currentUpdateWith = args2;
+            instance.currentUpdateWith = args;
             return instance.inProgress;
           }
           if (instance.currentUpdatePromise) {
             if (!instance.nextUpdatePromise) {
               instance.nextUpdatePromise = new Promise2();
             }
-            instance.nextUpdateWith = args2;
+            instance.nextUpdateWith = args;
             return instance.nextUpdatePromise;
           }
-          return inWrapper.call(localThis, args2);
+          return inWrapper.call(localThis, args);
         };
       }
-      inWrapper = function(args2) {
+      inWrapper = function(args) {
         var instance = getInstance(this);
-        instance.inProgress = asyncFn.call(this, ...args2);
+        instance.inProgress = asyncFn.call(this, ...args);
         Promise2.finally(instance.inProgress, outWrapper.bind(this));
         return instance.inProgress;
       };
-      return function(...args2) {
+      return function(...args) {
         var localThis = thisBinding || this, instance = getInstance(localThis);
         if (instance.inProgress) {
           if (!instance.nextUpdatePromise) {
             instance.nextUpdatePromise = new Promise2();
           }
-          instance.nextUpdateWith = args2;
+          instance.nextUpdateWith = args;
           return instance.nextUpdatePromise;
         }
-        return inWrapper.call(localThis, args2);
+        return inWrapper.call(localThis, args);
       };
     };
     Promise2.NO_DELAY = {};
@@ -5513,7 +5513,7 @@ var require_decorators = __commonJS({
         return resourceData;
       };
       const outWrapper = (resourceData, level) => {
-        var delta, args2, sharedPromise, now = /* @__PURE__ */ new Date();
+        var delta, args, sharedPromise, now = /* @__PURE__ */ new Date();
         resourceData.inProgress = null;
         if (level >= 2) {
           resourceData.lastFullSyncTime = resourceData.lastTime = now;
@@ -5526,24 +5526,24 @@ var require_decorators = __commonJS({
             resourceData.inProgress.finally(() => outWrapper(resourceData, 0));
             return resourceData.nextFullSyncPromise;
           }
-          args2 = resourceData.nextFullSyncWith;
+          args = resourceData.nextFullSyncWith;
           resourceData.nextFullSyncWith = null;
           sharedPromise = resourceData.nextFullSyncPromise;
           resourceData.nextFullSyncPromise = null;
-          resourceData.lastFullSync = resourceData.last = resourceData.inProgress = fullSyncParams.fn.call(...args2);
+          resourceData.lastFullSync = resourceData.last = resourceData.inProgress = fullSyncParams.fn.call(...args);
           Promise2.propagate(resourceData.inProgress, sharedPromise);
           Promise2.finally(resourceData.inProgress, () => outWrapper(resourceData, 2));
           return resourceData.inProgress;
         }
       };
-      const getInWrapper = function(resourceId, ...args2) {
+      const getInWrapper = function(resourceId, ...args) {
         var noDelay = false, localThis = getParams.thisBinding || this, resourceData = getResourceData(resourceId);
-        if (args2[0] === Promise2.NO_DELAY) {
+        if (args[0] === Promise2.NO_DELAY) {
           noDelay = true;
-          args2.shift();
-        } else if (args2[0] === Promise2.BATCH_NO_DELAY) {
-          args2.shift();
-          let batchId = args2.shift();
+          args.shift();
+        } else if (args[0] === Promise2.BATCH_NO_DELAY) {
+          args.shift();
+          let batchId = args.shift();
           if (!resourceData.noDelayBatches.has(batchId)) {
             resourceData.noDelayBatches.add(batchId);
             noDelay = true;
@@ -5554,23 +5554,23 @@ var require_decorators = __commonJS({
         }
         if (!noDelay && getParams.delay && resourceData.lastTime && /* @__PURE__ */ new Date() - resourceData.lastTime < getParams.delay) {
           if (typeof getParams.onDebounce === "function") {
-            getParams.onDebounce(resourceId, ...args2);
+            getParams.onDebounce(resourceId, ...args);
           }
           return resourceData.last;
         }
-        resourceData.last = resourceData.inProgress = getParams.fn.call(localThis, resourceId, ...args2);
+        resourceData.last = resourceData.inProgress = getParams.fn.call(localThis, resourceId, ...args);
         resourceData.inProgressIsFull = false;
         Promise2.finally(resourceData.inProgress, () => outWrapper(resourceData, 1));
         return resourceData.inProgress;
       };
-      const fullSyncInWrapper = function(resourceId, ...args2) {
+      const fullSyncInWrapper = function(resourceId, ...args) {
         var delta, noDelay = false, localThis = fullSyncParams.thisBinding || this, resourceData = getResourceData(resourceId);
-        if (args2[0] === Promise2.NO_DELAY) {
+        if (args[0] === Promise2.NO_DELAY) {
           noDelay = true;
-          args2.shift();
-        } else if (args2[0] === Promise2.BATCH_NO_DELAY) {
-          args2.shift();
-          let batchId = args2.shift();
+          args.shift();
+        } else if (args[0] === Promise2.BATCH_NO_DELAY) {
+          args.shift();
+          let batchId = args.shift();
           if (!resourceData.noDelayBatches.has(batchId)) {
             resourceData.noDelayBatches.add(batchId);
             noDelay = true;
@@ -5584,27 +5584,27 @@ var require_decorators = __commonJS({
           if (!resourceData.nextFullSyncPromise) {
             resourceData.nextFullSyncPromise = new Promise2();
           }
-          resourceData.nextFullSyncWith = [localThis, resourceId, ...args2];
+          resourceData.nextFullSyncWith = [localThis, resourceId, ...args];
           return resourceData.nextFullSyncPromise;
         }
-        resourceData.lastFullSync = resourceData.last = resourceData.inProgress = fullSyncParams.fn.call(localThis, resourceId, ...args2);
+        resourceData.lastFullSync = resourceData.last = resourceData.inProgress = fullSyncParams.fn.call(localThis, resourceId, ...args);
         Promise2.finally(resourceData.inProgress, () => outWrapper(resourceData, 2));
         return resourceData.inProgress;
       };
       return [getInWrapper, fullSyncInWrapper];
     };
     Promise2.timeout = (timeout, asyncFn, thisBinding) => {
-      return function(...args2) {
+      return function(...args) {
         var promise = new Promise2();
-        Promise2.propagate(asyncFn.call(thisBinding || this, ...args2), promise);
+        Promise2.propagate(asyncFn.call(thisBinding || this, ...args), promise);
         setTimeout(() => promise.reject(new Error("Timeout")), timeout);
         return promise;
       };
     };
     Promise2.variableTimeout = (asyncFn, thisBinding) => {
-      return function(timeout, ...args2) {
+      return function(timeout, ...args) {
         var promise = new Promise2();
-        Promise2.propagate(asyncFn.call(thisBinding || this, ...args2), promise);
+        Promise2.propagate(asyncFn.call(thisBinding || this, ...args), promise);
         setTimeout(() => promise.reject(new Error("Timeout")), timeout);
         return promise;
       };
@@ -9046,7 +9046,7 @@ var require_Proxy = __commonJS({
     var MESSAGE_TYPE = "NextGenEvents/message";
     function noop() {
     }
-    Proxy2.create = (...args2) => new Proxy2(...args2);
+    Proxy2.create = (...args) => new Proxy2(...args);
     Proxy2.prototype.addLocalService = function(id, emitter, options) {
       this.localServices[id] = LocalService.create(this, id, emitter, options);
       return this.localServices[id];
@@ -9268,7 +9268,7 @@ var require_Proxy = __commonJS({
       });
       this.destroyed = true;
     };
-    RemoteService.prototype.emit = function(eventName, ...args2) {
+    RemoteService.prototype.emit = function(eventName, ...args) {
       if (this.destroyed) {
         return;
       }
@@ -9276,17 +9276,17 @@ var require_Proxy = __commonJS({
       if (typeof eventName === "number") {
         throw new TypeError("Cannot emit with a nice value on a remote service");
       }
-      if (typeof args2[args2.length - 1] !== "function") {
+      if (typeof args[args.length - 1] !== "function") {
         this.proxy.send({
           __type: MESSAGE_TYPE,
           service: this.id,
           method: "emit",
           event: eventName,
-          args: args2
+          args
         });
         return;
       }
-      callback = args2.pop();
+      callback = args.pop();
       ackId = this.proxy.nextAckId++;
       triggered = false;
       var onAck = (message) => {
@@ -9304,7 +9304,7 @@ var require_Proxy = __commonJS({
         method: "emit",
         ack: ackId,
         event: eventName,
-        args: args2
+        args
       });
     };
     RemoteService.prototype.addListener = function(eventName, fn, options) {
@@ -9607,7 +9607,7 @@ var require_NextGenEvents = __commonJS({
     };
     NextGenEvents.prototype.waitForAll = function(eventName) {
       return new Promise((resolve10) => {
-        this.addListener(eventName, (...args2) => resolve10(args2), { once: true });
+        this.addListener(eventName, (...args) => resolve10(args), { once: true });
       });
     };
     NextGenEvents.prototype.removeListener = function(eventName, id) {
@@ -9738,24 +9738,24 @@ var require_NextGenEvents = __commonJS({
       }
     };
     var nextEventId = 0;
-    NextGenEvents.prototype.emit = function(...args2) {
-      var event2 = NextGenEvents.createEvent(this, ...args2);
+    NextGenEvents.prototype.emit = function(...args) {
+      var event2 = NextGenEvents.createEvent(this, ...args);
       return NextGenEvents.emitEvent(event2);
     };
-    NextGenEvents.prototype.emitIfListener = function(...args2) {
-      var eventName = typeof args2[0] === "number" ? args2[1] : args2[0];
+    NextGenEvents.prototype.emitIfListener = function(...args) {
+      var eventName = typeof args[0] === "number" ? args[1] : args[0];
       if (!this.__ngev || !this.__ngev.listeners[eventName] || !this.__ngev.listeners[eventName].length) {
         return null;
       }
-      var event2 = NextGenEvents.createEvent(this, ...args2);
+      var event2 = NextGenEvents.createEvent(this, ...args);
       return NextGenEvents.emitEvent(event2);
     };
-    NextGenEvents.prototype.waitForEmit = function(...args2) {
+    NextGenEvents.prototype.waitForEmit = function(...args) {
       return new Promise((resolve10) => {
-        this.emit(...args2, (interrupt) => resolve10(interrupt));
+        this.emit(...args, (interrupt) => resolve10(interrupt));
       });
     };
-    NextGenEvents.createEvent = function(emitter, ...args2) {
+    NextGenEvents.createEvent = function(emitter, ...args) {
       var event2 = {
         emitter,
         interrupt: null,
@@ -9763,28 +9763,28 @@ var require_NextGenEvents = __commonJS({
         // For grouped-correlated events
         sync: true
       };
-      if (typeof args2[0] === "number") {
-        event2.nice = Math.floor(args2[0]);
-        event2.name = args2[1];
+      if (typeof args[0] === "number") {
+        event2.nice = Math.floor(args[0]);
+        event2.name = args[1];
         if (!event2.name || typeof event2.name !== "string") {
           throw new TypeError(".emit(): when argument #0 is a number, argument #1 should be a non-empty string");
         }
-        if (typeof args2[args2.length - 1] === "function") {
-          event2.callback = args2[args2.length - 1];
-          event2.args = args2.slice(2, -1);
+        if (typeof args[args.length - 1] === "function") {
+          event2.callback = args[args.length - 1];
+          event2.args = args.slice(2, -1);
         } else {
-          event2.args = args2.slice(2);
+          event2.args = args.slice(2);
         }
       } else {
-        event2.name = args2[0];
+        event2.name = args[0];
         if (!event2.name || typeof event2.name !== "string") {
           throw new TypeError(".emit(): argument #0 should be an number or a non-empty string");
         }
-        if (typeof args2[args2.length - 1] === "function") {
-          event2.callback = args2[args2.length - 1];
-          event2.args = args2.slice(1, -1);
+        if (typeof args[args.length - 1] === "function") {
+          event2.callback = args[args.length - 1];
+          event2.args = args.slice(1, -1);
         } else {
-          event2.args = args2.slice(1);
+          event2.args = args.slice(1);
         }
       }
       return event2;
@@ -10106,13 +10106,13 @@ var require_NextGenEvents = __commonJS({
       fn = fn || options.fn;
       delete options.fn;
       options.id = options.id || fn;
-      fnWrapper = (...args2) => {
+      fnWrapper = (...args) => {
         if (triggered) {
           return;
         }
         triggered = true;
         NextGenEvents.groupRemoveListener(emitters, eventName, options.id);
-        fn(...args2);
+        fn(...args);
       };
       emitters.forEach((emitter) => {
         emitter.once(eventName, fnWrapper.bind(void 0, emitter), options);
@@ -10125,7 +10125,7 @@ var require_NextGenEvents = __commonJS({
     };
     NextGenEvents.groupWaitForFirstAll = function(emitters, eventName) {
       return new Promise((resolve10) => {
-        NextGenEvents.groupOnceFirst(emitters, eventName, (...args2) => resolve10(args2));
+        NextGenEvents.groupOnceFirst(emitters, eventName, (...args) => resolve10(args));
       });
     };
     NextGenEvents.groupOnceLast = function(emitters, eventName, fn, options) {
@@ -10140,7 +10140,7 @@ var require_NextGenEvents = __commonJS({
       fn = fn || options.fn;
       delete options.fn;
       options.id = options.id || fn;
-      fnWrapper = (...args2) => {
+      fnWrapper = (...args) => {
         if (triggered) {
           return;
         }
@@ -10148,7 +10148,7 @@ var require_NextGenEvents = __commonJS({
           return;
         }
         triggered = true;
-        fn(...args2);
+        fn(...args);
       };
       emitters.forEach((emitter) => {
         emitter.once(eventName, fnWrapper.bind(void 0, emitter), options);
@@ -10161,7 +10161,7 @@ var require_NextGenEvents = __commonJS({
     };
     NextGenEvents.groupWaitForLastAll = function(emitters, eventName) {
       return new Promise((resolve10) => {
-        NextGenEvents.groupOnceLast(emitters, eventName, (...args2) => resolve10(args2));
+        NextGenEvents.groupOnceLast(emitters, eventName, (...args) => resolve10(args));
       });
     };
     NextGenEvents.groupRemoveListener = function(emitters, eventName, id) {
@@ -10175,11 +10175,11 @@ var require_NextGenEvents = __commonJS({
         emitter.removeAllListeners(eventName);
       });
     };
-    NextGenEvents.groupEmit = function(emitters, ...args2) {
+    NextGenEvents.groupEmit = function(emitters, ...args) {
       var eventName, nice, argStart = 1, argEnd, count = emitters.length, callback, callbackWrapper, callbackTriggered = false;
-      if (typeof args2[args2.length - 1] === "function") {
+      if (typeof args[args.length - 1] === "function") {
         argEnd = -1;
-        callback = args2[args2.length - 1];
+        callback = args[args.length - 1];
         callbackWrapper = (interruption) => {
           if (callbackTriggered) {
             return;
@@ -10193,30 +10193,30 @@ var require_NextGenEvents = __commonJS({
           }
         };
       }
-      if (typeof args2[0] === "number") {
+      if (typeof args[0] === "number") {
         argStart = 2;
-        nice = typeof args2[0];
+        nice = typeof args[0];
       }
-      eventName = args2[argStart - 1];
-      args2 = args2.slice(argStart, argEnd);
+      eventName = args[argStart - 1];
+      args = args.slice(argStart, argEnd);
       emitters.forEach((emitter) => {
         NextGenEvents.emitEvent({
           emitter,
           name: eventName,
-          args: args2,
+          args,
           nice,
           callback: callbackWrapper
         });
       });
     };
-    NextGenEvents.groupWaitForEmit = function(emitters, ...args2) {
+    NextGenEvents.groupWaitForEmit = function(emitters, ...args) {
       return new Promise((resolve10) => {
-        NextGenEvents.groupEmit(emitters, ...args2, (interrupt) => resolve10(interrupt));
+        NextGenEvents.groupEmit(emitters, ...args, (interrupt) => resolve10(interrupt));
       });
     };
-    NextGenEvents.groupDefineStates = function(emitters, ...args2) {
+    NextGenEvents.groupDefineStates = function(emitters, ...args) {
       emitters.forEach((emitter) => {
-        emitter.defineStates(...args2);
+        emitter.defineStates(...args);
       });
     };
     NextGenEvents.groupGlobalOnce = NextGenEvents.groupOnceFirst;
@@ -14810,8 +14810,8 @@ var require_Terminal = __commonJS({
     var NextGenEvents = require_NextGenEvents();
     var Promise2 = require_seventh();
     var termkit2 = require_termkit();
-    function Terminal(...args2) {
-      return Terminal.create(...args2);
+    function Terminal(...args) {
+      return Terminal.create(...args);
     }
     Terminal.prototype = Object.create(NextGenEvents.prototype);
     Terminal.prototype.constructor = Terminal;
@@ -15262,13 +15262,13 @@ var require_Terminal = __commonJS({
       term2.optimized.color24bits = term2.esc.color24bits.optimized || term2.str.color24bits;
       term2.optimized.bgColor24bits = term2.esc.bgColor24bits.optimized || term2.str.bgColor24bits;
     }
-    function applyEscape(options, ...args2) {
+    function applyEscape(options, ...args) {
       var fn, newOptions, wrapOptions;
       if (options.bounded) {
-        args2 = options.bounded.concat(args2);
+        args = options.bounded.concat(args);
       }
       if (options.bind) {
-        newOptions = Object.assign({}, options, { bind: false, bounded: args2 });
+        newOptions = Object.assign({}, options, { bind: false, bounded: args });
         fn = applyEscape.bind(this, newOptions);
         Object.setPrototypeOf(fn, Object.getPrototypeOf(options.root));
         fn.apply = Function.prototype.apply;
@@ -15277,9 +15277,9 @@ var require_Terminal = __commonJS({
         return fn;
       }
       var onFormat = [options.on], output, on, off;
-      var action = args2[options.params];
+      var action = args[options.params];
       if (options.params) {
-        onFormat = onFormat.concat(args2.slice(0, options.params));
+        onFormat = onFormat.concat(args.slice(0, options.params));
       }
       if (action === void 0 || action === true) {
         on = options.onHasFormatting ? options.root.format(...onFormat) : options.on;
@@ -15306,9 +15306,9 @@ var require_Terminal = __commonJS({
       }
       on = options.onHasFormatting ? options.root.format(...onFormat) : options.on;
       if (options.markupOnly) {
-        action = options.root.markup(...args2.slice(options.params));
+        action = options.root.markup(...args.slice(options.params));
       } else if (!options.noFormat) {
-        action = options.root.format(...args2.slice(options.params));
+        action = options.root.format(...args.slice(options.params));
       }
       if (options.wrap) {
         if (options.root.wrapOptions.x && options.root.wrapOptions.x > 1) {
@@ -15633,23 +15633,23 @@ var require_Terminal = __commonJS({
       }
       return termkit2.Element.createInline(this, termkit2.AnimatedText, options);
     };
-    notChainable.wrapColumn = function(...args2) {
+    notChainable.wrapColumn = function(...args) {
       this.wrapOptions.continue = false;
       this.wrapOptions.offset = 0;
-      if (!args2.length) {
+      if (!args.length) {
         return;
       }
-      if (args2[0] && typeof args2[0] === "object") {
-        Object.assign(this.wrapOptions, args2[0]);
+      if (args[0] && typeof args[0] === "object") {
+        Object.assign(this.wrapOptions, args[0]);
         return this.wrap;
       }
-      if (args2.length === 1) {
+      if (args.length === 1) {
         this.wrapOptions.x = 1;
-        this.wrapOptions.width = args2[0];
+        this.wrapOptions.width = args[0];
         return this.wrap;
       }
-      this.wrapOptions.x = args2[0];
-      this.wrapOptions.width = args2[1];
+      this.wrapOptions.x = args[0];
+      this.wrapOptions.width = args[1];
       return this.wrap;
     };
     notChainable.fullscreen = function(options) {
@@ -16383,7 +16383,7 @@ var require_Terminal = __commonJS({
     };
     notChainable.drawCursor = function() {
     };
-    notChainable.put = function(options, str2, ...args2) {
+    notChainable.put = function(options, str2, ...args) {
       var i, x, y, dx, dy, attr, wrap, characters, len, moveToNeeded, inline;
       if (!options) {
         options = {};
@@ -16447,8 +16447,8 @@ var require_Terminal = __commonJS({
           return;
         }
       }
-      if (args2.length) {
-        str2 = string.format(str2, ...args2);
+      if (args.length) {
+        str2 = string.format(str2, ...args);
       }
       str2 = termkit2.stripControlChars(str2);
       characters = string.unicode.toArray(str2);
@@ -16626,7 +16626,7 @@ var require_ndarray = __commonJS({
       }
       var code = ["'use strict'"];
       var indices = iota(dimension);
-      var args2 = indices.map(function(i2) {
+      var args = indices.map(function(i2) {
         return "i" + i2;
       });
       var index_str = "this.offset+" + indices.map(function(i2) {
@@ -16671,14 +16671,14 @@ var require_ndarray = __commonJS({
         }
       }
       code.push(
-        "proto.set=function " + className + "_set(" + args2.join(",") + ",v){"
+        "proto.set=function " + className + "_set(" + args.join(",") + ",v){"
       );
       if (useGetters) {
         code.push("return this.data.set(" + index_str + ",v)}");
       } else {
         code.push("return this.data[" + index_str + "]=v}");
       }
-      code.push("proto.get=function " + className + "_get(" + args2.join(",") + "){");
+      code.push("proto.get=function " + className + "_get(" + args.join(",") + "){");
       if (useGetters) {
         code.push("return this.data.get(" + index_str + ")}");
       } else {
@@ -16686,10 +16686,10 @@ var require_ndarray = __commonJS({
       }
       code.push(
         "proto.index=function " + className + "_index(",
-        args2.join(),
+        args.join(),
         "){return " + index_str + "}"
       );
-      code.push("proto.hi=function " + className + "_hi(" + args2.join(",") + "){return new " + className + "(this.data," + indices.map(function(i2) {
+      code.push("proto.hi=function " + className + "_hi(" + args.join(",") + "){return new " + className + "(this.data," + indices.map(function(i2) {
         return ["(typeof i", i2, "!=='number'||i", i2, "<0)?this.shape[", i2, "]:i", i2, "|0"].join("");
       }).join(",") + "," + indices.map(function(i2) {
         return "this.stride[" + i2 + "]";
@@ -16700,7 +16700,7 @@ var require_ndarray = __commonJS({
       var c_vars = indices.map(function(i2) {
         return "c" + i2 + "=this.stride[" + i2 + "]";
       });
-      code.push("proto.lo=function " + className + "_lo(" + args2.join(",") + "){var b=this.offset,d=0," + a_vars.join(",") + "," + c_vars.join(","));
+      code.push("proto.lo=function " + className + "_lo(" + args.join(",") + "){var b=this.offset,d=0," + a_vars.join(",") + "," + c_vars.join(","));
       for (var i = 0; i < dimension; ++i) {
         code.push(
           "if(typeof i" + i + "==='number'&&i" + i + ">=0){d=i" + i + "|0;b+=c" + i + "*d;a" + i + "-=d}"
@@ -16711,7 +16711,7 @@ var require_ndarray = __commonJS({
       }).join(",") + "," + indices.map(function(i2) {
         return "c" + i2;
       }).join(",") + ",b)}");
-      code.push("proto.step=function " + className + "_step(" + args2.join(",") + "){var " + indices.map(function(i2) {
+      code.push("proto.step=function " + className + "_step(" + args.join(",") + "){var " + indices.map(function(i2) {
         return "a" + i2 + "=this.shape[" + i2 + "]";
       }).join(",") + "," + indices.map(function(i2) {
         return "b" + i2 + "=this.stride[" + i2 + "]";
@@ -16733,12 +16733,12 @@ var require_ndarray = __commonJS({
         tStride[i] = "b[i" + i + "]";
       }
       code.push(
-        "proto.transpose=function " + className + "_transpose(" + args2 + "){" + args2.map(function(n, idx) {
+        "proto.transpose=function " + className + "_transpose(" + args + "){" + args.map(function(n, idx) {
           return n + "=(" + n + "===undefined?" + idx + ":" + n + "|0)";
         }).join(";"),
         "var a=this.shape,b=this.stride;return new " + className + "(this.data," + tShape.join(",") + "," + tStride.join(",") + ",this.offset)}"
       );
-      code.push("proto.pick=function " + className + "_pick(" + args2 + "){var a=[],b=[],c=this.offset");
+      code.push("proto.pick=function " + className + "_pick(" + args + "){var a=[],b=[],c=this.offset");
       for (var i = 0; i < dimension; ++i) {
         code.push("if(typeof i" + i + "==='number'&&i" + i + ">=0){c=(c+this.stride[" + i + "]*i" + i + ")|0}else{a.push(this.shape[" + i + "]);b.push(this.stride[" + i + "])}");
       }
@@ -23355,7 +23355,7 @@ var require_Rect = __commonJS({
       }
     }
     module.exports = Rect;
-    Rect.create = (...args2) => new Rect(...args2);
+    Rect.create = (...args) => new Rect(...args);
     Rect.prototype.set = function(data) {
       if (data.xmin !== void 0) {
         this.xmin = Math.floor(data.xmin);
@@ -23717,7 +23717,7 @@ var require_ScreenBuffer = __commonJS({
     ScreenBuffer.prototype = Object.create(NextGenEvents.prototype);
     ScreenBuffer.prototype.constructor = ScreenBuffer;
     ScreenBuffer.prototype.bitsPerColor = 8;
-    ScreenBuffer.create = (...args2) => new ScreenBuffer(...args2);
+    ScreenBuffer.create = (...args) => new ScreenBuffer(...args);
     var termkit2 = require_termkit();
     var Rect = termkit2.Rect;
     ScreenBuffer.createFromString = function(options, data) {
@@ -23830,7 +23830,7 @@ var require_ScreenBuffer = __commonJS({
     ScreenBuffer.prototype.clear = ScreenBuffer.prototype.fill;
     ScreenBuffer.prototype.preserveMarkupFormat = misc.preserveMarkupFormat;
     ScreenBuffer.prototype.parseMarkup = string.markupMethod.bind(misc.markupOptions);
-    ScreenBuffer.prototype.put = function(options, str2, ...args2) {
+    ScreenBuffer.prototype.put = function(options, str2, ...args) {
       var startX, startY, x, y, dx, dy, baseAttr, attr, attrObject, wrap, lastValidOffset = -1, xmin = 0, ymin = 0, xmax = this.width - 1, ymax = this.height - 1;
       if (!options) {
         options = {};
@@ -23889,8 +23889,8 @@ var require_ScreenBuffer = __commonJS({
           return;
         }
       }
-      if (args2.length) {
-        str2 = options.markup === true ? this.preserveMarkupFormat(str2, ...args2) : string.format(str2, ...args2);
+      if (args.length) {
+        str2 = options.markup === true ? this.preserveMarkupFormat(str2, ...args) : string.format(str2, ...args);
       }
       var processRaw = (part) => {
         var characters = string.unicode.toArray(part), iMax = characters.length;
@@ -25074,7 +25074,7 @@ var require_ScreenBufferHD = __commonJS({
     ScreenBufferHD.prototype = Object.create(ScreenBuffer.prototype);
     ScreenBufferHD.prototype.constructor = ScreenBufferHD;
     ScreenBufferHD.prototype.bitsPerColor = 24;
-    ScreenBufferHD.create = (...args2) => new ScreenBufferHD(...args2);
+    ScreenBufferHD.create = (...args) => new ScreenBufferHD(...args);
     ScreenBufferHD.createFromString = function(options, data) {
       var x, y, length, attr, attrTrans, width, height, lineWidth, screenBuffer;
       if (!options) {
@@ -25981,7 +25981,7 @@ var require_TextBuffer = __commonJS({
       }
     }
     module.exports = TextBuffer;
-    TextBuffer.create = (...args2) => new TextBuffer(...args2);
+    TextBuffer.create = (...args) => new TextBuffer(...args);
     TextBuffer.prototype.parseMarkup = string.markupMethod.bind(misc.markupOptions);
     function Cell(char = " ", special = 1, attr = null, misc_ = null) {
       this.char = char;
@@ -27956,17 +27956,17 @@ var require_SequencesReader = __commonJS({
       }
       return String.fromCharCode(charCode);
     }
-    function defaultArgs(args2, defaultArgs_) {
+    function defaultArgs(args, defaultArgs_) {
       if (!defaultArgs_ || !defaultArgs_.length) {
-        return args2;
+        return args;
       }
-      args2 = Array.from(args2);
+      args = Array.from(args);
       defaultArgs_.forEach((e, index) => {
-        if (e !== void 0 && args2[index] === void 0) {
-          args2[index] = e;
+        if (e !== void 0 && args[index] === void 0) {
+          args[index] = e;
         }
       });
-      return args2;
+      return args;
     }
     var ESC_3_BYTES = new Set(
       // Set character set
@@ -27999,7 +27999,7 @@ var require_SequencesReader = __commonJS({
       "?"
     );
     SequencesReader.prototype.streamToEvent = async function(stream) {
-      var charCode, charCodeStr, char, bytes, codepoint, type, args2, argIndex, emitParsedSequence, event2, subTree, subSubTree, basePtr, charBuffer = Buffer.alloc(6);
+      var charCode, charCodeStr, char, bytes, codepoint, type, args, argIndex, emitParsedSequence, event2, subTree, subSubTree, basePtr, charBuffer = Buffer.alloc(6);
       for (; ; ) {
         charCode = (await readStream(stream))[0];
         if (charCode <= 31 || charCode === 127) {
@@ -28007,28 +28007,28 @@ var require_SequencesReader = __commonJS({
           if (charCode === 27) {
             charCode = (await readStream(stream))[0];
             if (charCode === 91) {
-              args2 = "";
+              args = "";
               while (!charCodeIsAlpha(charCode = (await readStream(stream))[0])) {
-                args2 += String.fromCharCode(charCode);
+                args += String.fromCharCode(charCode);
               }
               type = String.fromCharCode(charCode);
-              args2 = args2 ? args2.split(";") : [];
+              args = args ? args.split(";") : [];
               emitParsedSequence = true;
-              if (args2.length && CSI_TYPE_EXTRA_CHAR_BEFORE.has(args2[0][0])) {
-                type = args2[0][0] + type;
-                args2[0] = args2[0].slice(1);
+              if (args.length && CSI_TYPE_EXTRA_CHAR_BEFORE.has(args[0][0])) {
+                type = args[0][0] + type;
+                args[0] = args[0].slice(1);
               }
-              if (args2.length && CSI_TYPE_EXTRA_CHAR_AFTER.has(args2[args2.length - 1][args2[args2.length - 1] - 1])) {
-                type = args2[args2.length - 1][args2[args2.length - 1] - 1] + type;
-                args2[args2.length - 1] = args2[args2.length - 1].slice(0, -1);
+              if (args.length && CSI_TYPE_EXTRA_CHAR_AFTER.has(args[args.length - 1][args[args.length - 1] - 1])) {
+                type = args[args.length - 1][args[args.length - 1] - 1] + type;
+                args[args.length - 1] = args[args.length - 1].slice(0, -1);
               }
               subTree = fromOutputSequence.CSI[type];
-              console.error(">>>>>>>>>> CSI parsing:", type, args2);
+              console.error(">>>>>>>>>> CSI parsing:", type, args);
               if (subTree) {
-                if (subTree.subTree && args2.length) {
+                if (subTree.subTree && args.length) {
                   basePtr = subTree;
-                  for (argIndex = 0; argIndex < args2.length; argIndex++) {
-                    subSubTree = basePtr.subTree[args2[argIndex]];
+                  for (argIndex = 0; argIndex < args.length; argIndex++) {
+                    subSubTree = basePtr.subTree[args[argIndex]];
                     if (subSubTree) {
                       if (subSubTree.subTree) {
                         basePtr = subSubTree;
@@ -28041,7 +28041,7 @@ var require_SequencesReader = __commonJS({
                           subSubTree.subType || basePtr.subType || subTree.subType,
                           subSubTree.arg !== void 0 ? subSubTree.arg : basePtr.arg !== void 0 ? basePtr.arg : subTree.arg,
                           /* eslint-disable-line no-nested-ternary */
-                          subSubTree.extraArgs || basePtr.extraArgs || subTree.extraArgs || defaultArgs(args2.slice(argIndex + 1), subSubTree.defaultExtraArgs)
+                          subSubTree.extraArgs || basePtr.extraArgs || subTree.extraArgs || defaultArgs(args.slice(argIndex + 1), subSubTree.defaultExtraArgs)
                         );
                       }
                       emitParsedSequence = false;
@@ -28060,18 +28060,18 @@ var require_SequencesReader = __commonJS({
                       subTree.event,
                       subTree.subType,
                       subTree.arg,
-                      subTree.extraArgs || defaultArgs(args2, subTree.defaultExtraArgs)
+                      subTree.extraArgs || defaultArgs(args, subTree.defaultExtraArgs)
                     );
                   }
                   emitParsedSequence = false;
                 }
               }
               if (emitParsedSequence) {
-                this.emit("CSI", type, args2);
+                this.emit("CSI", type, args);
               }
               continue;
             } else if (charCode === 93) {
-              args2 = "";
+              args = "";
               for (; ; ) {
                 charCode = (await readStream(stream))[0];
                 if (charCode === 7) {
@@ -28082,25 +28082,25 @@ var require_SequencesReader = __commonJS({
                   if (charCode === 92) {
                     break;
                   }
-                  args2 += String.fromCharCode(27);
+                  args += String.fromCharCode(27);
                 }
-                args2 += String.fromCharCode(charCode);
+                args += String.fromCharCode(charCode);
               }
-              args2 = args2 ? args2.split(";") : [];
-              type = args2.shift();
-              if (OSC_TYPE_EXTRA_PARAM_AFTER.has(args2[args2.length - 1])) {
-                type += args2.pop();
+              args = args ? args.split(";") : [];
+              type = args.shift();
+              if (OSC_TYPE_EXTRA_PARAM_AFTER.has(args[args.length - 1])) {
+                type += args.pop();
               }
               emitParsedSequence = true;
               subTree = fromOutputSequence.OSC[type];
               if (subTree) {
                 if (subTree.subTree) {
-                  for (argIndex = 0; argIndex < args2.length; argIndex++) {
-                    subSubTree = subTree.subTree[args2[argIndex]];
+                  for (argIndex = 0; argIndex < args.length; argIndex++) {
+                    subSubTree = subTree.subTree[args[argIndex]];
                     if (subSubTree) {
                       event2 = subSubTree.event || subTree.event;
                       if (event2 !== "none") {
-                        this.emit(event2, subSubTree.subType || subTree.subType, args2.slice(argIndex + 1));
+                        this.emit(event2, subSubTree.subType || subTree.subType, args.slice(argIndex + 1));
                       }
                       emitParsedSequence = false;
                     } else {
@@ -28110,31 +28110,31 @@ var require_SequencesReader = __commonJS({
                   }
                 } else if (subTree.event) {
                   if (subTree.event !== "none") {
-                    this.emit(subTree.event, subTree.subType, args2);
+                    this.emit(subTree.event, subTree.subType, args);
                   }
                   emitParsedSequence = false;
                 }
               }
               if (emitParsedSequence) {
-                this.emit("OSC", type, args2);
+                this.emit("OSC", type, args);
               }
               continue;
             } else {
               type = toCharOrCharCodeStr(charCode);
-              args2 = null;
+              args = null;
               if (ESC_3_BYTES.has(type)) {
-                args2 = [toCharOrCharCodeStr((await readStream(stream))[0])];
+                args = [toCharOrCharCodeStr((await readStream(stream))[0])];
               }
               emitParsedSequence = true;
               subTree = fromOutputSequence.ESC[type];
               if (subTree) {
                 if (subTree.event !== "none") {
-                  this.emit(subTree.event, subTree.subType, subTree.arg, args2 || subTree.extraArgs);
+                  this.emit(subTree.event, subTree.subType, subTree.arg, args || subTree.extraArgs);
                 }
                 emitParsedSequence = false;
               }
               if (emitParsedSequence) {
-                this.emit("ESC", type, args2);
+                this.emit("ESC", type, args);
               }
               continue;
             }
@@ -28190,8 +28190,8 @@ var require_Vte = __commonJS({
     var NextGenEvents = require_NextGenEvents();
     var Promise2 = require_seventh();
     var spawn = __require("child_process").spawn;
-    var logRed = (...args2) => console.error("\x1B[31m", ...args2, "\x1B[m");
-    var log = (...args2) => console.error(...args2);
+    var logRed = (...args) => console.error("\x1B[31m", ...args, "\x1B[m");
+    var log = (...args) => console.error(...args);
     function Vte(options = {}) {
       this.width = Math.floor(options.width) || (options.dst ? options.dst.width : 80);
       this.height = Math.floor(options.height) || (options.dst ? options.dst.height : 25);
@@ -28234,7 +28234,7 @@ var require_Vte = __commonJS({
     module.exports = Vte;
     Vte.prototype = Object.create(NextGenEvents.prototype);
     Vte.prototype.constructor = Vte;
-    Vte.prototype.run = function(command, args2) {
+    Vte.prototype.run = function(command, args) {
       var childPty, child, promise = new Promise2();
       if (this.childProcess) {
         return;
@@ -28242,14 +28242,14 @@ var require_Vte = __commonJS({
       this.start();
       try {
         childPty = __require("child_pty");
-        child = childPty.spawn(command, args2, {
+        child = childPty.spawn(command, args, {
           columns: this.width,
           rows: this.height
           //stdio: [ 'pty' , 'pty' , 'pty' ]
         });
       } catch (error) {
         logRed("'child_pty' optional dependency not found, using regular child_process.spawn()");
-        child = spawn(command, args2);
+        child = spawn(command, args);
       }
       this.childProcess = child;
       this.on("input", (data) => child.stdin.write(data));
@@ -28974,8 +28974,8 @@ var require_Vte = __commonJS({
           break;
       }
     };
-    Vte.prototype.onChildOutputCursorAttr = function(subType, args2) {
-      logRed("Cursor ATTR command:", subType, args2);
+    Vte.prototype.onChildOutputCursorAttr = function(subType, args) {
+      logRed("Cursor ATTR command:", subType, args);
     };
     Vte.prototype.onChildOutputBell = function() {
       logRed("bell");
@@ -29005,20 +29005,20 @@ var require_Vte = __commonJS({
           logRed("Unknown/unsupported device command", subType, arg, extraArgs);
       }
     };
-    Vte.prototype.onChildOutputSystem = function(subType, args2) {
-      logRed("System command:", subType, args2);
+    Vte.prototype.onChildOutputSystem = function(subType, args) {
+      logRed("System command:", subType, args);
     };
     Vte.prototype.onChildOutputControl = function(charCodeStr) {
       logRed("control", charCodeStr);
     };
-    Vte.prototype.onChildOutputESC = function(type, args2) {
-      logRed("ESC -- type:", type, args2);
+    Vte.prototype.onChildOutputESC = function(type, args) {
+      logRed("ESC -- type:", type, args);
     };
-    Vte.prototype.onChildOutputCSI = function(type, args2) {
-      logRed("CSI -- type:", type, ", args:", args2);
+    Vte.prototype.onChildOutputCSI = function(type, args) {
+      logRed("CSI -- type:", type, ", args:", args);
     };
-    Vte.prototype.onChildOutputOSC = function(type, args2) {
-      logRed("OSC -- type:", type, ", args:", args2);
+    Vte.prototype.onChildOutputOSC = function(type, args) {
+      logRed("OSC -- type:", type, ", args:", args);
     };
   }
 });
@@ -32747,7 +32747,7 @@ var require_BaseMenu = __commonJS({
         this.document.giveFocusTo(this.submenu);
       }
       this.submenu.on("submit", this.onSubmenuSubmit);
-      this.submenu.on("itemFocus", (...args2) => this.emit("itemFocus", ...args2));
+      this.submenu.on("itemFocus", (...args) => this.emit("itemFocus", ...args));
     };
     BaseMenu.prototype.closeSubmenu = function() {
       if (!this.submenu) {
@@ -36206,27 +36206,27 @@ var require_chroma = __commonJS({
       function type(obj2) {
         return classToType[Object.prototype.toString.call(obj2)] || "object";
       }
-      function unpack(args2, keyOrder) {
+      function unpack(args, keyOrder) {
         if (keyOrder === void 0) keyOrder = null;
-        if (args2.length >= 3) {
-          return Array.prototype.slice.call(args2);
+        if (args.length >= 3) {
+          return Array.prototype.slice.call(args);
         }
-        if (type(args2[0]) == "object" && keyOrder) {
+        if (type(args[0]) == "object" && keyOrder) {
           return keyOrder.split("").filter(function(k) {
-            return args2[0][k] !== void 0;
+            return args[0][k] !== void 0;
           }).map(function(k) {
-            return args2[0][k];
+            return args[0][k];
           });
         }
-        return args2[0];
+        return args[0];
       }
-      function last(args2) {
-        if (args2.length < 2) {
+      function last(args) {
+        if (args.length < 2) {
           return null;
         }
-        var l = args2.length - 1;
-        if (type(args2[l]) == "string") {
-          return args2[l].toLowerCase();
+        var l = args.length - 1;
+        if (type(args[l]) == "string") {
+          return args[l].toLowerCase();
         }
         return null;
       }
@@ -36242,13 +36242,13 @@ var require_chroma = __commonJS({
         autodetect: []
       };
       var Color = function Color2() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
         var me = this;
-        if (type(args2[0]) === "object" && args2[0].constructor && args2[0].constructor === this.constructor) {
-          return args2[0];
+        if (type(args[0]) === "object" && args[0].constructor && args[0].constructor === this.constructor) {
+          return args[0];
         }
-        var mode = last(args2);
+        var mode = last(args);
         var autodetect = false;
         if (!mode) {
           autodetect = true;
@@ -36260,7 +36260,7 @@ var require_chroma = __commonJS({
           }
           for (var i2 = 0, list2 = input.autodetect; i2 < list2.length; i2 += 1) {
             var chk = list2[i2];
-            mode = chk.test.apply(chk, args2);
+            mode = chk.test.apply(chk, args);
             if (mode) {
               break;
             }
@@ -36269,11 +36269,11 @@ var require_chroma = __commonJS({
         if (input.format[mode]) {
           var rgb3 = input.format[mode].apply(
             null,
-            autodetect ? args2 : args2.slice(0, -1)
+            autodetect ? args : args.slice(0, -1)
           );
           me._rgb = clip_rgb(rgb3);
         } else {
-          throw new Error("unknown format: " + args2);
+          throw new Error("unknown format: " + args);
         }
         if (me._rgb.length === 3) {
           me._rgb.push(1);
@@ -36287,21 +36287,21 @@ var require_chroma = __commonJS({
       };
       var version = "2.6.0";
       var chroma = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(chroma.Color, [null].concat(args2)))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(chroma.Color, [null].concat(args)))();
       };
       chroma.Color = Color;
       chroma.version = version;
       var cmyk2rgb = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        args2 = unpack(args2, "cmyk");
-        var c = args2[0];
-        var m = args2[1];
-        var y = args2[2];
-        var k = args2[3];
-        var alpha = args2.length > 4 ? args2[4] : 1;
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        args = unpack(args, "cmyk");
+        var c = args[0];
+        var m = args[1];
+        var y = args[2];
+        var k = args[3];
+        var alpha = args.length > 4 ? args[4] : 1;
         if (k === 1) {
           return [0, 0, 0, alpha];
         }
@@ -36317,9 +36317,9 @@ var require_chroma = __commonJS({
       };
       var max$2 = Math.max;
       var rgb2cmyk = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var ref = unpack(args2, "rgb");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var ref = unpack(args, "rgb");
         var r = ref[0];
         var g = ref[1];
         var b = ref[2];
@@ -36337,18 +36337,18 @@ var require_chroma = __commonJS({
         return rgb2cmyk(this._rgb);
       };
       chroma.cmyk = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["cmyk"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["cmyk"])))();
       };
       input.format.cmyk = cmyk2rgb;
       input.autodetect.push({
         p: 2,
         test: function() {
-          var args2 = [], len = arguments.length;
-          while (len--) args2[len] = arguments[len];
-          args2 = unpack(args2, "cmyk");
-          if (type(args2) === "array" && args2.length === 4) {
+          var args = [], len = arguments.length;
+          while (len--) args[len] = arguments[len];
+          args = unpack(args, "cmyk");
+          if (type(args) === "array" && args.length === 4) {
             return "cmyk";
           }
         }
@@ -36357,10 +36357,10 @@ var require_chroma = __commonJS({
         return Math.round(a * 100) / 100;
       };
       var hsl2css = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var hsla = unpack(args2, "hsla");
-        var mode = last(args2) || "lsa";
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var hsla = unpack(args, "hsla");
+        var mode = last(args) || "lsa";
         hsla[0] = rnd(hsla[0] || 0);
         hsla[1] = rnd(hsla[1] * 100) + "%";
         hsla[2] = rnd(hsla[2] * 100) + "%";
@@ -36373,12 +36373,12 @@ var require_chroma = __commonJS({
         return mode + "(" + hsla.join(",") + ")";
       };
       var rgb2hsl$1 = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        args2 = unpack(args2, "rgba");
-        var r = args2[0];
-        var g = args2[1];
-        var b = args2[2];
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        args = unpack(args, "rgba");
+        var r = args[0];
+        var g = args[1];
+        var b = args[2];
         r /= 255;
         g /= 255;
         b /= 255;
@@ -36403,17 +36403,17 @@ var require_chroma = __commonJS({
         if (h < 0) {
           h += 360;
         }
-        if (args2.length > 3 && args2[3] !== void 0) {
-          return [h, s2, l, args2[3]];
+        if (args.length > 3 && args[3] !== void 0) {
+          return [h, s2, l, args[3]];
         }
         return [h, s2, l];
       };
       var round$6 = Math.round;
       var rgb2css = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var rgba = unpack(args2, "rgba");
-        var mode = last(args2) || "rgb";
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var rgba = unpack(args, "rgba");
+        var mode = last(args) || "rgb";
         if (mode.substr(0, 3) == "hsl") {
           return hsl2css(rgb2hsl$1(rgba), mode);
         }
@@ -36429,12 +36429,12 @@ var require_chroma = __commonJS({
       var round$5 = Math.round;
       var hsl2rgb = function() {
         var assign2;
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        args2 = unpack(args2, "hsl");
-        var h = args2[0];
-        var s2 = args2[1];
-        var l = args2[2];
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        args = unpack(args, "hsl");
+        var h = args[0];
+        var s2 = args[1];
+        var l = args[2];
         var r, g, b;
         if (s2 === 0) {
           r = g = b = l * 255;
@@ -36466,8 +36466,8 @@ var require_chroma = __commonJS({
           }
           assign2 = [round$5(c[0] * 255), round$5(c[1] * 255), round$5(c[2] * 255)], r = assign2[0], g = assign2[1], b = assign2[2];
         }
-        if (args2.length > 3) {
-          return [r, g, b, args2[3]];
+        if (args.length > 3) {
+          return [r, g, b, args[3]];
         }
         return [r, g, b, 1];
       };
@@ -36542,9 +36542,9 @@ var require_chroma = __commonJS({
         return rgb2css(this._rgb, mode);
       };
       chroma.css = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["css"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["css"])))();
       };
       input.format.css = css2rgb;
       input.autodetect.push({
@@ -36558,18 +36558,18 @@ var require_chroma = __commonJS({
         }
       });
       input.format.gl = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var rgb3 = unpack(args2, "rgba");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var rgb3 = unpack(args, "rgba");
         rgb3[0] *= 255;
         rgb3[1] *= 255;
         rgb3[2] *= 255;
         return rgb3;
       };
       chroma.gl = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["gl"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["gl"])))();
       };
       Color.prototype.gl = function() {
         var rgb3 = this._rgb;
@@ -36578,12 +36578,12 @@ var require_chroma = __commonJS({
       var floor$3 = Math.floor;
       var hcg2rgb = function() {
         var assign2, assign$1, assign$2, assign$3, assign$4, assign$5;
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        args2 = unpack(args2, "hcg");
-        var h = args2[0];
-        var c = args2[1];
-        var _g = args2[2];
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        args = unpack(args, "hcg");
+        var h = args[0];
+        var c = args[1];
+        var _g = args[2];
         var r, g, b;
         _g = _g * 255;
         var _c = c * 255;
@@ -36627,12 +36627,12 @@ var require_chroma = __commonJS({
               break;
           }
         }
-        return [r, g, b, args2.length > 3 ? args2[3] : 1];
+        return [r, g, b, args.length > 3 ? args[3] : 1];
       };
       var rgb2hcg = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var ref = unpack(args2, "rgb");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var ref = unpack(args, "rgb");
         var r = ref[0];
         var g = ref[1];
         var b = ref[2];
@@ -36665,18 +36665,18 @@ var require_chroma = __commonJS({
         return rgb2hcg(this._rgb);
       };
       chroma.hcg = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["hcg"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["hcg"])))();
       };
       input.format.hcg = hcg2rgb;
       input.autodetect.push({
         p: 1,
         test: function() {
-          var args2 = [], len = arguments.length;
-          while (len--) args2[len] = arguments[len];
-          args2 = unpack(args2, "hcg");
-          if (type(args2) === "array" && args2.length === 3) {
+          var args = [], len = arguments.length;
+          while (len--) args[len] = arguments[len];
+          args = unpack(args, "hcg");
+          if (type(args) === "array" && args.length === 3) {
             return "hcg";
           }
         }
@@ -36717,14 +36717,14 @@ var require_chroma = __commonJS({
       };
       var round$3 = Math.round;
       var rgb2hex = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var ref = unpack(args2, "rgba");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var ref = unpack(args, "rgba");
         var r = ref[0];
         var g = ref[1];
         var b = ref[2];
         var a = ref[3];
-        var mode = last(args2) || "auto";
+        var mode = last(args) || "auto";
         if (a === void 0) {
           a = 1;
         }
@@ -36752,9 +36752,9 @@ var require_chroma = __commonJS({
         return rgb2hex(this._rgb, mode);
       };
       chroma.hex = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["hex"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["hex"])))();
       };
       input.format.hex = hex2rgb;
       input.autodetect.push({
@@ -36769,12 +36769,12 @@ var require_chroma = __commonJS({
       });
       var cos$4 = Math.cos;
       var hsi2rgb = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        args2 = unpack(args2, "hsi");
-        var h = args2[0];
-        var s2 = args2[1];
-        var i2 = args2[2];
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        args = unpack(args, "hsi");
+        var h = args[0];
+        var s2 = args[1];
+        var i2 = args[2];
         var r, g, b;
         if (isNaN(h)) {
           h = 0;
@@ -36807,15 +36807,15 @@ var require_chroma = __commonJS({
         r = limit(i2 * r * 3);
         g = limit(i2 * g * 3);
         b = limit(i2 * b * 3);
-        return [r * 255, g * 255, b * 255, args2.length > 3 ? args2[3] : 1];
+        return [r * 255, g * 255, b * 255, args.length > 3 ? args[3] : 1];
       };
       var min$2 = Math.min;
       var sqrt$4 = Math.sqrt;
       var acos = Math.acos;
       var rgb2hsi = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var ref = unpack(args2, "rgb");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var ref = unpack(args, "rgb");
         var r = ref[0];
         var g = ref[1];
         var b = ref[2];
@@ -36843,18 +36843,18 @@ var require_chroma = __commonJS({
         return rgb2hsi(this._rgb);
       };
       chroma.hsi = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["hsi"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["hsi"])))();
       };
       input.format.hsi = hsi2rgb;
       input.autodetect.push({
         p: 2,
         test: function() {
-          var args2 = [], len = arguments.length;
-          while (len--) args2[len] = arguments[len];
-          args2 = unpack(args2, "hsi");
-          if (type(args2) === "array" && args2.length === 3) {
+          var args = [], len = arguments.length;
+          while (len--) args[len] = arguments[len];
+          args = unpack(args, "hsi");
+          if (type(args) === "array" && args.length === 3) {
             return "hsi";
           }
         }
@@ -36863,18 +36863,18 @@ var require_chroma = __commonJS({
         return rgb2hsl$1(this._rgb);
       };
       chroma.hsl = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["hsl"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["hsl"])))();
       };
       input.format.hsl = hsl2rgb;
       input.autodetect.push({
         p: 2,
         test: function() {
-          var args2 = [], len = arguments.length;
-          while (len--) args2[len] = arguments[len];
-          args2 = unpack(args2, "hsl");
-          if (type(args2) === "array" && args2.length === 3) {
+          var args = [], len = arguments.length;
+          while (len--) args[len] = arguments[len];
+          args = unpack(args, "hsl");
+          if (type(args) === "array" && args.length === 3) {
             return "hsl";
           }
         }
@@ -36882,12 +36882,12 @@ var require_chroma = __commonJS({
       var floor$2 = Math.floor;
       var hsv2rgb = function() {
         var assign2, assign$1, assign$2, assign$3, assign$4, assign$5;
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        args2 = unpack(args2, "hsv");
-        var h = args2[0];
-        var s2 = args2[1];
-        var v = args2[2];
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        args = unpack(args, "hsv");
+        var h = args[0];
+        var s2 = args[1];
+        var v = args[2];
         var r, g, b;
         v *= 255;
         if (s2 === 0) {
@@ -36929,17 +36929,17 @@ var require_chroma = __commonJS({
               break;
           }
         }
-        return [r, g, b, args2.length > 3 ? args2[3] : 1];
+        return [r, g, b, args.length > 3 ? args[3] : 1];
       };
       var min$1 = Math.min;
       var max$1 = Math.max;
       var rgb2hsl = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        args2 = unpack(args2, "rgb");
-        var r = args2[0];
-        var g = args2[1];
-        var b = args2[2];
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        args = unpack(args, "rgb");
+        var r = args[0];
+        var g = args[1];
+        var b = args[2];
         var min_ = min$1(r, g, b);
         var max_ = max$1(r, g, b);
         var delta = max_ - min_;
@@ -36970,18 +36970,18 @@ var require_chroma = __commonJS({
         return rgb2hsl(this._rgb);
       };
       chroma.hsv = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["hsv"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["hsv"])))();
       };
       input.format.hsv = hsv2rgb;
       input.autodetect.push({
         p: 2,
         test: function() {
-          var args2 = [], len = arguments.length;
-          while (len--) args2[len] = arguments[len];
-          args2 = unpack(args2, "hsv");
-          if (type(args2) === "array" && args2.length === 3) {
+          var args = [], len = arguments.length;
+          while (len--) args[len] = arguments[len];
+          args = unpack(args, "hsv");
+          if (type(args) === "array" && args.length === 3) {
             return "hsv";
           }
         }
@@ -37004,12 +37004,12 @@ var require_chroma = __commonJS({
       };
       var pow$a = Math.pow;
       var lab2rgb = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        args2 = unpack(args2, "lab");
-        var l = args2[0];
-        var a = args2[1];
-        var b = args2[2];
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        args = unpack(args, "lab");
+        var l = args[0];
+        var a = args[1];
+        var b = args[2];
         var x, y, z, r, g, b_;
         y = (l + 16) / 116;
         x = isNaN(a) ? y : y + a / 500;
@@ -37020,7 +37020,7 @@ var require_chroma = __commonJS({
         r = xyz_rgb(3.2404542 * x - 1.5371385 * y - 0.4985314 * z);
         g = xyz_rgb(-0.969266 * x + 1.8760108 * y + 0.041556 * z);
         b_ = xyz_rgb(0.0556434 * x - 0.2040259 * y + 1.0572252 * z);
-        return [r, g, b_, args2.length > 3 ? args2[3] : 1];
+        return [r, g, b_, args.length > 3 ? args[3] : 1];
       };
       var xyz_rgb = function(r) {
         return 255 * (r <= 304e-5 ? 12.92 * r : 1.055 * pow$a(r, 1 / 2.4) - 0.055);
@@ -37030,9 +37030,9 @@ var require_chroma = __commonJS({
       };
       var pow$9 = Math.pow;
       var rgb2lab = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var ref = unpack(args2, "rgb");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var ref = unpack(args, "rgb");
         var r = ref[0];
         var g = ref[1];
         var b = ref[2];
@@ -37074,18 +37074,18 @@ var require_chroma = __commonJS({
         return rgb2lab(this._rgb);
       };
       chroma.lab = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["lab"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["lab"])))();
       };
       input.format.lab = lab2rgb;
       input.autodetect.push({
         p: 2,
         test: function() {
-          var args2 = [], len = arguments.length;
-          while (len--) args2[len] = arguments[len];
-          args2 = unpack(args2, "lab");
-          if (type(args2) === "array" && args2.length === 3) {
+          var args = [], len = arguments.length;
+          while (len--) args[len] = arguments[len];
+          args = unpack(args, "lab");
+          if (type(args) === "array" && args.length === 3) {
             return "lab";
           }
         }
@@ -37093,9 +37093,9 @@ var require_chroma = __commonJS({
       var sin$3 = Math.sin;
       var cos$3 = Math.cos;
       var lch2lab = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var ref = unpack(args2, "lch");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var ref = unpack(args, "lch");
         var l = ref[0];
         var c = ref[1];
         var h = ref[2];
@@ -37106,12 +37106,12 @@ var require_chroma = __commonJS({
         return [l, cos$3(h) * c, sin$3(h) * c];
       };
       var lch2rgb = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        args2 = unpack(args2, "lch");
-        var l = args2[0];
-        var c = args2[1];
-        var h = args2[2];
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        args = unpack(args, "lch");
+        var l = args[0];
+        var c = args[1];
+        var h = args[2];
         var ref = lch2lab(l, c, h);
         var L = ref[0];
         var a = ref[1];
@@ -37120,21 +37120,21 @@ var require_chroma = __commonJS({
         var r = ref$1[0];
         var g = ref$1[1];
         var b = ref$1[2];
-        return [r, g, b, args2.length > 3 ? args2[3] : 1];
+        return [r, g, b, args.length > 3 ? args[3] : 1];
       };
       var hcl2rgb = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var hcl = unpack(args2, "hcl").reverse();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var hcl = unpack(args, "hcl").reverse();
         return lch2rgb.apply(void 0, hcl);
       };
       var sqrt$3 = Math.sqrt;
       var atan2$2 = Math.atan2;
       var round$2 = Math.round;
       var lab2lch = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var ref = unpack(args2, "lab");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var ref = unpack(args, "lab");
         var l = ref[0];
         var a = ref[1];
         var b = ref[2];
@@ -37146,9 +37146,9 @@ var require_chroma = __commonJS({
         return [l, c, h];
       };
       var rgb2lch = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var ref = unpack(args2, "rgb");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var ref = unpack(args, "rgb");
         var r = ref[0];
         var g = ref[1];
         var b = ref[2];
@@ -37165,14 +37165,14 @@ var require_chroma = __commonJS({
         return rgb2lch(this._rgb).reverse();
       };
       chroma.lch = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["lch"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["lch"])))();
       };
       chroma.hcl = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["hcl"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["hcl"])))();
       };
       input.format.lch = lch2rgb;
       input.format.hcl = hcl2rgb;
@@ -37181,10 +37181,10 @@ var require_chroma = __commonJS({
           return input.autodetect.push({
             p: 2,
             test: function() {
-              var args2 = [], len = arguments.length;
-              while (len--) args2[len] = arguments[len];
-              args2 = unpack(args2, m);
-              if (type(args2) === "array" && args2.length === 3) {
+              var args = [], len = arguments.length;
+              while (len--) args[len] = arguments[len];
+              args = unpack(args, m);
+              if (type(args) === "array" && args.length === 3) {
                 return m;
               }
             }
@@ -37384,9 +37384,9 @@ var require_chroma = __commonJS({
         throw new Error("unknown num color: " + num2);
       };
       var rgb2num = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var ref = unpack(args2, "rgb");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var ref = unpack(args, "rgb");
         var r = ref[0];
         var g = ref[1];
         var b = ref[2];
@@ -37396,17 +37396,17 @@ var require_chroma = __commonJS({
         return rgb2num(this._rgb);
       };
       chroma.num = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["num"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["num"])))();
       };
       input.format.num = num2rgb;
       input.autodetect.push({
         p: 5,
         test: function() {
-          var args2 = [], len = arguments.length;
-          while (len--) args2[len] = arguments[len];
-          if (args2.length === 1 && type(args2[0]) === "number" && args2[0] >= 0 && args2[0] <= 16777215) {
+          var args = [], len = arguments.length;
+          while (len--) args[len] = arguments[len];
+          if (args.length === 1 && type(args[0]) === "number" && args[0] >= 0 && args[0] <= 16777215) {
             return "num";
           }
         }
@@ -37426,14 +37426,14 @@ var require_chroma = __commonJS({
         });
       };
       chroma.rgb = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["rgb"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["rgb"])))();
       };
       input.format.rgb = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var rgba = unpack(args2, "rgba");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var rgba = unpack(args, "rgba");
         if (rgba[3] === void 0) {
           rgba[3] = 1;
         }
@@ -37442,10 +37442,10 @@ var require_chroma = __commonJS({
       input.autodetect.push({
         p: 3,
         test: function() {
-          var args2 = [], len = arguments.length;
-          while (len--) args2[len] = arguments[len];
-          args2 = unpack(args2, "rgba");
-          if (type(args2) === "array" && (args2.length === 3 || args2.length === 4 && type(args2[3]) == "number" && args2[3] >= 0 && args2[3] <= 1)) {
+          var args = [], len = arguments.length;
+          while (len--) args[len] = arguments[len];
+          args = unpack(args, "rgba");
+          if (type(args) === "array" && (args.length === 3 || args.length === 4 && type(args[3]) == "number" && args[3] >= 0 && args[3] <= 1)) {
             return "rgb";
           }
         }
@@ -37467,9 +37467,9 @@ var require_chroma = __commonJS({
       };
       var round = Math.round;
       var rgb2temperature = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var rgb3 = unpack(args2, "rgb");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var rgb3 = unpack(args, "rgb");
         var r = rgb3[0], b = rgb3[2];
         var minTemp = 1e3;
         var maxTemp = 4e4;
@@ -37490,20 +37490,20 @@ var require_chroma = __commonJS({
         return rgb2temperature(this._rgb);
       };
       chroma.temp = chroma.kelvin = chroma.temperature = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["temp"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["temp"])))();
       };
       input.format.temp = input.format.kelvin = input.format.temperature = temperature2rgb;
       var pow$8 = Math.pow;
       var sign$1 = Math.sign;
       var oklab2rgb = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        args2 = unpack(args2, "lab");
-        var L = args2[0];
-        var a = args2[1];
-        var b = args2[2];
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        args = unpack(args, "lab");
+        var L = args[0];
+        var a = args[1];
+        var b = args[2];
         var l = pow$8(L + 0.3963377774 * a + 0.2158037573 * b, 3);
         var m = pow$8(L - 0.1055613458 * a - 0.0638541728 * b, 3);
         var s2 = pow$8(L - 0.0894841775 * a - 1.291485548 * b, 3);
@@ -37511,7 +37511,7 @@ var require_chroma = __commonJS({
           255 * lrgb2rgb(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s2),
           255 * lrgb2rgb(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s2),
           255 * lrgb2rgb(-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s2),
-          args2.length > 3 ? args2[3] : 1
+          args.length > 3 ? args[3] : 1
         ];
       };
       function lrgb2rgb(c) {
@@ -37525,9 +37525,9 @@ var require_chroma = __commonJS({
       var pow$7 = Math.pow;
       var sign = Math.sign;
       var rgb2oklab = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var ref = unpack(args2, "rgb");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var ref = unpack(args, "rgb");
         var r = ref[0];
         var g = ref[1];
         var b = ref[2];
@@ -37559,29 +37559,29 @@ var require_chroma = __commonJS({
         return rgb2oklab(this._rgb);
       };
       chroma.oklab = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["oklab"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["oklab"])))();
       };
       input.format.oklab = oklab2rgb;
       input.autodetect.push({
         p: 3,
         test: function() {
-          var args2 = [], len = arguments.length;
-          while (len--) args2[len] = arguments[len];
-          args2 = unpack(args2, "oklab");
-          if (type(args2) === "array" && args2.length === 3) {
+          var args = [], len = arguments.length;
+          while (len--) args[len] = arguments[len];
+          args = unpack(args, "oklab");
+          if (type(args) === "array" && args.length === 3) {
             return "oklab";
           }
         }
       });
       var oklch2rgb = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        args2 = unpack(args2, "lch");
-        var l = args2[0];
-        var c = args2[1];
-        var h = args2[2];
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        args = unpack(args, "lch");
+        var l = args[0];
+        var c = args[1];
+        var h = args[2];
         var ref = lch2lab(l, c, h);
         var L = ref[0];
         var a = ref[1];
@@ -37590,12 +37590,12 @@ var require_chroma = __commonJS({
         var r = ref$1[0];
         var g = ref$1[1];
         var b = ref$1[2];
-        return [r, g, b, args2.length > 3 ? args2[3] : 1];
+        return [r, g, b, args.length > 3 ? args[3] : 1];
       };
       var rgb2oklch = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        var ref = unpack(args2, "rgb");
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        var ref = unpack(args, "rgb");
         var r = ref[0];
         var g = ref[1];
         var b = ref[2];
@@ -37609,18 +37609,18 @@ var require_chroma = __commonJS({
         return rgb2oklch(this._rgb);
       };
       chroma.oklch = function() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
-        return new (Function.prototype.bind.apply(Color, [null].concat(args2, ["oklch"])))();
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
+        return new (Function.prototype.bind.apply(Color, [null].concat(args, ["oklch"])))();
       };
       input.format.oklch = oklch2rgb;
       input.autodetect.push({
         p: 3,
         test: function() {
-          var args2 = [], len = arguments.length;
-          while (len--) args2[len] = arguments[len];
-          args2 = unpack(args2, "oklch");
-          if (type(args2) === "array" && args2.length === 3) {
+          var args = [], len = arguments.length;
+          while (len--) args[len] = arguments[len];
+          args = unpack(args, "oklch");
+          if (type(args) === "array" && args.length === 3) {
             return "oklch";
           }
         }
@@ -38883,10 +38883,10 @@ var require_chroma = __commonJS({
         return Math.sqrt(sum_sq);
       }
       function valid() {
-        var args2 = [], len = arguments.length;
-        while (len--) args2[len] = arguments[len];
+        var args = [], len = arguments.length;
+        while (len--) args[len] = arguments[len];
         try {
-          new (Function.prototype.bind.apply(Color, [null].concat(args2)))();
+          new (Function.prototype.bind.apply(Color, [null].concat(args)))();
           return true;
         } catch (e) {
           return false;
@@ -40038,24 +40038,24 @@ var base64Regex = /^([0-9a-zA-Z+/]{4})*(([0-9a-zA-Z+/]{2}==)|([0-9a-zA-Z+/]{3}=)
 var base64urlRegex = /^([0-9a-zA-Z-_]{4})*(([0-9a-zA-Z-_]{2}(==)?)|([0-9a-zA-Z-_]{3}(=)?))?$/;
 var dateRegexSource = `((\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-((0[13578]|1[02])-(0[1-9]|[12]\\d|3[01])|(0[469]|11)-(0[1-9]|[12]\\d|30)|(02)-(0[1-9]|1\\d|2[0-8])))`;
 var dateRegex = new RegExp(`^${dateRegexSource}$`);
-function timeRegexSource(args2) {
+function timeRegexSource(args) {
   let secondsRegexSource = `[0-5]\\d`;
-  if (args2.precision) {
-    secondsRegexSource = `${secondsRegexSource}\\.\\d{${args2.precision}}`;
-  } else if (args2.precision == null) {
+  if (args.precision) {
+    secondsRegexSource = `${secondsRegexSource}\\.\\d{${args.precision}}`;
+  } else if (args.precision == null) {
     secondsRegexSource = `${secondsRegexSource}(\\.\\d+)?`;
   }
-  const secondsQuantifier = args2.precision ? "+" : "?";
+  const secondsQuantifier = args.precision ? "+" : "?";
   return `([01]\\d|2[0-3]):[0-5]\\d(:${secondsRegexSource})${secondsQuantifier}`;
 }
-function timeRegex(args2) {
-  return new RegExp(`^${timeRegexSource(args2)}$`);
+function timeRegex(args) {
+  return new RegExp(`^${timeRegexSource(args)}$`);
 }
-function datetimeRegex(args2) {
-  let regex = `${dateRegexSource}T${timeRegexSource(args2)}`;
+function datetimeRegex(args) {
+  let regex = `${dateRegexSource}T${timeRegexSource(args)}`;
   const opts = [];
-  opts.push(args2.local ? `Z?` : `Z`);
-  if (args2.offset)
+  opts.push(args.local ? `Z?` : `Z`);
+  if (args.offset)
     opts.push(`([+-]\\d{2}:?\\d{2})`);
   regex = `${regex}(${opts.join("|")})`;
   return new RegExp(`^${regex}$`);
@@ -42363,9 +42363,9 @@ var ZodFunction = class _ZodFunction extends ZodType {
       });
       return INVALID;
     }
-    function makeArgsIssue(args2, error) {
+    function makeArgsIssue(args, error) {
       return makeIssue({
-        data: args2,
+        data: args,
         path: ctx.path,
         errorMaps: [ctx.common.contextualErrorMap, ctx.schemaErrorMap, getErrorMap(), en_default].filter((x) => !!x),
         issueData: {
@@ -42389,10 +42389,10 @@ var ZodFunction = class _ZodFunction extends ZodType {
     const fn = ctx.data;
     if (this._def.returns instanceof ZodPromise) {
       const me = this;
-      return OK(async function(...args2) {
+      return OK(async function(...args) {
         const error = new ZodError([]);
-        const parsedArgs = await me._def.args.parseAsync(args2, params).catch((e) => {
-          error.addIssue(makeArgsIssue(args2, e));
+        const parsedArgs = await me._def.args.parseAsync(args, params).catch((e) => {
+          error.addIssue(makeArgsIssue(args, e));
           throw error;
         });
         const result = await Reflect.apply(fn, this, parsedArgs);
@@ -42404,10 +42404,10 @@ var ZodFunction = class _ZodFunction extends ZodType {
       });
     } else {
       const me = this;
-      return OK(function(...args2) {
-        const parsedArgs = me._def.args.safeParse(args2, params);
+      return OK(function(...args) {
+        const parsedArgs = me._def.args.safeParse(args, params);
         if (!parsedArgs.success) {
-          throw new ZodError([makeArgsIssue(args2, parsedArgs.error)]);
+          throw new ZodError([makeArgsIssue(args, parsedArgs.error)]);
         }
         const result = Reflect.apply(fn, this, parsedArgs.data);
         const parsedReturns = me._def.returns.safeParse(result, params);
@@ -42444,9 +42444,9 @@ var ZodFunction = class _ZodFunction extends ZodType {
     const validatedFunc = this.parse(func);
     return validatedFunc;
   }
-  static create(args2, returns, params) {
+  static create(args, returns, params) {
     return new _ZodFunction({
-      args: args2 ? args2 : ZodTuple.create([]).rest(ZodUnknown.create()),
+      args: args ? args : ZodTuple.create([]).rest(ZodUnknown.create()),
       returns: returns || ZodUnknown.create(),
       typeName: ZodFirstPartyTypeKind.ZodFunction,
       ...processCreateParams(params)
@@ -46716,52 +46716,52 @@ var MountedStores = class {
    *  caller supplies is deliberately ignored for the same reason: an
    *  authoritative scope is not something a caller can be trusted to know.
    *  The fourth argument (WriteOptions: operation_id) passes through. */
-  supersede(...args2) {
-    const store = this.mutatingStoreHolding("supersede", args2[0]);
-    return store.supersede(args2[0], args2[1], this.mountNameOf(store), args2[3]);
+  supersede(...args) {
+    const store = this.mutatingStoreHolding("supersede", args[0]);
+    return store.supersede(args[0], args[1], this.mountNameOf(store), args[3]);
   }
   /** Promotion tombstone: retire the original in its (project) store, pointing at
    *  the cross-store replacement. The replacement already lives in another store
    *  (the promoted domain copy), so only the original's holding store is touched. */
-  retireInFavorOf(...args2) {
-    return this.mutatingStoreHolding("retireInFavorOf", args2[0]).retireInFavorOf(...args2);
+  retireInFavorOf(...args) {
+    return this.mutatingStoreHolding("retireInFavorOf", args[0]).retireInFavorOf(...args);
   }
   /** Hard delete (+ §3.2.7 drain log for system todos) in the holding store. */
-  remove(...args2) {
-    return this.mutatingStoreHolding("remove", args2[0]).remove(...args2);
+  remove(...args) {
+    return this.mutatingStoreHolding("remove", args[0]).remove(...args);
   }
   // -- the generalized IN-PLACE write triad (stable-identity S2, decision
   // [stable-identity-design-v2]) — same holding-store routing as supersede:
   // an in-place write must land on the row that actually exists, and the
   // version counter it bumps is that store's.
   /** knowledge_update-shaped in-place write in the holding store. */
-  updateRecord(...args2) {
-    return this.mutatingStoreHolding("updateRecord", args2[0]).updateRecord(...args2);
+  updateRecord(...args) {
+    return this.mutatingStoreHolding("updateRecord", args[0]).updateRecord(...args);
   }
   /** NARROW server-owned metadata write (board 8c8b6d78 / R9) in the holding
    *  store — same routing as updateRecord, since it is the same in-place core
    *  with the body clock preserved. */
-  updateRecordMetadata(...args2) {
-    return this.mutatingStoreHolding("updateRecordMetadata", args2[0]).updateRecordMetadata(...args2);
+  updateRecordMetadata(...args) {
+    return this.mutatingStoreHolding("updateRecordMetadata", args[0]).updateRecordMetadata(...args);
   }
   /** knowledge_edit-shaped exactly-once passage replace in the holding store. */
-  editRecordField(...args2) {
-    return this.mutatingStoreHolding("editRecordField", args2[0]).editRecordField(...args2);
+  editRecordField(...args) {
+    return this.mutatingStoreHolding("editRecordField", args[0]).editRecordField(...args);
   }
   /** knowledge_append-shaped array growth in the holding store. */
-  appendRecordField(...args2) {
-    return this.mutatingStoreHolding("appendRecordField", args2[0]).appendRecordField(...args2);
+  appendRecordField(...args) {
+    return this.mutatingStoreHolding("appendRecordField", args[0]).appendRecordField(...args);
   }
   /** An archived (record_id, version) snapshot from whichever store holds the
    *  record. Version history is store-local, exactly like the record itself. */
-  getRecordVersion(...args2) {
-    return this.storeHolding(args2[0]).getRecordVersion(...args2);
+  getRecordVersion(...args) {
+    return this.storeHolding(args[0]).getRecordVersion(...args);
   }
   /** IN-PLACE todo edit (board_update) in the holding store — todos are always
    *  project-scoped (§3.3), so this always resolves to the project store, but it
    *  routes the same way as supersede/remove for consistency rather than assuming. */
-  updateTodo(...args2) {
-    return this.mutatingStoreHolding("updateTodo", args2[0]).updateTodo(...args2);
+  updateTodo(...args) {
+    return this.mutatingStoreHolding("updateTodo", args[0]).updateTodo(...args);
   }
   /** Typed link edge, added on the source record in its holding store. The TARGET
    *  is resolved across ALL mounted stores (cross-store get, like get()) before
@@ -46892,12 +46892,12 @@ var MountedStores = class {
   // appendRunReconcileNeeded, writeHandoff/readHandoffs, setRunReviewMandatory)
   // was removed with the staged pipeline (decision
   // sterling-claude-code-scale-down-boundary, 2ad87dd1).
-  recordCheckSkipped(...args2) {
-    return this.mutatingProject("recordCheckSkipped").recordCheckSkipped(...args2);
+  recordCheckSkipped(...args) {
+    return this.mutatingProject("recordCheckSkipped").recordCheckSkipped(...args);
   }
   /** The drain log is project-local (§3.2.7) — forwarded like every board surface. */
-  drainLogEntry(...args2) {
-    return this.mutatingProject("drainLogEntry").drainLogEntry(...args2);
+  drainLogEntry(...args) {
+    return this.mutatingProject("drainLogEntry").drainLogEntry(...args);
   }
   /**
    * Run `fn` holding the machine-level knowledge_move lock (move-lock.ts). Reentrant on this
@@ -53549,9 +53549,9 @@ var HandoffGitError = class extends HandoffSettingError {
 };
 var GIT_TIMEOUT_MS = 3e4;
 function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
-  const run = (args2) => {
-    const r = spawn("git", args2, { cwd: root, encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
-    const name = `git ${args2[0]}`;
+  const run = (args) => {
+    const r = spawn("git", args, { cwd: root, encoding: "utf8", timeout: GIT_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
+    const name = `git ${args[0]}`;
     if (r.error) return { failed: r.error.code === "ETIMEDOUT" ? `${name} timed out after ${GIT_TIMEOUT_MS / 1e3}s` : `${name} did not run (${r.error.message})` };
     if (r.status !== 0) {
       const stderr = (r.stderr || "").trim().split("\n")[0];
@@ -53856,9 +53856,9 @@ var IMPORTS = [
 function refusal(item, what, remedy) {
   return { item, status: "refused", refused: true, detail: what, instruction: `REFUSED: ${what}. Sterling will not overwrite it. Remedy: ${remedy}.` };
 }
-function git(projectDir, args2) {
-  const r = spawnSync2("git", args2, { cwd: projectDir, encoding: "utf8" });
-  if (r.error) throw new Error(`git ${args2.join(" ")} could not run in ${fwd2(projectDir)}: ${r.error.message}`);
+function git(projectDir, args) {
+  const r = spawnSync2("git", args, { cwd: projectDir, encoding: "utf8" });
+  if (r.error) throw new Error(`git ${args.join(" ")} could not run in ${fwd2(projectDir)}: ${r.error.message}`);
   return r;
 }
 var EDIT_FAMILY = ["edit", "write", "patch"];
@@ -54238,9 +54238,9 @@ function openDashboard(storePath2, options = {}) {
       Object.defineProperty(target, name, {
         configurable: true,
         writable: true,
-        value: (...args2) => {
+        value: (...args) => {
           storeCalls++;
-          return fn.apply(target, args2);
+          return fn.apply(target, args);
         }
       });
     }
@@ -54742,6 +54742,19 @@ function openDashboard(storePath2, options = {}) {
   };
 }
 
+// packages/tui/dist/launch-args.js
+function parseLaunchArgs(args) {
+  const storeIdx = args.indexOf("--store");
+  const hostIdx = args.indexOf("--host");
+  const host2 = hostIdx === -1 ? "claude" : args[hostIdx + 1];
+  if (storeIdx === -1 || !args[storeIdx + 1] || host2 !== "claude" && host2 !== "opencode")
+    return null;
+  return { storePath: args[storeIdx + 1], host: host2 };
+}
+function openLaunchDashboard(launch2, options) {
+  return openDashboard(launch2.storePath, { ...options, host: launch2.host === "opencode" ? "opencode" : void 0 });
+}
+
 // packages/tui/dist/github-status.js
 import { execFile as nodeExecFile } from "node:child_process";
 var POLL_MS = 6e4;
@@ -54872,9 +54885,9 @@ function createGithubPoller(options) {
   let lastGoodAt = 0;
   let child;
   let closed = false;
-  function spawn(file, args2, done) {
+  function spawn(file, args, done) {
     let answered = false;
-    const proc = run(file, args2, execOpts, (err, stdout, stderr) => {
+    const proc = run(file, args, execOpts, (err, stdout, stderr) => {
       answered = true;
       child = void 0;
       if (!closed)
@@ -54904,8 +54917,8 @@ function createGithubPoller(options) {
         return settle({ state: "hidden", reason: `origin is on ${origin.host}, not github.com` });
       const [, owner2, name] = origin.repo.split("/");
       const repo = `${owner2}/${name}`;
-      const args2 = ["api", "graphql", "-f", `query=${GITHUB_QUERY}`, "-f", `owner=${owner2}`, "-f", `name=${name}`];
-      spawn("gh", args2, (ghErr, ghOut, ghStderr) => {
+      const args = ["api", "graphql", "-f", `query=${GITHUB_QUERY}`, "-f", `owner=${owner2}`, "-f", `name=${name}`];
+      spawn("gh", args, (ghErr, ghOut, ghStderr) => {
         const at = clock();
         const loop = loopOf(readLoop, options.root);
         if (ghErr && ghErr.code === "ENOENT")
@@ -58453,15 +58466,12 @@ if (!process.stdout.isTTY && !smoke) {
   console.error("sterling-tui: stdout is not a TTY \u2014 exiting politely (\xA711)");
   process.exit(0);
 }
-var args = process.argv.slice(2);
-var storeIdx = args.indexOf("--store");
-var hostIdx = args.indexOf("--host");
-var host = hostIdx === -1 ? "claude" : args[hostIdx + 1];
-if (storeIdx === -1 || !args[storeIdx + 1] || host !== "claude" && host !== "opencode") {
+var launch = parseLaunchArgs(process.argv.slice(2));
+if (!launch) {
   console.error("usage: sterling-tui --store <path-to-sterling.db> [--host claude|opencode]");
   process.exit(2);
 }
-var storePath = args[storeIdx + 1];
+var { storePath, host } = launch;
 var termkit = await Promise.resolve().then(() => __toESM(require_termkit_no_lazy_require(), 1));
 var term = termkit.default.terminal;
 var colorGeneric = colorGenericFor(process.env, term.support ?? {});
@@ -58490,7 +58500,7 @@ if (owner !== null) {
 var profileEnv = process.env.STERLING_TUI_PROFILE;
 var profilePath = !profileEnv ? void 0 : profileEnv === "1" ? join22(dirname11(storePath), "transient", "tui-profile.log") : profileEnv;
 var github = createGithubPoller({ root: dirname11(dirname11(storePath)) });
-var ctl = openDashboard(storePath, { deferWrites: true, profile: profilePath !== void 0, onGithubRefresh: () => github.refresh() });
+var ctl = openLaunchDashboard(launch, { deferWrites: true, profile: profilePath !== void 0, onGithubRefresh: () => github.refresh() });
 if (profilePath) {
   mkdirSync12(dirname11(profilePath), { recursive: true });
   appendFileSync(profilePath, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), start: true, pid: process.pid, changeDetection: ctl.stats().changeDetection }) + "\n");
