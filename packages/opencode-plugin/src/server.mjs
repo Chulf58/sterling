@@ -81,6 +81,7 @@ import { onEvaluate as storeGuard } from './store-guard.mjs';
 import { BUSY_TIMEOUT_MS, createProjectStores, openProjectStore } from './store.mjs';
 import { createSessionSync } from './sync.mjs';
 import { createWorkerLaunch, inWorkerChild } from './worker.mjs';
+import { createConductorSessionRecorder } from './conductor-session.mjs';
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
@@ -239,6 +240,8 @@ export function createSterlingServer(deps = {}) {
     }
     const onSelection = createPromptHandler({ openStore, rootOf, fenced, env });
     const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels: () => models?.list?.(), env });
+    // The root session the user last prompted, for the launcher's --session (conductor-session.mjs).
+    const recordConductorSession = createConductorSessionRecorder({ rootOf, fenced, getSession: () => session, parents, env });
     // Each session's agent and model, for the Overpass mismatch notice (overpass.mjs).
     const sessionModels = createSessionModels();
     /**
@@ -263,6 +266,7 @@ export function createSterlingServer(deps = {}) {
       await onSelection(input);
       await onVolatile(input);
       await pressure.onPrompt(input);
+      await recordConductorSession(input);
       const root = rootOf();
       if (!root) return;
       const res = await convergeOverpass(root);
