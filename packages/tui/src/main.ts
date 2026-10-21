@@ -8,8 +8,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { openDashboard } from './controller.js';
-import { parseLaunchArgs } from './launch-args.js';
+import { openLaunchDashboard, parseLaunchArgs } from './launch-args.js';
 import { githubStripRows, visibleBodyLines, AGENTS_TAB, type DashboardState } from './state.js';
 import { createGithubPoller } from './github-status.js';
 import { bannerLines, scenePixels } from './banner.js';
@@ -30,7 +29,7 @@ if (!launch) {
   console.error('usage: sterling-tui --store <path-to-sterling.db> [--host claude|opencode]');
   process.exit(2);
 }
-const { storePath, host, dashboardHost } = launch;
+const { storePath, host } = launch;
 
 const termkit = await import('terminal-kit');
 let term = termkit.default.terminal;
@@ -85,7 +84,7 @@ const profilePath = !profileEnv ? undefined : profileEnv === '1' ? join(dirname(
 // waits on it: the tick hands the latest snapshot to the state layer.
 const github = createGithubPoller({ root: dirname(dirname(storePath)) });
 // Store writes are deferred: the frame is drawn first, then the write runs.
-const ctl = openDashboard(storePath, { host: dashboardHost, deferWrites: true, profile: profilePath !== undefined, onGithubRefresh: () => github.refresh() });
+const ctl = openLaunchDashboard(launch, { deferWrites: true, profile: profilePath !== undefined, onGithubRefresh: () => github.refresh() });
 if (profilePath) {
   mkdirSync(dirname(profilePath), { recursive: true });
   appendFileSync(profilePath, JSON.stringify({ at: new Date().toISOString(), start: true, pid: process.pid, changeDetection: ctl.stats().changeDetection }) + '\n');

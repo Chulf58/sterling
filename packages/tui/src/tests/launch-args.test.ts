@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseLaunchArgs } from '../launch-args.js';
-import { openDashboard } from '../controller.js';
+import { openLaunchDashboard, parseLaunchArgs } from '../launch-args.js';
 import { SYSTEM_TAB } from '../state.js';
 
 // The terminal TUI's command line (main.ts). The OpenCode launcher opens the
@@ -23,7 +22,8 @@ test('launch args: --host opencode reaches openDashboard, so the side pane shows
   const parsed = parseLaunchArgs(['--store', join(dir, '.sterling', 'sterling.db'), '--host', 'opencode']);
   assert.ok(parsed);
   assert.equal(parsed.host, 'opencode');
-  const ctl = openDashboard(parsed.storePath, { host: parsed.dashboardHost });
+  // the same call main.ts makes to open its dashboard
+  const ctl = openLaunchDashboard(parsed, {});
   try {
     await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
     const text = ctl.state(VP).rows.filter((r) => r.id.startsWith('sys:overpass')).map((r) => r.lines[0].text).join('\n');
@@ -36,9 +36,9 @@ test('launch args: --host opencode reaches openDashboard, so the side pane shows
   }
 });
 
-test('launch args: the Claude Code host (default, or --host claude) passes no dashboard host', () => {
-  assert.deepEqual(parseLaunchArgs(['--store', 'x.db']), { storePath: 'x.db', host: 'claude', dashboardHost: undefined });
-  assert.deepEqual(parseLaunchArgs(['--store', 'x.db', '--host', 'claude']), { storePath: 'x.db', host: 'claude', dashboardHost: undefined });
+test('launch args: the Claude Code host is the default, and --host claude names it', () => {
+  assert.deepEqual(parseLaunchArgs(['--store', 'x.db']), { storePath: 'x.db', host: 'claude' });
+  assert.deepEqual(parseLaunchArgs(['--store', 'x.db', '--host', 'claude']), { storePath: 'x.db', host: 'claude' });
 });
 
 test('launch args: a missing store or an unknown host is refused', () => {
