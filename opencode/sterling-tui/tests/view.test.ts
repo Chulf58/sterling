@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -98,6 +98,12 @@ test('escapeLeavesView: Esc leaves only when no help, edit, picker or search is 
   assert.equal(escapeLeavesView({ ...initialUi, boardEdit: { id: 'i', text: '', version: 1 } }), false);
   assert.equal(escapeLeavesView({ ...initialUi, tab: 3, sparringModelEdit: '' }), false);
   assert.equal(escapeLeavesView({ ...initialUi, tab: 3, selector: { key: 'k', stage: 'model', highlight: 0 } }), false);
+  assert.equal(escapeLeavesView({ ...initialUi, tab: 4, overpassProviderEdit: '' }), false, 'Esc cancels the Overpass provider edit, not the view');
+});
+
+test("the OpenCode dashboard opens its controller with host 'opencode', which offers the Overpass rows", () => {
+  const src = readFileSync(new URL('../tui.tsx', import.meta.url), 'utf8');
+  assert.match(src, /openDashboard\(storePath, \{ host: 'opencode' \}\)/);
 });
 
 test('both dashboard functions are on in OpenCode: no flag gate is left (the former ruling sterling-on-opencode-2-is-the-knowledge-loop-in-one-small-plugin (not in the current store), DASHBOARD FUNCTIONS)', () => {

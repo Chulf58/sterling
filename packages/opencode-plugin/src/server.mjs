@@ -31,6 +31,9 @@
 //      a root session's unshown notices (context.mjs); and
 //      H10's context-pressure lines for a root session, measured from the
 //      session.step.* events, each appended once (pressure.mjs);
+//      and the Overpass turn (overpass.mjs): the .opencode/opencode.json agent overlay
+//      converged to the current setting (also at setup), and the loud notice for a
+//      conductor or Plan session whose model is not the one Overpass gives it;
 //   5. the compaction hook: the session's delivery receipts are removed, so
 //      delivery fires again after compaction drops context, and its next prompt
 //      gets the whole set of session context lines again.
@@ -69,6 +72,7 @@ import { NOTICES_REL, addNotice } from './notices.mjs';
 import { createPrLoopNotice } from './pr-loop.mjs';
 import { createRotationRestore } from './restore.mjs';
 import { createResearchRecorder } from './research.mjs';
+import { convergeOverlay, createSessionModels, mismatchNotice, projectOverpass } from './overpass.mjs';
 import { createPromptHandler } from './selection.mjs';
 import { createPressureWatch } from './pressure.mjs';
 import { remember } from './bounded.mjs';
@@ -91,7 +95,7 @@ const EXECUTION_END_EVENTS = new Set(['session.execution.succeeded', 'session.ex
 
 // Per-handler budgets. The store calls are synchronous and cannot be cut off
 // mid-call; the budget bounds the awaited part and logs any overrun.
-export const BUDGET_MS = { context: 4000, delivery: 4000, axis: 4000, dispatch: 10000, research: 4000, settle: 30000, prompt: 4000, compaction: 4000, config: 4000 };
+export const BUDGET_MS = { context: 4000, delivery: 4000, axis: 4000, dispatch: 10000, research: 4000, settle: 30000, prompt: 4000, compaction: 4000, config: 4000, overpass: 4000 };
 
 
 /**
@@ -214,7 +218,8 @@ export function createSterlingServer(deps = {}) {
     const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
     const dispatch = createDispatchHandlers({ rootOf, fenced });
     const recordResearch = createResearchRecorder({ rootOf, fenced, now });
-    // Every handler is fenced, so none of them throws: Sterling never denies a tool call.
+    // Every handler is fenced, so none of them throws, with one exception: axis.onBefore
+    // refuses a subagent call by throwing when the Overpass setting cannot be read (axis.mjs).
     async function onBefore(input) {
       await delivery.onBefore(input);
       await axis.onBefore(input);
@@ -234,10 +239,40 @@ export function createSterlingServer(deps = {}) {
     }
     const onSelection = createPromptHandler({ openStore, rootOf, fenced, env });
     const pressure = createPressureWatch({ rootOf, fenced, getSession: () => session, parents, listModels: () => models?.list?.(), env });
+    // Each session's agent and model, for the Overpass mismatch notice (overpass.mjs).
+    const sessionModels = createSessionModels();
+    /**
+     * Converges the Overpass agent overlay in .opencode/opencode.json; returns the
+     * resolution, or null when it could not be read (the fence has logged it and raised
+     * a notice). Never inside the maintenance worker's child, whose run is not the user's.
+     */
+    async function convergeOverpass(root) {
+      if (inWorkerChild(env)) return null;
+      let res = null;
+      await fenced('overpass', root, () => {
+        res = projectOverpass(root);
+        const { notes } = convergeOverlay(root, res);
+        for (const note of notes) {
+          logLine(root, `overpass: ${note}`);
+          addNotice(root, `Sterling Overpass: ${note}.`, now());
+        }
+      });
+      return res;
+    }
     async function onPrompt(input) {
       await onSelection(input);
       await onVolatile(input);
       await pressure.onPrompt(input);
+      const root = rootOf();
+      if (!root) return;
+      const res = await convergeOverpass(root);
+      const seen = res && sessionModels.get(input?.sessionID);
+      const notice = seen ? mismatchNotice(res, seen.agent, seen.model) : '';
+      if (notice && typeof input?.prompt?.text === 'string') input.prompt.text = `${input.prompt.text}\n\n${notice}`;
+    }
+    async function onSessionContext(input) {
+      sessionModels.noteAgent(input?.sessionID, input?.agent);
+      await onContext(input);
     }
     const compaction = createCompactionHandler({ rootOf, fenced });
     async function onCompaction(input) {
@@ -247,7 +282,10 @@ export function createSterlingServer(deps = {}) {
 
     async function onEvent(ev) {
       // Step and execution events feed the context-pressure reading (pressure.mjs), keyed by session.
-      if (rootOf()) pressure.onEvent(ev);
+      if (rootOf()) {
+        pressure.onEvent(ev);
+        sessionModels.onEvent(ev);
+      }
       if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
       // An event that names another location's directory is that location's to handle.
       const evDir = ev.location?.directory;
@@ -318,7 +356,7 @@ export function createSterlingServer(deps = {}) {
       await fenced('settle', root, () => prLoopNotice(root));
     }
 
-    const handlers = { context: onContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };
+    const handlers = { context: onSessionContext, prompt: onPrompt, compaction: onCompaction, before: onBefore, after: onAfter, event: onEvent };
 
     /** Registers this location's hooks on its ctx and starts its event subscription; returns the cleanup. */
     async function bind(ctx, guarded) {
@@ -333,8 +371,10 @@ export function createSterlingServer(deps = {}) {
           addNotice(root, `Sterling plugin: ${why}.`, now());
         }
       }
-      if (root) await fenced('config', root, () => configure(ctx));
-      else {
+      if (root) {
+        await fenced('config', root, () => configure(ctx));
+        await convergeOverpass(root);
+      } else {
         // No store yet: register only what works without one (/sterling:init first),
         // and report a failure on stderr, since there is no .sterling/ to log into.
         try {
@@ -343,7 +383,7 @@ export function createSterlingServer(deps = {}) {
           process.stderr.write(`[sterling] the bootstrap commands could not be registered (${errText(e)})\n`);
         }
       }
-      await ctx.session.hook('context', onContext);
+      await ctx.session.hook('context', onSessionContext);
       await ctx.session.hook('prompt', onPrompt);
       await ctx.session.hook('compaction', onCompaction);
       await ctx.tool.hook('execute.before', onBefore);

@@ -27,7 +27,8 @@
 // — board 09f05fca half 2, review fix.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AutoMergeToggleEffect, HandoffToggleEffect, ModeToggleEffect, SparringToggleEffect, TddToggleEffect } from './state.js';
+import { OVERPASS_PROVIDER_RE } from '@sterling/schemas';
+import type { AutoMergeToggleEffect, HandoffToggleEffect, ModeToggleEffect, OverpassBypassEffect, OverpassProviderEffect, OverpassToggleEffect, SparringToggleEffect, TddToggleEffect } from './state.js';
 
 function configPath(explicit?: string): string {
   return explicit ?? join(process.cwd(), '.sterling', 'config.json');
@@ -145,6 +146,55 @@ export function applyAutoMergeToggle(e: AutoMergeToggleEffect, onError?: (msg: s
     return true;
   } catch (err) {
     onError?.(`auto-merge toggle failed — ${(err as Error).message}`);
+    return false;
+  }
+}
+
+/** Write one key of config.overpass (decision
+ *  overpass-toggle-work-mode-only-routes-every-lane-through-tiers). Every other
+ *  overpass key is kept; a recorded `overpass` that is not an object is replaced,
+ *  never spread. Nothing else is written: the plugin applies the routing on its
+ *  next turn. */
+function writeOverpassKey(field: 'enabled' | 'provider' | 'conductor_bypass', value: boolean | string, path?: string): void {
+  writeConfigKey(configPath(path), 'overpass', (old) => {
+    const block = old !== null && typeof old === 'object' && !Array.isArray(old) ? old : {};
+    return { ...block, [field]: value };
+  });
+}
+
+/** Execute an overpass_toggle effect: config.overpass.enabled. Optional trailing
+ *  `path` overrides the cwd-derived default (see applySparringToggle). */
+export function applyOverpassToggle(e: OverpassToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
+  try {
+    writeOverpassKey('enabled', e.enabled, path);
+    return true;
+  } catch (err) {
+    onError?.(`Overpass toggle failed — ${(err as Error).message}`);
+    return false;
+  }
+}
+
+/** Execute an overpass_provider effect: config.overpass.provider. The provider id
+ *  was validated by the reducer; it is checked again here, so a caller that skips
+ *  the reducer can never write an id the resolver would refuse. */
+export function applyOverpassProvider(e: OverpassProviderEffect, onError?: (msg: string) => void, path?: string): boolean {
+  try {
+    if (!OVERPASS_PROVIDER_RE.test(e.provider)) throw new Error(`'${e.provider}' is not a provider id`);
+    writeOverpassKey('provider', e.provider, path);
+    return true;
+  } catch (err) {
+    onError?.(`Overpass provider update failed — ${(err as Error).message}`);
+    return false;
+  }
+}
+
+/** Execute an overpass_bypass_toggle effect: config.overpass.conductor_bypass. */
+export function applyOverpassBypass(e: OverpassBypassEffect, onError?: (msg: string) => void, path?: string): boolean {
+  try {
+    writeOverpassKey('conductor_bypass', e.enabled, path);
+    return true;
+  } catch (err) {
+    onError?.(`Overpass conductor bypass toggle failed — ${(err as Error).message}`);
     return false;
   }
 }

@@ -4965,12 +4965,20 @@ var init_transient = __esm({
   }
 });
 
+// packages/schemas/dist/project.js
+var init_project = __esm({
+  "packages/schemas/dist/project.js"() {
+    "use strict";
+  }
+});
+
 // packages/schemas/dist/config.js
 var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
     init_zod();
+    init_project();
     effortLevel = external_exports.enum(["low", "medium", "high", "xhigh"]);
     modelPin = external_exports.object({
       model: external_exports.string(),
@@ -5455,7 +5463,16 @@ var init_config = __esm({
       // typo never turns into a merge. Toggled in the TUI System tab. The default
       // lives twice: here and in templates/default-config.json (config.test.ts pins
       // that they agree).
-      pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true })
+      pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true }),
+      // Overpass toggle (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers
+      // and overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice):
+      // routes the conductor and every lane through the provider's tiered models.
+      // Work mode on OpenCode only. PERMISSIVE like mode: the value is preserved
+      // raw so a typo never fails every parseConfig reader; the strict judge is
+      // resolveOverpass() below, which throws on a present but invalid value. The
+      // default lives twice: here and in templates/default-config.json
+      // (config.test.ts pins that they agree).
+      overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false })
     });
   }
 });
@@ -5499,13 +5516,6 @@ var init_staleness = __esm({
       pid: external_exports.number().int(),
       booted_at: external_exports.string()
     }).strict();
-  }
-});
-
-// packages/schemas/dist/project.js
-var init_project = __esm({
-  "packages/schemas/dist/project.js"() {
-    "use strict";
   }
 });
 

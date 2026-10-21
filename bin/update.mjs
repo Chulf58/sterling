@@ -5807,7 +5807,126 @@ var init_transient = __esm({
   }
 });
 
+// packages/schemas/dist/project.js
+import { lstatSync as lstatSync3, readFileSync as readFileSync5 } from "node:fs";
+import { join as join7, resolve as resolve4 } from "node:path";
+function readContainedText(root, rel, ErrorClass, subject) {
+  const segments = rel.split("/");
+  let cursor = resolve4(root);
+  for (const [index, part] of segments.entries()) {
+    cursor = join7(cursor, part);
+    let st;
+    try {
+      st = lstatSync3(cursor);
+    } catch (err) {
+      if (err?.code === "ENOENT")
+        return null;
+      throw err;
+    }
+    const shown = segments.slice(0, index + 1).join("/");
+    const isLeaf = index === segments.length - 1;
+    if (st.isSymbolicLink())
+      throw new ErrorClass(`${shown} is a symlink \u2014 refusing to follow it out of the project; ${subject} cannot be read`);
+    if (isLeaf ? !st.isFile() : !st.isDirectory()) {
+      throw new ErrorClass(`${shown} exists but is not a ${isLeaf ? "regular file" : "directory"} \u2014 ${subject} cannot be read`);
+    }
+  }
+  return readFileSync5(cursor, "utf8");
+}
+function readJsonObject(root, rel, ErrorClass, subject) {
+  const where = `${fwd2(resolve4(root))}/${rel}`;
+  const text = readContainedText(root, rel, ErrorClass, subject);
+  if (text === null)
+    return { where, parsed: void 0 };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
+  }
+  return { where, parsed };
+}
+function judgeProjectMode(mode, where) {
+  if (mode === void 0)
+    return "hobby";
+  if (!PROJECT_MODES.includes(mode)) {
+    throw new ProjectModeError(`config.mode is ${JSON.stringify(mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+  }
+  return mode;
+}
+function readProjectMode(root) {
+  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
+  if (parsed === void 0)
+    return "hobby";
+  return judgeProjectMode(parsed.mode, where);
+}
+function readProjectIdentity(root) {
+  const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
+  if (parsed === void 0)
+    return null;
+  if (!isProjectId(parsed.project_id)) {
+    throw new ProjectIdentityError(`project_id is ${JSON.stringify(parsed.project_id)} in ${where} \u2014 it must be a UUID v4 string; fix the file by hand (init never overwrites it) or restore it from git`);
+  }
+  return { project_id: parsed.project_id };
+}
+var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd2, UUID_V4_RE, isProjectId;
+var init_project = __esm({
+  "packages/schemas/dist/project.js"() {
+    "use strict";
+    PROJECT_MODES = ["hobby", "work"];
+    ProjectModeError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ProjectModeError";
+      }
+    };
+    ProjectIdentityError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ProjectIdentityError";
+      }
+    };
+    CONFIG_REL = ".sterling/config.json";
+    PROJECT_IDENTITY_REL = ".sterling/project.json";
+    fwd2 = (p) => p.replace(/\\/g, "/");
+    UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
+  }
+});
+
 // packages/schemas/dist/config.js
+function resolveOverpass(config, opts2) {
+  const cfg = isPlainObject(config) ? config : {};
+  const raw = cfg.overpass;
+  if (raw !== void 0 && !isPlainObject(raw)) {
+    throw new Error(`config.overpass is ${JSON.stringify(raw)} \u2014 it must be an object like {"enabled": false, "provider": "overpass"}`);
+  }
+  const block = raw ?? {};
+  const enabled = block.enabled === void 0 ? false : block.enabled;
+  if (typeof enabled !== "boolean") {
+    throw new Error(`config.overpass.enabled is ${JSON.stringify(enabled)} \u2014 it must be true or false`);
+  }
+  const bypass = block.conductor_bypass === void 0 ? false : block.conductor_bypass;
+  if (typeof bypass !== "boolean") {
+    throw new Error(`config.overpass.conductor_bypass is ${JSON.stringify(bypass)} \u2014 it must be true or false`);
+  }
+  const provider = block.provider === void 0 ? DEFAULT_OVERPASS_PROVIDER : block.provider;
+  if (typeof provider !== "string" || !OVERPASS_PROVIDER_RE.test(provider)) {
+    throw new Error(`config.overpass.provider is ${JSON.stringify(provider)} \u2014 it must be a provider id of letters, digits, '-', '_' and '.', with no '/' or '#'`);
+  }
+  const base2 = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/agentic-high` };
+  if (!enabled)
+    return { ...base2, effective: false, conductorRouted: false };
+  const mode = judgeProjectMode(cfg.mode, "the config");
+  if (mode !== "work")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };
+  if (opts2.host !== "opencode")
+    return { ...base2, effective: false, conductorRouted: false, reason: `overpass applies on OpenCode only; the host is '${opts2.host}'` };
+  return { ...base2, effective: true, conductorRouted: !bypass };
+}
 function normalizeRawConfig(raw) {
   if (!isPlainObject(raw))
     return raw;
@@ -5876,11 +5995,12 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 left in place and ignored; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, RETIRED_MODEL_KEYS, isPlainObject, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
     init_zod();
+    init_project();
     effortLevel = external_exports.enum(["low", "medium", "high", "xhigh"]);
     modelPin = external_exports.object({
       model: external_exports.string(),
@@ -6366,8 +6486,19 @@ var init_config = __esm({
       // typo never turns into a merge. Toggled in the TUI System tab. The default
       // lives twice: here and in templates/default-config.json (config.test.ts pins
       // that they agree).
-      pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true })
+      pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true }),
+      // Overpass toggle (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers
+      // and overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice):
+      // routes the conductor and every lane through the provider's tiered models.
+      // Work mode on OpenCode only. PERMISSIVE like mode: the value is preserved
+      // raw so a typo never fails every parseConfig reader; the strict judge is
+      // resolveOverpass() below, which throws on a present but invalid value. The
+      // default lives twice: here and in templates/default-config.json
+      // (config.test.ts pins that they agree).
+      overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false })
     });
+    DEFAULT_OVERPASS_PROVIDER = "overpass";
+    OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
     RETIRED_MODEL_KEYS = [
       "coder",
       "coder_hard",
@@ -6413,12 +6544,12 @@ var init_registry = __esm({
 });
 
 // packages/schemas/dist/staleness.js
-import { dirname, join as join7 } from "node:path";
+import { dirname, join as join8 } from "node:path";
 function buildIdPath(serverDir) {
-  return join7(serverDir, BUILD_ID_FILE);
+  return join8(serverDir, BUILD_ID_FILE);
 }
 function runtimeMarkerPath(storePath) {
-  return join7(dirname(storePath), "transient", "mcp-runtime.json");
+  return join8(dirname(storePath), "transient", "mcp-runtime.json");
 }
 function stalenessVerdict(currentBuildId, marker, markerPidAlive = null) {
   if (!currentBuildId || !marker)
@@ -6439,91 +6570,6 @@ var init_staleness = __esm({
       pid: external_exports.number().int(),
       booted_at: external_exports.string()
     }).strict();
-  }
-});
-
-// packages/schemas/dist/project.js
-import { lstatSync as lstatSync3, readFileSync as readFileSync5 } from "node:fs";
-import { join as join8, resolve as resolve4 } from "node:path";
-function readContainedText(root, rel, ErrorClass, subject) {
-  const segments = rel.split("/");
-  let cursor = resolve4(root);
-  for (const [index, part] of segments.entries()) {
-    cursor = join8(cursor, part);
-    let st;
-    try {
-      st = lstatSync3(cursor);
-    } catch (err) {
-      if (err?.code === "ENOENT")
-        return null;
-      throw err;
-    }
-    const shown = segments.slice(0, index + 1).join("/");
-    const isLeaf = index === segments.length - 1;
-    if (st.isSymbolicLink())
-      throw new ErrorClass(`${shown} is a symlink \u2014 refusing to follow it out of the project; ${subject} cannot be read`);
-    if (isLeaf ? !st.isFile() : !st.isDirectory()) {
-      throw new ErrorClass(`${shown} exists but is not a ${isLeaf ? "regular file" : "directory"} \u2014 ${subject} cannot be read`);
-    }
-  }
-  return readFileSync5(cursor, "utf8");
-}
-function readJsonObject(root, rel, ErrorClass, subject) {
-  const where = `${fwd2(resolve4(root))}/${rel}`;
-  const text = readContainedText(root, rel, ErrorClass, subject);
-  if (text === null)
-    return { where, parsed: void 0 };
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (err) {
-    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
-  }
-  return { where, parsed };
-}
-function readProjectMode(root) {
-  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
-  if (parsed === void 0 || parsed.mode === void 0)
-    return "hobby";
-  if (!PROJECT_MODES.includes(parsed.mode)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
-  }
-  return parsed.mode;
-}
-function readProjectIdentity(root) {
-  const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
-  if (parsed === void 0)
-    return null;
-  if (!isProjectId(parsed.project_id)) {
-    throw new ProjectIdentityError(`project_id is ${JSON.stringify(parsed.project_id)} in ${where} \u2014 it must be a UUID v4 string; fix the file by hand (init never overwrites it) or restore it from git`);
-  }
-  return { project_id: parsed.project_id };
-}
-var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd2, UUID_V4_RE, isProjectId;
-var init_project = __esm({
-  "packages/schemas/dist/project.js"() {
-    "use strict";
-    PROJECT_MODES = ["hobby", "work"];
-    ProjectModeError = class extends Error {
-      constructor(message) {
-        super(message);
-        this.name = "ProjectModeError";
-      }
-    };
-    ProjectIdentityError = class extends Error {
-      constructor(message) {
-        super(message);
-        this.name = "ProjectIdentityError";
-      }
-    };
-    CONFIG_REL = ".sterling/config.json";
-    PROJECT_IDENTITY_REL = ".sterling/project.json";
-    fwd2 = (p) => p.replace(/\\/g, "/");
-    UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
   }
 });
 
@@ -6691,6 +6737,7 @@ __export(dist_exports, {
   BROKER_REGISTRY_MAX_BYTES: () => BROKER_REGISTRY_MAX_BYTES,
   BUILD_ID_FILE: () => BUILD_ID_FILE,
   CLAUDE_MODEL_ID_RE: () => CLAUDE_MODEL_ID_RE,
+  DEFAULT_OVERPASS_PROVIDER: () => DEFAULT_OVERPASS_PROVIDER,
   DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS: () => DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS,
   DIGEST_CLIP: () => DIGEST_CLIP,
   DRAIN_VERBS: () => DRAIN_VERBS,
@@ -6713,6 +6760,7 @@ __export(dist_exports, {
   OPENCODE_MODEL_REF_RE: () => OPENCODE_MODEL_REF_RE,
   OPEN_QUESTION_CLOSED: () => OPEN_QUESTION_CLOSED,
   OPEN_QUESTION_TERMINUS_FIELD: () => OPEN_QUESTION_TERMINUS_FIELD,
+  OVERPASS_PROVIDER_RE: () => OVERPASS_PROVIDER_RE,
   PROJECT_IDENTITY_REL: () => PROJECT_IDENTITY_REL,
   PROJECT_MODES: () => PROJECT_MODES,
   ProjectIdentityError: () => ProjectIdentityError,
@@ -6769,6 +6817,7 @@ __export(dist_exports, {
   isProjectId: () => isProjectId,
   isSourcePath: () => isSourcePath,
   isUnderLocationAnyHost: () => isUnderLocationAnyHost,
+  judgeProjectMode: () => judgeProjectMode,
   knowledgeWriteSchema: () => knowledgeWriteSchema,
   knowledgeWritesOwnerPid: () => knowledgeWritesOwnerPid,
   knowledgeWritesProcessFile: () => knowledgeWritesProcessFile,
@@ -6799,6 +6848,7 @@ __export(dist_exports, {
   repoPath: () => repoPath,
   repoPathOfLocation: () => repoPathOfLocation,
   researchFindingSchema: () => researchFindingSchema,
+  resolveOverpass: () => resolveOverpass,
   runtimeMarkerPath: () => runtimeMarkerPath,
   runtimeMarkerSchema: () => runtimeMarkerSchema,
   sameLocationAnyHost: () => sameLocationAnyHost,

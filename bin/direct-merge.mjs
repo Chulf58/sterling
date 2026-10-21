@@ -5131,6 +5131,96 @@ var init_transient = __esm({
   }
 });
 
+// packages/schemas/dist/project.js
+import { lstatSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+function readContainedText(root, rel, ErrorClass, subject) {
+  const segments = rel.split("/");
+  let cursor = resolve(root);
+  for (const [index, part] of segments.entries()) {
+    cursor = join(cursor, part);
+    let st;
+    try {
+      st = lstatSync(cursor);
+    } catch (err) {
+      if (err?.code === "ENOENT")
+        return null;
+      throw err;
+    }
+    const shown = segments.slice(0, index + 1).join("/");
+    const isLeaf = index === segments.length - 1;
+    if (st.isSymbolicLink())
+      throw new ErrorClass(`${shown} is a symlink \u2014 refusing to follow it out of the project; ${subject} cannot be read`);
+    if (isLeaf ? !st.isFile() : !st.isDirectory()) {
+      throw new ErrorClass(`${shown} exists but is not a ${isLeaf ? "regular file" : "directory"} \u2014 ${subject} cannot be read`);
+    }
+  }
+  return readFileSync(cursor, "utf8");
+}
+function readJsonObject(root, rel, ErrorClass, subject) {
+  const where = `${fwd(resolve(root))}/${rel}`;
+  const text = readContainedText(root, rel, ErrorClass, subject);
+  if (text === null)
+    return { where, parsed: void 0 };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
+  }
+  return { where, parsed };
+}
+function judgeProjectMode(mode2, where) {
+  if (mode2 === void 0)
+    return "hobby";
+  if (!PROJECT_MODES.includes(mode2)) {
+    throw new ProjectModeError(`config.mode is ${JSON.stringify(mode2)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
+  }
+  return mode2;
+}
+function readProjectMode(root) {
+  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
+  if (parsed === void 0)
+    return "hobby";
+  return judgeProjectMode(parsed.mode, where);
+}
+function readProjectIdentity(root) {
+  const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
+  if (parsed === void 0)
+    return null;
+  if (!isProjectId(parsed.project_id)) {
+    throw new ProjectIdentityError(`project_id is ${JSON.stringify(parsed.project_id)} in ${where} \u2014 it must be a UUID v4 string; fix the file by hand (init never overwrites it) or restore it from git`);
+  }
+  return { project_id: parsed.project_id };
+}
+var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd, UUID_V4_RE, isProjectId;
+var init_project = __esm({
+  "packages/schemas/dist/project.js"() {
+    "use strict";
+    PROJECT_MODES = ["hobby", "work"];
+    ProjectModeError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ProjectModeError";
+      }
+    };
+    ProjectIdentityError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ProjectIdentityError";
+      }
+    };
+    CONFIG_REL = ".sterling/config.json";
+    PROJECT_IDENTITY_REL = ".sterling/project.json";
+    fwd = (p) => p.replace(/\\/g, "/");
+    UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
+  }
+});
+
 // packages/schemas/dist/config.js
 function normalizeRawConfig(raw) {
   if (!isPlainObject(raw))
@@ -5164,6 +5254,7 @@ var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
     init_zod();
+    init_project();
     effortLevel = external_exports.enum(["low", "medium", "high", "xhigh"]);
     modelPin = external_exports.object({
       model: external_exports.string(),
@@ -5648,7 +5739,16 @@ var init_config = __esm({
       // typo never turns into a merge. Toggled in the TUI System tab. The default
       // lives twice: here and in templates/default-config.json (config.test.ts pins
       // that they agree).
-      pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true })
+      pr_review: external_exports.unknown().default({ copilot_logins: [], auto_merge_on_clean: true }),
+      // Overpass toggle (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers
+      // and overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice):
+      // routes the conductor and every lane through the provider's tiered models.
+      // Work mode on OpenCode only. PERMISSIVE like mode: the value is preserved
+      // raw so a typo never fails every parseConfig reader; the strict judge is
+      // resolveOverpass() below, which throws on a present but invalid value. The
+      // default lives twice: here and in templates/default-config.json
+      // (config.test.ts pins that they agree).
+      overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false })
     });
     RETIRED_MODEL_KEYS = [
       "coder",
@@ -5702,91 +5802,6 @@ var init_staleness = __esm({
       pid: external_exports.number().int(),
       booted_at: external_exports.string()
     }).strict();
-  }
-});
-
-// packages/schemas/dist/project.js
-import { lstatSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-function readContainedText(root, rel, ErrorClass, subject) {
-  const segments = rel.split("/");
-  let cursor = resolve(root);
-  for (const [index, part] of segments.entries()) {
-    cursor = join(cursor, part);
-    let st;
-    try {
-      st = lstatSync(cursor);
-    } catch (err) {
-      if (err?.code === "ENOENT")
-        return null;
-      throw err;
-    }
-    const shown = segments.slice(0, index + 1).join("/");
-    const isLeaf = index === segments.length - 1;
-    if (st.isSymbolicLink())
-      throw new ErrorClass(`${shown} is a symlink \u2014 refusing to follow it out of the project; ${subject} cannot be read`);
-    if (isLeaf ? !st.isFile() : !st.isDirectory()) {
-      throw new ErrorClass(`${shown} exists but is not a ${isLeaf ? "regular file" : "directory"} \u2014 ${subject} cannot be read`);
-    }
-  }
-  return readFileSync(cursor, "utf8");
-}
-function readJsonObject(root, rel, ErrorClass, subject) {
-  const where = `${fwd(resolve(root))}/${rel}`;
-  const text = readContainedText(root, rel, ErrorClass, subject);
-  if (text === null)
-    return { where, parsed: void 0 };
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (err) {
-    throw new ErrorClass(`${where} is not valid JSON (${err.message}) \u2014 ${subject} cannot be read`);
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ErrorClass(`${where} is not a JSON object \u2014 ${subject} cannot be read`);
-  }
-  return { where, parsed };
-}
-function readProjectMode(root) {
-  const { where, parsed } = readJsonObject(root, CONFIG_REL, ProjectModeError, "the project mode");
-  if (parsed === void 0 || parsed.mode === void 0)
-    return "hobby";
-  if (!PROJECT_MODES.includes(parsed.mode)) {
-    throw new ProjectModeError(`config.mode is ${JSON.stringify(parsed.mode)} in ${where} \u2014 it must be 'hobby' or 'work'; switch it in the TUI System tab or fix the file`);
-  }
-  return parsed.mode;
-}
-function readProjectIdentity(root) {
-  const { where, parsed } = readJsonObject(root, PROJECT_IDENTITY_REL, ProjectIdentityError, "the project identity");
-  if (parsed === void 0)
-    return null;
-  if (!isProjectId(parsed.project_id)) {
-    throw new ProjectIdentityError(`project_id is ${JSON.stringify(parsed.project_id)} in ${where} \u2014 it must be a UUID v4 string; fix the file by hand (init never overwrites it) or restore it from git`);
-  }
-  return { project_id: parsed.project_id };
-}
-var PROJECT_MODES, ProjectModeError, ProjectIdentityError, CONFIG_REL, PROJECT_IDENTITY_REL, fwd, UUID_V4_RE, isProjectId;
-var init_project = __esm({
-  "packages/schemas/dist/project.js"() {
-    "use strict";
-    PROJECT_MODES = ["hobby", "work"];
-    ProjectModeError = class extends Error {
-      constructor(message) {
-        super(message);
-        this.name = "ProjectModeError";
-      }
-    };
-    ProjectIdentityError = class extends Error {
-      constructor(message) {
-        super(message);
-        this.name = "ProjectIdentityError";
-      }
-    };
-    CONFIG_REL = ".sterling/config.json";
-    PROJECT_IDENTITY_REL = ".sterling/project.json";
-    fwd = (p) => p.replace(/\\/g, "/");
-    UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    isProjectId = (value) => typeof value === "string" && UUID_V4_RE.test(value);
   }
 });
 
