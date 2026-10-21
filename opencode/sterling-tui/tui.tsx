@@ -79,7 +79,7 @@ function controller(): Guarded<DashboardController> {
   if (dashboard?.ok) return dashboard;
   const storePath = findStorePath(projectDir, process.env);
   dashboard = storePath
-    ? guarded('Sterling store', () => openDashboard(storePath))
+    ? guarded('Sterling store', () => openDashboard(storePath, { host: 'opencode' }))
     : { ok: false, error: `no .sterling/sterling.db at or above ${projectDir}` };
   return dashboard;
 }

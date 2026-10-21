@@ -8,6 +8,7 @@
 // separator. Builtins, sibling libs and @sterling/store only: hooks bundle this module.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { resolveOverpass } from '@sterling/schemas';
 import { missingDomainWarning } from '@sterling/store';
 import { loadConfig } from './common.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../lib/handoff-projection.mjs';
@@ -139,6 +140,45 @@ export function projectModeLine({ config, configUnreadable, noOrigin = false }) 
     `Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) — config.mode must be 'hobby' or 'work'; ` +
     '/sterling:merge, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).'
   );
+}
+
+/**
+ * OVERPASS (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers and
+ * overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice,
+ * point 6): whether every lane is routed through the Overpass tiers, through the one
+ * resolver the plugin's routing uses (resolveOverpass). States: ON (provider, the
+ * conductor's model or that it is bypassed, the lane model); CONFIGURED BUT NOT IN EFFECT
+ * with the resolver's reason; OFF, stated only where the toggle is offered (work mode on
+ * OpenCode) and silent elsewhere, since hobby mode and Claude Code never route through
+ * it; INVALID with the resolver's error; and UNKNOWN for an unreadable config, never
+ * the off default (anti-pattern config-derived-posture-line-collapses-absent-into-unusable).
+ */
+export function overpassLine({ config, configUnreadable, host }) {
+  if (configUnreadable) {
+    return (
+      'Overpass: UNKNOWN — the project config could not be read, so config.overpass could not be determined. ' +
+      'This is NOT the off default: repair the config.'
+    );
+  }
+  let res;
+  try {
+    res = resolveOverpass(config ?? {}, { host });
+  } catch (e) {
+    return `Overpass: INVALID — ${(e && e.message) || e}. Subagent dispatches are not routed through Overpass and say so on each result; fix .sterling/config.json (TUI System tab).`;
+  }
+  if (res.effective) {
+    const conductor = res.conductorRouted
+      ? `the conductor runs on ${res.conductorModel}`
+      : 'the conductor is bypassed (config.overpass.conductor_bypass) and keeps its direct model pin';
+    return (
+      `Overpass: ON (provider '${res.provider}', config.overpass — TUI System tab) — ${conductor}; ` +
+      `every subagent lane, the Plan agent and the maintenance worker run on ${res.laneModel}. ` +
+      'The direct model pins in agent files, briefs and models.<role>.opencode_model do not apply while it is on.'
+    );
+  }
+  if (res.configured) return `Overpass: CONFIGURED BUT NOT IN EFFECT — ${res.reason}; every lane uses its direct model pin.`;
+  if (host === 'opencode' && config?.mode === 'work') return 'Overpass: OFF (config.overpass.enabled — TUI System tab) — every lane uses its direct model pin.';
+  return '';
 }
 
 const STORAGE_TAIL = 'TUI System tab; switch with the move-store skill';

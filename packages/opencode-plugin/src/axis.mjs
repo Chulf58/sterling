@@ -8,6 +8,10 @@
 // opener the configured config.sparring_partner.model is written into the call's
 // arguments when the call names none: execute.before's input is the live object
 // (finding opencode-2-plugin-spike-hooks-and-sidebar-october-2026, supplement 2).
+// On a subagent call, while Overpass is effective, the lane model replaces the call's
+// model (overpass.mjs dispatchPin; finding
+// opencode-2-0-23-how-session-and-subagent-models-are-chosen-and-overridden: the
+// mutated model reaches execution, and an unavailable one fails as a tool error).
 // H20 never denies on either host: Claude Code's deny-once rung was removed by
 // decision sterling-claude-code-scale-down-boundary (h20-mechanism-axis.mjs:435-441),
 // so the question surface is a post-answer audit here too.
@@ -35,6 +39,8 @@ import { agentRole } from './agent-name.mjs';
 import { isListingCommand } from '../../../scripts/hooks/lib/listing-command.mjs';
 import { guardPath, markDiscoveryDelivered, markSubstanceDelivered, outgoingProposalText, readGuard, writeGuard } from '../../../scripts/hooks/lib/delivery.mjs';
 import { appendToResult } from './delivery.mjs';
+import { dispatchOverpass, dispatchPin, overpassRefusal, overpassUnknownLine } from './overpass.mjs';
+import { logLine } from './log.mjs';
 import { openSubjectFan, warnFanDegraded } from '../../../scripts/hooks/lib/subject-fan.mjs';
 
 const CODEX_OPENERS = new Set(['codex_codex', 'codex.codex']);
@@ -85,6 +91,15 @@ function buildOutputAxis(store, root, { tool, args, content, sessionID, director
   };
 }
 
+/** `message` into the plugin log, or onto stderr when the log cannot be written. */
+function reportOverpass(root, message) {
+  try {
+    logLine(root, `axis: ${message}`);
+  } catch (reportError) {
+    process.stderr.write(`[sterling] ${message} (and the plugin log is unwritable: ${reportError?.message ?? reportError})\n`);
+  }
+}
+
 /**
  * The axis handlers: onBefore (H20, including the codex model pin), onAfter
  * (appends the H20 carriage built before), outputOf and onOutput (H23). Take
@@ -114,6 +129,32 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliv
         if (pin.model && input.input && typeof input.input === 'object') input.input.model = pin.model;
         pinLine = pin.line;
       });
+    }
+    if (surface === 'dispatch') {
+      // Overpass (overpass.mjs): while effective, every subagent call runs on the lane
+      // model, replacing a model the call named. An overpass block that is present but
+      // invalid is never read as off: the call is REFUSED by a throw out of
+      // execute.before, outside the fence (OpenCode's documented way for a plugin to block
+      // a tool call), because letting it run could put it on a direct provider. A whole
+      // config that cannot be read or parsed does not refuse (a hobby project that never
+      // turned Overpass on keeps dispatching): the call goes ahead unrouted and carries a
+      // loud UNKNOWN line. Applied before the carriage, like the codex pin.
+      let read;
+      try {
+        read = dispatchOverpass(root);
+      } catch (e) {
+        const message = overpassRefusal(e);
+        reportOverpass(root, message);
+        throw new Error(message, { cause: e });
+      }
+      if (read.unreadable) {
+        pinLine = overpassUnknownLine(read.unreadable);
+        reportOverpass(root, pinLine);
+      } else {
+        const pin = dispatchPin(read.res, args);
+        if (pin.model && input.input && typeof input.input === 'object') input.input.model = pin.model;
+        pinLine = pin.line;
+      }
     }
     const overlap =
       surface === 'dispatch'

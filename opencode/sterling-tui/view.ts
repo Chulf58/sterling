@@ -378,10 +378,10 @@ export function paintedFg(line: Painted, colours: { muted?: string; warning?: st
 }
 
 /** Esc leaves the full view only when it has nothing of its own to cancel:
- *  an open key help, board edit, model picker, sparring-model edit, or
+ *  an open key help, board edit, model picker, sparring-model or Overpass-provider edit, or
  *  Knowledge query takes the Esc first, as it does in the terminal TUI. */
 export function escapeLeavesView(ui: UiState): boolean {
-  if (ui.help || ui.boardEdit || ui.selector || ui.sparringModelEdit !== undefined) return false;
+  if (ui.help || ui.boardEdit || ui.selector || ui.sparringModelEdit !== undefined || ui.overpassProviderEdit !== undefined) return false;
   if (ui.tab === KNOWLEDGE_TAB && ui.searchQuery) return false;
   return true;
 }

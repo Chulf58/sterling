@@ -394,6 +394,123 @@ test('[decision opencode-maintenance-worker-refuses-without-a-configured-model] 
   }
 });
 
+// ------------------------------------------------------------ Overpass (decision overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice, point 5)
+
+/** Launch through the plugin's launcher with `config` written to the project; returns what the lib was called with. */
+function pluginLaunch(fx, config, { claude = true, execPath = '/opt/oc/opencode.exe' } = {}) {
+  writeFileSync(join(fx.project, '.sterling', 'config.json'), JSON.stringify(config));
+  const seen = [];
+  const launchWorker = (o) => {
+    seen.push({ host: o.host, opencodeBin: o.opencodeBin, workerModel: o.workerModel, config: o.config });
+    return { launched: true, reason: 'launched' };
+  };
+  worker.createWorkerLaunch({ openStore: () => ({ close() {} }), claudeOnPath: () => claude, launchWorker, execPath, nodeOnPath: () => true })(fx.project, new Date(NOW).toISOString());
+  return seen;
+}
+const WORK_MODEL = { maintenance_worker: { opencode_model: 'openai/gpt-5.6-terra' } };
+
+test('[overpass] effective Overpass with claude on PATH runs the worker through OpenCode on <provider>/agentic-high, whatever opencode_model says or does not say; a custom provider id flows through', () => {
+  const fx = fixture();
+  try {
+    const on = { mode: 'work', overpass: { enabled: true } };
+    assert.deepEqual(pluginLaunch(fx, on).map(({ host, opencodeBin, workerModel }) => ({ host, opencodeBin, workerModel })), [{ host: 'opencode', opencodeBin: '/opt/oc/opencode.exe', workerModel: 'overpass/agentic-high' }], 'claude on PATH, opencode_model unset');
+    const set = pluginLaunch(fx, { ...on, ...WORK_MODEL });
+    assert.equal(set[0].workerModel, 'overpass/agentic-high', 'the toggle wins over a set opencode_model');
+    assert.equal(set[0].config.maintenance_worker.opencode_model, 'openai/gpt-5.6-terra', 'the setting itself is kept');
+    assert.equal(pluginLaunch(fx, { mode: 'work', overpass: { enabled: true, provider: 'acme-gw' } }, { claude: false })[0].workerModel, 'acme-gw/agentic-high');
+    assert.equal(pluginLaunch(fx, { mode: 'work', overpass: { enabled: true, provider: 'acme-gw' } })[0].workerModel, 'acme-gw/agentic-high');
+
+    const noBinary = pluginLaunch(fx, on, { execPath: '/usr/bin/node' });
+    assert.deepEqual(noBinary, [], 'effective Overpass with no OpenCode binary does not fall back to claude');
+    assert.match(notices(fx.project).join('\n'), /Overpass is effective/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[overpass] off, hobby mode and a missing mode leave the launch exactly as before: claude on PATH -> claude with no pinned model; claude absent -> the configured opencode_model', () => {
+  const fx = fixture();
+  try {
+    for (const overpass of [undefined, { enabled: false }, { enabled: false, provider: 'acme-gw' }]) {
+      const cfg = { mode: 'work', ...WORK_MODEL, ...(overpass ? { overpass } : {}) };
+      assert.deepEqual(pluginLaunch(fx, cfg).map(({ host, workerModel }) => ({ host, workerModel })), [{ host: undefined, workerModel: undefined }]);
+      assert.deepEqual(pluginLaunch(fx, cfg, { claude: false }).map(({ host, workerModel }) => ({ host, workerModel })), [{ host: 'opencode', workerModel: undefined }]);
+    }
+    for (const mode of [{ mode: 'hobby' }, {}]) {
+      const cfg = { ...mode, ...WORK_MODEL, overpass: { enabled: true } };
+      assert.deepEqual(pluginLaunch(fx, cfg).map(({ host, workerModel }) => ({ host, workerModel })), [{ host: undefined, workerModel: undefined }], 'configured but not effective');
+    }
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[overpass] an invalid overpass block fails loud: no launch, a notice and a log line naming the bad value, never a fall back to the direct providers', () => {
+  for (const [overpass, re] of [
+    ['yes', /config\.overpass is "yes"/],
+    [{ enabled: 'true' }, /config\.overpass\.enabled is "true"/],
+    [{ enabled: true, provider: 'a/b' }, /config\.overpass\.provider is "a\/b"/],
+  ]) {
+    const fx = fixture();
+    try {
+      for (const claude of [true, false]) {
+        const seen = pluginLaunch(fx, { mode: 'work', ...WORK_MODEL, overpass }, { claude });
+        assert.deepEqual(seen, [], `nothing launches (claude on PATH: ${claude})`);
+      }
+      const loud = notices(fx.project).filter((t) => /maintenance worker did not run/.test(t));
+      assert.equal(loud.length, 1, 'one notice per process');
+      assert.match(loud[0], re);
+      assert.match(readFileSync(join(fx.project, '.sterling', 'transient', 'opencode-plugin.log'), 'utf8'), re);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test('[overpass] the launcher records a caller-pinned model in eligible.json over the config model, and a CHAINED batch keeps the tier model with no opencode_model configured', async () => {
+  const fx = fixture();
+  // The test preload sets the worker-disable flag and the chained launch reads process.env; lift it for this injected-spawn test.
+  const prevDisable = process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
+  delete process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
+  try {
+    const sp = fakeSpawn();
+    const cfg = { maintenance_worker: { opencode_model: 'openai/gpt-5.6-terra' } };
+    assert.equal(launch(fx, { host: 'opencode', opencodeBin: '/opt/oc/opencode.exe', config: cfg, workerModel: 'overpass/agentic-high', spawn: sp.fn }).launched, true);
+    const e = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    assert.equal(e.opencode_model, 'overpass/agentic-high');
+    assert.equal(e.opencode_model_pinned, true);
+    rmSync(fx.paths.lock, { force: true });
+    rmSync(fx.paths.lastLaunch, { force: true });
+    launch(fx, { host: 'opencode', opencodeBin: '/opt/oc/opencode.exe', config: cfg, spawn: fakeSpawn().fn });
+    const plain = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    assert.equal(plain.opencode_model, 'openai/gpt-5.6-terra', 'unpinned: the config model, as before');
+    assert.equal(plain.opencode_model_pinned, undefined);
+
+    // The runner finishes a pinned batch that closed A; the real chained launch (no relaunch seam, config re-read from disk with no opencode_model) must carry the tier model.
+    rmSync(fx.paths.lock, { force: true });
+    rmSync(fx.paths.lastLaunch, { force: true });
+    writeFileSync(join(fx.project, '.sterling', 'config.json'), JSON.stringify({ mode: 'work', overpass: { enabled: true } }));
+    const items = [ITEM, { ...ITEM, id: 'item-b', file_keys: ['src/b.mjs'] }];
+    const run = opencodeRun(fx, [ITEM], { model: 'overpass/agentic-high' });
+    const eligible = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    writeFileSync(fx.paths.eligible, JSON.stringify({ ...eligible, opencode_model_pinned: true, queue_snapshot: items.map((t) => ({ id: t.id, system_reason: 'reconcile_needed', file_keys: t.file_keys, feature_link: null, created_at: null, text: `reconcile article '${t.id}'` })) }));
+    const child = fakeOpencode([sterling('maintenance_remove', { id: 'item-a' }, 'completed', removedText('item-a')), text('{"verdict":"none","reason":"x"}')]);
+    const chained = fakeSpawn();
+    const spawn = (cmd, args, opts) => (cmd === '/opt/oc/opencode.exe' ? child.fn(cmd, args, opts) : chained.fn(cmd, args, opts));
+    assert.equal(await runWorker({ ...run, spawn, spawnSync: fakeGit }), 0);
+    const chain = readJournal(fx).filter((l) => l.kind === 'chain');
+    assert.deepEqual(chain.map((l) => [l.launched, l.items_left]), [[true, 1]], JSON.stringify(chain));
+    const next = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    assert.equal(next.host, 'opencode');
+    assert.equal(next.opencode_model, 'overpass/agentic-high', 'the chained batch keeps the tier model');
+    assert.equal(next.opencode_model_pinned, true);
+  } finally {
+    if (prevDisable === undefined) delete process.env.STERLING_MAINTENANCE_WORKER_DISABLE;
+    else process.env.STERLING_MAINTENANCE_WORKER_DISABLE = prevDisable;
+    fx.cleanup();
+  }
+});
+
 // ------------------------------------------------------------ review fixes (task-end review)
 
 /** An execute whose OUTER status is 'error' (the code threw after the inner call returned). */

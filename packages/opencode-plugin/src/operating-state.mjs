@@ -1,6 +1,6 @@
 // H1's host-neutral operating-state lines for the OpenCode conductor's context
 // (board cbee2b3d, audit the former finding 'OpenCode parity audit' (not in the current store) row 2): MACHINE ROLE, TDD posture, Project mode,
-// Handoff files, Storage, the mounted domain lines, the pending Sterling issue-report count and the
+// Handoff files, Storage, Overpass, the mounted domain lines, the pending Sterling issue-report count and the
 // undeclared-source scan. The line
 // text and the config reading are scripts/hooks/lib/operating-state.mjs, shared
 // with h1-session-start.mjs.
@@ -15,7 +15,7 @@
 import { computeUndeclaredSourceDisclosure } from '../../../scripts/hooks/lib/undeclared-source-scan.mjs';
 import { renderUnavailable } from '../../../scripts/hooks/lib/undeclared-source.mjs';
 import { queueDepthLine, reconcileBacklog } from '../../../scripts/hooks/lib/maintenance-state.mjs';
-import { handoffFilesLine, machineRoleLine, mountedDomainLines, pendingIssueReportsLine, projectModeLine, readProjectConfig, storageLine, tddPostureLine } from '../../../scripts/hooks/lib/operating-state.mjs';
+import { handoffFilesLine, machineRoleLine, mountedDomainLines, overpassLine, pendingIssueReportsLine, projectModeLine, readProjectConfig, storageLine, tddPostureLine } from '../../../scripts/hooks/lib/operating-state.mjs';
 import { samePath } from '../../../scripts/lib/post-update-sync.mjs';
 import { noOriginRemote } from '../../../scripts/lib/work-pr.mjs';
 
@@ -29,7 +29,7 @@ import { noOriginRemote } from '../../../scripts/lib/work-pr.mjs';
 export function operatingStateLines(root, pluginRoot, { opener } = {}) {
   const { config, configUnreadable } = readProjectConfig(root);
   const atClone = Boolean(pluginRoot && samePath(root, pluginRoot));
-  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: config?.mode === 'work' && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root }), storageLine({ config, configUnreadable, root }), ...mountedDomainLines({ config, configUnreadable, opener, root }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
+  const lines = [machineRoleLine({ atClone, installedCopy: false, config, host: 'opencode' }), tddPostureLine({ config, configUnreadable }), projectModeLine({ config, configUnreadable, noOrigin: config?.mode === 'work' && noOriginRemote(root) }), handoffFilesLine({ config, configUnreadable, root }), storageLine({ config, configUnreadable, root }), overpassLine({ config, configUnreadable, host: 'opencode' }), ...mountedDomainLines({ config, configUnreadable, opener, root }), pendingIssueReportsLine({ cwd: root, pluginRoot })].filter(Boolean);
   return { lines, config };
 }
 
