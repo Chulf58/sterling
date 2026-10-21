@@ -301,9 +301,14 @@ test('dashboard.md: sterling:dashboard is not registered on OpenCode; the OpenCo
 
   // The text an agent reading the file on OpenCode gets: the TUI command, no launcher.
   const oc = cfg.hostMapText(cfg.splitFrontmatter(source, 'commands/dashboard.md').body, repo, 'commands/dashboard.md');
-  assert.doesNotMatch(oc, /tmux|launcher|sterling-launch|\.bat\b|split pane|<!--/i);
+  // The tmux side pane is reopened by /sterling-pane (decision
+  // reopen-the-sterling-side-pane-on-opencode-with-sterling-pane), so the OpenCode text may name
+  // tmux and sterling-launch.sh as what that command runs. It must still carry none of the Claude
+  // Code launcher text (the conductor-shell instruction), the .bat launchers, or a fence marker.
+  assert.doesNotMatch(oc, /conductor shell|launcher engine|\.bat\b|split pane|<!--/i);
   assert.match(oc, /no `\/sterling:dashboard` command/);
   assert.match(oc, /`\/sterling`/);
+  assert.match(oc, /`\/sterling-pane`/);
   assert.match(oc, /`<leader>k` \(ctrl\+x then k by default\)/);
   // The fix for a missing panel depends on the host that installed the copy (decision
   // sterling-on-opencode-installs-from-a-git-release-branch-v2):

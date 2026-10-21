@@ -86,8 +86,17 @@ function gitProject() {
   return { dir, store, cleanup };
 }
 
+// The spawned scripts pick their host from the environment; an OpenCode session sets these two and
+// would switch rotation-note.mjs to its OpenCode wording, so every spawn here runs without them.
+function hostFreeEnv() {
+  const env = { ...process.env };
+  delete env.OPENCODE_SESSION_ID;
+  delete env.OPENCODE;
+  return env;
+}
+
 function runRotationNote(dir, args) {
-  return spawnSync(process.execPath, [ROTATION_SCRIPT, ...args], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
+  return spawnSync(process.execPath, [ROTATION_SCRIPT, ...args], { cwd: dir, encoding: 'utf8', timeout: 30_000, env: hostFreeEnv() });
 }
 
 function readRotationNote(dir) {
@@ -101,7 +110,7 @@ function h1(dir, over = {}) {
     encoding: 'utf8',
     cwd: dir,
     timeout: 60_000,
-    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1', STERLING_NO_BANNER: '1', STERLING_PLUGIN_ROOT: root },
+    env: { ...hostFreeEnv(), STERLING_CURRENCY_DISABLE: '1', STERLING_NO_BANNER: '1', STERLING_PLUGIN_ROOT: root },
   });
   let out = null;
   try {

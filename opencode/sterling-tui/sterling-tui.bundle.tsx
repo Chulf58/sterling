@@ -17854,9 +17854,50 @@ function frameAt(tick2, phase, running) {
   return SEQUENCE[((Math.trunc(tick2) + Math.trunc(phase)) % n + n) % n];
 }
 
+// opencode/sterling-tui/pane.ts
+import { execFile } from "node:child_process";
+import { existsSync as existsSync11 } from "node:fs";
+import { basename as basename3, dirname as dirname8, isAbsolute as isAbsolute2, join as join19, relative, resolve as resolve9, sep as sep3 } from "node:path";
+var PANE_TITLE = "Sterling side pane";
+var EXEC_TIMEOUT_MS = 15e3;
+function isWithin(dir, root) {
+  const rel = relative(resolve9(root), resolve9(dir));
+  return rel === "" || rel !== ".." && !rel.startsWith(`..${sep3}`) && !isAbsolute2(rel);
+}
+function launcherRoot(dir, storePath, exists) {
+  if (exists(join19(dir, "sterling-launch.sh"))) return dir;
+  const storeRoot = storePath && basename3(dirname8(storePath)) === ".sterling" ? dirname8(dirname8(storePath)) : void 0;
+  return storeRoot && isWithin(dir, storeRoot) && exists(join19(storeRoot, "sterling-launch.sh")) ? storeRoot : dir;
+}
+async function reopenPane(root, deps) {
+  if (!deps.env.TMUX) {
+    return { title: PANE_TITLE, variant: "warning", message: "Not inside tmux; start OpenCode with the Sterling launcher to get a side pane." };
+  }
+  const script = join19(root, "sterling-launch.sh");
+  if (!deps.exists(script)) {
+    return { title: PANE_TITLE, variant: "warning", message: `No sterling-launch.sh in ${root}; run /sterling:init.` };
+  }
+  try {
+    const { stdout, stderr } = await deps.exec("bash", [script, "tui"], { cwd: root, timeout: EXEC_TIMEOUT_MS });
+    if (stderr.trim()) return { title: PANE_TITLE, variant: "warning", message: [stdout.trim(), stderr.trim()].filter(Boolean).join("\n") };
+    return { title: PANE_TITLE, variant: "success", message: stdout.trim() || "Side pane opened." };
+  } catch (err) {
+    const e = err;
+    const text = [e.stderr, e.stdout].map((s2) => typeof s2 === "string" ? s2.trim() : "").find(Boolean);
+    return { title: PANE_TITLE, variant: "error", message: text ?? e.message ?? String(err) };
+  }
+}
+var realPaneDeps = {
+  env: process.env,
+  exists: existsSync11,
+  exec: (file, args, options) => new Promise((resolve11, reject) => {
+    execFile(file, args, options, (error, stdout, stderr) => error ? reject(Object.assign(error, { stdout, stderr })) : resolve11({ stdout, stderr }));
+  })
+};
+
 // opencode/sterling-tui/view.ts
-import { existsSync as existsSync12 } from "node:fs";
-import { dirname as dirname9, join as join20 } from "node:path";
+import { existsSync as existsSync13 } from "node:fs";
+import { dirname as dirname10, join as join21 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 function makeExitHelpers({ stdout, stderr, exit }) {
@@ -17986,8 +18027,8 @@ var GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
 var PATH_SHAPED_TEST = new RegExp(`^(?:${PATH_CANDIDATE_RE.source}|${GLOB_PREFIX_RE.source})$`);
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync9, readFileSync as readFileSync15, writeFileSync as writeFileSync7, rmSync as rmSync5, rmdirSync, renameSync as renameSync4, existsSync as existsSync11, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync6, chmodSync } from "node:fs";
-import { join as join19, resolve as resolve9, dirname as dirname8, isAbsolute as isAbsolute2 } from "node:path";
+import { mkdirSync as mkdirSync9, readFileSync as readFileSync15, writeFileSync as writeFileSync7, rmSync as rmSync5, rmdirSync, renameSync as renameSync4, existsSync as existsSync12, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync6, chmodSync } from "node:fs";
+import { join as join20, resolve as resolve10, dirname as dirname9, isAbsolute as isAbsolute3 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 import { randomBytes, createHash as createHash4 } from "node:crypto";
 
@@ -18100,7 +18141,7 @@ function render2(x) {
 
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
-  return join19(root, ".sterling", "transient", "dispatch-register.json");
+  return join20(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -18122,7 +18163,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync11(p)) return { availability: "absent", arr: [] };
+  if (!existsSync12(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync15(p, "utf8");
@@ -18156,7 +18197,7 @@ var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function dispatchStateDir(root) {
-  return join19(root, ".sterling", "transient", "dispatch-state");
+  return join20(root, ".sterling", "transient", "dispatch-state");
 }
 var LIVE_PREFIX = "live-";
 var DONE_PREFIX = "done-";
@@ -18300,7 +18341,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync6(join19(dir, to));
+    lstatSync6(join20(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;
@@ -18310,7 +18351,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync4(join19(dir, from), join19(dir, to));
+    renameSync4(join20(dir, from), join20(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
@@ -18360,7 +18401,7 @@ function scanLiveState(root, { repair }) {
       done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
       continue;
     }
-    const classified = classifyRecordFile(join19(dir, name));
+    const classified = classifyRecordFile(join20(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
@@ -18506,7 +18547,7 @@ function contextText(tokens, model, limit) {
 }
 function isActiveChild(start, env, running) {
   const storePath = findStorePath(start, env);
-  const root = storePath ? dirname9(dirname9(storePath)) : start;
+  const root = storePath ? dirname10(dirname10(storePath)) : start;
   return (id) => running(id) || liveChildInRegister(root, id);
 }
 function readSubagents(src) {
@@ -18624,9 +18665,9 @@ function findStorePath(start, env) {
   if (env.STERLING_STORE) return env.STERLING_STORE;
   let dir = start;
   for (; ; ) {
-    const candidate = join20(dir, ".sterling", "sterling.db");
-    if (existsSync12(candidate) || existsSync12(join20(dir, ".sterling", "config.json")) && storeBackend(dir) === "routed") return candidate;
-    const parent = dirname9(dir);
+    const candidate = join21(dir, ".sterling", "sterling.db");
+    if (existsSync13(candidate) || existsSync13(join21(dir, ".sterling", "config.json")) && storeBackend(dir) === "routed") return candidate;
+    const parent = dirname10(dir);
     if (parent === dir) return void 0;
     dir = parent;
   }
@@ -18636,6 +18677,7 @@ function findStorePath(start, env) {
 var ROUTE = "sterling";
 var SUBAGENT_EVENTS = ["session.created", "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.step.ended"];
 var COMMAND = "sterling.open";
+var PANE_COMMAND = "sterling.pane";
 var [tick, setTick] = createSignal(0);
 var [frame, setFrame] = createSignal(0);
 var anyRunning = false;
@@ -18720,7 +18762,10 @@ function StyledLine(props) {
 function Commands(props) {
   props.api.keymap.layer(() => ({
     mode: "global",
-    commands: [{ id: COMMAND, title: "Open Sterling dashboard", group: "Sterling", bind: "<leader>k", palette: true, slash: { name: "sterling" }, run: props.open }]
+    commands: [
+      { id: COMMAND, title: "Open Sterling dashboard", group: "Sterling", bind: "<leader>k", palette: true, slash: { name: "sterling" }, run: props.open },
+      { id: PANE_COMMAND, title: "Reopen Sterling side pane", group: "Sterling", palette: true, slash: { name: "sterling-pane" }, run: props.pane }
+    ]
   }));
   return null;
 }
@@ -18853,9 +18898,17 @@ var tui_default = {
   id: "sterling.dashboard",
   setup(api2) {
     const dir = api2.location?.directory ?? process.cwd();
-    if (!findStorePath(dir, process.env)) return () => {
+    const storePath = findStorePath(dir, process.env);
+    if (!storePath) return () => {
     };
     projectDir = dir;
+    const root = launcherRoot(dir, storePath, realPaneDeps.exists);
+    const pane = () => {
+      reopenPane(root, realPaneDeps).then(
+        (toast) => api2.ui.toast.show(toast),
+        (err) => api2.ui.toast.show({ title: "Sterling side pane", variant: "error", message: err?.message ?? String(err) })
+      );
+    };
     let back = { type: "home" };
     const open2 = () => {
       const current = api2.ui.router.current();
@@ -18865,7 +18918,7 @@ var tui_default = {
       api2.ui.router.navigate({ type: "plugin", name: ROUTE });
     };
     const disposers = [
-      api2.ui.slot({ append: "app", render: () => <Commands api={api2} open={open2} /> }),
+      api2.ui.slot({ append: "app", render: () => <Commands api={api2} open={open2} pane={pane} /> }),
       api2.ui.slot({ append: "sidebar.content", render: (input) => <Sidebar api={api2} sessionID={input.sessionID} /> }),
       api2.ui.router.register({
         name: ROUTE,

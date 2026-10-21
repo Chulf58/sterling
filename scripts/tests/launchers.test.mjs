@@ -184,12 +184,13 @@ case "$1" in
 esac
 exit 0
 `;
-function runEngine(args, { running = '', panes = '', panesAll = '', caller = '', sessionPath, tmux, home, extraEnv = {}, lock } = {}) {
+function runEngine(args, { running = '', panes = '', panesAll = '', caller = '', sessionPath, tmux, home, extraEnv = {}, lock, conductor } = {}) {
   const { root, text } = engine();
   const work = tmp('sterling-ln-work-');
   mkdirSync(join(work, '.sterling', 'transient'), { recursive: true });
   writeFileSync(join(work, '.sterling', 'sterling.db'), '');
   if (lock !== undefined) writeFileSync(join(work, '.sterling', 'transient', 'tui.lock'), lock);
+  if (conductor !== undefined) writeFileSync(join(work, '.sterling', 'transient', 'opencode-conductor-session'), conductor);
   writeFileSync(join(work, 'sterling-launch.sh'), text);
   const bin = hermeticBin(ENGINE_TOOLS);
   script(join(bin, 'tmux'), FAKE_TMUX);
@@ -230,9 +231,36 @@ test('engine: no argument is claude mode — a fresh sterling-<proj>-claude sess
 test('engine: opencode mode runs a separate sterling-<proj>-opencode session with opencode and no --plugin-dir', { skip: LINUX }, () => {
   const { r, calls, root, work } = runEngine(['opencode'], { extraEnv: { OPENCODE_BIN: '/opt/oc/opencode' } });
   assert.equal(r.status, 0, r.stderr);
+  // No conductor session recorded: plain opencode, never --continue (which can pick a worker's session).
   assert.equal(first(calls, 'new-session'), `new-session -d -s sterling-demo-1a2b-opencode -c ${work} /opt/oc/opencode`);
   assert.ok(first(calls, 'split-window').includes('-t =sterling-demo-1a2b-opencode:'));
   assert.ok(first(calls, 'split-window').endsWith(`${root}/tui/sterling-tui.mjs --store ${work}/.sterling/sterling.db --host opencode`), `the OpenCode TUI reads subagent context from OpenCode: ${first(calls, 'split-window')}`);
+  assert.equal(calls.at(-1), 'attach-session -t =sterling-demo-1a2b-opencode');
+});
+
+// GitHub issue #187: a relaunch after a crash or service restart reopens the root session the user
+// last prompted (recorded by packages/opencode-plugin/src/conductor-session.mjs), never the most
+// recently updated one, which can be a maintenance worker's session.
+test('engine (#187): a fresh opencode session reopens the recorded conductor session with --session', { skip: LINUX }, () => {
+  const { r, calls, work } = runEngine(['opencode'], { conductor: 'ses_conductor42AbC\n', extraEnv: { OPENCODE_BIN: '/opt/oc/opencode' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(first(calls, 'new-session'), `new-session -d -s sterling-demo-1a2b-opencode -c ${work} /opt/oc/opencode --session ses_conductor42AbC`);
+  assert.equal(r.stderr, '', 'no noise');
+});
+
+test('engine (#187): a malformed or empty conductor record starts plain opencode, silently', { skip: LINUX }, () => {
+  for (const conductor of ['', '\n', 'not-a-session\n', 'ses_x; rm -rf ~\n', '-c\n']) {
+    const { r, calls, work } = runEngine(['opencode'], { conductor, extraEnv: { OPENCODE_BIN: '/opt/oc/opencode' } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(first(calls, 'new-session'), `new-session -d -s sterling-demo-1a2b-opencode -c ${work} /opt/oc/opencode`, JSON.stringify(conductor));
+    assert.equal(r.stderr, '', `no noise for ${JSON.stringify(conductor)}`);
+  }
+});
+
+test('engine (#187): a running opencode session is re-attached, the conductor record does not start another', { skip: LINUX }, () => {
+  const { r, calls } = runEngine(['opencode'], { running: 'sterling-demo-1a2b-opencode', conductor: 'ses_conductor42AbC\n', extraEnv: { OPENCODE_BIN: '/opt/oc/opencode' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(all(calls, 'new-session').length, 0);
   assert.equal(calls.at(-1), 'attach-session -t =sterling-demo-1a2b-opencode');
 });
 
