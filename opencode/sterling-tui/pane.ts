@@ -28,9 +28,15 @@ export interface PaneDeps {
 export const PANE_TITLE = 'Sterling side pane';
 const EXEC_TIMEOUT_MS = 15_000;
 
-/** The project root: the directory holding .sterling when the store path names one, else `fallback`. */
-export function projectRootOf(storePath: string | undefined, fallback: string): string {
-  return storePath && basename(dirname(storePath)) === '.sterling' ? dirname(dirname(storePath)) : fallback;
+/** The directory whose launcher to run: the OpenCode window's own project
+ *  (`dir`, api.location.directory). The root above the store is only a second
+ *  choice, for a window opened in a subdirectory; a foreign STERLING_STORE
+ *  must not send the command to another project's launcher. When neither has
+ *  one, `dir` is returned so the missing-script warning names the window's project. */
+export function launcherRoot(dir: string, storePath: string | undefined, exists: (path: string) => boolean): string {
+  if (exists(join(dir, 'sterling-launch.sh'))) return dir;
+  const storeRoot = storePath && basename(dirname(storePath)) === '.sterling' ? dirname(dirname(storePath)) : undefined;
+  return storeRoot && exists(join(storeRoot, 'sterling-launch.sh')) ? storeRoot : dir;
 }
 
 /** Runs `bash <root>/sterling-launch.sh tui` (argument array, no shell) and says what to show. */
@@ -43,7 +49,9 @@ export async function reopenPane(root: string, deps: PaneDeps): Promise<PaneToas
     return { title: PANE_TITLE, variant: 'warning', message: `No sterling-launch.sh in ${root}; run /sterling:init.` };
   }
   try {
-    const { stdout } = await deps.exec('bash', [script, 'tui'], { cwd: root, timeout: EXEC_TIMEOUT_MS });
+    const { stdout, stderr } = await deps.exec('bash', [script, 'tui'], { cwd: root, timeout: EXEC_TIMEOUT_MS });
+    // the launcher warns on stderr and still exits 0 (take_tui, when the old TUI could not be stopped)
+    if (stderr.trim()) return { title: PANE_TITLE, variant: 'warning', message: [stdout.trim(), stderr.trim()].filter(Boolean).join('\n') };
     return { title: PANE_TITLE, variant: 'success', message: stdout.trim() || 'Side pane opened.' };
   } catch (err) {
     const e = err as { stderr?: unknown; stdout?: unknown; message?: string };

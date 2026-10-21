@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { reopenPane, projectRootOf, type ExecFn, type PaneDeps } from '../pane.ts';
+import { reopenPane, launcherRoot, type ExecFn, type PaneDeps } from '../pane.ts';
 
 const ROOT = '/work/proj';
 const SCRIPT = `${ROOT}/sterling-launch.sh`;
@@ -77,8 +77,26 @@ test('pane: exec is bash with the exact argv [script, "tui"], run in the project
   assert.ok(!('shell' in calls[0].options), 'no shell option');
 });
 
-test('projectRootOf: the directory above .sterling, else the fallback', () => {
-  assert.equal(projectRootOf('/work/proj/.sterling/sterling.db', '/x'), '/work/proj');
-  assert.equal(projectRootOf('/elsewhere/store.db', '/x'), '/x');
-  assert.equal(projectRootOf(undefined, '/x'), '/x');
+test('pane: a zero exit with stderr is a warning that shows both outputs', async () => {
+  const exec: ExecFn = async () => ({ stdout: 'TUI pane added to session s\n', stderr: 'could not stop the old TUI\n' });
+  const toast = await reopenPane(ROOT, deps({ exec }));
+  assert.equal(toast.variant, 'warning');
+  assert.match(toast.message, /TUI pane added to session s/);
+  assert.match(toast.message, /could not stop the old TUI/);
+});
+
+test('launcherRoot: the window\'s own project wins over a foreign STERLING_STORE', () => {
+  const has = (...roots: string[]) => (p: string) => roots.some((r) => p === `${r}/sterling-launch.sh`);
+  assert.equal(launcherRoot('/work/a', '/work/b/.sterling/sterling.db', has('/work/a', '/work/b')), '/work/a');
+});
+
+test('launcherRoot: the store root is used only when the window directory has no launcher', () => {
+  const has = (...roots: string[]) => (p: string) => roots.some((r) => p === `${r}/sterling-launch.sh`);
+  assert.equal(launcherRoot('/work/a/sub', '/work/a/.sterling/sterling.db', has('/work/a')), '/work/a');
+});
+
+test('launcherRoot: with no launcher anywhere it names the window directory', () => {
+  assert.equal(launcherRoot('/work/a', '/work/a/.sterling/sterling.db', () => false), '/work/a');
+  assert.equal(launcherRoot('/work/a', '/elsewhere/store.db', () => false), '/work/a');
+  assert.equal(launcherRoot('/work/a', undefined, () => false), '/work/a');
 });

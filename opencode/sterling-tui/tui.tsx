@@ -18,7 +18,7 @@ import { useKeyboard, useTerminalDimensions } from '@opentui/solid';
 import { openDashboard, type DashboardController } from '@sterling/tui/dist/controller.js';
 import { TASKS_TAB, type DashboardState } from '@sterling/tui/dist/state.js';
 import { ANIMATION_MS } from '@sterling/tui/dist/avatars/index.js';
-import { projectRootOf, realPaneDeps, reopenPane } from './pane.ts';
+import { launcherRoot, realPaneDeps, reopenPane } from './pane.ts';
 import { SIDEBAR_WIDTH, bodyLinesFor, contextFill, emptyAvatars, escapeLeavesView, findStorePath, footerLines, guarded, isActiveChild, keyToUiEvent, modelLimit, paintedFg, readSidebarSummary, readSubagents, sidebarLines, stepAvatars, subagentSpanLines, type AvatarState, type Guarded, type KeyLike, type ModelInfoLike, type ModelRefLike, type Span, type SpanLine, type SubagentRow, type SubagentSession, type TokenUsageLike, type Painted } from './view.ts';
 
 const ROUTE = 'sterling';
@@ -344,7 +344,7 @@ export default {
     const storePath = findStorePath(dir, process.env);
     if (!storePath) return () => {};
     projectDir = dir;
-    const root = projectRootOf(storePath, dir);
+    const root = launcherRoot(dir, storePath, realPaneDeps.exists);
     // /sterling-pane: no agent turn; the launcher's own output is the toast (decision
     // reopen-the-sterling-side-pane-on-opencode-with-sterling-pane)
     const pane = () => {
