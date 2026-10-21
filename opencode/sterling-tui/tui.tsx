@@ -18,12 +18,14 @@ import { useKeyboard, useTerminalDimensions } from '@opentui/solid';
 import { openDashboard, type DashboardController } from '@sterling/tui/dist/controller.js';
 import { TASKS_TAB, type DashboardState } from '@sterling/tui/dist/state.js';
 import { ANIMATION_MS } from '@sterling/tui/dist/avatars/index.js';
+import { projectRootOf, realPaneDeps, reopenPane } from './pane.ts';
 import { SIDEBAR_WIDTH, bodyLinesFor, contextFill, emptyAvatars, escapeLeavesView, findStorePath, footerLines, guarded, isActiveChild, keyToUiEvent, modelLimit, paintedFg, readSidebarSummary, readSubagents, sidebarLines, stepAvatars, subagentSpanLines, type AvatarState, type Guarded, type KeyLike, type ModelInfoLike, type ModelRefLike, type Span, type SpanLine, type SubagentRow, type SubagentSession, type TokenUsageLike, type Painted } from './view.ts';
 
 const ROUTE = 'sterling';
 /** OpenCode events that change a sub-agent row: a child appears, starts or ends a run, finishes a step. */
 const SUBAGENT_EVENTS = ['session.created', 'session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.step.ended'];
 const COMMAND = 'sterling.open';
+const PANE_COMMAND = 'sterling.pane';
 
 type Route = { type: string; [k: string]: unknown };
 /** The slice of the OpenCode 2 TUI plugin context (@opencode/plugin/tui
@@ -40,6 +42,7 @@ interface Api {
   };
   ui: {
     dialog: { clear(): void };
+    toast: { show(options: { title?: string; message: string; variant?: 'info' | 'success' | 'warning' | 'error' }): void };
     router: { register(page: { name: string; render: () => unknown }): () => void; navigate(to: Route): void; current(): Route };
     slot(claim: { append: string; render: (input: { sessionID: string }) => unknown }): () => void;
   };
@@ -178,10 +181,13 @@ function StyledLine(props: { spans: Span[]; palette: Palette }) {
   );
 }
 
-function Commands(props: { api: Api; open: () => void }) {
+function Commands(props: { api: Api; open: () => void; pane: () => void }) {
   props.api.keymap.layer(() => ({
     mode: 'global',
-    commands: [{ id: COMMAND, title: 'Open Sterling dashboard', group: 'Sterling', bind: '<leader>k', palette: true, slash: { name: 'sterling' }, run: props.open }],
+    commands: [
+      { id: COMMAND, title: 'Open Sterling dashboard', group: 'Sterling', bind: '<leader>k', palette: true, slash: { name: 'sterling' }, run: props.open },
+      { id: PANE_COMMAND, title: 'Reopen Sterling side pane', group: 'Sterling', palette: true, slash: { name: 'sterling-pane' }, run: props.pane },
+    ],
   }));
   return null;
 }
@@ -335,8 +341,18 @@ export default {
   setup(api: Api) {
     // Outside a Sterling project the plugin is a no-op: no slot, command or route.
     const dir = api.location?.directory ?? process.cwd();
-    if (!findStorePath(dir, process.env)) return () => {};
+    const storePath = findStorePath(dir, process.env);
+    if (!storePath) return () => {};
     projectDir = dir;
+    const root = projectRootOf(storePath, dir);
+    // /sterling-pane: no agent turn; the launcher's own output is the toast (decision
+    // reopen-the-sterling-side-pane-on-opencode-with-sterling-pane)
+    const pane = () => {
+      reopenPane(root, realPaneDeps).then(
+        (toast) => api.ui.toast.show(toast),
+        (err: unknown) => api.ui.toast.show({ title: 'Sterling side pane', variant: 'error', message: (err as Error)?.message ?? String(err) }),
+      );
+    };
     let back: Route = { type: 'home' };
     const open = () => {
       const current = api.ui.router.current();
@@ -346,7 +362,7 @@ export default {
       api.ui.router.navigate({ type: 'plugin', name: ROUTE });
     };
     const disposers = [
-      api.ui.slot({ append: 'app', render: () => <Commands api={api} open={open} /> }),
+      api.ui.slot({ append: 'app', render: () => <Commands api={api} open={open} pane={pane} /> }),
       api.ui.slot({ append: 'sidebar.content', render: (input) => <Sidebar api={api} sessionID={input.sessionID} /> }),
       api.ui.router.register({
         name: ROUTE,
