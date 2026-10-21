@@ -12,6 +12,8 @@
 // model (overpass.mjs dispatchPin; finding
 // opencode-2-0-23-how-session-and-subagent-models-are-chosen-and-overridden: the
 // mutated model reaches execution, and an unavailable one fails as a tool error).
+// A brief with an `OVERPASS-BYPASS: <reason>` line keeps the model the call names
+// (decision overpass-per-dispatch-bypass-a-brief-line-overpass-bypass-re).
 // H20 never denies on either host: Claude Code's deny-once rung was removed by
 // decision sterling-claude-code-scale-down-boundary (h20-mechanism-axis.mjs:435-441),
 // so the question surface is a post-answer audit here too.
@@ -41,6 +43,7 @@ import { guardPath, markDiscoveryDelivered, markSubstanceDelivered, outgoingProp
 import { appendToResult } from './delivery.mjs';
 import { dispatchOverpass, dispatchPin, overpassRefusal, overpassUnknownLine } from './overpass.mjs';
 import { logLine } from './log.mjs';
+import { addNotice } from './notices.mjs';
 import { openSubjectFan, warnFanDegraded } from '../../../scripts/hooks/lib/subject-fan.mjs';
 
 const CODEX_OPENERS = new Set(['codex_codex', 'codex.codex']);
@@ -151,9 +154,22 @@ export function createAxisHandlers({ openStore, rootOf, directory, fenced, deliv
         pinLine = overpassUnknownLine(read.unreadable);
         reportOverpass(root, pinLine);
       } else {
-        const pin = dispatchPin(read.res, args);
+        // An OVERPASS-BYPASS brief line keeps the call's model; one that cannot be honoured
+        // (no model on the call, no reason) throws and refuses the dispatch the same way.
+        let pin;
+        try {
+          pin = dispatchPin(read.res, args);
+        } catch (e) {
+          reportOverpass(root, e.message);
+          throw e;
+        }
         if (pin.model && input.input && typeof input.input === 'object') input.input.model = pin.model;
         pinLine = pin.line;
+        // The bypass is also told to the conductor's session as a notice, so it stays visible beyond the one result.
+        if (pin.notice) {
+          reportOverpass(root, pin.notice);
+          await fenced('axis', root, () => addNotice(root, pin.notice));
+        }
       }
     }
     const overlap =
