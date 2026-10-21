@@ -186,7 +186,7 @@ function Commands(props: { api: Api; open: () => void; pane: () => void }) {
     mode: 'global',
     commands: [
       { id: COMMAND, title: 'Open Sterling dashboard', group: 'Sterling', bind: '<leader>k', palette: true, slash: { name: 'sterling' }, run: props.open },
-      { id: PANE_COMMAND, title: 'Reopen Sterling side pane', group: 'Sterling', palette: true, slash: { name: 'sterling-pane' }, run: props.pane },
+      { id: PANE_COMMAND, title: 'Reopen Sterling side pane', group: 'Sterling', palette: true, slash: { name: 'sterling:pane' }, run: props.pane },
     ],
   }));
   return null;
@@ -345,7 +345,7 @@ export default {
     if (!storePath) return () => {};
     projectDir = dir;
     const root = launcherRoot(dir, storePath, realPaneDeps.exists);
-    // /sterling-pane: no agent turn; the launcher's own output is the toast (decision
+    // /sterling:pane: no agent turn; the launcher's own output is the toast (decision
     // reopen-the-sterling-side-pane-on-opencode-with-sterling-pane)
     const pane = () => {
       reopenPane(root, realPaneDeps).then(

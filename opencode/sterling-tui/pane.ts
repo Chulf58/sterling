@@ -1,4 +1,4 @@
-// /sterling-pane: reopen the tmux side-pane dashboard (decision
+// /sterling:pane: reopen the tmux side-pane dashboard (decision
 // reopen-the-sterling-side-pane-on-opencode-with-sterling-pane). The decision
 // is a pure function over its inputs so it runs without OpenCode: the caller
 // passes the environment, a file-existence check and an exec, and shows the
