@@ -14,9 +14,12 @@
 // or api_key=, which also blanks the word after "token:" in ordinary prose),
 // and every delimiter-free token holding a / or \ that is not a file
 // Sterling ships, a Sterling-owned .sterling/ name, a slash command standing
-// alone or a slash-joined list of public Claude Code tool names (WebSearch/WebFetch,
-// from a fixed allowlist). That blanks harmless tokens such as "and/or" too, and a slash command
-// directly after a bracket, comma, semicolon or pipe. What it does NOT
+// alone, a slash-joined list of public Claude Code tool names (WebSearch/WebFetch,
+// from a fixed allowlist) or a slash-joined pair of numbers, single letters and
+// common prose words ("3/4", "A/B", "and/or", "read/write"; GitHub issue #186).
+// That still blanks other word pairs such as "client/server" (the same shape as a
+// customer path), and a slash command or prose pair directly after a bracket,
+// comma, semicolon or pipe. What it does NOT
 // guarantee: a path that contains spaces, below the root and home or anywhere
 // else, is cut at each space, so the words between them stay
 // ("/mnt/d/Acme Client Billing/x.ts" keeps "Client"); and a one-segment
@@ -138,6 +141,22 @@ function isToolNameList(token) {
   return parts.length > 1 && parts.every((p) => TOOL_NAMES.includes(p));
 }
 
+/** Function words and either/or verb or state pairs that are ordinary prose when
+ * slash-joined ("and/or", "read/write", "true/false"; GitHub issue #186). A fixed
+ * list, not a word shape: lib/x and Clients/Acme have the same shape and are paths.
+ * Nouns that real directories are named after (client, server, input, output, src,
+ * lib) stay off it. */
+const PROSE_WORDS = ['and', 'or', 'read', 'write', 'true', 'false', 'yes', 'no', 'on', 'off', 'pass', 'fail', 'success', 'failure', 'enable', 'disable', 'before', 'after', 'add', 'remove', 'get', 'set', 'push', 'pull', 'in', 'out', 'up', 'down', 'either', 'he', 'she', 'his', 'her'];
+
+/** A slash-joined pair or list that is prose or a figure, not a path: every
+ * part is a number (digits with optional , . % or a leading minus, so "3/4" and
+ * "1.5/2"), one letter ("A/B", "I/O") or a PROSE_WORDS word, with no empty part.
+ * Sentence punctuation after the token is ignored. */
+function isProsePair(token) {
+  const parts = token.replace(/[.,:;!?]+$/, '').split('/');
+  return parts.length > 1 && parts.every((p) => /^-?\d+(?:[.,]\d+)*%?$/.test(p) || /^[A-Za-z]$/.test(p) || PROSE_WORDS.includes(p.toLowerCase()));
+}
+
 /** Whether the token starting at `at` in `text` stands alone: it starts the
  * text or follows whitespace, or follows exactly one opening " ' ` or ( that
  * itself starts the text or follows whitespace. A token directly after any
@@ -167,7 +186,7 @@ export function scrub(text, { projectRoot, home, sterlingPathExists }) {
   for (const re of CREDENTIAL_RES) out = out.replace(re, CREDENTIAL);
   out = out.replace(TOKEN_RE, (tok, at, whole) => {
     if (!/[\\/]/.test(tok) || isSterlingPath(tok, sterlingPathExists)) return tok;
-    return (isSlashCommand(tok) || isToolNameList(tok)) && standsAlone(whole, at) ? tok : PLACEHOLDER;
+    return (isSlashCommand(tok) || isToolNameList(tok) || isProsePair(tok)) && standsAlone(whole, at) ? tok : PLACEHOLDER;
   });
   // After the path pass, so a URL with user@host in it is one <project-path> and not split around an <email>.
   return out.replace(EMAIL_RE, EMAIL);
