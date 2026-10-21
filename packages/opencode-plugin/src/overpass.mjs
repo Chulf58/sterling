@@ -63,13 +63,43 @@ export function overpassUnknownLine(error) {
   return `Overpass routing UNKNOWN: .sterling/config.json could not be read (${error?.message ?? error}); dispatches are not routed through Overpass until it is fixed.`;
 }
 
+// A brief line that opts one dispatch out of the tier (decision
+// overpass-per-dispatch-bypass-a-brief-line-overpass-bypass-re). Only a line that starts
+// with the marker counts, so a brief that merely quotes it mid-sentence does not bypass.
+const BYPASS_LINE = /^[ \t]*OVERPASS-BYPASS:(.*)$/m;
+
+/** The OVERPASS-BYPASS marker in a brief: null when absent, else { reason } (trimmed, possibly empty). */
+export function bypassMarker(prompt) {
+  const m = typeof prompt === 'string' ? BYPASS_LINE.exec(prompt) : null;
+  return m ? { reason: m[1].trim() } : null;
+}
+
+/** The message a dispatch is refused with when its OVERPASS-BYPASS marker cannot be honoured (`why` names the defect). */
+export function bypassRefusal(why) {
+  return `Sterling refused this subagent dispatch: its brief carries an OVERPASS-BYPASS line but ${why}. A bypass must name the model the call should run on (the call's \`model\`) and say why on the marker line, as "OVERPASS-BYPASS: <reason>". Fix the dispatch and send it again, or drop the line to run on the Overpass tier.`;
+}
+
 /**
- * The dispatch pin for a subagent call's arguments: { model, line }. `model` is the lane
- * model while Overpass is effective (null otherwise, and the call is left alone); `line`
- * names the model a call asked for when the toggle replaced it, else null.
+ * The dispatch pin for a subagent call's arguments: { model, line, notice? }. `model` is the
+ * lane model while Overpass is effective (null otherwise, and the call is left alone); `line`
+ * names the model a call asked for when the toggle replaced it, else null. A brief with an
+ * OVERPASS-BYPASS marker keeps the call's own model (`model` null, `line` and `notice` say
+ * so); the marker with no model on the call or an empty reason throws, which refuses the
+ * dispatch. Without Overpass in effect the marker means nothing and is ignored.
  */
 export function dispatchPin(res, args) {
   if (!res.effective) return { model: null, line: null };
+  const marker = bypassMarker(args?.prompt);
+  if (marker) {
+    const named = args?.model;
+    if (typeof named !== 'string' || !named) throw new Error(bypassRefusal('the call names no model'));
+    if (!marker.reason) throw new Error(bypassRefusal('the marker gives no reason'));
+    return {
+      model: null,
+      line: `OVERPASS-BYPASS: this dispatch ran on ${named} as the call named, not on the Overpass tier ${res.laneModel}; reason: ${marker.reason}.`,
+      notice: `Sterling Overpass: a subagent dispatch bypassed Overpass and ran on ${named}, not ${res.laneModel} (reason: ${marker.reason}).`,
+    };
+  }
   const asked = args?.model;
   const replaced = typeof asked === 'string' && asked && asked !== res.laneModel;
   return {
