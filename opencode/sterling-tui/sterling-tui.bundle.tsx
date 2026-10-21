@@ -18764,7 +18764,7 @@ function Commands(props) {
     mode: "global",
     commands: [
       { id: COMMAND, title: "Open Sterling dashboard", group: "Sterling", bind: "<leader>k", palette: true, slash: { name: "sterling" }, run: props.open },
-      { id: PANE_COMMAND, title: "Reopen Sterling side pane", group: "Sterling", palette: true, slash: { name: "sterling-pane" }, run: props.pane }
+      { id: PANE_COMMAND, title: "Reopen Sterling side pane", group: "Sterling", palette: true, slash: { name: "sterling:pane" }, run: props.pane }
     ]
   }));
   return null;
