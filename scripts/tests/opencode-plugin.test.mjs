@@ -1532,3 +1532,69 @@ function addArticleShape(slug, path) {
     dependencies: { relies_on: [], relied_by: [] }, state: 'active', version: 1, history: [{ date: NOW, event: 'seed' }], live_test_refs: [],
   };
 }
+
+// GitHub issue #187, through the REAL fence: the conductor-session handler has a budget (an
+// undefined one reads "exceeded its undefined ms budget"), and a prompt whose root-session lookup
+// outlives that budget cannot overwrite the record a newer prompt wrote meanwhile.
+test('conductor session: a timed-out lookup never overwrites the newer prompt\'s record', async () => {
+  assert.equal(typeof server.BUDGET_MS['conductor-session'], 'number', 'the handler has a budget');
+  const p = makeProject();
+  const saved = server.BUDGET_MS['conductor-session'];
+  server.BUDGET_MS['conductor-session'] = 30;
+  const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_slow: {}, ses_new: {} });
+  try {
+    const get = ctx.session.get;
+    let release;
+    const gate = new Promise((r) => (release = r));
+    ctx.session.get = async (q) => (q.sessionID === 'ses_slow' ? gate.then(() => get(q)) : get(q));
+    await ctx.hooks.session.prompt(promptInput('first'));
+    const slow = { ...promptInput('slow'), sessionID: 'ses_slow' };
+    await ctx.hooks.session.prompt(slow);
+    await ctx.hooks.session.prompt({ ...promptInput('new'), sessionID: 'ses_new' });
+    const rec = join(p.dir, '.sterling', 'transient', 'opencode-conductor-session');
+    assert.equal(readFileSync(rec, 'utf8'), 'ses_new\n');
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(readFileSync(rec, 'utf8'), 'ses_new\n', 'the timed-out lookup for ses_slow wrote nothing');
+    const log = readFileSync(join(p.dir, '.sterling', 'transient', 'opencode-plugin.log'), 'utf8');
+    assert.match(log, /conductor-session failed: conductor-session exceeded its 30 ms budget/);
+    assert.doesNotMatch(log, /undefined ms budget/);
+  } finally {
+    server.BUDGET_MS['conductor-session'] = saved;
+    await cleanup?.();
+    p.cleanup();
+  }
+});
+
+// GitHub issue #187: a prompt's place in the conductor order is fixed at prompt-hook entry, so a
+// prompt held in an EARLIER awaited handler (here the context handler's root-session lookup) that
+// resumes after a later prompt recorded cannot replace that later record.
+test('conductor session: prompt A held in an earlier handler, B arrives and records, A resumes: the record stays B', async () => {
+  const p = makeProject();
+  const { ctx, cleanup } = await setupPlugin(p.dir, {}, { ses_A: {}, ses_B: {} });
+  try {
+    const get = ctx.session.get;
+    let release;
+    const gate = new Promise((r) => (release = r));
+    let heldOnce = false;
+    ctx.session.get = async (q) => {
+      if (q.sessionID === 'ses_A' && !heldOnce) {
+        heldOnce = true;
+        await gate;
+      }
+      return get(q);
+    };
+    const a = ctx.hooks.session.prompt({ ...promptInput('a'), sessionID: 'ses_A' });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(heldOnce, true, 'A is held in the lookup of a handler before the recorder');
+    await ctx.hooks.session.prompt({ ...promptInput('b'), sessionID: 'ses_B' });
+    const rec = join(p.dir, '.sterling', 'transient', 'opencode-conductor-session');
+    assert.equal(readFileSync(rec, 'utf8'), 'ses_B\n');
+    release();
+    await a;
+    assert.equal(readFileSync(rec, 'utf8'), 'ses_B\n', 'A arrived first, so it cannot replace B');
+  } finally {
+    await cleanup?.();
+    p.cleanup();
+  }
+});
