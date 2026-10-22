@@ -8013,7 +8013,7 @@ var require_xterm2 = __commonJS({
       }
     };
     var handler = {};
-    handler.mouseX11Protocol = function(basename4, buffer) {
+    handler.mouseX11Protocol = function(basename5, buffer) {
       var code = buffer[0];
       var result = {
         data: {
@@ -8024,25 +8024,25 @@ var require_xterm2 = __commonJS({
       };
       if (code & 32) {
         if (code & 64) {
-          result.name = basename4 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+          result.name = basename5 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
         } else {
           switch (code & 3) {
             case 0:
-              result.name = basename4 + "_LEFT_BUTTON_PRESSED";
+              result.name = basename5 + "_LEFT_BUTTON_PRESSED";
               break;
             case 1:
-              result.name = basename4 + "_MIDDLE_BUTTON_PRESSED";
+              result.name = basename5 + "_MIDDLE_BUTTON_PRESSED";
               break;
             case 2:
-              result.name = basename4 + "_RIGHT_BUTTON_PRESSED";
+              result.name = basename5 + "_RIGHT_BUTTON_PRESSED";
               break;
             case 3:
-              result.name = basename4 + "_BUTTON_RELEASED";
+              result.name = basename5 + "_BUTTON_RELEASED";
               break;
           }
         }
       } else if (code & 64) {
-        result.name = basename4 + "_MOTION";
+        result.name = basename5 + "_MOTION";
       }
       result.eaten = 3;
       result.data.code = code;
@@ -8050,7 +8050,7 @@ var require_xterm2 = __commonJS({
       result.data.y = buffer[2] - 32;
       return result;
     };
-    handler.mouseSGRProtocol = function(basename4, buffer) {
+    handler.mouseSGRProtocol = function(basename5, buffer) {
       var code, pressed, matches, result;
       matches = buffer.toString().match(/^(-?[0-9]*);?([0-9]*);?([0-9]*)(M|m)/);
       if (!matches || matches[3].length === 0) {
@@ -8076,7 +8076,7 @@ var require_xterm2 = __commonJS({
       if (code & 32) {
         switch (code & 3) {
           case 0:
-            result.name = basename4 + "_DRAG";
+            result.name = basename5 + "_DRAG";
             result.data.left = true;
             result.data.right = false;
             result.data.xFrom = this.state.button.left.x;
@@ -8085,7 +8085,7 @@ var require_xterm2 = __commonJS({
           // Doesn't seem to exist, middle drag does not discriminate from motion
           //case 1 :
           case 2:
-            result.name = basename4 + "_DRAG";
+            result.name = basename5 + "_DRAG";
             result.data.left = false;
             result.data.right = true;
             result.data.xFrom = this.state.button.right.x;
@@ -8093,27 +8093,27 @@ var require_xterm2 = __commonJS({
             break;
           case 3:
           default:
-            result.name = basename4 + "_MOTION";
+            result.name = basename5 + "_MOTION";
             break;
         }
       } else if (code & 64) {
-        result.name = basename4 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+        result.name = basename5 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
       } else {
         switch (code & 3) {
           case 0:
-            result.name = basename4 + "_LEFT_BUTTON";
+            result.name = basename5 + "_LEFT_BUTTON";
             this.state.button.left = pressed ? result.data : null;
             break;
           case 1:
-            result.name = basename4 + "_MIDDLE_BUTTON";
+            result.name = basename5 + "_MIDDLE_BUTTON";
             this.state.button.middle = pressed ? result.data : null;
             break;
           case 2:
-            result.name = basename4 + "_RIGHT_BUTTON";
+            result.name = basename5 + "_RIGHT_BUTTON";
             this.state.button.right = pressed ? result.data : null;
             break;
           case 3:
-            result.name = basename4 + "_OTHER_BUTTON";
+            result.name = basename5 + "_OTHER_BUTTON";
             this.state.button.other = pressed ? result.data : null;
             break;
         }
@@ -8122,7 +8122,7 @@ var require_xterm2 = __commonJS({
       result.data.code = code;
       return result;
     };
-    handler.cursorLocation = function(basename4, paramString) {
+    handler.cursorLocation = function(basename5, paramString) {
       var params = paramString.split(";");
       return {
         name: "CURSOR_LOCATION",
@@ -8132,7 +8132,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.colorRegister = function(basename4, paramString) {
+    handler.colorRegister = function(basename5, paramString) {
       var matches = paramString.match(/^([0-9]*);rgb:([0-9a-f]{2})[0-9a-f]*\/([0-9a-f]{2})[0-9a-f]*\/([0-9a-f]{2})[0-9a-f]*/);
       if (!matches) {
         return { name: "ERROR" };
@@ -8147,7 +8147,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.screenSize = function(basename4, paramString) {
+    handler.screenSize = function(basename5, paramString) {
       var params = paramString.split(";"), width = parseInt(params[1], 10), height = parseInt(params[0], 10), resized = this.root.width !== width || this.root.height !== height;
       this.root.width = width;
       this.root.height = height;
@@ -8160,7 +8160,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.clipboard = function(basename4, paramString) {
+    handler.clipboard = function(basename5, paramString) {
       var matches = paramString.match(/^([cps][0-7]*);(.*)/);
       if (!matches) {
         return { name: "ERROR" };
@@ -8173,14 +8173,14 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.xtgettcap = function(basename4, paramString) {
-      console.log("handler.xtgettcap: ", basename4, paramString);
+    handler.xtgettcap = function(basename5, paramString) {
+      console.log("handler.xtgettcap: ", basename5, paramString);
       var matches = paramString.match(/^([0-9a-fA-F]*)=([0-9a-fA-F]*)/);
       if (!matches) {
         return {
           name: "TERMINFO",
           data: {
-            valid: basename4 !== "XTGETTCAP_INVALID",
+            valid: basename5 !== "XTGETTCAP_INVALID",
             key: Buffer.from(paramString, "hex").toString(),
             error: "Not found"
           }
@@ -8189,14 +8189,14 @@ var require_xterm2 = __commonJS({
       return {
         name: "TERMINFO",
         data: {
-          valid: basename4 !== "XTGETTCAP_INVALID",
+          valid: basename5 !== "XTGETTCAP_INVALID",
           key: Buffer.from(matches[1], "hex").toString(),
           value: Buffer.from(matches[2], "hex").toString()
         }
       };
     };
-    handler.terminalUnitId = function(basename4, paramString) {
-      console.log("handler.terminalUnitId: ", basename4, paramString);
+    handler.terminalUnitId = function(basename5, paramString) {
+      console.log("handler.terminalUnitId: ", basename5, paramString);
       return {
         name: "TERMINAL_UNIT_ID",
         data: {
@@ -8868,7 +8868,7 @@ var require_konsole2 = __commonJS({
     });
     var keymap = Object.create(xterm.keymap);
     var handler = Object.create(xterm.handler);
-    handler.mouseSGRProtocol = function mouseSGRProtocol(basename4, buffer) {
+    handler.mouseSGRProtocol = function mouseSGRProtocol(basename5, buffer) {
       var code, pressed, matches, result;
       matches = buffer.toString().match(/^([0-9]*);([0-9]*);([0-9]*)(.)/);
       code = parseInt(matches[1], 10);
@@ -8884,34 +8884,34 @@ var require_konsole2 = __commonJS({
       result.data.y = parseInt(matches[3], 10);
       result.eaten = matches[0].length;
       if (code & 32) {
-        result.name = basename4 + "_MOTION";
+        result.name = basename5 + "_MOTION";
       } else if (code & 64) {
-        result.name = basename4 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+        result.name = basename5 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
       } else {
         switch (code & 3) {
           case 0:
-            result.name = basename4 + "_LEFT_BUTTON";
+            result.name = basename5 + "_LEFT_BUTTON";
             if (this.state.button.left === pressed) {
               result.disable = true;
             }
             this.state.button.left = pressed;
             break;
           case 1:
-            result.name = basename4 + "_MIDDLE_BUTTON";
+            result.name = basename5 + "_MIDDLE_BUTTON";
             if (this.state.button.middle === pressed) {
               result.disable = true;
             }
             this.state.button.middle = pressed;
             break;
           case 2:
-            result.name = basename4 + "_RIGHT_BUTTON";
+            result.name = basename5 + "_RIGHT_BUTTON";
             if (this.state.button.right === pressed) {
               result.disable = true;
             }
             this.state.button.right = pressed;
             break;
           case 3:
-            result.name = basename4 + "_OTHER_BUTTON";
+            result.name = basename5 + "_OTHER_BUTTON";
             if (this.state.button.other === pressed) {
               result.disable = true;
             }
@@ -39073,7 +39073,7 @@ import { performance } from "node:perf_hooks";
 
 // packages/tui/dist/controller.js
 import { readFileSync as readFileSync16, writeFileSync as writeFileSync8, existsSync as existsSync12 } from "node:fs";
-import { basename as basename3, dirname as dirname9, join as join20 } from "node:path";
+import { basename as basename4, dirname as dirname9, join as join20 } from "node:path";
 import { randomUUID as randomUUID7 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
@@ -53690,7 +53690,7 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync13, readdirSync as readdirSync5, realpathSync as realpathSync5, rmSync as rmSync4, statSync as statSync5, unlinkSync as unlinkSync4, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname8, isAbsolute, join as join17, resolve as resolve8 } from "node:path";
+import { basename as basename3, dirname as dirname8, isAbsolute, join as join17, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/sterling-roots.mjs
@@ -54225,7 +54225,7 @@ function openDashboard(storePath2, options = {}) {
     stores.close();
     throw err;
   }
-  const projectName = basename3(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
+  const projectName = basename4(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
   let ui = initialUi;
   let probe;
   let changeDetection = "data_version";

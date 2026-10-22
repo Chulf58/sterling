@@ -13342,7 +13342,7 @@ init_dist();
 init_dist2();
 import { existsSync as existsSync15, mkdirSync as mkdirSync9, readFileSync as readFileSync20, writeFileSync as writeFileSync10, appendFileSync as appendFileSync4, statSync as statSync9, unlinkSync as unlinkSync7, renameSync as renameSync4, realpathSync as realpathSync7 } from "node:fs";
 import { spawnSync as spawnSync10 } from "node:child_process";
-import { join as join27, resolve as resolve9, dirname as dirname12, basename as basename4 } from "node:path";
+import { join as join27, resolve as resolve9, dirname as dirname12, basename as basename5 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 
 // scripts/lib/project.mjs
@@ -15908,7 +15908,7 @@ import { spawnSync as spawnSync7 } from "node:child_process";
 import { createHash as createHash5 } from "node:crypto";
 import { existsSync as existsSync14, mkdirSync as mkdirSync8, readFileSync as readFileSync19, readdirSync as readdirSync5, realpathSync as realpathSync6, rmSync as rmSync5, statSync as statSync8, unlinkSync as unlinkSync6, writeFileSync as writeFileSync9 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { dirname as dirname11, isAbsolute, join as join26, resolve as resolve8 } from "node:path";
+import { basename as basename4, dirname as dirname11, isAbsolute, join as join26, resolve as resolve8 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 init_dist();
 
@@ -15990,6 +15990,15 @@ var normalize5 = (s2) => s2.replace(/\r\n/g, "\n");
 function projectConfigText(config) {
   return `${JSON.stringify(config, null, 2)}
 `;
+}
+function opencodeSystemDir({ env = process.env, platform = process.platform } = {}) {
+  if (platform === "linux") return "/etc/opencode";
+  if (platform === "darwin") return "/Library/Application Support/opencode";
+  if (platform === "win32") {
+    const base2 = env.ProgramData || env.PROGRAMDATA;
+    return base2 ? join26(base2, "opencode") : null;
+  }
+  return null;
 }
 function opencodeConfigDir({ env = process.env, home = homedir9() } = {}) {
   return join26(env.XDG_CONFIG_HOME || join26(home, ".config"), "opencode");
@@ -16517,7 +16526,7 @@ function hasEvaluateHook(version) {
   for (let i = 0; i < 3; i++) if (Number(m[i + 1]) !== want[i]) return Number(m[i + 1]) > want[i];
   return true;
 }
-function visibleAgents({ projectDir, env = process.env, home = homedir9(), checkAgentFiles = true }) {
+function visibleAgents({ projectDir, env = process.env, home = homedir9(), checkAgentFiles = true, systemDir = opencodeSystemDir({ env }) }) {
   const globalDir = env.OPENCODE_CONFIG_DIR || opencodeConfigDir({ env, home });
   const dotDir = join26(projectDir, ".opencode");
   const ancestors = [];
@@ -16528,12 +16537,13 @@ function visibleAgents({ projectDir, env = process.env, home = homedir9(), check
   const names = /* @__PURE__ */ new Set();
   const envNames = /* @__PURE__ */ new Set();
   const problems = [];
+  const sources = [];
   let incomplete = false;
   const unreadable = (label, err) => {
     incomplete = true;
     problems.push({ item: label, status: "skipped", detail: `cannot be read (${err.code ?? err.message}), so the agents it defines are NOT checked and get no new per-agent guard; earlier per-agent guard entries are kept; fix it, then rerun /sterling:update` });
   };
-  for (const dir of [globalDir, dotDir, ...ancestors.map((a) => join26(a, ".opencode"))]) {
+  for (const dir of [...systemDir ? [systemDir] : [], globalDir, dotDir, ...ancestors.map((a) => join26(a, ".opencode"))]) {
     for (const [sub, flat] of [["agent", false], ["agents", false], ["mode", true], ["modes", true]]) {
       let files;
       try {
@@ -16542,6 +16552,7 @@ function visibleAgents({ projectDir, env = process.env, home = homedir9(), check
         unreadable(fwd7(join26(dir, sub)), err);
         continue;
       }
+      if (files.length) sources.push({ kind: "files", dir, names: files.map((f) => f.name), paths: Object.fromEntries(files.map((f) => [f.name, f.path])) });
       for (const { name: name4, path } of files) {
         (dir === env.OPENCODE_CONFIG_DIR ? envNames : names).add(name4);
         if (dir !== dotDir || !checkAgentFiles) continue;
@@ -16559,12 +16570,13 @@ function visibleAgents({ projectDir, env = process.env, home = homedir9(), check
     }
   }
   const docs = [
+    ...systemDir ? ["opencode.json", "opencode.jsonc"].map((f) => join26(systemDir, f)) : [],
     ...["opencode.json", "opencode.jsonc"].map((f) => join26(globalDir, f)),
     ...["opencode.json", "opencode.jsonc"].map((f) => join26(projectDir, f)),
     join26(dotDir, "opencode.jsonc"),
     ...ancestors.flatMap((a) => ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"].map((f) => join26(a, f))),
     ...env.OPENCODE_CONFIG ? [env.OPENCODE_CONFIG] : []
-  ].map((path) => ({ label: fwd7(path), read: () => existsSync14(path) ? readFileSync19(path, "utf8") : null }));
+  ].map((path) => ({ label: fwd7(path), path, read: () => existsSync14(path) ? readFileSync19(path, "utf8") : null }));
   if (env.OPENCODE_CONFIG_CONTENT) docs.push({ label: "OPENCODE_CONFIG_CONTENT", read: () => env.OPENCODE_CONFIG_CONTENT });
   const fromEnv = /* @__PURE__ */ new Set([...env.OPENCODE_CONFIG_DIR ? ["opencode.json", "opencode.jsonc"].map((f) => fwd7(join26(globalDir, f))) : [], ...env.OPENCODE_CONFIG ? [fwd7(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
   const late2 = /* @__PURE__ */ new Set([fwd7(join26(dotDir, "opencode.jsonc")), ...env.OPENCODE_CONFIG ? [fwd7(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
@@ -16585,18 +16597,27 @@ function visibleAgents({ projectDir, env = process.env, home = homedir9(), check
       problems.push({ item: doc.label, status: "skipped", detail: `not valid JSONC (${err.message}), so the agents it defines are NOT checked and get no new per-agent guard; earlier per-agent guard entries are kept; fix it, then rerun /sterling:update` });
       continue;
     }
-    const agents = config?.agent;
-    const hasAgents = agents && typeof agents === "object" && !Array.isArray(agents);
-    if (hasAgents) for (const name4 of Object.keys(agents)) (fromEnv.has(doc.label) ? envNames : names).add(name4);
+    const agents = agentMap(config?.agent);
+    const native = agentMap(config?.agents);
+    const hasAgents = agents !== null;
+    for (const map of [agents, native]) if (map) for (const name4 of Object.keys(map)) (fromEnv.has(doc.label) ? envNames : names).add(name4);
+    if (agents || native) sources.push({ kind: "doc", label: doc.label, path: doc.path ?? null, legacy: agents ?? {}, native: native ?? {} });
     const setsRules = config?.permission !== void 0 || hasAgents && Object.values(agents).some((a) => a?.permission !== void 0);
     if (late2.has(doc.label) && setsRules) {
       problems.push({ item: doc.label, status: "skipped", detail: `sets permission rules and is read after (or in an unmeasured order with) ${PROJECT_CONFIG_REL}, so its rules can override the store guard; move them into ${PROJECT_CONFIG_REL}` });
     }
   }
   const envOnly = [...envNames].filter((n) => !names.has(n)).sort();
-  return { names: [.../* @__PURE__ */ new Set([...names, ...envNames])].sort(), envOnly, problems, incomplete };
+  return { names: [.../* @__PURE__ */ new Set([...names, ...envNames])].sort(), envOnly, problems, incomplete, sources };
 }
-function ensureProjectConfig({ projectDir, env = process.env, home = homedir9(), tracked, conductorOk = true, opencodeVersion }) {
+var agentMap = (v) => v && typeof v === "object" && !Array.isArray(v) ? v : null;
+function guardNativeRules(rules) {
+  if (rules !== void 0 && !Array.isArray(rules)) return { bad: true };
+  const guard = STORE_GUARD_PATTERNS.map((resource) => ({ action: "edit", resource, effect: "deny" }));
+  const isGuard = (r) => guard.some((g) => JSON.stringify(g) === JSON.stringify(r));
+  return { value: [...(rules ?? []).filter((r) => !isGuard(r)), ...guard] };
+}
+function ensureProjectConfig({ projectDir, env = process.env, home = homedir9(), tracked, conductorOk = true, opencodeVersion, systemDir }) {
   const rel = PROJECT_CONFIG_REL;
   const path = join26(projectDir, rel);
   if (tracked.includes(rel)) {
@@ -16638,7 +16659,7 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir9(),
   let removedShellDeny = top.removedShellDeny;
   const agents = config.agent ?? {};
   if (typeof agents !== "object" || agents === null || Array.isArray(agents)) return [refusal(rel, `${rel}: "agent" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
-  const visible = visibleAgents({ projectDir, env, home, checkAgentFiles: !hasEvaluateHook(opencodeVersion) });
+  const visible = visibleAgents({ projectDir, env, home, checkAgentFiles: !hasEvaluateHook(opencodeVersion), systemDir });
   extraRows.push(...visible.problems);
   const guardOnly = JSON.stringify({ permission: guardPermission(void 0).value });
   const legacyDeny = { [LEGACY_SHELL_DENIES[0]]: "deny" };
@@ -16659,11 +16680,24 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir9(),
     if (perm.removedShellDeny) removedShellDeny = true;
   }
   for (const name4 of [...names].sort()) if (!nextAgents[name4]) nextAgents[name4] = JSON.parse(guardOnly);
+  const nativeNames = [];
+  if (config.agents !== void 0) {
+    if (!agentMap(config.agents)) return [refusal(rel, `${rel}: "agents" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
+    const nextNative = {};
+    for (const [name4, entry] of Object.entries(config.agents)) {
+      if (!agentMap(entry)) return [refusal(rel, `${rel}: "agents.${name4}" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
+      const rules = guardNativeRules(entry.permissions);
+      if (rules.bad) return [refusal(rel, `${rel}: "agents.${name4}.permissions" is not a list of rules`, `fix ${rel}, then rerun /sterling:update`)];
+      nextNative[name4] = { ...entry, permissions: rules.value };
+      nativeNames.push(name4);
+    }
+    config.agents = nextNative;
+  }
   const envOnly = visible.envOnly.filter((name4) => JSON.stringify(nextAgents[name4]) === guardOnly);
   if (Object.keys(nextAgents).length) config.agent = nextAgents;
   else delete config.agent;
   if (removedShellDeny) notes2.push("removed the shell deny on *sterling.db* an earlier init wrote, and an identical rule of your own if you had one, since the two cannot be told apart (the Sterling plugin now guards shell commands, and a command that only reads the store passes)");
-  notes2.push(`per-agent store guard on ${names.size} agents (agent files in the global config dir and ${fwd7(".opencode")}, and the config "agent" entries; not checked: agents a plugin adds); an agent added later is covered on the next /sterling:update`);
+  notes2.push(`per-agent store guard on ${(/* @__PURE__ */ new Set([...names, ...nativeNames])).size} agents (agent files in the global config dir and ${fwd7(".opencode")}, and the config "agent" and "agents" entries; not checked: agents a plugin adds); an agent added later is covered on the next /sterling:update`);
   if (envOnly.length) notes2.push(`guard entries for agents seen only through this run's OPENCODE_CONFIG_DIR, OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT: ${envOnly.join(", ")}; OpenCode started without that environment lists each as an agent with no prompt, and a rerun of /sterling:update without it removes them`);
   if (env.OPENCODE_CONFIG_DIR) notes2.push(`OPENCODE_CONFIG_DIR replaced the global config dir for this run, so agents in ${fwd7(opencodeConfigDir({ env, home }))} were not checked`);
   if (!conductorOk) {
