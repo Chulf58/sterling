@@ -34,6 +34,7 @@
 // DEPENDENCY-FREE (node builtins only), like maintenance-worker.mjs. The import
 // below is a cycle with that module; only functions are used, and only at call
 // time, so neither module reads the other's bindings while it loads.
+import { WORKER_AGENT } from '../../lib/conductor-identity.mjs';
 import { knowledgeWriteName, writeEntry } from './maintenance-worker.mjs';
 
 const SERVER = 'sterling';
@@ -45,7 +46,7 @@ const SERVER = 'sterling';
  *  last matching rule wins. With the deny list at the top level, shell ran and
  *  wrote a file; under `--agent build` the same config removed shell and
  *  subagent. So the run names this agent, defined in OPENCODE_CONFIG_CONTENT. */
-export const OPENCODE_WORKER_AGENT = 'sterling-maintenance-worker';
+export const OPENCODE_WORKER_AGENT = WORKER_AGENT;
 /** Everything the worker may call, as OpenCode permission keys: execute (the
  *  MCP code-mode tool), mcp (measured on 2.0.22: under '*' deny, no MCP tool
  *  reaches the code-mode catalog without it, even one allowed by its own key;
