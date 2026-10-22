@@ -851,7 +851,7 @@ test('model swap: a project without the Sterling-full OpenCode set is skipped an
 function writeConfig(dir, models) {
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'hobby', ...(models === undefined ? {} : { models }) }));
 }
-const pinsOf = (dir) => Object.fromEntries(['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'librarian']
+const pinsOf = (dir) => Object.fromEntries(['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'sparring', 'librarian']
   .map((n) => [n, readFileSync(join(dir, STERLING_AGENTS_SUBDIR, `${n}.md`), 'utf8').match(/^model: (\S+)$/gm)?.join('|') ?? null]));
 const agentFiles = (dir) => Object.fromEntries(readdirSync(join(dir, STERLING_AGENTS_SUBDIR)).sort().map((n) => [n, readFileSync(join(dir, STERLING_AGENTS_SUBDIR, n), 'utf8')]));
 const configRow = (r) => r.rows.find((x) => x.item === '.sterling/config.json models');
@@ -861,6 +861,7 @@ const ALL_ROLES = {
   scout: { model: 'claude-haiku-4-5', effort: 'low' },
   librarian: { model: 'claude-sonnet-5-5', effort: 'low' },
   reviewer: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6.1-sol' },
+  sparring: { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra' },
 };
 
 test('install: every governed role pins its config.models model (the override when set), the conductor none, .claude/agents untouched', () => {
@@ -877,6 +878,7 @@ test('install: every governed role pins its config.models model (the override wh
     researcher: 'model: anthropic/claude-sonnet-5-5',
     scout: 'model: anthropic/claude-haiku-4-5',
     reviewer: 'model: openai/gpt-6.1-sol',
+    sparring: 'model: openai/gpt-6-astra',
     librarian: 'model: anthropic/claude-sonnet-5-5',
   });
   assert.match(readFileSync(join(dir, STERLING_AGENTS_SUBDIR, 'implementor.md'), 'utf8'), /^---\ndescription: .+\nmode: subagent\nmodel: openai\/gpt-5\.6-terra\n/);
@@ -909,6 +911,7 @@ test('update: a changed config.models is re-applied, a cleared override goes bac
     researcher: 'model: anthropic/claude-sonnet-5-5',
     scout: 'model: openai/gpt-5.6-terra',
     reviewer: 'model: openai/gpt-6.1-sol',
+    sparring: 'model: openai/gpt-6-astra',
     librarian: 'model: anthropic/claude-sonnet-5-5',
   });
 });
@@ -925,6 +928,7 @@ test('a role config.json does not write pins the default the System tab shows; t
     researcher: 'model: anthropic/claude-sonnet-5-5',
     scout: 'model: anthropic/claude-sonnet-5-5',
     reviewer: 'model: anthropic/claude-haiku-4-5',
+    sparring: 'model: anthropic/claude-opus-5-5',
     // the librarian's schema default moved to claude-haiku-5-5 (haiku-5-5-classifiers)
     librarian: 'model: anthropic/claude-haiku-5-5',
   });

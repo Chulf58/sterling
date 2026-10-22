@@ -6,7 +6,7 @@
 // preserved-debt lifecycle: it BLOCKS once per session per arming (the nag,
 // with the PR link and the next action), and every other Stop releases with a
 // non-blocking reminder. The debt itself stays in pr-loop.json until the
-// conductor settles it (pr-review-wait.mjs --settle clean|capped|escalated).
+// conductor settles it (pr-review-wait.mjs --settle clean|capped|escalated|closed).
 // It is never an indefinite Stop refusal. A hobby project never carries it.
 //
 // NEW SIBLING FILE by the established precedent (h10-*.test.mjs siblings
@@ -73,7 +73,7 @@ test('work, owed, NO file changes: the first Stop blocks once with the PR link a
     assert.match(first.stderr, /PR review loop owed/);
     assert.ok(first.stderr.includes(PR_URL), 'names the PR link');
     assert.match(first.stderr, /pr-review-loop/, 'names the skill (the next action)');
-    assert.match(first.stderr, /--settle (clean\|capped\|escalated|<clean\|capped\|escalated>)/, 'names how the duty is discharged');
+    assert.match(first.stderr, /--settle (clean\|capped\|escalated\|closed|<clean\|capped\|escalated\|closed>)/, 'names how the duty is discharged');
 
     for (const active of [true, false]) {
       const again = stop(p.dir, { active });
@@ -98,7 +98,7 @@ test('the nag names the bundled bin entry as node "<Sterling root>/bin/pr-review
     assert.equal(first.code, 2, `the first Stop nags (exit 2): ${first.stdout} ${first.stderr}`);
     const entry = 'node "<Sterling root>/bin/pr-review-wait.mjs"';
     assert.ok(first.stderr.includes(`wait with ${entry} ${PR_URL}`), `names the wait command in the Sterling root form: ${first.stderr}`);
-    assert.ok(first.stderr.includes(`${entry} --settle <clean|capped|escalated> --pr 7`), `names the settle command in the Sterling root form: ${first.stderr}`);
+    assert.ok(first.stderr.includes(`${entry} --settle <clean|capped|escalated|closed> --pr 7`), `names the settle command in the Sterling root form: ${first.stderr}`);
     assert.doesNotMatch(first.stderr, /scripts\/pr-review-wait/, 'never the scripts/ file, which does not exist on an installed copy');
     assert.doesNotMatch(first.stderr, /CLAUDE_PLUGIN_ROOT/, 'never the unsubstituted plugin-root variable');
   } finally {

@@ -56,12 +56,14 @@
 // OpenCode not installed, or not 2.x: one loud skip line, nothing written.
 
 import { spawnSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isInstalledCopy } from './installed-copy.mjs';
+import { writeFileAtomic, writeFileAtomicIfChanged } from './atomic-write.mjs';
+export { writeFileAtomic };
 import { RESOLVER_SOURCE as STERLING_RESOLVER_SOURCE, STERLING_NPM_PACKAGE, installHostOf, readCopyVersion, compareSterlingVersions, scanInstalledSterling, sterlingInstallRemedy, sterlingPluginSpecs } from './sterling-roots.mjs';
 import { parseJsonc } from './jsonc.mjs';
 import { stampBody, verifyStamp } from './generated-marker.mjs';
@@ -76,7 +78,7 @@ import { isShellSafePath } from './shell-safe-path.mjs';
 export const STERLING_AGENTS_SUBDIR = '.opencode/agents/sterling';
 export const PROJECT_CONFIG_REL = '.opencode/opencode.json';
 export const CONDUCTOR_AGENT = 'sterling/conductor';
-export const ROSTER = ['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'librarian'];
+export const ROSTER = ['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'sparring', 'librarian'];
 export { STERLING_NPM_PACKAGE, parseJsonc };
 export const STORE_GUARD_PATTERNS =['**/.sterling/sterling.db*', '.sterling/sterling.db*'];
 // The shell denies an earlier Sterling wrote into shell, bash and "*" blocks. They are no longer
@@ -881,6 +883,28 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir(),
 }
 
 /**
+ * Whether OpenCode started in `dir` would see agent `name`: visibleAgents(dir) plus the
+ * `agent` entries of `dir`/.opencode/opencode.json, the one source visibleAgents leaves to
+ * its caller. Returns { visible, problems }: `problems` names each config source that could
+ * not be read, so a caller can tell "not defined" from "not known".
+ */
+export function agentVisibleFrom({ dir, name, env = process.env, home = homedir() }) {
+  const seen = visibleAgents({ projectDir: dir, env, home, checkAgentFiles: false });
+  const problems = seen.problems.filter((p) => p.status === 'skipped' && /cannot be read|not valid JSONC/.test(p.detail ?? ''));
+  if (seen.names.includes(name)) return { visible: true, problems };
+  const own = join(dir, PROJECT_CONFIG_REL);
+  if (existsSync(own)) {
+    try {
+      const agents = parseJsonc(readFileSync(own, 'utf8'))?.agent;
+      if (agents && typeof agents === 'object' && !Array.isArray(agents) && Object.hasOwn(agents, name)) return { visible: true, problems };
+    } catch (err) {
+      problems.push({ item: fwd(own), status: 'skipped', detail: `cannot be read (${err.code ?? err.message})` });
+    }
+  }
+  return { visible: false, problems };
+}
+
+/**
  * Merge Sterling's keys (store guard, default_agent) into .opencode/opencode.json without
  * touching any other key. Returns one row, or two when an mcp.sterling entry Sterling did
  * not write is kept. No mcp.sterling entry is written any more: the Sterling server plugin
@@ -983,7 +1007,8 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
   const after = projectConfigText(config);
   if (after === before) return [{ item: rel, status: 'matches', detail: notes.join('; ') }, ...extraRows];
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, after);
+  // Atomic: OpenCode reloads agents when its config changes and drops what it cannot parse (GitHub #189).
+  writeFileAtomic(path, after);
   return [{ item: rel, status: before === null ? 'created' : 'refreshed', detail: ['store-guard edit deny, default_agent', ...notes].join('; ') }, ...extraRows];
 }
 
@@ -1037,10 +1062,12 @@ const CONDUCTOR_OPENCODE_DESCRIPTION = "Sterling's orchestrating main-session ag
 
 // Sterling-full permissions for the roles with no portable copy (no registry
 // `opencode` block, so they never reach the committed set). They mirror the Claude
-// tool grants: the reviewer has Read/Grep/Glob/Bash and store reads; the librarian
-// has Read/Grep and the store tools, with no Edit, Write, Bash or web tool.
+// tool grants: the reviewer and the sparring agent have Read/Grep/Glob/Bash and store
+// reads; the librarian has Read/Grep and the store tools, with no Edit, Write, Bash or
+// web tool.
 const FULL_PERMISSIONS = {
   reviewer: { edit: 'deny', webfetch: 'deny', task: 'deny' },
+  sparring: { edit: 'deny', webfetch: 'deny', task: 'deny' },
   librarian: { edit: 'deny', bash: 'deny', webfetch: 'deny', task: 'deny' },
 };
 
@@ -1348,21 +1375,7 @@ export function stageFullAgentModel({ projectDir, pluginRoot, agents, model, ope
   return stageFullAgents({ projectDir, pluginRoot, tracked, models });
 }
 
-/** Replace one file atomically: write a temp file beside it, then rename it
- *  over the target, so a failed write never leaves the target half-written.
- *  The temp file is removed when the write or the rename fails. */
-export function writeFileAtomic(path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
-  const tmp = `${path}.tmp-${randomUUID()}`;
-  try {
-    writeFile(tmp, content);
-    rename(tmp, path);
-  } catch (err) {
-    rmSync(tmp, { force: true });
-    throw err;
-  }
-}
-
-/** Write staged files in order, each atomically. On a failure, the files already
+/** Write staged files in order, each atomically, skipping a file that already holds its content. On a failure, the files already
  *  written are put back (restoreFullAgentFiles) and the error is rethrown; a
  *  rollback failure is added to the error message. `fs` is a test seam. */
 export function writeFullAgentFiles(writes, fs = {}) {
@@ -1370,7 +1383,7 @@ export function writeFullAgentFiles(writes, fs = {}) {
   try {
     for (const w of writes) {
       mkdirSync(dirname(w.path), { recursive: true });
-      writeFileAtomic(w.path, w.content, fs);
+      writeFileAtomicIfChanged(w.path, w.content, fs);
       done.push(w);
     }
   } catch (err) {
@@ -1391,7 +1404,7 @@ export function restoreFullAgentFiles(writes, fs = {}) {
   for (const w of writes) {
     try {
       if (w.previous === null) rmSync(w.path, { force: true });
-      else writeFileAtomic(w.path, w.previous, fs);
+      else writeFileAtomicIfChanged(w.path, w.previous, fs);
     } catch (err) {
       failed.push(`${fwd(w.path)}: ${err.message}`);
     }

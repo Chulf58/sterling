@@ -79,6 +79,34 @@ function unfinishedReason(r, timeout) {
   return null;
 }
 
+/** The failing tests named in `node --test` spec-reporter output, from its closing
+ *  "✖ failing tests:" block: each entry is a "test at <file:line:col>" line followed by
+ *  "✖ <name> (<duration>)". [] when the block is absent (a killed run, another reporter).
+ *  The battery's full output runs to thousands of lines and a host that clips long
+ *  output drops its end, so the names are repeated in the closing summary (GitHub #190). */
+export function failingTests(out) {
+  const lines = String(out ?? '').split(/\r?\n/);
+  const start = lines.findIndex((l) => l.trim() === '✖ failing tests:');
+  if (start === -1) return [];
+  const found = [];
+  for (let i = start + 1; i < lines.length - 1; i++) {
+    const at = /^test at (.+)$/.exec(lines[i].trim());
+    if (!at) continue;
+    const name = /^✖ (.+?)(?: \([\d.]+m?s\))?$/.exec(lines[i + 1].trim());
+    if (name) found.push({ name: name[1], at: at[1] });
+  }
+  return found;
+}
+
+/** The closing-summary block for a red test battery: which tests failed, or a loud
+ *  line saying the names could not be read from the output. */
+function testBatterySummary(failed, cwd) {
+  if (!failed.length) {
+    return `✗ TEST BATTERY FAILED — no failing test could be read from its output (the run may have been cut off; see the test battery block above). Rerun \`npm test\` in ${cwd} to see which test fails.`;
+  }
+  return `✗ TEST BATTERY FAILED — ${failed.length} failing test(s):\n` + failed.map((t) => `  ✖ ${t.name} (${t.at})`).join('\n');
+}
+
 /** git wrapper over an injected exec: trimmed stdout, or '' when allowFail and git errored. */
 export function gitFrom(exec, cwd) {
   return (args, { allowFail = false } = {}) => {
@@ -1329,9 +1357,12 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // held back. `step()` already sets report.exit=1 on this failure — never
   // swallowed, never a `return`.
   let testFailed = false;
+  let failedTests = [];
   if (opts.test !== false) {
-    if (!step('test battery (npm test)', 'npm', ['test'], { timeout: TEST_STEP_TIMEOUT_MS }).ok) {
+    const battery = step('test battery (npm test)', 'npm', ['test'], { timeout: TEST_STEP_TIMEOUT_MS });
+    if (!battery.ok) {
       testFailed = true;
+      failedTests = failingTests(battery.out);
       log(
         '\n✗ TEST BATTERY FAILED — store migration is SKIPPED below (schema changes are the one irreversible step, and this is code the battery has just called suspect). Agent sync still runs, because the hooks from this pull are already live in every project via --plugin-dir. This run exits non-zero and will NOT write the completion marker — rerun after fixing the battery, or the next /sterling:update resumes from here instead of reporting "Already current".'
       );
@@ -1505,6 +1536,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       (report.contract_drift
         ? 'CONTRACT DRIFT in a sibling project — see the stamp-contract block above. Tolerated here (a sibling CLAUDE.md never blocks this clone), and it does NOT self-heal: resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply`.\n'
         : '') +
+      (testFailed ? `${testBatterySummary(failedTests, cwd)}\n` : '') +
       'RESTART THE SESSION before working — that means EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough, MCP servers survive it): the MCP server and every project subagent load at CLI start, so the code now on disk is not the code running.'
   );
 

@@ -221,8 +221,8 @@ test('the conductor owns the project\'s own test and check commands; `npm run ch
   }
 });
 
-test('roster: all six roles render for OpenCode, the conductor primary and the rest subagents', () => {
-  assert.deepEqual([...ROSTER].sort(), ['conductor', 'implementor', 'librarian', 'researcher', 'reviewer', 'scout']);
+test('roster: all seven roles render for OpenCode, the conductor primary and the rest subagents', () => {
+  assert.deepEqual([...ROSTER].sort(), ['conductor', 'implementor', 'librarian', 'researcher', 'reviewer', 'scout', 'sparring']);
   const home = mkdtempSync(join(tmpdir(), 'oc-host-home-'));
   const dir = mkdtempSync(join(tmpdir(), 'oc-host-proj-'));
   for (const args of [['init', '-q'], ['config', 'user.email', 't@example.com'], ['config', 'user.name', 't'], ['config', 'core.autocrlf', 'false']]) {
@@ -257,6 +257,16 @@ test('roster permissions: the reviewer is read-only with no store write; the lib
     assert.match(frontmatter(fullRender(name)), /^ {2}sterling_knowledge_create: deny$/m, `${name} holds no store write`);
   }
   assert.doesNotMatch(frontmatter(fullRender('conductor')), /permission:/, 'the conductor is unrestricted');
+});
+
+test('roster permissions: the sparring agent has the reviewer\'s grant exactly (no edit, no store write, shell and store reads kept)', () => {
+  const sparring = frontmatter(fullRender('sparring'));
+  assert.equal(sparring.replace(/^description: .*$/m, '').replace(/^model: .*$/m, ''), frontmatter(fullRender('reviewer')).replace(/^description: .*$/m, '').replace(/^model: .*$/m, ''), 'same permission block as the reviewer');
+  for (const line of ['edit: deny', 'webfetch: deny', 'task: deny', 'sterling_knowledge_create: deny', 'sterling_knowledge_update: deny', 'sterling_board_add: deny', 'sterling_maintenance_remove: deny']) {
+    assert.match(sparring, new RegExp(`^  ${line}$`, 'm'), `sparring: ${line}`);
+  }
+  assert.doesNotMatch(sparring, /^ {2}bash: deny$/m, 'sparring keeps shell (its Claude grant has Bash)');
+  assert.doesNotMatch(sparring, /sterling_knowledge_(query|get)|sterling_board_(query|get)/, 'sparring keeps its store reads');
 });
 
 test('the portable (committed) set is unchanged: reviewer and librarian stay out of it', () => {

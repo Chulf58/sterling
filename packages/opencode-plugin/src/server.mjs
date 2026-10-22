@@ -79,6 +79,7 @@ import { remember } from './bounded.mjs';
 import { createSettle, liveDispatch } from './settle.mjs';
 import { onEvaluate as storeGuard } from './store-guard.mjs';
 import { BUSY_TIMEOUT_MS, createProjectStores, openProjectStore } from './store.mjs';
+import { checkSessionMove, isSessionMove, sessionMoveUncheckedRefusal } from './session-move.mjs';
 import { createSessionSync } from './sync.mjs';
 import { createWorkerLaunch, inWorkerChild } from './worker.mjs';
 import { createConductorSessionRecorder, takePromptSeq } from './conductor-session.mjs';
@@ -96,7 +97,7 @@ const EXECUTION_END_EVENTS = new Set(['session.execution.succeeded', 'session.ex
 
 // Per-handler budgets. The store calls are synchronous and cannot be cut off
 // mid-call; the budget bounds the awaited part and logs any overrun.
-export const BUDGET_MS = { context: 4000, delivery: 4000, axis: 4000, dispatch: 10000, research: 4000, settle: 30000, prompt: 4000, compaction: 4000, config: 4000, overpass: 4000, 'conductor-session': 4000 };
+export const BUDGET_MS = { context: 4000, delivery: 4000, axis: 4000, dispatch: 10000, research: 4000, settle: 30000, prompt: 4000, compaction: 4000, config: 4000, overpass: 4000, 'conductor-session': 4000, 'session-move': 4000 };
 
 
 /**
@@ -219,9 +220,46 @@ export function createSterlingServer(deps = {}) {
     const axis = createAxisHandlers({ openStore, rootOf, directory: () => directory, fenced, deliveryPolicy });
     const dispatch = createDispatchHandlers({ rootOf, fenced });
     const recordResearch = createResearchRecorder({ rootOf, fenced, now });
-    // Every handler is fenced, so none of them throws, with one exception: axis.onBefore
-    // refuses a subagent call by throwing when the Overpass setting cannot be read (axis.mjs).
+    /** { agent, directory } of session `sessionID`, from session.get (throws when it cannot be read). */
+    async function sessionInfo(sessionID) {
+      if (typeof session?.get !== 'function') throw new Error('ctx.session.get is unavailable');
+      const info = await session.get({ sessionID });
+      return { agent: info?.agent, directory: info?.location?.directory };
+    }
+    /**
+     * Refuses a session_move that would strand a Sterling agent's session where OpenCode
+     * cannot resolve its agent (session-move.mjs). Fail closed: a check that throws or runs
+     * past its budget refuses the move too, with a retry message, and is logged.
+     */
+    async function guardSessionMove(input) {
+      const root = rootOf();
+      // Sterling installs its agents only in a Sterling project, so a location without a store has none to strand.
+      if (!root || !isSessionMove(input?.tool)) return;
+      let timer;
+      try {
+        await Promise.race([
+          checkSessionMove(input, { sessionInfo, env }),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`the check exceeded its ${BUDGET_MS['session-move']} ms budget`)), BUDGET_MS['session-move']);
+          }),
+        ]);
+      } catch (e) {
+        const refusal = e?.sessionMoveRefusal ? e : new Error(sessionMoveUncheckedRefusal(errText(e)));
+        try {
+          logLine(root, `session-move refused: ${refusal.message}`);
+        } catch (logError) {
+          process.stderr.write(`[sterling] session-move refused (${refusal.message}) and could not be logged (${errText(logError)})\n`);
+        }
+        throw refusal;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    // Every handler is fenced, so none of them throws, with two exceptions: axis.onBefore
+    // refuses a subagent call by throwing when the Overpass setting cannot be read (axis.mjs),
+    // and guardSessionMove refuses a session_move that would strand a Sterling agent (session-move.mjs).
     async function onBefore(input) {
+      await guardSessionMove(input);
       await delivery.onBefore(input);
       await axis.onBefore(input);
       if (input?.tool === 'subagent') laneDispatches.noteDispatch(input.sessionID, input.id, input.input);

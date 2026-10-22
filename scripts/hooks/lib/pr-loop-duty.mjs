@@ -65,7 +65,7 @@ export function prLoopNext(state, waitScript, { host = 'claude-code' } = {}) {
       : `wait with node "${waitScript}" ${state.pr_url} (background)`;
   return (
     `run the pr-review-loop skill: ${wait}, disposition each finding, push fixes via /sterling:merge; ` +
-    `when the loop ends, settle it: node "${waitScript}" --settle <clean|capped|escalated> --pr ${state.pr_number}. ` +
+    `when the loop ends, settle it: node "${waitScript}" --settle <clean|capped|escalated|closed> --pr ${state.pr_number}. ` +
     `Ending the session mid-loop: board item pointing at the PR + the PR link and next action in the rotation note.`
   );
 }
@@ -73,4 +73,4 @@ export function prLoopNext(state, waitScript, { host = 'claude-code' } = {}) {
 export const prLoopOwedText = (state, next) =>
   `• PR review loop owed (work mode): PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? '?').slice(0, 7)}, armed ${state.armed_at}) — ${next}`;
 
-export const prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number} ${state.pr_url} — next: pr-review-loop skill, then --settle clean|capped|escalated --pr ${state.pr_number}.`;
+export const prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number} ${state.pr_url} — next: pr-review-loop skill, then --settle clean|capped|escalated|closed --pr ${state.pr_number}.`;

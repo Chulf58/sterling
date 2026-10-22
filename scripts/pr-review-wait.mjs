@@ -7,7 +7,7 @@
 //        [--since-review <id>] [--head <sha>] [--timeout <s>] [--interval <s>]
 //        [--request-copilot] [--recheck-delay <s>] [--target <dir>]
 //   node scripts/pr-review-wait.mjs --resolve-threads <comment-id,...> --pr <n|pr-url> [--target <dir>]
-//   node scripts/pr-review-wait.mjs --settle <clean|capped|escalated> --pr <n|pr-url> [--unknown-retry-delay <s>]
+//   node scripts/pr-review-wait.mjs --settle <clean|capped|escalated|closed> --pr <n|pr-url> [--unknown-retry-delay <s>]
 //        [--checks-timeout <s>] [--checks-interval <s>] [--target <dir>]
 //
 // WAIT: the repo is bound to origin exactly as work-mode /sterling:merge binds
@@ -149,7 +149,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { resolveStoreRoot } from './lib/worktree-root.mjs';
-import { autoMergeOnCleanOf, DeadlineReachedError, fetchSettledMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
+import { autoMergeOnCleanOf, DeadlineReachedError, fetchPrMergeState, fetchSettledMergeState, mergeBlockers, parseOriginRepo, parsePrUrl, resolveReviewThreads, settlePrLoop } from './lib/work-pr.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (name) => {
@@ -401,7 +401,17 @@ if (argv.includes('--settle')) {
       }
       return { head_sha: state.head_sha };
     };
-    const s = settlePrLoop(storeRoot, outcome, flag('--pr'), { originRepo, guard: outcome === 'clean' ? guard : null });
+    // GitHub issue #194: a PR closed without merging (superseded) ends its loop
+    // as 'closed'. Only the PR's own state is read, and a PR that is open or
+    // merged is refused: open means the loop still runs, merged settles clean.
+    const closedGuard = (armed) => {
+      const state = fetchPrMergeState(target, originRepo, armed.pr_number);
+      merge = { pr_state: state.pr_state, already_merged: state.merged, head_sha: state.head_sha, armed_head_sha: armed.head_sha };
+      if (state.merged) throw new Error(`the PR is already merged, so it was not closed unmerged: settle clean instead; nothing settled`);
+      if (state.pr_state !== 'CLOSED') throw new Error(`the PR is ${state.pr_state}, not closed: settle closed only for a PR closed without merging; nothing settled`);
+      return { head_sha: state.head_sha };
+    };
+    const s = settlePrLoop(storeRoot, outcome, flag('--pr'), { originRepo, guard: outcome === 'clean' ? guard : outcome === 'closed' ? closedGuard : null });
     process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at, ...(merge ?? {}) }) + '\n');
     process.exit(0);
   } catch (e) {

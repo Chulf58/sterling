@@ -194,7 +194,24 @@ function resolveCreateType(args: unknown): { args: unknown } | { error: string }
     };
   }
   const type = outer ?? inner;
-  return { args: { ...input, type, fields: { ...fields, type } } };
+  // `scope` follows the same give-it-once rule (GitHub #196): a client that
+  // builds its call from the served schema sends top-level properties only
+  // when they are advertised, and a dropped scope silently writes the record
+  // to the project store. The one copy is filled into fields.scope, where the
+  // per-type parse and the store's routing already read it.
+  const outerScope = input.scope;
+  const innerScope = (fields as Record<string, unknown>).scope;
+  if (outerScope !== undefined && innerScope !== undefined && outerScope !== innerScope) {
+    return {
+      error: `knowledge_create: the top-level 'scope' ('${String(outerScope)}') does not match 'fields.scope' ('${String(innerScope)}'). Give the scope once, or set both to the same value.`,
+    };
+  }
+  // Only undefined means "not supplied": a null or malformed top-level value
+  // must reach the per-type parse and be refused exactly as it is inside fields.
+  const scope = outerScope !== undefined ? outerScope : innerScope;
+  const normalized: Record<string, unknown> = { ...input, type, fields: { ...fields, type, ...(scope === undefined ? {} : { scope }) } };
+  delete normalized.scope;
+  return { args: normalized };
 }
 
 /**
@@ -212,6 +229,10 @@ const knowledgeCreateParseSchema = z
 const knowledgeCreateInput = z
   .object({
     type: z.string().optional().describe("record type; give it here or as fields.type (one copy is enough)"),
+    scope: z
+      .string()
+      .optional()
+      .describe("'project' (default) or 'domain:<name>', routing the record to that mounted domain store; give it here or as fields.scope (one copy is enough)"),
     fields: z.union(buildCreateFieldVariants(true) as unknown as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]),
     projection: z.enum(['full', 'digest']).optional(),
   })
@@ -439,7 +460,7 @@ export function createSterlingServer(
     'knowledge_create',
     {
       description:
-        "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. Example: {\"type\":\"decision\",\"fields\":{\"title\":\"...\",\"statement\":\"...\",\"alternatives_rejected\":[],\"rationale\":\"...\"}}. A colliding feature_article slug is refused. A links entry with rel 'supersedes' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel 'cites' for a deliberate partial override. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." +
+        "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. `scope` ('project' by default, or 'domain:<name>') is given the same way, as the top-level `scope` or as fields.scope. Example: {\"type\":\"decision\",\"fields\":{\"title\":\"...\",\"statement\":\"...\",\"alternatives_rejected\":[],\"rationale\":\"...\"}}. A colliding feature_article slug is refused. A links entry with rel 'supersedes' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel 'cites' for a deliberate partial override. A domain:<name> scope with file_keys (or an article's files) is refused: repo paths stay project. A reference_material's location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain's description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record." +
         createDomainsNote,
       inputSchema: knowledgeCreateInput,
     },

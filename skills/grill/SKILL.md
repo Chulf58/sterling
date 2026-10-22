@@ -63,7 +63,7 @@ Each question is its own `AskUserQuestion` call:
 <!-- /claude-only -->
 <!-- opencode-only -->
 On OpenCode, the Astra sparring bullet reads as follows.
-- **Astra sparring, when warranted** (a new mechanism, persistent state, a deletion boundary, anything hard to unship): put the ruled design, your proposal and your own objections to the `sterling/reviewer` agent through the `subagent` tool with `model` set to `openai/gpt-6-astra#high` (when Overpass is ON for the project, omit `model`: the plugin sets the tier), and say in the prompt not to modify the worktree. The `codex` MCP tool is the Claude Code route only and is not used here. It runs **before** closure; a new trade-off it raises goes back to the tree as a form.
+- **Astra sparring, when warranted** (a new mechanism, persistent state, a deletion boundary, anything hard to unship): put the ruled design, your proposal and your own objections to the `sterling/sparring` agent through the `subagent` tool with `model` set to `openai/gpt-6-astra#high` (when Overpass is ON for the project, omit `model`: the plugin sets the tier), and say in the prompt not to modify the worktree. The `codex` MCP tool is the Claude Code route only and is not used here. It runs **before** closure; a new trade-off it raises goes back to the tree as a form.
 <!-- /opencode-only -->
 - **Close** when each consequential branch is resolved or **explicitly deferred** (named, with why). Never close with a "done?" or "is this ready?" form.
 - **Ending the interview does not authorize building.** Building is its own ask unless the user already asked for it.

@@ -299,6 +299,27 @@ export const CONDUCTOR_WORDING_EDITS = [
     before: "`user` and `grill` wait for the user; absent means nothing. Set `needs` at intake when an item cannot start on its own, and clear it (`needs: \"\"`) once the user has answered. H1 prints three groups at session start and after a clear (READY, READY FOR RESEARCH, WAITING ON YOU)",
     after: "`user` and `grill` wait for the user; `external` waits on an outside party (a mail reply, a meeting, a branch someone else owns) and needs a `needs_reason` saying what is awaited and what lets the work resume; recheck it when that evidence arrives, never clear it because time passed; absent means nothing. Set `needs` at intake when an item cannot start on its own, and clear it (`needs: \"\"`) once the user has answered. H1 prints four groups at session start and after a clear (READY, READY FOR RESEARCH, WAITING ON YOU, WAITING ON OTHERS)",
   },
+  {
+    commit: 'sterling/sparring',
+    date: '2026-10-22',
+    reason: "sparring lanes run as the new `sparring` agent, not as `reviewer` (user-ruled, \"Yes, as stated\")",
+    before: "Review, re-check and sparring lanes run as `reviewer` with the reviewer's model pinned",
+    after: "Review and re-check lanes run as `reviewer` with the reviewer's model pinned",
+  },
+  {
+    commit: 'sterling/sparring',
+    date: '2026-10-22',
+    reason: "the roster gains the read-only `sparring` agent, a bullet after the reviewer's (user-ruled, \"Yes, as stated\")",
+    before: "The Codex Sol review loads the same body through the `review-brief` skill. Returns ranked findings, a test-integrity verdict per changed test file, the areas checked with nothing found, and a verdict.\n",
+    after: "The Codex Sol review loads the same body through the `review-brief` skill. Returns ranked findings, a test-integrity verdict per changed test file, the areas checked with nothing found, and a verdict.\n- **sparring** — read-only by tool grant, the same grant as the reviewer (no Edit, Write or store-write tool). Its body is the sparring brief, not the review rubric: it takes your problem, your proposal and your objections, attacks the weak points, says where it disagrees and why, offers an alternative, and stays advisory, never gating. A sparring lane runs as `sparring`, never as `reviewer` or `general-purpose`, with the model pinned (the Fable fallback below; Astra goes through the `codex` MCP tool on this host). Returns the strongest objection, the points of disagreement with evidence, an alternative, what the proposal gets right and a recommendation.\n",
+  },
+  {
+    commit: 'sterling/sparring',
+    date: '2026-10-22',
+    reason: "the Fable sparring fallback runs as the `sparring` agent, not as a Plan agent (user-ruled, \"Yes, as stated\")",
+    before: "a `Plan` agent with `model: \"fable\"` pinned at the call (user-ruled 2026-10-01 through the question form, 'Fallback only').",
+    after: "the `sparring` agent with `model: \"fable\"` pinned at the call (user-ruled 2026-10-01 through the question form, 'Fallback only'; the `sparring` agent replaced the `Plan` agent as the carrier on 2026-10-22).",
+  },
 ];
 
 export const IMPLEMENTOR_WORDING_EDITS = [

@@ -1028,6 +1028,61 @@ test('knowledge_create takes type ONCE (GitHub issue #55): top level only, field
   }
 });
 
+test('knowledge_create honours a top-level scope like type (GitHub #196): domain:<name> routes to that domain store, a conflict with fields.scope is refused', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mcp-toplevel-scope-'));
+  const presentDb = join(dir, 'domains', 'present', 'sterling.db');
+  createDomain('present', 'present domain', presentDb);
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ stack_tags: ['present'], domain_paths: { present: presentDb } }));
+  const { server, store } = createSterlingServer(join(dir, 'sterling.db'));
+  const client = new Client({ name: 'test-client', version: '0.0.1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const body = { title: 'scope-top-level', statement: 'S', alternatives_rejected: [], rationale: 'R' };
+    const create = (args: Record<string, unknown>) => client.callTool({ name: 'knowledge_create', arguments: { projection: 'full', ...args } });
+
+    // the served schema advertises scope, so a client that builds its call from it sends it
+    const tool = (await client.listTools()).tools.find((t) => t.name === 'knowledge_create')!;
+    assert.ok('scope' in (tool.inputSchema.properties ?? {}), 'top-level scope is advertised');
+
+    const viaTop = payload(await create({ type: 'decision', scope: 'domain:present', fields: body })) as { record: { id: string; scope: string } };
+    assert.equal(viaTop.record.scope, 'domain:present');
+    assert.ok(store.querySource('present', {}).some((r) => r.id === viaTop.record.id), 'the record lands in the domain store, not the project store');
+    assert.ok(!store.querySource('project', {}).some((r) => r.id === viaTop.record.id), 'and is not in the project store');
+
+    const viaFields = payload(await create({ type: 'decision', fields: { ...body, title: 'via-fields', scope: 'domain:present' } })) as { record: { scope: string } };
+    assert.equal(viaFields.record.scope, 'domain:present', 'fields.scope still works');
+
+    const equal = payload(await create({ type: 'decision', scope: 'domain:present', fields: { ...body, title: 'both-equal', scope: 'domain:present' } })) as { record: { scope: string } };
+    assert.equal(equal.record.scope, 'domain:present', 'both copies, equal: accepted');
+
+    const conflict = await create({ type: 'decision', scope: 'domain:present', fields: { ...body, title: 'conflict', scope: 'project' } });
+    assert.equal(conflict.isError, true);
+    assert.match((conflict as { content: { text: string }[] }).content[0].text, /top-level 'scope' \('domain:present'\) does not match 'fields\.scope' \('project'\)/);
+
+    const unmounted = await create({ type: 'decision', scope: 'domain:ghost', fields: { ...body, title: 'ghost' } });
+    assert.equal(unmounted.isError, true, 'an unmounted domain is refused, never written to the project store');
+
+    // a malformed scope is refused identically at the top level and inside fields, with nothing written
+    const text = (r: unknown) => (r as { content: { text: string }[] }).content[0].text;
+    const count = () => store.querySource('project', {}).length + store.querySource('present', {}).length;
+    for (const bad of [null, 5, 'domain:', 'bogus']) {
+      const before = count();
+      const top = await create({ type: 'decision', scope: bad, fields: { ...body, title: `bad-top-${String(bad)}` } });
+      const inner = await create({ type: 'decision', fields: { ...body, title: `bad-inner-${String(bad)}`, scope: bad } });
+      assert.equal(top.isError, true, `top-level scope ${JSON.stringify(bad)} is refused`);
+      assert.equal(inner.isError, true, `fields.scope ${JSON.stringify(bad)} is refused`);
+      assert.equal(text(top), text(inner), `scope ${JSON.stringify(bad)} is refused the same way in both places`);
+      assert.equal(count(), before, `scope ${JSON.stringify(bad)} wrote nothing`);
+    }
+  } finally {
+    await client.close();
+    await server.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('knowledge_create serves capture_date and source_date inline as date strings, with no cross-branch $ref (GitHub #73)', async () => {
   const { client, tools, cleanup } = await harness();
   try {

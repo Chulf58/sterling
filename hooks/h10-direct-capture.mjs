@@ -4840,7 +4840,8 @@ var AGENT_MODEL_KEY = {
   researcher: "researcher",
   scout: "scout",
   librarian: "librarian",
-  reviewer: "reviewer"
+  reviewer: "reviewer",
+  sparring: "sparring"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
 var s = (v) => typeof v === "string" ? v : "";
@@ -5303,7 +5304,12 @@ var configSchema = external_exports.object({
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
-    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
+    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
+    // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
+    // read-only grant as the reviewer, so the same install-time default. Every
+    // dispatch pins its model (Astra, else a Fable model); under Overpass its
+    // role tier decides.
+    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
   }).catchall(agentModelEntry).default({}),
   // Per-project agent tool extension (decision
   // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
@@ -13179,7 +13185,7 @@ import { existsSync as existsSync9, linkSync as linkSync2, mkdirSync as mkdirSyn
 import { delimiter, dirname as dirname11, join as join17 } from "node:path";
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
-var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
+var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
 var prLoopPath = (root) => join17(root, PR_LOOP_REL);
 var prLoopFileRel = (prNumber) => `${PR_LOOPS_DIR_REL}/${prNumber}.json`;
 function parsePrLoopFile(file, rel) {
@@ -13266,10 +13272,10 @@ function evaluatePrLoop(root) {
 }
 function prLoopNext(state, waitScript, { host = "claude-code" } = {}) {
   const wait = host === "opencode" ? `wait with node "${waitScript}" ${state.pr_url} (add --request-copilot on the first wait after a push) started with the shell tool's background: true, which notifies you when it ends; never detach it with nohup or &` : `wait with node "${waitScript}" ${state.pr_url} (background)`;
-  return `run the pr-review-loop skill: ${wait}, disposition each finding, push fixes via /sterling:merge; when the loop ends, settle it: node "${waitScript}" --settle <clean|capped|escalated> --pr ${state.pr_number}. Ending the session mid-loop: board item pointing at the PR + the PR link and next action in the rotation note.`;
+  return `run the pr-review-loop skill: ${wait}, disposition each finding, push fixes via /sterling:merge; when the loop ends, settle it: node "${waitScript}" --settle <clean|capped|escalated|closed> --pr ${state.pr_number}. Ending the session mid-loop: board item pointing at the PR + the PR link and next action in the rotation note.`;
 }
 var prLoopOwedText = (state, next) => `\u2022 PR review loop owed (work mode): PR #${state.pr_number} ${state.pr_url} (head ${String(state.head_sha ?? "?").slice(0, 7)}, armed ${state.armed_at}) \u2014 ${next}`;
-var prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number} ${state.pr_url} \u2014 next: pr-review-loop skill, then --settle clean|capped|escalated --pr ${state.pr_number}.`;
+var prLoopReminderText = (state) => `PR review loop owed: PR #${state.pr_number} ${state.pr_url} \u2014 next: pr-review-loop skill, then --settle clean|capped|escalated|closed --pr ${state.pr_number}.`;
 
 // scripts/hooks/lib/maintenance-worker.mjs
 import { createHash as createHash5, randomUUID as randomUUID5 } from "node:crypto";
@@ -14653,7 +14659,11 @@ try {
     const age = nowMs - Date.parse(r.entry.ended?.at);
     return age >= 0 && age < resumeHoldMs;
   }) : [];
-  const pendingHeld = Boolean(pendingDetail) && (liveDispatches.length > 0 || recentlyEndedDispatches.length > 0);
+  const namesAgent = (text, agentId) => typeof agentId === "string" && agentId !== "" && new RegExp(`(?:^|[^\\w-])${agentId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(text);
+  const namedLapsedDispatches = classified.availability === "ok" ? classified.entries.filter(
+    (r) => r.status === "unknown" && r.reason === "lease-expired" && capturePendingEvents.some((e) => namesAgent(`${e.target ?? ""} ${e.detail}`, r.entry.agent_id))
+  ) : [];
+  const pendingHeld = Boolean(pendingDetail) && (liveDispatches.length > 0 || recentlyEndedDispatches.length > 0 || namedLapsedDispatches.length > 0);
   const pendingDeclId = (e) => JSON.stringify([e.at ?? null, e.detail]);
   const graceSpentIds = (() => {
     if (!existsSync12(nagMarker)) return /* @__PURE__ */ new Set();

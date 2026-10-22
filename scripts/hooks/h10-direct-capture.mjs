@@ -1567,7 +1567,28 @@ try {
           return age >= 0 && age < resumeHoldMs; // NaN (unreadable ended.at) fails both
         })
       : [];
-  const pendingHeld = Boolean(pendingDetail) && (liveDispatches.length > 0 || recentlyEndedDispatches.length > 0);
+  // NAMED-LANE HOLD (GitHub #195): a lane that runs past its lease while
+  // parked on its own background work is 'unknown' (lease-expired), never
+  // presumed-active, yet it has sent no terminal hook, so it is still running.
+  // A declaration whose target text names that lane's agent_id (whole token)
+  // holds while the row stays unended, so the declaration is not graced and
+  // converted to debt under a live lane. Only a NAMED row holds: an
+  // unnamed lease-expired row still defers nothing, so an orphan the
+  // declaration never mentioned cannot hold it. Not guaranteed: a named row
+  // that never receives a terminal hook holds until H1's session-boundary sweep.
+  const namesAgent = (text, agentId) =>
+    typeof agentId === 'string' && agentId !== '' && new RegExp(`(?:^|[^\\w-])${agentId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`).test(text);
+  const namedLapsedDispatches =
+    classified.availability === 'ok'
+      ? classified.entries.filter(
+          (r) =>
+            r.status === 'unknown' &&
+            r.reason === 'lease-expired' &&
+            capturePendingEvents.some((e) => namesAgent(`${e.target ?? ''} ${e.detail}`, r.entry.agent_id))
+        )
+      : [];
+  const pendingHeld =
+    Boolean(pendingDetail) && (liveDispatches.length > 0 || recentlyEndedDispatches.length > 0 || namedLapsedDispatches.length > 0);
 
   // GRACE PER DECLARATION (same decision, point 1; identity-based per the
   // fix-round review): each declaration EVENT has its own one-Stop grace. The
