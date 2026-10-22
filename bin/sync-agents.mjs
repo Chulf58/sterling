@@ -6959,10 +6959,13 @@ function isShellSafePath(path) {
   return SHELL_SAFE_PATH_RE.test(path);
 }
 
+// scripts/lib/conductor-identity.mjs
+var CONDUCTOR_ROLE = "conductor";
+var CONDUCTOR_AGENT = "sterling/conductor";
+
 // scripts/lib/opencode-install.mjs
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
 var PROJECT_CONFIG_REL = ".opencode/opencode.json";
-var CONDUCTOR_AGENT = "sterling/conductor";
 var ROSTER = ["conductor", "implementor", "researcher", "scout", "reviewer", "sparring", "librarian"];
 var STORE_GUARD_PATTERNS = ["**/.sterling/sterling.db*", ".sterling/sterling.db*"];
 var LEGACY_SHELL_DENIES = ["*sterling.db*", "*.sterling/sterling.db*"];
@@ -7864,7 +7867,7 @@ function fullAgentTargets(registry) {
     const entry = registry.agents.find((a) => a.name === name);
     if (!entry) throw new Error(`opencode roster: '${name}' is not in agent-templates/registry.json (P5)`);
     if (!agentHosts(entry).includes("opencode")) throw new Error(`opencode roster: '${name}' is in the roster but its registry hosts leave out opencode (P5)`);
-    return { name, entry, rel: `${STERLING_AGENTS_SUBDIR}/${name}.md`, primary: name === "conductor" };
+    return { name, entry, rel: `${STERLING_AGENTS_SUBDIR}/${name}.md`, primary: name === CONDUCTOR_ROLE };
   });
   for (const entry of registry.agents) {
     if (entry.opencode_full === void 0) continue;

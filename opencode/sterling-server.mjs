@@ -17626,9 +17626,11 @@ var SAFE_CHAR_CLASS = "[A-Za-z0-9_@%+=:,./-]";
 var SHELL_SAFE_PATH_RE = new RegExp(`^${SAFE_CHAR_CLASS}+$`);
 var SAFE_CHAR_RE = new RegExp(`^${SAFE_CHAR_CLASS}$`);
 
+// scripts/lib/conductor-identity.mjs
+var CONDUCTOR_AGENT = "sterling/conductor";
+
 // scripts/lib/opencode-install.mjs
 var PROJECT_CONFIG_REL = ".opencode/opencode.json";
-var CONDUCTOR_AGENT = "sterling/conductor";
 var FULL_HEADER_RE = /^<!-- sterling-full renderer=opencode-full\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
 var fwd2 = (p) => p.replace(/\\/g, "/");
 var normalize2 = (s2) => s2.replace(/\r\n/g, "\n");

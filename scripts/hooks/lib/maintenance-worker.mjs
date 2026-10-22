@@ -65,6 +65,7 @@ import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { WORKER_AGENT } from '../../lib/conductor-identity.mjs';
 import { buildOpencodeArgs, buildOpencodeConfig, opencodeEnv, opencodePrompt, opencodeStreamJournal } from './maintenance-worker-opencode.mjs';
 
 /** Sonnet 5.5, not Haiku: the worker writes factual edits, and an unreviewed
@@ -80,7 +81,7 @@ export const WORKER_EFFORT = 'medium';
  *  WebFetch), so stale_research and refresh_reference items could not be
  *  re-checked. This agent carries the librarian template's instructions with
  *  the worker's own tool list, so the conductor's store clerk keeps its grant. */
-export const WORKER_AGENT = 'sterling-maintenance-worker';
+export { WORKER_AGENT };
 /** The template whose instructions the worker agent carries. */
 export const WORKER_AGENT_TEMPLATE = 'librarian';
 /** Per-run runaway guard passed to --max-budget-usd on every launch. There is
