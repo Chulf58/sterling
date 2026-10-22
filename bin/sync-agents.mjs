@@ -7537,7 +7537,7 @@ function visibleAgents({ projectDir, env = process.env, home = homedir3(), check
         unreadable(fwd3(join10(dir, sub)), err);
         continue;
       }
-      if (files.length) sources.push({ kind: "files", dir, names: files.map((f) => f.name) });
+      if (files.length) sources.push({ kind: "files", dir, names: files.map((f) => f.name), paths: Object.fromEntries(files.map((f) => [f.name, f.path])) });
       for (const { name, path } of files) {
         (dir === env.OPENCODE_CONFIG_DIR ? envNames : names).add(name);
         if (dir !== dotDir || !checkAgentFiles) continue;
@@ -7596,7 +7596,13 @@ function visibleAgents({ projectDir, env = process.env, home = homedir3(), check
   return { names: [.../* @__PURE__ */ new Set([...names, ...envNames])].sort(), envOnly, problems, incomplete, sources };
 }
 var agentMap = (v) => v && typeof v === "object" && !Array.isArray(v) ? v : null;
-function ensureProjectConfig({ projectDir, env = process.env, home = homedir3(), tracked, conductorOk = true, opencodeVersion }) {
+function guardNativeRules(rules) {
+  if (rules !== void 0 && !Array.isArray(rules)) return { bad: true };
+  const guard = STORE_GUARD_PATTERNS.map((resource) => ({ action: "edit", resource, effect: "deny" }));
+  const isGuard = (r) => guard.some((g) => JSON.stringify(g) === JSON.stringify(r));
+  return { value: [...(rules ?? []).filter((r) => !isGuard(r)), ...guard] };
+}
+function ensureProjectConfig({ projectDir, env = process.env, home = homedir3(), tracked, conductorOk = true, opencodeVersion, systemDir }) {
   const rel = PROJECT_CONFIG_REL;
   const path = join10(projectDir, rel);
   if (tracked.includes(rel)) {
@@ -7638,7 +7644,7 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir3(),
   let removedShellDeny = top.removedShellDeny;
   const agents = config2.agent ?? {};
   if (typeof agents !== "object" || agents === null || Array.isArray(agents)) return [refusal(rel, `${rel}: "agent" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
-  const visible = visibleAgents({ projectDir, env, home, checkAgentFiles: !hasEvaluateHook(opencodeVersion) });
+  const visible = visibleAgents({ projectDir, env, home, checkAgentFiles: !hasEvaluateHook(opencodeVersion), systemDir });
   extraRows.push(...visible.problems);
   const guardOnly = JSON.stringify({ permission: guardPermission(void 0).value });
   const legacyDeny = { [LEGACY_SHELL_DENIES[0]]: "deny" };
@@ -7659,11 +7665,24 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir3(),
     if (perm.removedShellDeny) removedShellDeny = true;
   }
   for (const name of [...names].sort()) if (!nextAgents[name]) nextAgents[name] = JSON.parse(guardOnly);
+  const nativeNames = [];
+  if (config2.agents !== void 0) {
+    if (!agentMap(config2.agents)) return [refusal(rel, `${rel}: "agents" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
+    const nextNative = {};
+    for (const [name, entry] of Object.entries(config2.agents)) {
+      if (!agentMap(entry)) return [refusal(rel, `${rel}: "agents.${name}" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
+      const rules = guardNativeRules(entry.permissions);
+      if (rules.bad) return [refusal(rel, `${rel}: "agents.${name}.permissions" is not a list of rules`, `fix ${rel}, then rerun /sterling:update`)];
+      nextNative[name] = { ...entry, permissions: rules.value };
+      nativeNames.push(name);
+    }
+    config2.agents = nextNative;
+  }
   const envOnly = visible.envOnly.filter((name) => JSON.stringify(nextAgents[name]) === guardOnly);
   if (Object.keys(nextAgents).length) config2.agent = nextAgents;
   else delete config2.agent;
   if (removedShellDeny) notes.push("removed the shell deny on *sterling.db* an earlier init wrote, and an identical rule of your own if you had one, since the two cannot be told apart (the Sterling plugin now guards shell commands, and a command that only reads the store passes)");
-  notes.push(`per-agent store guard on ${names.size} agents (agent files in the global config dir and ${fwd3(".opencode")}, and the config "agent" entries; not checked: agents a plugin adds); an agent added later is covered on the next /sterling:update`);
+  notes.push(`per-agent store guard on ${(/* @__PURE__ */ new Set([...names, ...nativeNames])).size} agents (agent files in the global config dir and ${fwd3(".opencode")}, and the config "agent" and "agents" entries; not checked: agents a plugin adds); an agent added later is covered on the next /sterling:update`);
   if (envOnly.length) notes.push(`guard entries for agents seen only through this run's OPENCODE_CONFIG_DIR, OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT: ${envOnly.join(", ")}; OpenCode started without that environment lists each as an agent with no prompt, and a rerun of /sterling:update without it removes them`);
   if (env.OPENCODE_CONFIG_DIR) notes.push(`OPENCODE_CONFIG_DIR replaced the global config dir for this run, so agents in ${fwd3(opencodeConfigDir({ env, home }))} were not checked`);
   if (!conductorOk) {

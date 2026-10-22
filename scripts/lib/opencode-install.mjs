@@ -846,7 +846,7 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir(),
         unreadable(fwd(join(dir, sub)), err);
         continue;
       }
-      if (files.length) sources.push({ kind: 'files', dir, names: files.map((f) => f.name) });
+      if (files.length) sources.push({ kind: 'files', dir, names: files.map((f) => f.name), paths: Object.fromEntries(files.map((f) => [f.name, f.path])) });
       for (const { name, path } of files) {
         (dir === env.OPENCODE_CONFIG_DIR ? envNames : names).add(name);
         if (dir !== dotDir || !checkAgentFiles) continue;
@@ -917,6 +917,24 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir(),
 
 const agentMap = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : null);
 
+/** Whether a Markdown agent's frontmatter sets `disabled: true` (V2) or `disable: true` (V1). */
+export function markdownDisabled(text) {
+  const m = normalize(text).match(/^---\n([\s\S]*?)\n---/);
+  return m !== null && /^(?:disabled|disable)\s*:\s*(?:true|"true"|'true')\s*(?:#.*)?$/m.test(m[1]);
+}
+
+/**
+ * The store guard on a native V2 agent entry's `permissions` list: every rule the user
+ * wrote stays in its order, and the edit denies on the store come last (the last matching
+ * rule wins, opencode.ai/v2/docs/agents "Permissions"). Returns { value } or { bad: true }.
+ */
+function guardNativeRules(rules) {
+  if (rules !== undefined && !Array.isArray(rules)) return { bad: true };
+  const guard = STORE_GUARD_PATTERNS.map((resource) => ({ action: 'edit', resource, effect: 'deny' }));
+  const isGuard = (r) => guard.some((g) => JSON.stringify(g) === JSON.stringify(r));
+  return { value: [...(rules ?? []).filter((r) => !isGuard(r)), ...guard] };
+}
+
 /**
  * Whether OpenCode started in `dir` would see agent `name`, from the sources visibleAgents
  * finds plus `dir`/.opencode/opencode.json (the one it leaves to its caller). Returns
@@ -960,22 +978,40 @@ export function agentVisibleFrom({ dir, name, env = process.env, home = homedir(
   }
   const globalDir = opencodeConfigDir({ env, home });
   const depth = (d) => resolve(d).split(/[\\/]+/).filter(Boolean).length;
+  const onPath = new Set();
+  for (let d = resolve(dir); ; d = dirname(d)) {
+    onPath.add(d);
+    if (dirname(d) === d) break;
+  }
   // A documented precedence rank, or null where the V2 docs give none.
   const rank = (src) => {
     if (src.kind !== 'doc' || !src.path) return null;
     const file = basename(src.path);
     if (file !== 'opencode.json' && file !== 'opencode.jsonc') return null;
+    if (env.OPENCODE_CONFIG && resolve(src.path) === resolve(env.OPENCODE_CONFIG)) return null;
     const parent = dirname(resolve(src.path));
+    // A replaced global dir (OPENCODE_CONFIG_DIR) has no documented place in the order.
+    if (env.OPENCODE_CONFIG_DIR && parent === resolve(env.OPENCODE_CONFIG_DIR)) return null;
     if (systemDir && parent === resolve(systemDir)) return 30000;
     if (!env.OPENCODE_CONFIG_DIR && parent === resolve(globalDir)) return 0;
-    if (env.OPENCODE_CONFIG && resolve(src.path) === resolve(env.OPENCODE_CONFIG)) return null;
-    if (basename(parent) === '.opencode') return 20000 + depth(dirname(parent));
-    return 10000 + depth(parent);
+    // Only `dir` and its ancestors are ranked: direct files, then their .opencode files.
+    if (basename(parent) === '.opencode' && onPath.has(dirname(parent))) return 20000 + depth(dirname(parent));
+    if (onPath.has(parent)) return 10000 + depth(parent);
+    return null;
   };
   const events = [];
   for (const src of sources) {
     if (src.kind === 'files') {
-      if (src.names.includes(name)) events.push({ effect: 'define', rank: null, label: fwd(src.dir) });
+      if (!src.names.includes(name)) continue;
+      // A Markdown agent's frontmatter takes the fields of an agents entry (opencode.ai/v2/docs/agents, "Markdown"), so `disabled: true` (V1: `disable`) removes it.
+      let disabled;
+      try {
+        disabled = markdownDisabled(readFileSync(src.paths[name], 'utf8'));
+      } catch (err) {
+        problems.push({ item: fwd(src.paths[name]), status: 'skipped', detail: `cannot be read (${err.code ?? err.message})` });
+        return { visible: null, problems, why: `${fwd(src.paths[name])} could not be read` };
+      }
+      events.push({ effect: disabled ? 'disable' : 'define', rank: null, label: fwd(src.paths[name]) });
       continue;
     }
     const entry = Object.hasOwn(src.native, name) ? { v: src.native[name], key: 'disabled' } : Object.hasOwn(src.legacy, name) ? { v: src.legacy[name], key: 'disable' } : null;
@@ -1003,7 +1039,7 @@ export function agentVisibleFrom({ dir, name, env = process.env, home = homedir(
  * adds it (decision sterling-opencode-plugin-injects-its-own-mcp-entry). An entry an
  * earlier init wrote is removed only when it is exactly the entry Sterling wrote.
  */
-export function ensureProjectConfig({ projectDir, env = process.env, home = homedir(), tracked, conductorOk = true, opencodeVersion }) {
+export function ensureProjectConfig({ projectDir, env = process.env, home = homedir(), tracked, conductorOk = true, opencodeVersion, systemDir }) {
   const rel = PROJECT_CONFIG_REL;
   const path = join(projectDir, rel);
   if (tracked.includes(rel)) {
@@ -1059,7 +1095,8 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
   // guard-only entry is written only for a visible agent and dropped when it is gone.
   const agents = config.agent ?? {};
   if (typeof agents !== 'object' || agents === null || Array.isArray(agents)) return [refusal(rel, `${rel}: "agent" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
-  const visible = visibleAgents({ projectDir, env, home, checkAgentFiles: !hasEvaluateHook(opencodeVersion) });
+  // systemDir is a test seam; undefined takes the platform's own (opencodeSystemDir).
+  const visible = visibleAgents({ projectDir, env, home, checkAgentFiles: !hasEvaluateHook(opencodeVersion), systemDir });
   extraRows.push(...visible.problems);
   const guardOnly = JSON.stringify({ permission: guardPermission(undefined).value });
   // The guard-only entry an earlier Sterling wrote, with its shell and bash denies.
@@ -1082,6 +1119,23 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
     if (perm.removedShellDeny) removedShellDeny = true;
   }
   for (const name of [...names].sort()) if (!nextAgents[name]) nextAgents[name] = JSON.parse(guardOnly);
+  // Native V2 entries in this file (`agents`): guarded through their own `permissions`
+  // list, every other field (disabled included) kept as the user wrote it. Within one
+  // document the native entry wins over a legacy `agent` one (opencode.ai/v2/docs/migrate-v1),
+  // so a legacy guard entry would not hold for it.
+  const nativeNames = [];
+  if (config.agents !== undefined) {
+    if (!agentMap(config.agents)) return [refusal(rel, `${rel}: "agents" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
+    const nextNative = {};
+    for (const [name, entry] of Object.entries(config.agents)) {
+      if (!agentMap(entry)) return [refusal(rel, `${rel}: "agents.${name}" is not an object`, `fix ${rel}, then rerun /sterling:update`)];
+      const rules = guardNativeRules(entry.permissions);
+      if (rules.bad) return [refusal(rel, `${rel}: "agents.${name}.permissions" is not a list of rules`, `fix ${rel}, then rerun /sterling:update`)];
+      nextNative[name] = { ...entry, permissions: rules.value };
+      nativeNames.push(name);
+    }
+    config.agents = nextNative;
+  }
   // An entry for an agent seen only through this run's environment is written, so the
   // agent is guarded whenever OpenCode runs with that environment; OpenCode started
   // without it shows the entry as an agent with no prompt, so the row names it.
@@ -1089,7 +1143,7 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
   if (Object.keys(nextAgents).length) config.agent = nextAgents;
   else delete config.agent;
   if (removedShellDeny) notes.push('removed the shell deny on *sterling.db* an earlier init wrote, and an identical rule of your own if you had one, since the two cannot be told apart (the Sterling plugin now guards shell commands, and a command that only reads the store passes)');
-  notes.push(`per-agent store guard on ${names.size} agents (agent files in the global config dir and ${fwd('.opencode')}, and the config "agent" entries; not checked: agents a plugin adds); an agent added later is covered on the next /sterling:update`);
+  notes.push(`per-agent store guard on ${new Set([...names, ...nativeNames]).size} agents (agent files in the global config dir and ${fwd('.opencode')}, and the config "agent" and "agents" entries; not checked: agents a plugin adds); an agent added later is covered on the next /sterling:update`);
   if (envOnly.length) notes.push(`guard entries for agents seen only through this run's OPENCODE_CONFIG_DIR, OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT: ${envOnly.join(', ')}; OpenCode started without that environment lists each as an agent with no prompt, and a rerun of /sterling:update without it removes them`);
   if (env.OPENCODE_CONFIG_DIR) notes.push(`OPENCODE_CONFIG_DIR replaced the global config dir for this run, so agents in ${fwd(opencodeConfigDir({ env, home }))} were not checked`);
   if (!conductorOk) {

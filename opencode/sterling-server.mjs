@@ -17818,7 +17818,7 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7(), check
         unreadable(fwd2(join22(dir, sub)), err);
         continue;
       }
-      if (files.length) sources.push({ kind: "files", dir, names: files.map((f) => f.name) });
+      if (files.length) sources.push({ kind: "files", dir, names: files.map((f) => f.name), paths: Object.fromEntries(files.map((f) => [f.name, f.path])) });
       for (const { name, path } of files) {
         (dir === env.OPENCODE_CONFIG_DIR ? envNames : names).add(name);
         if (dir !== dotDir || !checkAgentFiles) continue;
@@ -17877,6 +17877,10 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7(), check
   return { names: [.../* @__PURE__ */ new Set([...names, ...envNames])].sort(), envOnly, problems, incomplete, sources };
 }
 var agentMap = (v) => v && typeof v === "object" && !Array.isArray(v) ? v : null;
+function markdownDisabled(text) {
+  const m = normalize2(text).match(/^---\n([\s\S]*?)\n---/);
+  return m !== null && /^(?:disabled|disable)\s*:\s*(?:true|"true"|'true')\s*(?:#.*)?$/m.test(m[1]);
+}
 function agentVisibleFrom({ dir, name, env = process.env, home = homedir7(), systemDir = opencodeSystemDir({ env }), managedPrefs = opencodeManagedPrefs({ env }) }) {
   const managed = managedPrefs.filter((p) => existsSync13(p));
   if (managed.length) return { visible: null, problems: [], why: `OpenCode managed preferences (${managed.join(", ")}) can define or disable ${name}, and Sterling does not read them` };
@@ -17896,21 +17900,36 @@ function agentVisibleFrom({ dir, name, env = process.env, home = homedir7(), sys
   }
   const globalDir = opencodeConfigDir({ env, home });
   const depth = (d) => resolve11(d).split(/[\\/]+/).filter(Boolean).length;
+  const onPath2 = /* @__PURE__ */ new Set();
+  for (let d = resolve11(dir); ; d = dirname9(d)) {
+    onPath2.add(d);
+    if (dirname9(d) === d) break;
+  }
   const rank = (src) => {
     if (src.kind !== "doc" || !src.path) return null;
     const file = basename2(src.path);
     if (file !== "opencode.json" && file !== "opencode.jsonc") return null;
+    if (env.OPENCODE_CONFIG && resolve11(src.path) === resolve11(env.OPENCODE_CONFIG)) return null;
     const parent = dirname9(resolve11(src.path));
+    if (env.OPENCODE_CONFIG_DIR && parent === resolve11(env.OPENCODE_CONFIG_DIR)) return null;
     if (systemDir && parent === resolve11(systemDir)) return 3e4;
     if (!env.OPENCODE_CONFIG_DIR && parent === resolve11(globalDir)) return 0;
-    if (env.OPENCODE_CONFIG && resolve11(src.path) === resolve11(env.OPENCODE_CONFIG)) return null;
-    if (basename2(parent) === ".opencode") return 2e4 + depth(dirname9(parent));
-    return 1e4 + depth(parent);
+    if (basename2(parent) === ".opencode" && onPath2.has(dirname9(parent))) return 2e4 + depth(dirname9(parent));
+    if (onPath2.has(parent)) return 1e4 + depth(parent);
+    return null;
   };
   const events = [];
   for (const src of sources) {
     if (src.kind === "files") {
-      if (src.names.includes(name)) events.push({ effect: "define", rank: null, label: fwd2(src.dir) });
+      if (!src.names.includes(name)) continue;
+      let disabled;
+      try {
+        disabled = markdownDisabled(readFileSync14(src.paths[name], "utf8"));
+      } catch (err) {
+        problems.push({ item: fwd2(src.paths[name]), status: "skipped", detail: `cannot be read (${err.code ?? err.message})` });
+        return { visible: null, problems, why: `${fwd2(src.paths[name])} could not be read` };
+      }
+      events.push({ effect: disabled ? "disable" : "define", rank: null, label: fwd2(src.paths[name]) });
       continue;
     }
     const entry = Object.hasOwn(src.native, name) ? { v: src.native[name], key: "disabled" } : Object.hasOwn(src.legacy, name) ? { v: src.legacy[name], key: "disable" } : null;

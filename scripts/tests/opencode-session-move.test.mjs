@@ -389,6 +389,58 @@ test('present macOS managed preferences make the answer unknown, so the move is 
   }
 });
 
+// Sol review of sterling/agent-discovery-v2-agents (d8ccaf32), findings (a) and (b).
+const disabledAgentFile = (dir) => {
+  mkdirSync(join(dir, '.opencode', 'agents', 'sterling'), { recursive: true });
+  writeFileSync(join(dir, '.opencode', 'agents', 'sterling', 'implementor.md'), '---\ndescription: fixture\nmode: subagent\ndisabled: true\n---\nbody\n');
+};
+
+test('(a) a Markdown agent file with disabled: true frontmatter is not an available agent: the move is refused', async () => {
+  const t = makeTree();
+  disabledAgentFile(t.worktree);
+  const s = await setup(t, own(t));
+  try {
+    await assert.rejects(move1(s, t), /would not see sterling\/implementor/);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+test('(a) a disabled Markdown agent plus a config definition has no documented order: refused with the retry message', async () => {
+  const t = makeTree();
+  disabledAgentFile(t.worktree);
+  writeFileSync(join(t.worktree, 'opencode.json'), JSON.stringify({ agents: { [AGENT]: { mode: 'subagent' } } }));
+  const s = await setup(t, own(t));
+  try {
+    await assert.rejects(move1(s, t), /could not check .*both defined and disabled/);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+for (const [label, inDir, inDest] of [
+  ['disables, the destination .opencode/opencode.json defines', { disabled: true }, { mode: 'subagent' }],
+  ['defines, the destination .opencode/opencode.json disables', { mode: 'subagent' }, { disabled: true }],
+]) {
+  test(`(b) a replaced OPENCODE_CONFIG_DIR has no documented rank: its opencode.json ${label}, refused with the retry message`, async () => {
+    const t = makeTree();
+    const ocdir = join(t.base, 'ocdir');
+    mkdirSync(ocdir);
+    writeFileSync(join(ocdir, 'opencode.json'), JSON.stringify({ agents: { [AGENT]: inDir } }));
+    mkdirSync(join(t.worktree, '.opencode'));
+    writeFileSync(join(t.worktree, '.opencode', 'opencode.json'), JSON.stringify({ agents: { [AGENT]: inDest } }));
+    const s = await setup(t, own(t), { XDG_CONFIG_HOME: t.xdg, OPENCODE_CONFIG_DIR: ocdir });
+    try {
+      await assert.rejects(move1(s, t), /could not check .*both defined and disabled, and the OpenCode V2 docs give no load order for .*ocdir\/opencode\.json/);
+    } finally {
+      await s.cleanup?.();
+      t.cleanup();
+    }
+  });
+}
+
 test('moveTarget expands ~ and resolves a relative path against the base', () => {
   assert.equal(move.moveTarget('~/wt', '/a/b', '/home/u'), '/home/u/wt');
   assert.equal(move.moveTarget('~', '/a/b', '/home/u'), '/home/u');
