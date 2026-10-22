@@ -37,7 +37,8 @@ function makeTree() {
   mkdirSync(worktree);
   const xdg = join(base, 'xdg');
   mkdirSync(xdg);
-  return { base, project, worktree, xdg, cleanup: () => rmSync(base, { recursive: true, force: true }) };
+  const system = join(base, 'system');
+  return { base, project, worktree, xdg, system, cleanup: () => rmSync(base, { recursive: true, force: true }) };
 }
 function installAgent(dir, sub = '.opencode/agents') {
   mkdirSync(join(dir, sub, 'sterling'), { recursive: true });
@@ -45,7 +46,7 @@ function installAgent(dir, sub = '.opencode/agents') {
 }
 
 /** The plugin set up at `directory`; `sessions` maps a session id to its session.get result (a function value throws). */
-async function setup(t, sessions, env = { XDG_CONFIG_HOME: t.xdg }) {
+async function setup(t, sessions, env = { XDG_CONFIG_HOME: t.xdg }, extra = {}) {
   const hooks = { session: {}, tool: {}, permission: {} };
   const transform = async () => ({ dispose: async () => {} });
   const ctx = {
@@ -66,7 +67,7 @@ async function setup(t, sessions, env = { XDG_CONFIG_HOME: t.xdg }) {
     model: { list: async () => [] },
     event: { subscribe: ({ signal } = {}) => ({ async *[Symbol.asyncIterator]() { await new Promise((r) => signal?.addEventListener('abort', r)); } }) },
   };
-  const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, syncSession: async () => {}, env });
+  const plugin = server.createSterlingServer({ claudeOnPath: () => false, configure: async () => {}, syncSession: async () => {}, env, opencodeSystemDir: t.system, opencodeManagedPrefs: [], ...extra });
   const cleanup = await plugin.setup(ctx);
   const before = (input) => hooks.tool['execute.before']({ id: 'call_1', messageID: 'msg_1', ...input });
   return { before, cleanup };
@@ -233,9 +234,227 @@ test('an agent defined in config is visible at the destination: OPENCODE_CONFIG_
   }
 });
 
+// Sol re-check findings (board 95a6b0eb): the V2 `agents` key defines an agent, and a
+// `disabled` / `disable` entry removes it, in the config order opencode.ai/v2/docs/config
+// documents (direct opencode.json files before .opencode/opencode.json files, farthest
+// ancestor first); where the docs give no order the move is refused, not guessed.
+const move1 = (s, t) => s.before({ tool: 'opencode_session_move', sessionID: 'ses_lane', agent: AGENT, input: { directory: t.worktree } });
+
+test('V2 native agents: an agent defined under `agents` in OPENCODE_CONFIG_CONTENT is visible (Sol repro 1)', async () => {
+  const t = makeTree();
+  const s = await setup(t, own(t), { XDG_CONFIG_HOME: t.xdg, OPENCODE_CONFIG_CONTENT: JSON.stringify({ agents: { [AGENT]: { mode: 'subagent', system: 'fixture' } } }) });
+  try {
+    await move1(s, t);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+test('V2 native agents in the destination opencode.json are visible', async () => {
+  const t = makeTree();
+  writeFileSync(join(t.worktree, 'opencode.json'), JSON.stringify({ agents: { [AGENT]: { mode: 'subagent' } } }));
+  const s = await setup(t, own(t));
+  try {
+    await move1(s, t);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+test('a legacy `agent` entry with disable: true is not an available agent: the move is refused (Sol repro 2)', async () => {
+  const t = makeTree();
+  writeFileSync(join(t.worktree, 'opencode.json'), JSON.stringify({ agent: { [AGENT]: { disable: true } } }));
+  const s = await setup(t, own(t));
+  try {
+    await assert.rejects(move1(s, t), /would not see sterling\/implementor/);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+test('a native `disabled: true` entry is not an available agent either', async () => {
+  const t = makeTree();
+  writeFileSync(join(t.worktree, 'opencode.json'), JSON.stringify({ agents: { [AGENT]: { disabled: true } } }));
+  const s = await setup(t, own(t));
+  try {
+    await assert.rejects(move1(s, t), /would not see sterling\/implementor/);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+test('a disable in a lower-precedence source is overridden by a later definition: direct opencode.json disables, .opencode/opencode.json defines', async () => {
+  const t = makeTree();
+  writeFileSync(join(t.worktree, 'opencode.json'), JSON.stringify({ agent: { [AGENT]: { disable: true } } }));
+  mkdirSync(join(t.worktree, '.opencode'));
+  writeFileSync(join(t.worktree, '.opencode', 'opencode.json'), JSON.stringify({ agents: { [AGENT]: { mode: 'subagent', system: 'x' } } }));
+  const s = await setup(t, own(t));
+  try {
+    await move1(s, t);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+test('a disable in a higher-precedence source wins: an ancestor definition, then the closer .opencode/opencode.json disables', async () => {
+  const t = makeTree();
+  const dest = join(t.worktree, 'pkg');
+  mkdirSync(join(dest, '.opencode'), { recursive: true });
+  writeFileSync(join(t.worktree, 'opencode.json'), JSON.stringify({ agents: { [AGENT]: { mode: 'subagent' } } }));
+  writeFileSync(join(dest, '.opencode', 'opencode.json'), JSON.stringify({ agents: { [AGENT]: { disabled: true } } }));
+  const s = await setup(t, own(t));
+  try {
+    await assert.rejects(s.before({ tool: 'opencode_session_move', sessionID: 'ses_lane', agent: AGENT, input: { directory: dest } }), /would not see sterling\/implementor/);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+test('within one document the native V2 entry wins over the legacy one', async () => {
+  const t = makeTree();
+  writeFileSync(join(t.worktree, 'opencode.json'), JSON.stringify({ agent: { [AGENT]: { mode: 'subagent' } }, agents: { [AGENT]: { disabled: true } } }));
+  const s = await setup(t, own(t));
+  try {
+    await assert.rejects(move1(s, t), /would not see sterling\/implementor/);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+test('fail closed: a disable plus a definition from a source the docs give no order for (an agent file) refuses with the retry message', async () => {
+  const t = makeTree();
+  installAgent(t.worktree);
+  writeFileSync(join(t.worktree, 'opencode.json'), JSON.stringify({ agents: { [AGENT]: { disabled: true } } }));
+  const s = await setup(t, own(t));
+  try {
+    await assert.rejects(move1(s, t), (e) => {
+      assert.match(e.message, /could not check whether the moved session's agent would still be found/);
+      assert.match(e.message, /both defined and disabled, and the OpenCode V2 docs give no load order for /);
+      assert.match(e.message, /Try the move again/);
+      return true;
+    });
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+// The system config dir (/etc/opencode on Linux; injected here) outranks every other
+// config document (opencode.ai/v2/docs/config, "Locations").
+test('a disable in the system config dir outranks a definition in the destination .opencode/opencode.json', async () => {
+  const t = makeTree();
+  mkdirSync(join(t.worktree, '.opencode'));
+  writeFileSync(join(t.worktree, '.opencode', 'opencode.json'), JSON.stringify({ agent: { [AGENT]: { mode: 'subagent' } } }));
+  mkdirSync(t.system);
+  writeFileSync(join(t.system, 'opencode.json'), JSON.stringify({ agents: { [AGENT]: { disabled: true } } }));
+  const s = await setup(t, own(t));
+  try {
+    await assert.rejects(move1(s, t), /would not see sterling\/implementor/);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+test('an agent file in the system config dir makes the agent visible', async () => {
+  const t = makeTree();
+  installAgent(t.system, 'agents');
+  const s = await setup(t, own(t));
+  try {
+    await move1(s, t);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+test('present macOS managed preferences make the answer unknown, so the move is refused with the retry message', async () => {
+  const t = makeTree();
+  installAgent(t.worktree);
+  const plist = join(t.base, 'ai.opencode.managed.plist');
+  writeFileSync(plist, '<plist/>');
+  const s = await setup(t, own(t), undefined, { opencodeManagedPrefs: [plist, join(t.base, 'absent.plist')] });
+  try {
+    await assert.rejects(move1(s, t), /could not check .*managed preferences \(.*ai\.opencode\.managed\.plist\)/);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+// Sol review of sterling/agent-discovery-v2-agents (d8ccaf32), findings (a) and (b).
+const disabledAgentFile = (dir) => {
+  mkdirSync(join(dir, '.opencode', 'agents', 'sterling'), { recursive: true });
+  writeFileSync(join(dir, '.opencode', 'agents', 'sterling', 'implementor.md'), '---\ndescription: fixture\nmode: subagent\ndisabled: true\n---\nbody\n');
+};
+
+test('(a) a Markdown agent file with disabled: true frontmatter is not an available agent: the move is refused', async () => {
+  const t = makeTree();
+  disabledAgentFile(t.worktree);
+  const s = await setup(t, own(t));
+  try {
+    await assert.rejects(move1(s, t), /would not see sterling\/implementor/);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+test('(a) a disabled Markdown agent plus a config definition has no documented order: refused with the retry message', async () => {
+  const t = makeTree();
+  disabledAgentFile(t.worktree);
+  writeFileSync(join(t.worktree, 'opencode.json'), JSON.stringify({ agents: { [AGENT]: { mode: 'subagent' } } }));
+  const s = await setup(t, own(t));
+  try {
+    await assert.rejects(move1(s, t), /could not check .*both defined and disabled/);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
+for (const [label, inDir, inDest] of [
+  ['disables, the destination .opencode/opencode.json defines', { disabled: true }, { mode: 'subagent' }],
+  ['defines, the destination .opencode/opencode.json disables', { mode: 'subagent' }, { disabled: true }],
+]) {
+  test(`(b) a replaced OPENCODE_CONFIG_DIR has no documented rank: its opencode.json ${label}, refused with the retry message`, async () => {
+    const t = makeTree();
+    const ocdir = join(t.base, 'ocdir');
+    mkdirSync(ocdir);
+    writeFileSync(join(ocdir, 'opencode.json'), JSON.stringify({ agents: { [AGENT]: inDir } }));
+    mkdirSync(join(t.worktree, '.opencode'));
+    writeFileSync(join(t.worktree, '.opencode', 'opencode.json'), JSON.stringify({ agents: { [AGENT]: inDest } }));
+    const s = await setup(t, own(t), { XDG_CONFIG_HOME: t.xdg, OPENCODE_CONFIG_DIR: ocdir });
+    try {
+      await assert.rejects(move1(s, t), /could not check .*both defined and disabled, and the OpenCode V2 docs give no load order for .*ocdir\/opencode\.json/);
+    } finally {
+      await s.cleanup?.();
+      t.cleanup();
+    }
+  });
+}
+
 test('moveTarget expands ~ and resolves a relative path against the base', () => {
   assert.equal(move.moveTarget('~/wt', '/a/b', '/home/u'), '/home/u/wt');
   assert.equal(move.moveTarget('~', '/a/b', '/home/u'), '/home/u');
   assert.equal(move.moveTarget('../wt', '/a/b', '/home/u'), '/a/wt');
   assert.equal(move.moveTarget('/x/y/', '/a/b', '/home/u'), '/x/y');
+});
+
+test('opencodeSystemDir gives the documented path per platform, and null where the docs give none', async () => {
+  const install = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'opencode-install.mjs')).href);
+  assert.equal(install.opencodeSystemDir({ platform: 'linux', env: {} }), '/etc/opencode');
+  assert.equal(install.opencodeSystemDir({ platform: 'darwin', env: {} }), '/Library/Application Support/opencode');
+  assert.equal(install.opencodeSystemDir({ platform: 'win32', env: { ProgramData: 'C:\\ProgramData' } }), join('C:\\ProgramData', 'opencode'));
+  assert.equal(install.opencodeSystemDir({ platform: 'win32', env: {} }), null);
+  assert.equal(install.opencodeSystemDir({ platform: 'freebsd', env: {} }), null);
+  assert.deepEqual(install.opencodeManagedPrefs({ platform: 'linux', env: { USER: 'u' } }), []);
+  assert.deepEqual(install.opencodeManagedPrefs({ platform: 'darwin', env: { USER: 'u' } }), ['/Library/Managed Preferences/u/ai.opencode.managed.plist', '/Library/Managed Preferences/ai.opencode.managed.plist']);
 });

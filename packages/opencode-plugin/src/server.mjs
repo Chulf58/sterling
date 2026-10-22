@@ -124,7 +124,9 @@ function sameDirectory(a, b) {
  * project stores outright) or projectStores (a createProjectStores() result), now(),
  * claudeOnPath(), launchWorker(opts), sterlingRoot (a path), renderRestore(note, opts),
  * configure(ctx), bootstrap(ctx) and syncSession(root, sessionID) (replace the config.mjs and sync.mjs handlers),
- * and env (process.env for the worker-child check and sync.mjs).
+ * env (process.env for the worker-child check and sync.mjs), and opencodeSystemDir and
+ * opencodeManagedPrefs (the OpenCode system config dir and macOS managed-preference paths the
+ * session-move guard reads; default the platform's own).
  *
  * OpenCode 2 imports the plugin module once per process and calls the one exported
  * object's setup once per location (a directory the service serves), each with that
@@ -238,7 +240,7 @@ export function createSterlingServer(deps = {}) {
       let timer;
       try {
         await Promise.race([
-          checkSessionMove(input, { sessionInfo, env }),
+          checkSessionMove(input, { sessionInfo, env, systemDir: deps.opencodeSystemDir, managedPrefs: deps.opencodeManagedPrefs }),
           new Promise((_, reject) => {
             timer = setTimeout(() => reject(new Error(`the check exceeded its ${BUDGET_MS['session-move']} ms budget`)), BUDGET_MS['session-move']);
           }),
