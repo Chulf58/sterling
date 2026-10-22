@@ -74,10 +74,11 @@ import { renderOpenCodeAgent, parseOpenCodeHeader } from './opencode-agents.mjs'
 import { ignoredPaths } from './git-ignore-check.mjs';
 import { readHandoffSetting, PORTABLE_AGENT_PATHS } from './handoff-projection.mjs';
 import { isShellSafePath } from './shell-safe-path.mjs';
+import { CONDUCTOR_AGENT, CONDUCTOR_ROLE } from './conductor-identity.mjs';
 
 export const STERLING_AGENTS_SUBDIR = '.opencode/agents/sterling';
 export const PROJECT_CONFIG_REL = '.opencode/opencode.json';
-export const CONDUCTOR_AGENT = 'sterling/conductor';
+export { CONDUCTOR_AGENT };
 export const ROSTER = ['conductor', 'implementor', 'researcher', 'scout', 'reviewer', 'sparring', 'librarian'];
 export { STERLING_NPM_PACKAGE, parseJsonc };
 export const STORE_GUARD_PATTERNS =['**/.sterling/sterling.db*', '.sterling/sterling.db*'];
@@ -1476,7 +1477,7 @@ function fullAgentTargets(registry) {
     const entry = registry.agents.find((a) => a.name === name);
     if (!entry) throw new Error(`opencode roster: '${name}' is not in agent-templates/registry.json (P5)`);
     if (!agentHosts(entry).includes('opencode')) throw new Error(`opencode roster: '${name}' is in the roster but its registry hosts leave out opencode (P5)`);
-    return { name, entry, rel: `${STERLING_AGENTS_SUBDIR}/${name}.md`, primary: name === 'conductor' };
+    return { name, entry, rel: `${STERLING_AGENTS_SUBDIR}/${name}.md`, primary: name === CONDUCTOR_ROLE };
   });
   for (const entry of registry.agents) {
     if (entry.opencode_full === undefined) continue;
