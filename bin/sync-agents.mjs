@@ -7641,6 +7641,12 @@ function ensureProjectConfig({ projectDir, env = process.env, home = homedir3(),
   const top = guardPermission(permission);
   if (top.bad !== void 0) return [refusal(rel, `${rel}: "permission.${top.bad}" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
   config2.permission = top.value;
+  if (config2.permissions !== void 0) {
+    const native = guardNativeRules(config2.permissions);
+    if (native.bad) return [refusal(rel, `${rel}: "permissions" is not a list of rules`, `fix ${rel}, then rerun /sterling:update`)];
+    config2.permissions = native.value;
+    notes.push('store guard appended to the native "permissions" list too, since it takes precedence over "permission"');
+  }
   let removedShellDeny = top.removedShellDeny;
   const agents = config2.agent ?? {};
   if (typeof agents !== "object" || agents === null || Array.isArray(agents)) return [refusal(rel, `${rel}: "agent" is not an object`, `fix ${rel}, then rerun /sterling:update`)];

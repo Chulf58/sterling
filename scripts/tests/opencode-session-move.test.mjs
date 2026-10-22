@@ -441,6 +441,43 @@ for (const [label, inDir, inDest] of [
   });
 }
 
+// Board e2ce56b7 (Sol): valid YAML spellings of a frontmatter disable the first reader
+// missed, and a form the strict reader cannot place, which must refuse rather than pass.
+const agentFileWith = (dir, frontmatter) => {
+  mkdirSync(join(dir, '.opencode', 'agents', 'sterling'), { recursive: true });
+  writeFileSync(join(dir, '.opencode', 'agents', 'sterling', 'implementor.md'), `---\n${frontmatter}\n---\nbody\n`);
+};
+for (const [form, fm, expected] of [
+  ['a quoted key', 'description: d\n"disabled": true', /would not see sterling\/implementor/],
+  ['a capitalised boolean', 'description: d\ndisabled: True', /would not see sterling\/implementor/],
+  ['a flow mapping', '{disabled: true, mode: subagent}', /could not check .*sets disable or disabled in a form Sterling cannot read/],
+  ['an unparseable value', 'description: d\ndisabled: yes', /could not check .*sets disable or disabled in a form Sterling cannot read/],
+]) {
+  test(`frontmatter disable as ${form} refuses the move`, async () => {
+    const t = makeTree();
+    agentFileWith(t.worktree, fm);
+    const s = await setup(t, own(t));
+    try {
+      await assert.rejects(move1(s, t), expected);
+    } finally {
+      await s.cleanup?.();
+      t.cleanup();
+    }
+  });
+}
+
+test('a plain Markdown agent whose text only mentions "disabled" outside a key is still allowed', async () => {
+  const t = makeTree();
+  agentFileWith(t.worktree, 'description: runs when the tests are disabled\nmode: subagent\nnotes: |\n  disabled: true is only text here');
+  const s = await setup(t, own(t));
+  try {
+    await move1(s, t);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
 test('moveTarget expands ~ and resolves a relative path against the base', () => {
   assert.equal(move.moveTarget('~/wt', '/a/b', '/home/u'), '/home/u/wt');
   assert.equal(move.moveTarget('~', '/a/b', '/home/u'), '/home/u');

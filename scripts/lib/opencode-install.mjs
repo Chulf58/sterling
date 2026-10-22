@@ -917,10 +917,46 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir(),
 
 const agentMap = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : null);
 
-/** Whether a Markdown agent's frontmatter sets `disabled: true` (V2) or `disable: true` (V1). */
+/**
+ * Whether a Markdown agent's frontmatter disables it: true, false, or null when that is
+ * not known. A strict reader, not YAML: it accepts a top-level `disabled` (V2) or
+ * `disable` (V1) key, bare or quoted, whose value is a YAML 1.2 core boolean (true, True,
+ * TRUE, false, False, FALSE) with an optional trailing comment. Any other mention of either
+ * name it cannot place (a flow mapping, a nested or repeated key, a quoted or other value,
+ * frontmatter with no closing ---) gives null, so a caller refuses rather than guesses.
+ * Text inside another key's value or block scalar is not a key and is skipped.
+ */
 export function markdownDisabled(text) {
-  const m = normalize(text).match(/^---\n([\s\S]*?)\n---/);
-  return m !== null && /^(?:disabled|disable)\s*:\s*(?:true|"true"|'true')\s*(?:#.*)?$/m.test(m[1]);
+  const doc = normalize(text);
+  const token = /\bdisabled?\b/;
+  if (!doc.startsWith('---\n')) return false;
+  const m = doc.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
+  if (!m) return token.test(doc) ? null : false;
+  let found = null;
+  let seen = 0;
+  let inBlock = false;
+  for (const line of m[1].split('\n')) {
+    if (inBlock && (/^\s/.test(line) || line === '')) continue;
+    inBlock = false;
+    if (line.trim() === '' || /^\s*#/.test(line)) continue;
+    const key = line.match(/^(?:"([^"]*)"|'([^']*)'|([A-Za-z_][\w-]*))\s*:(?:\s+(.*))?$/);
+    if (!key) {
+      if (token.test(line)) return null;
+      continue;
+    }
+    const name = key[1] ?? key[2] ?? key[3];
+    const value = (key[4] ?? '').replace(/\s+#.*$/, '').trim();
+    if (name !== 'disabled' && name !== 'disable') {
+      if (/^[|>][-+]?\d*$/.test(value)) inBlock = true;
+      continue;
+    }
+    seen++;
+    if (/^(?:true|True|TRUE)$/.test(value)) found = true;
+    else if (/^(?:false|False|FALSE)$/.test(value)) found = false;
+    else return null;
+  }
+  if (seen > 1) return null;
+  return found === true;
 }
 
 /**
@@ -1011,6 +1047,7 @@ export function agentVisibleFrom({ dir, name, env = process.env, home = homedir(
         problems.push({ item: fwd(src.paths[name]), status: 'skipped', detail: `cannot be read (${err.code ?? err.message})` });
         return { visible: null, problems, why: `${fwd(src.paths[name])} could not be read` };
       }
+      if (disabled === null) return { visible: null, problems, why: `the frontmatter of ${fwd(src.paths[name])} sets disable or disabled in a form Sterling cannot read` };
       events.push({ effect: disabled ? 'disable' : 'define', rank: null, label: fwd(src.paths[name]) });
       continue;
     }
@@ -1082,6 +1119,17 @@ export function ensureProjectConfig({ projectDir, env = process.env, home = home
   const top = guardPermission(permission);
   if (top.bad !== undefined) return [refusal(rel, `${rel}: "permission.${top.bad}" is neither a string nor an object`, `fix ${rel}, then rerun /sterling:update`)];
   config.permission = top.value;
+  // A native V2 `permissions` list in the same file wins over the legacy `permission`
+  // ("When both forms set the same canonical value, a valid native V2 value takes
+  // precedence regardless of JSON key order", opencode.ai/v2/docs/migrate-v1), so the guard
+  // goes into it too, last (the last matching rule wins, opencode.ai/v2/docs/permissions),
+  // as for a native agent entry (guardNativeRules).
+  if (config.permissions !== undefined) {
+    const native = guardNativeRules(config.permissions);
+    if (native.bad) return [refusal(rel, `${rel}: "permissions" is not a list of rules`, `fix ${rel}, then rerun /sterling:update`)];
+    config.permissions = native.value;
+    notes.push('store guard appended to the native "permissions" list too, since it takes precedence over "permission"');
+  }
   let removedShellDeny = top.removedShellDeny;
   // Per-agent guard. An agent's own rules (its file's permission block) are evaluated
   // after the top-level block, so a user agent that allows bash re-allowed the store;

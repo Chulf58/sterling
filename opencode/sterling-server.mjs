@@ -17878,8 +17878,36 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7(), check
 }
 var agentMap = (v) => v && typeof v === "object" && !Array.isArray(v) ? v : null;
 function markdownDisabled(text) {
-  const m = normalize2(text).match(/^---\n([\s\S]*?)\n---/);
-  return m !== null && /^(?:disabled|disable)\s*:\s*(?:true|"true"|'true')\s*(?:#.*)?$/m.test(m[1]);
+  const doc = normalize2(text);
+  const token = /\bdisabled?\b/;
+  if (!doc.startsWith("---\n")) return false;
+  const m = doc.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
+  if (!m) return token.test(doc) ? null : false;
+  let found = null;
+  let seen = 0;
+  let inBlock = false;
+  for (const line of m[1].split("\n")) {
+    if (inBlock && (/^\s/.test(line) || line === "")) continue;
+    inBlock = false;
+    if (line.trim() === "" || /^\s*#/.test(line)) continue;
+    const key = line.match(/^(?:"([^"]*)"|'([^']*)'|([A-Za-z_][\w-]*))\s*:(?:\s+(.*))?$/);
+    if (!key) {
+      if (token.test(line)) return null;
+      continue;
+    }
+    const name = key[1] ?? key[2] ?? key[3];
+    const value = (key[4] ?? "").replace(/\s+#.*$/, "").trim();
+    if (name !== "disabled" && name !== "disable") {
+      if (/^[|>][-+]?\d*$/.test(value)) inBlock = true;
+      continue;
+    }
+    seen++;
+    if (/^(?:true|True|TRUE)$/.test(value)) found = true;
+    else if (/^(?:false|False|FALSE)$/.test(value)) found = false;
+    else return null;
+  }
+  if (seen > 1) return null;
+  return found === true;
 }
 function agentVisibleFrom({ dir, name, env = process.env, home = homedir7(), systemDir = opencodeSystemDir({ env }), managedPrefs = opencodeManagedPrefs({ env }) }) {
   const managed = managedPrefs.filter((p) => existsSync13(p));
@@ -17929,6 +17957,7 @@ function agentVisibleFrom({ dir, name, env = process.env, home = homedir7(), sys
         problems.push({ item: fwd2(src.paths[name]), status: "skipped", detail: `cannot be read (${err.code ?? err.message})` });
         return { visible: null, problems, why: `${fwd2(src.paths[name])} could not be read` };
       }
+      if (disabled === null) return { visible: null, problems, why: `the frontmatter of ${fwd2(src.paths[name])} sets disable or disabled in a form Sterling cannot read` };
       events.push({ effect: disabled ? "disable" : "define", rank: null, label: fwd2(src.paths[name]) });
       continue;
     }
