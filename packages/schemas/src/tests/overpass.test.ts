@@ -45,6 +45,13 @@ test('overpass: effective only when enabled, work mode and the opencode host', (
     provider: 'overpass',
     conductorModel: 'overpass/agentic-conductor',
     laneModel: 'overpass/agentic-high',
+    roles: {
+      implementor: { model: 'overpass/agentic-high' },
+      researcher: { model: 'overpass/agentic-high' },
+      scout: { model: 'overpass/agentic-high' },
+      reviewer: { model: 'overpass/agentic-high' },
+      librarian: { model: 'overpass/agentic-high' },
+    },
   });
 });
 
@@ -141,4 +148,53 @@ test('overpass: a non-boolean conductor_bypass throws, naming the key and the va
       );
     }
   }
+});
+
+// ── per-role tier and effort (config.overpass.roles) ─────────────────────────
+
+test('overpass roles: unset gives every role agentic-high and no effort, the same as before', () => {
+  for (const cfg of [on(), on({ roles: {} }), on({ roles: { reviewer: {} } })]) {
+    const r = resolveOverpass(cfg, { host: 'opencode' });
+    assert.equal(r.laneModel, 'overpass/agentic-high');
+    for (const route of Object.values(r.roles)) assert.deepEqual(route, { model: 'overpass/agentic-high' }, JSON.stringify(cfg));
+  }
+});
+
+test('overpass roles: a tier and an effort apply to that role only, under the configured provider', () => {
+  const r = resolveOverpass(on({ provider: 'overpass-agentic', roles: { reviewer: { tier: 'agentic-max', effort: 'xhigh' }, scout: { effort: 'low' } } }), { host: 'opencode' });
+  assert.deepEqual(r.roles.reviewer, { model: 'overpass-agentic/agentic-max', effort: 'xhigh' });
+  assert.deepEqual(r.roles.scout, { model: 'overpass-agentic/agentic-high', effort: 'low' });
+  assert.deepEqual(r.roles.implementor, { model: 'overpass-agentic/agentic-high' });
+  assert.equal(r.laneModel, 'overpass-agentic/agentic-high', 'Plan and the worker keep the default lane model');
+});
+
+test('overpass roles: every effort level is accepted', () => {
+  for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    assert.equal(resolveOverpass(on({ roles: { implementor: { effort } } }), { host: 'opencode' }).roles.implementor.effort, effort);
+  }
+});
+
+test('overpass roles: an unknown role, an unknown field or a bad value throws, even while off', () => {
+  const cases: Array<[unknown, RegExp]> = [
+    [[], /config\.overpass\.roles is \[\]/],
+    [{ conductor: { effort: 'high' } }, /unknown role "conductor"/],
+    [{ plan: {} }, /unknown role "plan"/],
+    [{ 'sterling/reviewer': {} }, /unknown role "sterling\/reviewer"/],
+    [{ reviewer: 'high' }, /roles\.reviewer is "high"/],
+    [{ reviewer: { model: 'openai/gpt-6.1-sol' } }, /roles\.reviewer has the unknown field "model"/],
+    [{ reviewer: { tier: 'high' } }, /roles\.reviewer\.tier is "high"/],
+    [{ reviewer: { tier: 'agentic-High' } }, /roles\.reviewer\.tier/],
+    [{ reviewer: { tier: 'agentic-high#x' } }, /roles\.reviewer\.tier/],
+    [{ reviewer: { effort: 'extreme' } }, /roles\.reviewer\.effort is "extreme"/],
+    [{ reviewer: { effort: 3 } }, /roles\.reviewer\.effort is 3/],
+  ];
+  for (const [roles, why] of cases) {
+    assert.throws(() => resolveOverpass(on({ roles }), { host: 'opencode' }), why, JSON.stringify(roles));
+    assert.throws(() => resolveOverpass({ overpass: { enabled: false, roles } }, { host: 'opencode' }), why, `off: ${JSON.stringify(roles)}`);
+  }
+});
+
+test('overpass roles: parseConfig keeps an invalid roles value raw instead of throwing', () => {
+  const raw = { overpass: { enabled: true, roles: { conductor: { effort: 'nope' } } } };
+  assert.deepEqual((parseConfig(raw) as unknown as { overpass: unknown }).overpass, raw.overpass);
 });
