@@ -45,7 +45,7 @@ export interface GithubMerged {
 }
 
 export interface GithubLoop {
-  status: 'owed' | 'clean' | 'capped' | 'escalated';
+  status: 'owed' | 'clean' | 'capped' | 'escalated' | 'closed';
   pr: number;
 }
 

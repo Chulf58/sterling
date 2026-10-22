@@ -52,7 +52,7 @@ test('an owed loop raises a notice with the PR link, the wait command and the se
     // the user ruled (2026-10-15) the wait runs with the shell tool's background: true.
     assert.match(text, /node "\/opt\/sterling\/bin\/pr-review-wait\.mjs" https:\/\/github\.com\/acme\/widget\/pull\/7 \(add --request-copilot on the first wait after a push\) started with the shell tool's background: true, which notifies you when it ends; never detach it with nohup or &/);
     assert.doesNotMatch(text, /\(background\)/);
-    assert.match(text, /--settle <clean\|capped\|escalated> --pr 7/);
+    assert.match(text, /--settle <clean\|capped\|escalated\|closed> --pr 7/);
   } finally {
     p.cleanup();
   }

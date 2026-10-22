@@ -145,8 +145,23 @@ const renderConfig = parseConfig(JSON.parse(readFileSync(join(root, 'templates',
 const renderOpts = { pluginVersion: '0.0.0-test', now: '2026-01-01T00:00:00.000Z', vars: { NODE: '"/usr/bin/node"', HOOKS_DIR: '/x/hooks', GIT_RO: '/x/git-ro.mjs' }, config: renderConfig };
 const withoutHeader = (content) => content.replace(parseInstalledHeader(content).headerLine + '\n', '');
 
+// Templates written after the fencing have no pre-fence commit to compare against. sparring.md
+// (2026-10-22, user-ruled "Yes, as stated") is one: it carries no host fence, so its Claude
+// render is its source and the pin that holds is that no fence or marker line exists in either.
+const WRITTEN_AFTER_FENCING = new Set(['sparring.md']);
+
 // Only the entries Claude Code installs: an OpenCode-only template (plan.md) has no Claude render.
 for (const entry of claudeAgentEntries(loadRegistry(registryPath))) {
+  if (WRITTEN_AFTER_FENCING.has(entry.file)) {
+    test(`Claude render of ${entry.file} (written after the fencing) carries no fence and no marker line`, () => {
+      const source = template(entry.name);
+      assert.doesNotMatch(source, /<!--\s*\/?(claude|opencode|sterling|portable)-only\s*-->/, 'the source has no host fence');
+      const after = renderInstalledAgent(source, entry.file, renderOpts).installedContent;
+      assert.doesNotMatch(after, /(sterling|portable)-only/, 'no marker line may reach a Claude agent');
+      assert.equal(withoutHeader(after).replace(/^model: .*$/m, '').replace(/^effort: .*$/m, ''), source.replace(/^model: .*$/m, '').replace(/^effort: .*$/m, ''), 'the render is the source apart from the header and the model and effort tokens');
+    });
+    continue;
+  }
   const baseline = BASELINE_OVERRIDES[entry.file] ?? FENCE_BASELINE;
   test(`Claude render of ${entry.file} is byte-identical to the ${baseline} render (header aside)`, () => {
     const shown = spawnSync('git', ['show', `${baseline}:agent-templates/${entry.file}`], { cwd: root, encoding: 'utf8' });

@@ -30,6 +30,7 @@ import { projectRoot } from '../../../scripts/hooks/lib/common.mjs';
 import { sterlingRoot as defaultSterlingRoot } from './layer.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { addNotice } from './notices.mjs';
+import { inWorkerChild } from './worker.mjs';
 
 export const COMMAND_PREFIX = 'sterling:';
 export const SKILL_PREFIX = 'sterling:';
@@ -185,6 +186,7 @@ export function createBootstrapHandler(deps = {}) {
 /** Returns `configure(ctx)`, called once from setup inside the `config` fence. */
 export function createConfigHandler(deps = {}) {
   const now = deps.now ?? (() => new Date().toISOString());
+  const env = deps.env ?? process.env;
   return async function configure(ctx) {
     const project = projectRoot(ctx?.location?.directory);
     if (!project) throw new Error('configure ran outside a Sterling project');
@@ -203,6 +205,14 @@ export function createConfigHandler(deps = {}) {
         editor.add({ ...s });
       }
     });
+
+    // Inside the maintenance worker's `opencode run` child, the `sterling` entry
+    // is the worker's own server in worker mode (--worker-policy, --worker-token),
+    // passed through OPENCODE_CONFIG_CONTENT. The mcp transform edits the merged
+    // config, so replacing it would give the worker an unguarded server whose
+    // writes carry no stamp, and every run would fail as "unpoliced write"
+    // (GitHub #191). Commands and skills still register; the worker passes none.
+    if (inWorkerChild(env)) return;
 
     // Precedence: this copy's entry replaces a `sterling` entry from the project
     // config (decision sterling-opencode-plugin-injects-its-own-mcp-entry: the entry

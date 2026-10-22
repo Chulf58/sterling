@@ -8013,7 +8013,7 @@ var require_xterm2 = __commonJS({
       }
     };
     var handler = {};
-    handler.mouseX11Protocol = function(basename3, buffer) {
+    handler.mouseX11Protocol = function(basename4, buffer) {
       var code = buffer[0];
       var result = {
         data: {
@@ -8024,25 +8024,25 @@ var require_xterm2 = __commonJS({
       };
       if (code & 32) {
         if (code & 64) {
-          result.name = basename3 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+          result.name = basename4 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
         } else {
           switch (code & 3) {
             case 0:
-              result.name = basename3 + "_LEFT_BUTTON_PRESSED";
+              result.name = basename4 + "_LEFT_BUTTON_PRESSED";
               break;
             case 1:
-              result.name = basename3 + "_MIDDLE_BUTTON_PRESSED";
+              result.name = basename4 + "_MIDDLE_BUTTON_PRESSED";
               break;
             case 2:
-              result.name = basename3 + "_RIGHT_BUTTON_PRESSED";
+              result.name = basename4 + "_RIGHT_BUTTON_PRESSED";
               break;
             case 3:
-              result.name = basename3 + "_BUTTON_RELEASED";
+              result.name = basename4 + "_BUTTON_RELEASED";
               break;
           }
         }
       } else if (code & 64) {
-        result.name = basename3 + "_MOTION";
+        result.name = basename4 + "_MOTION";
       }
       result.eaten = 3;
       result.data.code = code;
@@ -8050,7 +8050,7 @@ var require_xterm2 = __commonJS({
       result.data.y = buffer[2] - 32;
       return result;
     };
-    handler.mouseSGRProtocol = function(basename3, buffer) {
+    handler.mouseSGRProtocol = function(basename4, buffer) {
       var code, pressed, matches, result;
       matches = buffer.toString().match(/^(-?[0-9]*);?([0-9]*);?([0-9]*)(M|m)/);
       if (!matches || matches[3].length === 0) {
@@ -8076,7 +8076,7 @@ var require_xterm2 = __commonJS({
       if (code & 32) {
         switch (code & 3) {
           case 0:
-            result.name = basename3 + "_DRAG";
+            result.name = basename4 + "_DRAG";
             result.data.left = true;
             result.data.right = false;
             result.data.xFrom = this.state.button.left.x;
@@ -8085,7 +8085,7 @@ var require_xterm2 = __commonJS({
           // Doesn't seem to exist, middle drag does not discriminate from motion
           //case 1 :
           case 2:
-            result.name = basename3 + "_DRAG";
+            result.name = basename4 + "_DRAG";
             result.data.left = false;
             result.data.right = true;
             result.data.xFrom = this.state.button.right.x;
@@ -8093,27 +8093,27 @@ var require_xterm2 = __commonJS({
             break;
           case 3:
           default:
-            result.name = basename3 + "_MOTION";
+            result.name = basename4 + "_MOTION";
             break;
         }
       } else if (code & 64) {
-        result.name = basename3 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+        result.name = basename4 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
       } else {
         switch (code & 3) {
           case 0:
-            result.name = basename3 + "_LEFT_BUTTON";
+            result.name = basename4 + "_LEFT_BUTTON";
             this.state.button.left = pressed ? result.data : null;
             break;
           case 1:
-            result.name = basename3 + "_MIDDLE_BUTTON";
+            result.name = basename4 + "_MIDDLE_BUTTON";
             this.state.button.middle = pressed ? result.data : null;
             break;
           case 2:
-            result.name = basename3 + "_RIGHT_BUTTON";
+            result.name = basename4 + "_RIGHT_BUTTON";
             this.state.button.right = pressed ? result.data : null;
             break;
           case 3:
-            result.name = basename3 + "_OTHER_BUTTON";
+            result.name = basename4 + "_OTHER_BUTTON";
             this.state.button.other = pressed ? result.data : null;
             break;
         }
@@ -8122,7 +8122,7 @@ var require_xterm2 = __commonJS({
       result.data.code = code;
       return result;
     };
-    handler.cursorLocation = function(basename3, paramString) {
+    handler.cursorLocation = function(basename4, paramString) {
       var params = paramString.split(";");
       return {
         name: "CURSOR_LOCATION",
@@ -8132,7 +8132,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.colorRegister = function(basename3, paramString) {
+    handler.colorRegister = function(basename4, paramString) {
       var matches = paramString.match(/^([0-9]*);rgb:([0-9a-f]{2})[0-9a-f]*\/([0-9a-f]{2})[0-9a-f]*\/([0-9a-f]{2})[0-9a-f]*/);
       if (!matches) {
         return { name: "ERROR" };
@@ -8147,7 +8147,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.screenSize = function(basename3, paramString) {
+    handler.screenSize = function(basename4, paramString) {
       var params = paramString.split(";"), width = parseInt(params[1], 10), height = parseInt(params[0], 10), resized = this.root.width !== width || this.root.height !== height;
       this.root.width = width;
       this.root.height = height;
@@ -8160,7 +8160,7 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.clipboard = function(basename3, paramString) {
+    handler.clipboard = function(basename4, paramString) {
       var matches = paramString.match(/^([cps][0-7]*);(.*)/);
       if (!matches) {
         return { name: "ERROR" };
@@ -8173,14 +8173,14 @@ var require_xterm2 = __commonJS({
         }
       };
     };
-    handler.xtgettcap = function(basename3, paramString) {
-      console.log("handler.xtgettcap: ", basename3, paramString);
+    handler.xtgettcap = function(basename4, paramString) {
+      console.log("handler.xtgettcap: ", basename4, paramString);
       var matches = paramString.match(/^([0-9a-fA-F]*)=([0-9a-fA-F]*)/);
       if (!matches) {
         return {
           name: "TERMINFO",
           data: {
-            valid: basename3 !== "XTGETTCAP_INVALID",
+            valid: basename4 !== "XTGETTCAP_INVALID",
             key: Buffer.from(paramString, "hex").toString(),
             error: "Not found"
           }
@@ -8189,14 +8189,14 @@ var require_xterm2 = __commonJS({
       return {
         name: "TERMINFO",
         data: {
-          valid: basename3 !== "XTGETTCAP_INVALID",
+          valid: basename4 !== "XTGETTCAP_INVALID",
           key: Buffer.from(matches[1], "hex").toString(),
           value: Buffer.from(matches[2], "hex").toString()
         }
       };
     };
-    handler.terminalUnitId = function(basename3, paramString) {
-      console.log("handler.terminalUnitId: ", basename3, paramString);
+    handler.terminalUnitId = function(basename4, paramString) {
+      console.log("handler.terminalUnitId: ", basename4, paramString);
       return {
         name: "TERMINAL_UNIT_ID",
         data: {
@@ -8868,7 +8868,7 @@ var require_konsole2 = __commonJS({
     });
     var keymap = Object.create(xterm.keymap);
     var handler = Object.create(xterm.handler);
-    handler.mouseSGRProtocol = function mouseSGRProtocol(basename3, buffer) {
+    handler.mouseSGRProtocol = function mouseSGRProtocol(basename4, buffer) {
       var code, pressed, matches, result;
       matches = buffer.toString().match(/^([0-9]*);([0-9]*);([0-9]*)(.)/);
       code = parseInt(matches[1], 10);
@@ -8884,34 +8884,34 @@ var require_konsole2 = __commonJS({
       result.data.y = parseInt(matches[3], 10);
       result.eaten = matches[0].length;
       if (code & 32) {
-        result.name = basename3 + "_MOTION";
+        result.name = basename4 + "_MOTION";
       } else if (code & 64) {
-        result.name = basename3 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
+        result.name = basename4 + (code & 1 ? "_WHEEL_DOWN" : "_WHEEL_UP");
       } else {
         switch (code & 3) {
           case 0:
-            result.name = basename3 + "_LEFT_BUTTON";
+            result.name = basename4 + "_LEFT_BUTTON";
             if (this.state.button.left === pressed) {
               result.disable = true;
             }
             this.state.button.left = pressed;
             break;
           case 1:
-            result.name = basename3 + "_MIDDLE_BUTTON";
+            result.name = basename4 + "_MIDDLE_BUTTON";
             if (this.state.button.middle === pressed) {
               result.disable = true;
             }
             this.state.button.middle = pressed;
             break;
           case 2:
-            result.name = basename3 + "_RIGHT_BUTTON";
+            result.name = basename4 + "_RIGHT_BUTTON";
             if (this.state.button.right === pressed) {
               result.disable = true;
             }
             this.state.button.right = pressed;
             break;
           case 3:
-            result.name = basename3 + "_OTHER_BUTTON";
+            result.name = basename4 + "_OTHER_BUTTON";
             if (this.state.button.other === pressed) {
               result.disable = true;
             }
@@ -39068,12 +39068,12 @@ var require_termkit_no_lazy_require = __commonJS({
 
 // packages/tui/dist/main.js
 import { appendFileSync, mkdirSync as mkdirSync12 } from "node:fs";
-import { dirname as dirname11, join as join22 } from "node:path";
+import { dirname as dirname12, join as join23 } from "node:path";
 import { performance } from "node:perf_hooks";
 
 // packages/tui/dist/controller.js
-import { readFileSync as readFileSync15, writeFileSync as writeFileSync7, existsSync as existsSync11 } from "node:fs";
-import { basename as basename2, dirname as dirname8, join as join19 } from "node:path";
+import { readFileSync as readFileSync16, writeFileSync as writeFileSync8, existsSync as existsSync12 } from "node:fs";
+import { basename as basename3, dirname as dirname9, join as join20 } from "node:path";
 import { randomUUID as randomUUID7 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
@@ -43881,7 +43881,8 @@ var AGENT_MODEL_KEY = {
   researcher: "researcher",
   scout: "scout",
   librarian: "librarian",
-  reviewer: "reviewer"
+  reviewer: "reviewer",
+  sparring: "sparring"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
 var s = (v) => typeof v === "string" ? v : "";
@@ -44336,7 +44337,12 @@ var configSchema = external_exports.object({
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
-    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
+    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
+    // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
+    // read-only grant as the reviewer, so the same install-time default. Every
+    // dispatch pins its model (Astra, else a Fable model); under Overpass its
+    // role tier decides.
+    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
   }).catchall(agentModelEntry).default({}),
   // Per-project agent tool extension (decision
   // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
@@ -44652,10 +44658,18 @@ var configSchema = external_exports.object({
 });
 var DEFAULT_OVERPASS_PROVIDER = "overpass";
 var OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
-var OVERPASS_ROLES = ["implementor", "researcher", "scout", "reviewer", "librarian"];
+var OVERPASS_ROLES = ["implementor", "researcher", "scout", "reviewer", "librarian", "sparring"];
 var OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 var OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
 var DEFAULT_OVERPASS_TIER = "agentic-high";
+var DEFAULT_OVERPASS_ROLE_TIERS = {
+  implementor: "agentic-premium",
+  researcher: DEFAULT_OVERPASS_TIER,
+  scout: DEFAULT_OVERPASS_TIER,
+  reviewer: DEFAULT_OVERPASS_TIER,
+  librarian: DEFAULT_OVERPASS_TIER,
+  sparring: "agentic-premium-max"
+};
 function resolveOverpassRoles(raw, provider) {
   if (raw !== void 0 && !isPlainObject(raw)) {
     throw new Error(`config.overpass.roles is ${JSON.stringify(raw)} \u2014 it must be an object like {"reviewer": {"tier": "agentic-high", "effort": "high"}}`);
@@ -44677,7 +44691,7 @@ function resolveOverpassRoles(raw, provider) {
       if (key !== "tier" && key !== "effort")
         throw new Error(`config.overpass.roles.${role} has the unknown field ${JSON.stringify(key)} \u2014 only "tier" and "effort" are allowed`);
     }
-    const tier = fields.tier === void 0 ? DEFAULT_OVERPASS_TIER : fields.tier;
+    const tier = fields.tier === void 0 ? DEFAULT_OVERPASS_ROLE_TIERS[role] : fields.tier;
     if (typeof tier !== "string" || !OVERPASS_TIER_RE.test(tier)) {
       throw new Error(`config.overpass.roles.${role}.tier is ${JSON.stringify(fields.tier)} \u2014 it must be an Overpass tier name like "agentic-high" (agentic- then lowercase letters, digits and '-')`);
     }
@@ -53013,7 +53027,7 @@ function parseOriginRepo(url) {
 }
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
-var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
+var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
 var prLoopPath = (root) => join10(root, PR_LOOP_REL);
 var prLoopFile = (root, prNumber) => join10(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
 var prLoopFileRel = (prNumber) => `${PR_LOOPS_DIR_REL}/${prNumber}.json`;
@@ -53134,8 +53148,8 @@ function openDataVersionProbe(paths, options = {}) {
 }
 
 // scripts/lib/agent-distribution.mjs
-import { createHash as createHash2, randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync8, writeFileSync as writeFileSync4, readdirSync as readdirSync2, existsSync as existsSync6, mkdirSync as mkdirSync6, statSync as statSync4, lstatSync as lstatSync3, unlinkSync as unlinkSync2, renameSync as renameSync2, linkSync as linkSync3 } from "node:fs";
+import { createHash as createHash2, randomUUID as randomUUID5 } from "node:crypto";
+import { readFileSync as readFileSync9, writeFileSync as writeFileSync5, readdirSync as readdirSync2, existsSync as existsSync7, mkdirSync as mkdirSync6, statSync as statSync4, lstatSync as lstatSync3, unlinkSync as unlinkSync2, renameSync as renameSync3, linkSync as linkSync3 } from "node:fs";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -53235,6 +53249,31 @@ function renderPortableText(text, label) {
 }
 function renderOpenCodeFullText(text, label) {
   return render(text, label, ["sterling-only", "opencode-only"]);
+}
+
+// scripts/lib/atomic-write.mjs
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { existsSync as existsSync6, readFileSync as readFileSync8, renameSync as renameSync2, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { basename as basename2, dirname as dirname7, join as join11 } from "node:path";
+function atomicTempPath(path) {
+  return join11(dirname7(path), `.${basename2(path)}.tmp-${process.pid}-${randomUUID4().slice(0, 8)}`);
+}
+function writeFileAtomic(path, content, fs = {}) {
+  replaceVia(`${path}.tmp-${randomUUID4()}`, path, content, fs);
+}
+function replaceVia(tmp, path, content, { writeFile = writeFileSync4, rename = renameSync2 } = {}) {
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync3(tmp, { force: true });
+    throw err;
+  }
+}
+function writeFileAtomicIfChanged(path, content, fs) {
+  if (existsSync6(path) && readFileSync8(path, "utf8") === content) return false;
+  replaceVia(atomicTempPath(path), path, content, fs);
+  return true;
 }
 
 // scripts/lib/agent-distribution.mjs
@@ -53337,7 +53376,7 @@ function validateHosts(entry, where) {
   }
 }
 function loadRegistry(registryPath2) {
-  const registry = JSON.parse(readFileSync8(registryPath2, "utf8"));
+  const registry = JSON.parse(readFileSync9(registryPath2, "utf8"));
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
     throw new Error(`agent registry ${registryPath2}: unsupported shape (expected {version: 1, agents: []})`);
   }
@@ -53373,11 +53412,11 @@ var RESTART_INSTRUCTION = [
 ].join("\n");
 
 // scripts/lib/codex-mcp.mjs
-import { readFileSync as readFileSync9 } from "node:fs";
+import { readFileSync as readFileSync10 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { join as join11 } from "node:path";
-function userScopeCodexServer({ env = process.env, home = homedir5(), readFile = readFileSync9 } = {}) {
-  const path = join11(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+import { join as join12 } from "node:path";
+function userScopeCodexServer({ env = process.env, home = homedir5(), readFile = readFileSync10 } = {}) {
+  const path = join12(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
   let raw;
   try {
     raw = readFile(path, "utf8");
@@ -53396,16 +53435,16 @@ function userScopeCodexServer({ env = process.env, home = homedir5(), readFile =
 
 // scripts/lib/handoff-projection.mjs
 import { spawnSync } from "node:child_process";
-import { existsSync as existsSync7 } from "node:fs";
-import { join as join14, resolve as resolve6 } from "node:path";
+import { existsSync as existsSync8 } from "node:fs";
+import { join as join15, resolve as resolve6 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync5, readFileSync as readFileSync10, readdirSync as readdirSync3, mkdirSync as mkdirSync7, openSync as openSync3, writeSync, closeSync as closeSync3, unlinkSync as unlinkSync3, constants } from "node:fs";
-import { join as join13, resolve as resolve5 } from "node:path";
+import { lstatSync as lstatSync5, readFileSync as readFileSync11, readdirSync as readdirSync3, mkdirSync as mkdirSync7, openSync as openSync3, writeSync, closeSync as closeSync3, unlinkSync as unlinkSync3, constants } from "node:fs";
+import { join as join14, resolve as resolve5 } from "node:path";
 
 // scripts/lib/store-path.mjs
 import { lstatSync as lstatSync4, realpathSync as realpathSync3 } from "node:fs";
-import { join as join12, resolve as resolve4, sep } from "node:path";
+import { join as join13, resolve as resolve4, sep } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target } = {}) {
     super(message);
@@ -53448,7 +53487,7 @@ function resolveStoreWritePath(root, ...segments) {
   }
   if (target !== rootResolved && !target.startsWith(rootResolved + sep)) {
     throw new StorePathContainmentError(
-      `resolveStoreWritePath: '${join12(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
+      `resolveStoreWritePath: '${join13(...segments)}' resolves outside '${rootResolved}' (got '${target}') \u2014 refusing`,
       { root: rootResolved, target }
     );
   }
@@ -53456,7 +53495,7 @@ function resolveStoreWritePath(root, ...segments) {
   let cursor = rootResolved;
   let deepestExisting = rootResolved;
   for (const part of relParts) {
-    const next = join12(cursor, part);
+    const next = join13(cursor, part);
     let st;
     try {
       st = lstatSync4(next);
@@ -53521,7 +53560,7 @@ function resolveStoreWritePath(root, ...segments) {
     );
   }
   const suffix = target.slice(deepestExisting.length);
-  const reconstructed = suffix ? join12(realDeepest, suffix) : realDeepest;
+  const reconstructed = suffix ? join13(realDeepest, suffix) : realDeepest;
   if (reconstructed !== realRoot && !reconstructed.startsWith(realRoot + sep)) {
     throw new StorePathContainmentError(
       `resolveStoreWritePath: reconstructed path '${reconstructed}' (root '${realRoot}', target '${target}') resolves outside the project \u2014 refusing, nothing was written`,
@@ -53551,7 +53590,7 @@ function containedPath(root, rel, leaf) {
   if (!segments.length || segments.some((s2) => s2 === ".." || s2 === ".")) throw new ContainmentError(`'${rel}' is not a plain repo-relative path`);
   let cursor = resolve5(root);
   for (const [index, part] of segments.entries()) {
-    cursor = join13(cursor, part);
+    cursor = join14(cursor, part);
     const st = lstatOrNull(cursor);
     if (!st) break;
     const isLeaf = index === segments.length - 1;
@@ -53571,7 +53610,7 @@ function existsContained(root, rel, leaf) {
   return lstatOrNull(containedPath(root, rel, leaf)) !== null;
 }
 function readContained(root, rel) {
-  return readFileSync10(containedPath(root, rel, "file"), "utf8");
+  return readFileSync11(containedPath(root, rel, "file"), "utf8");
 }
 var NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
@@ -53598,10 +53637,10 @@ function trackedHandoffFiles(root, { spawn = spawnSync } = {}) {
     }
     return { stdout: r.stdout || "" };
   };
-  if (!existsSync7(root)) return { files: [], unknown: null };
+  if (!existsSync8(root)) return { files: [], unknown: null };
   const inside = run(["rev-parse", "--is-inside-work-tree"]);
   if (inside.failed) {
-    if (inside.notARepo && !existsSync7(join14(root, ".git"))) return { files: [], unknown: null };
+    if (inside.notARepo && !existsSync8(join15(root, ".git"))) return { files: [], unknown: null };
     return { files: [], unknown: inside.failed };
   }
   if (inside.stdout.trim() !== "true") return { files: [], unknown: null };
@@ -53650,15 +53689,14 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { createHash as createHash3, randomUUID as randomUUID5 } from "node:crypto";
-import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync12, readdirSync as readdirSync5, realpathSync as realpathSync5, renameSync as renameSync3, rmSync as rmSync3, statSync as statSync5, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname7, isAbsolute, join as join16, resolve as resolve8 } from "node:path";
+import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync13, readdirSync as readdirSync5, realpathSync as realpathSync5, rmSync as rmSync4, statSync as statSync5, unlinkSync as unlinkSync4, writeFileSync as writeFileSync6 } from "node:fs";
+import { dirname as dirname8, isAbsolute, join as join17, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/sterling-roots.mjs
-import { existsSync as existsSync8, readFileSync as readFileSync11, readdirSync as readdirSync4, realpathSync as realpathSync4 } from "node:fs";
+import { existsSync as existsSync9, readFileSync as readFileSync12, readdirSync as readdirSync4, realpathSync as realpathSync4 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { join as join15, resolve as resolve7, sep as sep2 } from "node:path";
+import { join as join16, resolve as resolve7, sep as sep2 } from "node:path";
 var RESOLVER_IMPORTS = [
   "import { existsSync, readFileSync, readdirSync } from 'node:fs';",
   "import { homedir } from 'node:os';",
@@ -53802,7 +53840,7 @@ var api = new Function(
   "homedir",
   `${RESOLVER_SOURCE}
 return { installRoots, readCopyVersion, parseSterlingVersion, compareSterlingVersions, scanInstalledSterling, newestInstalledSterling, sterlingInstallRemedy, sterlingNotFoundMessage };`
-)(existsSync8, readFileSync11, readdirSync4, join15, homedir6);
+)(existsSync9, readFileSync12, readdirSync4, join16, homedir6);
 var installRoots = api.installRoots;
 var readCopyVersion = api.readCopyVersion;
 var parseSterlingVersion = api.parseSterlingVersion;
@@ -53875,7 +53913,7 @@ function isShellSafePath(path) {
 
 // scripts/lib/opencode-install.mjs
 var STERLING_AGENTS_SUBDIR = ".opencode/agents/sterling";
-var ROSTER = ["conductor", "implementor", "researcher", "scout", "reviewer", "librarian"];
+var ROSTER = ["conductor", "implementor", "researcher", "scout", "reviewer", "sparring", "librarian"];
 var FULL_HEADER_RE = /^<!-- sterling-full renderer=opencode-full\/1 template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) -->$/m;
 var fwd2 = (p) => p.replace(/\\/g, "/");
 var normalize3 = (s2) => s2.replace(/\r\n/g, "\n");
@@ -53905,14 +53943,15 @@ var GUARDED_KEYS = /* @__PURE__ */ new Set(["*", ...EDIT_FAMILY]);
 var CONDUCTOR_OPENCODE_DESCRIPTION = `Sterling's orchestrating main-session agent. Briefs, synthesizes, verifies, decides and commits; hands-on reading, implementing and reviewing go to subagents. Activated by default_agent "sterling/conductor" in the project's .opencode/opencode.json (written by /sterling:init and /sterling:update); never dispatched as a subagent.`;
 var FULL_PERMISSIONS = {
   reviewer: { edit: "deny", webfetch: "deny", task: "deny" },
+  sparring: { edit: "deny", webfetch: "deny", task: "deny" },
   librarian: { edit: "deny", bash: "deny", webfetch: "deny", task: "deny" }
 };
 var STORE_WRITERS = /* @__PURE__ */ new Set(["conductor", "librarian"]);
 function storeWriteTools(pluginRoot = sterlingRootFrom()) {
-  const fm = normalize3(readFileSync12(join16(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
+  const fm = normalize3(readFileSync13(join17(pluginRoot, "agent-templates", "implementor.md"), "utf8")).match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
   const list = fm.match(/^disallowedTools:\s*(.+)$/m)?.[1] ?? "";
   const tools = [...new Set(list.split(",").map((t) => t.trim().match(/^mcp__sterling__(\w+)$/)?.[1]).filter(Boolean))].map((t) => `sterling_${t}`);
-  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(join16(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
+  if (!tools.length) throw new Error(`opencode roster: no mcp__sterling__* entries in ${fwd2(join17(pluginRoot, "agent-templates", "implementor.md"))} disallowedTools (P5)`);
   return tools;
 }
 function opencodeModelRef(model) {
@@ -53927,10 +53966,10 @@ function opencodeModelFor({ model, opencodeModel } = {}) {
   return opencodeModel;
 }
 function sterlingRootFrom(moduleUrl = new URL("../scripts/lib/opencode-install.mjs", import.meta.url).href) {
-  const start = dirname7(fileURLToPath(moduleUrl));
-  for (let dir = start; ; dir = dirname7(dir)) {
-    if (existsSync9(join16(dir, "agent-templates", "registry.json"))) return dir;
-    if (dirname7(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
+  const start = dirname8(fileURLToPath(moduleUrl));
+  for (let dir = start; ; dir = dirname8(dir)) {
+    if (existsSync10(join17(dir, "agent-templates", "registry.json"))) return dir;
+    if (dirname8(dir) === dir) throw new Error(`no Sterling plugin root (agent-templates/registry.json) at or above ${start}`);
   }
 }
 function renderFullOpenCodeAgent(templateContent, label, entry, { primary = false, mode, model, writeTools, vars = {} } = {}) {
@@ -54012,19 +54051,19 @@ function fullAgentTargets(registry) {
   return targets;
 }
 function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
-  const registry = loadRegistry(join16(pluginRoot, "agent-templates", "registry.json"));
+  const registry = loadRegistry(join17(pluginRoot, "agent-templates", "registry.json"));
   const writeTools = storeWriteTools(pluginRoot);
   const vars = { PROJECT_DIR: fwd2(projectDir), STERLING_ROOT: fwd2(pluginRoot) };
   const rows = [];
   for (const { name, entry, rel, primary, mode } of fullAgentTargets(registry)) {
-    const path = join16(projectDir, rel);
-    const templateContent = readFileSync12(join16(pluginRoot, "agent-templates", entry.file), "utf8");
+    const path = join17(projectDir, rel);
+    const templateContent = readFileSync13(join17(pluginRoot, "agent-templates", entry.file), "utf8");
     const unsafe = usesInstallVars(templateContent, entry.opencode_full?.permission) ? INSTALL_VARS.filter((v) => !isShellSafePath(vars[v])) : [];
     if (tracked.includes(rel)) {
       rows.push(refusal(rel, `${rel} is tracked by git, and the Sterling-full agents are per-user`, `untrack it (git rm --cached ${rel} and commit), then rerun /sterling:update`));
       continue;
     }
-    const raw = existsSync9(path) ? readFileSync12(path, "utf8") : null;
+    const raw = existsSync10(path) ? readFileSync13(path, "utf8") : null;
     const disk = raw === null ? null : normalize3(raw);
     if (disk !== null) {
       const m = disk.match(FULL_HEADER_RE);
@@ -54060,7 +54099,7 @@ function planFullAgents({ projectDir, pluginRoot, tracked, models = {} }) {
   return rows;
 }
 function swapFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync9(join16(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync10(join17(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
@@ -54068,29 +54107,19 @@ function swapFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeMod
   return { rows: ensureFullAgents({ projectDir, pluginRoot, tracked, models }) };
 }
 function stageFullAgentModel({ projectDir, pluginRoot, agents, model, opencodeModel }) {
-  if (!existsSync9(join16(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
+  if (!existsSync10(join17(projectDir, STERLING_AGENTS_SUBDIR))) return { skipped: `no Sterling-full OpenCode agents in ${STERLING_AGENTS_SUBDIR}` };
   const ref = opencodeModelFor({ model, opencodeModel });
   const models = Object.fromEntries(agents.filter((a) => ROSTER.includes(a)).map((a) => [a, ref]));
   const ls = git(projectDir, ["ls-files", "--", ".opencode"]);
   const tracked = ls.status === 0 ? ls.stdout.split("\n").filter(Boolean) : [];
   return stageFullAgents({ projectDir, pluginRoot, tracked, models });
 }
-function writeFileAtomic(path, content, { writeFile = writeFileSync5, rename = renameSync3 } = {}) {
-  const tmp = `${path}.tmp-${randomUUID5()}`;
-  try {
-    writeFile(tmp, content);
-    rename(tmp, path);
-  } catch (err) {
-    rmSync3(tmp, { force: true });
-    throw err;
-  }
-}
 function writeFullAgentFiles(writes, fs = {}) {
   const done = [];
   try {
     for (const w of writes) {
-      mkdirSync8(dirname7(w.path), { recursive: true });
-      writeFileAtomic(w.path, w.content, fs);
+      mkdirSync8(dirname8(w.path), { recursive: true });
+      writeFileAtomicIfChanged(w.path, w.content, fs);
       done.push(w);
     }
   } catch (err) {
@@ -54106,8 +54135,8 @@ function restoreFullAgentFiles(writes, fs = {}) {
   const failed = [];
   for (const w of writes) {
     try {
-      if (w.previous === null) rmSync3(w.path, { force: true });
-      else writeFileAtomic(w.path, w.previous, fs);
+      if (w.previous === null) rmSync4(w.path, { force: true });
+      else writeFileAtomicIfChanged(w.path, w.previous, fs);
     } catch (err) {
       failed.push(`${fwd2(w.path)}: ${err.message}`);
     }
@@ -54116,15 +54145,15 @@ function restoreFullAgentFiles(writes, fs = {}) {
 }
 
 // scripts/hooks/lib/store-backend.mjs
-import { existsSync as existsSync10, readFileSync as readFileSync13 } from "node:fs";
-import { join as join17 } from "node:path";
-var CONFIG_REL3 = join17(".sterling", "config.json");
-var STORE_DB_REL = join17(".sterling", "sterling.db");
+import { existsSync as existsSync11, readFileSync as readFileSync14 } from "node:fs";
+import { join as join18 } from "node:path";
+var CONFIG_REL3 = join18(".sterling", "config.json");
+var STORE_DB_REL = join18(".sterling", "sterling.db");
 function storeBackend(root) {
-  const dbExists = () => existsSync10(join17(root, STORE_DB_REL));
+  const dbExists = () => existsSync11(join18(root, STORE_DB_REL));
   let text;
   try {
-    text = readFileSync13(join17(root, CONFIG_REL3), "utf8");
+    text = readFileSync14(join18(root, CONFIG_REL3), "utf8");
   } catch (e) {
     if (e?.code === "ENOENT") return "sqlite";
     return dbExists() ? "sqlite" : "routed";
@@ -54139,19 +54168,19 @@ function storeBackend(root) {
 }
 
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync9, readFileSync as readFileSync14, renameSync as renameSync4, rmSync as rmSync4, writeFileSync as writeFileSync6 } from "node:fs";
+import { mkdirSync as mkdirSync9, readFileSync as readFileSync15, renameSync as renameSync4, rmSync as rmSync5, writeFileSync as writeFileSync7 } from "node:fs";
 import { hostname as hostname2 } from "node:os";
-import { join as join18 } from "node:path";
+import { join as join19 } from "node:path";
 import { randomUUID as randomUUID6 } from "node:crypto";
 function selectionFilePath(root, host2 = hostname2()) {
   const safeHost = String(host2).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
-  return join18(root, ".sterling", "transient", `selection.${safeHost}.json`);
+  return join19(root, ".sterling", "transient", `selection.${safeHost}.json`);
 }
 function writeSelectionFile(root, type, recordId, at) {
   const path = selectionFilePath(root);
-  mkdirSync9(join18(root, ".sterling", "transient"), { recursive: true });
+  mkdirSync9(join19(root, ".sterling", "transient"), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${randomUUID6()}`;
-  writeFileSync6(tmp, JSON.stringify({ type, record_id: recordId, at }));
+  writeFileSync7(tmp, JSON.stringify({ type, record_id: recordId, at }));
   renameSync4(tmp, path);
 }
 
@@ -54160,9 +54189,9 @@ var DASHBOARD_BUSY_TIMEOUT_MS = 250;
 var LOCK_NOTICE_AFTER_MS = DEFAULT_BUSY_TIMEOUT_MS;
 function openDashboard(storePath2, options = {}) {
   const disabled = options.disabledEffects ?? {};
-  const configPath2 = join19(dirname8(storePath2), "config.json");
-  const projectRoot = dirname8(dirname8(storePath2));
-  const agentsDir = join19(projectRoot, ".claude", "agents");
+  const configPath2 = join20(dirname9(storePath2), "config.json");
+  const projectRoot = dirname9(dirname9(storePath2));
+  const agentsDir = join20(projectRoot, ".claude", "agents");
   function resolveProjectHeadSha() {
     try {
       const sha = execFileSync2("git", ["rev-parse", "HEAD"], {
@@ -54180,7 +54209,7 @@ function openDashboard(storePath2, options = {}) {
   let domainsAvailable = true;
   if (!routed) {
     try {
-      const config = parseConfig(JSON.parse(readFileSync15(configPath2, "utf8")));
+      const config = parseConfig(JSON.parse(readFileSync16(configPath2, "utf8")));
       mounts = resolveDomainMounts(config);
     } catch {
       mounts = [];
@@ -54196,7 +54225,7 @@ function openDashboard(storePath2, options = {}) {
     stores.close();
     throw err;
   }
-  const projectName = basename2(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
+  const projectName = basename3(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
   let ui = initialUi;
   let probe;
   let changeDetection = "data_version";
@@ -54341,7 +54370,7 @@ function openDashboard(storePath2, options = {}) {
   let roster;
   function readInstalledModelEffort(name) {
     try {
-      const content = readFileSync15(join19(agentsDir, `${name}.md`), "utf8");
+      const content = readFileSync16(join20(agentsDir, `${name}.md`), "utf8");
       const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
       const block = fm ? fm[1] : "";
       return {
@@ -54357,7 +54386,7 @@ function openDashboard(storePath2, options = {}) {
   }
   function readRawMode() {
     try {
-      const raw = JSON.parse(readFileSync15(configPath2, "utf8"));
+      const raw = JSON.parse(readFileSync16(configPath2, "utf8"));
       return raw.mode === void 0 ? void 0 : typeof raw.mode === "string" ? raw.mode : JSON.stringify(raw.mode);
     } catch (err) {
       ui = { ...ui, notice: `project mode unknown \u2014 config unreadable: ${err.message}` };
@@ -54367,7 +54396,7 @@ function openDashboard(storePath2, options = {}) {
   function readRawStorage() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync15(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync16(configPath2, "utf8"));
     } catch {
       return null;
     }
@@ -54379,7 +54408,7 @@ function openDashboard(storePath2, options = {}) {
   function readHandoff() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync15(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync16(configPath2, "utf8"));
     } catch {
       return { handoff: null };
     }
@@ -54400,7 +54429,7 @@ function openDashboard(storePath2, options = {}) {
   function readAutoMergeOnClean() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync15(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync16(configPath2, "utf8"));
     } catch {
       return null;
     }
@@ -54418,7 +54447,7 @@ function openDashboard(storePath2, options = {}) {
   function readOverpass() {
     let raw;
     try {
-      raw = JSON.parse(readFileSync15(configPath2, "utf8"));
+      raw = JSON.parse(readFileSync16(configPath2, "utf8"));
     } catch {
       return { enabled: null, provider: null, conductorBypass: null, effective: false };
     }
@@ -54443,7 +54472,7 @@ function openDashboard(storePath2, options = {}) {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     let config;
     try {
-      config = parseConfig(JSON.parse(readFileSync15(configPath2, "utf8")));
+      config = parseConfig(JSON.parse(readFileSync16(configPath2, "utf8")));
     } catch {
       config = { models: {}, models_catalog: { staleness_days: 45 } };
     }
@@ -54454,7 +54483,7 @@ function openDashboard(storePath2, options = {}) {
     const mode = readRawMode();
     const handoff = readHandoff();
     const codexWired = probeCodexWired();
-    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync11(join19(agentsDir, `${name}.md`))).map((name) => {
+    const agents = Object.keys(AGENT_MODEL_KEY).filter((name) => existsSync12(join20(agentsDir, `${name}.md`))).map((name) => {
       const v = readInstalledModelEffort(name);
       return { name, installedModel: v.model, installedEffort: v.effort };
     });
@@ -54479,7 +54508,7 @@ function openDashboard(storePath2, options = {}) {
   }
   function applySparringModel(e) {
     try {
-      const raw = JSON.parse(readFileSync15(configPath2, "utf8"));
+      const raw = JSON.parse(readFileSync16(configPath2, "utf8"));
       const { model: _legacy, ...sp } = { ...raw.sparring_partner };
       const { model: _previous, ...rest } = { ...sp.models?.openai };
       const models = { ...sp.models };
@@ -54488,7 +54517,7 @@ function openDashboard(storePath2, options = {}) {
       else
         delete models.openai;
       raw.sparring_partner = { ...sp, models };
-      writeFileSync7(configPath2, JSON.stringify(raw, null, 2) + "\n");
+      writeFileSync8(configPath2, JSON.stringify(raw, null, 2) + "\n");
     } catch (err) {
       ui = { ...ui, notice: `sparring partner model update failed \u2014 ${err.message}` };
     }
@@ -54496,19 +54525,19 @@ function openDashboard(storePath2, options = {}) {
   async function applySwap(e) {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     try {
-      const raw = JSON.parse(readFileSync15(configPath2, "utf8"));
+      const raw = JSON.parse(readFileSync16(configPath2, "utf8"));
       raw.models = raw.models ?? {};
       const prev = raw.models[e.key] ?? {};
       raw.models[e.key] = { ...prev, model: e.to.model, effort: e.to.effort };
-      writeFileSync7(configPath2, JSON.stringify(raw, null, 2) + "\n");
+      writeFileSync8(configPath2, JSON.stringify(raw, null, 2) + "\n");
       const opencodeModel = typeof prev.opencode_model === "string" ? prev.opencode_model : void 0;
       for (const name of e.agents) {
-        const p = join19(agentsDir, `${name}.md`);
-        if (!existsSync11(p))
+        const p = join20(agentsDir, `${name}.md`);
+        if (!existsSync12(p))
           continue;
-        const content = readFileSync15(p, "utf8");
+        const content = readFileSync16(p, "utf8");
         const hdr = parseInstalledHeader(content);
-        writeFileSync7(p, setInstalledModelEffort(content, {
+        writeFileSync8(p, setInstalledModelEffort(content, {
           model: e.to.model,
           effort: e.to.effort,
           pluginVersion: hdr?.pluginVersion ?? "0.0.0",
@@ -54554,7 +54583,7 @@ function openDashboard(storePath2, options = {}) {
     try {
       if (e.to !== void 0 && !OPENCODE_MODEL_REF_RE.test(e.to))
         throw new Error(`'${e.to}' is not a <provider>/<model> id`);
-      configBefore = readFileSync15(configPath2, "utf8");
+      configBefore = readFileSync16(configPath2, "utf8");
       const raw = JSON.parse(configBefore);
       raw.models = raw.models ?? {};
       const { opencode_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
@@ -55409,17 +55438,17 @@ function mouseToEvent(name, data) {
 }
 
 // packages/tui/dist/subagents.js
-import { existsSync as existsSync14, readFileSync as readFileSync17, readdirSync as readdirSync8, statSync as statSync7 } from "node:fs";
+import { existsSync as existsSync15, readFileSync as readFileSync18, readdirSync as readdirSync8, statSync as statSync7 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { join as join21 } from "node:path";
+import { join as join22 } from "node:path";
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync10, readFileSync as readFileSync16, writeFileSync as writeFileSync8, rmSync as rmSync5, rmdirSync, renameSync as renameSync5, existsSync as existsSync12, lstatSync as lstatSync6, readdirSync as readdirSync6, realpathSync as realpathSync6, chmodSync } from "node:fs";
-import { join as join20, resolve as resolve9, dirname as dirname9, isAbsolute as isAbsolute2 } from "node:path";
+import { mkdirSync as mkdirSync10, readFileSync as readFileSync17, writeFileSync as writeFileSync9, rmSync as rmSync6, rmdirSync, renameSync as renameSync5, existsSync as existsSync13, lstatSync as lstatSync6, readdirSync as readdirSync6, realpathSync as realpathSync6, chmodSync } from "node:fs";
+import { join as join21, resolve as resolve9, dirname as dirname10, isAbsolute as isAbsolute2 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
-import { randomBytes, createHash as createHash4 } from "node:crypto";
+import { randomBytes, createHash as createHash3 } from "node:crypto";
 function registerPath(root) {
-  return join20(root, ".sterling", "transient", "dispatch-register.json");
+  return join21(root, ".sterling", "transient", "dispatch-register.json");
 }
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -55441,10 +55470,10 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync12(p)) return { availability: "absent", arr: [] };
+  if (!existsSync13(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
-    raw = readFileSync16(p, "utf8");
+    raw = readFileSync17(p, "utf8");
   } catch {
     return { availability: "corrupt", arr: [] };
   }
@@ -55474,32 +55503,32 @@ var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var RECORDER_LOCK_OPTS = Object.freeze({ timeoutMs: 5e3, retryMs: 10 });
 function dispatchStateDir(root) {
-  return join20(root, ".sterling", "transient", "dispatch-state");
+  return join21(root, ".sterling", "transient", "dispatch-state");
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
-  return `sha256-${createHash4("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+  return `sha256-${createHash3("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync as openSync4, readSync as readSync2, closeSync as closeSync4, fstatSync, existsSync as existsSync13, statSync as statSync6, readdirSync as readdirSync7 } from "node:fs";
+import { openSync as openSync4, readSync as readSync2, closeSync as closeSync4, fstatSync, existsSync as existsSync14, statSync as statSync6, readdirSync as readdirSync7 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function deriveAgentTranscript(parentTranscriptPath, agentId) {
   const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
   const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
-  if (existsSync13(flat)) return flat;
+  if (existsSync14(flat)) return flat;
   const wfRoot = `${sessionDir}/subagents/workflows`;
   try {
     for (const d of readdirSync7(wfRoot)) {
       const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
-      if (existsSync13(candidate)) return candidate;
+      if (existsSync14(candidate)) return candidate;
     }
   } catch {
   }
   return flat;
 }
 function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync13(path)) return null;
+  if (!existsSync14(path)) return null;
   const fd = openSync4(path, "r");
   try {
     const size = fstatSync(fd).size;
@@ -57909,7 +57938,7 @@ function roundOf(e) {
 }
 function readCurrentSessionId(projectRoot) {
   try {
-    const parsed = JSON.parse(readFileSync17(join21(projectRoot, ".sterling", "transient", "session.json"), "utf8"));
+    const parsed = JSON.parse(readFileSync18(join22(projectRoot, ".sterling", "transient", "session.json"), "utf8"));
     return typeof parsed?.session_id === "string" && parsed.session_id ? parsed.session_id : null;
   } catch {
     return null;
@@ -57995,15 +58024,15 @@ function lastTurnEntry(tail) {
 function readDispatchDescription(projectRoot, toolUseId) {
   const dir = dispatchStateDir(projectRoot);
   const key = dispatchStateKey(toolUseId);
-  let file = join21(dir, `live-${key}.json`);
+  let file = join22(dir, `live-${key}.json`);
   try {
-    if (!existsSync14(file)) {
+    if (!existsSync15(file)) {
       const done = readdirSync8(dir).find((n) => n.startsWith(`done-${key}~`) && n.endsWith(".json"));
       if (!done)
         return null;
-      file = join21(dir, done);
+      file = join22(dir, done);
     }
-    const rec = JSON.parse(readFileSync17(file, "utf8"));
+    const rec = JSON.parse(readFileSync18(file, "utf8"));
     return rec.tool_use_id === toolUseId && typeof rec.description === "string" && rec.description ? rec.description : null;
   } catch {
     return null;
@@ -58011,7 +58040,7 @@ function readDispatchDescription(projectRoot, toolUseId) {
 }
 function readAgentModel(projectRoot, type) {
   try {
-    const content = readFileSync17(join21(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
+    const content = readFileSync18(join22(projectRoot, ".claude", "agents", `${type}.md`), "utf8");
     const model = content.match(/^---\n([\s\S]*?)\n---\n/)?.[1]?.match(/^model:\s*(\S+)/m)?.[1];
     if (model)
       return model;
@@ -58021,7 +58050,7 @@ function readAgentModel(projectRoot, type) {
   if (!key)
     return null;
   try {
-    const raw = JSON.parse(readFileSync17(join21(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync18(join22(projectRoot, ".sterling", "config.json"), "utf8"));
     const model = raw.models?.[key]?.model;
     return typeof model === "string" && model ? model : null;
   } catch {
@@ -58029,9 +58058,9 @@ function readAgentModel(projectRoot, type) {
   }
 }
 function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir = defaultClaudeConfigDir()) {
-  const projects = join21(claudeConfigDir, "projects");
+  const projects = join22(claudeConfigDir, "projects");
   const slug = projectRoot.replace(/[^A-Za-z0-9]/g, "-");
-  const sessionUnder = (dir2) => existsSync14(join21(projects, dir2, sessionId));
+  const sessionUnder = (dir2) => existsSync15(join22(projects, dir2, sessionId));
   let dir = sessionUnder(slug) ? slug : void 0;
   if (!dir) {
     let all;
@@ -58042,10 +58071,10 @@ function subagentTranscriptPath(projectRoot, sessionId, agentId, claudeConfigDir
     }
     dir = all.find((d) => d !== slug && sessionUnder(d));
   }
-  return dir ? deriveAgentTranscript(join21(projects, dir, `${sessionId}.jsonl`), agentId) : null;
+  return dir ? deriveAgentTranscript(join22(projects, dir, `${sessionId}.jsonl`), agentId) : null;
 }
 function defaultClaudeConfigDir() {
-  return process.env.CLAUDE_CONFIG_DIR || join21(homedir7(), ".claude");
+  return process.env.CLAUDE_CONFIG_DIR || join22(homedir7(), ".claude");
 }
 function readContextUsage(path) {
   try {
@@ -58070,7 +58099,7 @@ function displayModel(ref) {
 }
 function readSharedWindows() {
   try {
-    const raw = JSON.parse(readFileSync17(join21(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
+    const raw = JSON.parse(readFileSync18(join22(sterlingRootFrom(new URL("../packages/tui/dist/subagents.js", import.meta.url).href), "templates", "context-windows.json"), "utf8"));
     return parseConfig({ context_watch: { windows: raw.windows } }).context_watch.windows;
   } catch {
     return null;
@@ -58078,14 +58107,14 @@ function readSharedWindows() {
 }
 function readProjectWindows(projectRoot) {
   try {
-    const raw = JSON.parse(readFileSync17(join21(projectRoot, ".sterling", "config.json"), "utf8"));
+    const raw = JSON.parse(readFileSync18(join22(projectRoot, ".sterling", "config.json"), "utf8"));
     return parseConfig(raw).context_watch.windows;
   } catch {
     return {};
   }
 }
 function defaultOpenCodeDbPath(env = process.env) {
-  return join21(env.XDG_DATA_HOME || join21(homedir7(), ".local", "share"), "opencode", "opencode.db");
+  return join22(env.XDG_DATA_HOME || join22(homedir7(), ".local", "share"), "opencode", "opencode.db");
 }
 function isOpenCodeSessionId(agentId) {
   return /^ses_[0-9A-Za-z]+$/.test(agentId);
@@ -58093,7 +58122,7 @@ function isOpenCodeSessionId(agentId) {
 var CATALOG_KEY = "models-dev:catalog";
 var OPENCODE_DB_BUSY_MS = 50;
 function openOpenCodeDb(path) {
-  if (!existsSync14(path))
+  if (!existsSync15(path))
     throw new Error(`no OpenCode database at ${path}`);
   return openForeignDbReadOnly(path, OPENCODE_DB_BUSY_MS);
 }
@@ -58421,8 +58450,8 @@ function composeCards(view, width, maxHeight, tick, neonEdge) {
 }
 
 // packages/tui/dist/lock.js
-import { mkdirSync as mkdirSync11, readFileSync as readFileSync18, rmSync as rmSync6, writeFileSync as writeFileSync9 } from "node:fs";
-import { dirname as dirname10 } from "node:path";
+import { mkdirSync as mkdirSync11, readFileSync as readFileSync19, rmSync as rmSync7, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname11 } from "node:path";
 function pidIsAlive2(pid) {
   if (!Number.isInteger(pid) || pid <= 0)
     return false;
@@ -58435,7 +58464,7 @@ function pidIsAlive2(pid) {
 }
 function procStartTime2(pid) {
   try {
-    const stat = readFileSync18(`/proc/${pid}/stat`, "utf8");
+    const stat = readFileSync19(`/proc/${pid}/stat`, "utf8");
     const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
     return fields[19] ?? null;
   } catch {
@@ -58448,12 +58477,12 @@ function ownerStillHolds(storedToken, currentToken) {
   return storedToken === currentToken;
 }
 function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive2, startTimeOf = procStartTime2) {
-  mkdirSync11(dirname10(lockPath2), { recursive: true });
+  mkdirSync11(dirname11(lockPath2), { recursive: true });
   const token = startTimeOf(pid);
   const content = token ? `${pid} ${token}` : String(pid);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      writeFileSync9(lockPath2, content, { flag: "wx" });
+      writeFileSync10(lockPath2, content, { flag: "wx" });
       return null;
     } catch (e) {
       if (e.code !== "EEXIST")
@@ -58461,7 +58490,7 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive2, startTimeOf = pro
     }
     let parts;
     try {
-      parts = readFileSync18(lockPath2, "utf8").trim().split(/\s+/);
+      parts = readFileSync19(lockPath2, "utf8").trim().split(/\s+/);
     } catch {
       continue;
     }
@@ -58472,19 +58501,19 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive2, startTimeOf = pro
     if (isAlive(owner2) && ownerStillHolds(parts[1], startTimeOf(owner2)))
       return owner2;
     try {
-      const cur = readFileSync18(lockPath2, "utf8").trim().split(/\s+/)[0];
+      const cur = readFileSync19(lockPath2, "utf8").trim().split(/\s+/)[0];
       if (cur === ownerRaw)
-        rmSync6(lockPath2, { force: true });
+        rmSync7(lockPath2, { force: true });
     } catch {
     }
   }
   try {
-    const owner2 = Number(readFileSync18(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    const owner2 = Number(readFileSync19(lockPath2, "utf8").trim().split(/\s+/)[0]);
     if (owner2 !== pid && isAlive(owner2))
       return owner2;
   } catch {
     try {
-      writeFileSync9(lockPath2, content, { flag: "wx" });
+      writeFileSync10(lockPath2, content, { flag: "wx" });
     } catch {
     }
   }
@@ -58492,9 +58521,9 @@ function acquireTuiLock(lockPath2, pid, isAlive = pidIsAlive2, startTimeOf = pro
 }
 function releaseTuiLock(lockPath2, pid) {
   try {
-    const owner2 = Number(readFileSync18(lockPath2, "utf8").trim().split(/\s+/)[0]);
+    const owner2 = Number(readFileSync19(lockPath2, "utf8").trim().split(/\s+/)[0]);
     if (owner2 === pid)
-      rmSync6(lockPath2, { force: true });
+      rmSync7(lockPath2, { force: true });
   } catch {
   }
 }
@@ -58530,18 +58559,18 @@ try {
   console.error(`sterling-tui: ${err.message}`);
   process.exit(2);
 }
-var lockPath = join22(dirname11(storePath), "transient", "tui.lock");
+var lockPath = join23(dirname12(storePath), "transient", "tui.lock");
 var owner = acquireTuiLock(lockPath, process.pid);
 if (owner !== null) {
   console.error(`sterling-tui: already running (pid ${owner}) for this store \u2014 exiting politely (\xA711)`);
   process.exit(0);
 }
 var profileEnv = process.env.STERLING_TUI_PROFILE;
-var profilePath = !profileEnv ? void 0 : profileEnv === "1" ? join22(dirname11(storePath), "transient", "tui-profile.log") : profileEnv;
-var github = createGithubPoller({ root: dirname11(dirname11(storePath)) });
+var profilePath = !profileEnv ? void 0 : profileEnv === "1" ? join23(dirname12(storePath), "transient", "tui-profile.log") : profileEnv;
+var github = createGithubPoller({ root: dirname12(dirname12(storePath)) });
 var ctl = openLaunchDashboard(launch, { deferWrites: true, profile: profilePath !== void 0, onGithubRefresh: () => github.refresh() });
 if (profilePath) {
-  mkdirSync12(dirname11(profilePath), { recursive: true });
+  mkdirSync12(dirname12(profilePath), { recursive: true });
   appendFileSync(profilePath, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), start: true, pid: process.pid, changeDetection: ctl.stats().changeDetection }) + "\n");
 }
 function profiled(kind, work, extra = () => ({})) {
@@ -58557,7 +58586,7 @@ function profiled(kind, work, extra = () => ({})) {
 }
 var showBanner = process.env.STERLING_NO_BANNER !== "1";
 var screen = new termkit.default.ScreenBuffer({ dst: term });
-var subagents = createSubagentTracker(dirname11(dirname11(storePath)), { host });
+var subagents = createSubagentTracker(dirname12(dirname12(storePath)), { host });
 var shownView = { availability: "absent", active: 0, agents: [] };
 var bodyTop = 0;
 function fullBodyLines() {

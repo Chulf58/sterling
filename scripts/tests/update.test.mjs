@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { readCurrency, refusalFor, isGeneratedTrackedPath, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, UPDATE_MARKER_RELATIVE_PATH, preScaleDownMarkers, reexecArgs, UPDATE_REEXEC_ENV, UPDATE_REEXEC_FROM_ENV } from '../lib/update.mjs';
+import { readCurrency, refusalFor, isGeneratedTrackedPath, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, UPDATE_MARKER_RELATIVE_PATH, preScaleDownMarkers, reexecArgs, UPDATE_REEXEC_ENV, UPDATE_REEXEC_FROM_ENV, failingTests } from '../lib/update.mjs';
 import { BUNDLED_ARTIFACTS } from '../lib/bundled-artifacts.mjs';
 import { ensureUpdateLauncher, renderUpdateLauncher, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
 
@@ -700,6 +700,56 @@ test('a red test battery skips store migration (machine + per-project), still sy
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(projA, { recursive: true, force: true });
+  }
+});
+
+// GitHub #190: a red battery's output was dumped mid-run and the closing summary
+// said only "Updated: X → Y", so a host that clipped the long output lost every
+// failing test name. The closing summary now names them. The output parsed here
+// is REAL `node --test` output, so a change in the reporter's format fails this.
+// NODE_TEST_CONTEXT is deleted (an empty value is not enough): inherited from this
+// runner, it makes the child report to the parent instead of printing spec output.
+test('a red test battery is named in the closing summary: each failing test with its file, read from real node --test output (GitHub #190)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-update-red-'));
+  const cwd = scratchCwd();
+  try {
+    writeFileSync(
+      join(dir, 'red.test.mjs'),
+      "import test from 'node:test';\nimport assert from 'node:assert/strict';\n" +
+        "test('green one', () => {});\n" +
+        "test('AC-h2 (discriminating floor): a record whose only hit is central', () => { assert.equal(1, 2); });\n" +
+        "test('group', async (t) => { await t.test('inner red', () => { throw new Error('boom'); }); });\n"
+    );
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    delete env.NODE_TEST_WORKER_ID;
+    const real = spawnSync(process.execPath, ['--test', '--test-reporter=spec', 'red.test.mjs'], { cwd: dir, encoding: 'utf8', timeout: 60_000, env });
+    assert.notEqual(real.status, 0, 'the fixture battery is red');
+    const batteryOut = `${real.stdout}${real.stderr}`;
+    assert.deepEqual(failingTests(batteryOut).map((t) => t.name), ['AC-h2 (discriminating floor): a record whose only hit is central', 'inner red']);
+    assert.match(failingTests(batteryOut)[0].at, /^red\.test\.mjs:4:/);
+    assert.deepEqual(failingTests('killed before the summary'), []);
+
+    const { exec: base } = fakeExec({ behind: 1 });
+    const exec = (cmd, args, o) => (cmd === 'npm' && args[0] === 'test' ? { status: 1, stdout: batteryOut, stderr: '' } : base(cmd, args, o));
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (m) => lines.push(String(m)), projects: [], opts: {} });
+    assert.equal(report.exit, 1);
+    const summary = lines.slice(lines.findLastIndex((l) => l.includes('Updated:'))).join('\n');
+    assert.match(summary, /TEST BATTERY FAILED — 2 failing test\(s\)/);
+    assert.match(summary, /✖ AC-h2 \(discriminating floor\): a record whose only hit is central \(red\.test\.mjs:4:\d+\)/);
+    assert.match(summary, /✖ inner red \(red\.test\.mjs:5:\d+\)/);
+
+    // Output with no readable summary (a cut-off run) is said loudly, never left out.
+    const { exec: base2 } = fakeExec({ behind: 1 });
+    const cut = (cmd, args, o) => (cmd === 'npm' && args[0] === 'test' ? { status: 1, stdout: '✔ AC-h2 (discriminating floor still applies): a record whose only h', stderr: '' } : base2(cmd, args, o));
+    const cutLines = [];
+    await runUpdate({ cwd, exec: cut, log: (m) => cutLines.push(String(m)), projects: [], opts: {} });
+    const cutSummary = cutLines.slice(cutLines.findLastIndex((l) => l.includes('Updated:'))).join('\n');
+    assert.match(cutSummary, /TEST BATTERY FAILED — no failing test could be read from its output.*Rerun `npm test`/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
   }
 });
 

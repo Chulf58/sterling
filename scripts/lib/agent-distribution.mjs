@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { AGENT_MODEL_KEY, AGENT_TOOL_NAME_RE } from '@sterling/schemas';
 import { MCP_PREFIXES } from './checks.mjs';
 import { renderClaudeText } from './agent-fences.mjs';
+import { writeFileAtomicIfChanged } from './atomic-write.mjs';
 
 // Dead-term check (spec §0.4, CLAUDE.md conduct rules): no residue of the
 // predecessor's vocabulary in anything shipped, scaffolded, or generated.
@@ -621,7 +622,7 @@ export function installAgents({ templatesDir, registryPath, targetAgentsDir, plu
         const installedBody = normalize(installed).replace(header.headerLine + '\n', '');
         const candidateBody = entry.installedContent.replace(parseInstalledHeader(entry.installedContent).headerLine + '\n', '');
         if (installedBody === candidateBody) {
-          writeFileSync(installedPath, entry.installedContent);
+          writeFileAtomicIfChanged(installedPath, entry.installedContent);
           report.push({ name: entry.name, status: 'header_repaired' });
         } else {
           report.push({ name: entry.name, status: 'refused_local_modification', refused: true, instruction: refuseInstruction(entry.name) });
@@ -629,7 +630,7 @@ export function installAgents({ templatesDir, registryPath, targetAgentsDir, plu
         continue;
       }
     }
-    writeFileSync(installedPath, entry.installedContent);
+    writeFileAtomicIfChanged(installedPath, entry.installedContent);
     report.push({ name: entry.name, status: 'installed' });
   }
   report.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), fs: retirementFs }));
@@ -692,7 +693,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
     const installedPath = join(targetAgentsDir, `${entry.name}.md`);
     const renderCandidate = () => entry.installedContent;
     if (!existsSync(installedPath)) {
-      writeFileSync(installedPath, renderCandidate());
+      writeFileAtomicIfChanged(installedPath, renderCandidate());
       report.push({ name: entry.name, status: 'installed' });
       continue;
     }
@@ -714,7 +715,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
       const installedBody = normalize(installed).replace(header.headerLine + '\n', '');
       const candidateBody = candidate.replace(parseInstalledHeader(candidate).headerLine + '\n', '');
       if (installedBody === candidateBody) {
-        writeFileSync(installedPath, candidate);
+        writeFileAtomicIfChanged(installedPath, candidate);
         report.push({ name: entry.name, status: 'header_repaired' });
       } else {
         report.push({ name: entry.name, status: 'refused_local_modification', refused: true, instruction: refuseInstruction(entry.name) });
@@ -722,7 +723,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
     } else if (modified) {
       report.push({ name: entry.name, status: 'locally_modified_up_to_date' });
     } else if (stale) {
-      writeFileSync(installedPath, renderCandidate());
+      writeFileAtomicIfChanged(installedPath, renderCandidate());
       report.push({ name: entry.name, status: 'refreshed' });
     } else {
       // Unmodified + template-current — but hash bookkeeping cannot see a
@@ -749,7 +750,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
       const unexpected = installedTools.filter((t) => !configuredTools.includes(t));
       const modelDrift = installedModel.model !== configuredModel.model || installedModel.effort !== configuredModel.effort;
       if (!sameCommands) {
-        writeFileSync(installedPath, candidate);
+        writeFileAtomicIfChanged(installedPath, candidate);
         report.push({ name: entry.name, status: 'machine_rebaked' });
       } else if (modelDrift || missing.length || unexpected.length) {
         const drift = { name: entry.name, status: 'config_drift', installed: installedModel, configured: configuredModel, fix: CONFIG_DRIFT_FIX };

@@ -76,10 +76,10 @@ test('an unreadable mode with an armed loop present is disclosed; without the fi
 test('the next-action text names the wait script, the PR and the settle command', () => {
   const next = duty.prLoopNext(STATE, '/opt/sterling/bin/pr-review-wait.mjs');
   assert.match(next, /pr-review-loop skill: wait with node "\/opt\/sterling\/bin\/pr-review-wait\.mjs" https:\/\/github\.com\/acme\/widget\/pull\/7 \(background\)/);
-  assert.match(next, /--settle <clean\|capped\|escalated> --pr 7/);
+  assert.match(next, /--settle <clean\|capped\|escalated\|closed> --pr 7/);
   const full = duty.prLoopOwedText(STATE, next);
   assert.match(full, /^• PR review loop owed \(work mode\): PR #7 .* \(head aaaaaaa, armed 2026-09-26T10:00:00\.000Z\) — run the pr-review-loop skill/);
-  assert.match(duty.prLoopReminderText(STATE), /^PR review loop owed: PR #7 https:\/\/github\.com\/acme\/widget\/pull\/7 — next: pr-review-loop skill, then --settle clean\|capped\|escalated --pr 7\.$/);
+  assert.match(duty.prLoopReminderText(STATE), /^PR review loop owed: PR #7 https:\/\/github\.com\/acme\/widget\/pull\/7 — next: pr-review-loop skill, then --settle clean\|capped\|escalated\|closed --pr 7\.$/);
 });
 
 // GitHub issue #100: on OpenCode the notice said "(background)", which reads as
@@ -88,7 +88,7 @@ test('issue #100: the OpenCode next-action text says to start the wait with the 
   const oc = duty.prLoopNext(STATE, '/opt/sterling/bin/pr-review-wait.mjs', { host: 'opencode' });
   assert.match(oc, /wait with node "\/opt\/sterling\/bin\/pr-review-wait\.mjs" https:\/\/github\.com\/acme\/widget\/pull\/7 \(add --request-copilot on the first wait after a push\) started with the shell tool's background: true, which notifies you when it ends; never detach it with nohup or &/);
   assert.doesNotMatch(oc, /\(background\)/, 'never the bare (background) that read as "detach it"');
-  assert.match(oc, /--settle <clean\|capped\|escalated> --pr 7/);
+  assert.match(oc, /--settle <clean\|capped\|escalated\|closed> --pr 7/);
   assert.match(duty.prLoopNext(STATE, '/x/pr-review-wait.mjs'), /\(background\)/);
 });
 

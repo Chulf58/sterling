@@ -215,6 +215,25 @@ test('the sterling MCP entry points at this copy and replaces a project entry, l
   assert.equal(log.match(/sterling MCP entry from the project config/g).length, 1, 'logged once across reloads');
 });
 
+test('[#191] inside the maintenance worker child the worker\'s own guarded sterling MCP entry is kept, never replaced; outside it the same entry is replaced', async (t) => {
+  const project = tempProject(t);
+  // What the worker passes through OPENCODE_CONFIG_CONTENT: a server in worker
+  // mode, which refuses or stamps every write. Replacing it with the plain entry
+  // left every worker write unstamped, so each run failed as "unpoliced write".
+  const workerEntry = { type: 'local', command: ['node', join(repo, 'mcp', 'sterling-mcp.mjs'), '--project', project, '--worker-policy', '/p/eligible.json', '--worker-token', 'tok'], enabled: true };
+  const ctx = stubCtx(project, { mcpBase: { sterling: workerEntry } });
+  await cfg.createConfigHandler({ sterlingRoot: repo, now: () => NOW, env: { STERLING_MAINTENANCE_WORKER: '1' } })(ctx);
+  const first = ctx.run();
+  assert.deepEqual(first.mcp.get('sterling'), workerEntry, 'the worker-mode entry survives the plugin');
+  assert.deepEqual(ctx.run().mcp.get('sterling'), workerEntry, 'and survives a reload');
+  assert.ok(first.commands.size > 0 && first.skills.has('sterling:grill'), 'commands and skills still register in the worker child');
+  assert.equal(existsSync(join(project, '.sterling', 'transient', 'opencode-plugin.log')), false, 'no replacement is logged');
+
+  const outside = stubCtx(project, { mcpBase: { sterling: workerEntry } });
+  await cfg.createConfigHandler({ sterlingRoot: repo, now: () => NOW, env: {} })(outside);
+  assert.deepEqual(outside.run().mcp.get('sterling'), cfg.mcpEntry(repo, project), 'outside the worker child the entry follows this copy');
+});
+
 test('transform callbacks re-run on reload and give the same registrations', async (t) => {
   const project = tempProject(t);
   const ctx = stubCtx(project);
@@ -251,7 +270,7 @@ test('review-brief, grill and delegating-to-subagents: the OpenCode render names
   const { renderClaudeText } = await import(pathToFileURL(join(repo, 'scripts', 'lib', 'agent-fences.mjs')).href);
   const expected = {
     'review-brief': { opencode: ['sterling/reviewer', 'openai/gpt-6.1-sol#high', 'do not modify the worktree'], claude: 'call the `codex` MCP tool at `sandbox: read-only`' },
-    grill: { opencode: ['sterling/reviewer', 'openai/gpt-6-astra#high'], claude: 'through the `codex` MCP tool — `model: gpt-6-astra`, `sandbox: read-only`' },
+    grill: { opencode: ['sterling/sparring', 'openai/gpt-6-astra#high'], claude: 'through the `codex` MCP tool — `model: gpt-6-astra`, `sandbox: read-only`' },
     'delegating-to-subagents': { opencode: ['sterling/implementor', 'openai/gpt-5.6-terra'], claude: '(`gpt-5.6-terra`, through the `codex` MCP tool)' },
   };
   for (const [dir, want] of Object.entries(expected)) {

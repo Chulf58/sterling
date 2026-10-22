@@ -8,8 +8,8 @@ var __export = (target, all) => {
 
 // scripts/install-agents.mjs
 import { fileURLToPath } from "node:url";
-import { dirname, join as join2, resolve } from "node:path";
-import { readFileSync as readFileSync2, existsSync as existsSync2 } from "node:fs";
+import { dirname as dirname2, join as join3, resolve } from "node:path";
+import { readFileSync as readFileSync3, existsSync as existsSync3 } from "node:fs";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -4781,7 +4781,8 @@ var AGENT_MODEL_KEY = {
   researcher: "researcher",
   scout: "scout",
   librarian: "librarian",
-  reviewer: "reviewer"
+  reviewer: "reviewer",
+  sparring: "sparring"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
 
@@ -5016,7 +5017,12 @@ var configSchema = external_exports.object({
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
-    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
+    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
+    // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
+    // read-only grant as the reviewer, so the same install-time default. Every
+    // dispatch pins its model (Astra, else a Fable model); under Overpass its
+    // role tier decides.
+    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
   }).catchall(agentModelEntry).default({}),
   // Per-project agent tool extension (decision
   // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
@@ -5466,9 +5472,9 @@ var renameFenceSchema = external_exports.object({
 }).strict();
 
 // scripts/lib/agent-distribution.mjs
-import { createHash, randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, statSync, lstatSync, unlinkSync, renameSync, linkSync } from "node:fs";
-import { join } from "node:path";
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+import { readFileSync as readFileSync2, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync2, mkdirSync, statSync, lstatSync, unlinkSync, renameSync as renameSync2, linkSync } from "node:fs";
+import { join as join2 } from "node:path";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -5569,6 +5575,28 @@ function renderClaudeText(text, label) {
 
 // scripts/lib/checks.mjs
 var MCP_PREFIXES = ["mcp__sterling__", "mcp__plugin_sterling_sterling__"];
+
+// scripts/lib/atomic-write.mjs
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+function atomicTempPath(path) {
+  return join(dirname(path), `.${basename(path)}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`);
+}
+function replaceVia(tmp, path, content, { writeFile = writeFileSync, rename = renameSync } = {}) {
+  try {
+    writeFile(tmp, content);
+    rename(tmp, path);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+function writeFileAtomicIfChanged(path, content, fs) {
+  if (existsSync(path) && readFileSync(path, "utf8") === content) return false;
+  replaceVia(atomicTempPath(path), path, content, fs);
+  return true;
+}
 
 // scripts/lib/agent-distribution.mjs
 var DEAD_TERM_PATTERNS = [
@@ -5764,7 +5792,7 @@ function validateHosts(entry, where) {
   }
 }
 function loadRegistry(registryPath) {
-  const registry = JSON.parse(readFileSync(registryPath, "utf8"));
+  const registry = JSON.parse(readFileSync2(registryPath, "utf8"));
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
     throw new Error(`agent registry ${registryPath}: unsupported shape (expected {version: 1, agents: []})`);
   }
@@ -5810,7 +5838,7 @@ function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion: pl
     }
   }
   return entries.map((entry) => {
-    const templateContent = readFileSync(join(templatesDir, entry.file), "utf8");
+    const templateContent = readFileSync2(join2(templatesDir, entry.file), "utf8");
     const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion: pluginVersion2, now, vars, config: config2 });
     if (name !== entry.name) {
       throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name}'`);
@@ -5828,7 +5856,7 @@ function retirementRefuseInstruction(name) {
   ].join("\n");
 }
 function retireAgents({ targetAgentsDir, registryNames, fs = {} }) {
-  const io = { readdirSync, lstatSync, readFileSync, unlinkSync, renameSync, linkSync, ...fs };
+  const io = { readdirSync, lstatSync, readFileSync: readFileSync2, unlinkSync, renameSync: renameSync2, linkSync, ...fs };
   const report2 = [];
   let entries;
   try {
@@ -5841,7 +5869,7 @@ Unable to scan the agent directory: ${err?.code ?? err?.message ?? err}` }];
     if (!filename.endsWith(".md")) continue;
     const name = filename.slice(0, -3);
     if (registryNames.has(name)) continue;
-    const path = join(targetAgentsDir, filename);
+    const path = join2(targetAgentsDir, filename);
     let stat;
     try {
       stat = io.lstatSync(path);
@@ -5879,7 +5907,7 @@ Unable to read the file: ${err?.code ?? err?.message ?? err}` });
       report2.push({ name, status: "retired_but_modified", refused: true, instruction: retirementRefuseInstruction(name) });
       continue;
     }
-    const quarantine = join(targetAgentsDir, `.sterling-retire-${name}-${randomUUID()}`);
+    const quarantine = join2(targetAgentsDir, `.sterling-retire-${name}-${randomUUID2()}`);
     const verifyQuarantine = () => {
       const qstat = io.lstatSync(quarantine);
       if (!qstat.isFile()) throw new Error("quarantine is not a regular file");
@@ -5920,9 +5948,9 @@ function installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVers
   mkdirSync(targetAgentsDir, { recursive: true });
   const report2 = [];
   for (const entry of prepared) {
-    const installedPath = join(targetAgentsDir, `${entry.name}.md`);
-    if (existsSync(installedPath)) {
-      const installed = readFileSync(installedPath, "utf8");
+    const installedPath = join2(targetAgentsDir, `${entry.name}.md`);
+    if (existsSync2(installedPath)) {
+      const installed = readFileSync2(installedPath, "utf8");
       const header = parseInstalledHeader(installed);
       if (!header) {
         report2.push({ name: entry.name, status: "foreign_file", refused: true, instruction: foreignFileInstruction(entry.name) });
@@ -5936,7 +5964,7 @@ function installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVers
         const installedBody = normalize(installed).replace(header.headerLine + "\n", "");
         const candidateBody = entry.installedContent.replace(parseInstalledHeader(entry.installedContent).headerLine + "\n", "");
         if (installedBody === candidateBody) {
-          writeFileSync(installedPath, entry.installedContent);
+          writeFileAtomicIfChanged(installedPath, entry.installedContent);
           report2.push({ name: entry.name, status: "header_repaired" });
         } else {
           report2.push({ name: entry.name, status: "refused_local_modification", refused: true, instruction: refuseInstruction(entry.name) });
@@ -5944,7 +5972,7 @@ function installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVers
         continue;
       }
     }
-    writeFileSync(installedPath, entry.installedContent);
+    writeFileAtomicIfChanged(installedPath, entry.installedContent);
     report2.push({ name: entry.name, status: "installed" });
   }
   report2.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), fs: retirementFs }));
@@ -5975,12 +6003,12 @@ function foreignFileInstruction(name) {
 }
 var CONDUCTOR_ACTIVATION_SUCCESS_STATUSES = /* @__PURE__ */ new Set(["installed", "up_to_date", "refreshed", "header_repaired"]);
 function ensureConductorActivation(targetDir2, agentResults) {
-  const settingsPath = join(targetDir2, ".claude", "settings.json");
+  const settingsPath = join2(targetDir2, ".claude", "settings.json");
   let parsed;
   let eol = "\n";
   let trailingNewline = true;
-  if (existsSync(settingsPath)) {
-    let raw = readFileSync(settingsPath, "utf8");
+  if (existsSync2(settingsPath)) {
+    let raw = readFileSync2(settingsPath, "utf8");
     if (raw.charCodeAt(0) === 65279) raw = raw.slice(1);
     eol = raw.includes("\r\n") ? "\r\n" : "\n";
     trailingNewline = /\r?\n$/.test(raw);
@@ -6029,32 +6057,32 @@ function ensureConductorActivation(targetDir2, agentResults) {
   if (result.activation !== "written" && result.autoMemory !== "written") return result;
   if (result.activation === "written") parsed.agent = "conductor";
   if (result.autoMemory === "written") parsed.autoMemoryEnabled = false;
-  mkdirSync(join(targetDir2, ".claude"), { recursive: true });
-  const tmp = `${settingsPath}.tmp-${randomUUID()}`;
+  mkdirSync(join2(targetDir2, ".claude"), { recursive: true });
+  const tmp = `${settingsPath}.tmp-${randomUUID2()}`;
   let body = JSON.stringify(parsed, null, 2);
   if (eol === "\r\n") body = body.replace(/\n/g, "\r\n");
   if (trailingNewline) body += eol;
-  writeFileSync(tmp, body);
-  renameSync(tmp, settingsPath);
+  writeFileSync2(tmp, body);
+  renameSync2(tmp, settingsPath);
   result.path = settingsPath;
   return result;
 }
 
 // scripts/install-agents.mjs
-var here = dirname(fileURLToPath(new URL("../scripts/install-agents.mjs", import.meta.url).href));
+var here = dirname2(fileURLToPath(new URL("../scripts/install-agents.mjs", import.meta.url).href));
 var pluginRoot = resolve(here, "..");
 var args = process.argv.slice(2);
 var targetIdx = args.indexOf("--target");
 var targetDir = targetIdx !== -1 ? resolve(args[targetIdx + 1]) : process.cwd();
-var pluginVersion = JSON.parse(readFileSync2(join2(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version;
-var configPath = join2(targetDir, ".sterling", "config.json");
+var pluginVersion = JSON.parse(readFileSync3(join3(pluginRoot, ".claude-plugin", "plugin.json"), "utf8")).version;
+var configPath = join3(targetDir, ".sterling", "config.json");
 var config = parseConfig(
-  JSON.parse(readFileSync2(existsSync2(configPath) ? configPath : join2(pluginRoot, "templates", "default-config.json"), "utf8"))
+  JSON.parse(readFileSync3(existsSync3(configPath) ? configPath : join3(pluginRoot, "templates", "default-config.json"), "utf8"))
 );
 var { report, restartInstruction } = installAgents({
-  templatesDir: join2(pluginRoot, "agent-templates"),
-  registryPath: join2(pluginRoot, "agent-templates", "registry.json"),
-  targetAgentsDir: join2(targetDir, ".claude", "agents"),
+  templatesDir: join3(pluginRoot, "agent-templates"),
+  registryPath: join3(pluginRoot, "agent-templates", "registry.json"),
+  targetAgentsDir: join3(targetDir, ".claude", "agents"),
   pluginVersion,
   now: (/* @__PURE__ */ new Date()).toISOString(),
   config

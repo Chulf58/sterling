@@ -5581,7 +5581,8 @@ var init_records = __esm({
       researcher: "researcher",
       scout: "scout",
       librarian: "librarian",
-      reviewer: "reviewer"
+      reviewer: "reviewer",
+      sparring: "sparring"
     };
     REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
     s = (v) => typeof v === "string" ? v : "";
@@ -5919,7 +5920,7 @@ function resolveOverpassRoles(raw, provider) {
       if (key !== "tier" && key !== "effort")
         throw new Error(`config.overpass.roles.${role} has the unknown field ${JSON.stringify(key)} \u2014 only "tier" and "effort" are allowed`);
     }
-    const tier = fields.tier === void 0 ? DEFAULT_OVERPASS_TIER : fields.tier;
+    const tier = fields.tier === void 0 ? DEFAULT_OVERPASS_ROLE_TIERS[role] : fields.tier;
     if (typeof tier !== "string" || !OVERPASS_TIER_RE.test(tier)) {
       throw new Error(`config.overpass.roles.${role}.tier is ${JSON.stringify(fields.tier)} \u2014 it must be an Overpass tier name like "agentic-high" (agentic- then lowercase letters, digits and '-')`);
     }
@@ -6029,7 +6030,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 left in place and ignored; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, RETIRED_MODEL_KEYS, isPlainObject, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, DEFAULT_OVERPASS_ROLE_TIERS, RETIRED_MODEL_KEYS, isPlainObject, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6218,7 +6219,12 @@ var init_config = __esm({
         // reviewer judges a diff (decision
         // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
         // dispatch pins its model explicitly; this is the install-time default.
-        reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
+        reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
+        // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
+        // read-only grant as the reviewer, so the same install-time default. Every
+        // dispatch pins its model (Astra, else a Fable model); under Overpass its
+        // role tier decides.
+        sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
       }).catchall(agentModelEntry).default({}),
       // Per-project agent tool extension (decision
       // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
@@ -6534,10 +6540,18 @@ var init_config = __esm({
     });
     DEFAULT_OVERPASS_PROVIDER = "overpass";
     OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
-    OVERPASS_ROLES = ["implementor", "researcher", "scout", "reviewer", "librarian"];
+    OVERPASS_ROLES = ["implementor", "researcher", "scout", "reviewer", "librarian", "sparring"];
     OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
     OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
     DEFAULT_OVERPASS_TIER = "agentic-high";
+    DEFAULT_OVERPASS_ROLE_TIERS = {
+      implementor: "agentic-premium",
+      researcher: DEFAULT_OVERPASS_TIER,
+      scout: DEFAULT_OVERPASS_TIER,
+      reviewer: DEFAULT_OVERPASS_TIER,
+      librarian: DEFAULT_OVERPASS_TIER,
+      sparring: "agentic-premium-max"
+    };
     RETIRED_MODEL_KEYS = [
       "coder",
       "coder_hard",
@@ -13915,6 +13929,12 @@ var init_checks = __esm({
   }
 });
 
+// scripts/lib/atomic-write.mjs
+var init_atomic_write = __esm({
+  "scripts/lib/atomic-write.mjs"() {
+  }
+});
+
 // scripts/lib/agent-distribution.mjs
 function parseInstalledHeader(content) {
   const m = normalize3(content).match(HEADER_RE);
@@ -13928,6 +13948,7 @@ var init_agent_distribution = __esm({
     init_dist();
     init_checks();
     init_agent_fences();
+    init_atomic_write();
     normalize3 = (s2) => s2.replace(/\r\n/g, "\n");
     HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=((?:(?!-->)[^\n])+) -->$/m;
     RESTART_INSTRUCTION = [
@@ -15397,6 +15418,26 @@ function unfinishedReason(r, timeout) {
   if (r.errorCode) return `could not run (${r.errorCode})`;
   return null;
 }
+function failingTests(out) {
+  const lines = String(out ?? "").split(/\r?\n/);
+  const start = lines.findIndex((l) => l.trim() === "\u2716 failing tests:");
+  if (start === -1) return [];
+  const found = [];
+  for (let i = start + 1; i < lines.length - 1; i++) {
+    const at = /^test at (.+)$/.exec(lines[i].trim());
+    if (!at) continue;
+    const name = /^✖ (.+?)(?: \([\d.]+m?s\))?$/.exec(lines[i + 1].trim());
+    if (name) found.push({ name: name[1], at: at[1] });
+  }
+  return found;
+}
+function testBatterySummary(failed, cwd) {
+  if (!failed.length) {
+    return `\u2717 TEST BATTERY FAILED \u2014 no failing test could be read from its output (the run may have been cut off; see the test battery block above). Rerun \`npm test\` in ${cwd} to see which test fails.`;
+  }
+  return `\u2717 TEST BATTERY FAILED \u2014 ${failed.length} failing test(s):
+` + failed.map((t) => `  \u2716 ${t.name} (${t.at})`).join("\n");
+}
 function gitFrom(exec, cwd) {
   return (args, { allowFail = false } = {}) => {
     const r = exec("git", args, { cwd });
@@ -16194,9 +16235,12 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
   if (!step("build server + packages (npm run build)", "npm", ["run", "build"]).ok) return report2;
   if (!step("consistency checks (npm run check)", "npm", ["run", "check"], { show: true }).ok) return report2;
   let testFailed = false;
+  let failedTests = [];
   if (opts2.test !== false) {
-    if (!step("test battery (npm test)", "npm", ["test"], { timeout: TEST_STEP_TIMEOUT_MS }).ok) {
+    const battery = step("test battery (npm test)", "npm", ["test"], { timeout: TEST_STEP_TIMEOUT_MS });
+    if (!battery.ok) {
       testFailed = true;
+      failedTests = failingTests(battery.out);
       log(
         '\n\u2717 TEST BATTERY FAILED \u2014 store migration is SKIPPED below (schema changes are the one irreversible step, and this is code the battery has just called suspect). Agent sync still runs, because the hooks from this pull are already live in every project via --plugin-dir. This run exits non-zero and will NOT write the completion marker \u2014 rerun after fixing the battery, or the next /sterling:update resumes from here instead of reporting "Already current".'
       );
@@ -16300,7 +16344,8 @@ ${changed.length} file(s) changed ${from.slice(0, 7)}..${after.head_short}`);
     `
 ${"\u2500".repeat(60)}
 Updated: ${before.head_short} \u2192 ${after.head_short}${after.describe && after.describe !== after.head_short ? ` (${after.describe})` : ""}
-` + (report2.contract_drift ? "CONTRACT DRIFT in a sibling project \u2014 see the stamp-contract block above. Tolerated here (a sibling CLAUDE.md never blocks this clone), and it does NOT self-heal: resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply`.\n" : "") + "RESTART THE SESSION before working \u2014 that means EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough, MCP servers survive it): the MCP server and every project subagent load at CLI start, so the code now on disk is not the code running."
+` + (report2.contract_drift ? "CONTRACT DRIFT in a sibling project \u2014 see the stamp-contract block above. Tolerated here (a sibling CLAUDE.md never blocks this clone), and it does NOT self-heal: resolve the hand-tuned text, then `node scripts/stamp-contract.mjs --apply`.\n" : "") + (testFailed ? `${testBatterySummary(failedTests, cwd)}
+` : "") + "RESTART THE SESSION before working \u2014 that means EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough, MCP servers survive it): the MCP server and every project subagent load at CLI start, so the code now on disk is not the code running."
   );
   if (registryFailed) {
     log(`

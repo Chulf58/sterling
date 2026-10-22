@@ -64,7 +64,7 @@ function parseOriginRepo(url) {
 }
 var PR_LOOP_REL = ".sterling/transient/pr-loop.json";
 var PR_LOOPS_DIR_REL = ".sterling/transient/pr-loops";
-var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated"];
+var PR_LOOP_OUTCOMES = ["clean", "capped", "escalated", "closed"];
 var prLoopPath = (root) => join2(root, PR_LOOP_REL);
 var prLoopFile = (root, prNumber2) => join2(root, PR_LOOPS_DIR_REL, `${prNumber2}.json`);
 var prLoopFileRel = (prNumber2) => `${PR_LOOPS_DIR_REL}/${prNumber2}.json`;
@@ -501,7 +501,14 @@ if (argv.includes("--settle")) {
       }
       return { head_sha: state.head_sha };
     };
-    const s = settlePrLoop(storeRoot, outcome, flag("--pr"), { originRepo, guard: outcome === "clean" ? guard : null });
+    const closedGuard = (armed) => {
+      const state = fetchPrMergeState(target, originRepo, armed.pr_number);
+      merge = { pr_state: state.pr_state, already_merged: state.merged, head_sha: state.head_sha, armed_head_sha: armed.head_sha };
+      if (state.merged) throw new Error(`the PR is already merged, so it was not closed unmerged: settle clean instead; nothing settled`);
+      if (state.pr_state !== "CLOSED") throw new Error(`the PR is ${state.pr_state}, not closed: settle closed only for a PR closed without merging; nothing settled`);
+      return { head_sha: state.head_sha };
+    };
+    const s = settlePrLoop(storeRoot, outcome, flag("--pr"), { originRepo, guard: outcome === "clean" ? guard : outcome === "closed" ? closedGuard : null });
     process.stdout.write(JSON.stringify({ status: s.status, pr_number: s.pr_number, pr_url: s.pr_url, settled_at: s.settled_at, ...merge ?? {} }) + "\n");
     process.exit(0);
   } catch (e) {

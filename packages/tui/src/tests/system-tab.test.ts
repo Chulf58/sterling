@@ -255,6 +255,8 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
       // last, so the cursor indices above are unchanged (reviewer joined the
       // roster in decision reviewer-agent-is-the-one-review-rubric-for-claude-and-codex)
       reviewer: { model: 'claude-opus-4-8', effort: 'low' },
+      // sparring joined the roster 2026-10-22 (user-ruled "Yes, as stated"); also last
+      sparring: { model: 'claude-opus-4-8', effort: 'low' },
     },
     catalog: freshCatalog(),
     ...over,

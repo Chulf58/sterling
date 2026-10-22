@@ -4968,7 +4968,8 @@ var init_records = __esm({
       researcher: "researcher",
       scout: "scout",
       librarian: "librarian",
-      reviewer: "reviewer"
+      reviewer: "reviewer",
+      sparring: "sparring"
     };
     REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
     s = (v) => typeof v === "string" ? v : "";
@@ -5440,7 +5441,12 @@ var init_config = __esm({
         // reviewer judges a diff (decision
         // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
         // dispatch pins its model explicitly; this is the install-time default.
-        reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
+        reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
+        // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
+        // read-only grant as the reviewer, so the same install-time default. Every
+        // dispatch pins its model (Astra, else a Fable model); under Overpass its
+        // role tier decides.
+        sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
       }).catchall(agentModelEntry).default({}),
       // Per-project agent tool extension (decision
       // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
@@ -12191,6 +12197,12 @@ var init_checks = __esm({
   }
 });
 
+// scripts/lib/atomic-write.mjs
+var init_atomic_write = __esm({
+  "scripts/lib/atomic-write.mjs"() {
+  }
+});
+
 // scripts/lib/agent-distribution.mjs
 import { createHash as createHash5, randomUUID as randomUUID6 } from "node:crypto";
 import { readFileSync as readFileSync14, writeFileSync as writeFileSync5, readdirSync as readdirSync5, existsSync as existsSync12, mkdirSync as mkdirSync9, statSync as statSync5, lstatSync as lstatSync7, unlinkSync as unlinkSync3, renameSync as renameSync4, linkSync as linkSync2 } from "node:fs";
@@ -12310,6 +12322,7 @@ var init_agent_distribution = __esm({
     init_dist();
     init_checks();
     init_agent_fences();
+    init_atomic_write();
     normalize = (s2) => s2.replace(/\r\n/g, "\n");
     HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=((?:(?!-->)[^\n])+) -->$/m;
     OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];

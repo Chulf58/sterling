@@ -1010,6 +1010,7 @@ export const AGENT_MODEL_KEY = {
   scout: 'scout',
   librarian: 'librarian',
   reviewer: 'reviewer',
+  sparring: 'sparring',
 } as Record<string, string>;
 
 // REVIEWER_ROLES (decision foreign_628c4b7f, run r-d630, phase 1 — AC1): derived from

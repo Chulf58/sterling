@@ -45,10 +45,11 @@ const CFG = { config: { models: MODELS }, models: MODELS };
 // runs it through each linter and expects an empty (vacuous) result. Decision
 // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex (2026-09-30)
 // then added reviewer, a fifth subagent. The roster is now
-// implementor/researcher/scout/librarian/reviewer/conductor, plus plan: the
+// implementor/researcher/scout/librarian/reviewer/sparring/conductor (sparring was
+// added 2026-10-22, user-ruled "Yes, as stated"), plus plan: the
 // OpenCode-only Plan agent (registry hosts ["opencode"], GitHub #76), a primary
 // agent the user Tabs to, so it is in MAIN_SESSION_AGENTS like the conductor.
-const ROSTER = ['implementor', 'researcher', 'scout', 'librarian', 'reviewer', 'conductor', 'plan'];
+const ROSTER = ['implementor', 'researcher', 'scout', 'librarian', 'reviewer', 'sparring', 'conductor', 'plan'];
 // What Claude Code installs to .claude/agents/: every agent but the OpenCode-only plan.
 const CLAUDE_ROSTER = ROSTER.filter((n) => n !== 'plan');
 
@@ -232,7 +233,7 @@ test('inherit-all implementor: no tools: line; disallowedTools denies exactly th
 });
 
 test('the allowlist agents keep their tools: line (a read-only agent must not silently gain an MCP writer)', () => {
-  for (const file of ['researcher.md', 'scout.md', 'librarian.md', 'reviewer.md']) {
+  for (const file of ['researcher.md', 'scout.md', 'librarian.md', 'reviewer.md', 'sparring.md']) {
     assert.match(fmOf(readFileSync(join(TPL, file), 'utf8')), /^tools:/m, `${file} keeps its allowlist`);
   }
 });
@@ -286,6 +287,31 @@ test('reviewer: registered, read-only by tool grant (no Edit/Write/NotebookEdit,
   for (const read of ['knowledge_query', 'knowledge_get', 'board_query', 'board_get']) {
     for (const prefix of ['mcp__sterling__', 'mcp__plugin_sterling_sterling__']) assert.ok(tools.includes(prefix + read), `reviewer.md grants ${prefix}${read}`);
   }
+});
+
+// User ruling 2026-10-22 ("Yes, as stated"): sparring has its own agent, so Overpass
+// can route it to its own tier. It holds the reviewer's exact read-only grant, and
+// its body is a sparring brief, not the review rubric.
+test('sparring: registered, holds exactly the reviewer\'s tool grant, body is the sparring brief and keeps the no-worktree-edit and no-.sterling rules', () => {
+  const registry = loadRegistry(join(TPL, 'registry.json'));
+  assert.ok(registry.agents.some((a) => a.name === 'sparring' && a.file === 'sparring.md'), 'sparring is registered against sparring.md');
+  const sparringText = readFileSync(join(TPL, 'sparring.md'), 'utf8');
+  const fm = fmOf(sparringText);
+  assert.match(fm, /^name: sparring$/m);
+  assert.doesNotMatch(fm, /^disallowedTools:/m, 'an allowlist agent, not inherit-all');
+  const grant = (text) => fmOf(text).match(/^tools:\s*(.+)$/m)[1].split(',').map((t) => t.trim()).sort();
+  assert.deepEqual(grant(sparringText), grant(readFileSync(join(TPL, 'reviewer.md'), 'utf8')), 'the same tools as the reviewer, so no write tool and no web tool');
+  const body = sparringText.replace(/^---[\s\S]*?\n---/, '');
+  for (const [label, re] of [
+    ['takes the dispatcher\'s problem, proposal and objections', /problem[\s\S]*proposal[\s\S]*objections/i],
+    ['attacks the weak points', /strongest objection/i],
+    ['says where it disagrees and why', /where you disagree and why/i],
+    ['offers an alternative', /alternative/i],
+    ['advisory, never gating', /advisory, never gating/i],
+    ['do not modify the worktree', /Do not modify the worktree/],
+    ['never read or write under .sterling', /Never read or write anything under `\.sterling\/`/],
+  ]) assert.match(body, re, `sparring body carries: ${label}`);
+  assert.doesNotMatch(body, /Test integrity:|Verdict: APPROVE/, 'the sparring body is not the review rubric');
 });
 
 // The reviewer body is the ONE rubric: the Codex Sol call is handed the same
