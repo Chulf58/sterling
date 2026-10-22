@@ -19185,8 +19185,9 @@ var configSchema = external_exports.object({
   // routes the conductor and every lane through the provider's tiered models.
   // Work mode on OpenCode only. PERMISSIVE like mode: the value is preserved
   // raw so a typo never fails every parseConfig reader; the strict judge is
-  // resolveOverpass() below, which throws on a present but invalid value. The
-  // default lives twice: here and in templates/default-config.json
+  // resolveOverpass() below, which throws on a present but invalid value,
+  // including an unknown role or field under the optional `roles` map
+  // (per-role tier and effort, resolveOverpassRoles). The default lives twice: here and in templates/default-config.json
   // (config.test.ts pins that they agree).
   overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false })
 });

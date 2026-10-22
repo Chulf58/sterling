@@ -602,8 +602,9 @@ export const configSchema = z.object({
   // routes the conductor and every lane through the provider's tiered models.
   // Work mode on OpenCode only. PERMISSIVE like mode: the value is preserved
   // raw so a typo never fails every parseConfig reader; the strict judge is
-  // resolveOverpass() below, which throws on a present but invalid value. The
-  // default lives twice: here and in templates/default-config.json
+  // resolveOverpass() below, which throws on a present but invalid value,
+  // including an unknown role or field under the optional `roles` map
+  // (per-role tier and effort, resolveOverpassRoles). The default lives twice: here and in templates/default-config.json
   // (config.test.ts pins that they agree).
   overpass: z.unknown().default({ enabled: false, provider: 'overpass', conductor_bypass: false }),
 });
@@ -619,6 +620,27 @@ export const DEFAULT_OVERPASS_PROVIDER = 'overpass';
 // is interpolated into `<provider>/agentic-conductor` model references.
 export const OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
 
+// Per-role routing (decision overpass-toggle-work-mode-only-routes-every-lane-through-tiers,
+// amended 2026-10-22, "Effort and tier per role"): config.overpass.roles maps a subagent
+// role to an optional tier (the role's lanes run on <provider>/<tier> instead of
+// <provider>/agentic-high) and an optional client reasoning effort, which the OpenCode
+// plugin sends on each request of that role's lane. Effort is an exact override, not a
+// minimum: 'high' also replaces an xhigh the gateway would have picked. Both are off by
+// default. Plan and the maintenance worker are not roles here and keep laneModel.
+export const OVERPASS_ROLES = ['implementor', 'researcher', 'scout', 'reviewer', 'librarian'] as const;
+export type OverpassRole = (typeof OVERPASS_ROLES)[number];
+export const OVERPASS_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type OverpassEffort = (typeof OVERPASS_EFFORTS)[number];
+export const OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
+export const DEFAULT_OVERPASS_TIER = 'agentic-high';
+
+export interface OverpassRoleRoute {
+  /** <provider>/<roles[role].tier ?? 'agentic-high'>. */
+  model: string;
+  /** The client reasoning effort for the role's requests; absent when none is set. */
+  effort?: OverpassEffort;
+}
+
 export interface OverpassResolution {
   /** overpass.enabled is true in the config, whatever the mode or host. */
   configured: boolean;
@@ -628,9 +650,46 @@ export interface OverpassResolution {
   conductorRouted: boolean;
   provider: string;
   conductorModel: string;
+  /** The lane model of Plan and the maintenance worker, and of a subagent that is not one of OVERPASS_ROLES. */
   laneModel: string;
+  /** Every role in OVERPASS_ROLES, with its lane model and effort (config.overpass.roles). */
+  roles: Record<OverpassRole, OverpassRoleRoute>;
   /** Why a configured overpass is not effective; absent otherwise. */
   reason?: string;
+}
+
+/** config.overpass.roles judged strictly: unknown roles, unknown entry fields and bad values throw. */
+function resolveOverpassRoles(raw: unknown, provider: string): Record<OverpassRole, OverpassRoleRoute> {
+  if (raw !== undefined && !isPlainObject(raw)) {
+    throw new Error(`config.overpass.roles is ${JSON.stringify(raw)} — it must be an object like {"reviewer": {"tier": "agentic-high", "effort": "high"}}`);
+  }
+  const block = raw ?? {};
+  for (const key of Object.keys(block)) {
+    if (!(OVERPASS_ROLES as readonly string[]).includes(key)) {
+      throw new Error(`config.overpass.roles has the unknown role ${JSON.stringify(key)} — the roles are ${OVERPASS_ROLES.join(', ')}`);
+    }
+  }
+  const out = {} as Record<OverpassRole, OverpassRoleRoute>;
+  for (const role of OVERPASS_ROLES) {
+    const entry = block[role];
+    if (entry !== undefined && !isPlainObject(entry)) {
+      throw new Error(`config.overpass.roles.${role} is ${JSON.stringify(entry)} — it must be an object with an optional "tier" and "effort"`);
+    }
+    const fields = entry ?? {};
+    for (const key of Object.keys(fields)) {
+      if (key !== 'tier' && key !== 'effort') throw new Error(`config.overpass.roles.${role} has the unknown field ${JSON.stringify(key)} — only "tier" and "effort" are allowed`);
+    }
+    const tier = fields.tier === undefined ? DEFAULT_OVERPASS_TIER : fields.tier;
+    if (typeof tier !== 'string' || !OVERPASS_TIER_RE.test(tier)) {
+      throw new Error(`config.overpass.roles.${role}.tier is ${JSON.stringify(fields.tier)} — it must be an Overpass tier name like "agentic-high" (agentic- then lowercase letters, digits and '-')`);
+    }
+    const effort = fields.effort;
+    if (effort !== undefined && (typeof effort !== 'string' || !(OVERPASS_EFFORTS as readonly string[]).includes(effort))) {
+      throw new Error(`config.overpass.roles.${role}.effort is ${JSON.stringify(effort)} — it must be one of ${OVERPASS_EFFORTS.join(', ')}`);
+    }
+    out[role] = effort === undefined ? { model: `${provider}/${tier}` } : { model: `${provider}/${tier}`, effort: effort as OverpassEffort };
+  }
+  return out;
 }
 
 export function resolveOverpass(config: unknown, opts: { host: string }): OverpassResolution {
@@ -652,7 +711,8 @@ export function resolveOverpass(config: unknown, opts: { host: string }): Overpa
   if (typeof provider !== 'string' || !OVERPASS_PROVIDER_RE.test(provider)) {
     throw new Error(`config.overpass.provider is ${JSON.stringify(provider)} — it must be a provider id of letters, digits, '-', '_' and '.', with no '/' or '#'`);
   }
-  const base = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/agentic-high` };
+  const roles = resolveOverpassRoles(block.roles, provider);
+  const base = { configured: enabled, provider, conductorModel: `${provider}/agentic-conductor`, laneModel: `${provider}/${DEFAULT_OVERPASS_TIER}`, roles };
   if (!enabled) return { ...base, effective: false, conductorRouted: false };
   const mode = judgeProjectMode(cfg.mode, 'the config');
   if (mode !== 'work') return { ...base, effective: false, conductorRouted: false, reason: `overpass applies in work mode only; the project mode is '${mode}'` };

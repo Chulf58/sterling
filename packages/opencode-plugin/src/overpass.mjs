@@ -1,9 +1,13 @@
 // The Overpass toggle on OpenCode (decisions overpass-toggle-work-mode-only-routes-every-lane-through-tiers
 // and overpass-toggle-mechanism-dispatch-pin-opencode-json-overlay-loud-open-session-notice,
 // points 2, 3, 4 and 8). The resolver is resolveOverpass in packages/schemas; this
-// file applies what it says on the three plugin seams:
+// file applies what it says on these plugin seams:
 //   - the dispatch pin: while Overpass is effective, every subagent call's model is
-//     the lane model, replacing any model the call named (axis.mjs calls dispatchPin);
+//     its role's lane model (config.overpass.roles tier, else the lane model), replacing
+//     any model the call named (axis.mjs calls dispatchPin);
+//   - the request effort: while effective, a request of a role with an effort set, on
+//     exactly that role's lane model, carries it as options.reasoningEffort (requestEffort,
+//     set from server.mjs's context hook);
 //   - the opencode.json overlay: while effective, agent.plan.model is the lane model
 //     and, unless the conductor is bypassed, agent["sterling/conductor"].model is the
 //     conductor model. A `variant` on those entries is taken out while the tier model
@@ -28,6 +32,7 @@ import { dirname, join } from 'node:path';
 import { resolveOverpass } from '@sterling/schemas';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { CONDUCTOR_AGENT, PROJECT_CONFIG_REL, normalizeConfigText, projectConfigText, writeFileAtomic } from '../../../scripts/lib/opencode-install.mjs';
+import { agentRole } from './agent-name.mjs';
 import { remember } from './bounded.mjs';
 
 export const OVERLAY_REL = '.sterling/overpass-overlay.json';
@@ -114,6 +119,7 @@ export function bypassRefusal(why) {
  */
 export function dispatchPin(res, args) {
   if (!res.effective) return { model: null, line: null };
+  const lane = laneRoute(res, args?.agent).model;
   const marker = bypassMarker(args?.prompt);
   if (marker) {
     const named = args?.model;
@@ -121,15 +127,99 @@ export function dispatchPin(res, args) {
     if (!marker.reason) throw new Error(bypassRefusal('the marker gives no reason'));
     return {
       model: null,
-      line: `OVERPASS-BYPASS: Overpass bypassed for this dispatch: it was sent to ${named} instead of ${res.laneModel} (reason: ${marker.reason}).`,
-      notice: `Sterling Overpass: Overpass bypassed for a subagent dispatch: it was sent to ${named} instead of ${res.laneModel} (reason: ${marker.reason}).`,
+      line: `OVERPASS-BYPASS: Overpass bypassed for this dispatch: it was sent to ${named} instead of ${lane} (reason: ${marker.reason}).`,
+      notice: `Sterling Overpass: Overpass bypassed for a subagent dispatch: it was sent to ${named} instead of ${lane} (reason: ${marker.reason}).`,
     };
   }
   const asked = args?.model;
-  const replaced = typeof asked === 'string' && asked && asked !== res.laneModel;
+  const replaced = typeof asked === 'string' && asked && asked !== lane;
   return {
-    model: res.laneModel,
-    line: replaced ? `OVERPASS: this dispatch ran on ${res.laneModel}, not ${asked} as the call named; while Overpass is on every subagent lane takes the tier model (config.overpass).` : null,
+    model: lane,
+    line: replaced ? `OVERPASS: this dispatch ran on ${lane}, not ${asked} as the call named; while Overpass is on every subagent lane takes the tier model (config.overpass).` : null,
+  };
+}
+
+/**
+ * The Overpass route of a subagent `agent` (an OpenCode agent name): { model, effort? }.
+ * A Sterling role (agentRole) takes its config.overpass.roles entry; any other agent
+ * takes the default lane model with no effort.
+ */
+export function laneRoute(res, agent) {
+  const role = agentRole(agent);
+  return (typeof role === 'string' && Object.hasOwn(res.roles ?? {}, role) && res.roles[role]) || { model: res.laneModel };
+}
+
+/**
+ * The client reasoning effort for one model request of `agent` on `model` (the context
+ * hook's Model.Ref, { providerID, id }), or null to leave the request alone. Set only
+ * while Overpass is effective, the request's session is known to come from a dispatch
+ * that was not bypassed (`dispatched`, from createLaneDispatches().dispatchOf; null when
+ * that cannot be told), the agent maps to a role with an effort set, and the request runs
+ * on exactly that role's lane model. A bypassed dispatch is never touched, even one that
+ * named the role's own lane model, and neither is any other model.
+ */
+export function requestEffort(res, agent, model, dispatched) {
+  if (!res?.effective) return null;
+  if (!dispatched || dispatched.bypassed !== false) return null;
+  const role = agentRole(agent);
+  if (typeof role !== 'string' || !Object.hasOwn(res.roles ?? {}, role)) return null;
+  const route = res.roles[role];
+  if (!route?.effort) return null;
+  if (!model || typeof model.providerID !== 'string' || typeof model.id !== 'string') return null;
+  return `${model.providerID}/${model.id}` === route.model ? route.effort : null;
+}
+
+/**
+ * Which subagent dispatch each child session came from, so a request in the child knows
+ * whether its dispatch was bypassed. In memory and bounded (bounded.mjs).
+ *
+ * The link, as OpenCode 2.1.2's subagent tool makes it: execute.before gives the call id,
+ * the parent session and the arguments; the tool then creates the child session with
+ * parentID set to the parent and reports `progress({ sessionID: child, status: 'running' })`
+ * BEFORE it prompts the child, which reaches plugins as a session.tool.progress event
+ * ({ sessionID: parent, id: call id, metadata: { sessionID: child } }); the completed call's
+ * result carries the same metadata.sessionID (execute.after). Either links child to call.
+ *
+ * A dispatch is keyed by (parent session, call id), since call ids are only unique within
+ * a session. dispatchOf answers only for a child positively linked to its own recorded
+ * dispatch whose parent equals the child's actual parent. Anything else (not linked yet,
+ * evicted by the bound, recorded before a restart, a parent mismatch) is unknown, and
+ * unknown sends no effort: a child's first requests before its link arrives go without.
+ */
+export function createLaneDispatches() {
+  const calls = new Map();
+  const children = new Map();
+  const keyOf = (parent, callID) => (typeof parent === 'string' && parent && typeof callID === 'string' && callID ? JSON.stringify([parent, callID]) : null);
+  /** Links call `callID` of `parentSessionID` to `child`; a call already linked to another child keeps it. */
+  const linkChild = (parentSessionID, callID, child) => {
+    const key = keyOf(parentSessionID, callID);
+    const call = key && calls.get(key);
+    if (!call || typeof child !== 'string' || !child || (call.child && call.child !== child)) return;
+    call.child = child;
+    remember(children, child, key);
+  };
+  return {
+    /** A subagent call that passed the dispatch pin: execute.before's sessionID, id and arguments. */
+    noteDispatch(parentSessionID, callID, args) {
+      const key = keyOf(parentSessionID, callID);
+      if (key) remember(calls, key, { parent: parentSessionID, role: agentRole(args?.agent), bypassed: bypassMarker(args?.prompt) !== null, child: null });
+    },
+    linkChild,
+    /** A call that ended: linked to `child` when its result names one, else its record is dropped. */
+    endCall(parentSessionID, callID, child) {
+      if (child) return linkChild(parentSessionID, callID, child);
+      const key = keyOf(parentSessionID, callID);
+      if (key && calls.get(key)?.child === null) calls.delete(key);
+    },
+    onEvent(ev) {
+      if (ev?.type === 'session.tool.progress') linkChild(ev.data?.sessionID, ev.data?.id, ev.data?.metadata?.sessionID);
+    },
+    /** { bypassed } for child session `sessionID` of agent `agent`, whose actual parent is `parentID`; null when unknown. */
+    dispatchOf(sessionID, parentID, agent) {
+      const call = calls.get(children.get(sessionID));
+      if (!call || call.child !== sessionID || typeof parentID !== 'string' || call.parent !== parentID || call.role !== agentRole(agent)) return null;
+      return { bypassed: call.bypassed };
+    },
   };
 }
 
