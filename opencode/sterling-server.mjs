@@ -17878,7 +17878,7 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7(), check
 }
 var agentMap = (v) => v && typeof v === "object" && !Array.isArray(v) ? v : null;
 function markdownDisabled(text) {
-  const doc = normalize2(text);
+  const doc = normalize2(text).replace(/^\uFEFF/, "");
   const token = /\bdisabled?\b/;
   if (!doc.startsWith("---\n")) return false;
   const m = doc.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
@@ -17898,7 +17898,7 @@ function markdownDisabled(text) {
     const name = key[1] ?? key[2] ?? key[3];
     const value = (key[4] ?? "").replace(/\s+#.*$/, "").trim();
     if (name !== "disabled" && name !== "disable") {
-      if (/^[|>][-+]?\d*$/.test(value)) inBlock = true;
+      if (value !== "") inBlock = true;
       continue;
     }
     seen++;

@@ -924,16 +924,20 @@ const agentMap = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : n
  * TRUE, false, False, FALSE) with an optional trailing comment. Any other mention of either
  * name it cannot place (a flow mapping, a nested or repeated key, a quoted or other value,
  * frontmatter with no closing ---) gives null, so a caller refuses rather than guesses.
- * Text inside another key's value or block scalar is not a key and is skipped.
+ * Text inside another key's value (a block scalar, or a plain or quoted scalar wrapped onto
+ * more-indented lines) is not a key and is skipped. A leading UTF-8 BOM is ignored.
  */
 export function markdownDisabled(text) {
-  const doc = normalize(text);
+  // A leading UTF-8 BOM is not part of the frontmatter fence.
+  const doc = normalize(text).replace(/^\uFEFF/, '');
   const token = /\bdisabled?\b/;
   if (!doc.startsWith('---\n')) return false;
   const m = doc.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
   if (!m) return token.test(doc) ? null : false;
   let found = null;
   let seen = 0;
+  // inBlock: the lines after a top-level key whose value is a block scalar (| or >) or a
+  // plain or quoted scalar, where a more-indented line is that value's text, not a key.
   let inBlock = false;
   for (const line of m[1].split('\n')) {
     if (inBlock && (/^\s/.test(line) || line === '')) continue;
@@ -947,7 +951,8 @@ export function markdownDisabled(text) {
     const name = key[1] ?? key[2] ?? key[3];
     const value = (key[4] ?? '').replace(/\s+#.*$/, '').trim();
     if (name !== 'disabled' && name !== 'disable') {
-      if (/^[|>][-+]?\d*$/.test(value)) inBlock = true;
+      // An empty value opens a nested mapping or list, whose keys are not placed here.
+      if (value !== '') inBlock = true;
       continue;
     }
     seen++;

@@ -478,6 +478,42 @@ test('a plain Markdown agent whose text only mentions "disabled" outside a key i
   }
 });
 
+// Sol review of bb73d581: a wrapped scalar's continuation lines are its text, not keys,
+// and a leading UTF-8 BOM does not hide the frontmatter.
+const agentFileRaw = (dir, text) => {
+  mkdirSync(join(dir, '.opencode', 'agents', 'sterling'), { recursive: true });
+  writeFileSync(join(dir, '.opencode', 'agents', 'sterling', 'implementor.md'), text);
+};
+for (const [label, text] of [
+  ['a wrapped plain description', '---\ndescription: Runs when tests are\n  disabled\nmode: subagent\n---\nbody\n'],
+  ['a wrapped value that contains "disabled: true" as text', '---\ndescription: "Runs only when\n  disabled: true is set elsewhere"\nmode: subagent\n---\nbody\n'],
+  ['a BOM-prefixed plain agent', '\uFEFF---\ndescription: d\nmode: subagent\n---\nbody\n'],
+]) {
+  test(`${label} is still allowed`, async () => {
+    const t = makeTree();
+    agentFileRaw(t.worktree, text);
+    const s = await setup(t, own(t));
+    try {
+      await move1(s, t);
+    } finally {
+      await s.cleanup?.();
+      t.cleanup();
+    }
+  });
+}
+
+test('a BOM-prefixed disabled agent is read as disabled: the move is refused', async () => {
+  const t = makeTree();
+  agentFileRaw(t.worktree, '\uFEFF---\ndescription: d\ndisabled: true\n---\nbody\n');
+  const s = await setup(t, own(t));
+  try {
+    await assert.rejects(move1(s, t), /would not see sterling\/implementor/);
+  } finally {
+    await s.cleanup?.();
+    t.cleanup();
+  }
+});
+
 test('moveTarget expands ~ and resolves a relative path against the base', () => {
   assert.equal(move.moveTarget('~/wt', '/a/b', '/home/u'), '/home/u/wt');
   assert.equal(move.moveTarget('~', '/a/b', '/home/u'), '/home/u');
