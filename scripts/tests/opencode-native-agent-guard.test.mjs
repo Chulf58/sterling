@@ -63,3 +63,42 @@ test('a native entry whose permissions is not a list is refused, not rewritten',
     p.cleanup();
   }
 });
+
+// Board 1f87e1e4: a native top-level `permissions` list wins over the legacy `permission`
+// in the same file (opencode.ai/v2/docs/migrate-v1), so the store guard is appended to it.
+test('a native top-level permissions list gets the store guard appended last, the user rules kept', () => {
+  const rules = [{ action: 'edit', resource: '*', effect: 'allow' }, { action: 'shell', resource: 'git push *', effect: 'deny' }];
+  const p = project({ permissions: rules });
+  try {
+    const rows = p.run();
+    assert.match(rows.find((r) => r.item === '.opencode/opencode.json').detail, /store guard appended to the native "permissions" list too/);
+    const out = p.read();
+    assert.deepEqual(out.permissions, [...rules, ...GUARD]);
+    assert.deepEqual(out.permission.edit, { '**/.sterling/sterling.db*': 'deny', '.sterling/sterling.db*': 'deny' }, 'the legacy guard is still written');
+    p.run();
+    assert.deepEqual(p.read().permissions, [...rules, ...GUARD], 'a rerun does not duplicate the guard');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('no native permissions list is added when the file has none', () => {
+  const p = project({ permission: { edit: 'allow' } });
+  try {
+    p.run();
+    assert.equal(p.read().permissions, undefined);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('a native top-level permissions that is not a list is refused', () => {
+  const p = project({ permissions: { edit: 'allow' } });
+  try {
+    const rows = p.run();
+    assert.equal(rows[0].status, 'refused');
+    assert.match(rows[0].detail, /"permissions" is not a list of rules/);
+  } finally {
+    p.cleanup();
+  }
+});
