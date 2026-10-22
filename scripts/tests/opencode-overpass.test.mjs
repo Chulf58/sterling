@@ -809,3 +809,350 @@ test('mismatch notice: the agent from the context hook counts when the step even
     p.cleanup();
   }
 });
+
+// ── per-role tier and effort (config.overpass.roles) ─────────────────────────
+
+const ROLES_ON = { mode: 'work', overpass: { enabled: true, roles: { reviewer: { tier: 'agentic-max', effort: 'xhigh' }, implementor: { effort: 'high' }, scout: { tier: 'agentic-fast' } } } };
+const LANE = { providerID: 'overpass', id: 'agentic-high' };
+
+/** One model request through the context hook in session `sessionID`; returns its options afterwards. */
+async function request(s, agent, model, options = {}, sessionID = 'ses_lane') {
+  const input = { sessionID, agent, model, system: [], messages: [], options, tools: {} };
+  await s.ctx.hooks.session.context(input);
+  return input.options;
+}
+/** Child sessions answer session.get with their parentID: `parentOf[id]`, else ses_root for every ses_child*. */
+function childSessions(s, parentOf = {}) {
+  s.ctx.session.get = async ({ sessionID }) => {
+    const parentID = parentOf[sessionID] ?? (sessionID.startsWith('ses_child') ? 'ses_root' : undefined);
+    return { id: sessionID, location: { directory: s.ctx.location.directory }, ...(parentID ? { parentID } : {}) };
+  };
+}
+/** A subagent call's execute.before only (the child runs while the call is open); returns the hook input. */
+async function begin(s, args, id, parent = 'ses_root') {
+  const input = { tool: 'subagent', id, sessionID: parent, input: { description: 'fixture lane', prompt: 'Change the fixture file.', ...args } };
+  await s.ctx.hooks.tool['execute.before'](input);
+  return input;
+}
+/** OpenCode 2.1.2's subagent progress report naming the child, before the child is prompted. */
+async function progress(s, id, child, parent = 'ses_root') {
+  s.ctx.emit({ type: 'session.tool.progress', data: { sessionID: parent, assistantMessageID: 'msg_a', id, metadata: { sessionID: child, status: 'running' } } });
+  await s.plugin.idle();
+}
+/** The call's execute.after, its result naming the child as OpenCode's does. */
+async function finish(s, input, child) {
+  await s.ctx.hooks.tool['execute.after']({ ...input, status: 'completed', result: { content: [{ type: 'text', text: 'lane done' }], metadata: { sessionID: child, status: 'completed' } } });
+}
+/** A dispatch of `agent`, linked to `child` by the progress event; returns the call input. */
+async function linkedLane(s, agent, child, id, extra = {}) {
+  const input = await begin(s, { agent, ...extra }, id);
+  await progress(s, id, child);
+  return input;
+}
+const has = (options) => Object.hasOwn(options, 'reasoningEffort');
+
+test('roles: a role tier changes the dispatch model; other roles and unmapped agents keep agentic-high', async () => {
+  const p = makeProject(ROLES_ON);
+  const s = await setup(p.dir);
+  try {
+    assert.equal((await s.dispatch({ agent: 'sterling/reviewer', model: 'openai/gpt-6.1-sol#high' })).args.model, 'overpass/agentic-max');
+    assert.equal((await s.dispatch({ agent: 'sterling/scout' }, 'call_2')).args.model, 'overpass/agentic-fast');
+    assert.equal((await s.dispatch({ agent: 'sterling/implementor' }, 'call_3')).args.model, 'overpass/agentic-high');
+    assert.equal((await s.dispatch({ agent: 'sterling/researcher' }, 'call_4')).args.model, 'overpass/agentic-high');
+    assert.equal((await s.dispatch({ agent: 'general' }, 'call_5')).args.model, 'overpass/agentic-high');
+    const named = await s.dispatch({ agent: 'sterling/reviewer', model: 'overpass/agentic-high' }, 'call_6');
+    assert.match(named.result, /OVERPASS: this dispatch ran on overpass\/agentic-max, not overpass\/agentic-high/);
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('roles: a bypassed dispatch keeps its model and the bypass line names the role lane', async () => {
+  const p = makeProject(ROLES_ON);
+  const s = await setup(p.dir);
+  try {
+    const r = await s.dispatch({ agent: 'sterling/reviewer', model: 'overpass/agentic-conductor', prompt: 'OVERPASS-BYPASS: needs the conductor tier\nReview it.' });
+    assert.equal(r.args.model, 'overpass/agentic-conductor');
+    assert.match(r.result, /sent to overpass\/agentic-conductor instead of overpass\/agentic-max/);
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('roles: an unknown role or field refuses the dispatch like any invalid Overpass block', async () => {
+  for (const [roles, why] of [
+    [{ conductor: { effort: 'high' } }, /unknown role "conductor"/],
+    [{ reviewer: { model: 'openai/x' } }, /unknown field "model"/],
+  ]) {
+    const p = makeProject({ mode: 'work', overpass: { enabled: true, roles } });
+    const s = await setup(p.dir);
+    try {
+      await assert.rejects(s.dispatch({ agent: 'sterling/reviewer' }), why);
+    } finally {
+      await s.cleanup();
+      p.cleanup();
+    }
+  }
+});
+
+test('effort: unset roles sends no reasoningEffort (today exactly)', async () => {
+  const p = makeProject(ON);
+  const s = await setup(p.dir);
+  try {
+    childSessions(s);
+    for (const [i, agent] of ['sterling/implementor', 'sterling/reviewer'].entries()) {
+      await linkedLane(s, agent, `ses_child${i}`, `call_${i}`);
+      assert.equal(has(await request(s, agent, LANE, {}, `ses_child${i}`)), false, agent);
+    }
+    assert.equal(has(await request(s, 'plan', LANE)), false);
+    assert.equal(has(await request(s, 'sterling/conductor', LANE)), false);
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('effort: set on a linked role lane on exactly its lane model, replacing any effort already there', async () => {
+  const p = makeProject(ROLES_ON);
+  const s = await setup(p.dir);
+  try {
+    childSessions(s);
+    await linkedLane(s, 'sterling/implementor', 'ses_child1', 'call_1');
+    assert.equal((await request(s, 'sterling/implementor', LANE, {}, 'ses_child1')).reasoningEffort, 'high');
+    assert.equal((await request(s, 'sterling/implementor', LANE, { reasoningEffort: 'xhigh', temperature: 1 }, 'ses_child1')).reasoningEffort, 'high', 'an exact override, not a minimum');
+    assert.equal((await request(s, 'sterling/implementor', LANE, { temperature: 1 }, 'ses_child1')).temperature, 1, 'other options are kept');
+    const noOptions = { sessionID: 'ses_child1', agent: 'sterling/implementor', model: LANE, system: [], messages: [] };
+    await s.ctx.hooks.session.context(noOptions);
+    assert.equal(noOptions.options?.reasoningEffort, 'high');
+    await linkedLane(s, 'sterling/reviewer', 'ses_child2', 'call_2');
+    assert.equal((await request(s, 'sterling/reviewer', { providerID: 'overpass', id: 'agentic-max' }, {}, 'ses_child2')).reasoningEffort, 'xhigh');
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('effort: a dispatch bypassed onto the role\'s exact lane model never gets the role effort (Sol review, CRITICAL)', async () => {
+  const p = makeProject({ mode: 'work', overpass: { enabled: true, roles: { reviewer: { effort: 'high' } } } });
+  const s = await setup(p.dir);
+  try {
+    childSessions(s);
+    const bypass = { model: 'overpass/agentic-high', prompt: 'OVERPASS-BYPASS: keep the plain tier\nReview it.' };
+    // Linked by the progress event before the child's first request.
+    const call = await linkedLane(s, 'sterling/reviewer', 'ses_child1', 'call_1', bypass);
+    assert.equal(call.input.model, 'overpass/agentic-high');
+    assert.equal(has(await request(s, 'sterling/reviewer', LANE, {}, 'ses_child1')), false, 'linked bypass');
+    // Not linked yet: unknown, so no effort.
+    await begin(s, { agent: 'sterling/reviewer', ...bypass }, 'call_2');
+    assert.equal(has(await request(s, 'sterling/reviewer', LANE, {}, 'ses_child2')), false, 'unlinked bypass');
+    // A plain sibling open at the same time does not make the unlinked bypassed child known.
+    await begin(s, { agent: 'sterling/reviewer' }, 'call_3');
+    assert.equal(has(await request(s, 'sterling/reviewer', LANE, {}, 'ses_child2')), false, 'ambiguous between a plain and a bypassed sibling');
+    // Once each child is linked (progress or execute.after), each gets its own answer.
+    await progress(s, 'call_3', 'ses_child3');
+    await finish(s, await begin(s, { agent: 'sterling/reviewer', ...bypass }, 'call_4'), 'ses_child4');
+    await progress(s, 'call_2', 'ses_child2');
+    assert.equal(has(await request(s, 'sterling/reviewer', LANE, {}, 'ses_child2')), false, 'bypass linked late');
+    assert.equal(has(await request(s, 'sterling/reviewer', LANE, {}, 'ses_child4')), false, 'bypass linked by execute.after');
+    assert.equal((await request(s, 'sterling/reviewer', LANE, {}, 'ses_child3')).reasoningEffort, 'high', 'the plain sibling');
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+// Changed in the second fix round (conductor ruling after the Sol re-check): this test
+// asserted the removed parent-plus-role fallback, which gave an unlinked child the effort
+// when every open dispatch of its parent and role was plain. A child now gets none until
+// it is linked to its own dispatch.
+test('effort: a child not linked yet gets none; once linked to its own plain dispatch it gets the effort; an unknown child gets none', async () => {
+  const p = makeProject(ROLES_ON);
+  const s = await setup(p.dir);
+  try {
+    childSessions(s);
+    await begin(s, { agent: 'sterling/implementor' }, 'call_1');
+    assert.equal(has(await request(s, 'sterling/implementor', LANE, {}, 'ses_child1')), false, 'not linked yet, even with only plain dispatches open');
+    await progress(s, 'call_1', 'ses_child1');
+    assert.equal((await request(s, 'sterling/implementor', LANE, {}, 'ses_child1')).reasoningEffort, 'high', 'linked');
+    assert.equal(has(await request(s, 'sterling/implementor', LANE, {}, 'ses_lane')), false, 'a session with no parent');
+    assert.equal(has(await request(s, 'sterling/reviewer', { providerID: 'overpass', id: 'agentic-max' }, {}, 'ses_child9')), false, 'no reviewer dispatch');
+    await finish(s, await begin(s, { agent: 'sterling/implementor' }, 'call_2'), 'ses_child2');
+    assert.equal((await request(s, 'sterling/implementor', LANE, {}, 'ses_child2')).reasoningEffort, 'high', 'linked by execute.after');
+    s.ctx.session.get = async () => {
+      throw new Error('session store unavailable');
+    };
+    await linkedLane(s, 'sterling/implementor', 'ses_child7', 'call_7');
+    assert.equal(has(await request(s, 'sterling/implementor', LANE, {}, 'ses_child7')), false, 'parent unreadable: fail safe');
+    assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /no per-role reasoning effort for session ses_child7: its parent session could not be read/);
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('effort: after a restart a child linked before it gets none, even with a plain sibling open (Sol re-check, CRITICAL)', async () => {
+  const p = makeProject({ mode: 'work', overpass: { enabled: true, roles: { reviewer: { effort: 'high' } } } });
+  const first = await setup(p.dir);
+  let second = null;
+  try {
+    childSessions(first);
+    await linkedLane(first, 'sterling/reviewer', 'ses_child1', 'call_1', { model: 'overpass/agentic-high', prompt: 'OVERPASS-BYPASS: keep the plain tier\nReview it.' });
+    assert.equal(has(await request(first, 'sterling/reviewer', LANE, {}, 'ses_child1')), false);
+    await first.cleanup();
+    second = await setup(p.dir);
+    childSessions(second);
+    await begin(second, { agent: 'sterling/reviewer' }, 'call_2');
+    assert.equal(has(await request(second, 'sterling/reviewer', LANE, {}, 'ses_child1')), false, 'the bypassed child after a restart');
+    await progress(second, 'call_2', 'ses_child2');
+    assert.equal((await request(second, 'sterling/reviewer', LANE, {}, 'ses_child2')).reasoningEffort, 'high', 'the plain sibling, once linked');
+  } finally {
+    await second?.cleanup();
+    p.cleanup();
+  }
+});
+
+test('effort: the same call id under two parents never crosses; a link or a child under the wrong parent gets none (Sol re-check, HIGH)', async () => {
+  const p = makeProject({ mode: 'work', overpass: { enabled: true, roles: { reviewer: { effort: 'high' } } } });
+  const s = await setup(p.dir);
+  try {
+    childSessions(s, { ses_childA: 'ses_root', ses_childB: 'ses_rootB', ses_childX: 'ses_rootB' });
+    await begin(s, { agent: 'sterling/reviewer', model: 'overpass/agentic-high', prompt: 'OVERPASS-BYPASS: keep the plain tier\nReview it.' }, 'call_1', 'ses_root');
+    await begin(s, { agent: 'sterling/reviewer' }, 'call_1', 'ses_rootB');
+    await progress(s, 'call_1', 'ses_childA', 'ses_root');
+    assert.equal(has(await request(s, 'sterling/reviewer', LANE, {}, 'ses_childA')), false, "A's bypassed child");
+    await progress(s, 'call_1', 'ses_childB', 'ses_rootB');
+    assert.equal((await request(s, 'sterling/reviewer', LANE, {}, 'ses_childB')).reasoningEffort, 'high', "B's plain child");
+    // A progress event naming B's call under the wrong parent links nothing.
+    await begin(s, { agent: 'sterling/reviewer' }, 'call_2', 'ses_rootB');
+    await progress(s, 'call_2', 'ses_childX', 'ses_root');
+    assert.equal(has(await request(s, 'sterling/reviewer', LANE, {}, 'ses_childX')), false, 'linked under the wrong parent');
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('effort: a child whose actual parent differs from its linked dispatch\'s parent gets none', async () => {
+  const p = makeProject({ mode: 'work', overpass: { enabled: true, roles: { reviewer: { effort: 'high' } } } });
+  const s = await setup(p.dir);
+  try {
+    childSessions(s, { ses_child1: 'ses_other' });
+    await linkedLane(s, 'sterling/reviewer', 'ses_child1', 'call_1');
+    assert.equal(has(await request(s, 'sterling/reviewer', LANE, {}, 'ses_child1')), false);
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('lane dispatches: an evicted link is unknown, never matched to a plain sibling (Sol re-check, CRITICAL)', () => {
+  const lanes = overpass.createLaneDispatches();
+  lanes.noteDispatch('ses_root', 'call_bypass', { agent: 'sterling/reviewer', prompt: 'OVERPASS-BYPASS: keep\nReview.' });
+  lanes.linkChild('ses_root', 'call_bypass', 'ses_child_b');
+  assert.deepEqual(lanes.dispatchOf('ses_child_b', 'ses_root', 'sterling/reviewer'), { bypassed: true });
+  for (let i = 0; i < 520; i++) {
+    lanes.noteDispatch('ses_root', `call_${i}`, { agent: 'sterling/reviewer', prompt: 'Review.' });
+    lanes.linkChild('ses_root', `call_${i}`, `ses_child_${i}`);
+  }
+  lanes.noteDispatch('ses_root', 'call_open', { agent: 'sterling/reviewer', prompt: 'Review.' });
+  assert.equal(lanes.dispatchOf('ses_child_b', 'ses_root', 'sterling/reviewer'), null, 'evicted: unknown');
+  assert.deepEqual(lanes.dispatchOf('ses_child_519', 'ses_root', 'sterling/reviewer'), { bypassed: false });
+  assert.equal(lanes.dispatchOf('ses_child_519', 'ses_root', 'sterling/scout'), null, 'another role');
+  assert.equal(lanes.dispatchOf('ses_child_519', 'ses_rootB', 'sterling/reviewer'), null, 'another parent');
+});
+
+test('lane dispatches: a call that ends without a child is dropped; one already linked keeps its child', () => {
+  const lanes = overpass.createLaneDispatches();
+  lanes.noteDispatch('ses_root', 'call_1', { agent: 'sterling/reviewer', prompt: 'Review.' });
+  lanes.endCall('ses_root', 'call_1', null);
+  lanes.linkChild('ses_root', 'call_1', 'ses_child1');
+  assert.equal(lanes.dispatchOf('ses_child1', 'ses_root', 'sterling/reviewer'), null, 'dropped, so a late link finds nothing');
+  lanes.noteDispatch('ses_root', 'call_2', { agent: 'sterling/reviewer', prompt: 'Review.' });
+  lanes.linkChild('ses_root', 'call_2', 'ses_child2');
+  lanes.endCall('ses_root', 'call_2', 'ses_child_other');
+  assert.deepEqual(lanes.dispatchOf('ses_child2', 'ses_root', 'sterling/reviewer'), { bypassed: false });
+  assert.equal(lanes.dispatchOf('ses_child_other', 'ses_root', 'sterling/reviewer'), null);
+});
+
+test('effort: never set for another model, a bypass that kept an overpass/* model, an unmapped agent, Plan, the worker or a role with no effort', async () => {
+  const p = makeProject(ROLES_ON);
+  const s = await setup(p.dir);
+  try {
+    childSessions(s);
+    await linkedLane(s, 'sterling/implementor', 'ses_child1', 'call_1');
+    await linkedLane(s, 'sterling/reviewer', 'ses_child2', 'call_2');
+    await linkedLane(s, 'sterling/scout', 'ses_child3', 'call_3');
+    await linkedLane(s, 'sterling/researcher', 'ses_child4', 'call_4');
+    await linkedLane(s, 'general', 'ses_child5', 'call_5');
+    await linkedLane(s, 'sterling/implementor', 'ses_child6', 'call_6', { model: 'overpass/agentic-conductor', prompt: 'OVERPASS-BYPASS: conductor tier\nDo it.' });
+    const cases = [
+      ['sterling/implementor', { providerID: 'openai', id: 'gpt-6.1-sol' }, 'ses_child1', 'a direct model'],
+      ['sterling/implementor', { providerID: 'overpass', id: 'agentic-conductor' }, 'ses_child6', 'a bypass that kept an overpass model'],
+      ['sterling/reviewer', LANE, 'ses_child2', 'a reviewer on agentic-high while its tier is agentic-max'],
+      ['sterling/implementor', { providerID: 'overpass-agentic', id: 'agentic-high' }, 'ses_child1', 'another provider with the same id'],
+      ['sterling/implementor', undefined, 'ses_child1', 'no model on the request'],
+      ['general', LANE, 'ses_child5', 'an unmapped agent'],
+      ['plan', LANE, 'ses_plan', 'Plan'],
+      ['sterling-maintenance-worker', LANE, 'ses_worker', 'the maintenance worker'],
+      ['sterling/conductor', { providerID: 'overpass', id: 'agentic-conductor' }, 'ses_root', 'the conductor'],
+      ['sterling/scout', { providerID: 'overpass', id: 'agentic-fast' }, 'ses_child3', 'a role with a tier but no effort'],
+      ['sterling/researcher', LANE, 'ses_child4', 'a role with no entry'],
+    ];
+    for (const [agent, model, sessionID, why] of cases) assert.equal(has(await request(s, agent, model, {}, sessionID)), false, why);
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+});
+
+test('effort: never set while Overpass is off or in hobby mode', async () => {
+  const roles = ROLES_ON.overpass.roles;
+  for (const config of [{ mode: 'work', overpass: { enabled: false, roles } }, { mode: 'hobby', overpass: { enabled: true, roles } }, { overpass: { enabled: true, roles } }]) {
+    const p = makeProject(config);
+    const s = await setup(p.dir);
+    try {
+      childSessions(s);
+      await linkedLane(s, 'sterling/implementor', 'ses_child1', 'call_1');
+      assert.equal(has(await request(s, 'sterling/implementor', LANE, {}, 'ses_child1')), false, JSON.stringify(config));
+      assert.equal(notices(p.dir), '', 'nothing to report');
+    } finally {
+      await s.cleanup();
+      p.cleanup();
+    }
+  }
+});
+
+test('effort: an invalid overpass block or an unreadable config sends none and says so once, each in its own words (Sol review, MEDIUM)', async () => {
+  for (const [config, words] of [
+    [{ mode: 'work', overpass: { enabled: true, roles: { conductor: { effort: 'high' } } } }, /Sterling Overpass: no per-role reasoning effort is sent: the Overpass setting in \.sterling\/config\.json is invalid \(config\.overpass\.roles has the unknown role "conductor"/],
+    ['{ not json', /Sterling Overpass: no per-role reasoning effort is sent: Overpass routing UNKNOWN: \.sterling\/config\.json could not be read/],
+  ]) {
+    const p = makeProject(config);
+    const s = await setup(p.dir);
+    try {
+      for (let i = 0; i < 3; i++) assert.equal(has(await request(s, 'sterling/implementor', LANE, {}, 'ses_child1')), false);
+      const said = notices(p.dir).split('\n').filter((line) => /no per-role reasoning effort/.test(line));
+      assert.equal(said.length, 1, `reported once: ${said.join(' | ')}`);
+      assert.match(said[0], words);
+    } finally {
+      await s.cleanup();
+      p.cleanup();
+    }
+  }
+});
+
+test('roles: Plan and the maintenance worker keep the default lane model', () => {
+  const p = makeProject(ROLES_ON);
+  try {
+    const res = overpass.projectOverpass(p.dir);
+    assert.equal(res.laneModel, 'overpass/agentic-high');
+    assert.equal(overpass.desiredOverlay(res).plan, 'overpass/agentic-high');
+    assert.equal(overpass.expectedSessionModel(res, 'plan'), 'overpass/agentic-high');
+    assert.deepEqual(overpass.laneRoute(res, 'sterling-maintenance-worker'), { model: 'overpass/agentic-high' });
+    assert.deepEqual(overpass.laneRoute(res, 'plan'), { model: 'overpass/agentic-high' });
+  } finally {
+    p.cleanup();
+  }
+});

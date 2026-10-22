@@ -66,13 +66,13 @@ import { createBootstrapHandler, createConfigHandler } from './config.mjs';
 import { createContextHandler } from './context.mjs';
 import { createDeliveryHandlers } from './delivery.mjs';
 import { createDeliveryPolicy } from './delivery-policy.mjs';
-import { createDispatchHandlers, liveChildInRegister, rootSessionGate, sweepStaleDispatches } from './dispatch.mjs';
+import { childSessionOf, createDispatchHandlers, liveChildInRegister, rootSessionGate, sessionKind, sweepStaleDispatches } from './dispatch.mjs';
 import { LOG_REL, errText, logLine } from './log.mjs';
 import { NOTICES_REL, addNotice } from './notices.mjs';
 import { createPrLoopNotice } from './pr-loop.mjs';
 import { createRotationRestore } from './restore.mjs';
 import { createResearchRecorder } from './research.mjs';
-import { convergeOverlay, createSessionModels, mismatchNotice, projectOverpass } from './overpass.mjs';
+import { convergeOverlay, createLaneDispatches, createSessionModels, dispatchOverpass, mismatchNotice, overpassUnknownLine, projectOverpass, requestEffort } from './overpass.mjs';
 import { createPromptHandler } from './selection.mjs';
 import { createPressureWatch } from './pressure.mjs';
 import { remember } from './bounded.mjs';
@@ -224,12 +224,14 @@ export function createSterlingServer(deps = {}) {
     async function onBefore(input) {
       await delivery.onBefore(input);
       await axis.onBefore(input);
+      if (input?.tool === 'subagent') laneDispatches.noteDispatch(input.sessionID, input.id, input.input);
       await dispatch.onBefore(input);
     }
     // H23 matches only the tool's own output, taken before anything is appended,
     // and runs after the file delivery has written the session guard.
     async function onAfter(input) {
       const output = axis.outputOf(input);
+      if (input?.tool === 'subagent') laneDispatches.endCall(input.sessionID, input.id, childSessionOf(input));
       await delivery.onAfter(input);
       await axis.onOutput(input, output);
       await axis.onAfter(input);
@@ -276,8 +278,50 @@ export function createSterlingServer(deps = {}) {
       const notice = seen ? mismatchNotice(res, seen.agent, seen.model) : '';
       if (notice && typeof input?.prompt?.text === 'string') input.prompt.text = `${input.prompt.text}\n\n${notice}`;
     }
+    // Which dispatch each child session came from, for the per-role effort (overpass.mjs).
+    const laneDispatches = createLaneDispatches();
+    // The effort-skip reports already made, so each distinct one is reported once (bounded).
+    const effortReported = new Map();
+    function reportEffortSkip(root, text, { notice = true } = {}) {
+      if (effortReported.has(text)) return;
+      remember(effortReported, text, true);
+      logLine(root, `overpass: ${text}`);
+      if (notice) addNotice(root, `Sterling Overpass: ${text}`, now());
+    }
+    /**
+     * Sets the Overpass per-role client reasoning effort on one model request
+     * (requestEffort, overpass.mjs): an exact override of the effort the gateway would
+     * pick, sent only when the request's session is known to come from a dispatch that
+     * was not bypassed. A config that cannot be read, or an invalid overpass block, sends
+     * none and says so once per distinct cause.
+     */
+    async function applyRequestEffort(root, input) {
+      if (!input || typeof input !== 'object') return;
+      let read;
+      try {
+        read = dispatchOverpass(root);
+      } catch (e) {
+        reportEffortSkip(root, `no per-role reasoning effort is sent: the Overpass setting in .sterling/config.json is invalid (${errText(e)}).`);
+        return;
+      }
+      if (read.unreadable) {
+        reportEffortSkip(root, `no per-role reasoning effort is sent: ${overpassUnknownLine(read.unreadable)}`);
+        return;
+      }
+      if (!requestEffort(read.res, input.agent, input.model, { bypassed: false })) return;
+      const kind = await sessionKind(session, input.sessionID, parents);
+      const effort = requestEffort(read.res, input.agent, input.model, laneDispatches.dispatchOf(input.sessionID, parents.get(input.sessionID) ?? null, input.agent));
+      if (!effort) {
+        if (kind.why) reportEffortSkip(root, `no per-role reasoning effort for session ${input.sessionID}: its parent session could not be read (${kind.why})`, { notice: false });
+        return;
+      }
+      if (!input.options || typeof input.options !== 'object') input.options = {};
+      input.options.reasoningEffort = effort;
+    }
     async function onSessionContext(input) {
       sessionModels.noteAgent(input?.sessionID, input?.agent);
+      const root = rootOf();
+      if (root) await fenced('overpass', root, () => applyRequestEffort(root, input));
       await onContext(input);
     }
     const compaction = createCompactionHandler({ rootOf, fenced });
@@ -291,6 +335,7 @@ export function createSterlingServer(deps = {}) {
       if (rootOf()) {
         pressure.onEvent(ev);
         sessionModels.onEvent(ev);
+        laneDispatches.onEvent(ev);
       }
       if (!EXECUTION_END_EVENTS.has(ev?.type)) return;
       // An event that names another location's directory is that location's to handle.
