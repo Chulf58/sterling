@@ -13,7 +13,7 @@ import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 
 // packages/tui/dist/controller.js
 import { readFileSync as readFileSync15, writeFileSync as writeFileSync7, existsSync as existsSync11 } from "node:fs";
-import { basename as basename3, dirname as dirname8, join as join19 } from "node:path";
+import { basename as basename4, dirname as dirname8, join as join19 } from "node:path";
 import { randomUUID as randomUUID7 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
@@ -14444,7 +14444,7 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync12, readdirSync as readdirSync4, realpathSync as realpathSync5, rmSync as rmSync4, statSync as statSync5, unlinkSync as unlinkSync3, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname7, isAbsolute, join as join16, resolve as resolve8 } from "node:path";
+import { basename as basename3, dirname as dirname7, isAbsolute, join as join16, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/sterling-roots.mjs
@@ -14979,7 +14979,7 @@ function openDashboard(storePath, options = {}) {
     stores.close();
     throw err;
   }
-  const projectName = basename3(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
+  const projectName = basename4(projectRoot) + (domainsAvailable ? "" : " \u2014 domains unavailable (project-only)");
   let ui = initialUi;
   let probe;
   let changeDetection = "data_version";
@@ -17925,7 +17925,7 @@ function frameAt(tick2, phase, running) {
 // opencode/sterling-tui/pane.ts
 import { execFile } from "node:child_process";
 import { existsSync as existsSync12 } from "node:fs";
-import { basename as basename4, dirname as dirname9, isAbsolute as isAbsolute2, join as join20, relative, resolve as resolve9, sep as sep3 } from "node:path";
+import { basename as basename5, dirname as dirname9, isAbsolute as isAbsolute2, join as join20, relative, resolve as resolve9, sep as sep3 } from "node:path";
 var PANE_TITLE = "Sterling side pane";
 var EXEC_TIMEOUT_MS = 15e3;
 function isWithin(dir, root) {
@@ -17934,7 +17934,7 @@ function isWithin(dir, root) {
 }
 function launcherRoot(dir, storePath, exists) {
   if (exists(join20(dir, "sterling-launch.sh"))) return dir;
-  const storeRoot = storePath && basename4(dirname9(storePath)) === ".sterling" ? dirname9(dirname9(storePath)) : void 0;
+  const storeRoot = storePath && basename5(dirname9(storePath)) === ".sterling" ? dirname9(dirname9(storePath)) : void 0;
   return storeRoot && isWithin(dir, storeRoot) && exists(join20(storeRoot, "sterling-launch.sh")) ? storeRoot : dir;
 }
 async function reopenPane(root, deps) {
