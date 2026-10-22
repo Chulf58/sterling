@@ -8,7 +8,7 @@ export function readPrLoop(root: string): {
   repo: string;
   head_sha: string;
   armed_at: string;
-  status: 'owed' | 'clean' | 'capped' | 'escalated';
+  status: 'owed' | 'clean' | 'capped' | 'escalated' | 'closed';
   settled_at?: string;
 } | null;
 export function autoMergeOnCleanOf(cfg: unknown): boolean;

@@ -17845,7 +17845,8 @@ var AGENT_MODEL_KEY = {
   researcher: "researcher",
   scout: "scout",
   librarian: "librarian",
-  reviewer: "reviewer"
+  reviewer: "reviewer",
+  sparring: "sparring"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
 var s = (v) => typeof v === "string" ? v : "";
@@ -18877,7 +18878,12 @@ var configSchema = external_exports.object({
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
-    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
+    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
+    // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
+    // read-only grant as the reviewer, so the same install-time default. Every
+    // dispatch pins its model (Astra, else a Fable model); under Overpass its
+    // role tier decides.
+    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
   }).catchall(agentModelEntry).default({}),
   // Per-project agent tool extension (decision
   // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):
@@ -39962,11 +39968,22 @@ function resolveCreateType(args2) {
     };
   }
   const type = outer ?? inner;
-  return { args: { ...input, type, fields: { ...fields, type } } };
+  const outerScope = input.scope;
+  const innerScope = fields.scope;
+  if (outerScope !== void 0 && innerScope !== void 0 && outerScope !== innerScope) {
+    return {
+      error: `knowledge_create: the top-level 'scope' ('${String(outerScope)}') does not match 'fields.scope' ('${String(innerScope)}'). Give the scope once, or set both to the same value.`
+    };
+  }
+  const scope = outerScope !== void 0 ? outerScope : innerScope;
+  const normalized = { ...input, type, fields: { ...fields, type, ...scope === void 0 ? {} : { scope } } };
+  delete normalized.scope;
+  return { args: normalized };
 }
 var knowledgeCreateParseSchema = external_exports.object({ type: external_exports.string(), fields: knowledgeCreateFieldsSchema, projection: external_exports.enum(["full", "digest"]).optional() }).strict();
 var knowledgeCreateInput = external_exports.object({
   type: external_exports.string().optional().describe("record type; give it here or as fields.type (one copy is enough)"),
+  scope: external_exports.string().optional().describe("'project' (default) or 'domain:<name>', routing the record to that mounted domain store; give it here or as fields.scope (one copy is enough)"),
   fields: external_exports.union(buildCreateFieldVariants(true)),
   projection: external_exports.enum(["full", "digest"]).optional()
 }).strict();
@@ -40061,7 +40078,7 @@ function createSterlingServer(target, opts = {}) {
   const ID_EXACT_DESTROY = "the EXACT full uuid: this call destroys, so a slug or an 8-char prefix is refused";
   const RESOLVES_FULL_IDS = "full uuids only; a slug or an 8-char prefix is refused because claimed items are hard-deleted";
   server.registerTool("knowledge_create", {
-    description: 'Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type\'s allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. Example: {"type":"decision","fields":{"title":"...","statement":"...","alternatives_rejected":[],"rationale":"..."}}. A colliding feature_article slug is refused. A links entry with rel \'supersedes\' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel \'cites\' for a deliberate partial override. A domain:<name> scope with file_keys (or an article\'s files) is refused: repo paths stay project. A reference_material\'s location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain\'s description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.' + createDomainsNote,
+    description: 'Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type\'s allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Give `type` once, as the top-level `type` or as fields.type (if both are given they must match); it selects one schema branch, so use only properties from that branch. `scope` (\'project\' by default, or \'domain:<name>\') is given the same way, as the top-level `scope` or as fields.scope. Example: {"type":"decision","fields":{"title":"...","statement":"...","alternatives_rejected":[],"rationale":"..."}}. A colliding feature_article slug is refused. A links entry with rel \'supersedes\' is refused with nothing written: use knowledge_supersede to replace a record (it retires the old one), or link the old record with rel \'cites\' for a deliberate partial override. A domain:<name> scope with file_keys (or an article\'s files) is refused: repo paths stay project. A reference_material\'s location is not a file_key and does not count. The receipt lists mounted_domains with their descriptions, and warns when a project record fits a domain\'s description (a promotion_review item is queued). Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:"full" returns the whole stored record.' + createDomainsNote,
     inputSchema: knowledgeCreateInput
   }, ({ fields, projection }) => {
     const { type: recordType2, ...restFields } = fields;

@@ -467,7 +467,7 @@ export function shipAsPr({ cwd, repo, branch, base, mergeBase, branchTip, state,
 // its per-PR file (unless that PR already has one) and deletes it.
 export const PR_LOOP_REL = '.sterling/transient/pr-loop.json';
 export const PR_LOOPS_DIR_REL = '.sterling/transient/pr-loops';
-export const PR_LOOP_OUTCOMES = ['clean', 'capped', 'escalated'];
+export const PR_LOOP_OUTCOMES = ['clean', 'capped', 'escalated', 'closed'];
 export const prLoopPath = (root) => join(root, PR_LOOP_REL);
 export const prLoopFile = (root, prNumber) => join(root, PR_LOOPS_DIR_REL, `${prNumber}.json`);
 const prLoopFileRel = (prNumber) => `${PR_LOOPS_DIR_REL}/${prNumber}.json`;
@@ -659,7 +659,8 @@ export function parsePrUrl(url) {
 }
 
 /** The deliberate settle act: mark the loop armed for the named PR clean,
- * capped or escalated. `prRef` is the PR number or its full URL. BOUND (Sol
+ * capped, escalated or closed (the PR was closed without merging, GitHub issue
+ * #194). `prRef` is the PR number or its full URL. BOUND (Sol
  * review): the armed state must be coherent (pr_url, repo and pr_number
  * agree), its repo must be `originRepo` (the current origin), `prRef` must
  * name that same PR, and the loop must still be OWED — a settled loop is never
@@ -667,7 +668,7 @@ export function parsePrUrl(url) {
  * re-runs only the guard's merge decision and writes nothing (returned with
  * resettle: true). `guard`, when given, runs last as guard(state, {resettle})
  * and throws to refuse (the clean outcome uses it to check that GitHub would
- * let the PR merge); a {head_sha} it returns is recorded as settled_head_sha.
+ * let the PR merge, the closed outcome that GitHub shows it closed unmerged); a {head_sha} it returns is recorded as settled_head_sha.
  * Throws (nothing written) otherwise. Other PRs' loops are never read for the
  * decision or written. */
 export function settlePrLoop(root, outcome, prRef, { originRepo, now = new Date().toISOString(), guard = null }) {

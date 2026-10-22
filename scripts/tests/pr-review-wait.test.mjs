@@ -7,7 +7,7 @@
 // timeout; with no Copilot request pending and nothing unconsumed it ends at
 // once with no_review_requested. Stdout is ONE JSON object; timeout, error
 // and no_review_requested are never 'review'. Also carries the deliberate settle act for the H10 duty
-// (`--settle <clean|capped|escalated> --pr <n>`).
+// (`--settle <clean|capped|escalated|closed> --pr <n>`).
 //
 // Harness: a git repo whose origin is a GitHub-shaped URL (nothing is ever
 // pushed or fetched), and a PATH-prepended fake `gh` answering `gh api` from
@@ -1478,6 +1478,48 @@ test('--settle capped and escalated never ask GitHub, even when the PR is blocke
     }
   }
 });
+
+// GitHub issue #194: a PR closed without merging (superseded) settles 'closed',
+// which asks GitHub and refuses a PR that is still open or already merged.
+test('issue #194: --settle closed on a CLOSED unmerged PR writes status closed, prints pr_state and no auto_merge', () => {
+  const f = makeFixture();
+  try {
+    const armed = arm(f);
+    putMerge(f, [mergePage('UNKNOWN', [], { state: 'CLOSED', merged: false })]);
+    const r = run(f, ['--settle', 'closed', '--pr', '7']);
+    assert.equal(r.code, 0, oneLine(r.stdout + r.stderr));
+    const after = JSON.parse(readFileSync(loopPath(f), 'utf8'));
+    assert.equal(after.status, 'closed');
+    assert.equal(typeof after.settled_at, 'string');
+    for (const k of ['pr_url', 'pr_number', 'repo', 'head_sha', 'armed_at']) assert.equal(after[k], armed[k]);
+    assert.equal(r.out.status, 'closed');
+    assert.equal(r.out.pr_state, 'CLOSED');
+    assert.equal(r.out.already_merged, false);
+    assert.equal('auto_merge' in r.out, false);
+    assert.equal(mergeCalls(f).length, 1, 'one merge-state query, no UNKNOWN re-read');
+    const again = run(f, ['--settle', 'closed', '--pr', '7']);
+    assert.equal(again.code, 1, 'a closed loop is settled and is not settled again');
+  } finally {
+    f.cleanup();
+  }
+});
+
+for (const [label, over, pattern] of [['an OPEN PR', { state: 'OPEN', merged: false }, /OPEN, not closed/], ['a MERGED PR', { state: 'MERGED', merged: true }, /already merged/]]) {
+  test(`issue #194: --settle closed refuses ${label}, nothing written`, () => {
+    const f = makeFixture();
+    try {
+      arm(f);
+      const before = readFileSync(loopPath(f), 'utf8');
+      putMerge(f, [mergePage('CLEAN', [], over)]);
+      const r = run(f, ['--settle', 'closed', '--pr', '7']);
+      assert.equal(r.code, 1, oneLine(r.stdout + r.stderr));
+      assert.match(r.stderr, pattern);
+      assert.equal(readFileSync(loopPath(f), 'utf8'), before, 'the loop stays owed');
+    } finally {
+      f.cleanup();
+    }
+  });
+}
 
 // ----------------------------------------------------------- --resolve-threads
 

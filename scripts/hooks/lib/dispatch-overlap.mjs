@@ -56,7 +56,7 @@ export const OVERLAP_DISPLAY_CAP = 5;
 // Agent types whose write-set is empty for repo files. H26's list (explorer,
 // Explore, Plan, librarian, reviewer-*) plus this project's researcher, scout
 // and a plain 'reviewer'.
-const READ_ONLY_TYPES = new Set(['researcher', 'scout', 'reviewer', 'explore', 'explorer', 'plan', 'librarian']);
+const READ_ONLY_TYPES = new Set(['researcher', 'scout', 'reviewer', 'sparring', 'explore', 'explorer', 'plan', 'librarian']);
 
 export function isReadOnlyDispatchType(type) {
   if (typeof type !== 'string' || !type) return false;

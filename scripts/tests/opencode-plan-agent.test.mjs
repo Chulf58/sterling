@@ -119,7 +119,7 @@ test('install writes .opencode/agents/plan.md: primary, read-only permissions wi
   const S = fwd(repoRoot);
   const fm = text.match(/^---\n([\s\S]*?)\n---\n/)[1].split('\n');
   assert.match(fm[0], /^description: Sterling's planning agent for OpenCode\. Plans only, never implements\./);
-  assert.deepEqual(fm.slice(1, 23), [
+  assert.deepEqual(fm.slice(1, 24), [
     'mode: primary',
     'permission:',
     '  edit:',
@@ -130,6 +130,7 @@ test('install writes .opencode/agents/plan.md: primary, read-only permissions wi
     '    "sterling/scout": allow',
     '    "sterling/researcher": allow',
     '    "sterling/reviewer": allow',
+    '    "sterling/sparring": allow',
     '    "sterling/implementor": deny',
     '  bash:',
     '    "*": deny',

@@ -116,11 +116,11 @@ test('dispatch pin: while effective a subagent call runs on the lane model, and 
   const s = await setup(p.dir);
   try {
     const plain = await s.dispatch({});
-    assert.equal(plain.args.model, 'overpass/agentic-high');
+    assert.equal(plain.args.model, 'overpass/agentic-premium');
     assert.doesNotMatch(plain.result, /OVERPASS/, 'no line when the call named no model');
     const explicit = await s.dispatch({ model: 'openai/gpt-6.1-sol#high' }, 'call_2');
-    assert.equal(explicit.args.model, 'overpass/agentic-high', 'the toggle wins over the call');
-    assert.match(explicit.result, /OVERPASS: this dispatch ran on overpass\/agentic-high, not openai\/gpt-6\.1-sol#high/);
+    assert.equal(explicit.args.model, 'overpass/agentic-premium', 'the toggle wins over the call');
+    assert.match(explicit.result, /OVERPASS: this dispatch ran on overpass\/agentic-premium, not openai\/gpt-6\.1-sol#high/);
   } finally {
     await s.cleanup();
     p.cleanup();
@@ -131,7 +131,7 @@ test('dispatch pin: a custom provider id routes to <provider>/agentic-high', asy
   const p = makeProject({ mode: 'work', overpass: { enabled: true, provider: 'overpass-agentic' } });
   const s = await setup(p.dir);
   try {
-    assert.equal((await s.dispatch({ model: 'anthropic/claude-opus-5-5' })).args.model, 'overpass-agentic/agentic-high');
+    assert.equal((await s.dispatch({ model: 'anthropic/claude-opus-5-5' })).args.model, 'overpass-agentic/agentic-premium');
   } finally {
     await s.cleanup();
     p.cleanup();
@@ -232,10 +232,10 @@ test('bypass: a brief line keeps the model the call names, reported on the resul
   try {
     const bypassed = await s.dispatch({ model: SOL, prompt: BYPASS_BRIEF('cross-family review') });
     assert.equal(bypassed.args.model, SOL, 'the call keeps the model it named');
-    assert.match(bypassed.result, /OVERPASS-BYPASS: Overpass bypassed for this dispatch: it was sent to openai\/gpt-6\.1-sol#high instead of overpass\/agentic-high \(reason: cross-family review\)\./);
+    assert.match(bypassed.result, /OVERPASS-BYPASS: Overpass bypassed for this dispatch: it was sent to openai\/gpt-6\.1-sol#high instead of overpass\/agentic-premium \(reason: cross-family review\)\./);
     assert.doesNotMatch(bypassed.result, /^OVERPASS: this dispatch ran on/m, 'not reported as a replaced model');
     assert.doesNotMatch(bypassed.result, /ran on/, 'the report states the routing choice, not a completed run');
-    assert.match(notices(p.dir), /Sterling Overpass: Overpass bypassed for a subagent dispatch: it was sent to openai\/gpt-6\.1-sol#high instead of overpass\/agentic-high \(reason: cross-family review\)\./);
+    assert.match(notices(p.dir), /Sterling Overpass: Overpass bypassed for a subagent dispatch: it was sent to openai\/gpt-6\.1-sol#high instead of overpass\/agentic-premium \(reason: cross-family review\)\./);
     assert.match(await s.prompt('ses_root'), /Overpass bypassed for a subagent dispatch: it was sent to openai\/gpt-6\.1-sol#high/, 'the conductor session is told on its next prompt');
   } finally {
     await s.cleanup();
@@ -248,11 +248,11 @@ test('bypass: without the line the call is still rewritten to the tier, and a ma
   const s = await setup(p.dir);
   try {
     const plain = await s.dispatch({ model: SOL });
-    assert.equal(plain.args.model, 'overpass/agentic-high');
-    assert.match(plain.result, /OVERPASS: this dispatch ran on overpass\/agentic-high, not openai\/gpt-6\.1-sol#high/);
+    assert.equal(plain.args.model, 'overpass/agentic-premium');
+    assert.match(plain.result, /OVERPASS: this dispatch ran on overpass\/agentic-premium, not openai\/gpt-6\.1-sol#high/);
     assert.equal(notices(p.dir), '', 'no bypass notice');
     const quoted = await s.dispatch({ model: SOL, prompt: 'Write "OVERPASS-BYPASS: reason" in the docs.' }, 'call_2');
-    assert.equal(quoted.args.model, 'overpass/agentic-high', 'a quoted marker is not a bypass');
+    assert.equal(quoted.args.model, 'overpass/agentic-premium', 'a quoted marker is not a bypass');
   } finally {
     await s.cleanup();
     p.cleanup();
@@ -310,11 +310,11 @@ test('bypass: a marker inside a fenced code block is quoted text, so the tier re
     for (const [i, fence] of ['```', '```text', '~~~', '````md'].entries()) {
       const prompt = `Explain the rule:\n${fence}\nOVERPASS-BYPASS: example reason\n${fence[0].repeat(fence.match(/^[`~]+/)[0].length)}\nThen stop.`;
       const out = await s.dispatch({ model: SOL, prompt }, `call_f${i}`);
-      assert.equal(out.args.model, 'overpass/agentic-high', `fence ${fence}`);
+      assert.equal(out.args.model, 'overpass/agentic-premium', `fence ${fence}`);
       assert.doesNotMatch(out.result, /OVERPASS-BYPASS/, `fence ${fence}`);
     }
     const unclosed = await s.dispatch({ model: SOL, prompt: 'Quote:\n```\nOVERPASS-BYPASS: never closed' }, 'call_u');
-    assert.equal(unclosed.args.model, 'overpass/agentic-high', 'an unclosed fence runs to the end of the brief');
+    assert.equal(unclosed.args.model, 'overpass/agentic-premium', 'an unclosed fence runs to the end of the brief');
     assert.equal(notices(p.dir), '', 'no bypass notice');
   } finally {
     await s.cleanup();
@@ -332,7 +332,7 @@ test('bypass: a real marker outside a fence wins over a fenced one; a bare fence
     assert.match(out.result, /\(reason: real reason\)/);
     assert.doesNotMatch(out.result, /fenced example/);
     const fencedOnly = await s.dispatch({ prompt: '```\nOVERPASS-BYPASS: x\n```' }, 'call_2');
-    assert.equal(fencedOnly.args.model, 'overpass/agentic-high', 'a fenced marker is not a bypass, so no model is not an error');
+    assert.equal(fencedOnly.args.model, 'overpass/agentic-premium', 'a fenced marker is not a bypass, so no model is not an error');
   } finally {
     await s.cleanup();
     p.cleanup();
@@ -728,7 +728,14 @@ test('overlay: the plugin converges it at setup and each turn, following a confi
 
 test('session line: ON, bypass, not in effect, off, invalid and unknown', () => {
   const line = (config, host = 'opencode', configUnreadable = false) => opState.overpassLine({ config, configUnreadable, host });
-  assert.match(line(ON), /^Overpass: ON \(provider 'overpass'.*the conductor runs on overpass\/agentic-conductor; every subagent lane, the Plan agent and the maintenance worker run on overpass\/agentic-high\./);
+  // Changed because the ruled per-role defaults (2026-10-22, "Yes, as stated") made the old
+  // "every subagent lane ... run on overpass/agentic-high" false: implementor runs on
+  // agentic-premium and sparring on agentic-premium-max.
+  assert.match(line(ON), /^Overpass: ON \(provider 'overpass'.*the conductor runs on overpass\/agentic-conductor; subagent roles run on overpass\/agentic-premium \(implementor\), overpass\/agentic-high \(researcher, scout, reviewer, librarian\), overpass\/agentic-premium-max \(sparring\); other agents, the Plan agent and the maintenance worker run on overpass\/agentic-high\./);
+  // An explicit override: a role tier moves that role to its own group, an effort adds "at effort" to the group.
+  const overridden = line({ mode: 'work', overpass: { enabled: true, roles: { reviewer: { tier: 'agentic-max', effort: 'xhigh' }, scout: { effort: 'low' }, implementor: { tier: 'agentic-high' } } } });
+  assert.match(overridden, /subagent roles run on overpass\/agentic-high \(implementor, researcher, librarian\), overpass\/agentic-high at effort low \(scout\), overpass\/agentic-max at effort xhigh \(reviewer\), overpass\/agentic-premium-max \(sparring\); other agents, the Plan agent and the maintenance worker run on overpass\/agentic-high\./);
+  assert.doesNotMatch(overridden, /agentic-premium \(/, 'the implementor override replaces its default');
   assert.match(line({ mode: 'work', overpass: { enabled: true, conductor_bypass: true, provider: 'overpass-agentic' } }), /^Overpass: ON \(provider 'overpass-agentic'.*the conductor is bypassed \(config\.overpass\.conductor_bypass\) and keeps its direct model pin; .* run on overpass-agentic\/agentic-high/);
   assert.match(line({ mode: 'hobby', overpass: { enabled: true } }), /^Overpass: CONFIGURED BUT NOT IN EFFECT — overpass applies in work mode only; the project mode is 'hobby'/);
   assert.match(line({ overpass: { enabled: true } }), /NOT IN EFFECT — overpass applies in work mode only; the project mode is 'hobby'/, 'absent mode is hobby');
@@ -814,6 +821,8 @@ test('mismatch notice: the agent from the context hook counts when the step even
 
 const ROLES_ON = { mode: 'work', overpass: { enabled: true, roles: { reviewer: { tier: 'agentic-max', effort: 'xhigh' }, implementor: { effort: 'high' }, scout: { tier: 'agentic-fast' } } } };
 const LANE = { providerID: 'overpass', id: 'agentic-high' };
+// The implementor role's default lane model (ruled default change 2026-10-22: agentic-premium).
+const IMPL_LANE = { providerID: 'overpass', id: 'agentic-premium' };
 
 /** One model request through the context hook in session `sessionID`; returns its options afterwards. */
 async function request(s, agent, model, options = {}, sessionID = 'ses_lane') {
@@ -851,13 +860,13 @@ async function linkedLane(s, agent, child, id, extra = {}) {
 }
 const has = (options) => Object.hasOwn(options, 'reasoningEffort');
 
-test('roles: a role tier changes the dispatch model; other roles and unmapped agents keep agentic-high', async () => {
+test('roles: a role tier changes the dispatch model; other roles and unmapped agents keep their defaults (implementor premium, the rest high)', async () => {
   const p = makeProject(ROLES_ON);
   const s = await setup(p.dir);
   try {
     assert.equal((await s.dispatch({ agent: 'sterling/reviewer', model: 'openai/gpt-6.1-sol#high' })).args.model, 'overpass/agentic-max');
     assert.equal((await s.dispatch({ agent: 'sterling/scout' }, 'call_2')).args.model, 'overpass/agentic-fast');
-    assert.equal((await s.dispatch({ agent: 'sterling/implementor' }, 'call_3')).args.model, 'overpass/agentic-high');
+    assert.equal((await s.dispatch({ agent: 'sterling/implementor' }, 'call_3')).args.model, 'overpass/agentic-premium');
     assert.equal((await s.dispatch({ agent: 'sterling/researcher' }, 'call_4')).args.model, 'overpass/agentic-high');
     assert.equal((await s.dispatch({ agent: 'general' }, 'call_5')).args.model, 'overpass/agentic-high');
     const named = await s.dispatch({ agent: 'sterling/reviewer', model: 'overpass/agentic-high' }, 'call_6');
@@ -865,6 +874,30 @@ test('roles: a role tier changes the dispatch model; other roles and unmapped ag
   } finally {
     await s.cleanup();
     p.cleanup();
+  }
+});
+
+test('roles: sterling/sparring runs on agentic-premium-max by default, the reviewer stays on agentic-high, and a roles.sparring tier overrides it', async () => {
+  const p = makeProject({ mode: 'work', overpass: { enabled: true } });
+  const s = await setup(p.dir);
+  try {
+    // the call names the Astra pin; the sparring role's tier wins over it
+    const spar = await s.dispatch({ agent: 'sterling/sparring', model: 'openai/gpt-6-astra#high' });
+    assert.equal(spar.args.model, 'overpass/agentic-premium-max');
+    assert.match(spar.result, /OVERPASS: this dispatch ran on overpass\/agentic-premium-max, not openai\/gpt-6-astra#high/);
+    assert.equal((await s.dispatch({ agent: 'sterling/sparring' }, 'call_2')).args.model, 'overpass/agentic-premium-max', 'no model on the call is fine');
+    assert.equal((await s.dispatch({ agent: 'sterling/reviewer' }, 'call_3')).args.model, 'overpass/agentic-high', 'the reviewer is not the sparring role');
+  } finally {
+    await s.cleanup();
+    p.cleanup();
+  }
+  const q = makeProject({ mode: 'work', overpass: { enabled: true, roles: { sparring: { tier: 'agentic-max' } } } });
+  const t = await setup(q.dir);
+  try {
+    assert.equal((await t.dispatch({ agent: 'sterling/sparring' })).args.model, 'overpass/agentic-max', 'an explicit roles.sparring.tier wins over the default');
+  } finally {
+    await t.cleanup();
+    q.cleanup();
   }
 });
 
@@ -904,7 +937,7 @@ test('effort: unset roles sends no reasoningEffort (today exactly)', async () =>
     childSessions(s);
     for (const [i, agent] of ['sterling/implementor', 'sterling/reviewer'].entries()) {
       await linkedLane(s, agent, `ses_child${i}`, `call_${i}`);
-      assert.equal(has(await request(s, agent, LANE, {}, `ses_child${i}`)), false, agent);
+      assert.equal(has(await request(s, agent, agent === 'sterling/implementor' ? IMPL_LANE : LANE, {}, `ses_child${i}`)), false, agent);
     }
     assert.equal(has(await request(s, 'plan', LANE)), false);
     assert.equal(has(await request(s, 'sterling/conductor', LANE)), false);
@@ -920,10 +953,10 @@ test('effort: set on a linked role lane on exactly its lane model, replacing any
   try {
     childSessions(s);
     await linkedLane(s, 'sterling/implementor', 'ses_child1', 'call_1');
-    assert.equal((await request(s, 'sterling/implementor', LANE, {}, 'ses_child1')).reasoningEffort, 'high');
-    assert.equal((await request(s, 'sterling/implementor', LANE, { reasoningEffort: 'xhigh', temperature: 1 }, 'ses_child1')).reasoningEffort, 'high', 'an exact override, not a minimum');
-    assert.equal((await request(s, 'sterling/implementor', LANE, { temperature: 1 }, 'ses_child1')).temperature, 1, 'other options are kept');
-    const noOptions = { sessionID: 'ses_child1', agent: 'sterling/implementor', model: LANE, system: [], messages: [] };
+    assert.equal((await request(s, 'sterling/implementor', IMPL_LANE, {}, 'ses_child1')).reasoningEffort, 'high');
+    assert.equal((await request(s, 'sterling/implementor', IMPL_LANE, { reasoningEffort: 'xhigh', temperature: 1 }, 'ses_child1')).reasoningEffort, 'high', 'an exact override, not a minimum');
+    assert.equal((await request(s, 'sterling/implementor', IMPL_LANE, { temperature: 1 }, 'ses_child1')).temperature, 1, 'other options are kept');
+    const noOptions = { sessionID: 'ses_child1', agent: 'sterling/implementor', model: IMPL_LANE, system: [], messages: [] };
     await s.ctx.hooks.session.context(noOptions);
     assert.equal(noOptions.options?.reasoningEffort, 'high');
     await linkedLane(s, 'sterling/reviewer', 'ses_child2', 'call_2');
@@ -973,18 +1006,18 @@ test('effort: a child not linked yet gets none; once linked to its own plain dis
   try {
     childSessions(s);
     await begin(s, { agent: 'sterling/implementor' }, 'call_1');
-    assert.equal(has(await request(s, 'sterling/implementor', LANE, {}, 'ses_child1')), false, 'not linked yet, even with only plain dispatches open');
+    assert.equal(has(await request(s, 'sterling/implementor', IMPL_LANE, {}, 'ses_child1')), false, 'not linked yet, even with only plain dispatches open');
     await progress(s, 'call_1', 'ses_child1');
-    assert.equal((await request(s, 'sterling/implementor', LANE, {}, 'ses_child1')).reasoningEffort, 'high', 'linked');
-    assert.equal(has(await request(s, 'sterling/implementor', LANE, {}, 'ses_lane')), false, 'a session with no parent');
+    assert.equal((await request(s, 'sterling/implementor', IMPL_LANE, {}, 'ses_child1')).reasoningEffort, 'high', 'linked');
+    assert.equal(has(await request(s, 'sterling/implementor', IMPL_LANE, {}, 'ses_lane')), false, 'a session with no parent');
     assert.equal(has(await request(s, 'sterling/reviewer', { providerID: 'overpass', id: 'agentic-max' }, {}, 'ses_child9')), false, 'no reviewer dispatch');
     await finish(s, await begin(s, { agent: 'sterling/implementor' }, 'call_2'), 'ses_child2');
-    assert.equal((await request(s, 'sterling/implementor', LANE, {}, 'ses_child2')).reasoningEffort, 'high', 'linked by execute.after');
+    assert.equal((await request(s, 'sterling/implementor', IMPL_LANE, {}, 'ses_child2')).reasoningEffort, 'high', 'linked by execute.after');
     s.ctx.session.get = async () => {
       throw new Error('session store unavailable');
     };
     await linkedLane(s, 'sterling/implementor', 'ses_child7', 'call_7');
-    assert.equal(has(await request(s, 'sterling/implementor', LANE, {}, 'ses_child7')), false, 'parent unreadable: fail safe');
+    assert.equal(has(await request(s, 'sterling/implementor', IMPL_LANE, {}, 'ses_child7')), false, 'parent unreadable: fail safe');
     assert.match(readFileSync(join(p.dir, server.LOG_REL), 'utf8'), /no per-role reasoning effort for session ses_child7: its parent session could not be read/);
   } finally {
     await s.cleanup();
@@ -1115,7 +1148,7 @@ test('effort: never set while Overpass is off or in hobby mode', async () => {
     try {
       childSessions(s);
       await linkedLane(s, 'sterling/implementor', 'ses_child1', 'call_1');
-      assert.equal(has(await request(s, 'sterling/implementor', LANE, {}, 'ses_child1')), false, JSON.stringify(config));
+      assert.equal(has(await request(s, 'sterling/implementor', IMPL_LANE, {}, 'ses_child1')), false, JSON.stringify(config));
       assert.equal(notices(p.dir), '', 'nothing to report');
     } finally {
       await s.cleanup();
@@ -1132,7 +1165,7 @@ test('effort: an invalid overpass block or an unreadable config sends none and s
     const p = makeProject(config);
     const s = await setup(p.dir);
     try {
-      for (let i = 0; i < 3; i++) assert.equal(has(await request(s, 'sterling/implementor', LANE, {}, 'ses_child1')), false);
+      for (let i = 0; i < 3; i++) assert.equal(has(await request(s, 'sterling/implementor', IMPL_LANE, {}, 'ses_child1')), false);
       const said = notices(p.dir).split('\n').filter((line) => /no per-role reasoning effort/.test(line));
       assert.equal(said.length, 1, `reported once: ${said.join(' | ')}`);
       assert.match(said[0], words);

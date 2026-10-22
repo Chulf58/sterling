@@ -4809,7 +4809,8 @@ var AGENT_MODEL_KEY = {
   researcher: "researcher",
   scout: "scout",
   librarian: "librarian",
-  reviewer: "reviewer"
+  reviewer: "reviewer",
+  sparring: "sparring"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
 var s = (v) => typeof v === "string" ? v : "";
@@ -5249,7 +5250,12 @@ var configSchema = external_exports.object({
     // reviewer judges a diff (decision
     // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
     // dispatch pins its model explicitly; this is the install-time default.
-    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
+    reviewer: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
+    // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
+    // read-only grant as the reviewer, so the same install-time default. Every
+    // dispatch pins its model (Astra, else a Fable model); under Overpass its
+    // role tier decides.
+    sparring: agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" })
   }).catchall(agentModelEntry).default({}),
   // Per-project agent tool extension (decision
   // the former ruling 'per-project-agent-extra-tools-config-appended-at-render' (not in the current store):

@@ -262,6 +262,11 @@ export const configSchema = z.object({
       // reviewer-agent-is-the-one-review-rubric-for-claude-and-codex). Every
       // dispatch pins its model explicitly; this is the install-time default.
       reviewer: agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high' }),
+      // sparring is the sterling/sparring agent (user-ruled 2026-10-22): the same
+      // read-only grant as the reviewer, so the same install-time default. Every
+      // dispatch pins its model (Astra, else a Fable model); under Overpass its
+      // role tier decides.
+      sparring: agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high' }),
     })
     // Any installed agent's name is a key (decision
     // system-tab-sets-vendor-policy-and-models-for-reviewer-sparring-and-hard-tasks):
@@ -622,20 +627,35 @@ export const OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
 
 // Per-role routing (decision overpass-toggle-work-mode-only-routes-every-lane-through-tiers,
 // amended 2026-10-22, "Effort and tier per role"): config.overpass.roles maps a subagent
-// role to an optional tier (the role's lanes run on <provider>/<tier> instead of
-// <provider>/agentic-high) and an optional client reasoning effort, which the OpenCode
+// role to an optional tier (the role's lanes run on <provider>/<tier> instead of the
+// role's default tier, DEFAULT_OVERPASS_ROLE_TIERS) and an optional client reasoning effort, which the OpenCode
 // plugin sends on each request of that role's lane. Effort is an exact override, not a
 // minimum: 'high' also replaces an xhigh the gateway would have picked. Both are off by
 // default. Plan and the maintenance worker are not roles here and keep laneModel.
-export const OVERPASS_ROLES = ['implementor', 'researcher', 'scout', 'reviewer', 'librarian'] as const;
+export const OVERPASS_ROLES = ['implementor', 'researcher', 'scout', 'reviewer', 'librarian', 'sparring'] as const;
 export type OverpassRole = (typeof OVERPASS_ROLES)[number];
 export const OVERPASS_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type OverpassEffort = (typeof OVERPASS_EFFORTS)[number];
 export const OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
 export const DEFAULT_OVERPASS_TIER = 'agentic-high';
+// Per-role default tiers (user-ruled 2026-10-22 through the question form, "Yes, as
+// stated"): the implementor role defaults to agentic-premium (Sonnet 5.5, Opus 5.5 and
+// Sol 6.1, each at high, xhigh or max) and the sparring role (the sterling/sparring agent)
+// to agentic-premium-max (Fable 5.1 and Astra 6, each at high, xhigh or
+// max). Every other role, the reviewer included, stays on DEFAULT_OVERPASS_TIER. An
+// explicit roles.<role>.tier still wins, and any name matching OVERPASS_TIER_RE is
+// accepted, so no list of tier names needs to grow when the gateway adds one.
+export const DEFAULT_OVERPASS_ROLE_TIERS: Record<OverpassRole, string> = {
+  implementor: 'agentic-premium',
+  researcher: DEFAULT_OVERPASS_TIER,
+  scout: DEFAULT_OVERPASS_TIER,
+  reviewer: DEFAULT_OVERPASS_TIER,
+  librarian: DEFAULT_OVERPASS_TIER,
+  sparring: 'agentic-premium-max',
+};
 
 export interface OverpassRoleRoute {
-  /** <provider>/<roles[role].tier ?? 'agentic-high'>. */
+  /** <provider>/<roles[role].tier ?? DEFAULT_OVERPASS_ROLE_TIERS[role]>. */
   model: string;
   /** The client reasoning effort for the role's requests; absent when none is set. */
   effort?: OverpassEffort;
@@ -679,7 +699,7 @@ function resolveOverpassRoles(raw: unknown, provider: string): Record<OverpassRo
     for (const key of Object.keys(fields)) {
       if (key !== 'tier' && key !== 'effort') throw new Error(`config.overpass.roles.${role} has the unknown field ${JSON.stringify(key)} — only "tier" and "effort" are allowed`);
     }
-    const tier = fields.tier === undefined ? DEFAULT_OVERPASS_TIER : fields.tier;
+    const tier = fields.tier === undefined ? DEFAULT_OVERPASS_ROLE_TIERS[role] : fields.tier;
     if (typeof tier !== 'string' || !OVERPASS_TIER_RE.test(tier)) {
       throw new Error(`config.overpass.roles.${role}.tier is ${JSON.stringify(fields.tier)} — it must be an Overpass tier name like "agentic-high" (agentic- then lowercase letters, digits and '-')`);
     }

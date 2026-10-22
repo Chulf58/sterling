@@ -46,11 +46,12 @@ test('overpass: effective only when enabled, work mode and the opencode host', (
     conductorModel: 'overpass/agentic-conductor',
     laneModel: 'overpass/agentic-high',
     roles: {
-      implementor: { model: 'overpass/agentic-high' },
+      implementor: { model: 'overpass/agentic-premium' },
       researcher: { model: 'overpass/agentic-high' },
       scout: { model: 'overpass/agentic-high' },
       reviewer: { model: 'overpass/agentic-high' },
       librarian: { model: 'overpass/agentic-high' },
+      sparring: { model: 'overpass/agentic-premium-max' },
     },
   });
 });
@@ -152,19 +153,36 @@ test('overpass: a non-boolean conductor_bypass throws, naming the key and the va
 
 // ── per-role tier and effort (config.overpass.roles) ─────────────────────────
 
-test('overpass roles: unset gives every role agentic-high and no effort, the same as before', () => {
-  for (const cfg of [on(), on({ roles: {} }), on({ roles: { reviewer: {} } })]) {
+test('overpass roles: unset gives the per-role default tier and no effort (implementor premium, sparring premium-max, the rest high)', () => {
+  const expected = {
+    implementor: { model: 'overpass/agentic-premium' },
+    researcher: { model: 'overpass/agentic-high' },
+    scout: { model: 'overpass/agentic-high' },
+    reviewer: { model: 'overpass/agentic-high' },
+    librarian: { model: 'overpass/agentic-high' },
+    sparring: { model: 'overpass/agentic-premium-max' },
+  };
+  for (const cfg of [on(), on({ roles: {} }), on({ roles: { reviewer: {} } }), on({ roles: { implementor: {} } }), on({ roles: { sparring: {} } })]) {
     const r = resolveOverpass(cfg, { host: 'opencode' });
-    assert.equal(r.laneModel, 'overpass/agentic-high');
-    for (const route of Object.values(r.roles)) assert.deepEqual(route, { model: 'overpass/agentic-high' }, JSON.stringify(cfg));
+    assert.equal(r.laneModel, 'overpass/agentic-high', 'Plan and the worker stay on agentic-high');
+    assert.deepEqual(r.roles, expected, JSON.stringify(cfg));
   }
+});
+
+test('overpass roles: the premium tiers are accepted as an explicit tier and an explicit tier replaces the role default', () => {
+  const r = resolveOverpass(on({ roles: { scout: { tier: 'agentic-premium-max' }, researcher: { tier: 'agentic-premium' }, reviewer: { tier: 'agentic-premium-max' }, sparring: { tier: 'agentic-high', effort: 'high' }, implementor: { tier: 'agentic-premium-max', effort: 'max' } } }), { host: 'opencode' });
+  assert.deepEqual(r.roles.scout, { model: 'overpass/agentic-premium-max' });
+  assert.deepEqual(r.roles.researcher, { model: 'overpass/agentic-premium' });
+  assert.deepEqual(r.roles.reviewer, { model: 'overpass/agentic-premium-max' });
+  assert.deepEqual(r.roles.sparring, { model: 'overpass/agentic-high', effort: 'high' });
+  assert.deepEqual(r.roles.implementor, { model: 'overpass/agentic-premium-max', effort: 'max' });
 });
 
 test('overpass roles: a tier and an effort apply to that role only, under the configured provider', () => {
   const r = resolveOverpass(on({ provider: 'overpass-agentic', roles: { reviewer: { tier: 'agentic-max', effort: 'xhigh' }, scout: { effort: 'low' } } }), { host: 'opencode' });
   assert.deepEqual(r.roles.reviewer, { model: 'overpass-agentic/agentic-max', effort: 'xhigh' });
   assert.deepEqual(r.roles.scout, { model: 'overpass-agentic/agentic-high', effort: 'low' });
-  assert.deepEqual(r.roles.implementor, { model: 'overpass-agentic/agentic-high' });
+  assert.deepEqual(r.roles.implementor, { model: 'overpass-agentic/agentic-premium' });
   assert.equal(r.laneModel, 'overpass-agentic/agentic-high', 'Plan and the worker keep the default lane model');
 });
 
