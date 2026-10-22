@@ -59,7 +59,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isInstalledCopy } from './installed-copy.mjs';
 import { writeFileAtomic, writeFileAtomicIfChanged } from './atomic-write.mjs';
@@ -102,6 +102,29 @@ export function projectConfigText(config) {
 }
 
 /** OpenCode's global config dir: <XDG_CONFIG_HOME or <home>/.config>/opencode. */
+/**
+ * OpenCode's system configuration directory, the highest-precedence source
+ * (opencode.ai/v2/docs/config, "Locations"): /etc/opencode on Linux,
+ * /Library/Application Support/opencode on macOS, %ProgramData%\\opencode on Windows.
+ * Null where the docs give no path (another platform, or Windows without ProgramData).
+ */
+export function opencodeSystemDir({ env = process.env, platform = process.platform } = {}) {
+  if (platform === 'linux') return '/etc/opencode';
+  if (platform === 'darwin') return '/Library/Application Support/opencode';
+  if (platform === 'win32') {
+    const base = env.ProgramData || env.PROGRAMDATA;
+    return base ? join(base, 'opencode') : null;
+  }
+  return null;
+}
+
+/** The macOS managed-preference files OpenCode reads above the system directory (opencode.ai/v2/docs/config, "Locations"). */
+export function opencodeManagedPrefs({ env = process.env, platform = process.platform } = {}) {
+  if (platform !== 'darwin') return [];
+  const user = env.USER || env.LOGNAME;
+  return [...(user ? [`/Library/Managed Preferences/${user}/ai.opencode.managed.plist`] : []), '/Library/Managed Preferences/ai.opencode.managed.plist'];
+}
+
 export function opencodeConfigDir({ env = process.env, home = homedir() } = {}) {
   return join(env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode');
 }
@@ -793,7 +816,7 @@ export function hasEvaluateHook(version) {
  * config Sterling cannot read is a `skipped` row and sets `incomplete`; a source whose
  * rules can come after .opencode/opencode.json is a row too, so no gap is silent.
  */
-export function visibleAgents({ projectDir, env = process.env, home = homedir(), checkAgentFiles = true }) {
+export function visibleAgents({ projectDir, env = process.env, home = homedir(), checkAgentFiles = true, systemDir = opencodeSystemDir({ env }) }) {
   const globalDir = env.OPENCODE_CONFIG_DIR || opencodeConfigDir({ env, home });
   const dotDir = join(projectDir, '.opencode');
   const ancestors = [];
@@ -804,12 +827,17 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir(),
   const names = new Set();
   const envNames = new Set();
   const problems = [];
+  // Every source that names an agent, in scan order (not precedence order): agent-file
+  // directories as { kind: 'files', dir, names }, config documents as { kind: 'doc',
+  // label, path, legacy, native } (the V1 `agent` and V2 `agents` maps). agentVisibleFrom
+  // resolves them; the init guard reads only `names`.
+  const sources = [];
   let incomplete = false;
   const unreadable = (label, err) => {
     incomplete = true;
     problems.push({ item: label, status: 'skipped', detail: `cannot be read (${err.code ?? err.message}), so the agents it defines are NOT checked and get no new per-agent guard; earlier per-agent guard entries are kept; fix it, then rerun /sterling:update` });
   };
-  for (const dir of [globalDir, dotDir, ...ancestors.map((a) => join(a, '.opencode'))]) {
+  for (const dir of [...(systemDir ? [systemDir] : []), globalDir, dotDir, ...ancestors.map((a) => join(a, '.opencode'))]) {
     for (const [sub, flat] of [['agent', false], ['agents', false], ['mode', true], ['modes', true]]) {
       let files;
       try {
@@ -818,6 +846,7 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir(),
         unreadable(fwd(join(dir, sub)), err);
         continue;
       }
+      if (files.length) sources.push({ kind: 'files', dir, names: files.map((f) => f.name) });
       for (const { name, path } of files) {
         (dir === env.OPENCODE_CONFIG_DIR ? envNames : names).add(name);
         if (dir !== dotDir || !checkAgentFiles) continue;
@@ -843,12 +872,13 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir(),
     }
   }
   const docs = [
+    ...(systemDir ? ['opencode.json', 'opencode.jsonc'].map((f) => join(systemDir, f)) : []),
     ...['opencode.json', 'opencode.jsonc'].map((f) => join(globalDir, f)),
     ...['opencode.json', 'opencode.jsonc'].map((f) => join(projectDir, f)),
     join(dotDir, 'opencode.jsonc'),
     ...ancestors.flatMap((a) => ['opencode.json', 'opencode.jsonc', '.opencode/opencode.json', '.opencode/opencode.jsonc'].map((f) => join(a, f))),
     ...(env.OPENCODE_CONFIG ? [env.OPENCODE_CONFIG] : []),
-  ].map((path) => ({ label: fwd(path), read: () => (existsSync(path) ? readFileSync(path, 'utf8') : null) }));
+  ].map((path) => ({ label: fwd(path), path, read: () => (existsSync(path) ? readFileSync(path, 'utf8') : null) }));
   if (env.OPENCODE_CONFIG_CONTENT) docs.push({ label: 'OPENCODE_CONFIG_CONTENT', read: () => env.OPENCODE_CONFIG_CONTENT });
   const fromEnv = new Set([...(env.OPENCODE_CONFIG_DIR ? ['opencode.json', 'opencode.jsonc'].map((f) => fwd(join(globalDir, f))) : []), ...(env.OPENCODE_CONFIG ? [fwd(env.OPENCODE_CONFIG)] : []), 'OPENCODE_CONFIG_CONTENT']);
   const late = new Set([fwd(join(dotDir, 'opencode.jsonc')), ...(env.OPENCODE_CONFIG ? [fwd(env.OPENCODE_CONFIG)] : []), 'OPENCODE_CONFIG_CONTENT']);
@@ -870,38 +900,100 @@ export function visibleAgents({ projectDir, env = process.env, home = homedir(),
       problems.push({ item: doc.label, status: 'skipped', detail: `not valid JSONC (${err.message}), so the agents it defines are NOT checked and get no new per-agent guard; earlier per-agent guard entries are kept; fix it, then rerun /sterling:update` });
       continue;
     }
-    const agents = config?.agent;
-    const hasAgents = agents && typeof agents === 'object' && !Array.isArray(agents);
-    if (hasAgents) for (const name of Object.keys(agents)) (fromEnv.has(doc.label) ? envNames : names).add(name);
+    // V1 `agent` and V2 `agents` both define agents (opencode.ai/v2/docs/migrate-v1, "Agents and modes").
+    const agents = agentMap(config?.agent);
+    const native = agentMap(config?.agents);
+    const hasAgents = agents !== null;
+    for (const map of [agents, native]) if (map) for (const name of Object.keys(map)) (fromEnv.has(doc.label) ? envNames : names).add(name);
+    if (agents || native) sources.push({ kind: 'doc', label: doc.label, path: doc.path ?? null, legacy: agents ?? {}, native: native ?? {} });
     const setsRules = config?.permission !== undefined || (hasAgents && Object.values(agents).some((a) => a?.permission !== undefined));
     if (late.has(doc.label) && setsRules) {
       problems.push({ item: doc.label, status: 'skipped', detail: `sets permission rules and is read after (or in an unmeasured order with) ${PROJECT_CONFIG_REL}, so its rules can override the store guard; move them into ${PROJECT_CONFIG_REL}` });
     }
   }
   const envOnly = [...envNames].filter((n) => !names.has(n)).sort();
-  return { names: [...new Set([...names, ...envNames])].sort(), envOnly, problems, incomplete };
+  return { names: [...new Set([...names, ...envNames])].sort(), envOnly, problems, incomplete, sources };
 }
 
+const agentMap = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : null);
+
 /**
- * Whether OpenCode started in `dir` would see agent `name`: visibleAgents(dir) plus the
- * `agent` entries of `dir`/.opencode/opencode.json, the one source visibleAgents leaves to
- * its caller. Returns { visible, problems }: `problems` names each config source that could
- * not be read, so a caller can tell "not defined" from "not known".
+ * Whether OpenCode started in `dir` would see agent `name`, from the sources visibleAgents
+ * finds plus `dir`/.opencode/opencode.json (the one it leaves to its caller). Returns
+ * { visible, problems, why }: visible is true or false when the effective definition is
+ * known, and null when it is not (`why` says what is unknown); `problems` names each
+ * config source that could not be read.
+ *
+ * The effective definition (opencode.ai/v2/docs/agents, "Merging" and "Disabled";
+ * opencode.ai/v2/docs/migrate-v1, "Agents and modes"): V1 `agent` and V2 `agents` both
+ * define an agent, the native V2 entry winning within one document; `disabled: true` (V2)
+ * or `disable: true` (V1) removes it at that point of loading, and a later definition
+ * brings it back. The document order is the one opencode.ai/v2/docs/config ("Locations")
+ * gives: the global opencode.json(c), then direct opencode.json(c) files from the farthest
+ * ancestor to `dir`, then .opencode/opencode.json(c) files in the same order. That page
+ * gives no place in that order for agent Markdown files, OPENCODE_CONFIG,
+ * OPENCODE_CONFIG_CONTENT or an OPENCODE_CONFIG_DIR global, nor between opencode.json and
+ * opencode.jsonc in one directory: when a disable and a definition both exist and one of
+ * them is in such a source, the result is null, never a guess. The system directory's
+ * opencode.json(c) (opencodeSystemDir) outranks every other document; its agent files have
+ * no documented place and are unordered like the others. Present macOS managed
+ * preferences make the result null.
  */
-export function agentVisibleFrom({ dir, name, env = process.env, home = homedir() }) {
-  const seen = visibleAgents({ projectDir: dir, env, home, checkAgentFiles: false });
+export function agentVisibleFrom({ dir, name, env = process.env, home = homedir(), systemDir = opencodeSystemDir({ env }), managedPrefs = opencodeManagedPrefs({ env }) }) {
+  // Managed preferences (macOS) outrank everything and are a plist Sterling does not parse:
+  // present, they make the answer unknown; absent, they say nothing.
+  const managed = managedPrefs.filter((p) => existsSync(p));
+  if (managed.length) return { visible: null, problems: [], why: `OpenCode managed preferences (${managed.join(', ')}) can define or disable ${name}, and Sterling does not read them` };
+  const seen = visibleAgents({ projectDir: dir, env, home, checkAgentFiles: false, systemDir });
   const problems = seen.problems.filter((p) => p.status === 'skipped' && /cannot be read|not valid JSONC/.test(p.detail ?? ''));
-  if (seen.names.includes(name)) return { visible: true, problems };
+  const sources = [...seen.sources];
   const own = join(dir, PROJECT_CONFIG_REL);
   if (existsSync(own)) {
     try {
-      const agents = parseJsonc(readFileSync(own, 'utf8'))?.agent;
-      if (agents && typeof agents === 'object' && !Array.isArray(agents) && Object.hasOwn(agents, name)) return { visible: true, problems };
+      const config = parseJsonc(normalizeConfigText(readFileSync(own, 'utf8')));
+      const legacy = agentMap(config?.agent);
+      const native = agentMap(config?.agents);
+      if (legacy || native) sources.push({ kind: 'doc', label: fwd(own), path: own, legacy: legacy ?? {}, native: native ?? {} });
     } catch (err) {
       problems.push({ item: fwd(own), status: 'skipped', detail: `cannot be read (${err.code ?? err.message})` });
     }
   }
-  return { visible: false, problems };
+  const globalDir = opencodeConfigDir({ env, home });
+  const depth = (d) => resolve(d).split(/[\\/]+/).filter(Boolean).length;
+  // A documented precedence rank, or null where the V2 docs give none.
+  const rank = (src) => {
+    if (src.kind !== 'doc' || !src.path) return null;
+    const file = basename(src.path);
+    if (file !== 'opencode.json' && file !== 'opencode.jsonc') return null;
+    const parent = dirname(resolve(src.path));
+    if (systemDir && parent === resolve(systemDir)) return 30000;
+    if (!env.OPENCODE_CONFIG_DIR && parent === resolve(globalDir)) return 0;
+    if (env.OPENCODE_CONFIG && resolve(src.path) === resolve(env.OPENCODE_CONFIG)) return null;
+    if (basename(parent) === '.opencode') return 20000 + depth(dirname(parent));
+    return 10000 + depth(parent);
+  };
+  const events = [];
+  for (const src of sources) {
+    if (src.kind === 'files') {
+      if (src.names.includes(name)) events.push({ effect: 'define', rank: null, label: fwd(src.dir) });
+      continue;
+    }
+    const entry = Object.hasOwn(src.native, name) ? { v: src.native[name], key: 'disabled' } : Object.hasOwn(src.legacy, name) ? { v: src.legacy[name], key: 'disable' } : null;
+    if (!entry) continue;
+    events.push({ effect: entry.v?.[entry.key] === true ? 'disable' : 'define', rank: rank(src), label: src.label });
+  }
+  const defines = events.filter((e) => e.effect === 'define');
+  const disables = events.filter((e) => e.effect === 'disable');
+  if (!disables.length) return { visible: defines.length > 0, problems, why: null };
+  if (!defines.length) return { visible: false, problems, why: null };
+  const unordered = events.filter((e) => e.rank === null);
+  const top = Math.max(...events.map((e) => e.rank ?? -1));
+  const last = events.filter((e) => e.rank === top);
+  if (unordered.length || new Set(last.map((e) => e.effect)).size > 1) {
+    const at = (unordered.length ? unordered : last).map((e) => e.label).join(', ');
+    return { visible: null, problems, why: `${name} is both defined and disabled, and the OpenCode V2 docs give no load order for ${at}` };
+  }
+  return { visible: last[0].effect === 'define', problems, why: null };
 }
 
 /**

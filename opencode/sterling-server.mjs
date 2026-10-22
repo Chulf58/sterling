@@ -17065,7 +17065,7 @@ import { dirname as dirname10, join as join23 } from "node:path";
 import { createHash as createHash5 } from "node:crypto";
 import { existsSync as existsSync13, mkdirSync as mkdirSync10, readFileSync as readFileSync14, readdirSync as readdirSync5, realpathSync as realpathSync8, rmSync as rmSync6, statSync as statSync5, unlinkSync as unlinkSync2, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname9, isAbsolute as isAbsolute3, join as join22, resolve as resolve11 } from "node:path";
+import { basename as basename2, dirname as dirname9, isAbsolute as isAbsolute3, join as join22, resolve as resolve11 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/lib/installed-copy.mjs
@@ -17637,6 +17637,20 @@ function projectConfigText(config) {
   return `${JSON.stringify(config, null, 2)}
 `;
 }
+function opencodeSystemDir({ env = process.env, platform = process.platform } = {}) {
+  if (platform === "linux") return "/etc/opencode";
+  if (platform === "darwin") return "/Library/Application Support/opencode";
+  if (platform === "win32") {
+    const base2 = env.ProgramData || env.PROGRAMDATA;
+    return base2 ? join22(base2, "opencode") : null;
+  }
+  return null;
+}
+function opencodeManagedPrefs({ env = process.env, platform = process.platform } = {}) {
+  if (platform !== "darwin") return [];
+  const user = env.USER || env.LOGNAME;
+  return [...user ? [`/Library/Managed Preferences/${user}/ai.opencode.managed.plist`] : [], "/Library/Managed Preferences/ai.opencode.managed.plist"];
+}
 function opencodeConfigDir({ env = process.env, home = homedir7() } = {}) {
   return join22(env.XDG_CONFIG_HOME || join22(home, ".config"), "opencode");
 }
@@ -17778,7 +17792,7 @@ function isUneditedSterlingFull(text) {
 `, "")) === m[3];
 }
 var EVALUATE_HOOK_MIN_VERSION = "2.0.22";
-function visibleAgents({ projectDir, env = process.env, home = homedir7(), checkAgentFiles = true }) {
+function visibleAgents({ projectDir, env = process.env, home = homedir7(), checkAgentFiles = true, systemDir = opencodeSystemDir({ env }) }) {
   const globalDir = env.OPENCODE_CONFIG_DIR || opencodeConfigDir({ env, home });
   const dotDir = join22(projectDir, ".opencode");
   const ancestors = [];
@@ -17789,12 +17803,13 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7(), check
   const names = /* @__PURE__ */ new Set();
   const envNames = /* @__PURE__ */ new Set();
   const problems = [];
+  const sources = [];
   let incomplete = false;
   const unreadable = (label, err) => {
     incomplete = true;
     problems.push({ item: label, status: "skipped", detail: `cannot be read (${err.code ?? err.message}), so the agents it defines are NOT checked and get no new per-agent guard; earlier per-agent guard entries are kept; fix it, then rerun /sterling:update` });
   };
-  for (const dir of [globalDir, dotDir, ...ancestors.map((a) => join22(a, ".opencode"))]) {
+  for (const dir of [...systemDir ? [systemDir] : [], globalDir, dotDir, ...ancestors.map((a) => join22(a, ".opencode"))]) {
     for (const [sub, flat] of [["agent", false], ["agents", false], ["mode", true], ["modes", true]]) {
       let files;
       try {
@@ -17803,6 +17818,7 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7(), check
         unreadable(fwd2(join22(dir, sub)), err);
         continue;
       }
+      if (files.length) sources.push({ kind: "files", dir, names: files.map((f) => f.name) });
       for (const { name, path } of files) {
         (dir === env.OPENCODE_CONFIG_DIR ? envNames : names).add(name);
         if (dir !== dotDir || !checkAgentFiles) continue;
@@ -17820,12 +17836,13 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7(), check
     }
   }
   const docs = [
+    ...systemDir ? ["opencode.json", "opencode.jsonc"].map((f) => join22(systemDir, f)) : [],
     ...["opencode.json", "opencode.jsonc"].map((f) => join22(globalDir, f)),
     ...["opencode.json", "opencode.jsonc"].map((f) => join22(projectDir, f)),
     join22(dotDir, "opencode.jsonc"),
     ...ancestors.flatMap((a) => ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"].map((f) => join22(a, f))),
     ...env.OPENCODE_CONFIG ? [env.OPENCODE_CONFIG] : []
-  ].map((path) => ({ label: fwd2(path), read: () => existsSync13(path) ? readFileSync14(path, "utf8") : null }));
+  ].map((path) => ({ label: fwd2(path), path, read: () => existsSync13(path) ? readFileSync14(path, "utf8") : null }));
   if (env.OPENCODE_CONFIG_CONTENT) docs.push({ label: "OPENCODE_CONFIG_CONTENT", read: () => env.OPENCODE_CONFIG_CONTENT });
   const fromEnv = /* @__PURE__ */ new Set([...env.OPENCODE_CONFIG_DIR ? ["opencode.json", "opencode.jsonc"].map((f) => fwd2(join22(globalDir, f))) : [], ...env.OPENCODE_CONFIG ? [fwd2(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
   const late2 = /* @__PURE__ */ new Set([fwd2(join22(dotDir, "opencode.jsonc")), ...env.OPENCODE_CONFIG ? [fwd2(env.OPENCODE_CONFIG)] : [], "OPENCODE_CONFIG_CONTENT"]);
@@ -17846,31 +17863,72 @@ function visibleAgents({ projectDir, env = process.env, home = homedir7(), check
       problems.push({ item: doc.label, status: "skipped", detail: `not valid JSONC (${err.message}), so the agents it defines are NOT checked and get no new per-agent guard; earlier per-agent guard entries are kept; fix it, then rerun /sterling:update` });
       continue;
     }
-    const agents = config?.agent;
-    const hasAgents = agents && typeof agents === "object" && !Array.isArray(agents);
-    if (hasAgents) for (const name of Object.keys(agents)) (fromEnv.has(doc.label) ? envNames : names).add(name);
+    const agents = agentMap(config?.agent);
+    const native = agentMap(config?.agents);
+    const hasAgents = agents !== null;
+    for (const map of [agents, native]) if (map) for (const name of Object.keys(map)) (fromEnv.has(doc.label) ? envNames : names).add(name);
+    if (agents || native) sources.push({ kind: "doc", label: doc.label, path: doc.path ?? null, legacy: agents ?? {}, native: native ?? {} });
     const setsRules = config?.permission !== void 0 || hasAgents && Object.values(agents).some((a) => a?.permission !== void 0);
     if (late2.has(doc.label) && setsRules) {
       problems.push({ item: doc.label, status: "skipped", detail: `sets permission rules and is read after (or in an unmeasured order with) ${PROJECT_CONFIG_REL}, so its rules can override the store guard; move them into ${PROJECT_CONFIG_REL}` });
     }
   }
   const envOnly = [...envNames].filter((n) => !names.has(n)).sort();
-  return { names: [.../* @__PURE__ */ new Set([...names, ...envNames])].sort(), envOnly, problems, incomplete };
+  return { names: [.../* @__PURE__ */ new Set([...names, ...envNames])].sort(), envOnly, problems, incomplete, sources };
 }
-function agentVisibleFrom({ dir, name, env = process.env, home = homedir7() }) {
-  const seen = visibleAgents({ projectDir: dir, env, home, checkAgentFiles: false });
+var agentMap = (v) => v && typeof v === "object" && !Array.isArray(v) ? v : null;
+function agentVisibleFrom({ dir, name, env = process.env, home = homedir7(), systemDir = opencodeSystemDir({ env }), managedPrefs = opencodeManagedPrefs({ env }) }) {
+  const managed = managedPrefs.filter((p) => existsSync13(p));
+  if (managed.length) return { visible: null, problems: [], why: `OpenCode managed preferences (${managed.join(", ")}) can define or disable ${name}, and Sterling does not read them` };
+  const seen = visibleAgents({ projectDir: dir, env, home, checkAgentFiles: false, systemDir });
   const problems = seen.problems.filter((p) => p.status === "skipped" && /cannot be read|not valid JSONC/.test(p.detail ?? ""));
-  if (seen.names.includes(name)) return { visible: true, problems };
+  const sources = [...seen.sources];
   const own = join22(dir, PROJECT_CONFIG_REL);
   if (existsSync13(own)) {
     try {
-      const agents = parseJsonc(readFileSync14(own, "utf8"))?.agent;
-      if (agents && typeof agents === "object" && !Array.isArray(agents) && Object.hasOwn(agents, name)) return { visible: true, problems };
+      const config = parseJsonc(normalizeConfigText(readFileSync14(own, "utf8")));
+      const legacy = agentMap(config?.agent);
+      const native = agentMap(config?.agents);
+      if (legacy || native) sources.push({ kind: "doc", label: fwd2(own), path: own, legacy: legacy ?? {}, native: native ?? {} });
     } catch (err) {
       problems.push({ item: fwd2(own), status: "skipped", detail: `cannot be read (${err.code ?? err.message})` });
     }
   }
-  return { visible: false, problems };
+  const globalDir = opencodeConfigDir({ env, home });
+  const depth = (d) => resolve11(d).split(/[\\/]+/).filter(Boolean).length;
+  const rank = (src) => {
+    if (src.kind !== "doc" || !src.path) return null;
+    const file = basename2(src.path);
+    if (file !== "opencode.json" && file !== "opencode.jsonc") return null;
+    const parent = dirname9(resolve11(src.path));
+    if (systemDir && parent === resolve11(systemDir)) return 3e4;
+    if (!env.OPENCODE_CONFIG_DIR && parent === resolve11(globalDir)) return 0;
+    if (env.OPENCODE_CONFIG && resolve11(src.path) === resolve11(env.OPENCODE_CONFIG)) return null;
+    if (basename2(parent) === ".opencode") return 2e4 + depth(dirname9(parent));
+    return 1e4 + depth(parent);
+  };
+  const events = [];
+  for (const src of sources) {
+    if (src.kind === "files") {
+      if (src.names.includes(name)) events.push({ effect: "define", rank: null, label: fwd2(src.dir) });
+      continue;
+    }
+    const entry = Object.hasOwn(src.native, name) ? { v: src.native[name], key: "disabled" } : Object.hasOwn(src.legacy, name) ? { v: src.legacy[name], key: "disable" } : null;
+    if (!entry) continue;
+    events.push({ effect: entry.v?.[entry.key] === true ? "disable" : "define", rank: rank(src), label: src.label });
+  }
+  const defines = events.filter((e) => e.effect === "define");
+  const disables = events.filter((e) => e.effect === "disable");
+  if (!disables.length) return { visible: defines.length > 0, problems, why: null };
+  if (!defines.length) return { visible: false, problems, why: null };
+  const unordered = events.filter((e) => e.rank === null);
+  const top = Math.max(...events.map((e) => e.rank ?? -1));
+  const last = events.filter((e) => e.rank === top);
+  if (unordered.length || new Set(last.map((e) => e.effect)).size > 1) {
+    const at = (unordered.length ? unordered : last).map((e) => e.label).join(", ");
+    return { visible: null, problems, why: `${name} is both defined and disabled, and the OpenCode V2 docs give no load order for ${at}` };
+  }
+  return { visible: last[0].effect === "define", problems, why: null };
 }
 function sterlingRootFrom(moduleUrl = import.meta.url) {
   const start = dirname9(fileURLToPath(moduleUrl));
@@ -18787,7 +18845,7 @@ import { join as join31 } from "node:path";
 
 // packages/opencode-plugin/src/layer.mjs
 import { existsSync as existsSync18, readFileSync as readFileSync18 } from "node:fs";
-import { basename as basename2, join as join28 } from "node:path";
+import { basename as basename3, join as join28 } from "node:path";
 init_agent_fences();
 function opencodeHostTail(pluginRoot) {
   const install = pluginRoot ? `- **Sterling is installed at \`${pluginRoot}\`.** Its scripts are \`${pluginRoot}/bin/*.mjs\` (run one with \`node "${pluginRoot}/bin/<name>.mjs"\`), its commands are \`${pluginRoot}/commands/*.md\`, its skills are \`${pluginRoot}/skills/*/SKILL.md\` and its agent templates are under \`${pluginRoot}/agent-templates/\`. Those files are written for Claude Code: where one says CLAUDE_PLUGIN_ROOT, use \`${pluginRoot}\`, and read the rest with the substitutions this layer makes.` : "- **Sterling's install root could not be resolved** (the error is above), so its scripts, commands and skills are unreachable this session. Tell the user before relying on any of them.";
@@ -18875,7 +18933,7 @@ function unmarkedOpenCodeBlocks(source) {
   return out;
 }
 function renderSterlingLayer(projectDir, pluginRoot = sterlingRoot(), templatePath = join28(pluginRoot, "templates", "target-claude-md.md")) {
-  const projectName = loadConfig(projectDir)?.project_name ?? basename2(projectDir);
+  const projectName = loadConfig(projectDir)?.project_name ?? basename3(projectDir);
   const named = (s2) => s2.replaceAll("{{PROJECT_NAME}}", () => projectName);
   const templateText = readFileSync18(templatePath, "utf8");
   const pairs = hostBlockPairs(templateText).map((p) => ({ claude: p.claude.map(named), opencode: p.opencode.map(named) }));
@@ -21009,7 +21067,7 @@ function stageChild({ store, root, sessionID, agent: agentName, brief, disclosur
 
 // packages/opencode-plugin/src/dispatch.mjs
 import { mkdirSync as mkdirSync19, readdirSync as readdirSync9, rmSync as rmSync12, statSync as statSync8 } from "node:fs";
-import { basename as basename3, dirname as dirname17, join as join39 } from "node:path";
+import { basename as basename4, dirname as dirname17, join as join39 } from "node:path";
 
 // scripts/hooks/lib/rotation-restore.mjs
 import { spawnSync as spawnSync6 } from "node:child_process";
@@ -21258,7 +21316,7 @@ async function sweepStaleDispatches(root) {
         if (sweep.refused) refused = sweep.refused;
         terminated = sweep.terminated ?? 0;
         rmSync12(registerPath(root), { force: true });
-        const registerBasename = basename3(registerPath(root));
+        const registerBasename = basename4(registerPath(root));
         for (const f of readdirSync9(transientDir)) {
           if (f.startsWith(`${registerBasename}.tmp-`)) rmSync12(join39(transientDir, f), { force: true });
         }
@@ -23613,11 +23671,11 @@ function onEvaluate(request) {
 
 // packages/opencode-plugin/src/store.mjs
 init_dist2();
-import { basename as basename4, dirname as dirname20 } from "node:path";
+import { basename as basename5, dirname as dirname20 } from "node:path";
 var BUSY_TIMEOUT_MS = 1e3;
 function projectRootOf(dbPath) {
   const sterlingDir = dirname20(dbPath);
-  if (basename4(dbPath) === "sterling.db" && basename4(sterlingDir) === ".sterling") return dirname20(sterlingDir);
+  if (basename5(dbPath) === "sterling.db" && basename5(sterlingDir) === ".sterling") return dirname20(sterlingDir);
   return null;
 }
 function openProjectStore(dbPath) {
@@ -23698,7 +23756,7 @@ function refuse(message) {
   e.sessionMoveRefusal = true;
   return e;
 }
-async function checkSessionMove(input, { sessionInfo, env = process.env, home = homedir9() } = {}) {
+async function checkSessionMove(input, { sessionInfo, env = process.env, home = homedir9(), systemDir, managedPrefs } = {}) {
   if (!isSessionMove(input?.tool)) return;
   const args = input.input ?? {};
   if (typeof args.directory !== "string" || !args.directory) return;
@@ -23723,8 +23781,9 @@ async function checkSessionMove(input, { sessionInfo, env = process.env, home = 
     target = moveTarget(args.directory, info.directory, home);
   }
   if (!existsSync30(target)) return;
-  const seen = agentVisibleFrom({ dir: target, name: agent, env, home });
-  if (seen.visible) return;
+  const seen = agentVisibleFrom({ dir: target, name: agent, env, home, systemDir, managedPrefs });
+  if (seen.visible === true) return;
+  if (seen.visible === null) throw refuse(sessionMoveUncheckedRefusal(seen.why));
   if (seen.problems.length) throw refuse(sessionMoveUncheckedRefusal(`${seen.problems.map((p) => p.item).join(", ")} could not be read, so whether ${target} defines ${agent} is unknown`));
   throw refuse(sessionMoveRefusal(moved, agent, target));
 }
@@ -24061,7 +24120,7 @@ function createSterlingServer(deps = {}) {
       let timer;
       try {
         await Promise.race([
-          checkSessionMove(input, { sessionInfo, env }),
+          checkSessionMove(input, { sessionInfo, env, systemDir: deps.opencodeSystemDir, managedPrefs: deps.opencodeManagedPrefs }),
           new Promise((_, reject) => {
             timer = setTimeout(() => reject(new Error(`the check exceeded its ${BUDGET_MS["session-move"]} ms budget`)), BUDGET_MS["session-move"]);
           })

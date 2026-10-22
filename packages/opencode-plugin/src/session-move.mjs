@@ -65,7 +65,7 @@ function refuse(message) {
  * and an absolute destination needs no lookup; otherwise `sessionInfo(id)` (session.get:
  * { agent, directory }) must succeed. Any other throw is the caller's to turn into a refusal.
  */
-export async function checkSessionMove(input, { sessionInfo, env = process.env, home = homedir() } = {}) {
+export async function checkSessionMove(input, { sessionInfo, env = process.env, home = homedir(), systemDir, managedPrefs } = {}) {
   if (!isSessionMove(input?.tool)) return;
   const args = input.input ?? {};
   if (typeof args.directory !== 'string' || !args.directory) return;
@@ -91,8 +91,10 @@ export async function checkSessionMove(input, { sessionInfo, env = process.env, 
     target = moveTarget(args.directory, info.directory, home);
   }
   if (!existsSync(target)) return;
-  const seen = agentVisibleFrom({ dir: target, name: agent, env, home });
-  if (seen.visible) return;
+  // systemDir and managedPrefs are test seams; undefined takes the platform's own (opencode-install.mjs).
+  const seen = agentVisibleFrom({ dir: target, name: agent, env, home, systemDir, managedPrefs });
+  if (seen.visible === true) return;
+  if (seen.visible === null) throw refuse(sessionMoveUncheckedRefusal(seen.why));
   if (seen.problems.length) throw refuse(sessionMoveUncheckedRefusal(`${seen.problems.map((p) => p.item).join(', ')} could not be read, so whether ${target} defines ${agent} is unknown`));
   throw refuse(sessionMoveRefusal(moved, agent, target));
 }
