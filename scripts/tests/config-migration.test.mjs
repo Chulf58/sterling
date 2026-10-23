@@ -163,6 +163,26 @@ test('a symlinked config with retired keys is refused (the rename would replace 
   }
 });
 
+test('a symlinked .sterling directory is refused and the config it points at is left untouched', { skip: process.platform === 'win32' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-config-migration-'));
+  const real = mkdtempSync(join(tmpdir(), 'sterling-config-realdir-'));
+  try {
+    const original = JSON.stringify(retiredConfig());
+    writeFileSync(join(real, 'config.json'), original);
+    symlinkSync(real, join(dir, '.sterling'), 'dir');
+    const r = prepareConfigMigration(dir);
+    assert.equal(r.status, 'refused');
+    assert.match(r.lines[0], /\.sterling that is not a plain directory/);
+    assert.equal(migrateProjectConfig(dir).status, 'refused');
+    assert.equal(readFileSync(join(real, 'config.json'), 'utf8'), original);
+    writeFileSync(join(real, 'config.json'), JSON.stringify({ mode: 'hobby' }));
+    assert.equal(prepareConfigMigration(dir).status, 'unchanged');
+  } finally {
+    cleanup(dir);
+    cleanup(real);
+  }
+});
+
 function sync(dir) {
   const r = spawnSync(process.execPath, [join(repo, 'scripts', 'sync-agents.mjs'), '--target', dir], {
     encoding: 'utf8',

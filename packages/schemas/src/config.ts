@@ -903,5 +903,5 @@ export function unreadConfigKeys(raw: unknown): UnreadConfigKey[] {
  *  "…/.sterling/config.json carries ". */
 export function describeUnreadConfigKeys(keys: readonly UnreadConfigKey[]): string {
   const names = keys.map((k) => (k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path));
-  return `${keys.length} key(s) Sterling no longer reads: ${names.join(', ')} — left in place and ignored; move a renamed value to its new key, and delete the rest by hand when convenient`;
+  return `${keys.length} key(s) Sterling no longer reads: ${names.join(', ')} — ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
