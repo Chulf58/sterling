@@ -235,7 +235,7 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
   return {
     agents: ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
     // insertion order fixes the row order + the cursor index per key:
-    // implementor=0, researcher=1, scout=2, librarian=3, classifiers=4, reviewer=5.
+    // implementor=0, researcher=1, scout=2, librarian=3, reviewer=4.
     // LOW-3 (second Opus re-check round): the System tab now filters
     // config.models to exactly this 6-key set (the classless four-agent
     // roster, the former ruling 'agent-roster-is-classless-four-agents' (not in the current store), plus
@@ -251,7 +251,6 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
       researcher: { model: 'claude-opus-4-8', effort: 'low' },
       scout: { model: 'claude-opus-4-8', effort: 'low' },
       librarian: { model: 'claude-opus-4-8', effort: 'low' },
-      classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
       // last, so the cursor indices above are unchanged (reviewer joined the
       // roster in decision reviewer-agent-is-the-one-review-rubric-for-claude-and-codex)
       reviewer: { model: 'claude-opus-4-8', effort: 'low' },
@@ -362,8 +361,8 @@ test('AC1: buildSystemTab renders exactly one row per config.models KEY, in key 
   assert.ok(Array.isArray(view.rows), 'buildSystemTab returns a rows array');
   assert.deepEqual(
     view.rows.map((r) => r.id),
-    Object.keys(snap.configModels).map((k) => `sys:${k}`),
-    'one row per config.models key, in configModels key order',
+    [...Object.keys(snap.configModels), 'maintenance-worker'].map((k) => `sys:${k}`),
+    'one row per config.models key, in configModels key order, then the Maintenance worker row',
   );
 });
 
@@ -374,24 +373,23 @@ test('AC1: each current registry agent is listed under its governed key with ins
     const row = rowOf(view, name);
     assert.ok(row, `the ${name} row is present`);
     const text = rowText(row!);
-    assert.match(text, new RegExp(name), `the ${name} row lists its governed agent`);
+    // Changed 2026-10-23 (board 4e7a6bfc, user-ruled "As proposed"): the agent-name line under a row is
+    // dropped when it only repeats the header, so the row is identified by its Title-cased header.
+    assert.match(text, new RegExp(name.charAt(0).toUpperCase() + name.slice(1)), `the ${name} row is headed by its governed key`);
+    // line by line: rowText() joins with spaces, so a whole-line match on it can never fire
+    assert.ok(!row!.lines.some((l) => l.text.trim() === name), `the ${name} row has no agent-name line repeating its header`);
     assert.match(text, /claude-opus-4-8/, `the ${name} row shows the installed model`);
     assert.match(text, /\blow\b/, `the ${name} row shows the installed effort`);
   }
 });
 
-test('AC1: config-only key (classifiers) appears with no governed agent, showing its config model+effort', () => {
-  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
-  const view = buildSystemTab!(baseSnapshot(), st({ tab: SYS_TAB }), 80);
-  const hard = rowOf(view, 'classifiers');
-  assert.ok(hard, 'the classifiers config-only row is present');
-  const hardText = rowText(hard!);
-  // no installed/registered agent maps to classifiers, so no agent name is listed on it
-  for (const name of ROSTER_AGENTS) {
-    assert.doesNotMatch(hardText, new RegExp(name), `classifiers is config-only — it does not list the agent ${name}`);
-  }
-  assert.match(hardText, /claude-haiku-4-5/, 'classifiers shows its config model');
-  assert.match(hardText, /low/, 'classifiers shows its config effort');
+// Board 07ee17a9 (user-ruled 2026-10-23, "Remove it"): the classifiers row is gone. A config.models
+// classifiers key that an old config still carries is filtered out here, never rendered.
+test('AC1: a stale classifiers key in config.models renders no row (the config-only key was retired)', () => {
+  const snap = baseSnapshot({ configModels: { ...baseSnapshot().configModels, classifiers: { model: 'claude-haiku-4-5', effort: 'low' } } });
+  const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
+  assert.equal(rowOf(view, 'classifiers'), undefined);
+  assert.ok(!view.rows.some((r) => /classifiers/i.test(rowText(r))));
 });
 
 test('AC1: every registered agent in the snapshot appears in exactly one row (the tab lists every agent)', () => {
@@ -401,7 +399,9 @@ test('AC1: every registered agent in the snapshot appears in exactly one row (th
   for (const agent of snap.agents.filter((agent) => ROSTER_AGENTS.includes(agent.name))) {
     // a whole agent name: 'implementor' must not count the implementor-hard row, which names
     // a different agent (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
-    const hits = view.rows.filter((r) => new RegExp(`(?<![\\w-])${agent.name}(?![\\w-])`).test(rowText(r)));
+    // (the header now carries it: 'Implementor:' for the implementor agent)
+    const header = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
+    const hits = view.rows.filter((r) => new RegExp(`(?<![\\w-])${header}(?![\\w-])`).test(rowText(r)));
     assert.equal(hits.length, 1, `agent ${agent.name} is listed in exactly one row`);
   }
 });
@@ -417,7 +417,6 @@ test('AC1: the row shows the INSTALLED frontmatter value (the governing copy), N
       researcher: { model: 'claude-sonnet-4-6', effort: 'high' },
       scout: { model: 'claude-opus-4-8', effort: 'low' },
       librarian: { model: 'claude-opus-4-8', effort: 'low' },
-      classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
     },
   });
   const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
@@ -456,13 +455,12 @@ test('AC4: a row whose installed model disagrees with config shows a visible dri
   assert.equal(governed.drift, true, 'the governed row is flagged drift (installed sonnet ≠ config opus)');
   assert.match(rowText(governed), /drift/i, 'the drift is visible in the governed row text (AC4 marker)');
 
-  // classifiers is config-only (no governed agent, so `governed.some(...)` over
-  // an empty array is structurally always false) — a row that categorically
-  // CANNOT drift, used here as the "an aligned row does not" half of this AC
-  // (LOW-3 removed the old 'coder' row this half used to check).
-  const classifiersRow = rowOf(view, 'classifiers')!;
-  assert.notEqual(classifiersRow.drift, true, 'the config-only classifiers row is never flagged drift');
-  assert.doesNotMatch(rowText(classifiersRow), /drift/i, 'no drift marker on the classifiers row');
+  // the Maintenance worker row has no governed agent (so `governed.some(...)` over an empty
+  // array is structurally always false) — a row that categorically CANNOT drift, used here as the
+  // "an aligned row does not" half of this AC (it replaced the classifiers row, board 07ee17a9).
+  const workerRow = rowOf(view, 'maintenance-worker')!;
+  assert.notEqual(workerRow.drift, true, 'the Maintenance worker row is never flagged drift');
+  assert.doesNotMatch(rowText(workerRow), /drift/i, 'no drift marker on the Maintenance worker row');
 });
 
 test('AC4: EFFORT-only disagreement (model equal) still drifts the row', () => {
@@ -493,7 +491,6 @@ test('AC4/AC5 (P5 backstop): a partially applied projection — config updated b
       researcher: { model: 'claude-sonnet-4-6', effort: 'low' }, // config already swapped to sonnet
       scout: { model: 'claude-sonnet-4-6', effort: 'low' },
       librarian: { model: 'claude-sonnet-4-6', effort: 'low' },
-      classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
     },
   });
   const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
@@ -636,25 +633,28 @@ test('AC5 commit (governed key): ENTER→DOWN→ENTER→ENTER emits ONE model_sw
   }
 });
 
-test('AC5 commit (config-only key): a classifiers swap emits the effect with NO governed agents (config write + decision only, no frontmatter projection)', () => {
+// Changed 2026-10-23 (board 07ee17a9): the config-only classifiers key this test swapped is gone. The same
+// guarantee is kept on a config.models key whose agent is not installed (the snapshot lists no agent for
+// it): the swap still emits the effect with no governed agents.
+test('AC5 commit (agentless key): a swap on a key whose agent is not installed emits the effect with NO governed agents (config write + decision only, no frontmatter projection)', () => {
   const { store, cleanup } = storeFixture();
   try {
-    const snap = baseSnapshot();
-    // classifiers row (cursor 4: implementor=0, researcher=1, scout=2,
-    // librarian=3, classifiers=4): open → DOWN to sonnet-4-6 (index 1) → confirm → commit.
+    const snap = baseSnapshot({ agents: ROSTER_AGENTS.filter((n) => n !== 'librarian').map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })) });
+    // librarian row (cursor 3: implementor=0, researcher=1, scout=2, librarian=3), no agent installed for it:
+    // open → DOWN to sonnet-4-6 (index 1) → confirm → commit.
     const res = drive(
       store,
-      st({ tab: SYS_TAB, cursor: 4 }),
+      st({ tab: SYS_TAB, cursor: 3 }),
       [key('ENTER'), key('DOWN'), key('ENTER'), key('ENTER')],
       snap,
     );
     const swap = findSwap(res.effects);
     assert.ok(swap, 'a config-only key still emits a swap effect (AC5: every swap is recorded)');
-    assert.equal(swap!.key, 'classifiers', 'the effect names the classifiers key');
-    assert.equal(swap!.from?.model, 'claude-haiku-4-5', 'from = the current classifiers config model');
+    assert.equal(swap!.key, 'librarian', 'the effect names the librarian key');
+    assert.equal(swap!.from?.model, 'claude-opus-4-8', 'from = the current librarian config model');
     assert.equal(swap!.to?.model, 'claude-sonnet-4-6', 'to = the selected model');
-    assert.deepEqual(swap!.agents ?? [], [], 'a config-only key governs no installed agent — no frontmatter file to project');
-    assert.ok((swap!.decisionTitle ?? '').startsWith('Model swap: classifiers '), 'the decision is still titled for the config-only key');
+    assert.deepEqual(swap!.agents ?? [], [], 'a key with no installed agent governs nothing — no frontmatter file to project');
+    assert.ok((swap!.decisionTitle ?? '').startsWith('Model swap: librarian '), 'the decision is still titled for the key');
   } finally {
     cleanup();
   }
@@ -755,7 +755,7 @@ test('33-col floor: an OPEN selector still renders within the 33-column pane', (
 // tab used to render/edit whatever key the caller's configModels handed it,
 // trusting it blindly — including a relic like 'coder_hard' that no agent
 // has EVER read (the former ruling 'agent-roster-is-classless-four-agents' (not in the current store).
-// Now filtered to exactly the classless roster + classifiers
+// Now filtered to exactly the classless roster
 // (SYSTEM_TAB_MODEL_KEYS), regardless of what a stray key in the snapshot
 // carries — a defensive floor, not just fixture hygiene, since an old
 // project's config.json can carry such a key forever.
@@ -775,7 +775,6 @@ test("LOW-3: a relic config.models key outside the classless roster (e.g. 'coder
         researcher: { model: 'claude-opus-4-8', effort: 'low' },
         scout: { model: 'claude-opus-4-8', effort: 'low' },
         librarian: { model: 'claude-opus-4-8', effort: 'low' },
-        classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
       },
     });
     const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);

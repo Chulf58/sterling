@@ -35,7 +35,9 @@ export function describeMigration(dropped) {
   return dropped.map((d) =>
     d.renamed_to
       ? `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.key} dropped (ignored since the roster rename to models.${d.renamed_to}); value was ${show(d.value)}; set models.${d.renamed_to} in the System tab if you want it`
-      : `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.key} dropped (a retired key, ignored since the roster rename); value was ${show(d.value)}; set models.<role> in the System tab for the role you want it on`
+      : d.key === 'classifiers'
+        ? `${CONFIG_MIGRATION_LINE_PREFIX}models.classifiers dropped (a retired key: it belonged to the retired Haiku noise-gate and nothing read it); value was ${show(d.value)}`
+        : `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.key} dropped (a retired key, ignored since the roster rename); value was ${show(d.value)}; set models.<role> in the System tab for the role you want it on`
   );
 }
 

@@ -5334,7 +5334,6 @@ var configSchema = external_exports.object({
     "implementor-hard": agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
     researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // librarian is mechanical clerking — cheap model, low effort (P8). The
     // roster is classless (decision agent-roster-is-classless-four-agents), and
     // the debugger role it rejected has no key here.
@@ -5676,7 +5675,8 @@ var RETIRED_MODEL_KEYS = [
   "test_writer",
   "reviewers",
   "implementation_architect",
-  "debugger"
+  "debugger",
+  "classifiers"
 ];
 var isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 function normalizeRawConfig(raw) {
@@ -13745,7 +13745,7 @@ function launchWorker(opts) {
     let logFd;
     try {
       writeFileSync7(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
-      const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...opts.workerModel !== void 0 ? { opencode_model_pinned: true } : {} } : { host };
+      const runnerHost = host === "opencode" ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...opts.workerModel !== void 0 ? { opencode_model_pinned: true, ...opts.workerEffort ? { opencode_variant: opts.workerEffort } : {} } : {} } : { host };
       const batch = selectBatch(eligible);
       const baselinesById = new Map(eligible.map((t) => [t.id, opts.store ? itemBaselines(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.baselines : void 0]));
       const updatedAtById = new Map(eligible.map((t) => [t.id, opts.store ? itemTargetUpdatedAt(opts.store, t) : DIFF_LANES.includes(t.system_reason) ? t.target_updated_at : void 0]));

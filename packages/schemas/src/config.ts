@@ -267,7 +267,6 @@ export const configSchema = z.object({
       'implementor-hard': agentModelEntry.default({ model: 'claude-opus-5-5', effort: 'high' }),
       researcher: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'medium' }),
       scout: agentModelEntry.default({ model: 'claude-sonnet-5-5', effort: 'low' }),
-      classifiers: agentModelEntry.default({ model: 'claude-haiku-5-5', effort: 'low' }),
       // librarian is mechanical clerking — cheap model, low effort (P8). The
       // roster is classless (decision agent-roster-is-classless-four-agents), and
       // the debugger role it rejected has no key here.
@@ -653,8 +652,19 @@ export const OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
 // role's default tier, DEFAULT_OVERPASS_ROLE_TIERS) and an optional client reasoning effort, which the OpenCode
 // plugin sends on each request of that role's lane. Effort is an exact override, not a
 // minimum: 'high' also replaces an xhigh the gateway would have picked. Both are off by
-// default. Plan and the maintenance worker are not roles here and keep laneModel.
-export const OVERPASS_ROLES = ['implementor', 'implementor-hard', 'researcher', 'scout', 'reviewer', 'librarian', 'sparring', 'preflight'] as const;
+// default. Plan is not a role here and keeps laneModel.
+// 'maintenance-worker' (board c97ddc97, user-ruled 2026-10-23, "Row + its own Overpass tier") is
+// the one role that is not a subagent: no installed agent has that name, so a dispatch never
+// reaches it through agentRole (the worker's own agent is WORKER_AGENT, 'sterling-maintenance-worker').
+// Its route is read by the OpenCode plugin's worker launch (packages/opencode-plugin/src/worker.mjs).
+export const OVERPASS_ROLES = ['implementor', 'implementor-hard', 'researcher', 'scout', 'reviewer', 'librarian', 'sparring', 'preflight', 'maintenance-worker'] as const;
+export const MAINTENANCE_WORKER_ROLE = 'maintenance-worker' as const satisfies OverpassRole;
+// The model and effort of the worker when it runs through the `claude` CLI (decision
+// maintenance-worker-drains-every-lane-and-writes-factual-refresh-on-sonnet). Fixed in
+// scripts/hooks/lib/maintenance-worker.mjs (WORKER_MODEL, WORKER_EFFORT), which stays
+// dependency-free, so a test pins the two copies to each other; the System tab shows them.
+export const MAINTENANCE_WORKER_CLAUDE_MODEL = 'claude-sonnet-5-5';
+export const MAINTENANCE_WORKER_CLAUDE_EFFORT = 'medium';
 export type OverpassRole = (typeof OVERPASS_ROLES)[number];
 export const OVERPASS_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type OverpassEffort = (typeof OVERPASS_EFFORTS)[number];
@@ -685,6 +695,7 @@ export const DEFAULT_OVERPASS_ROLE_TIERS: Record<OverpassRole, string> = {
   librarian: DEFAULT_OVERPASS_TIER,
   sparring: 'agentic-premium-max',
   preflight: DEFAULT_OVERPASS_TIER,
+  'maintenance-worker': DEFAULT_OVERPASS_TIER,
 };
 
 export interface OverpassRoleRoute {
@@ -703,7 +714,7 @@ export interface OverpassResolution {
   conductorRouted: boolean;
   provider: string;
   conductorModel: string;
-  /** The lane model of Plan and the maintenance worker, and of a subagent that is not one of OVERPASS_ROLES. */
+  /** The lane model of Plan, and of a subagent that is not one of OVERPASS_ROLES. */
   laneModel: string;
   /** Every role in OVERPASS_ROLES, with its lane model and effort (config.overpass.roles). */
   roles: Record<OverpassRole, OverpassRoleRoute>;
@@ -775,7 +786,8 @@ export function resolveOverpass(config: unknown, opts: { host: string }): Overpa
 
 // Pre-rename models keys: never read, so dropped before the parse and named by
 // unreadConfigKeys. They must stay out of `models`, which now accepts any agent
-// name as a key.
+// name as a key. 'classifiers' belonged to the retired Haiku noise-gate and was read by
+// nothing (user-ruled 2026-10-23, "Remove it").
 const RETIRED_MODEL_KEYS: readonly string[] = [
   'coder',
   'coder_hard',
@@ -784,6 +796,7 @@ const RETIRED_MODEL_KEYS: readonly string[] = [
   'reviewers',
   'implementation_architect',
   'debugger',
+  'classifiers',
 ];
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);

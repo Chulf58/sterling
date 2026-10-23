@@ -87,7 +87,7 @@ test('handoff row: a separate single-entry handoffRows array; the other row list
   assert.strictEqual(typeof buildSystemTab, 'function');
   const snap = snapshot({ handoff: false });
   const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
-  assert.equal(view.rows.length, Object.keys(snap.configModels).length);
+  assert.equal(view.rows.length, Object.keys(snap.configModels).length + 1);
   assert.equal(view.sparringRows?.length, 2);
   assert.equal(view.tddRows?.length, 1);
   assert.equal(view.modeRows?.length, 1);
@@ -124,7 +124,7 @@ test('handoff row: DOWN from the project mode row lands on it; DOWN again moves 
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot({ handoff: false });
-    const n = Object.keys(snap.configModels).length;
+    const n = Object.keys(snap.configModels).length + 1;
     const down = reduce(store, st({ tab: SYS_TAB, cursor: n + 3 }), key('DOWN'), undefined, undefined, snap);
     assert.equal(down.ui.cursor, n + 4);
     // the PR auto-merge row (decision
@@ -154,7 +154,7 @@ test('handoff row: ENTER and SPACE emit handoff_toggle with the NEW value (offâ†
     for (const mode of ['hobby', 'work']) {
       for (const [handoff, k, next] of cases) {
         const snap = snapshot({ mode, ...(handoff === undefined ? {} : { handoff }) });
-        const n = Object.keys(snap.configModels).length;
+        const n = Object.keys(snap.configModels).length + 1;
         const r = reduce(store, st({ tab: SYS_TAB, cursor: n + 4 }), key(k), undefined, undefined, snap);
         const effect = r.effects.find((e) => e.type === 'handoff_toggle');
         assert.ok(effect, `${k} on the handoff row emits handoff_toggle (from ${String(handoff)}, ${mode})`);
@@ -172,7 +172,7 @@ test('mode row: toggling the mode emits no handoff_toggle', () => {
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot({ mode: 'hobby', handoff: false });
-    const n = Object.keys(snap.configModels).length;
+    const n = Object.keys(snap.configModels).length + 1;
     const r = reduce(store, st({ tab: SYS_TAB, cursor: n + 3 }), key('ENTER'), undefined, undefined, snap);
     assert.deepEqual(r.effects.map((e) => e.type), ['mode_toggle']);
   } finally {

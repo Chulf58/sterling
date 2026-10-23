@@ -10,7 +10,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
-import { resolveOverpass } from '@sterling/schemas';
+import { MAINTENANCE_WORKER_ROLE, resolveOverpass } from '@sterling/schemas';
 import { loadConfig } from '../../../scripts/hooks/lib/common.mjs';
 import { maybeLaunchMaintenanceWorker, OPENCODE_MODEL_UNSET, opencodeModelOf, WORKER_ENV_FLAG } from '../../../scripts/hooks/lib/maintenance-worker.mjs';
 import { errText, logLine } from './log.mjs';
@@ -91,17 +91,24 @@ export function createWorkerLaunch({
     // through OpenCode on the tier lane model, even with `claude` on PATH and
     // whatever maintenance_worker.opencode_model says. An invalid overpass
     // block fails loud here: no launch, never a fall back to direct providers.
+    // The model and effort are the maintenance-worker role's route (board c97ddc97, user-ruled
+    // 2026-10-23: its own Overpass tier, default agentic-high), not the shared lane model.
     let tierModel = null;
+    let tierEffort;
     try {
       const overpass = resolveOverpass(config, { host: 'opencode' });
-      if (overpass.effective) tierModel = overpass.laneModel;
+      if (overpass.effective) {
+        const route = overpass.roles[MAINTENANCE_WORKER_ROLE];
+        tierModel = route.model;
+        tierEffort = route.effort;
+      }
     } catch (e) {
       skipOnce(root, at, `maintenance worker skipped: ${errText(e)}`, `Sterling: the maintenance worker did not run. ${errText(e)}. Fix .sterling/config.json; until then the queue drains by hand with /sterling:drain.`);
       return;
     }
     const ocBin = claudeOnPath() && !tierModel ? null : findOpencode();
     // No host field means 'claude', the lib's default.
-    const runnerHost = ocBin ? { host: 'opencode', opencodeBin: ocBin, ...(tierModel ? { workerModel: tierModel } : {}) } : {};
+    const runnerHost = ocBin ? { host: 'opencode', opencodeBin: ocBin, ...(tierModel ? { workerModel: tierModel, ...(tierEffort ? { workerEffort: tierEffort } : {}) } : {}) } : {};
     if (!ocBin && tierModel) {
       skipOnce(root, at, 'maintenance worker skipped: Overpass is effective but no OpenCode binary was found to run the worker through', OVERPASS_NO_RUNNER_TEXT);
       return;

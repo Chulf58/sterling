@@ -138,7 +138,6 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
       researcher: { model: 'claude-opus-4-8', effort: 'low' },
       scout: { model: 'claude-opus-4-8', effort: 'low' },
       librarian: { model: 'claude-opus-4-8', effort: 'low' },
-      classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
     },
     catalog: freshCatalog(),
     codexWired: true,
@@ -234,7 +233,7 @@ test('label 3: committing a model sets a ui.notice saying explicit calls overrid
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot({ sparringPartner: { enabled: true, model: undefined } });
-    const numKeys = Object.keys(snap.configModels).length;
+    const numKeys = Object.keys(snap.configModels).length + 1;
     const ui0 = st({ tab: SYS_TAB, cursor: numKeys + 1 });
 
     // CONTROL FIRST (must pass for the OPPOSITE reason): an ESCAPEd edit commits

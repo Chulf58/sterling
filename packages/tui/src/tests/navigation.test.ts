@@ -55,7 +55,7 @@ const ENTRIES = Array.from({ length: 12 }, (_, i) => ({ id: `claude-m${i}`, labe
 function roster(): AgentRosterSnapshot {
   return {
     agents: [{ name: 'implementor', installedModel: 'claude-m0', installedEffort: 'low' }],
-    configModels: { implementor: { model: 'claude-m0', effort: 'low' }, classifiers: { model: 'claude-m1', effort: 'low' } },
+    configModels: { implementor: { model: 'claude-m0', effort: 'low' } },
     catalog: { present: true, stale: false, staleDate: null, entries: ENTRIES },
   };
 }
@@ -139,19 +139,19 @@ test('System tab clicks: a row click runs ENTER on that row; a picker option cli
     assert.equal(s0.rows[0]!.type, 'system-banner');
     assert.equal(banner.ui, ui0, 'the catalog banner does nothing');
 
-    const open = click(ui0, yOf(s0, 'sys:classifiers', 0));
-    assert.deepEqual(open.ui.selector, { key: 'classifiers', stage: 'model', highlight: 0 }, 'a click on a model row opens its picker');
+    const open = click(ui0, yOf(s0, 'sys:implementor', 0));
+    assert.deepEqual(open.ui.selector, { key: 'implementor', stage: 'model', highlight: 0 }, 'a click on a model row opens its picker');
     const s1 = state(open.ui);
-    const row = s1.rows.find((r) => r.id === 'sys:classifiers')!;
+    const row = s1.rows.find((r) => r.id === 'sys:implementor')!;
     const firstOption = row.lines.length - ENTRIES.length;
-    const title = click(open.ui, yOf(s1, 'sys:classifiers', 0));
+    const title = click(open.ui, yOf(s1, 'sys:implementor', 0));
     assert.equal(title.ui, open.ui, "the picker's title line does nothing");
-    const picked = click(open.ui, yOf(s1, 'sys:classifiers', firstOption + 7));
+    const picked = click(open.ui, yOf(s1, 'sys:implementor', firstOption + 7));
     assert.equal(picked.ui.selector?.stage, 'effort');
     assert.equal(picked.ui.selector?.model, 'claude-m7', 'the clicked option is the one confirmed');
     const s2 = state(picked.ui);
-    const effortRow = s2.rows.find((r) => r.id === 'sys:classifiers')!;
-    const committed = click(picked.ui, yOf(s2, 'sys:classifiers', effortRow.lines.length - 3 + 2));
+    const effortRow = s2.rows.find((r) => r.id === 'sys:implementor')!;
+    const committed = click(picked.ui, yOf(s2, 'sys:implementor', effortRow.lines.length - 3 + 2));
     assert.deepEqual(committed.effects.map((e) => e.type), ['model_swap']);
     assert.deepEqual((committed.effects[0] as { to: unknown }).to, { model: 'claude-m7', effort: 'high' }, 'the clicked effort is committed');
   } finally {

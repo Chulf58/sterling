@@ -10,8 +10,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { judgedVerdicts, maybeLaunchMaintenanceWorker, runWorker, workerPaths } from '../hooks/lib/maintenance-worker.mjs';
-import { CLAUDE_TOOLS_LINE, OPENCODE_ALLOWED_TOOLS, OPENCODE_PROMPT_NOTE, OPENCODE_WORKER_AGENT, OPENCODE_TOOLS_LINE, opencodePrompt, opencodeStreamJournal } from '../hooks/lib/maintenance-worker-opencode.mjs';
+import { judgedVerdicts, maybeLaunchMaintenanceWorker, runWorker, WORKER_EFFORT, WORKER_MODEL, workerPaths } from '../hooks/lib/maintenance-worker.mjs';
+import { buildOpencodeArgs, CLAUDE_TOOLS_LINE, OPENCODE_ALLOWED_TOOLS, OPENCODE_PROMPT_NOTE, OPENCODE_WORKER_AGENT, OPENCODE_TOOLS_LINE, opencodePrompt, opencodeStreamJournal } from '../hooks/lib/maintenance-worker-opencode.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -401,13 +401,50 @@ function pluginLaunch(fx, config, { claude = true, execPath = '/opt/oc/opencode.
   writeFileSync(join(fx.project, '.sterling', 'config.json'), JSON.stringify(config));
   const seen = [];
   const launchWorker = (o) => {
-    seen.push({ host: o.host, opencodeBin: o.opencodeBin, workerModel: o.workerModel, config: o.config });
+    seen.push({ host: o.host, opencodeBin: o.opencodeBin, workerModel: o.workerModel, workerEffort: o.workerEffort, config: o.config });
     return { launched: true, reason: 'launched' };
   };
   worker.createWorkerLaunch({ openStore: () => ({ close() {} }), claudeOnPath: () => claude, launchWorker, execPath, nodeOnPath: () => true })(fx.project, new Date(NOW).toISOString());
   return seen;
 }
 const WORK_MODEL = { maintenance_worker: { opencode_model: 'openai/gpt-5.6-terra' } };
+
+test('[overpass] the worker takes the maintenance-worker role\'s tier and effort, not the shared lane model (board c97ddc97)', () => {
+  const fx = fixture();
+  try {
+    const roles = { 'maintenance-worker': { tier: 'agentic-premium', effort: 'high' }, reviewer: { tier: 'agentic-max' } };
+    const [seen] = pluginLaunch(fx, { mode: 'work', overpass: { enabled: true, roles } });
+    assert.equal(seen.workerModel, 'overpass/agentic-premium');
+    assert.equal(seen.workerEffort, 'high');
+    const tierOnly = pluginLaunch(fx, { mode: 'work', overpass: { enabled: true, provider: 'acme-gw', roles: { 'maintenance-worker': { tier: 'agentic-low' } } } })[0];
+    assert.equal(tierOnly.workerModel, 'acme-gw/agentic-low');
+    assert.equal(tierOnly.workerEffort, undefined, 'no effort set, none sent');
+    assert.equal(pluginLaunch(fx, { mode: 'work', overpass: { enabled: true } })[0].workerModel, 'overpass/agentic-high', 'the default role tier is agentic-high');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('[overpass] the role\'s effort travels as the OpenCode run\'s --variant, through eligible.json, and is absent without one', () => {
+  const args = (variant) => buildOpencodeArgs({ prompt: 'p', model: 'overpass/agentic-premium', variant });
+  assert.deepEqual(args('high').slice(-3), ['--variant', 'high', 'p']);
+  assert.ok(!args(null).includes('--variant'));
+  assert.ok(!buildOpencodeArgs({ prompt: 'p', model: 'm' }).includes('--variant'));
+  const fx = fixture();
+  try {
+    const cfg = { maintenance_worker: { enabled: true } };
+    assert.equal(launch(fx, { host: 'opencode', opencodeBin: '/opt/oc/opencode.exe', config: cfg, workerModel: 'overpass/agentic-premium', workerEffort: 'high', spawn: fakeSpawn().fn }).launched, true);
+    const e = JSON.parse(readFileSync(fx.paths.eligible, 'utf8'));
+    assert.equal(e.opencode_variant, 'high');
+    assert.equal(e.opencode_model, 'overpass/agentic-premium');
+    rmSync(fx.paths.lock, { force: true });
+    rmSync(fx.paths.lastLaunch, { force: true });
+    launch(fx, { host: 'opencode', opencodeBin: '/opt/oc/opencode.exe', config: cfg, workerModel: 'overpass/agentic-high', spawn: fakeSpawn().fn });
+    assert.equal(JSON.parse(readFileSync(fx.paths.eligible, 'utf8')).opencode_variant, undefined, 'a role with no effort sends no variant');
+  } finally {
+    fx.cleanup();
+  }
+});
 
 test('[overpass] effective Overpass with claude on PATH runs the worker through OpenCode on <provider>/agentic-high, whatever opencode_model says or does not say; a custom provider id flows through', () => {
   const fx = fixture();
@@ -699,4 +736,10 @@ test('[#56 opencode shared output] an execute holding two Sterling writes gives 
   } finally {
     fx.cleanup();
   }
+});
+
+test('the System tab\'s claude CLI worker model and effort are the ones the runner passes (schemas constants pinned to the lib)', async () => {
+  const schemas = await import('@sterling/schemas');
+  assert.equal(schemas.MAINTENANCE_WORKER_CLAUDE_MODEL, WORKER_MODEL);
+  assert.equal(schemas.MAINTENANCE_WORKER_CLAUDE_EFFORT, WORKER_EFFORT);
 });

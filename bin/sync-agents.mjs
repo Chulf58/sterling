@@ -5131,7 +5131,6 @@ var configSchema = external_exports.object({
     "implementor-hard": agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
     researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
     scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-    classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
     // librarian is mechanical clerking — cheap model, low effort (P8). The
     // roster is classless (decision agent-roster-is-classless-four-agents), and
     // the debugger role it rejected has no key here.
@@ -5473,7 +5472,8 @@ var RETIRED_MODEL_KEYS = [
   "test_writer",
   "reviewers",
   "implementation_architect",
-  "debugger"
+  "debugger",
+  "classifiers"
 ];
 var isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 function normalizeRawConfig(raw) {
@@ -6568,7 +6568,7 @@ var CONFIG_MIGRATION_LINE_PREFIX = "config migration: ";
 var show = (value) => JSON.stringify(value);
 function describeMigration(dropped) {
   return dropped.map(
-    (d) => d.renamed_to ? `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.key} dropped (ignored since the roster rename to models.${d.renamed_to}); value was ${show(d.value)}; set models.${d.renamed_to} in the System tab if you want it` : `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.key} dropped (a retired key, ignored since the roster rename); value was ${show(d.value)}; set models.<role> in the System tab for the role you want it on`
+    (d) => d.renamed_to ? `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.key} dropped (ignored since the roster rename to models.${d.renamed_to}); value was ${show(d.value)}; set models.${d.renamed_to} in the System tab if you want it` : d.key === "classifiers" ? `${CONFIG_MIGRATION_LINE_PREFIX}models.classifiers dropped (a retired key: it belonged to the retired Haiku noise-gate and nothing read it); value was ${show(d.value)}` : `${CONFIG_MIGRATION_LINE_PREFIX}models.${d.key} dropped (a retired key, ignored since the roster rename); value was ${show(d.value)}; set models.<role> in the System tab for the role you want it on`
   );
 }
 function describeAdded(added) {

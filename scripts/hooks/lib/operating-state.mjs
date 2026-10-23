@@ -8,7 +8,7 @@
 // separator. Builtins, sibling libs and @sterling/store only: hooks bundle this module.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolveOverpass } from '@sterling/schemas';
+import { MAINTENANCE_WORKER_ROLE, resolveOverpass } from '@sterling/schemas';
 import { missingDomainWarning } from '@sterling/store';
 import { loadConfig } from './common.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../lib/handoff-projection.mjs';
@@ -145,10 +145,12 @@ export function projectModeLine({ config, configUnreadable, noOrigin = false }) 
 // The resolved per-role routes (resolveOverpass().roles, ruled defaults plus any
 // config.overpass.roles override) grouped by model and effort, in role order:
 // "model (role, role), model at effort high (role)".
+const routeLabel = ({ model, effort }) => (effort ? `${model} at effort ${effort}` : model);
+
 function overpassRoleRoutes(roles) {
   const groups = new Map();
-  for (const [role, { model, effort }] of Object.entries(roles)) {
-    const label = effort ? `${model} at effort ${effort}` : model;
+  for (const [role, route] of Object.entries(roles)) {
+    const label = routeLabel(route);
     groups.set(label, [...(groups.get(label) ?? []), role]);
   }
   return [...groups].map(([label, names]) => `${label} (${names.join(', ')})`).join(', ');
@@ -182,10 +184,13 @@ export function overpassLine({ config, configUnreadable, host }) {
     const conductor = res.conductorRouted
       ? `the conductor runs on ${res.conductorModel}`
       : 'the conductor is bypassed (config.overpass.conductor_bypass) and keeps its direct model pin';
+    // The maintenance worker is a role of its own but no subagent: it is named apart.
+    const { [MAINTENANCE_WORKER_ROLE]: worker, ...subagentRoles } = res.roles;
     return (
       `Overpass: ON (provider '${res.provider}', config.overpass — TUI System tab) — ${conductor}; ` +
-      `subagent roles run on ${overpassRoleRoutes(res.roles)}; ` +
-      `other agents, the Plan agent and the maintenance worker run on ${res.laneModel}. ` +
+      `subagent roles run on ${overpassRoleRoutes(subagentRoles)}; ` +
+      `the maintenance worker runs on ${routeLabel(worker)}; ` +
+      `other agents and the Plan agent run on ${res.laneModel}. ` +
       'The direct model pins in agent files, briefs and models.<role>.opencode_model do not apply while it is on.'
     );
   }
