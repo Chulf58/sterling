@@ -71,7 +71,8 @@ import { buildOpencodeArgs, buildOpencodeConfig, opencodeEnv, opencodePrompt, op
 /** Sonnet 5.5, not Haiku: the worker writes factual edits, and an unreviewed
  *  wrong edit makes the store lie (decision
  *  maintenance-worker-drains-every-lane-and-writes-factual-refresh-on-sonnet,
- *  user ruling (2)). */
+ *  user ruling (2)). The System tab shows these two through
+ *  MAINTENANCE_WORKER_CLAUDE_MODEL and _EFFORT in packages/schemas; a test pins them equal. */
 export const WORKER_MODEL = 'claude-sonnet-5-5';
 export const WORKER_EFFORT = 'medium';
 /** The child's agent, defined at launch through --agents (GitHub #70). MEASURED
@@ -1134,7 +1135,9 @@ function launchWorker(opts) {
       writeFileSync(paths.lastLaunch, JSON.stringify({ at_ms: nowMs, at: startedAt, trigger: opts.trigger }));
       // The child judges ONLY these (PARTIAL 2); the runner checks the token.
       // The runner host travels with the eligible list, bound to this launch by the token.
-      const runnerHost = host === 'opencode' ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...(opts.workerModel !== undefined ? { opencode_model_pinned: true } : {}) } : { host };
+      // `opts.workerEffort` rides with the pinned model (the Overpass role's effort, sent as
+      // the OpenCode run's --variant); the config model has no effort.
+      const runnerHost = host === 'opencode' ? { host, opencode_bin: opts.opencodeBin, opencode_model: model.trim(), ...(opts.workerModel !== undefined ? { opencode_model_pinned: true, ...(opts.workerEffort ? { opencode_variant: opts.workerEffort } : {}) } : {}) } : { host };
       // THE BATCH POLICY (change (ii)): eligible.json is token-bound, and the
       // worker's own Sterling server reads it through --worker-policy. `items`
       // keeps its shape for the runner and the prompt; `policy_items` is the
@@ -1553,7 +1556,8 @@ export async function runWorker(opts) {
       const model = opts.opencodeModel ?? eligible?.opencode_model ?? null;
       if (typeof model !== 'string' || !model.trim()) throw new Error(OPENCODE_MODEL_UNSET);
       const config = buildOpencodeConfig({ mcpConfig, model });
-      return { host, bin: ocBin, args: buildOpencodeArgs({ prompt: opencodePrompt(prompt), model }), env: opencodeEnv({ root: opts.root, config }) };
+      const variant = opts.opencodeVariant ?? eligible?.opencode_variant ?? null;
+      return { host, bin: ocBin, args: buildOpencodeArgs({ prompt: opencodePrompt(prompt), model, variant }), env: opencodeEnv({ root: opts.root, config }) };
     }
     if (host !== 'claude') throw new Error(`unknown runner host '${host}'`);
     return { host, bin, args: buildWorkerArgs({ prompt, mcpConfig, agentDefinition: workerAgentDefinition(opts.pluginRoot), budgetUsd: budgetOk ? budgetUsd : rawBudget }), env: {} };
@@ -1892,7 +1896,7 @@ export async function runWorker(opts) {
         const attempted = new Set([...(Array.isArray(eligible.chain_attempted) ? eligible.chain_attempted.map(String) : []), ...actedIds]);
         const snapshot = Array.isArray(eligible.queue_snapshot) ? eligible.queue_snapshot : [];
         const left = snapshot.filter((t) => t && !closedIds.has(t.id) && !attempted.has(t.id));
-        if (left.length) chain = { items: left, attempted: [...attempted], host: eligible.host, opencodeBin: eligible.opencode_bin, ...(eligible.opencode_model_pinned === true ? { pinnedModel: eligible.opencode_model } : {}) };
+        if (left.length) chain = { items: left, attempted: [...attempted], host: eligible.host, opencodeBin: eligible.opencode_bin, ...(eligible.opencode_model_pinned === true ? { pinnedModel: eligible.opencode_model, ...(eligible.opencode_variant ? { pinnedEffort: eligible.opencode_variant } : {}) } : {}) };
       }
       return ok ? 0 : 1;
     })();
@@ -1930,7 +1934,7 @@ function relaunchAfterRun(opts, chain) {
       ...(opts.spawnSync ? { spawnSync: opts.spawnSync } : {}),
       // A model the first launch pinned (Overpass) rides along: the chain never
       // falls back to the config model, and it does not re-resolve the toggle.
-      ...(chain.host === 'opencode' ? { host: 'opencode', opencodeBin: chain.opencodeBin, ...(chain.pinnedModel ? { workerModel: chain.pinnedModel } : {}) } : {}),
+      ...(chain.host === 'opencode' ? { host: 'opencode', opencodeBin: chain.opencodeBin, ...(chain.pinnedModel ? { workerModel: chain.pinnedModel, ...(chain.pinnedEffort ? { workerEffort: chain.pinnedEffort } : {}) } : {}) } : {}),
     });
   } catch (e) {
     return { launched: false, reason: 'error', detail: `not chained: ${e?.message ?? e}` };

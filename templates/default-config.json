@@ -12,7 +12,6 @@
     "implementor-hard": { "model": "claude-opus-5-5", "effort": "high" },
     "researcher": { "model": "claude-sonnet-5-5", "effort": "medium" },
     "scout": { "model": "claude-sonnet-5-5", "effort": "low" },
-    "classifiers": { "model": "claude-haiku-5-5", "effort": "low" },
     "librarian": { "model": "claude-haiku-5-5", "effort": "low" },
     "reviewer": { "model": "claude-opus-5-5", "effort": "high", "opencode_model": "openai/gpt-6.1-sol" },
     "sparring": { "model": "claude-opus-5-5", "effort": "high", "opencode_model": "openai/gpt-6-astra" },

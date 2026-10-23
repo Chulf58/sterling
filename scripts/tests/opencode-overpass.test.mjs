@@ -738,12 +738,12 @@ test('session line: ON, bypass, not in effect, off, invalid and unknown', () => 
   // agentic-premium and sparring on agentic-premium-max.
   // Changed again 2026-10-23 (user-ruled, "the regular implementer should run angentic-auto"):
   // the implementor defaults to agentic-auto and implementor-hard to agentic-premium.
-  assert.match(line(ON), /^Overpass: ON \(provider 'overpass'.*the conductor runs on overpass\/agentic-conductor; subagent roles run on overpass\/agentic-auto \(implementor\), overpass\/agentic-premium \(implementor-hard\), overpass\/agentic-high \(researcher, scout, reviewer, librarian, preflight\), overpass\/agentic-premium-max \(sparring\); other agents, the Plan agent and the maintenance worker run on overpass\/agentic-high\./);
+  assert.match(line(ON), /^Overpass: ON \(provider 'overpass'.*the conductor runs on overpass\/agentic-conductor; subagent roles run on overpass\/agentic-auto \(implementor\), overpass\/agentic-premium \(implementor-hard\), overpass\/agentic-high \(researcher, scout, reviewer, librarian, preflight\), overpass\/agentic-premium-max \(sparring\); the maintenance worker runs on overpass\/agentic-high; other agents and the Plan agent run on overpass\/agentic-high\./);
   // An explicit override: a role tier moves that role to its own group, an effort adds "at effort" to the group.
   // implementor-hard (decision hard-implementor-is-its-own-agent-sterling-implementor-hard) keeps its own default
   // tier when the implementor's is overridden, so it is a group of its own here.
   const overridden = line({ mode: 'work', overpass: { enabled: true, roles: { reviewer: { tier: 'agentic-max', effort: 'xhigh' }, scout: { effort: 'low' }, implementor: { tier: 'agentic-high' } } } });
-  assert.match(overridden, /subagent roles run on overpass\/agentic-high \(implementor, researcher, librarian, preflight\), overpass\/agentic-premium \(implementor-hard\), overpass\/agentic-high at effort low \(scout\), overpass\/agentic-max at effort xhigh \(reviewer\), overpass\/agentic-premium-max \(sparring\); other agents, the Plan agent and the maintenance worker run on overpass\/agentic-high\./);
+  assert.match(overridden, /subagent roles run on overpass\/agentic-high \(implementor, researcher, librarian, preflight\), overpass\/agentic-premium \(implementor-hard\), overpass\/agentic-high at effort low \(scout\), overpass\/agentic-max at effort xhigh \(reviewer\), overpass\/agentic-premium-max \(sparring\); the maintenance worker runs on overpass\/agentic-high; other agents and the Plan agent run on overpass\/agentic-high\./);
   assert.doesNotMatch(overridden, /agentic-premium \((?:[^)]*, )?implementor[,)]/, 'the implementor override replaces its default');
   assert.match(line({ mode: 'work', overpass: { enabled: true, conductor_bypass: true, provider: 'overpass-agentic' } }), /^Overpass: ON \(provider 'overpass-agentic'.*the conductor is bypassed \(config\.overpass\.conductor_bypass\) and keeps its direct model pin; .* run on overpass-agentic\/agentic-high/);
   assert.match(line({ mode: 'hobby', overpass: { enabled: true } }), /^Overpass: CONFIGURED BUT NOT IN EFFECT — overpass applies in work mode only; the project mode is 'hobby'/);
@@ -1210,7 +1210,22 @@ test('effort: an invalid overpass block or an unreadable config sends none and s
   }
 });
 
-test('roles: Plan and the maintenance worker keep the default lane model', () => {
+test('roles: the maintenance worker has its own role, which no agent name reaches; laneRoute and dispatchPin ignore it', () => {
+  const p = makeProject({ mode: 'work', overpass: { enabled: true, roles: { 'maintenance-worker': { tier: 'agentic-premium', effort: 'high' } } } });
+  try {
+    const res = overpass.projectOverpass(p.dir);
+    assert.deepEqual(res.roles['maintenance-worker'], { model: 'overpass/agentic-premium', effort: 'high' });
+    // the worker's own agent name is not the role's key, so its session is not routed as a role
+    assert.deepEqual(overpass.laneRoute(res, 'sterling-maintenance-worker'), { model: 'overpass/agentic-high' });
+    // a dispatch of a subagent that is not a role still takes the lane model
+    assert.deepEqual(overpass.laneRoute(res, 'sterling/implementor'), { model: 'overpass/agentic-auto' });
+    assert.equal(overpass.requestEffort(res, 'sterling-maintenance-worker', { providerID: 'overpass', id: 'agentic-premium' }, { bypassed: false }), null);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('roles: Plan keeps the default lane model, and the maintenance worker keeps it too until its own role is set', () => {
   const p = makeProject(ROLES_ON);
   try {
     const res = overpass.projectOverpass(p.dir);

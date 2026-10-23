@@ -22,8 +22,8 @@ const CATALOG: CatalogEntry[] = [
 function snapshot(implementor: AgentRosterSnapshot['configModels'][string] = { model: 'claude-sonnet-5-5', effort: 'high' }): AgentRosterSnapshot {
   return {
     agents: [{ name: 'implementor', installedModel: implementor.model, installedEffort: implementor.effort }],
-    // cursor 0 = implementor (governs the implementor agent), 1 = classifiers (no agent)
-    configModels: { implementor, classifiers: { model: 'claude-haiku-4-5', effort: 'low' } },
+    // cursor 0 = implementor (governs the implementor agent), 1 = scout (a config key whose agent is not installed here)
+    configModels: { implementor, scout: { model: 'claude-sonnet-5-5', effort: 'low' } },
     catalog: { present: true, stale: false, staleDate: null, entries: CATALOG },
   };
 }
@@ -69,7 +69,7 @@ test('a Claude pick still walks model then effort and emits a model_swap, not an
 test('an OpenAI pick on a key with no agent is refused with a notice', () => {
   const r = drive(snapshot(), 1, ['ENTER', 'DOWN', 'ENTER']);
   assert.equal(r.effects.length, 0);
-  assert.match(r.ui.notice ?? '', /OpenCode model refused: 'classifiers' has no agent/);
+  assert.match(r.ui.notice ?? '', /OpenCode model refused: 'scout' has no agent/);
 });
 
 test('the row shows a set override; the picker marks OpenAI entries OpenCode-only and offers a clear option', () => {

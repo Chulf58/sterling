@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { MountedStores, SterlingStore, StoreBusyError, DEFAULT_BUSY_TIMEOUT_MS, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
 import { parseConfig, resolveOverpass, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE, OVERPASS_ROLES } from '@sterling/schemas';
-import { buildDashboardFrame, clipEllipsis, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect, type OverpassToggleEffect, type OverpassProviderEffect, type OverpassBypassEffect, type OverpassRoleEffect, type OverpassView } from './state.js';
+import { buildDashboardFrame, clipEllipsis, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type WorkerModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect, type OverpassToggleEffect, type OverpassProviderEffect, type OverpassBypassEffect, type OverpassRoleEffect, type OverpassView } from './state.js';
 import { ConfigChangedError, replaceConfigFile, writeConfigKey, type ConfigWriteSeams, applyAutoMergeToggle, applyHandoffToggle, applyModeToggle, applyOverpassBypass, applyOverpassProvider, applyOverpassRole, applyOverpassToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
 import { AutoMergeSettingError, autoMergeOnCleanOf } from '../../../scripts/lib/work-pr.mjs';
 import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
@@ -566,7 +566,48 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // finding 41/43) — surface it as a visible System-tab notice instead.
       ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
     }
-    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), ...handoff };
+    return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode, storage: readRawStorage(), autoMergeOnClean: readAutoMergeOnClean(), host: options.host, overpass: readOverpass(), maintenanceWorker: readMaintenanceWorker(), ...handoff };
+  }
+
+  /** maintenance_worker.opencode_model for the Maintenance worker row, from the RAW
+   *  config. Three states stay apart (anti-pattern
+   *  config-derived-posture-line-collapses-absent-into-unusable): the string, or null when
+   *  it is absent or null (unset, as the worker's reader treats it); `invalid` (the JSON
+   *  text) when it is present but not a usable string, a blank one included, because the
+   *  worker refuses it; and `unreadable` (the reason) when the config cannot be read, is
+   *  not a JSON object, or carries a maintenance_worker that is not an object, so the row
+   *  never says "not set" about a config nobody could read. */
+  function readMaintenanceWorker(): NonNullable<AgentRosterSnapshot['maintenanceWorker']> {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    } catch (err) {
+      return { opencodeModel: null, unreadable: `${(err as Error).message.split('\n')[0]}` };
+    }
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return { opencodeModel: null, unreadable: `config.json holds ${JSON.stringify(raw)}, not an object` };
+    const block = (raw as { maintenance_worker?: unknown }).maintenance_worker;
+    if (block === undefined) return { opencodeModel: null };
+    if (block === null || typeof block !== 'object' || Array.isArray(block)) return { opencodeModel: null, unreadable: `maintenance_worker is ${JSON.stringify(block)}, not an object` };
+    const value = (block as { opencode_model?: unknown }).opencode_model;
+    if (value === undefined || value === null) return { opencodeModel: null };
+    if (typeof value !== 'string' || value.trim() === '') return { opencodeModel: null, invalid: JSON.stringify(value) };
+    return { opencodeModel: value };
+  }
+
+  /** Execute a worker_model effect: set or clear config.maintenance_worker.opencode_model
+   *  and write nothing else. Refused while Overpass is effective in the bytes the write
+   *  is built from: the worker then runs on its tier and the saved model is not applied. */
+  function applyWorkerModel(e: WorkerModelEffect): void {
+    try {
+      if (e.to !== undefined && !OPENCODE_MODEL_REF_RE.test(e.to)) throw new Error(`'${e.to}' is not a <provider>/<model> id`);
+      writeConfigKey(configPath, 'maintenance_worker', (old, raw) => {
+        if (overpassEffectiveIn(raw)) throw new Error('Overpass is on, so the worker runs on its tier and the saved model is not applied; turn Overpass off to edit it. Nothing was written');
+        const { opencode_model: _previous, ...rest } = old !== null && typeof old === 'object' && !Array.isArray(old) ? (old as Record<string, unknown>) : {};
+        return e.to === undefined ? rest : { ...rest, opencode_model: e.to };
+      }, options.configWriteFs);
+    } catch (err) {
+      ui = { ...ui, notice: `Maintenance worker model not changed — ${(err as Error).message}` };
+    }
   }
 
   /** Execute a sparring_model effect: config.sparring_partner.models.openai
@@ -791,6 +832,8 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     overpassRefusedEdit = false;
     for (const e of swaps) await applySwap(e);
     for (const e of overrides) applyOpenCodeModel(e);
+    const workerModels = effects.filter((e): e is WorkerModelEffect => e.type === 'worker_model');
+    for (const e of workerModels) applyWorkerModel(e);
     const refused = overpassRefusedEdit;
     const sparringModels = effects.filter((e): e is SparringModelEffect => e.type === 'sparring_model');
     for (const e of sparringModels) applySparringModel(e);
@@ -869,7 +912,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // that does not — restart the session to pick the new value up there.
       notice('config.json updated — hooks pick this up on their next invocation; restart the session (Claude Code) or run opencode reload (OpenCode) to reload the MCP server.');
     }
-    if (refused || swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length || overpassRoles.length) roster = loadRoster();
+    if (refused || swaps.length || overrides.length || workerModels.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length || overpassRoles.length) roster = loadRoster();
     for (const e of effects) {
       if (e.type === 'select') pending = [...pending.filter((p) => p.type !== 'select'), e];
       else if (e.type === 'board_edit') pending.push(e);

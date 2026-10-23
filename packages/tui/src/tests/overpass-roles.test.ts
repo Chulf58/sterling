@@ -37,7 +37,6 @@ function snapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnapshot 
       implementor: { model: 'claude-opus-5-5', effort: 'medium', opencode_model: 'openai/gpt-6-terra' },
       scout: { model: 'claude-sonnet-5', effort: 'low' },
       sparring: { model: 'claude-fable-5-1', effort: 'high' },
-      classifiers: { model: 'claude-haiku-5', effort: 'low' },
     },
     catalog: { present: true, stale: false, staleDate: null, entries: [{ id: 'claude-opus-5-5', label: 'Opus 5.5', tier: 'opus', status: 'active' }] },
     codexWired: true,
@@ -61,15 +60,16 @@ function storeFixture() {
   return { store, cleanup: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
+// Changed 2026-10-23 (board 4e7a6bfc): the agent-name line under a role is gone, because it only
+// repeated the header (AGENT_MODEL_KEY is an identity map); the classifiers row is gone (board
+// 07ee17a9); the Maintenance worker row (board c97ddc97) closes the list.
 const OFF_ROWS = [
   '› Implementor: claude-opus-5-5 medium',
-  '    implementor',
   '    OpenCode: openai/gpt-6-terra',
   '  Scout: claude-sonnet-5 low',
-  '    scout',
   '  Sparring: claude-fable-5-1 high',
-  '    sparring',
-  '  Classifiers: claude-haiku-5 low',
+  '  Maintenance worker: not set: worker will not start',
+  '    claude CLI, when on PATH: claude-sonnet-5-5 medium',
 ];
 
 test('Overpass off: the agent rows are exactly the pre-Overpass rows, whatever the view carries', () => {
@@ -84,15 +84,12 @@ test('Overpass on: each role row reads its tier with (Overpass), the saved model
   assert.deepEqual(rows, [
     '› Implementor: agentic-auto (Overpass)',
     '    saved: claude-opus-5-5 medium',
-    '    implementor',
-    '    OpenCode: openai/gpt-6-terra (inactive: Overpass)',
+    '    saved OpenCode: openai/gpt-6-terra',
     '  Scout: agentic-high (Overpass)',
     '    saved: claude-sonnet-5 low',
-    '    scout',
     '  Sparring: agentic-premium-max (Overpass)',
     '    saved: claude-fable-5-1 high',
-    '    sparring',
-    '  Classifiers: claude-haiku-5 low',
+    '  Maintenance worker: agentic-high (Overpass)',
   ]);
   const saved = buildSystemTab(snapshot({ overpass: on() }), st(), 120).rows[0].lines[1];
   assert.equal(saved.kind, 'meta', 'the saved line is the dimmed kind');
@@ -112,7 +109,7 @@ test('Overpass on: an installed preflight agent gets its own row on agentic-high
   const onRows = rowTexts(withPreflight({ overpass: on() }));
   const at = onRows.indexOf('  Preflight: agentic-high (Overpass)');
   assert.ok(at >= 0, onRows.join('\n'));
-  assert.deepEqual(onRows.slice(at, at + 3), ['  Preflight: agentic-high (Overpass)', '    saved: claude-sonnet-5-5 low', '    preflight']);
+  assert.deepEqual(onRows.slice(at, at + 2), ['  Preflight: agentic-high (Overpass)', '    saved: claude-sonnet-5-5 low']);
   const offRows = rowTexts(withPreflight());
   assert.ok(offRows.includes('  Preflight: claude-sonnet-5-5 low'), offRows.join('\n'));
 });
@@ -221,12 +218,17 @@ test('Overpass off: ENTER on a role row opens the model picker and the swap walk
   }
 });
 
-test('classifiers is not an Overpass role: its row and picker are unchanged while Overpass is effective', () => {
+// Board c97ddc97: the Maintenance worker row follows the config.models rows. It has no agent, and
+// it is an Overpass role, so ENTER opens its tier picker while Overpass is effective and its model
+// picker while it is off.
+test('Maintenance worker row: ENTER opens its tier picker with Overpass on and its model picker with Overpass off', () => {
   const { store, cleanup } = storeFixture();
   try {
-    const snap = snapshot({ overpass: on() });
-    const r = reduce(store, st({ cursor: 3 }), key('ENTER'), undefined, undefined, snap);
-    assert.deepEqual(r.ui.selector, { key: 'classifiers', stage: 'model', highlight: 0 });
+    const workerCursor = Object.keys(snapshot().configModels).length;
+    const on1 = reduce(store, st({ cursor: workerCursor }), key('ENTER'), undefined, undefined, snapshot({ overpass: on() }));
+    assert.deepEqual(on1.ui.selector, { key: 'maintenance-worker', stage: 'tier', highlight: 1 }, 'agentic-high is the second listed tier');
+    const off1 = reduce(store, st({ cursor: workerCursor }), key('ENTER'), undefined, undefined, snapshot());
+    assert.deepEqual(off1.ui.selector, { key: 'maintenance-worker', stage: 'model', highlight: 0 });
   } finally {
     cleanup();
   }
@@ -373,7 +375,7 @@ test('controller: Overpass switched on between two model edits of one batch refu
 });
 
 test('controller: Overpass switched on since the roster loaded refuses a model swap and an OpenCode override on a role, writes nothing and refreshes the roster', async () => {
-  const models = { implementor: { model: 'claude-opus-5-5', effort: 'medium' }, classifiers: { model: 'claude-haiku-5', effort: 'low' } };
+  const models = { implementor: { model: 'claude-opus-5-5', effort: 'medium' } };
   const dir = mkdtempSync(join(tmpdir(), 'sterling-overpass-roles-stale-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   const configPath = join(dir, '.sterling', 'config.json');
@@ -392,11 +394,10 @@ test('controller: Overpass switched on since the roster loaded refuses a model s
     assert.equal(readFileSync(configPath, 'utf8'), external, 'config.json is byte-identical');
     assert.match(ctl.ui().notice ?? '', /^Overpass is on — .*Nothing was written\./);
     assert.equal(ctl.roster()?.overpass?.effective, true, 'the roster is refreshed');
-    // classifiers is not an Overpass role: its swap is not refused by this check
-    await ctl.applyEffects([
-      { type: 'model_swap', key: 'classifiers', from: { model: 'claude-haiku-5', effort: 'low' }, to: { model: 'claude-haiku-5-1', effort: 'low' }, agents: [], decisionTitle: 't' },
-    ]);
-    assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).models.classifiers.model, 'claude-haiku-5-1');
+    // the Maintenance worker's saved model is refused the same way: it runs on its tier now
+    await ctl.applyEffects([{ type: 'worker_model', to: 'openai/gpt-6-terra' }]);
+    assert.equal(readFileSync(configPath, 'utf8'), external, 'config.json is byte-identical');
+    assert.match(ctl.ui().notice ?? '', /^Maintenance worker model not changed — Overpass is on.*Nothing was written/);
   } finally {
     ctl.close();
     rmSync(dir, { recursive: true, force: true });
@@ -419,19 +420,18 @@ test('implementor-hard row: model and effort with Overpass off, its own tier wit
   });
   assert.deepEqual(rowTexts(hardSnap()), [
     '› Implementor: claude-sonnet-5-5 high',
-    '    implementor',
     '  Implementor-hard: claude-opus-5-5 high',
-    '    implementor-hard',
+    '  Maintenance worker: not set: worker will not start',
+    '    claude CLI, when on PATH: claude-sonnet-5-5 medium',
   ]);
   assert.deepEqual(rowTexts(hardSnap({ overpass: on({ implementor: { tier: 'agentic-high' }, 'implementor-hard': { tier: 'agentic-premium-max', effort: 'xhigh' } }) })), [
     '› Implementor: agentic-high (Overpass)',
     '    saved: claude-sonnet-5-5 high',
-    '    implementor',
     '  Implementor-hard: agentic-premium-max (Overpass) xhigh',
     '    saved: claude-opus-5-5 high',
-    '    implementor-hard',
+    '  Maintenance worker: agentic-high (Overpass)',
   ]);
-  assert.equal(rowTexts(hardSnap({ overpass: on() }))[3], '  Implementor-hard: agentic-premium (Overpass)', 'its default tier is agentic-premium');
+  assert.equal(rowTexts(hardSnap({ overpass: on() }))[2], '  Implementor-hard: agentic-premium (Overpass)', 'its default tier is agentic-premium');
   assert.equal(rowTexts(hardSnap({ overpass: on() }))[0], '› Implementor: agentic-auto (Overpass)', 'the implementor default is agentic-auto');
   const { store, cleanup } = storeFixture();
   try {

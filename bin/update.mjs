@@ -6318,7 +6318,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, OVERPASS_TIERS, DEFAULT_OVERPASS_ROLE_TIERS, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, DEFAULT_OVERPASS_PROVIDER, OVERPASS_PROVIDER_RE, OVERPASS_ROLES, MAINTENANCE_WORKER_ROLE, MAINTENANCE_WORKER_CLAUDE_MODEL, MAINTENANCE_WORKER_CLAUDE_EFFORT, OVERPASS_EFFORTS, OVERPASS_TIER_RE, DEFAULT_OVERPASS_TIER, OVERPASS_TIERS, DEFAULT_OVERPASS_ROLE_TIERS, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -6513,7 +6513,6 @@ var init_config = __esm({
         "implementor-hard": agentModelEntry.default({ model: "claude-opus-5-5", effort: "high" }),
         researcher: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "medium" }),
         scout: agentModelEntry.default({ model: "claude-sonnet-5-5", effort: "low" }),
-        classifiers: agentModelEntry.default({ model: "claude-haiku-5-5", effort: "low" }),
         // librarian is mechanical clerking — cheap model, low effort (P8). The
         // roster is classless (decision agent-roster-is-classless-four-agents), and
         // the debugger role it rejected has no key here.
@@ -6850,7 +6849,10 @@ var init_config = __esm({
     });
     DEFAULT_OVERPASS_PROVIDER = "overpass";
     OVERPASS_PROVIDER_RE = /^[A-Za-z0-9._-]+$/;
-    OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight"];
+    OVERPASS_ROLES = ["implementor", "implementor-hard", "researcher", "scout", "reviewer", "librarian", "sparring", "preflight", "maintenance-worker"];
+    MAINTENANCE_WORKER_ROLE = "maintenance-worker";
+    MAINTENANCE_WORKER_CLAUDE_MODEL = "claude-sonnet-5-5";
+    MAINTENANCE_WORKER_CLAUDE_EFFORT = "medium";
     OVERPASS_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
     OVERPASS_TIER_RE = /^agentic-[a-z0-9-]+$/;
     DEFAULT_OVERPASS_TIER = "agentic-high";
@@ -6863,7 +6865,8 @@ var init_config = __esm({
       reviewer: DEFAULT_OVERPASS_TIER,
       librarian: DEFAULT_OVERPASS_TIER,
       sparring: "agentic-premium-max",
-      preflight: DEFAULT_OVERPASS_TIER
+      preflight: DEFAULT_OVERPASS_TIER,
+      "maintenance-worker": DEFAULT_OVERPASS_TIER
     };
     RETIRED_MODEL_KEYS = [
       "coder",
@@ -6872,7 +6875,8 @@ var init_config = __esm({
       "test_writer",
       "reviewers",
       "implementation_architect",
-      "debugger"
+      "debugger",
+      "classifiers"
     ];
     isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
     MODEL_DEFAULTS_MIGRATION_ID = "model-defaults-2026-10-23";
@@ -7131,6 +7135,9 @@ __export(dist_exports, {
   KNOWLEDGE_WRITES_TEMP_FILE: () => KNOWLEDGE_WRITES_TEMP_FILE,
   LIFECYCLE_VALUES: () => LIFECYCLE_VALUES,
   LINK_RELS: () => LINK_RELS,
+  MAINTENANCE_WORKER_CLAUDE_EFFORT: () => MAINTENANCE_WORKER_CLAUDE_EFFORT,
+  MAINTENANCE_WORKER_CLAUDE_MODEL: () => MAINTENANCE_WORKER_CLAUDE_MODEL,
+  MAINTENANCE_WORKER_ROLE: () => MAINTENANCE_WORKER_ROLE,
   MODEL_DEFAULTS_MIGRATION_ID: () => MODEL_DEFAULTS_MIGRATION_ID,
   NAME_CLIP: () => NAME_CLIP,
   NOT_APPLICABLE_EXEMPT_KINDS: () => NOT_APPLICABLE_EXEMPT_KINDS,

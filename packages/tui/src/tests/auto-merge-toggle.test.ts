@@ -63,7 +63,7 @@ function rowText(snap: AgentRosterSnapshot, ui: UiState = st({ tab: SYS_TAB }), 
 test('auto-merge row: one row, id sys:pr_auto_merge; the other row lists are untouched', () => {
   const snap = snapshot();
   const view = buildSystemTab(snap, st({ tab: SYS_TAB }), 80);
-  assert.equal(view.rows.length, Object.keys(snap.configModels).length);
+  assert.equal(view.rows.length, Object.keys(snap.configModels).length + 1);
   assert.equal(view.handoffRows.length, 1);
   assert.equal(view.storageRows.length, 1);
   assert.equal(view.autoMergeRows.length, 1);
@@ -89,7 +89,7 @@ test('auto-merge row: DOWN from the handoff row lands on it; it is the last row 
   const { store, cleanup } = storeFixture();
   try {
     const snap = snapshot();
-    const n = Object.keys(snap.configModels).length;
+    const n = Object.keys(snap.configModels).length + 1;
     const down = reduce(store, st({ tab: SYS_TAB, cursor: n + 4 }), key('DOWN'), undefined, undefined, snap);
     assert.equal(down.ui.cursor, n + 5);
     const clamped = reduce(store, down.ui, key('DOWN'), undefined, undefined, snap);
@@ -116,7 +116,7 @@ test('auto-merge row: ENTER and SPACE emit auto_merge_toggle with the NEW value 
     ];
     for (const [value, k, next] of cases) {
       const snap = snapshot(value === undefined ? {} : { autoMergeOnClean: value });
-      const n = Object.keys(snap.configModels).length;
+      const n = Object.keys(snap.configModels).length + 1;
       const r = reduce(store, st({ tab: SYS_TAB, cursor: n + 5 }), key(k), undefined, undefined, snap);
       const types = r.effects.map((e: Effect) => e.type);
       assert.deepEqual(types, ['auto_merge_toggle'], `${k} from ${String(value)}: exactly one auto_merge_toggle`);
