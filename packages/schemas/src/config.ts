@@ -793,6 +793,52 @@ export function parseConfig(raw: unknown): SterlingConfig {
   return configSchema.parse(normalizeRawConfig(raw));
 }
 
+// ── Retired models keys: the on-disk migration ──────────────────────────────
+// normalizeRawConfig drops a retired key in memory on every parse, so the key
+// stays in the file forever and its value is lost without a word. This is the
+// one rewrite that removes them from the document and names each value it
+// removed (anti_pattern wiring-a-formerly-inert-config-field-to-authoritative-
+// without-migrating-the-live-config-values). DROP ONLY, never a carry (user-
+// ruled 2026-10-23): these keys have been ignored since the rename, so removing
+// one changes no rendered model, while carrying a stale pin to its successor
+// would make it authoritative (decisions pin exact model ids and keep scout on
+// Sonnet). A renamed key's report names its successor so the user can set it by hand.
+
+export interface RetiredModelKeyDrop {
+  key: string;
+  value: unknown;
+  /** The models key that replaced this one in the roster rename, when it has one (CONFIG_KEY_RENAMES). */
+  renamed_to?: string;
+}
+
+export interface RetiredModelKeysMigration {
+  /** A copy with the retired keys gone; the input itself when nothing changed. */
+  config: unknown;
+  changed: boolean;
+  dropped: RetiredModelKeyDrop[];
+  /** The models keys that were not retired and so were left exactly as written. */
+  untouched: string[];
+}
+
+/** Drop every retired models key and report each with its value. Pure and
+ *  idempotent: a config with no retired key comes back as the same object,
+ *  unreported. Anything that is not a plain object with a plain-object `models`
+ *  passes through. */
+export function migrateRetiredModelKeys(raw: unknown): RetiredModelKeysMigration {
+  const none = (untouched: string[]): RetiredModelKeysMigration => ({ config: raw, changed: false, dropped: [], untouched });
+  if (!isPlainObject(raw) || !isPlainObject(raw.models)) return none([]);
+  const models = raw.models;
+  const retired = RETIRED_MODEL_KEYS.filter((k) => Object.prototype.hasOwnProperty.call(models, k));
+  const untouched = Object.keys(models).filter((k) => !RETIRED_MODEL_KEYS.includes(k));
+  if (retired.length === 0) return none(untouched);
+  const dropped = retired.map((key): RetiredModelKeyDrop => {
+    const renamed = CONFIG_KEY_RENAMES[`models.${key}`]?.replace(/^models\./, '');
+    return renamed === undefined ? { key, value: models[key] } : { key, value: models[key], renamed_to: renamed };
+  });
+  const next = Object.fromEntries(Object.entries(models).filter(([k]) => !RETIRED_MODEL_KEYS.includes(k)));
+  return { config: { ...raw, models: next }, changed: true, dropped, untouched };
+}
+
 // ── Config keys Sterling no longer reads (decision gap-hunt-2026-09-28-rulings
 //    item 12) ────────────────────────────────────────────────────────────────
 // Every non-strict z.object above STRIPS a key it does not define, silently, so
