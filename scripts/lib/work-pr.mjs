@@ -629,6 +629,10 @@ export function readPrLoop(root, prNumber) {
   return loops.find((s) => s.status === 'owed') ?? loops.at(-1) ?? null;
 }
 
+/** How many loops the settle refusal names, and how much of an unreadable file's error it prints. */
+const MAX_LOOPS_NAMED = 5;
+const MAX_LOOP_ERROR_CHARS = 200;
+
 /** Each loop file on disk, read tolerantly for a diagnostic: { file, state }
  * or { file, error }. */
 function listPrLoopFilesForDiagnostic(root) {
@@ -684,8 +688,15 @@ export function settlePrLoop(root, outcome, prRef, { originRepo, now = new Date(
   if (!entry) {
     const others = listPrLoopFilesForDiagnostic(root);
     if (!others.length) throw new Error(`no PR review loop is armed here (${PR_LOOPS_DIR_REL}/ and ${PR_LOOP_REL} are absent) — nothing to settle`);
-    const armed = others.map((o) => (o.state ? `PR #${o.state.pr_number} (${o.state.pr_url}, ${unstick(o)})` : `${o.file} (unreadable: ${o.error})`)).join('; ');
-    throw new Error(`no PR review loop is armed for ${prRef}; the armed loops are for ${armed} — nothing settled`);
+    // GitHub issue #201: settled loop files stay on disk for a merge-only re-settle (#150), so
+    // the refusal names only the loops still owed and the unreadable files, at most
+    // MAX_LOOPS_NAMED of them, and counts the settled ones it leaves out.
+    const live = others.filter((o) => !o.state || o.state.status === 'owed');
+    const settledNote = others.length > live.length ? `${others.length - live.length} settled loop${others.length - live.length === 1 ? '' : 's'} ignored` : '';
+    if (!live.length) throw new Error(`no PR review loop is armed for ${prRef} (${settledNote}); rerun /sterling:merge on the branch to arm it — nothing settled`);
+    const armed = live.slice(0, MAX_LOOPS_NAMED).map((o) => (o.state ? `PR #${o.state.pr_number} (${o.state.pr_url}, ${unstick(o)})` : `${o.file} (unreadable: ${o.error.slice(0, MAX_LOOP_ERROR_CHARS)})`)).join('; ');
+    const more = live.length > MAX_LOOPS_NAMED ? `; +${live.length - MAX_LOOPS_NAMED} more` : '';
+    throw new Error(`no PR review loop is armed for ${prRef}; the armed loops are for ${armed}${more}${settledNote ? ` (${settledNote})` : ''} — nothing settled`);
   }
   const s = entry.state;
   const armed = parsePrUrl(s.pr_url);

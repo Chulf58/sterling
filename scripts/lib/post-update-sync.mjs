@@ -309,15 +309,41 @@ export async function postUpdateSync({ root, project, host = 'claude', runStep =
   };
 }
 
-/** The banner clause for dropped retired models keys; the values are in the model-facing context. */
-function migratedWarning(migrated) {
-  if (!migrated.length) return '';
-  return `.sterling/config.json lost ${migrated.length} retired models key${migrated.length === 1 ? '' : 's'} (ignored before, so no model changed). `;
+// The "config migration: ..." lines sync-agents prints, by what each one did. A retired-key drop
+// ("models.<key> dropped (...)", one level deep; models.implementor.hard_task is not one) changes
+// no model, because the key was ignored already. The Overpass defaults reset changes routing: it
+// removes tier overrides and turns the conductor bypass on. Anything else (model defaults added,
+// the implementor-hard move) changes what the model pins say.
+const RETIRED_KEY_LINE = /^config migration: models\.[^\s.]+ dropped \(/;
+const OVERPASS_RESET_LINE = /^config migration: overpass\./;
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const strip = (l) => l.replace(/^config migration: /, '');
+function splitMigrated(migrated) {
+  return {
+    retired: migrated.filter((l) => RETIRED_KEY_LINE.test(l)),
+    overpass: migrated.filter((l) => OVERPASS_RESET_LINE.test(l)),
+    other: migrated.filter((l) => !RETIRED_KEY_LINE.test(l) && !OVERPASS_RESET_LINE.test(l)),
+  };
 }
 
-/** The model-facing receipt: each dropped key with its value, so the user can set a successor by hand. */
+/** The banner clauses for config migrations, one per kind; the values are in the model-facing context. */
+function migratedWarning(migrated) {
+  const { retired, overpass, other } = splitMigrated(migrated);
+  return (
+    (retired.length ? `.sterling/config.json lost ${plural(retired.length, 'retired models key')} (ignored before, so no model changed). ` : '') +
+    (overpass.length ? `.sterling/config.json had its Overpass settings reset to the defaults (tier overrides removed, conductor bypass on), which changes model routing. ` : '') +
+    (other.length ? `.sterling/config.json had ${plural(other.length, 'other config migration step')} applied (model defaults or the implementor-hard move), which can change model pins. ` : '')
+  );
+}
+
+/** The model-facing receipt: each migration line, so the user can set a successor or an override by hand. */
 function migratedContext(migrated) {
-  return migrated.length ? ` sync-agents removed ${migrated.length} retired models key${migrated.length === 1 ? '' : 's'} from .sterling/config.json (they were already ignored, so no model changed); tell the user, because the values are no longer in the file: ${migrated.map((l) => l.replace(/^config migration: /, '')).join('; ')}.` : '';
+  const { retired, overpass, other } = splitMigrated(migrated);
+  return (
+    (retired.length ? ` sync-agents removed ${plural(retired.length, 'retired models key')} from .sterling/config.json (they were already ignored, so no model changed); tell the user, because the values are no longer in the file: ${retired.map(strip).join('; ')}.` : '') +
+    (overpass.length ? ` sync-agents reset the Overpass settings in .sterling/config.json, which changes model routing (config.overpass.roles overrides are gone and the conductor bypass is on); tell the user, because the old values are no longer in the file: ${overpass.map(strip).join('; ')}.` : '') +
+    (other.length ? ` sync-agents applied ${plural(other.length, 'other config migration step')} to .sterling/config.json, which can change model pins; tell the user: ${other.map(strip).join('; ')}.` : '')
+  );
 }
 
 /** True when the clone agent sync applies: a git clone as plugin root and a project with .sterling/config.json. The clone itself is a project like any other. */

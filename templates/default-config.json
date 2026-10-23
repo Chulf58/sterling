@@ -6,7 +6,7 @@
     },
     "conductor": { "soft_pct": 35, "hard_pct": 50 }
   },
-  "applied_config_migrations": ["model-defaults-2026-10-23", "implementor-hard-2026-10-23"],
+  "applied_config_migrations": ["model-defaults-2026-10-23", "implementor-hard-2026-10-23", "overpass-defaults-2026-10-23"],
   "models": {
     "implementor": { "model": "claude-sonnet-5-5", "effort": "high" },
     "implementor-hard": { "model": "claude-opus-5-5", "effort": "high" },
@@ -72,6 +72,6 @@
   "overpass": {
     "enabled": false,
     "provider": "overpass",
-    "conductor_bypass": false
+    "conductor_bypass": true
   }
 }

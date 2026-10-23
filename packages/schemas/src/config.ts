@@ -628,7 +628,7 @@ export const configSchema = z.object({
   // including an unknown role or field under the optional `roles` map
   // (per-role tier and effort, resolveOverpassRoles). The default lives twice: here and in templates/default-config.json
   // (config.test.ts pins that they agree).
-  overpass: z.unknown().default({ enabled: false, provider: 'overpass', conductor_bypass: false }),
+  overpass: z.unknown().default({ enabled: false, provider: 'overpass', conductor_bypass: true }),
   // The one-time config migrations already applied to this file (addModelDefaults),
   // so a value a migration added and the user later cleared is never added again.
   // Written by sync and init only.
@@ -685,17 +685,19 @@ export const OVERPASS_TIERS = ['agentic-low', 'agentic-high', 'agentic-conductor
 // hard-implementor-is-its-own-agent-sterling-implementor-hard) took over agentic-premium,
 // and the implementor moved to agentic-auto (user-ruled 2026-10-23, verbatim: "The new
 // implementer-hard should run the angentic-premium tier, and the regular implementer should
-// run angentic-auto").
+// run angentic-auto"). The scout, librarian, preflight and maintenance-worker roles moved to
+// agentic-auto too (user-ruled 2026-10-23, 'Defaults + reset + bypass ON': the tiers CH.Core's
+// System tab showed are the defaults for every project; resetOverpassDefaults clears the live overrides).
 export const DEFAULT_OVERPASS_ROLE_TIERS: Record<OverpassRole, string> = {
   implementor: 'agentic-auto',
   'implementor-hard': 'agentic-premium',
   researcher: DEFAULT_OVERPASS_TIER,
-  scout: DEFAULT_OVERPASS_TIER,
+  scout: 'agentic-auto',
   reviewer: DEFAULT_OVERPASS_TIER,
-  librarian: DEFAULT_OVERPASS_TIER,
+  librarian: 'agentic-auto',
   sparring: 'agentic-premium-max',
-  preflight: DEFAULT_OVERPASS_TIER,
-  'maintenance-worker': DEFAULT_OVERPASS_TIER,
+  preflight: 'agentic-auto',
+  'maintenance-worker': 'agentic-auto',
 };
 
 export interface OverpassRoleRoute {
@@ -781,7 +783,7 @@ export function resolveOverpass(config: unknown, opts: { host: string }): Overpa
   if (typeof enabled !== 'boolean') {
     throw new Error(`config.overpass.enabled is ${JSON.stringify(enabled)} — it must be true or false`);
   }
-  const bypass = block.conductor_bypass === undefined ? false : block.conductor_bypass;
+  const bypass = block.conductor_bypass === undefined ? true : block.conductor_bypass;
   if (typeof bypass !== 'boolean') {
     throw new Error(`config.overpass.conductor_bypass is ${JSON.stringify(bypass)} — it must be true or false`);
   }
@@ -995,6 +997,49 @@ export function moveImplementorHardTask(raw: unknown): ImplementorHardMigration 
       : { model: pin.model, effort };
   models['implementor-hard'] = entry;
   return record(models, { kind: 'moved', hard_task, entry });
+}
+
+// ── Overpass defaults: the one-time reset ───────────────────────────────────
+// Decision overpass-per-role-default-tiers-implementor-premium-sparring-premium-max (user-
+// ruled 2026-10-23, 'Defaults + reset + bypass ON'; verbatim: "The ch.core tui shows the
+// models/effect that I want overpass to use on all projects, both current but also new
+// init'ed"): every existing project drops its config.overpass.roles overrides, so the
+// shipped DEFAULT_OVERPASS_ROLE_TIERS apply, and gets overpass.conductor_bypass true.
+// It touches those two keys only, runs once per file (its id goes into
+// applied_config_migrations, so a roles override or a bypass switched off afterwards stays),
+// and reports each change. A config whose `overpass` is present but not an object is
+// refused whole, never half-written.
+export const OVERPASS_DEFAULTS_MIGRATION_ID = 'overpass-defaults-2026-10-23';
+
+export interface OverpassDefaultsMigration {
+  config: unknown;
+  /** True when the file must be rewritten: something changed, or the migration id was recorded. */
+  changed: boolean;
+  /** The config.overpass.roles value that was removed; absent when there was none. */
+  rolesRemoved?: { value: unknown };
+  /** The conductor_bypass value that was replaced by true; absent when it was already true. */
+  bypassSet?: { was: unknown };
+  /** Set when the file cannot be migrated and must stay as it is. */
+  refusal?: string;
+}
+
+/** Reset the Overpass overrides to the shipped defaults (see above). Pure; anything that
+ *  is not a plain object, or a file that already records the migration, comes back unchanged. */
+export function resetOverpassDefaults(raw: unknown): OverpassDefaultsMigration {
+  const none = { config: raw, changed: false };
+  if (!isPlainObject(raw)) return none;
+  const applied = raw.applied_config_migrations;
+  if (applied !== undefined && !(Array.isArray(applied) && applied.every((x) => typeof x === 'string'))) return none;
+  if ((applied ?? []).includes(OVERPASS_DEFAULTS_MIGRATION_ID)) return none;
+  if (raw.overpass !== undefined && !isPlainObject(raw.overpass)) {
+    return { ...none, refusal: `config.overpass is ${JSON.stringify(raw.overpass)}, not an object, so the Overpass defaults reset cannot be applied` };
+  }
+  const { roles, ...block } = raw.overpass ?? {};
+  const result: OverpassDefaultsMigration = { config: raw, changed: true };
+  if (Object.prototype.hasOwnProperty.call(raw.overpass ?? {}, 'roles')) result.rolesRemoved = { value: roles };
+  if (block.conductor_bypass !== true) result.bypassSet = { was: block.conductor_bypass };
+  result.config = { ...raw, overpass: { ...block, conductor_bypass: true }, applied_config_migrations: [...(applied ?? []), OVERPASS_DEFAULTS_MIGRATION_ID] };
+  return result;
 }
 
 // ── Retired models keys: the on-disk migration ──────────────────────────────

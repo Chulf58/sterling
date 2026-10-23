@@ -85,8 +85,9 @@ test('overpass rows: three rows, ids in order, shown in work mode on OpenCode; t
   assert.equal(v.storageRows.length, 1);
 });
 
-test('overpass rows: values read ON/OFF, the provider id, and the bypass state; absent view means the defaults (off)', () => {
-  assert.deepEqual(texts(snapshot()), ['  Overpass: OFF', '  Overpass provider: overpass', '  Conductor bypass: OFF']);
+test('overpass rows: values read ON/OFF, the provider id, and the bypass state; absent view means the defaults (Overpass off, bypass on)', () => {
+  // Deliberate default change (user-ruled 2026-10-23, 'Defaults + reset + bypass ON'): the conductor bypass reads ON by default.
+  assert.deepEqual(texts(snapshot()), ['  Overpass: OFF', '  Overpass provider: overpass', '  Conductor bypass: ON']);
   assert.deepEqual(
     texts(snapshot({ overpass: view({ enabled: true, provider: 'overpass-agentic', conductorBypass: true, effective: true }) })),
     ['  Overpass: ON', '  Overpass provider: overpass-agentic', '  Conductor bypass: ON'],
@@ -196,7 +197,8 @@ test('conductor bypass: ENTER and SPACE emit overpass_bypass_toggle with the NEW
   const { store, cleanup } = storeFixture();
   try {
     const cases: [OverpassView | undefined, string, boolean][] = [
-      [undefined, 'ENTER', true],
+      [undefined, 'ENTER', false],
+      [view({ conductorBypass: false }), 'ENTER', true],
       [view({ conductorBypass: true }), 'SPACE', false],
       [view({ conductorBypass: '1' }), 'ENTER', false],
       [view({ conductorBypass: null }), 'ENTER', false],
@@ -407,15 +409,15 @@ test('controller: the OpenCode host in work mode shows the rows and writes each 
   try {
     await ctl.handle({ kind: 'tab', index: SYSTEM_TAB }, VP);
     assert.equal(ctl.roster()?.host, 'opencode');
-    assert.deepEqual(ctl.roster()?.overpass, { enabled: false, provider: 'overpass', conductorBypass: false, effective: false });
+    assert.deepEqual(ctl.roster()?.overpass, { enabled: false, provider: 'overpass', conductorBypass: true, effective: false });
     assert.ok(rowIds(ctl).includes('sys:overpass'));
     // the rows are last: DOWN clamps on the bypass row, the provider row sits above it, the toggle above that
     for (let i = 0; i < 40; i++) await ctl.handle({ kind: 'key', name: 'DOWN' }, VP);
     await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
     let written = JSON.parse(readFileSync(f.configPath, 'utf8'));
-    assert.deepEqual(written.overpass, { conductor_bypass: true });
-    assert.match(ctl.ui().notice ?? '', /^conductor bypass turned on — /);
-    assert.equal(ctl.roster()?.overpass?.conductorBypass, true, 'the roster reloads after the write');
+    assert.deepEqual(written.overpass, { conductor_bypass: false });
+    assert.match(ctl.ui().notice ?? '', /^conductor bypass turned off — /);
+    assert.equal(ctl.roster()?.overpass?.conductorBypass, false, 'the roster reloads after the write');
 
     await ctl.handle({ kind: 'key', name: 'UP' }, VP);
     await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
@@ -434,7 +436,7 @@ test('controller: the OpenCode host in work mode shows the rows and writes each 
     await ctl.handle({ kind: 'key', name: 'UP' }, VP);
     await ctl.handle({ kind: 'key', name: 'ENTER' }, VP);
     written = JSON.parse(readFileSync(f.configPath, 'utf8'));
-    assert.deepEqual(written.overpass, { conductor_bypass: true, provider: 'acme-1', enabled: true });
+    assert.deepEqual(written.overpass, { conductor_bypass: false, provider: 'acme-1', enabled: true });
     assert.equal(written.mode, 'work', 'the mode is untouched');
     assert.match(ctl.ui().notice ?? '', /^Overpass turned on — /);
     assert.equal(ctl.roster()?.overpass?.effective, true, 'work mode on OpenCode with Overpass on is effective');
@@ -465,7 +467,7 @@ test('controller: an invalid present overpass config reaches the rows as INVALID
   const cases: [Record<string, unknown>, RegExp[]][] = [
     [{ mode: 'work', overpass: 'on' }, [/Overpass: INVALID \("on"\)/, /Overpass provider: INVALID \("on"\)/, /Conductor bypass: INVALID \("on"\)/]],
     [{ mode: 'work', overpass: { enabled: 'yes', provider: 'a/b', conductor_bypass: 2 } }, [/Overpass: INVALID \("yes"\)/, /Overpass provider: INVALID \("a\/b"\)/, /Conductor bypass: INVALID \(2\)/]],
-    [{ mode: 'work', overpass: { provider: 7 } }, [/Overpass: OFF/, /Overpass provider: INVALID \(7\)/, /Conductor bypass: OFF/]],
+    [{ mode: 'work', overpass: { provider: 7 } }, [/Overpass: OFF/, /Overpass provider: INVALID \(7\)/, /Conductor bypass: ON/]],
   ];
   for (const [config, expected] of cases) {
     const f = fixture(config);

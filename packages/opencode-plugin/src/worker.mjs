@@ -92,7 +92,7 @@ export function createWorkerLaunch({
     // whatever maintenance_worker.opencode_model says. An invalid overpass
     // block fails loud here: no launch, never a fall back to direct providers.
     // The model and effort are the maintenance-worker role's route (board c97ddc97, user-ruled
-    // 2026-10-23: its own Overpass tier, default agentic-high), not the shared lane model.
+    // 2026-10-23: its own Overpass tier, default agentic-auto), not the shared lane model.
     let tierModel = null;
     let tierEffort;
     try {

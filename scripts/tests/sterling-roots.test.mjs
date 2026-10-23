@@ -385,6 +385,23 @@ test('openCodeLoadedSterling, one spec: the newest generation wins when it holds
   }
 });
 
+// Board 1199c770: OpenCode unpacks an install into <spec dir>/.staging-<ts>-<uuid>/ first. The depth-4
+// walk found a copy there, so the newest-version rule could pick one that is half-finished or already moved.
+test('scanInstalledSterling skips OpenCode .staging-* folders: a higher version inside one is never counted, whatever the folder order', () => {
+  const home = tmp('sterling-roots-oc-');
+  try {
+    const real = gitCopy(home, '1792750000000', '0.19.113');
+    touch(join(npmCache(home), 'git-sterling-8c334bb56af9', '.staging-1792760000000-abc', 'node_modules', '@chulf58', 'sterling', 'package.json'), JSON.stringify({ version: '0.19.120' }));
+    touch(join(npmCache(home), 'git-sterling-8c334bb56af9', '.staging-1792760000001-def', 'node_modules', '@chulf58', 'sterling', 'package.json'), JSON.stringify({ version: '0.19.121' }));
+    const scan = scanInstalledSterling({}, home);
+    assert.deepEqual(scan.copies, [{ root: real, version: '0.19.113', host: 'opencode' }]);
+    assert.equal(scan.skipped.length, 0, 'a staging folder is not a skipped copy either');
+    assert.deepEqual(newestInstalledSterling({}, home), { root: real, version: '0.19.113', host: 'opencode' });
+  } finally {
+    rm(home);
+  }
+});
+
 test('openCodeLoadedSterling, across specs: the configured spec\'s copy wins over a newer version under a spec the config no longer lists; no config is no copies; a broken config is an error', () => {
   const home = tmp('sterling-roots-oc-');
   try {

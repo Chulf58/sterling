@@ -282,7 +282,7 @@ export interface OverpassView {
   roles?: Record<string, { tier: string; effort?: string }>;
 }
 
-const DEFAULT_OVERPASS_VIEW: OverpassView = { enabled: false, provider: 'overpass', conductorBypass: false, effective: false };
+const DEFAULT_OVERPASS_VIEW: OverpassView = { enabled: false, provider: 'overpass', conductorBypass: true, effective: false };
 
 type OverpassRole = (typeof OVERPASS_ROLES)[number];
 const isOverpassRole = (key: string): key is OverpassRole => (OVERPASS_ROLES as readonly string[]).includes(key);

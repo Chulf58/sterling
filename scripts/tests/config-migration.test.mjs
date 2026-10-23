@@ -22,8 +22,10 @@ const cfgPath = (dir) => join(dir, '.sterling', 'config.json');
 const read = (dir) => readFileSync(cfgPath(dir), 'utf8');
 // The fixtures below are about the retired keys, so they record the model-defaults add and
 // the implementor-hard move as already applied (added with those steps, user-ruled 2026-10-23,
-// and decision hard-implementor-is-its-own-agent-sterling-implementor-hard); their own tests are at the end.
-const DEFAULTS_DONE = { applied_config_migrations: ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23'] };
+// and decision hard-implementor-is-its-own-agent-sterling-implementor-hard) and the Overpass defaults reset
+// (decision overpass-per-role-default-tiers-implementor-premium-sparring-premium-max, 'Defaults + reset + bypass ON');
+// their own tests are at the end.
+const DEFAULTS_DONE = { applied_config_migrations: ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23', 'overpass-defaults-2026-10-23'] };
 const retiredConfig = () => ({
   ...DEFAULTS_DONE,
   mode: 'hobby',
@@ -301,11 +303,12 @@ test('model defaults: absent opencode_model and hard_task are added and reported
     assert.deepEqual(after.models.reviewer, { model: 'claude-opus-5-5', effort: 'low', opencode_model: 'anthropic/claude-opus-5-5' }, 'a value the user set stays');
     assert.deepEqual(after.models.sparring, { model: 'claude-opus-5-5', effort: 'high', opencode_model: 'openai/gpt-6-astra' }, 'a role with no entry gets the shipped default entry');
     assert.deepEqual(after.models.researcher, { model: 'claude-sonnet-5-5', effort: 'medium' }, 'other roles are not touched');
-    assert.deepEqual(after.applied_config_migrations, ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23']);
-    assert.equal(r.lines.length, 3);
+    assert.deepEqual(after.applied_config_migrations, ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23', 'overpass-defaults-2026-10-23']);
+    assert.equal(r.lines.length, 4);
     assert.match(r.lines[0], /^config migration: models\.implementor\.hard_task added as \{"model":"claude-opus-5-5"\}/);
     assert.match(r.lines[1], /^config migration: models\.sparring added as the shipped default \{"model":"claude-opus-5-5","effort":"high","opencode_model":"openai\/gpt-6-astra"\}/);
     assert.match(r.lines[2], /^config migration: models\.implementor\.hard_task \{"model":"claude-opus-5-5"\} moved to models\.implementor-hard as \{"model":"claude-opus-5-5","effort":"high"\}/);
+    assert.match(r.lines[3], /^config migration: overpass\.conductor_bypass set to true \(was unset\)/);
   } finally {
     cleanup(dir);
   }
@@ -340,6 +343,7 @@ test('model defaults: a config that already has them records the step once, says
       'config migration: model defaults already set; recorded model-defaults-2026-10-23 in applied_config_migrations so they are never added again',
       // the implementor-hard step that follows moves the hard_task (decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
       'config migration: models.implementor.hard_task {"model":"claude-opus-5-5"} moved to models.implementor-hard as {"model":"claude-opus-5-5","effort":"high"}, the sterling/implementor-hard agent\'s model; change it in the System tab',
+      'config migration: overpass.conductor_bypass set to true (was unset); the conductor keeps its direct model pin',
     ]);
     assert.equal(prepareConfigMigration(dir).status, 'unchanged');
   } finally {
@@ -358,7 +362,7 @@ test('model defaults: the shipped default-config.json already carries them, so a
 
 // ── the implementor-hard move (decision hard-implementor-is-its-own-agent-sterling-implementor-hard) ──
 // models.implementor.hard_task moves into models.implementor-hard, once per file; other roles keep theirs.
-const MOVE_PRE = { applied_config_migrations: ['model-defaults-2026-10-23'] };
+const MOVE_PRE = { applied_config_migrations: ['model-defaults-2026-10-23', 'overpass-defaults-2026-10-23'] };
 
 test('implementor-hard move: a Claude hard_task becomes the entry at the implementor\'s effort; other roles keep their hard_task', () => {
   const dir = project(JSON.stringify({ ...MOVE_PRE, mode: 'hobby', models: {
@@ -372,7 +376,7 @@ test('implementor-hard move: a Claude hard_task becomes the entry at the impleme
     assert.deepEqual(after.models.implementor, { model: 'claude-sonnet-5-5', effort: 'medium' }, 'hard_task leaves the implementor entry');
     assert.deepEqual(after.models['implementor-hard'], { model: 'claude-opus-4-8', effort: 'medium' }, 'no hard_task effort: the implementor effort a hard dispatch was sent with');
     assert.deepEqual(after.models.researcher.hard_task, { model: 'claude-opus-5-5' }, 'another role keeps its hard_task');
-    assert.deepEqual(after.applied_config_migrations, ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23']);
+    assert.deepEqual(after.applied_config_migrations, ['model-defaults-2026-10-23', 'overpass-defaults-2026-10-23', 'implementor-hard-2026-10-23']);
     assert.deepEqual(r.lines, ['config migration: models.implementor.hard_task {"model":"claude-opus-4-8"} moved to models.implementor-hard as {"model":"claude-opus-4-8","effort":"medium"}, the sterling/implementor-hard agent\'s model; change it in the System tab']);
     assert.equal(prepareConfigMigration(dir).status, 'unchanged', 'runs once');
   } finally {
@@ -446,6 +450,86 @@ test('a live models.classifiers key is dropped as a retired key, with its value 
     const after = JSON.parse(read(dir));
     assert.ok(!('classifiers' in after.models), 'the key is gone from the file');
     assert.ok('implementor' in after.models, 'the other keys stay');
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// ── the Overpass defaults reset (decision overpass-per-role-default-tiers-implementor-premium-sparring-premium-max, user-ruled 2026-10-23, 'Defaults + reset + bypass ON') ──
+// config.overpass.roles is removed and overpass.conductor_bypass set true, once per file; nothing else moves.
+const OVERPASS_PRE = { applied_config_migrations: ['model-defaults-2026-10-23', 'implementor-hard-2026-10-23'] };
+
+test('overpass reset: removes roles, sets the bypass, reports both, touches no other key, and runs once', () => {
+  const doc = { ...OVERPASS_PRE, mode: 'work', tdd: { enabled: true }, overpass: { enabled: true, provider: 'acme-gw', conductor_bypass: false, roles: { scout: { tier: 'agentic-low', effort: 'low' }, reviewer: { tier: 'agentic-max' } } } };
+  const dir = project(JSON.stringify(doc, null, 2) + '\n');
+  try {
+    const r = migrateProjectConfig(dir);
+    assert.equal(r.status, 'migrated');
+    assert.deepEqual(r.lines, [
+      'config migration: overpass.roles removed (value was {"scout":{"tier":"agentic-low","effort":"low"},"reviewer":{"tier":"agentic-max"}}); every role now runs on its default tier',
+      'config migration: overpass.conductor_bypass set to true (was false); the conductor keeps its direct model pin',
+    ]);
+    assert.deepEqual(JSON.parse(read(dir)), { mode: 'work', tdd: { enabled: true }, overpass: { enabled: true, provider: 'acme-gw', conductor_bypass: true }, applied_config_migrations: [...OVERPASS_PRE.applied_config_migrations, 'overpass-defaults-2026-10-23'] });
+    assert.ok(read(dir).endsWith('\n'), 'the trailing newline is kept');
+    // runs once: an override or a bypass switched off afterwards survives the next sync
+    const cfg = JSON.parse(read(dir));
+    cfg.overpass.conductor_bypass = false;
+    cfg.overpass.roles = { scout: { tier: 'agentic-low' } };
+    writeFileSync(cfgPath(dir), JSON.stringify(cfg));
+    const second = prepareConfigMigration(dir);
+    assert.equal(second.status, 'unchanged');
+    assert.deepEqual(second.lines, []);
+    assert.deepEqual(JSON.parse(read(dir)).overpass, { enabled: true, provider: 'acme-gw', conductor_bypass: false, roles: { scout: { tier: 'agentic-low' } } });
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('overpass reset: a config with no overpass block gets conductor_bypass true and says it was unset', () => {
+  const dir = project(JSON.stringify({ ...OVERPASS_PRE, mode: 'hobby' }));
+  try {
+    const r = migrateProjectConfig(dir);
+    assert.equal(r.status, 'migrated');
+    assert.deepEqual(r.lines, ['config migration: overpass.conductor_bypass set to true (was unset); the conductor keeps its direct model pin']);
+    assert.deepEqual(JSON.parse(read(dir)).overpass, { conductor_bypass: true });
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('overpass reset: a block already on the defaults records the id once, says so, and is unchanged after', () => {
+  const dir = project(JSON.stringify({ ...OVERPASS_PRE, overpass: { enabled: false, provider: 'overpass', conductor_bypass: true } }));
+  try {
+    const r = migrateProjectConfig(dir);
+    assert.equal(r.status, 'migrated');
+    assert.deepEqual(r.lines, ['config migration: overpass defaults already in place; recorded overpass-defaults-2026-10-23 in applied_config_migrations so they are never reset again']);
+    assert.equal(prepareConfigMigration(dir).status, 'unchanged');
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('overpass reset: an overpass block that is not an object is refused whole, never half-written', () => {
+  const text = JSON.stringify({ models: { coder: { model: 'claude-opus-5', effort: 'high' } }, overpass: 'on' }, null, 2) + '\n';
+  const dir = project(text);
+  try {
+    const r = migrateProjectConfig(dir);
+    assert.equal(r.status, 'refused');
+    assert.match(r.lines[0], /^config migration refused: .*config\.json config\.overpass is "on", not an object.*; left untouched$/);
+    assert.equal(read(dir), text, 'the retired models key is not dropped either: the file is untouched');
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('overpass reset: sync-agents prints the report and writes the reset into the live config', () => {
+  const dir = project(JSON.stringify({ ...OVERPASS_PRE, mode: 'hobby', overpass: { enabled: true, roles: { implementor: { tier: 'agentic-low' } } } }, null, 2) + '\n');
+  try {
+    const r = sync(dir);
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /config migration: overpass\.roles removed \(value was \{"implementor":\{"tier":"agentic-low"\}\}\)/);
+    assert.match(r.out, /config migration: overpass\.conductor_bypass set to true \(was unset\)/);
+    assert.deepEqual(JSON.parse(read(dir)).overpass, { enabled: true, conductor_bypass: true });
   } finally {
     cleanup(dir);
   }
