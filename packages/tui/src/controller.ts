@@ -9,9 +9,9 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { MountedStores, SterlingStore, StoreBusyError, DEFAULT_BUSY_TIMEOUT_MS, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { openRoutedStores } from '@sterling/store/routing';
-import { parseConfig, resolveOverpass, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE } from '@sterling/schemas';
-import { buildDashboardFrame, clipEllipsis, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect, type OverpassToggleEffect, type OverpassProviderEffect, type OverpassBypassEffect, type OverpassView } from './state.js';
-import { applyAutoMergeToggle, applyHandoffToggle, applyModeToggle, applyOverpassBypass, applyOverpassProvider, applyOverpassToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
+import { parseConfig, resolveOverpass, AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE, OVERPASS_ROLES } from '@sterling/schemas';
+import { buildDashboardFrame, clipEllipsis, initialUi, reduce, runEffects, SYSTEM_TAB, type DashboardFrame, type BoardEditEffect, type SelectEffect, type UiState, type UiEvent, type Effect, type DashboardState, type Viewport, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type OpenCodeModelEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect, type HandoffToggleEffect, type AutoMergeToggleEffect, type OverpassToggleEffect, type OverpassProviderEffect, type OverpassBypassEffect, type OverpassRoleEffect, type OverpassView } from './state.js';
+import { ConfigChangedError, replaceConfigFile, writeConfigKey, type ConfigWriteSeams, applyAutoMergeToggle, applyHandoffToggle, applyModeToggle, applyOverpassBypass, applyOverpassProvider, applyOverpassRole, applyOverpassToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
 import { AutoMergeSettingError, autoMergeOnCleanOf } from '../../../scripts/lib/work-pr.mjs';
 import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
 // Static, so esbuild inlines both into the bundles: an installed copy has no
@@ -20,7 +20,7 @@ import { openDataVersionProbe, type DataVersionProbe } from './data-version.js';
 import { parseInstalledHeader, setInstalledModelEffort } from '../../../scripts/lib/agent-distribution.mjs';
 import { userScopeCodexServer } from '../../../scripts/lib/codex-mcp.mjs';
 import { handoffSettingOf, HandoffGitError, HandoffSettingError } from '../../../scripts/lib/handoff-projection.mjs';
-import { sterlingRootFrom, swapFullAgentModel, stageFullAgentModel, writeFileAtomic, writeFullAgentFiles, restoreFullAgentFiles, type AtomicWriteFs, type StagedWrite } from '../../../scripts/lib/opencode-install.mjs';
+import { sterlingRootFrom, swapFullAgentModel, stageFullAgentModel, writeFullAgentFiles, type StagedWrite } from '../../../scripts/lib/opencode-install.mjs';
 import { storeBackend } from '../../../scripts/hooks/lib/store-backend.mjs';
 import { writeSelectionFile } from '../../../scripts/hooks/lib/selection-file.mjs';
 
@@ -47,7 +47,7 @@ export interface DashboardOptions {
   onGithubRefresh?: () => void;
   /** The file operations the OpenCode-override config.json write uses; tests
    *  use it to make that write fail part-way. */
-  configWriteFs?: AtomicWriteFs;
+  configWriteFs?: ConfigWriteSeams;
   /** Which host opened the dashboard. 'opencode' offers the Overpass rows (in
    *  work mode). The in-OpenCode dashboard (opencode/sterling-tui/tui.tsx)
    *  passes 'opencode'; the tmux side pane (main.ts) passes it from
@@ -474,8 +474,12 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     const root = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? (raw as { overpass?: unknown }) : {};
     const block = root.overpass;
     let effective = false;
+    let roles: OverpassView['roles'];
     try {
-      effective = resolveOverpass(raw, { host: options.host ?? 'terminal' }).effective;
+      const resolved = resolveOverpass(raw, { host: options.host ?? 'terminal' });
+      effective = resolved.effective;
+      // the tier is the model reference after '<provider>/' (a provider id holds no '/')
+      if (effective) roles = Object.fromEntries(Object.entries(resolved.roles).map(([role, route]) => [role, { tier: route.model.slice(route.model.indexOf('/') + 1), ...(route.effort === undefined ? {} : { effort: route.effort }) }]));
     } catch {
       // a config the resolver refuses is not effective; the rows say which field is invalid
     }
@@ -484,7 +488,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     }
     const fields = (block ?? {}) as { enabled?: unknown; provider?: unknown; conductor_bypass?: unknown };
     const flag = (v: unknown): boolean | string => (v === undefined ? false : typeof v === 'boolean' ? v : JSON.stringify(v));
-    const base = { enabled: flag(fields.enabled), conductorBypass: flag(fields.conductor_bypass), effective };
+    const base = { enabled: flag(fields.enabled), conductorBypass: flag(fields.conductor_bypass), effective, ...(roles ? { roles } : {}) };
     if (fields.provider !== undefined && typeof fields.provider !== 'string') return { ...base, provider: null, providerInvalid: JSON.stringify(fields.provider) };
     return { ...base, provider: fields.provider ?? 'overpass' };
   }
@@ -548,14 +552,14 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
   function applySparringModel(e: SparringModelEffect): void {
     try {
       type Pin = { model?: string; effort?: string };
-      const raw = JSON.parse(readFileSync(configPath, 'utf8')) as { sparring_partner?: { enabled?: boolean; model?: string; models?: { openai?: Pin } } };
-      const { model: _legacy, ...sp } = { ...raw.sparring_partner };
-      const { model: _previous, ...rest } = { ...sp.models?.openai };
-      const models = { ...sp.models };
-      if (e.model) models.openai = { ...rest, model: e.model };
-      else delete models.openai;
-      raw.sparring_partner = { ...sp, models };
-      writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
+      writeConfigKey(configPath, 'sparring_partner', (old) => {
+        const { model: _legacy, ...sp } = { ...(old as { enabled?: boolean; model?: string; models?: { openai?: Pin } } | undefined) };
+        const { model: _previous, ...rest } = { ...sp.models?.openai };
+        const models = { ...sp.models };
+        if (e.model) models.openai = { ...rest, model: e.model };
+        else delete models.openai;
+        return { ...sp, models };
+      }, options.configWriteFs);
     } catch (err) {
       ui = { ...ui, notice: `sparring partner model update failed — ${(err as Error).message}` };
     }
@@ -571,11 +575,22 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     try {
       // 1. config.models write — the authoritative per-project declaration
       // The entry's other fields (hard_task, the OpenCode override) are kept.
-      const raw = JSON.parse(readFileSync(configPath, 'utf8')) as { models?: Record<string, Record<string, unknown> | undefined> };
+      // The write is atomic and refuses a config.json that changed since this read;
+      // every agent file below is touched only after it succeeded.
+      const original = readFileSync(configPath);
+      const raw = JSON.parse(original.toString('utf8')) as { models?: Record<string, Record<string, unknown> | undefined> };
       raw.models = raw.models ?? {};
       const prev = raw.models[e.key] ?? {};
       raw.models[e.key] = { ...prev, model: e.to.model, effort: e.to.effort };
-      writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
+      try {
+        replaceConfigFile(configPath, JSON.stringify(raw, null, 2) + '\n', original, options.configWriteFs);
+      } catch (err) {
+        if (err instanceof ConfigChangedError) {
+          ui = { ...ui, notice: `model swap for '${e.key}' not changed — ${err.message}; config.json and the agent files are as they were` };
+          return;
+        }
+        throw err;
+      }
       const opencodeModel = typeof prev.opencode_model === 'string' ? prev.opencode_model : undefined;
 
       // 2. surgical installed-frontmatter projection on each governed agent file
@@ -638,20 +653,20 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
    *  opencode-only-model-override-per-role-for-openai-picks): set or clear
    *  config.models[key].opencode_model and re-render the key's Sterling-full
    *  OpenCode agents, all or nothing. Every agent render and refusal check runs
-   *  first, with nothing written; then the agent files and config.json are
-   *  written, and a failure puts every written file back, so config.json stays
-   *  byte-identical. The decision is recorded only once both have converged.
+   *  first, with nothing written; then config.json is replaced (atomically, refused
+   *  when it changed since it was read) and only then the agent files are written; a
+   *  failed agent write puts the agent files and config.json back. The decision is recorded only once both have converged.
    *  The Claude agent files under .claude/agents are never written here. */
   function applyOpenCodeModel(e: OpenCodeModelEffect): void {
     const nowISO = new Date().toISOString();
     const fail = (msg: string) => { ui = { ...ui, notice: `OpenCode model for '${e.key}' not changed — ${msg}; config.json and the OpenCode agents are as they were` }; };
-    let configBefore: string;
+    let configBefore: Buffer;
     let configAfter: string;
     let claudeModel: string;
     try {
       if (e.to !== undefined && !OPENCODE_MODEL_REF_RE.test(e.to)) throw new Error(`'${e.to}' is not a <provider>/<model> id`);
-      configBefore = readFileSync(configPath, 'utf8');
-      const raw = JSON.parse(configBefore) as { models?: Record<string, Record<string, unknown> | undefined> };
+      configBefore = readFileSync(configPath);
+      const raw = JSON.parse(configBefore.toString('utf8')) as { models?: Record<string, Record<string, unknown> | undefined> };
       raw.models = raw.models ?? {};
       // a key the file does not carry yet takes its current (default) Claude values
       const { opencode_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
@@ -676,30 +691,31 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       fail(`the OpenCode agent render failed: ${(err as Error).message}`);
       return;
     }
-    // 2. commit: the agent files, then config.json; a failure restores what was written
+    // 2. commit config.json first, atomically and only if it still holds the bytes
+    // this change was built from (a concurrent change refuses it); the agent files
+    // are written only after it succeeded, so a refused or failed config write
+    // leaves them untouched
+    try {
+      replaceConfigFile(configPath, configAfter, configBefore, options.configWriteFs);
+    } catch (err) {
+      fail(err instanceof ConfigChangedError ? err.message : `writing config.json failed: ${(err as Error).message}`);
+      return;
+    }
+    // 3. the agent files; a failure puts them back (writeFullAgentFiles) and the
+    // config.json write is undone, but only if the file still holds what this change wrote
     try {
       writeFullAgentFiles(writes);
     } catch (err) {
+      try {
+        replaceConfigFile(configPath, configBefore.toString('utf8'), Buffer.from(configAfter), options.configWriteFs);
+      } catch (restoreErr) {
+        ui = { ...ui, notice: `OpenCode model for '${e.key}': writing the OpenCode agents failed (${(err as Error).message}) and config.json was not restored: ${(restoreErr as Error).message}` };
+        return;
+      }
       fail(`writing the OpenCode agents failed: ${(err as Error).message}`);
       return;
     }
-    // config.json is replaced atomically (temp file, then rename), so a failed
-    // write never leaves it truncated
-    try {
-      writeFileAtomic(configPath, configAfter, options.configWriteFs);
-    } catch (err) {
-      // the two restores run independently, so one failing never skips the other
-      const rollback: string[] = [];
-      try { writeFileAtomic(configPath, configBefore, options.configWriteFs); } catch (restoreErr) { rollback.push(`config.json not restored: ${(restoreErr as Error).message}`); }
-      try { restoreFullAgentFiles(writes); } catch (restoreErr) { rollback.push(`OpenCode agents not restored: ${(restoreErr as Error).message}`); }
-      if (rollback.length) {
-        ui = { ...ui, notice: `OpenCode model for '${e.key}': writing config.json failed (${(err as Error).message}) and the rollback failed — ${rollback.join('; ')}` };
-        return;
-      }
-      fail(`writing config.json failed: ${(err as Error).message}`);
-      return;
-    }
-    // 3. converged: record the change
+    // 4. converged: record the change
     const shown = (v?: string) => v ?? `anthropic/${claudeModel}`;
     try {
       store.create({
@@ -735,11 +751,26 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       if (off !== null) ui = { ...ui, notice: off };
       return false;
     });
-    const swaps = effects.filter((e): e is ModelSwapEffect => e.type === 'model_swap');
-    for (const e of swaps) await applySwap(e);
-    const overrides = effects.filter((e): e is OpenCodeModelEffect => e.type === 'opencode_model');
-    for (const e of overrides) applyOpenCodeModel(e);
     const notice = (msg: string) => { ui = { ...ui, notice: msg }; };
+    // Overpass is judged from the config on disk right now, not from the roster the
+    // picker opened on: Overpass may have been switched on since (config_set, another
+    // session). While it is effective an Overpass role's saved model and OpenCode
+    // override are not editable (decision
+    // system-tab-agent-catalog-with-overpass-on-each-row-shows-the), so those effects
+    // are refused and the roster is refreshed to show the tier rows.
+    const overpassRoleKeys: readonly string[] = OVERPASS_ROLES;
+    const modelEdit = (e: Effect): e is ModelSwapEffect | OpenCodeModelEffect => (e.type === 'model_swap' || e.type === 'opencode_model') && overpassRoleKeys.includes(e.key);
+    let refused = false;
+    let swaps = effects.filter((e): e is ModelSwapEffect => e.type === 'model_swap');
+    let overrides = effects.filter((e): e is OpenCodeModelEffect => e.type === 'opencode_model');
+    if (effects.some(modelEdit) && readOverpass().effective) {
+      swaps = swaps.filter((e) => !modelEdit(e));
+      overrides = overrides.filter((e) => !modelEdit(e));
+      refused = true;
+      notice('Overpass is on — the saved model and OpenCode override cannot be changed; turn Overpass off to edit them. Nothing was written.');
+    }
+    for (const e of swaps) await applySwap(e);
+    for (const e of overrides) applyOpenCodeModel(e);
     const sparringModels = effects.filter((e): e is SparringModelEffect => e.type === 'sparring_model');
     for (const e of sparringModels) applySparringModel(e);
     // sparring/tdd/mode/handoff toggle writes (board a0714d0b, decision foreign_752caf98):
@@ -754,6 +785,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
     const overpassToggles = effects.filter((e): e is OverpassToggleEffect => e.type === 'overpass_toggle');
     const overpassProviders = effects.filter((e): e is OverpassProviderEffect => e.type === 'overpass_provider');
     const overpassBypasses = effects.filter((e): e is OverpassBypassEffect => e.type === 'overpass_bypass_toggle');
+    const overpassRoles = effects.filter((e): e is OverpassRoleEffect => e.type === 'overpass_role');
     let toggleWrote = false;
     let toggleFailure: string | undefined;
     const collectFailure = (msg: string) => { toggleFailure = msg; };
@@ -785,6 +817,12 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
           : 'conductor bypass turned off — while Overpass is on, the conductor is routed through the tier too.';
       }
     }
+    for (const e of overpassRoles) {
+      if (applyOverpassRole(e, collectFailure, configPath)) {
+        toggleWrote = true;
+        overpassNotice = `Overpass tier for '${e.role}' set to ${e.tier}${e.effort ? ` at ${e.effort} effort` : ' with no effort override'} — it applies from the next turn; the saved model is unchanged.`;
+      }
+    }
     if (toggleFailure !== undefined) {
       notice(toggleFailure);
     } else if (overpassNotice !== undefined) {
@@ -810,7 +848,7 @@ export function openDashboard(storePath: string, options: DashboardOptions = {})
       // that does not — restart the session to pick the new value up there.
       notice('config.json updated — hooks pick this up on their next invocation; restart the session to reload the MCP server.');
     }
-    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length) roster = loadRoster();
+    if (refused || swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length || overpassRoles.length) roster = loadRoster();
     for (const e of effects) {
       if (e.type === 'select') pending = [...pending.filter((p) => p.type !== 'select'), e];
       else if (e.type === 'board_edit') pending.push(e);

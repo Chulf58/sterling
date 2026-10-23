@@ -25,10 +25,11 @@
 // failure on the shared UI notice sink. The caller (main.ts) composes the
 // single H17-latch reminder itself once all appliers in the batch have run
 // — board 09f05fca half 2, review fix.
-import { readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { chmodSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { OVERPASS_PROVIDER_RE } from '@sterling/schemas';
-import type { AutoMergeToggleEffect, HandoffToggleEffect, ModeToggleEffect, OverpassBypassEffect, OverpassProviderEffect, OverpassToggleEffect, SparringToggleEffect, TddToggleEffect } from './state.js';
+import { OVERPASS_PROVIDER_RE, resolveOverpass } from '@sterling/schemas';
+import type { AutoMergeToggleEffect, HandoffToggleEffect, ModeToggleEffect, OverpassBypassEffect, OverpassProviderEffect, OverpassRoleEffect, OverpassToggleEffect, SparringToggleEffect, TddToggleEffect } from './state.js';
 
 function configPath(explicit?: string): string {
   return explicit ?? join(process.cwd(), '.sterling', 'config.json');
@@ -52,15 +53,72 @@ export class StorageTransitionRequiredError extends Error {
   }
 }
 
-/** The one write path every applier below uses: read config.json, replace the
- *  top-level `key` with `update(old)`, write it back with every other key kept.
- *  `storage` (or any `storage.` path) is refused before anything is read or
- *  written: only the store move writes it. */
-export function writeConfigKey(target: string, key: string, update: (old: unknown, raw: Record<string, unknown>) => unknown): void {
+/** Test seams for the config.json write: `writeFile` replaces the temp-file write and
+ *  `beforeRename` runs in the window between that write and the final compare. */
+export interface ConfigWriteSeams {
+  writeFile?: (path: string, content: string, mode: number) => void;
+  beforeRename?: () => void;
+}
+
+/** Thrown when config.json changed on disk between the read a write was built from and
+ *  the rename: nothing was written and the other writer's file stands. */
+export class ConfigChangedError extends Error {
+  constructor() {
+    super('config.json changed on disk while this write was in flight (a concurrent change); nothing was written — reopen the setting and retry');
+    this.name = 'ConfigChangedError';
+  }
+}
+
+/** The one place the TUI replaces config.json: a temp file in the same directory with
+ *  the original's mode, then a rename, so a failed write leaves the original whole.
+ *  Immediately before the rename the file's bytes are compared with `expected`, the
+ *  bytes `next` was built from: a concurrent change (config_set, another TUI) throws
+ *  ConfigChangedError, with the temp file removed and the file as the other writer left
+ *  it. Residual, as in config_set and commitConfigMigration: the sliver between that
+ *  compare and the rename needs a file lock this does not take. */
+export function replaceConfigFile(target: string, next: string, expected: Buffer, seams: ConfigWriteSeams = {}): void {
+  // lstat, not stat: the rename replaces the path itself, so a symlinked config.json would
+  // be swapped for a plain file (config_set and the config migration refuse the same way)
+  const linkStat = lstatSync(target);
+  if (linkStat.isSymbolicLink()) throw new Error('config.json is a symlink — refusing to write through a link, which the write would replace with a plain file. Nothing was written.');
+  const mode = linkStat.mode & 0o777;
+  const tmp = `${target}.tmp-${randomUUID()}`;
+  let renamed = false;
+  try {
+    if (seams.writeFile) seams.writeFile(tmp, next, mode);
+    else writeFileSync(tmp, next, { mode });
+    chmodSync(tmp, mode);
+    seams.beforeRename?.();
+    let now: Buffer | undefined;
+    try {
+      now = readFileSync(target);
+    } catch {
+      now = undefined;
+    }
+    if (now === undefined || !now.equals(expected)) throw new ConfigChangedError();
+    renameSync(tmp, target);
+    renamed = true;
+  } finally {
+    if (!renamed) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // the temp file may never have been created; the original is untouched either way
+      }
+    }
+  }
+}
+
+/** Read config.json, replace the top-level `key` with `update(old, raw)`, and write it
+ *  back through replaceConfigFile with every other key kept. `storage` (or any
+ *  `storage.` path) is refused before anything is read or written: only the store move
+ *  writes it. */
+export function writeConfigKey(target: string, key: string, update: (old: unknown, raw: Record<string, unknown>) => unknown, seams: ConfigWriteSeams = {}): void {
   if (key === 'storage' || key.startsWith('storage.')) throw new StorageTransitionRequiredError(key);
-  const raw = JSON.parse(readFileSync(target, 'utf8')) as Record<string, unknown>;
+  const original = readFileSync(target);
+  const raw = JSON.parse(original.toString('utf8')) as Record<string, unknown>;
   raw[key] = update(raw[key], raw);
-  writeFileSync(target, JSON.stringify(raw, null, 2) + '\n');
+  replaceConfigFile(target, JSON.stringify(raw, null, 2) + '\n', original, seams);
 }
 
 /** Execute a sparring_toggle effect: config.sparring_partner.enabled write
@@ -160,6 +218,32 @@ function writeOverpassKey(field: 'enabled' | 'provider' | 'conductor_bypass', va
     const block = old !== null && typeof old === 'object' && !Array.isArray(old) ? old : {};
     return { ...block, [field]: value };
   });
+}
+
+/** Execute an overpass_role effect: config.overpass.roles.<role> becomes the picked
+ *  tier and optional effort. Every other overpass key and every other role is kept;
+ *  a recorded `overpass` or `roles` that is not an object is replaced, never spread.
+ *  The whole proposed overpass block goes through resolveOverpass before anything is
+ *  written, so a caller that skips the reducer can never persist a role, tier or effort
+ *  the resolver would throw on (including a non-string tier). config.models and the
+ *  agent files are not touched. */
+export function applyOverpassRole(e: OverpassRoleEffect, onError?: (msg: string) => void, path?: string): boolean {
+  try {
+    const entry = e.effort === undefined ? { tier: e.tier } : { tier: e.tier, effort: e.effort };
+    writeConfigKey(configPath(path), 'overpass', (old) => {
+      const block = old !== null && typeof old === 'object' && !Array.isArray(old) ? (old as Record<string, unknown>) : {};
+      const roles = block.roles !== null && typeof block.roles === 'object' && !Array.isArray(block.roles) ? (block.roles as Record<string, unknown>) : {};
+      const proposed = { ...block, roles: { ...roles, [e.role]: entry } };
+      // the canonical resolver judges the whole proposed block, so a value it would
+      // throw on is never persisted (a throw there blocks every dispatch)
+      resolveOverpass({ mode: 'work', overpass: proposed }, { host: 'opencode' });
+      return proposed;
+    });
+    return true;
+  } catch (err) {
+    onError?.(`Overpass role update failed — ${(err as Error).message}`);
+    return false;
+  }
 }
 
 /** Execute an overpass_toggle effect: config.overpass.enabled. Optional trailing
