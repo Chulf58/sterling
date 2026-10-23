@@ -4,7 +4,7 @@
 // anything else alone as a hand edit.
 //
 // MATCHING: each historical template is split into literal segments at its {{TOKEN}}
-// placeholders (the headSegments approach in scripts/init-impl.mjs; never one big
+// placeholders (the headSegments approach in scripts/init-impl.mjs; never one big (stale-claim-ok: describes headSegments, not a placeholder)
 // wildcard regex,
 // anti-pattern wildcard-regex-over-multi-kb-legacy-text-hits-v8-regexp-too-large). The file must start with the first segment, end with the last, and hold
 // every middle segment in order. The text between two segments is that placeholder's
