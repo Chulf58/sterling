@@ -310,7 +310,11 @@ test('override labels: a saved OpenCode override reads (inactive: Overpass) only
   }
 });
 
-test('override labels: editing an override while Overpass is effective still emits the plain opencode_model effect, and nothing else', () => {
+// Changed from "still emits the plain opencode_model effect": decision
+// system-tab-agent-catalog-with-overpass-on-each-row-shows-the makes the saved model
+// and OpenCode override uneditable while Overpass is effective; ENTER on a role row
+// now opens the tier picker (the full contract is in overpass-roles.test.ts).
+test('override labels: editing an override while Overpass is effective is refused, and nothing is emitted', () => {
   const { store, cleanup } = storeFixture();
   try {
     const snap = withOverride({
@@ -324,10 +328,10 @@ test('override labels: editing an override while Overpass is effective still emi
     });
     const opened = reduce(store, st({ tab: SYS_TAB, cursor: 0 }), key('ENTER'), undefined, undefined, snap);
     assert.equal(opened.ui.selector?.key, 'implementor');
-    const picked = reduce(store, opened.ui, key('ENTER'), undefined, undefined, snap);
-    assert.deepEqual(picked.effects, [
-      { type: 'opencode_model', key: 'implementor', from: 'openai/gpt-6-terra', to: 'openai/gpt-6-astra', model: 'claude-opus-5-5', effort: 'medium', agents: ['implementor'] },
-    ]);
+    assert.equal(opened.ui.selector?.stage, 'tier', 'the row opens the tier picker, not the model picker');
+    const picked = reduce(store, st({ tab: SYS_TAB, cursor: 0, selector: { key: 'implementor', stage: 'model', highlight: 0 } }), key('ENTER'), undefined, undefined, snap);
+    assert.deepEqual(picked.effects, []);
+    assert.match(picked.ui.notice ?? '', /Overpass is on/);
   } finally {
     cleanup();
   }

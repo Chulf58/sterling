@@ -5,7 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
-import { AGENT_MODEL_KEY, OPENCODE_MODEL_REF_RE, OVERPASS_PROVIDER_RE } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, DEFAULT_OVERPASS_ROLE_TIERS, DEFAULT_OVERPASS_TIER, OPENCODE_MODEL_REF_RE, OVERPASS_EFFORTS, OVERPASS_PROVIDER_RE, OVERPASS_ROLES } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
 import type { GithubPr, GithubSnapshot } from './github-status.js';
@@ -135,9 +135,13 @@ export interface UiState {
  *  current option index; `model` holds the model confirmed at the model stage. */
 export interface SystemSelector {
   key: string;
-  stage: 'model' | 'effort';
+  /** 'model' and 'effort' edit config.models; 'tier' and 'role_effort' edit
+   *  config.overpass.roles.<role> and open only while Overpass is effective. */
+  stage: 'model' | 'effort' | 'tier' | 'role_effort';
   highlight: number;
   model?: string;
+  /** The tier confirmed at the 'tier' stage, carried to the 'role_effort' stage. */
+  tier?: string;
 }
 
 export const initialUi: UiState = { tab: 0, cursor: 0, expanded: [], searchQuery: '', scroll: 0 };
@@ -267,9 +271,33 @@ export interface OverpassView {
   invalid?: string;
   /** The JSON text of a provider that is not a string (INVALID); provider is then null. */
   providerInvalid?: string;
+  /** Each role's resolved tier and optional effort (resolveOverpass: config.overpass.roles
+   *  over the per-role default tiers), filled while the config resolves. Absent → the
+   *  default tier of each role with no effort. */
+  roles?: Record<string, { tier: string; effort?: string }>;
 }
 
 const DEFAULT_OVERPASS_VIEW: OverpassView = { enabled: false, provider: 'overpass', conductorBypass: false, effective: false };
+
+type OverpassRole = (typeof OVERPASS_ROLES)[number];
+const isOverpassRole = (key: string): key is OverpassRole => (OVERPASS_ROLES as readonly string[]).includes(key);
+
+/** The tier and effort a role runs on while Overpass is effective. */
+function overpassRoute(view: OverpassView, role: OverpassRole): { tier: string; effort?: string } {
+  return view.roles?.[role] ?? { tier: DEFAULT_OVERPASS_ROLE_TIERS[role] };
+}
+
+/** The tier picker's options: the tiers the schema names (the default lane tier and
+ *  every role default; the schema accepts any `agentic-*` name, so this is not a closed
+ *  set), plus the role's current tier when it is a custom one. */
+function overpassTierOptions(view: OverpassView, role: OverpassRole): string[] {
+  const known = [...new Set([DEFAULT_OVERPASS_TIER, ...Object.values(DEFAULT_OVERPASS_ROLE_TIERS)])];
+  const current = overpassRoute(view, role).tier;
+  return known.includes(current) ? known : [...known, current];
+}
+
+/** The effort picker's options: 'default' clears the role's effort. */
+const OVERPASS_EFFORT_OPTIONS: readonly string[] = ['default', ...OVERPASS_EFFORTS];
 
 /** The Overpass rows are offered only in work mode on the OpenCode host; hidden
  *  elsewhere, and the cursor clamp follows. */
@@ -604,6 +632,17 @@ export interface OverpassBypassEffect {
   type: 'overpass_bypass_toggle';
   enabled: boolean;
 }
+/** System tab agent row while Overpass is effective (decision
+ *  system-tab-agent-catalog-with-overpass-on-each-row-shows-the): sets
+ *  config.overpass.roles.<role> to the picked tier and effort (absent = no effort
+ *  override) and writes nothing else; config.models and the agent files are never
+ *  touched. */
+export interface OverpassRoleEffect {
+  type: 'overpass_role';
+  role: string;
+  tier: string;
+  effort?: string;
+}
 /** Tasks tab board-item edit commit (user-ruled 2026-09-28, board f25e5547
  *  lane J): the TUI's second write surface after the System tab. Carries the
  *  full replacement text; runEffects executes it through the same store
@@ -638,6 +677,7 @@ export type Effect =
   | OverpassToggleEffect
   | OverpassProviderEffect
   | OverpassBypassEffect
+  | OverpassRoleEffect
   | BoardEditEffect
   | GithubRefreshEffect;
 
@@ -942,7 +982,8 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   const keys = Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
   const selector = ui.selector;
   const clip = (s: string): string => clipEllipsis(s, width);
-  const overpassEffective = overpassOffered(snap) && (snap.overpass ?? DEFAULT_OVERPASS_VIEW).effective;
+  const overpassView = snap.overpass ?? DEFAULT_OVERPASS_VIEW;
+  const overpassEffective = overpassOffered(snap) && overpassView.effective;
 
   const rows: SystemRow[] = keys.map((key, i) => {
     const config = snap.configModels[key];
@@ -962,15 +1003,35 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
     // like classifiers never surfaces the substring an agent name would match —
     // the roster lists each agent in exactly one row (AC1).
     const label = key.charAt(0).toUpperCase() + key.slice(1);
-    const lines: SystemLine[] = [
-      { text: clip(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? '  drift' : ''}`), kind: 'title', selected },
-    ];
+    // While Overpass is effective an agent role runs on its Overpass tier, so that is
+    // the row's value; the user's own model stays visible, dimmed, as 'saved'
+    // (decision system-tab-agent-catalog-with-overpass-on-each-row-shows-the).
+    const route = overpassEffective && isOverpassRole(key) ? overpassRoute(overpassView, key) : undefined;
+    const lines: SystemLine[] = route
+      ? [
+          { text: clip(`${marker}${label}: ${route.tier} (Overpass)${route.effort ? ` ${route.effort}` : ''}`), kind: 'title', selected },
+          // 'saved' is the user's config.models pair (decision
+          // system-tab-agent-catalog-with-overpass-on-each-row-shows-the); the
+          // installed-frontmatter drift check stays a separate marker
+          { text: clip(`    saved: ${config.model} ${config.effort}${drift ? '  drift' : ''}`), kind: 'meta' },
+        ]
+      : [{ text: clip(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? '  drift' : ''}`), kind: 'title', selected }];
     for (const name of agentNames) lines.push({ text: clip(`    ${name}`), kind: 'body' });
     // While Overpass is effective the saved override is kept but not applied
     if (config.opencode_model) lines.push({ text: clip(`    OpenCode: ${config.opencode_model}${overpassEffective ? ' (inactive: Overpass)' : ''}`), kind: 'body' });
 
     if (selector && selector.key === key) {
-      if (selector.stage === 'model') {
+      if (selector.stage === 'tier' && isOverpassRole(key)) {
+        overpassTierOptions(overpassView, key).forEach((tier, oi) => {
+          const m = oi === selector.highlight ? '› ' : '  ';
+          lines.push({ text: clip(`  ${m}tier ${tier}`), kind: 'option', selected: oi === selector.highlight });
+        });
+      } else if (selector.stage === 'role_effort') {
+        OVERPASS_EFFORT_OPTIONS.forEach((eff, oi) => {
+          const m = oi === selector.highlight ? '› ' : '  ';
+          lines.push({ text: clip(`  ${m}effort ${eff}`), kind: 'option', selected: oi === selector.highlight });
+        });
+      } else if (selector.stage === 'model') {
         // a non-anthropic entry is offered as the OpenCode override only, and
         // says so; a set override adds a last option that clears it
         modelOptions(snap.catalog.entries, config).forEach((o, oi) => {
@@ -1964,7 +2025,10 @@ function reduceNodes(
   /** How many option lines the open System picker draws: the model stage
    *  lists the catalog plus the OpenCode override's clear option when one is set. */
   const pickerOptions = (sel: NonNullable<UiState['selector']>): number =>
-    sel.stage === 'model' ? modelOptions(roster!.catalog.entries, roster!.configModels[sel.key]).length : effortOptions(sel.key).length;
+    sel.stage === 'tier' ? overpassTierOptions(roster!.overpass ?? DEFAULT_OVERPASS_VIEW, sel.key as OverpassRole).length
+    : sel.stage === 'role_effort' ? OVERPASS_EFFORT_OPTIONS.length
+    : sel.stage === 'model' ? modelOptions(roster!.catalog.entries, roster!.configModels[sel.key]).length
+    : effortOptions(sel.key).length;
 
   /** The open System picker with its highlight scrolled into view: the
    *  highlighted option line, and the row's title too when both fit. */
@@ -2196,7 +2260,7 @@ function reduceNodes(
             return { ui: revealAt(sysClamp(pageTarget(selectable, ui.cursor, name === 'PAGE_UP' ? -1 : 1, maxBodyLines))), effects };
           }
           case 'ESCAPE':
-            if (sel) return { ui: { ...ui, selector: undefined }, effects };
+            if (sel) return { ui: { ...ui, selector: undefined, ...(sel.stage === 'tier' || sel.stage === 'role_effort' ? { notice: undefined } : {}) }, effects };
             if (providerEditing) return { ui: { ...ui, overpassProviderEdit: undefined, notice: undefined }, effects };
             if (editing) return { ui: { ...ui, sparringModelEdit: undefined }, effects };
             return { ui, effects };
@@ -2287,6 +2351,37 @@ function reduceNodes(
             }
             const key = sysKeys[cursor];
             if (!key) return { ui, effects };
+            // While Overpass is effective an agent role runs on its tier, so the
+            // saved Claude model and OpenCode override are not editable: a model
+            // picker is never opened, and one already open is refused (decision
+            // system-tab-agent-catalog-with-overpass-on-each-row-shows-the).
+            const overpassView = roster.overpass ?? DEFAULT_OVERPASS_VIEW;
+            const roleKey = sel ? sel.key : key;
+            const overpassRoleEdit = overpassOn && overpassView.effective && isOverpassRole(roleKey);
+            if (overpassRoleEdit && sel && (sel.stage === 'model' || sel.stage === 'effort')) {
+              return { ui: { ...ui, selector: undefined, notice: 'Overpass is on — the saved model and OpenCode override cannot be changed; turn Overpass off to edit them' }, effects };
+            }
+            if (overpassRoleEdit && !sel) {
+              const tiers = overpassTierOptions(overpassView, roleKey);
+              const highlight = Math.max(0, tiers.indexOf(overpassRoute(overpassView, roleKey).tier));
+              return {
+                ui: revealPicker({ ...ui, cursor, selector: { key: roleKey, stage: 'tier', highlight }, notice: 'Overpass is on — pick the role\'s tier and effort here; the saved model stays as it is and cannot be edited until Overpass is off' }),
+                effects,
+              };
+            }
+            if (overpassRoleEdit && sel && sel.stage === 'tier') {
+              const tier = overpassTierOptions(overpassView, roleKey)[sel.highlight];
+              if (tier === undefined) return { ui: { ...ui, selector: undefined }, effects };
+              const effort = overpassRoute(overpassView, roleKey).effort;
+              const highlight = Math.max(0, effort === undefined ? 0 : OVERPASS_EFFORT_OPTIONS.indexOf(effort));
+              return { ui: revealPicker({ ...ui, selector: { key: roleKey, stage: 'role_effort', highlight, tier } }), effects };
+            }
+            if (overpassRoleEdit && sel && sel.stage === 'role_effort') {
+              const effort = OVERPASS_EFFORT_OPTIONS[sel.highlight];
+              if (sel.tier === undefined || effort === undefined) return { ui: { ...ui, selector: undefined }, effects };
+              effects.push({ type: 'overpass_role', role: roleKey, tier: sel.tier, ...(effort === 'default' ? {} : { effort }) });
+              return { ui: { ...ui, selector: undefined, notice: undefined }, effects };
+            }
             if (!sel) {
               // do NOT open a picker on an empty/invalid catalog (audit finding
               // 24/43): the selector would show zero rows and every commit would

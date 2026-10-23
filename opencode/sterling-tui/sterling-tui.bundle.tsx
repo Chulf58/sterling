@@ -14,7 +14,7 @@ import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 // packages/tui/dist/controller.js
 import { readFileSync as readFileSync15, writeFileSync as writeFileSync7, existsSync as existsSync11 } from "node:fs";
 import { basename as basename4, dirname as dirname8, join as join19 } from "node:path";
-import { randomUUID as randomUUID7 } from "node:crypto";
+import { randomUUID as randomUUID8 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 
 // packages/store/dist/index.js
@@ -12457,6 +12457,16 @@ function isOpenCodeOnlyEntry(entry) {
   return entry.vendor !== void 0 && entry.vendor !== "anthropic";
 }
 var DEFAULT_OVERPASS_VIEW = { enabled: false, provider: "overpass", conductorBypass: false, effective: false };
+var isOverpassRole = (key) => OVERPASS_ROLES.includes(key);
+function overpassRoute(view, role) {
+  return view.roles?.[role] ?? { tier: DEFAULT_OVERPASS_ROLE_TIERS[role] };
+}
+function overpassTierOptions(view, role) {
+  const known = [.../* @__PURE__ */ new Set([DEFAULT_OVERPASS_TIER, ...Object.values(DEFAULT_OVERPASS_ROLE_TIERS)])];
+  const current = overpassRoute(view, role).tier;
+  return known.includes(current) ? known : [...known, current];
+}
+var OVERPASS_EFFORT_OPTIONS = ["default", ...OVERPASS_EFFORTS];
 function overpassOffered(snap) {
   return snap.host === "opencode" && snap.mode === "work";
 }
@@ -12631,7 +12641,8 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
   const keys = Object.keys(snap.configModels).filter((k) => SYSTEM_TAB_MODEL_KEYS.has(k));
   const selector = ui.selector;
   const clip3 = (s2) => clipEllipsis(s2, width);
-  const overpassEffective = overpassOffered(snap) && (snap.overpass ?? DEFAULT_OVERPASS_VIEW).effective;
+  const overpassView = snap.overpass ?? DEFAULT_OVERPASS_VIEW;
+  const overpassEffective = overpassOffered(snap) && overpassView.effective;
   const rows = keys.map((key, i) => {
     const config = snap.configModels[key];
     const governed = snap.agents.filter((a) => AGENT_MODEL_KEY[a.name] === key);
@@ -12642,15 +12653,30 @@ function buildSystemTab(snapshot, ui, width = Infinity) {
     const selected = i === ui.cursor;
     const marker = selected ? "\u203A " : "  ";
     const label = key.charAt(0).toUpperCase() + key.slice(1);
-    const lines = [
-      { text: clip3(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? "  drift" : ""}`), kind: "title", selected }
-    ];
+    const route = overpassEffective && isOverpassRole(key) ? overpassRoute(overpassView, key) : void 0;
+    const lines = route ? [
+      { text: clip3(`${marker}${label}: ${route.tier} (Overpass)${route.effort ? ` ${route.effort}` : ""}`), kind: "title", selected },
+      // 'saved' is the user's config.models pair (decision
+      // system-tab-agent-catalog-with-overpass-on-each-row-shows-the); the
+      // installed-frontmatter drift check stays a separate marker
+      { text: clip3(`    saved: ${config.model} ${config.effort}${drift ? "  drift" : ""}`), kind: "meta" }
+    ] : [{ text: clip3(`${marker}${label}: ${shownModel} ${shownEffort}${drift ? "  drift" : ""}`), kind: "title", selected }];
     for (const name of agentNames)
       lines.push({ text: clip3(`    ${name}`), kind: "body" });
     if (config.opencode_model)
       lines.push({ text: clip3(`    OpenCode: ${config.opencode_model}${overpassEffective ? " (inactive: Overpass)" : ""}`), kind: "body" });
     if (selector && selector.key === key) {
-      if (selector.stage === "model") {
+      if (selector.stage === "tier" && isOverpassRole(key)) {
+        overpassTierOptions(overpassView, key).forEach((tier, oi) => {
+          const m = oi === selector.highlight ? "\u203A " : "  ";
+          lines.push({ text: clip3(`  ${m}tier ${tier}`), kind: "option", selected: oi === selector.highlight });
+        });
+      } else if (selector.stage === "role_effort") {
+        OVERPASS_EFFORT_OPTIONS.forEach((eff, oi) => {
+          const m = oi === selector.highlight ? "\u203A " : "  ";
+          lines.push({ text: clip3(`  ${m}effort ${eff}`), kind: "option", selected: oi === selector.highlight });
+        });
+      } else if (selector.stage === "model") {
         modelOptions(snap.catalog.entries, config).forEach((o, oi) => {
           const m = oi === selector.highlight ? "\u203A " : "  ";
           const text = o.kind === "clear" ? "OpenCode: use the Claude model" : isOpenCodeOnlyEntry(o.entry) ? `${o.entry.vendor}/${o.entry.id} ${o.entry.label} (OpenCode only)` : `${o.entry.id} ${o.entry.label}`;
@@ -13299,7 +13325,7 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
     return { ...ui, cursor, scroll: Math.max(0, Math.min(scroll, max)) };
   };
   const moveCursor = (delta) => revealAt(clamp(ui.cursor + delta));
-  const pickerOptions = (sel) => sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key]).length : effortOptions(sel.key).length;
+  const pickerOptions = (sel) => sel.stage === "tier" ? overpassTierOptions(roster.overpass ?? DEFAULT_OVERPASS_VIEW, sel.key).length : sel.stage === "role_effort" ? OVERPASS_EFFORT_OPTIONS.length : sel.stage === "model" ? modelOptions(roster.catalog.entries, roster.configModels[sel.key]).length : effortOptions(sel.key).length;
   const revealPicker = (next) => {
     const sel = next.selector;
     if (!sel || !roster || !Number.isFinite(maxBodyLines))
@@ -13459,7 +13485,7 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
           }
           case "ESCAPE":
             if (sel)
-              return { ui: { ...ui, selector: void 0 }, effects };
+              return { ui: { ...ui, selector: void 0, ...sel.stage === "tier" || sel.stage === "role_effort" ? { notice: void 0 } : {} }, effects };
             if (providerEditing)
               return { ui: { ...ui, overpassProviderEdit: void 0, notice: void 0 }, effects };
             if (editing)
@@ -13527,6 +13553,35 @@ function reduceNodes(store, ui, event, viewport, knowledge, roster, resolveHeadS
             const key = sysKeys[cursor];
             if (!key)
               return { ui, effects };
+            const overpassView = roster.overpass ?? DEFAULT_OVERPASS_VIEW;
+            const roleKey = sel ? sel.key : key;
+            const overpassRoleEdit = overpassOn && overpassView.effective && isOverpassRole(roleKey);
+            if (overpassRoleEdit && sel && (sel.stage === "model" || sel.stage === "effort")) {
+              return { ui: { ...ui, selector: void 0, notice: "Overpass is on \u2014 the saved model and OpenCode override cannot be changed; turn Overpass off to edit them" }, effects };
+            }
+            if (overpassRoleEdit && !sel) {
+              const tiers = overpassTierOptions(overpassView, roleKey);
+              const highlight = Math.max(0, tiers.indexOf(overpassRoute(overpassView, roleKey).tier));
+              return {
+                ui: revealPicker({ ...ui, cursor, selector: { key: roleKey, stage: "tier", highlight }, notice: "Overpass is on \u2014 pick the role's tier and effort here; the saved model stays as it is and cannot be edited until Overpass is off" }),
+                effects
+              };
+            }
+            if (overpassRoleEdit && sel && sel.stage === "tier") {
+              const tier = overpassTierOptions(overpassView, roleKey)[sel.highlight];
+              if (tier === void 0)
+                return { ui: { ...ui, selector: void 0 }, effects };
+              const effort2 = overpassRoute(overpassView, roleKey).effort;
+              const highlight = Math.max(0, effort2 === void 0 ? 0 : OVERPASS_EFFORT_OPTIONS.indexOf(effort2));
+              return { ui: revealPicker({ ...ui, selector: { key: roleKey, stage: "role_effort", highlight, tier } }), effects };
+            }
+            if (overpassRoleEdit && sel && sel.stage === "role_effort") {
+              const effort2 = OVERPASS_EFFORT_OPTIONS[sel.highlight];
+              if (sel.tier === void 0 || effort2 === void 0)
+                return { ui: { ...ui, selector: void 0 }, effects };
+              effects.push({ type: "overpass_role", role: roleKey, tier: sel.tier, ...effort2 === "default" ? {} : { effort: effort2 } });
+              return { ui: { ...ui, selector: void 0, notice: void 0 }, effects };
+            }
             if (!sel) {
               if (roster.catalog.entries.length === 0) {
                 return { ui: { ...ui, cursor, notice: "model catalog empty or invalid \u2014 nothing to pick; refresh the catalog first" }, effects };
@@ -13742,7 +13797,8 @@ function runEffects(store, effects, now = () => (/* @__PURE__ */ new Date()).toI
 }
 
 // packages/tui/dist/config-writeback.js
-import { readFileSync as readFileSync6, writeFileSync as writeFileSync2 } from "node:fs";
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { chmodSync, lstatSync as lstatSync3, readFileSync as readFileSync6, renameSync, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join9 } from "node:path";
 function configPath(explicit) {
   return explicit ?? join9(process.cwd(), ".sterling", "config.json");
@@ -13754,12 +13810,52 @@ var StorageTransitionRequiredError = class extends Error {
     this.name = "StorageTransitionRequiredError";
   }
 };
-function writeConfigKey(target, key, update) {
+var ConfigChangedError = class extends Error {
+  constructor() {
+    super("config.json changed on disk while this write was in flight (a concurrent change); nothing was written \u2014 reopen the setting and retry");
+    this.name = "ConfigChangedError";
+  }
+};
+function replaceConfigFile(target, next, expected, seams = {}) {
+  const linkStat = lstatSync3(target);
+  if (linkStat.isSymbolicLink())
+    throw new Error("config.json is a symlink \u2014 refusing to write through a link, which the write would replace with a plain file. Nothing was written.");
+  const mode = linkStat.mode & 511;
+  const tmp = `${target}.tmp-${randomUUID4()}`;
+  let renamed = false;
+  try {
+    if (seams.writeFile)
+      seams.writeFile(tmp, next, mode);
+    else
+      writeFileSync2(tmp, next, { mode });
+    chmodSync(tmp, mode);
+    seams.beforeRename?.();
+    let now;
+    try {
+      now = readFileSync6(target);
+    } catch {
+      now = void 0;
+    }
+    if (now === void 0 || !now.equals(expected))
+      throw new ConfigChangedError();
+    renameSync(tmp, target);
+    renamed = true;
+  } finally {
+    if (!renamed) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+      }
+    }
+  }
+}
+function writeConfigKey(target, key, update, seams = {}) {
   if (key === "storage" || key.startsWith("storage."))
     throw new StorageTransitionRequiredError(key);
-  const raw = JSON.parse(readFileSync6(target, "utf8"));
+  const original = readFileSync6(target);
+  const raw = JSON.parse(original.toString("utf8"));
   raw[key] = update(raw[key], raw);
-  writeFileSync2(target, JSON.stringify(raw, null, 2) + "\n");
+  replaceConfigFile(target, JSON.stringify(raw, null, 2) + "\n", original, seams);
 }
 function applySparringToggle(e, onError, path) {
   try {
@@ -13817,6 +13913,22 @@ function writeOverpassKey(field, value, path) {
     const block = old !== null && typeof old === "object" && !Array.isArray(old) ? old : {};
     return { ...block, [field]: value };
   });
+}
+function applyOverpassRole(e, onError, path) {
+  try {
+    const entry = e.effort === void 0 ? { tier: e.tier } : { tier: e.tier, effort: e.effort };
+    writeConfigKey(configPath(path), "overpass", (old) => {
+      const block = old !== null && typeof old === "object" && !Array.isArray(old) ? old : {};
+      const roles = block.roles !== null && typeof block.roles === "object" && !Array.isArray(block.roles) ? block.roles : {};
+      const proposed = { ...block, roles: { ...roles, [e.role]: entry } };
+      resolveOverpass({ mode: "work", overpass: proposed }, { host: "opencode" });
+      return proposed;
+    });
+    return true;
+  } catch (err) {
+    onError?.(`Overpass role update failed \u2014 ${err.message}`);
+    return false;
+  }
 }
 function applyOverpassToggle(e, onError, path) {
   try {
@@ -13902,8 +14014,8 @@ function openDataVersionProbe(paths, options = {}) {
 }
 
 // scripts/lib/agent-distribution.mjs
-import { createHash as createHash2, randomUUID as randomUUID5 } from "node:crypto";
-import { readFileSync as readFileSync8, writeFileSync as writeFileSync4, readdirSync, existsSync as existsSync6, mkdirSync as mkdirSync5, statSync as statSync4, lstatSync as lstatSync3, unlinkSync, renameSync as renameSync2, linkSync as linkSync2 } from "node:fs";
+import { createHash as createHash2, randomUUID as randomUUID6 } from "node:crypto";
+import { readFileSync as readFileSync8, writeFileSync as writeFileSync4, readdirSync, existsSync as existsSync6, mkdirSync as mkdirSync5, statSync as statSync4, lstatSync as lstatSync4, unlinkSync as unlinkSync2, renameSync as renameSync3, linkSync as linkSync2 } from "node:fs";
 
 // scripts/lib/agent-fences.mjs
 var FENCE_KINDS = {
@@ -14006,16 +14118,13 @@ function renderOpenCodeFullText(text, label) {
 }
 
 // scripts/lib/atomic-write.mjs
-import { randomUUID as randomUUID4 } from "node:crypto";
-import { existsSync as existsSync5, readFileSync as readFileSync7, renameSync, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { randomUUID as randomUUID5 } from "node:crypto";
+import { existsSync as existsSync5, readFileSync as readFileSync7, renameSync as renameSync2, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { basename as basename2, dirname as dirname6, join as join10 } from "node:path";
 function atomicTempPath(path) {
-  return join10(dirname6(path), `.${basename2(path)}.tmp-${process.pid}-${randomUUID4().slice(0, 8)}`);
+  return join10(dirname6(path), `.${basename2(path)}.tmp-${process.pid}-${randomUUID5().slice(0, 8)}`);
 }
-function writeFileAtomic(path, content, fs = {}) {
-  replaceVia(`${path}.tmp-${randomUUID4()}`, path, content, fs);
-}
-function replaceVia(tmp, path, content, { writeFile = writeFileSync3, rename = renameSync } = {}) {
+function replaceVia(tmp, path, content, { writeFile = writeFileSync3, rename = renameSync2 } = {}) {
   try {
     writeFile(tmp, content);
     rename(tmp, path);
@@ -14193,11 +14302,11 @@ import { existsSync as existsSync7 } from "node:fs";
 import { join as join14, resolve as resolve6 } from "node:path";
 
 // scripts/lib/contained-fs.mjs
-import { lstatSync as lstatSync5, readFileSync as readFileSync10, readdirSync as readdirSync2, mkdirSync as mkdirSync6, openSync as openSync3, writeSync, closeSync as closeSync3, unlinkSync as unlinkSync2, constants } from "node:fs";
+import { lstatSync as lstatSync6, readFileSync as readFileSync10, readdirSync as readdirSync2, mkdirSync as mkdirSync6, openSync as openSync3, writeSync, closeSync as closeSync3, unlinkSync as unlinkSync3, constants } from "node:fs";
 import { join as join13, resolve as resolve5 } from "node:path";
 
 // scripts/lib/store-path.mjs
-import { lstatSync as lstatSync4, realpathSync as realpathSync3 } from "node:fs";
+import { lstatSync as lstatSync5, realpathSync as realpathSync3 } from "node:fs";
 import { join as join12, resolve as resolve4, sep } from "node:path";
 var StorePathContainmentError = class extends Error {
   constructor(message, { root, target } = {}) {
@@ -14252,7 +14361,7 @@ function resolveStoreWritePath(root, ...segments) {
     const next = join12(cursor, part);
     let st;
     try {
-      st = lstatSync4(next);
+      st = lstatSync5(next);
     } catch (e) {
       if (e && e.code === "ENOENT") break;
       throw new StorePathContainmentError(
@@ -14333,7 +14442,7 @@ var ContainmentError = class extends Error {
 };
 var lstatOrNull = (p) => {
   try {
-    return lstatSync5(p);
+    return lstatSync6(p);
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     throw e;
@@ -14443,7 +14552,7 @@ var HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${
 
 // scripts/lib/opencode-install.mjs
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync12, readdirSync as readdirSync4, realpathSync as realpathSync5, rmSync as rmSync4, statSync as statSync5, unlinkSync as unlinkSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync12, readdirSync as readdirSync4, realpathSync as realpathSync5, rmSync as rmSync4, statSync as statSync5, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { basename as basename3, dirname as dirname7, isAbsolute, join as join16, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15992,10 +16101,10 @@ function storeBackend(root) {
 }
 
 // scripts/hooks/lib/selection-file.mjs
-import { mkdirSync as mkdirSync8, readFileSync as readFileSync14, renameSync as renameSync3, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { mkdirSync as mkdirSync8, readFileSync as readFileSync14, renameSync as renameSync4, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "node:fs";
 import { hostname as hostname2 } from "node:os";
 import { join as join18 } from "node:path";
-import { randomUUID as randomUUID6 } from "node:crypto";
+import { randomUUID as randomUUID7 } from "node:crypto";
 function selectionFilePath(root, host = hostname2()) {
   const safeHost = String(host).replace(/[^A-Za-z0-9._-]/g, "_") || "unknown-host";
   return join18(root, ".sterling", "transient", `selection.${safeHost}.json`);
@@ -16003,9 +16112,9 @@ function selectionFilePath(root, host = hostname2()) {
 function writeSelectionFile(root, type, recordId, at) {
   const path = selectionFilePath(root);
   mkdirSync8(join18(root, ".sterling", "transient"), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${randomUUID6()}`;
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID7()}`;
   writeFileSync6(tmp, JSON.stringify({ type, record_id: recordId, at }));
-  renameSync3(tmp, path);
+  renameSync4(tmp, path);
 }
 
 // packages/tui/dist/controller.js
@@ -16278,8 +16387,12 @@ function openDashboard(storePath, options = {}) {
     const root = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
     const block = root.overpass;
     let effective = false;
+    let roles;
     try {
-      effective = resolveOverpass(raw, { host: options.host ?? "terminal" }).effective;
+      const resolved = resolveOverpass(raw, { host: options.host ?? "terminal" });
+      effective = resolved.effective;
+      if (effective)
+        roles = Object.fromEntries(Object.entries(resolved.roles).map(([role, route]) => [role, { tier: route.model.slice(route.model.indexOf("/") + 1), ...route.effort === void 0 ? {} : { effort: route.effort } }]));
     } catch {
     }
     if (block !== void 0 && (block === null || typeof block !== "object" || Array.isArray(block))) {
@@ -16287,7 +16400,7 @@ function openDashboard(storePath, options = {}) {
     }
     const fields = block ?? {};
     const flag = (v) => v === void 0 ? false : typeof v === "boolean" ? v : JSON.stringify(v);
-    const base2 = { enabled: flag(fields.enabled), conductorBypass: flag(fields.conductor_bypass), effective };
+    const base2 = { enabled: flag(fields.enabled), conductorBypass: flag(fields.conductor_bypass), effective, ...roles ? { roles } : {} };
     if (fields.provider !== void 0 && typeof fields.provider !== "string")
       return { ...base2, provider: null, providerInvalid: JSON.stringify(fields.provider) };
     return { ...base2, provider: fields.provider ?? "overpass" };
@@ -16332,16 +16445,16 @@ function openDashboard(storePath, options = {}) {
   }
   function applySparringModel(e) {
     try {
-      const raw = JSON.parse(readFileSync15(configPath2, "utf8"));
-      const { model: _legacy, ...sp } = { ...raw.sparring_partner };
-      const { model: _previous, ...rest } = { ...sp.models?.openai };
-      const models = { ...sp.models };
-      if (e.model)
-        models.openai = { ...rest, model: e.model };
-      else
-        delete models.openai;
-      raw.sparring_partner = { ...sp, models };
-      writeFileSync7(configPath2, JSON.stringify(raw, null, 2) + "\n");
+      writeConfigKey(configPath2, "sparring_partner", (old) => {
+        const { model: _legacy, ...sp } = { ...old };
+        const { model: _previous, ...rest } = { ...sp.models?.openai };
+        const models = { ...sp.models };
+        if (e.model)
+          models.openai = { ...rest, model: e.model };
+        else
+          delete models.openai;
+        return { ...sp, models };
+      }, options.configWriteFs);
     } catch (err) {
       ui = { ...ui, notice: `sparring partner model update failed \u2014 ${err.message}` };
     }
@@ -16349,11 +16462,20 @@ function openDashboard(storePath, options = {}) {
   async function applySwap(e) {
     const nowISO = (/* @__PURE__ */ new Date()).toISOString();
     try {
-      const raw = JSON.parse(readFileSync15(configPath2, "utf8"));
+      const original = readFileSync15(configPath2);
+      const raw = JSON.parse(original.toString("utf8"));
       raw.models = raw.models ?? {};
       const prev = raw.models[e.key] ?? {};
       raw.models[e.key] = { ...prev, model: e.to.model, effort: e.to.effort };
-      writeFileSync7(configPath2, JSON.stringify(raw, null, 2) + "\n");
+      try {
+        replaceConfigFile(configPath2, JSON.stringify(raw, null, 2) + "\n", original, options.configWriteFs);
+      } catch (err) {
+        if (err instanceof ConfigChangedError) {
+          ui = { ...ui, notice: `model swap for '${e.key}' not changed \u2014 ${err.message}; config.json and the agent files are as they were` };
+          return;
+        }
+        throw err;
+      }
       const opencodeModel = typeof prev.opencode_model === "string" ? prev.opencode_model : void 0;
       for (const name of e.agents) {
         const p = join19(agentsDir, `${name}.md`);
@@ -16377,7 +16499,7 @@ function openDashboard(storePath, options = {}) {
         ui = { ...ui, notice: `model swap for '${e.key}': config.models and the Claude agents were updated, but the OpenCode agent re-render failed \u2014 ${ocErr.message}` };
       }
       store.create({
-        id: randomUUID7(),
+        id: randomUUID8(),
         type: "decision",
         created_at: nowISO,
         updated_at: nowISO,
@@ -16391,7 +16513,7 @@ function openDashboard(storePath, options = {}) {
         statement: `config.models['${e.key}'] set to ${e.to.model} / ${e.to.effort} (was ${e.from.model} / ${e.from.effort}); ${e.agents.length} installed agent file(s) re-stamped via the System tab.`,
         rationale: "Model/effort pin changed from the TUI System tab (config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL\u2194Windows machine boundary, d53dc92c).",
         alternatives_rejected: []
-      }, { operation_id: randomUUID7() });
+      }, { operation_id: randomUUID8() });
     } catch (err) {
       ui = { ...ui, notice: `model swap for '${e.key}' failed partway \u2014 ${err.message}` };
     }
@@ -16407,8 +16529,8 @@ function openDashboard(storePath, options = {}) {
     try {
       if (e.to !== void 0 && !OPENCODE_MODEL_REF_RE.test(e.to))
         throw new Error(`'${e.to}' is not a <provider>/<model> id`);
-      configBefore = readFileSync15(configPath2, "utf8");
-      const raw = JSON.parse(configBefore);
+      configBefore = readFileSync15(configPath2);
+      const raw = JSON.parse(configBefore.toString("utf8"));
       raw.models = raw.models ?? {};
       const { opencode_model: _previous, ...rest } = raw.models[e.key] ?? { model: e.model, effort: e.effort };
       raw.models[e.key] = e.to === void 0 ? rest : { ...rest, opencode_model: e.to };
@@ -16432,36 +16554,27 @@ function openDashboard(storePath, options = {}) {
       return;
     }
     try {
-      writeFullAgentFiles(writes);
+      replaceConfigFile(configPath2, configAfter, configBefore, options.configWriteFs);
     } catch (err) {
-      fail(`writing the OpenCode agents failed: ${err.message}`);
+      fail(err instanceof ConfigChangedError ? err.message : `writing config.json failed: ${err.message}`);
       return;
     }
     try {
-      writeFileAtomic(configPath2, configAfter, options.configWriteFs);
+      writeFullAgentFiles(writes);
     } catch (err) {
-      const rollback = [];
       try {
-        writeFileAtomic(configPath2, configBefore, options.configWriteFs);
+        replaceConfigFile(configPath2, configBefore.toString("utf8"), Buffer.from(configAfter), options.configWriteFs);
       } catch (restoreErr) {
-        rollback.push(`config.json not restored: ${restoreErr.message}`);
-      }
-      try {
-        restoreFullAgentFiles(writes);
-      } catch (restoreErr) {
-        rollback.push(`OpenCode agents not restored: ${restoreErr.message}`);
-      }
-      if (rollback.length) {
-        ui = { ...ui, notice: `OpenCode model for '${e.key}': writing config.json failed (${err.message}) and the rollback failed \u2014 ${rollback.join("; ")}` };
+        ui = { ...ui, notice: `OpenCode model for '${e.key}': writing the OpenCode agents failed (${err.message}) and config.json was not restored: ${restoreErr.message}` };
         return;
       }
-      fail(`writing config.json failed: ${err.message}`);
+      fail(`writing the OpenCode agents failed: ${err.message}`);
       return;
     }
     const shown = (v) => v ?? `anthropic/${claudeModel}`;
     try {
       store.create({
-        id: randomUUID7(),
+        id: randomUUID8(),
         type: "decision",
         created_at: nowISO,
         updated_at: nowISO,
@@ -16475,7 +16588,7 @@ function openDashboard(storePath, options = {}) {
         statement: `config.models['${e.key}'].opencode_model ${e.to === void 0 ? "cleared" : `set to ${e.to}`} (was ${e.from ?? "unset"}); the OpenCode agents for this role now run ${shown(e.to)}, and Claude Code keeps ${claudeModel}.`,
         rationale: "OpenCode model override changed from the TUI System tab (decision opencode-only-model-override-per-role-for-openai-picks: the Claude model stays for Claude Code, and only the OpenCode agent files are re-rendered).",
         alternatives_rejected: []
-      }, { operation_id: randomUUID7() });
+      }, { operation_id: randomUUID8() });
     } catch (err) {
       ui = { ...ui, notice: `OpenCode model for '${e.key}' set to ${shown(e.to)}, but recording the decision failed \u2014 ${err.message}` };
       return;
@@ -16493,15 +16606,24 @@ function openDashboard(storePath, options = {}) {
         ui = { ...ui, notice: off };
       return false;
     });
-    const swaps = effects.filter((e) => e.type === "model_swap");
-    for (const e of swaps)
-      await applySwap(e);
-    const overrides = effects.filter((e) => e.type === "opencode_model");
-    for (const e of overrides)
-      applyOpenCodeModel(e);
     const notice = (msg) => {
       ui = { ...ui, notice: msg };
     };
+    const overpassRoleKeys = OVERPASS_ROLES;
+    const modelEdit = (e) => (e.type === "model_swap" || e.type === "opencode_model") && overpassRoleKeys.includes(e.key);
+    let refused = false;
+    let swaps = effects.filter((e) => e.type === "model_swap");
+    let overrides = effects.filter((e) => e.type === "opencode_model");
+    if (effects.some(modelEdit) && readOverpass().effective) {
+      swaps = swaps.filter((e) => !modelEdit(e));
+      overrides = overrides.filter((e) => !modelEdit(e));
+      refused = true;
+      notice("Overpass is on \u2014 the saved model and OpenCode override cannot be changed; turn Overpass off to edit them. Nothing was written.");
+    }
+    for (const e of swaps)
+      await applySwap(e);
+    for (const e of overrides)
+      applyOpenCodeModel(e);
     const sparringModels = effects.filter((e) => e.type === "sparring_model");
     for (const e of sparringModels)
       applySparringModel(e);
@@ -16513,6 +16635,7 @@ function openDashboard(storePath, options = {}) {
     const overpassToggles = effects.filter((e) => e.type === "overpass_toggle");
     const overpassProviders = effects.filter((e) => e.type === "overpass_provider");
     const overpassBypasses = effects.filter((e) => e.type === "overpass_bypass_toggle");
+    const overpassRoles = effects.filter((e) => e.type === "overpass_role");
     let toggleWrote = false;
     let toggleFailure;
     const collectFailure = (msg) => {
@@ -16566,6 +16689,12 @@ function openDashboard(storePath, options = {}) {
         overpassNotice = e.enabled ? "conductor bypass turned on \u2014 while Overpass is on, the conductor keeps its normal model pin and every other lane is routed." : "conductor bypass turned off \u2014 while Overpass is on, the conductor is routed through the tier too.";
       }
     }
+    for (const e of overpassRoles) {
+      if (applyOverpassRole(e, collectFailure, configPath2)) {
+        toggleWrote = true;
+        overpassNotice = `Overpass tier for '${e.role}' set to ${e.tier}${e.effort ? ` at ${e.effort} effort` : " with no effort override"} \u2014 it applies from the next turn; the saved model is unchanged.`;
+      }
+    }
     if (toggleFailure !== void 0) {
       notice(toggleFailure);
     } else if (overpassNotice !== void 0) {
@@ -16579,7 +16708,7 @@ function openDashboard(storePath, options = {}) {
     } else if (toggleWrote) {
       notice("config.json updated \u2014 hooks pick this up on their next invocation; restart the session to reload the MCP server.");
     }
-    if (swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length)
+    if (refused || swaps.length || overrides.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length || handoffToggles.length || autoMergeToggles.length || overpassToggles.length || overpassProviders.length || overpassBypasses.length || overpassRoles.length)
       roster = loadRoster();
     for (const e of effects) {
       if (e.type === "select")
@@ -19165,7 +19294,7 @@ var GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
 var PATH_SHAPED_TEST = new RegExp(`^(?:${PATH_CANDIDATE_RE.source}|${GLOB_PREFIX_RE.source})$`);
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync9, readFileSync as readFileSync16, writeFileSync as writeFileSync8, rmSync as rmSync6, rmdirSync, renameSync as renameSync4, existsSync as existsSync13, lstatSync as lstatSync6, readdirSync as readdirSync5, realpathSync as realpathSync6, chmodSync } from "node:fs";
+import { mkdirSync as mkdirSync9, readFileSync as readFileSync16, writeFileSync as writeFileSync8, rmSync as rmSync6, rmdirSync, renameSync as renameSync5, existsSync as existsSync13, lstatSync as lstatSync7, readdirSync as readdirSync5, realpathSync as realpathSync6, chmodSync as chmodSync2 } from "node:fs";
 import { join as join21, resolve as resolve10, dirname as dirname10, isAbsolute as isAbsolute3 } from "node:path";
 import { DatabaseSync as DatabaseSync5 } from "node:sqlite";
 import { randomBytes, createHash as createHash3 } from "node:crypto";
@@ -19433,7 +19562,7 @@ function validateRecordShape(r) {
 function classifyRecordFile(file) {
   let st;
   try {
-    st = lstatSync6(file);
+    st = lstatSync7(file);
   } catch {
     return { exists: false };
   }
@@ -19461,7 +19590,7 @@ function checkDispatchStateContainment(root, { create }) {
   const dir = dispatchStateDir(root);
   let st;
   try {
-    st = lstatSync6(dir);
+    st = lstatSync7(dir);
   } catch (e) {
     if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
     if (!create) return { ok: true, availability: "absent" };
@@ -19479,7 +19608,7 @@ function finishTerminalRename(root, key, record) {
   const to = terminalFileName(key, record);
   let occupied = false;
   try {
-    lstatSync6(join21(dir, to));
+    lstatSync7(join21(dir, to));
     occupied = true;
   } catch (e) {
     if (e?.code !== "ENOENT") occupied = true;
@@ -19489,7 +19618,7 @@ function finishTerminalRename(root, key, record) {
     return from;
   }
   try {
-    renameSync4(join21(dir, from), join21(dir, to));
+    renameSync5(join21(dir, from), join21(dir, to));
     return to;
   } catch (e) {
     warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
