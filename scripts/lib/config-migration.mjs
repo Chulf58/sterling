@@ -8,8 +8,10 @@
 // absent, never overwriting a value, and reports each add. The move step
 // (moveImplementorHardTask, decision hard-implementor-is-its-own-agent-sterling-implementor-hard)
 // then moves models.implementor.hard_task into models.implementor-hard, once per file, and
-// reports it. The rewrites are migrateRetiredModelKeys, addModelDefaults and
-// moveImplementorHardTask in packages/schemas; this wraps them in two steps so a caller can defer the write:
+// reports it. The last step (resetOverpassDefaults, decision overpass-per-role-default-tiers-implementor-
+// premium-sparring-premium-max) removes config.overpass.roles and sets overpass.conductor_bypass true,
+// once per file, touching those two keys only. The rewrites are migrateRetiredModelKeys, addModelDefaults,
+// moveImplementorHardTask and resetOverpassDefaults in packages/schemas; this wraps them in two steps so a caller can defer the write:
 //   prepareConfigMigration  reads, parses and plans; writes nothing.
 //   commitConfigMigration   replaces the file only if its bytes are still the ones
 //                           the plan was made from (the compare-and-swap config_set
@@ -21,7 +23,7 @@
 // keys plus the added defaults: parseConfig is a gate only, never serialized (it would materialize defaults).
 import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { IMPLEMENTOR_HARD_MIGRATION_ID, MODEL_DEFAULTS_MIGRATION_ID, addModelDefaults, migrateRetiredModelKeys, moveImplementorHardTask, parseConfig } from '@sterling/schemas';
+import { IMPLEMENTOR_HARD_MIGRATION_ID, MODEL_DEFAULTS_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, addModelDefaults, migrateRetiredModelKeys, moveImplementorHardTask, parseConfig, resetOverpassDefaults } from '@sterling/schemas';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { containedPath, ContainmentError } from './contained-fs.mjs';
 
@@ -58,6 +60,16 @@ export function describeHardMove(move) {
   return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor-hard added as ${show(move.entry)}, a copy of models.implementor, because models.implementor had no hard_task (no separate hard lane); change it in the System tab`];
 }
 
+/** The report lines of the Overpass defaults reset (resetOverpassDefaults), or none. */
+export function describeOverpassReset(reset) {
+  if (!reset.changed) return [];
+  const lines = [];
+  if (reset.rolesRemoved) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass.roles removed (value was ${show(reset.rolesRemoved.value)}); every role now runs on its default tier`);
+  if (reset.bypassSet) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass.conductor_bypass set to true (was ${reset.bypassSet.was === undefined ? 'unset' : show(reset.bypassSet.was)}); the conductor keeps its direct model pin`);
+  if (!lines.length) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass defaults already in place; recorded ${OVERPASS_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never reset again`);
+  return lines;
+}
+
 class ConcurrentChange extends Error {}
 
 const oneLine = (err) => err.message.replace(/\s+/g, ' ');
@@ -81,7 +93,9 @@ export function prepareConfigMigration(projectDir) {
   const m = migrateRetiredModelKeys(raw);
   const d = addModelDefaults(m.config);
   const h = moveImplementorHardTask(d.config);
-  if (!m.changed && !d.changed && !h.changed) return { status: 'unchanged', lines: [] };
+  const o = resetOverpassDefaults(h.config);
+  if (o.refusal) return refuse(o.refusal);
+  if (!m.changed && !d.changed && !h.changed && !o.changed) return { status: 'unchanged', lines: [] };
   // A linked .sterling would send the rewrite to a config outside the project.
   try {
     containedPath(projectDir, '.sterling', 'dir');
@@ -92,7 +106,7 @@ export function prepareConfigMigration(projectDir) {
   const stat = lstatSync(configPath);
   if (stat.isSymbolicLink()) return refuse('is a symlink, which the rewrite would replace');
   try {
-    parseConfig(h.config);
+    parseConfig(o.config);
   } catch (err) {
     return refuse(`would not validate after the migration (${oneLine(err)})`);
   }
@@ -103,17 +117,19 @@ export function prepareConfigMigration(projectDir) {
     shown,
     originalBytes,
     mode: stat.mode & 0o777,
-    next: JSON.stringify(h.config, null, 2) + (text.endsWith('\n') ? '\n' : ''),
-    config: h.config,
+    next: JSON.stringify(o.config, null, 2) + (text.endsWith('\n') ? '\n' : ''),
+    config: o.config,
     dropped: m.dropped,
     added: d.added,
     hardMove: h.move,
+    overpassReset: o.changed ? { rolesRemoved: o.rolesRemoved, bypassSet: o.bypassSet } : null,
     lines: [
       ...describeMigration(m.dropped),
       ...describeAdded(d.added),
       ...(d.changed && !d.added.length ? [`${CONFIG_MIGRATION_LINE_PREFIX}model defaults already set; recorded ${MODEL_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never added again`] : []),
       ...describeHardMove(h.move),
       ...(h.changed && !h.move ? [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor has no hard_task to move; recorded ${IMPLEMENTOR_HARD_MIGRATION_ID} in applied_config_migrations`] : []),
+      ...describeOverpassReset(o),
     ],
   };
 }

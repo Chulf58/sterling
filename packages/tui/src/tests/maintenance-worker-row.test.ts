@@ -14,7 +14,7 @@ import { openDashboard } from '../controller.js';
 // off: its model is maintenance_worker.opencode_model, 'not set: worker will not
 // start' when empty, with the claude CLI model shown beneath; ENTER opens a model
 // picker that commits a worker_model effect. Overpass on: its tier (role
-// 'maintenance-worker', default agentic-high), edited like the other roles.
+// 'maintenance-worker', default agentic-auto since 2026-10-23, agentic-high before), edited like the other roles.
 // ===========================================================================
 
 const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, tab: SYSTEM_TAB, ...over });
@@ -77,7 +77,7 @@ test('worker row, Overpass off, model set: the title shows maintenance_worker.op
 });
 
 test('worker row, Overpass on: its tier with (Overpass) and effort, the saved model dimmed as saved OpenCode, no claude CLI line', () => {
-  assert.deepEqual(texts(snapshot({ overpass: on() })), ['  Maintenance worker: agentic-high (Overpass)']);
+  assert.deepEqual(texts(snapshot({ overpass: on() })), ['  Maintenance worker: agentic-auto (Overpass)']);
   const set = snapshot({ overpass: on({ 'maintenance-worker': { tier: 'agentic-premium', effort: 'high' } }), maintenanceWorker: { opencodeModel: 'openai/gpt-6.1-sol' } });
   assert.deepEqual(texts(set), ['  Maintenance worker: agentic-premium (Overpass) high', '    saved OpenCode: openai/gpt-6.1-sol']);
   assert.equal(workerRow(set).lines[1].kind, 'meta', 'dimmed like the saved line');
@@ -86,11 +86,11 @@ test('worker row, Overpass on: its tier with (Overpass) and effort, the saved mo
 test('worker row, Overpass on: ENTER opens the tier picker, the effort picker follows, and the commit is one overpass_role effect for maintenance-worker', () => {
   const snap = snapshot({ overpass: on() });
   const opened = drive(snap, st({ cursor: WORKER_CURSOR }), ['ENTER']);
-  assert.deepEqual(opened.ui.selector, { key: 'maintenance-worker', stage: 'tier', highlight: 1 });
+  assert.deepEqual(opened.ui.selector, { key: 'maintenance-worker', stage: 'tier', highlight: 3 });
   const lines = texts(snap, opened.ui);
   assert.ok(lines.some((l) => l.includes('tier agentic-premium-max')), lines.join('\n'));
-  // tiers listed: low, high, conductor, auto, premium, premium-max; highlight starts on high, three DOWN reach premium; efforts: default, low, medium, high
-  const done = drive(snap, st({ cursor: WORKER_CURSOR }), ['ENTER', 'DOWN', 'DOWN', 'DOWN', 'ENTER', 'DOWN', 'DOWN', 'DOWN', 'ENTER']);
+  // tiers listed: low, high, conductor, auto, premium, premium-max; highlight starts on auto, one DOWN reaches premium; efforts: default, low, medium, high
+  const done = drive(snap, st({ cursor: WORKER_CURSOR }), ['ENTER', 'DOWN', 'ENTER', 'DOWN', 'DOWN', 'DOWN', 'ENTER']);
   assert.deepEqual(done.effects, [{ type: 'overpass_role', role: 'maintenance-worker', tier: 'agentic-premium', effort: 'high' }]);
 });
 
@@ -213,7 +213,7 @@ test('worker row: an unreadable config renders as config unreadable (no "not set
   const off = texts(snapshot({ maintenanceWorker: unreadable }));
   assert.deepEqual(off, ['  Maintenance worker: config unreadable: maintenance_worker is 5, not an object']);
   assert.ok(!off.join('\n').includes('not set'));
-  assert.deepEqual(texts(snapshot({ overpass: on(), maintenanceWorker: unreadable })), ['  Maintenance worker: agentic-high (Overpass)', '    maintenance_worker unreadable: maintenance_worker is 5, not an object']);
+  assert.deepEqual(texts(snapshot({ overpass: on(), maintenanceWorker: unreadable })), ['  Maintenance worker: agentic-auto (Overpass)', '    maintenance_worker unreadable: maintenance_worker is 5, not an object']);
   const r = drive(snapshot({ maintenanceWorker: unreadable }), st({ cursor: WORKER_CURSOR }), ['ENTER']);
   assert.equal(r.ui.selector, undefined);
   assert.deepEqual(r.effects, []);

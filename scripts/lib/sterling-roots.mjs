@@ -11,7 +11,8 @@
 //                new timestamp dir; the key is `name@spec` for a registry spec, so the scope may
 //                or may not be its own directory level, and `git-<slug>-<sha12>` for the Git spec
 //                Sterling ships with (STERLING_GIT_SPEC; measured 2026-10-02 on OpenCode 2.0.21),
-//                which is why the walk is depth-bounded instead of fixed.)
+//                which is why the walk is depth-bounded instead of fixed. The walk skips OpenCode's
+//                .staging-* folders: a copy inside one is half-finished, GitHub board 1199c770.)
 // VERSION: read from the copy's own manifest, never from a directory name. A claude-code
 //   copy reads .claude-plugin/plugin.json first, an opencode copy package.json first; the
 //   other file is the fallback. A copy with neither, or with an unparsable one, is skipped
@@ -141,11 +142,13 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
       }
       continue;
     }
+    // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
+    // its timestamp; a copy found there is half-finished or already moved, never one to use.
     const walk = (d, depth) => {
       const pkg = join(d, 'node_modules', '@chulf58', 'sterling');
       if (existsSync(pkg)) consider(pkg, host);
       if (depth === 0) return;
-      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules') walk(join(d, name), depth - 1);
+      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules' && !name.startsWith('.staging-')) walk(join(d, name), depth - 1);
     };
     walk(dir, 4);
   }

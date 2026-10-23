@@ -419,7 +419,7 @@ test('[overpass] the worker takes the maintenance-worker role\'s tier and effort
     const tierOnly = pluginLaunch(fx, { mode: 'work', overpass: { enabled: true, provider: 'acme-gw', roles: { 'maintenance-worker': { tier: 'agentic-low' } } } })[0];
     assert.equal(tierOnly.workerModel, 'acme-gw/agentic-low');
     assert.equal(tierOnly.workerEffort, undefined, 'no effort set, none sent');
-    assert.equal(pluginLaunch(fx, { mode: 'work', overpass: { enabled: true } })[0].workerModel, 'overpass/agentic-high', 'the default role tier is agentic-high');
+    assert.equal(pluginLaunch(fx, { mode: 'work', overpass: { enabled: true } })[0].workerModel, 'overpass/agentic-auto', 'the default role tier is agentic-auto (agentic-high until 2026-10-23)');
   } finally {
     fx.cleanup();
   }
@@ -446,16 +446,16 @@ test('[overpass] the role\'s effort travels as the OpenCode run\'s --variant, th
   }
 });
 
-test('[overpass] effective Overpass with claude on PATH runs the worker through OpenCode on <provider>/agentic-high, whatever opencode_model says or does not say; a custom provider id flows through', () => {
+test('[overpass] effective Overpass with claude on PATH runs the worker through OpenCode on <provider>/agentic-auto, whatever opencode_model says or does not say; a custom provider id flows through', () => {
   const fx = fixture();
   try {
     const on = { mode: 'work', overpass: { enabled: true } };
-    assert.deepEqual(pluginLaunch(fx, on).map(({ host, opencodeBin, workerModel }) => ({ host, opencodeBin, workerModel })), [{ host: 'opencode', opencodeBin: '/opt/oc/opencode.exe', workerModel: 'overpass/agentic-high' }], 'claude on PATH, opencode_model unset');
+    assert.deepEqual(pluginLaunch(fx, on).map(({ host, opencodeBin, workerModel }) => ({ host, opencodeBin, workerModel })), [{ host: 'opencode', opencodeBin: '/opt/oc/opencode.exe', workerModel: 'overpass/agentic-auto' }], 'claude on PATH, opencode_model unset');
     const set = pluginLaunch(fx, { ...on, ...WORK_MODEL });
-    assert.equal(set[0].workerModel, 'overpass/agentic-high', 'the toggle wins over a set opencode_model');
+    assert.equal(set[0].workerModel, 'overpass/agentic-auto', 'the toggle wins over a set opencode_model');
     assert.equal(set[0].config.maintenance_worker.opencode_model, 'openai/gpt-5.6-terra', 'the setting itself is kept');
-    assert.equal(pluginLaunch(fx, { mode: 'work', overpass: { enabled: true, provider: 'acme-gw' } }, { claude: false })[0].workerModel, 'acme-gw/agentic-high');
-    assert.equal(pluginLaunch(fx, { mode: 'work', overpass: { enabled: true, provider: 'acme-gw' } })[0].workerModel, 'acme-gw/agentic-high');
+    assert.equal(pluginLaunch(fx, { mode: 'work', overpass: { enabled: true, provider: 'acme-gw' } }, { claude: false })[0].workerModel, 'acme-gw/agentic-auto');
+    assert.equal(pluginLaunch(fx, { mode: 'work', overpass: { enabled: true, provider: 'acme-gw' } })[0].workerModel, 'acme-gw/agentic-auto');
 
     const noBinary = pluginLaunch(fx, on, { execPath: '/usr/bin/node' });
     assert.deepEqual(noBinary, [], 'effective Overpass with no OpenCode binary does not fall back to claude');

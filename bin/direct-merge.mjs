@@ -5804,7 +5804,7 @@ var init_config = __esm({
       // including an unknown role or field under the optional `roles` map
       // (per-role tier and effort, resolveOverpassRoles). The default lives twice: here and in templates/default-config.json
       // (config.test.ts pins that they agree).
-      overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false }),
+      overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: true }),
       // The one-time config migrations already applied to this file (addModelDefaults),
       // so a value a migration added and the user later cleared is never added again.
       // Written by sync and init only.
@@ -12452,11 +12452,13 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
       }
       continue;
     }
+    // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
+    // its timestamp; a copy found there is half-finished or already moved, never one to use.
     const walk = (d, depth) => {
       const pkg = join(d, 'node_modules', '@chulf58', 'sterling');
       if (existsSync(pkg)) consider(pkg, host);
       if (depth === 0) return;
-      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules') walk(join(d, name), depth - 1);
+      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules' && !name.startsWith('.staging-')) walk(join(d, name), depth - 1);
     };
     walk(dir, 4);
   }

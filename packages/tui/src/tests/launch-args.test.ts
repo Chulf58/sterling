@@ -29,7 +29,7 @@ test('launch args: --host opencode reaches openDashboard, so the side pane shows
     const text = ctl.state(VP).rows.filter((r) => r.id.startsWith('sys:overpass')).map((r) => r.lines[0].text).join('\n');
     assert.match(text, /Overpass: OFF/);
     assert.match(text, /Overpass provider: overpass/);
-    assert.match(text, /Conductor bypass: OFF/);
+    assert.match(text, /Conductor bypass: ON/);
   } finally {
     ctl.close();
     rmSync(dir, { recursive: true, force: true });

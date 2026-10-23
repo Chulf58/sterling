@@ -5391,6 +5391,27 @@ function moveImplementorHardTask(raw) {
   models["implementor-hard"] = entry;
   return record(models, { kind: "moved", hard_task, entry });
 }
+function resetOverpassDefaults(raw) {
+  const none = { config: raw, changed: false };
+  if (!isPlainObject(raw))
+    return none;
+  const applied = raw.applied_config_migrations;
+  if (applied !== void 0 && !(Array.isArray(applied) && applied.every((x) => typeof x === "string")))
+    return none;
+  if ((applied ?? []).includes(OVERPASS_DEFAULTS_MIGRATION_ID))
+    return none;
+  if (raw.overpass !== void 0 && !isPlainObject(raw.overpass)) {
+    return { ...none, refusal: `config.overpass is ${JSON.stringify(raw.overpass)}, not an object, so the Overpass defaults reset cannot be applied` };
+  }
+  const { roles, ...block } = raw.overpass ?? {};
+  const result = { config: raw, changed: true };
+  if (Object.prototype.hasOwnProperty.call(raw.overpass ?? {}, "roles"))
+    result.rolesRemoved = { value: roles };
+  if (block.conductor_bypass !== true)
+    result.bypassSet = { was: block.conductor_bypass };
+  result.config = { ...raw, overpass: { ...block, conductor_bypass: true }, applied_config_migrations: [...applied ?? [], OVERPASS_DEFAULTS_MIGRATION_ID] };
+  return result;
+}
 function migrateRetiredModelKeys(raw) {
   const none = (untouched2) => ({ config: raw, changed: false, dropped: [], untouched: untouched2 });
   if (!isPlainObject(raw) || !isPlainObject(raw.models))
@@ -5448,7 +5469,7 @@ function describeUnreadConfigKeys(keys) {
   const names = keys.map((k) => k.renamed_to ? `${k.path} (renamed to ${k.renamed_to})` : k.path);
   return `${keys.length} key(s) Sterling no longer reads: ${names.join(", ")} \u2014 ignored; sync and init drop the retired models keys and report their values, any other key stays in the file; move a renamed value to its new key, and delete the rest by hand when convenient`;
 }
-var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, CONFIG_KEY_RENAMES;
+var effortLevel, modelPin, OPENCODE_MODEL_REF_RE, CLAUDE_MODEL_ID_RE, agentModelEntry, vendorPins, successPredicateSchema, AGENT_TOOL_NAME_RE, DEFAULT_UNDECLARED_SOURCE_EXCLUDE_GLOBS, configSchema, RETIRED_MODEL_KEYS, isPlainObject, MODEL_DEFAULTS_MIGRATION_ID, MODEL_DEFAULT_FIELDS, ADDED_IMPLEMENTOR_HARD_TASK, IMPLEMENTOR_HARD_MIGRATION_ID, OVERPASS_DEFAULTS_MIGRATION_ID, CONFIG_KEY_RENAMES;
 var init_config = __esm({
   "packages/schemas/dist/config.js"() {
     "use strict";
@@ -5971,7 +5992,7 @@ var init_config = __esm({
       // including an unknown role or field under the optional `roles` map
       // (per-role tier and effort, resolveOverpassRoles). The default lives twice: here and in templates/default-config.json
       // (config.test.ts pins that they agree).
-      overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: false }),
+      overpass: external_exports.unknown().default({ enabled: false, provider: "overpass", conductor_bypass: true }),
       // The one-time config migrations already applied to this file (addModelDefaults),
       // so a value a migration added and the user later cleared is never added again.
       // Written by sync and init only.
@@ -5996,6 +6017,7 @@ var init_config = __esm({
     ];
     ADDED_IMPLEMENTOR_HARD_TASK = { model: "claude-opus-5-5" };
     IMPLEMENTOR_HARD_MIGRATION_ID = "implementor-hard-2026-10-23";
+    OVERPASS_DEFAULTS_MIGRATION_ID = "overpass-defaults-2026-10-23";
     CONFIG_KEY_RENAMES = {
       "models.coder": "models.implementor",
       "models.explorer": "models.scout"
@@ -14781,6 +14803,14 @@ function describeHardMove(move) {
   if (move.kind === "dropped") return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor.hard_task dropped (value was ${show(move.hard_task)}); models.implementor-hard ${show(move.entry)} was already set and is kept`];
   return [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor-hard added as ${show(move.entry)}, a copy of models.implementor, because models.implementor had no hard_task (no separate hard lane); change it in the System tab`];
 }
+function describeOverpassReset(reset) {
+  if (!reset.changed) return [];
+  const lines = [];
+  if (reset.rolesRemoved) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass.roles removed (value was ${show(reset.rolesRemoved.value)}); every role now runs on its default tier`);
+  if (reset.bypassSet) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass.conductor_bypass set to true (was ${reset.bypassSet.was === void 0 ? "unset" : show(reset.bypassSet.was)}); the conductor keeps its direct model pin`);
+  if (!lines.length) lines.push(`${CONFIG_MIGRATION_LINE_PREFIX}overpass defaults already in place; recorded ${OVERPASS_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never reset again`);
+  return lines;
+}
 var ConcurrentChange = class extends Error {
 };
 var oneLine = (err) => err.message.replace(/\s+/g, " ");
@@ -14800,7 +14830,9 @@ function prepareConfigMigration(projectDir) {
   const m = migrateRetiredModelKeys(raw);
   const d = addModelDefaults(m.config);
   const h = moveImplementorHardTask(d.config);
-  if (!m.changed && !d.changed && !h.changed) return { status: "unchanged", lines: [] };
+  const o = resetOverpassDefaults(h.config);
+  if (o.refusal) return refuse(o.refusal);
+  if (!m.changed && !d.changed && !h.changed && !o.changed) return { status: "unchanged", lines: [] };
   try {
     containedPath(projectDir, ".sterling", "dir");
   } catch (err) {
@@ -14810,7 +14842,7 @@ function prepareConfigMigration(projectDir) {
   const stat = lstatSync5(configPath2);
   if (stat.isSymbolicLink()) return refuse("is a symlink, which the rewrite would replace");
   try {
-    parseConfig(h.config);
+    parseConfig(o.config);
   } catch (err) {
     return refuse(`would not validate after the migration (${oneLine(err)})`);
   }
@@ -14821,17 +14853,19 @@ function prepareConfigMigration(projectDir) {
     shown,
     originalBytes,
     mode: stat.mode & 511,
-    next: JSON.stringify(h.config, null, 2) + (text.endsWith("\n") ? "\n" : ""),
-    config: h.config,
+    next: JSON.stringify(o.config, null, 2) + (text.endsWith("\n") ? "\n" : ""),
+    config: o.config,
     dropped: m.dropped,
     added: d.added,
     hardMove: h.move,
+    overpassReset: o.changed ? { rolesRemoved: o.rolesRemoved, bypassSet: o.bypassSet } : null,
     lines: [
       ...describeMigration(m.dropped),
       ...describeAdded(d.added),
       ...d.changed && !d.added.length ? [`${CONFIG_MIGRATION_LINE_PREFIX}model defaults already set; recorded ${MODEL_DEFAULTS_MIGRATION_ID} in applied_config_migrations so they are never added again`] : [],
       ...describeHardMove(h.move),
-      ...h.changed && !h.move ? [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor has no hard_task to move; recorded ${IMPLEMENTOR_HARD_MIGRATION_ID} in applied_config_migrations`] : []
+      ...h.changed && !h.move ? [`${CONFIG_MIGRATION_LINE_PREFIX}models.implementor has no hard_task to move; recorded ${IMPLEMENTOR_HARD_MIGRATION_ID} in applied_config_migrations`] : [],
+      ...describeOverpassReset(o)
     ]
   };
 }
@@ -15068,11 +15102,13 @@ function scanInstalledSterling(env = process.env, home = homedir()) {
       }
       continue;
     }
+    // OpenCode unpacks an install into a .staging-<timestamp>-<uuid> folder before it renames it to
+    // its timestamp; a copy found there is half-finished or already moved, never one to use.
     const walk = (d, depth) => {
       const pkg = join(d, 'node_modules', '@chulf58', 'sterling');
       if (existsSync(pkg)) consider(pkg, host);
       if (depth === 0) return;
-      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules') walk(join(d, name), depth - 1);
+      for (const name of sterlingRootsLs(d)) if (name !== 'node_modules' && !name.startsWith('.staging-')) walk(join(d, name), depth - 1);
     };
     walk(dir, 4);
   }
@@ -17525,21 +17561,28 @@ export default {
 `, "//");
 }
 function renderTuiShim(pluginRoot2, installed, shimDir, { materializedRoot } = {}) {
-  const pkgDirExpr = materializedRoot ? "newestMaterializedTui()" : `join(${rootExpr(pluginRoot2, installed)}, 'opencode', 'sterling-tui')`;
-  const materialized = materializedRoot ? `
+  const pkgDirExpr = materializedRoot ? "loadedMaterializedTui()" : `join(${rootExpr(pluginRoot2, installed)}, 'opencode', 'sterling-tui')`;
+  const materializedImports = materializedRoot ? "\nimport { createHash } from 'node:crypto';" : "";
+  const materialized = materializedRoot ? `${JSONC_SOURCE}${SPECS_SOURCE}${OPENCODE_LOADED_SOURCE}
 // The npm-installed Sterling's dashboard, copied out of the npm cache because OpenCode
 // gives a TUI bundle its own solid-js only outside node_modules (the former finding 'opencode plugin installs land under node_modules' (not in the current store)).
-// The newest copied version is taken when this loads, so an update needs no new shim.
-function newestMaterializedTui() {
+// The copied version that matches the Sterling copy OpenCode loads is taken when this loads,
+// so an update or a rollback needs no new shim (board 1199c770: the newest copied version ran
+// ahead of the plugin after a rollback). With no readable OpenCode config, no installed copy for
+// the configured spec, or no copied dashboard of that version yet, the newest copied version is
+// the fallback.
+function loadedMaterializedTui() {
   const base = ${JSON.stringify(fwd7(materializedRoot))};
   const versions = sterlingRootsLs(base).filter((n) => /^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$/.test(n));
   if (!versions.length) throw new Error('Sterling: no dashboard has been copied to ' + base + ' \u2014 rerun /sterling:update (or /sterling:init) so Sterling copies it out of the npm cache.');
+  const loaded = (openCodeLoadedSterling().copies || []).find((c) => c.root !== null && c.version);
+  if (loaded && versions.includes(loaded.version)) return join(base, loaded.version);
   versions.sort(compareSterlingVersions);
   return join(base, versions[versions.length - 1]);
 }
 ` : "";
   return stampBody(`// Sterling OpenCode TUI shim \u2014 generated by /sterling:init and /sterling:update; do not edit.
-${IMPORTS}
+${IMPORTS}${materializedImports}
 ${RESOLVER_SOURCE2}${materialized}
 async function loadSterlingTui() {
   const pkgDir = ${pkgDirExpr};
@@ -17779,13 +17822,16 @@ function npmCopyOnMachine({ env = process.env, home = homedir9() } = {}) {
   const plugins = config && typeof config === "object" && !Array.isArray(config) ? config.plugins : void 0;
   return { root, configured: sterlingPluginSpecs(plugins).length > 0 };
 }
+function loadedNpmCopyRoot({ env, home }) {
+  return openCodeLoadedSterling(env, home).copies?.find((c) => c.root !== null)?.root ?? null;
+}
 function installGlobal({ pluginRoot: pluginRoot2, installed, npmCopy = false, env = process.env, home = homedir9() }) {
   const pluginsDir = join27(opencodeConfigDir({ env, home }), "plugins");
   const tuiDir = join27(pluginsDir, "sterling-tui");
   const rows = [];
   const machine = npmCopyOnMachine({ env, home });
   if (machine.row) rows.push(machine.row);
-  const npmRoot = npmCopy ? pluginRoot2 : machine.root;
+  const npmRoot = loadedNpmCopyRoot({ env, home }) ?? (npmCopy ? pluginRoot2 : machine.root);
   if (npmCopy || machine.root !== null || machine.configured) {
     rows.push(retireServerShim(join27(pluginsDir, "sterling.js")));
   } else {

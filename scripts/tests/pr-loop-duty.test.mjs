@@ -97,6 +97,15 @@ test('issue #100: the OpenCode next-action text says to start the wait with the 
 const work = await import(pathToFileURL(join(root, 'scripts', 'lib', 'work-pr.mjs')).href);
 const ORIGIN = 'github.com/acme/widget';
 const armArgs = (n, head = 'a'.repeat(40)) => ({ pr_url: `https://github.com/acme/widget/pull/${n}`, pr_number: n, repo: ORIGIN, head_sha: head });
+// The refusal message settling an unarmed PR gives (settlePrLoop throws, nothing is written).
+const work_msg = (dir, pr) => {
+  try {
+    work.settlePrLoop(dir, 'clean', pr, { originRepo: ORIGIN });
+  } catch (e) {
+    return e.message;
+  }
+  throw new Error(`settling ${pr} did not refuse`);
+};
 
 test('issue #104: arming a second PR keeps the first PR\'s owed loop; each settles on its own and the duty lists every owed PR', () => {
   const p = project('work');
@@ -113,7 +122,9 @@ test('issue #104: arming a second PR keeps the first PR\'s owed loop; each settl
     assert.deepEqual(duty.evaluatePrLoops(p.dir).states.map((s) => s.pr_number), [8]);
     assert.equal(work.readPrLoop(p.dir, 9).status, 'clean');
     assert.equal(work.readPrLoop(p.dir, 8).status, 'owed');
-    assert.throws(() => work.settlePrLoop(p.dir, 'clean', '10', { originRepo: ORIGIN }), /no PR review loop is armed for 10; the armed loops are for PR #7 .*PR #8 .*PR #9/s);
+    assert.throws(() => work.settlePrLoop(p.dir, 'clean', '10', { originRepo: ORIGIN }), /no PR review loop is armed for 10; the armed loops are for PR #8 \(.*\) \(2 settled loops ignored\)/s);
+    // Changed for GitHub #201: PR 7 (capped) and PR 9 (clean) are settled, so the refusal no longer lists them as armed.
+    assert.doesNotMatch(work_msg(p.dir, '10'), /PR #7|PR #9/);
     work.armPrLoop(p.dir, { ...armArgs(7, 'b'.repeat(40)), now: '2026-10-01T14:00:00.000Z' });
     assert.deepEqual(duty.evaluatePrLoops(p.dir).states.map((s) => [s.pr_number, s.head_sha[0]]), [[8, 'a'], [7, 'b']], 're-arming PR 7 replaces only its own loop');
   } finally {
@@ -200,9 +211,63 @@ test('issue #104: a malformed loop file of ANOTHER PR never blocks settling or r
     assert.equal(work.readPrLoop(p.dir, 7).status, 'owed');
     assert.equal(work.settlePrLoop(p.dir, 'capped', '7', { originRepo: ORIGIN, now: '2026-10-01T12:00:00.000Z' }).status, 'capped');
     assert.equal(work.readPrLoop(p.dir, 7).status, 'capped');
-    assert.throws(() => work.settlePrLoop(p.dir, 'clean', '9', { originRepo: ORIGIN }), /no PR review loop is armed for 9; .*PR #7 .*pr-loops\/8\.json \(unreadable: .*not valid JSON/s);
+    assert.throws(() => work.settlePrLoop(p.dir, 'clean', '9', { originRepo: ORIGIN }), /no PR review loop is armed for 9; the armed loops are for .*pr-loops\/8\.json \(unreadable: .*not valid JSON.*\(1 settled loop ignored\)/s);
+    // Changed for GitHub #201: PR 7 is settled (capped), so only the unreadable file of PR 8 is named.
+    assert.doesNotMatch(work_msg(p.dir, '9'), /PR #7/);
     assert.throws(() => work.settlePrLoop(p.dir, 'clean', '8', { originRepo: ORIGIN }), /pr-loops\/8\.json is not valid JSON/, 'the named PR\'s own malformed file still refuses');
     assert.match(duty.evaluatePrLoops(p.dir).degraded, /pr-loops\/8\.json is unreadable/, 'the duty still discloses it');
+  } finally {
+    p.cleanup();
+  }
+});
+
+// GitHub #201: settled loop files stay on disk (a clean one can be re-settled, #150), so the refusal
+// for an unarmed PR named every loop ever armed, ~80 KB for 96 of them. It names only owed and
+// unreadable loops, at most five, and counts the settled ones it leaves out.
+test('issue #201: settling an unarmed PR names only the owed and unreadable loops, counts the settled ones, and stays small', () => {
+  const p = project('work');
+  try {
+    for (let n = 1; n <= 61; n++) work.armPrLoop(p.dir, { ...armArgs(n), now: '2026-10-01T10:00:00.000Z' });
+    for (let n = 2; n <= 41; n++) work.settlePrLoop(p.dir, 'clean', String(n), { originRepo: ORIGIN, now: '2026-10-01T11:00:00.000Z' });
+    for (let n = 42; n <= 61; n++) work.settlePrLoop(p.dir, 'capped', String(n), { originRepo: ORIGIN, now: '2026-10-01T11:00:00.000Z' });
+    writeFileSync(join(p.dir, '.sterling', 'transient', 'pr-loops', '500.json'), '{broken');
+    const msg = work_msg(p.dir, '9999');
+    assert.match(msg, /^no PR review loop is armed for 9999; the armed loops are for PR #1 \(https:\/\/github\.com\/acme\/widget\/pull\/1,/);
+    assert.match(msg, /pr-loops\/500\.json \(unreadable: .*not valid JSON/);
+    assert.match(msg, /\(60 settled loops ignored\) — nothing settled$/);
+    assert.doesNotMatch(msg, /PR #(?:[2-9]|[1-6][0-9])\b/, 'no settled PR is named');
+    assert.doesNotMatch(msg, /\+\d+ more/, 'two live entries fit under the cap');
+    assert.ok(msg.length < 2000, `the refusal stays small, got ${msg.length} characters`);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('issue #201: more than five owed loops are cut at five with "+N more"', () => {
+  const p = project('work');
+  try {
+    for (let n = 1; n <= 8; n++) work.armPrLoop(p.dir, { ...armArgs(n), now: '2026-10-01T10:00:00.000Z' });
+    const msg = work_msg(p.dir, '9999');
+    for (const n of [1, 2, 3, 4, 5]) assert.match(msg, new RegExp(`PR #${n} \\(`));
+    for (const n of [6, 7, 8]) assert.doesNotMatch(msg, new RegExp(`PR #${n} \\(`));
+    assert.match(msg, /; \+3 more — nothing settled$/);
+    assert.doesNotMatch(msg, /settled loops? ignored/, 'nothing settled yet, so nothing to count');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('issue #201: only settled loops on disk: the refusal says none is armed, counts them, and points at /sterling:merge', () => {
+  const p = project('work');
+  try {
+    for (let n = 1; n <= 3; n++) work.armPrLoop(p.dir, { ...armArgs(n), now: '2026-10-01T10:00:00.000Z' });
+    work.settlePrLoop(p.dir, 'clean', '1', { originRepo: ORIGIN, now: '2026-10-01T11:00:00.000Z' });
+    work.settlePrLoop(p.dir, 'capped', '2', { originRepo: ORIGIN, now: '2026-10-01T11:00:00.000Z' });
+    work.settlePrLoop(p.dir, 'clean', '3', { originRepo: ORIGIN, now: '2026-10-01T11:00:00.000Z' });
+    assert.equal(work_msg(p.dir, '99'), 'no PR review loop is armed for 99 (3 settled loops ignored); rerun /sterling:merge on the branch to arm it — nothing settled');
+    work.armPrLoop(p.dir, { ...armArgs(4), now: '2026-10-01T12:00:00.000Z' });
+    work.settlePrLoop(p.dir, 'closed', '4', { originRepo: ORIGIN, now: '2026-10-01T13:00:00.000Z' });
+    assert.match(work_msg(p.dir, '99'), /^no PR review loop is armed for 99 \(4 settled loops ignored\); rerun/);
   } finally {
     p.cleanup();
   }

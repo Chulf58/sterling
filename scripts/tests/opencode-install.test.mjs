@@ -13,6 +13,7 @@ import {
   swapFullAgentModel, opencodeModelRef, opencodeModelFor, writeFullAgentFiles, stageFullAgentModel, sterlingRootFrom, storeWriteTools, materializeTui,
 } from '../lib/opencode-install.mjs';
 import { renderPortableText } from '../lib/agent-fences.mjs';
+import { STERLING_GIT_SPEC } from '../lib/sterling-roots.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const OC2 = () => ({ installed: true, version: '2.0.21', major: 2 });
@@ -1307,6 +1308,91 @@ test('materialized TUI shim: loads the NEWEST materialized version at load time'
   assert.equal(tui.setup({ location: { directory: dir } }), `1.10.0:${dir}`);
 });
 
+// Board 1199c770 (the #202 class): the dashboard follows the Sterling copy OpenCode loads, which is the
+// newest install folder of the configured spec, not the highest version in the cache. After a rollback
+// the older plugin sits in the newer folder, and the sidepanel used to run the newer version.
+const GIT_CACHE_KEY = 'git-sterling-8c334bb56af9'; // openCodeCacheKey(STERLING_GIT_SPEC, 'git')
+function gitCacheCopy(home, ts, version) {
+  const root = join(home, '.cache', 'opencode', 'npm', GIT_CACHE_KEY, ts, 'node_modules', '@chulf58', 'sterling');
+  stubSterlingRoot(root, 'git');
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@chulf58/sterling', version }));
+  writeFileSync(join(root, 'opencode', 'sterling-tui', 'package.json'), JSON.stringify({ name: 'sterling-tui', type: 'module', exports: { './tui': './sterling-tui.bundle.tsx' } }));
+  writeFileSync(join(root, 'opencode', 'sterling-tui', 'sterling-tui.bundle.tsx'), `export default { id: "tui-${version}" };\n`);
+  cpSync(join(repoRoot, 'agent-templates'), join(root, 'agent-templates'), { recursive: true });
+  return root;
+}
+function rolledBackMachine() {
+  const home = tmp('oc-home-');
+  const cfgDir = opencodeConfigDir({ env: {}, home });
+  mkdirSync(cfgDir, { recursive: true });
+  writeFileSync(join(cfgDir, 'opencode.json'), JSON.stringify({ plugins: [STERLING_GIT_SPEC] }));
+  const higher = gitCacheCopy(home, '1792747812087', '0.19.116');
+  const loaded = gitCacheCopy(home, '1792750000000', '0.19.113'); // the later install holds the OLDER version: a rollback
+  return { home, higher, loaded };
+}
+
+test('materialize: the dashboard copied is the one of the copy OpenCode loads (newest install folder of the configured spec), not the highest version in the cache', () => {
+  const { home } = rolledBackMachine();
+  const r = run(project('hobby'), home, { installed: true });
+  assert.equal(statusOf(r, '/tui/0.19.113/'), 'created');
+  assert.equal(existsSync(join(tuiBase(home), '0.19.116')), false, 'the higher version in the older folder is not copied');
+  assert.equal(readFileSync(join(tuiBase(home), '0.19.113', 'sterling-tui.bundle.tsx'), 'utf8'), 'export default { id: "tui-0.19.113" };\n');
+});
+
+test('materialize: an npm-installed caller (npmCopy) running a HIGHER version than the one OpenCode loads still materializes the loaded copy', () => {
+  const { home, higher } = rolledBackMachine();
+  // init or sync runs from the cached 0.19.116, while OpenCode's config loads the rolled-back 0.19.113
+  const r = setupOpenCode({ projectDir: project('hobby'), pluginRoot: higher, env: { HOME: home }, home, probe: OC2 });
+  assert.equal(statusOf(r, '/sterling.js'), 'skipped', 'the npm-installed caller is on the npmCopy path: no server shim');
+  assert.equal(statusOf(r, '/tui/0.19.113/'), 'created');
+  assert.equal(existsSync(join(tuiBase(home), '0.19.116')), false, 'the caller\'s own higher version is not copied');
+  assert.equal(readFileSync(join(tuiBase(home), '0.19.113', 'sterling-tui.bundle.tsx'), 'utf8'), 'export default { id: "tui-0.19.113" };\n');
+});
+
+test('materialize: an npm-installed caller whose OpenCode config lists no Sterling spec materializes its own copy', () => {
+  const { home, higher } = rolledBackMachine();
+  rmSync(join(opencodeConfigDir({ env: {}, home }), 'opencode.json'));
+  const r = setupOpenCode({ projectDir: project('hobby'), pluginRoot: higher, env: { HOME: home }, home, probe: OC2 });
+  assert.equal(statusOf(r, '/tui/0.19.116/'), 'created');
+  assert.equal(existsSync(join(tuiBase(home), '0.19.113')), false);
+});
+
+test('materialize: a machine whose OpenCode config lists no Sterling spec falls back to the highest version in the cache', () => {
+  const { home } = rolledBackMachine();
+  rmSync(join(opencodeConfigDir({ env: {}, home }), 'opencode.json'));
+  const r = run(project('hobby'), home, { installed: true });
+  assert.equal(statusOf(r, '/tui/0.19.116/'), 'created');
+  assert.equal(existsSync(join(tuiBase(home), '0.19.113')), false);
+});
+
+test('materialized TUI shim: loads the version of the copy OpenCode loads, though a higher one is materialized; with that version not copied yet it takes the newest', () => {
+  const { home } = rolledBackMachine();
+  const dir = project('hobby');
+  run(dir, home, { installed: true });
+  for (const v of ['0.19.113', '0.19.116']) {
+    const d = join(tuiBase(home), v);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, 'package.json'), JSON.stringify({ type: 'module', exports: { './tui': './t.mjs' } }));
+    writeFileSync(join(d, 't.mjs'), `export default { id: 'tui-${v}' };\n`);
+  }
+  const shim = join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling-tui', 'tui.tsx');
+  // A child process whose environment holds only this fixture: HOME (and USERPROFILE for Windows) is the temp
+  // home, and XDG_CONFIG_HOME, XDG_CACHE_HOME and CLAUDE_CONFIG_DIR, which the resolver also reads, are absent.
+  const load = (probeEnv = {}) => {
+    const copy = join(tmp('oc-tui-'), 'tui.mjs');
+    copyFileSync(shim, copy);
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', `const m = await import(${JSON.stringify(pathToFileURL(copy).href)}); process.stdout.write(m.default.id);`], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home, ...probeEnv },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout;
+  };
+  assert.equal(load(), 'tui-0.19.113', 'the loaded copy is 0.19.113 although 0.19.116 is also materialized');
+  rmSync(join(tuiBase(home), '0.19.113'), { recursive: true });
+  assert.equal(load(), 'tui-0.19.116', 'the loaded version is not copied: the newest copied one');
+});
+
 test('materialized TUI shim: an import failure is LOUD in a Sterling project, naming the file and the cause', async () => {
   const home = tmp('oc-home-');
   const dir = project('hobby');
@@ -1336,7 +1422,7 @@ test('npm-installed copy: an unedited server shim an earlier init wrote is remov
   assert.equal(statusOf(r, '/sterling.js'), 'removed');
   assert.equal(existsSync(join(plugins, 'sterling.js')), false);
   assert.equal(statusOf(r, 'sterling-tui/tui.tsx'), 'refreshed');
-  assert.match(readFileSync(join(plugins, 'sterling-tui', 'tui.tsx'), 'utf8'), /newestMaterializedTui\(\)/);
+  assert.match(readFileSync(join(plugins, 'sterling-tui', 'tui.tsx'), 'utf8'), /loadedMaterializedTui\(\)/);
   assert.equal(readFileSync(join(plugins, 'neighbour.js'), 'utf8'), 'export default {};\n', 'nothing else in plugins/ is touched');
   assert.equal(statusOf(runNpm(dir, home), '/sterling.js'), 'skipped', 'a second run has nothing left to remove');
 });
@@ -1374,7 +1460,7 @@ test('dual-host machine, Claude runs init: the npm copy in the cache retires the
   assert.equal(statusOf(r, '/sterling.js'), 'removed', 'the unedited shim is retired: the npm package registers the server');
   assert.equal(existsSync(join(plugins, 'sterling.js')), false);
   assert.equal(statusOf(r, '/tui/1.0.0/'), 'created', "the npm copy's dashboard is materialized from the npm copy, not from the Claude copy");
-  assert.match(readFileSync(join(plugins, 'sterling-tui', 'tui.tsx'), 'utf8'), /newestMaterializedTui\(\)/);
+  assert.match(readFileSync(join(plugins, 'sterling-tui', 'tui.tsx'), 'utf8'), /loadedMaterializedTui\(\)/);
   const again = run(dir, home, { installed: true });
   assert.equal(statusOf(again, '/sterling.js'), 'skipped', 'a second Claude init does not write the shim back');
   assert.equal(existsSync(join(plugins, 'sterling.js')), false);
@@ -1390,7 +1476,7 @@ test('dual-host machine: the global opencode.json naming Sterling (the Git spec 
     const r = run(project('hobby'), home, { installed: true });
     assert.equal(statusOf(r, '/sterling.js'), 'skipped', JSON.stringify(entry));
     assert.equal(existsSync(join(cfgDir, 'plugins', 'sterling.js')), false, JSON.stringify(entry));
-    assert.doesNotMatch(readFileSync(join(cfgDir, 'plugins', 'sterling-tui', 'tui.tsx'), 'utf8'), /newestMaterializedTui/, 'no npm copy to materialize yet, so the TUI shim keeps the running copy');
+    assert.doesNotMatch(readFileSync(join(cfgDir, 'plugins', 'sterling-tui', 'tui.tsx'), 'utf8'), /loadedMaterializedTui/, 'no npm copy to materialize yet, so the TUI shim keeps the running copy');
   }
   const home = tmp('oc-home-');
   const cfgDir = opencodeConfigDir({ env: {}, home });
@@ -1418,5 +1504,5 @@ test('a clone or Claude-cache copy keeps today\'s shims and materializes nothing
   assert.equal(statusOf(r, '/sterling.js'), 'created');
   assert.equal(statusOf(r, 'sterling-tui/tui.tsx'), 'created');
   assert.equal(existsSync(tuiBase(home)), false);
-  assert.doesNotMatch(readFileSync(join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling-tui', 'tui.tsx'), 'utf8'), /newestMaterializedTui/);
+  assert.doesNotMatch(readFileSync(join(opencodeConfigDir({ env: {}, home }), 'plugins', 'sterling-tui', 'tui.tsx'), 'utf8'), /loadedMaterializedTui/);
 });
